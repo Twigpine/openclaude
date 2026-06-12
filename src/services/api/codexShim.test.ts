@@ -883,6 +883,69 @@ describe('Codex request translation', () => {
     expect(tools.map(t => t.name)).toEqual(['ToolSearch', 'Read'])
   })
 
+  test('sanitizes Gemini Vertex signed tool_use ids for the Codex wire', () => {
+    // The Gemini Vertex client smuggles thought signatures into tool_use ids
+    // (`toolu_vertex_x~~sig~~<base64>`, up to ~1.8k chars). The Responses API
+    // rejects ids longer than 64 chars - the signature must never reach the
+    // Codex wire, and call/output pairing must survive the sanitization.
+    const signedId = `toolu_vertex_abc12_7~~sig~~${'U'.repeat(1700)}`
+    const items = convertAnthropicMessagesToResponsesInput([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: signedId, name: 'Read', input: { file_path: '/tmp/x' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: signedId, content: 'done' },
+        ],
+      },
+    ])
+
+    const call = items.find(i => i.type === 'function_call') as
+      | { id: string; call_id: string }
+      | undefined
+    const output = items.find(i => i.type === 'function_call_output') as
+      | { call_id: string }
+      | undefined
+
+    expect(call).toBeDefined()
+    expect(output).toBeDefined()
+    expect(call!.id.length).toBeLessThanOrEqual(64)
+    expect(call!.call_id.length).toBeLessThanOrEqual(64)
+    expect(call!.id).toMatch(/^[A-Za-z0-9_-]+$/)
+    expect(call!.call_id).toMatch(/^[A-Za-z0-9_-]+$/)
+    expect(output!.call_id).toBe(call!.call_id)
+  })
+
+  test('keeps overlong alphanumeric ids distinct after capping', () => {
+    // Ids that exceed the wire limit without any invalid character must be
+    // capped deterministically while staying distinct.
+    const a = `toolu_${'a'.repeat(90)}1`
+    const b = `toolu_${'a'.repeat(90)}2`
+    const items = convertAnthropicMessagesToResponsesInput([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: a, name: 'Read', input: {} },
+          { type: 'tool_use', id: b, name: 'Grep', input: {} },
+        ],
+      },
+    ])
+
+    const calls = items.filter(i => i.type === 'function_call') as Array<{
+      call_id: string
+    }>
+    expect(calls).toHaveLength(2)
+    for (const c of calls) {
+      expect(c.call_id.length).toBeLessThanOrEqual(64)
+      expect(c.call_id).toMatch(/^[A-Za-z0-9_-]+$/)
+    }
+    expect(calls[0]!.call_id).not.toBe(calls[1]!.call_id)
+  })
+
   test('converts completed Codex tool response into Anthropic message', () => {
     const message = convertCodexResponseToAnthropicMessage(
       {

@@ -1,5 +1,6 @@
 import { feature } from 'bun:bundle'
 import { getAPIProvider } from './model/providers.js'
+import { sanitizeToolUseIdForWire } from './toolUseIds.js'
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type {
   ContentBlock,
@@ -1389,6 +1390,35 @@ function relocateToolReferenceSiblings(
   return result
 }
 
+/**
+ * Rewrite tool_result.tool_use_id values that carry a smuggled Gemini Vertex
+ * thought signature so non-Vertex wires receive valid ids. Must mirror the
+ * tool_use id sanitation in the assistant branch so call/result pairing holds.
+ */
+function sanitizeUserMessageToolUseIds(message: UserMessage): UserMessage {
+  const content = message.message.content
+  if (!Array.isArray(content)) return message
+  let changed = false
+  const next = content.map(block => {
+    if (
+      block.type === 'tool_result' &&
+      typeof block.tool_use_id === 'string'
+    ) {
+      const sanitized = sanitizeToolUseIdForWire(block.tool_use_id)
+      if (sanitized !== block.tool_use_id) {
+        changed = true
+        return { ...block, tool_use_id: sanitized }
+      }
+    }
+    return block
+  })
+  if (!changed) return message
+  return {
+    ...message,
+    message: { ...message.message, content: next },
+  }
+}
+
 export function normalizeMessagesForAPI(
   messages: Message[],
   tools: Tools = [],
@@ -1457,6 +1487,13 @@ export function normalizeMessagesForAPI(
   }
   // Build set of available tool names for filtering unavailable tool references
   const availableToolNames = new Set(tools.map(t => t.name))
+
+  // The Gemini Vertex client smuggles thought signatures into tool_use ids
+  // (`toolu_vertex_x~~sig~~<base64>`) so they survive persistence; the Vertex
+  // client decodes them on its own wire. Every OTHER wire rejects those ids
+  // (length/charset), so strip them here when the session history is sent to
+  // a different provider — e.g. after a /provider switch or --resume.
+  const sanitizeVertexToolUseIds = getAPIProvider() !== 'gemini-vertex'
 
   // Whether to inject internal snip ids this pass. Gate must match
   // SnipTool.isEnabled() and skip test mode — markers change message content
@@ -1642,6 +1679,11 @@ export function normalizeMessagesForAPI(
             )
           }
 
+          if (sanitizeVertexToolUseIds) {
+            normalizedMessage =
+              sanitizeUserMessageToolUseIds(normalizedMessage)
+          }
+
           // Strip document/image blocks from the specific user message that
           // preceded a PDF/image/request-too-large error, to prevent re-sending
           // the problematic content on every subsequent API call.
@@ -1752,12 +1794,17 @@ export function normalizeMessagesForAPI(
                     : block.input
                   const canonicalName = tool?.name ?? block.name
 
+                  const wireId = sanitizeVertexToolUseIds
+                    ? sanitizeToolUseIdForWire(block.id)
+                    : block.id
+
                   // When tool search is enabled, preserve all fields including 'caller'
                   if (toolSearchEnabled) {
                     const blockWithExtra = block as unknown as { extra_content?: unknown } & Record<string, unknown>
                     const { extra_content, ...restBlock } = blockWithExtra
                     return {
                       ...restBlock,
+                      id: wireId,
                       name: canonicalName,
                       input: normalizedInput,
                       ...(extra_content ? { extra_content } : {}),
@@ -1770,7 +1817,7 @@ export function normalizeMessagesForAPI(
                   const blockExtra = (block as unknown as { extra_content?: unknown }).extra_content
                   return {
                     type: 'tool_use' as const,
-                    id: block.id,
+                    id: wireId,
                     name: canonicalName,
                     input: normalizedInput,
                     ...(blockExtra ? { extra_content: blockExtra } : {}),
