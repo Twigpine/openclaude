@@ -6,6 +6,7 @@ import { parseModelFlagValue } from '../../utils/cliArgs.js'
 import { argsBeforeModelOwningSubcommand } from '../../utils/printFlag.js'
 import { resolveRouteIdFromBaseUrl } from '../../integrations/routeMetadata.js'
 import { sanitizeApiKey } from '../../utils/providerSecrets.js'
+import { PROVIDER_SELECTION_FLAGS } from '../../utils/providerSelectionFlags.js'
 
 /**
  * Provider override resolved from agent routing config.
@@ -39,13 +40,7 @@ export interface AgentRunModelRouting {
 type AgentModelConfig = NonNullable<SettingsJson['agentModels']>[string]
 
 const PROVIDER_ENV_VARS_TO_CLEAR_FOR_OVERRIDE = [
-  'CLAUDE_CODE_USE_OPENAI',
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'CLAUDE_CODE_USE_GITHUB',
-  'CLAUDE_CODE_USE_GEMINI',
-  'CLAUDE_CODE_USE_MISTRAL',
+  ...PROVIDER_SELECTION_FLAGS,
   'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
   'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
   'NVIDIA_NIM',

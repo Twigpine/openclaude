@@ -470,6 +470,27 @@ describe('applyProviderFlag - github', () => {
   })
 })
 
+describe('applyProviderFlag - gemini-vertex', () => {
+  test('sets CLAUDE_CODE_USE_GEMINI_VERTEX=1 without OpenAI routing', () => {
+    const result = applyProviderFlag('gemini-vertex', [])
+    expect(result.error).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+  })
+
+  test('sets GEMINI_VERTEX_MODEL when --model is provided', () => {
+    applyProviderFlag('gemini-vertex', ['--model', 'gemini-3.5-pro'])
+    expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-3.5-pro')
+  })
+
+  test('clears the Gemini Vertex flag when switching to another provider', () => {
+    applyProviderFlag('gemini-vertex', [])
+    applyProviderFlag('openai', [])
+    expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+  })
+})
+
 describe('applyProviderFlag - bedrock', () => {
   test('sets CLAUDE_CODE_USE_BEDROCK=1', () => {
     const result = applyProviderFlag('bedrock', [])

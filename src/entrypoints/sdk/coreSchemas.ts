@@ -69,6 +69,7 @@ const API_PROVIDER_VALUES = [
   'foundry',
   'openai',
   'gemini',
+  'gemini-vertex',
   'github',
   'codex',
   'nvidia-nim',

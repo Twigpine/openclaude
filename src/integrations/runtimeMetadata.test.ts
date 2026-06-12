@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, it, expect, spyOn } from 'bun:test'
+import { describe, it, expect, spyOn, test } from 'bun:test'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -148,6 +148,21 @@ async function withTempConfigDir<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe('resolveModelRuntimeLimits', () => {
+  test('uses Gemini 3.5 Flash Vertex metadata instead of fallback limits', () => {
+    const limits = resolveModelRuntimeLimits({
+      model: 'gemini-3.5-flash',
+      processEnv: {
+        CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+      },
+      activeProfileProvider: 'gemini-vertex',
+    })
+
+    expect(limits).toEqual({
+      contextWindow: 1_048_576,
+      maxOutputTokens: 65_536,
+    })
+  })
+
   it('uses discovered custom route context windows from the discovery cache', async () => {
     await withTempConfigDir(async () => {
       const baseUrl = 'http://localhost:4000/v1'

@@ -30,6 +30,7 @@ const RESTORED_KEYS = [
   'OPENCLAUDE_CONFIG_DIR',
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
   'CLAUDE_CODE_USE_MISTRAL',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_BEDROCK',
@@ -3167,6 +3168,67 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBeUndefined()
     expect(process.env.OPENAI_MODEL).toBeUndefined()
+  })
+
+  test('does not override explicit Gemini Vertex startup selection with saved profile', async () => {
+    // Maintainer repro: CLAUDE_CODE_USE_GEMINI_VERTEX=1 with concrete
+    // project/model vars must win over a saved OpenAI profile, like every
+    // other provider. Before the fix the saved profile was applied and the
+    // Vertex vars were cleared.
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_PROJECT = 'explicit-project'
+    process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+    try {
+      const applied = applyActiveProviderProfileFromConfig({
+        providerProfiles: [
+          buildProfile({
+            id: 'saved_openai',
+            baseUrl: 'https://api.openai.com/v1',
+            model: 'gpt-4o',
+          }),
+        ],
+        activeProviderProfileId: 'saved_openai',
+      } as any)
+
+      expect(applied).toBeUndefined()
+      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
+      expect(process.env.GEMINI_VERTEX_PROJECT).toBe('explicit-project')
+      expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-3.5-flash')
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+      expect(process.env.OPENAI_MODEL).toBeUndefined()
+    } finally {
+      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+      delete process.env.GEMINI_VERTEX_PROJECT
+      delete process.env.GEMINI_VERTEX_MODEL
+    }
+  })
+
+  test('applies saved profile when the Gemini Vertex flag is bare (stale export)', async () => {
+    // A lone CLAUDE_CODE_USE_GEMINI_VERTEX=1 with no project/model/location
+    // is a stale shell export, not intent - same semantics as the other
+    // providers' bare-flag handling.
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    try {
+      const applied = applyActiveProviderProfileFromConfig({
+        providerProfiles: [
+          buildProfile({
+            id: 'saved_moonshot',
+            baseUrl: 'https://api.moonshot.ai/v1',
+            model: 'kimi-k2.6',
+          }),
+        ],
+        activeProviderProfileId: 'saved_moonshot',
+      } as any)
+
+      expect(applied?.id).toBe('saved_moonshot')
+      expect(process.env.OPENAI_MODEL!).toBe('kimi-k2.6')
+    } finally {
+      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+    }
   })
 
   test('does not override explicit env-only MiniMax selection with saved profile', async () => {

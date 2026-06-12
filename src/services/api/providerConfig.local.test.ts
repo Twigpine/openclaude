@@ -333,6 +333,18 @@ test('skips local model cache scope for remote openai-compatible providers', () 
   expect(getAdditionalModelOptionsCacheScope()).toBeNull()
 })
 
+test('does not classify Gemini Vertex sessions as first-party bootstrap traffic', () => {
+  // Maintainer P2: with only the Gemini Vertex flag set, the cache scope
+  // must be null (third-party), not 'firstParty' — otherwise bootstrap
+  // options are fetched through the Anthropic first-party path.
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  try {
+    expect(getAdditionalModelOptionsCacheScope()).toBeNull()
+  } finally {
+    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+  }
+})
+
 test('derives local retry base URLs with /v1 and loopback fallback candidates', () => {
   expect(getLocalProviderRetryBaseUrls('http://localhost:11434')).toEqual([
     'http://localhost:11434/v1',

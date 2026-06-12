@@ -18,11 +18,13 @@ type NotDeprecatedInfo = {
 
 type DeprecationInfo = DeprecatedModelInfo | NotDeprecatedInfo
 
+type DeprecationProvider = Exclude<LegacyAPIProvider, 'gemini-vertex'>
+
 type DeprecationEntry = {
   /** Human-readable model name */
   modelName: string
   /** Retirement dates by legacy provider category (null = not deprecated there) */
-  retirementDates: Record<LegacyAPIProvider, string | null>
+  retirementDates: Record<DeprecationProvider, string | null>
 }
 
 /**
@@ -93,6 +95,9 @@ const DEPRECATED_MODELS: Record<string, DeprecationEntry> = {
 function getDeprecatedModelInfo(modelId: string): DeprecationInfo {
   const lowercaseModelId = modelId.toLowerCase()
   const provider = getAPIProvider()
+  if (provider === 'gemini-vertex') {
+    return { isDeprecated: false }
+  }
 
   for (const [key, value] of Object.entries(DEPRECATED_MODELS)) {
     const retirementDate = value.retirementDates[provider]

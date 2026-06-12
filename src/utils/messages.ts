@@ -336,6 +336,15 @@ export {
 } from './messages/content.js'
 
 export function isNotEmptyMessage(message: Message): boolean {
+  // Defensive guard: any earlier normalization step that produces a falsy
+  // slot (a missing entry from a sparse array, an unrecognised type that
+  // skipped its switch case, or a streaming bookkeeping bug) would crash
+  // here when we read message.type. Treat such slots as empty so render
+  // pipelines stay alive instead of taking the UI down.
+  if (!message || typeof message !== 'object') {
+    return false
+  }
+
   if (
     message.type === 'progress' ||
     message.type === 'attachment' ||

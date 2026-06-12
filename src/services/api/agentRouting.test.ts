@@ -735,6 +735,7 @@ describe('applyAgentProviderOverrideToEnv', () => {
   test('switches a spawned teammate process to OpenAI-compatible routing', () => {
     const env: Record<string, string | undefined> = {
       CLAUDE_CODE_USE_GEMINI: '1',
+      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED: '1',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID: 'saved-gemini',
       GEMINI_MODEL: 'gemini-parent',
@@ -760,6 +761,7 @@ describe('applyAgentProviderOverrideToEnv', () => {
     expect(env.OPENAI_BASE_URL).toBe('https://api.deepseek.com/v1')
     expect(env.OPENAI_API_KEY).toBe('sk-ds')
     expect(env.CLAUDE_CODE_USE_GEMINI).toBeUndefined()
+    expect(env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID).toBeUndefined()
     expect(env.GEMINI_MODEL).toBeUndefined()

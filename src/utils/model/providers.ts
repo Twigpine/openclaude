@@ -17,6 +17,7 @@ export type LegacyAPIProvider =
   | 'foundry'
   | 'openai'
   | 'gemini'
+  | 'gemini-vertex'
   | 'github'
   | 'codex'
   | 'nvidia-nim'
@@ -39,6 +40,8 @@ export function getAPIProvider(): LegacyAPIProvider {
   switch (activeRouteId) {
     case 'gemini':
       return 'gemini'
+    case 'gemini-vertex':
+      return 'gemini-vertex'
     case 'mistral':
       return 'mistral'
     case 'github':

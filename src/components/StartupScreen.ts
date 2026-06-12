@@ -78,10 +78,21 @@ const LOGO_CLAUDE = [
 // ─── Provider detection ───────────────────────────────────────────────────────
 
 export function detectProvider(modelOverride?: string): { name: string; model: string; baseUrl: string; isLocal: boolean } {
+  const useGeminiVertex = process.env.CLAUDE_CODE_USE_GEMINI_VERTEX === '1' || process.env.CLAUDE_CODE_USE_GEMINI_VERTEX === 'true'
   const useGemini = process.env.CLAUDE_CODE_USE_GEMINI === '1' || process.env.CLAUDE_CODE_USE_GEMINI === 'true'
   const useGithub = process.env.CLAUDE_CODE_USE_GITHUB === '1' || process.env.CLAUDE_CODE_USE_GITHUB === 'true'
   const useOpenAI = process.env.CLAUDE_CODE_USE_OPENAI === '1' || process.env.CLAUDE_CODE_USE_OPENAI === 'true'
   const useMistral = process.env.CLAUDE_CODE_USE_MISTRAL === '1' || process.env.CLAUDE_CODE_USE_MISTRAL === 'true'
+
+  if (useGeminiVertex) {
+    const model = modelOverride || process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+    const location = process.env.GEMINI_VERTEX_LOCATION || 'global'
+    const project = process.env.GEMINI_VERTEX_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || process.env.GOOGLE_PROJECT_ID
+    const baseUrl = project
+      ? `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
+      : `https://aiplatform.googleapis.com/v1/locations/${location}`
+    return { name: 'Gemini Vertex', model, baseUrl, isLocal: false }
+  }
 
   if (useGemini) {
     const model = modelOverride || process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL

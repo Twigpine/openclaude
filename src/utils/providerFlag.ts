@@ -47,6 +47,7 @@ import {
   argsBeforeModelOwningSubcommand,
   parseRootOptionValue,
 } from './printFlag.js'
+import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
 
 const PREFERRED_PROVIDER_ORDER = [
   'anthropic',
@@ -312,6 +313,9 @@ export function applyModelFlagFromArgs(
     if (error) return { error }
   }
 
+  const useGeminiVertex =
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX === '1' ||
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX === 'true'
   const useGemini =
     process.env.CLAUDE_CODE_USE_GEMINI === '1' ||
     process.env.CLAUDE_CODE_USE_GEMINI === 'true'
@@ -325,7 +329,9 @@ export function applyModelFlagFromArgs(
     process.env.CLAUDE_CODE_USE_GITHUB === '1' ||
     process.env.CLAUDE_CODE_USE_GITHUB === 'true'
 
-  if (useGemini) {
+  if (useGeminiVertex) {
+    process.env.GEMINI_VERTEX_MODEL = effectiveModel
+  } else if (useGemini) {
     process.env.GEMINI_MODEL = effectiveModel
   } else if (useMistral) {
     process.env.MISTRAL_MODEL = effectiveModel
@@ -446,13 +452,12 @@ export function applyProviderFlag(
                       ? 'cloudflare'
                       : null
 
-  delete process.env.CLAUDE_CODE_USE_OPENAI
-  delete process.env.CLAUDE_CODE_USE_GEMINI
-  delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
-  delete process.env.CLAUDE_CODE_USE_BEDROCK
-  delete process.env.CLAUDE_CODE_USE_VERTEX
-  delete process.env.CLAUDE_CODE_USE_FOUNDRY
+  // Clear every provider-selection flag so switching providers never leaves
+  // a stale selection behind (includes CLAUDE_CODE_USE_FOUNDRY, which the
+  // hardcoded list used to miss).
+  for (const flag of PROVIDER_SELECTION_FLAGS) {
+    delete process.env[flag]
+  }
   delete process.env.NVIDIA_NIM
   if (copiedOpenAIKeyProvider && provider !== copiedOpenAIKeyProvider) {
     delete process.env.OPENAI_API_KEY
@@ -559,6 +564,11 @@ export function applyProviderFlag(
 
     case 'vertex':
       process.env.CLAUDE_CODE_USE_VERTEX = '1'
+      break
+
+    case 'gemini-vertex':
+      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+      if (model) process.env.GEMINI_VERTEX_MODEL = model
       break
 
     case 'ollama':

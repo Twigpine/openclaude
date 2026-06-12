@@ -11,6 +11,7 @@ import {
 } from '../../bootstrap/state.js'
 import { quote } from '../bash/shellQuote.js'
 import { isInBundledMode } from '../bundledMode.js'
+import { PROVIDER_SELECTION_FLAGS } from '../providerSelectionFlags.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getTeammateModeFromSnapshot } from './backends/teammateModeSnapshot.js'
 import { TEAMMATE_COMMAND_ENV_VAR } from './constants.js'
@@ -98,13 +99,7 @@ export function buildInheritedCliFlags(options?: {
 const TEAMMATE_ENV_VARS = [
   // API provider selection — without these, teammates default to firstParty
   // and send requests to the wrong endpoint (GitHub issue #23561)
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'CLAUDE_CODE_USE_GITHUB',
-  'CLAUDE_CODE_USE_GEMINI',
-  'CLAUDE_CODE_USE_MISTRAL',
-  'CLAUDE_CODE_USE_OPENAI',
+  ...PROVIDER_SELECTION_FLAGS,
   'GITHUB_TOKEN',
   'GH_TOKEN',
   'OPENAI_API_KEYS',
@@ -126,6 +121,13 @@ const TEAMMATE_ENV_VARS = [
   'GEMINI_API_KEY',
   'GEMINI_BASE_URL',
   'GEMINI_MODEL',
+  'GEMINI_VERTEX_AUTH_MODE',
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_LOCATION',
+  'GEMINI_ACCESS_TOKEN',
+  'GOOGLE_CLOUD_PROJECT',
+  'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_API_KEY',
   'MISTRAL_API_KEY',
   'MISTRAL_MODEL',

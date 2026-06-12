@@ -5,7 +5,7 @@
  * 1. Gemini `store: false` rejection fix
  * 2. Session timeout / 500 error fix (stream idle timeout)
  * 3. Agent loop continuation nudge
- * 4. Web search result count improvements
+ * 5. Gemini Vertex provider drift guards
  */
 
 import { afterEach, describe, test, expect, mock } from 'bun:test'
@@ -493,6 +493,81 @@ describe('Context overflow 500 fix', () => {
     expect(content).toContain('Safety net: when auto-compact')
     expect(content).toContain('circuit breaker has tripped')
     expect(content).toContain('automatic compaction has failed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix N: Gemini Vertex provider drift guards
+// ---------------------------------------------------------------------------
+describe('Gemini Vertex provider drift guards', () => {
+  test('API customer, model flag, and startup detection include Gemini Vertex', async () => {
+    const authContent = await file('utils/auth.ts').text()
+    const apiCustomerStart = authContent.indexOf('export function is1PApiCustomer')
+    const apiCustomerEnd = authContent.indexOf('export function getOauthAccountInfo', apiCustomerStart)
+    const apiCustomerSection = authContent.slice(apiCustomerStart, apiCustomerEnd)
+
+    expect(apiCustomerSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+
+    const providerFlagContent = await file('utils/providerFlag.ts').text()
+    const modelFlagStart = providerFlagContent.indexOf('export function applyModelFlagFromArgs')
+    const modelFlagEnd = providerFlagContent.indexOf('export function applyProviderFlag', modelFlagStart)
+    const modelFlagSection = providerFlagContent.slice(modelFlagStart, modelFlagEnd)
+
+    expect(modelFlagSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+    expect(modelFlagSection).toContain('GEMINI_VERTEX_MODEL')
+
+    const startupScreenContent = await file('components/StartupScreen.ts').text()
+    const detectProviderStart = startupScreenContent.indexOf('export function detectProvider')
+    const detectProviderEnd = startupScreenContent.indexOf('export function StartupScreen', detectProviderStart)
+    const detectProviderSection = startupScreenContent.slice(
+      detectProviderStart,
+      detectProviderEnd,
+    )
+
+    expect(detectProviderSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+    expect(detectProviderSection).toContain('Gemini Vertex')
+  })
+
+  test('log and GitHub onboarding clear Gemini Vertex provider state', async () => {
+    const logContent = await file('utils/log.ts').text()
+    const errorReportingStart = logContent.indexOf('Cloud providers')
+    const errorReportingEnd = logContent.indexOf('process.env.DISABLE_ERROR_REPORTING', errorReportingStart)
+    const errorReportingSection = logContent.slice(
+      errorReportingStart,
+      errorReportingEnd,
+    )
+
+    expect(errorReportingSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+
+    const onboardGithubContent = await file(
+      'commands/onboard-github/onboard-github.tsx',
+    ).text()
+    const providerKeysStart = onboardGithubContent.indexOf('PROVIDER_SPECIFIC_KEYS')
+    const providerKeysEnd = onboardGithubContent.indexOf('])', providerKeysStart)
+    const providerKeysSection = onboardGithubContent.slice(
+      providerKeysStart,
+      providerKeysEnd,
+    )
+
+    expect(providerKeysSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+  })
+
+  test('auth treats Gemini Vertex as a third-party provider', async () => {
+    const content = await file('utils/auth.ts').text()
+    const is3PStart = content.indexOf('const is3P =')
+    const is3PEnd = content.indexOf('// Check if user has configured', is3PStart)
+    const is3PSection = content.slice(is3PStart, is3PEnd)
+
+    expect(is3PSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+  })
+
+  test('API preconnect skips Gemini Vertex routing', async () => {
+    const content = await file('utils/apiPreconnect.ts').text()
+    const cloudSkipStart = content.indexOf('// Skip if using a cloud provider')
+    const cloudSkipEnd = content.indexOf('// Skip if proxy/mTLS/unix', cloudSkipStart)
+    const cloudSkipSection = content.slice(cloudSkipStart, cloudSkipEnd)
+
+    expect(cloudSkipSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
   })
 })
 

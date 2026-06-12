@@ -10,6 +10,7 @@ export type TransportKind =
   | 'openai-compatible'
   | 'local'
   | 'gemini-native'
+  | 'gemini-vertex'
   | 'bedrock'
   | 'vertex'
 

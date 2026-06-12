@@ -319,14 +319,21 @@ export const MODEL_TOKENIZER_CONFIGS: ModelTokenizerConfig[] = [
  * Get tokenizer config for a model.
  */
 export function getTokenizerConfig(model: string): ModelTokenizerConfig {
+  // Defensive: estimators are called from many incidental paths (context
+  // pruning, autocompact, status display). An undefined model here would
+  // bubble a TypeError up through React's render — return the unknown
+  // tokenizer profile so the surrounding pipeline keeps going.
+  if (typeof model !== 'string' || !model) {
+    return { modelFamily: 'unknown', bytesPerToken: 4, supportsJson: true, supportsCode: true }
+  }
   const lower = model.toLowerCase()
-  
+
   for (const config of MODEL_TOKENIZER_CONFIGS) {
     if (lower.includes(config.modelFamily)) {
       return config
     }
   }
-  
+
   return { modelFamily: 'unknown', bytesPerToken: 4, supportsJson: true, supportsCode: true }
 }
 

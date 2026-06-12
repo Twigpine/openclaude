@@ -91,6 +91,11 @@ export function getSmallFastModel(): ModelName {
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite'
   }
+  // Gemini on Vertex AI: keep requests inside the same provider so background
+  // helper tasks don't try a non-existent Claude name on the Vertex endpoint.
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+  }
   if (getAPIProvider() === 'mistral') {
     return process.env.MISTRAL_MODEL || 'ministral-3b-latest'
   }
@@ -188,6 +193,7 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
       : activeRouteId === 'api-route'
         ? getAllowedApiRouteConfigModel()
         : (provider === 'gemini' ? process.env.GEMINI_MODEL : undefined) ||
+        (provider === 'gemini-vertex' ? process.env.GEMINI_VERTEX_MODEL : undefined) ||
         (provider === 'mistral' ? process.env.MISTRAL_MODEL : undefined) ||
         (provider === 'minimax' ? getMiniMaxModelEnv() : undefined) ||
         (isOpenAIShimProvider ? process.env.OPENAI_MODEL : undefined) ||
@@ -236,6 +242,10 @@ export function getDefaultOpusModel(): ModelName {
   // Gemini provider
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || 'gemini-2.5-pro'
+  }
+  // Gemini on Vertex AI
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-pro'
   }
   // Mistral provider
   if (getAPIProvider() === 'mistral') {
@@ -286,6 +296,10 @@ export function getDefaultSonnetModel(): ModelName {
   // Gemini provider
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL
+  }
+  // Gemini on Vertex AI
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
   }
   // Mistral provider
   if (getAPIProvider() === 'mistral') {
@@ -350,6 +364,10 @@ export function getDefaultHaikuModel(): ModelName {
   // Gemini provider
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite'
+  }
+  // Gemini on Vertex AI — Claude haiku is not available on this endpoint.
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
   }
   // NVIDIA NIM
   if (getAPIProvider() === 'nvidia-nim') {
@@ -444,6 +462,10 @@ export function getDefaultMainLoopModelSetting(): ModelName | ModelAlias {
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL
   }
+  // Gemini on Vertex AI: always use the configured Vertex Gemini model
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+  }
   if (getAPIProvider() === 'mistral') {
     return process.env.MISTRAL_MODEL || 'devstral-latest'
   }
@@ -517,6 +539,14 @@ export function getDefaultMainLoopModel(): ModelName {
  * module top-level (see MODEL_COSTS in modelCost.ts).
  */
 export function firstPartyNameToCanonical(name: ModelName): ModelShortName {
+  // Defensive: callers in the model-resolution chain can hand us undefined
+  // (e.g. when a third-party provider like Vertex returns an assistant message
+  // without a `model` field, or when a stale code path consults a fallback
+  // that wasn't seeded yet). Crashing here cascades into the render layer
+  // and takes the whole chat down — return an empty canonical instead.
+  if (typeof name !== 'string') {
+    return ''
+  }
   name = name.toLowerCase()
   // Special cases for Claude 4+ models to differentiate versions
   // Order matters: check more specific versions first (4-8 before 4-7 before 4-6 before 4-5 before 4)

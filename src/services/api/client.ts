@@ -56,6 +56,12 @@ import {
 } from '../../integrations/routeMetadata.js'
 import { resolveOpenAIShimRuntimeContext } from '../../integrations/runtimeMetadata.js'
 import {
+  getGeminiVertexLocation,
+  getGeminiVertexModel,
+  getGeminiVertexProjectId,
+  resolveGeminiCredential,
+} from '../../utils/geminiAuth.js'
+import {
   shouldUseCustomAnthropicBearerAuth,
   shouldUseFirstPartyAnthropicAuthForProvider,
   type ProviderOverride,
@@ -772,6 +778,40 @@ export async function getAnthropicClient({
     }
     return new Anthropic(nativeArgs)
   }
+
+  // Native Gemini-on-Vertex (Gemini models via the Vertex AI generateContent
+  // API). Profile-based routing lands with the provider-profiles PR; here the
+  // env flag is the only selector.
+  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+    const project = getGeminiVertexProjectId(process.env)
+    const location = getGeminiVertexLocation(process.env)
+    const geminiVertexModel = getGeminiVertexModel(process.env) || model?.trim() || 'gemini-3.5-flash'
+    const credential = await resolveGeminiCredential({
+      ...process.env,
+      GEMINI_AUTH_MODE:
+        process.env.GEMINI_VERTEX_AUTH_MODE ??
+        (process.env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc'),
+      GEMINI_API_KEY: undefined,
+      GOOGLE_API_KEY: undefined,
+    } as NodeJS.ProcessEnv)
+    if (credential.kind === 'none') {
+      throw new Error('Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN or Google ADC credentials')
+    }
+    const vertexProject = project ?? (credential.kind === 'adc' ? credential.projectId : undefined)
+    if (!vertexProject) {
+      throw new Error('Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT')
+    }
+
+    const { createGeminiVertexClient } = await import('./geminiVertexClient.js')
+    return createGeminiVertexClient({
+      project: vertexProject,
+      location,
+      model: geminiVertexModel,
+      getAccessToken: async () => credential.credential,
+      ...(resolvedFetch ? { fetch: resolvedFetch } : {}),
+    }) as unknown as Anthropic
+  }
+
   if (
     useXiaomiMimoEnvOnlyProvider ||
     useXaiEnvOnlyProvider ||
@@ -881,6 +921,9 @@ export async function getAnthropicClient({
     return new AnthropicFoundry(foundryArgs) as unknown as Anthropic
   }
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)) {
+    // Anthropic-on-Vertex (Claude models). The Gemini-on-Vertex case already
+    // returned above, so reaching this branch means the user really
+    // selected Anthropic-on-Vertex.
     // Refresh GCP credentials if gcpAuthRefresh is configured and credentials are expired
     // This is similar to how we handle AWS credential refresh for Bedrock
     if (!isEnvTruthy(process.env.CLAUDE_CODE_SKIP_VERTEX_AUTH)) {

@@ -15,6 +15,7 @@ import {
 import type { ModelOption } from './model/modelOptions.js'
 import { isCurrentMiniMaxModelOption } from './model/minimaxCatalog.js'
 import { getPrimaryModel, parseModelList } from './providerModels.js'
+import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
 import {
   buildCompatibilityProcessEnv,
   createProfileFile,
@@ -665,15 +666,7 @@ export function hasProviderProfiles(config = getGlobalConfig()): boolean {
 function hasProviderSelectionFlags(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return (
-    processEnv.CLAUDE_CODE_USE_OPENAI !== undefined ||
-    processEnv.CLAUDE_CODE_USE_GEMINI !== undefined ||
-    processEnv.CLAUDE_CODE_USE_MISTRAL !== undefined ||
-    processEnv.CLAUDE_CODE_USE_GITHUB !== undefined ||
-    processEnv.CLAUDE_CODE_USE_BEDROCK !== undefined ||
-    processEnv.CLAUDE_CODE_USE_VERTEX !== undefined ||
-    processEnv.CLAUDE_CODE_USE_FOUNDRY !== undefined
-  )
+  return PROVIDER_SELECTION_FLAGS.some(flag => processEnv[flag] !== undefined)
 }
 
 /**
@@ -708,6 +701,16 @@ function hasCompleteProviderSelection(
       trimOrUndefined(processEnv.OPENAI_BASE_URL) !== undefined ||
       trimOrUndefined(processEnv.OPENAI_API_BASE) !== undefined ||
       trimOrUndefined(processEnv.OPENAI_MODEL) !== undefined
+    )
+  }
+  if (processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX !== undefined) {
+    return (
+      trimOrUndefined(processEnv.GEMINI_VERTEX_PROJECT) !== undefined ||
+      trimOrUndefined(processEnv.GOOGLE_CLOUD_PROJECT) !== undefined ||
+      trimOrUndefined(processEnv.GCLOUD_PROJECT) !== undefined ||
+      trimOrUndefined(processEnv.GOOGLE_PROJECT_ID) !== undefined ||
+      trimOrUndefined(processEnv.GEMINI_VERTEX_MODEL) !== undefined ||
+      trimOrUndefined(processEnv.GEMINI_VERTEX_LOCATION) !== undefined
     )
   }
   if (processEnv.CLAUDE_CODE_USE_GEMINI !== undefined) {
