@@ -70,6 +70,7 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
   // and remains true for all subsequent messages in the normalization process.
   let isNewChain = false
   return messages.flatMap(message => {
+    if (!message || typeof message !== 'object' || !('type' in message)) return []
     switch (message.type) {
       case 'assistant': {
         isNewChain = isNewChain || message.message.content.length > 1

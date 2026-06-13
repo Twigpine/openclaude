@@ -97,6 +97,7 @@ describe('onboarding auth precedence cleanup', () => {
       GITHUB_ENTERPRISE_URL: 'https://github.old.example.com',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED: '1',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID: 'profile_old',
+      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
     }
 
     applyGithubOnboardingProcessEnv('github:copilot', undefined, env)
@@ -115,6 +116,9 @@ describe('onboarding auth precedence cleanup', () => {
     expect(env.GITHUB_ENTERPRISE_URL).toBeUndefined()
 
     expect(env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    // The fast path must clear Gemini Vertex routing too, like the
+    // device-flow finalize path (PROVIDER_SPECIFIC_KEYS).
+    expect(env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID).toBeUndefined()
 
@@ -127,6 +131,7 @@ describe('onboarding auth precedence cleanup', () => {
     expect(settingsEnv.OPENAI_PROJECT).toBeUndefined()
     expect(settingsEnv.OPENAI_ORGANIZATION).toBeUndefined()
     expect(settingsEnv.GITHUB_ENTERPRISE_URL).toBeUndefined()
+    expect(settingsEnv.CLAUDE_CODE_USE_GEMINI_VERTEX).toBeUndefined()
   })
 
   test('persists Enterprise URL when switching to GitHub Enterprise', () => {

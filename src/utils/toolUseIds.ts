@@ -34,5 +34,8 @@ export function sanitizeToolUseIdForWire(
   if (clean.length === 0) {
     return `tool${tail}`
   }
-  return clean.slice(0, maxLength - tail.length) + tail
+  // Defensive: keep at least one prefix char if a caller ever passes a
+  // maxLength smaller than the hash tail (all current call sites use >= 40).
+  const prefixLength = Math.max(1, maxLength - tail.length)
+  return clean.slice(0, prefixLength) + tail
 }
