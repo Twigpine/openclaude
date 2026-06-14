@@ -1,10 +1,28 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   createAssistantMessage,
   createUserMessage,
   normalizeMessagesForAPI,
 } from './messages.js'
+import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
 import type { Message } from '../types/message.js'
+
+// getAPIProvider() inspects every CLAUDE_CODE_USE_* flag (e.g. FOUNDRY is
+// checked before route resolution), so a flag leaked by an earlier test in
+// the full suite would flip the wire and make these assertions order-dependent.
+// Clear the whole provider-selection registry before each test.
+const VERTEX_VARS = [
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_LOCATION',
+  'OPENAI_MODEL',
+  'OPENAI_BASE_URL',
+] as const
+
+function clearProviderEnv(): void {
+  for (const flag of PROVIDER_SELECTION_FLAGS) delete process.env[flag]
+  for (const v of VERTEX_VARS) delete process.env[v]
+}
 
 const SIGNED_ID = `toolu_vertex_k9x_3~~sig~~${'S'.repeat(1700)}`
 
@@ -50,13 +68,8 @@ function extractIds(normalized: ReturnType<typeof normalizeMessagesForAPI>): {
 }
 
 describe('normalizeMessagesForAPI Vertex tool_use id sanitation', () => {
-  afterEach(() => {
-    delete process.env.CLAUDE_CODE_USE_OPENAI
-    delete process.env.OPENAI_MODEL
-    delete process.env.OPENAI_BASE_URL
-    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-    delete process.env.GEMINI_VERTEX_MODEL
-  })
+  beforeEach(clearProviderEnv)
+  afterEach(clearProviderEnv)
 
   test('strips smuggled thought signatures when the wire is not Gemini Vertex', () => {
     process.env.CLAUDE_CODE_USE_OPENAI = '1'

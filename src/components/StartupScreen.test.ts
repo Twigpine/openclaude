@@ -47,6 +47,12 @@ const ENV_KEYS = [
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'GEMINI_MODEL',
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_LOCATION',
+  'GOOGLE_CLOUD_PROJECT',
+  'GCLOUD_PROJECT',
+  'GOOGLE_PROJECT_ID',
   'MISTRAL_MODEL',
   'ANTHROPIC_MODEL',
   'CLAUDE_MODEL',
@@ -450,5 +456,29 @@ describe('detectProvider — modelOverride from --model flag', () => {
     const result = detectProvider()
     expect(result.name).toBe('Anthropic')
     expect(result.model).toContain('sonnet')
+  })
+})
+
+describe('detectProvider — Gemini Vertex endpoint reflects the runtime project contract', () => {
+  test('shows the full /projects/<project>/locations/<location> endpoint when a project resolves', () => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_PROJECT = 'my-project'
+    process.env.GEMINI_VERTEX_LOCATION = 'europe-west4'
+
+    const result = detectProvider()
+    expect(result.name).toBe('Gemini Vertex')
+    expect(result.baseUrl).toBe(
+      'https://aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west4',
+    )
+  })
+
+  test('surfaces a project-required state instead of a project-less endpoint', () => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    // no project env set — the native client would throw, so the startup
+    // display must not imply a callable project-less endpoint.
+    const result = detectProvider()
+    expect(result.name).toBe('Gemini Vertex')
+    expect(result.baseUrl).toContain('/projects/')
+    expect(result.baseUrl).toContain('GEMINI_VERTEX_PROJECT')
   })
 })

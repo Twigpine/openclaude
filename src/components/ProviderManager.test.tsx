@@ -177,6 +177,7 @@ const PRESET_ORDER = [
   'Fireworks AI',
   'GMI Cloud',
   'Google AI / Gemini',
+  'Google Vertex AI Gemini',
   'Groq',
   'Hicap',
   'LLMTR',

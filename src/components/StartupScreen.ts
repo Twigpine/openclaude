@@ -88,9 +88,13 @@ export function detectProvider(modelOverride?: string): { name: string; model: s
     const model = modelOverride || process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
     const location = process.env.GEMINI_VERTEX_LOCATION || 'global'
     const project = process.env.GEMINI_VERTEX_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || process.env.GOOGLE_PROJECT_ID
+    // The native client always targets /projects/<project>/locations/<location>
+    // and throws when no project resolves. Mirror that contract here: when a
+    // project is missing, surface a clear "project required" state instead of a
+    // project-less endpoint that the runtime would never actually call.
     const baseUrl = project
       ? `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
-      : `https://aiplatform.googleapis.com/v1/locations/${location}`
+      : `https://aiplatform.googleapis.com/v1/projects/<set GEMINI_VERTEX_PROJECT>/locations/${location}`
     return { name: 'Gemini Vertex', model, baseUrl, isLocal: false }
   }
 
