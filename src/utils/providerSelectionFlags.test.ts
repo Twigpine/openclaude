@@ -21,6 +21,10 @@ describe('PROVIDER_SELECTION_FLAGS parity', () => {
     const found = new Set<string>()
 
     for (const relPath of glob.scanSync({ cwd: srcRoot })) {
+      // Only the runtime code must recognise selection flags. Test fixtures
+      // may set arbitrary flags (e.g. a placeholder the code never reads), so
+      // they are excluded from the parity scan.
+      if (/\.test\.[tj]sx?$/.test(relPath)) continue
       const content = readFileSync(join(srcRoot, relPath), 'utf8')
       for (const match of content.matchAll(/CLAUDE_CODE_USE_[A-Z_]+/g)) {
         found.add(match[0])

@@ -1,27 +1,26 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import * as providersModule from './model/providers.js'
 import {
   createAssistantMessage,
   createUserMessage,
   normalizeMessagesForAPI,
 } from './messages.js'
-import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
 import type { Message } from '../types/message.js'
+import type { LegacyAPIProvider } from './model/providers.js'
 
-// getAPIProvider() inspects every CLAUDE_CODE_USE_* flag (e.g. FOUNDRY is
-// checked before route resolution), so a flag leaked by an earlier test in
-// the full suite would flip the wire and make these assertions order-dependent.
-// Clear the whole provider-selection registry before each test.
-const VERTEX_VARS = [
-  'GEMINI_VERTEX_MODEL',
-  'GEMINI_VERTEX_PROJECT',
-  'GEMINI_VERTEX_LOCATION',
-  'OPENAI_MODEL',
-  'OPENAI_BASE_URL',
-] as const
+// normalizeMessagesForAPI decides whether to sanitize tool ids from
+// getAPIProvider(). That reads global env/route state which other tests in the
+// full suite mutate (mock.module on providers, leaked flags, etc.), so we mock
+// the provider directly to make these assertions hermetic and order-independent.
+function mockApiProvider(provider: LegacyAPIProvider): void {
+  mock.module('./model/providers.js', () => ({
+    ...providersModule,
+    getAPIProvider: () => provider,
+  }))
+}
 
-function clearProviderEnv(): void {
-  for (const flag of PROVIDER_SELECTION_FLAGS) delete process.env[flag]
-  for (const v of VERTEX_VARS) delete process.env[v]
+function restoreApiProvider(): void {
+  mock.module('./model/providers.js', () => ({ ...providersModule }))
 }
 
 const SIGNED_ID = `toolu_vertex_k9x_3~~sig~~${'S'.repeat(1700)}`
@@ -68,13 +67,10 @@ function extractIds(normalized: ReturnType<typeof normalizeMessagesForAPI>): {
 }
 
 describe('normalizeMessagesForAPI Vertex tool_use id sanitation', () => {
-  beforeEach(clearProviderEnv)
-  afterEach(clearProviderEnv)
+  afterEach(restoreApiProvider)
 
   test('strips smuggled thought signatures when the wire is not Gemini Vertex', () => {
-    process.env.CLAUDE_CODE_USE_OPENAI = '1'
-    process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
-    process.env.OPENAI_MODEL = 'gpt-4o'
+    mockApiProvider('openai')
 
     const { toolUseId, toolResultId } = extractIds(
       normalizeMessagesForAPI(buildHistory()),
@@ -88,8 +84,7 @@ describe('normalizeMessagesForAPI Vertex tool_use id sanitation', () => {
   })
 
   test('preserves signed ids when the wire is Gemini Vertex', () => {
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+    mockApiProvider('gemini-vertex')
 
     const { toolUseId, toolResultId } = extractIds(
       normalizeMessagesForAPI(buildHistory()),
