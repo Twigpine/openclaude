@@ -18,6 +18,10 @@ import {
   type RecommendationGoal,
 } from './providerRecommendation.js'
 import { readGeminiAccessToken } from './geminiCredentials.js'
+import {
+  DEFAULT_GEMINI_VERTEX_MODEL,
+  getGeminiVertexLocation,
+} from './geminiAuth.js'
 import { getOllamaChatBaseUrl } from './providerDiscovery.js'
 import { getPrimaryModel } from './providerModels.js'
 import { getProviderValidationError } from './providerValidation.js'
@@ -67,6 +71,7 @@ const PROFILE_ENV_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
   'CLAUDE_CODE_USE_MISTRAL',
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
@@ -100,7 +105,22 @@ const PROFILE_ENV_KEYS = [
   'GEMINI_ACCESS_TOKEN',
   'GEMINI_MODEL',
   'GEMINI_BASE_URL',
+  'GEMINI_VERTEX_AUTH_MODE',
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_LOCATION',
+  'GOOGLE_CLOUD_PROJECT',
+  'GCLOUD_PROJECT',
+  'GOOGLE_PROJECT_ID',
+  'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_API_KEY',
+  // CLOUD_ML_REGION is read by the @anthropic-ai/vertex-sdk to pick a region
+  // (via getDefaultVertexRegion). Leaving a stale value in process.env after a
+  // profile switch would let a malformed location like "glogal" leak into a
+  // 404 even when the active profile is Gemini Vertex. Clear it with the rest
+  // of the managed vars so each profile activation starts from a clean slate.
+  'CLOUD_ML_REGION',
+  'ANTHROPIC_VERTEX_PROJECT_ID',
   'NVIDIA_NIM',
   'NVIDIA_API_KEY',
   'NVIDIA_MODEL',
@@ -154,6 +174,7 @@ export type CompatibilityProfileMode =
   | 'anthropic'
   | 'openai'
   | 'gemini'
+  | 'gemini-vertex'
   | 'mistral'
   | 'github'
   | 'github-enterprise'
@@ -166,6 +187,7 @@ export type ProviderProfile =
   | 'ollama'
   | 'codex'
   | 'gemini'
+  | 'gemini-vertex'
   | 'atomic-chat'
   | 'nvidia-nim'
   | 'minimax'
@@ -207,6 +229,15 @@ export type ProfileEnv = {
   GEMINI_ACCESS_TOKEN?: string
   GEMINI_MODEL?: string
   GEMINI_BASE_URL?: string
+  CLAUDE_CODE_USE_GEMINI_VERTEX?: string
+  GEMINI_VERTEX_AUTH_MODE?: 'access-token' | 'adc'
+  GEMINI_VERTEX_MODEL?: string
+  GEMINI_VERTEX_PROJECT?: string
+  GEMINI_VERTEX_LOCATION?: string
+  GOOGLE_CLOUD_PROJECT?: string
+  GCLOUD_PROJECT?: string
+  GOOGLE_PROJECT_ID?: string
+  GOOGLE_APPLICATION_CREDENTIALS?: string
   GOOGLE_API_KEY?: string
   NVIDIA_NIM?: string
   NVIDIA_API_KEY?: string
@@ -360,6 +391,7 @@ export function isProviderProfile(value: unknown): value is ProviderProfile {
     value === 'ollama' ||
     value === 'codex' ||
     value === 'gemini' ||
+    value === 'gemini-vertex' ||
     value === 'atomic-chat' ||
     value === 'nvidia-nim' ||
     value === 'minimax' ||
@@ -468,6 +500,36 @@ export function buildVertexProfileEnv(options: {
   }
 
   return env
+}
+
+export function buildGeminiVertexProfileEnv(options: {
+  model?: string | null
+  project?: string | null
+  location?: string | null
+  authMode?: 'access-token' | 'adc' | null
+  processEnv?: NodeJS.ProcessEnv
+}): ProfileEnv {
+  const processEnv = options.processEnv ?? process.env
+  const project = sanitizeProviderConfigValue(
+    options.project ?? processEnv.GEMINI_VERTEX_PROJECT,
+  )
+  const location = sanitizeProviderConfigValue(
+    options.location ?? processEnv.GEMINI_VERTEX_LOCATION,
+  ) || getGeminiVertexLocation(processEnv)
+  const model = normalizeProfileModel(
+    sanitizeProviderConfigValue(options.model ?? processEnv.GEMINI_VERTEX_MODEL),
+  ) || DEFAULT_GEMINI_VERTEX_MODEL
+  const authMode = options.authMode ?? processEnv.GEMINI_VERTEX_AUTH_MODE
+
+  return {
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+    ...(authMode === 'access-token' || authMode === 'adc'
+      ? { GEMINI_VERTEX_AUTH_MODE: authMode }
+      : {}),
+    GEMINI_VERTEX_MODEL: model,
+    ...(project ? { GEMINI_VERTEX_PROJECT: project } : {}),
+    GEMINI_VERTEX_LOCATION: location,
+  }
 }
 
 export function buildNvidiaNimProfileEnv(options: {
@@ -1243,6 +1305,7 @@ function getCompatibilityProfileFlag(
   | 'CLAUDE_CODE_USE_OPENAI'
   | 'CLAUDE_CODE_USE_GITHUB'
   | 'CLAUDE_CODE_USE_GEMINI'
+  | 'CLAUDE_CODE_USE_GEMINI_VERTEX'
   | 'CLAUDE_CODE_USE_MISTRAL'
   | 'CLAUDE_CODE_USE_BEDROCK'
   | 'CLAUDE_CODE_USE_VERTEX'
@@ -1255,6 +1318,8 @@ function getCompatibilityProfileFlag(
       return 'CLAUDE_CODE_USE_GITHUB'
     case 'gemini':
       return 'CLAUDE_CODE_USE_GEMINI'
+    case 'gemini-vertex':
+      return 'CLAUDE_CODE_USE_GEMINI_VERTEX'
     case 'mistral':
       return 'CLAUDE_CODE_USE_MISTRAL'
     case 'bedrock':
@@ -1440,6 +1505,7 @@ export function hasExplicitProviderSelection(
     isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI) ||
     isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB) ||
     isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI) ||
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) ||
     isEnvTruthy(processEnv.CLAUDE_CODE_USE_MISTRAL) ||
     isEnvTruthy(processEnv.CLAUDE_CODE_USE_BEDROCK) ||
     isEnvTruthy(processEnv.CLAUDE_CODE_USE_VERTEX) ||
@@ -1494,6 +1560,21 @@ function hasConcreteProviderSelection(
       ) !== undefined ||
       sanitizeApiKey(processEnv.GEMINI_API_KEY) !== undefined ||
       sanitizeApiKey(processEnv.GOOGLE_API_KEY) !== undefined
+    )
+  }
+
+  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+    return (
+      sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_PROJECT) !== undefined ||
+      sanitizeProviderConfigValue(processEnv.GOOGLE_CLOUD_PROJECT) !== undefined ||
+      sanitizeProviderConfigValue(processEnv.GCLOUD_PROJECT) !== undefined ||
+      sanitizeProviderConfigValue(processEnv.GOOGLE_PROJECT_ID) !== undefined ||
+      sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_LOCATION) !== undefined ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_MODEL),
+      ) !== undefined ||
+      sanitizeApiKey(processEnv.GEMINI_ACCESS_TOKEN) !== undefined ||
+      sanitizeProviderConfigValue(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined
     )
   }
 
@@ -1710,6 +1791,7 @@ export async function buildLaunchEnv(options: {
       ['CLAUDE_CODE_USE_GITHUB', 'github'],
       ['CLAUDE_CODE_USE_BEDROCK', 'bedrock'],
       ['CLAUDE_CODE_USE_VERTEX', 'vertex'],
+      ['CLAUDE_CODE_USE_GEMINI_VERTEX', 'gemini-vertex'],
       ['CLAUDE_CODE_USE_MISTRAL', 'mistral'],
       ['CLAUDE_CODE_USE_GEMINI', 'gemini'],
       ['CLAUDE_CODE_USE_OPENAI', 'openai'],
@@ -1874,6 +1956,53 @@ export async function buildLaunchEnv(options: {
     return buildCompatibilityProcessEnv({
       processEnv,
       compatibilityMode: 'gemini',
+      profileEnv: env,
+    })
+  }
+
+  if (selectedProfile === 'gemini-vertex') {
+    const env = buildGeminiVertexProfileEnv({
+      authMode:
+        persistedEnv.GEMINI_VERTEX_AUTH_MODE === 'access-token' ||
+        persistedEnv.GEMINI_VERTEX_AUTH_MODE === 'adc'
+          ? persistedEnv.GEMINI_VERTEX_AUTH_MODE
+          : 'adc',
+      model: processEnv.GEMINI_VERTEX_MODEL || persistedEnv.GEMINI_VERTEX_MODEL,
+      project:
+        processEnv.GEMINI_VERTEX_PROJECT ||
+        persistedEnv.GEMINI_VERTEX_PROJECT ||
+        processEnv.GOOGLE_CLOUD_PROJECT ||
+        persistedEnv.GOOGLE_CLOUD_PROJECT ||
+        processEnv.GCLOUD_PROJECT ||
+        persistedEnv.GCLOUD_PROJECT ||
+        processEnv.GOOGLE_PROJECT_ID ||
+        persistedEnv.GOOGLE_PROJECT_ID,
+      location: processEnv.GEMINI_VERTEX_LOCATION || persistedEnv.GEMINI_VERTEX_LOCATION,
+      processEnv,
+    })
+
+    const googleCloudProject = sanitizeProviderConfigValue(
+      processEnv.GOOGLE_CLOUD_PROJECT || persistedEnv.GOOGLE_CLOUD_PROJECT,
+    )
+    const gcloudProject = sanitizeProviderConfigValue(
+      processEnv.GCLOUD_PROJECT || persistedEnv.GCLOUD_PROJECT,
+    )
+    const googleProjectId = sanitizeProviderConfigValue(
+      processEnv.GOOGLE_PROJECT_ID || persistedEnv.GOOGLE_PROJECT_ID,
+    )
+    const googleApplicationCredentials = sanitizeProviderConfigValue(
+      processEnv.GOOGLE_APPLICATION_CREDENTIALS || persistedEnv.GOOGLE_APPLICATION_CREDENTIALS,
+    )
+    if (googleCloudProject) env.GOOGLE_CLOUD_PROJECT = googleCloudProject
+    if (gcloudProject) env.GCLOUD_PROJECT = gcloudProject
+    if (googleProjectId) env.GOOGLE_PROJECT_ID = googleProjectId
+    if (googleApplicationCredentials) {
+      env.GOOGLE_APPLICATION_CREDENTIALS = googleApplicationCredentials
+    }
+
+    return buildCompatibilityProcessEnv({
+      processEnv,
+      compatibilityMode: 'gemini-vertex',
       profileEnv: env,
     })
   }

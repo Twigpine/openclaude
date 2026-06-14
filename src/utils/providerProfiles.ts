@@ -23,6 +23,7 @@ import {
   buildBedrockProfileEnv,
   buildConcentrateProfileEnv,
   buildGeminiProfileEnv,
+  buildGeminiVertexProfileEnv,
   buildGithubProfileEnv,
   buildMiniMaxProfileEnv,
   buildMistralProfileEnv,
@@ -123,6 +124,7 @@ type ProfileCompatibilityMode =
   | 'github-enterprise'
   | 'bedrock'
   | 'vertex'
+  | 'gemini-vertex'
   | 'openai'
 
 function isGithubCompatibilityMode(
@@ -157,6 +159,9 @@ function resolveProfileCompatibility(provider: string): {
   }
   if (route.vendorId === 'minimax') {
     return { route, compatibilityMode: 'anthropic' }
+  }
+  if (route.vendorId === 'gemini-vertex') {
+    return { route, compatibilityMode: 'gemini-vertex' }
   }
   if (route.vendorId === 'gemini') {
     return { route, compatibilityMode: 'gemini' }
@@ -755,6 +760,7 @@ function hasConflictingProviderFlagsForProfile(
   return (
     (compatibilityMode !== 'openai' && processEnv.CLAUDE_CODE_USE_OPENAI !== undefined) ||
     (compatibilityMode !== 'gemini' && processEnv.CLAUDE_CODE_USE_GEMINI !== undefined) ||
+    (compatibilityMode !== 'gemini-vertex' && processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX !== undefined) ||
     (compatibilityMode !== 'mistral' && processEnv.CLAUDE_CODE_USE_MISTRAL !== undefined) ||
     (!isGithubCompatibilityMode(compatibilityMode) &&
       processEnv.CLAUDE_CODE_USE_GITHUB !== undefined) ||
@@ -762,6 +768,21 @@ function hasConflictingProviderFlagsForProfile(
     (compatibilityMode !== 'vertex' && processEnv.CLAUDE_CODE_USE_VERTEX !== undefined) ||
     processEnv.CLAUDE_CODE_USE_FOUNDRY !== undefined
   )
+}
+
+/**
+ * Whether the API client should route to the native Gemini Vertex client
+ * based on the saved active profile alone (i.e. CLAUDE_CODE_USE_GEMINI_VERTEX
+ * is absent from env). An explicit startup selection for another provider
+ * keeps precedence over the saved profile — the same semantics
+ * applyActiveProviderProfileFromConfig enforces at startup.
+ */
+export function shouldRouteToGeminiVertexFromProfile(
+  processEnv: NodeJS.ProcessEnv,
+  activeProfile: ProviderProfile | undefined,
+): boolean {
+  if (activeProfile?.provider !== 'gemini-vertex') return false
+  return !hasConflictingProviderFlagsForProfile(processEnv, activeProfile)
 }
 
 function sameOptionalEnvValue(
@@ -979,6 +1000,22 @@ function isProcessEnvAlignedWithProfile(
       sameOptionalEnvValue(processEnv.GEMINI_MODEL, primaryModel) &&
       (!includeApiKey ||
         sameOptionalEnvValue(processEnv.GEMINI_API_KEY, profile.apiKey))
+    )
+  }
+
+  if (compatibilityMode === 'gemini-vertex') {
+    return (
+      processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX !== undefined &&
+      processEnv.CLAUDE_CODE_USE_OPENAI === undefined &&
+      processEnv.CLAUDE_CODE_USE_GEMINI === undefined &&
+      processEnv.CLAUDE_CODE_USE_MISTRAL === undefined &&
+      processEnv.CLAUDE_CODE_USE_GITHUB === undefined &&
+      processEnv.CLAUDE_CODE_USE_BEDROCK === undefined &&
+      processEnv.CLAUDE_CODE_USE_VERTEX === undefined &&
+      processEnv.CLAUDE_CODE_USE_FOUNDRY === undefined &&
+      processEnv.OPENAI_BASE_URL === undefined &&
+      processEnv.OPENAI_MODEL === undefined &&
+      sameOptionalEnvValue(processEnv.GEMINI_VERTEX_MODEL, getPrimaryModel(profile.model))
     )
   }
 
@@ -1227,6 +1264,16 @@ export function applyProviderProfileToProcessEnv(
       GEMINI_MODEL: primaryModel,
       ...(profile.apiKey ? { GEMINI_API_KEY: profile.apiKey } : {}),
     }
+  } else if (compatibilityMode === 'gemini-vertex') {
+    profileEnv = buildGeminiVertexProfileEnv({
+      model: primaryModel,
+      project: profile.baseUrl || process.env.GEMINI_VERTEX_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || process.env.GOOGLE_PROJECT_ID,
+      location: process.env.GEMINI_VERTEX_LOCATION,
+      authMode:
+        process.env.GEMINI_VERTEX_AUTH_MODE === 'access-token' || process.env.GEMINI_VERTEX_AUTH_MODE === 'adc'
+          ? process.env.GEMINI_VERTEX_AUTH_MODE
+          : 'adc',
+    })
   } else if (isGithubCompatibilityMode(compatibilityMode)) {
     profileEnv = buildGithubCompatibleProfileEnv({
       model: primaryModel,
@@ -2163,6 +2210,14 @@ function buildStartupProfileFromActiveProfile(
           baseUrl: activeProfile.baseUrl,
         })),
       }
+    case 'gemini-vertex': {
+      const env = buildGeminiVertexProfileEnv({
+        model: getPrimaryModel(activeProfile.model),
+        project: activeProfile.baseUrl,
+        processEnv: process.env,
+      })
+      return { profile: 'gemini-vertex', env: applySupportedProfileCustomHeaders(activeProfile, env) }
+    }
     case 'openai': {
       if (route.gatewayId === 'nvidia-nim') {
         const env =

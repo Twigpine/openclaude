@@ -70,6 +70,10 @@ import { hasUsableOpenAICredential } from './credentialPool.js'
 import { getApiTimeoutMs } from './openaiShim/transport.js'
 import { AnthropicVertex } from './vertexClient.js'
 import { importOptionalRuntimeModule } from '../../utils/optionalRuntimeModule.js'
+import {
+  getActiveProviderProfile,
+  shouldRouteToGeminiVertexFromProfile,
+} from '../../utils/providerProfiles.js'
 
 type OptionalRuntimeImporter = typeof importOptionalRuntimeModule
 
@@ -779,10 +783,24 @@ export async function getAnthropicClient({
     return new Anthropic(nativeArgs)
   }
 
-  // Native Gemini-on-Vertex (Gemini models via the Vertex AI generateContent
-  // API). Profile-based routing lands with the provider-profiles PR; here the
-  // env flag is the only selector.
-  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+  // Intent check: if the user's active provider profile is gemini-vertex,
+  // route to our Gemini Vertex client even when the env flag is missing — a
+  // stale CLAUDE_CODE_USE_VERTEX from the launching shell would otherwise
+  // fall through to the Anthropic Vertex SDK and emit a 404 for
+  // publishers/anthropic/models/gemini-* (a model that doesn't exist there).
+  // Explicit startup selections for another provider keep precedence over
+  // the saved profile (see shouldRouteToGeminiVertexFromProfile).
+  const activeProfile = (() => {
+    try {
+      return getActiveProviderProfile()
+    } catch {
+      return undefined
+    }
+  })()
+  const useGeminiVertexProvider =
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) ||
+    shouldRouteToGeminiVertexFromProfile(process.env, activeProfile)
+  if (useGeminiVertexProvider) {
     const project = getGeminiVertexProjectId(process.env)
     const location = getGeminiVertexLocation(process.env)
     const geminiVertexModel = getGeminiVertexModel(process.env) || model?.trim() || 'gemini-3.5-flash'
@@ -922,7 +940,8 @@ export async function getAnthropicClient({
   }
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)) {
     // Anthropic-on-Vertex (Claude models). The Gemini-on-Vertex case already
-    // returned above, so reaching this branch means the user really
+    // returned above (env flag or saved profile without a conflicting
+    // explicit selection), so reaching this branch means the user really
     // selected Anthropic-on-Vertex.
     // Refresh GCP credentials if gcpAuthRefresh is configured and credentials are expired
     // This is similar to how we handle AWS credential refresh for Bedrock
