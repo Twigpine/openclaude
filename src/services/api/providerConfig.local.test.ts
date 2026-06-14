@@ -337,11 +337,18 @@ test('does not classify Gemini Vertex sessions as first-party bootstrap traffic'
   // Maintainer P2: with only the Gemini Vertex flag set, the cache scope
   // must be null (third-party), not 'firstParty' — otherwise bootstrap
   // options are fetched through the Anthropic first-party path.
+  const priorUseOpenAI = process.env.CLAUDE_CODE_USE_OPENAI
+  // A leaked CLAUDE_CODE_USE_OPENAI from the runner env would take the OpenAI
+  // branch and make this pass/fail for the wrong reason.
+  delete process.env.CLAUDE_CODE_USE_OPENAI
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   try {
     expect(getAdditionalModelOptionsCacheScope()).toBeNull()
   } finally {
     delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+    if (priorUseOpenAI !== undefined) {
+      process.env.CLAUDE_CODE_USE_OPENAI = priorUseOpenAI
+    }
   }
 })
 

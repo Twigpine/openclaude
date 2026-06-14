@@ -354,6 +354,14 @@ export function isNotEmptyMessage(message: Message): boolean {
     return true
   }
 
+  // Defensive: user/assistant slots can be malformed (e.g. `{ type: 'user' }`
+  // or `{ type: 'user', message: {} }`) after an error path; reading
+  // message.message.content below would then crash. Treat them as empty.
+  const inner = (message as { message?: { content?: unknown } }).message
+  if (!inner || typeof inner !== 'object' || inner.content == null) {
+    return false
+  }
+
   if (typeof message.message.content === 'string') {
     return message.message.content.trim().length > 0
   }

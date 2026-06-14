@@ -1961,12 +1961,15 @@ export async function buildLaunchEnv(options: {
   }
 
   if (selectedProfile === 'gemini-vertex') {
+    // Shell value wins over the persisted one (same precedence as model/project
+    // below) so an explicit GEMINI_VERTEX_AUTH_MODE isn't silently replaced.
+    const isVertexAuthMode = (value: string | undefined) =>
+      value === 'access-token' || value === 'adc' ? value : undefined
     const env = buildGeminiVertexProfileEnv({
       authMode:
-        persistedEnv.GEMINI_VERTEX_AUTH_MODE === 'access-token' ||
-        persistedEnv.GEMINI_VERTEX_AUTH_MODE === 'adc'
-          ? persistedEnv.GEMINI_VERTEX_AUTH_MODE
-          : 'adc',
+        isVertexAuthMode(processEnv.GEMINI_VERTEX_AUTH_MODE) ??
+        isVertexAuthMode(persistedEnv.GEMINI_VERTEX_AUTH_MODE) ??
+        'adc',
       model: processEnv.GEMINI_VERTEX_MODEL || persistedEnv.GEMINI_VERTEX_MODEL,
       project:
         processEnv.GEMINI_VERTEX_PROJECT ||

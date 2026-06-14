@@ -1004,6 +1004,18 @@ function isProcessEnvAlignedWithProfile(
   }
 
   if (compatibilityMode === 'gemini-vertex') {
+    // The profile stores its Vertex project in baseUrl. When it pins one, treat
+    // the env as aligned only if the active project still matches — otherwise a
+    // project drift would skip re-apply and route to the wrong project. When the
+    // profile has no explicit project (ADC resolves it), don't constrain it.
+    const activeProject =
+      trimOrUndefined(processEnv.GEMINI_VERTEX_PROJECT) ??
+      trimOrUndefined(processEnv.GOOGLE_CLOUD_PROJECT) ??
+      trimOrUndefined(processEnv.GCLOUD_PROJECT) ??
+      trimOrUndefined(processEnv.GOOGLE_PROJECT_ID)
+    const projectAligned = profile.baseUrl
+      ? sameOptionalEnvValue(activeProject, profile.baseUrl)
+      : true
     return (
       processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX !== undefined &&
       processEnv.CLAUDE_CODE_USE_OPENAI === undefined &&
@@ -1015,7 +1027,8 @@ function isProcessEnvAlignedWithProfile(
       processEnv.CLAUDE_CODE_USE_FOUNDRY === undefined &&
       processEnv.OPENAI_BASE_URL === undefined &&
       processEnv.OPENAI_MODEL === undefined &&
-      sameOptionalEnvValue(processEnv.GEMINI_VERTEX_MODEL, getPrimaryModel(profile.model))
+      sameOptionalEnvValue(processEnv.GEMINI_VERTEX_MODEL, getPrimaryModel(profile.model)) &&
+      projectAligned
     )
   }
 
