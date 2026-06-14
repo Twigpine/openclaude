@@ -19,6 +19,14 @@ describe('isNotEmptyMessage malformed-history hardening', () => {
     expect(
       isNotEmptyMessage({ type: 'user', message: { content: null } } as unknown as Message),
     ).toBe(false)
+    // Non-string/non-array content (object or number) must not reach the
+    // indexed reads below.
+    expect(
+      isNotEmptyMessage({ type: 'user', message: { content: {} } } as unknown as Message),
+    ).toBe(false)
+    expect(
+      isNotEmptyMessage({ type: 'user', message: { content: 5 } } as unknown as Message),
+    ).toBe(false)
   })
 
   test('still reports a non-empty string user message', () => {

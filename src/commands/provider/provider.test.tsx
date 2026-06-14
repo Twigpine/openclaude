@@ -734,6 +734,38 @@ test('buildCurrentProviderSummary recognizes Gemini mode', () => {
   )
 })
 
+test('buildCurrentProviderSummary recognizes Gemini Vertex mode', () => {
+  const summary = buildCurrentProviderSummary({
+    processEnv: {
+      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+      GEMINI_VERTEX_MODEL: 'gemini-2.5-pro',
+      GEMINI_VERTEX_PROJECT: 'my-project',
+      GEMINI_VERTEX_LOCATION: 'europe-west4',
+    },
+    persisted: null,
+  })
+
+  expect(summary.providerLabel).toBe('Google Vertex AI Gemini')
+  expect(summary.modelLabel).toBe('gemini-2.5-pro')
+  expect(summary.endpointLabel).toBe(
+    'https://aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west4',
+  )
+})
+
+test('buildCurrentProviderSummary shows project-required Vertex endpoint when no project is set', () => {
+  const summary = buildCurrentProviderSummary({
+    processEnv: {
+      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+      GEMINI_VERTEX_MODEL: 'gemini-2.5-flash',
+    },
+    persisted: null,
+  })
+
+  expect(summary.providerLabel).toBe('Google Vertex AI Gemini')
+  expect(summary.endpointLabel).toContain('/projects/')
+  expect(summary.endpointLabel).toContain('GEMINI_VERTEX_PROJECT')
+})
+
 test('buildCurrentProviderSummary recognizes Mistral mode', () => {
   const summary = buildCurrentProviderSummary({
     processEnv: {

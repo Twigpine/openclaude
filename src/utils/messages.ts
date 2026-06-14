@@ -354,11 +354,17 @@ export function isNotEmptyMessage(message: Message): boolean {
     return true
   }
 
-  // Defensive: user/assistant slots can be malformed (e.g. `{ type: 'user' }`
-  // or `{ type: 'user', message: {} }`) after an error path; reading
-  // message.message.content below would then crash. Treat them as empty.
+  // Defensive: user/assistant slots can be malformed (e.g. `{ type: 'user' }`,
+  // `{ message: {} }`, or a non-string/non-array `content`) after an error
+  // path; the string/array reads below would then crash. Narrow content to the
+  // only two shapes the rest of this function handles and treat the rest as
+  // empty.
   const inner = (message as { message?: { content?: unknown } }).message
-  if (!inner || typeof inner !== 'object' || inner.content == null) {
+  if (!inner || typeof inner !== 'object') {
+    return false
+  }
+  const content = inner.content
+  if (typeof content !== 'string' && !Array.isArray(content)) {
     return false
   }
 

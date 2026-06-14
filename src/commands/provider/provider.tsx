@@ -59,6 +59,9 @@ import {
 } from '../../utils/providerProfile.js'
 import {
   getGeminiProjectIdHint,
+  getGeminiVertexLocation,
+  getGeminiVertexModel,
+  getGeminiVertexProjectId,
   mayHaveGeminiAdcCredentials,
 } from '../../utils/geminiAuth.js'
 import {
@@ -290,6 +293,27 @@ export function buildCurrentProviderSummary(options?: {
   const secretSource = processEnv as SecretSourceEnv
   const persisted = options?.persisted ?? loadProfileFile()
   const savedProfileLabel = persisted?.profile ?? 'none'
+
+  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+    const vertexMetadata = getProviderPresetUiMetadata('gemini-vertex', processEnv)
+    const location = getGeminiVertexLocation(processEnv)
+    const project = getGeminiVertexProjectId(processEnv)
+    // Mirror the startup screen: the native client always targets
+    // /projects/<project>/locations/<location> and requires a project, so
+    // surface a project-required state rather than a project-less endpoint.
+    const endpoint = project
+      ? `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
+      : `https://aiplatform.googleapis.com/v1/projects/<set GEMINI_VERTEX_PROJECT>/locations/${location}`
+    return {
+      providerLabel: vertexMetadata.label,
+      modelLabel: getSafeDisplayValue(
+        getGeminiVertexModel(processEnv),
+        secretSource,
+      ),
+      endpointLabel: getSafeDisplayValue(endpoint, secretSource),
+      savedProfileLabel,
+    }
+  }
 
   if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI)) {
     const geminiMetadata = getProviderPresetUiMetadata('gemini', processEnv)
