@@ -96,6 +96,34 @@ test('buildInheritedEnvVars forwards the official Command Code credential alias'
   expect(envVars).not.toContain('OPENAI_BASE_URL=')
 })
 
+test('buildInheritedEnvVars forwards every Gemini Vertex project alias to teammates', () => {
+  // Gemini Vertex accepts GEMINI_VERTEX_PROJECT, GOOGLE_CLOUD_PROJECT,
+  // GCLOUD_PROJECT and GOOGLE_PROJECT_ID as project sources. An env-only
+  // teammate (access token + one of the aliases) must keep the project hint.
+  const aliases = [
+    'GEMINI_VERTEX_PROJECT',
+    'GOOGLE_CLOUD_PROJECT',
+    'GCLOUD_PROJECT',
+    'GOOGLE_PROJECT_ID',
+  ] as const
+  const prior = Object.fromEntries(aliases.map(k => [k, process.env[k]]))
+  try {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    for (const k of aliases) process.env[k] = `value-${k}`
+    const envVars = buildInheritedEnvVars()
+    for (const k of aliases) {
+      expect(envVars).toContain(`${k}=`)
+      expect(envVars).toContain(`value-${k}`)
+    }
+  } finally {
+    for (const k of aliases) {
+      if (prior[k] === undefined) delete process.env[k]
+      else process.env[k] = prior[k]
+    }
+    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+  }
+})
+
 test('buildInheritedEnvVars forwards PATH for source-built teammate tool lookups', () => {
   process.env.PATH = '/custom/bin:/usr/bin'
 

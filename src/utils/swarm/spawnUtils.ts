@@ -126,7 +126,12 @@ const TEAMMATE_ENV_VARS = [
   'GEMINI_VERTEX_PROJECT',
   'GEMINI_VERTEX_LOCATION',
   'GEMINI_ACCESS_TOKEN',
+  // All project-id sources Gemini Vertex accepts (getGeminiVertexProjectId /
+  // validation), so an env-only teammate keeps the same project hint as the
+  // leader regardless of which alias was set.
   'GOOGLE_CLOUD_PROJECT',
+  'GCLOUD_PROJECT',
+  'GOOGLE_PROJECT_ID',
   'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_API_KEY',
   'MISTRAL_API_KEY',

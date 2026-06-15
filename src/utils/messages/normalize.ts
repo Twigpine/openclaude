@@ -70,7 +70,30 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
   // and remains true for all subsequent messages in the normalization process.
   let isNewChain = false
   return messages.flatMap(message => {
-    if (!message || typeof message !== 'object' || !('type' in message)) return []
+    // Defensive: a falsy slot (sparse array) or a non-object would throw on
+    // the message.type read below. Drop it — this mirrors the default arm
+    // and keeps the render pipeline alive instead of crashing the UI.
+    if (!message || typeof message !== 'object' || !('type' in message)) {
+      return []
+    }
+
+    // The assistant/user branches dereference message.message.content; drop
+    // malformed payloads (missing message, or non-array/non-string content)
+    // before they reach those reads. queryHelpers feeds progress-derived
+    // messages through here, so a corrupt slot must not crash the pipeline.
+    const innerContent = (message as { message?: { content?: unknown } }).message
+      ?.content
+    if (message.type === 'assistant' && !Array.isArray(innerContent)) {
+      return []
+    }
+    if (
+      message.type === 'user' &&
+      typeof innerContent !== 'string' &&
+      !Array.isArray(innerContent)
+    ) {
+      return []
+    }
+
     switch (message.type) {
       case 'assistant': {
         isNewChain = isNewChain || message.message.content.length > 1
