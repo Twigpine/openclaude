@@ -56,6 +56,7 @@ import {
 } from '../../integrations/routeMetadata.js'
 import { resolveOpenAIShimRuntimeContext } from '../../integrations/runtimeMetadata.js'
 import {
+  DEFAULT_GEMINI_VERTEX_MODEL,
   getGeminiVertexLocation,
   getGeminiVertexModel,
   getGeminiVertexProjectId,
@@ -816,20 +817,29 @@ export async function getAnthropicClient({
       : undefined
     const project = getGeminiVertexProjectId(process.env) ?? profileProject
     const location = getGeminiVertexLocation(process.env)
+    // getGeminiVertexModel already falls back to the default model; the trailing
+    // literal only satisfies its `string | undefined` signature (it never
+    // actually returns undefined) so geminiVertexModel stays a plain string.
     const geminiVertexModel =
       process.env.GEMINI_VERTEX_MODEL?.trim() ||
       profileModel ||
       model?.trim() ||
       getGeminiVertexModel(process.env) ||
-      'gemini-3.5-flash'
-    const credential = await resolveGeminiCredential({
-      ...process.env,
-      GEMINI_AUTH_MODE:
-        process.env.GEMINI_VERTEX_AUTH_MODE ??
-        (process.env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc'),
-      GEMINI_API_KEY: undefined,
-      GOOGLE_API_KEY: undefined,
-    } as NodeJS.ProcessEnv)
+      DEFAULT_GEMINI_VERTEX_MODEL
+    // Re-resolve on every call instead of capturing one token: ADC access
+    // tokens expire (~1h), so a long-lived client must pick up refreshed
+    // tokens. resolveGeminiCredential memoizes the ADC path (5-min TTL) and
+    // GoogleAuth refreshes internally, so this stays cheap.
+    const resolveVertexCredential = () =>
+      resolveGeminiCredential({
+        ...process.env,
+        GEMINI_AUTH_MODE:
+          process.env.GEMINI_VERTEX_AUTH_MODE ??
+          (process.env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc'),
+        GEMINI_API_KEY: undefined,
+        GOOGLE_API_KEY: undefined,
+      } as NodeJS.ProcessEnv)
+    const credential = await resolveVertexCredential()
     if (credential.kind === 'none') {
       throw new Error('Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN or Google ADC credentials')
     }
@@ -843,7 +853,13 @@ export async function getAnthropicClient({
       project: vertexProject,
       location,
       model: geminiVertexModel,
-      getAccessToken: async () => credential.credential,
+      getAccessToken: async () => {
+        const fresh = await resolveVertexCredential()
+        if (fresh.kind === 'none') {
+          throw new Error('Gemini Vertex authentication is no longer available (token expired or revoked; re-set GEMINI_ACCESS_TOKEN or refresh ADC).')
+        }
+        return fresh.credential
+      },
       ...(resolvedFetch ? { fetch: resolvedFetch } : {}),
     }) as unknown as Anthropic
   }

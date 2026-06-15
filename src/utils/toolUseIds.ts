@@ -16,18 +16,21 @@ export const MAX_WIRE_TOOL_ID_LENGTH = 64
  * distinct. Dependency-free so shims and message normalization can share it.
  */
 export function sanitizeToolUseIdForWire(
-  value: string,
+  value: unknown,
   maxLength = MAX_WIRE_TOOL_ID_LENGTH,
 ): string {
-  const clean = value.replace(/[^A-Za-z0-9_-][\s\S]*$/, '')
+  // Callers pass ids from loosely typed history blocks; a non-string id
+  // (number/object/undefined) would throw on .replace below. Coerce first.
+  const str = typeof value === 'string' ? value : value == null ? '' : String(value)
+  const clean = str.replace(/[^A-Za-z0-9_-][\s\S]*$/, '')
   if (clean.length > 0 && clean.length <= maxLength) {
     return clean
   }
   // Deterministic non-cryptographic hash of the FULL original value (FNV-1a)
   // — keeps distinct ids distinct even when their clean prefixes collide.
   let hash = 0x811c9dc5
-  for (let i = 0; i < value.length; i++) {
-    hash ^= value.charCodeAt(i)
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i)
     hash = Math.imul(hash, 0x01000193) >>> 0
   }
   const tail = `_${hash.toString(36)}`

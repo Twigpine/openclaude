@@ -27,6 +27,7 @@ import {
   type SecretValueSource,
 } from '../src/utils/providerSecrets.js'
 import { redactUrlForDisplay } from '../src/utils/redaction.js'
+import { getGeminiVertexProjectId } from '../src/utils/geminiAuth.js'
 import {
   MIN_NODE_ENGINE_RANGE,
   checkSupportedNodeVersion,
@@ -982,11 +983,7 @@ function currentBaseUrl(): string {
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
     const location = process.env.GEMINI_VERTEX_LOCATION ?? 'global'
     const project =
-      process.env.GEMINI_VERTEX_PROJECT ??
-      process.env.GOOGLE_CLOUD_PROJECT ??
-      process.env.GCLOUD_PROJECT ??
-      process.env.GOOGLE_PROJECT_ID ??
-      '<set GEMINI_VERTEX_PROJECT>'
+      getGeminiVertexProjectId(process.env) ?? '<set GEMINI_VERTEX_PROJECT>'
     return `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
   }
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)) {
@@ -1030,16 +1027,20 @@ function checkGeminiVertexEnv(): CheckResult[] {
   const results: CheckResult[] = []
   results.push(pass('Provider mode', 'Google Vertex AI Gemini provider enabled.'))
 
-  const model = process.env.GEMINI_VERTEX_MODEL
-  const project =
-    process.env.GEMINI_VERTEX_PROJECT ??
-    process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.GCLOUD_PROJECT ??
-    process.env.GOOGLE_PROJECT_ID
-  const location = process.env.GEMINI_VERTEX_LOCATION ?? 'global'
+  const nonBlank = (v: string | undefined): string | undefined => {
+    const t = v?.trim()
+    return t ? t : undefined
+  }
+  const model = nonBlank(process.env.GEMINI_VERTEX_MODEL)
+  // Same resolver as the runtime validator / client so doctor never reports a
+  // different project than the one the provider would actually use.
+  const project = getGeminiVertexProjectId(process.env)
+  const location = nonBlank(process.env.GEMINI_VERTEX_LOCATION) ?? 'global'
+  const accessToken = nonBlank(process.env.GEMINI_ACCESS_TOKEN)
+  const adcFile = nonBlank(process.env.GOOGLE_APPLICATION_CREDENTIALS)
   const authMode =
-    process.env.GEMINI_VERTEX_AUTH_MODE ??
-    (process.env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc')
+    nonBlank(process.env.GEMINI_VERTEX_AUTH_MODE) ??
+    (accessToken ? 'access-token' : 'adc')
 
   if (!project) {
     results.push(
@@ -1061,13 +1062,13 @@ function checkGeminiVertexEnv(): CheckResult[] {
 
   if (authMode === 'access-token') {
     results.push(
-      process.env.GEMINI_ACCESS_TOKEN
+      accessToken
         ? pass('GEMINI_VERTEX_AUTH', 'access-token configured.')
         : fail('GEMINI_VERTEX_AUTH', 'access-token mode selected but GEMINI_ACCESS_TOKEN is missing.'),
     )
   } else {
     results.push(
-      process.env.GOOGLE_APPLICATION_CREDENTIALS
+      adcFile
         ? pass('GEMINI_VERTEX_AUTH', 'ADC via GOOGLE_APPLICATION_CREDENTIALS.')
         : pass('GEMINI_VERTEX_AUTH', 'ADC mode — relying on ambient Google Application Default Credentials.'),
     )
@@ -1515,12 +1516,7 @@ export function serializeSafeEnvSummary(): Record<string, string | boolean> {
     return {
       CLAUDE_CODE_USE_GEMINI_VERTEX: true,
       GEMINI_VERTEX_MODEL: process.env.GEMINI_VERTEX_MODEL ?? '(unset, default: gemini-2.5-flash)',
-      GEMINI_VERTEX_PROJECT:
-        process.env.GEMINI_VERTEX_PROJECT ??
-        process.env.GOOGLE_CLOUD_PROJECT ??
-        process.env.GCLOUD_PROJECT ??
-        process.env.GOOGLE_PROJECT_ID ??
-        '(unset)',
+      GEMINI_VERTEX_PROJECT: getGeminiVertexProjectId(process.env) ?? '(unset)',
       GEMINI_VERTEX_LOCATION: process.env.GEMINI_VERTEX_LOCATION ?? 'global',
       GEMINI_VERTEX_AUTH_MODE:
         process.env.GEMINI_VERTEX_AUTH_MODE ??

@@ -29,6 +29,7 @@ import {
   listAtomicChatModels,
   listOllamaModels,
 } from './provider-discovery.ts'
+import { getGeminiVertexProjectId } from '../src/utils/geminiAuth.ts'
 
 function parseArg(name: string): string | null {
   const args = process.argv.slice(2)
@@ -94,13 +95,9 @@ async function main(): Promise<void> {
 
     env = builtEnv
   } else if (selected === 'gemini-vertex') {
-    const project =
-      argBaseUrl ||
-      process.env.GEMINI_VERTEX_PROJECT ||
-      process.env.GOOGLE_CLOUD_PROJECT ||
-      process.env.GCLOUD_PROJECT ||
-      process.env.GOOGLE_PROJECT_ID ||
-      null
+    // Reuse the runtime project resolver (same normalization as the provider
+    // validator) rather than an ad-hoc OR chain.
+    const project = argBaseUrl?.trim() || getGeminiVertexProjectId(process.env) || null
     if (!project) {
       console.error('Gemini Vertex profile requires a project. Use --base-url <project> or set GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID.')
       process.exit(1)

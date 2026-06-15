@@ -14,6 +14,7 @@ import {
   type ProfileFile,
   type ProviderProfile,
 } from '../src/utils/providerProfile.ts'
+import { getGeminiVertexProjectId } from '../src/utils/geminiAuth.ts'
 import {
   getRouteCredentialValue,
   resolveActiveRouteIdFromEnv,
@@ -253,14 +254,11 @@ async function main(): Promise<void> {
   }
 
   if (profile === 'gemini-vertex') {
-    const hasProject = Boolean(
-      env.GEMINI_VERTEX_PROJECT ||
-        env.GOOGLE_CLOUD_PROJECT ||
-        env.GCLOUD_PROJECT ||
-        env.GOOGLE_PROJECT_ID,
-    )
+    // Reuse the runtime project resolver so launch validation matches the
+    // provider validator / client contract instead of drifting.
+    const hasProject = Boolean(getGeminiVertexProjectId(env))
     const hasCredential = Boolean(
-      env.GEMINI_ACCESS_TOKEN || env.GOOGLE_APPLICATION_CREDENTIALS,
+      env.GEMINI_ACCESS_TOKEN?.trim() || env.GOOGLE_APPLICATION_CREDENTIALS?.trim(),
     )
     if (!hasProject || !hasCredential) {
       console.error('Gemini Vertex requires a project (GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID) and a credential (GEMINI_ACCESS_TOKEN or Google ADC via GOOGLE_APPLICATION_CREDENTIALS). Save a gemini-vertex profile with `/provider` or set those env vars.')

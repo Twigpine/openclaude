@@ -44,11 +44,20 @@ describe('PROVIDER_SELECTION_FLAGS parity', () => {
     expect(unregistered).toEqual([])
   })
 
-  test('registered flags actually appear in src', () => {
+  test('registered flags are actually consumed outside the registry definition', () => {
     const srcRoot = join(import.meta.dir, '..')
     const glob = new Bun.Glob('**/*.{ts,tsx}')
     let allContent = ''
     for (const relPath of glob.scanSync({ cwd: srcRoot })) {
+      // Exclude the registry itself (and its test) so the assertion proves the
+      // flag is referenced by real runtime code, not just by its own
+      // definition — otherwise the check is tautological.
+      if (
+        relPath.endsWith('providerSelectionFlags.ts') ||
+        relPath.endsWith('providerSelectionFlags.test.ts')
+      ) {
+        continue
+      }
       allContent += readFileSync(join(srcRoot, relPath), 'utf8')
     }
     for (const flag of PROVIDER_SELECTION_FLAGS) {
