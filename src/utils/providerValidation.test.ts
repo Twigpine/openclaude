@@ -116,8 +116,33 @@ test('accepts Gemini Vertex project env aliases without requiring API-key Gemini
     process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
     process.env[projectEnvVar] = 'project-test-1234'
 
-    await expect(getProviderValidationError(process.env)).resolves.toBeNull()
+    await expect(
+      getProviderValidationError(process.env, {
+        // Deterministic credential so this case tests project resolution, not
+        // the ambient machine's ADC.
+        resolveGeminiCredential: async () => ({
+          kind: 'access-token',
+          credential: 'vertex-token',
+        }),
+      }),
+    ).resolves.toBeNull()
   }
+})
+
+test('rejects Gemini Vertex when the selected credential path is missing', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+  delete process.env.GEMINI_ACCESS_TOKEN
+
+  await expect(
+    getProviderValidationError(process.env, {
+      resolveGeminiCredential: async () => ({ kind: 'none' }),
+    }),
+  ).resolves.toBe(
+    'Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN (access-token mode) or Google ADC credentials.',
+  )
 })
 
 test('requires a project id for Gemini Vertex', async () => {

@@ -70,6 +70,7 @@ import { hasUsableOpenAICredential } from './credentialPool.js'
 import { getApiTimeoutMs } from './openaiShim/transport.js'
 import { AnthropicVertex } from './vertexClient.js'
 import { importOptionalRuntimeModule } from '../../utils/optionalRuntimeModule.js'
+import { getPrimaryModel } from '../../utils/providerModels.js'
 import {
   getActiveProviderProfile,
   shouldRouteToGeminiVertexFromProfile,
@@ -797,13 +798,30 @@ export async function getAnthropicClient({
       return undefined
     }
   })()
-  const useGeminiVertexProvider =
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) ||
+  const routedFromProfileOnly =
+    !isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
     shouldRouteToGeminiVertexFromProfile(process.env, activeProfile)
+  const useGeminiVertexProvider =
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) || routedFromProfileOnly
   if (useGeminiVertexProvider) {
-    const project = getGeminiVertexProjectId(process.env)
+    // When routing purely from the saved profile (no env flag), the profile's
+    // own project (stored in baseUrl) and model must win over ambient/default
+    // env, otherwise this branch throws "project required" or routes to the
+    // wrong project/model. Env still wins when explicitly set.
+    const profileProject = routedFromProfileOnly
+      ? activeProfile?.baseUrl?.trim() || undefined
+      : undefined
+    const profileModel = routedFromProfileOnly && activeProfile?.model
+      ? getPrimaryModel(activeProfile.model)
+      : undefined
+    const project = getGeminiVertexProjectId(process.env) ?? profileProject
     const location = getGeminiVertexLocation(process.env)
-    const geminiVertexModel = getGeminiVertexModel(process.env) || model?.trim() || 'gemini-3.5-flash'
+    const geminiVertexModel =
+      process.env.GEMINI_VERTEX_MODEL?.trim() ||
+      profileModel ||
+      model?.trim() ||
+      getGeminiVertexModel(process.env) ||
+      'gemini-3.5-flash'
     const credential = await resolveGeminiCredential({
       ...process.env,
       GEMINI_AUTH_MODE:

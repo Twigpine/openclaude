@@ -608,6 +608,23 @@ export async function getProviderValidationError(
     if (env.GEMINI_VERTEX_MODEL !== undefined && !hasNonEmptyEnvValue(env, 'GEMINI_VERTEX_MODEL')) {
       return 'Gemini Vertex model is required via GEMINI_VERTEX_MODEL.'
     }
+    // Validate the selected credential path too, mirroring getAnthropicClient,
+    // so setup/startup catches a missing access token or ADC credentials before
+    // the provider is considered ready (instead of failing on the first
+    // request).
+    const vertexCredential = await (
+      options?.resolveGeminiCredential ?? resolveGeminiCredential
+    )({
+      ...env,
+      GEMINI_AUTH_MODE:
+        env.GEMINI_VERTEX_AUTH_MODE ??
+        (env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc'),
+      GEMINI_API_KEY: undefined,
+      GOOGLE_API_KEY: undefined,
+    } as NodeJS.ProcessEnv)
+    if (vertexCredential.kind === 'none') {
+      return 'Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN (access-token mode) or Google ADC credentials.'
+    }
     return null
   }
 
