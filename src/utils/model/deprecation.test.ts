@@ -1,62 +1,43 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
-
-import {
-  acquireSharedMutationLock,
-  releaseSharedMutationLock,
-} from '../../test/sharedMutationLock.js'
+import { afterEach, describe, expect, mock, test } from 'bun:test'
+import * as providersModule from './providers.js'
+import type { LegacyAPIProvider } from './providers.js'
 import { getModelDeprecationWarning } from './deprecation.js'
 
-// Provider selection is driven entirely by env flags read live by
-// getAPIProvider(); snapshot the ones this suite mutates so it stays hermetic.
-const TOUCHED_ENV = [
-  'CLAUDE_CODE_USE_GEMINI_VERTEX',
-  'CLAUDE_CODE_USE_GEMINI',
-  'CLAUDE_CODE_USE_OPENAI',
-  'CLAUDE_CODE_USE_GITHUB',
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'CLAUDE_CODE_USE_MISTRAL',
-] as const
+// getModelDeprecationWarning resolves the active provider through
+// getAPIProvider(), which reads global env/route state that other tests in the
+// full suite mutate (leaked CLAUDE_CODE_USE_* flags, mock.module on providers).
+// Mock the provider directly so these assertions stay hermetic and
+// order-independent instead of racing on process.env.
+function mockApiProvider(provider: LegacyAPIProvider): void {
+  mock.module('./providers.js', () => ({
+    ...providersModule,
+    getAPIProvider: () => provider,
+  }))
+}
 
-const originalEnv = new Map<string, string | undefined>()
-
-beforeEach(async () => {
-  await acquireSharedMutationLock('model/deprecation.test.ts')
-  for (const key of TOUCHED_ENV) {
-    originalEnv.set(key, process.env[key])
-    delete process.env[key]
-  }
-})
-
-afterEach(() => {
-  try {
-    for (const key of TOUCHED_ENV) {
-      const value = originalEnv.get(key)
-      if (value === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = value
-      }
-    }
-  } finally {
-    releaseSharedMutationLock()
-  }
-})
+function restoreApiProvider(): void {
+  mock.module('./providers.js', () => ({ ...providersModule }))
+}
 
 // claude-3-opus is deprecated under first-party / Anthropic-wire providers.
 const DEPRECATED_FIRST_PARTY_MODEL = 'claude-3-opus-20240229'
 
-test('first-party provider still surfaces the deprecation warning', () => {
-  // Sanity anchor: the bypass below is only meaningful if this model is
-  // otherwise reported as deprecated.
-  const warning = getModelDeprecationWarning(DEPRECATED_FIRST_PARTY_MODEL)
-  expect(warning).toContain('Claude 3 Opus')
-})
+describe('getModelDeprecationWarning — Gemini Vertex bypass', () => {
+  afterEach(restoreApiProvider)
 
-test('Gemini Vertex provider bypasses model deprecation warnings', () => {
-  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-  // Gemini Vertex serves its own model catalog, so Anthropic retirement dates
-  // must never leak into its deprecation banner.
-  expect(getModelDeprecationWarning(DEPRECATED_FIRST_PARTY_MODEL)).toBeNull()
+  test('first-party provider still surfaces the deprecation warning', () => {
+    mockApiProvider('firstParty')
+    // Sanity anchor: the bypass below is only meaningful if this model is
+    // otherwise reported as deprecated.
+    expect(getModelDeprecationWarning(DEPRECATED_FIRST_PARTY_MODEL)).toContain(
+      'Claude 3 Opus',
+    )
+  })
+
+  test('Gemini Vertex provider bypasses model deprecation warnings', () => {
+    mockApiProvider('gemini-vertex')
+    // Gemini Vertex serves its own model catalog, so Anthropic retirement dates
+    // must never leak into its deprecation banner.
+    expect(getModelDeprecationWarning(DEPRECATED_FIRST_PARTY_MODEL)).toBeNull()
+  })
 })
