@@ -1248,3 +1248,55 @@ describe('sandbox runtime diagnostics', () => {
     )
   })
 })
+
+describe('doctor recognises Gemini Vertex', () => {
+  const FLAGS = [
+    'CLAUDE_CODE_USE_GEMINI_VERTEX',
+    'CLAUDE_CODE_USE_OPENAI',
+    'CLAUDE_CODE_USE_GEMINI',
+    'CLAUDE_CODE_USE_GITHUB',
+    'CLAUDE_CODE_USE_MISTRAL',
+    'GEMINI_VERTEX_PROJECT',
+    'GEMINI_VERTEX_MODEL',
+    'GEMINI_VERTEX_LOCATION',
+    'GEMINI_VERTEX_AUTH_MODE',
+    'GEMINI_ACCESS_TOKEN',
+  ] as const
+  const prior = Object.fromEntries(FLAGS.map(k => [k, process.env[k]]))
+
+  afterEach(() => {
+    for (const k of FLAGS) {
+      if (prior[k] === undefined) delete process.env[k]
+      else process.env[k] = prior[k]
+    }
+  })
+
+  test('checkOpenAIEnv reports the Vertex provider, not the Anthropic flow', async () => {
+    const { __test } = await import('./system-check.ts')
+    for (const k of FLAGS) delete process.env[k]
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
+    process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
+    process.env.GEMINI_ACCESS_TOKEN = 'tok'
+
+    const results = __test.checkOpenAIEnv()
+    const providerMode = results.find(r => r.label === 'Provider mode')
+    expect(providerMode?.detail).toContain('Vertex')
+    expect(providerMode?.detail).not.toContain('Anthropic login flow')
+    expect(results.some(r => r.label === 'GEMINI_VERTEX_PROJECT')).toBe(true)
+  })
+
+  test('safe env summary surfaces Vertex config', async () => {
+    const { __test } = await import('./system-check.ts')
+    for (const k of FLAGS) delete process.env[k]
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+    process.env.GEMINI_ACCESS_TOKEN = 'tok'
+
+    const summary = __test.serializeSafeEnvSummary()
+    expect(summary.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe(true)
+    expect(summary.GEMINI_VERTEX_PROJECT).toBe('my-proj')
+    expect(summary.GEMINI_VERTEX_CREDENTIAL_SET).toBe(true)
+  })
+})

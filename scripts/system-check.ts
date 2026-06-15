@@ -979,6 +979,16 @@ function hasPlaceholderCredential(value: string | undefined): boolean {
 }
 
 function currentBaseUrl(): string {
+  if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+    const location = process.env.GEMINI_VERTEX_LOCATION ?? 'global'
+    const project =
+      process.env.GEMINI_VERTEX_PROJECT ??
+      process.env.GOOGLE_CLOUD_PROJECT ??
+      process.env.GCLOUD_PROJECT ??
+      process.env.GOOGLE_PROJECT_ID ??
+      '<set GEMINI_VERTEX_PROJECT>'
+    return `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
+  }
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)) {
     return process.env.GEMINI_BASE_URL ?? GEMINI_DEFAULT_BASE_URL
   }
@@ -1011,6 +1021,56 @@ function checkGeminiEnv(): CheckResult[] {
     results.push(fail('GEMINI_API_KEY', 'Missing. Set GEMINI_API_KEY or GOOGLE_API_KEY.'))
   } else {
     results.push(pass('GEMINI_API_KEY', 'Configured.'))
+  }
+
+  return results
+}
+
+function checkGeminiVertexEnv(): CheckResult[] {
+  const results: CheckResult[] = []
+  results.push(pass('Provider mode', 'Google Vertex AI Gemini provider enabled.'))
+
+  const model = process.env.GEMINI_VERTEX_MODEL
+  const project =
+    process.env.GEMINI_VERTEX_PROJECT ??
+    process.env.GOOGLE_CLOUD_PROJECT ??
+    process.env.GCLOUD_PROJECT ??
+    process.env.GOOGLE_PROJECT_ID
+  const location = process.env.GEMINI_VERTEX_LOCATION ?? 'global'
+  const authMode =
+    process.env.GEMINI_VERTEX_AUTH_MODE ??
+    (process.env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc')
+
+  if (!project) {
+    results.push(
+      fail(
+        'GEMINI_VERTEX_PROJECT',
+        'Missing. Set GEMINI_VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GOOGLE_PROJECT_ID).',
+      ),
+    )
+  } else {
+    results.push(pass('GEMINI_VERTEX_PROJECT', project))
+  }
+
+  results.push(
+    model
+      ? pass('GEMINI_VERTEX_MODEL', model)
+      : pass('GEMINI_VERTEX_MODEL', 'Not set. Default gemini-2.5-flash will be used.'),
+  )
+  results.push(pass('GEMINI_VERTEX_LOCATION', location))
+
+  if (authMode === 'access-token') {
+    results.push(
+      process.env.GEMINI_ACCESS_TOKEN
+        ? pass('GEMINI_VERTEX_AUTH', 'access-token configured.')
+        : fail('GEMINI_VERTEX_AUTH', 'access-token mode selected but GEMINI_ACCESS_TOKEN is missing.'),
+    )
+  } else {
+    results.push(
+      process.env.GOOGLE_APPLICATION_CREDENTIALS
+        ? pass('GEMINI_VERTEX_AUTH', 'ADC via GOOGLE_APPLICATION_CREDENTIALS.')
+        : pass('GEMINI_VERTEX_AUTH', 'ADC mode — relying on ambient Google Application Default Credentials.'),
+    )
   }
 
   return results
@@ -1070,10 +1130,15 @@ function checkGithubEnv(): CheckResult[] {
 
 export function checkOpenAIEnv(): CheckResult[] {
   const results: CheckResult[] = []
+  const useGeminiVertex = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const useMistral = isTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
   const useOpenAI = isTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
+
+  if (useGeminiVertex) {
+    return checkGeminiVertexEnv()
+  }
 
   if (useGemini) {
     return checkGeminiEnv()
@@ -1179,10 +1244,18 @@ export function checkOpenAIEnv(): CheckResult[] {
 }
 
 async function checkBaseUrlReachability(): Promise<CheckResult> {
+  const useGeminiVertex = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useOpenAI = isTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const useMistral = isTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
+
+  if (useGeminiVertex) {
+    return pass(
+      'Provider reachability',
+      'Skipped for Gemini Vertex (native generateContent endpoint differs from the OpenAI /models probe).',
+    )
+  }
 
   if (!useGemini && !useOpenAI && !useGithub && !useMistral) {
     return pass('Provider reachability', 'Skipped (OpenAI-compatible mode disabled).')
@@ -1288,10 +1361,18 @@ async function checkBaseUrlReachability(): Promise<CheckResult> {
 }
 
 async function checkProviderGenerationReadiness(): Promise<CheckResult> {
+  const useGeminiVertex = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useOpenAI = isTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const useMistral = isTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
+
+  if (useGeminiVertex) {
+    return pass(
+      'Provider generation readiness',
+      'Skipped for Gemini Vertex (native generateContent flow; env/credential checks above cover setup).',
+    )
+  }
 
   if (!useGemini && !useOpenAI && !useGithub && !useMistral) {
     return pass('Provider generation readiness', 'Skipped (OpenAI-compatible mode disabled).')
@@ -1430,6 +1511,25 @@ function checkOllamaProcessorMode(): CheckResult {
 }
 
 export function serializeSafeEnvSummary(): Record<string, string | boolean> {
+  if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+    return {
+      CLAUDE_CODE_USE_GEMINI_VERTEX: true,
+      GEMINI_VERTEX_MODEL: process.env.GEMINI_VERTEX_MODEL ?? '(unset, default: gemini-2.5-flash)',
+      GEMINI_VERTEX_PROJECT:
+        process.env.GEMINI_VERTEX_PROJECT ??
+        process.env.GOOGLE_CLOUD_PROJECT ??
+        process.env.GCLOUD_PROJECT ??
+        process.env.GOOGLE_PROJECT_ID ??
+        '(unset)',
+      GEMINI_VERTEX_LOCATION: process.env.GEMINI_VERTEX_LOCATION ?? 'global',
+      GEMINI_VERTEX_AUTH_MODE:
+        process.env.GEMINI_VERTEX_AUTH_MODE ??
+        (process.env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc'),
+      GEMINI_VERTEX_CREDENTIAL_SET: Boolean(
+        process.env.GEMINI_ACCESS_TOKEN ?? process.env.GOOGLE_APPLICATION_CREDENTIALS,
+      ),
+    }
+  }
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)) {
     return {
       CLAUDE_CODE_USE_GEMINI: true,
@@ -1580,4 +1680,5 @@ if (import.meta.main) {
   await main()
 }
 
-export {}
+// Test-only surface for the provider dispatch.
+export const __test = { checkOpenAIEnv, serializeSafeEnvSummary }

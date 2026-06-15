@@ -54,7 +54,7 @@ function parseLaunchOptions(argv: string[]): LaunchOptions {
       continue
     }
 
-    if ((lower === 'auto' || lower === 'openai' || lower === 'ollama' || lower === 'codex' || lower === 'gemini' || lower ==='mistral' || lower === 'atomic-chat') && requestedProfile === 'auto') {
+    if ((lower === 'auto' || lower === 'openai' || lower === 'ollama' || lower === 'codex' || lower === 'gemini' || lower === 'gemini-vertex' || lower ==='mistral' || lower === 'atomic-chat') && requestedProfile === 'auto') {
       requestedProfile = lower as ProviderProfile | 'auto'
       continue
     }
@@ -131,6 +131,8 @@ function printSummary(profile: ProviderProfile): void {
   console.log(`Launching profile: ${profile}`)
   if (profile === 'gemini') {
     console.log('Using configured Gemini provider settings.')
+  } else if (profile === 'gemini-vertex') {
+    console.log('Using configured Gemini Vertex provider settings.')
   } else if (profile === 'mistral') {
     console.log('Using configured Mistral provider settings.')
   } else if (profile === 'codex') {
@@ -248,6 +250,22 @@ async function main(): Promise<void> {
   if (profile === 'gemini' && !hasUsableGeminiLaunchAuth(env)) {
     console.error('Gemini credentials are required for gemini profile. Use `bun run profile:init -- --provider gemini --api-key <key>`, save an access-token/ADC Gemini profile with `/provider`, or set GEMINI_API_KEY/GOOGLE_API_KEY/GEMINI_ACCESS_TOKEN.')
     process.exit(1)
+  }
+
+  if (profile === 'gemini-vertex') {
+    const hasProject = Boolean(
+      env.GEMINI_VERTEX_PROJECT ||
+        env.GOOGLE_CLOUD_PROJECT ||
+        env.GCLOUD_PROJECT ||
+        env.GOOGLE_PROJECT_ID,
+    )
+    const hasCredential = Boolean(
+      env.GEMINI_ACCESS_TOKEN || env.GOOGLE_APPLICATION_CREDENTIALS,
+    )
+    if (!hasProject || !hasCredential) {
+      console.error('Gemini Vertex requires a project (GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID) and a credential (GEMINI_ACCESS_TOKEN or Google ADC via GOOGLE_APPLICATION_CREDENTIALS). Save a gemini-vertex profile with `/provider` or set those env vars.')
+      process.exit(1)
+    }
   }
 
   if (profile === 'mistral' && !env.MISTRAL_API_KEY) {

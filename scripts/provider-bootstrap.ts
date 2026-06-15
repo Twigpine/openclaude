@@ -11,6 +11,7 @@ import {
   buildAtomicChatProfileEnv,
   buildCodexProfileEnv,
   buildGeminiProfileEnv,
+  buildGeminiVertexProfileEnv,
   buildMistralProfileEnv,
   buildOllamaProfileEnv,
   buildOpenAIProfileEnv,
@@ -38,7 +39,7 @@ function parseArg(name: string): string | null {
 
 function parseProviderArg(): ProviderProfile | 'auto' {
   const p = parseArg('--provider')?.toLowerCase()
-  if (p === 'openai' || p === 'ollama' || p === 'codex' || p === 'gemini' || p === 'mistral' || p === 'atomic-chat') return p
+  if (p === 'openai' || p === 'ollama' || p === 'codex' || p === 'gemini' || p === 'gemini-vertex' || p === 'mistral' || p === 'atomic-chat') return p
   return 'auto'
 }
 
@@ -92,6 +93,23 @@ async function main(): Promise<void> {
     }
 
     env = builtEnv
+  } else if (selected === 'gemini-vertex') {
+    const project =
+      argBaseUrl ||
+      process.env.GEMINI_VERTEX_PROJECT ||
+      process.env.GOOGLE_CLOUD_PROJECT ||
+      process.env.GCLOUD_PROJECT ||
+      process.env.GOOGLE_PROJECT_ID ||
+      null
+    if (!project) {
+      console.error('Gemini Vertex profile requires a project. Use --base-url <project> or set GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID.')
+      process.exit(1)
+    }
+    env = buildGeminiVertexProfileEnv({
+      model: argModel || null,
+      project,
+      processEnv: process.env,
+    })
   } else if (selected === 'mistral') {
     const builtEnv = buildMistralProfileEnv({
       model: argModel || null,

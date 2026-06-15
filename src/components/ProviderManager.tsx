@@ -117,6 +117,7 @@ import {
 import { clearStartupProviderOverrides } from '../utils/providerStartupOverrides.js'
 import { redactSensitiveInfo, redactUrlForDisplay } from '../utils/redaction.js'
 import { registerCleanup } from '../utils/cleanupRegistry.js'
+import { PROVIDER_SELECTION_FLAGS } from '../utils/providerSelectionFlags.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import {
   type OptionWithDescription,
@@ -1714,6 +1715,14 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   }
 
   function activateGithubProvider(): string | null {
+    // Clear every provider-selection flag except GitHub from the central list
+    // so a previously selected provider (e.g. Gemini Vertex, checked before the
+    // GitHub branch in getAnthropicClient) can't keep routing after switching.
+    const clearedSelectionFlags = Object.fromEntries(
+      PROVIDER_SELECTION_FLAGS.filter(
+        flag => flag !== 'CLAUDE_CODE_USE_GITHUB',
+      ).map(flag => [flag, undefined]),
+    )
     const { error } = updateSettingsForSource('userSettings', {
       env: {
         CLAUDE_CODE_USE_GITHUB: '1',
@@ -1728,11 +1737,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         OPENAI_ORGANIZATION: undefined as unknown as string,
         OPENAI_BASE_URL: undefined as unknown as string,
         OPENAI_API_BASE: undefined as unknown as string,
-        CLAUDE_CODE_USE_OPENAI: undefined as unknown as string,
-        CLAUDE_CODE_USE_GEMINI: undefined as unknown as string,
-        CLAUDE_CODE_USE_BEDROCK: undefined as unknown as string,
-        CLAUDE_CODE_USE_VERTEX: undefined as unknown as string,
-        CLAUDE_CODE_USE_FOUNDRY: undefined as unknown as string,
+        ...(clearedSelectionFlags as Record<string, string | undefined>),
       },
     })
     if (error) {
@@ -1748,11 +1753,9 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     delete process.env.OPENAI_ORGANIZATION
     delete process.env.OPENAI_BASE_URL
     delete process.env.OPENAI_API_BASE
-    delete process.env.CLAUDE_CODE_USE_OPENAI
-    delete process.env.CLAUDE_CODE_USE_GEMINI
-    delete process.env.CLAUDE_CODE_USE_BEDROCK
-    delete process.env.CLAUDE_CODE_USE_VERTEX
-    delete process.env.CLAUDE_CODE_USE_FOUNDRY
+    for (const flag of PROVIDER_SELECTION_FLAGS) {
+      if (flag !== 'CLAUDE_CODE_USE_GITHUB') delete process.env[flag]
+    }
     delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
     delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
     delete process.env[GITHUB_MODELS_HYDRATED_ENV_MARKER]
