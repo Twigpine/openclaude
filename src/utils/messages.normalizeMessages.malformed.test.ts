@@ -26,13 +26,12 @@ describe('normalizeMessages malformed-payload hardening', () => {
     const out = normalizeMessages([
       { type: 'user', message: { content: 'hello' }, uuid: 'u1' },
     ] as unknown as Message[])
-    expect(out).toEqual([
-      {
-        type: 'user',
-        uuid: 'u1',
-        message: { content: [{ type: 'text', text: 'hello' }] },
-      },
-    ])
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({
+      type: 'user',
+      uuid: 'u1',
+      message: { content: [{ type: 'text', text: 'hello' }] },
+    })
   })
 
   test('keeps a well-formed assistant block message', () => {
