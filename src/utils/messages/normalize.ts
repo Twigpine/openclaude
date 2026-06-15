@@ -93,6 +93,24 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
     ) {
       return []
     }
+    // Array content whose elements are themselves malformed (null, primitives,
+    // a missing/non-string type, or a text block without text) would still
+    // crash downstream on block.type / block.text — drop the whole slot.
+    if (
+      (message.type === 'assistant' || message.type === 'user') &&
+      Array.isArray(innerContent) &&
+      innerContent.some(block => {
+        if (!block || typeof block !== 'object') return true
+        const type = (block as { type?: unknown }).type
+        if (typeof type !== 'string') return true
+        return (
+          type === 'text' &&
+          typeof (block as { text?: unknown }).text !== 'string'
+        )
+      })
+    ) {
+      return []
+    }
 
     switch (message.type) {
       case 'assistant': {
