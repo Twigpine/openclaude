@@ -1772,6 +1772,12 @@ describe('applyModelFlagFromArgs', () => {
     expect(process.env.GEMINI_MODEL).toBe('gemini-2.0-flash')
   })
 
+  test('sets GEMINI_VERTEX_MODEL when CLAUDE_CODE_USE_GEMINI_VERTEX is active', () => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    applyModelFlagFromArgs(['--model', 'gemini-2.5-flash'])
+    expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
+  })
+
   test('sets MISTRAL_MODEL when CLAUDE_CODE_USE_MISTRAL is active', () => {
     process.env.CLAUDE_CODE_USE_MISTRAL = '1'
     applyModelFlagFromArgs(['--model', 'devstral-latest'])

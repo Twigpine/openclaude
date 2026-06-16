@@ -10,6 +10,7 @@ import {
   resolveProviderRequest,
   shouldAttemptLocalToollessRetry,
 } from './providerConfig.js'
+import { PROVIDER_SELECTION_FLAGS } from '../../utils/providerSelectionFlags.js'
 
 const originalEnv = {
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
@@ -337,17 +338,26 @@ test('does not classify Gemini Vertex sessions as first-party bootstrap traffic'
   // Maintainer P2: with only the Gemini Vertex flag set, the cache scope
   // must be null (third-party), not 'firstParty' — otherwise bootstrap
   // options are fetched through the Anthropic first-party path.
-  const priorUseOpenAI = process.env.CLAUDE_CODE_USE_OPENAI
-  // A leaked CLAUDE_CODE_USE_OPENAI from the runner env would take the OpenAI
-  // branch and make this pass/fail for the wrong reason.
-  delete process.env.CLAUDE_CODE_USE_OPENAI
+  //
+  // Isolate every provider-selection flag (not just CLAUDE_CODE_USE_OPENAI) so a
+  // leaked flag from the runner env can't take another branch and make this
+  // pass/fail for the wrong reason — the null result must be attributable to
+  // Gemini Vertex selection alone.
+  const priorFlags = new Map<string, string | undefined>()
+  for (const flag of PROVIDER_SELECTION_FLAGS) {
+    priorFlags.set(flag, process.env[flag])
+    delete process.env[flag]
+  }
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   try {
     expect(getAdditionalModelOptionsCacheScope()).toBeNull()
   } finally {
-    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-    if (priorUseOpenAI !== undefined) {
-      process.env.CLAUDE_CODE_USE_OPENAI = priorUseOpenAI
+    for (const [flag, value] of priorFlags) {
+      if (value === undefined) {
+        delete process.env[flag]
+      } else {
+        process.env[flag] = value
+      }
     }
   }
 })

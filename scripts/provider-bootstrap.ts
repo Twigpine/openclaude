@@ -97,7 +97,12 @@ async function main(): Promise<void> {
   } else if (selected === 'gemini-vertex') {
     // Reuse the runtime project resolver (same normalization as the provider
     // validator) rather than an ad-hoc OR chain.
-    const project = argBaseUrl?.trim() || getGeminiVertexProjectId(process.env) || null
+    const projectFromArg = argBaseUrl?.trim()
+    if (projectFromArg && /^https?:\/\//i.test(projectFromArg)) {
+      console.error('Gemini Vertex --base-url expects a Google Cloud project id, not an API endpoint URL.')
+      process.exit(1)
+    }
+    const project = projectFromArg || getGeminiVertexProjectId(process.env) || null
     if (!project) {
       console.error('Gemini Vertex profile requires a project. Use --base-url <project> or set GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID.')
       process.exit(1)

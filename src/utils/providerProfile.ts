@@ -2002,6 +2002,14 @@ export async function buildLaunchEnv(options: {
     if (googleApplicationCredentials) {
       env.GOOGLE_APPLICATION_CREDENTIALS = googleApplicationCredentials
     }
+    // PROFILE_ENV_KEYS clears GEMINI_ACCESS_TOKEN on relaunch; an access-token
+    // Vertex profile must carry its bearer forward or it relaunches unauthed.
+    if (env.GEMINI_VERTEX_AUTH_MODE === 'access-token') {
+      const geminiAccessToken = sanitizeApiKey(
+        processEnv.GEMINI_ACCESS_TOKEN || persistedEnv.GEMINI_ACCESS_TOKEN,
+      )
+      if (geminiAccessToken) env.GEMINI_ACCESS_TOKEN = geminiAccessToken
+    }
 
     return buildCompatibilityProcessEnv({
       processEnv,

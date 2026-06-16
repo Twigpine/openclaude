@@ -1296,6 +1296,11 @@ export function applyProviderProfileToProcessEnv(
       ...(profile.apiKey ? { GEMINI_API_KEY: profile.apiKey } : {}),
     }
   } else if (compatibilityMode === 'gemini-vertex') {
+    const vertexAuthMode =
+      process.env.GEMINI_VERTEX_AUTH_MODE === 'access-token' ||
+      process.env.GEMINI_VERTEX_AUTH_MODE === 'adc'
+        ? process.env.GEMINI_VERTEX_AUTH_MODE
+        : 'adc'
     profileEnv = buildGeminiVertexProfileEnv({
       model: primaryModel,
       project:
@@ -1305,11 +1310,19 @@ export function applyProviderProfileToProcessEnv(
         process.env.GCLOUD_PROJECT ||
         process.env.GOOGLE_PROJECT_ID,
       location: process.env.GEMINI_VERTEX_LOCATION,
-      authMode:
-        process.env.GEMINI_VERTEX_AUTH_MODE === 'access-token' || process.env.GEMINI_VERTEX_AUTH_MODE === 'adc'
-          ? process.env.GEMINI_VERTEX_AUTH_MODE
-          : 'adc',
+      authMode: vertexAuthMode,
     })
+    // buildCompatibilityProcessEnv clears every managed key (incl.
+    // GEMINI_ACCESS_TOKEN / GOOGLE_APPLICATION_CREDENTIALS) before applying
+    // profileEnv, so carry the active credential forward or selecting a Vertex
+    // profile would erase it before the first request.
+    if (vertexAuthMode === 'access-token') {
+      const accessToken = trimOrUndefined(process.env.GEMINI_ACCESS_TOKEN)
+      if (accessToken) profileEnv.GEMINI_ACCESS_TOKEN = accessToken
+    } else {
+      const adcFile = trimOrUndefined(process.env.GOOGLE_APPLICATION_CREDENTIALS)
+      if (adcFile) profileEnv.GOOGLE_APPLICATION_CREDENTIALS = adcFile
+    }
   } else if (isGithubCompatibilityMode(compatibilityMode)) {
     profileEnv = buildGithubCompatibleProfileEnv({
       model: primaryModel,
@@ -2249,7 +2262,14 @@ function buildStartupProfileFromActiveProfile(
     case 'gemini-vertex': {
       const env = buildGeminiVertexProfileEnv({
         model: getPrimaryModel(activeProfile.model),
-        project: activeProfile.baseUrl,
+        // baseUrl carries the project id, but the preset can seed it with the
+        // endpoint URL — never let a URL through as a project.
+        project:
+          geminiVertexProjectFromProfile(activeProfile.baseUrl) ||
+          process.env.GEMINI_VERTEX_PROJECT ||
+          process.env.GOOGLE_CLOUD_PROJECT ||
+          process.env.GCLOUD_PROJECT ||
+          process.env.GOOGLE_PROJECT_ID,
         processEnv: process.env,
       })
       return { profile: 'gemini-vertex', env: applySupportedProfileCustomHeaders(activeProfile, env) }

@@ -789,6 +789,34 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.GEMINI_VERTEX_PROJECT).toBe('my-gcp-project')
   })
 
+  test('gemini vertex access-token profile preserves GEMINI_ACCESS_TOKEN', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    // buildCompatibilityProcessEnv clears managed keys; the access token must
+    // survive a profile switch or the first request relaunches unauthed.
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+    process.env.GEMINI_ACCESS_TOKEN = 'ya29.test-bearer'
+
+    applyProviderProfileToProcessEnv(
+      buildGeminiVertexProfile({ baseUrl: 'my-gcp-project' }),
+    )
+
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.test-bearer')
+  })
+
+  test('gemini vertex adc profile preserves GOOGLE_APPLICATION_CREDENTIALS', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
+
+    applyProviderProfileToProcessEnv(
+      buildGeminiVertexProfile({ baseUrl: 'my-gcp-project' }),
+    )
+
+    expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/tmp/adc.json')
+  })
+
   test('bedrock profile sets CLAUDE_CODE_USE_BEDROCK and preserves anthropic model routing', async () => {
     const { applyProviderProfileToProcessEnv } =
       await importFreshProviderProfileModules()
