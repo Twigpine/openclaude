@@ -49,12 +49,12 @@ describe('PROVIDER_SELECTION_FLAGS parity', () => {
     const glob = new Bun.Glob('**/*.{ts,tsx}')
     let allContent = ''
     for (const relPath of glob.scanSync({ cwd: srcRoot })) {
-      // Exclude the registry itself (and its test) so the assertion proves the
-      // flag is referenced by real runtime code, not just by its own
-      // definition — otherwise the check is tautological.
+      // Exclude the registry itself and every test file so the assertion proves
+      // the flag is referenced by real runtime code, not just by its own
+      // definition or by a fixture — otherwise the check is tautological.
       if (
         relPath.endsWith('providerSelectionFlags.ts') ||
-        relPath.endsWith('providerSelectionFlags.test.ts')
+        /\.test\.[tj]sx?$/.test(relPath)
       ) {
         continue
       }
