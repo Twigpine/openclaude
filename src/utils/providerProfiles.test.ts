@@ -65,6 +65,14 @@ const RESTORED_KEYS = [
   'GEMINI_API_KEY',
   'GEMINI_AUTH_MODE',
   'GEMINI_ACCESS_TOKEN',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_LOCATION',
+  'GEMINI_VERTEX_AUTH_MODE',
+  'GOOGLE_CLOUD_PROJECT',
+  'GCLOUD_PROJECT',
+  'GOOGLE_PROJECT_ID',
+  'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_API_KEY',
   'MISTRAL_BASE_URL',
   'MISTRAL_MODEL',
@@ -755,6 +763,30 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.OPENAI_MODEL).toBeUndefined()
     expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
     expect(getFreshAPIProvider()).toBe('gemini-vertex')
+  })
+
+  test('gemini vertex profile never writes the endpoint URL into GEMINI_VERTEX_PROJECT', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    // The preset seeds baseUrl with the API endpoint default; it must not be
+    // persisted as the Google Cloud project (Vertex would build an invalid
+    // /v1/projects/https://.../locations/... request).
+    applyProviderProfileToProcessEnv(buildGeminiVertexProfile())
+
+    expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
+    expect(process.env.GEMINI_VERTEX_PROJECT).toBeUndefined()
+  })
+
+  test('gemini vertex profile persists a real project id from baseUrl', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    applyProviderProfileToProcessEnv(
+      buildGeminiVertexProfile({ baseUrl: 'my-gcp-project' }),
+    )
+
+    expect(process.env.GEMINI_VERTEX_PROJECT).toBe('my-gcp-project')
   })
 
   test('bedrock profile sets CLAUDE_CODE_USE_BEDROCK and preserves anthropic model routing', async () => {

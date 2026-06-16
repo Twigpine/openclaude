@@ -257,11 +257,24 @@ async function main(): Promise<void> {
     // Reuse the runtime project resolver so launch validation matches the
     // provider validator / client contract instead of drifting.
     const hasProject = Boolean(getGeminiVertexProjectId(env))
-    const hasCredential = Boolean(
-      env.GEMINI_ACCESS_TOKEN?.trim() || env.GOOGLE_APPLICATION_CREDENTIALS?.trim(),
-    )
-    if (!hasProject || !hasCredential) {
-      console.error('Gemini Vertex requires a project (GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID) and a credential (GEMINI_ACCESS_TOKEN or Google ADC via GOOGLE_APPLICATION_CREDENTIALS). Save a gemini-vertex profile with `/provider` or set those env vars.')
+    const authMode =
+      env.GEMINI_VERTEX_AUTH_MODE?.trim().toLowerCase() ||
+      (env.GEMINI_ACCESS_TOKEN?.trim() ? 'access-token' : 'adc')
+    // Only access-token mode needs an upfront credential. ADC mode (explicit
+    // or default) relies on ambient Google ADC, which only the runtime resolver
+    // (resolveGeminiCredential) can discover from the well-known gcloud
+    // location — so defer that check to runtime instead of hard-failing here,
+    // matching what doctor and the native client already accept.
+    const hasCredential =
+      authMode === 'access-token'
+        ? Boolean(env.GEMINI_ACCESS_TOKEN?.trim())
+        : true
+    if (!hasProject) {
+      console.error('Gemini Vertex requires a project (GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID). Save a gemini-vertex profile with `/provider` or set those env vars.')
+      process.exit(1)
+    }
+    if (!hasCredential) {
+      console.error('Gemini Vertex access-token mode requires GEMINI_ACCESS_TOKEN. Set it, or switch to ADC (GEMINI_VERTEX_AUTH_MODE=adc with ambient Google ADC or GOOGLE_APPLICATION_CREDENTIALS).')
       process.exit(1)
     }
   }

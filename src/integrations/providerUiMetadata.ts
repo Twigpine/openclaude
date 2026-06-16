@@ -102,10 +102,11 @@ export function getProviderPresetUiMetadata(
     ''
   const label =
     presetMetadata.label ?? getRouteLabel(route.routeId) ?? route.routeId
+  const authMode: AuthMode = descriptor?.setup.authMode ?? 'api-key'
 
   return {
     apiKey: readFirstEnvValue(processEnv, credentialEnvVars),
-    authMode: descriptor?.setup.authMode ?? 'api-key',
+    authMode,
     badge: presetMetadata.badge,
     baseUrl,
     credentialEnvVars,
@@ -115,7 +116,10 @@ export function getProviderPresetUiMetadata(
     name: presetMetadata.name ?? label,
     preset,
     provider: route.routeId,
-    requiresApiKey: descriptor?.setup.requiresAuth ?? false,
+    // Only api-key presets should prompt for an API key. requiresAuth is also
+    // true for ADC / access-token Vertex presets, but those have no key to
+    // enter, so they must not be pushed through the generic API-key step.
+    requiresApiKey: authMode === 'api-key' && (descriptor?.setup.requiresAuth ?? false),
     routeId: route.routeId,
     supportsCustomHeaders: routeSupportsCustomHeaders(route.routeId),
   }

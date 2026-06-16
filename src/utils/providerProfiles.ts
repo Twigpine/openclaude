@@ -287,6 +287,23 @@ function trimOrUndefined(value: string | undefined): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined
 }
 
+/**
+ * Gemini Vertex profiles reuse the shared `baseUrl` field to carry the Google
+ * Cloud project id. The preset, however, seeds that field with the API endpoint
+ * default (`https://aiplatform.googleapis.com`). A URL is never a valid project
+ * id — using it would build requests like `/v1/projects/https://.../locations/…`
+ * that Vertex rejects — so treat a URL-shaped value as "no project set".
+ */
+function geminiVertexProjectFromProfile(
+  baseUrl: string | undefined,
+): string | undefined {
+  const trimmed = trimOrUndefined(baseUrl)
+  if (!trimmed || /^https?:\/\//i.test(trimmed)) {
+    return undefined
+  }
+  return trimmed
+}
+
 function sanitizeAuthHeader(value: string | undefined): string | undefined {
   const trimmed = trimOrUndefined(value)
   if (!trimmed) {
@@ -1013,8 +1030,9 @@ function isProcessEnvAlignedWithProfile(
       trimOrUndefined(processEnv.GOOGLE_CLOUD_PROJECT) ??
       trimOrUndefined(processEnv.GCLOUD_PROJECT) ??
       trimOrUndefined(processEnv.GOOGLE_PROJECT_ID)
-    const projectAligned = profile.baseUrl
-      ? sameOptionalEnvValue(activeProject, profile.baseUrl)
+    const profileProject = geminiVertexProjectFromProfile(profile.baseUrl)
+    const projectAligned = profileProject
+      ? sameOptionalEnvValue(activeProject, profileProject)
       : true
     return (
       processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX !== undefined &&
@@ -1280,7 +1298,12 @@ export function applyProviderProfileToProcessEnv(
   } else if (compatibilityMode === 'gemini-vertex') {
     profileEnv = buildGeminiVertexProfileEnv({
       model: primaryModel,
-      project: profile.baseUrl || process.env.GEMINI_VERTEX_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || process.env.GOOGLE_PROJECT_ID,
+      project:
+        geminiVertexProjectFromProfile(profile.baseUrl) ||
+        process.env.GEMINI_VERTEX_PROJECT ||
+        process.env.GOOGLE_CLOUD_PROJECT ||
+        process.env.GCLOUD_PROJECT ||
+        process.env.GOOGLE_PROJECT_ID,
       location: process.env.GEMINI_VERTEX_LOCATION,
       authMode:
         process.env.GEMINI_VERTEX_AUTH_MODE === 'access-token' || process.env.GEMINI_VERTEX_AUTH_MODE === 'adc'
