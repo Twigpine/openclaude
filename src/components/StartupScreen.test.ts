@@ -481,4 +481,16 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
     expect(result.baseUrl).toContain('/projects/')
     expect(result.baseUrl).toContain('GEMINI_VERTEX_PROJECT')
   })
+
+  test('resolves the project from a fallback alias (GOOGLE_CLOUD_PROJECT) when GEMINI_VERTEX_PROJECT is unset', () => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    // Only the alias is set; getGeminiVertexProjectId() must resolve it so the
+    // endpoint matches the runtime/provider contract for alias projects.
+    process.env.GOOGLE_CLOUD_PROJECT = 'alias-project'
+
+    const result = detectProvider()
+    expect(result.baseUrl).toBe(
+      'https://aiplatform.googleapis.com/v1/projects/alias-project/locations/global',
+    )
+  })
 })

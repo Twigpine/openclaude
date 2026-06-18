@@ -82,6 +82,8 @@ const originalEnv = {
   GEMINI_VERTEX_LOCATION: process.env.GEMINI_VERTEX_LOCATION,
   GEMINI_VERTEX_MODEL: process.env.GEMINI_VERTEX_MODEL,
   GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
+  GCLOUD_PROJECT: process.env.GCLOUD_PROJECT,
+  GOOGLE_PROJECT_ID: process.env.GOOGLE_PROJECT_ID,
   GEMINI_ACCESS_TOKEN: process.env.GEMINI_ACCESS_TOKEN,
   GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
   GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
@@ -215,6 +217,8 @@ beforeEach(async () => {
   delete process.env.GEMINI_VERTEX_LOCATION
   delete process.env.GEMINI_VERTEX_MODEL
   delete process.env.GOOGLE_CLOUD_PROJECT
+  delete process.env.GCLOUD_PROJECT
+  delete process.env.GOOGLE_PROJECT_ID
   delete process.env.GEMINI_ACCESS_TOKEN
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS
   delete process.env.GOOGLE_API_KEY
@@ -286,6 +290,8 @@ afterEach(() => {
     restoreEnv('GEMINI_VERTEX_LOCATION', originalEnv.GEMINI_VERTEX_LOCATION)
     restoreEnv('GEMINI_VERTEX_MODEL', originalEnv.GEMINI_VERTEX_MODEL)
     restoreEnv('GOOGLE_CLOUD_PROJECT', originalEnv.GOOGLE_CLOUD_PROJECT)
+    restoreEnv('GCLOUD_PROJECT', originalEnv.GCLOUD_PROJECT)
+    restoreEnv('GOOGLE_PROJECT_ID', originalEnv.GOOGLE_PROJECT_ID)
     restoreEnv('GEMINI_ACCESS_TOKEN', originalEnv.GEMINI_ACCESS_TOKEN)
     restoreEnv('GOOGLE_APPLICATION_CREDENTIALS', originalEnv.GOOGLE_APPLICATION_CREDENTIALS)
     restoreEnv('GOOGLE_API_KEY', originalEnv.GOOGLE_API_KEY)

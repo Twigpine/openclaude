@@ -15,6 +15,12 @@ import { getLocalOpenAICompatibleProviderLabel } from '../utils/providerDiscover
 import { getSettings_DEPRECATED } from '../utils/settings/settings.js'
 import { parseUserSpecifiedModel } from '../utils/model/model.js'
 import { DEFAULT_GEMINI_MODEL } from '../utils/providerProfile.js'
+import {
+  DEFAULT_GEMINI_VERTEX_MODEL,
+  getGeminiVertexLocation,
+  getGeminiVertexModel,
+  getGeminiVertexProjectId,
+} from '../utils/geminiAuth.js'
 import { BRAND_TAGLINE } from '../constants/brand.js'
 import { getGlobalConfig } from '../utils/config.js'
 import { ANSI_DIM, ANSI_RESET, ansiRgb } from '../utils/terminalAnsi.js'
@@ -85,9 +91,15 @@ export function detectProvider(modelOverride?: string): { name: string; model: s
   const useMistral = process.env.CLAUDE_CODE_USE_MISTRAL === '1' || process.env.CLAUDE_CODE_USE_MISTRAL === 'true'
 
   if (useGeminiVertex) {
-    const model = modelOverride || process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
-    const location = process.env.GEMINI_VERTEX_LOCATION || 'global'
-    const project = process.env.GEMINI_VERTEX_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || process.env.GOOGLE_PROJECT_ID
+    // Use the shared resolvers so this display matches the runtime/provider
+    // summary contract (same default model, location and project-alias chain,
+    // with sanitization) instead of drifting via manual env reads.
+    const model =
+      modelOverride?.trim() ||
+      getGeminiVertexModel(process.env) ||
+      DEFAULT_GEMINI_VERTEX_MODEL
+    const location = getGeminiVertexLocation(process.env)
+    const project = getGeminiVertexProjectId(process.env)
     // The native client always targets /projects/<project>/locations/<location>
     // and throws when no project resolves. Mirror that contract here: when a
     // project is missing, surface a clear "project required" state instead of a
