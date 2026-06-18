@@ -26,8 +26,11 @@ import {
   redactSecretSubstringsForDisplay,
   type SecretValueSource,
 } from '../src/utils/providerSecrets.js'
+import {
+  getGeminiVertexProjectId,
+  resolveGeminiCredential,
+} from '../src/utils/geminiAuth.js'
 import { redactUrlForDisplay } from '../src/utils/redaction.js'
-import { getGeminiVertexProjectId } from '../src/utils/geminiAuth.js'
 import {
   MIN_NODE_ENGINE_RANGE,
   checkSupportedNodeVersion,
@@ -1070,7 +1073,7 @@ function checkGeminiVertexEnv(): CheckResult[] {
     results.push(
       adcFile
         ? pass('GEMINI_VERTEX_AUTH', 'ADC via GOOGLE_APPLICATION_CREDENTIALS.')
-        : pass('GEMINI_VERTEX_AUTH', 'ADC mode — relying on ambient Google Application Default Credentials.'),
+        : pass('GEMINI_VERTEX_AUTH', 'ADC mode — ambient Google ADC is validated by the generation-readiness check below.'),
     )
   }
 
@@ -1369,9 +1372,29 @@ async function checkProviderGenerationReadiness(): Promise<CheckResult> {
   const useMistral = isTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
 
   if (useGeminiVertex) {
+    // Reuse the runtime credential resolver so this preflight matches what
+    // startup/runtime will accept. Otherwise "relying on ambient ADC" is a
+    // false green: a fresh env with a project but no resolvable ADC passes the
+    // doctor, then `node bin/openclaude` fails startup validation. Map the
+    // Vertex auth mode to GEMINI_AUTH_MODE and clear API keys, exactly like the
+    // native client does, then fail when nothing actually resolves.
+    const credential = await resolveGeminiCredential({
+      ...process.env,
+      GEMINI_AUTH_MODE:
+        process.env.GEMINI_VERTEX_AUTH_MODE ??
+        (process.env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc'),
+      GEMINI_API_KEY: undefined,
+      GOOGLE_API_KEY: undefined,
+    })
+    if (credential.kind === 'none') {
+      return fail(
+        'Provider generation readiness',
+        'Gemini Vertex authentication could not be resolved. access-token mode needs GEMINI_ACCESS_TOKEN; ADC mode needs GOOGLE_APPLICATION_CREDENTIALS or ambient Google ADC (e.g. `gcloud auth application-default login`).',
+      )
+    }
     return pass(
       'Provider generation readiness',
-      'Skipped for Gemini Vertex (native generateContent flow; env/credential checks above cover setup).',
+      `Gemini Vertex credential resolved (${credential.kind}).`,
     )
   }
 
@@ -1677,4 +1700,8 @@ if (import.meta.main) {
 }
 
 // Test-only surface for the provider dispatch.
-export const __test = { checkOpenAIEnv, serializeSafeEnvSummary }
+export const __test = {
+  checkOpenAIEnv,
+  serializeSafeEnvSummary,
+  checkProviderGenerationReadiness,
+}

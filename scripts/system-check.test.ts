@@ -1299,4 +1299,32 @@ describe('doctor recognises Gemini Vertex', () => {
     expect(summary.GEMINI_VERTEX_PROJECT).toBe('my-proj')
     expect(summary.GEMINI_VERTEX_CREDENTIAL_SET).toBe(true)
   })
+
+  test('generation readiness passes when a Vertex credential resolves', async () => {
+    const { __test } = await import('./system-check.ts')
+    for (const k of FLAGS) delete process.env[k]
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+    process.env.GEMINI_ACCESS_TOKEN = 'tok'
+
+    const result = await __test.checkProviderGenerationReadiness()
+    expect(result.ok).toBe(true)
+    expect(result.detail).toContain('resolved')
+  })
+
+  test('generation readiness fails when no Vertex credential resolves (preflight matches startup)', async () => {
+    const { __test } = await import('./system-check.ts')
+    for (const k of FLAGS) delete process.env[k]
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
+    // Same fail branch the runtime resolver takes when ambient ADC cannot be
+    // found: an explicit auth mode with no usable credential must NOT report a
+    // false green, or the launcher preflight would pass and startup would fail.
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+
+    const result = await __test.checkProviderGenerationReadiness()
+    expect(result.ok).toBe(false)
+    expect(result.detail).toContain('could not be resolved')
+  })
 })
