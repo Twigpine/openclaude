@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import { getAPIProvider } from './model/providers.js'
+import { isGeminiVertexEffectiveProvider } from './providerProfiles.js'
 import { sanitizeToolUseIdForWire } from './toolUseIds.js'
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type {
@@ -1507,7 +1507,12 @@ export function normalizeMessagesForAPI(
   // client decodes them on its own wire. Every OTHER wire rejects those ids
   // (length/charset), so strip them here when the session history is sent to
   // a different provider — e.g. after a /provider switch or --resume.
-  const sanitizeVertexToolUseIds = getAPIProvider() !== 'gemini-vertex'
+  //
+  // Use the same effective-provider decision as the client (env flag OR saved
+  // active profile): getAPIProvider() only sees env route state, so on the
+  // saved-profile-only Vertex route it would wrongly strip the signatures
+  // before geminiVertexClient can decode and replay thoughtSignature.
+  const sanitizeVertexToolUseIds = !isGeminiVertexEffectiveProvider()
 
   // Whether to inject internal snip ids this pass. Gate must match
   // SnipTool.isEnabled() and skip test mode — markers change message content

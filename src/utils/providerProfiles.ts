@@ -12,6 +12,7 @@ import {
   saveGlobalConfig,
   type ProviderProfile,
 } from './config.js'
+import { isEnvTruthy } from './envUtils.js'
 import type { ModelOption } from './model/modelOptions.js'
 import { isCurrentMiniMaxModelOption } from './model/minimaxCatalog.js'
 import { getPrimaryModel, parseModelList } from './providerModels.js'
@@ -294,7 +295,7 @@ function trimOrUndefined(value: string | undefined): string | undefined {
  * id — using it would build requests like `/v1/projects/https://.../locations/…`
  * that Vertex rejects — so treat a URL-shaped value as "no project set".
  */
-function geminiVertexProjectFromProfile(
+export function geminiVertexProjectFromProfile(
   baseUrl: string | undefined,
 ): string | undefined {
   const trimmed = trimOrUndefined(baseUrl)
@@ -800,6 +801,24 @@ export function shouldRouteToGeminiVertexFromProfile(
 ): boolean {
   if (activeProfile?.provider !== 'gemini-vertex') return false
   return !hasConflictingProviderFlagsForProfile(processEnv, activeProfile)
+}
+
+/**
+ * Effective "is this session talking to Gemini Vertex?" decision, mirroring the
+ * client's routing in getAnthropicClient(): the env flag OR a saved active
+ * profile that routes to Vertex. getAPIProvider() only sees env route state, so
+ * paths that run before the client is selected (e.g. the tool_use id sanitizer
+ * in normalizeMessagesForAPI) must use this to avoid stripping Vertex
+ * thought-signature ids on the saved-profile-only route.
+ */
+export function isGeminiVertexEffectiveProvider(
+  processEnv: NodeJS.ProcessEnv = process.env,
+  activeProfile: ProviderProfile | undefined = getActiveProviderProfile(),
+): boolean {
+  return (
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) ||
+    shouldRouteToGeminiVertexFromProfile(processEnv, activeProfile)
+  )
 }
 
 function sameOptionalEnvValue(
@@ -2260,6 +2279,11 @@ function buildStartupProfileFromActiveProfile(
         })),
       }
     case 'gemini-vertex': {
+      const vertexAuthMode =
+        process.env.GEMINI_VERTEX_AUTH_MODE === 'access-token' ||
+        process.env.GEMINI_VERTEX_AUTH_MODE === 'adc'
+          ? process.env.GEMINI_VERTEX_AUTH_MODE
+          : 'adc'
       const env = buildGeminiVertexProfileEnv({
         model: getPrimaryModel(activeProfile.model),
         // baseUrl carries the project id, but the preset can seed it with the
@@ -2270,8 +2294,20 @@ function buildStartupProfileFromActiveProfile(
           process.env.GOOGLE_CLOUD_PROJECT ||
           process.env.GCLOUD_PROJECT ||
           process.env.GOOGLE_PROJECT_ID,
+        authMode: vertexAuthMode,
         processEnv: process.env,
       })
+      // This env is persisted as the startup profile; on relaunch buildLaunchEnv
+      // can only rehydrate Vertex credentials from the shell or this persisted
+      // profile (not the prior live env), so carry the active credential forward
+      // or the next launch drops auth — mirrors applyProviderProfileToProcessEnv.
+      if (vertexAuthMode === 'access-token') {
+        const accessToken = trimOrUndefined(process.env.GEMINI_ACCESS_TOKEN)
+        if (accessToken) env.GEMINI_ACCESS_TOKEN = accessToken
+      } else {
+        const adcFile = trimOrUndefined(process.env.GOOGLE_APPLICATION_CREDENTIALS)
+        if (adcFile) env.GOOGLE_APPLICATION_CREDENTIALS = adcFile
+      }
       return { profile: 'gemini-vertex', env: applySupportedProfileCustomHeaders(activeProfile, env) }
     }
     case 'openai': {

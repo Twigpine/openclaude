@@ -73,6 +73,7 @@ import { AnthropicVertex } from './vertexClient.js'
 import { importOptionalRuntimeModule } from '../../utils/optionalRuntimeModule.js'
 import { getPrimaryModel } from '../../utils/providerModels.js'
 import {
+  geminiVertexProjectFromProfile,
   getActiveProviderProfile,
   shouldRouteToGeminiVertexFromProfile,
 } from '../../utils/providerProfiles.js'
@@ -809,8 +810,12 @@ export async function getAnthropicClient({
     // own project (stored in baseUrl) and model must win over ambient/default
     // env, otherwise this branch throws "project required" or routes to the
     // wrong project/model. Env still wins when explicitly set.
+    // The profile stores its project in baseUrl, but the preset can seed it
+    // with the endpoint URL — never treat a URL as a project (it would build
+    // /v1/projects/https://.../locations/...). Shared sanitizer with the
+    // env-apply path.
     const profileProject = routedFromProfileOnly
-      ? activeProfile?.baseUrl?.trim() || undefined
+      ? geminiVertexProjectFromProfile(activeProfile?.baseUrl)
       : undefined
     const profileModel = routedFromProfileOnly && activeProfile?.model
       ? getPrimaryModel(activeProfile.model)

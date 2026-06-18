@@ -1,14 +1,14 @@
 import { defineVendor } from '../define.js'
 
-const geminiVertexEnvVars = [
-  'CLAUDE_CODE_USE_GEMINI_VERTEX',
-  'GEMINI_VERTEX_PROJECT',
-  'GEMINI_VERTEX_LOCATION',
-  'GEMINI_VERTEX_MODEL',
-  'GEMINI_VERTEX_AUTH_MODE',
-  'GOOGLE_CLOUD_PROJECT',
-  'GCLOUD_PROJECT',
-  'GOOGLE_PROJECT_ID',
+// Only real credential sources belong here (like every other vendor):
+// generic consumers (getProviderPresetUiMetadata / getRouteCredentialValue)
+// treat these as "the credential", so routing/config vars such as
+// CLAUDE_CODE_USE_GEMINI_VERTEX or GEMINI_VERTEX_PROJECT must not be included —
+// otherwise the preset flow would prefill apiKey with non-secret config.
+// access-token mode → GEMINI_ACCESS_TOKEN; ADC mode → GOOGLE_APPLICATION_CREDENTIALS
+// (ambient ADC has no env var and is resolved at runtime).
+const geminiVertexCredentialEnvVars = [
+  'GEMINI_ACCESS_TOKEN',
   'GOOGLE_APPLICATION_CREDENTIALS',
 ]
 
@@ -16,12 +16,17 @@ export default defineVendor({
   id: 'gemini-vertex',
   label: 'Google Vertex AI Gemini',
   classification: 'native',
-  defaultBaseUrl: 'https://aiplatform.googleapis.com',
+  // The native client builds its own aiplatform.googleapis.com URL from
+  // project+location, so this field is reused to carry the Google Cloud project
+  // id. Use a placeholder (not the endpoint URL) so the preset routes through
+  // the full setup form to collect the project instead of silently saving the
+  // endpoint URL as the project.
+  defaultBaseUrl: '<your-gcp-project-id>',
   defaultModel: 'gemini-2.5-flash',
   setup: {
     requiresAuth: true,
     authMode: 'adc',
-    credentialEnvVars: geminiVertexEnvVars,
+    credentialEnvVars: geminiVertexCredentialEnvVars,
   },
   transportConfig: {
     kind: 'gemini-vertex',

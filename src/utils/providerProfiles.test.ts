@@ -4460,6 +4460,75 @@ describe('setActiveProviderProfile', () => {
     }
   })
 
+  test('persists the access token into a saved Gemini Vertex startup profile', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
+    process.chdir(tempDir)
+    process.env.CLAUDE_CONFIG_DIR = configDir
+    // Session-provided credential: on relaunch buildLaunchEnv can only rehydrate
+    // from the persisted profile, so it must carry the token forward.
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+    process.env.GEMINI_ACCESS_TOKEN = 'ya29.session-bearer'
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [
+          buildGeminiVertexProfile({ id: 'vertex_prof', baseUrl: 'my-gcp-project' }),
+        ],
+      }))
+
+      const result = setActiveProviderProfile('vertex_prof', { configDir })
+      const persisted = JSON.parse(
+        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
+      )
+
+      expect(result?.id).toBe('vertex_prof')
+      expect(persisted.profile).toBe('gemini-vertex')
+      expect(persisted.env.GEMINI_VERTEX_PROJECT).toBe('my-gcp-project')
+      expect(persisted.env.GEMINI_ACCESS_TOKEN).toBe('ya29.session-bearer')
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
+  test('persists the ADC credentials file into a saved Gemini Vertex startup profile', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
+    process.chdir(tempDir)
+    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [
+          buildGeminiVertexProfile({ id: 'vertex_adc_prof', baseUrl: 'my-gcp-project' }),
+        ],
+      }))
+
+      setActiveProviderProfile('vertex_adc_prof', { configDir })
+      const persisted = JSON.parse(
+        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
+      )
+
+      expect(persisted.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/tmp/adc.json')
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
   test('persists no-key openai-compatible profiles for restart fallback', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
     const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
@@ -6602,4 +6671,37 @@ test('DEFAULT_MISTRAL_MODEL matches the mistral gateway defaultModel', async () 
   const { default: mistralGateway } = await import('../integrations/gateways/mistral.js')
   expect(mistralGateway.defaultModel).toBeDefined()
   expect(DEFAULT_MISTRAL_MODEL).toBe(mistralGateway.defaultModel!)
+})
+
+describe('isGeminiVertexEffectiveProvider', () => {
+  test('true when the env flag is set, regardless of profile', async () => {
+    const { isGeminiVertexEffectiveProvider } =
+      await importFreshProviderProfileModules()
+    expect(
+      isGeminiVertexEffectiveProvider(
+        { CLAUDE_CODE_USE_GEMINI_VERTEX: '1' } as NodeJS.ProcessEnv,
+        buildProfile(),
+      ),
+    ).toBe(true)
+  })
+
+  test('true for a saved gemini-vertex profile even without the env flag', async () => {
+    const { isGeminiVertexEffectiveProvider } =
+      await importFreshProviderProfileModules()
+    // The saved-profile-only route is exactly what getAPIProvider() misses.
+    expect(
+      isGeminiVertexEffectiveProvider(
+        {} as NodeJS.ProcessEnv,
+        buildGeminiVertexProfile(),
+      ),
+    ).toBe(true)
+  })
+
+  test('false for a non-vertex profile with no env flag', async () => {
+    const { isGeminiVertexEffectiveProvider } =
+      await importFreshProviderProfileModules()
+    expect(
+      isGeminiVertexEffectiveProvider({} as NodeJS.ProcessEnv, buildProfile()),
+    ).toBe(false)
+  })
 })

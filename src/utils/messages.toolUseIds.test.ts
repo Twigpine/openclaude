@@ -1,26 +1,27 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import * as providersModule from './model/providers.js'
+import { afterEach, describe, expect, mock, test } from 'bun:test'
+import * as providerProfilesModule from './providerProfiles.js'
 import {
   createAssistantMessage,
   createUserMessage,
   normalizeMessagesForAPI,
 } from './messages.js'
 import type { Message } from '../types/message.js'
-import type { LegacyAPIProvider } from './model/providers.js'
 
-// normalizeMessagesForAPI decides whether to sanitize tool ids from
-// getAPIProvider(). That reads global env/route state which other tests in the
-// full suite mutate (mock.module on providers, leaked flags, etc.), so we mock
-// the provider directly to make these assertions hermetic and order-independent.
-function mockApiProvider(provider: LegacyAPIProvider): void {
-  mock.module('./model/providers.js', () => ({
-    ...providersModule,
-    getAPIProvider: () => provider,
+// normalizeMessagesForAPI sanitizes Vertex tool ids based on the *effective*
+// provider (env flag OR saved active profile) via isGeminiVertexEffectiveProvider.
+// That reads global env/route + config state which other tests in the full suite
+// mutate, so mock the decision directly to make these assertions hermetic and
+// order-independent. Passing `true` exercises both the env-flag and the
+// saved-profile-only Vertex routes (the helper unifies them).
+function mockGeminiVertexEffective(isVertex: boolean): void {
+  mock.module('./providerProfiles.js', () => ({
+    ...providerProfilesModule,
+    isGeminiVertexEffectiveProvider: () => isVertex,
   }))
 }
 
-function restoreApiProvider(): void {
-  mock.module('./model/providers.js', () => ({ ...providersModule }))
+function restoreGeminiVertexEffective(): void {
+  mock.module('./providerProfiles.js', () => ({ ...providerProfilesModule }))
 }
 
 const SIGNED_ID = `toolu_vertex_k9x_3~~sig~~${'S'.repeat(1700)}`
@@ -67,10 +68,10 @@ function extractIds(normalized: ReturnType<typeof normalizeMessagesForAPI>): {
 }
 
 describe('normalizeMessagesForAPI Vertex tool_use id sanitation', () => {
-  afterEach(restoreApiProvider)
+  afterEach(restoreGeminiVertexEffective)
 
   test('strips smuggled thought signatures when the wire is not Gemini Vertex', () => {
-    mockApiProvider('openai')
+    mockGeminiVertexEffective(false)
 
     const { toolUseId, toolResultId } = extractIds(
       normalizeMessagesForAPI(buildHistory()),
@@ -83,8 +84,10 @@ describe('normalizeMessagesForAPI Vertex tool_use id sanitation', () => {
     expect(toolResultId).toBe(toolUseId)
   })
 
-  test('preserves signed ids when the wire is Gemini Vertex', () => {
-    mockApiProvider('gemini-vertex')
+  test('preserves signed ids when Gemini Vertex is the effective provider (env flag or saved profile)', () => {
+    // true covers both routes; isGeminiVertexEffectiveProvider returns true for
+    // the saved-profile-only path even when CLAUDE_CODE_USE_GEMINI_VERTEX is unset.
+    mockGeminiVertexEffective(true)
 
     const { toolUseId, toolResultId } = extractIds(
       normalizeMessagesForAPI(buildHistory()),
