@@ -20,6 +20,7 @@ import { probeRouteReadiness } from '../../integrations/discoveryService.js'
 import {
   getProviderPresetUiMetadata,
   getRouteLabel,
+  resolveActiveRouteIdFromEnv,
   resolveRouteIdFromBaseUrl,
 } from '../../integrations/index.js'
 import {
@@ -294,7 +295,17 @@ export function buildCurrentProviderSummary(options?: {
   const persisted = options?.persisted ?? loadProfileFile()
   const savedProfileLabel = persisted?.profile ?? 'none'
 
-  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+  // Honour saved-profile-only Gemini Vertex routing (no env flag) so the summary
+  // matches getAnthropicClient instead of falling through to the Anthropic
+  // branch for a profile that will actually drive Vertex requests.
+  const effectiveRouteId = resolveActiveRouteIdFromEnv(processEnv, {
+    activeProfileProvider: persisted?.profile,
+  })
+
+  if (
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) ||
+    effectiveRouteId === 'gemini-vertex'
+  ) {
     const vertexMetadata = getProviderPresetUiMetadata('gemini-vertex', processEnv)
     const location = getGeminiVertexLocation(processEnv)
     const project = getGeminiVertexProjectId(processEnv)

@@ -6705,3 +6705,36 @@ describe('isGeminiVertexEffectiveProvider', () => {
     ).toBe(false)
   })
 })
+
+describe('getAdditionalModelOptionsCacheScope — saved-profile Gemini Vertex', () => {
+  test('is not scoped as first-party when a saved gemini-vertex profile is active without an env flag', async () => {
+    const { getAdditionalModelOptionsCacheScope } = await import(
+      '../services/api/providerConfig.js'
+    )
+    // beforeEach clears every CLAUDE_CODE_USE_* flag; the saved profile is what
+    // routes the client to Vertex, so the cache scope must be third-party (null)
+    // rather than first-party Anthropic bootstrap traffic.
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [
+        buildGeminiVertexProfile({ id: 'vertex_prof', baseUrl: 'my-proj' }),
+      ],
+      activeProviderProfileId: 'vertex_prof',
+    }))
+
+    expect(getAdditionalModelOptionsCacheScope()).toBeNull()
+  })
+
+  test('remains first-party with no provider flag and no saved provider profile', async () => {
+    const { getAdditionalModelOptionsCacheScope } = await import(
+      '../services/api/providerConfig.js'
+    )
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [],
+      activeProviderProfileId: undefined,
+    }))
+
+    expect(getAdditionalModelOptionsCacheScope()).toBe('firstParty')
+  })
+})

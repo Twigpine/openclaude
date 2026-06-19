@@ -12,6 +12,7 @@ import {
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { PROVIDER_SELECTION_FLAGS } from '../../utils/providerSelectionFlags.js'
+import { getGlobalConfig } from '../../utils/config.js'
 import {
   asTrimmedString,
   parseChatgptAccountId,
@@ -1246,6 +1247,18 @@ export function resolveProviderRequest(options?: {
   }
 }
 
+/**
+ * Provider of the saved active profile, if any. Used to detect saved-profile-only
+ * routing (no provider env flag) that the API client honours via
+ * shouldRouteToGeminiVertexFromProfile but env-flag checks would miss.
+ */
+function getActiveProfileProviderId(): string | undefined {
+  const config = getGlobalConfig()
+  return config.providerProfiles?.find(
+    profile => profile.id === config.activeProviderProfileId,
+  )?.provider
+}
+
 export function getAdditionalModelOptionsCacheScope(): string | null {
   if (!isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)) {
     const anotherProviderSelected = PROVIDER_SELECTION_FLAGS.some(
@@ -1253,6 +1266,13 @@ export function getAdditionalModelOptionsCacheScope(): string | null {
         flag !== 'CLAUDE_CODE_USE_OPENAI' && isEnvTruthy(process.env[flag]),
     )
     if (!anotherProviderSelected) {
+      // No provider env flag is set, but a saved Gemini Vertex profile still
+      // routes the client to the native Vertex API. Scope it as third-party
+      // (null) so bootstrap/model-option traffic is not treated as first-party
+      // Anthropic — matching getAnthropicClient's saved-profile routing.
+      if (getActiveProfileProviderId() === 'gemini-vertex') {
+        return null
+      }
       return 'firstParty'
     }
     return null

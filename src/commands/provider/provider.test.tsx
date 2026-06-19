@@ -655,6 +655,25 @@ test('buildCurrentProviderSummary redacts poisoned model and endpoint values', (
   expect(summary.endpointLabel).toBe('sk-...678')
 })
 
+test('buildCurrentProviderSummary reports Gemini Vertex for a saved profile with no env flag', () => {
+  // Saved-profile-only routing: no CLAUDE_CODE_USE_GEMINI_VERTEX, but the active
+  // profile is gemini-vertex, so the summary must match the client's routing
+  // instead of falling through to the Anthropic branch.
+  const summary = buildCurrentProviderSummary({
+    processEnv: { GEMINI_VERTEX_PROJECT: 'my-proj' } as NodeJS.ProcessEnv,
+    persisted: {
+      profile: 'gemini-vertex',
+      env: { CLAUDE_CODE_USE_GEMINI_VERTEX: '1' },
+    } as unknown as NonNullable<
+      Parameters<typeof buildCurrentProviderSummary>[0]
+    >['persisted'],
+  })
+
+  expect(summary.providerLabel).toContain('Vertex')
+  expect(summary.providerLabel).not.toBe('Anthropic')
+  expect(summary.endpointLabel).toContain('/projects/my-proj/')
+})
+
 test('buildCurrentProviderSummary labels generic local openai-compatible providers', () => {
   const summary = buildCurrentProviderSummary({
     processEnv: {

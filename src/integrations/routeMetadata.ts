@@ -1689,6 +1689,14 @@ export function resolveActiveRouteIdFromEnv(
     return 'custom'
   }
 
+  // Saved-profile-only Gemini Vertex: with no provider env flag set, the API
+  // client still routes to the native Vertex client from the active profile
+  // (shouldRouteToGeminiVertexFromProfile). Keep route resolution in sync, or
+  // /model would skip the Vertex catalog/discovery for the same session.
+  if (options?.activeProfileProvider === 'gemini-vertex') {
+    return 'gemini-vertex'
+  }
+
   if (!anthropicBaseUrl && options?.activeProfileProvider) {
     const route = resolveProfileRoute(options.activeProfileProvider)
     if (

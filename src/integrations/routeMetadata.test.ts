@@ -623,6 +623,23 @@ test('resolveActiveRouteIdFromEnv gives gemini-vertex precedence over gemini and
   ).toBe('gemini-vertex')
 })
 
+test('resolveActiveRouteIdFromEnv resolves a saved-profile-only gemini-vertex route with no env flag', () => {
+  // Matches getAnthropicClient's saved-profile routing so /model loads the
+  // Vertex catalog for the same session.
+  expect(
+    resolveActiveRouteIdFromEnv({}, { activeProfileProvider: 'gemini-vertex' }),
+  ).toBe('gemini-vertex')
+})
+
+test('resolveActiveRouteIdFromEnv ignores a saved gemini-vertex profile when another provider flag is set', () => {
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_GEMINI: '1' },
+      { activeProfileProvider: 'gemini-vertex' },
+    ),
+  ).toBe('gemini')
+})
+
 test('resolveActiveRouteIdFromEnv treats Xiaomi MiMo credential-only env as Xiaomi MiMo', () => {
   expect(
     resolveActiveRouteIdFromEnv({
