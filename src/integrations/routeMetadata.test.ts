@@ -640,6 +640,27 @@ test('resolveActiveRouteIdFromEnv ignores a saved gemini-vertex profile when ano
   ).toBe('gemini')
 })
 
+test('resolveActiveRouteIdFromEnv keeps a saved gemini-vertex profile over ambient credential-only env', () => {
+  // The client routes a saved gemini-vertex profile unless a conflicting
+  // provider *flag* is set; an ambient API key (e.g. XAI_API_KEY) is not a
+  // conflict, so route resolution must agree and not fall to env-only inference.
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { XAI_API_KEY: 'xai-key' },
+      { activeProfileProvider: 'gemini-vertex' },
+    ),
+  ).toBe('gemini-vertex')
+})
+
+test('resolveActiveRouteIdFromEnv yields a saved gemini-vertex profile to an explicit OpenAI flag', () => {
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1' },
+      { activeProfileProvider: 'gemini-vertex' },
+    ),
+  ).not.toBe('gemini-vertex')
+})
+
 test('resolveActiveRouteIdFromEnv treats Xiaomi MiMo credential-only env as Xiaomi MiMo', () => {
   expect(
     resolveActiveRouteIdFromEnv({
