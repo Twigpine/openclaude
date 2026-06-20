@@ -145,19 +145,49 @@ test('rejects Gemini Vertex when the selected credential path is missing', async
   )
 })
 
-test('requires a project id for Gemini Vertex', async () => {
+test('requires a project id for Gemini Vertex when ADC does not supply one', async () => {
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
   process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
   process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
   delete process.env.GEMINI_VERTEX_PROJECT
   delete process.env.GOOGLE_CLOUD_PROJECT
   delete process.env.GCLOUD_PROJECT
   delete process.env.GOOGLE_PROJECT_ID
 
-  await expect(getProviderValidationError(process.env)).resolves.toBe(
-    'Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT.',
+  // access-token mode: the credential resolves but carries no project id.
+  await expect(
+    getProviderValidationError(process.env, {
+      resolveGeminiCredential: async () => ({
+        kind: 'access-token',
+        credential: 'vertex-token',
+      }),
+    }),
+  ).resolves.toBe(
+    'Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT (or an ADC-derived project).',
   )
+})
+
+test('accepts an ADC-derived project for Gemini Vertex when no project env is set', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  delete process.env.GEMINI_VERTEX_PROJECT
+  delete process.env.GOOGLE_CLOUD_PROJECT
+  delete process.env.GCLOUD_PROJECT
+  delete process.env.GOOGLE_PROJECT_ID
+
+  // ADC resolves both the credential and the project id, like the native client
+  // (client.ts falls back to credential.projectId), so validation must pass.
+  await expect(
+    getProviderValidationError(process.env, {
+      resolveGeminiCredential: async () => ({
+        kind: 'adc',
+        credential: 'adc-token',
+        projectId: 'adc-derived-project',
+      }),
+    }),
+  ).resolves.toBeNull()
 })
 
 test('requires a non-empty model for Gemini Vertex', async () => {

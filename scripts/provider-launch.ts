@@ -269,8 +269,12 @@ async function main(): Promise<void> {
       authMode === 'access-token'
         ? Boolean(env.GEMINI_ACCESS_TOKEN?.trim())
         : true
-    if (!hasProject) {
-      console.error('Gemini Vertex requires a project (GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID). Save a gemini-vertex profile with `/provider` or set those env vars.')
+    // ADC can also supply the project id (credential.projectId), which only the
+    // runtime resolver discovers — so in ADC mode defer the project check to
+    // runtime, matching the provider validator and native client. access-token
+    // mode has no ADC project to fall back on, so it still requires one here.
+    if (!hasProject && authMode === 'access-token') {
+      console.error('Gemini Vertex access-token mode requires a project (GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID). Save a gemini-vertex profile with `/provider` or set those env vars.')
       process.exit(1)
     }
     if (!hasCredential) {

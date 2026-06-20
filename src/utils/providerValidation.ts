@@ -597,21 +597,9 @@ export async function getProviderValidationError(
   },
 ): Promise<string | null> {
   if (isEnvTruthy(env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
-    const hasProject =
-      hasNonEmptyEnvValue(env, 'GEMINI_VERTEX_PROJECT') ||
-      hasNonEmptyEnvValue(env, 'GOOGLE_CLOUD_PROJECT') ||
-      hasNonEmptyEnvValue(env, 'GCLOUD_PROJECT') ||
-      hasNonEmptyEnvValue(env, 'GOOGLE_PROJECT_ID')
-    if (!hasProject) {
-      return 'Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT.'
-    }
-    if (env.GEMINI_VERTEX_MODEL !== undefined && !hasNonEmptyEnvValue(env, 'GEMINI_VERTEX_MODEL')) {
-      return 'Gemini Vertex model is required via GEMINI_VERTEX_MODEL.'
-    }
-    // Validate the selected credential path too, mirroring getAnthropicClient,
-    // so setup/startup catches a missing access token or ADC credentials before
-    // the provider is considered ready (instead of failing on the first
-    // request).
+    // Resolve the credential first, mirroring getAnthropicClient: ADC can supply
+    // both the access token and the project id (credential.projectId), so a
+    // missing project env var is only fatal once we know ADC didn't provide one.
     const vertexCredential = await (
       options?.resolveGeminiCredential ?? resolveGeminiCredential
     )({
@@ -624,6 +612,21 @@ export async function getProviderValidationError(
     } as NodeJS.ProcessEnv)
     if (vertexCredential.kind === 'none') {
       return 'Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN (access-token mode) or Google ADC credentials.'
+    }
+    const hasEnvProject =
+      hasNonEmptyEnvValue(env, 'GEMINI_VERTEX_PROJECT') ||
+      hasNonEmptyEnvValue(env, 'GOOGLE_CLOUD_PROJECT') ||
+      hasNonEmptyEnvValue(env, 'GCLOUD_PROJECT') ||
+      hasNonEmptyEnvValue(env, 'GOOGLE_PROJECT_ID')
+    const hasAdcProject =
+      vertexCredential.kind === 'adc' &&
+      typeof vertexCredential.projectId === 'string' &&
+      vertexCredential.projectId.trim() !== ''
+    if (!hasEnvProject && !hasAdcProject) {
+      return 'Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT (or an ADC-derived project).'
+    }
+    if (env.GEMINI_VERTEX_MODEL !== undefined && !hasNonEmptyEnvValue(env, 'GEMINI_VERTEX_MODEL')) {
+      return 'Gemini Vertex model is required via GEMINI_VERTEX_MODEL.'
     }
     return null
   }
