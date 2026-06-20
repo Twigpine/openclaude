@@ -658,7 +658,7 @@ test('resolveActiveRouteIdFromEnv yields a saved gemini-vertex profile to an exp
       { CLAUDE_CODE_USE_OPENAI: '1' },
       { activeProfileProvider: 'gemini-vertex' },
     ),
-  ).not.toBe('gemini-vertex')
+  ).toBe('openai')
 })
 
 test('resolveActiveRouteIdFromEnv treats Xiaomi MiMo credential-only env as Xiaomi MiMo', () => {

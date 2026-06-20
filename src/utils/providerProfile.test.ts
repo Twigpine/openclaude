@@ -1992,6 +1992,30 @@ test('buildStartupEnvFromProfile applies Gemini Vertex profiles', async () => {
   assert.equal(env.GEMINI_VERTEX_AUTH_MODE, 'adc')
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, undefined)
 })
+
+test('buildStartupEnvFromProfile ignores whitespace-only shell Vertex values over persisted ones', async () => {
+  const persisted = createProfileFile('gemini-vertex', {
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+    GEMINI_VERTEX_PROJECT: 'persisted-project',
+    GEMINI_VERTEX_MODEL: 'gemini-3.5-flash',
+    GEMINI_VERTEX_AUTH_MODE: 'access-token',
+  })
+
+  const env = await buildStartupEnvFromProfile({
+    persisted,
+    // Exported-but-blank shell values must not drop the persisted config.
+    processEnv: {
+      GEMINI_VERTEX_PROJECT: '   ',
+      GEMINI_VERTEX_MODEL: '   ',
+      GEMINI_ACCESS_TOKEN: '   ',
+    },
+    readGeminiAccessToken: () => undefined,
+  })
+
+  assert.equal(env.GEMINI_VERTEX_PROJECT, 'persisted-project')
+  assert.equal(env.GEMINI_VERTEX_MODEL, 'gemini-3.5-flash')
+})
+
 test('saveProfileFile writes a profile that loadProfileFile can read back', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-profile-file-'))
 

@@ -606,7 +606,7 @@ export async function getProviderValidationError(
       ...env,
       GEMINI_AUTH_MODE:
         env.GEMINI_VERTEX_AUTH_MODE ??
-        (env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc'),
+        (env.GEMINI_ACCESS_TOKEN?.trim() ? 'access-token' : 'adc'),
       GEMINI_API_KEY: undefined,
       GOOGLE_API_KEY: undefined,
     } as NodeJS.ProcessEnv)

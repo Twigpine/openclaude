@@ -102,14 +102,23 @@ async function main(): Promise<void> {
       console.error('Gemini Vertex --base-url expects a Google Cloud project id, not an API endpoint URL.')
       process.exit(1)
     }
+    const rawVertexAuthMode = process.env.GEMINI_VERTEX_AUTH_MODE?.trim().toLowerCase()
+    const vertexAuthMode =
+      rawVertexAuthMode === 'access-token' || rawVertexAuthMode === 'adc'
+        ? rawVertexAuthMode
+        : undefined
     const project = projectFromArg || getGeminiVertexProjectId(process.env) || null
-    if (!project) {
-      console.error('Gemini Vertex profile requires a project. Use --base-url <project> or set GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID.')
+    // ADC can supply the project id at runtime (credential.projectId), matching
+    // the provider validator / launcher — so only access-token profiles need an
+    // explicit project here, otherwise valid ADC-only profiles can't be saved.
+    if (!project && vertexAuthMode === 'access-token') {
+      console.error('Gemini Vertex access-token profiles require a project. Use --base-url <project> or set GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID.')
       process.exit(1)
     }
     env = buildGeminiVertexProfileEnv({
       model: argModel || null,
       project,
+      authMode: vertexAuthMode ?? null,
       processEnv: process.env,
     })
   } else if (selected === 'mistral') {

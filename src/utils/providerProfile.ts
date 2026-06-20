@@ -1963,24 +1963,46 @@ export async function buildLaunchEnv(options: {
   if (selectedProfile === 'gemini-vertex') {
     // Shell value wins over the persisted one (same precedence as model/project
     // below) so an explicit GEMINI_VERTEX_AUTH_MODE isn't silently replaced.
-    const isVertexAuthMode = (value: string | undefined) =>
-      value === 'access-token' || value === 'adc' ? value : undefined
+    // Sanitize each candidate first so a whitespace-only shell value (e.g.
+    // GEMINI_VERTEX_PROJECT=' ') doesn't win over a real persisted value.
+    const firstSanitizedProviderValue = (
+      ...values: Array<string | undefined>
+    ): string | undefined => {
+      for (const value of values) {
+        const sanitized = sanitizeProviderConfigValue(value)
+        if (sanitized) return sanitized
+      }
+      return undefined
+    }
+    const isVertexAuthMode = (value: string | undefined) => {
+      const normalized = value?.trim().toLowerCase()
+      return normalized === 'access-token' || normalized === 'adc'
+        ? normalized
+        : undefined
+    }
     const env = buildGeminiVertexProfileEnv({
       authMode:
         isVertexAuthMode(processEnv.GEMINI_VERTEX_AUTH_MODE) ??
         isVertexAuthMode(persistedEnv.GEMINI_VERTEX_AUTH_MODE) ??
         'adc',
-      model: processEnv.GEMINI_VERTEX_MODEL || persistedEnv.GEMINI_VERTEX_MODEL,
-      project:
-        processEnv.GEMINI_VERTEX_PROJECT ||
-        persistedEnv.GEMINI_VERTEX_PROJECT ||
-        processEnv.GOOGLE_CLOUD_PROJECT ||
-        persistedEnv.GOOGLE_CLOUD_PROJECT ||
-        processEnv.GCLOUD_PROJECT ||
-        persistedEnv.GCLOUD_PROJECT ||
-        processEnv.GOOGLE_PROJECT_ID ||
+      model: firstSanitizedProviderValue(
+        processEnv.GEMINI_VERTEX_MODEL,
+        persistedEnv.GEMINI_VERTEX_MODEL,
+      ),
+      project: firstSanitizedProviderValue(
+        processEnv.GEMINI_VERTEX_PROJECT,
+        persistedEnv.GEMINI_VERTEX_PROJECT,
+        processEnv.GOOGLE_CLOUD_PROJECT,
+        persistedEnv.GOOGLE_CLOUD_PROJECT,
+        processEnv.GCLOUD_PROJECT,
+        persistedEnv.GCLOUD_PROJECT,
+        processEnv.GOOGLE_PROJECT_ID,
         persistedEnv.GOOGLE_PROJECT_ID,
-      location: processEnv.GEMINI_VERTEX_LOCATION || persistedEnv.GEMINI_VERTEX_LOCATION,
+      ),
+      location: firstSanitizedProviderValue(
+        processEnv.GEMINI_VERTEX_LOCATION,
+        persistedEnv.GEMINI_VERTEX_LOCATION,
+      ),
       processEnv,
     })
 
@@ -2005,9 +2027,11 @@ export async function buildLaunchEnv(options: {
     // PROFILE_ENV_KEYS clears GEMINI_ACCESS_TOKEN on relaunch; an access-token
     // Vertex profile must carry its bearer forward or it relaunches unauthed.
     if (env.GEMINI_VERTEX_AUTH_MODE === 'access-token') {
-      const geminiAccessToken = sanitizeApiKey(
-        processEnv.GEMINI_ACCESS_TOKEN || persistedEnv.GEMINI_ACCESS_TOKEN,
-      )
+      // Sanitize each candidate so a whitespace-only shell token doesn't drop
+      // the real persisted bearer.
+      const geminiAccessToken =
+        sanitizeApiKey(processEnv.GEMINI_ACCESS_TOKEN) ??
+        sanitizeApiKey(persistedEnv.GEMINI_ACCESS_TOKEN)
       if (geminiAccessToken) env.GEMINI_ACCESS_TOKEN = geminiAccessToken
     }
 

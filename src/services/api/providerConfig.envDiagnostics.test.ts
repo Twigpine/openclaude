@@ -235,6 +235,8 @@ test('falls back to Google project env vars for Gemini Vertex project', async ()
   process.env.GOOGLE_CLOUD_PROJECT = 'project-test-1234'
   process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
   delete process.env.GEMINI_VERTEX_PROJECT
+  delete process.env.GCLOUD_PROJECT
+  delete process.env.GOOGLE_PROJECT_ID
   delete process.env.OPENAI_API_BASE
 
   const nonce = `${Date.now()}-${Math.random()}`
@@ -255,6 +257,8 @@ test('defaults Gemini Vertex location to global when unset', async () => {
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.GOOGLE_CLOUD_PROJECT = 'project-test-1234'
   delete process.env.GEMINI_VERTEX_PROJECT
+  delete process.env.GCLOUD_PROJECT
+  delete process.env.GOOGLE_PROJECT_ID
   delete process.env.GEMINI_VERTEX_LOCATION
   delete process.env.OPENAI_API_BASE
 
