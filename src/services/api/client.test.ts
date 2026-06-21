@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import {
   _clearRegistryForTesting,
@@ -48,6 +48,7 @@ mock.module(
 const { getAnthropicClient } = await import(
   `./client.js?real=${Date.now()}-${Math.random()}`,
 )
+import * as providerProfilesModule from '../../utils/providerProfiles.js'
 
 type FetchType = typeof globalThis.fetch
 
@@ -781,6 +782,67 @@ test('routes Gemini Vertex provider requests through the native client', async (
     role: 'assistant',
     model: 'gemini-3.5-flash',
   })
+})
+
+test('saved-profile-only Vertex prefers the profile project/model over ambient env', async () => {
+  let capturedUrl: string | undefined
+
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+  // Ambient env that must NOT win over the selected profile in profile-only mode.
+  process.env.GOOGLE_CLOUD_PROJECT = 'ambient-project'
+  process.env.GEMINI_VERTEX_MODEL = 'ambient-model'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
+
+  const spy = spyOn(
+    providerProfilesModule,
+    'getActiveProviderProfile',
+  ).mockReturnValue({
+    id: 'vertex_prof',
+    provider: 'gemini-vertex',
+    name: 'Vertex',
+    baseUrl: 'profile-project',
+    model: 'profile-model',
+  } as ReturnType<typeof providerProfilesModule.getActiveProviderProfile>)
+
+  globalThis.fetch = (async (input, _init) => {
+    capturedUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  try {
+    const client = (await getAnthropicClient({
+      maxRetries: 0,
+    })) as unknown as ShimClient
+
+    await client.beta.messages.create({
+      model: 'profile-model',
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 64,
+      stream: false,
+    })
+
+    // Profile project + model win; the ambient GOOGLE_CLOUD_PROJECT / stale
+    // GEMINI_VERTEX_MODEL must not leak into the request.
+    expect(capturedUrl).toContain('/projects/profile-project/')
+    expect(capturedUrl).toContain('/models/profile-model:generateContent')
+    expect(capturedUrl).not.toContain('ambient-project')
+    expect(capturedUrl).not.toContain('ambient-model')
+  } finally {
+    spy.mockRestore()
+  }
 })
 
 test('Gemini Vertex provider uses GEMINI_VERTEX_MODEL instead of generic OPENAI_MODEL', async () => {

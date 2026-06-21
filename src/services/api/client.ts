@@ -820,14 +820,17 @@ export async function getAnthropicClient({
     const profileModel = routedFromProfileOnly && activeProfile?.model
       ? getPrimaryModel(activeProfile.model)
       : undefined
-    const project = getGeminiVertexProjectId(process.env) ?? profileProject
+    // In profile-only routing the selected profile must win over ambient env;
+    // profileProject/profileModel are only set when routedFromProfileOnly, so
+    // leading with them keeps env precedence for an explicit Vertex selection.
+    const project = profileProject ?? getGeminiVertexProjectId(process.env)
     const location = getGeminiVertexLocation(process.env)
     // getGeminiVertexModel already falls back to the default model; the trailing
     // literal only satisfies its `string | undefined` signature (it never
     // actually returns undefined) so geminiVertexModel stays a plain string.
     const geminiVertexModel =
-      process.env.GEMINI_VERTEX_MODEL?.trim() ||
       profileModel ||
+      process.env.GEMINI_VERTEX_MODEL?.trim() ||
       model?.trim() ||
       getGeminiVertexModel(process.env) ||
       DEFAULT_GEMINI_VERTEX_MODEL
