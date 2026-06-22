@@ -18,6 +18,7 @@ import {
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { isFirstPartyAnthropicBaseUrlForEnv } from '../utils/anthropicBaseUrl.js'
+import { PROVIDER_SELECTION_FLAGS } from '../utils/providerSelectionFlags.js'
 
 export type RouteDescriptor = GatewayDescriptor | VendorDescriptor | import('./descriptors.js').AnthropicProxyDescriptor
 
@@ -1620,11 +1621,17 @@ export function resolveActiveRouteIdFromEnv(
   // Saved-profile-only Gemini Vertex must win over ambient credential-only
   // inference (e.g. a stray XAI_API_KEY), matching getAnthropicClient: it routes
   // a saved gemini-vertex profile unless a conflicting provider flag is set.
-  // Only CLAUDE_CODE_USE_OPENAI remains unchecked at this point, so guarding on
-  // it mirrors shouldRouteToGeminiVertexFromProfile's conflicting-flag rule.
+  // Mirror shouldRouteToGeminiVertexFromProfile exactly — any *defined* (not
+  // just truthy) provider flag other than the Vertex one is explicit intent, so
+  // CLAUDE_CODE_USE_OPENAI=0 must block the saved-profile route here too.
+  const hasConflictingProviderFlag = PROVIDER_SELECTION_FLAGS.some(
+    flag =>
+      flag !== 'CLAUDE_CODE_USE_GEMINI_VERTEX' &&
+      processEnv[flag] !== undefined,
+  )
   if (
     options?.activeProfileProvider === 'gemini-vertex' &&
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI)
+    !hasConflictingProviderFlag
   ) {
     return 'gemini-vertex'
   }
