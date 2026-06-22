@@ -817,6 +817,22 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/tmp/adc.json')
   })
 
+  test('gemini vertex token-only profile (auth mode unset) preserves GEMINI_ACCESS_TOKEN', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    // A present access token with no explicit GEMINI_VERTEX_AUTH_MODE implies
+    // access-token mode (resolveGeminiVertexAuthMode), so the token must be
+    // carried forward — not dropped by defaulting to adc.
+    delete process.env.GEMINI_VERTEX_AUTH_MODE
+    process.env.GEMINI_ACCESS_TOKEN = 'ya29.token-only'
+
+    applyProviderProfileToProcessEnv(
+      buildGeminiVertexProfile({ baseUrl: 'my-gcp-project' }),
+    )
+
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.token-only')
+  })
+
   test('bedrock profile sets CLAUDE_CODE_USE_BEDROCK and preserves anthropic model routing', async () => {
     const { applyProviderProfileToProcessEnv } =
       await importFreshProviderProfileModules()
@@ -4490,6 +4506,41 @@ describe('setActiveProviderProfile', () => {
       expect(persisted.profile).toBe('gemini-vertex')
       expect(persisted.env.GEMINI_VERTEX_PROJECT).toBe('my-gcp-project')
       expect(persisted.env.GEMINI_ACCESS_TOKEN).toBe('ya29.session-bearer')
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
+  test('persists the access token into a saved Vertex startup profile when auth mode is unset', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
+    process.chdir(tempDir)
+    process.env.CLAUDE_CONFIG_DIR = configDir
+    // No explicit GEMINI_VERTEX_AUTH_MODE: a present token implies access-token
+    // mode, so the persisted startup profile must still carry the bearer.
+    delete process.env.GEMINI_VERTEX_AUTH_MODE
+    process.env.GEMINI_ACCESS_TOKEN = 'ya29.token-only-bearer'
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [
+          buildGeminiVertexProfile({ id: 'vertex_prof', baseUrl: 'my-gcp-project' }),
+        ],
+      }))
+
+      setActiveProviderProfile('vertex_prof', { configDir })
+      const persisted = JSON.parse(
+        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
+      )
+
+      expect(persisted.env.GEMINI_VERTEX_AUTH_MODE).toBe('access-token')
+      expect(persisted.env.GEMINI_ACCESS_TOKEN).toBe('ya29.token-only-bearer')
     } finally {
       process.chdir(originalCwd)
       rmSync(tempDir, { recursive: true, force: true })

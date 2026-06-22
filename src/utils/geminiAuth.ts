@@ -102,6 +102,23 @@ export function getGeminiAuthMode(
   return undefined
 }
 
+/**
+ * Single source of truth for the Gemini Vertex auth mode. An explicit
+ * (sanitized) GEMINI_VERTEX_AUTH_MODE wins; otherwise a present access token
+ * implies access-token mode, falling back to ADC. Every site that shapes Vertex
+ * credentials (client, validator, doctor, profile builders) must use this so a
+ * token-only or whitespace-only configuration is classified identically.
+ */
+export function resolveGeminiVertexAuthMode(
+  env: NodeJS.ProcessEnv = process.env,
+): 'access-token' | 'adc' {
+  const explicit = sanitizeCredential(env.GEMINI_VERTEX_AUTH_MODE)?.toLowerCase()
+  if (explicit === 'access-token' || explicit === 'adc') {
+    return explicit
+  }
+  return sanitizeCredential(env.GEMINI_ACCESS_TOKEN) ? 'access-token' : 'adc'
+}
+
 export function getGeminiAdcCredentialPaths(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {

@@ -207,9 +207,19 @@ test('accepts Gemini Vertex with project id and access token', async () => {
   process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
   process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
   process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
   process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
 
-  await expect(getProviderValidationError(process.env)).resolves.toBeNull()
+  await expect(
+    getProviderValidationError(process.env, {
+      // Stub the access-token path explicitly so this case exercises it
+      // deterministically rather than the machine's ambient ADC.
+      resolveGeminiCredential: async () => ({
+        kind: 'access-token',
+        credential: 'vertex-token',
+      }),
+    }),
+  ).resolves.toBeNull()
 })
 
 test('accepts ADC credentials for Gemini auth', async () => {

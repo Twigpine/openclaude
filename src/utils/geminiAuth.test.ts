@@ -12,6 +12,7 @@ import {
   getGeminiVertexProjectId,
   mayHaveGeminiAdcCredentials,
   resolveGeminiCredential,
+  resolveGeminiVertexAuthMode,
 } from './geminiAuth.ts'
 
 const existingFilePath = import.meta.path
@@ -279,5 +280,32 @@ describe('Gemini auth helpers', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe('resolveGeminiVertexAuthMode', () => {
+  test('honours an explicit (case/space-normalized) GEMINI_VERTEX_AUTH_MODE', () => {
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_VERTEX_AUTH_MODE: '  Access-Token ' } as NodeJS.ProcessEnv),
+    ).toBe('access-token')
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_VERTEX_AUTH_MODE: 'adc' } as NodeJS.ProcessEnv),
+    ).toBe('adc')
+  })
+
+  test('infers access-token from a present token when the mode is unset', () => {
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_ACCESS_TOKEN: 'ya29.tok' } as NodeJS.ProcessEnv),
+    ).toBe('access-token')
+  })
+
+  test('defaults to adc for empty/whitespace token or invalid mode', () => {
+    expect(resolveGeminiVertexAuthMode({} as NodeJS.ProcessEnv)).toBe('adc')
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_ACCESS_TOKEN: '   ' } as NodeJS.ProcessEnv),
+    ).toBe('adc')
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_VERTEX_AUTH_MODE: 'bogus' } as NodeJS.ProcessEnv),
+    ).toBe('adc')
   })
 })

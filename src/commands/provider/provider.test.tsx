@@ -669,9 +669,10 @@ test('buildCurrentProviderSummary reports Gemini Vertex for a saved profile with
     >['persisted'],
   })
 
-  expect(summary.providerLabel).toContain('Vertex')
-  expect(summary.providerLabel).not.toBe('Anthropic')
-  expect(summary.endpointLabel).toContain('/projects/my-proj/')
+  expect(summary.providerLabel).toBe('Google Vertex AI Gemini')
+  expect(summary.endpointLabel).toBe(
+    'https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global',
+  )
 })
 
 test('buildCurrentProviderSummary labels generic local openai-compatible providers', () => {

@@ -174,6 +174,9 @@ export function resolveActiveProviderBaseUrl(
       )
     case 'bedrock':
     case 'vertex':
+    case 'gemini-vertex':
+      // Native, non-OpenAI-compatible providers: never resolve to an OPENAI base
+      // URL (a saved-profile Vertex route reaches here without the env flag).
       return undefined
     default:
       return (
