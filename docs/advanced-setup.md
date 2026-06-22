@@ -92,9 +92,10 @@ export GEMINI_MODEL=gemini-3-flash-preview
 ### Claude on Vertex AI
 
 The Vertex route uses Anthropic's Claude-on-Vertex API. It is not a general
-Vertex AI Model Garden adapter for Gemini or arbitrary partner models; use the
-Gemini provider for Gemini models and OpenAI-compatible routes for compatible
-third-party gateways.
+Vertex AI Model Garden adapter for Gemini or arbitrary partner models; for
+Gemini on Vertex use the [Gemini on Vertex AI](#gemini-on-vertex-ai) route
+below (or the API-key Gemini provider), and OpenAI-compatible routes for
+compatible third-party gateways.
 
 Authentication uses Google Application Default Credentials through
 `google-auth-library`. There is no `OPENAI_API_KEY`-style API key for this
@@ -130,6 +131,44 @@ openclaude --model claude-sonnet-4-6
 `CLOUD_ML_REGION` is optional and defaults to `us-east5`. Model-specific
 Vertex region override variables are also supported for Claude models; see
 `src/utils/envUtils.ts` for the current override names.
+
+### Gemini on Vertex AI
+
+Native Gemini on Vertex AI (the `generateContent` API), distinct from Claude on
+Vertex (above) and from the API-key Gemini provider. Enable it with
+`CLAUDE_CODE_USE_GEMINI_VERTEX=1` or through `/provider`.
+
+Authentication is either ambient Google Application Default Credentials (the
+default) or an access token — there is no API key for this route:
+
+```bash
+# ADC mode (default): no token needed, uses your gcloud ADC
+gcloud auth application-default login
+```
+
+Minimal setup (ADC):
+
+```bash
+export CLAUDE_CODE_USE_GEMINI_VERTEX=1
+export GEMINI_VERTEX_PROJECT=my-gcp-project   # or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GOOGLE_PROJECT_ID; ADC can also supply it
+export GEMINI_VERTEX_LOCATION=global          # optional, defaults to global
+export GEMINI_VERTEX_MODEL=gemini-2.5-flash   # optional, defaults to gemini-2.5-flash
+
+openclaude --model gemini-2.5-flash
+```
+
+Access-token mode instead of ADC:
+
+```bash
+export CLAUDE_CODE_USE_GEMINI_VERTEX=1
+export GEMINI_VERTEX_AUTH_MODE=access-token
+export GEMINI_ACCESS_TOKEN="$(gcloud auth print-access-token)"
+export GEMINI_VERTEX_PROJECT=my-gcp-project
+```
+
+A project is required (from one of the env vars above, or derived from ADC).
+`GEMINI_VERTEX_AUTH_MODE` defaults to `access-token` when `GEMINI_ACCESS_TOKEN`
+is set, otherwise `adc`.
 
 ### Gemini via OpenRouter
 
