@@ -582,6 +582,17 @@ describe('Gemini Vertex provider drift guards', () => {
     expect(is3PSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
   })
 
+  test('isUsing3PServices() includes Gemini Vertex flag', async () => {
+    const content = await file('utils/auth.ts').text()
+    const using3PSection = sectionBetween(
+      content,
+      'export function isUsing3PServices',
+      'function getConfiguredOtelHeadersHelper',
+    )
+
+    expect(using3PSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+  })
+
   test('API preconnect skips Gemini Vertex routing', async () => {
     const content = await file('utils/apiPreconnect.ts').text()
     const cloudSkipSection = sectionBetween(
