@@ -734,7 +734,9 @@ function hasCompleteProviderSelection(
       trimOrUndefined(processEnv.GCLOUD_PROJECT) !== undefined ||
       trimOrUndefined(processEnv.GOOGLE_PROJECT_ID) !== undefined ||
       trimOrUndefined(processEnv.GEMINI_VERTEX_MODEL) !== undefined ||
-      trimOrUndefined(processEnv.GEMINI_VERTEX_LOCATION) !== undefined
+      trimOrUndefined(processEnv.GEMINI_VERTEX_LOCATION) !== undefined ||
+      trimOrUndefined(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined ||
+      trimOrUndefined(processEnv.GEMINI_VERTEX_AUTH_MODE)?.toLowerCase() === 'adc'
     )
   }
   if (processEnv.CLAUDE_CODE_USE_GEMINI !== undefined) {
@@ -1321,10 +1323,10 @@ export function applyProviderProfileToProcessEnv(
       model: primaryModel,
       project:
         geminiVertexProjectFromProfile(profile.baseUrl) ||
-        process.env.GEMINI_VERTEX_PROJECT ||
-        process.env.GOOGLE_CLOUD_PROJECT ||
-        process.env.GCLOUD_PROJECT ||
-        process.env.GOOGLE_PROJECT_ID,
+        trimOrUndefined(process.env.GEMINI_VERTEX_PROJECT) ||
+        trimOrUndefined(process.env.GOOGLE_CLOUD_PROJECT) ||
+        trimOrUndefined(process.env.GCLOUD_PROJECT) ||
+        trimOrUndefined(process.env.GOOGLE_PROJECT_ID),
       location: process.env.GEMINI_VERTEX_LOCATION,
       authMode: vertexAuthMode,
     })

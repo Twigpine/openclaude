@@ -2006,17 +2006,21 @@ export async function buildLaunchEnv(options: {
       processEnv,
     })
 
-    const googleCloudProject = sanitizeProviderConfigValue(
-      processEnv.GOOGLE_CLOUD_PROJECT || persistedEnv.GOOGLE_CLOUD_PROJECT,
+    const googleCloudProject = firstSanitizedProviderValue(
+      processEnv.GOOGLE_CLOUD_PROJECT,
+      persistedEnv.GOOGLE_CLOUD_PROJECT,
     )
-    const gcloudProject = sanitizeProviderConfigValue(
-      processEnv.GCLOUD_PROJECT || persistedEnv.GCLOUD_PROJECT,
+    const gcloudProject = firstSanitizedProviderValue(
+      processEnv.GCLOUD_PROJECT,
+      persistedEnv.GCLOUD_PROJECT,
     )
-    const googleProjectId = sanitizeProviderConfigValue(
-      processEnv.GOOGLE_PROJECT_ID || persistedEnv.GOOGLE_PROJECT_ID,
+    const googleProjectId = firstSanitizedProviderValue(
+      processEnv.GOOGLE_PROJECT_ID,
+      persistedEnv.GOOGLE_PROJECT_ID,
     )
-    const googleApplicationCredentials = sanitizeProviderConfigValue(
-      processEnv.GOOGLE_APPLICATION_CREDENTIALS || persistedEnv.GOOGLE_APPLICATION_CREDENTIALS,
+    const googleApplicationCredentials = firstSanitizedProviderValue(
+      processEnv.GOOGLE_APPLICATION_CREDENTIALS,
+      persistedEnv.GOOGLE_APPLICATION_CREDENTIALS,
     )
     if (googleCloudProject) env.GOOGLE_CLOUD_PROJECT = googleCloudProject
     if (gcloudProject) env.GCLOUD_PROJECT = gcloudProject

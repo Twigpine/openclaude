@@ -302,10 +302,7 @@ export function buildCurrentProviderSummary(options?: {
     activeProfileProvider: persisted?.profile,
   })
 
-  if (
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) ||
-    effectiveRouteId === 'gemini-vertex'
-  ) {
+  if (effectiveRouteId === 'gemini-vertex') {
     const vertexMetadata = getProviderPresetUiMetadata('gemini-vertex', processEnv)
     const location = getGeminiVertexLocation(processEnv)
     const project = getGeminiVertexProjectId(processEnv)

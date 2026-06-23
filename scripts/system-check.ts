@@ -1402,6 +1402,18 @@ async function checkProviderGenerationReadiness(): Promise<CheckResult> {
         'Gemini Vertex authentication could not be resolved. access-token mode needs GEMINI_ACCESS_TOKEN; ADC mode needs GOOGLE_APPLICATION_CREDENTIALS or ambient Google ADC (e.g. `gcloud auth application-default login`).',
       )
     }
+    // A resolved ADC credential may still lack a project if none appears in env
+    // vars and the ADC JSON doesn't embed one. Mirror getProviderValidationError.
+    const project =
+      getGeminiVertexProjectId(process.env) ||
+      (credential.kind === 'adc' && credential.projectId?.trim()) ||
+      null
+    if (!project) {
+      return fail(
+        'Provider generation readiness',
+        'Gemini Vertex: a project id is required. Set GEMINI_VERTEX_PROJECT, GOOGLE_CLOUD_PROJECT, or use an ADC credential that embeds a project.',
+      )
+    }
     return pass(
       'Provider generation readiness',
       `Gemini Vertex credential resolved (${credential.kind}).`,

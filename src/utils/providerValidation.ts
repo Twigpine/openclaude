@@ -43,6 +43,7 @@ import { isBareMode } from './envUtils.js'
 import {
   type GeminiResolvedCredential,
   resolveGeminiCredential,
+  resolveGeminiVertexAuthMode,
 } from './geminiAuth.js'
 import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
 import { readXaiCredentialsAsync } from './xaiCredentials.js'
@@ -604,9 +605,7 @@ export async function getProviderValidationError(
       options?.resolveGeminiCredential ?? resolveGeminiCredential
     )({
       ...env,
-      GEMINI_AUTH_MODE:
-        env.GEMINI_VERTEX_AUTH_MODE ??
-        (env.GEMINI_ACCESS_TOKEN?.trim() ? 'access-token' : 'adc'),
+      GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(env),
       GEMINI_API_KEY: undefined,
       GOOGLE_API_KEY: undefined,
     } as NodeJS.ProcessEnv)

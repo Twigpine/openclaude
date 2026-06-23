@@ -166,9 +166,10 @@ export GEMINI_ACCESS_TOKEN="$(gcloud auth print-access-token)"
 export GEMINI_VERTEX_PROJECT=my-gcp-project
 ```
 
-A project is required (from one of the env vars above, or derived from ADC).
-`GEMINI_VERTEX_AUTH_MODE` defaults to `access-token` when `GEMINI_ACCESS_TOKEN`
-is set, otherwise `adc`.
+A project is required. In access-token mode it must be set explicitly via one
+of the env vars above; in ADC mode it can alternatively be derived from the ADC
+credential at runtime. `GEMINI_VERTEX_AUTH_MODE` defaults to `access-token`
+when `GEMINI_ACCESS_TOKEN` is set, otherwise `adc`.
 
 ### Gemini via OpenRouter
 

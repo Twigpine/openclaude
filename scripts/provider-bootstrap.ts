@@ -29,7 +29,7 @@ import {
   listAtomicChatModels,
   listOllamaModels,
 } from './provider-discovery.ts'
-import { getGeminiVertexProjectId } from '../src/utils/geminiAuth.ts'
+import { getGeminiVertexProjectId, resolveGeminiVertexAuthMode } from '../src/utils/geminiAuth.ts'
 
 function parseArg(name: string): string | null {
   const args = process.argv.slice(2)
@@ -102,11 +102,7 @@ async function main(): Promise<void> {
       console.error('Gemini Vertex --base-url expects a Google Cloud project id, not an API endpoint URL.')
       process.exit(1)
     }
-    const rawVertexAuthMode = process.env.GEMINI_VERTEX_AUTH_MODE?.trim().toLowerCase()
-    const vertexAuthMode =
-      rawVertexAuthMode === 'access-token' || rawVertexAuthMode === 'adc'
-        ? rawVertexAuthMode
-        : undefined
+    const vertexAuthMode = resolveGeminiVertexAuthMode(process.env)
     const project = projectFromArg || getGeminiVertexProjectId(process.env) || null
     // ADC can supply the project id at runtime (credential.projectId), matching
     // the provider validator / launcher — so only access-token profiles need an
@@ -118,7 +114,7 @@ async function main(): Promise<void> {
     env = buildGeminiVertexProfileEnv({
       model: argModel || null,
       project,
-      authMode: vertexAuthMode ?? null,
+      authMode: vertexAuthMode,
       processEnv: process.env,
     })
   } else if (selected === 'mistral') {
