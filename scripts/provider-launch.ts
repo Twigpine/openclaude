@@ -14,7 +14,7 @@ import {
   type ProfileFile,
   type ProviderProfile,
 } from '../src/utils/providerProfile.ts'
-import { getGeminiVertexProjectId } from '../src/utils/geminiAuth.ts'
+import { getGeminiVertexProjectId, resolveGeminiVertexAuthMode } from '../src/utils/geminiAuth.ts'
 import {
   getRouteCredentialValue,
   resolveActiveRouteIdFromEnv,
@@ -257,9 +257,7 @@ async function main(): Promise<void> {
     // Reuse the runtime project resolver so launch validation matches the
     // provider validator / client contract instead of drifting.
     const hasProject = Boolean(getGeminiVertexProjectId(env))
-    const authMode =
-      env.GEMINI_VERTEX_AUTH_MODE?.trim().toLowerCase() ||
-      (env.GEMINI_ACCESS_TOKEN?.trim() ? 'access-token' : 'adc')
+    const authMode = resolveGeminiVertexAuthMode(env)
     // Only access-token mode needs an upfront credential. ADC mode (explicit
     // or default) relies on ambient Google ADC, which only the runtime resolver
     // (resolveGeminiCredential) can discover from the well-known gcloud
