@@ -117,6 +117,21 @@ async function main(): Promise<void> {
       authMode: vertexAuthMode,
       processEnv: process.env,
     })
+    // PROFILE_ENV_KEYS clears GEMINI_ACCESS_TOKEN / GOOGLE_APPLICATION_CREDENTIALS
+    // on relaunch, so the saved profile must carry the active credential forward
+    // or it relaunches unauthed — mirrors the compatibility builder in
+    // providerProfile.ts / applyProviderProfileToProcessEnv.
+    if (vertexAuthMode === 'access-token') {
+      const accessToken = process.env.GEMINI_ACCESS_TOKEN?.trim()
+      if (!accessToken) {
+        console.error('Gemini Vertex access-token profiles require GEMINI_ACCESS_TOKEN.')
+        process.exit(1)
+      }
+      env.GEMINI_ACCESS_TOKEN = accessToken
+    } else {
+      const adcFile = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()
+      if (adcFile) env.GOOGLE_APPLICATION_CREDENTIALS = adcFile
+    }
   } else if (selected === 'mistral') {
     const builtEnv = buildMistralProfileEnv({
       model: argModel || null,

@@ -2282,13 +2282,15 @@ function buildStartupProfileFromActiveProfile(
       const env = buildGeminiVertexProfileEnv({
         model: getPrimaryModel(activeProfile.model),
         // baseUrl carries the project id, but the preset can seed it with the
-        // endpoint URL — never let a URL through as a project.
+        // endpoint URL — never let a URL through as a project. Sanitize each
+        // candidate first so a whitespace-only GEMINI_VERTEX_PROJECT doesn't win
+        // over a real GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID.
         project:
-          geminiVertexProjectFromProfile(activeProfile.baseUrl) ||
-          process.env.GEMINI_VERTEX_PROJECT ||
-          process.env.GOOGLE_CLOUD_PROJECT ||
-          process.env.GCLOUD_PROJECT ||
-          process.env.GOOGLE_PROJECT_ID,
+          geminiVertexProjectFromProfile(activeProfile.baseUrl) ??
+          trimOrUndefined(process.env.GEMINI_VERTEX_PROJECT) ??
+          trimOrUndefined(process.env.GOOGLE_CLOUD_PROJECT) ??
+          trimOrUndefined(process.env.GCLOUD_PROJECT) ??
+          trimOrUndefined(process.env.GOOGLE_PROJECT_ID),
         authMode: vertexAuthMode,
         processEnv: process.env,
       })

@@ -106,13 +106,11 @@ describe('SAFE_ENV_VARS excludes credentials', () => {
   })
 
   test('Gemini Vertex routing env vars are managed; project ids stay unsafe', async () => {
-    const content = await file('utils/managedEnvConstants.ts').text()
-    const managedStart = content.indexOf('const PROVIDER_MANAGED_ENV_VARS')
-    const managedEnd = content.indexOf('])', managedStart)
-    const managedSection = content.slice(managedStart, managedEnd)
-    const safeStart = content.indexOf('export const SAFE_ENV_VARS')
-    const safeEnd = content.indexOf('])', safeStart)
-    const safeSection = content.slice(safeStart, safeEnd)
+    // Assert runtime classification behavior, not source formatting, so the
+    // test catches real regressions in env policy instead of breaking on edits.
+    const { isProviderManagedEnvVar, SAFE_ENV_VARS } = await import(
+      '../utils/managedEnvConstants.ts'
+    )
 
     for (const envVar of [
       'CLAUDE_CODE_USE_GEMINI_VERTEX',
@@ -124,7 +122,7 @@ describe('SAFE_ENV_VARS excludes credentials', () => {
       'GCLOUD_PROJECT',
       'GOOGLE_PROJECT_ID',
     ]) {
-      expect(managedSection).toContain(envVar)
+      expect(isProviderManagedEnvVar(envVar)).toBe(true)
     }
 
     for (const envVar of [
@@ -133,7 +131,7 @@ describe('SAFE_ENV_VARS excludes credentials', () => {
       'GEMINI_VERTEX_MODEL',
       'GEMINI_VERTEX_LOCATION',
     ]) {
-      expect(safeSection).toContain(envVar)
+      expect(SAFE_ENV_VARS.has(envVar)).toBe(true)
     }
 
     // Project ids from untrusted settings would switch Vertex traffic to an
@@ -145,7 +143,7 @@ describe('SAFE_ENV_VARS excludes credentials', () => {
       'GCLOUD_PROJECT',
       'GOOGLE_PROJECT_ID',
     ]) {
-      expect(safeSection).not.toContain(envVar)
+      expect(SAFE_ENV_VARS.has(envVar)).toBe(false)
     }
   })
 })
