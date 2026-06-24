@@ -58,6 +58,7 @@ import {
   isEnvTruthy,
   isRunningOnHomespace,
 } from './envUtils.js'
+import { hasAnyTruthyProviderSelectionFlag } from './providerSelectionFlags.js'
 import { errorMessage } from './errors.js'
 import { execSyncWithDefaults_DEPRECATED } from './execFileNoThrow.js'
 import * as lockfile from './lockfile.js'
@@ -1782,18 +1783,9 @@ export function getSubscriptionName(): string {
   }
 }
 
-/** Check if using third-party services (Bedrock or Vertex or Foundry or OpenAI-compatible or Gemini or GitHub Models) */
+/** Check if any third-party provider-selection flag is active (derives from PROVIDER_SELECTION_FLAGS). */
 export function isUsing3PServices(): boolean {
-  return !!(
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_MISTRAL) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
-  )
+  return hasAnyTruthyProviderSelectionFlag()
 }
 
 /**

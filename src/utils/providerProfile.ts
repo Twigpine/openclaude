@@ -57,6 +57,7 @@ export {
   sanitizeProviderConfigValue,
 } from './providerSecrets.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
+import { hasAnyTruthyProviderSelectionFlag } from './providerSelectionFlags.js'
 
 export const PROFILE_FILE_NAME = '.openclaude-profile.json'
 export const DEFAULT_GEMINI_BASE_URL =
@@ -1501,16 +1502,7 @@ export function hasExplicitProviderSelection(
     return true
   }
 
-  return (
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI) ||
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB) ||
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI) ||
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) ||
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_MISTRAL) ||
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_BEDROCK) ||
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_VERTEX) ||
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_FOUNDRY)
-  )
+  return hasAnyTruthyProviderSelectionFlag(processEnv)
 }
 
 function hasExplicitNonOpenAIProviderSelection(

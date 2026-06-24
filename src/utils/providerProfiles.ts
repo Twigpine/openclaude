@@ -17,7 +17,11 @@ import { resolveGeminiVertexAuthMode } from './geminiAuth.js'
 import type { ModelOption } from './model/modelOptions.js'
 import { isCurrentMiniMaxModelOption } from './model/minimaxCatalog.js'
 import { getPrimaryModel, parseModelList } from './providerModels.js'
-import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
+import {
+  PROVIDER_SELECTION_FLAGS,
+  hasConflictingProviderFlag,
+  type ProviderSelectionFlag,
+} from './providerSelectionFlags.js'
 import {
   buildCompatibilityProcessEnv,
   createProfileFile,
@@ -778,17 +782,37 @@ function hasConflictingProviderFlagsForProfile(
     return hasProviderSelectionFlags(processEnv)
   }
 
-  return (
-    (compatibilityMode !== 'openai' && processEnv.CLAUDE_CODE_USE_OPENAI !== undefined) ||
-    (compatibilityMode !== 'gemini' && processEnv.CLAUDE_CODE_USE_GEMINI !== undefined) ||
-    (compatibilityMode !== 'gemini-vertex' && processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX !== undefined) ||
-    (compatibilityMode !== 'mistral' && processEnv.CLAUDE_CODE_USE_MISTRAL !== undefined) ||
-    (!isGithubCompatibilityMode(compatibilityMode) &&
-      processEnv.CLAUDE_CODE_USE_GITHUB !== undefined) ||
-    (compatibilityMode !== 'bedrock' && processEnv.CLAUDE_CODE_USE_BEDROCK !== undefined) ||
-    (compatibilityMode !== 'vertex' && processEnv.CLAUDE_CODE_USE_VERTEX !== undefined) ||
-    processEnv.CLAUDE_CODE_USE_FOUNDRY !== undefined
+  // The active profile's own flag is the only non-conflicting selection. The
+  // mapping is exhaustive (TS errors if a new compatibility mode is added), and
+  // ProfileCompatibilityMode never resolves to 'foundry', so the Foundry flag is
+  // always treated as a conflict — matching the prior hand-enumerated check.
+  return hasConflictingProviderFlag(
+    processEnv,
+    activeProviderFlagForCompatibilityMode(compatibilityMode),
   )
+}
+
+/** Maps a non-anthropic compatibility mode to the selection flag it owns. */
+function activeProviderFlagForCompatibilityMode(
+  compatibilityMode: Exclude<ProfileCompatibilityMode, 'anthropic'>,
+): ProviderSelectionFlag {
+  switch (compatibilityMode) {
+    case 'openai':
+      return 'CLAUDE_CODE_USE_OPENAI'
+    case 'gemini':
+      return 'CLAUDE_CODE_USE_GEMINI'
+    case 'gemini-vertex':
+      return 'CLAUDE_CODE_USE_GEMINI_VERTEX'
+    case 'mistral':
+      return 'CLAUDE_CODE_USE_MISTRAL'
+    case 'github':
+    case 'github-enterprise':
+      return 'CLAUDE_CODE_USE_GITHUB'
+    case 'bedrock':
+      return 'CLAUDE_CODE_USE_BEDROCK'
+    case 'vertex':
+      return 'CLAUDE_CODE_USE_VERTEX'
+  }
 }
 
 /**

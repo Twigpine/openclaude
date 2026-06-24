@@ -9,9 +9,12 @@
  * registered here, which is how the Gemini Vertex provider drifted out of
  * several reference lists in the first place.
  *
- * Dependency-free on purpose: both low-level (model/providers.ts) and
- * high-level (providerProfiles.ts) modules import it without cycles.
+ * Leaf module on purpose: it only depends on envUtils (itself a leaf), so
+ * both low-level (model/providers.ts) and high-level (providerProfiles.ts)
+ * modules import it without cycles.
  */
+import { isEnvTruthy } from './envUtils.js'
+
 export const PROVIDER_SELECTION_FLAGS = [
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
@@ -24,3 +27,31 @@ export const PROVIDER_SELECTION_FLAGS = [
 ] as const
 
 export type ProviderSelectionFlag = (typeof PROVIDER_SELECTION_FLAGS)[number]
+
+/**
+ * True when any registered provider-selection flag is set to a truthy value.
+ * Derives from PROVIDER_SELECTION_FLAGS so flag-agnostic call sites (explicit
+ * selection, 3P-service detection, non-OpenAI-compatible gating) never drift
+ * out of sync — this is exactly the check that silently omitted Gemini Vertex.
+ */
+export function hasAnyTruthyProviderSelectionFlag(
+  processEnv: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return PROVIDER_SELECTION_FLAGS.some(flag => isEnvTruthy(processEnv[flag]))
+}
+
+/**
+ * True when any registered provider-selection flag other than `exceptFlag` is
+ * present in env. Uses presence (`!== undefined`), not truthiness, because even
+ * a bare `CLAUDE_CODE_USE_<provider>=` signals intent for the conflict check. Pass the
+ * flag of the active profile to detect a conflicting selection for any other
+ * provider.
+ */
+export function hasConflictingProviderFlag(
+  processEnv: NodeJS.ProcessEnv = process.env,
+  exceptFlag?: ProviderSelectionFlag,
+): boolean {
+  return PROVIDER_SELECTION_FLAGS.some(
+    flag => flag !== exceptFlag && processEnv[flag] !== undefined,
+  )
+}

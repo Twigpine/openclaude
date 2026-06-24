@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
+import {
+  PROVIDER_SELECTION_FLAGS,
+  hasAnyTruthyProviderSelectionFlag,
+  hasConflictingProviderFlag,
+} from './providerSelectionFlags.js'
 
 /**
  * Feature toggles that share the CLAUDE_CODE_USE_ prefix but do not select
@@ -15,6 +19,9 @@ const NON_PROVIDER_USE_FLAGS = new Set([
 ])
 
 describe('PROVIDER_SELECTION_FLAGS parity', () => {
+  // These two tests synchronously walk the whole src/ tree, which is I/O-bound
+  // and can exceed Bun's 5000 ms default under parallel test load (~8.5 s cold,
+  // ~0.2 s isolated). A generous explicit timeout keeps them from flaking in CI.
   test('every CLAUDE_CODE_USE_* provider flag in src is registered', () => {
     const srcRoot = join(import.meta.dir, '..')
     const glob = new Bun.Glob('**/*.{ts,tsx}')
@@ -42,7 +49,7 @@ describe('PROVIDER_SELECTION_FLAGS parity', () => {
     // startup-selection, env-propagation and cleanup paths all recognise it
     // (this is how gemini-vertex drifted out of the reference lists).
     expect(unregistered).toEqual([])
-  })
+  }, 30000)
 
   test('registered flags are actually consumed outside the registry definition', () => {
     const srcRoot = join(import.meta.dir, '..')
@@ -63,5 +70,58 @@ describe('PROVIDER_SELECTION_FLAGS parity', () => {
     for (const flag of PROVIDER_SELECTION_FLAGS) {
       expect(allContent).toContain(flag)
     }
+  }, 30000)
+})
+
+describe('hasAnyTruthyProviderSelectionFlag', () => {
+  test('returns false for an empty env', () => {
+    expect(hasAnyTruthyProviderSelectionFlag({})).toBe(false)
+  })
+
+  // Every registered flag must be recognised by the shared helper — this is the
+  // guard that prevents a flag-agnostic call site (e.g. isUsing3PServices) from
+  // silently omitting a provider, as Gemini Vertex was before the registry.
+  test.each([...PROVIDER_SELECTION_FLAGS])(
+    'recognises %s when truthy',
+    flag => {
+      expect(hasAnyTruthyProviderSelectionFlag({ [flag]: '1' })).toBe(true)
+    },
+  )
+
+  test('ignores falsy values', () => {
+    expect(
+      hasAnyTruthyProviderSelectionFlag({ CLAUDE_CODE_USE_OPENAI: '0' }),
+    ).toBe(false)
+  })
+})
+
+describe('hasConflictingProviderFlag', () => {
+  test('returns false for an empty env', () => {
+    expect(hasConflictingProviderFlag({})).toBe(false)
+  })
+
+  test('treats any present flag (even bare) as a conflict', () => {
+    expect(hasConflictingProviderFlag({ CLAUDE_CODE_USE_GEMINI: '' })).toBe(true)
+  })
+
+  test('does not flag the excepted active flag', () => {
+    expect(
+      hasConflictingProviderFlag(
+        { CLAUDE_CODE_USE_GEMINI_VERTEX: '1' },
+        'CLAUDE_CODE_USE_GEMINI_VERTEX',
+      ),
+    ).toBe(false)
+  })
+
+  test('flags a different provider even when the active flag is set', () => {
+    expect(
+      hasConflictingProviderFlag(
+        {
+          CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+          CLAUDE_CODE_USE_OPENAI: '1',
+        },
+        'CLAUDE_CODE_USE_GEMINI_VERTEX',
+      ),
+    ).toBe(true)
   })
 })

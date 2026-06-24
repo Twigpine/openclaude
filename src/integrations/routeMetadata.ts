@@ -18,6 +18,7 @@ import {
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { isFirstPartyAnthropicBaseUrlForEnv } from '../utils/anthropicBaseUrl.js'
+import { hasAnyTruthyProviderSelectionFlag } from '../utils/providerSelectionFlags.js'
 import { PROVIDER_SELECTION_FLAGS } from '../utils/providerSelectionFlags.js'
 
 export type RouteDescriptor = GatewayDescriptor | VendorDescriptor | import('./descriptors.js').AnthropicProxyDescriptor
@@ -963,16 +964,7 @@ function isAimlapiBaseUrl(baseUrl?: string): boolean {
 function hasNoExplicitNonOpenAICompatibleProvider(
   processEnv: NodeJS.ProcessEnv,
 ): boolean {
-  return (
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI) &&
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB) &&
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI) &&
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_MISTRAL) &&
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_BEDROCK) &&
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_VERTEX) &&
-    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_FOUNDRY)
-  )
+  return !hasAnyTruthyProviderSelectionFlag(processEnv)
 }
 
 function hasNoExplicitNonOpenAIProvider(
