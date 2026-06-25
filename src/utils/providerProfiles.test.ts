@@ -3348,6 +3348,67 @@ describe('applyActiveProviderProfileFromConfig', () => {
     }
   })
 
+  test('does not override Gemini Vertex access-token startup selection with saved profile', async () => {
+    // Maintainer repro: CLAUDE_CODE_USE_GEMINI_VERTEX=1 + GEMINI_ACCESS_TOKEN
+    // (no project) is a concrete access-token selection — hasConcreteProviderSelection
+    // already treats it as such — so hasCompleteProviderSelection must agree and
+    // keep the saved profile from hijacking the explicit env selection.
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_ACCESS_TOKEN = 'ya29.startup-token'
+    try {
+      const applied = applyActiveProviderProfileFromConfig({
+        providerProfiles: [
+          buildProfile({
+            id: 'saved_openai',
+            baseUrl: 'https://api.openai.com/v1',
+            model: 'gpt-4o',
+          }),
+        ],
+        activeProviderProfileId: 'saved_openai',
+      } as any)
+
+      expect(applied).toBeUndefined()
+      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
+      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.startup-token')
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+      expect(process.env.OPENAI_MODEL).toBeUndefined()
+    } finally {
+      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+      delete process.env.GEMINI_ACCESS_TOKEN
+    }
+  })
+
+  test('does not override Gemini Vertex access-token mode startup selection with saved profile', async () => {
+    // Symmetric to the token case: an explicit GEMINI_VERTEX_AUTH_MODE=access-token
+    // is itself a concrete selection (the token may arrive at request time).
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+    try {
+      const applied = applyActiveProviderProfileFromConfig({
+        providerProfiles: [
+          buildProfile({
+            id: 'saved_openai',
+            baseUrl: 'https://api.openai.com/v1',
+            model: 'gpt-4o',
+          }),
+        ],
+        activeProviderProfileId: 'saved_openai',
+      } as any)
+
+      expect(applied).toBeUndefined()
+      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
+      expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('access-token')
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    } finally {
+      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+      delete process.env.GEMINI_VERTEX_AUTH_MODE
+    }
+  })
+
   test('applies saved profile when the Gemini Vertex flag is bare (stale export)', async () => {
     // A lone CLAUDE_CODE_USE_GEMINI_VERTEX=1 with no project/model/location
     // is a stale shell export, not intent — same semantics as the other

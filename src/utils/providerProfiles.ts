@@ -739,8 +739,11 @@ function hasCompleteProviderSelection(
       trimOrUndefined(processEnv.GOOGLE_PROJECT_ID) !== undefined ||
       trimOrUndefined(processEnv.GEMINI_VERTEX_MODEL) !== undefined ||
       trimOrUndefined(processEnv.GEMINI_VERTEX_LOCATION) !== undefined ||
+      trimOrUndefined(processEnv.GEMINI_ACCESS_TOKEN) !== undefined ||
       trimOrUndefined(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined ||
-      trimOrUndefined(processEnv.GEMINI_VERTEX_AUTH_MODE)?.toLowerCase() === 'adc'
+      trimOrUndefined(processEnv.GEMINI_VERTEX_AUTH_MODE)?.toLowerCase() === 'adc' ||
+      trimOrUndefined(processEnv.GEMINI_VERTEX_AUTH_MODE)?.toLowerCase() ===
+        'access-token'
     )
   }
   if (processEnv.CLAUDE_CODE_USE_GEMINI !== undefined) {

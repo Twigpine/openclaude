@@ -48,6 +48,7 @@ import {
   parseRootOptionValue,
 } from './printFlag.js'
 import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
+import { isEnvTruthy } from './envUtils.js'
 
 const PREFERRED_PROVIDER_ORDER = [
   'anthropic',
@@ -313,9 +314,7 @@ export function applyModelFlagFromArgs(
     if (error) return { error }
   }
 
-  const useGeminiVertex =
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX === '1' ||
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX === 'true'
+  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini =
     process.env.CLAUDE_CODE_USE_GEMINI === '1' ||
     process.env.CLAUDE_CODE_USE_GEMINI === 'true'

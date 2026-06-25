@@ -482,6 +482,15 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
     expect(result.baseUrl).toContain('GEMINI_VERTEX_PROJECT')
   })
 
+  test('detects Vertex for isEnvTruthy flag values (yes/on), not just 1/true', () => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = 'yes'
+    process.env.GEMINI_VERTEX_PROJECT = 'my-project'
+
+    const result = detectProvider()
+    expect(result.name).toBe('Gemini Vertex')
+    expect(result.baseUrl).toContain('/projects/my-project/')
+  })
+
   test('resolves the project from a fallback alias (GOOGLE_CLOUD_PROJECT) when GEMINI_VERTEX_PROJECT is unset', () => {
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     // Only the alias is set; getGeminiVertexProjectId() must resolve it so the
