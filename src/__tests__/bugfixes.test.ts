@@ -583,6 +583,12 @@ describe('Gemini Vertex provider drift guards', () => {
   })
 
   test('isUsing3PServices() includes Gemini Vertex flag', async () => {
+    // isUsing3PServices now derives from the PROVIDER_SELECTION_FLAGS registry
+    // instead of hand-enumerating CLAUDE_CODE_USE_* flags, so the coverage
+    // guarantee is two-fold: (1) the function routes through the registry
+    // helper, and (2) the Vertex flag is registered in that single source of
+    // truth. Asserting the literal in the function body would regress to the
+    // exact drift the registry refactor eliminated.
     const content = await file('utils/auth.ts').text()
     const using3PSection = sectionBetween(
       content,
@@ -590,7 +596,12 @@ describe('Gemini Vertex provider drift guards', () => {
       'function getConfiguredOtelHeadersHelper',
     )
 
-    expect(using3PSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+    expect(using3PSection).toContain('hasAnyTruthyProviderSelectionFlag')
+
+    const { PROVIDER_SELECTION_FLAGS } = await import(
+      '../utils/providerSelectionFlags.js'
+    )
+    expect(PROVIDER_SELECTION_FLAGS).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
   })
 
   test('API preconnect skips Gemini Vertex routing', async () => {
