@@ -27,6 +27,7 @@ import {
   type SecretValueSource,
 } from '../src/utils/providerSecrets.js'
 import {
+  getGeminiVertexLocation,
   getGeminiVertexProjectId,
   resolveGeminiCredential,
   resolveGeminiVertexAuthMode,
@@ -985,7 +986,7 @@ function hasPlaceholderCredential(value: string | undefined): boolean {
 
 function currentBaseUrl(): string {
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
-    const location = process.env.GEMINI_VERTEX_LOCATION ?? 'global'
+    const location = getGeminiVertexLocation(process.env)
     const project =
       getGeminiVertexProjectId(process.env) ?? '<set GEMINI_VERTEX_PROJECT>'
     return `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`

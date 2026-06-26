@@ -61,6 +61,7 @@ import {
   getGeminiVertexModel,
   getGeminiVertexProjectId,
   resolveGeminiCredential,
+  resolveGeminiVertexAuthMode,
 } from '../../utils/geminiAuth.js'
 import {
   shouldUseCustomAnthropicBearerAuth,
@@ -841,9 +842,7 @@ export async function getAnthropicClient({
     const resolveVertexCredential = () =>
       resolveGeminiCredential({
         ...process.env,
-        GEMINI_AUTH_MODE:
-          process.env.GEMINI_VERTEX_AUTH_MODE ??
-          (process.env.GEMINI_ACCESS_TOKEN ? 'access-token' : 'adc'),
+        GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
         GEMINI_API_KEY: undefined,
         GOOGLE_API_KEY: undefined,
       } as NodeJS.ProcessEnv)

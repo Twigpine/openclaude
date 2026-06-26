@@ -381,14 +381,21 @@ export function isNotEmptyMessage(message: Message): boolean {
     return true
   }
 
-  if (message.message.content[0]!.type !== 'text') {
+  const firstBlock = message.message.content[0]
+  if (!firstBlock || typeof firstBlock !== 'object') {
+    return false
+  }
+  if (firstBlock.type !== 'text') {
     return true
+  }
+  if (typeof firstBlock.text !== 'string') {
+    return false
   }
 
   return (
-    message.message.content[0]!.text.trim().length > 0 &&
-    message.message.content[0]!.text !== NO_CONTENT_MESSAGE &&
-    message.message.content[0]!.text !== INTERRUPT_MESSAGE_FOR_TOOL_USE
+    firstBlock.text.trim().length > 0 &&
+    firstBlock.text !== NO_CONTENT_MESSAGE &&
+    firstBlock.text !== INTERRUPT_MESSAGE_FOR_TOOL_USE
   )
 }
 
@@ -1414,10 +1421,11 @@ function sanitizeUserMessageToolUseIds(message: UserMessage): UserMessage {
   if (!Array.isArray(content)) return message
   let changed = false
   const next = content.map(block => {
-    if (
-      block.type === 'tool_result' &&
-      typeof block.tool_use_id === 'string'
-    ) {
+    // Mirror the assistant tool_use.id path (which sanitizes any present id via
+    // the unknown-safe helper): a non-string persisted tool_use_id would
+    // otherwise stay un-sanitized while its matching tool_use.id is rewritten,
+    // breaking call/result pairing on the wire.
+    if (block.type === 'tool_result' && block.tool_use_id != null) {
       const sanitized = sanitizeToolUseIdForWire(block.tool_use_id)
       if (sanitized !== block.tool_use_id) {
         changed = true

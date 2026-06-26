@@ -1566,7 +1566,8 @@ function hasConcreteProviderSelection(
         sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_MODEL),
       ) !== undefined ||
       sanitizeApiKey(processEnv.GEMINI_ACCESS_TOKEN) !== undefined ||
-      sanitizeProviderConfigValue(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined
+      sanitizeProviderConfigValue(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined ||
+      sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_AUTH_MODE) !== undefined
     )
   }
 

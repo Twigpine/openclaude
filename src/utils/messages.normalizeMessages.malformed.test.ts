@@ -5,6 +5,11 @@ import type { Message } from '../types/message.js'
 describe('normalizeMessages malformed-payload hardening', () => {
   test('drops malformed assistant/user slots instead of throwing', () => {
     const messages = [
+      // Falsy top-level slots must be dropped, not throw.
+      null,
+      undefined,
+      // Unknown message type must be dropped.
+      { type: 'totally-bogus', message: { content: 'x' } },
       { type: 'user', message: {} },
       { type: 'assistant' },
       { type: 'user', message: { content: null } },

@@ -18,8 +18,10 @@ import {
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { isFirstPartyAnthropicBaseUrlForEnv } from '../utils/anthropicBaseUrl.js'
-import { hasAnyTruthyProviderSelectionFlag } from '../utils/providerSelectionFlags.js'
-import { PROVIDER_SELECTION_FLAGS } from '../utils/providerSelectionFlags.js'
+import {
+  hasAnyTruthyProviderSelectionFlag,
+  hasConflictingProviderFlag,
+} from '../utils/providerSelectionFlags.js'
 
 export type RouteDescriptor = GatewayDescriptor | VendorDescriptor | import('./descriptors.js').AnthropicProxyDescriptor
 
@@ -1616,14 +1618,9 @@ export function resolveActiveRouteIdFromEnv(
   // Mirror shouldRouteToGeminiVertexFromProfile exactly — any *defined* (not
   // just truthy) provider flag other than the Vertex one is explicit intent, so
   // CLAUDE_CODE_USE_OPENAI=0 must block the saved-profile route here too.
-  const hasConflictingProviderFlag = PROVIDER_SELECTION_FLAGS.some(
-    flag =>
-      flag !== 'CLAUDE_CODE_USE_GEMINI_VERTEX' &&
-      processEnv[flag] !== undefined,
-  )
   if (
     options?.activeProfileProvider === 'gemini-vertex' &&
-    !hasConflictingProviderFlag
+    !hasConflictingProviderFlag(processEnv, 'CLAUDE_CODE_USE_GEMINI_VERTEX')
   ) {
     return 'gemini-vertex'
   }

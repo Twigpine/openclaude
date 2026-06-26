@@ -572,6 +572,12 @@ describe('Gemini Vertex provider drift guards', () => {
   })
 
   test('auth treats Gemini Vertex as a third-party provider', async () => {
+    // isAnthropicAuthEnabled's is3P gate now derives from the
+    // PROVIDER_SELECTION_FLAGS registry instead of hand-enumerating
+    // CLAUDE_CODE_USE_* flags, so the guarantee is two-fold: (1) the gate routes
+    // through the registry helper, and (2) the Vertex flag is registered in that
+    // single source of truth. Asserting the literal in the function body would
+    // regress to the exact drift the registry refactor eliminated.
     const content = await file('utils/auth.ts').text()
     const is3PSection = sectionBetween(
       content,
@@ -579,7 +585,12 @@ describe('Gemini Vertex provider drift guards', () => {
       '// Check if user has configured',
     )
 
-    expect(is3PSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
+    expect(is3PSection).toContain('hasAnyTruthyProviderSelectionFlag')
+
+    const { PROVIDER_SELECTION_FLAGS } = await import(
+      '../utils/providerSelectionFlags.js'
+    )
+    expect(PROVIDER_SELECTION_FLAGS).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
   })
 
   test('isUsing3PServices() includes Gemini Vertex flag', async () => {

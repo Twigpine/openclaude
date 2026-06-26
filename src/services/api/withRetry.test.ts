@@ -5,6 +5,7 @@ import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test
 import * as debugNs from '../../utils/debug.js'
 import * as sleepNs from '../../utils/sleep.js'
 import { markOpenAIRequestNonReplayable } from './openaiErrorClassification.js'
+import { PROVIDER_SELECTION_FLAGS } from '../../utils/providerSelectionFlags.js'
 type ProvidersModule = typeof import('../../utils/model/providers.js')
 type FastModeModule = typeof import('../../utils/fastMode.js')
 
@@ -27,13 +28,7 @@ let originalProvidersModule: ProvidersModule | undefined
 let originalFastModeModule: FastModeModule | undefined
 
 const envKeys = [
-  'CLAUDE_CODE_USE_OPENAI',
-  'CLAUDE_CODE_USE_GEMINI',
-  'CLAUDE_CODE_USE_GEMINI_VERTEX',
-  'CLAUDE_CODE_USE_GITHUB',
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
+  ...PROVIDER_SELECTION_FLAGS,
   'CLAUDE_CODE_UNATTENDED_RETRY',
   'CLAUDE_CODE_REMOTE',
   'CLAUDE_CODE_MAX_RETRIES',
