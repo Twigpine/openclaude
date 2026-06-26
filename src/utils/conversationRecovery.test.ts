@@ -44,6 +44,7 @@ const tempDirs: string[] = []
 const originalSimple = process.env.CLAUDE_CODE_SIMPLE
 const providerEnvKeys = [
   'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
   'CLAUDE_CODE_USE_MISTRAL',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_BEDROCK',

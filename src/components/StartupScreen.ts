@@ -86,10 +86,10 @@ const LOGO_CLAUDE = [
 
 export function detectProvider(modelOverride?: string): { name: string; model: string; baseUrl: string; isLocal: boolean } {
   const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
-  const useGemini = process.env.CLAUDE_CODE_USE_GEMINI === '1' || process.env.CLAUDE_CODE_USE_GEMINI === 'true'
-  const useGithub = process.env.CLAUDE_CODE_USE_GITHUB === '1' || process.env.CLAUDE_CODE_USE_GITHUB === 'true'
-  const useOpenAI = process.env.CLAUDE_CODE_USE_OPENAI === '1' || process.env.CLAUDE_CODE_USE_OPENAI === 'true'
-  const useMistral = process.env.CLAUDE_CODE_USE_MISTRAL === '1' || process.env.CLAUDE_CODE_USE_MISTRAL === 'true'
+  const useGemini = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
+  const useGithub = isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
+  const useOpenAI = isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
+  const useMistral = isEnvTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
 
   if (useGeminiVertex) {
     // Use the shared resolvers so this display matches the runtime/provider

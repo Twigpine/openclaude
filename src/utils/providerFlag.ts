@@ -315,18 +315,10 @@ export function applyModelFlagFromArgs(
   }
 
   const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
-  const useGemini =
-    process.env.CLAUDE_CODE_USE_GEMINI === '1' ||
-    process.env.CLAUDE_CODE_USE_GEMINI === 'true'
-  const useMistral =
-    process.env.CLAUDE_CODE_USE_MISTRAL === '1' ||
-    process.env.CLAUDE_CODE_USE_MISTRAL === 'true'
-  const useOpenAI =
-    process.env.CLAUDE_CODE_USE_OPENAI === '1' ||
-    process.env.CLAUDE_CODE_USE_OPENAI === 'true'
-  const useGithub =
-    process.env.CLAUDE_CODE_USE_GITHUB === '1' ||
-    process.env.CLAUDE_CODE_USE_GITHUB === 'true'
+  const useGemini = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
+  const useMistral = isEnvTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
+  const useOpenAI = isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
+  const useGithub = isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
 
   if (useGeminiVertex) {
     process.env.GEMINI_VERTEX_MODEL = effectiveModel
