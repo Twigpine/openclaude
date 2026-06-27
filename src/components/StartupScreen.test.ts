@@ -50,9 +50,11 @@ const ENV_KEYS = [
   'GEMINI_VERTEX_MODEL',
   'GEMINI_VERTEX_PROJECT',
   'GEMINI_VERTEX_LOCATION',
+  'GEMINI_VERTEX_AUTH_MODE',
   'GOOGLE_CLOUD_PROJECT',
   'GCLOUD_PROJECT',
   'GOOGLE_PROJECT_ID',
+  'GOOGLE_APPLICATION_CREDENTIALS',
   'MISTRAL_MODEL',
   'ANTHROPIC_MODEL',
   'CLAUDE_MODEL',
@@ -482,6 +484,19 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
     expect(result.baseUrl).toContain('GEMINI_VERTEX_PROJECT')
   })
 
+  test('shows a neutral placeholder for ADC setups that derive the project at runtime', () => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    // ADC credential present, no explicit project: getAnthropicClient resolves
+    // the project from credential.projectId at runtime, so the display must not
+    // imperatively demand GEMINI_VERTEX_PROJECT.
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
+
+    const result = detectProvider()
+    expect(result.name).toBe('Gemini Vertex')
+    expect(result.baseUrl).toContain('ADC-resolved project')
+    expect(result.baseUrl).not.toContain('GEMINI_VERTEX_PROJECT')
+  })
+
   test('detects Vertex for isEnvTruthy flag values (yes/on), not just 1/true', () => {
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = 'yes'
     process.env.GEMINI_VERTEX_PROJECT = 'my-project'
@@ -508,7 +523,9 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
     // active profile, exactly like getAnthropicClient. The profile's project
     // (stored in baseUrl) and model must drive the startup display instead of
     // falling through to the default Anthropic/OpenAI branch.
-    const restore = getGlobalConfig()
+    // Snapshot an immutable clone so the finally block fully resets the config
+    // instead of restoring a reference that saveGlobalConfig may have mutated.
+    const restore = structuredClone(getGlobalConfig())
     saveGlobalConfig(current => ({
       ...current,
       providerProfiles: [

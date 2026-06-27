@@ -3405,6 +3405,68 @@ describe('applyActiveProviderProfileFromConfig', () => {
     }
   })
 
+  test('applies saved profile when a Vertex token coexists with a credentials file but no project', async () => {
+    // A GEMINI_ACCESS_TOKEN makes the effective auth mode access-token even when
+    // GOOGLE_APPLICATION_CREDENTIALS is also set, so the credentials file must
+    // NOT make this token-only (no-project) selection look complete — the
+    // native client would still throw "project is required".
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_ACCESS_TOKEN = 'ya29.startup-token'
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
+    try {
+      const applied = applyActiveProviderProfileFromConfig({
+        providerProfiles: [
+          buildProfile({
+            id: 'saved_openai',
+            baseUrl: 'https://api.openai.com/v1',
+            model: 'gpt-4o',
+          }),
+        ],
+        activeProviderProfileId: 'saved_openai',
+      } as any)
+
+      expect(applied?.id).toBe('saved_openai')
+      expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
+    } finally {
+      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+      delete process.env.GEMINI_ACCESS_TOKEN
+      delete process.env.GOOGLE_APPLICATION_CREDENTIALS
+    }
+  })
+
+  test('keeps a Vertex ADC credentials-file startup selection (no project needed)', async () => {
+    // A credentials file with the effective mode still ADC (no token) can derive
+    // the project at runtime, so it is a complete selection and must not be
+    // overridden by the saved profile.
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
+    try {
+      const applied = applyActiveProviderProfileFromConfig({
+        providerProfiles: [
+          buildProfile({
+            id: 'saved_openai',
+            baseUrl: 'https://api.openai.com/v1',
+            model: 'gpt-4o',
+          }),
+        ],
+        activeProviderProfileId: 'saved_openai',
+      } as any)
+
+      expect(applied).toBeUndefined()
+      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
+      expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/tmp/adc.json')
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+      expect(process.env.OPENAI_MODEL).toBeUndefined()
+    } finally {
+      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+      delete process.env.GOOGLE_APPLICATION_CREDENTIALS
+    }
+  })
+
   test('keeps Gemini Vertex access-token startup selection when a project is set', async () => {
     // With a project alias the access-token selection is usable, so it stays
     // and the saved profile must not hijack it.

@@ -743,13 +743,16 @@ function hasCompleteProviderSelection(
     }
     // ADC is the only auth mode that can derive a project from the credentials
     // (getAnthropicClient falls back to credential.projectId for ADC only), so
-    // an ADC selection is complete even without an explicit project alias.
-    const authMode = trimOrUndefined(
+    // an ADC selection is complete even without an explicit project alias. Use
+    // the *effective* mode (resolveGeminiVertexAuthMode), not the raw env: a
+    // GEMINI_ACCESS_TOKEN makes the runtime resolve access-token even when a
+    // credentials file is also present, and that path still needs a project.
+    const explicitAuthMode = trimOrUndefined(
       processEnv.GEMINI_VERTEX_AUTH_MODE,
     )?.toLowerCase()
-    if (authMode === 'adc') return true
+    if (explicitAuthMode === 'adc') return true
     if (
-      authMode !== 'access-token' &&
+      resolveGeminiVertexAuthMode(processEnv) === 'adc' &&
       trimOrUndefined(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined
     ) {
       return true

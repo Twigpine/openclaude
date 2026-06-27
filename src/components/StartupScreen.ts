@@ -128,13 +128,21 @@ export function detectProvider(modelOverride?: string): { name: string; model: s
       DEFAULT_GEMINI_VERTEX_MODEL
     const location = getGeminiVertexLocation(process.env)
     const project = profileProject ?? getGeminiVertexProjectId(process.env)
-    // The native client always targets /projects/<project>/locations/<location>
-    // and throws when no project resolves. Mirror that contract here: when a
-    // project is missing, surface a clear "project required" state instead of a
-    // project-less endpoint that the runtime would never actually call.
-    const baseUrl = project
-      ? `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
-      : `https://aiplatform.googleapis.com/v1/projects/<set GEMINI_VERTEX_PROJECT>/locations/${location}`
+    // The native client always targets /projects/<project>/locations/<location>.
+    // With an explicit ADC credential it can derive the project at runtime
+    // (credential.projectId), so a missing project is not necessarily an error
+    // there — show a neutral placeholder. For access-token/ambient setups the
+    // client throws without a project, so keep the actionable "set the project"
+    // hint instead of a project-less endpoint the runtime would never call.
+    const adcWillResolveProject =
+      process.env.GEMINI_VERTEX_AUTH_MODE?.trim().toLowerCase() === 'adc' ||
+      (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim().length ?? 0) > 0
+    const projectSegment =
+      project ??
+      (adcWillResolveProject
+        ? '<ADC-resolved project>'
+        : '<set GEMINI_VERTEX_PROJECT>')
+    const baseUrl = `https://aiplatform.googleapis.com/v1/projects/${projectSegment}/locations/${location}`
     return { name: 'Gemini Vertex', model, baseUrl, isLocal: false }
   }
 

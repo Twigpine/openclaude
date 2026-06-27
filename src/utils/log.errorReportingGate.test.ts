@@ -7,7 +7,10 @@ import { getInMemoryErrors, logError } from './log.js'
 // saved active profile (effective-provider check), so a saved-profile-only
 // Vertex session does not leak errors to the in-memory/reporting sink.
 describe('logError error-reporting gate — Gemini Vertex effective provider', () => {
-  const PROVIDER_FLAGS = [
+  // Provider-selection flags plus every other env input the logError() gate
+  // reads (DISABLE_ERROR_REPORTING and the essential-traffic switch), so the
+  // control case is hermetic and does not depend on leaked CI state.
+  const GATING_ENV = [
     'CLAUDE_CODE_USE_GEMINI_VERTEX',
     'CLAUDE_CODE_USE_BEDROCK',
     'CLAUDE_CODE_USE_VERTEX',
@@ -16,25 +19,28 @@ describe('logError error-reporting gate — Gemini Vertex effective provider', (
     'CLAUDE_CODE_USE_GEMINI',
     'CLAUDE_CODE_USE_MISTRAL',
     'CLAUDE_CODE_USE_GITHUB',
+    'DISABLE_ERROR_REPORTING',
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+    'DISABLE_TELEMETRY',
   ]
-  const savedFlags: Record<string, string | undefined> = {}
+  const savedEnv: Record<string, string | undefined> = {}
   let restoreConfig: ReturnType<typeof getGlobalConfig>
 
   beforeEach(() => {
-    for (const flag of PROVIDER_FLAGS) {
-      savedFlags[flag] = process.env[flag]
-      delete process.env[flag]
+    for (const key of GATING_ENV) {
+      savedEnv[key] = process.env[key]
+      delete process.env[key]
     }
-    restoreConfig = getGlobalConfig()
+    restoreConfig = structuredClone(getGlobalConfig())
   })
 
   afterEach(() => {
     saveGlobalConfig(() => restoreConfig)
-    for (const flag of PROVIDER_FLAGS) {
-      if (savedFlags[flag] === undefined) {
-        delete process.env[flag]
+    for (const key of GATING_ENV) {
+      if (savedEnv[key] === undefined) {
+        delete process.env[key]
       } else {
-        process.env[flag] = savedFlags[flag]
+        process.env[key] = savedEnv[key]
       }
     }
   })

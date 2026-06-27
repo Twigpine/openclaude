@@ -49,6 +49,7 @@ const { getAnthropicClient } = await import(
   `./client.js?real=${Date.now()}-${Math.random()}`,
 )
 import * as providerProfilesModule from '../../utils/providerProfiles.js'
+import * as geminiAuthModule from '../../utils/geminiAuth.js'
 
 type FetchType = typeof globalThis.fetch
 
@@ -903,6 +904,64 @@ test('saved-profile-only Vertex prefers the profile project/model over ambient e
     expect(capturedUrl).toContain('/models/profile-model:generateContent')
     expect(capturedUrl).not.toContain('ambient-project')
     expect(capturedUrl).not.toContain('ambient-model')
+  } finally {
+    spy.mockRestore()
+  }
+})
+
+test('ADC-only Vertex routing uses the credential-discovered project', async () => {
+  let capturedUrl: string | undefined
+
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+  // No GEMINI_VERTEX_PROJECT / alias and no token: the project must come from
+  // the ADC credential (getAnthropicClient falls back to credential.projectId).
+
+  const spy = spyOn(
+    geminiAuthModule,
+    'resolveGeminiCredential',
+  ).mockResolvedValue({
+    kind: 'adc',
+    credential: 'adc-access-token',
+    projectId: 'adc-discovered-project',
+  } as Awaited<ReturnType<typeof geminiAuthModule.resolveGeminiCredential>>)
+
+  globalThis.fetch = (async (input, _init) => {
+    capturedUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  try {
+    const client = (await getAnthropicClient({
+      maxRetries: 0,
+      model: 'gemini-2.5-flash',
+    })) as unknown as ShimClient
+
+    await client.beta.messages.create({
+      model: 'gemini-2.5-flash',
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 64,
+      stream: false,
+    })
+
+    expect(capturedUrl).toBe(
+      'https://us-central1-aiplatform.googleapis.com/v1/projects/adc-discovered-project/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
+    )
   } finally {
     spy.mockRestore()
   }

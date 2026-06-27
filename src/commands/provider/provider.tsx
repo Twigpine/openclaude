@@ -318,12 +318,19 @@ export function buildCurrentProviderSummary(options?: {
     const vertexMetadata = getProviderPresetUiMetadata('gemini-vertex', vertexEnv)
     const location = getGeminiVertexLocation(vertexEnv)
     const project = getGeminiVertexProjectId(vertexEnv)
-    // Mirror the startup screen: the native client always targets
-    // /projects/<project>/locations/<location> and requires a project, so
-    // surface a project-required state rather than a project-less endpoint.
-    const endpoint = project
-      ? `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
-      : `https://aiplatform.googleapis.com/v1/projects/<set GEMINI_VERTEX_PROJECT>/locations/${location}`
+    // Mirror the startup screen: an explicit ADC credential lets the native
+    // client derive the project at runtime (credential.projectId), so show a
+    // neutral placeholder there; access-token/ambient setups genuinely require
+    // a project, so keep the actionable hint rather than a project-less endpoint.
+    const adcWillResolveProject =
+      vertexEnv.GEMINI_VERTEX_AUTH_MODE?.trim().toLowerCase() === 'adc' ||
+      (vertexEnv.GOOGLE_APPLICATION_CREDENTIALS?.trim().length ?? 0) > 0
+    const projectSegment =
+      project ??
+      (adcWillResolveProject
+        ? '<ADC-resolved project>'
+        : '<set GEMINI_VERTEX_PROJECT>')
+    const endpoint = `https://aiplatform.googleapis.com/v1/projects/${projectSegment}/locations/${location}`
     return {
       providerLabel: vertexMetadata.label,
       modelLabel: getSafeDisplayValue(
