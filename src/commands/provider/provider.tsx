@@ -59,6 +59,7 @@ import {
   type ProviderProfile,
 } from '../../utils/providerProfile.js'
 import {
+  geminiVertexAdcWillResolveProject,
   getGeminiProjectIdHint,
   getGeminiVertexLocation,
   getGeminiVertexModel,
@@ -322,12 +323,9 @@ export function buildCurrentProviderSummary(options?: {
     // client derive the project at runtime (credential.projectId), so show a
     // neutral placeholder there; access-token/ambient setups genuinely require
     // a project, so keep the actionable hint rather than a project-less endpoint.
-    const adcWillResolveProject =
-      vertexEnv.GEMINI_VERTEX_AUTH_MODE?.trim().toLowerCase() === 'adc' ||
-      (vertexEnv.GOOGLE_APPLICATION_CREDENTIALS?.trim().length ?? 0) > 0
     const projectSegment =
       project ??
-      (adcWillResolveProject
+      (geminiVertexAdcWillResolveProject(vertexEnv)
         ? '<ADC-resolved project>'
         : '<set GEMINI_VERTEX_PROJECT>')
     const endpoint = `https://aiplatform.googleapis.com/v1/projects/${projectSegment}/locations/${location}`

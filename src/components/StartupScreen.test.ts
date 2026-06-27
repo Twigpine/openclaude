@@ -51,6 +51,7 @@ const ENV_KEYS = [
   'GEMINI_VERTEX_PROJECT',
   'GEMINI_VERTEX_LOCATION',
   'GEMINI_VERTEX_AUTH_MODE',
+  'GEMINI_ACCESS_TOKEN',
   'GOOGLE_CLOUD_PROJECT',
   'GCLOUD_PROJECT',
   'GOOGLE_PROJECT_ID',
@@ -495,6 +496,20 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
     expect(result.name).toBe('Gemini Vertex')
     expect(result.baseUrl).toContain('ADC-resolved project')
     expect(result.baseUrl).not.toContain('GEMINI_VERTEX_PROJECT')
+  })
+
+  test('keeps the project-required hint when a token coexists with a credentials file', () => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    // A GEMINI_ACCESS_TOKEN makes the effective mode access-token even though
+    // GOOGLE_APPLICATION_CREDENTIALS is set, so the runtime needs an explicit
+    // project — keep the actionable hint, not the ADC placeholder.
+    process.env.GEMINI_ACCESS_TOKEN = 'ya29.token'
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
+
+    const result = detectProvider()
+    expect(result.name).toBe('Gemini Vertex')
+    expect(result.baseUrl).toContain('GEMINI_VERTEX_PROJECT')
+    expect(result.baseUrl).not.toContain('ADC-resolved project')
   })
 
   test('detects Vertex for isEnvTruthy flag values (yes/on), not just 1/true', () => {

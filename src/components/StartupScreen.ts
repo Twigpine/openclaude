@@ -17,6 +17,7 @@ import { parseUserSpecifiedModel } from '../utils/model/model.js'
 import { DEFAULT_GEMINI_MODEL } from '../utils/providerProfile.js'
 import {
   DEFAULT_GEMINI_VERTEX_MODEL,
+  geminiVertexAdcWillResolveProject,
   getGeminiVertexLocation,
   getGeminiVertexModel,
   getGeminiVertexProjectId,
@@ -134,12 +135,9 @@ export function detectProvider(modelOverride?: string): { name: string; model: s
     // there — show a neutral placeholder. For access-token/ambient setups the
     // client throws without a project, so keep the actionable "set the project"
     // hint instead of a project-less endpoint the runtime would never call.
-    const adcWillResolveProject =
-      process.env.GEMINI_VERTEX_AUTH_MODE?.trim().toLowerCase() === 'adc' ||
-      (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim().length ?? 0) > 0
     const projectSegment =
       project ??
-      (adcWillResolveProject
+      (geminiVertexAdcWillResolveProject(process.env)
         ? '<ADC-resolved project>'
         : '<set GEMINI_VERTEX_PROJECT>')
     const baseUrl = `https://aiplatform.googleapis.com/v1/projects/${projectSegment}/locations/${location}`

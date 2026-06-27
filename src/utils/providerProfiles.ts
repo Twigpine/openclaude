@@ -13,7 +13,10 @@ import {
   type ProviderProfile,
 } from './config.js'
 import { isEnvTruthy } from './envUtils.js'
-import { resolveGeminiVertexAuthMode } from './geminiAuth.js'
+import {
+  geminiVertexAdcWillResolveProject,
+  resolveGeminiVertexAuthMode,
+} from './geminiAuth.js'
 import type { ModelOption } from './model/modelOptions.js'
 import { isCurrentMiniMaxModelOption } from './model/minimaxCatalog.js'
 import { getPrimaryModel, parseModelList } from './providerModels.js'
@@ -741,22 +744,10 @@ function hasCompleteProviderSelection(
     ) {
       return true
     }
-    // ADC is the only auth mode that can derive a project from the credentials
-    // (getAnthropicClient falls back to credential.projectId for ADC only), so
-    // an ADC selection is complete even without an explicit project alias. Use
-    // the *effective* mode (resolveGeminiVertexAuthMode), not the raw env: a
-    // GEMINI_ACCESS_TOKEN makes the runtime resolve access-token even when a
-    // credentials file is also present, and that path still needs a project.
-    const explicitAuthMode = trimOrUndefined(
-      processEnv.GEMINI_VERTEX_AUTH_MODE,
-    )?.toLowerCase()
-    if (explicitAuthMode === 'adc') return true
-    if (
-      resolveGeminiVertexAuthMode(processEnv) === 'adc' &&
-      trimOrUndefined(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined
-    ) {
-      return true
-    }
+    // An ADC credential lets the runtime derive the project, so an ADC
+    // selection is complete even without an explicit project alias. Shared
+    // with the startup/summary placeholders to prevent drift.
+    if (geminiVertexAdcWillResolveProject(processEnv)) return true
     // access-token / token-only Vertex selections cannot route without a
     // project — the native client throws "project is required" — so treating
     // them as complete would suppress the saved active profile and strand
