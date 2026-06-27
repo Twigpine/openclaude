@@ -303,9 +303,21 @@ export function buildCurrentProviderSummary(options?: {
   })
 
   if (effectiveRouteId === 'gemini-vertex') {
-    const vertexMetadata = getProviderPresetUiMetadata('gemini-vertex', processEnv)
-    const location = getGeminiVertexLocation(processEnv)
-    const project = getGeminiVertexProjectId(processEnv)
+    // Mirror getAnthropicClient: when routing purely from the saved profile (no
+    // env flag), the saved profile env supplies the project/model/location and
+    // wins over ambient process defaults. With an explicit env flag, the env
+    // values take precedence (the saved keys only fill gaps).
+    const routedFromProfileOnly =
+      !isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
+      persisted?.profile === 'gemini-vertex'
+    const vertexEnv = (
+      routedFromProfileOnly
+        ? { ...processEnv, ...persisted?.env }
+        : processEnv
+    ) as NodeJS.ProcessEnv
+    const vertexMetadata = getProviderPresetUiMetadata('gemini-vertex', vertexEnv)
+    const location = getGeminiVertexLocation(vertexEnv)
+    const project = getGeminiVertexProjectId(vertexEnv)
     // Mirror the startup screen: the native client always targets
     // /projects/<project>/locations/<location> and requires a project, so
     // surface a project-required state rather than a project-less endpoint.
@@ -315,7 +327,7 @@ export function buildCurrentProviderSummary(options?: {
     return {
       providerLabel: vertexMetadata.label,
       modelLabel: getSafeDisplayValue(
-        getGeminiVertexModel(processEnv),
+        getGeminiVertexModel(vertexEnv),
         secretSource,
       ),
       endpointLabel: getSafeDisplayValue(endpoint, secretSource),

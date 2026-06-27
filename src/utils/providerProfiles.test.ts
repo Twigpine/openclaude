@@ -3348,11 +3348,12 @@ describe('applyActiveProviderProfileFromConfig', () => {
     }
   })
 
-  test('does not override Gemini Vertex access-token startup selection with saved profile', async () => {
-    // Maintainer repro: CLAUDE_CODE_USE_GEMINI_VERTEX=1 + GEMINI_ACCESS_TOKEN
-    // (no project) is a concrete access-token selection — hasConcreteProviderSelection
-    // already treats it as such — so hasCompleteProviderSelection must agree and
-    // keep the saved profile from hijacking the explicit env selection.
+  test('applies saved profile over Gemini Vertex access-token env with no project', async () => {
+    // Maintainer repro (round 7): CLAUDE_CODE_USE_GEMINI_VERTEX=1 +
+    // GEMINI_ACCESS_TOKEN with no project is an UNUSABLE Vertex selection — the
+    // native client throws "project is required" because access-token mode
+    // cannot derive a project (only ADC can). A stale token-only shell must not
+    // suppress the saved active profile, so the saved profile is applied.
     const { applyActiveProviderProfileFromConfig } =
       await importFreshProviderProfileModules()
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
@@ -3369,20 +3370,17 @@ describe('applyActiveProviderProfileFromConfig', () => {
         activeProviderProfileId: 'saved_openai',
       } as any)
 
-      expect(applied).toBeUndefined()
-      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
-      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.startup-token')
-      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
-      expect(process.env.OPENAI_MODEL).toBeUndefined()
+      expect(applied?.id).toBe('saved_openai')
+      expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
     } finally {
       delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
       delete process.env.GEMINI_ACCESS_TOKEN
     }
   })
 
-  test('does not override Gemini Vertex access-token mode startup selection with saved profile', async () => {
-    // Symmetric to the token case: an explicit GEMINI_VERTEX_AUTH_MODE=access-token
-    // is itself a concrete selection (the token may arrive at request time).
+  test('applies saved profile over Gemini Vertex access-token mode with no project', async () => {
+    // Symmetric to the token case: GEMINI_VERTEX_AUTH_MODE=access-token with no
+    // project is equally unusable, so the saved profile wins.
     const { applyActiveProviderProfileFromConfig } =
       await importFreshProviderProfileModules()
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
@@ -3399,13 +3397,44 @@ describe('applyActiveProviderProfileFromConfig', () => {
         activeProviderProfileId: 'saved_openai',
       } as any)
 
-      expect(applied).toBeUndefined()
-      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
-      expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('access-token')
-      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+      expect(applied?.id).toBe('saved_openai')
+      expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
     } finally {
       delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
       delete process.env.GEMINI_VERTEX_AUTH_MODE
+    }
+  })
+
+  test('keeps Gemini Vertex access-token startup selection when a project is set', async () => {
+    // With a project alias the access-token selection is usable, so it stays
+    // and the saved profile must not hijack it.
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_ACCESS_TOKEN = 'ya29.startup-token'
+    process.env.GEMINI_VERTEX_PROJECT = 'explicit-project'
+    try {
+      const applied = applyActiveProviderProfileFromConfig({
+        providerProfiles: [
+          buildProfile({
+            id: 'saved_openai',
+            baseUrl: 'https://api.openai.com/v1',
+            model: 'gpt-4o',
+          }),
+        ],
+        activeProviderProfileId: 'saved_openai',
+      } as any)
+
+      expect(applied).toBeUndefined()
+      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
+      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.startup-token')
+      expect(process.env.GEMINI_VERTEX_PROJECT).toBe('explicit-project')
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+      expect(process.env.OPENAI_MODEL).toBeUndefined()
+    } finally {
+      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+      delete process.env.GEMINI_ACCESS_TOKEN
+      delete process.env.GEMINI_VERTEX_PROJECT
     }
   })
 

@@ -385,6 +385,12 @@ export function isNotEmptyMessage(message: Message): boolean {
   if (!firstBlock || typeof firstBlock !== 'object') {
     return false
   }
+  // Reject typeless blocks (e.g. `{ foo: 'bar' }`) before the non-text branch:
+  // without a string `type` we can't prove it's a real content block, so it
+  // must not count as non-empty.
+  if (typeof firstBlock.type !== 'string') {
+    return false
+  }
   if (firstBlock.type !== 'text') {
     return true
   }

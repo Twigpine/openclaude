@@ -62,7 +62,10 @@ export default defineVendor({
         contextWindow: 1_048_576,
         maxOutputTokens: 65_536,
       },
-      // Thinking model — available on global endpoint only
+      // Thinking model — available on the global endpoint only. The client
+      // enforces this via isGlobalOnlyVertexModel (utils/geminiAuth.ts): a
+      // regional GEMINI_VERTEX_LOCATION with this model is rejected. Keep the
+      // two in sync.
       {
         id: 'gemini-3.5-flash',
         apiName: 'gemini-3.5-flash',

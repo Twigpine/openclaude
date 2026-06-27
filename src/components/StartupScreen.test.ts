@@ -502,4 +502,35 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
       'https://aiplatform.googleapis.com/v1/projects/alias-project/locations/global',
     )
   })
+
+  test('detects Vertex from a saved active profile with no env flag (profile-only)', () => {
+    // No CLAUDE_CODE_USE_GEMINI_VERTEX: routing comes purely from the saved
+    // active profile, exactly like getAnthropicClient. The profile's project
+    // (stored in baseUrl) and model must drive the startup display instead of
+    // falling through to the default Anthropic/OpenAI branch.
+    const restore = getGlobalConfig()
+    saveGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [
+        {
+          id: 'saved_vertex',
+          name: 'Saved Vertex',
+          provider: 'gemini-vertex',
+          baseUrl: 'saved-proj',
+          model: 'gemini-2.5-pro',
+        },
+      ],
+      activeProviderProfileId: 'saved_vertex',
+    }))
+    try {
+      const result = detectProvider()
+      expect(result.name).toBe('Gemini Vertex')
+      expect(result.model).toBe('gemini-2.5-pro')
+      expect(result.baseUrl).toBe(
+        'https://aiplatform.googleapis.com/v1/projects/saved-proj/locations/global',
+      )
+    } finally {
+      saveGlobalConfig(() => restore)
+    }
+  })
 })

@@ -88,6 +88,17 @@ export function getGeminiVertexModel(
   return sanitizeCredential(env.GEMINI_VERTEX_MODEL) ?? DEFAULT_GEMINI_VERTEX_MODEL
 }
 
+// Models Vertex only serves from the global endpoint. Pairing one with a
+// regional GEMINI_VERTEX_LOCATION would build a regional URL the model is not
+// available on, so the client validates this before issuing the request. The
+// catalog (integrations/vendors/gemini-vertex.ts) documents which models are
+// global-only; keep the two in sync.
+const GLOBAL_ONLY_VERTEX_MODELS = new Set(['gemini-3.5-flash'])
+
+export function isGlobalOnlyVertexModel(model: string | undefined): boolean {
+  return model !== undefined && GLOBAL_ONLY_VERTEX_MODELS.has(model.trim())
+}
+
 export function getGeminiAuthMode(
   env: NodeJS.ProcessEnv = process.env,
 ): GeminiAuthMode | undefined {

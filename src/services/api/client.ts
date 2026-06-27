@@ -60,6 +60,7 @@ import {
   getGeminiVertexLocation,
   getGeminiVertexModel,
   getGeminiVertexProjectId,
+  isGlobalOnlyVertexModel,
   resolveGeminiCredential,
   resolveGeminiVertexAuthMode,
 } from '../../utils/geminiAuth.js'
@@ -853,6 +854,14 @@ export async function getAnthropicClient({
     const vertexProject = project ?? (credential.kind === 'adc' ? credential.projectId : undefined)
     if (!vertexProject) {
       throw new Error('Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT')
+    }
+    // Some Vertex models are served only from the global endpoint; routing one
+    // to a regional location builds a URL the model is not available on. Fail
+    // fast with an actionable message instead of issuing a doomed request.
+    if (location !== 'global' && isGlobalOnlyVertexModel(geminiVertexModel)) {
+      throw new Error(
+        `Gemini Vertex model "${geminiVertexModel}" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "${location}") to use it.`,
+      )
     }
 
     const { createGeminiVertexClient } = await import('./geminiVertexClient.js')

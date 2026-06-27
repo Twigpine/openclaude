@@ -732,7 +732,9 @@ test('routes Gemini Vertex provider requests through the native client', async (
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
   process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
-  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  // A regional location requires a regionally-available model (gemini-3.5-flash
+  // is global-only and would be rejected — see the dedicated test below).
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
   process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
   process.env.OPENAI_MODEL = 'gpt-5.5'
 
@@ -760,18 +762,18 @@ test('routes Gemini Vertex provider requests through the native client', async (
 
   const client = (await getAnthropicClient({
     maxRetries: 0,
-    model: 'gemini-3.5-flash',
+    model: 'gemini-2.5-flash',
   })) as unknown as ShimClient
 
   const response = await client.beta.messages.create({
-    model: 'gemini-3.5-flash',
+    model: 'gemini-2.5-flash',
     messages: [{ role: 'user', content: 'hello' }],
     max_tokens: 64,
     stream: false,
   })
 
   expect(capturedUrl).toBe(
-    'https://us-central1-aiplatform.googleapis.com/v1/projects/project-test-1234/locations/us-central1/publishers/google/models/gemini-3.5-flash:generateContent',
+    'https://us-central1-aiplatform.googleapis.com/v1/projects/project-test-1234/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
   )
   expect(capturedHeaders?.get('authorization')).toBe('Bearer vertex-access-token')
   expect(capturedHeaders?.get('x-goog-user-project')).toBe('project-test-1234')
@@ -780,8 +782,69 @@ test('routes Gemini Vertex provider requests through the native client', async (
   ])
   expect(response).toMatchObject({
     role: 'assistant',
-    model: 'gemini-3.5-flash',
+    model: 'gemini-2.5-flash',
   })
+})
+
+test('rejects a global-only Vertex model paired with a regional location', async () => {
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  // gemini-3.5-flash is served only from the global endpoint, so a regional
+  // location must fail fast instead of building an unusable regional URL.
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
+
+  await expect(
+    getAnthropicClient({ maxRetries: 0, model: 'gemini-3.5-flash' }),
+  ).rejects.toThrow(/only available on the global endpoint/)
+})
+
+test('allows a global-only Vertex model on the global endpoint', async () => {
+  let capturedUrl: string | undefined
+
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'global'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
+
+  globalThis.fetch = (async (input, init) => {
+    capturedUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  const client = (await getAnthropicClient({
+    maxRetries: 0,
+    model: 'gemini-3.5-flash',
+  })) as unknown as ShimClient
+
+  await client.beta.messages.create({
+    model: 'gemini-3.5-flash',
+    messages: [{ role: 'user', content: 'hello' }],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  expect(capturedUrl).toBe(
+    'https://aiplatform.googleapis.com/v1/projects/project-test-1234/locations/global/publishers/google/models/gemini-3.5-flash:generateContent',
+  )
 })
 
 test('saved-profile-only Vertex prefers the profile project/model over ambient env', async () => {

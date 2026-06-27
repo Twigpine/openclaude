@@ -29,6 +29,34 @@ describe('isNotEmptyMessage malformed-history hardening', () => {
     ).toBe(false)
   })
 
+  test('treats a single typeless content block as empty', () => {
+    // A first block without a string `type` (e.g. `{ foo: 'bar' }`) is not a
+    // real content block, so it must not slip through the non-text branch as
+    // non-empty.
+    expect(
+      isNotEmptyMessage({
+        type: 'user',
+        message: { content: [{ foo: 'bar' }] },
+      } as unknown as Message),
+    ).toBe(false)
+    expect(
+      isNotEmptyMessage({
+        type: 'user',
+        message: { content: [{ type: 123 }] },
+      } as unknown as Message),
+    ).toBe(false)
+  })
+
+  test('still reports a non-empty single non-text block', () => {
+    // A well-formed non-text block (e.g. an image) is still non-empty.
+    expect(
+      isNotEmptyMessage({
+        type: 'user',
+        message: { content: [{ type: 'image', source: {} }] },
+      } as unknown as Message),
+    ).toBe(true)
+  })
+
   test('still reports a non-empty string user message', () => {
     expect(
       isNotEmptyMessage({

@@ -732,19 +732,33 @@ function hasCompleteProviderSelection(
     )
   }
   if (processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX !== undefined) {
-    return (
+    // An explicit project alias is enough to route, regardless of auth mode.
+    if (
       trimOrUndefined(processEnv.GEMINI_VERTEX_PROJECT) !== undefined ||
       trimOrUndefined(processEnv.GOOGLE_CLOUD_PROJECT) !== undefined ||
       trimOrUndefined(processEnv.GCLOUD_PROJECT) !== undefined ||
-      trimOrUndefined(processEnv.GOOGLE_PROJECT_ID) !== undefined ||
-      trimOrUndefined(processEnv.GEMINI_VERTEX_MODEL) !== undefined ||
-      trimOrUndefined(processEnv.GEMINI_VERTEX_LOCATION) !== undefined ||
-      trimOrUndefined(processEnv.GEMINI_ACCESS_TOKEN) !== undefined ||
-      trimOrUndefined(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined ||
-      trimOrUndefined(processEnv.GEMINI_VERTEX_AUTH_MODE)?.toLowerCase() === 'adc' ||
-      trimOrUndefined(processEnv.GEMINI_VERTEX_AUTH_MODE)?.toLowerCase() ===
-        'access-token'
-    )
+      trimOrUndefined(processEnv.GOOGLE_PROJECT_ID) !== undefined
+    ) {
+      return true
+    }
+    // ADC is the only auth mode that can derive a project from the credentials
+    // (getAnthropicClient falls back to credential.projectId for ADC only), so
+    // an ADC selection is complete even without an explicit project alias.
+    const authMode = trimOrUndefined(
+      processEnv.GEMINI_VERTEX_AUTH_MODE,
+    )?.toLowerCase()
+    if (authMode === 'adc') return true
+    if (
+      authMode !== 'access-token' &&
+      trimOrUndefined(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined
+    ) {
+      return true
+    }
+    // access-token / token-only Vertex selections cannot route without a
+    // project — the native client throws "project is required" — so treating
+    // them as complete would suppress the saved active profile and strand
+    // startup on an unusable Vertex route. Require a project alias here.
+    return false
   }
   if (processEnv.CLAUDE_CODE_USE_GEMINI !== undefined) {
     return (
