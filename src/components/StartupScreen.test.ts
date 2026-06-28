@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
 
 const actualSettings = await import('../utils/settings/settings.js')
 import {
@@ -33,6 +33,7 @@ import {
   resetSettingsCache,
   setSessionSettingsCache,
 } from '../utils/settings/settingsCache.js'
+import * as providerProfilesModule from '../utils/providerProfiles.js'
 
 const ENV_KEYS = [
   'CI',
@@ -538,22 +539,24 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
     // active profile, exactly like getAnthropicClient. The profile's project
     // (stored in baseUrl) and model must drive the startup display instead of
     // falling through to the default Anthropic/OpenAI branch.
-    // Snapshot an immutable clone so the finally block fully resets the config
-    // instead of restoring a reference that saveGlobalConfig may have mutated.
-    const restore = structuredClone(getGlobalConfig())
-    saveGlobalConfig(current => ({
-      ...current,
-      providerProfiles: [
-        {
-          id: 'saved_vertex',
-          name: 'Saved Vertex',
-          provider: 'gemini-vertex',
-          baseUrl: 'saved-proj',
-          model: 'gemini-2.5-pro',
-        },
-      ],
-      activeProviderProfileId: 'saved_vertex',
-    }))
+    //
+    // Stub getActiveProviderProfile directly (mirroring the client.test.ts Vertex
+    // specs) instead of mutating the shared global config: another test file in
+    // the same process can leave a leaked mock.module('./config.js') installed
+    // (bun's mock.restore() does not revert mock.module()), which silently turns
+    // a saveGlobalConfig()-based setup into a no-op and makes this assertion
+    // order-dependent. detectProvider() passes the resolved profile straight into
+    // isGeminiVertexEffectiveProvider(), so the real routing logic still runs.
+    const spy = spyOn(
+      providerProfilesModule,
+      'getActiveProviderProfile',
+    ).mockReturnValue({
+      id: 'saved_vertex',
+      name: 'Saved Vertex',
+      provider: 'gemini-vertex',
+      baseUrl: 'saved-proj',
+      model: 'gemini-2.5-pro',
+    } as ReturnType<typeof providerProfilesModule.getActiveProviderProfile>)
     try {
       const result = detectProvider()
       expect(result.name).toBe('Gemini Vertex')
@@ -562,7 +565,7 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
         'https://aiplatform.googleapis.com/v1/projects/saved-proj/locations/global',
       )
     } finally {
-      saveGlobalConfig(() => restore)
+      spy.mockRestore()
     }
   })
 })

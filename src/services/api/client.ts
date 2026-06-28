@@ -827,15 +827,28 @@ export async function getAnthropicClient({
     // leading with them keeps env precedence for an explicit Vertex selection.
     const project = profileProject ?? getGeminiVertexProjectId(process.env)
     const location = getGeminiVertexLocation(process.env)
+    // Model precedence depends on how we got here:
+    // - Saved-profile-only routing: an explicit model override (e.g. --model /
+    //   runtime override) must win over the profile's saved model, matching the
+    //   startup display and the other provider paths; the saved model in turn
+    //   wins over ambient env so a stale GEMINI_VERTEX_MODEL export can't hijack
+    //   the profile.
+    // - Env-flag routing: an explicit GEMINI_VERTEX_MODEL is the deliberate
+    //   Vertex selection and wins over a generic model arg (e.g. a stale
+    //   OPENAI_MODEL forwarded as `model`). profileModel is undefined here.
     // getGeminiVertexModel already falls back to the default model; the trailing
     // literal only satisfies its `string | undefined` signature (it never
     // actually returns undefined) so geminiVertexModel stays a plain string.
-    const geminiVertexModel =
-      profileModel ||
-      process.env.GEMINI_VERTEX_MODEL?.trim() ||
-      model?.trim() ||
-      getGeminiVertexModel(process.env) ||
-      DEFAULT_GEMINI_VERTEX_MODEL
+    const geminiVertexModel = routedFromProfileOnly
+      ? model?.trim() ||
+        profileModel ||
+        process.env.GEMINI_VERTEX_MODEL?.trim() ||
+        getGeminiVertexModel(process.env) ||
+        DEFAULT_GEMINI_VERTEX_MODEL
+      : process.env.GEMINI_VERTEX_MODEL?.trim() ||
+        model?.trim() ||
+        getGeminiVertexModel(process.env) ||
+        DEFAULT_GEMINI_VERTEX_MODEL
     // Re-resolve on every call instead of capturing one token: ADC access
     // tokens expire (~1h), so a long-lived client must pick up refreshed
     // tokens. resolveGeminiCredential memoizes the ADC path (5-min TTL) and

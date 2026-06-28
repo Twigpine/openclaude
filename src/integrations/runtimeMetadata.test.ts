@@ -163,6 +163,23 @@ describe('resolveModelRuntimeLimits', () => {
     })
   })
 
+  test('selects Vertex catalog metadata from the saved profile alone (no env flag)', () => {
+    // Saved-profile-only routing: getAnthropicClient routes a gemini-vertex
+    // profile even when CLAUDE_CODE_USE_GEMINI_VERTEX is unset, so the runtime
+    // limits must resolve the Vertex catalog from activeProfileProvider alone
+    // rather than falling back to generic limits.
+    const limits = resolveModelRuntimeLimits({
+      model: 'gemini-3.5-flash',
+      processEnv: {},
+      activeProfileProvider: 'gemini-vertex',
+    })
+
+    expect(limits).toEqual({
+      contextWindow: 1_048_576,
+      maxOutputTokens: 65_536,
+    })
+  })
+
   it('uses discovered custom route context windows from the discovery cache', async () => {
     await withTempConfigDir(async () => {
       const baseUrl = 'http://localhost:4000/v1'
