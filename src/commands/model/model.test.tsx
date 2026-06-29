@@ -4,7 +4,17 @@ import { snapshotEnv } from '../../test/envSnapshot.js'
 import { afterAll, afterEach, beforeEach, expect, mock, setSystemTime, test } from 'bun:test'
 import React from 'react'
 
+import * as realProviderProfilesModule from '../../utils/providerProfiles.js'
 import { getAdditionalModelOptionsCacheScope } from '../../services/api/providerConfig.js'
+
+// Static snapshot of the REAL providerProfiles exports, captured at import time
+// before any mock.module() runs. mock.restore() (used in afterEach) does NOT
+// revert mock.module(), so without this the partial providerProfiles stub
+// (getActiveProviderProfile -> undefined) installed by mockModelModule() leaks
+// into later files in the full suite: client routing then cannot see a saved
+// Gemini Vertex profile and falls back to the generic OPENAI_MODEL. The afterAll
+// below reinstalls the genuine module from this frozen snapshot.
+const realProviderProfilesSnapshot = { ...realProviderProfilesModule }
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -318,6 +328,14 @@ afterEach(() => {
   } finally {
     releaseSharedMutationLock()
   }
+})
+
+afterAll(() => {
+  // mock.restore() does not revert mock.module(), so explicitly reinstall the real
+  // providerProfiles.js module to stop the partial stub from leaking into later
+  // test files (e.g. services/api/client.test.ts Gemini Vertex model routing).
+  mock.restore()
+  mock.module('../../utils/providerProfiles.js', () => realProviderProfilesSnapshot)
 })
 
 async function waitForCondition(
