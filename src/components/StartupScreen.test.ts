@@ -77,6 +77,7 @@ const originalWrite = process.stdout.write
 const originalColumns = process.stdout.columns
 // `model` is a legacy loose key not declared on GlobalConfig.
 const originalModel = (getGlobalConfig() as GlobalConfig & Record<string, unknown>).model
+let activeProfileSpy: ReturnType<typeof spyOn> | undefined
 
 beforeEach(() => {
   for (const key of ENV_KEYS) {
@@ -88,10 +89,23 @@ beforeEach(() => {
     ...current,
     model: undefined,
   }))
+  // detectProvider() reads getActiveProviderProfile() to decide Gemini Vertex
+  // routing. Pin it to "no active profile" by default so a gemini-vertex profile
+  // leaked into the shared global config by another test file (the beforeEach
+  // above only resets `model`, not providerProfiles) can't make these detection
+  // assertions return "Gemini Vertex". detectProvider imports the function as a
+  // cross-module binding, so the spy intercepts it; the profile-only spec below
+  // overrides this default for its single assertion.
+  activeProfileSpy = spyOn(
+    providerProfilesModule,
+    'getActiveProviderProfile',
+  ).mockReturnValue(undefined)
 })
 
 afterEach(() => {
   resetSettingsCache()
+  activeProfileSpy?.mockRestore()
+  activeProfileSpy = undefined
   saveGlobalConfig(current => ({
     ...current,
     model: originalModel,
@@ -540,32 +554,28 @@ describe('detectProvider — Gemini Vertex endpoint reflects the runtime project
     // (stored in baseUrl) and model must drive the startup display instead of
     // falling through to the default Anthropic/OpenAI branch.
     //
-    // Stub getActiveProviderProfile directly (mirroring the client.test.ts Vertex
-    // specs) instead of mutating the shared global config: another test file in
-    // the same process can leave a leaked mock.module('./config.js') installed
-    // (bun's mock.restore() does not revert mock.module()), which silently turns
-    // a saveGlobalConfig()-based setup into a no-op and makes this assertion
-    // order-dependent. detectProvider() passes the resolved profile straight into
-    // isGeminiVertexEffectiveProvider(), so the real routing logic still runs.
-    const spy = spyOn(
-      providerProfilesModule,
-      'getActiveProviderProfile',
-    ).mockReturnValue({
+    // Override the beforeEach getActiveProviderProfile spy (which defaults to no
+    // active profile) with a saved gemini-vertex profile, mirroring the
+    // client.test.ts Vertex specs, instead of mutating the shared global config:
+    // another test file in the same process can leave a leaked
+    // mock.module('./config.js') installed (bun's mock.restore() does not revert
+    // mock.module()), which silently turns a saveGlobalConfig()-based setup into a
+    // no-op and makes this assertion order-dependent. detectProvider() passes the
+    // resolved profile straight into isGeminiVertexEffectiveProvider(), so the
+    // real routing logic still runs. afterEach restores the spy.
+    activeProfileSpy!.mockReturnValue({
       id: 'saved_vertex',
       name: 'Saved Vertex',
       provider: 'gemini-vertex',
       baseUrl: 'saved-proj',
       model: 'gemini-2.5-pro',
     } as ReturnType<typeof providerProfilesModule.getActiveProviderProfile>)
-    try {
-      const result = detectProvider()
-      expect(result.name).toBe('Gemini Vertex')
-      expect(result.model).toBe('gemini-2.5-pro')
-      expect(result.baseUrl).toBe(
-        'https://aiplatform.googleapis.com/v1/projects/saved-proj/locations/global',
-      )
-    } finally {
-      spy.mockRestore()
-    }
+
+    const result = detectProvider()
+    expect(result.name).toBe('Gemini Vertex')
+    expect(result.model).toBe('gemini-2.5-pro')
+    expect(result.baseUrl).toBe(
+      'https://aiplatform.googleapis.com/v1/projects/saved-proj/locations/global',
+    )
   })
 })
