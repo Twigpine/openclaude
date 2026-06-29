@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import * as providerProfilesModule from './providerProfiles.js'
 import {
   createAssistantMessage,
@@ -10,18 +10,27 @@ import type { Message } from '../types/message.js'
 // normalizeMessagesForAPI sanitizes Vertex tool ids based on the *effective*
 // provider (env flag OR saved active profile) via isGeminiVertexEffectiveProvider.
 // That reads global env/route + config state which other tests in the full suite
-// mutate, so mock the decision directly to make these assertions hermetic and
+// mutate, so spy on the decision directly to make these assertions hermetic and
 // order-independent. Passing `true` exercises both the env-flag and the
 // saved-profile-only Vertex routes (the helper unifies them).
+//
+// Use spyOn (restored via mockRestore in afterEach), NOT mock.module: restoring
+// a mock.module by re-spreading the `import * as` namespace re-captures the
+// already-mocked live binding, so the "restore" reinstalls the mock and leaks a
+// pinned isGeminiVertexEffectiveProvider into every later test file — which makes
+// detectProvider() mislabel every provider as "Gemini Vertex".
+let vertexEffectiveSpy: ReturnType<typeof spyOn> | undefined
+
 function mockGeminiVertexEffective(isVertex: boolean): void {
-  mock.module('./providerProfiles.js', () => ({
-    ...providerProfilesModule,
-    isGeminiVertexEffectiveProvider: () => isVertex,
-  }))
+  vertexEffectiveSpy = spyOn(
+    providerProfilesModule,
+    'isGeminiVertexEffectiveProvider',
+  ).mockReturnValue(isVertex)
 }
 
 function restoreGeminiVertexEffective(): void {
-  mock.module('./providerProfiles.js', () => ({ ...providerProfilesModule }))
+  vertexEffectiveSpy?.mockRestore()
+  vertexEffectiveSpy = undefined
 }
 
 const SIGNED_ID = `toolu_vertex_k9x_3~~sig~~${'S'.repeat(1700)}`
