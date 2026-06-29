@@ -80,6 +80,7 @@ const originalEnv = {
   GEMINI_MODEL: process.env.GEMINI_MODEL,
   GEMINI_BASE_URL: process.env.GEMINI_BASE_URL,
   GEMINI_AUTH_MODE: process.env.GEMINI_AUTH_MODE,
+  GEMINI_VERTEX_AUTH_MODE: process.env.GEMINI_VERTEX_AUTH_MODE,
   GEMINI_VERTEX_PROJECT: process.env.GEMINI_VERTEX_PROJECT,
   GEMINI_VERTEX_LOCATION: process.env.GEMINI_VERTEX_LOCATION,
   GEMINI_VERTEX_MODEL: process.env.GEMINI_VERTEX_MODEL,
@@ -164,6 +165,7 @@ function clearEnvForMiniMaxOnlyTest(): void {
   delete process.env.GEMINI_MODEL
   delete process.env.GEMINI_BASE_URL
   delete process.env.GEMINI_AUTH_MODE
+  delete process.env.GEMINI_VERTEX_AUTH_MODE
   delete process.env.GOOGLE_API_KEY
   delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_BASE_URL
@@ -288,6 +290,7 @@ afterEach(() => {
     restoreEnv('GEMINI_MODEL', originalEnv.GEMINI_MODEL)
     restoreEnv('GEMINI_BASE_URL', originalEnv.GEMINI_BASE_URL)
     restoreEnv('GEMINI_AUTH_MODE', originalEnv.GEMINI_AUTH_MODE)
+    restoreEnv('GEMINI_VERTEX_AUTH_MODE', originalEnv.GEMINI_VERTEX_AUTH_MODE)
     restoreEnv('GEMINI_VERTEX_PROJECT', originalEnv.GEMINI_VERTEX_PROJECT)
     restoreEnv('GEMINI_VERTEX_LOCATION', originalEnv.GEMINI_VERTEX_LOCATION)
     restoreEnv('GEMINI_VERTEX_MODEL', originalEnv.GEMINI_VERTEX_MODEL)
