@@ -58,6 +58,7 @@ const actualSettingsModule = (await import(
 const actualProviderStartupOverridesModule = (await import(
   `../utils/providerStartupOverrides.ts?providerManagerStartupOverridesActual=${Date.now()}-${Math.random()}`
 )) as ProviderStartupOverridesModule
+const realProviderProfilesSnapshot = realProviderProfiles
 const SYNC_START = '\x1B[?2026h'
 const SYNC_END = '\x1B[?2026l'
 
@@ -247,7 +248,7 @@ function mockProviderProfilesModule(options?: {
   setActiveProviderProfile?: (...args: unknown[]) => unknown
 }): void {
   mock.module('../utils/providerProfiles.js', () => ({
-    ...realProviderProfilesModule,
+    ...realProviderProfilesSnapshot,
     addProviderProfile: options?.addProviderProfile ?? (() => null),
     applyActiveProviderProfileFromConfig: () => {},
     deleteProviderProfile: () => ({ removed: false, activeProfileId: null }),
@@ -938,7 +939,7 @@ afterAll(() => {
   // real providerProfiles.js module to stop the partial stub installed by
   // mockProviderProfilesModule() from leaking into later test files.
   mock.restore()
-  mock.module('../utils/providerProfiles.js', () => realProviderProfilesModule)
+  mock.module('../utils/providerProfiles.js', () => realProviderProfilesSnapshot)
 })
 
 test('ProviderManager resolves GitHub virtual provider from async storage without sync reads in render flow', async () => {

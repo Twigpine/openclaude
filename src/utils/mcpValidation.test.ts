@@ -15,6 +15,18 @@ const realLog = {
   ...await import(`./log.js?real=${nonce}`),
 } as typeof import('./log.js')
 
+// Static snapshots captured at import time, before any mock.module() runs. The
+// `import * as` namespaces are live bindings, so after applyMocks() they reflect
+// the *mocked* exports; restoring from the live binding would re-install the stub
+// (notably log.js -> { logError: () => {} }), and bun's mock.restore() does not
+// revert mock.module(). That leaked no-op logError then makes the logError
+// error-reporting gate record nothing in later files. Restore from these frozen
+// snapshots so the real modules are genuinely reinstated.
+const realGrowthbookSnapshot = { ...realGrowthbook }
+const realTokenEstimationSnapshot = { ...realTokenEstimation }
+const realImageResizerSnapshot = { ...realImageResizer }
+const realLogSnapshot = { ...realLog }
+
 // 60_000-char inputs: real roughTokenCountEstimation returns 15_000, which exceeds
 // DEFAULT_MAX_MCP_OUTPUT_TOKENS * MCP_TOKEN_COUNT_THRESHOLD_FACTOR (25_000 * 0.5 = 12_500),
 // so the threshold-check is bypassed and countMessagesTokensWithAPI is exercised —
@@ -34,7 +46,7 @@ function applyMocks() {
   mock.module('../services/tokenEstimation.js', () => ({
     // Spread the real module so roughTokenCountEstimation is never replaced.
     // Only countMessagesTokensWithAPI is controlled per-test via tokenState.
-    ...realTokenEstimation,
+    ...realTokenEstimationSnapshot,
     countMessagesTokensWithAPI: async () => tokenState.apiReturn,
   }))
   mock.module('./imageResizer.js', () => ({
@@ -45,10 +57,10 @@ function applyMocks() {
 
 function restoreMocks() {
   mock.restore()
-  mock.module('../services/analytics/growthbook.js', () => realGrowthbook)
-  mock.module('../services/tokenEstimation.js', () => realTokenEstimation)
-  mock.module('./imageResizer.js', () => realImageResizer)
-  mock.module('./log.js', () => realLog)
+  mock.module('../services/analytics/growthbook.js', () => realGrowthbookSnapshot)
+  mock.module('../services/tokenEstimation.js', () => realTokenEstimationSnapshot)
+  mock.module('./imageResizer.js', () => realImageResizerSnapshot)
+  mock.module('./log.js', () => realLogSnapshot)
 }
 
 // ---------- SEC-04: fail-closed on null ----------
