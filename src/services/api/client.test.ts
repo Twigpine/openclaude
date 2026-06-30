@@ -912,6 +912,72 @@ test('saved-profile-only Vertex prefers the profile project/model over ambient e
   }
 })
 
+test('saved-profile-only Vertex lets an explicit model override the profile model', async () => {
+  let capturedUrl: string | undefined
+
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+  // Ambient env that must NOT win over the explicit override in profile-only mode.
+  process.env.GEMINI_VERTEX_MODEL = 'ambient-model'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
+
+  const spy = spyOn(
+    providerProfilesModule,
+    'getActiveProviderProfile',
+  ).mockReturnValue({
+    id: 'vertex_prof',
+    provider: 'gemini-vertex',
+    name: 'Vertex',
+    baseUrl: 'profile-project',
+    model: 'profile-model',
+  } as ReturnType<typeof providerProfilesModule.getActiveProviderProfile>)
+
+  globalThis.fetch = (async (input, _init) => {
+    capturedUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  try {
+    // Explicit model override (e.g. --model / runtime override) routed through
+    // the saved profile must win over the profile's saved model.
+    const client = (await getAnthropicClient({
+      maxRetries: 0,
+      model: 'explicit-override-model',
+    })) as unknown as ShimClient
+
+    await client.beta.messages.create({
+      model: 'explicit-override-model',
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 64,
+      stream: false,
+    })
+
+    // The explicit override wins; neither the profile model nor the stale
+    // ambient GEMINI_VERTEX_MODEL may leak into the request. The profile
+    // project still wins since no explicit project override was provided.
+    expect(capturedUrl).toContain('/projects/profile-project/')
+    expect(capturedUrl).toContain(
+      '/models/explicit-override-model:generateContent',
+    )
+    expect(capturedUrl).not.toContain('profile-model')
+    expect(capturedUrl).not.toContain('ambient-model')
+  } finally {
+    spy.mockRestore()
+  }
+})
+
 test('ADC-only Vertex routing uses the credential-discovered project', async () => {
   let capturedUrl: string | undefined
 
