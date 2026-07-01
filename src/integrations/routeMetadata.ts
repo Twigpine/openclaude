@@ -1668,6 +1668,11 @@ export function resolveActiveRouteIdFromEnv(
         route.routeId !== 'unknown-fallback' &&
         route.routeId !== 'openai' &&
         route.routeId !== 'custom' &&
+        // gemini-vertex is a native (non-OpenAI-compatible) route handled only
+        // by its explicit flag or the saved-profile guard above (which already
+        // ran the conflicting-flag check). An explicit OpenAI flag is a
+        // conflict, so the saved Vertex profile must not hijack the route here.
+        route.routeId !== 'gemini-vertex' &&
         profileRouteHonorsBaseUrlBoundary(
           route.routeId,
           options.activeProfileBaseUrl ?? baseUrl,
@@ -1703,6 +1708,11 @@ export function resolveActiveRouteIdFromEnv(
       route.routeId !== 'unknown-fallback' &&
       route.routeId !== 'openai' &&
       route.routeId !== 'custom' &&
+      // gemini-vertex is routed only by its explicit flag or the saved-profile
+      // guard above (which enforces the conflicting-flag check). A defined-but-
+      // falsey provider flag is an explicit conflict, so it must not reach the
+      // saved Vertex route through this generic profile fallback.
+      route.routeId !== 'gemini-vertex' &&
       profileRouteHonorsBaseUrlBoundary(
         route.routeId,
         options.activeProfileBaseUrl,
