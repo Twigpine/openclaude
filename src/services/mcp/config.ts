@@ -1709,8 +1709,14 @@ export function isMcpServerDisabled(name: string): boolean {
     const enabledServers = projectConfig.enabledMcpServers || []
     return !enabledServers.includes(name)
   }
-  const disabledServers = projectConfig.disabledMcpServers || []
-  return disabledServers.includes(name)
+  // Use project-level disabledMcpServers if explicitly set (even if empty),
+  // otherwise fall back to the global list so MCP state is consistent
+  // across all projects.
+  if (projectConfig.disabledMcpServers !== undefined) {
+    return projectConfig.disabledMcpServers.includes(name)
+  }
+  const globalConfig = getGlobalConfig()
+  return (globalConfig.disabledMcpServers || []).includes(name)
 }
 
 function toggleMembership(
@@ -1740,6 +1746,15 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
       return { ...current, enabledMcpServers: next }
     }
 
+    const prev = current.disabledMcpServers || []
+    const next = toggleMembership(prev, name, !enabled)
+    if (next === prev) return current
+    return { ...current, disabledMcpServers: next }
+  })
+
+  // Also persist to the global disabledMcpServers list so the toggle applies
+  // across all projects (used as fallback in isMcpServerDisabled).
+  saveGlobalConfig(current => {
     const prev = current.disabledMcpServers || []
     const next = toggleMembership(prev, name, !enabled)
     if (next === prev) return current
