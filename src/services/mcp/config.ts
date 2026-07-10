@@ -1754,12 +1754,16 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
 
   // Also persist to the global disabledMcpServers list so the toggle applies
   // across all projects (used as fallback in isMcpServerDisabled).
-  saveGlobalConfig(current => {
-    const prev = current.disabledMcpServers || []
-    const next = toggleMembership(prev, name, !enabled)
-    if (next === prev) return current
-    return { ...current, disabledMcpServers: next }
-  })
+  // Builtin default-disabled servers track state via enabledMcpServers, not
+  // disabledMcpServers, so skip the global write to avoid polluting the list.
+  if (!isDefaultDisabledBuiltin(name)) {
+    saveGlobalConfig(current => {
+      const prev = current.disabledMcpServers || []
+      const next = toggleMembership(prev, name, !enabled)
+      if (next === prev) return current
+      return { ...current, disabledMcpServers: next }
+    })
+  }
 
   if (isBuiltinStateChange) {
     logEvent('tengu_builtin_mcp_toggle', {
