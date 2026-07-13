@@ -1752,14 +1752,14 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
     return { ...current, disabledMcpServers: next }
   })
 
-  // Also persist to the global disabledMcpServers list so the toggle applies
-  // across all projects (used as fallback in isMcpServerDisabled).
-  // Builtin default-disabled servers track state via enabledMcpServers, not
-  // disabledMcpServers, so skip the global write to avoid polluting the list.
-  if (!isDefaultDisabledBuiltin(name)) {
+  // Propagate only the *disable* direction to global so that disabling a
+  // server in one project takes effect everywhere by default, but enabling
+  // stays project-local (avoids silently force-enabling in unrelated projects).
+  // Builtins are exempt — they track state via enabledMcpServers.
+  if (!enabled && !isDefaultDisabledBuiltin(name)) {
     saveGlobalConfig(current => {
       const prev = current.disabledMcpServers || []
-      const next = toggleMembership(prev, name, !enabled)
+      const next = toggleMembership(prev, name, true)
       if (next === prev) return current
       return { ...current, disabledMcpServers: next }
     })
