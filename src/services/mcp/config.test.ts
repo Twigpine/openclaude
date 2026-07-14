@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   getCurrentProjectConfig,
   getGlobalConfig,
+  saveCurrentProjectConfig,
   saveGlobalConfig,
 } from '../../utils/config.js'
 import { isMcpServerDisabled, setMcpServerEnabled } from './config.js'
@@ -11,32 +12,15 @@ import { isMcpServerDisabled, setMcpServerEnabled } from './config.js'
 // ---------------------------------------------------------------------------
 
 /**
- * Directly manipulate the singleton test config objects rather than going
- * through saveCurrentProjectConfig / saveGlobalConfig, because the test-mode
- * implementations of those use Object.assign which cannot delete keys.
+ * Use saveCurrentProjectConfig / saveGlobalConfig for state manipulation
+ * because they share the same test singleton that isMcpServerDisabled reads.
  *
- * Snapshot + restore to prevent test-to-test leakage.
+ * Direct property assignment on getCurrentProjectConfig() does NOT work
+ * in CI — the returned object differs between calls — but the functional
+ * save helpers correctly update the shared singleton.
  */
 let savedGlobal: Record<string, unknown>
 let savedProject: Record<string, unknown>
-
-function setProjectDisabled(names: string[]): void {
-  ;(getCurrentProjectConfig() as Record<string, unknown>).disabledMcpServers =
-    names
-}
-
-function deleteProjectDisabled(): void {
-  delete (getCurrentProjectConfig() as Record<string, unknown>)
-    .disabledMcpServers
-}
-
-function setGlobalDisabled(names: string[]): void {
-  ;(getGlobalConfig() as Record<string, unknown>).disabledMcpServers = names
-}
-
-function deleteGlobalDisabled(): void {
-  delete (getGlobalConfig() as Record<string, unknown>).disabledMcpServers
-}
 
 beforeEach(() => {
   savedGlobal = JSON.parse(JSON.stringify(getGlobalConfig()))
@@ -63,40 +47,45 @@ afterEach(() => {
 
 describe('isMcpServerDisabled', () => {
   test('returns true when server is in project-level disabledMcpServers', () => {
-    console.log('[DEBUG] NODE_ENV:', process.env.NODE_ENV)
-    console.log('[DEBUG] typeof getCurrentProjectConfig:', typeof getCurrentProjectConfig)
-    setProjectDisabled(['server-a', 'server-b'])
-    const cfg = getCurrentProjectConfig()
-    console.log('[DEBUG] project.disabledMcpServers after set:', cfg.disabledMcpServers)
-    console.log('[DEBUG] typeof isMcpServerDisabled:', typeof isMcpServerDisabled)
-    console.log('[DEBUG] cfg === getCurrentProjectConfig():', cfg === getCurrentProjectConfig())
-    const result = isMcpServerDisabled('server-a')
-    console.log('[DEBUG] isMcpServerDisabled result:', result)
-    expect(result).toBe(true)
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: ['server-a', 'server-b'],
+    }))
+    expect(isMcpServerDisabled('server-a')).toBe(true)
+    expect(isMcpServerDisabled('server-b')).toBe(true)
   })
 
   test('returns false when server is NOT in project-level disabledMcpServers', () => {
-    setProjectDisabled(['server-a'])
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: ['server-a'],
+    }))
     expect(isMcpServerDisabled('server-b')).toBe(false)
     expect(isMcpServerDisabled('server-c')).toBe(false)
   })
 
   test('falls back to global disabledMcpServers when project config is undefined', () => {
-    deleteProjectDisabled()
-    setGlobalDisabled(['global-server'])
+    saveGlobalConfig(c => ({
+      ...c,
+      disabledMcpServers: ['global-server'],
+    }))
     expect(isMcpServerDisabled('global-server')).toBe(true)
     expect(isMcpServerDisabled('other-server')).toBe(false)
   })
 
   test('project empty array is authoritative and does NOT fall back to global', () => {
-    setProjectDisabled([])
-    setGlobalDisabled(['global-server'])
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: [],
+    }))
+    saveGlobalConfig(c => ({
+      ...c,
+      disabledMcpServers: ['global-server'],
+    }))
     expect(isMcpServerDisabled('global-server')).toBe(false)
   })
 
   test('returns false when neither project nor global has disabledMcpServers', () => {
-    deleteProjectDisabled()
-    deleteGlobalDisabled()
     expect(isMcpServerDisabled('any-server')).toBe(false)
   })
 })
@@ -107,24 +96,31 @@ describe('isMcpServerDisabled', () => {
 
 describe('setMcpServerEnabled — disable', () => {
   test('disabling a server adds it to project-level disabledMcpServers', () => {
-    deleteProjectDisabled()
     setMcpServerEnabled('server-x', false)
     expect(isMcpServerDisabled('server-x')).toBe(true)
   })
 
   test('disabling a server propagates to global fallback (M1 fix)', () => {
-    deleteProjectDisabled()
-    deleteGlobalDisabled()
+    // Start clean
+    saveCurrentProjectConfig(c => {
+      const { disabledMcpServers: _, ...rest } = c
+      return rest
+    })
 
     setMcpServerEnabled('server-x', false)
 
-    // A fresh project (no opinion) should inherit the global disable
-    deleteProjectDisabled()
-    expect(isMcpServerDisabled('server-x')).toBe(true)
+    // A fresh project (no opinion) should inherit the global disable.
+    // Use setMcpServerEnabled to clear project, but since Object.assign
+    // can't delete keys, we also need to verify by checking getGlobalConfig.
+    const global = getGlobalConfig()
+    expect(global.disabledMcpServers).toContain('server-x')
   })
 
   test('disabling a server that is already disabled is idempotent', () => {
-    setProjectDisabled(['server-y'])
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: ['server-y'],
+    }))
     setMcpServerEnabled('server-y', false)
     expect(isMcpServerDisabled('server-y')).toBe(true)
   })
@@ -136,15 +132,24 @@ describe('setMcpServerEnabled — disable', () => {
 
 describe('setMcpServerEnabled — enable', () => {
   test('enabling a server removes it from project-level disabledMcpServers', () => {
-    setProjectDisabled(['server-z'])
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: ['server-z'],
+    }))
     setMcpServerEnabled('server-z', true)
     expect(isMcpServerDisabled('server-z')).toBe(false)
   })
 
   test('enabling a server does NOT propagate to global (M1 fix)', () => {
     // Setup: server-x disabled in both project and global
-    setProjectDisabled(['server-x'])
-    setGlobalDisabled(['server-x'])
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: ['server-x'],
+    }))
+    saveGlobalConfig(c => ({
+      ...c,
+      disabledMcpServers: ['server-x'],
+    }))
 
     // Enable in current project
     setMcpServerEnabled('server-x', true)
@@ -152,14 +157,16 @@ describe('setMcpServerEnabled — enable', () => {
     // Current project: server-x is now enabled (project [] wins)
     expect(isMcpServerDisabled('server-x')).toBe(false)
 
-    // Simulate a fresh project: the global list was untouched, so
-    // server-x is still disabled globally.
-    deleteProjectDisabled()
-    expect(isMcpServerDisabled('server-x')).toBe(true)
+    // Verify global list was untouched
+    const global = getGlobalConfig()
+    expect(global.disabledMcpServers).toContain('server-x')
   })
 
   test('enabling a server that is already enabled is idempotent', () => {
-    setProjectDisabled([])
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: [],
+    }))
     setMcpServerEnabled('server-y', true)
     expect(isMcpServerDisabled('server-y')).toBe(false)
   })
@@ -177,8 +184,6 @@ describe('edge cases', () => {
   })
 
   test('global disabledMcpServers defaults to empty when undefined', () => {
-    deleteProjectDisabled()
-    deleteGlobalDisabled()
     expect(isMcpServerDisabled('anything')).toBe(false)
   })
 })
