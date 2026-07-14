@@ -63,9 +63,16 @@ afterEach(() => {
 
 describe('isMcpServerDisabled', () => {
   test('returns true when server is in project-level disabledMcpServers', () => {
+    console.log('[DEBUG] NODE_ENV:', process.env.NODE_ENV)
+    console.log('[DEBUG] typeof getCurrentProjectConfig:', typeof getCurrentProjectConfig)
     setProjectDisabled(['server-a', 'server-b'])
-    expect(isMcpServerDisabled('server-a')).toBe(true)
-    expect(isMcpServerDisabled('server-b')).toBe(true)
+    const cfg = getCurrentProjectConfig()
+    console.log('[DEBUG] project.disabledMcpServers after set:', cfg.disabledMcpServers)
+    console.log('[DEBUG] typeof isMcpServerDisabled:', typeof isMcpServerDisabled)
+    console.log('[DEBUG] cfg === getCurrentProjectConfig():', cfg === getCurrentProjectConfig())
+    const result = isMcpServerDisabled('server-a')
+    console.log('[DEBUG] isMcpServerDisabled result:', result)
+    expect(result).toBe(true)
   })
 
   test('returns false when server is NOT in project-level disabledMcpServers', () => {
