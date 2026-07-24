@@ -453,7 +453,6 @@ async function loadDescriptorDiscoveryContext(
     return null
   }
 
-
   // Local custom providers (Ollama, LM Studio) should use the legacy local
   // OpenAI path which handles scoped caches, default options, and allowlist
   // filtering correctly. Remote custom providers proceed with descriptor
@@ -577,7 +576,10 @@ async function loadModelDiscoveryContext(): Promise<ModelDiscoveryContext | null
     }
   }
 
-  if (getAdditionalModelOptionsCacheScope()?.startsWith('openai:')) {
+  if (
+    getAdditionalModelOptionsCacheScope()?.startsWith('openai:') ||
+    routeId === 'custom'
+  ) {
     const { baseUrl } = await getOpenAIDiscoveryRequestOptions()
     const activeProfile = getActiveProviderProfile()
     const legacyRouteId = routeId ?? 'custom'
