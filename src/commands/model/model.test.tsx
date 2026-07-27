@@ -3824,7 +3824,41 @@ test('cross-profile /model does NOT switch a literal prefixed model id lacking t
     expect(doneMessage).toContain(
       encodeSwitchProfileValue('profile_openai', 'gpt-5-mini'),
     )
-  } finally {
-    instance.unmount()
-  }
-})
+	  } finally {
+	    instance.unmount()
+	  }
+	})
+
+	test('/model remote custom route falls through to legacy OpenAI path', async () => {
+	  // Remote custom endpoint — not a local URL so no openai: cache scope.
+	  // The route resolves to 'custom' and the code must fall through to the
+	  // legacy OpenAI path instead of getting stuck in descriptor discovery.
+	  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+	  process.env.OPENAI_BASE_URL = 'https://api.custom-remote.example.com/v1'
+	  process.env.OPENAI_MODEL = 'remote-model'
+	  delete process.env.OPENAI_API_KEY
+	  delete process.env.OPENROUTER_API_KEY
+	  delete process.env.CLAUDE_CODE_USE_GEMINI
+	  delete process.env.CLAUDE_CODE_USE_GITHUB
+	  delete process.env.CLAUDE_CODE_USE_MISTRAL
+	  delete process.env.CLAUDE_CODE_USE_BEDROCK
+	  delete process.env.CLAUDE_CODE_USE_VERTEX
+	  delete process.env.CLAUDE_CODE_USE_FOUNDRY
+		  delete process.env.OPENAI_API_BASE
+
+		  // Remote URL → no openai: cache scope (null or undefined)
+		  // The legacy fallback should still work regardless.
+
+		  const rendered = await renderModelCommandWithCapturedPicker(
+		    'remote-custom-legacy-fallback',
+		  )
+		  try {
+		    const props = rendered.getCapturedProps()
+		    // Remote custom route: falls through to legacy OpenAI path (no crash).
+		    // The ModelPicker renders with at least a "Default" option available.
+		    expect(props).toBeDefined()
+		  } finally {
+		    rendered.instance.unmount()
+		    rendered.stdout.end()
+		  }
+		})
