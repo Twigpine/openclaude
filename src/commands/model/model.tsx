@@ -384,6 +384,18 @@ async function getOpenAIDiscoveryRequestOptions(
       process.env.OPENAI_API_BASE?.trim(),
   })
 
+  const headers: Record<string, string> = {
+    ...parseCustomHeadersEnv(process.env.ANTHROPIC_CUSTOM_HEADERS),
+  }
+
+  // Forward custom auth headers that the OpenAI shim uses for inference.
+  // These support gateways that authenticate with non-Bearer schemes.
+  const authHeader = process.env.OPENAI_AUTH_HEADER?.trim()
+  const authHeaderValue = process.env.OPENAI_AUTH_HEADER_VALUE?.trim()
+  if (authHeader && /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(authHeader)) {
+    headers[authHeader] = authHeaderValue ?? ''
+  }
+
   return resolveDiscoveryRequestOptions(routeId ?? 'custom', {
     apiKey: firstUsableCredential(
       resolveRouteCredentialValue({
@@ -393,7 +405,7 @@ async function getOpenAIDiscoveryRequestOptions(
       }),
     ),
     baseUrl: request.baseUrl,
-    headers: parseCustomHeadersEnv(process.env.ANTHROPIC_CUSTOM_HEADERS),
+    headers,
   }, options)
 }
 
