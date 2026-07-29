@@ -388,25 +388,51 @@ async function getOpenAIDiscoveryRequestOptions(
     ...parseCustomHeadersEnv(process.env.ANTHROPIC_CUSTOM_HEADERS),
   }
 
-  // Forward custom auth headers that the OpenAI shim uses for inference.
-  // These support gateways that authenticate with non-Bearer schemes.
+  const apiKey = firstUsableCredential(
+    resolveRouteCredentialValue({
+      routeId,
+      baseUrl: request.baseUrl,
+      processEnv: process.env,
+    }),
+  )
+
+  // Forward custom auth headers matching the OpenAI shim's inference logic.
+  // This ensures discovery requests authenticate the same way as chat requests.
   const authHeader = process.env.OPENAI_AUTH_HEADER?.trim()
-  const authHeaderValue = process.env.OPENAI_AUTH_HEADER_VALUE?.trim()
+  let explicitCustomAuthHeaderValue: string | undefined
   if (authHeader && /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(authHeader)) {
-    headers[authHeader] = authHeaderValue ?? ''
+    explicitCustomAuthHeaderValue = process.env.OPENAI_AUTH_HEADER_VALUE?.trim()
   }
 
-  return resolveDiscoveryRequestOptions(routeId ?? 'custom', {
-    apiKey: firstUsableCredential(
-      resolveRouteCredentialValue({
-        routeId,
-        baseUrl: request.baseUrl,
-        processEnv: process.env,
-      }),
-    ),
-    baseUrl: request.baseUrl,
-    headers,
-  }, options)
+  if (explicitCustomAuthHeaderValue) {
+    // Custom auth header with explicit value — same as shim's hasCustomAuthHeader + configuredAuthHeaderValue.
+    // Apply OPENAI_AUTH_SCHEME: default 'bearer' for Authorization header, 'raw' for others.
+    const isAuth = authHeader!.toLowerCase() === 'authorization'
+    const scheme = process.env.OPENAI_AUTH_SCHEME?.trim().toLowerCase()
+    const effectiveScheme =
+      scheme === 'raw' || scheme === 'bearer' ? scheme : isAuth ? 'bearer' : 'raw'
+    headers[authHeader!] =
+      effectiveScheme === 'bearer'
+        ? `Bearer ${explicitCustomAuthHeaderValue}`
+        : explicitCustomAuthHeaderValue
+    // Auth is handled by the custom header — omit the default Bearer apiKey.
+    return resolveDiscoveryRequestOptions(routeId ?? 'custom', { baseUrl: request.baseUrl, headers }, options)
+  }
+
+  if (authHeader) {
+    // Custom auth header name is set but no explicit value — use the resolved apiKey
+    // formatted with OPENAI_AUTH_SCHEME (same as shim lines 4221-4231).
+    const scheme = process.env.OPENAI_AUTH_SCHEME?.trim().toLowerCase()
+    const isAuth = authHeader.toLowerCase() === 'authorization'
+    const effectiveScheme =
+      scheme === 'raw' || scheme === 'bearer' ? scheme : isAuth ? 'bearer' : 'raw'
+    headers[authHeader] =
+      effectiveScheme === 'bearer' ? `Bearer ${apiKey ?? ''}` : (apiKey ?? '')
+    // Auth is handled by the custom header — omit the default Bearer apiKey.
+    return resolveDiscoveryRequestOptions(routeId ?? 'custom', { baseUrl: request.baseUrl, headers }, options)
+  }
+
+  return resolveDiscoveryRequestOptions(routeId ?? 'custom', { apiKey, baseUrl: request.baseUrl, headers }, options)
 }
 
 // Reconciles fast-mode state when /model picks a new target — both the regular
@@ -543,6 +569,13 @@ async function loadDescriptorDiscoveryContext(
   const mergedEntries = filterAvailableCatalogEntries(
     mergeRouteCatalogEntries(rawStaticEntries, cached?.models ?? []),
   )
+
+  // If this dynamic catalog has no usable entries (no static models and no
+  // cached discovery), fall through to the legacy OpenAI path which provides
+  // the Default option and a working fallback surface.
+  if (mergedEntries.length === 0) {
+    return null
+  }
 
   let discoveryState: ModelPickerDiscoveryState | undefined
 
