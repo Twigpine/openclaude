@@ -1,6 +1,4 @@
-import { open } from 'fs/promises'
 import * as path from 'path'
-import { pathToFileURL } from 'url'
 import type {
   CallHierarchyIncomingCall,
   CallHierarchyItem,
@@ -18,6 +16,11 @@ import {
   isLspConnected,
   waitForInitialization,
 } from '../../services/lsp/manager.js'
+import {
+  getLspDocumentIdentity,
+  LspDocumentTooLargeError,
+  readLspDocumentContents,
+} from '../../services/lsp/documentIdentity.js'
 import type { ValidationResult } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { uniq } from '../../utils/array.js'
@@ -49,8 +52,6 @@ import {
   renderToolUseMessage,
   userFacingName,
 } from './UI.js'
-
-const MAX_LSP_FILE_SIZE_BYTES = 10_000_000
 
 /**
  * Tool-compatible input schema (regular ZodObject instead of discriminated union)
@@ -259,22 +260,8 @@ export const LSPTool = buildTool({
       // Most LSP servers require textDocument/didOpen before operations
       // Only read the file if it's not already open to avoid unnecessary I/O
       if (!manager.isFileOpen(absolutePath)) {
-        const handle = await open(absolutePath, 'r')
-        try {
-          const stats = await handle.stat()
-          if (stats.size > MAX_LSP_FILE_SIZE_BYTES) {
-            const output: Output = {
-              operation: input.operation,
-              result: `File too large for LSP analysis (${Math.ceil(stats.size / 1_000_000)}MB exceeds 10MB limit)`,
-              filePath: input.filePath,
-            }
-            return { data: output }
-          }
-          const fileContent = await handle.readFile({ encoding: 'utf-8' })
-          await manager.openFile(absolutePath, fileContent)
-        } finally {
-          await handle.close()
-        }
+        const fileContent = await readLspDocumentContents(absolutePath)
+        await manager.openFile(absolutePath, fileContent)
       }
 
       // Send request to LSP server
@@ -395,6 +382,16 @@ export const LSPTool = buildTool({
       const err = toError(error)
       const errorMessage = err.message
 
+      if (err instanceof LspDocumentTooLargeError) {
+        return {
+          data: {
+            operation: input.operation,
+            result: errorMessage,
+            filePath: input.filePath,
+          },
+        }
+      }
+
       // Log error for tracking
       logError(
         new Error(
@@ -428,7 +425,7 @@ function getMethodAndParams(
   input: Input,
   absolutePath: string,
 ): { method: string; params: unknown } {
-  const uri = pathToFileURL(absolutePath).href
+  const uri = getLspDocumentIdentity(absolutePath).fileUri
   // Convert from 1-based (user-friendly) to 0-based (LSP protocol)
   const position = {
     line: input.line - 1,

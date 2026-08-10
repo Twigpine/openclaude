@@ -1,15 +1,47 @@
-import * as path from 'path'
-import { pathToFileURL } from 'url'
+import * as path from 'node:path'
 import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { logError } from '../../utils/log.js'
 import { getAllLspServers } from './config.js'
+import {
+  getLspDocumentIdentity,
+  readLspDocumentContents,
+  type LspDocumentIdentity,
+} from './documentIdentity.js'
 import { recordLSPDiagnosticFileActivity } from './LSPDiagnosticRegistry.js'
 import {
   createLSPServerInstance,
   type LSPServerInstance,
+  type LSPServerInstanceOptions,
 } from './LSPServerInstance.js'
 import type { ScopedLspServerConfig } from './types.js'
+
+type OpenLspDocumentState = {
+  serverName: string
+  serverGeneration: number
+  version: number
+  fileUri: string
+}
+
+export type LSPServerManagerDependencies = {
+  loadServerConfigs: typeof getAllLspServers
+  createServerInstance: (
+    name: string,
+    config: ScopedLspServerConfig,
+    options: LSPServerInstanceOptions,
+  ) => LSPServerInstance
+  readDocument: (filePath: string) => Promise<string>
+  recordFileActivity: (filePath: string) => void
+}
+
+const DEFAULT_DEPENDENCIES: LSPServerManagerDependencies = {
+  loadServerConfigs: getAllLspServers,
+  createServerInstance: (name, config, options) =>
+    createLSPServerInstance(name, config, options),
+  readDocument: readLspDocumentContents,
+  recordFileActivity: recordLSPDiagnosticFileActivity,
+}
+
 /**
  * LSP Server Manager interface returned by createLSPServerManager.
  * Manages multiple LSP server instances and routes requests based on file extensions.
@@ -23,7 +55,7 @@ export type LSPServerManager = {
   getServerForFile(filePath: string): LSPServerInstance | undefined
   /** Ensure the appropriate LSP server is started for the given file */
   ensureServerStarted(filePath: string): Promise<LSPServerInstance | undefined>
-  /** Send a request to the appropriate LSP server for the given file */
+  /** Send a request after synchronizing the document to the current server generation */
   sendRequest<T>(
     filePath: string,
     method: string,
@@ -39,41 +71,150 @@ export type LSPServerManager = {
   saveFile(filePath: string): Promise<void>
   /** Synchronize file close to LSP server (sends didClose notification) */
   closeFile(filePath: string): Promise<void>
-  /** Check if a file is already open on a compatible LSP server */
+  /** Check if a file is open on its current compatible LSP server generation */
   isFileOpen(filePath: string): boolean
 }
 
 /**
  * Creates an LSP server manager instance.
  *
- * Manages multiple LSP server instances and routes requests based on file extensions.
- * Uses factory function pattern with closures for state encapsulation (avoiding classes).
- *
- * @returns LSP server manager instance
- *
- * @example
- * const manager = createLSPServerManager()
- * await manager.initialize()
- * const result = await manager.sendRequest('/path/to/file.ts', 'textDocument/definition', params)
- * await manager.shutdown()
+ * Server processes remain lazy-started. Document lifecycle operations are
+ * serialized per canonical document key, while unrelated documents remain
+ * independent after sharing any in-flight server initialization.
  */
-export function createLSPServerManager(): LSPServerManager {
-  // Private state managed via closures
-  const servers: Map<string, LSPServerInstance> = new Map()
-  const extensionMap: Map<string, string[]> = new Map()
-  // Track which files have been opened on which servers (URI -> server name)
-  const openedFiles: Map<string, string> = new Map()
+export function createLSPServerManager(
+  dependencyOverrides: Partial<LSPServerManagerDependencies> = {},
+): LSPServerManager {
+  const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides }
+  const servers = new Map<string, LSPServerInstance>()
+  const extensionMap = new Map<string, string[]>()
+  const openedDocuments = new Map<string, OpenLspDocumentState>()
+  const documentOperations = new Map<string, Promise<void>>()
 
-  /**
-   * Initialize the manager by loading all configured LSP servers.
-   *
-   * @throws {Error} If configuration loading fails
-   */
+  function invalidateServerDocuments(
+    serverName: string,
+    serverGeneration: number,
+  ): void {
+    for (const [documentKey, state] of openedDocuments) {
+      if (
+        state.serverName === serverName &&
+        state.serverGeneration === serverGeneration
+      ) {
+        openedDocuments.delete(documentKey)
+      }
+    }
+  }
+
+  async function withDocumentLock<T>(
+    documentKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = documentOperations.get(documentKey) ?? Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const tail = previous.catch(() => {}).then(() => gate)
+    documentOperations.set(documentKey, tail)
+
+    await previous.catch(() => {})
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (documentOperations.get(documentKey) === tail) {
+        documentOperations.delete(documentKey)
+      }
+    }
+  }
+
+  function isCurrentDocumentState(
+    state: OpenLspDocumentState | undefined,
+    server: LSPServerInstance,
+  ): state is OpenLspDocumentState {
+    return (
+      state !== undefined &&
+      state.serverName === server.name &&
+      state.serverGeneration === server.generation &&
+      server.state === 'running'
+    )
+  }
+
+  function getCurrentDocumentState(
+    identity: LspDocumentIdentity,
+    server: LSPServerInstance,
+  ): OpenLspDocumentState | undefined {
+    const state = openedDocuments.get(identity.stateKey)
+    if (isCurrentDocumentState(state, server)) return state
+    if (state) openedDocuments.delete(identity.stateKey)
+    return undefined
+  }
+
+  async function synchronizeOpenUnlocked(
+    filePath: string,
+    content: string,
+    identity: LspDocumentIdentity,
+    server: LSPServerInstance,
+  ): Promise<void> {
+    if (getCurrentDocumentState(identity, server)) {
+      logForDebugging(
+        `LSP: File already open, skipping didOpen for ${filePath}`,
+      )
+      return
+    }
+
+    const extension = path.extname(filePath).toLowerCase()
+    const languageId =
+      server.config.extensionToLanguage[extension] || 'plaintext'
+    const targetGeneration = server.generation
+
+    try {
+      await server.sendNotificationStrict('textDocument/didOpen', {
+        textDocument: {
+          uri: identity.fileUri,
+          languageId,
+          version: 1,
+          text: content,
+        },
+      })
+    } catch (error) {
+      openedDocuments.delete(identity.stateKey)
+      const syncError = new Error(
+        `Failed to sync file open ${filePath}: ${errorMessage(error)}`,
+      )
+      logError(syncError)
+      throw syncError
+    }
+
+    if (
+      server.state !== 'running' ||
+      server.generation !== targetGeneration
+    ) {
+      openedDocuments.delete(identity.stateKey)
+      const syncError = new Error(
+        `Failed to sync file open ${filePath}: LSP server generation changed during notification`,
+      )
+      logError(syncError)
+      throw syncError
+    }
+
+    openedDocuments.set(identity.stateKey, {
+      serverName: server.name,
+      serverGeneration: targetGeneration,
+      version: 1,
+      fileUri: identity.fileUri,
+    })
+    logForDebugging(
+      `LSP: Sent didOpen for ${filePath} (languageId: ${languageId}, generation: ${targetGeneration})`,
+    )
+  }
+
+  /** Initialize the manager by loading configured server definitions. */
   async function initialize(): Promise<void> {
     let serverConfigs: Record<string, ScopedLspServerConfig>
 
     try {
-      const result = await getAllLspServers()
+      const result = await dependencies.loadServerConfigs()
       serverConfigs = result.servers
       logForDebugging(
         `[LSP SERVER MANAGER] getAllLspServers returned ${Object.keys(serverConfigs).length} server(s)`,
@@ -86,10 +227,8 @@ export function createLSPServerManager(): LSPServerManager {
       throw error
     }
 
-    // Build extension → server mapping
     for (const [serverName, config] of Object.entries(serverConfigs)) {
       try {
-        // Validate config before using it
         if (!config.command) {
           throw new Error(
             `Server ${serverName} missing required 'command' field`,
@@ -104,33 +243,29 @@ export function createLSPServerManager(): LSPServerManager {
           )
         }
 
-        // Map file extensions to this server (derive from extensionToLanguage)
-        const fileExtensions = Object.keys(config.extensionToLanguage)
-        for (const ext of fileExtensions) {
-          const normalized = ext.toLowerCase()
-          if (!extensionMap.has(normalized)) {
-            extensionMap.set(normalized, [])
-          }
-          const serverList = extensionMap.get(normalized)
-          if (serverList) {
-            serverList.push(serverName)
-          }
+        for (const extension of Object.keys(config.extensionToLanguage)) {
+          const normalized = extension.toLowerCase()
+          const serverNames = extensionMap.get(normalized) ?? []
+          serverNames.push(serverName)
+          extensionMap.set(normalized, serverNames)
         }
 
-        // Create server instance
-        const instance = createLSPServerInstance(serverName, config)
+        const instance = dependencies.createServerInstance(
+          serverName,
+          config,
+          {
+            onUnavailable: generation =>
+              invalidateServerDocuments(serverName, generation),
+          },
+        )
         servers.set(serverName, instance)
 
-        // Register handler for workspace/configuration requests from the server
-        // Some servers (like TypeScript) send these even when we say we don't support them
         instance.onRequest(
           'workspace/configuration',
           (params: { items: Array<{ section?: string }> }) => {
             logForDebugging(
               `LSP: Received workspace/configuration request from ${serverName}`,
             )
-            // Return empty/null config for each requested item
-            // This satisfies the protocol without providing actual configuration
             return params.items.map(() => null)
           },
         )
@@ -141,85 +276,63 @@ export function createLSPServerManager(): LSPServerManager {
             `Failed to initialize LSP server ${serverName}: ${err.message}`,
           ),
         )
-        // Continue with other servers - don't fail entire initialization
       }
     }
 
     logForDebugging(`LSP manager initialized with ${servers.size} servers`)
   }
 
-  /**
-   * Shutdown all running servers and clear state.
-   * Only servers in 'running' state are explicitly stopped;
-   * servers in other states are cleared without shutdown.
-   *
-   * @throws {Error} If one or more servers fail to stop
-   */
+  /** Stop every server and clear manager-owned state. */
   async function shutdown(): Promise<void> {
     const toStop = Array.from(servers.entries()).filter(
-      ([, s]) => s.state === 'running' || s.state === 'error',
+      ([, server]) =>
+        server.state === 'running' || server.state === 'error',
     )
-
     const results = await Promise.allSettled(
       toStop.map(([, server]) => server.stop()),
     )
 
     servers.clear()
     extensionMap.clear()
-    openedFiles.clear()
+    openedDocuments.clear()
+    documentOperations.clear()
 
     const errors = results
-      .map((r, i) =>
-        r.status === 'rejected'
-          ? `${toStop[i]![0]}: ${errorMessage(r.reason)}`
+      .map((result, index) =>
+        result.status === 'rejected'
+          ? `${toStop[index]![0]}: ${errorMessage(result.reason)}`
           : null,
       )
-      .filter((e): e is string => e !== null)
+      .filter((error): error is string => error !== null)
 
     if (errors.length > 0) {
-      const err = new Error(
+      const shutdownError = new Error(
         `Failed to stop ${errors.length} LSP server(s): ${errors.join('; ')}`,
       )
-      logError(err)
-      throw err
+      logError(shutdownError)
+      throw shutdownError
     }
   }
 
-  /**
-   * Get the LSP server instance for a given file path.
-   * If multiple servers handle the same extension, returns the first registered server.
-   * Returns undefined if no server handles this file type.
-   */
+  /** Return the first configured server for the file extension. */
   function getServerForFile(filePath: string): LSPServerInstance | undefined {
-    const ext = path.extname(filePath).toLowerCase()
-    const serverNames = extensionMap.get(ext)
-
-    if (!serverNames || serverNames.length === 0) {
-      return undefined
-    }
-
-    // Use first server (can add priority later)
-    const serverName = serverNames[0]
-    if (!serverName) {
-      return undefined
-    }
-
-    return servers.get(serverName)
+    const extension = path.extname(filePath).toLowerCase()
+    const serverName = extensionMap.get(extension)?.[0]
+    return serverName ? servers.get(serverName) : undefined
   }
 
-  /**
-   * Ensure the appropriate LSP server is started for the given file.
-   * Returns undefined if no server handles this file type.
-   *
-   * @throws {Error} If server fails to start
-   */
+  /** Lazily start or await the server selected for this file. */
   async function ensureServerStarted(
     filePath: string,
   ): Promise<LSPServerInstance | undefined> {
     const server = getServerForFile(filePath)
     if (!server) return undefined
 
-    if (server.state === 'stopped' || server.state === 'error') {
+    if (
+      server.state === 'stopped' ||
+      server.state === 'error' ||
+      server.state === 'starting'
+    ) {
       try {
         await server.start()
       } catch (error) {
@@ -233,184 +346,192 @@ export function createLSPServerManager(): LSPServerManager {
       }
     }
 
+    if (server.state !== 'running') {
+      throw new Error(
+        `LSP server '${server.name}' is not ready for file ${filePath}: server is ${server.state}`,
+      )
+    }
+
     return server
   }
 
-  /**
-   * Send a request to the appropriate LSP server for the given file.
-   * Returns undefined if no server handles this file type.
-   *
-   * @throws {Error} If server fails to start or request fails
-   */
+  /** Synchronize the current generation, then send the request under the document lock. */
   async function sendRequest<T>(
     filePath: string,
     method: string,
     params: unknown,
   ): Promise<T | undefined> {
-    const server = await ensureServerStarted(filePath)
-    if (!server) return undefined
+    const identity = getLspDocumentIdentity(filePath)
+    return withDocumentLock(identity.stateKey, async () => {
+      try {
+        const server = await ensureServerStarted(filePath)
+        if (!server) return undefined
 
-    try {
-      return await server.sendRequest<T>(method, params)
-    } catch (error) {
-      const err = error as Error
-      logError(
-        new Error(
-          `LSP request failed for file ${filePath}, method '${method}': ${err.message}`,
-        ),
-      )
-      throw error
-    }
+        if (!getCurrentDocumentState(identity, server)) {
+          const content = await dependencies.readDocument(identity.resolvedPath)
+          dependencies.recordFileActivity(identity.activityPath)
+          await synchronizeOpenUnlocked(
+            filePath,
+            content,
+            identity,
+            server,
+          )
+        }
+
+        if (!getCurrentDocumentState(identity, server)) {
+          throw new Error(
+            `LSP document ${filePath} is not synchronized to server generation ${server.generation}`,
+          )
+        }
+
+        return await server.sendRequest<T>(method, params)
+      } catch (error) {
+        const err = error as Error
+        logError(
+          new Error(
+            `LSP request failed for file ${filePath}, method '${method}': ${err.message}`,
+          ),
+        )
+        throw error
+      }
+    })
   }
 
-  // Return public interface
   function getAllServers(): Map<string, LSPServerInstance> {
     return servers
   }
 
   async function openFile(filePath: string, content: string): Promise<void> {
-    const server = await ensureServerStarted(filePath)
-    if (!server) return
-
-    const resolvedFilePath = path.resolve(filePath)
-    const fileUri = pathToFileURL(resolvedFilePath).href
-    recordLSPDiagnosticFileActivity(resolvedFilePath)
-
-    // Skip if already opened on this server
-    if (openedFiles.get(fileUri) === server.name) {
-      logForDebugging(
-        `LSP: File already open, skipping didOpen for ${filePath}`,
-      )
-      return
-    }
-
-    // Get language ID from server's extensionToLanguage mapping
-    const ext = path.extname(filePath).toLowerCase()
-    const languageId = server.config.extensionToLanguage[ext] || 'plaintext'
-
-    try {
-      await server.sendNotification('textDocument/didOpen', {
-        textDocument: {
-          uri: fileUri,
-          languageId,
-          version: 1,
-          text: content,
-        },
-      })
-      // Track that this file is now open on this server
-      openedFiles.set(fileUri, server.name)
-      logForDebugging(
-        `LSP: Sent didOpen for ${filePath} (languageId: ${languageId})`,
-      )
-    } catch (error) {
-      const err = new Error(
-        `Failed to sync file open ${filePath}: ${errorMessage(error)}`,
-      )
-      logError(err)
-      // Re-throw to propagate error to caller
-      throw err
-    }
+    const identity = getLspDocumentIdentity(filePath)
+    await withDocumentLock(identity.stateKey, async () => {
+      const server = await ensureServerStarted(filePath)
+      if (!server) return
+      dependencies.recordFileActivity(identity.activityPath)
+      await synchronizeOpenUnlocked(filePath, content, identity, server)
+    })
   }
 
   async function changeFile(filePath: string, content: string): Promise<void> {
-    const server = getServerForFile(filePath)
-    if (!server || server.state !== 'running') {
-      return openFile(filePath, content)
-    }
+    const identity = getLspDocumentIdentity(filePath)
+    await withDocumentLock(identity.stateKey, async () => {
+      const server = await ensureServerStarted(filePath)
+      if (!server) return
+      dependencies.recordFileActivity(identity.activityPath)
 
-    const resolvedFilePath = path.resolve(filePath)
-    const fileUri = pathToFileURL(resolvedFilePath).href
+      const state = getCurrentDocumentState(identity, server)
+      if (!state) {
+        await synchronizeOpenUnlocked(filePath, content, identity, server)
+        return
+      }
 
-    // If file hasn't been opened on this server yet, open it first
-    // LSP servers require didOpen before didChange
-    if (openedFiles.get(fileUri) !== server.name) {
-      return openFile(filePath, content)
-    }
+      const nextVersion = state.version + 1
+      const targetGeneration = server.generation
+      try {
+        await server.sendNotificationStrict('textDocument/didChange', {
+          textDocument: {
+            uri: state.fileUri,
+            version: nextVersion,
+          },
+          contentChanges: [{ text: content }],
+        })
+      } catch (error) {
+        openedDocuments.delete(identity.stateKey)
+        const syncError = new Error(
+          `Failed to sync file change ${filePath}: ${errorMessage(error)}`,
+        )
+        logError(syncError)
+        throw syncError
+      }
 
-    recordLSPDiagnosticFileActivity(resolvedFilePath)
+      if (
+        server.state !== 'running' ||
+        server.generation !== targetGeneration
+      ) {
+        openedDocuments.delete(identity.stateKey)
+        const syncError = new Error(
+          `Failed to sync file change ${filePath}: LSP server generation changed during notification`,
+        )
+        logError(syncError)
+        throw syncError
+      }
 
-    try {
-      await server.sendNotification('textDocument/didChange', {
-        textDocument: {
-          uri: fileUri,
-          version: 1,
-        },
-        contentChanges: [{ text: content }],
+      openedDocuments.set(identity.stateKey, {
+        ...state,
+        version: nextVersion,
       })
-      logForDebugging(`LSP: Sent didChange for ${filePath}`)
-    } catch (error) {
-      const err = new Error(
-        `Failed to sync file change ${filePath}: ${errorMessage(error)}`,
+      logForDebugging(
+        `LSP: Sent didChange for ${filePath} (version: ${nextVersion})`,
       )
-      logError(err)
-      // Re-throw to propagate error to caller
-      throw err
-    }
+    })
   }
 
-  /**
-   * Save a file in LSP servers (sends didSave notification)
-   * Called after file is written to disk to trigger diagnostics
-   */
+  /** Send didSave after earlier same-document lifecycle operations settle. */
   async function saveFile(filePath: string): Promise<void> {
-    const server = getServerForFile(filePath)
-    if (!server || server.state !== 'running') return
+    const identity = getLspDocumentIdentity(filePath)
+    await withDocumentLock(identity.stateKey, async () => {
+      const server = getServerForFile(filePath)
+      if (!server || server.state !== 'running') return
+      dependencies.recordFileActivity(identity.activityPath)
+      const state = getCurrentDocumentState(identity, server)
+      if (!state) return
 
-    const resolvedFilePath = path.resolve(filePath)
-    recordLSPDiagnosticFileActivity(resolvedFilePath)
-
-    try {
-      await server.sendNotification('textDocument/didSave', {
-        textDocument: {
-          uri: pathToFileURL(resolvedFilePath).href,
-        },
-      })
-      logForDebugging(`LSP: Sent didSave for ${filePath}`)
-    } catch (error) {
-      const err = new Error(
-        `Failed to sync file save ${filePath}: ${errorMessage(error)}`,
-      )
-      logError(err)
-      // Re-throw to propagate error to caller
-      throw err
-    }
+      try {
+        await server.sendNotification('textDocument/didSave', {
+          textDocument: {
+            uri: state.fileUri,
+          },
+        })
+        logForDebugging(`LSP: Sent didSave for ${filePath}`)
+      } catch (error) {
+        const syncError = new Error(
+          `Failed to sync file save ${filePath}: ${errorMessage(error)}`,
+        )
+        logError(syncError)
+        throw syncError
+      }
+    })
   }
 
-  /**
-   * Close a file in LSP servers (sends didClose notification)
-   *
-   * NOTE: Currently available but not yet integrated with compact flow.
-   * TODO: Integrate with compact - call closeFile() when compact removes files from context
-   * This will notify LSP servers that files are no longer in active use.
-   */
+  /** Close the current document lifecycle, forgetting local state on every outcome. */
   async function closeFile(filePath: string): Promise<void> {
-    const server = getServerForFile(filePath)
-    if (!server || server.state !== 'running') return
+    const identity = getLspDocumentIdentity(filePath)
+    await withDocumentLock(identity.stateKey, async () => {
+      const state = openedDocuments.get(identity.stateKey)
+      if (!state) return
+      openedDocuments.delete(identity.stateKey)
 
-    const fileUri = pathToFileURL(path.resolve(filePath)).href
+      const server = servers.get(state.serverName)
+      if (
+        !server ||
+        server.state !== 'running' ||
+        server.generation !== state.serverGeneration
+      ) {
+        return
+      }
 
-    try {
-      await server.sendNotification('textDocument/didClose', {
-        textDocument: {
-          uri: fileUri,
-        },
-      })
-      // Remove from tracking so file can be reopened later
-      openedFiles.delete(fileUri)
-      logForDebugging(`LSP: Sent didClose for ${filePath}`)
-    } catch (error) {
-      const err = new Error(
-        `Failed to sync file close ${filePath}: ${errorMessage(error)}`,
-      )
-      logError(err)
-      // Re-throw to propagate error to caller
-      throw err
-    }
+      try {
+        await server.sendNotificationStrict('textDocument/didClose', {
+          textDocument: { uri: state.fileUri },
+        })
+        logForDebugging(`LSP: Sent didClose for ${filePath}`)
+      } catch (error) {
+        const syncError = new Error(
+          `Failed to sync file close ${filePath}: ${errorMessage(error)}`,
+        )
+        logError(syncError)
+        throw syncError
+      }
+    })
   }
 
   function isFileOpen(filePath: string): boolean {
-    const fileUri = pathToFileURL(path.resolve(filePath)).href
-    return openedFiles.has(fileUri)
+    const identity = getLspDocumentIdentity(filePath)
+    const state = openedDocuments.get(identity.stateKey)
+    if (!state) return false
+    const server = servers.get(state.serverName)
+    if (server && isCurrentDocumentState(state, server)) return true
+    openedDocuments.delete(identity.stateKey)
+    return false
   }
 
   return {

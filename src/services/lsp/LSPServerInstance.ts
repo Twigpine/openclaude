@@ -43,6 +43,8 @@ export type LSPServerInstance = {
   readonly lastError: Error | undefined
   /** Number of times restart() has been called */
   readonly restartCount: number
+  /** Successful initialization generation for the current process lifecycle */
+  readonly generation: number
   /** Start the server and initialize it */
   start(): Promise<void>
   /** Stop the server gracefully */
@@ -55,6 +57,8 @@ export type LSPServerInstance = {
   sendRequest<T>(method: string, params: unknown): Promise<T>
   /** Send an LSP notification to the server (fire-and-forget) */
   sendNotification(method: string, params: unknown): Promise<void>
+  /** Send an LSP notification and surface transport/write failure */
+  sendNotificationStrict(method: string, params: unknown): Promise<void>
   /** Register a handler for LSP notifications */
   onNotification(method: string, handler: (params: unknown) => void): void
   /** Register a handler for LSP requests from the server */
@@ -62,6 +66,11 @@ export type LSPServerInstance = {
     method: string,
     handler: (params: TParams) => TResult | Promise<TResult>,
   ): void
+}
+
+export type LSPServerInstanceOptions = {
+  createClient?: typeof createLSPClientType
+  onUnavailable?: (generation: number) => void
 }
 
 /**
@@ -90,6 +99,7 @@ export type LSPServerInstance = {
 export function createLSPServerInstance(
   name: string,
   config: ScopedLspServerConfig,
+  options: LSPServerInstanceOptions = {},
 ): LSPServerInstance {
   // Validate that unimplemented fields are not set
   if (config.restartOnCrash !== undefined) {
@@ -106,15 +116,21 @@ export function createLSPServerInstance(
   // Private state encapsulated via closures. Lazy-require LSPClient so
   // vscode-jsonrpc (~129KB) only loads when an LSP server is actually
   // instantiated, not when the static import chain reaches this module.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { createLSPClient } = require('./LSPClient.js') as {
-    createLSPClient: typeof createLSPClientType
+  let createLSPClient = options.createClient
+  if (!createLSPClient) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const clientModule = require('./LSPClient.js') as {
+      createLSPClient: typeof createLSPClientType
+    }
+    createLSPClient = clientModule.createLSPClient
   }
   let state: LspServerState = 'stopped'
   let startTime: Date | undefined
   let lastError: Error | undefined
   let restartCount = 0
   let crashRecoveryCount = 0
+  let generation = 0
+  let startPromise: Promise<void> | undefined
   // Propagate crash state so ensureServerStarted can restart on next use.
   // Without this, state stays 'running' after crash and the server is never
   // restarted (zombie state).
@@ -122,21 +138,30 @@ export function createLSPServerInstance(
     state = 'error'
     lastError = error
     crashRecoveryCount++
+    options.onUnavailable?.(generation)
   })
 
   /**
    * Starts the LSP server and initializes it with workspace information.
    *
-   * If the server is already running or starting, this method returns immediately.
+   * If the server is already running it returns immediately. Concurrent callers
+   * while starting share and await the same initialization promise.
    * On failure, sets state to 'error', logs for monitoring, and throws.
    *
    * @throws {Error} If server fails to start or initialize
    */
-  async function start(): Promise<void> {
-    if (state === 'running' || state === 'starting') {
-      return
-    }
+  function start(): Promise<void> {
+    if (state === 'running') return Promise.resolve()
+    if (startPromise) return startPromise
 
+    const pending = startInternal()
+    startPromise = pending.finally(() => {
+      startPromise = undefined
+    })
+    return startPromise
+  }
+
+  async function startInternal(): Promise<void> {
     // Cap crash-recovery attempts so a persistently crashing server doesn't
     // spawn unbounded child processes on every incoming request.
     const maxRestarts = config.maxRestarts ?? 3
@@ -247,6 +272,7 @@ export function createLSPServerInstance(
         await initPromise
       }
 
+      generation++
       state = 'running'
       startTime = new Date()
       crashRecoveryCount = 0
@@ -276,14 +302,17 @@ export function createLSPServerInstance(
       return
     }
 
+    const stoppedGeneration = generation
     try {
       state = 'stopping'
       await client.stop()
       state = 'stopped'
+      options.onUnavailable?.(stoppedGeneration)
       logForDebugging(`LSP server instance stopped: ${name}`)
     } catch (error) {
       state = 'error'
       lastError = error as Error
+      options.onUnavailable?.(stoppedGeneration)
       logError(error)
       throw error
     }
@@ -437,6 +466,33 @@ export function createLSPServerInstance(
   }
 
   /**
+   * Send a notification while preserving transport/write failure for callers
+   * whose local state depends on acceptance by the JSON-RPC writer.
+   */
+  async function sendNotificationStrict(
+    method: string,
+    params: unknown,
+  ): Promise<void> {
+    if (!isHealthy()) {
+      const error = new Error(
+        `Cannot send notification to LSP server '${name}': server is ${state}`,
+      )
+      logError(error)
+      throw error
+    }
+
+    try {
+      await client.sendNotificationStrict(method, params)
+    } catch (error) {
+      const notificationError = new Error(
+        `LSP notification '${method}' failed for server '${name}': ${errorMessage(error)}`,
+      )
+      logError(notificationError)
+      throw notificationError
+    }
+  }
+
+  /**
    * Registers a handler for LSP notifications from the server.
    *
    * @param method - LSP notification method (e.g., 'window/logMessage')
@@ -481,12 +537,16 @@ export function createLSPServerInstance(
     get restartCount() {
       return restartCount
     },
+    get generation() {
+      return generation
+    },
     start,
     stop,
     restart,
     isHealthy,
     sendRequest,
     sendNotification,
+    sendNotificationStrict,
     onNotification,
     onRequest,
   }
