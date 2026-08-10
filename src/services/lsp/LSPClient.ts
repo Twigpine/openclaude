@@ -38,7 +38,7 @@ export type LSPClient = {
     method: string,
     handler: (params: TParams) => TResult | Promise<TResult>,
   ) => void
-  stop: () => Promise<void>
+  stop: (options?: { force?: boolean }) => Promise<void>
 }
 
 export type LSPClientDependencies = {
@@ -75,6 +75,9 @@ export function createLSPClient(
   let isStopping = false // Track intentional shutdown to avoid spurious error logging
   let unavailableReported = false
   let stopPromise: Promise<void> | undefined
+  let spawnWait:
+    | { process: ChildProcess; reject: (error: Error) => void }
+    | undefined
   // Retain handlers for the client lifetime so replacement connections receive them.
   const notificationHandlers: Array<{
     method: string
@@ -95,8 +98,14 @@ export function createLSPClient(
     if (isStopping || unavailableReported) return
     unavailableReported = true
     isInitialized = false
+    capabilities = undefined
     startFailed = true
     startError = error
+    const unavailableConnection = connection
+    const unavailableProcess = process
+    connection = undefined
+    process = undefined
+    disposeResources(unavailableConnection, unavailableProcess)
     onCrash?.(error)
   }
 
@@ -115,6 +124,11 @@ export function createLSPClient(
     }
 
     if (!targetProcess) return
+    if (spawnWait?.process === targetProcess) {
+      spawnWait.reject(
+        new Error(`LSP server ${serverName} start was cancelled during spawn`),
+      )
+    }
     targetProcess.removeAllListeners('error')
     targetProcess.removeAllListeners('exit')
     targetProcess.stdin?.removeAllListeners('error')
@@ -132,11 +146,10 @@ export function createLSPClient(
     method: string,
     params: unknown,
   ): Promise<void> {
+    checkStartFailed()
     if (!connection) {
       throw new Error('LSP client not started')
     }
-
-    checkStartFailed()
 
     try {
       await connection.sendNotification(method, params)
@@ -166,7 +179,7 @@ export function createLSPClient(
         cwd?: string
       },
     ): Promise<void> {
-      if (stopPromise) await stopPromise
+      if (stopPromise) await stopPromise.catch(() => {})
 
       // A crashed transport may leave handles behind even though its owner has
       // already marked the server unavailable. Detach those handles before a
@@ -206,20 +219,22 @@ export function createLSPClient(
         // If we use the streams before confirming spawn succeeded, we get
         // unhandled promise rejections when writes fail on invalid streams.
         await new Promise<void>((resolve, reject) => {
-          const onSpawn = (): void => {
+          const resolveWait = (): void => {
             cleanup()
             resolve()
           }
-          const onError = (error: Error): void => {
+          const rejectWait = (error: Error): void => {
             cleanup()
             reject(error)
           }
           const cleanup = (): void => {
-            spawnedProcess.removeListener('spawn', onSpawn)
-            spawnedProcess.removeListener('error', onError)
+            spawnedProcess.removeListener('spawn', resolveWait)
+            spawnedProcess.removeListener('error', rejectWait)
+            if (spawnWait?.process === spawnedProcess) spawnWait = undefined
           }
-          spawnedProcess.once('spawn', onSpawn)
-          spawnedProcess.once('error', onError)
+          spawnWait = { process: spawnedProcess, reject: rejectWait }
+          spawnedProcess.once('spawn', resolveWait)
+          spawnedProcess.once('error', rejectWait)
         })
 
         // Capture stderr for server diagnostics and errors
@@ -344,21 +359,27 @@ export function createLSPClient(
     },
 
     async initialize(params: InitializeParams): Promise<InitializeResult> {
+      checkStartFailed()
       if (!connection) {
         throw new Error('LSP client not started')
       }
       const initializingConnection = connection
-
-      checkStartFailed()
 
       try {
         const result: InitializeResult = await initializingConnection.sendRequest(
           'initialize',
           params,
         )
+        checkStartFailed()
+        if (connection !== initializingConnection) {
+          throw new Error(
+            `LSP server ${serverName} connection changed during initialization`,
+          )
+        }
 
         // Send initialized notification
         await initializingConnection.sendNotification('initialized', {})
+        checkStartFailed()
 
         if (connection !== initializingConnection) {
           throw new Error(
@@ -386,11 +407,10 @@ export function createLSPClient(
       method: string,
       params: unknown,
     ): Promise<TResult> {
+      checkStartFailed()
       if (!connection) {
         throw new Error('LSP client not started')
       }
-
-      checkStartFailed()
 
       if (!isInitialized) {
         throw new Error('LSP server not initialized')
@@ -410,11 +430,10 @@ export function createLSPClient(
     },
 
     async sendNotification(method: string, params: unknown): Promise<void> {
+      checkStartFailed()
       if (!connection) {
         throw new Error('LSP client not started')
       }
-
-      checkStartFailed()
 
       try {
         await connection.sendNotification(method, params)
@@ -466,7 +485,7 @@ export function createLSPClient(
       connection.onRequest<unknown, unknown>(method, handler)
     },
 
-    stop(): Promise<void> {
+    stop(options?: { force?: boolean }): Promise<void> {
       if (stopPromise) return stopPromise
 
       const stoppingConnection = connection
@@ -478,7 +497,7 @@ export function createLSPClient(
         isStopping = true
 
         try {
-          if (stoppingConnection) {
+          if (stoppingConnection && !options?.force) {
             // Try to send shutdown request and exit notification
             await stoppingConnection.sendRequest('shutdown', {})
             await stoppingConnection.sendNotification('exit', {})

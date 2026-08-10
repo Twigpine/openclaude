@@ -12,11 +12,20 @@ type FakeConnection = {
   connection: MessageConnection
   notificationMethods: string[]
   requestMethods: string[]
+  sentRequestMethods: string[]
   emitError(error: Error): void
   emitClose(): void
 }
 
-function createFakeProcess(): ChildProcess {
+type FakeConnectionOptions = {
+  failTransportDuringRequest?: { method: string; error: Error }
+  pendingRequest?: string
+  rejectNotification?: string
+  rejectRequest?: string
+  retainHandlersOnDispose?: boolean
+}
+
+function createFakeProcess(autoSpawn = true): ChildProcess {
   const child = new EventEmitter() as ChildProcess
   Object.assign(child, {
     stdin: new PassThrough(),
@@ -24,7 +33,7 @@ function createFakeProcess(): ChildProcess {
     stderr: new PassThrough(),
     kill: mock(() => true),
   })
-  queueMicrotask(() => child.emit('spawn'))
+  if (autoSpawn) queueMicrotask(() => child.emit('spawn'))
   return child
 }
 
@@ -32,12 +41,14 @@ const spawnFakeProcess = (() => createFakeProcess()) as
   LSPClientDependencies['spawnProcess']
 
 function createFakeConnection(
-  rejectNotification?: string,
+  options: FakeConnectionOptions = {},
 ): FakeConnection {
   const notificationMethods: string[] = []
   const requestMethods: string[] = []
+  const sentRequestMethods: string[] = []
   let errorHandler: ((error: [Error, unknown, number]) => void) | undefined
   let closeHandler: (() => void) | undefined
+  let pendingRequestReject: ((error: Error) => void) | undefined
 
   const connection = {
     listen: mock(() => {}),
@@ -54,17 +65,39 @@ function createFakeConnection(
     onRequest: mock((method: string) => {
       requestMethods.push(method)
     }),
-    sendRequest: mock(async (method: string) =>
-      method === 'initialize' ? { capabilities: {} } : null,
-    ),
+    sendRequest: mock(async (method: string) => {
+      sentRequestMethods.push(method)
+      if (method === options.pendingRequest) {
+        return await new Promise((_resolve, reject) => {
+          pendingRequestReject = reject
+        })
+      }
+      if (method === options.rejectRequest) {
+        throw new Error('request rejected')
+      }
+      if (method === options.failTransportDuringRequest?.method) {
+        queueMicrotask(() => {
+          errorHandler?.([
+            options.failTransportDuringRequest!.error,
+            undefined,
+            0,
+          ])
+        })
+      }
+      return method === 'initialize' ? { capabilities: {} } : null
+    }),
     sendNotification: mock(async (method: string) => {
-      if (method === rejectNotification) {
+      if (method === options.rejectNotification) {
         throw new Error('writer rejected')
       }
     }),
     dispose: mock(() => {
-      errorHandler = undefined
-      closeHandler = undefined
+      pendingRequestReject?.(new Error('connection disposed'))
+      pendingRequestReject = undefined
+      if (!options.retainHandlersOnDispose) {
+        errorHandler = undefined
+        closeHandler = undefined
+      }
     }),
   } as unknown as MessageConnection
 
@@ -72,6 +105,7 @@ function createFakeConnection(
     connection,
     notificationMethods,
     requestMethods,
+    sentRequestMethods,
     emitError(error) {
       errorHandler?.([error, undefined, 0])
     },
@@ -112,7 +146,9 @@ describe('LSP client notification delivery', () => {
   })
 
   test('strict notifications reject while best-effort notifications keep resolving', async () => {
-    const fakeConnection = createFakeConnection('textDocument/didOpen')
+    const fakeConnection = createFakeConnection({
+      rejectNotification: 'textDocument/didOpen',
+    })
     const client = createLSPClient('typescript', undefined, {
       spawnProcess: spawnFakeProcess,
       createConnection: () => fakeConnection.connection,
@@ -154,7 +190,7 @@ describe('LSP client notification delivery', () => {
     const client = createLSPClient('typescript', undefined, {
       spawnProcess: spawnFakeProcess,
       createConnection: () => {
-        const fake = createFakeConnection()
+        const fake = createFakeConnection({ retainHandlersOnDispose: true })
         connections.push(fake)
         return fake.connection
       },
@@ -169,6 +205,122 @@ describe('LSP client notification delivery', () => {
     expect(client.isInitialized).toBe(true)
 
     await client.stop()
+  })
+
+  test('starts after an overlapping shutdown request fails', async () => {
+    const shutdownErrorConnection = createFakeConnection({
+      rejectRequest: 'shutdown',
+    })
+    const replacementConnection = createFakeConnection()
+    const connections = [shutdownErrorConnection, replacementConnection]
+    const client = createLSPClient('typescript', undefined, {
+      spawnProcess: spawnFakeProcess,
+      createConnection: () => connections.shift()!.connection,
+    })
+
+    await client.start('unused', [])
+    await client.initialize(initializeParams())
+
+    const stopOutcome = client.stop().then(
+      () => undefined,
+      error => error,
+    )
+    const restart = client.start('unused', [])
+
+    expect(await stopOutcome).toEqual(new Error('request rejected'))
+    await expect(restart).resolves.toBeUndefined()
+    await client.initialize(initializeParams())
+    expect(client.isInitialized).toBe(true)
+
+    await client.stop()
+  })
+
+  test('force stop skips the graceful shutdown request', async () => {
+    const fakeConnection = createFakeConnection()
+    const client = createLSPClient('typescript', undefined, {
+      spawnProcess: spawnFakeProcess,
+      createConnection: () => fakeConnection.connection,
+    })
+
+    await client.start('unused', [])
+    await client.initialize(initializeParams())
+    await client.stop({ force: true })
+
+    expect(fakeConnection.sentRequestMethods).toEqual(['initialize'])
+  })
+
+  test('an immediate stop settles an in-flight spawn wait', async () => {
+    const child = createFakeProcess(false)
+    const client = createLSPClient('typescript', undefined, {
+      spawnProcess: (() => child) as LSPClientDependencies['spawnProcess'],
+    })
+
+    const startOutcome = client.start('unused', []).then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+    await client.stop({ force: true })
+
+    const outcome = await Promise.race([
+      startOutcome,
+      new Promise<'pending'>(resolve =>
+        setTimeout(() => resolve('pending'), 30),
+      ),
+    ])
+    expect(outcome).toBe('rejected')
+  })
+
+  test('transport failure rejects a pending initialization', async () => {
+    const fakeConnection = createFakeConnection({ pendingRequest: 'initialize' })
+    const client = createLSPClient('typescript', undefined, {
+      spawnProcess: spawnFakeProcess,
+      createConnection: () => fakeConnection.connection,
+    })
+
+    await client.start('unused', [])
+    const initializeOutcome = client.initialize(initializeParams()).then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+    fakeConnection.emitError(new Error('connection lost'))
+
+    try {
+      const outcome = await Promise.race([
+        initializeOutcome,
+        new Promise<'pending'>(resolve =>
+          setTimeout(() => resolve('pending'), 30),
+        ),
+      ])
+      expect(outcome).toBe('rejected')
+      expect(client.isInitialized).toBe(false)
+    } finally {
+      await client.stop({ force: true }).catch(() => {})
+      await initializeOutcome
+    }
+  })
+
+  test('transport failure cannot be overwritten by initialization success', async () => {
+    const transportError = new Error('late transport failure')
+    const fakeConnection = createFakeConnection({
+      failTransportDuringRequest: {
+        method: 'initialize',
+        error: transportError,
+      },
+    })
+    const client = createLSPClient('typescript', undefined, {
+      spawnProcess: spawnFakeProcess,
+      createConnection: () => fakeConnection.connection,
+    })
+
+    await client.start('unused', [])
+    try {
+      await expect(client.initialize(initializeParams())).rejects.toBe(
+        transportError,
+      )
+      expect(client.isInitialized).toBe(false)
+    } finally {
+      await client.stop().catch(() => {})
+    }
   })
 
   test('reinstalls registered handlers on a replacement connection', async () => {

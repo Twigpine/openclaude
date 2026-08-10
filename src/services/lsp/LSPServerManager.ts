@@ -21,6 +21,7 @@ type OpenLspDocumentState = {
   serverGeneration: number
   version: number
   fileUri: string
+  activityPath: string
 }
 
 export type LSPServerManagerDependencies = {
@@ -229,6 +230,7 @@ export function createLSPServerManager(
       serverGeneration: targetGeneration,
       version: 1,
       fileUri: identity.fileUri,
+      activityPath: identity.activityPath,
     })
     logForDebugging(
       `LSP: Sent didOpen for ${filePath} (languageId: ${languageId}, generation: ${targetGeneration})`,
@@ -463,7 +465,10 @@ export function createLSPServerManager(
     await withDocumentLock(identity.stateKey, async () => {
       const server = await ensureServerStarted(filePath)
       if (!server) return
-      dependencies.recordFileActivity(identity.activityPath)
+      const state = getCurrentDocumentState(identity, server)
+      dependencies.recordFileActivity(
+        state?.activityPath ?? identity.activityPath,
+      )
       await synchronizeOpenUnlocked(filePath, content, identity, server)
     })
   }
@@ -473,9 +478,11 @@ export function createLSPServerManager(
     await withDocumentLock(identity.stateKey, async () => {
       const server = await ensureServerStarted(filePath)
       if (!server) return
-      dependencies.recordFileActivity(identity.activityPath)
 
       const state = getCurrentDocumentState(identity, server)
+      dependencies.recordFileActivity(
+        state?.activityPath ?? identity.activityPath,
+      )
       if (!state) {
         await synchronizeOpenUnlocked(filePath, content, identity, server)
         return
@@ -528,9 +535,9 @@ export function createLSPServerManager(
     await withDocumentLock(identity.stateKey, async () => {
       const server = getServerForFile(filePath)
       if (!server || server.state !== 'running') return
-      dependencies.recordFileActivity(identity.activityPath)
       const state = getCurrentDocumentState(identity, server)
       if (!state) return
+      dependencies.recordFileActivity(state.activityPath)
 
       // Best-effort by design: didSave carries no version or content, so a
       // dropped notification cannot desynchronize the document version space.

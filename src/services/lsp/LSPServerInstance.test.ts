@@ -19,8 +19,17 @@ type FakeClientController = {
   crash(error?: Error): void
   failNextInitialize(error: Error): void
   failNextRequest(error: Error): { called: Promise<void> }
+  failNextStop(error: Error): void
+  finishNextInitializeUnhealthy(): void
+  holdNextRequest<TResult>(result: TResult): {
+    started: Promise<void>
+    release(): void
+  }
   holdNextInitialize(): { started: Promise<void>; release(): void }
-  holdNextStop(): { started: Promise<void>; release(): void }
+  holdNextStop(options?: { blockForce?: boolean }): {
+    started: Promise<void>
+    release(): void
+  }
   startCalls: ReturnType<typeof mock>
   initializeCalls: ReturnType<typeof mock>
   stopCalls: ReturnType<typeof mock>
@@ -31,6 +40,8 @@ function createFakeClientController(): FakeClientController {
   let initialized = false
   let onCrash: ((error: Error) => void) | undefined
   let initializeError: Error | undefined
+  let initializeUnhealthy = false
+  let stopError: Error | undefined
   let requestFailure:
     | { error: Error; calledResolve: () => void }
     | undefined
@@ -43,6 +54,15 @@ function createFakeClientController(): FakeClientController {
     | undefined
   let stopGate:
     | {
+        startedResolve: () => void
+        wait: Promise<void>
+        release: () => void
+        blockForce: boolean
+      }
+    | undefined
+  let requestGate:
+    | {
+        result: unknown
         startedResolve: () => void
         wait: Promise<void>
         release: () => void
@@ -61,19 +81,34 @@ function createFakeClientController(): FakeClientController {
       initializeError = undefined
       throw error
     }
-    initialized = true
+    initialized = !initializeUnhealthy
+    initializeUnhealthy = false
     return { capabilities: {} } satisfies InitializeResult
   })
 
-  const stopCalls = mock(async () => {
-    stopGate?.startedResolve()
-    if (stopGate) {
+  const stopCalls = mock(async (options?: { force?: boolean }) => {
+    const shouldBlock =
+      stopGate && (!options?.force || stopGate.blockForce)
+    if (shouldBlock) stopGate?.startedResolve()
+    if (stopGate && shouldBlock) {
       await stopGate.wait
       stopGate = undefined
     }
     initialized = false
+    if (stopError) {
+      const error = stopError
+      stopError = undefined
+      throw error
+    }
   })
   const sendRequestCalls = mock(async <TResult>() => {
+    if (requestGate) {
+      const gate = requestGate
+      gate.startedResolve()
+      await gate.wait
+      requestGate = undefined
+      return gate.result as TResult
+    }
     if (requestFailure) {
       const failure = requestFailure
       requestFailure = undefined
@@ -120,6 +155,24 @@ function createFakeClientController(): FakeClientController {
       requestFailure = { error, calledResolve }
       return { called }
     },
+    failNextStop(error) {
+      stopError = error
+    },
+    finishNextInitializeUnhealthy() {
+      initializeUnhealthy = true
+    },
+    holdNextRequest(result) {
+      let startedResolve!: () => void
+      let release!: () => void
+      const started = new Promise<void>(resolve => {
+        startedResolve = resolve
+      })
+      const wait = new Promise<void>(resolve => {
+        release = resolve
+      })
+      requestGate = { result, startedResolve, wait, release }
+      return { started, release }
+    },
     holdNextInitialize() {
       let startedResolve!: () => void
       let release!: () => void
@@ -132,7 +185,7 @@ function createFakeClientController(): FakeClientController {
       initializeGate = { startedResolve, wait, release }
       return { started, release }
     },
-    holdNextStop() {
+    holdNextStop(options = {}) {
       let startedResolve!: () => void
       let release!: () => void
       const started = new Promise<void>(resolve => {
@@ -141,7 +194,12 @@ function createFakeClientController(): FakeClientController {
       const wait = new Promise<void>(resolve => {
         release = resolve
       })
-      stopGate = { startedResolve, wait, release }
+      stopGate = {
+        startedResolve,
+        wait,
+        release,
+        blockForce: options.blockForce ?? true,
+      }
       return { started, release }
     },
     startCalls,
@@ -286,6 +344,112 @@ describe('LSP server generations', () => {
     await instance.start()
     expect(fake.startCalls).toHaveBeenCalledTimes(2)
     expect(instance.generation).toBe(1)
+  })
+
+  test('starts after an overlapping stop fails', async () => {
+    const fake = createFakeClientController()
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+    })
+    await instance.start()
+    const stopError = new Error('shutdown rejected')
+    fake.failNextStop(stopError)
+
+    const stopOutcome = instance.stop().then(
+      () => undefined,
+      error => error,
+    )
+    const restart = instance.start()
+
+    expect(await stopOutcome).toBe(stopError)
+    await expect(restart).resolves.toBeUndefined()
+    expect(instance.state).toBe('running')
+    expect(instance.generation).toBe(2)
+  })
+
+  test('a stop during initialization wins over the cancelled start', async () => {
+    const fake = createFakeClientController()
+    const initializeGate = fake.holdNextInitialize()
+    const stopGate = fake.holdNextStop()
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+    })
+
+    const start = instance.start()
+    await initializeGate.started
+    const stop = instance.stop()
+    await stopGate.started
+
+    initializeGate.release()
+    await Promise.resolve()
+    stopGate.release()
+
+    await expect(start).rejects.toThrow('start was cancelled')
+    await expect(stop).resolves.toBeUndefined()
+    expect(instance.state).toBe('stopped')
+    expect(instance.generation).toBe(0)
+  })
+
+  test('startup timeout uses immediate cleanup instead of graceful shutdown', async () => {
+    const fake = createFakeClientController()
+    const initializeGate = fake.holdNextInitialize()
+    const stopGate = fake.holdNextStop({ blockForce: false })
+    const instance = createLSPServerInstance(
+      'typescript',
+      { ...CONFIG, startupTimeout: 5 },
+      { createClient: fake.createClient },
+    )
+
+    const startOutcome = instance.start().then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+    await initializeGate.started
+
+    try {
+      const outcome = await Promise.race([
+        startOutcome,
+        new Promise<'pending'>(resolve =>
+          setTimeout(() => resolve('pending'), 30),
+        ),
+      ])
+      expect(outcome).toBe('rejected')
+      expect(fake.stopCalls).toHaveBeenCalledWith({ force: true })
+    } finally {
+      initializeGate.release()
+      stopGate.release()
+      await startOutcome
+    }
+  })
+
+  test('does not publish a generation when initialization reports unhealthy', async () => {
+    const fake = createFakeClientController()
+    fake.finishNextInitializeUnhealthy()
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+    })
+
+    await expect(instance.start()).rejects.toThrow('did not finish initialization')
+    expect(instance.state).toBe('error')
+    expect(instance.generation).toBe(0)
+  })
+
+  test('rejects a successful response from a replaced generation', async () => {
+    const fake = createFakeClientController()
+    const requestGate = fake.holdNextRequest('stale response')
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+    })
+    await instance.start()
+
+    const request = instance.sendRequest<string>('textDocument/hover', {})
+    await requestGate.started
+    fake.crash()
+    await instance.start()
+    requestGate.release()
+
+    await expect(request).rejects.toThrow('changed generation')
+    expect(instance.generation).toBe(2)
   })
 
   test('does not retry ContentModified on a replacement generation', async () => {

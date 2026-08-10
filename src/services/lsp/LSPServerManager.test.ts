@@ -669,7 +669,7 @@ describe('LSP document identity and diagnostics activity', () => {
     ])
     expect(activityPaths).toEqual([
       fileURLToPath(firstIdentity.fileUri),
-      fileURLToPath(secondIdentity.fileUri),
+      fileURLToPath(firstIdentity.fileUri),
     ])
   })
 

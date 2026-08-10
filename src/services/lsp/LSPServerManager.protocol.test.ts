@@ -188,18 +188,17 @@ test('resends current contents after restart before making a request', async () 
   }
 })
 
-test('records Windows activity without losing supplied path casing', async () => {
+test('records Windows activity with the opened document casing', async () => {
   const { manager } = await createManager()
   const firstSpelling = String.raw`C:\Repo\Source File.ts`
   const secondSpelling = 'c:/repo/source file.ts'
   const openedUri = 'file:///c:/Repo/Source%20File.ts'
-  const changedUri = 'file:///c:/repo/source%20file.ts'
 
   await manager.openFile(firstSpelling, 'one')
   await manager.changeFile(secondSpelling, 'two')
 
   expect(activityPaths).toEqual([
     fileURLToPath(openedUri),
-    fileURLToPath(changedUri),
+    fileURLToPath(openedUri),
   ])
 })

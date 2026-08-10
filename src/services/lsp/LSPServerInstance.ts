@@ -137,6 +137,7 @@ export function createLSPServerInstance(
   // Without this, state stays 'running' after crash and the server is never
   // restarted (zombie state).
   const client = createLSPClient(name, error => {
+    startEpoch++
     state = 'error'
     lastError = error
     crashRecoveryCount++
@@ -153,7 +154,7 @@ export function createLSPServerInstance(
    * @throws {Error} If server fails to start or initialize
    */
   function start(): Promise<void> {
-    if (stopPromise) return stopPromise.then(start)
+    if (stopPromise) return stopPromise.catch(() => {}).then(start)
     if (state === 'running') return Promise.resolve()
     if (startPromise) return startPromise
 
@@ -281,6 +282,11 @@ export function createLSPServerInstance(
       if (epoch !== startEpoch) {
         throw new Error(`LSP server '${name}' start was cancelled`)
       }
+      if (state !== 'starting' || !client.isInitialized) {
+        throw new Error(
+          `LSP server '${name}' did not finish initialization in a healthy state`,
+        )
+      }
 
       generation++
       state = 'running'
@@ -289,7 +295,7 @@ export function createLSPServerInstance(
       logForDebugging(`LSP server instance started: ${name}`)
     } catch (error) {
       // Clean up the spawned child process on timeout/error
-      await client.stop().catch(() => {})
+      await client.stop({ force: true }).catch(() => {})
       // Prevent unhandled rejection from abandoned initialize promise
       initPromise?.catch(() => {})
       if (epoch === startEpoch) {
@@ -324,11 +330,12 @@ export function createLSPServerInstance(
 
   async function stopInternal(): Promise<void> {
     const stoppedGeneration = generation
+    const force = state === 'starting'
     startEpoch++
     let stopError: unknown
     state = 'stopping'
     try {
-      await client.stop()
+      await client.stop({ force })
     } catch (error) {
       stopError = error
     }
@@ -434,7 +441,13 @@ export function createLSPServerInstance(
         )
       }
       try {
-        return await client.sendRequest(method, params)
+        const result = await client.sendRequest<T>(method, params)
+        if (generation !== requestGeneration || !isHealthy()) {
+          throw new Error(
+            `LSP request '${method}' aborted because server '${name}' changed generation or became unavailable`,
+          )
+        }
+        return result
       } catch (error) {
         lastAttemptError = error as Error
 
