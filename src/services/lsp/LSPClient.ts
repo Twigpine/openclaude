@@ -55,9 +55,9 @@ const DEFAULT_DEPENDENCIES: LSPClientDependencies = {
  * Create an LSP client wrapper using vscode-jsonrpc.
  * Manages communication with an LSP server process via stdio.
  *
- * @param onCrash - Called when the server process exits unexpectedly (non-zero
- *   exit code during operation, not during intentional stop). Allows the owner
- *   to propagate crash state so the server can be restarted on next use.
+ * @param onCrash - Called when the active process or JSON-RPC connection becomes
+ *   unavailable outside intentional shutdown. Allows the owner to propagate
+ *   crash state so the server can be restarted on next use.
  */
 export function createLSPClient(
   serverName: string,
@@ -73,6 +73,8 @@ export function createLSPClient(
   let startFailed = false
   let startError: Error | undefined
   let isStopping = false // Track intentional shutdown to avoid spurious error logging
+  let unavailableReported = false
+  let stopPromise: Promise<void> | undefined
   // Retain handlers for the client lifetime so replacement connections receive them.
   const notificationHandlers: Array<{
     method: string
@@ -86,6 +88,43 @@ export function createLSPClient(
   function checkStartFailed(): void {
     if (startFailed) {
       throw startError || new Error(`LSP server ${serverName} failed to start`)
+    }
+  }
+
+  function reportUnavailable(error: Error): void {
+    if (isStopping || unavailableReported) return
+    unavailableReported = true
+    isInitialized = false
+    startFailed = true
+    startError = error
+    onCrash?.(error)
+  }
+
+  function disposeResources(
+    targetConnection: MessageConnection | undefined,
+    targetProcess: ChildProcess | undefined,
+  ): void {
+    if (targetConnection) {
+      try {
+        targetConnection.dispose()
+      } catch (error) {
+        logForDebugging(
+          `Connection disposal failed for ${serverName}: ${errorMessage(error)}`,
+        )
+      }
+    }
+
+    if (!targetProcess) return
+    targetProcess.removeAllListeners('error')
+    targetProcess.removeAllListeners('exit')
+    targetProcess.stdin?.removeAllListeners('error')
+    targetProcess.stderr?.removeAllListeners('data')
+    try {
+      targetProcess.kill()
+    } catch (error) {
+      logForDebugging(
+        `Process kill failed for ${serverName} (may already be dead): ${errorMessage(error)}`,
+      )
     }
   }
 
@@ -127,17 +166,37 @@ export function createLSPClient(
         cwd?: string
       },
     ): Promise<void> {
+      if (stopPromise) await stopPromise
+
+      // A crashed transport may leave handles behind even though its owner has
+      // already marked the server unavailable. Detach those handles before a
+      // replacement is installed so they cannot leak across generations.
+      if (connection || process) {
+        const staleConnection = connection
+        const staleProcess = process
+        connection = undefined
+        process = undefined
+        disposeResources(staleConnection, staleProcess)
+      }
+
       try {
+        unavailableReported = false
+        startFailed = false
+        startError = undefined
+        isInitialized = false
+        capabilities = undefined
+
         // 1. Spawn LSP server process
-        process = dependencies.spawnProcess(command, args, {
+        const spawnedProcess = dependencies.spawnProcess(command, args, {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: { ...subprocessEnv(), ...options?.env },
           cwd: options?.cwd,
           // Prevent visible console window on Windows (no-op on other platforms)
           windowsHide: true,
         })
+        process = spawnedProcess
 
-        if (!process.stdout || !process.stdin) {
+        if (!spawnedProcess.stdout || !spawnedProcess.stdin) {
           throw new Error('LSP server process stdio not available')
         }
 
@@ -146,7 +205,6 @@ export function createLSPClient(
         // (e.g., ENOENT for command not found) fires asynchronously.
         // If we use the streams before confirming spawn succeeded, we get
         // unhandled promise rejections when writes fail on invalid streams.
-        const spawnedProcess = process // Capture for closure
         await new Promise<void>((resolve, reject) => {
           const onSpawn = (): void => {
             cleanup()
@@ -165,8 +223,8 @@ export function createLSPClient(
         })
 
         // Capture stderr for server diagnostics and errors
-        if (process.stderr) {
-          process.stderr.on('data', (data: Buffer) => {
+        if (spawnedProcess.stderr) {
+          spawnedProcess.stderr.on('data', (data: Buffer) => {
             const output = data.toString().trim()
             if (output) {
               logForDebugging(`[LSP SERVER ${serverName}] ${output}`)
@@ -175,10 +233,10 @@ export function createLSPClient(
         }
 
         // Handle process errors (after successful spawn, e.g., crash during operation)
-        process.on('error', error => {
+        spawnedProcess.on('error', error => {
+          if (process !== spawnedProcess || isStopping) return
+          reportUnavailable(error)
           if (!isStopping) {
-            startFailed = true
-            startError = error
             logError(
               new Error(
                 `LSP server ${serverName} failed to start: ${error.message}`,
@@ -187,23 +245,21 @@ export function createLSPClient(
           }
         })
 
-        process.on('exit', (code, _signal) => {
-          if (code !== 0 && code !== null && !isStopping) {
-            isInitialized = false
-            startFailed = false
-            startError = undefined
-            const crashError = new Error(
-              `LSP server ${serverName} crashed with exit code ${code}`,
-            )
-            logError(crashError)
-            onCrash?.(crashError)
-          }
+        spawnedProcess.on('exit', (code, signal) => {
+          if (process !== spawnedProcess || isStopping) return
+          const exitDetail =
+            signal !== null ? `signal ${signal}` : `exit code ${code}`
+          const crashError = new Error(
+            `LSP server ${serverName} exited unexpectedly with ${exitDetail}`,
+          )
+          logError(crashError)
+          reportUnavailable(crashError)
         })
 
         // Handle stdin stream errors to prevent unhandled promise rejections
         // when the LSP server process exits before we finish writing
-        process.stdin.on('error', (error: Error) => {
-          if (!isStopping) {
+        spawnedProcess.stdin.on('error', (error: Error) => {
+          if (process === spawnedProcess && !isStopping) {
             logForDebugging(
               `LSP server ${serverName} stdin error: ${error.message}`,
             )
@@ -212,17 +268,18 @@ export function createLSPClient(
         })
 
         // 2. Create JSON-RPC connection
-        const reader = new StreamMessageReader(process.stdout)
-        const writer = new StreamMessageWriter(process.stdin)
-        connection = dependencies.createConnection(reader, writer)
+        const reader = new StreamMessageReader(spawnedProcess.stdout)
+        const writer = new StreamMessageWriter(spawnedProcess.stdin)
+        const startedConnection = dependencies.createConnection(reader, writer)
+        connection = startedConnection
 
         // 2.5. Register error/close handlers BEFORE listen() to catch all errors
         // This prevents unhandled promise rejections when the server crashes or closes unexpectedly
-        connection.onError(([error, _message, _code]) => {
+        startedConnection.onError(([error, _message, _code]) => {
+          if (connection !== startedConnection || isStopping) return
+          reportUnavailable(error)
           // Only log if not intentionally stopping (avoid spurious errors during shutdown)
           if (!isStopping) {
-            startFailed = true
-            startError = error
             logError(
               new Error(
                 `LSP server ${serverName} connection error: ${error.message}`,
@@ -231,23 +288,24 @@ export function createLSPClient(
           }
         })
 
-        connection.onClose(() => {
+        startedConnection.onClose(() => {
+          if (connection !== startedConnection || isStopping) return
           // Only treat as error if not intentionally stopping
-          if (!isStopping) {
-            isInitialized = false
-            // Don't set startFailed here - the connection may close after graceful shutdown
-            logForDebugging(`LSP server ${serverName} connection closed`)
-          }
+          const closeError = new Error(
+            `LSP server ${serverName} connection closed unexpectedly`,
+          )
+          logForDebugging(closeError.message)
+          reportUnavailable(closeError)
         })
 
         // 3. Start listening for messages
-        connection.listen()
+        startedConnection.listen()
 
         // 3.5. Enable protocol tracing for debugging
         // Note: trace() sends a $/setTrace notification which can fail if the server
         // process has already exited. We catch and log the error rather than letting
         // it become an unhandled promise rejection.
-        connection
+        startedConnection
           .trace(Trace.Verbose, {
             log: (message: string) => {
               logForDebugging(`[LSP PROTOCOL ${serverName}] ${message}`)
@@ -261,7 +319,7 @@ export function createLSPClient(
 
         // 4. Apply all retained notification handlers to this connection
         for (const { method, handler } of notificationHandlers) {
-          connection.onNotification(method, handler)
+          startedConnection.onNotification(method, handler)
           logForDebugging(
             `Applied notification handler for ${serverName}.${method}`,
           )
@@ -269,7 +327,7 @@ export function createLSPClient(
 
         // 5. Apply all retained request handlers to this connection
         for (const { method, handler } of requestHandlers) {
-          connection.onRequest(method, handler)
+          startedConnection.onRequest(method, handler)
           logForDebugging(
             `Applied request handler for ${serverName}.${method}`,
           )
@@ -289,20 +347,26 @@ export function createLSPClient(
       if (!connection) {
         throw new Error('LSP client not started')
       }
+      const initializingConnection = connection
 
       checkStartFailed()
 
       try {
-        const result: InitializeResult = await connection.sendRequest(
+        const result: InitializeResult = await initializingConnection.sendRequest(
           'initialize',
           params,
         )
 
-        capabilities = result.capabilities
-
         // Send initialized notification
-        await connection.sendNotification('initialized', {})
+        await initializingConnection.sendNotification('initialized', {})
 
+        if (connection !== initializingConnection) {
+          throw new Error(
+            `LSP server ${serverName} connection changed during initialization`,
+          )
+        }
+
+        capabilities = result.capabilities
         isInitialized = true
         logForDebugging(`LSP server ${serverName} initialized`)
 
@@ -402,78 +466,58 @@ export function createLSPClient(
       connection.onRequest<unknown, unknown>(method, handler)
     },
 
-    async stop(): Promise<void> {
-      let shutdownError: Error | undefined
+    stop(): Promise<void> {
+      if (stopPromise) return stopPromise
 
-      // Mark as stopping to prevent error handlers from logging spurious errors
-      isStopping = true
+      const stoppingConnection = connection
+      const stoppingProcess = process
+      const pending = (async () => {
+        let shutdownError: Error | undefined
 
-      try {
-        if (connection) {
-          // Try to send shutdown request and exit notification
-          await connection.sendRequest('shutdown', {})
-          await connection.sendNotification('exit', {})
-        }
-      } catch (error) {
-        const err = error as Error
-        logError(
-          new Error(`LSP server ${serverName} stop failed: ${err.message}`),
-        )
-        shutdownError = err
-        // Continue to cleanup despite shutdown failure
-      } finally {
-        // Always cleanup resources, even if shutdown/exit failed
-        if (connection) {
-          try {
-            connection.dispose()
-          } catch (error) {
-            // Log but don't throw - disposal errors are less critical
-            logForDebugging(
-              `Connection disposal failed for ${serverName}: ${errorMessage(error)}`,
-            )
+        // Mark as stopping to prevent error handlers from logging spurious errors
+        isStopping = true
+
+        try {
+          if (stoppingConnection) {
+            // Try to send shutdown request and exit notification
+            await stoppingConnection.sendRequest('shutdown', {})
+            await stoppingConnection.sendNotification('exit', {})
           }
-          connection = undefined
-        }
+        } catch (error) {
+          const err = error as Error
+          logError(
+            new Error(`LSP server ${serverName} stop failed: ${err.message}`),
+          )
+          shutdownError = err
+          // Continue to cleanup despite shutdown failure
+        } finally {
+          // Always cleanup the resources captured for this stop attempt.
+          if (connection === stoppingConnection) connection = undefined
+          if (process === stoppingProcess) process = undefined
+          disposeResources(stoppingConnection, stoppingProcess)
 
-        if (process) {
-          // Remove event listeners to prevent memory leaks
-          process.removeAllListeners('error')
-          process.removeAllListeners('exit')
-          if (process.stdin) {
-            process.stdin.removeAllListeners('error')
+          if (!connection) {
+            isInitialized = false
+            capabilities = undefined
           }
-          if (process.stderr) {
-            process.stderr.removeAllListeners('data')
+          isStopping = false // Reset for potential restart
+          // Don't reset startFailed - preserve error state for diagnostics
+          if (shutdownError) {
+            startFailed = true
+            startError = shutdownError
           }
 
-          try {
-            process.kill()
-          } catch (error) {
-            // Process might already be dead, which is fine
-            logForDebugging(
-              `Process kill failed for ${serverName} (may already be dead): ${errorMessage(error)}`,
-            )
-          }
-          process = undefined
+          logForDebugging(`LSP client stopped for ${serverName}`)
         }
 
-        isInitialized = false
-        capabilities = undefined
-        isStopping = false // Reset for potential restart
-        // Don't reset startFailed - preserve error state for diagnostics
-        // startFailed and startError remain as-is
-        if (shutdownError) {
-          startFailed = true
-          startError = shutdownError
-        }
+        // Re-throw shutdown error after cleanup is complete
+        if (shutdownError) throw shutdownError
+      })()
 
-        logForDebugging(`LSP client stopped for ${serverName}`)
-      }
-
-      // Re-throw shutdown error after cleanup is complete
-      if (shutdownError) {
-        throw shutdownError
-      }
+      stopPromise = pending.finally(() => {
+        stopPromise = undefined
+      })
+      return stopPromise
     },
   }
 }

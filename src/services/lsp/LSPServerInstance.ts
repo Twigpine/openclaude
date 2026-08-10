@@ -130,7 +130,9 @@ export function createLSPServerInstance(
   let restartCount = 0
   let crashRecoveryCount = 0
   let generation = 0
+  let startEpoch = 0
   let startPromise: Promise<void> | undefined
+  let stopPromise: Promise<void> | undefined
   // Propagate crash state so ensureServerStarted can restart on next use.
   // Without this, state stays 'running' after crash and the server is never
   // restarted (zombie state).
@@ -151,17 +153,19 @@ export function createLSPServerInstance(
    * @throws {Error} If server fails to start or initialize
    */
   function start(): Promise<void> {
+    if (stopPromise) return stopPromise.then(start)
     if (state === 'running') return Promise.resolve()
     if (startPromise) return startPromise
 
-    const pending = startInternal()
+    const epoch = ++startEpoch
+    const pending = startInternal(epoch)
     startPromise = pending.finally(() => {
       startPromise = undefined
     })
     return startPromise
   }
 
-  async function startInternal(): Promise<void> {
+  async function startInternal(epoch: number): Promise<void> {
     // Cap crash-recovery attempts so a persistently crashing server doesn't
     // spawn unbounded child processes on every incoming request.
     const maxRestarts = config.maxRestarts ?? 3
@@ -184,6 +188,9 @@ export function createLSPServerInstance(
         env: config.env,
         cwd: config.workspaceFolder,
       })
+      if (epoch !== startEpoch) {
+        throw new Error(`LSP server '${name}' start was cancelled`)
+      }
 
       // Initialize with workspace info
       const workspaceFolder = config.workspaceFolder || getCwd()
@@ -271,6 +278,9 @@ export function createLSPServerInstance(
       } else {
         await initPromise
       }
+      if (epoch !== startEpoch) {
+        throw new Error(`LSP server '${name}' start was cancelled`)
+      }
 
       generation++
       state = 'running'
@@ -279,12 +289,14 @@ export function createLSPServerInstance(
       logForDebugging(`LSP server instance started: ${name}`)
     } catch (error) {
       // Clean up the spawned child process on timeout/error
-      client.stop().catch(() => {})
+      await client.stop().catch(() => {})
       // Prevent unhandled rejection from abandoned initialize promise
       initPromise?.catch(() => {})
-      state = 'error'
-      lastError = error as Error
-      logError(error)
+      if (epoch === startEpoch) {
+        state = 'error'
+        lastError = error as Error
+        logError(error)
+      }
       throw error
     }
   }
@@ -297,25 +309,42 @@ export function createLSPServerInstance(
    *
    * @throws {Error} If server fails to stop
    */
-  async function stop(): Promise<void> {
+  function stop(): Promise<void> {
     if (state === 'stopped' || state === 'stopping') {
-      return
+      return stopPromise ?? Promise.resolve()
+    }
+    if (stopPromise) return stopPromise
+
+    const pending = stopInternal()
+    stopPromise = pending.finally(() => {
+      stopPromise = undefined
+    })
+    return stopPromise
+  }
+
+  async function stopInternal(): Promise<void> {
+    const stoppedGeneration = generation
+    startEpoch++
+    let stopError: unknown
+    state = 'stopping'
+    try {
+      await client.stop()
+    } catch (error) {
+      stopError = error
     }
 
-    const stoppedGeneration = generation
-    try {
-      state = 'stopping'
-      await client.stop()
-      state = 'stopped'
-      options.onUnavailable?.(stoppedGeneration)
-      logForDebugging(`LSP server instance stopped: ${name}`)
-    } catch (error) {
+    await startPromise?.catch(() => {})
+    options.onUnavailable?.(stoppedGeneration)
+
+    if (stopError) {
       state = 'error'
-      lastError = error as Error
-      options.onUnavailable?.(stoppedGeneration)
-      logError(error)
-      throw error
+      lastError = stopError as Error
+      logError(stopError)
+      throw stopError
     }
+
+    state = 'stopped'
+    logForDebugging(`LSP server instance stopped: ${name}`)
   }
 
   /**
@@ -391,6 +420,7 @@ export function createLSPServerInstance(
       throw error
     }
 
+    const requestGeneration = generation
     let lastAttemptError: Error | undefined
 
     for (
@@ -398,6 +428,11 @@ export function createLSPServerInstance(
       attempt <= MAX_RETRIES_FOR_TRANSIENT_ERRORS;
       attempt++
     ) {
+      if (generation !== requestGeneration || !isHealthy()) {
+        throw new Error(
+          `LSP request '${method}' aborted because server '${name}' changed generation or became unavailable`,
+        )
+      }
       try {
         return await client.sendRequest(method, params)
       } catch (error) {

@@ -55,7 +55,12 @@ type FakeServerControl = {
   server: LSPServerInstance
   events: ServerEvent[]
   startCalls: ReturnType<typeof mock>
+  stopCalls: ReturnType<typeof mock>
   blockNextNotification(method: string): {
+    started: Promise<void>
+    release(): void
+  }
+  blockNextRequest(method: string, error?: Error): {
     started: Promise<void>
     release(): void
   }
@@ -73,6 +78,7 @@ function createFakeServer(
 ): FakeServerControl {
   let state: LspServerState = 'stopped'
   let generation = 0
+  let startEpoch = 0
   let startPromise: Promise<void> | undefined
   let nextStartGate:
     | { startedResolve: () => void; wait: Promise<void>; release: () => void }
@@ -86,6 +92,15 @@ function createFakeServer(
       }
     | undefined
   let notificationFailure: { method: string; error: Error } | undefined
+  let requestGate:
+    | {
+        method: string
+        error: Error
+        startedResolve: () => void
+        wait: Promise<void>
+        release: () => void
+      }
+    | undefined
   let startInvocationCount = 0
   const startWaiters: Array<{ count: number; resolve: () => void }> = []
   const events: ServerEvent[] = []
@@ -98,12 +113,14 @@ function createFakeServer(
     if (state === 'running') return
     if (startPromise) return startPromise
     state = 'starting'
+    const epoch = startEpoch
     const pending = (async () => {
       nextStartGate?.startedResolve()
       if (nextStartGate) {
         await nextStartGate.wait
         nextStartGate = undefined
       }
+      if (epoch !== startEpoch) return
       generation++
       state = 'running'
     })()
@@ -111,6 +128,15 @@ function createFakeServer(
       startPromise = undefined
     })
     return startPromise
+  })
+
+  const stopCalls = mock(async () => {
+    const stoppedGeneration = generation
+    startEpoch++
+    state = 'stopped'
+    nextStartGate?.release()
+    nextStartGate = undefined
+    options.onUnavailable?.(stoppedGeneration)
   })
 
   const server: LSPServerInstance = {
@@ -132,11 +158,7 @@ function createFakeServer(
       return 0
     },
     start: startCalls,
-    async stop() {
-      const stoppedGeneration = generation
-      state = 'stopped'
-      options.onUnavailable?.(stoppedGeneration)
-    },
+    stop: stopCalls,
     async restart() {
       await server.stop()
       await server.start()
@@ -146,6 +168,13 @@ function createFakeServer(
     },
     async sendRequest<TResult>(method: string, params: unknown) {
       events.push({ kind: 'request', generation, method, params })
+      if (requestGate?.method === method) {
+        const gate = requestGate
+        gate.startedResolve()
+        await gate.wait
+        requestGate = undefined
+        throw gate.error
+      }
       return null as TResult
     },
     async sendNotification(method: string, params: unknown) {
@@ -184,6 +213,7 @@ function createFakeServer(
     server,
     events,
     startCalls,
+    stopCalls,
     blockNextNotification(method) {
       let startedResolve!: () => void
       let release!: () => void
@@ -194,6 +224,18 @@ function createFakeServer(
         release = resolve
       })
       notificationGate = { method, startedResolve, wait, release }
+      return { started, release }
+    },
+    blockNextRequest(method, error = new Error('request interrupted')) {
+      let startedResolve!: () => void
+      let release!: () => void
+      const started = new Promise<void>(resolve => {
+        startedResolve = resolve
+      })
+      const wait = new Promise<void>(resolve => {
+        release = resolve
+      })
+      requestGate = { method, error, startedResolve, wait, release }
       return { started, release }
     },
     failNextNotification(method, error = new Error('transport rejected')) {
@@ -453,6 +495,38 @@ describe('LSP generation resynchronization', () => {
     ])
   })
 
+  test('resynchronizes before retrying a request interrupted by a generation change', async () => {
+    const { manager, controls } = await createManager({
+      readDocument: async () => 'replacement contents',
+    })
+    const server = controls.get('typescript')!
+    const file = '/repo/src/retry-generation.ts'
+    const uri = getLspDocumentIdentity(file).fileUri
+
+    await manager.openFile(file, 'old contents')
+    const gate = server.blockNextRequest(
+      'textDocument/hover',
+      new Error('generation changed'),
+    )
+    const request = manager.sendRequest(file, 'textDocument/hover', {
+      textDocument: { uri },
+    })
+    await gate.started
+    server.replaceGeneration()
+    gate.release()
+
+    await expect(request).resolves.toBeNull()
+    expect(server.events.slice(-3)).toMatchObject([
+      { kind: 'request', generation: 1, method: 'textDocument/hover' },
+      {
+        kind: 'notification',
+        generation: 2,
+        method: 'textDocument/didOpen',
+      },
+      { kind: 'request', generation: 2, method: 'textDocument/hover' },
+    ])
+  })
+
   test('stopping one server clears only that server generation documents', async () => {
     const { manager, controls } = await createManager({
       configs: { typescript: TYPESCRIPT_CONFIG, python: PYTHON_CONFIG },
@@ -527,6 +601,30 @@ describe('LSP request concurrency', () => {
     expect(server.server.generation).toBe(1)
     expect(server.events.filter(event => event.kind === 'request')).toHaveLength(2)
   })
+
+  test('shutdown stops a starting server and rejects its in-flight request', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const gate = server.holdNextStart()
+    const requestOutcome = manager
+      .sendRequest('/repo/src/shutdown.ts', 'textDocument/hover', {})
+      .then(
+        () => undefined,
+        error => error,
+      )
+
+    await gate.started
+    try {
+      await manager.shutdown()
+      expect(server.stopCalls).toHaveBeenCalledTimes(1)
+      expect(await requestOutcome).toBeInstanceOf(Error)
+      expect(server.server.state).toBe('stopped')
+      expect(manager.getAllServers().size).toBe(0)
+    } finally {
+      gate.release()
+      await requestOutcome
+    }
+  })
 })
 
 describe('LSP document identity and diagnostics activity', () => {
@@ -554,9 +652,9 @@ describe('LSP document identity and diagnostics activity', () => {
 
     const firstIdentity = getLspDocumentIdentity(firstSpelling)
     const secondIdentity = getLspDocumentIdentity(secondSpelling)
-    expect(firstIdentity.fileUri).toBe('file:///c:/repo/source%20file.ts')
+    expect(firstIdentity.fileUri).toBe('file:///c:/Repo/Source%20File.ts')
     expect(secondIdentity).toMatchObject({
-      fileUri: firstIdentity.fileUri,
+      fileUri: 'file:///c:/repo/source%20file.ts',
       stateKey: firstIdentity.stateKey,
     })
 
@@ -571,7 +669,34 @@ describe('LSP document identity and diagnostics activity', () => {
     ])
     expect(activityPaths).toEqual([
       fileURLToPath(firstIdentity.fileUri),
-      fileURLToPath(firstIdentity.fileUri),
+      fileURLToPath(secondIdentity.fileUri),
+    ])
+  })
+
+  test('reuses the opened Windows URI for requests through a case alias', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const firstSpelling = String.raw`C:\Repo\Source File.ts`
+    const secondSpelling = 'c:/repo/source file.ts'
+    const openedUri = getLspDocumentIdentity(firstSpelling).fileUri
+    const aliasUri = getLspDocumentIdentity(secondSpelling).fileUri
+
+    await manager.openFile(firstSpelling, 'one')
+    await manager.sendRequest(secondSpelling, 'textDocument/hover', {
+      textDocument: { uri: aliasUri },
+    })
+
+    expect(server.events.slice(-2)).toMatchObject([
+      {
+        kind: 'notification',
+        method: 'textDocument/didOpen',
+        params: { textDocument: { uri: openedUri } },
+      },
+      {
+        kind: 'request',
+        method: 'textDocument/hover',
+        params: { textDocument: { uri: openedUri } },
+      },
     ])
   })
 

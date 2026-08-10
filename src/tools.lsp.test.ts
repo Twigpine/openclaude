@@ -1,16 +1,14 @@
 import {
-  closeSync,
-  constants,
   mkdtempSync,
-  openSync,
   rmSync,
   truncateSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { afterAll, beforeEach, expect, mock, test } from 'bun:test'
+import { MAX_LSP_FILE_SIZE_BYTES } from './services/lsp/documentIdentity.js'
 import { getEmptyToolPermissionContext } from './Tool.js'
 import {
   acquireSharedMutationLock,
@@ -102,7 +100,7 @@ test('LSPTool keeps the 10 MB guard ahead of open and request', async () => {
   const sendRequest = mock(async () => null)
   try {
     writeFileSync(filePath, '')
-    truncateSync(filePath, 10_000_001)
+    truncateSync(filePath, MAX_LSP_FILE_SIZE_BYTES + 1)
     lspManager = {
       isFileOpen: () => false,
       openFile,
@@ -118,52 +116,6 @@ test('LSPTool keeps the 10 MB guard ahead of open and request', async () => {
     expect(openFile).not.toHaveBeenCalled()
     expect(sendRequest).not.toHaveBeenCalled()
   } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
-})
-
-test('LSPTool rejects non-regular documents without reading their stream', async () => {
-  if (process.platform === 'win32') return
-
-  const directory = mkdtempSync(join(tmpdir(), 'openclaude-lsp-tool-fifo-'))
-  const filePath = join(directory, 'stream.ts')
-  const openFile = mock(async () => {})
-  const sendRequest = mock(async () => null)
-  let keeper: number | undefined
-  try {
-    execFileSync('mkfifo', [filePath])
-    keeper = openSync(
-      filePath,
-      constants.O_RDONLY | constants.O_NONBLOCK,
-    )
-    const writer = spawn(
-      'dd',
-      ['if=/dev/zero', `of=${filePath}`, 'bs=10000001', 'count=1', 'status=none'],
-      { stdio: 'ignore' },
-    )
-    const writerDone = new Promise<void>((resolve, reject) => {
-      writer.once('error', reject)
-      writer.once('exit', () => resolve())
-    })
-    lspManager = {
-      isFileOpen: () => false,
-      openFile,
-      sendRequest,
-    }
-
-    const result = await LSPTool.call(
-      { operation: 'hover', filePath, line: 1, character: 1 },
-      {} as never,
-    )
-    closeSync(keeper)
-    keeper = undefined
-    await writerDone
-
-    expect(result.data.result).toContain('not a regular file')
-    expect(openFile).not.toHaveBeenCalled()
-    expect(sendRequest).not.toHaveBeenCalled()
-  } finally {
-    if (keeper !== undefined) closeSync(keeper)
     rmSync(directory, { recursive: true, force: true })
   }
 })

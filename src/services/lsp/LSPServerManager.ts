@@ -90,6 +90,7 @@ export function createLSPServerManager(
   const extensionMap = new Map<string, string[]>()
   const openedDocuments = new Map<string, OpenLspDocumentState>()
   const documentOperations = new Map<string, Promise<void>>()
+  let shuttingDown = false
 
   function invalidateServerDocuments(
     serverName: string,
@@ -109,6 +110,9 @@ export function createLSPServerManager(
     documentKey: string,
     operation: () => Promise<T>,
   ): Promise<T> {
+    if (shuttingDown) {
+      throw new Error('LSP server manager is shutting down')
+    }
     const previous = documentOperations.get(documentKey) ?? Promise.resolve()
     let release!: () => void
     const gate = new Promise<void>(resolve => {
@@ -148,6 +152,28 @@ export function createLSPServerManager(
     if (isCurrentDocumentState(state, server)) return state
     if (state) openedDocuments.delete(identity.stateKey)
     return undefined
+  }
+
+  function useDocumentUri(params: unknown, fileUri: string): unknown {
+    if (!params || typeof params !== 'object' || Array.isArray(params)) {
+      return params
+    }
+    const requestParams = params as Record<string, unknown>
+    const textDocument = requestParams.textDocument
+    if (
+      !textDocument ||
+      typeof textDocument !== 'object' ||
+      Array.isArray(textDocument)
+    ) {
+      return params
+    }
+    return {
+      ...requestParams,
+      textDocument: {
+        ...(textDocument as Record<string, unknown>),
+        uri: fileUri,
+      },
+    }
   }
 
   async function synchronizeOpenUnlocked(
@@ -211,6 +237,7 @@ export function createLSPServerManager(
 
   /** Initialize the manager by loading configured server definitions. */
   async function initialize(): Promise<void> {
+    shuttingDown = false
     let serverConfigs: Record<string, ScopedLspServerConfig>
 
     try {
@@ -284,13 +311,15 @@ export function createLSPServerManager(
 
   /** Stop every server and clear manager-owned state. */
   async function shutdown(): Promise<void> {
+    shuttingDown = true
+    const operations = Array.from(documentOperations.values())
     const toStop = Array.from(servers.entries()).filter(
-      ([, server]) =>
-        server.state === 'running' || server.state === 'error',
+      ([, server]) => server.state !== 'stopped',
     )
     const results = await Promise.allSettled(
       toStop.map(([, server]) => server.stop()),
     )
+    await Promise.allSettled(operations)
 
     servers.clear()
     extensionMap.clear()
@@ -325,6 +354,9 @@ export function createLSPServerManager(
   async function ensureServerStarted(
     filePath: string,
   ): Promise<LSPServerInstance | undefined> {
+    if (shuttingDown) {
+      throw new Error('LSP server manager is shutting down')
+    }
     const server = getServerForFile(filePath)
     if (!server) return undefined
 
@@ -346,6 +378,10 @@ export function createLSPServerManager(
       }
     }
 
+    if (shuttingDown) {
+      throw new Error('LSP server manager is shutting down')
+    }
+
     if (server.state !== 'running') {
       throw new Error(
         `LSP server '${server.name}' is not ready for file ${filePath}: server is ${server.state}`,
@@ -364,27 +400,48 @@ export function createLSPServerManager(
     const identity = getLspDocumentIdentity(filePath)
     return withDocumentLock(identity.stateKey, async () => {
       try {
-        const server = await ensureServerStarted(filePath)
-        if (!server) return undefined
+        for (let generationRetry = 0; generationRetry <= 1; generationRetry++) {
+          const server = await ensureServerStarted(filePath)
+          if (!server) return undefined
 
-        if (!getCurrentDocumentState(identity, server)) {
-          const content = await dependencies.readDocument(identity.resolvedPath)
-          dependencies.recordFileActivity(identity.activityPath)
-          await synchronizeOpenUnlocked(
-            filePath,
-            content,
-            identity,
-            server,
-          )
+          if (!getCurrentDocumentState(identity, server)) {
+            const content = await dependencies.readDocument(identity.resolvedPath)
+            dependencies.recordFileActivity(identity.activityPath)
+            await synchronizeOpenUnlocked(
+              filePath,
+              content,
+              identity,
+              server,
+            )
+          }
+
+          const state = getCurrentDocumentState(identity, server)
+          if (!state) {
+            throw new Error(
+              `LSP document ${filePath} is not synchronized to server generation ${server.generation}`,
+            )
+          }
+
+          try {
+            return await server.sendRequest<T>(
+              method,
+              useDocumentUri(params, state.fileUri),
+            )
+          } catch (error) {
+            const generationChanged =
+              server.generation !== state.serverGeneration ||
+              server.state !== 'running'
+            if (generationChanged && generationRetry === 0) {
+              openedDocuments.delete(identity.stateKey)
+              continue
+            }
+            throw error
+          }
         }
 
-        if (!getCurrentDocumentState(identity, server)) {
-          throw new Error(
-            `LSP document ${filePath} is not synchronized to server generation ${server.generation}`,
-          )
-        }
-
-        return await server.sendRequest<T>(method, params)
+        throw new Error(
+          `LSP request failed for file ${filePath}: server generation kept changing`,
+        )
       } catch (error) {
         const err = error as Error
         logError(
@@ -475,20 +532,14 @@ export function createLSPServerManager(
       const state = getCurrentDocumentState(identity, server)
       if (!state) return
 
-      try {
-        await server.sendNotification('textDocument/didSave', {
-          textDocument: {
-            uri: state.fileUri,
-          },
-        })
-        logForDebugging(`LSP: Sent didSave for ${filePath}`)
-      } catch (error) {
-        const syncError = new Error(
-          `Failed to sync file save ${filePath}: ${errorMessage(error)}`,
-        )
-        logError(syncError)
-        throw syncError
-      }
+      // Best-effort by design: didSave carries no version or content, so a
+      // dropped notification cannot desynchronize the document version space.
+      await server.sendNotification('textDocument/didSave', {
+        textDocument: {
+          uri: state.fileUri,
+        },
+      })
+      logForDebugging(`LSP: Sent didSave for ${filePath}`)
     })
   }
 

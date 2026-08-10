@@ -27,7 +27,7 @@ export type LspDocumentIdentity = {
 const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/
 
 function encodeWindowsFileUri(filePath: string): string {
-  const normalized = filePath.replaceAll('\\', '/').toLowerCase()
+  const normalized = filePath.replaceAll('\\', '/')
   const [drive, ...segments] = normalized.split('/')
   const encodedSegments = segments.map(segment =>
     encodeURIComponent(segment).replace(/[!'()*]/g, character =>
@@ -51,7 +51,7 @@ export function getLspDocumentIdentity(
       return {
         resolvedPath,
         fileUri,
-        stateKey: fileUri,
+        stateKey: fileUri.toLowerCase(),
         activityPath: fileURLToPath(fileUri),
       }
     }

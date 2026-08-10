@@ -3,8 +3,10 @@ import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
-import type { ScopedLspServerConfig } from './types.js'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { createLSPServerManager } from './LSPServerManager.js'
+import type { LSPServerInstance } from './LSPServerInstance.js'
+import type { LspServerState, ScopedLspServerConfig } from './types.js'
 
 type ProtocolEvent = {
   generation: number
@@ -14,7 +16,7 @@ type ProtocolEvent = {
 }
 
 type FakeServer = {
-  server: Record<string, unknown>
+  server: LSPServerInstance
   events: ProtocolEvent[]
   crash(): void
 }
@@ -27,18 +29,17 @@ const CONFIG = {
 } satisfies ScopedLspServerConfig
 
 let currentServer: FakeServer | undefined
-let installedBaselineMocks = false
 const managers: Array<{ shutdown(): Promise<void> }> = []
 const activityPaths: string[] = []
 
 function createFakeServer(
   onUnavailable?: (generation: number) => void,
 ): FakeServer {
-  let state = 'stopped'
+  let state: LspServerState = 'stopped'
   let generation = 0
   const events: ProtocolEvent[] = []
 
-  const server = {
+  const server: LSPServerInstance = {
     name: 'typescript',
     config: CONFIG,
     get state() {
@@ -73,9 +74,9 @@ function createFakeServer(
     isHealthy() {
       return state === 'running'
     },
-    async sendRequest(method: string, params: unknown) {
+    async sendRequest<TResult>(method: string, params: unknown) {
       events.push({ generation, kind: 'request', method, params })
-      return null
+      return null as TResult
     },
     async sendNotification(method: string, params: unknown) {
       events.push({ generation, kind: 'notification', method, params })
@@ -98,35 +99,6 @@ function createFakeServer(
   }
 }
 
-try {
-  await import('./documentIdentity.js')
-} catch {
-  // The prior head has no dependency-injection seam. These mocks are installed
-  // only for that compatibility path so the same behavioral checks can execute
-  // without launching a real server.
-  installedBaselineMocks = true
-  mock.module('./config.js', () => ({
-    getAllLspServers: async () => ({ servers: { typescript: CONFIG } }),
-  }))
-  mock.module('./LSPDiagnosticRegistry.js', () => ({
-    recordLSPDiagnosticFileActivity: (filePath: string) => {
-      activityPaths.push(filePath)
-    },
-  }))
-  mock.module('./LSPServerInstance.js', () => ({
-    createLSPServerInstance: (
-      _name: string,
-      _config: unknown,
-      options?: { onUnavailable?: (generation: number) => void },
-    ) => {
-      currentServer = createFakeServer(options?.onUnavailable)
-      return currentServer.server
-    },
-  }))
-}
-
-const { createLSPServerManager } = await import('./LSPServerManager.js')
-
 afterEach(async () => {
   await Promise.allSettled(managers.splice(0).map(manager => manager.shutdown()))
   currentServer = undefined
@@ -134,10 +106,6 @@ afterEach(async () => {
 
 beforeEach(() => {
   activityPaths.length = 0
-})
-
-afterAll(() => {
-  if (installedBaselineMocks) mock.restore()
 })
 
 async function createManager() {
@@ -151,7 +119,7 @@ async function createManager() {
       options: { onUnavailable?: (generation: number) => void },
     ) => {
       currentServer = createFakeServer(options.onUnavailable)
-      return currentServer.server as never
+      return currentServer.server
     },
     readDocument: filePath => readFile(filePath, 'utf-8'),
     recordFileActivity: filePath => {
@@ -220,17 +188,18 @@ test('resends current contents after restart before making a request', async () 
   }
 })
 
-test('records Windows activity with the same canonical path as diagnostics', async () => {
+test('records Windows activity without losing supplied path casing', async () => {
   const { manager } = await createManager()
   const firstSpelling = String.raw`C:\Repo\Source File.ts`
   const secondSpelling = 'c:/repo/source file.ts'
-  const canonicalUri = 'file:///c:/repo/source%20file.ts'
+  const openedUri = 'file:///c:/Repo/Source%20File.ts'
+  const changedUri = 'file:///c:/repo/source%20file.ts'
 
   await manager.openFile(firstSpelling, 'one')
   await manager.changeFile(secondSpelling, 'two')
 
   expect(activityPaths).toEqual([
-    fileURLToPath(canonicalUri),
-    fileURLToPath(canonicalUri),
+    fileURLToPath(openedUri),
+    fileURLToPath(changedUri),
   ])
 })

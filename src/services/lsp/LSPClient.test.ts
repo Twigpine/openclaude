@@ -1,18 +1,19 @@
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { afterAll, describe, expect, mock, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
 import type { ChildProcess } from 'child_process'
 import type { MessageConnection } from 'vscode-jsonrpc/node.js'
-import type { LSPClientDependencies } from './LSPClient.js'
-
-let baselineConnectionFactory: (() => MessageConnection) | undefined
-let installedBaselineMocks = false
+import {
+  createLSPClient,
+  type LSPClientDependencies,
+} from './LSPClient.js'
 
 type FakeConnection = {
   connection: MessageConnection
   notificationMethods: string[]
   requestMethods: string[]
   emitError(error: Error): void
+  emitClose(): void
 }
 
 function createFakeProcess(): ChildProcess {
@@ -74,31 +75,11 @@ function createFakeConnection(
     emitError(error) {
       errorHandler?.([error, undefined, 0])
     },
+    emitClose() {
+      closeHandler?.()
+    },
   }
 }
-
-try {
-  await import('./documentIdentity.js')
-} catch {
-  // The prior head lacks the dependency-injection seam. Keep its transport
-  // fakes isolated so the same behavioral checks can run without a real server.
-  installedBaselineMocks = true
-  mock.module('child_process', () => ({
-    spawn: () => createFakeProcess(),
-  }))
-  mock.module('vscode-jsonrpc/node.js', () => ({
-    createMessageConnection: () => baselineConnectionFactory?.(),
-    StreamMessageReader: class {},
-    StreamMessageWriter: class {},
-    Trace: { Verbose: 'verbose' },
-  }))
-}
-
-const { createLSPClient } = await import('./LSPClient.js')
-
-afterAll(() => {
-  if (installedBaselineMocks) mock.restore()
-})
 
 function initializeParams() {
   return {
@@ -111,7 +92,6 @@ function initializeParams() {
 describe('LSP client notification delivery', () => {
   test('best-effort notifications preserve lifecycle preflight errors', async () => {
     const fakeConnection = createFakeConnection()
-    baselineConnectionFactory = () => fakeConnection.connection
     const client = createLSPClient('typescript', undefined, {
       spawnProcess: spawnFakeProcess,
       createConnection: () => fakeConnection.connection,
@@ -133,7 +113,6 @@ describe('LSP client notification delivery', () => {
 
   test('strict notifications reject while best-effort notifications keep resolving', async () => {
     const fakeConnection = createFakeConnection('textDocument/didOpen')
-    baselineConnectionFactory = () => fakeConnection.connection
     const client = createLSPClient('typescript', undefined, {
       spawnProcess: spawnFakeProcess,
       createConnection: () => fakeConnection.connection,
@@ -152,6 +131,46 @@ describe('LSP client notification delivery', () => {
     await client.stop()
   })
 
+  test('active connection failures make the client unavailable exactly once', async () => {
+    const fakeConnection = createFakeConnection()
+    const onCrash = mock((_error: Error) => {})
+    const client = createLSPClient('typescript', onCrash, {
+      spawnProcess: spawnFakeProcess,
+      createConnection: () => fakeConnection.connection,
+    })
+
+    await client.start('unused', [])
+    await client.initialize(initializeParams())
+    fakeConnection.emitError(new Error('connection failed'))
+    fakeConnection.emitClose()
+
+    expect(client.isInitialized).toBe(false)
+    expect(onCrash).toHaveBeenCalledTimes(1)
+    await client.stop()
+  })
+
+  test('ignores a stale close callback after connection replacement', async () => {
+    const connections: FakeConnection[] = []
+    const client = createLSPClient('typescript', undefined, {
+      spawnProcess: spawnFakeProcess,
+      createConnection: () => {
+        const fake = createFakeConnection()
+        connections.push(fake)
+        return fake.connection
+      },
+    })
+
+    await client.start('unused', [])
+    await client.initialize(initializeParams())
+    await client.start('unused', [])
+    await client.initialize(initializeParams())
+
+    connections[0]?.emitClose()
+    expect(client.isInitialized).toBe(true)
+
+    await client.stop()
+  })
+
   test('reinstalls registered handlers on a replacement connection', async () => {
     const connections: FakeConnection[] = []
     const nextConnection = () => {
@@ -159,7 +178,6 @@ describe('LSP client notification delivery', () => {
       connections.push(fake)
       return fake.connection
     }
-    baselineConnectionFactory = nextConnection
     const client = createLSPClient('typescript', undefined, {
       spawnProcess: spawnFakeProcess,
       createConnection: nextConnection,
