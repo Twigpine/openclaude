@@ -94,6 +94,17 @@ export function createLSPClient(
     }
   }
 
+  function reportTransportUnavailable(error: Error): void {
+    if (isStopping) return
+    isInitialized = false
+    capabilities = undefined
+    startFailed = true
+    startError = error
+    const unavailableConnection = connection
+    connection = undefined
+    disposeResources(unavailableConnection, undefined)
+  }
+
   function reportUnavailable(error: Error): void {
     if (isStopping || unavailableReported) return
     unavailableReported = true
@@ -250,7 +261,7 @@ export function createLSPClient(
         // Handle process errors (after successful spawn, e.g., crash during operation)
         spawnedProcess.on('error', error => {
           if (process !== spawnedProcess || isStopping) return
-          reportUnavailable(error)
+          reportTransportUnavailable(error)
           if (!isStopping) {
             logError(
               new Error(
@@ -262,6 +273,7 @@ export function createLSPClient(
 
         spawnedProcess.on('exit', (code, signal) => {
           if (process !== spawnedProcess || isStopping) return
+          if (code === 0 || code === null) return
           const exitDetail =
             signal !== null ? `signal ${signal}` : `exit code ${code}`
           const crashError = new Error(
@@ -292,7 +304,7 @@ export function createLSPClient(
         // This prevents unhandled promise rejections when the server crashes or closes unexpectedly
         startedConnection.onError(([error, _message, _code]) => {
           if (connection !== startedConnection || isStopping) return
-          reportUnavailable(error)
+          reportTransportUnavailable(error)
           // Only log if not intentionally stopping (avoid spurious errors during shutdown)
           if (!isStopping) {
             logError(
@@ -310,7 +322,7 @@ export function createLSPClient(
             `LSP server ${serverName} connection closed unexpectedly`,
           )
           logForDebugging(closeError.message)
-          reportUnavailable(closeError)
+          reportTransportUnavailable(closeError)
         })
 
         // 3. Start listening for messages

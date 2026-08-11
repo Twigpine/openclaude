@@ -400,25 +400,16 @@ describe('LSP server generations', () => {
       { createClient: fake.createClient },
     )
 
-    const startOutcome = instance.start().then(
-      () => 'resolved',
-      () => 'rejected',
-    )
+    const start = instance.start()
     await initializeGate.started
 
     try {
-      const outcome = await Promise.race([
-        startOutcome,
-        new Promise<'pending'>(resolve =>
-          setTimeout(() => resolve('pending'), 30),
-        ),
-      ])
-      expect(outcome).toBe('rejected')
+      await expect(start).rejects.toThrow('timed out')
       expect(fake.stopCalls).toHaveBeenCalledWith({ force: true })
     } finally {
       initializeGate.release()
       stopGate.release()
-      await startOutcome
+      await start.catch(() => {})
     }
   })
 

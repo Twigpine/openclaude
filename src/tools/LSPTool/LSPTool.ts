@@ -125,6 +125,14 @@ type OutputSchema = ReturnType<typeof outputSchema>
 export type Output = z.infer<OutputSchema>
 export type Input = z.infer<InputSchema>
 
+const LSP_SERVER_GENERATION_CHANGED = 'LSP_SERVER_GENERATION_CHANGED'
+
+function isLspServerGenerationChanged(error: unknown): boolean {
+  return (
+    (error as { code?: unknown }).code === LSP_SERVER_GENERATION_CHANGED
+  )
+}
+
 export const LSPTool = buildTool({
   name: LSP_TOOL_NAME,
   searchHint: 'code intelligence (definitions, references, symbols, hover)',
@@ -264,8 +272,67 @@ export const LSPTool = buildTool({
         await manager.openFile(absolutePath, fileContent)
       }
 
-      // Send request to LSP server
-      let result = await manager.sendRequest(absolutePath, method, params)
+      let result: unknown
+
+      // Call hierarchy items may contain opaque, process-owned data. Keep the
+      // prepare result and its follow-up request on one server generation.
+      if (
+        input.operation === 'incomingCalls' ||
+        input.operation === 'outgoingCalls'
+      ) {
+        for (let generationRetry = 0; generationRetry <= 1; generationRetry++) {
+          const prepared = await manager.sendRequestWithGeneration<
+            CallHierarchyItem[]
+          >(absolutePath, method, params)
+          if (!prepared) {
+            result = undefined
+            break
+          }
+
+          const callItems = prepared.result
+          if (!callItems || callItems.length === 0) {
+            const output: Output = {
+              operation: input.operation,
+              result: 'No call hierarchy item found at this position',
+              filePath: input.filePath,
+              resultCount: 0,
+              fileCount: 0,
+            }
+            return { data: output }
+          }
+
+          const callMethod =
+            input.operation === 'incomingCalls'
+              ? 'callHierarchy/incomingCalls'
+              : 'callHierarchy/outgoingCalls'
+
+          try {
+            const calls = await manager.sendRequestWithGeneration(
+              absolutePath,
+              callMethod,
+              { item: callItems[0] },
+              { expectedGeneration: prepared.serverGeneration },
+            )
+            if (!calls) {
+              logForDebugging(
+                `LSP server returned undefined for ${callMethod} on ${input.filePath}`,
+              )
+            }
+            result = calls?.result ?? null
+            break
+          } catch (error) {
+            if (
+              generationRetry === 0 &&
+              isLspServerGenerationChanged(error)
+            ) {
+              continue
+            }
+            throw error
+          }
+        }
+      } else {
+        result = await manager.sendRequest(absolutePath, method, params)
+      }
 
       if (result === undefined) {
         // Log for diagnostic purposes - helps track usage patterns and potential bugs
@@ -280,43 +347,6 @@ export const LSPTool = buildTool({
         }
         return {
           data: output,
-        }
-      }
-
-      // For incomingCalls and outgoingCalls, we need a two-step process:
-      // 1. First get CallHierarchyItem(s) from prepareCallHierarchy
-      // 2. Then request the actual calls using that item
-      if (
-        input.operation === 'incomingCalls' ||
-        input.operation === 'outgoingCalls'
-      ) {
-        const callItems = result as CallHierarchyItem[]
-        if (!callItems || callItems.length === 0) {
-          const output: Output = {
-            operation: input.operation,
-            result: 'No call hierarchy item found at this position',
-            filePath: input.filePath,
-            resultCount: 0,
-            fileCount: 0,
-          }
-          return { data: output }
-        }
-
-        // Use the first call hierarchy item to request calls
-        const callMethod =
-          input.operation === 'incomingCalls'
-            ? 'callHierarchy/incomingCalls'
-            : 'callHierarchy/outgoingCalls'
-
-        result = await manager.sendRequest(absolutePath, callMethod, {
-          item: callItems[0],
-        })
-
-        if (result === undefined) {
-          logForDebugging(
-            `LSP server returned undefined for ${callMethod} on ${input.filePath}`,
-          )
-          // Continue to formatter which will handle empty/null gracefully
         }
       }
 

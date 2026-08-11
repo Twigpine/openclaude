@@ -368,6 +368,56 @@ describe('LSP document versions', () => {
 })
 
 describe('LSP lifecycle notification failures', () => {
+  test('generation replacement during open leaves no committed state', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/open-generation-change.ts'
+    const gate = server.blockNextNotification('textDocument/didOpen')
+
+    const open = manager.openFile(file, 'one')
+    await gate.started
+    server.replaceGeneration()
+    gate.release()
+
+    await expect(open).rejects.toThrow('generation changed')
+    expect(manager.isFileOpen(file)).toBe(false)
+
+    await manager.changeFile(file, 'two')
+    expect(manager.isFileOpen(file)).toBe(true)
+    expect(
+      documentVersions(server.events, getLspDocumentIdentity(file).fileUri),
+    ).toEqual([
+      { method: 'textDocument/didOpen', version: 1 },
+      { method: 'textDocument/didOpen', version: 1 },
+    ])
+  })
+
+  test('generation replacement during change forces a version-one reopen', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/change-generation-change.ts'
+
+    await manager.openFile(file, 'one')
+    const gate = server.blockNextNotification('textDocument/didChange')
+    const change = manager.changeFile(file, 'two')
+    await gate.started
+    server.replaceGeneration()
+    gate.release()
+
+    await expect(change).rejects.toThrow('generation changed')
+    expect(manager.isFileOpen(file)).toBe(false)
+
+    await manager.changeFile(file, 'three')
+    expect(manager.isFileOpen(file)).toBe(true)
+    expect(
+      documentVersions(server.events, getLspDocumentIdentity(file).fileUri),
+    ).toEqual([
+      { method: 'textDocument/didOpen', version: 1 },
+      { method: 'textDocument/didChange', version: 2 },
+      { method: 'textDocument/didOpen', version: 1 },
+    ])
+  })
+
   test('failed open creates no state and a later open retries', async () => {
     const { manager, controls } = await createManager()
     const server = controls.get('typescript')!
@@ -446,6 +496,31 @@ describe('LSP lifecycle notification failures', () => {
 })
 
 describe('LSP generation resynchronization', () => {
+  test('generation-bound requests reject instead of replaying opaque params', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/generation-bound.ts'
+
+    await manager.openFile(file, 'one')
+    const gate = server.blockNextRequest('callHierarchy/incomingCalls')
+    const request = manager.sendRequestWithGeneration(
+      file,
+      'callHierarchy/incomingCalls',
+      { item: { data: { generation: 1 } } },
+      { expectedGeneration: 1 },
+    )
+    await gate.started
+    server.replaceGeneration()
+    gate.release()
+
+    await expect(request).rejects.toMatchObject({
+      code: 'LSP_SERVER_GENERATION_CHANGED',
+    })
+    expect(
+      server.events.filter(event => event.kind === 'request'),
+    ).toHaveLength(1)
+  })
+
   test('opens current contents on a replacement generation before the request', async () => {
     const readDocument = mock(async () => 'contents after crash')
     const { manager, controls } = await createManager({ readDocument })
@@ -719,6 +794,26 @@ describe('LSP document identity and diagnostics activity', () => {
       file,
       file,
     ])
+  })
+
+  test('records save activity when no document lifecycle is tracked', async () => {
+    const recordFileActivity = mock((_filePath: string) => {})
+    const { manager, controls } = await createManager({ recordFileActivity })
+    const server = controls.get('typescript')!
+    const file = '/repo/src/unopened-save.ts'
+
+    await manager.ensureServerStarted(file)
+    await manager.saveFile(file)
+
+    expect(recordFileActivity).toHaveBeenCalledTimes(1)
+    expect(recordFileActivity).toHaveBeenCalledWith(file)
+    expect(
+      server.events.some(
+        event =>
+          event.kind === 'notification' &&
+          event.method === 'textDocument/didSave',
+      ),
+    ).toBe(false)
   })
 
   test('the shared document reader rejects files above the tool limit', async () => {

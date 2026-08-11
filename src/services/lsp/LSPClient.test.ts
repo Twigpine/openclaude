@@ -167,11 +167,12 @@ describe('LSP client notification delivery', () => {
     await client.stop()
   })
 
-  test('active connection failures make the client unavailable exactly once', async () => {
+  test('connection-only failures stay outside crash recovery until a nonzero exit', async () => {
+    const child = createFakeProcess()
     const fakeConnection = createFakeConnection()
     const onCrash = mock((_error: Error) => {})
     const client = createLSPClient('typescript', onCrash, {
-      spawnProcess: spawnFakeProcess,
+      spawnProcess: (() => child) as LSPClientDependencies['spawnProcess'],
       createConnection: () => fakeConnection.connection,
     })
 
@@ -181,8 +182,46 @@ describe('LSP client notification delivery', () => {
     fakeConnection.emitClose()
 
     expect(client.isInitialized).toBe(false)
+    expect(onCrash).not.toHaveBeenCalled()
+
+    child.emit('exit', 1, null)
     expect(onCrash).toHaveBeenCalledTimes(1)
-    await client.stop()
+    await client.stop({ force: true })
+  })
+
+  test('only nonzero process exits enter crash recovery', async () => {
+    const createStartedClient = async () => {
+      const child = createFakeProcess()
+      const fakeConnection = createFakeConnection()
+      const onCrash = mock((_error: Error) => {})
+      const client = createLSPClient('typescript', onCrash, {
+        spawnProcess: (() => child) as LSPClientDependencies['spawnProcess'],
+        createConnection: () => fakeConnection.connection,
+      })
+      await client.start('unused', [])
+      await client.initialize(initializeParams())
+      return { child, client, onCrash }
+    }
+
+    const cleanExit = await createStartedClient()
+    cleanExit.child.emit('exit', 0, null)
+    expect(cleanExit.onCrash).not.toHaveBeenCalled()
+    await cleanExit.client.stop({ force: true })
+
+    const signalExit = await createStartedClient()
+    signalExit.child.emit('exit', null, 'SIGTERM')
+    expect(signalExit.onCrash).not.toHaveBeenCalled()
+    await signalExit.client.stop({ force: true })
+
+    const processError = await createStartedClient()
+    processError.child.emit('error', new Error('process transport error'))
+    expect(processError.onCrash).not.toHaveBeenCalled()
+    await processError.client.stop({ force: true })
+
+    const crash = await createStartedClient()
+    crash.child.emit('exit', 1, null)
+    expect(crash.onCrash).toHaveBeenCalledTimes(1)
+    await crash.client.stop({ force: true })
   })
 
   test('ignores a stale close callback after connection replacement', async () => {
@@ -255,19 +294,10 @@ describe('LSP client notification delivery', () => {
       spawnProcess: (() => child) as LSPClientDependencies['spawnProcess'],
     })
 
-    const startOutcome = client.start('unused', []).then(
-      () => 'resolved',
-      () => 'rejected',
-    )
+    const start = client.start('unused', [])
     await client.stop({ force: true })
 
-    const outcome = await Promise.race([
-      startOutcome,
-      new Promise<'pending'>(resolve =>
-        setTimeout(() => resolve('pending'), 30),
-      ),
-    ])
-    expect(outcome).toBe('rejected')
+    await expect(start).rejects.toThrow('cancelled during spawn')
   })
 
   test('transport failure rejects a pending initialization', async () => {
@@ -278,24 +308,15 @@ describe('LSP client notification delivery', () => {
     })
 
     await client.start('unused', [])
-    const initializeOutcome = client.initialize(initializeParams()).then(
-      () => 'resolved',
-      () => 'rejected',
-    )
+    const initialize = client.initialize(initializeParams())
     fakeConnection.emitError(new Error('connection lost'))
 
     try {
-      const outcome = await Promise.race([
-        initializeOutcome,
-        new Promise<'pending'>(resolve =>
-          setTimeout(() => resolve('pending'), 30),
-        ),
-      ])
-      expect(outcome).toBe('rejected')
+      await expect(initialize).rejects.toThrow('connection disposed')
       expect(client.isInitialized).toBe(false)
     } finally {
       await client.stop({ force: true }).catch(() => {})
-      await initializeOutcome
+      await initialize.catch(() => {})
     }
   })
 

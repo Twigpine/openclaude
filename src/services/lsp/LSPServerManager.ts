@@ -24,6 +24,26 @@ type OpenLspDocumentState = {
   activityPath: string
 }
 
+export type LspGenerationRequestResult<T> = {
+  result: T
+  serverGeneration: number
+}
+
+const LSP_SERVER_GENERATION_CHANGED = 'LSP_SERVER_GENERATION_CHANGED'
+
+function generationChangedError(
+  serverName: string,
+  expectedGeneration: number,
+  actualGeneration: number,
+): Error & { code: typeof LSP_SERVER_GENERATION_CHANGED } {
+  return Object.assign(
+    new Error(
+      `LSP server '${serverName}' changed generation from ${expectedGeneration} to ${actualGeneration}`,
+    ),
+    { code: LSP_SERVER_GENERATION_CHANGED },
+  ) as Error & { code: typeof LSP_SERVER_GENERATION_CHANGED }
+}
+
 export type LSPServerManagerDependencies = {
   loadServerConfigs: typeof getAllLspServers
   createServerInstance: (
@@ -62,6 +82,13 @@ export type LSPServerManager = {
     method: string,
     params: unknown,
   ): Promise<T | undefined>
+  /** Send a request and atomically report which server generation produced it. */
+  sendRequestWithGeneration<T>(
+    filePath: string,
+    method: string,
+    params: unknown,
+    options?: { expectedGeneration?: number },
+  ): Promise<LspGenerationRequestResult<T> | undefined>
   /** Get all running server instances */
   getAllServers(): Map<string, LSPServerInstance>
   /** Synchronize file open to LSP server (sends didOpen notification) */
@@ -394,48 +421,91 @@ export function createLSPServerManager(
   }
 
   /** Synchronize the current generation, then send the request under the document lock. */
-  async function sendRequest<T>(
+  async function sendRequestWithGeneration<T>(
     filePath: string,
     method: string,
     params: unknown,
-  ): Promise<T | undefined> {
+    options: { expectedGeneration?: number } = {},
+  ): Promise<LspGenerationRequestResult<T> | undefined> {
     const identity = getLspDocumentIdentity(filePath)
     return withDocumentLock(identity.stateKey, async () => {
       try {
         for (let generationRetry = 0; generationRetry <= 1; generationRetry++) {
           const server = await ensureServerStarted(filePath)
           if (!server) return undefined
-
-          if (!getCurrentDocumentState(identity, server)) {
-            const content = await dependencies.readDocument(identity.resolvedPath)
-            dependencies.recordFileActivity(identity.activityPath)
-            await synchronizeOpenUnlocked(
-              filePath,
-              content,
-              identity,
-              server,
+          const expectedGeneration = options.expectedGeneration
+          if (
+            expectedGeneration !== undefined &&
+            server.generation !== expectedGeneration
+          ) {
+            throw generationChangedError(
+              server.name,
+              expectedGeneration,
+              server.generation,
             )
           }
 
-          const state = getCurrentDocumentState(identity, server)
-          if (!state) {
-            throw new Error(
-              `LSP document ${filePath} is not synchronized to server generation ${server.generation}`,
-            )
-          }
-
+          let requestGeneration = server.generation
           try {
-            return await server.sendRequest<T>(
+            if (!getCurrentDocumentState(identity, server)) {
+              const content = await dependencies.readDocument(
+                identity.resolvedPath,
+              )
+              dependencies.recordFileActivity(identity.activityPath)
+              await synchronizeOpenUnlocked(
+                filePath,
+                content,
+                identity,
+                server,
+              )
+            }
+
+            const state = getCurrentDocumentState(identity, server)
+            if (!state) {
+              throw new Error(
+                `LSP document ${filePath} is not synchronized to server generation ${server.generation}`,
+              )
+            }
+            requestGeneration = state.serverGeneration
+            if (
+              expectedGeneration !== undefined &&
+              state.serverGeneration !== expectedGeneration
+            ) {
+              throw generationChangedError(
+                server.name,
+                expectedGeneration,
+                state.serverGeneration,
+              )
+            }
+
+            const result = await server.sendRequest<T>(
               method,
               useDocumentUri(params, state.fileUri),
             )
+            return {
+              result,
+              serverGeneration: state.serverGeneration,
+            }
           } catch (error) {
+            if (
+              (error as { code?: unknown }).code ===
+              LSP_SERVER_GENERATION_CHANGED
+            ) {
+              throw error
+            }
             const generationChanged =
-              server.generation !== state.serverGeneration ||
+              server.generation !== requestGeneration ||
               server.state !== 'running'
-            if (generationChanged && generationRetry === 0) {
+            if (generationChanged) {
               openedDocuments.delete(identity.stateKey)
-              continue
+              if (options.expectedGeneration !== undefined) {
+                throw generationChangedError(
+                  server.name,
+                  options.expectedGeneration,
+                  server.generation,
+                )
+              }
+              if (generationRetry === 0) continue
             }
             throw error
           }
@@ -454,6 +524,15 @@ export function createLSPServerManager(
         throw error
       }
     })
+  }
+
+  async function sendRequest<T>(
+    filePath: string,
+    method: string,
+    params: unknown,
+  ): Promise<T | undefined> {
+    return (await sendRequestWithGeneration<T>(filePath, method, params))
+      ?.result
   }
 
   function getAllServers(): Map<string, LSPServerInstance> {
@@ -536,8 +615,10 @@ export function createLSPServerManager(
       const server = getServerForFile(filePath)
       if (!server || server.state !== 'running') return
       const state = getCurrentDocumentState(identity, server)
+      dependencies.recordFileActivity(
+        state?.activityPath ?? identity.activityPath,
+      )
       if (!state) return
-      dependencies.recordFileActivity(state.activityPath)
 
       // Best-effort by design: didSave carries no version or content, so a
       // dropped notification cannot desynchronize the document version space.
@@ -598,6 +679,7 @@ export function createLSPServerManager(
     getServerForFile,
     ensureServerStarted,
     sendRequest,
+    sendRequestWithGeneration,
     getAllServers,
     openFile,
     changeFile,
