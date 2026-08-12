@@ -1,8 +1,12 @@
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, mock, test } from 'bun:test'
+import type { ChildProcess } from 'child_process'
+import type { MessageConnection } from 'vscode-jsonrpc/node.js'
 import {
   getLspDocumentIdentity,
   LspDocumentTooLargeError,
@@ -10,12 +14,17 @@ import {
   readLspDocumentContents,
 } from './documentIdentity.js'
 import {
+  createLSPClient,
+  type LSPClientDependencies,
+} from './LSPClient.js'
+import {
   createLSPServerManager,
   type LSPServerManager,
 } from './LSPServerManager.js'
-import type {
-  LSPServerInstance,
-  LSPServerInstanceOptions,
+import {
+  createLSPServerInstance,
+  type LSPServerInstance,
+  type LSPServerInstanceOptions,
 } from './LSPServerInstance.js'
 import type { LspServerState, ScopedLspServerConfig } from './types.js'
 
@@ -64,11 +73,16 @@ type FakeServerControl = {
     started: Promise<void>
     release(): void
   }
+  holdNextRequest<TResult>(method: string, result: TResult): {
+    started: Promise<void>
+    release(): void
+  }
   failNextNotification(method: string, error?: Error): void
   holdNextStart(): { started: Promise<void>; release(): void }
   waitForStartCalls(count: number): Promise<void>
   simulateCrash(notifyManager?: boolean): void
   replaceGeneration(): void
+  setCrashRecoveryExhausted(exhausted: boolean): void
 }
 
 function createFakeServer(
@@ -95,13 +109,15 @@ function createFakeServer(
   let requestGate:
     | {
         method: string
-        error: Error
+        result?: unknown
+        error?: Error
         startedResolve: () => void
         wait: Promise<void>
         release: () => void
       }
     | undefined
   let startInvocationCount = 0
+  let crashRecoveryExhausted = false
   const startWaiters: Array<{ count: number; resolve: () => void }> = []
   const events: ServerEvent[] = []
 
@@ -157,6 +173,9 @@ function createFakeServer(
     get restartCount() {
       return 0
     },
+    get isCrashRecoveryExhausted() {
+      return crashRecoveryExhausted
+    },
     start: startCalls,
     stop: stopCalls,
     async restart() {
@@ -173,7 +192,8 @@ function createFakeServer(
         gate.startedResolve()
         await gate.wait
         requestGate = undefined
-        throw gate.error
+        if (gate.error) throw gate.error
+        return gate.result as TResult
       }
       return null as TResult
     },
@@ -238,6 +258,18 @@ function createFakeServer(
       requestGate = { method, error, startedResolve, wait, release }
       return { started, release }
     },
+    holdNextRequest(method, result) {
+      let startedResolve!: () => void
+      let release!: () => void
+      const started = new Promise<void>(resolve => {
+        startedResolve = resolve
+      })
+      const wait = new Promise<void>(resolve => {
+        release = resolve
+      })
+      requestGate = { method, result, startedResolve, wait, release }
+      return { started, release }
+    },
     failNextNotification(method, error = new Error('transport rejected')) {
       notificationFailure = { method, error }
     },
@@ -268,6 +300,9 @@ function createFakeServer(
       generation++
       state = 'running'
     },
+    setCrashRecoveryExhausted(exhausted) {
+      crashRecoveryExhausted = exhausted
+    },
   }
 }
 
@@ -275,6 +310,7 @@ async function createManager(options?: {
   configs?: Record<string, ScopedLspServerConfig>
   readDocument?: (filePath: string) => Promise<string>
   recordFileActivity?: (filePath: string) => void
+  lifecycleNotificationTimeoutMs?: number
 }): Promise<{
   manager: LSPServerManager
   controls: Map<string, FakeServerControl>
@@ -290,9 +326,72 @@ async function createManager(options?: {
     },
     readDocument: options?.readDocument ?? (async () => 'current contents'),
     recordFileActivity: options?.recordFileActivity ?? (() => {}),
+    lifecycleNotificationTimeoutMs:
+      options?.lifecycleNotificationTimeoutMs,
   })
   await manager.initialize()
   return { manager, controls }
+}
+
+type IntegratedConnectionEvent = {
+  kind: 'notification' | 'request'
+  method: string
+  params: unknown
+}
+
+type IntegratedTransport = {
+  child: ChildProcess
+  connection: MessageConnection
+  events: IntegratedConnectionEvent[]
+  emitConnectionError(error: Error): void
+  emitConnectionClose(): void
+}
+
+function createIntegratedTransport(): IntegratedTransport {
+  const child = new EventEmitter() as ChildProcess
+  Object.assign(child, {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: mock(() => true),
+  })
+  queueMicrotask(() => child.emit('spawn'))
+
+  const events: IntegratedConnectionEvent[] = []
+  let errorHandler: ((error: [Error, unknown, number]) => void) | undefined
+  let closeHandler: (() => void) | undefined
+  const connection = {
+    listen: mock(() => {}),
+    trace: mock(async () => {}),
+    onError: mock((handler: (error: [Error, unknown, number]) => void) => {
+      errorHandler = handler
+    }),
+    onClose: mock((handler: () => void) => {
+      closeHandler = handler
+    }),
+    onNotification: mock(() => {}),
+    onRequest: mock(() => {}),
+    sendRequest: mock(async (method: string, params: unknown) => {
+      events.push({ kind: 'request', method, params })
+      return method === 'initialize' ? { capabilities: {} } : null
+    }),
+    sendNotification: mock(async (method: string, params: unknown) => {
+      events.push({ kind: 'notification', method, params })
+    }),
+    dispose: mock(() => {}),
+  } as unknown as MessageConnection
+
+  return {
+    child,
+    connection,
+    events,
+    emitConnectionError(error) {
+      errorHandler?.([error, undefined, 0])
+    },
+    emitConnectionClose() {
+      closeHandler?.()
+    },
+  }
 }
 
 function documentVersions(
@@ -450,6 +549,7 @@ describe('LSP lifecycle notification failures', () => {
     await expect(manager.changeFile(file, 'two')).rejects.toThrow(
       'Failed to sync file change',
     )
+    expect(server.stopCalls).toHaveBeenCalledTimes(1)
     expect(manager.isFileOpen(file)).toBe(false)
     await manager.saveFile(file)
     expect(
@@ -493,9 +593,85 @@ describe('LSP lifecycle notification failures', () => {
       { method: 'textDocument/didOpen', version: 1 },
     ])
   })
+
+  test('bounds shutdown while a lifecycle notification is stuck', async () => {
+    const { manager, controls } = await createManager({
+      lifecycleNotificationTimeoutMs: 5,
+    })
+    const server = controls.get('typescript')!
+    const gate = server.blockNextNotification('textDocument/didOpen')
+    const open = manager.openFile('/repo/src/stuck-open.ts', 'contents')
+    await gate.started
+    const shutdown = manager.shutdown()
+    const outcome = await Promise.race([
+      shutdown.then(() => 'settled' as const),
+      new Promise<'pending'>(resolve =>
+        setTimeout(() => resolve('pending'), 20),
+      ),
+    ])
+
+    try {
+      expect(outcome).toBe('settled')
+      await expect(open).rejects.toThrow('timed out after 5ms')
+    } finally {
+      gate.release()
+      await Promise.allSettled([open, shutdown])
+    }
+  })
+
+  test('a stale lifecycle timeout does not stop the replacement generation', async () => {
+    const { manager, controls } = await createManager({
+      lifecycleNotificationTimeoutMs: 5,
+    })
+    const server = controls.get('typescript')!
+    const gate = server.blockNextNotification('textDocument/didOpen')
+    const open = manager.openFile('/repo/src/stale-open.ts', 'contents')
+    await gate.started
+    server.replaceGeneration()
+
+    const outcome = await Promise.race([
+      open.then(
+        () => 'resolved' as const,
+        () => 'rejected' as const,
+      ),
+      new Promise<'pending'>(resolve =>
+        setTimeout(() => resolve('pending'), 20),
+      ),
+    ])
+
+    try {
+      expect(outcome).toBe('rejected')
+      expect(server.server.state).toBe('running')
+      expect(server.server.generation).toBe(2)
+      expect(server.stopCalls).not.toHaveBeenCalled()
+    } finally {
+      gate.release()
+      await open.catch(() => {})
+    }
+  })
 })
 
 describe('LSP generation resynchronization', () => {
+  test('recognizes request-context changes without throwing on non-object errors', async () => {
+    const {
+      isLspDocumentRevisionChanged,
+      isLspServerGenerationChanged,
+      LSP_DOCUMENT_REVISION_CHANGED,
+      LSP_SERVER_GENERATION_CHANGED,
+    } = await import('./LSPServerManager.js')
+
+    for (const value of [null, undefined, 'context changed']) {
+      expect(isLspServerGenerationChanged(value)).toBe(false)
+      expect(isLspDocumentRevisionChanged(value)).toBe(false)
+    }
+    expect(
+      isLspServerGenerationChanged({ code: LSP_SERVER_GENERATION_CHANGED }),
+    ).toBe(true)
+    expect(
+      isLspDocumentRevisionChanged({ code: LSP_DOCUMENT_REVISION_CHANGED }),
+    ).toBe(true)
+  })
+
   test('generation-bound requests reject instead of replaying opaque params', async () => {
     const { manager, controls } = await createManager()
     const server = controls.get('typescript')!
@@ -618,6 +794,110 @@ describe('LSP generation resynchronization', () => {
   })
 })
 
+describe('LSP transport recovery integration', () => {
+  const scenarios: Array<{
+    name: string
+    terminate(transport: IntegratedTransport): void
+  }> = [
+    {
+      name: 'JSON-RPC error',
+      terminate: transport =>
+        transport.emitConnectionError(new Error('connection failed')),
+    },
+    {
+      name: 'JSON-RPC close',
+      terminate: transport => transport.emitConnectionClose(),
+    },
+    {
+      name: 'child-process error',
+      terminate: transport =>
+        transport.child.emit('error', new Error('process transport error')),
+    },
+    {
+      name: 'clean child exit',
+      terminate: transport => transport.child.emit('exit', 0, null),
+    },
+    {
+      name: 'signal child exit',
+      terminate: transport =>
+        transport.child.emit('exit', null, 'SIGTERM'),
+    },
+    {
+      name: 'nonzero child exit',
+      terminate: transport => transport.child.emit('exit', 1, null),
+    },
+  ]
+
+  for (const scenario of scenarios) {
+    test(`${scenario.name} recreates the full stack and opens current contents`, async () => {
+      const transports: IntegratedTransport[] = []
+      let currentContent = 'before termination'
+      const manager = createLSPServerManager({
+        loadServerConfigs: async () => ({
+          servers: { typescript: TYPESCRIPT_CONFIG },
+        }),
+        createServerInstance: (name, config, instanceOptions) =>
+          createLSPServerInstance(name, config, {
+            ...instanceOptions,
+            createClient: (clientName, onCrash) =>
+              createLSPClient(clientName, onCrash, {
+                spawnProcess: (() => {
+                  const transport = createIntegratedTransport()
+                  transports.push(transport)
+                  return transport.child
+                }) as LSPClientDependencies['spawnProcess'],
+                createConnection: () => transports.at(-1)!.connection,
+                gracefulShutdownTimeoutMs: 5,
+              }),
+          }),
+        readDocument: async () => currentContent,
+        recordFileActivity: () => {},
+      })
+      await manager.initialize()
+
+      try {
+        const file = '/repo/src/integration.ts'
+        await manager.openFile(file, currentContent)
+        const server = manager.getServerForFile(file)!
+        expect(server.generation).toBe(1)
+
+        scenario.terminate(transports[0]!)
+        expect(server.state).toBe('error')
+        currentContent = 'after termination'
+
+        await manager.sendRequest(file, 'textDocument/hover', {
+          textDocument: { uri: 'stale-uri' },
+          position: { line: 0, character: 0 },
+        })
+
+        expect(server.generation).toBe(2)
+        expect(transports).toHaveLength(2)
+        const replacementEvents = transports[1]!.events
+        const openIndex = replacementEvents.findIndex(
+          event =>
+            event.kind === 'notification' &&
+            event.method === 'textDocument/didOpen',
+        )
+        const requestIndex = replacementEvents.findIndex(
+          event =>
+            event.kind === 'request' && event.method === 'textDocument/hover',
+        )
+        expect(openIndex).toBeGreaterThan(-1)
+        expect(requestIndex).toBeGreaterThan(openIndex)
+        expect(replacementEvents[openIndex]!.params).toMatchObject({
+          textDocument: {
+            uri: getLspDocumentIdentity(file).fileUri,
+            version: 1,
+            text: 'after termination',
+          },
+        })
+      } finally {
+        await manager.shutdown()
+      }
+    })
+  }
+})
+
 describe('LSP request concurrency', () => {
   test('two simultaneous first requests send one open before either request', async () => {
     const { manager, controls } = await createManager()
@@ -651,6 +931,273 @@ describe('LSP request concurrency', () => {
       ),
     ).toHaveLength(1)
     expect(server.events.filter(event => event.kind === 'request')).toHaveLength(2)
+  })
+
+  test('delivers document changes while a stale request is still pending', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/pending-request.ts'
+    await manager.openFile(file, 'before')
+    const gate = server.holdNextRequest('textDocument/hover', 'stale response')
+    const request = manager.sendRequest<string>(file, 'textDocument/hover', {})
+    await gate.started
+
+    const changeGate = server.blockNextNotification('textDocument/didChange')
+    const change = manager.changeFile(file, 'after')
+    await changeGate.started
+
+    try {
+      expect(
+        server.events.filter(event => event.kind === 'request'),
+      ).toHaveLength(1)
+      changeGate.release()
+      await change
+      expect(
+        documentVersions(server.events, getLspDocumentIdentity(file).fileUri),
+      ).toEqual([
+        { method: 'textDocument/didOpen', version: 1 },
+        { method: 'textDocument/didChange', version: 2 },
+      ])
+    } finally {
+      gate.release()
+    }
+
+    await expect(request).resolves.toBeNull()
+    expect(
+      server.events.filter(event => event.kind === 'request'),
+    ).toHaveLength(2)
+  })
+
+  test('waits for a queued didChange before publishing a response', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/change-before-response.ts'
+    await manager.openFile(file, 'before')
+    const requestGate = server.holdNextRequest(
+      'textDocument/hover',
+      'stale response',
+    )
+    const request = manager.sendRequest<string>(file, 'textDocument/hover', {})
+    await requestGate.started
+
+    const changeGate = server.blockNextNotification('textDocument/didChange')
+    const change = manager.changeFile(file, 'after')
+    await changeGate.started
+
+    try {
+      requestGate.release()
+      const outcome = await Promise.race([
+        request.then(() => 'settled' as const),
+        new Promise<'pending'>(resolve =>
+          setTimeout(() => resolve('pending'), 20),
+        ),
+      ])
+      expect(outcome).toBe('pending')
+    } finally {
+      changeGate.release()
+      await Promise.allSettled([change, request])
+    }
+
+    await expect(change).resolves.toBeUndefined()
+    await expect(request).resolves.toBeNull()
+    expect(
+      server.events.filter(event => event.kind === 'request'),
+    ).toHaveLength(2)
+  })
+
+  test('does not replay a pending request after close and reopen', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/closed-pending-request.ts'
+    const fileUri = getLspDocumentIdentity(file).fileUri
+    await manager.openFile(file, 'before close')
+    const gate = server.holdNextRequest('textDocument/hover', 'stale response')
+    const request = manager.sendRequest<string>(file, 'textDocument/hover', {})
+    await gate.started
+
+    await manager.closeFile(file)
+    expect(manager.isFileOpen(file)).toBe(false)
+    await manager.openFile(file, 'after reopen')
+    expect(manager.isFileOpen(file)).toBe(true)
+    expect(
+      server.events.map(event => ({ kind: event.kind, method: event.method })),
+    ).toEqual([
+      { kind: 'notification', method: 'textDocument/didOpen' },
+      { kind: 'request', method: 'textDocument/hover' },
+      { kind: 'notification', method: 'textDocument/didClose' },
+      { kind: 'notification', method: 'textDocument/didOpen' },
+    ])
+
+    gate.release()
+    await expect(request).rejects.toMatchObject({
+      code: 'LSP_DOCUMENT_CLOSED',
+    })
+    expect(manager.isFileOpen(file)).toBe(true)
+    expect(
+      documentVersions(server.events, fileUri).filter(
+        event => event.method === 'textDocument/didOpen',
+      ),
+    ).toHaveLength(2)
+    expect(
+      server.events.filter(event => event.kind === 'request'),
+    ).toHaveLength(1)
+  })
+
+  test('does not retry a closed document after its server generation changes', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/closed-before-replacement.ts'
+    const fileUri = getLspDocumentIdentity(file).fileUri
+    await manager.openFile(file, 'before close')
+    const gate = server.holdNextRequest('textDocument/hover', 'stale response')
+    const request = manager.sendRequest<string>(file, 'textDocument/hover', {})
+    await gate.started
+
+    await manager.closeFile(file)
+    server.replaceGeneration()
+    gate.release()
+
+    await expect(request).rejects.toMatchObject({
+      code: 'LSP_DOCUMENT_CLOSED',
+    })
+    expect(manager.isFileOpen(file)).toBe(false)
+    expect(documentVersions(server.events, fileUri)).toEqual([
+      { method: 'textDocument/didOpen', version: 1 },
+    ])
+    expect(
+      server.events.filter(event => event.kind === 'request'),
+    ).toHaveLength(1)
+  })
+
+  test('does not recover a request after close is queued behind didChange', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/close-queued-behind-change.ts'
+    const fileUri = getLspDocumentIdentity(file).fileUri
+    await manager.openFile(file, 'before')
+    const requestGate = server.blockNextRequest('textDocument/hover')
+    const request = manager.sendRequest(file, 'textDocument/hover', {})
+    const requestOutcome = request.then(
+      result => ({ status: 'resolved' as const, result }),
+      error => ({ status: 'rejected' as const, error }),
+    )
+    await requestGate.started
+
+    const changeGate = server.blockNextNotification('textDocument/didChange')
+    const change = manager.changeFile(file, 'after')
+    const changeOutcome = change.then(
+      () => undefined,
+      error => error,
+    )
+    await changeGate.started
+    const close = manager.closeFile(file)
+
+    server.replaceGeneration()
+    requestGate.release()
+    changeGate.release()
+    await expect(changeOutcome).resolves.toBeInstanceOf(Error)
+    await expect(close).resolves.toBeUndefined()
+
+    expect(await requestOutcome).toMatchObject({ status: 'rejected' })
+    expect(manager.isFileOpen(file)).toBe(false)
+    expect(documentVersions(server.events, fileUri)).toEqual([
+      { method: 'textDocument/didOpen', version: 1 },
+      { method: 'textDocument/didChange', version: 2 },
+    ])
+    expect(
+      server.events.filter(event => event.kind === 'request'),
+    ).toHaveLength(1)
+  })
+
+  test('does not recover after close interrupts the initial didOpen', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/close-during-initial-open.ts'
+    const gate = server.blockNextNotification('textDocument/didOpen')
+    const request = manager.sendRequest(file, 'textDocument/hover', {})
+    await gate.started
+    const close = manager.closeFile(file)
+    server.simulateCrash(false)
+    gate.release()
+
+    await expect(request).rejects.toMatchObject({
+      code: 'LSP_DOCUMENT_CLOSED',
+    })
+    await expect(close).resolves.toBeUndefined()
+    expect(manager.isFileOpen(file)).toBe(false)
+    expect(
+      server.events.filter(
+        event =>
+          event.kind === 'notification' &&
+          event.method === 'textDocument/didOpen',
+      ),
+    ).toHaveLength(1)
+    expect(
+      server.events.filter(event => event.kind === 'request'),
+    ).toHaveLength(0)
+  })
+
+  test('generation-bound requests also require the prepared document revision', async () => {
+    const { manager } = await createManager()
+    const file = '/repo/src/revision-bound.ts'
+    await manager.openFile(file, 'version one')
+
+    const prepared = await manager.sendRequestWithGeneration<unknown>(
+      file,
+      'textDocument/prepareCallHierarchy',
+      {},
+    )
+    expect(prepared).toBeDefined()
+    await manager.changeFile(file, 'version two')
+
+    await expect(
+      manager.sendRequestWithGeneration(
+        file,
+        'callHierarchy/incomingCalls',
+        { item: { data: 'version one' } },
+        {
+          expectedGeneration: prepared!.serverGeneration,
+          expectedDocumentRevision: prepared!.documentRevision,
+        },
+      ),
+    ).rejects.toThrow('changed document revision')
+  })
+
+  test('generation-bound requests preserve an explicit close as terminal', async () => {
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const file = '/repo/src/closed-call-hierarchy.ts'
+    const fileUri = getLspDocumentIdentity(file).fileUri
+    await manager.openFile(file, 'version one')
+
+    const prepared = await manager.sendRequestWithGeneration<unknown>(
+      file,
+      'textDocument/prepareCallHierarchy',
+      {},
+    )
+    expect(prepared).toBeDefined()
+    await manager.closeFile(file)
+
+    await expect(
+      manager.sendRequestWithGeneration(
+        file,
+        'callHierarchy/incomingCalls',
+        { item: { data: 'version one' } },
+        {
+          expectedGeneration: prepared!.serverGeneration,
+          expectedDocumentRevision: prepared!.documentRevision,
+          expectedDocumentCloseEpoch: prepared!.documentCloseEpoch,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'LSP_DOCUMENT_CLOSED' })
+    expect(
+      documentVersions(server.events, fileUri).filter(
+        event => event.method === 'textDocument/didOpen',
+      ),
+    ).toHaveLength(1)
+    expect(
+      server.events.filter(event => event.kind === 'request'),
+    ).toHaveLength(1)
   })
 
   test('different documents await one shared lazy server initialization', async () => {
@@ -704,6 +1251,8 @@ describe('LSP request concurrency', () => {
 
 describe('LSP document identity and diagnostics activity', () => {
   test('keeps POSIX document identity canonical and case-sensitive', () => {
+    if (process.platform === 'win32') return
+
     const mixedCase = getLspDocumentIdentity('/repo/Source File.ts')
     const lowerCase = getLspDocumentIdentity('/repo/source file.ts')
 
@@ -746,6 +1295,14 @@ describe('LSP document identity and diagnostics activity', () => {
       fileURLToPath(firstIdentity.fileUri),
       fileURLToPath(firstIdentity.fileUri),
     ])
+  })
+
+  test('case-folds Unicode Windows aliases before URI encoding', () => {
+    const upper = getLspDocumentIdentity('C:\\Repo\\Ä.ts')
+    const lower = getLspDocumentIdentity('c:/repo/ä.ts')
+
+    expect(upper.fileUri).not.toBe(lower.fileUri)
+    expect(upper.stateKey).toBe(lower.stateKey)
   })
 
   test('reuses the opened Windows URI for requests through a case alias', async () => {

@@ -57,6 +57,9 @@ function createFakeServer(
     get restartCount() {
       return 0
     },
+    get isCrashRecoveryExhausted() {
+      return false
+    },
     async start() {
       if (state === 'running') return
       generation++

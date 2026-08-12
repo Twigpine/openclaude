@@ -1,15 +1,16 @@
-import {
-  mkdtempSync,
-  rmSync,
-  truncateSync,
-  writeFileSync,
-} from 'node:fs'
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterAll, beforeEach, expect, mock, test } from 'bun:test'
-import { MAX_LSP_FILE_SIZE_BYTES } from './services/lsp/documentIdentity.js'
-import type { LSPServerManager } from './services/lsp/LSPServerManager.js'
+import {
+  getLspDocumentIdentity,
+  MAX_LSP_FILE_SIZE_BYTES,
+} from './services/lsp/documentIdentity.js'
+import {
+  LSP_SERVER_GENERATION_CHANGED,
+  type LSPServerManager,
+} from './services/lsp/LSPServerManager.js'
 import { getEmptyToolPermissionContext } from './Tool.js'
 import {
   acquireSharedMutationLock,
@@ -32,7 +33,12 @@ function createLspManagerDouble(
     },
     async sendRequestWithGeneration<T>() {
       return undefined as
-        | { result: T; serverGeneration: number }
+        | {
+            result: T
+            serverGeneration: number
+            documentRevision: number
+            documentCloseEpoch: number
+          }
         | undefined
     },
     getAllServers: () => new Map(),
@@ -122,17 +128,19 @@ beforeEach(() => {
 })
 
 test('LSPTool is part of the base tool pool', () => {
-  expect(getAllBaseTools().map(tool => tool.name)).toContain('LSP')
+  expect(getAllBaseTools().map((tool) => tool.name)).toContain('LSP')
 })
 
 test('LSPTool is filtered from usable tools until a server is connected', () => {
   const permissionContext = getEmptyToolPermissionContext()
 
-  expect(getTools(permissionContext).map(tool => tool.name)).not.toContain('LSP')
+  expect(getTools(permissionContext).map((tool) => tool.name)).not.toContain(
+    'LSP',
+  )
 
   lspConnected = true
 
-  expect(getTools(permissionContext).map(tool => tool.name)).toContain('LSP')
+  expect(getTools(permissionContext).map((tool) => tool.name)).toContain('LSP')
 })
 
 test('LSPTool keeps the 10 MB guard ahead of open and request', async () => {
@@ -235,105 +243,139 @@ test('LSPTool request params use the shared canonical document URI', async () =>
     '/repo/Source File.ts',
     'textDocument/hover',
     {
-      textDocument: { uri: 'file:///repo/Source%20File.ts' },
+      textDocument: {
+        uri: getLspDocumentIdentity('/repo/Source File.ts').fileUri,
+      },
       position: { line: 0, character: 0 },
     },
   )
 })
 
-test('LSPTool retries both call-hierarchy requests on one replacement generation', async () => {
-  const requests: Array<{
-    method: string
-    expectedGeneration: number | undefined
-    itemGeneration: number | undefined
-  }> = []
-  let prepareGeneration = 0
-  const sendRequestWithGeneration: LSPServerManager['sendRequestWithGeneration'] =
-    async <T>(
-      _filePath: string,
-      method: string,
-      params: unknown,
-      options?: { expectedGeneration?: number },
-    ) => {
-      const itemGeneration = (
-        params as { item?: { data?: { generation?: number } } }
-      ).item?.data?.generation
-      requests.push({
-        method,
-        expectedGeneration: options?.expectedGeneration,
-        itemGeneration,
+for (const [contextName, contextCode] of [
+  ['replacement generation', LSP_SERVER_GENERATION_CHANGED],
+  ['document revision change', 'LSP_DOCUMENT_REVISION_CHANGED'],
+] as const) {
+  for (const operation of ['incomingCalls', 'outgoingCalls'] as const) {
+    test(`LSPTool retries ${operation} after one ${contextName}`, async () => {
+      const requests: Array<{
+        method: string
+        expectedGeneration: number | undefined
+        expectedDocumentRevision: number | undefined
+        expectedDocumentCloseEpoch: number | undefined
+        itemGeneration: number | undefined
+      }> = []
+      let prepareGeneration = 0
+      const sendRequestWithGeneration: LSPServerManager['sendRequestWithGeneration'] =
+        async <T>(
+          _filePath: string,
+          method: string,
+          params: unknown,
+          options?: {
+            expectedGeneration?: number
+            expectedDocumentRevision?: number
+            expectedDocumentCloseEpoch?: number
+          },
+        ) => {
+          const itemGeneration = (
+            params as { item?: { data?: { generation?: number } } }
+          ).item?.data?.generation
+          requests.push({
+            method,
+            expectedGeneration: options?.expectedGeneration,
+            expectedDocumentRevision: options?.expectedDocumentRevision,
+            expectedDocumentCloseEpoch:
+              options?.expectedDocumentCloseEpoch,
+            itemGeneration,
+          })
+
+          if (method === 'textDocument/prepareCallHierarchy') {
+            prepareGeneration++
+            return {
+              result: [
+                {
+                  name: 'target',
+                  kind: 12,
+                  uri: 'file:///repo/src/current.ts',
+                  range: {
+                    start: { line: 0, character: 0 },
+                    end: { line: 0, character: 6 },
+                  },
+                  selectionRange: {
+                    start: { line: 0, character: 0 },
+                    end: { line: 0, character: 6 },
+                  },
+                  data: { generation: prepareGeneration },
+                },
+              ] as T,
+              serverGeneration: prepareGeneration,
+              documentRevision: prepareGeneration,
+              documentCloseEpoch: prepareGeneration,
+            }
+          }
+
+          if (options?.expectedGeneration === 1) {
+            throw Object.assign(new Error('request context changed'), {
+              code: contextCode,
+            })
+          }
+
+          return {
+            result: [] as T,
+            serverGeneration: options?.expectedGeneration ?? 0,
+            documentRevision: options?.expectedDocumentRevision ?? 0,
+            documentCloseEpoch: options?.expectedDocumentCloseEpoch ?? 0,
+          }
+        }
+
+      lspManager = createLspManagerDouble({
+        isFileOpen: () => true,
+        sendRequestWithGeneration,
       })
 
-      if (method === 'textDocument/prepareCallHierarchy') {
-        prepareGeneration++
-        return {
-          result: [
-            {
-              name: 'target',
-              kind: 12,
-              uri: 'file:///repo/src/current.ts',
-              range: {
-                start: { line: 0, character: 0 },
-                end: { line: 0, character: 6 },
-              },
-              selectionRange: {
-                start: { line: 0, character: 0 },
-                end: { line: 0, character: 6 },
-              },
-              data: { generation: prepareGeneration },
-            },
-          ] as T,
-          serverGeneration: prepareGeneration,
-        }
-      }
+      await LSPTool.call(
+        {
+          operation,
+          filePath: '/repo/src/current.ts',
+          line: 1,
+          character: 1,
+        },
+        {} as never,
+      )
 
-      if (options?.expectedGeneration === 1) {
-        throw Object.assign(new Error('server generation changed'), {
-          code: 'LSP_SERVER_GENERATION_CHANGED',
-        })
-      }
-
-      return {
-        result: [] as T,
-        serverGeneration: options?.expectedGeneration ?? 0,
-      }
-    }
-
-  lspManager = createLspManagerDouble({
-    isFileOpen: () => true,
-    sendRequestWithGeneration,
-  })
-
-  await LSPTool.call(
-    {
-      operation: 'incomingCalls',
-      filePath: '/repo/src/current.ts',
-      line: 1,
-      character: 1,
-    },
-    {} as never,
-  )
-
-  expect(requests).toEqual([
-    {
-      method: 'textDocument/prepareCallHierarchy',
-      expectedGeneration: undefined,
-      itemGeneration: undefined,
-    },
-    {
-      method: 'callHierarchy/incomingCalls',
-      expectedGeneration: 1,
-      itemGeneration: 1,
-    },
-    {
-      method: 'textDocument/prepareCallHierarchy',
-      expectedGeneration: undefined,
-      itemGeneration: undefined,
-    },
-    {
-      method: 'callHierarchy/incomingCalls',
-      expectedGeneration: 2,
-      itemGeneration: 2,
-    },
-  ])
-})
+      const callMethod =
+        operation === 'incomingCalls'
+          ? 'callHierarchy/incomingCalls'
+          : 'callHierarchy/outgoingCalls'
+      expect(requests).toEqual([
+        {
+          method: 'textDocument/prepareCallHierarchy',
+          expectedGeneration: undefined,
+          expectedDocumentRevision: undefined,
+          expectedDocumentCloseEpoch: undefined,
+          itemGeneration: undefined,
+        },
+        {
+          method: callMethod,
+          expectedGeneration: 1,
+          expectedDocumentRevision: 1,
+          expectedDocumentCloseEpoch: 1,
+          itemGeneration: 1,
+        },
+        {
+          method: 'textDocument/prepareCallHierarchy',
+          expectedGeneration: undefined,
+          expectedDocumentRevision: undefined,
+          expectedDocumentCloseEpoch: undefined,
+          itemGeneration: undefined,
+        },
+        {
+          method: callMethod,
+          expectedGeneration: 2,
+          expectedDocumentRevision: 2,
+          expectedDocumentCloseEpoch: 2,
+          itemGeneration: 2,
+        },
+      ])
+    })
+  }
+}

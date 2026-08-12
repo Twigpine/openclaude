@@ -51,7 +51,7 @@ export function getLspDocumentIdentity(
       return {
         resolvedPath,
         fileUri,
-        stateKey: fileUri.toLowerCase(),
+        stateKey: encodeWindowsFileUri(resolvedPath.toLowerCase()),
         activityPath: fileURLToPath(fileUri),
       }
     }
@@ -60,7 +60,7 @@ export function getLspDocumentIdentity(
     return {
       resolvedPath,
       fileUri,
-      stateKey: fileUri.toLowerCase(),
+      stateKey: pathToFileURL(resolvedPath.toLowerCase()).href,
       activityPath: fileURLToPath(fileUri),
     }
   }

@@ -26,6 +26,8 @@ const MAX_RETRIES_FOR_TRANSIENT_ERRORS = 3
  * Actual delays: 500ms, 1000ms, 2000ms
  */
 const RETRY_BASE_DELAY_MS = 500
+
+const DEFAULT_LSP_STARTUP_TIMEOUT_MS = 30_000
 /**
  * LSP server instance interface returned by createLSPServerInstance.
  * Manages the lifecycle of a single LSP server with state tracking and health monitoring.
@@ -45,6 +47,8 @@ export type LSPServerInstance = {
   readonly restartCount: number
   /** Successful initialization generation for the current process lifecycle */
   readonly generation: number
+  /** Whether automatic recovery has exhausted the configured crash budget */
+  readonly isCrashRecoveryExhausted: boolean
   /** Start the server and initialize it */
   start(): Promise<void>
   /** Stop the server gracefully */
@@ -71,6 +75,7 @@ export type LSPServerInstance = {
 export type LSPServerInstanceOptions = {
   createClient?: typeof createLSPClientType
   onUnavailable?: (generation: number) => void
+  defaultStartupTimeoutMs?: number
 }
 
 /**
@@ -125,6 +130,7 @@ export function createLSPServerInstance(
     createLSPClient = clientModule.createLSPClient
   }
   let state: LspServerState = 'stopped'
+  const maxRestarts = config.maxRestarts ?? 3
   let startTime: Date | undefined
   let lastError: Error | undefined
   let restartCount = 0
@@ -133,6 +139,12 @@ export function createLSPServerInstance(
   let startEpoch = 0
   let startPromise: Promise<void> | undefined
   let stopPromise: Promise<void> | undefined
+  let lastUnavailableGeneration: number | undefined
+  const notifyUnavailable = (unavailableGeneration: number): void => {
+    if (lastUnavailableGeneration === unavailableGeneration) return
+    lastUnavailableGeneration = unavailableGeneration
+    options.onUnavailable?.(unavailableGeneration)
+  }
   // Propagate crash state so ensureServerStarted can restart on next use.
   // Without this, state stays 'running' after crash and the server is never
   // restarted (zombie state).
@@ -141,7 +153,7 @@ export function createLSPServerInstance(
     state = 'error'
     lastError = error
     crashRecoveryCount++
-    options.onUnavailable?.(generation)
+    notifyUnavailable(generation)
   })
 
   /**
@@ -169,8 +181,7 @@ export function createLSPServerInstance(
   async function startInternal(epoch: number): Promise<void> {
     // Cap crash-recovery attempts so a persistently crashing server doesn't
     // spawn unbounded child processes on every incoming request.
-    const maxRestarts = config.maxRestarts ?? 3
-    if (state === 'error' && crashRecoveryCount > maxRestarts) {
+    if (crashRecoveryCount > maxRestarts) {
       const error = new Error(
         `LSP server '${name}' exceeded max crash recovery attempts (${maxRestarts})`,
       )
@@ -184,11 +195,20 @@ export function createLSPServerInstance(
       state = 'starting'
       logForDebugging(`Starting LSP server instance: ${name}`)
 
+      const startupTimeoutMs =
+        config.startupTimeout ??
+        options.defaultStartupTimeoutMs ??
+        DEFAULT_LSP_STARTUP_TIMEOUT_MS
+
       // Start the client
-      await client.start(config.command, config.args || [], {
-        env: config.env,
-        cwd: config.workspaceFolder,
-      })
+      await withTimeout(
+        client.start(config.command, config.args || [], {
+          env: config.env,
+          cwd: config.workspaceFolder,
+        }),
+        startupTimeoutMs,
+        `LSP server '${name}' timed out after ${startupTimeoutMs}ms during process startup`,
+      )
       if (epoch !== startEpoch) {
         throw new Error(`LSP server '${name}' start was cancelled`)
       }
@@ -270,15 +290,11 @@ export function createLSPServerInstance(
       }
 
       initPromise = client.initialize(initParams)
-      if (config.startupTimeout !== undefined) {
-        await withTimeout(
-          initPromise,
-          config.startupTimeout,
-          `LSP server '${name}' timed out after ${config.startupTimeout}ms during initialization`,
-        )
-      } else {
-        await initPromise
-      }
+      await withTimeout(
+        initPromise,
+        startupTimeoutMs,
+        `LSP server '${name}' timed out after ${startupTimeoutMs}ms during initialization`,
+      )
       if (epoch !== startEpoch) {
         throw new Error(`LSP server '${name}' start was cancelled`)
       }
@@ -291,7 +307,6 @@ export function createLSPServerInstance(
       generation++
       state = 'running'
       startTime = new Date()
-      crashRecoveryCount = 0
       logForDebugging(`LSP server instance started: ${name}`)
     } catch (error) {
       // Clean up the spawned child process on timeout/error
@@ -341,7 +356,7 @@ export function createLSPServerInstance(
     }
 
     await startPromise?.catch(() => {})
-    options.onUnavailable?.(stoppedGeneration)
+    notifyUnavailable(stoppedGeneration)
 
     if (stopError) {
       state = 'error'
@@ -375,7 +390,6 @@ export function createLSPServerInstance(
 
     restartCount++
 
-    const maxRestarts = config.maxRestarts ?? 3
     if (restartCount > maxRestarts) {
       const error = new Error(
         `Max restart attempts (${maxRestarts}) exceeded for server '${name}'`,
@@ -383,6 +397,10 @@ export function createLSPServerInstance(
       logError(error)
       throw error
     }
+
+    // A manual restart is the explicit operator action that resets the
+    // automatic crash-recovery budget. Ordinary stop/start cleanup must not.
+    crashRecoveryCount = 0
 
     try {
       await start()
@@ -587,6 +605,9 @@ export function createLSPServerInstance(
     },
     get generation() {
       return generation
+    },
+    get isCrashRecoveryExhausted() {
+      return crashRecoveryCount > maxRestarts
     },
     start,
     stop,

@@ -25,6 +25,7 @@ type FakeClientController = {
     started: Promise<void>
     release(): void
   }
+  holdNextStart(): { started: Promise<void>; release(): void }
   holdNextInitialize(): { started: Promise<void>; release(): void }
   holdNextStop(options?: { blockForce?: boolean }): {
     started: Promise<void>
@@ -44,6 +45,13 @@ function createFakeClientController(): FakeClientController {
   let stopError: Error | undefined
   let requestFailure:
     | { error: Error; calledResolve: () => void }
+    | undefined
+  let startGate:
+    | {
+        startedResolve: () => void
+        wait: Promise<void>
+        release: () => void
+      }
     | undefined
   let initializeGate:
     | {
@@ -69,7 +77,13 @@ function createFakeClientController(): FakeClientController {
       }
     | undefined
 
-  const startCalls = mock(async () => {})
+  const startCalls = mock(async () => {
+    startGate?.startedResolve()
+    if (startGate) {
+      await startGate.wait
+      startGate = undefined
+    }
+  })
   const initializeCalls = mock(async (_params: InitializeParams) => {
     initializeGate?.startedResolve()
     if (initializeGate) {
@@ -173,6 +187,18 @@ function createFakeClientController(): FakeClientController {
       requestGate = { result, startedResolve, wait, release }
       return { started, release }
     },
+    holdNextStart() {
+      let startedResolve!: () => void
+      let release!: () => void
+      const started = new Promise<void>(resolve => {
+        startedResolve = resolve
+      })
+      const wait = new Promise<void>(resolve => {
+        release = resolve
+      })
+      startGate = { startedResolve, wait, release }
+      return { started, release }
+    },
     holdNextInitialize() {
       let startedResolve!: () => void
       let release!: () => void
@@ -257,10 +283,17 @@ describe('LSP server generations', () => {
     const firstStart = instance.start()
     await gate.started
     const secondStart = instance.start()
+    let secondSettled = false
+    void secondStart.finally(() => {
+      secondSettled = true
+    })
 
     expect(fake.startCalls).toHaveBeenCalledTimes(1)
     expect(fake.initializeCalls).toHaveBeenCalledTimes(1)
     expect(instance.state).toBe('starting')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(secondSettled).toBe(false)
 
     gate.release()
     await Promise.all([firstStart, secondStart])
@@ -413,6 +446,77 @@ describe('LSP server generations', () => {
     }
   })
 
+  test('startup timeout also bounds the process spawn wait', async () => {
+    const fake = createFakeClientController()
+    const startGate = fake.holdNextStart()
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+      defaultStartupTimeoutMs: 5,
+    })
+
+    const start = instance.start()
+    await startGate.started
+    const outcome = await Promise.race([
+      start.then(
+        () => ({ status: 'resolved' as const }),
+        error => ({ status: 'rejected' as const, error }),
+      ),
+      new Promise<{ status: 'pending' }>(resolve =>
+        setTimeout(() => resolve({ status: 'pending' }), 20),
+      ),
+    ])
+
+    try {
+      expect(outcome).toMatchObject({
+        status: 'rejected',
+        error: expect.objectContaining({
+          message: expect.stringContaining(
+            'timed out after 5ms during process startup',
+          ),
+        }),
+      })
+      expect(fake.initializeCalls).not.toHaveBeenCalled()
+      expect(fake.stopCalls).toHaveBeenCalledWith({ force: true })
+    } finally {
+      startGate.release()
+      await start.catch(() => {})
+    }
+  })
+
+  test('applies a bounded default when startupTimeout is omitted', async () => {
+    const fake = createFakeClientController()
+    const initializeGate = fake.holdNextInitialize()
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+      defaultStartupTimeoutMs: 5,
+    })
+
+    const start = instance.start()
+    await initializeGate.started
+    const outcome = await Promise.race([
+      start.then(
+        () => ({ status: 'resolved' as const }),
+        error => ({ status: 'rejected' as const, error }),
+      ),
+      new Promise<{ status: 'pending' }>(resolve =>
+        setTimeout(() => resolve({ status: 'pending' }), 20),
+      ),
+    ])
+
+    try {
+      expect(outcome).toMatchObject({
+        status: 'rejected',
+        error: expect.objectContaining({
+          message: expect.stringContaining('timed out after 5ms'),
+        }),
+      })
+      expect(fake.stopCalls).toHaveBeenCalledWith({ force: true })
+    } finally {
+      initializeGate.release()
+      await start.catch(() => {})
+    }
+  })
+
   test('does not publish a generation when initialization reports unhealthy', async () => {
     const fake = createFakeClientController()
     fake.finishNextInitializeUnhealthy()
@@ -423,6 +527,89 @@ describe('LSP server generations', () => {
     await expect(instance.start()).rejects.toThrow('did not finish initialization')
     expect(instance.state).toBe('error')
     expect(instance.generation).toBe(0)
+  })
+
+  test('caps repeated crash recovery across successful replacement generations', async () => {
+    const fake = createFakeClientController()
+    const instance = createLSPServerInstance(
+      'typescript',
+      { ...CONFIG, maxRestarts: 2 },
+      { createClient: fake.createClient },
+    )
+
+    await instance.start()
+    fake.crash()
+    await instance.start()
+    fake.crash()
+    await instance.start()
+    fake.crash()
+
+    await expect(instance.start()).rejects.toThrow(
+      'exceeded max crash recovery attempts (2)',
+    )
+    expect(fake.startCalls).toHaveBeenCalledTimes(3)
+    expect(instance.generation).toBe(3)
+  })
+
+  test('explicit restart resets an exhausted automatic recovery budget', async () => {
+    const fake = createFakeClientController()
+    const instance = createLSPServerInstance(
+      'typescript',
+      { ...CONFIG, maxRestarts: 2 },
+      { createClient: fake.createClient },
+    )
+
+    await instance.start()
+    fake.crash()
+    await instance.start()
+    fake.crash()
+    await instance.start()
+    fake.crash()
+
+    expect(instance.isCrashRecoveryExhausted).toBe(true)
+
+    await instance.restart()
+    expect(instance.isCrashRecoveryExhausted).toBe(false)
+
+    fake.crash()
+    await expect(instance.start()).resolves.toBeUndefined()
+    expect(instance.generation).toBe(5)
+  })
+
+  test('ordinary stop does not reset or bypass an exhausted automatic recovery budget', async () => {
+    const fake = createFakeClientController()
+    const instance = createLSPServerInstance(
+      'typescript',
+      { ...CONFIG, maxRestarts: 0 },
+      { createClient: fake.createClient },
+    )
+
+    await instance.start()
+    fake.crash()
+
+    await instance.stop()
+    expect(instance.state).toBe('stopped')
+    await expect(instance.start()).rejects.toThrow(
+      'exceeded max crash recovery attempts (0)',
+    )
+    expect(instance.isCrashRecoveryExhausted).toBe(true)
+    expect(fake.startCalls).toHaveBeenCalledTimes(1)
+  })
+
+  test('notifies one unavailable transition when a crashed generation is later stopped', async () => {
+    const fake = createFakeClientController()
+    const unavailableGenerations: number[] = []
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+      onUnavailable: generation => unavailableGenerations.push(generation),
+    })
+
+    await instance.start()
+    fake.crash()
+    expect(unavailableGenerations).toEqual([1])
+
+    await instance.stop()
+    expect(unavailableGenerations).toEqual([1])
   })
 
   test('rejects a successful response from a replaced generation', async () => {

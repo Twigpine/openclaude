@@ -13,6 +13,8 @@ type FakeConnection = {
   notificationMethods: string[]
   requestMethods: string[]
   sentRequestMethods: string[]
+  emitNotification(method: string, params: unknown): void
+  emitRequest(method: string, params: unknown): Promise<unknown>
   emitError(error: Error): void
   emitClose(): void
 }
@@ -49,6 +51,14 @@ function createFakeConnection(
   let errorHandler: ((error: [Error, unknown, number]) => void) | undefined
   let closeHandler: (() => void) | undefined
   let pendingRequestReject: ((error: Error) => void) | undefined
+  const notificationHandlers = new Map<
+    string,
+    (params: unknown) => void
+  >()
+  const requestHandlers = new Map<
+    string,
+    (params: unknown) => unknown | Promise<unknown>
+  >()
 
   const connection = {
     listen: mock(() => {}),
@@ -59,12 +69,19 @@ function createFakeConnection(
     onClose: mock((handler: () => void) => {
       closeHandler = handler
     }),
-    onNotification: mock((method: string) => {
+    onNotification: mock((method: string, handler: (params: unknown) => void) => {
       notificationMethods.push(method)
+      notificationHandlers.set(method, handler)
     }),
-    onRequest: mock((method: string) => {
+    onRequest: mock(
+      (
+        method: string,
+        handler: (params: unknown) => unknown | Promise<unknown>,
+      ) => {
       requestMethods.push(method)
-    }),
+        requestHandlers.set(method, handler)
+      },
+    ),
     sendRequest: mock(async (method: string) => {
       sentRequestMethods.push(method)
       if (method === options.pendingRequest) {
@@ -106,6 +123,14 @@ function createFakeConnection(
     notificationMethods,
     requestMethods,
     sentRequestMethods,
+    emitNotification(method, params) {
+      notificationHandlers.get(method)?.(params)
+    },
+    async emitRequest(method, params) {
+      const handler = requestHandlers.get(method)
+      if (!handler) throw new Error(`No request handler registered for ${method}`)
+      return await handler(params)
+    },
     emitError(error) {
       errorHandler?.([error, undefined, 0])
     },
@@ -167,29 +192,7 @@ describe('LSP client notification delivery', () => {
     await client.stop()
   })
 
-  test('connection-only failures stay outside crash recovery until a nonzero exit', async () => {
-    const child = createFakeProcess()
-    const fakeConnection = createFakeConnection()
-    const onCrash = mock((_error: Error) => {})
-    const client = createLSPClient('typescript', onCrash, {
-      spawnProcess: (() => child) as LSPClientDependencies['spawnProcess'],
-      createConnection: () => fakeConnection.connection,
-    })
-
-    await client.start('unused', [])
-    await client.initialize(initializeParams())
-    fakeConnection.emitError(new Error('connection failed'))
-    fakeConnection.emitClose()
-
-    expect(client.isInitialized).toBe(false)
-    expect(onCrash).not.toHaveBeenCalled()
-
-    child.emit('exit', 1, null)
-    expect(onCrash).toHaveBeenCalledTimes(1)
-    await client.stop({ force: true })
-  })
-
-  test('only nonzero process exits enter crash recovery', async () => {
+  test('every unexpected transport termination enters crash recovery once', async () => {
     const createStartedClient = async () => {
       const child = createFakeProcess()
       const fakeConnection = createFakeConnection()
@@ -200,28 +203,55 @@ describe('LSP client notification delivery', () => {
       })
       await client.start('unused', [])
       await client.initialize(initializeParams())
-      return { child, client, onCrash }
+      return { child, client, fakeConnection, onCrash }
     }
 
-    const cleanExit = await createStartedClient()
-    cleanExit.child.emit('exit', 0, null)
-    expect(cleanExit.onCrash).not.toHaveBeenCalled()
-    await cleanExit.client.stop({ force: true })
+    type StartedClient = Awaited<ReturnType<typeof createStartedClient>>
+    const scenarios: Array<{
+      name: string
+      terminate: (started: StartedClient) => void
+    }> = [
+      {
+        name: 'JSON-RPC error',
+        terminate: ({ fakeConnection }) =>
+          fakeConnection.emitError(new Error('connection failed')),
+      },
+      {
+        name: 'JSON-RPC close',
+        terminate: ({ fakeConnection }) => fakeConnection.emitClose(),
+      },
+      {
+        name: 'child-process error',
+        terminate: ({ child }) =>
+          child.emit('error', new Error('process transport error')),
+      },
+      {
+        name: 'clean child exit',
+        terminate: ({ child }) => child.emit('exit', 0, null),
+      },
+      {
+        name: 'signal child exit',
+        terminate: ({ child }) => child.emit('exit', null, 'SIGTERM'),
+      },
+      {
+        name: 'nonzero child exit',
+        terminate: ({ child }) => child.emit('exit', 1, null),
+      },
+    ]
 
-    const signalExit = await createStartedClient()
-    signalExit.child.emit('exit', null, 'SIGTERM')
-    expect(signalExit.onCrash).not.toHaveBeenCalled()
-    await signalExit.client.stop({ force: true })
+    for (const scenario of scenarios) {
+      const started = await createStartedClient()
+      scenario.terminate(started)
 
-    const processError = await createStartedClient()
-    processError.child.emit('error', new Error('process transport error'))
-    expect(processError.onCrash).not.toHaveBeenCalled()
-    await processError.client.stop({ force: true })
+      expect(started.client.isInitialized, scenario.name).toBe(false)
+      expect(started.onCrash, scenario.name).toHaveBeenCalledTimes(1)
+      expect(started.child.kill, scenario.name).toHaveBeenCalledTimes(1)
 
-    const crash = await createStartedClient()
-    crash.child.emit('exit', 1, null)
-    expect(crash.onCrash).toHaveBeenCalledTimes(1)
-    await crash.client.stop({ force: true })
+      started.fakeConnection.emitClose()
+      started.child.emit('exit', 1, null)
+      expect(started.onCrash, scenario.name).toHaveBeenCalledTimes(1)
+      await started.client.stop({ force: true })
+    }
   })
 
   test('ignores a stale close callback after connection replacement', async () => {
@@ -288,6 +318,64 @@ describe('LSP client notification delivery', () => {
     expect(fakeConnection.sentRequestMethods).toEqual(['initialize'])
   })
 
+  test('force stop supersedes an in-flight graceful shutdown', async () => {
+    const child = createFakeProcess()
+    const fakeConnection = createFakeConnection({ pendingRequest: 'shutdown' })
+    const client = createLSPClient('typescript', undefined, {
+      spawnProcess: (() => child) as LSPClientDependencies['spawnProcess'],
+      createConnection: () => fakeConnection.connection,
+    })
+
+    await client.start('unused', [])
+    await client.initialize(initializeParams())
+    const gracefulStop = client.stop()
+    await Promise.resolve()
+
+    const forcedStop = client.stop({ force: true })
+    const outcome = await Promise.race([
+      forcedStop.then(() => 'stopped' as const),
+      new Promise<'timed-out'>(resolve =>
+        setTimeout(() => resolve('timed-out'), 50),
+      ),
+    ])
+
+    try {
+      expect(outcome).toBe('stopped')
+      expect(child.kill).toHaveBeenCalledTimes(1)
+    } finally {
+      fakeConnection.connection.dispose()
+      await Promise.allSettled([gracefulStop, forcedStop])
+    }
+  })
+
+  test('bounds an unanswered graceful shutdown exchange', async () => {
+    const child = createFakeProcess()
+    const fakeConnection = createFakeConnection({ pendingRequest: 'shutdown' })
+    const client = createLSPClient('typescript', undefined, {
+      spawnProcess: (() => child) as LSPClientDependencies['spawnProcess'],
+      createConnection: () => fakeConnection.connection,
+      gracefulShutdownTimeoutMs: 5,
+    })
+
+    await client.start('unused', [])
+    await client.initialize(initializeParams())
+    const gracefulStop = client.stop()
+    const outcome = await Promise.race([
+      gracefulStop.then(() => 'stopped' as const),
+      new Promise<'timed-out'>(resolve =>
+        setTimeout(() => resolve('timed-out'), 50),
+      ),
+    ])
+
+    try {
+      expect(outcome).toBe('stopped')
+      expect(child.kill).toHaveBeenCalledTimes(1)
+    } finally {
+      fakeConnection.connection.dispose()
+      await gracefulStop.catch(() => {})
+    }
+  })
+
   test('an immediate stop settles an in-flight spawn wait', async () => {
     const child = createFakeProcess(false)
     const client = createLSPClient('typescript', undefined, {
@@ -298,6 +386,9 @@ describe('LSP client notification delivery', () => {
     await client.stop({ force: true })
 
     await expect(start).rejects.toThrow('cancelled during spawn')
+    expect(() =>
+      child.emit('error', new Error('late missing-command ENOENT')),
+    ).not.toThrow()
   })
 
   test('transport failure rejects a pending initialization', async () => {
@@ -356,14 +447,35 @@ describe('LSP client notification delivery', () => {
       createConnection: nextConnection,
     })
 
-    client.onNotification('textDocument/publishDiagnostics', () => {})
-    client.onRequest('workspace/configuration', () => [])
+    const notificationHandler = mock((_params: unknown) => {})
+    const requestHandler = mock((params: unknown) => ({ configured: params }))
+    client.onNotification(
+      'textDocument/publishDiagnostics',
+      notificationHandler,
+    )
+    client.onRequest('workspace/configuration', requestHandler)
 
     await client.start('unused', [])
     await client.initialize(initializeParams())
+    connections[0]?.emitNotification('textDocument/publishDiagnostics', {
+      generation: 1,
+    })
+    expect(
+      await connections[0]?.emitRequest('workspace/configuration', {
+        generation: 1,
+      }),
+    ).toEqual({ configured: { generation: 1 } })
     await client.stop()
     await client.start('unused', [])
     await client.initialize(initializeParams())
+    connections[1]?.emitNotification('textDocument/publishDiagnostics', {
+      generation: 2,
+    })
+    expect(
+      await connections[1]?.emitRequest('workspace/configuration', {
+        generation: 2,
+      }),
+    ).toEqual({ configured: { generation: 2 } })
 
     expect(connections).toHaveLength(2)
     expect(connections[0]?.notificationMethods).toEqual([
@@ -374,6 +486,10 @@ describe('LSP client notification delivery', () => {
     ])
     expect(connections[0]?.requestMethods).toEqual(['workspace/configuration'])
     expect(connections[1]?.requestMethods).toEqual(['workspace/configuration'])
+    expect(notificationHandler).toHaveBeenCalledTimes(2)
+    expect(notificationHandler).toHaveBeenNthCalledWith(1, { generation: 1 })
+    expect(notificationHandler).toHaveBeenNthCalledWith(2, { generation: 2 })
+    expect(requestHandler).toHaveBeenCalledTimes(2)
 
     await client.stop()
   })

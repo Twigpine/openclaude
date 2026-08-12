@@ -17,6 +17,11 @@ import {
   waitForInitialization,
 } from '../../services/lsp/manager.js'
 import {
+  isLspDocumentRevisionChanged,
+  isLspServerGenerationChanged,
+  type LSPServerManager,
+} from '../../services/lsp/LSPServerManager.js'
+import {
   getLspDocumentIdentity,
   LspDocumentTooLargeError,
   readLspDocumentContents,
@@ -125,12 +130,72 @@ type OutputSchema = ReturnType<typeof outputSchema>
 export type Output = z.infer<OutputSchema>
 export type Input = z.infer<InputSchema>
 
-const LSP_SERVER_GENERATION_CHANGED = 'LSP_SERVER_GENERATION_CHANGED'
+type CallHierarchyFlowResult =
+  | { kind: 'result'; result: unknown }
+  | { kind: 'output'; output: Output }
 
-function isLspServerGenerationChanged(error: unknown): boolean {
-  return (
-    (error as { code?: unknown }).code === LSP_SERVER_GENERATION_CHANGED
-  )
+async function runCallHierarchyFlow(
+  manager: LSPServerManager,
+  input: Input,
+  absolutePath: string,
+  method: string,
+  params: unknown,
+): Promise<CallHierarchyFlowResult> {
+  const callMethod =
+    input.operation === 'incomingCalls'
+      ? 'callHierarchy/incomingCalls'
+      : 'callHierarchy/outgoingCalls'
+
+  for (let generationRetry = 0; generationRetry <= 1; generationRetry++) {
+    const prepared = await manager.sendRequestWithGeneration<
+      CallHierarchyItem[]
+    >(absolutePath, method, params)
+    if (!prepared) return { kind: 'result', result: undefined }
+
+    const callItems = prepared.result
+    if (!callItems || callItems.length === 0) {
+      return {
+        kind: 'output',
+        output: {
+          operation: input.operation,
+          result: 'No call hierarchy item found at this position',
+          filePath: input.filePath,
+          resultCount: 0,
+          fileCount: 0,
+        },
+      }
+    }
+
+    try {
+      const calls = await manager.sendRequestWithGeneration(
+        absolutePath,
+        callMethod,
+        { item: callItems[0] },
+        {
+          expectedGeneration: prepared.serverGeneration,
+          expectedDocumentRevision: prepared.documentRevision,
+          expectedDocumentCloseEpoch: prepared.documentCloseEpoch,
+        },
+      )
+      if (!calls) {
+        logForDebugging(
+          `LSP server returned undefined for ${callMethod} on ${input.filePath}`,
+        )
+      }
+      return { kind: 'result', result: calls?.result ?? null }
+    } catch (error) {
+      if (
+        generationRetry === 0 &&
+        (isLspServerGenerationChanged(error) ||
+          isLspDocumentRevisionChanged(error))
+      ) {
+        continue
+      }
+      throw error
+    }
+  }
+
+  return { kind: 'result', result: undefined }
 }
 
 export const LSPTool = buildTool({
@@ -280,56 +345,17 @@ export const LSPTool = buildTool({
         input.operation === 'incomingCalls' ||
         input.operation === 'outgoingCalls'
       ) {
-        for (let generationRetry = 0; generationRetry <= 1; generationRetry++) {
-          const prepared = await manager.sendRequestWithGeneration<
-            CallHierarchyItem[]
-          >(absolutePath, method, params)
-          if (!prepared) {
-            result = undefined
-            break
-          }
-
-          const callItems = prepared.result
-          if (!callItems || callItems.length === 0) {
-            const output: Output = {
-              operation: input.operation,
-              result: 'No call hierarchy item found at this position',
-              filePath: input.filePath,
-              resultCount: 0,
-              fileCount: 0,
-            }
-            return { data: output }
-          }
-
-          const callMethod =
-            input.operation === 'incomingCalls'
-              ? 'callHierarchy/incomingCalls'
-              : 'callHierarchy/outgoingCalls'
-
-          try {
-            const calls = await manager.sendRequestWithGeneration(
-              absolutePath,
-              callMethod,
-              { item: callItems[0] },
-              { expectedGeneration: prepared.serverGeneration },
-            )
-            if (!calls) {
-              logForDebugging(
-                `LSP server returned undefined for ${callMethod} on ${input.filePath}`,
-              )
-            }
-            result = calls?.result ?? null
-            break
-          } catch (error) {
-            if (
-              generationRetry === 0 &&
-              isLspServerGenerationChanged(error)
-            ) {
-              continue
-            }
-            throw error
-          }
+        const callHierarchy = await runCallHierarchyFlow(
+          manager,
+          input,
+          absolutePath,
+          method,
+          params,
+        )
+        if (callHierarchy.kind === 'output') {
+          return { data: callHierarchy.output }
         }
+        result = callHierarchy.result
       } else {
         result = await manager.sendRequest(absolutePath, method, params)
       }

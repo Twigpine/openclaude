@@ -44,11 +44,13 @@ export type LSPClient = {
 export type LSPClientDependencies = {
   spawnProcess: typeof spawn
   createConnection: typeof createMessageConnection
+  gracefulShutdownTimeoutMs: number
 }
 
 const DEFAULT_DEPENDENCIES: LSPClientDependencies = {
   spawnProcess: spawn,
   createConnection: createMessageConnection,
+  gracefulShutdownTimeoutMs: 2_000,
 }
 
 /**
@@ -75,6 +77,8 @@ export function createLSPClient(
   let isStopping = false // Track intentional shutdown to avoid spurious error logging
   let unavailableReported = false
   let stopPromise: Promise<void> | undefined
+  let stopMode: 'graceful' | 'force' | undefined
+  let forceCurrentStop: (() => void) | undefined
   let spawnWait:
     | { process: ChildProcess; reject: (error: Error) => void }
     | undefined
@@ -92,17 +96,6 @@ export function createLSPClient(
     if (startFailed) {
       throw startError || new Error(`LSP server ${serverName} failed to start`)
     }
-  }
-
-  function reportTransportUnavailable(error: Error): void {
-    if (isStopping) return
-    isInitialized = false
-    capabilities = undefined
-    startFailed = true
-    startError = error
-    const unavailableConnection = connection
-    connection = undefined
-    disposeResources(unavailableConnection, undefined)
   }
 
   function reportUnavailable(error: Error): void {
@@ -135,13 +128,21 @@ export function createLSPClient(
     }
 
     if (!targetProcess) return
-    if (spawnWait?.process === targetProcess) {
-      spawnWait.reject(
+    const activeSpawnWait = spawnWait
+    const cancelledDuringSpawn = activeSpawnWait?.process === targetProcess
+    if (cancelledDuringSpawn) {
+      activeSpawnWait.reject(
         new Error(`LSP server ${serverName} start was cancelled during spawn`),
       )
     }
     targetProcess.removeAllListeners('error')
     targetProcess.removeAllListeners('exit')
+    if (cancelledDuringSpawn) {
+      // spawn() may report a real launch error after an immediate force-stop.
+      // Keep a one-shot sink after detaching the cancelled start listener so
+      // that late error cannot become an uncaught EventEmitter error.
+      targetProcess.once('error', () => {})
+    }
     targetProcess.stdin?.removeAllListeners('error')
     targetProcess.stderr?.removeAllListeners('data')
     try {
@@ -261,21 +262,18 @@ export function createLSPClient(
         // Handle process errors (after successful spawn, e.g., crash during operation)
         spawnedProcess.on('error', error => {
           if (process !== spawnedProcess || isStopping) return
-          reportTransportUnavailable(error)
-          if (!isStopping) {
-            logError(
-              new Error(
-                `LSP server ${serverName} failed to start: ${error.message}`,
-              ),
-            )
-          }
+          reportUnavailable(error)
+          logError(
+            new Error(
+              `LSP server ${serverName} failed to start: ${error.message}`,
+            ),
+          )
         })
 
         spawnedProcess.on('exit', (code, signal) => {
           if (process !== spawnedProcess || isStopping) return
-          if (code === 0 || code === null) return
           const exitDetail =
-            signal !== null ? `signal ${signal}` : `exit code ${code}`
+            code !== null ? `exit code ${code}` : `signal ${signal ?? 'unknown'}`
           const crashError = new Error(
             `LSP server ${serverName} exited unexpectedly with ${exitDetail}`,
           )
@@ -304,15 +302,12 @@ export function createLSPClient(
         // This prevents unhandled promise rejections when the server crashes or closes unexpectedly
         startedConnection.onError(([error, _message, _code]) => {
           if (connection !== startedConnection || isStopping) return
-          reportTransportUnavailable(error)
-          // Only log if not intentionally stopping (avoid spurious errors during shutdown)
-          if (!isStopping) {
-            logError(
-              new Error(
-                `LSP server ${serverName} connection error: ${error.message}`,
-              ),
-            )
-          }
+          reportUnavailable(error)
+          logError(
+            new Error(
+              `LSP server ${serverName} connection error: ${error.message}`,
+            ),
+          )
         })
 
         startedConnection.onClose(() => {
@@ -322,7 +317,7 @@ export function createLSPClient(
             `LSP server ${serverName} connection closed unexpectedly`,
           )
           logForDebugging(closeError.message)
-          reportTransportUnavailable(closeError)
+          reportUnavailable(closeError)
         })
 
         // 3. Start listening for messages
@@ -498,10 +493,23 @@ export function createLSPClient(
     },
 
     stop(options?: { force?: boolean }): Promise<void> {
-      if (stopPromise) return stopPromise
+      const force = options?.force === true
+      if (stopPromise) {
+        if (force && stopMode === 'graceful') {
+          stopMode = 'force'
+          forceCurrentStop?.()
+        }
+        return stopPromise
+      }
 
       const stoppingConnection = connection
       const stoppingProcess = process
+      let requestForce!: () => void
+      const forceRequested = new Promise<void>(resolve => {
+        requestForce = resolve
+      })
+      stopMode = force ? 'force' : 'graceful'
+      forceCurrentStop = requestForce
       const pending = (async () => {
         let shutdownError: Error | undefined
 
@@ -509,10 +517,36 @@ export function createLSPClient(
         isStopping = true
 
         try {
-          if (stoppingConnection && !options?.force) {
-            // Try to send shutdown request and exit notification
-            await stoppingConnection.sendRequest('shutdown', {})
-            await stoppingConnection.sendNotification('exit', {})
+          if (stoppingConnection && !force) {
+            let timeout: ReturnType<typeof setTimeout> | undefined
+            const gracefulExchange = (async () => {
+              await stoppingConnection.sendRequest('shutdown', {})
+              await stoppingConnection.sendNotification('exit', {})
+              return 'completed' as const
+            })()
+            const timedOut = new Promise<'timed-out'>(resolve => {
+              timeout = setTimeout(
+                () => resolve('timed-out'),
+                dependencies.gracefulShutdownTimeoutMs,
+              )
+            })
+            const forced = forceRequested.then(() => 'forced' as const)
+
+            let outcome: 'completed' | 'timed-out' | 'forced'
+            try {
+              outcome = await Promise.race([
+                gracefulExchange,
+                timedOut,
+                forced,
+              ])
+            } finally {
+              if (timeout) clearTimeout(timeout)
+            }
+            if (outcome === 'timed-out') {
+              logForDebugging(
+                `LSP server ${serverName} graceful shutdown timed out after ${dependencies.gracefulShutdownTimeoutMs}ms`,
+              )
+            }
           }
         } catch (error) {
           const err = error as Error
@@ -547,6 +581,8 @@ export function createLSPClient(
 
       stopPromise = pending.finally(() => {
         stopPromise = undefined
+        stopMode = undefined
+        forceCurrentStop = undefined
       })
       return stopPromise
     },

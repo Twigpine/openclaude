@@ -797,7 +797,9 @@ export const LspServerConfigSchema = lazySchema(() =>
       .int()
       .positive()
       .optional()
-      .describe('Maximum time to wait for server startup (milliseconds)'),
+      .describe(
+        'Maximum time to wait for each server startup phase (default: 30000 milliseconds)',
+      ),
     shutdownTimeout: z
       .number()
       .int()
