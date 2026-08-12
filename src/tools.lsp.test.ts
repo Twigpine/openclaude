@@ -8,6 +8,7 @@ import {
   MAX_LSP_FILE_SIZE_BYTES,
 } from './services/lsp/documentIdentity.js'
 import {
+  LSP_DOCUMENT_REVISION_CHANGED,
   LSP_SERVER_GENERATION_CHANGED,
   type LSPServerManager,
 } from './services/lsp/LSPServerManager.js'
@@ -162,7 +163,9 @@ test('LSPTool keeps the 10 MB guard ahead of open and request', async () => {
       {} as never,
     )
 
-    expect(result.data.result).toContain('exceeds 10MB limit')
+    expect(result.data.result).toBe(
+      'File too large for LSP analysis (11MB exceeds 10MB limit)',
+    )
     expect(openFile).not.toHaveBeenCalled()
     expect(sendRequestCalls).not.toHaveBeenCalled()
   } finally {
@@ -253,7 +256,7 @@ test('LSPTool request params use the shared canonical document URI', async () =>
 
 for (const [contextName, contextCode] of [
   ['replacement generation', LSP_SERVER_GENERATION_CHANGED],
-  ['document revision change', 'LSP_DOCUMENT_REVISION_CHANGED'],
+  ['document revision change', LSP_DOCUMENT_REVISION_CHANGED],
 ] as const) {
   for (const operation of ['incomingCalls', 'outgoingCalls'] as const) {
     test(`LSPTool retries ${operation} after one ${contextName}`, async () => {

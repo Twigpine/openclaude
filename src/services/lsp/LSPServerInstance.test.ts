@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { describe, expect, jest, mock, test } from 'bun:test'
 import type { InitializeParams, InitializeResult } from 'vscode-languageserver-protocol'
 import type { LSPClient } from './LSPClient.js'
 import { createLSPServerInstance } from './LSPServerInstance.js'
@@ -447,6 +447,7 @@ describe('LSP server generations', () => {
   })
 
   test('startup timeout also bounds the process spawn wait', async () => {
+    jest.useFakeTimers()
     const fake = createFakeClientController()
     const startGate = fake.holdNextStart()
     const instance = createLSPServerInstance('typescript', CONFIG, {
@@ -456,34 +457,26 @@ describe('LSP server generations', () => {
 
     const start = instance.start()
     await startGate.started
-    const outcome = await Promise.race([
-      start.then(
-        () => ({ status: 'resolved' as const }),
-        error => ({ status: 'rejected' as const, error }),
-      ),
-      new Promise<{ status: 'pending' }>(resolve =>
-        setTimeout(() => resolve({ status: 'pending' }), 20),
-      ),
-    ])
 
     try {
-      expect(outcome).toMatchObject({
-        status: 'rejected',
-        error: expect.objectContaining({
-          message: expect.stringContaining(
-            'timed out after 5ms during process startup',
-          ),
-        }),
-      })
+      jest.advanceTimersByTime(4)
+      expect(instance.state).toBe('starting')
+      jest.advanceTimersByTime(1)
+      await expect(start).rejects.toThrow(
+        'timed out after 5ms during process startup',
+      )
       expect(fake.initializeCalls).not.toHaveBeenCalled()
       expect(fake.stopCalls).toHaveBeenCalledWith({ force: true })
     } finally {
       startGate.release()
+      jest.runAllTimers()
+      jest.useRealTimers()
       await start.catch(() => {})
     }
   })
 
   test('applies a bounded default when startupTimeout is omitted', async () => {
+    jest.useFakeTimers()
     const fake = createFakeClientController()
     const initializeGate = fake.holdNextInitialize()
     const instance = createLSPServerInstance('typescript', CONFIG, {
@@ -493,26 +486,17 @@ describe('LSP server generations', () => {
 
     const start = instance.start()
     await initializeGate.started
-    const outcome = await Promise.race([
-      start.then(
-        () => ({ status: 'resolved' as const }),
-        error => ({ status: 'rejected' as const, error }),
-      ),
-      new Promise<{ status: 'pending' }>(resolve =>
-        setTimeout(() => resolve({ status: 'pending' }), 20),
-      ),
-    ])
 
     try {
-      expect(outcome).toMatchObject({
-        status: 'rejected',
-        error: expect.objectContaining({
-          message: expect.stringContaining('timed out after 5ms'),
-        }),
-      })
+      jest.advanceTimersByTime(4)
+      expect(instance.state).toBe('starting')
+      jest.advanceTimersByTime(1)
+      await expect(start).rejects.toThrow('timed out after 5ms')
       expect(fake.stopCalls).toHaveBeenCalledWith({ force: true })
     } finally {
       initializeGate.release()
+      jest.runAllTimers()
+      jest.useRealTimers()
       await start.catch(() => {})
     }
   })

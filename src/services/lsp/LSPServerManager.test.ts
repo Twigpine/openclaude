@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, mock, test } from 'bun:test'
+import { afterEach, describe, expect, mock, test } from 'bun:test'
 import type { ChildProcess } from 'child_process'
 import type { MessageConnection } from 'vscode-jsonrpc/node.js'
 import {
@@ -44,6 +44,12 @@ const PYTHON_CONFIG: ScopedLspServerConfig = {
   scope: 'project',
   source: 'test',
 }
+
+const managers: LSPServerManager[] = []
+
+afterEach(async () => {
+  await Promise.allSettled(managers.splice(0).map(manager => manager.shutdown()))
+})
 
 type ServerEvent =
   | {
@@ -330,6 +336,7 @@ async function createManager(options?: {
       options?.lifecycleNotificationTimeoutMs,
   })
   await manager.initialize()
+  managers.push(manager)
   return { manager, controls }
 }
 

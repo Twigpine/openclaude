@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { createLSPServerManager } from './LSPServerManager.js'
 import type { LSPServerInstance } from './LSPServerInstance.js'
@@ -136,8 +136,8 @@ async function createManager() {
 
 test('delivers monotonically increasing versions for one document', async () => {
   const { manager, server } = await createManager()
-  const file = '/repo/src/version.ts'
-  const uri = pathToFileURL(file).href
+  const file = String.raw`C:\repo\src\version.ts`
+  const uri = 'file:///c:/repo/src/version.ts'
 
   await manager.openFile(file, 'one')
   await manager.changeFile(file, 'two')

@@ -148,7 +148,7 @@ function initializeParams() {
   }
 }
 
-describe('LSP client notification delivery', () => {
+describe('LSP client transport lifecycle', () => {
   test('best-effort notifications preserve lifecycle preflight errors', async () => {
     const fakeConnection = createFakeConnection()
     const client = createLSPClient('typescript', undefined, {
