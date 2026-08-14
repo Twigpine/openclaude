@@ -529,7 +529,7 @@ describe('LSP server generations', () => {
     fake.crash()
 
     await expect(instance.start()).rejects.toThrow(
-      'exceeded max crash recovery attempts (2)',
+      'exceeded max automatic recovery attempts (2)',
     )
     expect(fake.startCalls).toHaveBeenCalledTimes(3)
     expect(instance.generation).toBe(3)
@@ -574,7 +574,7 @@ describe('LSP server generations', () => {
     await instance.stop()
     expect(instance.state).toBe('stopped')
     await expect(instance.start()).rejects.toThrow(
-      'exceeded max crash recovery attempts (0)',
+      'exceeded max automatic recovery attempts (0)',
     )
     expect(instance.isCrashRecoveryExhausted).toBe(true)
     expect(fake.startCalls).toHaveBeenCalledTimes(1)

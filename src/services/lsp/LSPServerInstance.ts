@@ -47,7 +47,7 @@ export type LSPServerInstance = {
   readonly restartCount: number
   /** Successful initialization generation for the current process lifecycle */
   readonly generation: number
-  /** Whether automatic recovery has exhausted the configured crash budget */
+  /** Whether automatic recovery has exhausted the configured failure budget */
   readonly isCrashRecoveryExhausted: boolean
   /** Start the server and initialize it */
   start(): Promise<void>
@@ -134,7 +134,7 @@ export function createLSPServerInstance(
   let startTime: Date | undefined
   let lastError: Error | undefined
   let restartCount = 0
-  let crashRecoveryCount = 0
+  let automaticRecoveryFailureCount = 0
   let generation = 0
   let startEpoch = 0
   let startPromise: Promise<void> | undefined
@@ -145,15 +145,24 @@ export function createLSPServerInstance(
     lastUnavailableGeneration = unavailableGeneration
     options.onUnavailable?.(unavailableGeneration)
   }
+
+  // Automatic recovery is bounded across both startup failures and unexpected
+  // transport loss. Successful lazy replacement does not reset this budget;
+  // only an explicit restart does. Intentional stop/cancellation is excluded.
+  const recordAutomaticRecoveryFailure = (error: unknown): void => {
+    state = 'error'
+    lastError =
+      error instanceof Error ? error : new Error(errorMessage(error))
+    automaticRecoveryFailureCount++
+    notifyUnavailable(generation)
+  }
+
   // Propagate crash state so ensureServerStarted can restart on next use.
   // Without this, state stays 'running' after crash and the server is never
   // restarted (zombie state).
   const client = createLSPClient(name, error => {
     startEpoch++
-    state = 'error'
-    lastError = error
-    crashRecoveryCount++
-    notifyUnavailable(generation)
+    recordAutomaticRecoveryFailure(error)
   })
 
   /**
@@ -179,11 +188,11 @@ export function createLSPServerInstance(
   }
 
   async function startInternal(epoch: number): Promise<void> {
-    // Cap crash-recovery attempts so a persistently crashing server doesn't
-    // spawn unbounded child processes on every incoming request.
-    if (crashRecoveryCount > maxRestarts) {
+    // Cap automatic recovery so a persistently crashing or unstartable server
+    // doesn't spawn unbounded child processes on every incoming request.
+    if (automaticRecoveryFailureCount > maxRestarts) {
       const error = new Error(
-        `LSP server '${name}' exceeded max crash recovery attempts (${maxRestarts})`,
+        `LSP server '${name}' exceeded max automatic recovery attempts (${maxRestarts})`,
       )
       lastError = error
       logError(error)
@@ -314,8 +323,7 @@ export function createLSPServerInstance(
       // Prevent unhandled rejection from abandoned initialize promise
       initPromise?.catch(() => {})
       if (epoch === startEpoch) {
-        state = 'error'
-        lastError = error as Error
+        recordAutomaticRecoveryFailure(error)
         logError(error)
       }
       throw error
@@ -399,8 +407,8 @@ export function createLSPServerInstance(
     }
 
     // A manual restart is the explicit operator action that resets the
-    // automatic crash-recovery budget. Ordinary stop/start cleanup must not.
-    crashRecoveryCount = 0
+    // automatic-recovery budget. Ordinary stop/start cleanup must not.
+    automaticRecoveryFailureCount = 0
 
     try {
       await start()
@@ -607,7 +615,7 @@ export function createLSPServerInstance(
       return generation
     },
     get isCrashRecoveryExhausted() {
-      return crashRecoveryCount > maxRestarts
+      return automaticRecoveryFailureCount > maxRestarts
     },
     start,
     stop,
