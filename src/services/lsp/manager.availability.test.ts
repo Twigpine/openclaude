@@ -102,7 +102,7 @@ test('bounds failed starts before advertising server availability', () => {
         process.stdout.write(JSON.stringify(results))
       `,
     ],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', timeout: 30_000 },
   )
 
   expect(JSON.parse(output)).toEqual({

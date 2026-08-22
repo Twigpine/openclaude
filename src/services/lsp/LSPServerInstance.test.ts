@@ -19,6 +19,7 @@ type FakeClientController = {
   crash(error?: Error): void
   failNextInitialize(error: Error): void
   failNextRequest(error: Error): { called: Promise<void> }
+  failNextStrictNotification(error: Error): void
   failNextStop(error: Error): void
   finishNextInitializeUnhealthy(): void
   holdNextRequest<TResult>(result: TResult): {
@@ -42,6 +43,7 @@ function createFakeClientController(): FakeClientController {
   let onCrash: ((error: Error) => void) | undefined
   let initializeError: Error | undefined
   let initializeUnhealthy = false
+  let strictNotificationError: Error | undefined
   let stopError: Error | undefined
   let requestFailure:
     | { error: Error; calledResolve: () => void }
@@ -131,6 +133,13 @@ function createFakeClientController(): FakeClientController {
     }
     return undefined as TResult
   })
+  const sendNotificationStrictCalls = mock(async () => {
+    if (strictNotificationError) {
+      const error = strictNotificationError
+      strictNotificationError = undefined
+      throw error
+    }
+  })
 
   const client: LSPClient = {
     get capabilities() {
@@ -143,7 +152,7 @@ function createFakeClientController(): FakeClientController {
     initialize: initializeCalls,
     sendRequest: sendRequestCalls as LSPClient['sendRequest'],
     sendNotification: async () => {},
-    sendNotificationStrict: async () => {},
+    sendNotificationStrict: sendNotificationStrictCalls,
     onNotification: () => {},
     onRequest: () => {},
     stop: stopCalls,
@@ -168,6 +177,9 @@ function createFakeClientController(): FakeClientController {
       })
       requestFailure = { error, calledResolve }
       return { called }
+    },
+    failNextStrictNotification(error) {
+      strictNotificationError = error
     },
     failNextStop(error) {
       stopError = error
@@ -236,6 +248,34 @@ function createFakeClientController(): FakeClientController {
 }
 
 describe('LSP server generations', () => {
+  test('rejects strict notifications while the server is unhealthy', async () => {
+    const fake = createFakeClientController()
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+    })
+
+    await expect(
+      instance.sendNotificationStrict('textDocument/didOpen', {}),
+    ).rejects.toThrow(
+      "Cannot send notification to LSP server 'typescript': server is stopped",
+    )
+  })
+
+  test('wraps strict notification client failures with instance context', async () => {
+    const fake = createFakeClientController()
+    const instance = createLSPServerInstance('typescript', CONFIG, {
+      createClient: fake.createClient,
+    })
+    await instance.start()
+    fake.failNextStrictNotification(new Error('writer rejected'))
+
+    await expect(
+      instance.sendNotificationStrict('textDocument/didOpen', {}),
+    ).rejects.toThrow(
+      "LSP notification 'textDocument/didOpen' failed for server 'typescript': writer rejected",
+    )
+  })
+
   test('advance only after successful initialization and change after restart', async () => {
     const fake = createFakeClientController()
     const unavailableGenerations: number[] = []

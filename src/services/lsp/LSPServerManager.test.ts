@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, describe, expect, jest, mock, test } from 'bun:test'
 import type { ChildProcess } from 'child_process'
 import type { MessageConnection } from 'vscode-jsonrpc/node.js'
 import {
@@ -602,6 +602,7 @@ describe('LSP lifecycle notification failures', () => {
   })
 
   test('bounds shutdown while a lifecycle notification is stuck', async () => {
+    jest.useFakeTimers()
     const { manager, controls } = await createManager({
       lifecycleNotificationTimeoutMs: 5,
     })
@@ -610,23 +611,21 @@ describe('LSP lifecycle notification failures', () => {
     const open = manager.openFile('/repo/src/stuck-open.ts', 'contents')
     await gate.started
     const shutdown = manager.shutdown()
-    const outcome = await Promise.race([
-      shutdown.then(() => 'settled' as const),
-      new Promise<'pending'>(resolve =>
-        setTimeout(() => resolve('pending'), 20),
-      ),
-    ])
 
     try {
-      expect(outcome).toBe('settled')
+      jest.advanceTimersByTime(5)
+      await expect(shutdown).resolves.toBeUndefined()
       await expect(open).rejects.toThrow('timed out after 5ms')
     } finally {
       gate.release()
+      jest.runAllTimers()
+      jest.useRealTimers()
       await Promise.allSettled([open, shutdown])
     }
   })
 
   test('a stale lifecycle timeout does not stop the replacement generation', async () => {
+    jest.useFakeTimers()
     const { manager, controls } = await createManager({
       lifecycleNotificationTimeoutMs: 5,
     })
@@ -636,23 +635,16 @@ describe('LSP lifecycle notification failures', () => {
     await gate.started
     server.replaceGeneration()
 
-    const outcome = await Promise.race([
-      open.then(
-        () => 'resolved' as const,
-        () => 'rejected' as const,
-      ),
-      new Promise<'pending'>(resolve =>
-        setTimeout(() => resolve('pending'), 20),
-      ),
-    ])
-
     try {
-      expect(outcome).toBe('rejected')
+      jest.advanceTimersByTime(5)
+      await expect(open).rejects.toThrow('timed out after 5ms')
       expect(server.server.state).toBe('running')
       expect(server.server.generation).toBe(2)
       expect(server.stopCalls).not.toHaveBeenCalled()
     } finally {
       gate.release()
+      jest.runAllTimers()
+      jest.useRealTimers()
       await open.catch(() => {})
     }
   })

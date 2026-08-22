@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { describe, expect, mock, test } from 'bun:test'
+import { describe, expect, jest, mock, test } from 'bun:test'
 import type { ChildProcess } from 'child_process'
 import type { MessageConnection } from 'vscode-jsonrpc/node.js'
 import {
@@ -349,6 +349,7 @@ describe('LSP client transport lifecycle', () => {
   })
 
   test('bounds an unanswered graceful shutdown exchange', async () => {
+    jest.useFakeTimers()
     const child = createFakeProcess()
     const fakeConnection = createFakeConnection({ pendingRequest: 'shutdown' })
     const client = createLSPClient('typescript', undefined, {
@@ -360,18 +361,15 @@ describe('LSP client transport lifecycle', () => {
     await client.start('unused', [])
     await client.initialize(initializeParams())
     const gracefulStop = client.stop()
-    const outcome = await Promise.race([
-      gracefulStop.then(() => 'stopped' as const),
-      new Promise<'timed-out'>(resolve =>
-        setTimeout(() => resolve('timed-out'), 50),
-      ),
-    ])
 
     try {
-      expect(outcome).toBe('stopped')
+      jest.advanceTimersByTime(5)
+      await expect(gracefulStop).resolves.toBeUndefined()
       expect(child.kill).toHaveBeenCalledTimes(1)
     } finally {
       fakeConnection.connection.dispose()
+      jest.runAllTimers()
+      jest.useRealTimers()
       await gracefulStop.catch(() => {})
     }
   })
