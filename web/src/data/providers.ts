@@ -1,5 +1,5 @@
 // Mirrors the provider preset manifest in
-// src/integrations/generated/integrationManifest.generated.ts (v0.26.0)
+// src/integrations/generated/integrationManifest.generated.ts (v0.29.1)
 // plus the OAuth/special entries injected by the /provider picker.
 
 export type ProviderGroup =
@@ -147,6 +147,14 @@ export const providers: Provider[] = [
     setup: '/provider or OpenAI-compatible env vars',
     envVars: ['LLMTR_API_KEY', 'OPENAI_API_KEY'],
     notes: '/provider and --provider llmtr default to deepseek/deepseek-v4-flash; raw env setup must set OPENAI_BASE_URL=https://llmtr.com/v1 and OPENAI_MODEL. Uses public discovery of tool-capable chat models.',
+  },
+  {
+    id: 'merge-gateway',
+    name: 'Merge Gateway',
+    group: 'gateways',
+    setup: '/provider or env vars',
+    envVars: ['MERGE_GATEWAY_API_KEY'],
+    notes: 'Multi-provider model router with Chat Completions, Responses, authenticated catalog discovery, and routing policies.',
   },
   {
     id: 'near-ai',
