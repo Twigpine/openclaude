@@ -461,6 +461,33 @@ test('resolveProviderRequest resolves the GPT-5.6 family Codex aliases', () => {
   expect(bare.reasoning).toEqual({ effort: 'high' })
 })
 
+test('resolveProviderRequest pairs bare Codex-alias launches with the Codex backend endpoint', () => {
+  // --provider openai --model <alias> with no base URL anywhere resolves
+  // through OPENAI_MODEL; the codex_responses transport must not end up
+  // paired with the public OpenAI fallback URL (#2066).
+  for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5']) {
+    const request = resolveProviderRequest({
+      processEnv: { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_MODEL: model },
+    })
+    expect(request.requestedModel).toBe(model)
+    expect(request.transport).toBe('codex_responses')
+    expect(request.baseUrl).toBe('https://chatgpt.com/backend-api/codex')
+  }
+})
+
+test('resolveProviderRequest keeps an explicit default base URL on the direct route for Codex aliases', () => {
+  const request = resolveProviderRequest({
+    processEnv: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_MODEL: 'gpt-5.6-terra',
+    },
+  })
+
+  expect(request.transport).not.toBe('codex_responses')
+  expect(request.baseUrl).toBe('https://api.openai.com/v1')
+})
+
 test('resolveProviderRequest keeps the implicit Codex fallback on Sol with high reasoning', () => {
   expect(resolveProviderRequest({ processEnv: {} })).toMatchObject({
     requestedModel: 'codexplan',

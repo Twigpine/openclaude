@@ -1082,9 +1082,19 @@ export function resolveProviderRequest(options?: {
     descriptor.baseModel === envResolvedCodexModel
   const isCodexAliasModel =
     isOpenAICodexShortcutAlias(requestedModel) || requestedMatchesEnvCodexShortcut
+  // A non-shortcut Codex alias launched with no endpoint identity anywhere
+  // still selects the codex_responses transport (shouldUseCodexTransport
+  // treats every alias as Codex once the base URL is absent), leaving it
+  // paired with the public OpenAI fallback URL (#2066). Promote bare-alias
+  // launches to the Codex backend so transport and baseUrl describe one
+  // route. An explicit base URL — even set to the literal default value —
+  // still pins the direct OpenAI route.
+  const isBareCodexAliasLaunch =
+    !isGithubMode && !isCodexAliasModel && !rawBaseUrl && isCodexAlias(requestedModel)
   const hasUserSetBaseUrl = rawBaseUrl && rawBaseUrl !== DEFAULT_OPENAI_BASE_URL
   const finalBaseUrlRaw =
-    !isGithubMode && isCodexAliasModel && !hasUserSetBaseUrl
+    !isGithubMode &&
+    ((isCodexAliasModel && !hasUserSetBaseUrl) || isBareCodexAliasLaunch)
       ? DEFAULT_CODEX_BASE_URL
       : rawBaseUrl
   const finalBaseUrl = normalizeGitlawbOpengatewayBaseUrl(finalBaseUrlRaw)
