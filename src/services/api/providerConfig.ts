@@ -1089,8 +1089,12 @@ export function resolveProviderRequest(options?: {
   // launches to the Codex backend so transport and baseUrl describe one
   // route. An explicit base URL — even set to the literal default value —
   // still pins the direct OpenAI route.
+  // Classification consumes the canonical alias identity: the supported
+  // trailing [1m] context tag is stripped first so tagged and untagged
+  // aliases resolve identically (#2171).
+  const codexAliasCandidate = requestedModel.trim().replace(/\[1m]$/i, '').trim()
   const isBareCodexAliasLaunch =
-    !isGithubMode && !isCodexAliasModel && !rawBaseUrl && isCodexAlias(requestedModel)
+    !isGithubMode && !isCodexAliasModel && !rawBaseUrl && isCodexAlias(codexAliasCandidate)
   const hasUserSetBaseUrl = rawBaseUrl && rawBaseUrl !== DEFAULT_OPENAI_BASE_URL
   const finalBaseUrlRaw =
     !isGithubMode &&
