@@ -491,7 +491,7 @@ test('resolveProviderRequest keeps an explicit default base URL on the direct ro
 test('resolveProviderRequest promotes [1m]-tagged Codex aliases identically to untagged ones', () => {
   // The trailing [1m] client-side context tag is a supported form; alias
   // classification must consume the canonical (tag-stripped) identity (#2171).
-  for (const model of ['gpt-5.6-sol[1m]', 'gpt-5.5?reasoning=medium[1m]']) {
+  for (const model of ['gpt-5.6-sol[1m]', 'gpt-5.5?reasoning=medium[1m]', 'codexplan[1m]']) {
     const request = resolveProviderRequest({
       processEnv: { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_MODEL: model },
     })

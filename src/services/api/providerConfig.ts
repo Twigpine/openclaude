@@ -450,7 +450,12 @@ function parseModelDescriptor(model: string): ModelDescriptor {
 }
 
 export function isCodexAlias(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
+  // Canonical alias identity: the supported trailing [1m] client-side
+  // context tag is never part of the alias id, so every consumer of this
+  // predicate (endpoint promotion, transport choice) classifies tagged and
+  // untagged aliases identically (#2171).
+  const stripped = model.trim().replace(/\[1m]$/i, '')
+  const normalized = stripped.toLowerCase()
   const base = normalized.split('?', 1)[0] ?? normalized
   return Object.hasOwn(CODEX_ALIAS_MODELS, base)
 }
@@ -1089,12 +1094,8 @@ export function resolveProviderRequest(options?: {
   // launches to the Codex backend so transport and baseUrl describe one
   // route. An explicit base URL — even set to the literal default value —
   // still pins the direct OpenAI route.
-  // Classification consumes the canonical alias identity: the supported
-  // trailing [1m] context tag is stripped first so tagged and untagged
-  // aliases resolve identically (#2171).
-  const codexAliasCandidate = requestedModel.trim().replace(/\[1m]$/i, '').trim()
   const isBareCodexAliasLaunch =
-    !isGithubMode && !isCodexAliasModel && !rawBaseUrl && isCodexAlias(codexAliasCandidate)
+    !isGithubMode && !isCodexAliasModel && !rawBaseUrl && isCodexAlias(requestedModel)
   const hasUserSetBaseUrl = rawBaseUrl && rawBaseUrl !== DEFAULT_OPENAI_BASE_URL
   const finalBaseUrlRaw =
     !isGithubMode &&
