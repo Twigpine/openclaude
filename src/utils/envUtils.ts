@@ -94,14 +94,30 @@ export function getProjectsDir(): string {
 
 /**
  * Check if NODE_OPTIONS contains a specific flag.
- * Splits on whitespace and checks for exact match to avoid false positives.
+ * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`,
+ * `--inspect=0.0.0.0:9229`) and quoted tokens. Matches exact flag
+ * or flag with an `=value` suffix to avoid false positives on
+ * prefix-related flags (e.g. `--inspect` must not match `--inspect-brk`).
  */
 export function hasNodeOption(flag: string): boolean {
   const nodeOptions = process.env.NODE_OPTIONS
   if (!nodeOptions) {
     return false
   }
-  return nodeOptions.split(/\s+/).includes(flag)
+  const tokens = nodeOptions.split(/\s+/).filter(Boolean)
+  for (let token of tokens) {
+    // Strip surrounding single/double quotes (NODE_OPTIONS may be quoted)
+    if (
+      (token.startsWith('"') && token.endsWith('"')) ||
+      (token.startsWith("'") && token.endsWith("'"))
+    ) {
+      token = token.slice(1, -1)
+    }
+    if (token === flag || token.startsWith(flag + '=')) {
+      return true
+    }
+  }
+  return false
 }
 
 export function isEnvTruthy(envVar: string | boolean | undefined): boolean {
