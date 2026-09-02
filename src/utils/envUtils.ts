@@ -94,10 +94,13 @@ export function getProjectsDir(): string {
 
 /**
  * Check if NODE_OPTIONS contains a specific flag.
+ *
  * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`,
- * `--inspect=0.0.0.0:9229`) and quoted tokens. Matches exact flag
- * or flag with an `=value` suffix to avoid false positives on
- * prefix-related flags (e.g. `--inspect` must not match `--inspect-brk`).
+ * `--inspect=0.0.0.0:9229`) and double-quoted tokens (matching Node's
+ * option lexer; single quotes are literal once inside `process.env`).
+ * Matches exact flag or flag with an `=value` suffix to avoid false
+ * positives on prefix-related flags (e.g. `--inspect` must not match
+ * `--inspect-brk`).
  */
 export function hasNodeOption(flag: string): boolean {
   const nodeOptions = process.env.NODE_OPTIONS
@@ -106,10 +109,12 @@ export function hasNodeOption(flag: string): boolean {
   }
   const tokens = nodeOptions.split(/\s+/).filter(Boolean)
   for (let token of tokens) {
-    // Strip surrounding single/double quotes (NODE_OPTIONS may be quoted)
+    // Only double quotes are interpreted by Node's NODE_OPTIONS parser;
+    // single quotes are kept literal (Node leaves them as part of the token).
     if (
-      (token.startsWith('"') && token.endsWith('"')) ||
-      (token.startsWith("'") && token.endsWith("'"))
+      token.length >= 2 &&
+      token.startsWith('"') &&
+      token.endsWith('"')
     ) {
       token = token.slice(1, -1)
     }
