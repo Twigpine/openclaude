@@ -75,6 +75,13 @@ describe('hasNodeOption', () => {
     // Mixed flags
     { name: 'mixed flags contains target', nodeOptions: '--experimental-vm-modules --max-old-space-size=4096 --inspect=9229', flag: '--max-old-space-size', expected: true },
     { name: 'mixed flags does not contain absent', nodeOptions: '--experimental-vm-modules --max-old-space-size=4096', flag: '--use-system-ca', expected: false },
+
+    // Quoted option values must not create spurious flag tokens (Node quote grammar)
+    { name: 'quoted value with option-like text is not a flag', nodeOptions: '--conditions "foo --use-system-ca bar"', flag: '--use-system-ca', expected: false },
+    { name: 'quoted value with option-like text — explicit flag still matches', nodeOptions: '--conditions "foo --use-system-ca bar" --use-system-ca', flag: '--use-system-ca', expected: true },
+    { name: 'equals-quoted value with option-like text is not a flag', nodeOptions: '--title="foo --use-system-ca bar"', flag: '--use-system-ca', expected: false },
+    { name: 'quoted value preserves other flag detection', nodeOptions: '--title="foo bar" --use-system-ca', flag: '--use-system-ca', expected: true },
+    { name: 'quoted value with --expose-gc inner text is not a flag', nodeOptions: '--conditions "foo --expose-gc bar"', flag: '--expose-gc', expected: false },
   ]
 
   for (const { name, nodeOptions, flag, expected } of cases) {

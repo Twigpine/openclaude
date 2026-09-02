@@ -98,16 +98,39 @@ export function getProjectsDir(): string {
  * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`,
  * `--inspect=0.0.0.0:9229`) and double-quoted tokens (matching Node's
  * option lexer; single quotes are literal once inside `process.env`).
- * Matches exact flag or flag with an `=value` suffix to avoid false
- * positives on prefix-related flags (e.g. `--inspect` must not match
- * `--inspect-brk`).
+ * Whitespace inside double quotes does not split tokens — option-like
+ * text inside a quoted value (e.g. `--conditions "foo --use-system-ca bar"`)
+ * is not treated as an independent flag. Matches exact flag or flag with
+ * an `=value` suffix to avoid false positives on prefix-related flags
+ * (e.g. `--inspect` must not match `--inspect-brk`).
  */
 export function hasNodeOption(flag: string): boolean {
   const nodeOptions = process.env.NODE_OPTIONS
   if (!nodeOptions) {
     return false
   }
-  const tokens = nodeOptions.split(/\s+/).filter(Boolean)
+  // Tokenize respecting double quotes so quoted values with spaces or
+  // option-like text do not create spurious flag tokens.
+  const tokens: string[] = []
+  let current = ''
+  let inDoubleQuote = false
+  for (let i = 0; i < nodeOptions.length; i++) {
+    const char = nodeOptions[i]!
+    if (char === '"') {
+      inDoubleQuote = !inDoubleQuote
+      current += char
+    } else if (/\s/.test(char) && !inDoubleQuote) {
+      if (current) {
+        tokens.push(current)
+        current = ''
+      }
+    } else {
+      current += char
+    }
+  }
+  if (current) {
+    tokens.push(current)
+  }
   for (let token of tokens) {
     // Only double quotes are interpreted by Node's NODE_OPTIONS parser;
     // single quotes are kept literal (Node leaves them as part of the token).
