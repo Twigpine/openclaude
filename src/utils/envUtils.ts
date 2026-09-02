@@ -95,51 +95,137 @@ export function getProjectsDir(): string {
 /**
  * Check if NODE_OPTIONS contains a specific flag.
  *
- * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`,
- * `--inspect=0.0.0.0:9229`) and double-quoted tokens (matching Node's
- * option lexer; single quotes are literal once inside `process.env`).
- * Whitespace inside double quotes does not split tokens — option-like
- * text inside a quoted value (e.g. `--conditions "foo --use-system-ca bar"`)
- * is not treated as an independent flag. Matches exact flag or flag with
- * an `=value` suffix to avoid false positives on prefix-related flags
- * (e.g. `--inspect` must not match `--inspect-brk`).
+ * Mirrors Node's `ParseNodeOptionsEnvVar` (src/node_options.cc):
+ * - double quotes toggle `is_in_string` and are stripped
+ * - backslash escapes the next character only when `is_in_string`
+ * - spaces outside quotes delimit tokens; single quotes are literal
+ * - value-taking options consume the next token as a value so
+ *   `--conditions "--use-system-ca"` does not count as `--use-system-ca`
+ * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`) and avoids
+ * prefix false positives (e.g. `--inspect` must not match `--inspect-brk`).
  */
 export function hasNodeOption(flag: string): boolean {
   const nodeOptions = process.env.NODE_OPTIONS
   if (!nodeOptions) {
     return false
   }
-  // Tokenize respecting double quotes so quoted values with spaces or
-  // option-like text do not create spurious flag tokens.
-  const tokens: string[] = []
-  let current = ''
-  let inDoubleQuote = false
+
+  // Node's ParseNodeOptionsEnvVar (src/node_options.cc)
+  const rawTokens: string[] = []
+  let isInString = false
+  let willStartNewArg = true
   for (let i = 0; i < nodeOptions.length; i++) {
-    const char = nodeOptions[i]!
-    if (char === '"') {
-      inDoubleQuote = !inDoubleQuote
-      current += char
-    } else if (/\s/.test(char) && !inDoubleQuote) {
-      if (current) {
-        tokens.push(current)
-        current = ''
+    let c = nodeOptions[i]!
+    if (c === '\\' && isInString) {
+      if (i + 1 >= nodeOptions.length) {
+        continue
       }
+      c = nodeOptions[++i]!
+    } else if (c === ' ' && !isInString) {
+      willStartNewArg = true
+      continue
+    } else if (c === '"') {
+      isInString = !isInString
+      continue
+    } else if (c === '\t' && !isInString) {
+      willStartNewArg = true
+      continue
+    }
+
+    if (willStartNewArg) {
+      rawTokens.push(c)
+      willStartNewArg = false
     } else {
-      current += char
+      rawTokens[rawTokens.length - 1] += c
     }
   }
-  if (current) {
-    tokens.push(current)
-  }
-  for (let token of tokens) {
-    // Only double quotes are interpreted by Node's NODE_OPTIONS parser;
-    // single quotes are kept literal (Node leaves them as part of the token).
-    if (
-      token.length >= 2 &&
-      token.startsWith('"') &&
-      token.endsWith('"')
-    ) {
-      token = token.slice(1, -1)
+
+  // For hasNodeOption we fail closed on unterminated strings for CA flags,
+  // but keep tokens for other checks. No early return needed.
+
+  // Options whose value is required and may look like a flag (e.g. --conditions).
+  // These always consume the next token as value, even if it starts with '-'.
+  const ALWAYS_CONSUMES_NEXT = new Set(['--conditions', '-C'])
+
+  // Other value-taking options (std::string / vector / int / HostPort) that
+  // require a value but whose values are typically paths/names. We only skip
+  // the next token if it does not look like an option (does not start with '-'),
+  // to avoid false negatives like `--inspect --use-system-ca`.
+  const VALUE_TAKING = new Set([
+    '--allow-fs-read',
+    '--allow-fs-write',
+    '--cpu-prof-dir',
+    '--cpu-prof-interval',
+    '--cpu-prof-name',
+    '--diagnostic-dir',
+    '--disable-proto',
+    '--disable-warning',
+    '--dns-result-order',
+    '--experimental-default-type',
+    '--experimental-import-meta-resolve',
+    '--experimental-loader',
+    '--heap-prof-dir',
+    '--heap-prof-interval',
+    '--heap-prof-name',
+    '--heapsnapshot-near-heap-limit',
+    '--heapsnapshot-signal',
+    '--icu-data-dir',
+    '--import',
+    '--input-type',
+    '--localstorage-file',
+    '--max-http-header-size',
+    '--network-family-autoselection-attempt-timeout',
+    '--openssl-config',
+    '--redirect-warnings',
+    '--report-dir',
+    '--report-directory',
+    '--report-filename',
+    '--report-signal',
+    '--require',
+    '-r',
+    '--secure-heap',
+    '--secure-heap-min',
+    '--snapshot-blob',
+    '--test-coverage-branches',
+    '--test-coverage-exclude',
+    '--test-coverage-functions',
+    '--test-coverage-include',
+    '--test-coverage-lines',
+    '--test-name-pattern',
+    '--test-reporter',
+    '--test-reporter-destination',
+    '--test-shard',
+    '--test-skip-pattern',
+    '--title',
+    '--tls-cipher-list',
+    '--tls-keylog',
+    '--trace-event-categories',
+    '--trace-event-file-pattern',
+    '--trace-require-module',
+    '--unhandled-rejections',
+    '--use-largepages',
+    '--v8-pool-size',
+    '--watch-kill-signal',
+    '--watch-path',
+    '--max-old-space-size',
+    '--max-old-space-size-percentage',
+    '--max-semi-space-size',
+    '--stack-trace-limit',
+  ])
+
+  for (let i = 0; i < rawTokens.length; i++) {
+    const token = rawTokens[i]!
+    if (i > 0) {
+      const prev = rawTokens[i - 1]!
+      const prevBase = prev.split('=')[0]!
+      if (!prev.includes('=')) {
+        if (ALWAYS_CONSUMES_NEXT.has(prevBase)) {
+          continue
+        }
+        if (VALUE_TAKING.has(prevBase) && !token.startsWith('-')) {
+          continue
+        }
+      }
     }
     if (token === flag || token.startsWith(flag + '=')) {
       return true

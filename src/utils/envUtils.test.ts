@@ -82,6 +82,10 @@ describe('hasNodeOption', () => {
     { name: 'equals-quoted value with option-like text is not a flag', nodeOptions: '--title="foo --use-system-ca bar"', flag: '--use-system-ca', expected: false },
     { name: 'quoted value preserves other flag detection', nodeOptions: '--title="foo bar" --use-system-ca', flag: '--use-system-ca', expected: true },
     { name: 'quoted value with --expose-gc inner text is not a flag', nodeOptions: '--conditions "foo --expose-gc bar"', flag: '--expose-gc', expected: false },
+    { name: '--conditions value exactly --use-system-ca is not a flag', nodeOptions: '--conditions "--use-system-ca"', flag: '--use-system-ca', expected: false },
+    { name: '--conditions escaped quote does not expose inner flag', nodeOptions: '--conditions "foo \\" --use-system-ca bar"', flag: '--use-system-ca', expected: false },
+    { name: '--conditions escaped value still allows explicit flag after', nodeOptions: '--conditions "foo \\" --use-system-ca bar" --use-system-ca', flag: '--use-system-ca', expected: true },
+    { name: '--conditions with equals value is not a flag', nodeOptions: '--conditions=--use-system-ca', flag: '--use-system-ca', expected: false },
   ]
 
   for (const { name, nodeOptions, flag, expected } of cases) {
