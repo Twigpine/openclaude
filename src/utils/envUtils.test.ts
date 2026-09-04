@@ -54,6 +54,11 @@ describe('hasNodeOption', () => {
     { name: 'repeated whitespace second flag', nodeOptions: '  --use-system-ca   --use-openssl-ca  ', flag: '--use-openssl-ca', expected: true },
     { name: 'multiple spaces and tabs', nodeOptions: '--use-system-ca\t  --max-old-space-size=4096', flag: '--max-old-space-size', expected: true },
     { name: 'flag not present with repeated whitespace', nodeOptions: '  --use-system-ca   ', flag: '--use-openssl-ca', expected: false },
+    // Node only treats ASCII spaces as delimiters: a tab with no spaces keeps
+    // the input as one token, so neither option is reported (verified on Node
+    // 22.23.2 where the tab-joined value is rejected as a bad option).
+    { name: 'tab without spaces does not delimit (second flag)', nodeOptions: '--use-system-ca\t--max-old-space-size=4096', flag: '--max-old-space-size', expected: false },
+    { name: 'tab without spaces does not delimit (first flag)', nodeOptions: '--use-system-ca\t--max-old-space-size=4096', flag: '--use-system-ca', expected: false },
 
     // --inspect vs --inspect-brk boundary
     { name: '--inspect exact', nodeOptions: '--inspect', flag: '--inspect', expected: true },
@@ -87,6 +92,12 @@ describe('hasNodeOption', () => {
     { name: '--conditions escaped quote does not expose inner flag', nodeOptions: '--conditions "foo \\" --use-system-ca bar"', flag: '--use-system-ca', expected: false },
     { name: '--conditions escaped value still allows explicit flag after', nodeOptions: '--conditions "foo \\" --use-system-ca bar" --use-system-ca', flag: '--use-system-ca', expected: true },
     { name: '--conditions with equals value is not a flag', nodeOptions: '--conditions=--use-system-ca', flag: '--use-system-ca', expected: false },
+
+    // Required option value that looks flag-like: Node rejects the whole
+    // value (e.g. `--title requires an argument`), so nothing is active.
+    { name: '--title with flag-like value fails closed', nodeOptions: '--title --use-system-ca', flag: '--use-system-ca', expected: false },
+    { name: '--title with flag-like value fails closed for the option itself', nodeOptions: '--title --use-system-ca', flag: '--title', expected: false },
+    { name: '--title with real value still detects later flag', nodeOptions: '--title openclaude --use-system-ca', flag: '--use-system-ca', expected: true },
 
     // Malformed quoting fails closed (Node rejects the whole value)
     { name: 'unterminated double quote is not a flag', nodeOptions: '"--use-system-ca', flag: '--use-system-ca', expected: false },
@@ -179,6 +190,10 @@ describe('hasNodeOption CA selection via cache rebuild', () => {
     expect(
       getEffectiveCACerts('--use-openssl-ca=1 --no-use-openssl-ca'),
     ).toBeUndefined()
+  })
+
+  test('required value with flag-like text selects bundled roots (undefined)', () => {
+    expect(getEffectiveCACerts('--title --use-system-ca')).toBeUndefined()
   })
 
   test('negation then equals-positive selects system roots (defined)', () => {

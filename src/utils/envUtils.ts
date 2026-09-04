@@ -98,14 +98,15 @@ export function getProjectsDir(): string {
  * Mirrors Node's `ParseNodeOptionsEnvVar` (src/node_options.cc):
  * - double quotes toggle `is_in_string` and are stripped
  * - backslash escapes the next character only when `is_in_string`
- * - spaces outside quotes delimit tokens; single quotes are literal
+ * - only ASCII spaces outside quotes delimit tokens (tabs are literal);
+ *   single quotes are literal
  * - value-taking options consume the next token as a value so
  *   `--conditions "--use-system-ca"` does not count as `--use-system-ca`
  * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`) and avoids
  * prefix false positives (e.g. `--inspect` must not match `--inspect-brk`).
- * Fails closed (returns false) when quoting is malformed: an unterminated
- * double-quoted string or an incomplete in-string escape means Node would
- * reject the whole NODE_OPTIONS value, so no option is reported active.
+ * Fails closed (returns false) when quoting is malformed or when a required
+ * option value looks flag-like (`--title --use-system-ca`): Node rejects the
+ * whole NODE_OPTIONS value in both cases, so no option is reported active.
  * For `--use-system-ca` / `--use-openssl-ca`, later `--no-*` occurrences
  * disable earlier positives (and vice versa) in token order.
  */
@@ -135,9 +136,6 @@ export function hasNodeOption(flag: string): boolean {
     } else if (c === '"') {
       isInString = !isInString
       continue
-    } else if (c === '\t' && !isInString) {
-      willStartNewArg = true
-      continue
     }
 
     if (willStartNewArg) {
@@ -160,10 +158,11 @@ export function hasNodeOption(flag: string): boolean {
   // These always consume the next token as value, even if it starts with '-'.
   const ALWAYS_CONSUMES_NEXT = new Set(['--conditions', '-C'])
 
-  // Other value-taking options (std::string / vector / int / HostPort) that
-  // require a value but whose values are typically paths/names. We only skip
-  // the next token if it does not look like an option (does not start with '-'),
-  // to avoid false negatives like `--inspect --use-system-ca`.
+  // Other value-taking options (std::string / vector / int) that require a
+  // value. When the next token looks flag-like (starts with '-'), Node
+  // rejects the whole NODE_OPTIONS value (e.g. `--title requires an
+  // argument`), so the helper fails closed below instead of exposing that
+  // token to flag matching.
   const VALUE_TAKING = new Set([
     '--allow-fs-read',
     '--allow-fs-write',
@@ -244,7 +243,10 @@ export function hasNodeOption(flag: string): boolean {
       if (!token.startsWith('-')) {
         continue
       }
-      // Flag-like token: not a value, fall through as an option.
+      // Required value looks flag-like (e.g. `--title --use-system-ca`):
+      // Node rejects the whole NODE_OPTIONS value with `<flag> requires an
+      // argument`, so fail closed — no option is active.
+      return false
     }
     effectiveTokens.push(token)
     const base = token.split('=')[0]!
