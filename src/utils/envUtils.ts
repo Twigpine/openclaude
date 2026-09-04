@@ -103,6 +103,11 @@ export function getProjectsDir(): string {
  *   `--conditions "--use-system-ca"` does not count as `--use-system-ca`
  * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`) and avoids
  * prefix false positives (e.g. `--inspect` must not match `--inspect-brk`).
+ * Fails closed (returns false) when quoting is malformed: an unterminated
+ * double-quoted string or an incomplete in-string escape means Node would
+ * reject the whole NODE_OPTIONS value, so no option is reported active.
+ * For `--use-system-ca` / `--use-openssl-ca`, later `--no-*` occurrences
+ * disable earlier positives (and vice versa) in token order.
  */
 export function hasNodeOption(flag: string): boolean {
   const nodeOptions = process.env.NODE_OPTIONS
@@ -114,11 +119,14 @@ export function hasNodeOption(flag: string): boolean {
   const rawTokens: string[] = []
   let isInString = false
   let willStartNewArg = true
+  let malformed = false
   for (let i = 0; i < nodeOptions.length; i++) {
     let c = nodeOptions[i]!
     if (c === '\\' && isInString) {
       if (i + 1 >= nodeOptions.length) {
-        continue
+        // Trailing escape with nothing to escape: Node rejects the value.
+        malformed = true
+        break
       }
       c = nodeOptions[++i]!
     } else if (c === ' ' && !isInString) {
@@ -140,8 +148,13 @@ export function hasNodeOption(flag: string): boolean {
     }
   }
 
-  // For hasNodeOption we fail closed on unterminated strings for CA flags,
-  // but keep tokens for other checks. No early return needed.
+  // Node rejects unterminated quotes / incomplete escapes at startup. This
+  // helper can also run after bootstrap (settings re-applies NODE_OPTIONS,
+  // clears CA/proxy/mTLS caches, rebuilds agents), so fail closed here to
+  // avoid trusting system roots from an invalid option string.
+  if (malformed || isInString) {
+    return false
+  }
 
   // Options whose value is required and may look like a flag (e.g. --conditions).
   // These always consume the next token as value, even if it starts with '-'.
@@ -213,20 +226,70 @@ export function hasNodeOption(flag: string): boolean {
     '--stack-trace-limit',
   ])
 
-  for (let i = 0; i < rawTokens.length; i++) {
-    const token = rawTokens[i]!
-    if (i > 0) {
-      const prev = rawTokens[i - 1]!
-      const prevBase = prev.split('=')[0]!
-      if (!prev.includes('=')) {
-        if (ALWAYS_CONSUMES_NEXT.has(prevBase)) {
-          continue
-        }
-        if (VALUE_TAKING.has(prevBase) && !token.startsWith('-')) {
-          continue
-        }
+  // Build the effective option stream: value-taking options consume the
+  // next token so `--conditions "--use-system-ca"` does not count as a flag.
+  // Use a pending-consume flag (not raw-prev lookup) so a consumed value that
+  // happens to spell an option (e.g. `--conditions --conditions X`) cannot
+  // itself consume the following token.
+  const effectiveTokens: string[] = []
+  let pendingAlwaysConsume = false
+  let pendingValueConsume = false
+  for (const token of rawTokens) {
+    if (pendingAlwaysConsume) {
+      pendingAlwaysConsume = false
+      continue
+    }
+    if (pendingValueConsume) {
+      pendingValueConsume = false
+      if (!token.startsWith('-')) {
+        continue
+      }
+      // Flag-like token: not a value, fall through as an option.
+    }
+    effectiveTokens.push(token)
+    const base = token.split('=')[0]!
+    if (!token.includes('=')) {
+      if (ALWAYS_CONSUMES_NEXT.has(base)) {
+        pendingAlwaysConsume = true
+      } else if (VALUE_TAKING.has(base)) {
+        pendingValueConsume = true
       }
     }
+  }
+
+  // CA flags are boolean options with `--no-*` negations applied in order.
+  // Later occurrences win so `--use-system-ca=1 --no-use-system-ca` disables
+  // (Node leaves bundled roots) and the reverse re-enables.
+  const CA_NEGATIONS: Record<string, string> = {
+    '--use-system-ca': '--no-use-system-ca',
+    '--use-openssl-ca': '--no-use-openssl-ca',
+  }
+  const CA_POSITIVES: Record<string, string> = {
+    '--no-use-system-ca': '--use-system-ca',
+    '--no-use-openssl-ca': '--use-openssl-ca',
+  }
+  let positive = flag
+  let negative: string | undefined
+  if (flag in CA_NEGATIONS) {
+    negative = CA_NEGATIONS[flag]
+  } else if (flag in CA_POSITIVES) {
+    positive = CA_POSITIVES[flag]!
+    negative = flag
+  }
+
+  if (negative !== undefined) {
+    let enabled = false
+    for (const token of effectiveTokens) {
+      if (token === positive || token.startsWith(positive + '=')) {
+        enabled = true
+      } else if (token === negative || token.startsWith(negative + '=')) {
+        enabled = false
+      }
+    }
+    return enabled
+  }
+
+  for (const token of effectiveTokens) {
     if (token === flag || token.startsWith(flag + '=')) {
       return true
     }

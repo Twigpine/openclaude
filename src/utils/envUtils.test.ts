@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { clearCACertsCache, getCACertificates } from './caCerts.js'
 import { hasNodeOption } from './envUtils.js'
 
 describe('hasNodeOption', () => {
@@ -86,6 +87,26 @@ describe('hasNodeOption', () => {
     { name: '--conditions escaped quote does not expose inner flag', nodeOptions: '--conditions "foo \\" --use-system-ca bar"', flag: '--use-system-ca', expected: false },
     { name: '--conditions escaped value still allows explicit flag after', nodeOptions: '--conditions "foo \\" --use-system-ca bar" --use-system-ca', flag: '--use-system-ca', expected: true },
     { name: '--conditions with equals value is not a flag', nodeOptions: '--conditions=--use-system-ca', flag: '--use-system-ca', expected: false },
+
+    // Malformed quoting fails closed (Node rejects the whole value)
+    { name: 'unterminated double quote is not a flag', nodeOptions: '"--use-system-ca', flag: '--use-system-ca', expected: false },
+    { name: 'unterminated double quote with trailing escape is not a flag', nodeOptions: '"--use-system-ca\\', flag: '--use-system-ca', expected: false },
+    { name: 'unterminated double quote is not a flag (--use-openssl-ca)', nodeOptions: '"--use-openssl-ca', flag: '--use-openssl-ca', expected: false },
+    { name: 'unterminated double quote with trailing escape is not a flag (--use-openssl-ca)', nodeOptions: '"--use-openssl-ca\\', flag: '--use-openssl-ca', expected: false },
+    { name: 'malformed leading flag does not leak later flag', nodeOptions: '"--use-system-ca --use-openssl-ca', flag: '--use-openssl-ca', expected: false },
+
+    // Ordered CA state: later occurrences win (equals-positive forms)
+    { name: '--use-system-ca=1 then --no-use-system-ca disables', nodeOptions: '--use-system-ca=1 --no-use-system-ca', flag: '--use-system-ca', expected: false },
+    { name: '--no-use-system-ca then --use-system-ca=1 re-enables', nodeOptions: '--no-use-system-ca --use-system-ca=1', flag: '--use-system-ca', expected: true },
+    { name: '--use-openssl-ca=1 then --no-use-openssl-ca disables', nodeOptions: '--use-openssl-ca=1 --no-use-openssl-ca', flag: '--use-openssl-ca', expected: false },
+    { name: '--no-use-openssl-ca then --use-openssl-ca=1 re-enables', nodeOptions: '--no-use-openssl-ca --use-openssl-ca=1', flag: '--use-openssl-ca', expected: true },
+    // Exact-positive ordering baseline (last wins)
+    { name: '--use-system-ca then --no-use-system-ca disables (exact)', nodeOptions: '--use-system-ca --no-use-system-ca', flag: '--use-system-ca', expected: false },
+    { name: '--no-use-system-ca then --use-system-ca re-enables (exact)', nodeOptions: '--no-use-system-ca --use-system-ca', flag: '--use-system-ca', expected: true },
+    { name: '--use-openssl-ca then --no-use-openssl-ca disables (exact)', nodeOptions: '--use-openssl-ca --no-use-openssl-ca', flag: '--use-openssl-ca', expected: false },
+    { name: '--no-use-openssl-ca then --use-openssl-ca re-enables (exact)', nodeOptions: '--no-use-openssl-ca --use-openssl-ca', flag: '--use-openssl-ca', expected: true },
+    { name: 'negation alone does not enable positive', nodeOptions: '--no-use-system-ca', flag: '--use-system-ca', expected: false },
+    { name: 'negation with =value disables equals-positive', nodeOptions: '--use-system-ca=1 --no-use-system-ca=0', flag: '--use-system-ca', expected: false },
   ]
 
   for (const { name, nodeOptions, flag, expected } of cases) {
@@ -106,5 +127,66 @@ describe('hasNodeOption', () => {
     process.env.NODE_OPTIONS = '--use-system-ca'
     expect(hasNodeOption('--use-system-ca')).toBe(true)
     expect(hasNodeOption('--use-openssl-ca')).toBe(false)
+  })
+})
+
+describe('hasNodeOption CA selection via cache rebuild', () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS
+  const originalExtraCerts = process.env.NODE_EXTRA_CA_CERTS
+
+  afterEach(() => {
+    if (originalNodeOptions === undefined) {
+      delete process.env.NODE_OPTIONS
+    } else {
+      process.env.NODE_OPTIONS = originalNodeOptions
+    }
+    if (originalExtraCerts === undefined) {
+      delete process.env.NODE_EXTRA_CA_CERTS
+    } else {
+      process.env.NODE_EXTRA_CA_CERTS = originalExtraCerts
+    }
+    clearCACertsCache()
+  })
+
+  beforeEach(() => {
+    delete process.env.NODE_OPTIONS
+    delete process.env.NODE_EXTRA_CA_CERTS
+    clearCACertsCache()
+  })
+
+  function getEffectiveCACerts(nodeOptions: string): string[] | undefined {
+    // Simulates the settings-reload path: applyConfigEnvironmentVariables()
+    // replaces process.env.NODE_OPTIONS, then clears CA/proxy/mTLS caches and
+    // rebuilds global agents. getCACertificates() must reflect the effective
+    // ordered CA state after the rebuild.
+    process.env.NODE_OPTIONS = nodeOptions
+    clearCACertsCache()
+    return getCACertificates()
+  }
+
+  test('malformed unterminated quote selects bundled roots (undefined)', () => {
+    expect(getEffectiveCACerts('"--use-system-ca')).toBeUndefined()
+  })
+
+  test('malformed trailing escape selects bundled roots (undefined)', () => {
+    expect(getEffectiveCACerts('"--use-system-ca\\')).toBeUndefined()
+  })
+
+  test('equals-positive then negation selects bundled roots (undefined)', () => {
+    expect(
+      getEffectiveCACerts('--use-system-ca=1 --no-use-system-ca'),
+    ).toBeUndefined()
+    expect(
+      getEffectiveCACerts('--use-openssl-ca=1 --no-use-openssl-ca'),
+    ).toBeUndefined()
+  })
+
+  test('negation then equals-positive selects system roots (defined)', () => {
+    expect(
+      getEffectiveCACerts('--no-use-system-ca --use-system-ca=1'),
+    ).toBeDefined()
+    expect(
+      getEffectiveCACerts('--no-use-openssl-ca --use-openssl-ca=1'),
+    ).toBeDefined()
   })
 })
