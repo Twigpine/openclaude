@@ -75,7 +75,7 @@ describe('hasNodeOption', () => {
     { name: '--max-old-space-size with =value', nodeOptions: '--max-old-space-size=4096', flag: '--max-old-space-size', expected: true },
     { name: '--max-old-space-size double-quoted with =value', nodeOptions: '"--max-old-space-size=4096"', flag: '--max-old-space-size', expected: true },
     { name: "--max-old-space-size single-quoted is literal (negative)", nodeOptions: "'--max-old-space-size=4096'", flag: '--max-old-space-size', expected: false },
-    { name: '--max-old-space-size exact without value', nodeOptions: '--max-old-space-size', flag: '--max-old-space-size', expected: true },
+    { name: '--max-old-space-size exact without value fails closed (Node requires an argument)', nodeOptions: '--max-old-space-size', flag: '--max-old-space-size', expected: false },
     { name: '--max-old-space-size not confused with prefix', nodeOptions: '--max-old-space-size-extra', flag: '--max-old-space-size', expected: false },
 
     // Mixed flags
@@ -118,6 +118,43 @@ describe('hasNodeOption', () => {
     { name: '--no-use-openssl-ca then --use-openssl-ca re-enables (exact)', nodeOptions: '--no-use-openssl-ca --use-openssl-ca', flag: '--use-openssl-ca', expected: true },
     { name: 'negation alone does not enable positive', nodeOptions: '--no-use-system-ca', flag: '--use-system-ca', expected: false },
     { name: 'negation with =value disables equals-positive', nodeOptions: '--use-system-ca=1 --no-use-system-ca=0', flag: '--use-system-ca', expected: false },
+
+    // Required-value failures invalidate the whole stream even when the CA
+    // target appears before the error (Node exits, so nothing is active).
+    { name: '--use-system-ca=1 then --title at EOF fails closed', nodeOptions: '--use-system-ca=1 --title', flag: '--use-system-ca', expected: false },
+    { name: '--use-openssl-ca=1 then --title at EOF fails closed', nodeOptions: '--use-openssl-ca=1 --title', flag: '--use-openssl-ca', expected: false },
+    { name: '--use-system-ca=1 then --title= fails closed', nodeOptions: '--use-system-ca=1 --title=', flag: '--use-system-ca', expected: false },
+    { name: '--use-openssl-ca=1 then --title= fails closed', nodeOptions: '--use-openssl-ca=1 --title=', flag: '--use-openssl-ca', expected: false },
+    { name: '--use-system-ca=1 then --conditions at EOF fails closed', nodeOptions: '--use-system-ca=1 --conditions', flag: '--use-system-ca', expected: false },
+    { name: '--use-system-ca=1 then --conditions= fails closed', nodeOptions: '--use-system-ca=1 --conditions=', flag: '--use-system-ca', expected: false },
+    { name: '--use-system-ca=1 then --conditions flag-like fails closed', nodeOptions: '--use-system-ca=1 --conditions -x', flag: '--use-system-ca', expected: false },
+    { name: '--conditions flag-like then CA fails closed', nodeOptions: '--conditions -x --use-system-ca=1', flag: '--use-system-ca', expected: false },
+
+    // Required-value aliases follow the same rule (error before and after target).
+    { name: '--loader flag-like then CA fails closed', nodeOptions: '--loader --use-system-ca=1', flag: '--use-system-ca', expected: false },
+    { name: 'CA then --loader at EOF fails closed', nodeOptions: '--use-system-ca=1 --loader', flag: '--use-system-ca', expected: false },
+    { name: 'CA then --loader= fails closed', nodeOptions: '--use-system-ca=1 --loader=', flag: '--use-system-ca', expected: false },
+    { name: '--loader flag-like then openssl CA fails closed', nodeOptions: '--loader --use-openssl-ca=1', flag: '--use-openssl-ca', expected: false },
+    { name: 'openssl CA then --loader at EOF fails closed', nodeOptions: '--use-openssl-ca=1 --loader', flag: '--use-openssl-ca', expected: false },
+    { name: '--inspect-port flag-like then CA fails closed', nodeOptions: '--inspect-port --use-system-ca=1', flag: '--use-system-ca', expected: false },
+    { name: 'CA then --inspect-port at EOF fails closed', nodeOptions: '--use-system-ca=1 --inspect-port', flag: '--use-system-ca', expected: false },
+    { name: 'CA then --inspect-port= fails closed', nodeOptions: '--use-system-ca=1 --inspect-port=', flag: '--use-system-ca', expected: false },
+    { name: '--inspect-port flag-like then openssl CA fails closed', nodeOptions: '--inspect-port --use-openssl-ca=1', flag: '--use-openssl-ca', expected: false },
+    { name: '--inspect-publish-uid flag-like then CA fails closed', nodeOptions: '--inspect-publish-uid --use-system-ca=1', flag: '--use-system-ca', expected: false },
+    { name: 'CA then --inspect-publish-uid at EOF fails closed', nodeOptions: '--use-system-ca=1 --inspect-publish-uid', flag: '--use-system-ca', expected: false },
+    { name: '--inspect-publish-uid flag-like then openssl CA fails closed', nodeOptions: '--inspect-publish-uid --use-openssl-ca=1', flag: '--use-openssl-ca', expected: false },
+    { name: 'CA then --title flag-like value fails closed (openssl)', nodeOptions: '--use-openssl-ca=1 --title --use-system-ca', flag: '--use-openssl-ca', expected: false },
+
+    // Valid required-value forms preserve later CA detection.
+    { name: '--title with real value preserves later CA', nodeOptions: '--title foo --use-system-ca=1', flag: '--use-system-ca', expected: true },
+    { name: '--title=foo preserves later CA', nodeOptions: '--title=foo --use-system-ca=1', flag: '--use-system-ca', expected: true },
+    { name: '--loader=foo preserves later CA', nodeOptions: '--loader=foo --use-system-ca=1', flag: '--use-system-ca', expected: true },
+    { name: '--title=--use-system-ca inline flag-like value is valid (no CA)', nodeOptions: '--title=--use-system-ca', flag: '--use-system-ca', expected: false },
+
+    // --experimental-import-meta-resolve is boolean: following CA stays visible.
+    { name: 'boolean import-meta-resolve then CA stays visible', nodeOptions: '--experimental-import-meta-resolve --use-system-ca', flag: '--use-system-ca', expected: true },
+    { name: 'boolean import-meta-resolve then openssl CA stays visible', nodeOptions: '--experimental-import-meta-resolve --use-openssl-ca', flag: '--use-openssl-ca', expected: true },
+    { name: 'boolean import-meta-resolve then equals CA stays visible', nodeOptions: '--experimental-import-meta-resolve --use-system-ca=1', flag: '--use-system-ca', expected: true },
   ]
 
   for (const { name, nodeOptions, flag, expected } of cases) {
@@ -202,6 +239,40 @@ describe('hasNodeOption CA selection via cache rebuild', () => {
     ).toBeDefined()
     expect(
       getEffectiveCACerts('--no-use-openssl-ca --use-openssl-ca=1'),
+    ).toBeDefined()
+  })
+
+  test('target-before-error selects bundled roots (undefined)', () => {
+    expect(getEffectiveCACerts('--use-system-ca=1 --title')).toBeUndefined()
+    expect(getEffectiveCACerts('--use-openssl-ca=1 --title')).toBeUndefined()
+    expect(getEffectiveCACerts('--use-system-ca=1 --title=')).toBeUndefined()
+    expect(getEffectiveCACerts('--use-system-ca=1 --loader')).toBeUndefined()
+    expect(
+      getEffectiveCACerts('--use-system-ca=1 --inspect-port'),
+    ).toBeUndefined()
+    expect(
+      getEffectiveCACerts('--use-system-ca=1 --inspect-publish-uid'),
+    ).toBeUndefined()
+  })
+
+  test('alias error-before-target selects bundled roots (undefined)', () => {
+    expect(getEffectiveCACerts('--loader --use-system-ca=1')).toBeUndefined()
+    expect(
+      getEffectiveCACerts('--inspect-port --use-system-ca=1'),
+    ).toBeUndefined()
+    expect(
+      getEffectiveCACerts('--inspect-publish-uid --use-openssl-ca=1'),
+    ).toBeUndefined()
+  })
+
+  test('boolean import-meta-resolve preserves system roots (defined)', () => {
+    expect(
+      getEffectiveCACerts('--experimental-import-meta-resolve --use-system-ca'),
+    ).toBeDefined()
+    expect(
+      getEffectiveCACerts(
+        '--experimental-import-meta-resolve --use-openssl-ca',
+      ),
     ).toBeDefined()
   })
 })

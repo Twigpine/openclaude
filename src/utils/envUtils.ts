@@ -100,13 +100,17 @@ export function getProjectsDir(): string {
  * - backslash escapes the next character only when `is_in_string`
  * - only ASCII spaces outside quotes delimit tokens (tabs are literal);
  *   single quotes are literal
- * - value-taking options consume the next token as a value so
- *   `--conditions "--use-system-ca"` does not count as `--use-system-ca`
+ * - value-taking options (incl. `--loader`, `--inspect-port`,
+ *   `--inspect-publish-uid` aliases) consume the next token as a value so
+ *   `--conditions "--use-system-ca"` does not count as `--use-system-ca`;
+ *   `--experimental-import-meta-resolve` stays boolean and never consumes
  * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`) and avoids
  * prefix false positives (e.g. `--inspect` must not match `--inspect-brk`).
- * Fails closed (returns false) when quoting is malformed or when a required
- * option value looks flag-like (`--title --use-system-ca`): Node rejects the
- * whole NODE_OPTIONS value in both cases, so no option is reported active.
+ * Fails closed (returns false) when quoting is malformed, when a required
+ * value is missing at EOF, empty inline (`--title=`), or flag-like
+ * (`--title --use-system-ca`): Node rejects the whole NODE_OPTIONS value in
+ * all these cases, so no option is reported active regardless of whether the
+ * invalid construct appears before or after the target.
  * For `--use-system-ca` / `--use-openssl-ca`, later `--no-*` occurrences
  * disable earlier positives (and vice versa) in token order.
  */
@@ -154,15 +158,23 @@ export function hasNodeOption(flag: string): boolean {
     return false
   }
 
-  // Options whose value is required and may look like a flag (e.g. --conditions).
-  // These always consume the next token as value, even if it starts with '-'.
+  // Options whose value is required. The value may be supplied inline
+  // (`--opt=value`) or as the next token (`--opt value`). A separate-token
+  // value beginning with `-`, a missing value at EOF, or an empty inline
+  // value (`--opt=`) makes Node reject the whole NODE_OPTIONS stream, so the
+  // helper fails closed in all three cases. `--conditions`/`-C` follow the
+  // same rule (verified on Node 22.23.2: `--conditions -x` exits with
+  // `--conditions requires an argument`).
   const ALWAYS_CONSUMES_NEXT = new Set(['--conditions', '-C'])
 
   // Other value-taking options (std::string / vector / int) that require a
-  // value. When the next token looks flag-like (starts with '-'), Node
-  // rejects the whole NODE_OPTIONS value (e.g. `--title requires an
-  // argument`), so the helper fails closed below instead of exposing that
-  // token to flag matching.
+  // value. Audited against the Node 22 contract: every entry here exits with
+  // `<flag> requires an argument` when the value is missing, empty inline,
+  // or flag-like (verified with NODE_OPTIONS probes on Node 22.23.2).
+  // NOTE: `--experimental-import-meta-resolve` is intentionally absent — it
+  // is a no-value boolean in Node 22 (bool backing field since v22.0.0;
+  // `--experimental-import-meta-resolve --use-system-ca` exits 0 and enables
+  // the CA flag), so it must never consume the following token.
   const VALUE_TAKING = new Set([
     '--allow-fs-read',
     '--allow-fs-write',
@@ -174,8 +186,10 @@ export function hasNodeOption(flag: string): boolean {
     '--disable-warning',
     '--dns-result-order',
     '--experimental-default-type',
-    '--experimental-import-meta-resolve',
     '--experimental-loader',
+    '--loader',
+    '--inspect-port',
+    '--inspect-publish-uid',
     '--heap-prof-dir',
     '--heap-prof-interval',
     '--heap-prof-name',
@@ -225,17 +239,26 @@ export function hasNodeOption(flag: string): boolean {
     '--stack-trace-limit',
   ])
 
-  // Build the effective option stream: value-taking options consume the
-  // next token so `--conditions "--use-system-ca"` does not count as a flag.
-  // Use a pending-consume flag (not raw-prev lookup) so a consumed value that
-  // happens to spell an option (e.g. `--conditions --conditions X`) cannot
-  // itself consume the following token.
+  // Build the effective option stream with validity gating: required-value
+  // failure anywhere in the stream invalidates the whole NODE_OPTIONS value
+  // (Node exits with `<flag> requires an argument`), so no CA flag is
+  // reported active regardless of whether the invalid construct appears
+  // before or after the CA target. Use pending-consume flags (not raw-prev
+  // lookup) so a consumed value that happens to spell an option (e.g.
+  // `--conditions --conditions X`) cannot itself consume the next token.
+  // Inline `=` values (even flag-like, e.g. `--title=--use-system-ca`) are
+  // valid; only an empty inline value (`--title=`) fails.
   const effectiveTokens: string[] = []
   let pendingAlwaysConsume = false
   let pendingValueConsume = false
   for (const token of rawTokens) {
     if (pendingAlwaysConsume) {
       pendingAlwaysConsume = false
+      // `--conditions -x`: Node rejects a separate-token value beginning
+      // with `-`, so fail closed instead of exposing later tokens.
+      if (token.startsWith('-')) {
+        return false
+      }
       continue
     }
     if (pendingValueConsume) {
@@ -249,14 +272,30 @@ export function hasNodeOption(flag: string): boolean {
       return false
     }
     effectiveTokens.push(token)
-    const base = token.split('=')[0]!
-    if (!token.includes('=')) {
-      if (ALWAYS_CONSUMES_NEXT.has(base)) {
-        pendingAlwaysConsume = true
-      } else if (VALUE_TAKING.has(base)) {
-        pendingValueConsume = true
+    const eqIndex = token.indexOf('=')
+    const base = eqIndex === -1 ? token : token.slice(0, eqIndex)
+    if (eqIndex !== -1) {
+      // Empty inline required value (e.g. `--title=`, `--conditions=`):
+      // Node exits with `--title= requires an argument`.
+      if (
+        token.slice(eqIndex + 1) === '' &&
+        (ALWAYS_CONSUMES_NEXT.has(base) || VALUE_TAKING.has(base))
+      ) {
+        return false
       }
+      continue
     }
+    if (ALWAYS_CONSUMES_NEXT.has(base)) {
+      pendingAlwaysConsume = true
+    } else if (VALUE_TAKING.has(base)) {
+      pendingValueConsume = true
+    }
+  }
+  // Missing value at EOF (e.g. `--use-system-ca=1 --title`): Node exits
+  // with `--title requires an argument`, so fail closed even though an
+  // earlier CA positive exists.
+  if (pendingAlwaysConsume || pendingValueConsume) {
+    return false
   }
 
   // CA flags are boolean options with `--no-*` negations applied in order.
