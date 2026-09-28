@@ -32,6 +32,7 @@ const TEST_ENV_KEYS = [
   'OPENAI_BASE_URL',
   'OPENAI_MODEL',
   'OPENCLAUDE_OLLAMA_NUM_CTX',
+  'REQUESTY_API_KEY',
   'OLLAMA_API_KEY',
   'OLLAMA_BASE_URL',
   'WEB_AUTH_HEADER',
@@ -352,6 +353,17 @@ describe('loadEnvFile', () => {
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBeUndefined()
     expect(loaded).toEqual({ LLMTR_API_KEY: 'llmtr-key' })
+  })
+
+  it('loads the dedicated Requesty credential without selecting a route', () => {
+    const filePath = writeTempEnvFile('REQUESTY_API_KEY=requesty-key')
+
+    const loaded = loadEnvFile(filePath)
+
+    expect(process.env.REQUESTY_API_KEY).toBe('requesty-key')
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBeUndefined()
+    expect(loaded).toEqual({ REQUESTY_API_KEY: 'requesty-key' })
   })
 
   it('loads the dedicated Command Code credential without selecting a route', () => {
