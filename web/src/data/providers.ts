@@ -141,6 +141,14 @@ export const providers: Provider[] = [
     notes: 'OpenAI-compatible aggregation across hundreds of hosted models.',
   },
   {
+    id: 'requesty',
+    name: 'Requesty',
+    group: 'gateways',
+    setup: '/provider or OpenAI-compatible env vars',
+    envVars: ['REQUESTY_API_KEY', 'OPENAI_API_KEY'],
+    notes: 'OpenAI-compatible gateway at https://router.requesty.ai/v1 (EU: https://router.eu.requesty.ai/v1); /provider and --provider requesty default to openai/gpt-5-mini. Uses public discovery of chat models.',
+  },
+  {
     id: 'llmtr',
     name: 'LLMTR',
     group: 'gateways',
