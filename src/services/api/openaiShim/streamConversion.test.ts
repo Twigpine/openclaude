@@ -324,6 +324,47 @@ test('emits usage supplied by a final empty-choices chunk', async () => {
   expect(usageIndex).toBeLessThan(messageStopIndex)
 })
 
+test('emits terminal usage when the provider repeats finish_reason', async () => {
+  // Some providers end a stream twice: one chunk carrying the finish_reason,
+  // then a second, identical but for the usage, with choices still populated.
+  // The loop ignores a repeated finish_reason, so that usage was dropped and
+  // every assistant message stored zeros — which is what anything reading the
+  // size or the cost of a conversation reads.
+  const events = await collect(
+    openaiStreamToAnthropic(
+      makeSseResponse([
+        makeOpenAIChunk({ content: 'done' }),
+        makeOpenAIChunk({}, 'stop'),
+        makeOpenAIChunk({ content: '' }, 'stop', {
+          prompt_tokens: 84,
+          completion_tokens: 1,
+        }),
+      ]),
+      'test-model',
+      undefined,
+      false,
+      undefined,
+      createStreamDependencies(),
+    ),
+  )
+
+  expect(events).toContainEqual({
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    usage: {
+      input_tokens: 84,
+      output_tokens: 1,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    },
+  })
+  expect(
+    events.filter(
+      event => event.type === 'message_delta' && event.usage !== undefined,
+    ),
+  ).toHaveLength(1)
+})
+
 test('emits terminal usage once when both terminal chunks report it', async () => {
   const usage = { prompt_tokens: 10, completion_tokens: 2 }
   const events = await collect(

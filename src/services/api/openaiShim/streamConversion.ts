@@ -1090,12 +1090,33 @@ export async function* openaiStreamToAnthropic(
         }
       }
 
-      if (
-        !hasEmittedFinalUsage &&
-        chunkUsage &&
-        (chunk.choices?.length ?? 0) === 0 &&
-        lastStopReason !== null
-      ) {
+      // FINAL USAGE, however the provider chooses to deliver it.
+      //
+      // Two shapes are in the wild. Some providers send one terminal chunk
+      // carrying both the finish_reason and the usage — handled in the loop
+      // above. Others repeat the finish_reason: one chunk to end the message,
+      // then a second, identical but for the usage. OpenRouter does the
+      // second, measured on the wire:
+      //
+      //   chunks carrying a finish_reason: 2
+      //   chunks carrying usage:           1   (the later of the two)
+      //
+      // The loop above deliberately ignores a repeated finish_reason, so that
+      // second chunk never produced a message_delta and its usage was
+      // dropped. The condition here used to require an EMPTY choices array,
+      // which is the third shape, and so it missed this one too.
+      //
+      // What that cost: every assistant message stored usage of all zeros.
+      // Anything reading the size of a conversation reads it from there —
+      // `tokenCountWithEstimation` walks back to the newest message carrying
+      // usage and trusts it — so automatic compaction on size could not fire,
+      // the context warning never warned, and the cost tracker recorded
+      // nothing. A real session went to 1 763 messages and recorded
+      // `preTokens: 183` at its compaction boundary.
+      //
+      // `hasEmittedFinalUsage` keeps this from double-emitting for the
+      // providers already served by the loop.
+      if (!hasEmittedFinalUsage && chunkUsage && lastStopReason !== null) {
         throwIfStreamAborted(signal)
         yield {
           type: 'message_delta',
