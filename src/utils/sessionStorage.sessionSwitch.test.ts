@@ -136,10 +136,12 @@ test('a second session in the same process writes to its own transcript', async 
   expect(second.length).toBeGreaterThan(0)
   expect(second.every(id => id === SECOND)).toBe(true)
 
-  // And nothing of the second session leaked into the first one's file, which
-  // is what made the damage invisible: the records were written, just not
-  // where anything could find them.
-  expect(await sessionIds(FIRST)).not.toContain(SECOND)
+  // And the first session kept its own records, with nothing of the second
+  // leaked in — which is what made the damage invisible: the records were
+  // written, just not where anything could find them.
+  const firstIds = await sessionIds(FIRST)
+  expect(firstIds.length).toBeGreaterThan(0)
+  expect(firstIds.every(id => id === FIRST)).toBe(true)
 })
 
 test('switching to the same session id keeps the file it already has', async () => {
