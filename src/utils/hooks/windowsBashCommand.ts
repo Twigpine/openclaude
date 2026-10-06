@@ -25,7 +25,12 @@ export function getWindowsBashHookCommand(command: string): string {
 
     // Require a literal suffix, not .sh inside a parameter expansion such as
     // "${HOOK_COMMAND:-./hook.sh}" whose actual executable is unknown here.
-    return /\.sh["']?$/.test(word)
+    //
+    // Case-insensitive, because the thing being worked around is not: Windows
+    // picks a file handler by extension without regard to case, so hook.SH
+    // opens in an editor exactly as hook.sh would. Without the flag such a
+    // hook never ran and failed silently.
+    return /\.sh["']?$/i.test(word)
       ? `${command.slice(0, offset)}bash ${rest}`
       : command
   }

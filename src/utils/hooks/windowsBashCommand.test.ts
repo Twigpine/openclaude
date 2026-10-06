@@ -13,6 +13,8 @@ describe('Windows bash hook commands', () => {
     '(bash ./hook.sh)',
     '{ bash ./hook.sh; }',
     'echo ./hook.sh',
+    'echo ./hook.SH',
+    'node ./hook.SH.js',
     'echo "./hook.sh"',
     'bash ./hook.sh',
     'bash\t./hook.sh',
@@ -51,6 +53,9 @@ describe('Windows bash hook commands', () => {
     './hook.sh && printf done',
     './hook.sh; printf done',
     './C#/hooks/hook.sh',
+    './hook.SH',
+    './hook.Sh argument',
+    '"/c/Program Files/hooks/HOOK.SH" argument',
   ])('runs a directly invoked script with bash: %s', command => {
     expect(getWindowsBashHookCommand(command)).toBe(`bash ${command}`)
   })
