@@ -10,6 +10,7 @@ import {
   isSessionPersistenceDisabled,
   setOriginalCwd,
   setSessionPersistenceDisabled,
+  resetStateForTests,
   switchSession,
 } from '../bootstrap/state.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
@@ -158,4 +159,52 @@ test('switching to the same session id keeps the file it already has', async () 
 
   const ids = await sessionIds(FIRST)
   expect(ids.filter(id => id === FIRST).length).toBeGreaterThanOrEqual(2)
+})
+
+/**
+ * Pointer-following must survive another test file wiping the signal.
+ *
+ * Raised in review. `resetStateForTests()` calls `sessionSwitched.clear()`,
+ * dropping every listener. Test files share one bun process, so a module that
+ * only remembered "I am subscribed" would believe it was still following
+ * switches while its listener was gone — and would then stop following them
+ * for every test that ran afterwards, failing in a full-suite run and nowhere
+ * else. This reproduces that order deliberately.
+ */
+test('the switch listener is re-registered after the signal is cleared', async () => {
+  // Create the Project, so the listener exists to be lost.
+  switchSession(FIRST as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(FIRST)), { recursive: true, mode: 0o700 })
+  await recordTranscript([message('40000000-0000-4000-8000-000000000004', 'before the wipe')])
+  await flushSessionStorage()
+
+  // What another test file does, and it takes every listener with it. That
+  // file runs under NODE_ENV=test, which this one deliberately does not — the
+  // guard in resetStateForTests is about who may call it, not about the bug.
+  const persistenceEnv = process.env.NODE_ENV
+  process.env.NODE_ENV = 'test'
+  try {
+    resetStateForTests()
+  } finally {
+    process.env.NODE_ENV = persistenceEnv
+  }
+
+  // Then this file's own setup runs again, as it would in a full-suite pass.
+  setSessionPersistenceDisabled(false)
+  setOriginalCwd(join(testRoot, 'workspace'))
+  resetProjectForTesting()
+
+  switchSession(FIRST as never, null)
+  await recordTranscript([message('40000000-0000-4000-8000-000000000005', 'first again')])
+  await flushSessionStorage()
+
+  switchSession(SECOND as never, null)
+  await recordTranscript([message('40000000-0000-4000-8000-000000000006', 'second after the wipe')])
+  await flushSessionStorage()
+
+  // Without a fresh subscription the pointer never moves and this lands in
+  // FIRST's file, which is the original bug wearing a different hat.
+  const second = await sessionIds(SECOND)
+  expect(second.length).toBeGreaterThan(0)
+  expect(second.every(id => id === SECOND)).toBe(true)
 })
