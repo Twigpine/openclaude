@@ -772,7 +772,8 @@ export const getProjectDir = memoize((projectDir: string): string => {
 
 let project: Project | null = null
 let cleanupRegistered = false
-let sessionSwitchRegistered = false
+/** Held so the subscription can be given up again — see resetProjectForTesting. */
+let unsubscribeSessionSwitch: (() => void) | null = null
 /** The session the cached file pointer belongs to. */
 let pointerSessionId: string | null = null
 
@@ -803,10 +804,9 @@ let pointerSessionId: string | null = null
  * entries and re-resolve the same path for nothing.
  */
 function followSessionSwitches(): void {
-  if (sessionSwitchRegistered) return
-  sessionSwitchRegistered = true
+  if (unsubscribeSessionSwitch) return
   pointerSessionId = getSessionId()
-  onSessionSwitch(sessionId => {
+  unsubscribeSessionSwitch = onSessionSwitch(sessionId => {
     if (sessionId === pointerSessionId) return
     pointerSessionId = sessionId
     // Lazily re-resolved from the new session id on the next write. An
@@ -875,11 +875,21 @@ export function resetProjectFlushStateForTesting(): void {
  */
 export function resetProjectForTesting(): void {
   project = null
-  // The switch listener outlives the singleton it resets (a signal cannot be
-  // unsubscribed from here), so the session it thinks the pointer belongs to
-  // has to be re-read. Otherwise a test that switches sessions and then resets
-  // the project sees the next switch ignored as "no change".
-  pointerSessionId = sessionSwitchRegistered ? getSessionId() : null
+  // Give up the switch subscription with the singleton it resets.
+  //
+  // Raised in review. `resetStateForTests()` calls `sessionSwitched.clear()`,
+  // which drops every listener at once. A module that merely remembered "I am
+  // subscribed" would then believe it was still following switches while its
+  // listener was gone, and since test files share one bun process that
+  // silently stops pointer-following for every test that runs afterwards —
+  // failing the switch tests in a full-suite run and nowhere else.
+  //
+  // Unsubscribing and forgetting lets the next getProject() register afresh. A
+  // stale unsubscribe against an already-cleared signal is a no-op, so this
+  // heals the resetStateForTests() case as well as its own.
+  unsubscribeSessionSwitch?.()
+  unsubscribeSessionSwitch = null
+  pointerSessionId = null
 }
 
 export function setSessionFileForTesting(path: string): void {
