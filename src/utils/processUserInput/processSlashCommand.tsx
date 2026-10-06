@@ -536,6 +536,9 @@ async function getMessagesForSlashCommand(commandName: string, args: string, set
     switch (command.type) {
       case 'local-jsx':
         {
+          // Same redaction as 'local' below: isSensitive args (API keys,
+          // earn codes) must not reach the transcript or the model.
+          const displayArgs = command.isSensitive && args.trim() ? '***' : args;
           return new Promise<SlashCommandResult>(resolve => {
             let doneWasCalled = false;
             const onDone = (result?: string, options?: {
@@ -576,9 +579,9 @@ async function getMessagesForSlashCommand(commandName: string, args: string, set
               // output that must reach the transcript.
               const skipTranscript = isFullscreenEnvEnabled() && typeof result === 'string' && result.endsWith(' dismissed');
               void resolve({
-                messages: options?.display === 'system' ? skipTranscript ? metaMessages : [createCommandInputMessage(formatCommandInput(command, args)), createCommandInputMessage(`<local-command-stdout>${result}</local-command-stdout>`), ...metaMessages] : [createUserMessage({
+                messages: options?.display === 'system' ? skipTranscript ? metaMessages : [createCommandInputMessage(formatCommandInput(command, displayArgs)), createCommandInputMessage(`<local-command-stdout>${result}</local-command-stdout>`), ...metaMessages] : [createUserMessage({
                   content: prepareUserContent({
-                    inputString: formatCommandInput(command, args),
+                    inputString: formatCommandInput(command, displayArgs),
                     precedingInputBlocks
                   })
                 }), result ? createUserMessage({

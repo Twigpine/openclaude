@@ -43,7 +43,7 @@ export const commandCategories: { id: CommandCategory; label: string; blurb: str
   {
     id: 'tools',
     label: 'tools & integrations',
-    blurb: 'MCP servers, language servers, IDEs, plugins, skills, agents, and hooks.',
+    blurb: 'MCP servers, language servers, IDEs, web search, plugins, skills, agents, and hooks.',
   },
   {
     id: 'customization',
@@ -123,6 +123,7 @@ export const commands: SlashCommand[] = [
   { name: 'mcp', description: 'Manage MCP servers', category: 'tools', args: '[enable|disable [server-name]]' },
   { name: 'lsp', description: 'Inspect and set up Language Server Protocol code intelligence', category: 'tools', args: 'status | recommend [path] | install <plugin-id> | uninstall <plugin-id> | restart' },
   { name: 'ide', description: 'Manage IDE integrations and show status', category: 'tools', args: '[open]' },
+  { name: 'search', description: 'Choose the web search backend (Exa by default) and manage its API key', category: 'tools', args: '[status | test | key | remove-key | auto | exa | tavily | brave | …]' },
   { name: 'plugin', description: 'Manage OpenClaude plugins', category: 'tools' },
   { name: 'reload-plugins', description: 'Activate pending plugin changes in the current session', category: 'tools' },
   { name: 'skills', description: 'List available skills', category: 'tools' },

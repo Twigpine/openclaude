@@ -120,9 +120,9 @@ function formatProviderOutput(po: ProviderOutput, query: string): Output {
 function buildEmptyAdapterResultHint(provider: string, providerName: string): string {
   return (
     `No results from "${providerName}" search backend for provider "${provider}". ` +
-    `The default DuckDuckGo backend is rate-limited from many networks (datacenter IPs, VPNs, repeated requests) and returns 0 results when blocked. ` +
-    `For reliable web search on this provider, set one of: ` +
-    `OLLAMA_BASE_URL, OLLAMA_API_KEY, FIRECRAWL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, JINA_API_KEY, BING_API_KEY, MOJEEK_API_KEY, LINKUP_API_KEY, YOU_API_KEY — ` +
+    `The keyless search backends (the Exa free tier and DuckDuckGo) are rate-limited, so searches can fail or come back empty once a limit is hit or the network is blocked. ` +
+    `For reliable web search on this provider, run /search to add an Exa API key, or set EXA_API_KEY (recommended) or one of: ` +
+    `OLLAMA_BASE_URL, OLLAMA_API_KEY, FIRECRAWL_API_KEY, TAVILY_API_KEY, JINA_API_KEY, BING_API_KEY, MOJEEK_API_KEY, LINKUP_API_KEY, YOU_API_KEY — ` +
     `or switch to an Anthropic / Vertex / Foundry provider that supports the native web_search tool.`
   )
 }
@@ -561,7 +561,7 @@ function shouldUseAdapterProvider(): boolean {
  * Anthropic's web_search_20250305 tool, so falling through to the native
  * path silently produces "Did 0 searches".
  */
-function hasNativeSearchFallback(): boolean {
+export function hasNativeSearchFallback(): boolean {
   if (isCodexResponsesWebSearchEnabled()) return true
   const provider = getAPIProvider()
   return (provider === 'firstParty' && isFirstPartyAnthropicBaseUrl()) || provider === 'vertex' || provider === 'foundry'

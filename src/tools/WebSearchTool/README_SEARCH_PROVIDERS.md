@@ -2,6 +2,35 @@
 
 OpenClaude supports multiple search backends through a provider adapter system.
 
+**Exa is the default search backend.** With no configuration at all, web search
+runs on Exa's keyless free tier. Add an `EXA_API_KEY` for higher limits; any other
+backend you configure with a key is used before the free tier.
+
+## Configure with `/search`
+
+The `/search` command sets everything below without editing env vars:
+
+| Command | Effect |
+|---|---|
+| `/search` | Pick a backend from a list that shows which ones have keys |
+| `/search <backend>` | Select a backend directly (`auto`, `exa`, `tavily`, `brave`, …); prompts for its key if needed |
+| `/search key [backend]` | Add or replace an API key in a hidden input (defaults to `exa`) |
+| `/search remove-key [backend]` | Remove a saved API key (defaults to `exa`) |
+| `/search status` | Show which backend handles searches and what it falls back to |
+| `/search test [query]` | Run a test search through the configured backends |
+
+Selections are saved as `WEB_SEARCH_PROVIDER` and the backend's key variable in
+the `env` block of `~/.openclaude.json` (readable only by you — the same file
+`/provider` uses), and take effect immediately. Keys are never accepted on the
+command line.
+
+Precedence: values saved by `/search` override the same variables exported in
+your shell, and are overridden by an `env` entry for that variable in any
+`settings.json` (user, project, `--settings`, or managed policy) — `/search`
+tells you when that happens. `/search remove-key` only removes keys that
+`/search` saved; a key that comes from your shell or a settings file is reported
+instead.
+
 ## Supported Providers
 
 | Provider | Env Var | Auth Header | Method |
@@ -15,22 +44,23 @@ OpenClaude supports multiple search backends through a provider adapter system.
 | SerpAPI | `WEB_PROVIDER=serpapi` | `Authorization: Bearer` | GET |
 | Firecrawl | `FIRECRAWL_API_KEY` | Internal | SDK |
 | Tavily | `TAVILY_API_KEY` | `Authorization: Bearer` | POST |
-| Exa | `EXA_API_KEY` | `x-api-key` | POST |
+| Exa (default) | `EXA_API_KEY` | `x-api-key` | POST |
+| Exa free tier | *(none — zero-config default)* | — | POST |
 | You.com | `YOU_API_KEY` | `X-API-Key` | GET |
 | Jina | `JINA_API_KEY` | `Authorization: Bearer` | GET |
 | Bing | `BING_API_KEY` | `Ocp-Apim-Subscription-Key` | GET |
 | Mojeek | `MOJEEK_API_KEY` | `Authorization: Bearer` | GET |
 | Linkup | `LINKUP_API_KEY` | `Authorization: Bearer` | POST |
-| DuckDuckGo | *(default)* | — | SDK |
+| DuckDuckGo | *(none — last-resort fallback)* | — | SDK |
 
 ## Quick Start
 
 ```bash
-# Tavily (recommended for AI — fast, RAG-ready)
-export TAVILY_API_KEY=tvly-your-key
-
-# Exa (neural search, semantic queries)
+# Exa (default) — works with no setup on the free tier; add a key for higher limits
 export EXA_API_KEY=your-exa-key
+
+# Tavily (fast, RAG-ready)
+export TAVILY_API_KEY=tvly-your-key
 
 # Brave (independent index, good free tier)
 export BRAVE_API_KEY=your-brave-key
@@ -52,14 +82,22 @@ export WEB_SEARCH_API=https://search.example.com/search
 | `auto` (default) | Try all configured providers in order, fall through on failure |
 | `ollama` | Local signed-in Ollama, then hosted Ollama when `OLLAMA_API_KEY` is set; throws if both fail |
 | `tavily` | Tavily only — throws on failure |
-| `exa` | Exa only — throws on failure |
+| `exa` | Exa only — keyed API when `EXA_API_KEY` is set, otherwise the free tier; throws on failure |
 | `brave` | Brave only — throws on failure |
 | `custom` | Custom API only — throws on failure. **Not in the auto chain** — must be explicitly selected |
 | `firecrawl` | Firecrawl only — throws on failure |
 | `ddg` | DuckDuckGo only — throws on failure |
 | `native` | Anthropic native / Codex only |
 
-**Auto mode priority:** ollama → firecrawl → tavily → exa → you → jina → brave → bing → mojeek → linkup → ddg
+**Auto mode priority:** exa → ollama → firecrawl → tavily → you → jina → brave → bing → mojeek → linkup → exa free tier → ddg
+
+Each entry is only tried when it is configured (has its key or route). Keyed Exa
+leads the chain; any other keyed backend still runs before the keyless Exa free
+tier, and DuckDuckGo is the last resort.
+
+In `auto` mode, providers with built-in web search (Anthropic first-party,
+Vertex, Foundry, Codex) keep using it. Set `WEB_SEARCH_PROVIDER=exa` to use Exa
+there too.
 
 > **Note:** The `custom` provider is excluded from the `auto` chain. It is only used when `WEB_SEARCH_PROVIDER=custom` is explicitly set. This prevents the generic outbound provider from silently becoming the default backend.
 
@@ -133,11 +171,18 @@ Content-Type: application/json
 }
 ```
 
-### Exa
+### Exa (default)
 
 ```bash
-export EXA_API_KEY=your-exa-key
+export EXA_API_KEY=your-exa-key   # optional — the free tier works without it
 ```
+
+| Env var | Default | Effect |
+|---|---|---|
+| `EXA_API_KEY` | — | Use the keyed Exa API (higher limits) |
+| `EXA_SEARCH_TYPE` | `auto` | `auto`, `instant`, `fast`, `deep-lite`, `deep`, or `deep-reasoning` (keyed API only; the deep types may need a higher `WEB_SEARCH_TIMEOUT_SEC`) |
+| `EXA_NUM_RESULTS` | `15` | Results per search, 1–50 (keyed API and free tier) |
+| `EXA_FREE_TIER` | on | Set to `0` to never use the keyless free tier |
 
 **Request:**
 ```
@@ -145,8 +190,10 @@ POST https://api.exa.ai/search
 x-api-key: your-exa-key
 Content-Type: application/json
 
-{"query": "search terms", "numResults": 10, "type": "auto"}
+{"query": "search terms", "numResults": 15, "type": "auto", "contents": {"highlights": true}}
 ```
+
+`allowed_domains` / `blocked_domains` are sent as `includeDomains` / `excludeDomains`.
 
 **Response:**
 ```json
@@ -155,11 +202,42 @@ Content-Type: application/json
     {
       "title": "Result Title",
       "url": "https://example.com/page",
-      "snippet": "A short summary of the page content...",
-      "score": 0.89
+      "highlights": ["The most query-relevant excerpt...", "Another excerpt..."],
+      "highlightScores": [0.91, 0.84]
     }
   ]
 }
+```
+
+### Exa Free Tier (Zero-Config Default)
+
+No configuration needed. When no `EXA_API_KEY` is set, OpenClaude calls Exa's
+hosted endpoint, which serves a free tier with a per-IP requests-per-second limit
+and a daily quota. Concurrent searches are spaced automatically. When the limit is
+hit, `auto` mode falls through to DuckDuckGo and skips the free tier for the next
+few minutes; in `exa` mode (and `/search test`) the error tells you to add a key
+with `/search key exa`.
+
+**Request** (MCP streamable HTTP, JSON-RPC):
+```
+POST https://mcp.exa.ai/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+x-exa-source: openclaude
+
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+ "params": {"name": "web_search_exa",
+            "arguments": {"query": "search terms", "objective": "...", "numResults": 15}}}
+```
+
+The reply is plain text (`Title:` / `URL:` / `Highlights:` blocks) inside an SSE
+`message` event. `allowed_domains` become `site:` operators in the query, and both
+domain lists are also enforced on the parsed results.
+
+Opt out (searches never go to Exa without a key):
+
+```bash
+export EXA_FREE_TIER=0
 ```
 
 ### You.com
@@ -425,9 +503,10 @@ Authorization: Bearer your-serpapi-key
 }
 ```
 
-### DuckDuckGo (Default Fallback)
+### DuckDuckGo (Last-Resort Fallback)
 
-No configuration needed. Uses the `duck-duck-scrape` npm package.
+No configuration needed. Uses the `duck-duck-scrape` npm package. In `auto` mode it
+runs only after every configured backend (including the Exa free tier) has failed.
 
 ```bash
 # Set as explicit-only backend

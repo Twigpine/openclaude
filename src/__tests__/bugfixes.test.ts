@@ -289,7 +289,7 @@ describe('Web search result count improvements', () => {
       'tools/WebSearchTool/providers/exa.ts',
     ).text()
 
-    expect(content).toMatch(/numResults:\s*15/)
+    expect(content).toMatch(/DEFAULT_EXA_NUM_RESULTS\s*=\s*15/)
   })
 
   test('Firecrawl provider requests at least 15 results', async () => {

@@ -4,6 +4,7 @@ import {
   releaseSharedMutationLock,
 } from '../../../test/sharedMutationLock.js'
 import { getProviderMode, getProviderChain, getAvailableProviders } from './index.js'
+import { resetExaFreeRateLimiterForTests } from './exaFree.js'
 import type { ProviderMode } from './index.js'
 
 const savedWebSearchEnv = {
@@ -13,6 +14,7 @@ const savedWebSearchEnv = {
   FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL,
   TAVILY_API_KEY: process.env.TAVILY_API_KEY,
   EXA_API_KEY: process.env.EXA_API_KEY,
+  EXA_FREE_TIER: process.env.EXA_FREE_TIER,
   YOU_API_KEY: process.env.YOU_API_KEY,
   JINA_API_KEY: process.env.JINA_API_KEY,
   BRAVE_API_KEY: process.env.BRAVE_API_KEY,
@@ -42,6 +44,10 @@ function restoreWebSearchEnv() {
 
 beforeEach(async () => {
   await acquireSharedMutationLock('WebSearchTool/providers/index.test.ts')
+  // The keyless Exa free tier is always configured, so it would join every
+  // auto chain and make real network calls. Tests that exercise it opt in.
+  process.env.EXA_FREE_TIER = '0'
+  resetExaFreeRateLimiterForTests()
 })
 
 afterEach(() => {
@@ -363,6 +369,7 @@ describe('getAvailableProviders', () => {
   })
 
   test('auto mode puts Ollama first when its API key is configured', () => {
+    delete process.env.EXA_API_KEY
     process.env.OLLAMA_API_KEY = 'ollama-test-key'
     const providers = getAvailableProviders()
     expect(providers[0]?.name).toBe('ollama')
@@ -388,5 +395,148 @@ describe('getAvailableProviders', () => {
     const providers = getAvailableProviders()
     expect(providers.some(p => p.name === 'tavily')).toBe(false)
     if (saved !== undefined) process.env.TAVILY_API_KEY = saved
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Exa as the default backend
+// ---------------------------------------------------------------------------
+
+function clearKeyedSearchProviders(): void {
+  process.env.WEB_SEARCH_PROVIDER = 'auto'
+  for (const key of [
+    'FIRECRAWL_API_KEY',
+    'FIRECRAWL_API_URL',
+    'TAVILY_API_KEY',
+    'EXA_API_KEY',
+    'YOU_API_KEY',
+    'JINA_API_KEY',
+    'BRAVE_API_KEY',
+    'BING_API_KEY',
+    'MOJEEK_API_KEY',
+    'LINKUP_API_KEY',
+    'OLLAMA_API_KEY',
+    'OLLAMA_BASE_URL',
+    'CLAUDE_CODE_USE_OPENAI',
+    'OPENAI_BASE_URL',
+    'OPENAI_API_BASE',
+    'CLAUDE_CODE_PROVIDER_ROUTE_ID',
+  ]) {
+    delete process.env[key]
+  }
+}
+
+function exaFreeSseResponse(text: string, isError = false): Response {
+  const payload = JSON.stringify({
+    result: { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) },
+    jsonrpc: '2.0',
+    id: 1,
+  })
+  return new Response(`event: message\ndata: ${payload}\n\n`, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  })
+}
+
+describe('Exa default ordering', () => {
+  test('keyed Exa leads the auto chain', () => {
+    clearKeyedSearchProviders()
+    process.env.EXA_API_KEY = 'exa-test-key'
+    process.env.OLLAMA_API_KEY = 'ollama-test-key'
+    process.env.TAVILY_API_KEY = 'tvly-test-key'
+
+    const names = getProviderChain('auto').map(p => p.name)
+    expect(names[0]).toBe('exa')
+  })
+
+  test('with no keys, the auto chain is the Exa free tier then DuckDuckGo', () => {
+    clearKeyedSearchProviders()
+    process.env.EXA_FREE_TIER = '1'
+
+    const names = getProviderChain('auto').map(p => p.name)
+    expect(names).toEqual(['exa-free', 'duckduckgo'])
+  })
+
+  test('user-configured keys run before the Exa free tier', () => {
+    clearKeyedSearchProviders()
+    delete process.env.EXA_FREE_TIER
+    process.env.BRAVE_API_KEY = 'brv-test-key'
+
+    const names = getProviderChain('auto').map(p => p.name)
+    expect(names.indexOf('brave')).toBeLessThan(names.indexOf('exa-free'))
+    expect(names.indexOf('exa-free')).toBeLessThan(names.indexOf('duckduckgo'))
+  })
+
+  test('EXA_FREE_TIER=0 removes the free tier from the auto chain', () => {
+    clearKeyedSearchProviders()
+    process.env.EXA_FREE_TIER = '0'
+
+    const names = getProviderChain('auto').map(p => p.name)
+    expect(names).not.toContain('exa-free')
+  })
+
+  test('exa mode uses the keyed API when EXA_API_KEY is set', () => {
+    clearKeyedSearchProviders()
+    delete process.env.EXA_FREE_TIER
+    process.env.EXA_API_KEY = 'exa-test-key'
+
+    expect(getProviderChain('exa').map(p => p.name)).toEqual(['exa'])
+  })
+
+  test('exa mode uses the free tier when no key is set', () => {
+    clearKeyedSearchProviders()
+    delete process.env.EXA_FREE_TIER
+
+    expect(getProviderChain('exa').map(p => p.name)).toEqual(['exa-free'])
+  })
+
+  test('exa mode with no key and the free tier disabled fails as not configured', async () => {
+    clearKeyedSearchProviders()
+    process.env.WEB_SEARCH_PROVIDER = 'exa'
+    process.env.EXA_FREE_TIER = 'off'
+
+    const { runSearch } = await import('./index.js')
+    await expect(runSearch({ query: 'anything' })).rejects.toThrow(
+      /"exa" is not configured/,
+    )
+  })
+
+  test('auto mode answers from the Exa free tier when no keys are set', async () => {
+    clearKeyedSearchProviders()
+    delete process.env.EXA_FREE_TIER
+    globalThis.fetch = (async () =>
+      exaFreeSseResponse(
+        'Title: Exa result\nURL: https://example.com/exa\nPublished: N/A\nAuthor: N/A\nHighlights:\nFrom the free tier.',
+      )) as unknown as typeof fetch
+
+    let duckDuckGoCalls = 0
+    mockDuckDuckGoSearch(async () => {
+      duckDuckGoCalls++
+      return { results: [] }
+    })
+
+    const { runSearch } = await import('./index.js')
+    const output = await runSearch({ query: 'default backend' })
+
+    expect(output.providerName).toBe('exa-free')
+    expect(output.hits[0]?.title).toBe('Exa result')
+    expect(duckDuckGoCalls).toBe(0)
+  })
+
+  test('auto mode falls through to DuckDuckGo when the free tier is rate-limited', async () => {
+    clearKeyedSearchProviders()
+    delete process.env.EXA_FREE_TIER
+    console.error = () => {}
+    globalThis.fetch = (async () =>
+      exaFreeSseResponse('Rate limit exceeded for free tier', true)) as unknown as typeof fetch
+    mockDuckDuckGoSearch(async () => ({
+      results: [{ title: 'DDG fallback', url: 'https://example.com/ddg' }],
+    }))
+
+    const { runSearch } = await import('./index.js')
+    const output = await runSearch({ query: 'rate limited' })
+
+    expect(output.providerName).toBe('duckduckgo')
+    expect(output.hits[0]?.title).toBe('DDG fallback')
   })
 })

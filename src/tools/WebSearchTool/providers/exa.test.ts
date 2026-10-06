@@ -152,3 +152,61 @@ describe('exaProvider response mapping', () => {
     await expect(exaProvider.search({ query: 'q' })).rejects.toThrow(/402/)
   })
 })
+
+describe('exaProvider tuning env', () => {
+  const savedTuning = {
+    EXA_NUM_RESULTS: process.env.EXA_NUM_RESULTS,
+    EXA_SEARCH_TYPE: process.env.EXA_SEARCH_TYPE,
+  }
+
+  beforeEach(() => {
+    process.env.EXA_API_KEY = 'exa-test-key'
+  })
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedTuning)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  })
+
+  async function captureBody(): Promise<Record<string, unknown>> {
+    let capturedBody: Record<string, unknown> = {}
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return new Response(JSON.stringify({ results: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    await exaProvider.search({ query: 'q' })
+    return capturedBody
+  }
+
+  test('EXA_SEARCH_TYPE selects the search type', async () => {
+    process.env.EXA_SEARCH_TYPE = 'Fast'
+    expect((await captureBody()).type).toBe('fast')
+  })
+
+  test('accepts multi-word Exa search types', async () => {
+    process.env.EXA_SEARCH_TYPE = 'deep-reasoning'
+    expect((await captureBody()).type).toBe('deep-reasoning')
+  })
+
+  test.each(['keyword-ish', 'neural'])('unsupported EXA_SEARCH_TYPE %p falls back to auto', async value => {
+    process.env.EXA_SEARCH_TYPE = value
+    expect((await captureBody()).type).toBe('auto')
+  })
+
+  test('EXA_NUM_RESULTS sets the result count', async () => {
+    process.env.EXA_NUM_RESULTS = '25'
+    expect((await captureBody()).numResults).toBe(25)
+  })
+
+  test('EXA_NUM_RESULTS is clamped to 50', async () => {
+    process.env.EXA_NUM_RESULTS = '500'
+    expect((await captureBody()).numResults).toBe(50)
+  })
+
+  test.each(['0', '-3', '2.5', 'many', ''])('invalid EXA_NUM_RESULTS %p uses the default', async value => {
+    process.env.EXA_NUM_RESULTS = value
+    expect((await captureBody()).numResults).toBe(15)
+  })
+})

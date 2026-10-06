@@ -17,11 +17,51 @@
  *   results[].highlights      string[]   (when contents.highlights requested)
  *   results[].highlightScores number[]   (cosine similarity per highlight)
  *   results[].text            string     (only when contents.text requested)
+ *
+ * Tuning (env):
+ *   EXA_SEARCH_TYPE  auto (default) | instant | fast | deep-lite | deep |
+ *                    deep-reasoning (https://exa.ai/docs/reference/search)
+ *   EXA_NUM_RESULTS  results per search, 1–50 (default 15); also used by the
+ *                    keyless free-tier adapter (exaFree.ts)
+ *   EXA_FREE_TIER    0/false/off disables the keyless free-tier fallback
  */
 
+import { isEnvDefinedFalsy } from '../../../utils/envUtils.js'
 import type { SearchInput, SearchProvider } from './types.js'
 import { applyDomainFilters, safeHostname, type ProviderOutput } from './types.js'
 import { fetchJsonWithWebSearchTimeout } from './timeout.js'
+
+export const DEFAULT_EXA_NUM_RESULTS = 15
+const MAX_EXA_NUM_RESULTS = 50
+
+const EXA_SEARCH_TYPES = new Set([
+  'auto',
+  'instant',
+  'fast',
+  'deep-lite',
+  'deep',
+  'deep-reasoning',
+])
+
+/** EXA_NUM_RESULTS clamped to 1–50; invalid or empty values use the default. */
+export function getExaNumResults(env: NodeJS.ProcessEnv = process.env): number {
+  const trimmed = env.EXA_NUM_RESULTS?.trim()
+  if (!trimmed || !/^\d+$/.test(trimmed)) return DEFAULT_EXA_NUM_RESULTS
+  const count = Number(trimmed)
+  if (count < 1) return DEFAULT_EXA_NUM_RESULTS
+  return Math.min(count, MAX_EXA_NUM_RESULTS)
+}
+
+/** EXA_SEARCH_TYPE when it names a known Exa search type, otherwise "auto". */
+export function getExaSearchType(env: NodeJS.ProcessEnv = process.env): string {
+  const normalized = env.EXA_SEARCH_TYPE?.trim().toLowerCase()
+  return normalized && EXA_SEARCH_TYPES.has(normalized) ? normalized : 'auto'
+}
+
+/** The keyless free tier is on unless EXA_FREE_TIER is explicitly falsy. */
+export function isExaFreeTierEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !isEnvDefinedFalsy(env.EXA_FREE_TIER)
+}
 
 /** Join up to 3 highlight excerpts with an ellipsis separator. */
 function describeFromHighlights(r: unknown): string | undefined {
@@ -47,8 +87,8 @@ export const exaProvider: SearchProvider = {
 
     const body: Record<string, unknown> = {
       query: input.query,
-      numResults: 15,
-      type: 'auto',
+      numResults: getExaNumResults(),
+      type: getExaSearchType(),
       contents: { highlights: true },
     }
 

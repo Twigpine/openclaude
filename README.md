@@ -158,6 +158,7 @@ Inside OpenClaude:
 
 - run `/provider` for guided provider setup and saved profiles
 - run `/onboard-github` for GitHub Models onboarding
+- run `/search` to choose the web search backend (Exa by default) or add a search API key
 
 > **Note:** OpenClaude does not automatically load project `.env` files. We recommend using the `/provider` command for setup, which saves provider profiles and credentials in `.openclaude-profile.json`. If you prefer environment variables, export them explicitly or run `openclaude --provider-env-file .env` for provider/setup variables. Export runtime/debug knobs from your shell or launcher.
 
@@ -399,11 +400,21 @@ See [Agent Routing and Step Limits](docs/agent-routing.md) for the full guide.
 
 ## Web Search and Fetch
 
-By default, `WebSearch` works on non-Anthropic models using configured search adapters and then DuckDuckGo. When the active provider is Ollama, OpenClaude first uses the signed-in local Ollama Web Search endpoint. Set `OLLAMA_API_KEY` to enable the hosted Ollama endpoint as a fallback.
+[Exa](https://exa.ai) is the default web search backend. With no setup, `WebSearch` on non-Anthropic models uses Exa's keyless free tier, which has per-second and daily limits. Run `/search` to pick a backend, add an API key, or test search:
 
-> **Note:** DuckDuckGo fallback works by scraping search results and may be rate-limited, blocked, or subject to DuckDuckGo's Terms of Service. If you want a more reliable supported option, configure Ollama Web Search or Firecrawl.
+```text
+/search              # pick a backend
+/search key exa      # add an Exa API key (hidden input) for higher limits
+/search remove-key   # remove a saved Exa key
+/search status       # show which backend handles searches
+/search test         # run a test search
+```
 
-For Anthropic-native backends and Codex responses, OpenClaude keeps the native provider web search behavior.
+Any other backend you configure with a key (Tavily, Brave, Firecrawl, …) runs before the Exa free tier, and DuckDuckGo is the last-resort fallback. When the active provider is Ollama, OpenClaude uses the signed-in local Ollama Web Search endpoint ahead of the free tier. Set `OLLAMA_API_KEY` to enable the hosted Ollama endpoint as a fallback. Set `EXA_FREE_TIER=0` if searches should never go to Exa without a key. See [Web Search Providers](src/tools/WebSearchTool/README_SEARCH_PROVIDERS.md) for every backend and option.
+
+> **Note:** DuckDuckGo fallback works by scraping search results and may be rate-limited, blocked, or subject to DuckDuckGo's Terms of Service.
+
+For Anthropic-native backends and Codex responses, OpenClaude keeps the native provider web search behavior unless you pick a specific backend with `/search` (for example `/search exa`).
 
 To select Ollama search explicitly, use `WEB_SEARCH_PROVIDER=ollama`. A local Ollama route uses its configured `OPENAI_BASE_URL` or `OLLAMA_BASE_URL`; hosted search sends `OLLAMA_API_KEY` only to `https://ollama.com/api/web_search`.
 
@@ -417,7 +428,7 @@ export FIRECRAWL_API_KEY=your-key-here
 
 With Firecrawl enabled:
 
-- `WebSearch` can use Firecrawl's search API while DuckDuckGo remains the default free path for non-Claude models
+- `WebSearch` can use Firecrawl's search API while the Exa free tier remains the default free path for non-Claude models
 - `WebFetch` uses Firecrawl's scrape endpoint instead of raw HTTP, handling JS-rendered pages correctly
 
 Free tier at [firecrawl.dev](https://firecrawl.dev) includes 500 credits. The key is optional.

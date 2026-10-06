@@ -12,8 +12,8 @@ import {
 // to configure a working backend.
 const DDG_ANOMALY_HINT =
   'DuckDuckGo scraping is rate-limited from this network. ' +
-  'Configure a search backend with one of: ' +
-  'OLLAMA_BASE_URL, OLLAMA_API_KEY, FIRECRAWL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, YOU_API_KEY, ' +
+  'Run /search to configure a backend, or set EXA_API_KEY (recommended) or one of: ' +
+  'OLLAMA_BASE_URL, OLLAMA_API_KEY, FIRECRAWL_API_KEY, TAVILY_API_KEY, YOU_API_KEY, ' +
   'JINA_API_KEY, BING_API_KEY, MOJEEK_API_KEY, LINKUP_API_KEY — ' +
   'or use an Anthropic / Vertex / Foundry provider for native web search.'
 
