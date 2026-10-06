@@ -89,6 +89,7 @@ function ApiKeyDialog({
   )
 }
 
+/** Picker description for a backend, noting whether its key is set or missing. */
 function backendDescription(option: SearchBackendOption): string {
   if (!option.keyEnv) return option.description
   if (hasApiKey(option)) return `${option.description} · key set`
@@ -101,6 +102,11 @@ type Step =
   | { kind: 'key-choice'; option: SearchBackendOption }
   | { kind: 'key'; option: SearchBackendOption; setMode: boolean; warnExposed: boolean }
 
+/**
+ * The interactive /search flow: backend picker → optional key-choice step for
+ * key-optional backends → masked key dialog. `initialStep` lets subcommands
+ * start partway through.
+ */
 function SearchSetup({
   onDone,
   nativeSearchAvailable,

@@ -279,6 +279,19 @@ describe('exaFreeProvider response handling', () => {
     })
 
     expect(out.hits.map(h => h.source)).toEqual(['bun.com'])
+    expect(out.fallbackInAuto).toBe(false)
+  })
+
+  test('asks auto mode to fall through when domain filtering removes every hit', async () => {
+    mockFetch(() => sseResponse(toolResult(LIVE_SHAPED_TEXT)))
+
+    const out = await exaFreeProvider.search({
+      query: 'bun runtime',
+      allowed_domains: ['example.org'],
+    })
+
+    expect(out.hits).toEqual([])
+    expect(out.fallbackInAuto).toBe(true)
   })
 
   test('accepts a plain JSON reply as well as SSE', async () => {
@@ -295,8 +308,10 @@ describe('exaFreeProvider response handling', () => {
   test('returns no hits when the tool says there are no results', async () => {
     mockFetch(() => sseResponse(toolResult('No results found.')))
 
-    const out = await exaFreeProvider.search({ query: 'nothing' })
+    const out = await exaFreeProvider.search({ query: 'nothing', allowed_domains: ['example.org'] })
     expect(out.hits).toEqual([])
+    // A genuine no-results reply is a successful result, not a fall-through.
+    expect(out.fallbackInAuto).toBe(false)
   })
 
   test('throws on an unrecognized text format so auto mode can fall through', async () => {

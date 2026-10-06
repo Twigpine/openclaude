@@ -110,6 +110,7 @@ const BACKEND_DISPLAY_NAMES: Record<string, string> = {
 
 export const DEFAULT_TEST_QUERY = 'latest stable Node.js release'
 
+/** Look up a backend by mode name or alias (case-insensitive). */
 export function findSearchBackend(name: string): SearchBackendOption | undefined {
   const normalized = name.trim().toLowerCase()
   const mode = BACKEND_ALIASES[normalized] ?? normalized
@@ -121,6 +122,7 @@ export function displayBackendName(providerName: string): string {
   return BACKEND_DISPLAY_NAMES[providerName] ?? providerName
 }
 
+/** True when the backend's API key env var is set in this session. */
 export function hasApiKey(option: SearchBackendOption): boolean {
   return Boolean(option.keyEnv && process.env[option.keyEnv]?.trim())
 }
@@ -294,6 +296,10 @@ const SETTINGS_ENV_SOURCES: ReadonlyArray<[SettingSource, string]> = [
   ['userSettings', 'user settings'],
 ]
 
+/**
+ * The enabled settings.json source (highest precedence first) whose `env`
+ * block sets `key`, described for the user, or undefined when none does.
+ */
 export function findSettingsEnvOverride(key: string): string | undefined {
   for (const [source, label] of SETTINGS_ENV_SOURCES) {
     // Startup only applies env from enabled sources (--setting-sources).
@@ -353,6 +359,7 @@ function persistSearchEnv(
   return warnings
 }
 
+/** User-facing message for a persistence failure. */
 function saveFailure(err: unknown): string {
   return `Failed to save web search settings: ${err instanceof Error ? err.message : String(err)}`
 }
@@ -462,6 +469,10 @@ export function removeSearchApiKey(
 // Test search
 // ---------------------------------------------------------------------------
 
+/**
+ * Run a test search through the configured chain and describe the outcome.
+ * `run` is injectable so tests never hit the network.
+ */
 export async function runSearchTest(
   query: string,
   nativeSearchAvailable: boolean,

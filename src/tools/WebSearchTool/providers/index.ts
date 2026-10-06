@@ -168,6 +168,10 @@ export async function runSearch(
   }
 
   const errors: Error[] = []
+  // Output from a provider that asked auto mode to keep going (e.g. domain
+  // filtering removed every hit). Returned if no later provider does better,
+  // so a legitimately empty result is not reported as a failure.
+  let filteredEmptyOutput: ProviderOutput | undefined
 
   // Explicit provider mode: fail fast if the provider isn't configured
   if (mode !== 'auto' && mode !== 'native') {
@@ -183,7 +187,15 @@ export async function runSearch(
 
   for (const provider of chain) {
     try {
-      return await provider.search(input, signal)
+      const { fallbackInAuto, ...output } = await provider.search(input, signal)
+      if (mode === 'auto' && fallbackInAuto) {
+        console.error(
+          `[web-search] ${provider.name} returned no hits after domain filtering; trying the next backend`,
+        )
+        filteredEmptyOutput ??= output
+        continue
+      }
+      return output
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
 
@@ -203,6 +215,10 @@ export async function runSearch(
       console.error(`[web-search] ${provider.name} failed: ${error.message}`)
     }
   }
+
+  // Every later provider failed or was skipped: the filtered-empty result
+  // is the best answer we have.
+  if (filteredEmptyOutput) return filteredEmptyOutput
 
   // All providers failed in auto mode
   const lastErr = errors[errors.length - 1]

@@ -83,6 +83,7 @@ export function resetExaFreeRateLimiterForTests(): void {
   rateLimitedUntil = 0
 }
 
+/** Start the cooldown and build the user-facing limit error. */
 function rateLimitError(): Error {
   rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS
   return new Error(
@@ -109,12 +110,14 @@ async function waitForCallSlot(signal: AbortSignal): Promise<void> {
   }
 }
 
+/** The search query, with allowed domains appended as `site:` operators. */
 function buildQuery(input: SearchInput): string {
   const allowed = input.allowed_domains?.filter(Boolean) ?? []
   if (allowed.length === 0) return input.query
   return `${input.query} ${allowed.map(d => `site:${d}`).join(' OR ')}`
 }
 
+/** The required `objective` argument: the query plus any domain constraints. */
 function buildObjective(input: SearchInput): string {
   const parts = [`Find web pages that answer: ${input.query}`]
   const allowed = input.allowed_domains?.filter(Boolean) ?? []
@@ -137,6 +140,7 @@ function errorDetail(body: string): string {
 // which doesn't apply here — so rateLimitError() replaces the detail rather
 // than echoing it.
 
+/** Map an MCP tool error text to a rate-limit or generic search error. */
 function toolError(detail: string): Error {
   if (RATE_LIMIT_PATTERN.test(detail)) return rateLimitError()
   return new Error(`Exa free tier search error: ${detail.trim() || 'unknown error'}`)
@@ -196,6 +200,7 @@ function extractResultText(rpc: unknown): string {
   return text
 }
 
+/** Turn a result block's body (after the Title/URL lines) into a snippet. */
 function describeResultBody(body: string): string | undefined {
   const contentAt = body.search(/^(?:Highlights|Text|Summary):[ \t]*/m)
   const raw =
@@ -301,8 +306,14 @@ export const exaFreeProvider: SearchProvider = {
       throw new Error('Exa free tier returned an unrecognized response format')
     }
 
+    // The free tier has no server-side domain filters, so when the client-side
+    // filter removes every hit, let auto mode try a backend that can honor the
+    // filter (DuckDuckGo) instead of reporting no results. A genuine
+    // no-results reply (hits empty before filtering) stays a successful result.
+    const filteredHits = applyDomainFilters(hits, input)
     return {
-      hits: applyDomainFilters(hits, input),
+      hits: filteredHits,
+      fallbackInAuto: hits.length > 0 && filteredHits.length === 0,
       providerName: 'exa-free',
       durationSeconds: (performance.now() - start) / 1000,
     }

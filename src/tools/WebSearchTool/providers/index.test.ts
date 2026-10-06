@@ -523,6 +523,67 @@ describe('Exa default ordering', () => {
     expect(duckDuckGoCalls).toBe(0)
   })
 
+  test('auto mode tries DuckDuckGo when domain filtering empties the free-tier hits', async () => {
+    clearKeyedSearchProviders()
+    delete process.env.EXA_FREE_TIER
+    console.error = () => {}
+    globalThis.fetch = (async () =>
+      exaFreeSseResponse(
+        'Title: Off-domain\nURL: https://elsewhere.example.com/x\nPublished: N/A\nAuthor: N/A\nHighlights:\nnope',
+      )) as unknown as typeof fetch
+    mockDuckDuckGoSearch(async () => ({
+      results: [{ title: 'On-domain', url: 'https://docs.example.org/page' }],
+    }))
+
+    const { runSearch } = await import('./index.js')
+    const output = await runSearch({ query: 'q', allowed_domains: ['example.org'] })
+
+    expect(output.providerName).toBe('duckduckgo')
+    expect(output.hits.map(h => h.url)).toEqual(['https://docs.example.org/page'])
+  })
+
+  test('auto mode returns the filtered-empty result when no later backend does better', async () => {
+    clearKeyedSearchProviders()
+    delete process.env.EXA_FREE_TIER
+    console.error = () => {}
+    globalThis.fetch = (async () =>
+      exaFreeSseResponse(
+        'Title: Off-domain\nURL: https://elsewhere.example.com/x\nPublished: N/A\nAuthor: N/A\nHighlights:\nnope',
+      )) as unknown as typeof fetch
+    mockDuckDuckGoSearch(async () => {
+      throw new Error('ddg down')
+    })
+
+    const { runSearch } = await import('./index.js')
+    const output = await runSearch({ query: 'q', allowed_domains: ['example.org'] })
+
+    expect(output.providerName).toBe('exa-free')
+    expect(output.hits).toEqual([])
+    expect('fallbackInAuto' in output).toBe(false)
+  })
+
+  test('explicit exa mode returns a filtered-empty result instead of falling through', async () => {
+    clearKeyedSearchProviders()
+    delete process.env.EXA_FREE_TIER
+    process.env.WEB_SEARCH_PROVIDER = 'exa'
+    globalThis.fetch = (async () =>
+      exaFreeSseResponse(
+        'Title: Off-domain\nURL: https://elsewhere.example.com/x\nPublished: N/A\nAuthor: N/A\nHighlights:\nnope',
+      )) as unknown as typeof fetch
+    let duckDuckGoCalls = 0
+    mockDuckDuckGoSearch(async () => {
+      duckDuckGoCalls++
+      return { results: [] }
+    })
+
+    const { runSearch } = await import('./index.js')
+    const output = await runSearch({ query: 'q', allowed_domains: ['example.org'] })
+
+    expect(output.providerName).toBe('exa-free')
+    expect(output.hits).toEqual([])
+    expect(duckDuckGoCalls).toBe(0)
+  })
+
   test('auto mode falls through to DuckDuckGo when the free tier is rate-limited', async () => {
     clearKeyedSearchProviders()
     delete process.env.EXA_FREE_TIER

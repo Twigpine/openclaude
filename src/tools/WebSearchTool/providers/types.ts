@@ -29,6 +29,13 @@ export interface ProviderOutput {
   providerName: string
   /** Duration of the provider call in seconds */
   durationSeconds: number
+  /**
+   * In auto mode, continue to the next provider instead of returning this
+   * output — e.g. when client-side domain filtering removed every hit and a
+   * later backend may honor the filter server-side. Explicit modes return
+   * the output as-is.
+   */
+  fallbackInAuto?: boolean
 }
 
 export interface SearchProvider {
