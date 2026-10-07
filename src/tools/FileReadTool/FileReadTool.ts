@@ -89,6 +89,7 @@ import {
   OFFSET_INSTRUCTION_TARGETED,
   renderPromptTemplate,
 } from './prompt.js'
+import { checkReadDedup } from './readDedup.js'
 import {
   getToolUseSummary,
   renderToolResultMessage,
@@ -632,35 +633,36 @@ export const FileReadTool = buildTool({
     const existingState = dedupKillswitch
       ? undefined
       : readFileState.get(fullFilePath)
-    // Only dedup entries that came from a prior Read (offset is always set
-    // by Read). Edit/Write store offset=undefined — their readFileState
-    // entry reflects post-edit mtime, so deduping against it would wrongly
-    // point the model at the pre-edit Read content.
-    if (
-      existingState &&
-      !existingState.isPartialView &&
-      existingState.offset !== undefined
-    ) {
-      const rangeMatch =
-        existingState.offset === offset && existingState.limit === limit
-      if (rangeMatch) {
-        try {
-          const mtimeMs = await getFileModificationTimeAsync(fullFilePath)
-          if (mtimeMs === existingState.timestamp) {
-            const analyticsExt = getFileExtensionForAnalytics(fullFilePath)
-            logEvent('tengu_file_read_dedup', {
-              ...(analyticsExt !== undefined && { ext: analyticsExt }),
-            })
-            return {
-              data: {
-                type: 'file_unchanged' as const,
-                file: { filePath: file_path },
-              },
-            }
-          }
-        } catch {
-          // stat failed — fall through to full read
-        }
+    // Hits cover the exact same range, any in-bounds range of a prior full
+    // Read, and files whose mtime moved but whose bytes did not (see
+    // readDedup.ts for the eligibility rules).
+    const dedup = await checkReadDedup(existingState, offset, limit, {
+      getModificationTime: () => getFileModificationTimeAsync(fullFilePath),
+      readRange: (rangeOffset, rangeLimit) =>
+        readFileInRange(
+          fullFilePath,
+          rangeOffset === 0 ? 0 : rangeOffset - 1,
+          rangeLimit,
+          rangeLimit === undefined ? maxSizeBytes : undefined,
+          context.abortController.signal,
+        ),
+    })
+    if (dedup.kind !== 'miss' && existingState) {
+      if (dedup.kind === 'touched') {
+        readFileState.set(fullFilePath, {
+          ...existingState,
+          timestamp: dedup.timestamp,
+        })
+      }
+      const analyticsExt = getFileExtensionForAnalytics(fullFilePath)
+      logEvent('tengu_file_read_dedup', {
+        ...(analyticsExt !== undefined && { ext: analyticsExt }),
+      })
+      return {
+        data: {
+          type: 'file_unchanged' as const,
+          file: { filePath: file_path },
+        },
       }
     }
 
