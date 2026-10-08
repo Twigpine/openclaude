@@ -408,9 +408,13 @@ See [Agent Routing and Step Limits](docs/agent-routing.md) for the full guide.
 /search remove-key   # remove a saved Exa key
 /search status       # show which backend handles searches
 /search test         # run a test search
+/search anysearch    # select AnySearch (works without a key)
+/search key anysearch # optionally add an AnySearch API key in the hidden input
 ```
 
-Any other backend you configure with a key (Tavily, Brave, Firecrawl, …) runs before the Exa free tier, and DuckDuckGo is the last-resort fallback. When the active provider is Ollama, OpenClaude uses the signed-in local Ollama Web Search endpoint ahead of the free tier. Set `OLLAMA_API_KEY` to enable the hosted Ollama endpoint as a fallback. Set `EXA_FREE_TIER=0` if searches should never go to Exa without a key. See [Web Search Providers](src/tools/WebSearchTool/README_SEARCH_PROVIDERS.md) for every backend and option.
+Other backends in the auto chain that you configure with a key (Tavily, Brave, Firecrawl, …) run before the Exa free tier, and DuckDuckGo is the last-resort fallback. When the active provider is Ollama, OpenClaude uses the signed-in local Ollama Web Search endpoint ahead of the free tier. Set `OLLAMA_API_KEY` to enable the hosted Ollama endpoint as a fallback. Set `EXA_FREE_TIER=0` if searches should never go to Exa without a key. See [Web Search Providers](src/tools/WebSearchTool/README_SEARCH_PROVIDERS.md) for every backend and option.
+
+AnySearch is available as an explicit backend with `/search anysearch` or `WEB_SEARCH_PROVIDER=anysearch`. `ANYSEARCH_API_KEY` is optional; anonymous access has lower service limits. Set `ANYSEARCH_MAX_RESULTS` to an integer from 1 to 10 (default 10) to control the requested result count. AnySearch does not change the `auto` search order.
 
 > **Note:** DuckDuckGo fallback works by scraping search results and may be rate-limited, blocked, or subject to DuckDuckGo's Terms of Service.
 

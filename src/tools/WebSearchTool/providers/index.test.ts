@@ -13,6 +13,7 @@ const savedWebSearchEnv = {
   FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY,
   FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL,
   TAVILY_API_KEY: process.env.TAVILY_API_KEY,
+  ANYSEARCH_API_KEY: process.env.ANYSEARCH_API_KEY,
   EXA_API_KEY: process.env.EXA_API_KEY,
   EXA_FREE_TIER: process.env.EXA_FREE_TIER,
   YOU_API_KEY: process.env.YOU_API_KEY,
@@ -128,6 +129,11 @@ describe('getProviderMode', () => {
     expect(getProviderMode()).toBe('ollama')
   })
 
+  test('returns anysearch mode', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'anysearch'
+    expect(getProviderMode()).toBe('anysearch')
+  })
+
   test('returns native mode', () => {
     process.env.WEB_SEARCH_PROVIDER = 'native'
     expect(getProviderMode()).toBe('native')
@@ -154,6 +160,19 @@ describe('getProviderChain', () => {
   test('auto mode does NOT include custom provider', () => {
     const chain = getProviderChain('auto')
     expect(chain.some(p => p.name === 'custom')).toBe(false)
+  })
+
+  test('auto mode does not select AnySearch without an explicit choice', () => {
+    const chain = getProviderChain('auto')
+    expect(chain.some(p => p.name === 'anysearch')).toBe(false)
+  })
+
+  test('anysearch mode selects the built-in provider without a key', () => {
+    delete process.env.ANYSEARCH_API_KEY
+    const chain = getProviderChain('anysearch' as ProviderMode)
+    expect(chain).toHaveLength(1)
+    expect(chain[0].name).toBe('anysearch')
+    expect(chain[0].isConfigured()).toBe(true)
   })
 
   test('custom mode explicitly returns custom provider', () => {
@@ -194,6 +213,19 @@ describe('getProviderChain', () => {
 // ---------------------------------------------------------------------------
 
 describe('runSearch', () => {
+  test('explicit AnySearch failure does not fall back to another provider', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'anysearch'
+    let requestCount = 0
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      requestCount += 1
+      return new Response(JSON.stringify({ code: 429 }), { status: 429 })
+    }) as typeof fetch
+
+    const { runSearch } = await import('./index.js')
+    await expect(runSearch({ query: 'quota' })).rejects.toThrow(/AnySearch search error HTTP 429/)
+    expect(requestCount).toBe(1)
+  })
+
   test('AbortError stops the chain immediately in auto mode', async () => {
     // Use AbortController to cancel
     const controller = new AbortController()

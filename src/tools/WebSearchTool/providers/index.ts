@@ -8,6 +8,7 @@
  *   "ollama"    — use Ollama local/hosted Web Search API only (fail loudly)
  *   "firecrawl" — use Firecrawl only (fail loudly)
  *   "tavily"    — use Tavily only (fail loudly)
+ *   "anysearch" — use AnySearch only, with an optional API key (fail loudly)
  *   "exa"       — use Exa only (fail loudly): the keyed API when EXA_API_KEY
  *                 is set, otherwise the keyless free tier
  *   "you"       — use You.com only (fail loudly)
@@ -33,6 +34,7 @@ import { customProvider } from './custom.js'
 import { duckduckgoProvider } from './duckduckgo.js'
 import { firecrawlProvider } from './firecrawl.js'
 import { tavilyProvider } from './tavily.js'
+import { anysearchProvider } from './anysearch.js'
 import { exaProvider } from './exa.js'
 import { exaFreeProvider } from './exaFree.js'
 import { youProvider } from './you.js'
@@ -93,6 +95,7 @@ export type ProviderMode =
   | 'firecrawl'
   | 'ddg'
   | 'tavily'
+  | 'anysearch'
   | 'exa'
   | 'you'
   | 'jina'
@@ -108,6 +111,7 @@ const PROVIDER_BY_NAME: Record<string, SearchProvider> = {
   firecrawl: firecrawlProvider,
   ddg: duckduckgoProvider,
   tavily: tavilyProvider,
+  anysearch: anysearchProvider,
   exa: exaProvider,
   you: youProvider,
   jina: jinaProvider,

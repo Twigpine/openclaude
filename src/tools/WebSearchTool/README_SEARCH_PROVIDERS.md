@@ -46,6 +46,7 @@ instead.
 | Tavily | `TAVILY_API_KEY` | `Authorization: Bearer` | POST |
 | Exa (default) | `EXA_API_KEY` | `x-api-key` | POST |
 | Exa free tier | *(none — zero-config default)* | — | POST |
+| AnySearch (explicit only) | `ANYSEARCH_API_KEY` (optional) | `Authorization: Bearer` when set | POST |
 | You.com | `YOU_API_KEY` | `X-API-Key` | GET |
 | Jina | `JINA_API_KEY` | `Authorization: Bearer` | GET |
 | Bing | `BING_API_KEY` | `Ocp-Apim-Subscription-Key` | GET |
@@ -83,6 +84,7 @@ export WEB_SEARCH_API=https://search.example.com/search
 | `ollama` | Local signed-in Ollama, then hosted Ollama when `OLLAMA_API_KEY` is set; throws if both fail |
 | `tavily` | Tavily only — throws on failure |
 | `exa` | Exa only — keyed API when `EXA_API_KEY` is set, otherwise the free tier; throws on failure |
+| `anysearch` | AnySearch only — anonymous without a key, Bearer authentication with one; throws on failure |
 | `brave` | Brave only — throws on failure |
 | `custom` | Custom API only — throws on failure. **Not in the auto chain** — must be explicitly selected |
 | `firecrawl` | Firecrawl only — throws on failure |
@@ -100,6 +102,8 @@ Vertex, Foundry, Codex) keep using it. Set `WEB_SEARCH_PROVIDER=exa` to use Exa
 there too.
 
 > **Note:** The `custom` provider is excluded from the `auto` chain. It is only used when `WEB_SEARCH_PROVIDER=custom` is explicitly set. This prevents the generic outbound provider from silently becoming the default backend.
+
+AnySearch is also explicit-only: selecting it does not change the existing `auto` chain.
 
 ```bash
 # Fail loudly if Tavily is down (don't silently switch backends)
@@ -120,6 +124,16 @@ export WEB_SEARCH_TIMEOUT_SEC=30
 Invalid, fractional, zero, negative, or very large values fall back to 15s. Custom API providers keep their separate `WEB_CUSTOM_TIMEOUT_SEC` setting because self-hosted endpoints may need different budgets.
 
 ## Provider Request & Response Formats
+
+### AnySearch
+
+Run `/search anysearch` to use its general web search without a key, or `/search key anysearch` to add an optional key through hidden input. Anonymous access has lower service limits. `/search remove-key anysearch` removes a key saved by `/search`; keys from the shell or `settings.json` remain controlled by those sources.
+
+`ANYSEARCH_MAX_RESULTS` accepts an integer from 1 to 10 (default 10). Invalid values use 10. General search sends `query` and `max_results` to `POST https://api.anysearch.com/v1/search`. Results come from `data.results`; OpenClaude reports HTTP and business-code failures separately from an empty result list. A key, when present, is sent only as `Authorization: Bearer <key>` to that endpoint.
+
+```json
+{"query":"search terms","max_results":10}
+```
 
 ### Ollama
 

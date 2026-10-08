@@ -33,6 +33,8 @@ const SEARCH_ENV_KEYS = [
   'EXA_API_KEY',
   'EXA_FREE_TIER',
   'TAVILY_API_KEY',
+  'ANYSEARCH_API_KEY',
+  'ANYSEARCH_MAX_RESULTS',
   'FIRECRAWL_API_KEY',
   'FIRECRAWL_API_URL',
   'YOU_API_KEY',
@@ -50,6 +52,7 @@ const SEARCH_ENV_KEYS = [
 ] as const
 
 const savedEnv = Object.fromEntries(SEARCH_ENV_KEYS.map(k => [k, process.env[k]]))
+const originalFetch = globalThis.fetch
 
 beforeEach(async () => {
   await acquireSharedMutationLock('commands/search/searchSettings.test.ts')
@@ -58,6 +61,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    globalThis.fetch = originalFetch
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
@@ -124,6 +128,11 @@ describe('parseSearchArgs', () => {
     })
     expect(parseSearchArgs('duckduckgo')).toMatchObject({ kind: 'set', option: { mode: 'ddg' } })
     expect(parseSearchArgs('builtin')).toMatchObject({ kind: 'set', option: { mode: 'native' } })
+    expect(parseSearchArgs('anysearch')).toMatchObject({
+      kind: 'set',
+      option: { mode: 'anysearch' },
+      typedInline: false,
+    })
   })
 
   test('extra tokens after a backend are flagged as an inline key', () => {
@@ -194,6 +203,7 @@ describe('needsApiKey', () => {
     expect(needsApiKey(backend('exa'))).toBe(false)
     expect(needsApiKey(backend('ddg'))).toBe(false)
     expect(needsApiKey(backend('auto'))).toBe(false)
+    expect(needsApiKey(backend('anysearch'))).toBe(false)
   })
 
   test('Exa needs a key when the free tier is turned off', () => {
@@ -235,6 +245,11 @@ describe('describeSearchStatus', () => {
     )
   })
 
+  test('an explicit AnySearch selection reports the active backend without a key', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'anysearch'
+    expect(describeSearchStatus(false)).toContain('Searches go to: AnySearch')
+  })
+
   test('native mode without built-in search reports searches as unavailable', () => {
     process.env.WEB_SEARCH_PROVIDER = 'native'
     expect(describeSearchStatus(false)).toContain('searches are unavailable')
@@ -242,6 +257,16 @@ describe('describeSearchStatus', () => {
 })
 
 describe('applySearchSelection', () => {
+  test('saves AnySearch selection without requiring an API key', () => {
+    const store = recordingStore()
+    const message = applySearchSelection(backend('anysearch'), undefined, false, store)
+
+    expect(store.saves).toEqual([
+      { set: { WEB_SEARCH_PROVIDER: 'anysearch' }, unset: [] },
+    ])
+    expect(message).toBe('Web search set to AnySearch.')
+  })
+
   test('saves the backend and its key, and applies them to this session', () => {
     const store = recordingStore()
     const message = applySearchSelection(backend('tavily'), ' tvly-key ', false, store)
@@ -455,6 +480,24 @@ describe('runSearchTest', () => {
     providerName: 'exa-free',
     durationSeconds: 1.234,
   }
+
+  test('uses the selected AnySearch backend through the normal test entry', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'anysearch'
+    let requestedUrl = ''
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      requestedUrl = String(input)
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { results: [{ title: 'Any result', url: 'https://example.com/result' }] },
+      }), { status: 200 })
+    }) as typeof fetch
+
+    const message = await runSearchTest('any query', false)
+
+    expect(requestedUrl).toBe('https://api.anysearch.com/v1/search')
+    expect(message).toContain('Search OK via AnySearch: 1 results')
+    expect(message).toContain('Top result: Any result — https://example.com/result')
+  })
 
   test('reports the backend, count, timing, and top result', async () => {
     let query = ''
