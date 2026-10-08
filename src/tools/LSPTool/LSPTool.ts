@@ -1,6 +1,4 @@
-import { open } from 'fs/promises'
 import * as path from 'path'
-import { pathToFileURL } from 'url'
 import type {
   CallHierarchyIncomingCall,
   CallHierarchyItem,
@@ -18,6 +16,16 @@ import {
   isLspConnected,
   waitForInitialization,
 } from '../../services/lsp/manager.js'
+import {
+  isLspDocumentRevisionChanged,
+  isLspServerGenerationChanged,
+  type LSPServerManager,
+} from '../../services/lsp/LSPServerManager.js'
+import {
+  getLspDocumentIdentity,
+  LspDocumentTooLargeError,
+  readLspDocumentContents,
+} from '../../services/lsp/documentIdentity.js'
 import type { ValidationResult } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { uniq } from '../../utils/array.js'
@@ -49,8 +57,6 @@ import {
   renderToolUseMessage,
   userFacingName,
 } from './UI.js'
-
-const MAX_LSP_FILE_SIZE_BYTES = 10_000_000
 
 /**
  * Tool-compatible input schema (regular ZodObject instead of discriminated union)
@@ -123,6 +129,74 @@ type OutputSchema = ReturnType<typeof outputSchema>
 
 export type Output = z.infer<OutputSchema>
 export type Input = z.infer<InputSchema>
+
+type CallHierarchyFlowResult =
+  | { kind: 'result'; result: unknown }
+  | { kind: 'output'; output: Output }
+
+async function runCallHierarchyFlow(
+  manager: LSPServerManager,
+  input: Input,
+  absolutePath: string,
+  method: string,
+  params: unknown,
+): Promise<CallHierarchyFlowResult> {
+  const callMethod =
+    input.operation === 'incomingCalls'
+      ? 'callHierarchy/incomingCalls'
+      : 'callHierarchy/outgoingCalls'
+
+  for (let generationRetry = 0; generationRetry <= 1; generationRetry++) {
+    const prepared = await manager.sendRequestWithGeneration<
+      CallHierarchyItem[]
+    >(absolutePath, method, params)
+    if (!prepared) return { kind: 'result', result: undefined }
+
+    const callItems = prepared.result
+    if (!callItems || callItems.length === 0) {
+      return {
+        kind: 'output',
+        output: {
+          operation: input.operation,
+          result: 'No call hierarchy item found at this position',
+          filePath: input.filePath,
+          resultCount: 0,
+          fileCount: 0,
+        },
+      }
+    }
+
+    try {
+      const calls = await manager.sendRequestWithGeneration(
+        absolutePath,
+        callMethod,
+        { item: callItems[0] },
+        {
+          expectedGeneration: prepared.serverGeneration,
+          expectedDocumentRevision: prepared.documentRevision,
+          expectedDocumentCloseEpoch: prepared.documentCloseEpoch,
+        },
+      )
+      if (!calls) {
+        logForDebugging(
+          `LSP server returned undefined for ${callMethod} on ${input.filePath}`,
+        )
+      }
+      return { kind: 'result', result: calls?.result ?? null }
+    } catch (error) {
+      if (
+        generationRetry === 0 &&
+        (isLspServerGenerationChanged(error) ||
+          isLspDocumentRevisionChanged(error))
+      ) {
+        continue
+      }
+      throw error
+    }
+  }
+
+  return { kind: 'result', result: undefined }
+}
 
 export const LSPTool = buildTool({
   name: LSP_TOOL_NAME,
@@ -259,26 +333,32 @@ export const LSPTool = buildTool({
       // Most LSP servers require textDocument/didOpen before operations
       // Only read the file if it's not already open to avoid unnecessary I/O
       if (!manager.isFileOpen(absolutePath)) {
-        const handle = await open(absolutePath, 'r')
-        try {
-          const stats = await handle.stat()
-          if (stats.size > MAX_LSP_FILE_SIZE_BYTES) {
-            const output: Output = {
-              operation: input.operation,
-              result: `File too large for LSP analysis (${Math.ceil(stats.size / 1_000_000)}MB exceeds 10MB limit)`,
-              filePath: input.filePath,
-            }
-            return { data: output }
-          }
-          const fileContent = await handle.readFile({ encoding: 'utf-8' })
-          await manager.openFile(absolutePath, fileContent)
-        } finally {
-          await handle.close()
-        }
+        const fileContent = await readLspDocumentContents(absolutePath)
+        await manager.openFile(absolutePath, fileContent)
       }
 
-      // Send request to LSP server
-      let result = await manager.sendRequest(absolutePath, method, params)
+      let result: unknown
+
+      // Call hierarchy items may contain opaque, process-owned data. Keep the
+      // prepare result and its follow-up request on one server generation.
+      if (
+        input.operation === 'incomingCalls' ||
+        input.operation === 'outgoingCalls'
+      ) {
+        const callHierarchy = await runCallHierarchyFlow(
+          manager,
+          input,
+          absolutePath,
+          method,
+          params,
+        )
+        if (callHierarchy.kind === 'output') {
+          return { data: callHierarchy.output }
+        }
+        result = callHierarchy.result
+      } else {
+        result = await manager.sendRequest(absolutePath, method, params)
+      }
 
       if (result === undefined) {
         // Log for diagnostic purposes - helps track usage patterns and potential bugs
@@ -293,43 +373,6 @@ export const LSPTool = buildTool({
         }
         return {
           data: output,
-        }
-      }
-
-      // For incomingCalls and outgoingCalls, we need a two-step process:
-      // 1. First get CallHierarchyItem(s) from prepareCallHierarchy
-      // 2. Then request the actual calls using that item
-      if (
-        input.operation === 'incomingCalls' ||
-        input.operation === 'outgoingCalls'
-      ) {
-        const callItems = result as CallHierarchyItem[]
-        if (!callItems || callItems.length === 0) {
-          const output: Output = {
-            operation: input.operation,
-            result: 'No call hierarchy item found at this position',
-            filePath: input.filePath,
-            resultCount: 0,
-            fileCount: 0,
-          }
-          return { data: output }
-        }
-
-        // Use the first call hierarchy item to request calls
-        const callMethod =
-          input.operation === 'incomingCalls'
-            ? 'callHierarchy/incomingCalls'
-            : 'callHierarchy/outgoingCalls'
-
-        result = await manager.sendRequest(absolutePath, callMethod, {
-          item: callItems[0],
-        })
-
-        if (result === undefined) {
-          logForDebugging(
-            `LSP server returned undefined for ${callMethod} on ${input.filePath}`,
-          )
-          // Continue to formatter which will handle empty/null gracefully
         }
       }
 
@@ -395,6 +438,16 @@ export const LSPTool = buildTool({
       const err = toError(error)
       const errorMessage = err.message
 
+      if (err instanceof LspDocumentTooLargeError) {
+        return {
+          data: {
+            operation: input.operation,
+            result: errorMessage,
+            filePath: input.filePath,
+          },
+        }
+      }
+
       // Log error for tracking
       logError(
         new Error(
@@ -428,7 +481,7 @@ function getMethodAndParams(
   input: Input,
   absolutePath: string,
 ): { method: string; params: unknown } {
-  const uri = pathToFileURL(absolutePath).href
+  const uri = getLspDocumentIdentity(absolutePath).fileUri
   // Convert from 1-based (user-friendly) to 0-based (LSP protocol)
   const position = {
     line: input.line - 1,
