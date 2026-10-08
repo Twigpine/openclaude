@@ -28,6 +28,7 @@ import {
   getReplayIndexBuilder,
   getSessionId,
   getSessionProjectDir,
+  onSessionSwitch,
   switchSession,
 } from '../bootstrap/state.js'
 import { COMMAND_NAME_TAG, TICK_TAG } from '../constants/xml.js'
@@ -771,10 +772,54 @@ export const getProjectDir = memoize((projectDir: string): string => {
 
 let project: Project | null = null
 let cleanupRegistered = false
+/** Held so the subscription can be given up again — see resetProjectForTesting. */
+let unsubscribeSessionSwitch: (() => void) | null = null
+/** The session the cached file pointer belongs to. */
+let pointerSessionId: string | null = null
+
+/**
+ * Follow switchSession with the file pointer.
+ *
+ * `Project.sessionFile` is resolved once and cached for the life of the
+ * process. Every CLI path that changes the active session resets it by hand
+ * immediately afterwards — sessionRestore.ts, /clear, print.ts all call
+ * resetSessionFilePointer right after switchSession, and its own docstring
+ * says that is when to call it.
+ *
+ * The v2 SDK does not, because it cannot: `unstable_v2_createSession` hands
+ * back a session object and the switch happens inside sendMessage, with no
+ * moment the embedder could hook. So a second session created in one process
+ * went on writing into the FIRST session's file. Its records carried its own
+ * sessionId, so nothing looked wrong until something tried to resume it:
+ * `resolveSessionFilePath` found no file, the resume came back with zero
+ * prior messages, and the conversation was gone.
+ *
+ * Measured in an embedder (2026-09-30): one project directory, one .jsonl,
+ * and inside it three sessions' records — 3979, 917 and 348 — while two of
+ * the three had no file of their own. An interrupt resumed the newest and
+ * silently started from nothing.
+ *
+ * Only on a real change: v2 calls switchSession before EVERY turn with the id
+ * it already has, and resetting the pointer each time would drop buffered
+ * entries and re-resolve the same path for nothing.
+ */
+function followSessionSwitches(): void {
+  if (unsubscribeSessionSwitch) return
+  pointerSessionId = getSessionId()
+  unsubscribeSessionSwitch = onSessionSwitch(sessionId => {
+    if (sessionId === pointerSessionId) return
+    pointerSessionId = sessionId
+    // Lazily re-resolved from the new session id on the next write. An
+    // existing file is appended to, not replaced — a resume lands back in the
+    // conversation it came from.
+    project?.resetSessionFile()
+  })
+}
 
 function getProject(): Project {
   if (!project) {
     project = new Project()
+    followSessionSwitches()
 
     // Register flush as a cleanup handler (only once)
     if (!cleanupRegistered) {
@@ -830,6 +875,21 @@ export function resetProjectFlushStateForTesting(): void {
  */
 export function resetProjectForTesting(): void {
   project = null
+  // Give up the switch subscription with the singleton it resets.
+  //
+  // Raised in review. `resetStateForTests()` calls `sessionSwitched.clear()`,
+  // which drops every listener at once. A module that merely remembered "I am
+  // subscribed" would then believe it was still following switches while its
+  // listener was gone, and since test files share one bun process that
+  // silently stops pointer-following for every test that runs afterwards —
+  // failing the switch tests in a full-suite run and nowhere else.
+  //
+  // Unsubscribing and forgetting lets the next getProject() register afresh. A
+  // stale unsubscribe against an already-cleared signal is a no-op, so this
+  // heals the resetStateForTests() case as well as its own.
+  unsubscribeSessionSwitch?.()
+  unsubscribeSessionSwitch = null
+  pointerSessionId = null
 }
 
 export function setSessionFileForTesting(path: string): void {
