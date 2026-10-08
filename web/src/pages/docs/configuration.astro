@@ -5,6 +5,7 @@ import { settingsFiles, settingOptions, envVars } from '../../data/configuration
 const toc = [
   { id: 'settings-files', label: 'settings files' },
   { id: 'common-options', label: 'common options' },
+  { id: 'chat-channels', label: 'chat channels' },
   { id: 'environment-variables', label: 'environment variables' },
   { id: 'project-instructions', label: 'project instructions' },
 ]
@@ -67,6 +68,25 @@ const toc = [
     One-off overrides beat files: <code>--settings</code> accepts a path or inline JSON,
     and <code>--setting-sources</code> restricts which layers load — see the
     <a href="/docs/cli-reference/#config">CLI reference</a>.
+  </p>
+
+  <h2 id="chat-channels">chat channels</h2>
+  <p>
+    Connect Telegram through an MCP channel server. The server owns the bot token
+    and Telegram polling; openclaude routes inbound notifications into the active
+    model session.
+  </p>
+  <p>
+    Configure an MCP server that declares <code>claude/channel</code> and emits
+    <code>notifications/claude/channel</code>, then explicitly enable it for a
+    session:
+  </p>
+  <pre><code>openclaude --channels server:telegram</code></pre>
+  <p>
+    Use the exact configured server name. Plugin channels use
+    <code>plugin:&lt;name&gt;@&lt;marketplace&gt;</code> and remain subject to the
+    approved plugin allowlist. The explicit flag is required because inbound
+    messages can contain prompt injection.
   </p>
 
   <h2 id="environment-variables">environment variables</h2>

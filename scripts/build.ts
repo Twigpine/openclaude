@@ -99,6 +99,7 @@ const featureFlags: Record<string, boolean> = {
   CHICAGO_MCP: false,             // Computer-use MCP (native Swift modules stubbed)
   COWORKER_TYPE_TELEMETRY: false, // Telemetry for agent/coworker type classification
   MCP_SKILLS: true,               // Dynamic MCP skill discovery via skill:// resources
+  KAIROS_CHANNELS: true,          // Inbound messages from explicitly configured MCP channels
 
   // ── Disabled by default, opt-in via runtime env var ─────────────────
   REPO_MAP: false,                // Auto-injected codebase intelligence repo-map; users opt in with REPO_MAP=1 (the runtime gate in src/context.ts honors the env var even when this flag is false)

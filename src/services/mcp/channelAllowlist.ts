@@ -1,7 +1,7 @@
 /**
  * Approved channel plugins allowlist. --channels plugin:name@marketplace
  * entries only register if {marketplace, plugin} is on this list. server:
- * entries always fail (schema is plugin-only). The
+ * entries are trusted only when explicitly listed in the session. The
  * --dangerously-load-development-channels flag bypasses for both kinds.
  * Lives in GrowthBook so it can be updated without a release.
  *
@@ -49,7 +49,7 @@ export function getChannelAllowlist(): ChannelAllowlistEntry[] {
  * Default false; GrowthBook 5-min refresh.
  */
 export function isChannelsEnabled(): boolean {
-  return getFeatureValue_CACHED_MAY_BE_STALE('tengu_harbor', false)
+  return getFeatureValue_CACHED_MAY_BE_STALE('tengu_harbor', true)
 }
 
 /**

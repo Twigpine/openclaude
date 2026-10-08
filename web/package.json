@@ -13,6 +13,7 @@
     "@astrojs/check": "0.9.9",
     "@astrojs/sitemap": "3.7.3",
     "@fontsource-variable/geist-mono": "^5.2.5",
+    "@gitlawb/openclaude": "file:..",
     "astro": "6.4.6",
     "typescript": "^5.8.3"
   }

@@ -192,8 +192,7 @@ type State = {
   // Channel server allowlist from --channels flag (servers whose channel
   // notifications should register this session). Parsed once in main.tsx —
   // the tag decides trust model: 'plugin' → marketplace verification +
-  // allowlist, 'server' → allowlist always fails (schema is plugin-only).
-  // Either kind needs entry.dev to bypass allowlist.
+  // allowlist, 'server' → explicitly configured MCP server.
   allowedChannels: ChannelEntry[]
   // True if any entry in allowedChannels came from
   // --dangerously-load-development-channels (so ChannelsNotice can name the
