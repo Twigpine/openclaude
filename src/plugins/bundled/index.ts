@@ -15,10 +15,12 @@
  */
 
 import { registerKarpathyGuidelinesPlugin } from './karpathyGuidelines.js'
+import { registerMemlawbPlugin } from './memlawb.js'
 
 /**
  * Initialize built-in plugins. Called during CLI startup.
  */
 export function initBuiltinPlugins(): void {
   registerKarpathyGuidelinesPlugin()
+  registerMemlawbPlugin()
 }
