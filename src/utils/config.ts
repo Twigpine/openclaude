@@ -704,6 +704,11 @@ export type GlobalConfig = {
   // Use a different (e.g. cheaper/faster) model for compaction.
   // Defaults to mainLoopModel when unset.
   compactModel?: string
+
+  // Global MCP server disabled list. When a project has no disabledMcpServers
+  // configured, this list is used as the fallback so MCP state is consistent
+  // across all projects.
+  disabledMcpServers?: string[]
 }
 
 /**
@@ -817,6 +822,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'logoColor',
   'maxMessagesCompactionThreshold',
   'compactModel',
+  'disabledMcpServers',
 ] as const
 
 export type GlobalConfigKey = (typeof GLOBAL_CONFIG_KEYS)[number]
