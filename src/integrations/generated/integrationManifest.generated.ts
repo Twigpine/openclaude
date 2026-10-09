@@ -465,6 +465,17 @@ export const PROVIDER_PRESET_MANIFEST = [
     ]
   },
   {
+    "preset": "requesty",
+    "routeKind": "gateway",
+    "routeId": "requesty",
+    "vendorId": "openai",
+    "gatewayId": "requesty",
+    "description": "Requesty OpenAI-compatible gateway",
+    "apiKeyEnvVars": [
+      "REQUESTY_API_KEY"
+    ]
+  },
+  {
     "preset": "together",
     "routeKind": "gateway",
     "routeId": "together",
@@ -635,6 +646,7 @@ export const ORDERED_PROVIDER_PRESETS = [
   "opencode-go",
   "opencode",
   "openrouter",
+  "requesty",
   "together",
   "venice",
   "xai",

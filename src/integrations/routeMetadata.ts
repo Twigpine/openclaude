@@ -511,6 +511,43 @@ export function isCanonicalLlmtrInferenceBaseUrl(
   }
 }
 
+const REQUESTY_INFERENCE_HOSTS = new Set([
+  'router.requesty.ai',
+  'router.eu.requesty.ai',
+  'router.us.requesty.ai',
+  'router.ap.requesty.ai',
+])
+
+/**
+ * Requesty serves the same OpenAI-compatible /v1 API from a global host and
+ * regional hosts (EU, US, AP) that accept the same key. Only those exact https
+ * origins with the /v1 path may receive REQUESTY_API_KEY.
+ */
+export function isCanonicalRequestyInferenceBaseUrl(
+  value: string | undefined,
+): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const candidate = new URL(trimmed)
+    return (
+      candidate.protocol === 'https:' &&
+      !candidate.port &&
+      !candidate.username &&
+      !candidate.password &&
+      !candidate.search &&
+      !candidate.hash &&
+      REQUESTY_INFERENCE_HOSTS.has(candidate.hostname.toLowerCase()) &&
+      candidate.pathname.replace(/\/+$/, '') === '/v1'
+    )
+  } catch {
+    return false
+  }
+}
+
 const COMMANDCODE_CANONICAL_INFERENCE_BASE_URL =
   'https://api.commandcode.ai/provider/v1'
 
@@ -1273,6 +1310,13 @@ export function resolveRouteCredentialValue(
     routeId === 'api-route' &&
     options?.baseUrl !== undefined &&
     !isCanonicalApiRouteInferenceBaseUrl(options.baseUrl)
+  ) {
+    return undefined
+  }
+  if (
+    routeId === 'requesty' &&
+    options?.baseUrl !== undefined &&
+    !isCanonicalRequestyInferenceBaseUrl(options.baseUrl)
   ) {
     return undefined
   }

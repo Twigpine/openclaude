@@ -316,6 +316,7 @@ Advanced and source-build guides:
 | ApiSmart | `/provider` or `APISMART_API_KEY` | Uses `https://gw.apismart.ai/v1`, defaults to `DEEPSEEK_V4_FLASH`, and supports optional `APISMART_MODEL` plus authenticated model discovery |
 | API Route | `/provider` or `API_ROUTE_API_KEY` | Uses `https://global.api-route.com/v1`, defaults to `claude-sonnet-4-6`, and supports optional `API_ROUTE_MODEL` plus authenticated model discovery |
 | Hicap | `/provider` or OpenAI-compatible env vars | Uses `api-key` auth, discovers models from unauthenticated `/models`, and supports Responses mode for `gpt-` models |
+| Requesty | `/provider` or OpenAI-compatible env vars | OpenAI-compatible gateway at `https://router.requesty.ai/v1` (EU: `https://router.eu.requesty.ai/v1`); `/provider` and `--provider requesty` default to `openai/gpt-5-mini`, while raw env setup must set `OPENAI_BASE_URL` and `OPENAI_MODEL`; accepts `REQUESTY_API_KEY` or `OPENAI_API_KEY` after the route is selected and discovers chat models from the public `/models` catalog |
 | Fireworks AI | `/provider` or env vars | First-class provider with 276 curated models (DeepSeek, Qwen, Llama, Gemma, and more); uses `FIREWORKS_API_KEY` |
 | LongCat | `/provider` or env vars | Meituan LongCat OpenAI-compatible API at `https://api.longcat.chat/openai/v1`; uses `LONGCAT_API_KEY` and defaults to `LongCat-2.0` |
 | ClinePass | `/provider` or env vars | AI model gateway with usage limits (5hr, weekly, monthly); uses `CLINE_API_KEY` at `https://api.cline.bot/api/v1` |

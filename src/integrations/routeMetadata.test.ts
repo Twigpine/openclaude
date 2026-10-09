@@ -8,6 +8,7 @@ import {
   getRouteProviderTypeLabel,
   isApismartBaseUrl,
   isCanonicalApismartInferenceBaseUrl,
+  isCanonicalRequestyInferenceBaseUrl,
   isCloudflareBaseUrl,
   isConcentrateBaseUrl,
   isLongcatBaseUrl,
@@ -503,6 +504,84 @@ test('isCanonicalApismartInferenceBaseUrl requires the exact /v1 inference path'
   // Host-scoped route match still accepts path suffixes for identity.
   expect(isApismartBaseUrl('https://gw.apismart.ai/v1/models')).toBe(true)
   expect(isApismartBaseUrl('https://gw.apismart.ai')).toBe(true)
+})
+
+test('isCanonicalRequestyInferenceBaseUrl accepts only the https /v1 hosts', () => {
+  for (const baseUrl of [
+    'https://router.requesty.ai/v1',
+    'https://router.requesty.ai/v1/',
+    'https://router.eu.requesty.ai/v1',
+    'https://router.us.requesty.ai/v1',
+    'https://router.ap.requesty.ai/v1',
+  ]) {
+    expect(isCanonicalRequestyInferenceBaseUrl(baseUrl)).toBe(true)
+  }
+
+  for (const baseUrl of [
+    undefined,
+    '',
+    'not a url',
+    'http://router.requesty.ai/v1',
+    'https://router.requesty.ai:8443/v1',
+    'https://user:pass@router.requesty.ai/v1',
+    'https://router.requesty.ai/v1?x=1',
+    'https://router.requesty.ai/v1#fragment',
+    'https://router.requesty.ai',
+    'https://router.requesty.ai/v1/models',
+    'https://router.requesty.ai.evil.example/v1',
+    'https://evil-router.requesty.ai/v1',
+    'https://requesty.ai/v1',
+  ]) {
+    expect(isCanonicalRequestyInferenceBaseUrl(baseUrl)).toBe(false)
+  }
+})
+
+test('Requesty regional hosts resolve to the requesty route', () => {
+  expect(resolveRouteIdFromBaseUrl('https://router.requesty.ai/v1')).toBe(
+    'requesty',
+  )
+  expect(resolveRouteIdFromBaseUrl('https://router.eu.requesty.ai/v1')).toBe(
+    'requesty',
+  )
+  expect(
+    resolveRouteIdFromBaseUrl('https://router.requesty.ai.evil.example/v1'),
+  ).toBe(null)
+})
+
+test('Requesty credential is limited to the canonical inference base URLs', () => {
+  const processEnv = {
+    REQUESTY_API_KEY: 'requesty-secret',
+    OPENAI_API_KEY: 'sk-openai-fallback',
+  }
+
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'requesty',
+      baseUrl: 'https://router.eu.requesty.ai/v1',
+      processEnv,
+    }),
+  ).toBe('requesty-secret')
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'requesty',
+      baseUrl: 'https://router.requesty.ai/v1',
+      processEnv: { OPENAI_API_KEY: 'sk-openai-fallback' },
+    }),
+  ).toBe('sk-openai-fallback')
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'requesty',
+      baseUrl: 'http://router.requesty.ai/v1',
+      processEnv,
+    }),
+  ).toBeUndefined()
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'requesty',
+      baseUrl: 'https://router.requesty.ai/v1/models',
+      processEnv,
+    }),
+  ).toBeUndefined()
 })
 
 test('AI/ML API route credential discovery ignores placeholder dedicated key', () => {
