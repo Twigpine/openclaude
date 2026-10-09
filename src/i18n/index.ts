@@ -1,6 +1,7 @@
 import { detectLocale } from './locale.js'
 import { en } from './languages/en.js'
 import { vi } from './languages/vi.js'
+import zhHK from './languages/zh-HK.js'
 import type {
   I18nDictionary,
   InterpolationValues,
@@ -10,6 +11,7 @@ import type {
 const dictionaries: Record<string, I18nDictionary> = {
   en,
   vi,
+  'zh-HK': zhHK,
 }
 
 export { detectLocale }
