@@ -16,7 +16,7 @@ import {
   writeFile,
 } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, join, resolve as resolvePath } from 'path'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -30,7 +30,13 @@ import {
   getSessionProjectDir,
   switchSession,
 } from '../bootstrap/state.js'
-import { COMMAND_NAME_TAG, TICK_TAG } from '../constants/xml.js'
+import {
+  COMMAND_NAME_TAG,
+  LOCAL_COMMAND_CAVEAT_TAG,
+  LOCAL_COMMAND_STDERR_TAG,
+  LOCAL_COMMAND_STDOUT_TAG,
+  TICK_TAG,
+} from '../constants/xml.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import * as sessionIngress from '../services/api/sessionIngress.js'
 import { REPL_TOOL_NAME } from '../tools/REPLTool/constants.js'
@@ -82,7 +88,11 @@ import { getBranch } from './git.js'
 import { gracefulShutdownSync, isShuttingDown } from './gracefulShutdown.js'
 import { parseJSONL } from './json.js'
 import { logError } from './log.js'
-import { extractTag, isCompactBoundaryMessage } from './messages.js'
+import {
+  extractTag,
+  isCompactBoundaryMessage,
+  SYNTHETIC_MODEL,
+} from './messages.js'
 import { sanitizePath } from './path.js'
 import {
   extractJsonStringField,
@@ -481,6 +491,35 @@ export function isTranscriptMessage(entry: Entry): entry is TranscriptMessage {
  */
 export function isChainParticipant(m: Pick<Message, 'type'>): boolean {
   return m.type !== 'progress'
+}
+
+const LOCAL_COMMAND_TAGS = [
+  COMMAND_NAME_TAG,
+  LOCAL_COMMAND_STDOUT_TAG,
+  LOCAL_COMMAND_STDERR_TAG,
+  LOCAL_COMMAND_CAVEAT_TAG,
+]
+
+/**
+ * True for a message that makes the session worth saving: a real prompt, tool
+ * result or model reply. Local slash-command bookkeeping (`/clear`, `/exit`,
+ * `/sessions` and their output) and synthetic replies are not, so a launch
+ * that only runs commands leaves no transcript behind — no empty "/exit"
+ * entry in /resume and no resume hint for it at exit.
+ */
+function startsConversation(message: Message): boolean {
+  if (message.type === 'assistant') {
+    return message.message.model !== SYNTHETIC_MODEL
+  }
+  if (message.type !== 'user' || message.isMeta) return false
+  const content = message.message.content
+  const blocks =
+    typeof content === 'string' ? [{ type: 'text', text: content }] : content
+  return blocks.some(
+    block =>
+      block.type !== 'text' ||
+      !LOCAL_COMMAND_TAGS.some(tag => block.text.trimStart().startsWith(`<${tag}>`)),
+  )
 }
 
 type LegacyProgressEntry = {
@@ -1028,6 +1067,7 @@ class Project {
     filePath: string,
     data: string,
   ): Promise<void> {
+    if (this.isDeletedSessionFile(filePath)) return
     transcriptRewriteHooksForTesting.beforeFileAppend?.(filePath)
     await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
     await withTranscriptFileLock(filePath, async signal => {
@@ -1093,6 +1133,7 @@ class Project {
   ): Promise<void> {
     const earlierDirectAppends = this.pendingDirectAppends.get(filePath)
     if (earlierDirectAppends) await Promise.all(earlierDirectAppends)
+    if (this.isDeletedSessionFile(filePath)) return
     await withTranscriptFileLock(filePath, signal => rewrite(signal))
     transcriptRewriteHooksForTesting.beforeBarrierRelease?.(filePath)
   }
@@ -1583,12 +1624,10 @@ class Project {
     return this.trackWrite(async () => {
       let parentUuid: UUID | null = startingParentUuid ?? null
 
-      // First user/assistant message materializes the session file.
-      // Hook progress/attachment messages alone stay buffered.
-      if (
-        this.sessionFile === null &&
-        messages.some(m => m.type === 'user' || m.type === 'assistant')
-      ) {
+      // First conversation message materializes the session file.
+      // Hook progress/attachment messages and local-command bookkeeping
+      // alone stay buffered.
+      if (this.sessionFile === null && messages.some(startsConversation)) {
         await this.materializeSessionFile()
       }
 
@@ -1931,6 +1970,49 @@ class Project {
    * Caches positive results so we only stat once per session.
    */
   private existingSessionFiles = new Map<string, string>()
+
+  /**
+   * Transcripts deleted (e.g. from /sessions) during this process. Writers
+   * that finish later — async AI title, task summary, queued appends, the
+   * exit-time metadata re-append — would otherwise recreate the file with
+   * metadata only, and the session would reappear in /sessions and /resume.
+   */
+  private deletedSessionFiles = new Set<string>()
+
+  /** True when `filePath` is a transcript deleted earlier in this process. */
+  isDeletedSessionFile(filePath: string): boolean {
+    return (
+      this.deletedSessionFiles.size > 0 &&
+      this.deletedSessionFiles.has(resolvePath(filePath))
+    )
+  }
+
+  async forgetDeletedSession(
+    sessionId: UUID,
+    transcriptPath: string,
+  ): Promise<void> {
+    this.deletedSessionFiles.add(resolvePath(transcriptPath))
+    this.existingSessionFiles.delete(sessionId)
+    if (this.sessionFile && this.isDeletedSessionFile(this.sessionFile)) {
+      this.resetSessionFile()
+    }
+    // Let an in-flight drain finish so no write lands after the caller
+    // removes the file; queued appends for it are now skipped.
+    await this.flush()
+    // flush() does not wait for direct appends. One that passed the deleted
+    // check before the path was marked can still be waiting on mkdir or the
+    // file lock, and would recreate the file after the caller removes it.
+    const inFlight = [...this.pendingDirectAppends]
+      .filter(([path]) => this.isDeletedSessionFile(path))
+      .flatMap(([, appends]) => [...appends])
+    await Promise.allSettled(inFlight)
+  }
+
+  /** Undo forgetDeletedSession for a transcript that could not be removed. */
+  restoreSessionWrites(transcriptPath: string): void {
+    this.deletedSessionFiles.delete(resolvePath(transcriptPath))
+  }
+
   private async getExistingSessionFile(
     sessionId: UUID,
   ): Promise<string | null> {
@@ -2158,6 +2240,25 @@ export async function recordGoalState(
   sessionId: UUID = getSessionId() as UUID,
 ) {
   await getProject().insertGoalState(goal, sessionId)
+}
+
+/**
+ * Call before deleting a saved session's transcript: blocks every later
+ * write to it in this process and waits for pending writes to settle.
+ */
+export async function forgetDeletedSession(
+  sessionId: UUID,
+  transcriptPath: string,
+): Promise<void> {
+  await getProject().forgetDeletedSession(sessionId, transcriptPath)
+}
+
+/**
+ * Undo forgetDeletedSession when the transcript is still on disk (its removal
+ * failed), so this process keeps writing to it instead of dropping writes.
+ */
+export function restoreSessionWrites(transcriptPath: string): void {
+  getProject().restoreSessionWrites(transcriptPath)
 }
 
 /**
@@ -3527,6 +3628,7 @@ function appendEntryToFile(
   entry: Record<string, unknown>,
 ): void {
   const fs = getFsImplementation()
+  if (project?.isDeletedSessionFile(fullPath)) return
   const line = jsonStringify(entry) + '\n'
   if (project?._deferSynchronousAppend(fullPath, line)) return
   fs.mkdirSync(dirname(fullPath), { mode: 0o700 })

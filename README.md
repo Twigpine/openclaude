@@ -183,6 +183,15 @@ openclaude --continue --fork-session
 Forking is conversation branching only. It does not create filesystem isolation,
 copy your working tree, or create a git worktree branch.
 
+### Manage saved conversations
+
+Run `/sessions` inside OpenClaude to list this project's saved conversations.
+Press Enter on one to **Resume**, **Delete** (asks for confirmation, defaulting
+to Cancel), or go **Back** to the list. As a shortcut, press `d` on a row and
+then `d` again to delete it; any other key in between cancels. Deleting removes
+the transcript and its sidecar files from disk and cannot be undone. The
+session you are currently in is not listed and cannot be deleted.
+
 ### Background sessions
 
 Run long non-interactive prompts detached from the current terminal:

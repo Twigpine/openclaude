@@ -56,6 +56,7 @@ import resume, { continueCommand } from './commands/resume/index.js'
 import review, { ultrareview } from './commands/review.js'
 import search from './commands/search/index.js'
 import session from './commands/session/index.js'
+import sessions from './commands/sessions/index.js'
 import setContextWindow from './commands/set-context-window/index.js'
 import share from './commands/share/index.js'
 import skills from './commands/skills/index.js'
@@ -342,6 +343,7 @@ const COMMANDS = memoize((): Command[] => [
   resume,
   search,
   session,
+  sessions,
   setContextWindow,
   skills,
   stats,
