@@ -79,7 +79,9 @@
     "doctor:report": "bun run scripts/system-check.ts --out reports/doctor-runtime.json",
     "hardening:check": "bun run smoke && bun run doctor:runtime",
     "hardening:strict": "bun run typecheck && bun run hardening:check",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "build:cli-dev": "bun run scripts/build.ts && bun run scripts/emit-cli-dev.ts",
+    "emit:cli-dev": "bun run scripts/emit-cli-dev.ts"
   },
   "dependencies": {
     "@orama/orama": "3.1.18",
