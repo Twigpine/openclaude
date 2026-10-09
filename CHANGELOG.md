@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/Gitlawb/openclaude/compare/v0.31.0...v0.32.0) (2026-09-29)
+
+
+### Features
+
+* **gateway:** add API Route hybrid gateway ([#2225](https://github.com/Gitlawb/openclaude/issues/2225)) ([9a2910d](https://github.com/Gitlawb/openclaude/commit/9a2910da236395d259c72c3b4ddf92278625a6c1))
+
 ## [0.31.0](https://github.com/Gitlawb/openclaude/compare/v0.30.0...v0.31.0) (2026-09-22)
 
 
