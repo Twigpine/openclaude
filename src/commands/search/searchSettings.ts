@@ -45,7 +45,7 @@ export const SEARCH_BACKENDS: readonly SearchBackendOption[] = [
   {
     mode: 'auto',
     label: 'Auto (recommended)',
-    description: 'Exa first, then any backend you configured, then free fallbacks',
+    description: 'Exa first, then configured auto backends, then free fallbacks',
   },
   {
     mode: 'exa',
@@ -53,6 +53,13 @@ export const SEARCH_BACKENDS: readonly SearchBackendOption[] = [
     keyEnv: 'EXA_API_KEY',
     keyOptional: true,
     description: 'Exa only — free tier without a key, higher limits with one',
+  },
+  {
+    mode: 'anysearch',
+    label: 'AnySearch',
+    keyEnv: 'ANYSEARCH_API_KEY',
+    keyOptional: true,
+    description: 'AnySearch only — anonymous access without a key, higher limits with one',
   },
   { mode: 'tavily', label: 'Tavily', keyEnv: 'TAVILY_API_KEY', description: 'Tavily only' },
   {
@@ -95,6 +102,7 @@ const BACKEND_ALIASES: Record<string, ProviderMode> = {
 const BACKEND_DISPLAY_NAMES: Record<string, string> = {
   exa: 'Exa (API key)',
   'exa-free': 'Exa free tier',
+  anysearch: 'AnySearch',
   ollama: 'Ollama',
   firecrawl: 'Firecrawl',
   tavily: 'Tavily',

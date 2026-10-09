@@ -31,8 +31,9 @@ const memoryStore: SearchEnvStore = {
 const SYNC_START = '\x1B[?2026h'
 const SYNC_END = '\x1B[?2026l'
 
-const ENV_KEYS = ['WEB_SEARCH_PROVIDER', 'EXA_API_KEY', 'TAVILY_API_KEY'] as const
+const ENV_KEYS = ['WEB_SEARCH_PROVIDER', 'EXA_API_KEY', 'TAVILY_API_KEY', 'ANYSEARCH_API_KEY'] as const
 const savedEnv = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]))
+const originalFetch = globalThis.fetch
 
 beforeEach(async () => {
   await acquireSharedMutationLock('commands/search/search.test.tsx')
@@ -44,6 +45,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     setSearchEnvStoreForTests(undefined)
+    globalThis.fetch = originalFetch
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
@@ -184,7 +186,16 @@ describe('/search command', () => {
 
     expect(frame).toContain('Auto (recommended)')
     expect(frame).toContain('Exa')
+    expect(frame).toContain('AnySearch')
     expect(frame).toContain('needs TAVILY_API_KEY')
+  })
+
+  test('direct selection enables AnySearch without opening a key dialog', async () => {
+    const { text, mounted } = await runSearch('anysearch')
+
+    expect(mounted).toBeUndefined()
+    expect(text).toBe('Web search set to AnySearch.')
+    expect(savedEnvBlock).toEqual({ WEB_SEARCH_PROVIDER: 'anysearch' })
   })
 
   test('typing a key saves the backend and key without ever showing the key', async () => {
@@ -204,6 +215,38 @@ describe('/search command', () => {
       TAVILY_API_KEY: 'tvly-secret-123',
     })
     expect(process.env.TAVILY_API_KEY).toBe('tvly-secret-123')
+  })
+
+  test('an AnySearch key can be saved through hidden input and removed', async () => {
+    await runSearch('anysearch')
+    const { mounted } = await runSearch('key anysearch')
+    await mounted!.waitFor(f => f.includes('AnySearch API key'))
+
+    mounted!.stdin.write('private-any-key')
+    const masked = await mounted!.waitFor(f => f.includes('***************'))
+    mounted!.stdin.write('\r')
+    const message = await waitUntil(mounted!.done, text => text !== undefined)
+    mounted!.unmount()
+
+    expect(masked).not.toContain('private-any-key')
+    expect(message).toBe('Saved ANYSEARCH_API_KEY. AnySearch now uses your key.')
+    expect(savedEnvBlock).toEqual({
+      WEB_SEARCH_PROVIDER: 'anysearch',
+      ANYSEARCH_API_KEY: 'private-any-key',
+    })
+
+    const removed = await runSearch('remove-key anysearch')
+    expect(removed.text).toBe('Removed the saved ANYSEARCH_API_KEY.')
+    expect(process.env.ANYSEARCH_API_KEY).toBeUndefined()
+
+    let authorizationPresent = true
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      authorizationPresent = Object.hasOwn(init?.headers ?? {}, 'Authorization')
+      return new Response(JSON.stringify({ code: 0, data: { results: [] } }), { status: 200 })
+    }) as typeof fetch
+    const anonymousTest = await runSearch('test anonymous after removing key')
+    expect(anonymousTest.text).toContain('Search OK via AnySearch: 0 results')
+    expect(authorizationPresent).toBe(false)
   })
 
   test('Esc in the key dialog cancels without saving', async () => {
