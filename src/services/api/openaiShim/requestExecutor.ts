@@ -1,6 +1,7 @@
 import type { CredentialLease, CredentialPool } from '../credentialPool.js'
 import type { OpenAICompatibilityFailure } from '../openaiErrorClassification.js'
 import type { OpenAIShimRuntimeContext } from '../../../integrations/runtimeMetadata.js'
+import { resolveRouteIdFromBaseUrl } from '../../../integrations/routeMetadata.js'
 import { getCommandcodeChatCompletionsModelError } from '../../../integrations/gateways/commandcode.js'
 import {
   redactEncodedSecretSubstringsForDisplay,
@@ -295,7 +296,10 @@ export async function executeOpenAIRequest(
   const isXaiRoute =
     runtimeShimContext.routeId === 'xai' || isXaiBaseUrl(request.baseUrl)
   const openCodeGoSessionId =
-    runtimeShimContext.routeId === 'opencode-go' ? getSessionId() : null
+    (runtimeShimContext.routeId === 'opencode-go' ||
+      resolveRouteIdFromBaseUrl(request.baseUrl) === 'opencode-go')
+      ? getSessionId()
+      : null
   const openAIApiKeysPoolRaw =
     routeAcceptsGenericOpenAICredentials &&
     parseCredentialList(requestProcessEnv.OPENAI_API_KEYS).length > 0

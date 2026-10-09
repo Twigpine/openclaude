@@ -777,6 +777,40 @@ test('raw-env LLMTR ignores unsupported custom auth and custom headers', async (
   expect(captured.headers['X-Tenant-Secret']).toBeUndefined()
 })
 
+test('OpenCode Go sends the required stable session and user-agent headers', async () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://opencode.ai/zen/go/v1'
+  process.env.OPENAI_MODEL = 'glm-5.1'
+  process.env.OPENCODE_API_KEY = 'opencode-key'
+  delete process.env.OPENAI_API_KEY
+  delete process.env.OPENAI_API_KEYS
+
+  const captured = await captureChatCompletionRequest('glm-5.1', {
+    'x-opencode-session': 'caller-session',
+    'User-Agent': 'caller-agent',
+  })
+
+  expect(captured.headers['x-opencode-session']).toMatch(
+    /^[0-9a-f-]{36}$/,
+  )
+  expect(captured.headers['User-Agent']).toMatch(/^openclaude\//)
+  expect(captured.headers['x-opencode-session']).not.toBe('caller-session')
+  expect(captured.headers['User-Agent']).not.toBe('caller-agent')
+})
+
+test('OpenCode Zen does not receive the OpenCode Go session header', async () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://opencode.ai/zen/v1'
+  process.env.OPENAI_MODEL = 'gpt-5.4'
+  process.env.OPENCODE_API_KEY = 'opencode-key'
+  delete process.env.OPENAI_API_KEY
+  delete process.env.OPENAI_API_KEYS
+
+  const captured = await captureChatCompletionRequest('gpt-5.4')
+
+  expect(captured.headers['x-opencode-session']).toBeUndefined()
+})
+
 test('custom endpoints preserve configured auth and custom headers', async () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = 'https://proxy.example/v1'
