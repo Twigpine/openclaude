@@ -14,9 +14,9 @@ export const PROVIDER_PRESET_MANIFEST = [
     "routeId": "gitlawb-opengateway",
     "vendorId": "openai",
     "gatewayId": "gitlawb-opengateway",
-    "description": "Gitlawb Opengateway - (API key required, signup at https://gitlawb.com/opengateway/keys)",
-    "label": "Gitlawb Opengateway",
-    "name": "Gitlawb Opengateway",
+    "description": "Twigpine Opengateway - (API key required, signup at https://gitlawb.com/opengateway/keys)",
+    "label": "Twigpine Opengateway",
+    "name": "Twigpine Opengateway",
     "apiKeyEnvVars": [
       "OPENGATEWAY_API_KEY"
     ],

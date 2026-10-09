@@ -5,7 +5,7 @@ export default defineConfig({
   site: 'https://openclaude.gitlawb.com',
   trailingSlash: 'always',
   redirects: {
-    '/changelog/': 'https://github.com/Gitlawb/openclaude/releases',
+    '/changelog/': 'https://github.com/Twigpine/openclaude/releases',
   },
   integrations: [sitemap()],
 })

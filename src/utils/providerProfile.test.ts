@@ -980,7 +980,7 @@ test('openai launch ignores codex persisted transport hints', async () => {
   assert.equal(env.OPENAI_API_KEY, 'sk-live')
 })
 
-test('buildStartupEnvFromProfile defaults fresh installs to Gitlawb Opengateway', async () => {
+test('buildStartupEnvFromProfile defaults fresh installs to Twigpine Opengateway', async () => {
   const env = await buildStartupEnvFromProfile({
     persisted: null,
     processEnv: {},
@@ -1321,13 +1321,13 @@ test('buildStartupEnvFromProfile preserves env-only Fireworks setup without a sa
     },
   })
 
-  // Must NOT fall through to Gitlawb Opengateway default
+  // Must NOT fall through to Twigpine Opengateway default
   assert.equal(env.FIREWORKS_API_KEY, 'fw-key')
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, undefined)
   assert.equal(
     env.OPENAI_BASE_URL,
     undefined,
-    'should not inject Gitlawb Opengateway base URL',
+    'should not inject Twigpine Opengateway base URL',
   )
   assert.equal(isDefaultStartupProviderEnv(env), false)
 })
@@ -1344,7 +1344,7 @@ test('buildStartupEnvFromProfile preserves env-only NEAR AI setup without a save
   assert.equal(
     env.OPENAI_BASE_URL,
     undefined,
-    'should not inject Gitlawb Opengateway base URL',
+    'should not inject Twigpine Opengateway base URL',
   )
   assert.equal(isDefaultStartupProviderEnv(env), false)
 })
@@ -1361,7 +1361,7 @@ test('buildStartupEnvFromProfile preserves env-only LongCat setup without a save
   assert.equal(
     env.OPENAI_BASE_URL,
     undefined,
-    'should not inject Gitlawb Opengateway base URL',
+    'should not inject Twigpine Opengateway base URL',
   )
   assert.equal(isDefaultStartupProviderEnv(env), false)
 })

@@ -10,7 +10,7 @@
 
 ## Testing
 
-- [ ] I ran the required [local preflight](https://github.com/Gitlawb/openclaude/blob/main/CONTRIBUTING.md#validation).
+- [ ] I ran the required [local preflight](https://github.com/Twigpine/openclaude/blob/main/CONTRIBUTING.md#validation).
 - exact commands and results:
 - focused tests:
 - documented skipped checks, platform limitations, or verified pre-existing failures:

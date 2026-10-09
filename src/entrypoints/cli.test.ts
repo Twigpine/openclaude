@@ -1,6 +1,6 @@
 /**
  * Regression tests for issue #402 — NODE_OPTIONS heap cap
- * Closes: Gitlawb/openclaude#402 — JavaScript heap OOM during large tasks
+ * Closes: Twigpine/openclaude#402 — JavaScript heap OOM during large tasks
  */
 
 import {

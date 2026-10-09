@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test'
 const REPO_ROOT = join(import.meta.dir, '..')
 const DIST = join(REPO_ROOT, 'dist/cli.mjs')
 
-// Regression for Gitlawb/openclaude#706. The bundled KAIROS dream skill
+// Regression for Twigpine/openclaude#706. The bundled KAIROS dream skill
 // (src/skills/bundled/dream.js, not mirrored) must not stub the real
 // /dream slash command at src/commands/dream/dream.ts during bundling.
 test('/dream command is present in the CLI bundle', () => {

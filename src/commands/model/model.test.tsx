@@ -1017,7 +1017,7 @@ test('auto profile model picker mode uses explicit multi-model profiles as the p
 test('provider profile model picker surface keeps static route catalogs for single-default profiles', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Gitlawb Opengateway',
+    name: 'Twigpine Opengateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'mimo-v2.5-pro',
@@ -1043,12 +1043,12 @@ test('provider profile model picker surface keeps static route catalogs for sing
         {
           value: 'mimo-v2.5-pro',
           label: 'MiMo v2.5 Pro',
-          description: 'Recommended · Provider: Gitlawb Opengateway',
+          description: 'Recommended · Provider: Twigpine Opengateway',
         },
         {
           value: 'mimo-v2-pro',
           label: 'MiMo v2 Pro',
-          description: 'Provider: Gitlawb Opengateway',
+          description: 'Provider: Twigpine Opengateway',
         },
       ],
       { profileModelSurface: 'provider' },
@@ -1057,12 +1057,12 @@ test('provider profile model picker surface keeps static route catalogs for sing
     {
       value: 'mimo-v2.5-pro',
       label: 'MiMo v2.5 Pro',
-      description: 'Recommended · Provider: Gitlawb Opengateway',
+      description: 'Recommended · Provider: Twigpine Opengateway',
     },
     {
       value: 'mimo-v2-pro',
       label: 'MiMo v2 Pro',
-      description: 'Provider: Gitlawb Opengateway',
+      description: 'Provider: Twigpine Opengateway',
     },
   ])
 })
@@ -1549,7 +1549,7 @@ test('/model discovery override still surfaces inactive-profile switch options (
 test('/model applies auto provider surface for single-model static descriptor profiles', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Gitlawb Opengateway',
+    name: 'Twigpine Opengateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'mimo-v2.5-pro',
@@ -1620,7 +1620,7 @@ test('/model applies auto provider surface for single-model static descriptor pr
 test('/model drops expired availableUntil entries from the static picker after the cutoff', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Gitlawb Opengateway',
+    name: 'Twigpine Opengateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'mimo-v2.5-pro',
@@ -1672,7 +1672,7 @@ test('/model drops expired availableUntil entries from the static picker after t
 test('/model merges non-empty OpenGateway discovery cache with curated entries without duplicate MiMo rows', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Gitlawb Opengateway',
+    name: 'Twigpine Opengateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'mimo-v2.5-pro',
@@ -1740,7 +1740,7 @@ test('/model merges non-empty OpenGateway discovery cache with curated entries w
 test('/model OpenGateway interactive refresh preserves availability filter and hides expired models', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Gitlawb Opengateway',
+    name: 'Twigpine Opengateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'auto',
@@ -3045,7 +3045,7 @@ test('/model refresh reports discovered model changes for dynamic active profile
 test('/model refresh on OpenGateway does not restore or mention expired models', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Gitlawb Opengateway',
+    name: 'Twigpine Opengateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'auto',
@@ -3123,7 +3123,7 @@ test('/model refresh on OpenGateway does not restore or mention expired models',
     'refresh',
   )
 
-  expect(messages).toContain('Updated Gitlawb Opengateway models.')
+  expect(messages).toContain('Updated Twigpine Opengateway models.')
   expect(messages.join(' ')).not.toContain('inclusionai/ling-3.0-tiny:free')
 })
 

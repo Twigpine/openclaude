@@ -153,7 +153,7 @@ model is normalized.
 
 ### Public aggregator model discovery
 
-OpenRouter and Gitlawb Opengateway use public model-list endpoints to keep their
+OpenRouter and Twigpine Opengateway use public model-list endpoints to keep their
 hybrid catalogs current. Listing models does not require credentials, but chat
 and other inference requests still require the provider's API key. OpenRouter
 refreshes stale discovery data in the background. Opengateway refreshes once at

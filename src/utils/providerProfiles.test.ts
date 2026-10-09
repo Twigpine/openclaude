@@ -3367,7 +3367,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     // user on built-in Anthropic. Previously applyActiveProviderProfileFromConfig()
     // returned without marking provider env as handled (the sentinel resolves to
     // no profile), so buildStartupEnvFromProfile() saw the missing mirror as a
-    // fresh install and synthesized the default Gitlawb OpenGateway env —
+    // fresh install and synthesized the default Twigpine OpenGateway env —
     // silently moving the user back onto a third-party provider.
     const { applyActiveProviderProfileFromConfig, ANTHROPIC_DEFAULT_PROFILE_ID } =
       await importFreshProviderProfileModules()

@@ -16,8 +16,8 @@ const { ChatController, OpenClaudeChatViewProvider, OpenClaudeChatPanelManager }
 const { SessionManager } = require('./chat/sessionManager');
 const { DiffContentProvider, SCHEME: DIFF_SCHEME } = require('./chat/diffController');
 
-const OPENCLAUDE_REPO_URL = 'https://github.com/Gitlawb/openclaude';
-const OPENCLAUDE_SETUP_URL = 'https://github.com/Gitlawb/openclaude/blob/main/README.md#quick-start';
+const OPENCLAUDE_REPO_URL = 'https://github.com/Twigpine/openclaude';
+const OPENCLAUDE_SETUP_URL = 'https://github.com/Twigpine/openclaude/blob/main/README.md#quick-start';
 const PROFILE_FILE_NAME = '.openclaude-profile.json';
 const SECRET_AZURE_API_KEY = 'openclaude.azure.apiKey';
 

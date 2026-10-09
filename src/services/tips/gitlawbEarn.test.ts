@@ -35,7 +35,7 @@ afterEach(() => {
   else process.env.OPENCLAUDE_ADS_TIP_EVERY = ORIGINAL_TIP_EVERY
 })
 
-describe('gitlawb earning tips', () => {
+describe('twigpine earning tips', () => {
   test('disabled by default (no ads config)', () => {
     setAds(undefined)
     expect(adsEarningEnabled()).toBe(false)
@@ -72,7 +72,7 @@ describe('gitlawb earning tips', () => {
   test('content falls back to a static line when the ads service is unreachable', async () => {
     setAds({ enabled: true, earnCode: 'earn_abc' })
     const text = await buildEarningTip().content({ theme: 'dark' })
-    expect(text.toLowerCase()).toContain('gitlawb.com')
+    expect(text.toLowerCase()).toContain('twigpine.com')
   })
 
   test('content renders a fetched ad (advertiser + ad copy) on the success path', async () => {
@@ -93,8 +93,8 @@ describe('gitlawb earning tips', () => {
 
     const text = await buildEarningTip().content({ theme: 'dark' })
     expect(text).toContain('Serverless Postgres that scales to zero') // ad copy
-    expect(text).toContain('Neon') // real advertiser, not the Gitlawb fallback
-    expect(text.toLowerCase()).not.toContain('gitlawb.com')
+    expect(text).toContain('Neon') // real advertiser, not the Twigpine fallback
+    expect(text.toLowerCase()).not.toContain('twigpine.com')
   })
 
   test('content falls back when the ad has blank copy (no blank-ad credit)', async () => {
@@ -106,6 +106,6 @@ describe('gitlawb earning tips', () => {
       )) as typeof fetch
 
     const text = await buildEarningTip().content({ theme: 'dark' })
-    expect(text.toLowerCase()).toContain('gitlawb.com') // degraded to static line
+    expect(text.toLowerCase()).toContain('twigpine.com') // degraded to static line
   })
 })

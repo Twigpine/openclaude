@@ -68,7 +68,7 @@ class RemoteSourceHttpError extends Error {
 }
 
 const DEFAULT_SKILLS_REGISTRY_URL =
-  'https://raw.githubusercontent.com/Gitlawb/openclaude-skills/main/registry.json'
+  'https://raw.githubusercontent.com/Twigpine/openclaude-skills/main/registry.json'
 const VALID_INSTALL_SKILL_NAME = /^[a-z0-9][a-z0-9-]*(?::[a-z0-9][a-z0-9-]*)*$/
 const MAX_INSTALL_SKILL_NAME_LENGTH = 120
 const REMOTE_SOURCE_TIMEOUT_MS = 30_000

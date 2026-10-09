@@ -101,7 +101,7 @@ import type { OutputStyleConfig } from './outputStyles.js'
 import { CYBER_RISK_INSTRUCTION } from './cyberRiskInstruction.js'
 
 export const CLAUDE_CODE_DOCS_MAP_URL =
-  'https://github.com/Gitlawb/openclaude'
+  'https://github.com/Twigpine/openclaude'
 
 /**
  * Boundary marker separating static (cross-org cacheable) content from dynamic content.

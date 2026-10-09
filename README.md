@@ -2,9 +2,9 @@
   <img src="docs/assets/openclaude-wordmark.png" alt="OpenClaude — Open terminal for any LLM" width="830">
 
   <p>
-    <a href="https://trendshift.io/repositories/25807?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-25807" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/25807/daily?language=TypeScript" alt="Gitlawb%2Fopenclaude | Trendshift" width="250" height="55"/></a>
-    <a href="https://trendshift.io/repositories/25807?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-25807" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/25807/monthly?language=TypeScript" alt="Gitlawb%2Fopenclaude | Trendshift" width="250" height="55"/></a>
-    <a href="https://trendshift.io/repositories/25807?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25807" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25807" alt="Gitlawb%2Fopenclaude | Trendshift" width="250" height="55"/></a>
+    <a href="https://trendshift.io/repositories/25807?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-25807" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/25807/daily?language=TypeScript" alt="Twigpine%2Fopenclaude | Trendshift" width="250" height="55"/></a>
+    <a href="https://trendshift.io/repositories/25807?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-25807" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/25807/monthly?language=TypeScript" alt="Twigpine%2Fopenclaude | Trendshift" width="250" height="55"/></a>
+    <a href="https://trendshift.io/repositories/25807?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25807" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25807" alt="Twigpine%2Fopenclaude | Trendshift" width="250" height="55"/></a>
   </p>
 </div>
 
@@ -12,16 +12,16 @@ OpenClaude is an open-source coding-agent CLI for cloud and local model provider
 
 Use OpenAI-compatible APIs, Gemini, GitHub Models, Codex OAuth, Codex, Ollama, Atomic Chat, and other supported backends while keeping one terminal-first workflow: prompts, tools, agents, MCP, slash commands, and streaming output.
 
-[![PR Checks](https://github.com/Gitlawb/openclaude/actions/workflows/pr-checks.yml/badge.svg?branch=main)](https://github.com/Gitlawb/openclaude/actions/workflows/pr-checks.yml)
-[![Release](https://img.shields.io/github/v/tag/Gitlawb/openclaude?label=release&color=0ea5e9)](https://github.com/Gitlawb/openclaude/tags)
+[![PR Checks](https://github.com/Twigpine/openclaude/actions/workflows/pr-checks.yml/badge.svg?branch=main)](https://github.com/Twigpine/openclaude/actions/workflows/pr-checks.yml)
+[![Release](https://img.shields.io/github/v/tag/Twigpine/openclaude?label=release&color=0ea5e9)](https://github.com/Twigpine/openclaude/tags)
 [![npm downloads](https://img.shields.io/npm/dm/@gitlawb/openclaude)](https://www.npmjs.com/package/@gitlawb/openclaude)
-[![Discussions](https://img.shields.io/badge/discussions-open-7c3aed)](https://github.com/Gitlawb/openclaude/discussions)
+[![Discussions](https://img.shields.io/badge/discussions-open-7c3aed)](https://github.com/Twigpine/openclaude/discussions)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/k68zFR6AcB)
 [![X](https://img.shields.io/badge/X-@gitlawb-000000?logo=x&logoColor=white)](https://x.com/gitlawb)
 [![Security Policy](https://img.shields.io/badge/security-policy-0f766e)](SECURITY.md)
 [![License](https://img.shields.io/badge/license-MIT-2563eb)](LICENSE)
 
-OpenClaude is also mirrored to GitLawb:
+OpenClaude is also mirrored to Twigpine:
 [gitlawb.com/node/repos/z6MkqDnb/openclaude](https://gitlawb.com/node/repos/z6MkqDnb/openclaude)
 
 [Quick Start](#quick-start) | [Setup Guides](#setup-guides) | [Providers](#supported-providers) | [Development](#development) | [VS Code Extension](#vs-code-extension) | [Partners](#partners) | [Community](#community)
@@ -31,8 +31,8 @@ OpenClaude is also mirrored to GitLawb:
 <table align="center">
   <tr>
     <td align="center" width="150" height="80">
-      <a href="https://gitlawb.com">
-        <img src="https://gitlawb.com/logo.png" alt="GitLawb logo" width="72">
+      <a href="https://twigpine.com">
+        <img src="https://twigpine.com/logo.png" alt="Twigpine logo" width="72">
       </a>
     </td>
     <td align="center" width="150" height="80">
@@ -57,7 +57,7 @@ OpenClaude is also mirrored to GitLawb:
     </td>
   </tr>
   <tr>
-    <td align="center"><a href="https://gitlawb.com"><strong>GitLawb</strong></a></td>
+    <td align="center"><a href="https://twigpine.com"><strong>Twigpine</strong></a></td>
     <td align="center"><a href="https://bankr.bot"><strong>Bankr.bot</strong></a></td>
     <td align="center"><a href="https://atomic.chat/"><strong>Atomic Chat</strong></a></td>
     <td align="center"><a href="https://mimo.mi.com"><strong>Xiaomi MiMo</strong></a></td>
@@ -323,7 +323,7 @@ Advanced and source-build guides:
 | GitHub Models | `/onboard-github` | Interactive onboarding with saved credentials |
 | Codex OAuth | `/provider` | Opens ChatGPT sign-in in your browser and stores Codex credentials securely |
 | Codex | `/provider` | Uses existing Codex CLI auth, OpenClaude secure storage, or env credentials |
-| Gitlawb Opengateway | Startup default, `/provider`, or env vars | Smart gateway at `https://opengateway.gitlawb.com/v1`; requires an API key from https://gitlawb.com/opengateway/keys and routes Xiaomi MiMo and GMI Cloud partner models by `OPENAI_MODEL` |
+| Twigpine Opengateway | Startup default, `/provider`, or env vars | Smart gateway at `https://opengateway.gitlawb.com/v1`; requires an API key from https://gitlawb.com/opengateway/keys and routes Xiaomi MiMo and GMI Cloud partner models by `OPENAI_MODEL` |
 | OpenCode Zen | `/provider` or env vars | Pay-as-you-go AI gateway (48 models); uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/v1`; shared key with OpenCode Go |
 | OpenCode Go | `/provider` or env vars | $10/mo subscription for open models (13 models); uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/go/v1`; shared key with OpenCode Zen |
 | Xiaomi MiMo | `/provider` or env vars | OpenAI-compatible API at `https://mimo.mi.com`; uses `MIMO_API_KEY` and defaults to `mimo-v2.5-pro` |
@@ -376,7 +376,7 @@ OpenClaude supports multiple providers, but behavior is not identical across all
 - Smaller local models can struggle with long multi-step tool flows
 - Some providers impose lower output caps than the CLI defaults, and OpenClaude adapts where possible
 - AI/ML API uses the OpenAI-compatible route, defaults to `gpt-4o`, and only surfaces chat-capable models from its public catalog
-- Gitlawb Opengateway is the fresh-install startup default and requires an API key from https://gitlawb.com/opengateway/keys. It uses one OpenAI-compatible base URL; switch between `mimo-*` and `google/gemini-3.1-flash-lite-preview` with `/model`, and do not pin the base URL to `/v1/xiaomi-mimo`.
+- Twigpine Opengateway is the fresh-install startup default and requires an API key from https://gitlawb.com/opengateway/keys. It uses one OpenAI-compatible base URL; switch between `mimo-*` and `google/gemini-3.1-flash-lite-preview` with `/model`, and do not pin the base URL to `/v1/xiaomi-mimo`.
 - Z.AI GLM Coding Plan uses `https://api.z.ai/api/coding/paas/v4` with `glm-5.2` by default. On that direct route, GLM-5.3-Flash is selectable as `glm-5.3-flash` and accepts image input. Its OpenClaude effort choices are `low`, `high`, and `xhigh`, with `xhigh` requesting Z.AI `max`; GLM-5.3 and the existing GLM-5.2 query controls remain supported. These capabilities are not claimed for gateways that happen to carry the same model name.
 - Xiaomi MiMo uses `api-key` header auth on the direct OpenAI-compatible route and currently does not support `/usage` reporting in OpenClaude
 - GitHub Copilot serializes sub-agent execution by default to reduce Premium Request consumption — see [Agent Routing and Step Limits](docs/agent-routing.md#github-copilot-sub-agent-optimization) for tuning
@@ -512,8 +512,8 @@ If you believe you found a security issue, see [SECURITY.md](SECURITY.md).
 
 ## Community
 
-- Use [GitHub Discussions](https://github.com/Gitlawb/openclaude/discussions) for Q&A, ideas, and community conversation
-- Use [GitHub Issues](https://github.com/Gitlawb/openclaude/issues) for confirmed bugs and actionable feature work
+- Use [GitHub Discussions](https://github.com/Twigpine/openclaude/discussions) for Q&A, ideas, and community conversation
+- Use [GitHub Issues](https://github.com/Twigpine/openclaude/issues) for confirmed bugs and actionable feature work
 - Join the [Discord](https://discord.gg/k68zFR6AcB) to chat with the community in real time
 - Follow [@gitlawb on X](https://x.com/gitlawb) for updates and announcements
 

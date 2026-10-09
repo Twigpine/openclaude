@@ -15,7 +15,7 @@ openclaude skills verify [options]                 Check installed skills for re
 
 ## Install from the registry
 
-The default registry is the Gitlawb Skill Hub, published as `registry.json` in [Gitlawb/openclaude-skills](https://github.com/Gitlawb/openclaude-skills).
+The default registry is the Twigpine Skill Hub, published as `registry.json` in [Twigpine/openclaude-skills](https://github.com/Twigpine/openclaude-skills).
 Install a skill by its registry id:
 
 ```bash
@@ -76,7 +76,7 @@ ci-fix  enabled   Diagnoses and fixes CI pipeline failures.
 
 ```text
 $ openclaude skills verify
-Found 2 installed skills. Revocation list: https://raw.githubusercontent.com/Gitlawb/openclaude-skills/main/revocations.json
+Found 2 installed skills. Revocation list: https://raw.githubusercontent.com/Twigpine/openclaude-skills/main/revocations.json
   ci-fix     ok
   hand-made  skipped (no registry metadata)
 eyebrow not found; install it to check skill contents against a lockfile (see docs/skills.md).

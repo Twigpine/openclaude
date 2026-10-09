@@ -62,7 +62,7 @@ export function mapOpenGatewayModel(raw: unknown): ModelCatalogEntry | null {
 
 export default defineGateway({
   id: 'gitlawb-opengateway',
-  label: 'Gitlawb Opengateway',
+  label: 'Twigpine Opengateway',
   category: 'aggregating',
   defaultBaseUrl: 'https://opengateway.gitlawb.com/v1',
   defaultModel: 'mimo-v2.5-pro',
@@ -80,7 +80,7 @@ export default defineGateway({
     // fallbacks because existing openclaude configs may already hold generic credentials there.
     credentialEnvVars: ['OPENGATEWAY_API_KEY', 'OPENAI_API_KEYS', 'OPENAI_API_KEY'],
     missingCredentialMessage:
-      'OPENGATEWAY_API_KEY is required to use Gitlawb Opengateway.\n' +
+      'OPENGATEWAY_API_KEY is required to use Twigpine Opengateway.\n' +
       'Mint a free API key at https://gitlawb.com/opengateway/keys and set it as OPENGATEWAY_API_KEY (or OPENAI_API_KEYS / OPENAI_API_KEY when OPENAI_BASE_URL points at opengateway).',
     routing: {
       matchBaseUrlHosts: ['opengateway.gitlawb.com', 'opengateway.fly.dev'],
@@ -106,10 +106,10 @@ export default defineGateway({
   },
   preset: {
     id: 'gitlawb-opengateway',
-    description: 'Gitlawb Opengateway - (API key required, signup at https://gitlawb.com/opengateway/keys)',
+    description: 'Twigpine Opengateway - (API key required, signup at https://gitlawb.com/opengateway/keys)',
     apiKeyEnvVars: ['OPENGATEWAY_API_KEY'],
-    label: 'Gitlawb Opengateway',
-    name: 'Gitlawb Opengateway',
+    label: 'Twigpine Opengateway',
+    name: 'Twigpine Opengateway',
     badge: {
       text: 'Recommended',
       color: 'success',

@@ -1393,7 +1393,7 @@ export function applyActiveProviderProfileFromConfig(
   // to undefined, so without this guard we would return below without marking
   // provider env as handled; buildStartupEnvFromProfile() then treats the
   // profile mirror that clearActiveProviderProfile() deleted as a fresh install
-  // and synthesizes the default Gitlawb OpenGateway env, bouncing the user off
+  // and synthesizes the default Twigpine OpenGateway env, bouncing the user off
   // built-in Anthropic on the next launch (#1429). Clear any managed provider
   // env and set the applied flag so the legacy/fresh-install fallback is
   // suppressed. An explicit startup provider selection still wins for the

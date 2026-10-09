@@ -72,7 +72,7 @@ export const envVars: EnvVar[] = [
   { name: 'OPENAI_API_KEYS', description: 'Comma-separated key pool for OpenAI-compatible endpoints; rotates on failure and is checked before OPENAI_API_KEY.' },
   { name: 'OPENAI_BASE_URL', description: 'Base URL of an OpenAI-compatible /v1 endpoint (OpenRouter, LM Studio, LiteLLM, …).' },
   { name: 'OPENAI_MODEL', description: 'Model name to request from the OpenAI-compatible endpoint.' },
-  { name: 'OPENGATEWAY_API_KEY', description: 'Gitlawb Opengateway key (preferred over OPENAI_API_KEY for the gateway).' },
+  { name: 'OPENGATEWAY_API_KEY', description: 'Twigpine Opengateway key (preferred over OPENAI_API_KEY for the gateway).' },
   { name: 'OPENGATEWAY_BASE_URL', description: 'Override the Opengateway base URL.' },
   { name: 'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS', description: 'JSON map of model → context window; takes precedence over settings.modelLimits.' },
   { name: 'CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS', description: 'JSON map of model → max output tokens; takes precedence over settings.modelLimits.' },

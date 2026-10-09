@@ -17,7 +17,7 @@ import {
 
 const MAX_RELEASE_NOTES_SHOWN = 5
 const RELEASES_API_URL =
-  'https://api.github.com/repos/Gitlawb/openclaude/releases?per_page=10'
+  'https://api.github.com/repos/Twigpine/openclaude/releases?per_page=10'
 const SECTION_HEADER_PREFIX = '__section__:'
 
 type GitHubRelease = {

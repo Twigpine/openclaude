@@ -72,7 +72,7 @@ const originalClientType = getClientType()
 const originalMainLoopModelOverride = getMainLoopModelOverride()
 
 const defaultPrAttribution =
-  '🤖 Generated with [OpenClaude](https://github.com/Gitlawb/openclaude)'
+  '🤖 Generated with [OpenClaude](https://github.com/Twigpine/openclaude)'
 
 function useSettings(settings: SettingsJson): void {
   testSettings = settings

@@ -5,7 +5,7 @@ import { isEnvTruthy } from 'src/utils/envUtils.js'
 import { hasNativeDistribution } from 'src/utils/nativeDistribution.js'
 
 const NPM_DEPRECATION_MESSAGE =
-  'OpenClaude has switched from npm to the native installer. Run `openclaude install` or see https://github.com/Gitlawb/openclaude#quick-start for more options.'
+  'OpenClaude has switched from npm to the native installer. Run `openclaude install` or see https://github.com/Twigpine/openclaude#quick-start for more options.'
 
 export async function getNpmDeprecationNotification(deps: {
   isBundledMode?: () => boolean

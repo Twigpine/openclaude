@@ -32,8 +32,8 @@ function log(
 test('filterResumeLogs preserves PR filters before picker grouping', () => {
   const prLog = log(id(1), {
     prNumber: 42,
-    prUrl: 'https://github.com/Gitlawb/openclaude/pull/42',
-    prRepository: 'Gitlawb/openclaude',
+    prUrl: 'https://github.com/Twigpine/openclaude/pull/42',
+    prRepository: 'Twigpine/openclaude',
   })
   const otherPrLog = log(id(2), { prNumber: 77 })
   const nonPrLog = log(id(3))
@@ -58,7 +58,7 @@ test('filterResumeLogs preserves PR filters before picker grouping', () => {
   expect(
     filterResumeLogs(
       [prLog, otherPrLog, nonPrLog],
-      'https://github.com/Gitlawb/openclaude/pull/42',
+      'https://github.com/Twigpine/openclaude/pull/42',
     ),
   ).toEqual([prLog])
   expect(filterResumeLogs([prLog, sidechainLog], 42)).toEqual([prLog])

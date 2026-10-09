@@ -57,13 +57,13 @@ test('getRecentReleaseNotes treats legacy internal seen versions as unseen', () 
 test('release-please changelog headings are normalized for version lookups', () => {
   const changelog = `# Changelog
 
-## [0.8.0](https://github.com/Gitlawb/openclaude/compare/v0.7.0...v0.8.0) (2026-05-02)
+## [0.8.0](https://github.com/Twigpine/openclaude/compare/v0.7.0...v0.8.0) (2026-05-02)
 
 ### Features
 
 * add thing
 
-## [0.7.0](https://github.com/Gitlawb/openclaude/compare/v0.6.0...v0.7.0) (2026-04-26)
+## [0.7.0](https://github.com/Twigpine/openclaude/compare/v0.6.0...v0.7.0) (2026-04-26)
 
 ### Bug Fixes
 
@@ -77,7 +77,7 @@ test('release-please changelog headings are normalized for version lookups', () 
 
 test('getReleaseTagUrl normalizes build metadata to the public tag', () => {
   expect(getReleaseTagUrl('0.8.0+abc123')).toBe(
-    'https://github.com/Gitlawb/openclaude/releases/tag/v0.8.0',
+    'https://github.com/Twigpine/openclaude/releases/tag/v0.8.0',
   )
 })
 

@@ -116,7 +116,7 @@ export const providers: Provider[] = [
   // ── gateways ─────────────────────────────────────────────────────────
   {
     id: 'opengateway',
-    name: 'Gitlawb Opengateway',
+    name: 'Twigpine Opengateway',
     group: 'gateways',
     setup: 'startup default, /provider, or env vars',
     envVars: ['OPENGATEWAY_API_KEY'],

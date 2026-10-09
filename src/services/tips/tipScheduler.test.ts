@@ -168,7 +168,7 @@ describe('getTipToShowOnSpinner — sponsored partitioning', () => {
 })
 
 describe('getTipToShowOnSpinner — earning branch', () => {
-  test('returns the Gitlawb earning tip when earning is enabled', async () => {
+  test('returns the Twigpine earning tip when earning is enabled', async () => {
     setState({
       numStartups: 100,
       lastSponsored: 80, // would otherwise be an eligible sponsored slot

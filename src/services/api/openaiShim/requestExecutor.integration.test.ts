@@ -1083,7 +1083,7 @@ test('opengateway sends Accept-Encoding: identity header on chat requests', asyn
 
   registerGateway({
     id: 'gitlawb-opengateway-test',
-    label: 'Gitlawb Opengateway',
+    label: 'Twigpine Opengateway',
     category: 'aggregating',
     defaultBaseUrl: 'https://opengateway.gitlawb.com/v1/xiaomi-mimo',
     defaultModel: 'mimo-v2.5-pro',
@@ -2345,7 +2345,7 @@ test('gitlawb opengateway stored provider profile key becomes bearer auth', asyn
   applyProviderProfileToProcessEnv({
     id: 'stored-opengateway',
     provider: 'gitlawb-opengateway',
-    name: 'Gitlawb Opengateway',
+    name: 'Twigpine Opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'mimo-v2.5-pro',
     apiKey: 'fake-profile-key',

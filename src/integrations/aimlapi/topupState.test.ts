@@ -103,6 +103,31 @@ test('top-up state round-trips only for the same checkout intent', () => {
   }
 })
 
+test('a receipt persisted under an older partnerName still resumes after a rebrand', () => {
+  // partnerName is display metadata, not identity: partnerId is what ties a
+  // receipt to an intent. A rename (Gitlawb -> Twigpine) must not strand a
+  // user mid-topup, so the persisted name is deliberately excluded from
+  // matchesIntent.
+  useTemporaryConfig()
+  const staleIntent: AimlapiTopupIntent = { ...intent, partnerName: 'Gitlawb' }
+  const claimed = claimAimlapiTopupState(staleIntent)
+  saveAimlapiTopupState({
+    ...staleIntent,
+    paymentSessionId: claimed.paymentSessionId,
+    resumeSessionToken: 'session-token',
+  })
+
+  const current: AimlapiTopupIntent = { ...intent, partnerName: 'Twigpine' }
+  expect(loadAimlapiTopupState(current)).toEqual({
+    paymentSessionId: claimed.paymentSessionId,
+    resumeSessionToken: 'session-token',
+  })
+  // Still identity-scoped: a different partner id must not inherit the receipt.
+  expect(
+    loadAimlapiTopupState({ ...current, partnerId: 'part_other' }),
+  ).toBeNull()
+})
+
 test('claimAimlapiTopupStateAsync behaves like the sync claim (non-blocking for the interactive flow)', async () => {
   useTemporaryConfig()
 

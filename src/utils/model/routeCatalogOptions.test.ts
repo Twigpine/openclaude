@@ -42,7 +42,7 @@ describe('buildRouteCatalogModelOptions', () => {
   })
 
   test('surfaces catalog entry notes as a description tag', () => {
-    const options = buildRouteCatalogModelOptions('Gitlawb Opengateway', [
+    const options = buildRouteCatalogModelOptions('Twigpine Opengateway', [
       {
         id: 'opengateway-nemotron-3-ultra-free',
         apiName: 'nvidia/nemotron-3-ultra-550b-a55b:free',
@@ -51,7 +51,7 @@ describe('buildRouteCatalogModelOptions', () => {
       },
     ])
 
-    expect(options[0]?.description).toBe('Free · Provider: Gitlawb Opengateway')
+    expect(options[0]?.description).toBe('Free · Provider: Twigpine Opengateway')
   })
 })
 

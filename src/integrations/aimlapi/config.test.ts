@@ -202,7 +202,7 @@ test('canonical attribution drops mixed-case managed names before restamping', (
       'x-title': 'Attacker',
       'X-AIMLAPI-Source': 'agent/openclaude',
       'X-AIMLAPI-Partner-ID': DEFAULT_PARTNER_ID,
-      'X-AIMLAPI-Integration-Repo': 'Gitlawb/openclaude',
+      'X-AIMLAPI-Integration-Repo': 'Twigpine/openclaude',
       'X-AIMLAPI-Integration-Version': '1.2.3',
       'HTTP-Referer': 'OpenClaude',
       'X-Title': 'OpenClaude',
@@ -215,7 +215,7 @@ test('canonical attribution drops mixed-case managed names before restamping', (
   expectSingleManagedAttribution(resolved, {
     'X-AIMLAPI-Source': 'agent/openclaude',
     'X-AIMLAPI-Partner-ID': DEFAULT_PARTNER_ID,
-    'X-AIMLAPI-Integration-Repo': 'Gitlawb/openclaude',
+    'X-AIMLAPI-Integration-Repo': 'Twigpine/openclaude',
     'X-AIMLAPI-Integration-Version': '1.2.3',
     'HTTP-Referer': 'OpenClaude',
     'X-Title': 'OpenClaude',

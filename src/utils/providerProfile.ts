@@ -2550,7 +2550,7 @@ export async function buildStartupEnvFromProfile(options?: {
       return processEnv
     }
 
-    // No saved profile — default to Gitlawb Opengateway.
+    // No saved profile — default to Twigpine Opengateway.
     const env = buildCompatibilityProcessEnv({
       processEnv,
       compatibilityMode: 'openai',

@@ -234,7 +234,7 @@ function compareProviderPresetEntries(
     return 0
   }
 
-  // Keep the primary guided providers at the top of setup: Gitlawb
+  // Keep the primary guided providers at the top of setup: Twigpine
   // Opengateway first, aimlapi.com second, then the native Anthropic option.
   if (leftPreset === 'gitlawb-opengateway') {
     return -1

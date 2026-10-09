@@ -26,8 +26,8 @@ OpenClaude is a rapidly evolving open-source coding-agent CLI with support for m
 
 ## Before You Start
 
-- Search existing [issues](https://github.com/Gitlawb/openclaude/issues) and [discussions](https://github.com/Gitlawb/openclaude/discussions) before opening a new thread.
-- Check [open pull requests](https://github.com/Gitlawb/openclaude/pulls) for work that overlaps with your contribution. If a PR already exists that addresses the same change, open an issue or discussion first to align on direction — duplicate PRs may be closed without review.
+- Search existing [issues](https://github.com/Twigpine/openclaude/issues) and [discussions](https://github.com/Twigpine/openclaude/discussions) before opening a new thread.
+- Check [open pull requests](https://github.com/Twigpine/openclaude/pulls) for work that overlaps with your contribution. If a PR already exists that addresses the same change, open an issue or discussion first to align on direction — duplicate PRs may be closed without review.
 - Use issues for confirmed bugs and actionable feature work.
 - Use discussions for setup help, ideas, and general community conversation.
 - For larger changes, open an issue first so the scope is clear before implementation.
@@ -114,8 +114,8 @@ If you find yourself getting fix requests on every round, treat that as a signal
 
 We are proactive about closing duplicate PRs. Before submitting, **it is your responsibility to check** whether a similar PR already exists:
 
-- Search [open pull requests](https://github.com/Gitlawb/openclaude/pulls) for related work
-- Check [closed pull requests](https://github.com/Gitlawb/openclaude/pulls?q=is%3Apr+is%3Aclosed) to see if similar work was previously addressed or declined
+- Search [open pull requests](https://github.com/Twigpine/openclaude/pulls) for related work
+- Check [closed pull requests](https://github.com/Twigpine/openclaude/pulls?q=is%3Apr+is%3Aclosed) to see if similar work was previously addressed or declined
 - If you find an existing PR, engage in that thread rather than opening a new one
 
 Duplicate PRs will likely be closed without review or follow-up. This isn't personal — it's about keeping the review queue focused and efficient.
@@ -268,7 +268,7 @@ bun run typecheck:type-tests
 node bin/openclaude --version
 bun run test:provider
 npm run test:provider-recommendation
-git fetch https://github.com/Gitlawb/openclaude.git main
+git fetch https://github.com/Twigpine/openclaude.git main
 bun run security:pr-scan -- --base FETCH_HEAD --head HEAD
 ```
 
@@ -309,7 +309,7 @@ bun run web:build
 Notes on the local preflight:
 
 - `bun run check` already builds the CLI and includes smoke, deadcode, and the full unit pass (`test:full`) — do not run those separately, or you execute work twice.
-- Fetching upstream `main` by URL avoids assuming that a fork checkout's `origin` points at Gitlawb/openclaude. `FETCH_HEAD` is the fetched upstream tip. The scan deliberately uses local `HEAD` so it includes commits that have not been pushed yet; CI uses the pushed PR head SHA after the push.
+- Fetching upstream `main` by URL avoids assuming that a fork checkout's `origin` points at Twigpine/openclaude. `FETCH_HEAD` is the fetched upstream tip. The scan deliberately uses local `HEAD` so it includes commits that have not been pushed yet; CI uses the pushed PR head SHA after the push.
 - The web CI job remains unconditional as an integration backstop. Contributors do not need to run the web suite locally for changes that cannot affect the site.
 - This preflight covers the same command families as CI, but it does not reproduce CI exactly in one shell. CI runs the main checks under Node 22 and 24.11.x, separately builds and launches under exact Node 22.0.0, and executes every job on a clean runner.
 

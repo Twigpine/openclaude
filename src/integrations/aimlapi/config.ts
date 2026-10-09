@@ -3,7 +3,7 @@
  *
  * Wires OpenClaude to the AI/ML API "partner checkout" flow so a user can log
  * in, top up their balance, and have the issued key written back into
- * OpenClaude's provider profile automatically. Usage attributes to the Gitlawb
+ * OpenClaude's provider profile automatically. Usage attributes to the Twigpine
  * rebate partner (see the partner id below).
  *
  * Override any single URL via the corresponding `AIMLAPI_*_URL` env var.
@@ -33,12 +33,12 @@ const DEFAULT_ENDPOINTS: AimlapiEndpoints = {
 /**
  * Partner id (`^part_[A-Za-z0-9]{1,64}$`) - rebate attribution. Must EXACTLY
  * match an active row in the backend `rebate_partners` table. This is the
- * Gitlawb partner that all OpenClaude AI/ML API usage is credited to; it is the
+ * Twigpine partner that all OpenClaude AI/ML API usage is credited to; it is the
  * same value sent as the `X-AIMLAPI-Partner-ID` inference header (see
  * `integrations/gateways/aimlapi.ts`).
  */
 export const DEFAULT_PARTNER_ID = 'part_62yQoGYDq4Yqnrj2R1iGrDNJ'
-export const DEFAULT_PARTNER_NAME = 'Gitlawb'
+export const DEFAULT_PARTNER_NAME = 'Twigpine'
 export const PARTNER_HEADER_NAME = 'X-AIMLAPI-Partner-ID'
 export const SOURCE_HEADER_NAME = 'X-AIMLAPI-Source'
 export const INTEGRATION_REPO_HEADER_NAME = 'X-AIMLAPI-Integration-Repo'

@@ -18,7 +18,7 @@ npm install -g @gitlawb/openclaude@latest
 Use Bun `1.3.13` or newer for source builds. Older Bun versions can fail during `bun run build`.
 
 ```bash
-git clone https://github.com/Gitlawb/openclaude.git
+git clone https://github.com/Twigpine/openclaude.git
 cd openclaude
 
 bun install
@@ -29,7 +29,7 @@ npm link
 ### Option C: Run directly with Bun
 
 ```bash
-git clone https://github.com/Gitlawb/openclaude.git
+git clone https://github.com/Twigpine/openclaude.git
 cd openclaude
 
 bun install
@@ -276,7 +276,7 @@ MiMo, MiniMax, Qwen). Uses the same `OPENCODE_API_KEY` as OpenCode Zen.
 OpenClaude automatically sends the session and product identity headers that
 OpenCode Go requires for prompt caching and traffic attribution.
 
-### Gitlawb Opengateway
+### Twigpine Opengateway
 
 ```bash
 export CLAUDE_CODE_USE_OPENAI=1
@@ -713,7 +713,7 @@ command-injection validation, and sensitive-file / auto-edit guards. These are
 conservative by design, but a few of them can surface as refusals or approval
 prompts for entirely benign, routine coding tasks (e.g. editing `.gitmodules`,
 running a build script that contains `$(date)`, or writing a CTF port scanner).
-See [issue #1616](https://github.com/Gitlawb/openclaude/issues/1616).
+See [issue #1616](https://github.com/Twigpine/openclaude/issues/1616).
 
 Set `OPENCLAUDE_SAFETY_LEVEL` to dial strictness without changing behavior for
 everyone:

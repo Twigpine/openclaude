@@ -5,14 +5,14 @@ import { renderSponsorLink } from './tipLink.js'
 import type { Tip, TipContext, TipSponsor } from './types.js'
 
 /**
- * Gitlawb earning tips. Unlike the static partner sponsored tips (which show at
+ * Twigpine earning tips. Unlike the static partner sponsored tips (which show at
  * most once per session, gated by a per-startup counter), these target the
  * opt-in earning user who ran `/ads on <code>`: they appear on a per-TURN
  * cadence and credit opengateway credits each time one is shown.
  */
-const GITLAWB: TipSponsor = {
-  name: 'Gitlawb',
-  url: 'https://gitlawb.com',
+const TWIGPINE: TipSponsor = {
+  name: 'Twigpine',
+  url: 'https://twigpine.com',
   label: 'Sponsored',
 }
 
@@ -36,7 +36,7 @@ function tipEvery(): number {
 let pickCounter = 0
 
 /**
- * Whether this tip slot should be a Gitlawb earning ad. Called once per turn by
+ * Whether this tip slot should be a Twigpine earning ad. Called once per turn by
  * getTipToShowOnSpinner; returns true on every Nth eligible call. Does NOT
  * increment (or do anything) when earning is off, so non-opted-in users and the
  * existing tip tests are unaffected.
@@ -62,13 +62,13 @@ function renderEarningTip(
   const label = earning ? 'Sponsored +credits' : 'Sponsored'
   // Attribute to the real advertiser and point at the ad's click URL (the
   // partner's tracker — that's what records the click and pays us). Fall back to
-  // Gitlawb only for the static no-ad line.
-  const sponsor = ad?.name?.trim() || GITLAWB.name
-  // Never point a third-party advertiser's name at the Gitlawb URL: for a real
+  // Twigpine only for the static no-ad line.
+  const sponsor = ad?.name?.trim() || TWIGPINE.name
+  // Never point a third-party advertiser's name at the Twigpine URL: for a real
   // ad use only its own click URL (no link if it's missing), and reserve the
-  // Gitlawb fallback for the static no-ad line.
+  // Twigpine fallback for the static no-ad line.
   const adLink = ad?.link?.trim()
-  const linkUrl = earning ? adLink : adLink || GITLAWB.url
+  const linkUrl = earning ? adLink : adLink || TWIGPINE.url
   // Make the advertiser name a clickable hyperlink to its click URL instead of
   // printing the (often very long) tracker URL inline. Clicks still hit the
   // tracker, so attribution/payout are unchanged.
@@ -78,7 +78,7 @@ function renderEarningTip(
 }
 
 /**
- * The Gitlawb earning tip. content() fetches a real impression from the ads
+ * The Twigpine earning tip. content() fetches a real impression from the ads
  * service and schedules a confirm after the dwell so the viewer is credited for
  * seeing it. Any fetch/confirm failure degrades silently to a static line — ads
  * must never break or block the host CLI. (Confirm fires ~dwell after the tip is
@@ -87,11 +87,11 @@ function renderEarningTip(
 export function buildEarningTip(): Tip {
   return {
     id: 'gitlawb-earn',
-    sponsor: GITLAWB,
+    sponsor: TWIGPINE,
     cooldownSessions: 0,
     isRelevant: async () => adsEarningEnabled(),
     content: async (ctx: TipContext) => {
-      const fallback = 'Earn opengateway credits while you code — gitlawb.com'
+      const fallback = 'Earn opengateway credits while you code — twigpine.com'
       const code = getGlobalConfig().ads?.earnCode
       if (!code) return renderEarningTip(fallback, ctx, false)
 

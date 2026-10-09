@@ -203,9 +203,9 @@ result = await Bun.build({
     'MACRO.DISPLAY_VERSION': JSON.stringify(version),
     'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
     'MACRO.ISSUES_EXPLAINER':
-      JSON.stringify('report the issue at https://github.com/Gitlawb/openclaude/issues'),
+      JSON.stringify('report the issue at https://github.com/Twigpine/openclaude/issues'),
     'MACRO.FEEDBACK_CHANNEL':
-      JSON.stringify('https://github.com/Gitlawb/openclaude/issues'),
+      JSON.stringify('https://github.com/Twigpine/openclaude/issues'),
     'MACRO.PACKAGE_URL': JSON.stringify('@gitlawb/openclaude'),
     'MACRO.NATIVE_PACKAGE_URL': 'undefined',
     'MACRO.VERSION_CHANGELOG': 'undefined',
@@ -546,9 +546,9 @@ sdkResult = await Bun.build({
     'MACRO.DISPLAY_VERSION': JSON.stringify(version),
     'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
     'MACRO.ISSUES_EXPLAINER':
-      JSON.stringify('report the issue at https://github.com/Gitlawb/openclaude/issues'),
+      JSON.stringify('report the issue at https://github.com/Twigpine/openclaude/issues'),
     'MACRO.FEEDBACK_CHANNEL':
-      JSON.stringify('https://github.com/Gitlawb/openclaude/issues'),
+      JSON.stringify('https://github.com/Twigpine/openclaude/issues'),
     'MACRO.PACKAGE_URL': JSON.stringify('@gitlawb/openclaude'),
     'MACRO.NATIVE_PACKAGE_URL': 'undefined',
     'MACRO.VERSION_CHANGELOG': 'undefined',

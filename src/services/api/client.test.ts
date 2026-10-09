@@ -1311,7 +1311,7 @@ test('routes env-only AI/ML API requests through the OpenAI-compatible shim desp
   )
   expect(capturedHeaders?.get('x-aimlapi-partner-id')).toBe('part_62yQoGYDq4Yqnrj2R1iGrDNJ')
   expect(capturedHeaders?.get('x-aimlapi-integration-repo')).toBe(
-    'Gitlawb/openclaude',
+    'Twigpine/openclaude',
   )
   expect(capturedHeaders?.get('x-aimlapi-integration-version')).toBe(
     publicBuildVersion,

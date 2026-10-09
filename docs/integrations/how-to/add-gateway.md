@@ -453,7 +453,7 @@ Use `discoveryRefreshMode` to match the operational shape of the route:
 
 If an authenticated inference route exposes a public model endpoint, set
 `catalog.discovery.requiresAuth` to `false` while keeping `setup.requiresAuth`
-enabled. OpenRouter and Gitlawb Opengateway use this split: model listing is
+enabled. OpenRouter and Twigpine Opengateway use this split: model listing is
 keyless, but inference still requires an API key. Avoid combining
 `discoveryRefreshMode: 'startup'` with an `openai-compatible-models` readiness
 probe when both execute the same request, because that doubles startup traffic.

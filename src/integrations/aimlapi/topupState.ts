@@ -109,12 +109,19 @@ const KEY_MINT_LEASE_STALE_MS = 75_000
 /** Owner-only file/dir modes; these records hold API credentials. */
 const FILE_MODE = 0o600
 const DIR_MODE = 0o700
+/**
+ * Identity fields for topup-intent matching, NOT `partnerName`. The partner id
+ * is the identity; `partnerName` is display metadata that travels alongside it
+ * and is free to change (it did, on the Gitlawb -> Twigpine rebrand). Matching
+ * on the name would strand a persisted receipt written under the old name, so a
+ * user resuming an in-flight topup after upgrading would fail `matchesIntent` and
+ * restart the checkout.
+ */
 const INTENT_KEYS: ReadonlyArray<keyof AimlapiTopupIntent> = [
   'email',
   'amountUsdMinor',
   'autoTopUp',
   'partnerId',
-  'partnerName',
   'appBaseUrl',
   'inferenceBaseUrl',
   'payBaseUrl',

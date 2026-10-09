@@ -706,7 +706,7 @@ describe('discoverModelsForRoute', () => {
     expect(capturedHeaders).toEqual({
       'X-AIMLAPI-Source': 'agent/openclaude',
       'X-AIMLAPI-Partner-ID': 'part_62yQoGYDq4Yqnrj2R1iGrDNJ',
-      'X-AIMLAPI-Integration-Repo': 'Gitlawb/openclaude',
+      'X-AIMLAPI-Integration-Repo': 'Twigpine/openclaude',
       'X-AIMLAPI-Integration-Version': publicBuildVersion,
       'HTTP-Referer': 'OpenClaude',
       'X-Title': 'OpenClaude',
@@ -759,7 +759,7 @@ describe('discoverModelsForRoute', () => {
     expect(capturedHeaders).toEqual({
       'X-AIMLAPI-Source': 'agent/openclaude',
       'X-AIMLAPI-Partner-ID': 'part_62yQoGYDq4Yqnrj2R1iGrDNJ',
-      'X-AIMLAPI-Integration-Repo': 'Gitlawb/openclaude',
+      'X-AIMLAPI-Integration-Repo': 'Twigpine/openclaude',
       'X-AIMLAPI-Integration-Version': publicBuildVersion,
       'HTTP-Referer': 'OpenClaude',
       'X-Title': 'OpenClaude',
@@ -803,7 +803,7 @@ describe('discoverModelsForRoute', () => {
     expect(headers.get('x-aimlapi-partner-id')).toBe(
       'part_62yQoGYDq4Yqnrj2R1iGrDNJ',
     )
-    expect(headers.get('x-aimlapi-integration-repo')).toBe('Gitlawb/openclaude')
+    expect(headers.get('x-aimlapi-integration-repo')).toBe('Twigpine/openclaude')
     expect(headers.get('x-aimlapi-integration-version')).toBe(publicBuildVersion)
     expect(headers.get('http-referer')).toBe('OpenClaude')
     expect(headers.get('x-title')).toBe('OpenClaude')

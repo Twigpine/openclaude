@@ -262,8 +262,8 @@ test('findResumeLogByPrSelector selects the first non-sidechain PR match', async
     isSidechain: false,
     sessionId: id(12),
     prNumber: 1642,
-    prUrl: 'https://github.com/Gitlawb/openclaude/pull/1642',
-    prRepository: 'Gitlawb/openclaude',
+    prUrl: 'https://github.com/Twigpine/openclaude/pull/1642',
+    prRepository: 'Twigpine/openclaude',
   } as any
   const sidechain = {
     ...linked,
@@ -274,7 +274,7 @@ test('findResumeLogByPrSelector selects the first non-sidechain PR match', async
     ...linked,
     sessionId: id(14),
     prNumber: 17,
-    prUrl: 'https://github.com/Gitlawb/openclaude/pull/17',
+    prUrl: 'https://github.com/Twigpine/openclaude/pull/17',
   } as any
 
   expect(findResumeLogByPrSelector([sidechain, linked, unrelated], true)).toBe(
@@ -286,7 +286,7 @@ test('findResumeLogByPrSelector selects the first non-sidechain PR match', async
   expect(
     findResumeLogByPrSelector(
       [sidechain, linked, unrelated],
-      'https://github.com/Gitlawb/openclaude/pull/1642',
+      'https://github.com/Twigpine/openclaude/pull/1642',
     ),
   ).toBe(linked)
   expect(

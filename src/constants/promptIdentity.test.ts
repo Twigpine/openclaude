@@ -33,7 +33,7 @@ beforeAll(async () => {
     DISPLAY_VERSION: '0.0.0-test',
     BUILD_TIME: new Date().toISOString(),
     ISSUES_EXPLAINER:
-      'report the issue at https://github.com/Gitlawb/openclaude/issues',
+      'report the issue at https://github.com/Twigpine/openclaude/issues',
     PACKAGE_URL: '@gitlawb/openclaude',
     NATIVE_PACKAGE_URL: undefined,
   }

@@ -12,7 +12,7 @@ export interface Partner {
 }
 
 export const partners: Partner[] = [
-  { name: 'GitLawb', url: 'https://gitlawb.com', logo: '/partners/gitlawb.png', height: 44 },
+  { name: 'Twigpine', url: 'https://twigpine.com', logo: '/partners/twigpine.png', height: 44 },
   { name: 'Bankr.bot', url: 'https://bankr.bot', logo: '/partners/bankr.svg', height: 40 },
   { name: 'Atomic Chat', url: 'https://atomic.chat/', logo: '/partners/atomic-chat-logo.png', height: 40 },
   { name: 'Xiaomi MiMo', url: 'https://mimo.mi.com', logo: '/partners/mimo.svg', height: 30 },
@@ -55,9 +55,9 @@ export const partners: Partner[] = [
 ]
 
 export const community = [
-  { name: 'github', url: 'https://github.com/Gitlawb/openclaude', label: 'star the repo' },
+  { name: 'github', url: 'https://github.com/Twigpine/openclaude', label: 'star the repo' },
   { name: 'discord', url: 'https://discord.gg/k68zFR6AcB', label: 'join the discord' },
   { name: 'x', url: 'https://x.com/gitlawb', label: 'follow @gitlawb' },
-  { name: 'discussions', url: 'https://github.com/Gitlawb/openclaude/discussions', label: 'open a discussion' },
+  { name: 'discussions', url: 'https://github.com/Twigpine/openclaude/discussions', label: 'open a discussion' },
   { name: 'trendshift', url: 'https://trendshift.io/repositories/25807', label: 'featured on trendshift' },
 ]

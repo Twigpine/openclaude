@@ -570,9 +570,9 @@ test.serial('installs a registry skill by id from a local registry file', async 
       registryPath,
       JSON.stringify([
         buildRegistryEntry(sourceDir, {
-          repo: 'https://github.com/Gitlawb/openclaude-skills',
+          repo: 'https://github.com/Twigpine/openclaude-skills',
           path: 'skills/sample-skill/SKILL.md',
-          homepage: 'https://github.com/Gitlawb/openclaude-skills/tree/main/skills/sample-skill',
+          homepage: 'https://github.com/Twigpine/openclaude-skills/tree/main/skills/sample-skill',
           sha256: sha256OfSkillSource(VALID_SKILL),
           min_openclaude_version: '0.1.0',
           tools_required: ['Read', 'Bash'],

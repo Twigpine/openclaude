@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   release-please:
-    if: ${{ github.repository == 'Gitlawb/openclaude' }}
+    if: ${{ github.repository == 'Twigpine/openclaude' }}
     name: Release Please
     runs-on: ubuntu-latest
     permissions:
@@ -164,7 +164,7 @@ jobs:
             echo "## Released ${{ needs.release-please.outputs.tag_name }}"
             echo
             echo "- npm: https://www.npmjs.com/package/@gitlawb/openclaude"
-            echo "- GitHub: https://github.com/Gitlawb/openclaude/releases/tag/${{ needs.release-please.outputs.tag_name }}"
+            echo "- GitHub: https://github.com/Twigpine/openclaude/releases/tag/${{ needs.release-please.outputs.tag_name }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   docker:

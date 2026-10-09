@@ -149,7 +149,7 @@ export function HelpV2(t0) {
   }
   let t7;
   if ($[34] === Symbol.for("react.memo_cache_sentinel")) {
-    t7 = <Box marginTop={1}><Text>For more help:{" "}<Link url="https://github.com/Gitlawb/openclaude" /></Text></Box>;
+    t7 = <Box marginTop={1}><Text>For more help:{" "}<Link url="https://github.com/Twigpine/openclaude" /></Text></Box>;
     $[34] = t7;
   } else {
     t7 = $[34];
