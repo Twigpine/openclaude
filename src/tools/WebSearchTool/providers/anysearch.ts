@@ -4,6 +4,7 @@ import { withWebSearchTimeout } from './timeout.js'
 
 const ANYSEARCH_URL = 'https://api.anysearch.com/v1/search'
 const DEFAULT_MAX_RESULTS = 10
+const MAX_ERROR_SNIPPET_LENGTH = 200
 
 function maxResults(): number {
   const raw = process.env.ANYSEARCH_MAX_RESULTS?.trim()
@@ -27,6 +28,23 @@ function errorDetail(envelope: Record<string, unknown> | undefined): string {
     : ''
 }
 
+function errorBodySnippet(rawBody: string): string {
+  const compact = rawBody
+    .replace(/[\u0000-\u001f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!compact) return ''
+
+  const sanitized = compact
+    .replace(
+      /((?:api[_ -]?key|authorization|token|secret|password)\s*[:=]\s*)(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|[^\s,}]+)/gi,
+      '$1[redacted]',
+    )
+    .replace(/Bearer\s+[^\s"',}]+/gi, 'Bearer [redacted]')
+  const clipped = sanitized.slice(0, MAX_ERROR_SNIPPET_LENGTH)
+  return ` (response: ${clipped}${sanitized.length > MAX_ERROR_SNIPPET_LENGTH ? '…' : ''})`
+}
+
 export const anysearchProvider: SearchProvider = {
   name: 'anysearch',
 
@@ -43,15 +61,21 @@ export const anysearchProvider: SearchProvider = {
     }
     if (key) headers.Authorization = `Bearer ${key}`
 
-    const { response, body } = await withWebSearchTimeout(async combinedSignal => {
+    const { response, body, rawBody } = await withWebSearchTimeout(async combinedSignal => {
       const response = await fetch(ANYSEARCH_URL, {
         method: 'POST',
         headers,
         body: JSON.stringify({ query: input.query, max_results: maxResults() }),
         signal: combinedSignal,
       })
-      const body: unknown = await response.json().catch(() => undefined)
-      return { response, body }
+      const rawBody = await response.text()
+      let body: unknown
+      try {
+        body = JSON.parse(rawBody)
+      } catch {
+        body = undefined
+      }
+      return { response, body, rawBody }
     }, signal, { providerName: 'AnySearch' })
 
     const envelope = record(body)
@@ -62,7 +86,8 @@ export const anysearchProvider: SearchProvider = {
         : response.status === 429
           ? ' (rate limit or quota exceeded)'
           : ''
-      throw new Error(`AnySearch search error HTTP ${response.status}${hint}${detail}`)
+      const responseDetail = body === undefined ? errorBodySnippet(rawBody) : ''
+      throw new Error(`AnySearch search error HTTP ${response.status}${hint}${detail}${responseDetail}`)
     }
     if (!envelope || typeof envelope.code !== 'number') {
       throw new Error('AnySearch search returned an invalid response')

@@ -135,6 +135,23 @@ describe('AnySearch basic search', () => {
     )
   })
 
+  test('includes a sanitized and truncated snippet for non-JSON HTTP errors', async () => {
+    process.env.ANYSEARCH_API_KEY = 'private-key'
+    const gatewayBody = `gateway failure\nAuthorization: Bearer private-key\n${'x'.repeat(300)}`
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(gatewayBody, {
+      status: 502,
+    })) as typeof fetch
+
+    const error = await anysearchProvider.search({ query: 'gateway failure' }).catch(error => error)
+    const message = String(error)
+    expect(message).toContain('AnySearch search error HTTP 502')
+    expect(message).toContain('gateway failure')
+    expect(message).toContain('Authorization: [redacted]')
+    expect(message).not.toContain('private-key')
+    expect(message).toContain('…')
+    expect(message).not.toContain('x'.repeat(250))
+  })
+
   test('separates empty results from business errors and malformed responses', async () => {
     globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
       code: 1001,
