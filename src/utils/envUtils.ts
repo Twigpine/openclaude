@@ -208,6 +208,29 @@ export function isRunningOnHomespace(): boolean {
  *
  * Used for telemetry to measure auto-mode usage in sensitive environments.
  */
+export function getEnvNumber(key: string, defaultValue: number): number {
+  const value = process.env[key]
+  if (value === undefined) {
+    return defaultValue
+  }
+  const parsed = Number.parseInt(value, 10)
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return defaultValue
+  }
+  return parsed
+}
+
+/**
+ * Conservative check for whether Claude Code is running inside a protected
+ * (privileged or ASL3+) COO namespace or cluster.
+ *
+ * Conservative means: when signals are ambiguous, assume protected. We would
+ * rather over-report protected usage than miss it. Unprotected environments
+ * are homespace, namespaces on the open allowlist, and no k8s/COO signals
+ * at all (laptop/local dev).
+ *
+ * Used for telemetry to measure auto-mode usage in sensitive environments.
+ */
 export function isInProtectedNamespace(): boolean {
   // USER_TYPE is build-time --define'd; in external builds this block is
   // DCE'd so the require() and namespace allowlist never appear in the bundle.

@@ -574,6 +574,29 @@ export const SettingsSchema = lazySchema(() =>
           'Auto-fix configuration: automatically run lint/test after AI file edits ' +
           'and feed errors back for self-repair.',
         ),
+      todoReminder: z
+        .object({
+          turnsSinceWrite: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe(
+              'Assistant turns since last TodoWrite/TaskUpdate before showing reminder (default: 10)',
+            ),
+          turnsBetweenReminders: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe(
+              'Assistant turns between reminders (default: 10)',
+            ),
+        })
+        .optional()
+        .describe(
+          'Configuration for todo/task tool usage reminders',
+        ),
       worktree: z
         .preprocess((val: unknown) => {
           if (val && typeof val === 'object') {
