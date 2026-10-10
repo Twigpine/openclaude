@@ -9,6 +9,7 @@ import { AppState } from '../state/AppState.js'
 import { FileStateCache, READ_FILE_STATE_CACHE_SIZE } from '../utils/fileStateCache.js'
 import { getBuiltInAgents } from '../tools/AgentTool/builtInAgents.js'
 import type { Message } from '../types/message.js'
+import { extractBearerToken, tokenMatches } from './auth.js'
 
 const PROTO_PATH = path.resolve(import.meta.dirname, '../proto/openclaude.proto')
 
@@ -110,11 +111,52 @@ export class GrpcServer {
   private server: grpc.Server
   private sessions: Map<string, Message[]> = new Map()
 
-  constructor() {
-    this.server = new grpc.Server()
+  constructor(private readonly authToken?: string) {
+    this.server = new grpc.Server({
+      // Reject any call that does not present the configured bearer token. When
+      // no token is configured the server is intended for loopback-only use
+      // (see resolveGrpcBind) and calls are allowed through.
+      interceptors: [this.authInterceptor],
+    })
     this.server.addService(openclaudeProto.AgentService.service, {
       Chat: this.handleChat.bind(this),
     })
+  }
+
+  /**
+   * Server interceptor that validates the bearer token from call metadata
+   * before the handler runs. Unauthenticated calls are terminated with
+   * UNAUTHENTICATED and never reach the agent loop.
+   */
+  private authInterceptor: grpc.ServerInterceptor = (_methodDescriptor, call) => {
+    const token = this.authToken
+    if (!token) {
+      // No token configured: loopback-only use (enforced by resolveGrpcBind).
+      return new grpc.ServerInterceptingCall(call)
+    }
+    const listener = new grpc.ServerListenerBuilder()
+      .withOnReceiveMetadata((metadata, next) => {
+        const provided = extractBearerToken(metadata)
+        if (tokenMatches(token, provided)) {
+          // Do not let the credential linger in handler-visible metadata.
+          metadata.remove('authorization')
+          metadata.remove('x-api-key')
+          next(metadata)
+          return
+        }
+        // Reject without forwarding metadata so the handler never runs.
+        call.sendStatus({
+          code: grpc.status.UNAUTHENTICATED,
+          details: 'Missing or invalid gRPC authentication token',
+        })
+      })
+      .build()
+    const responder = new grpc.ResponderBuilder()
+      .withStart(next => {
+        next(listener)
+      })
+      .build()
+    return new grpc.ServerInterceptingCall(call, responder)
   }
 
   start(port: number = 50051, host: string = 'localhost') {

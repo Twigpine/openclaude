@@ -19,7 +19,24 @@ npm run dev:grpc
 | Variable | Default | Description |
 |-----------|-------------|------------------------------------------------|
 | `GRPC_PORT` | `50051` | Port the gRPC server listens on |
-| `GRPC_HOST` | `localhost` | Bind address. Use `0.0.0.0` to expose on all interfaces (not recommended without authentication) |
+| `GRPC_HOST` | `127.0.0.1` | Bind address. Loopback by default. A non-loopback value (such as `0.0.0.0`) is **refused at startup unless `GRPC_AUTH_TOKEN` is set** |
+| `GRPC_AUTH_TOKEN` | _(unset)_ | Bearer token required on every request. When set, clients must send `authorization: Bearer <token>` metadata |
+
+### Authentication
+
+The headless gRPC server exposes the full agent loop (Bash/Write/Edit/Read
+plus tool approval), so it must not be reachable by unauthenticated clients.
+It binds to `127.0.0.1` by default; to expose it on another interface you must
+set `GRPC_AUTH_TOKEN`, and every request then needs the matching bearer token:
+
+```bash
+export GRPC_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+GRPC_HOST=0.0.0.0 npm run dev:grpc
+```
+
+Requests without a valid `authorization: Bearer <token>` metadata header are
+rejected with `UNAUTHENTICATED`. TLS is not terminated by the server itself;
+run it behind a TLS-terminating proxy if it crosses a network boundary.
 
 ## 2. Run the test CLI client
 
