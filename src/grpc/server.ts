@@ -9,6 +9,7 @@ import { AppState } from '../state/AppState.js'
 import { FileStateCache, READ_FILE_STATE_CACHE_SIZE } from '../utils/fileStateCache.js'
 import { getBuiltInAgents } from '../tools/AgentTool/builtInAgents.js'
 import type { Message } from '../types/message.js'
+import { validateChatRequest } from './validation.js'
 
 const PROTO_PATH = path.resolve(import.meta.dirname, '../proto/openclaude.proto')
 
@@ -158,7 +159,24 @@ export class GrpcServer {
           }
           interrupted = false
           const req = clientMessage.request
-          sessionId = req.session_id || ''
+
+          const validated = validateChatRequest({
+            message: req.message,
+            working_directory: req.working_directory,
+            session_id: req.session_id,
+            model: req.model,
+          })
+          if (!validated.ok) {
+            call.write({
+              error: {
+                message: validated.error,
+                code: 'INVALID_ARGUMENT'
+              }
+            })
+            return
+          }
+          const request = validated.value
+          sessionId = request.sessionId ?? ''
           previousMessages = []
 
           // Load previous messages from session store (cross-stream persistence)
@@ -169,7 +187,7 @@ export class GrpcServer {
           const toolNameById = new Map<string, string>()
 
           engine = new QueryEngine({
-            cwd: req.working_directory || process.cwd(),
+            cwd: request.workingDirectory || process.cwd(),
             tools: getTools(appState.toolPermissionContext), // Gets all available tools
             commands: [], // Slash commands
             mcpClients: [],
@@ -224,8 +242,8 @@ export class GrpcServer {
             getAppState: () => appState,
             setAppState: (updater) => { appState = updater(appState) },
             readFileCache: fileCache,
-            userSpecifiedModel: req.model,
-            fallbackModel: req.model,
+            userSpecifiedModel: request.model,
+            fallbackModel: request.model,
           })
 
           // Track accumulated response data for FinalResponse
@@ -233,7 +251,7 @@ export class GrpcServer {
           let promptTokens = 0
           let completionTokens = 0
 
-          const generator = engine.submitMessage(req.message)
+          const generator = engine.submitMessage(request.message)
 
           for await (const msg of generator) {
             if (msg.type === 'stream_event') {
