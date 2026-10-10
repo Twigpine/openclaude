@@ -70,6 +70,28 @@ $ openclaude skills list
 ci-fix  enabled   Diagnoses and fixes CI pipeline failures.
 ```
 
+## Use installed skills in a `/duo` debate
+
+`/duo` also reads skills, so an installed skill can frame a two-model debate
+instead of being retyped by hand:
+
+```
+/duo skills                                        list the skills a debate may use
+/duo <question>                                    routed automatically to the 1-2 best skills
+/duo auto off                                      disable the routing pass
+/duo skill tdd <question>                          force one specific skill
+DUO_SKILL=code-review DUO_AUTO_SKILL=0 openclaude -p "/duo <question>"
+```
+
+The routing pass is one cheap model call before the debate: it receives the
+catalogue (`name: description`, capped at 60 entries) and answers with names
+only. The debaters are tool-less and never see the catalogue themselves, so
+the chosen skills' text is injected into both sides instead. Discovery matches
+this loader's rules — a skill is identified by its **directory name**, nested
+`category/skill` layouts are supported, and a `SKILL.md` without frontmatter
+`name` is still valid. Project skills win over user skills. A routing failure
+is never fatal: the debate runs without a skill.
+
 ## Verify installed skills
 
 `verify` reads the skills installed in the project's `.openclaude/skills` and in your user skills directory. Skills that `list` shows from plugins, MCP servers, or `--add-dir` directories are outside it. For each skill it reads the id, version, and digest from `skill.json` as written on disk, and matches them against the registry's `revocations.json` with the rule the installer uses. The digest is the registry pin recorded at install, not a hash of the current files, so `verify` says nothing about the contents on disk and trusts `skill.json` as it finds it. A skill whose `skill.json` has no id and no digest, such as one written by hand, is listed as skipped. A local install that copied a `skill.json` keeps that file's id and digest, so `verify` matches it like a registry install. The list comes from the default registry, from `--registry`, or from the environment variables named above. A list that cannot be read fails the command, the same as an install does.

@@ -39,6 +39,7 @@ import type { SettingsJson } from '../utils/settings/types.js'
 import { shouldEnableThinkingByDefault } from '../utils/thinking.js'
 import type { Store } from './store.js'
 import type { GoalState } from '../services/goal/types.js'
+import type { DuoState } from '../services/duo/types.js'
 
 export type CompletionBoundary =
   | { type: 'complete'; completedAt: number; outputTokens: number }
@@ -431,6 +432,8 @@ export type AppState = DeepImmutable<{
   fastMode?: boolean
   // Session-scoped auto-continuation goal.
   goal: GoalState | null
+  // duo — session-scoped two-model debate state (config + per-side histories).
+  duo?: DuoState | null
   // Advisor model for server-side advisor tool (undefined = disabled).
   advisorModel?: string
   // Effort value

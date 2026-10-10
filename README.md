@@ -439,6 +439,149 @@ environment variables:
 
 See [Agent Routing and Step Limits](docs/agent-routing.md) for the full guide.
 
+## Duo: structured two-model debate (`/duo`)
+
+`/duo` puts two models in a structured debate about the same message: both
+answer in parallel, then exchange replies for N internal rounds. With the
+consensus protocol on, every reply ends with a verdict line and the debate
+stops early on double consensus.
+
+```
+/duo why does this query skip the index?        run a debate on that question
+/duo rounds 2                                   internal debate rounds (0-5)
+/duo protocol on                                require VERDICT: CONSENSUS|SUITE
+/duo status                                     show config and continuity
+/duo clear                                      reset state
+```
+
+Two backends:
+
+- **builtin** (default): in-process forked queries on your configured provider.
+  Each debater gets its own model — routed through `appState` (`mainLoopModel`
+  and `mainLoopModelForSession`) exactly like AgentTool teammate models. Tools
+  are refused with `requireCanUseTool`, so a `PreToolUse` hook answering
+  "allow" cannot slip past, and the turn is capped at 1: debaters can only
+  produce text. Each side's history is bounded (12 messages).
+- **cli** (`/duo backend cli`): side A drives the `opencode` CLI, side B the
+  `cline` CLI, so the free models of both platforms can debate with each other.
+  OpenCode keeps its session (`--session`); Cline's history is replayed as a
+  transcript because `--id` requires a TTY and is incompatible with `--json`.
+  `/duo models` lists the free models verified by probe, `/duo model a|b <id>`
+  pins one, and `/duo approve on|off` gates tool auto-approval (off by default).
+
+Headless runs can set the initial state with `DUO_BACKEND`, `DUO_ROUNDS`,
+`DUO_PROTOCOL`, `DUO_APPROVE`, `DUO_AUTO_SKILL`, `DUO_MODEL_A`,
+`DUO_MODEL_A_FALLBACKS`, `DUO_MODEL_B`, `DUO_MODEL_B_FALLBACKS`, `DUO_GROUNDED`,
+`DUO_ADVERSARIAL` and `DUO_CLI_TIMEOUT_MS`:
+
+```
+DUO_BACKEND=cli DUO_PROTOCOL=1 openclaude -p "/duo explain this stack trace"
+```
+
+### Surviving a rate limit
+
+Free tiers saturate. `DUO_MODEL_A_FALLBACKS` and `DUO_MODEL_B_FALLBACKS` take a
+comma-separated list of models to try, in order, when a turn comes back 429 —
+side A resumes its `opencode` session on the next model, side B replays its
+transcript. If every model is saturated the turn fails loudly rather than
+silently:
+
+```
+DUO_MODEL_A=opencode/space-bunny-free \
+DUO_MODEL_A_FALLBACKS=opencode/nemotron-3-ultra-free,opencode/step-5-preview-free \
+openclaude -p "/duo why does this query skip the index?"
+```
+
+`/duo models` separates the two failures that look alike: a model listed as
+*rate-limited* is fine, just busy, and stays usable; one listed under
+*known-bad* has an id the provider no longer serves (404) or needs credentials
+(401), and no amount of retrying will fix it.
+
+### Skills inside a debate
+
+By default, each question is **routed automatically**: one cheap pass reads
+the catalogue of installed skills (name + description) and answers `NONE`, or
+`<name> | high` when a skill clearly and specifically applies. Abstaining is
+the default posture on purpose — a wrong skill is injected into *both*
+debaters, so it would bias the whole debate twice:
+
+```
+/duo fix the flaky checkout test          routed automatically, header shows skill=tdd
+/duo say hello in one word                routed to nothing (the router abstained)
+/duo auto off                             disable routing for this session
+/duo skills                               list installed skills
+/duo skill tdd how should we slice this migration?   force one skill
+DUO_SKILL=code-review openclaude -p "/duo is this diff safe?"   force one, headless
+```
+
+**Two paths, both visible.** The model router is primary; when it fails (429,
+network, timeout) or answers in prose instead of a bare name, a deterministic
+keyword fallback routes instead, and the header says which path was used
+(`skill=auto(mots-clés)` vs `skill=auto`) so a fallback never reads as a model
+decision. A failed router is never silent — that was the bug that made a
+rate-limited provider look like a well-behaved abstention.
+
+**The router's format contract is its system prompt** ("answer with EXACTLY one
+line", "NONE", "never explain"). On the `cli` backend that prompt travels on
+stdin rather than as a positional argument, because the positional form cannot
+carry one. Without it the router answers in prose, `parseSkillSelection` reads
+the prose as a multi-skill selection, and every question silently degrades to
+the keyword fallback — which still routes, so the feature looks healthy while
+the model router does nothing.
+
+Pin the models for a headless run (recommended — the router and side A both
+use side A's model, and a provider's default can be down):
+
+```
+DUO_BACKEND=cli DUO_PROTOCOL=1 DUO_MODEL_A=opencode/space-bunny-free \
+DUO_MODEL_B=cline-free/muse-spark-1.3-contributor openclaude -p "/duo ..."
+```
+
+Side A's recommendation churns with the free tiers: `longcat-2.5-preview-free`
+follows routing instructions best and is the default pick when it is serving,
+but it returned 429 throughout the 2026-10-10 measurement. Rather than pin one
+id and hope, list a rotation with `DUO_MODEL_A_FALLBACKS` and let a 429 move
+along. `DUO_CLI_TIMEOUT_MS` bounds one turn (default 180s) after a headless run
+hung for ten minutes at the old 600s.
+
+Skills are read from the usual directories (`~/.openclaude/skills`,
+`<project>/.openclaude/skills`), so anything installed with
+`openclaude skills install <path> --global` is immediately usable in `/duo`.
+A routing failure is never fatal — the debate simply runs without a skill.
+Interrupting a debate (Esc) discards it entirely: no partial turns are stored.
+
+### Grounded and adversarial
+
+Debaters are **not** tool-less by default: each side may `Read`, `Glob` and
+`Grep` to ground its answer in what is actually in the repo. Writes, shell and
+everything else stay denied (whitelisted by name, with `requireCanUseTool`, so a
+hook answering "allow" cannot bypass it):
+
+```
+/duo tools off                            text-only turns (no reading)
+```
+
+Each side must also state the peer's strongest counter-argument before
+updating, so real disagreement gets argued instead of smoothed over:
+
+```
+/duo mode neutral                         plain exchange, no adversarial step
+```
+
+### Reading the verdicts
+
+The summary leads with the disagreement, because "A agreed, B refused" is a
+finding, while "consensus" is only an end state:
+
+```
+verdicts: A 2/2 CI · B 0/2 CI · CI CO CI CO
+→ no consensus after 1 round(s) — the disagreement stands
+```
+
+`CI` = `VERDICT: CONSENSUS`, `CO` = `VERDICT: SUITE`. A double `CI` stops the
+debate early; reaching the round limit without it means the disagreement
+stands, which is reported rather than hidden.
+
 ## Web Search and Fetch
 
 [Exa](https://exa.ai) is the default web search backend. With no setup, `WebSearch` on non-Anthropic models uses Exa's keyless free tier, which has per-second and daily limits. Run `/search` to pick a backend, add an API key, or test search:

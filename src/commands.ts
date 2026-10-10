@@ -22,6 +22,7 @@ import cost from './commands/cost/index.js'
 import diff from './commands/diff/index.js'
 import diagnostics from './commands/diagnostics/index.js'
 import dream from './commands/dream/index.js'
+import duo from './commands/duo/index.js'
 import ctx_viz from './commands/ctx_viz/index.js'
 import doctor from './commands/doctor/index.js'
 import onboardGithub from './commands/onboard-github/index.js'
@@ -355,6 +356,7 @@ const COMMANDS = memoize((): Command[] => [
   logo,
   feedback,
   goal,
+  duo, // Structured debate between two models
   review,
   ultrareview,
   rewind,
