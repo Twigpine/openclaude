@@ -408,6 +408,16 @@ export type SDKSessionOptions = {
   allowDangerouslySkipPermissions?: boolean
   abortController?: AbortController
   /**
+   * Environment variables to apply while this session's turns run.
+   *
+   * Applied around each turn and restored afterwards, under the same
+   * process-wide env mutex `query()` uses. Turns belonging to sessions with
+   * different environments therefore serialise rather than overlap.
+   *
+   * A value of `undefined` removes the variable for the turn.
+   */
+  env?: Record<string, string | undefined>
+  /**
    * Callback invoked before each tool use. Return `{ behavior: 'allow' }` to
    * permit the call or `{ behavior: 'deny', message?: string }` to reject it.
    *
