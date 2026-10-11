@@ -53,8 +53,10 @@ import type {
   SDKPermissionRequestMessage,
 } from './shared.js'
 import {
+  acquireEnvMutex,
   assertValidSessionId,
   mapMessageToSDK,
+  releaseEnvMutex,
 } from './shared.js'
 import {
   buildPermissionContext,
@@ -97,6 +99,27 @@ export type SDKSessionOptions = {
   allowDangerouslySkipPermissions?: boolean
   /** AbortController to cancel the session. */
   abortController?: AbortController
+  /**
+   * Environment variables to apply while this session's turns run.
+   *
+   * `QueryOptions` already accepts this; a session could not, so a host that
+   * keeps several sessions in one process had to share one environment
+   * between them. That is a problem when the variable in question selects the
+   * provider: `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and the matching keys
+   * are read per request, so two sessions pointed at different endpoints
+   * silently used whichever was set last.
+   *
+   * Applied around each turn and restored afterwards, under the same
+   * process-wide env mutex `query()` uses, so a session's variables cannot
+   * leak into another session's turn. That mutex also means turns with
+   * different environments SERIALISE rather than overlap: with one process
+   * environment there is no honest alternative, and serialising is the
+   * behaviour that is correct rather than merely concurrent.
+   *
+   * A value of `undefined` removes the variable for the turn.
+   */
+  env?: Record<string, string | undefined>
+
   /**
    * Callback invoked before each tool use. Return `{ behavior: 'allow' }` to
    * permit the call or `{ behavior: 'deny', message?: string }` to reject it.
@@ -260,6 +283,45 @@ class SDKSessionImpl implements SDKSession {
     return this._sessionId
   }
 
+  /**
+   * Apply this session's `env`, remembering what was there.
+   *
+   * Returns the snapshot to restore, or null when the session set no `env` —
+   * in which case the mutex is never taken and a session without `env` costs
+   * nothing.
+   */
+  private async applySessionEnv(): Promise<Record<string, string | undefined> | null> {
+    const overrides = this.options.env
+    if (!overrides || Object.keys(overrides).length === 0) return null
+    await acquireEnvMutex()
+    const snapshot: Record<string, string | undefined> = {}
+    for (const key of Object.keys(overrides)) {
+      snapshot[key] = process.env[key]
+    }
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+    return snapshot
+  }
+
+  /** Put back what `applySessionEnv` found, and let the next turn in. */
+  private restoreSessionEnv(snapshot: Record<string, string | undefined> | null): void {
+    if (!snapshot) return
+    for (const key of Object.keys(snapshot)) {
+      const original = snapshot[key]
+      if (original === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = original
+      }
+    }
+    releaseEnvMutex()
+  }
+
   async *sendMessage(content: string): AsyncIterable<SDKMessage> {
     const sdkContext = {
       sessionId: this._sessionId as SessionId,
@@ -383,7 +445,17 @@ class SDKSessionImpl implements SDKSession {
       })(),
     )
 
-    yield* inner
+    // The session's own environment, for the length of the turn and no
+    // longer. Wrapped around the whole iteration rather than inside the
+    // generator so an abandoned iterator still restores: a consumer that
+    // breaks out of the loop triggers the generator's return, and this
+    // finally runs with it.
+    const envSnapshot = await this.applySessionEnv()
+    try {
+      yield* inner
+    } finally {
+      this.restoreSessionEnv(envSnapshot)
+    }
   }
 
   getMessages(): SDKMessage[] {
