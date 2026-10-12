@@ -209,4 +209,44 @@ describe('DeleteSessionConfirm (rendered)', () => {
       stdout.end()
     }
   })
+
+  test('n cancels without confirming', async () => {
+    const onConfirm = mock(() => {})
+    const onCancel = mock(() => {})
+    const { stdout, stdin, getOutput, root } = await renderConfirm(
+      onConfirm,
+      onCancel,
+    )
+    try {
+      await waitFor(() =>
+        stripAnsi(getOutput()).includes('Delete session?'),
+      )
+      stdin.write('n')
+      await waitFor(() => onCancel.mock.calls.length > 0)
+      expect(onConfirm).not.toHaveBeenCalled()
+    } finally {
+      root.unmount()
+      stdin.end()
+      stdout.end()
+    }
+  })
+
+  test('guide advertises y and n bindings', async () => {
+    const { stdout, stdin, getOutput, root } = await renderConfirm(
+      mock(() => {}),
+      mock(() => {}),
+    )
+    try {
+      await waitFor(() =>
+        stripAnsi(getOutput()).includes('Delete session?'),
+      )
+      const output = stripAnsi(getOutput())
+      expect(output).toContain('Enter/y')
+      expect(output).toContain('Esc/n')
+    } finally {
+      root.unmount()
+      stdin.end()
+      stdout.end()
+    }
+  })
 })

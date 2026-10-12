@@ -1,7 +1,9 @@
 import React from 'react';
 import { Text } from '../ink.js';
 import { useKeybinding } from '../keybindings/useKeybinding.js';
+import { Byline } from './design-system/Byline.js';
 import { Dialog } from './design-system/Dialog.js';
+import { KeyboardShortcutHint } from './design-system/KeyboardShortcutHint.js';
 
 type Props = {
   sessionTitle: string;
@@ -24,7 +26,7 @@ export function DeleteSessionConfirm({
       ? `${sessionId.slice(0, 8)}…${sessionId.slice(-6)}`
       : sessionId;
   return (
-    <Dialog title="Delete session?" color="error" onCancel={onCancel}>
+    <Dialog title="Delete session?" color="error" onCancel={onCancel} inputGuide={exitState => exitState.pending ? <Text>Press {exitState.keyName} again to exit</Text> : <Byline><KeyboardShortcutHint shortcut="Enter/y" action="confirm" /><KeyboardShortcutHint shortcut="Esc/n" action="cancel" /></Byline>}>
       <Text>
         {sessionTitle} ({shortId})
       </Text>

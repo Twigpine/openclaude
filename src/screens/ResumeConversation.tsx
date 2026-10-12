@@ -424,9 +424,9 @@ export function ResumeConversation({
   }
   const picker = <Box flexDirection="column">
       {resumeErrorBanner}
-      {deleteBanner}
       {deletingLog && <DeleteSessionConfirm sessionTitle={getResumeLogDisplayTitle(deletingLog)} sessionId={getSessionIdFromLog(deletingLog) ?? ''} onConfirm={() => void handleDeleteConfirm()} onCancel={handleDeleteCancel} />}
       <LogSelector logs={filteredLogs} maxHeight={rows} onCancel={onCancel} onSelect={onSelect} onDeleteRequest={handleDeleteRequest} isInputDisabled={deletingLog !== null} onLogsChanged={isResumeWithRenameEnabled ? () => loadLogs(showAllProjects) : undefined} onLoadMore={loadMoreLogs} initialSearchQuery={initialSearchQuery} showAllProjects={showAllProjects} onToggleAllProjects={handleToggleAllProjects} onAgenticSearch={agenticSessionSearch} />
+      {deleteBanner}
     </Box>;
   // Run the picker on the alternate screen everywhere except tmux -CC, where
   // alt-screen is known to corrupt terminal state. Cancelling then restores
