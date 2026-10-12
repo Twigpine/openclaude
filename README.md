@@ -17,7 +17,7 @@ Use OpenAI-compatible APIs, Gemini, GitHub Models, Codex OAuth, Codex, Ollama, A
 [![npm downloads](https://img.shields.io/npm/dm/@twigpine/openclaude)](https://www.npmjs.com/package/@twigpine/openclaude)
 [![Discussions](https://img.shields.io/badge/discussions-open-7c3aed)](https://github.com/Twigpine/openclaude/discussions)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/k68zFR6AcB)
-[![X](https://img.shields.io/badge/X-@gitlawb-000000?logo=x&logoColor=white)](https://x.com/gitlawb)
+[![X](https://img.shields.io/badge/X-@twigpine-000000?logo=x&logoColor=white)](https://x.com/twigpine)
 [![Security Policy](https://img.shields.io/badge/security-policy-0f766e)](SECURITY.md)
 [![License](https://img.shields.io/badge/license-MIT-2563eb)](LICENSE)
 
@@ -534,7 +534,7 @@ If you believe you found a security issue, see [SECURITY.md](SECURITY.md).
 - Use [GitHub Discussions](https://github.com/Twigpine/openclaude/discussions) for Q&A, ideas, and community conversation
 - Use [GitHub Issues](https://github.com/Twigpine/openclaude/issues) for confirmed bugs and actionable feature work
 - Join the [Discord](https://discord.gg/k68zFR6AcB) to chat with the community in real time
-- Follow [@gitlawb on X](https://x.com/gitlawb) for updates and announcements
+- Follow [@twigpine on X](https://x.com/twigpine) for updates and announcements
 
 ## Contributing
 

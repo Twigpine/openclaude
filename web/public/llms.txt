@@ -35,4 +35,4 @@ OpenClaude originated from the Claude Code codebase and has since been substanti
 
 - [Discord](https://discord.gg/k68zFR6AcB)
 - [GitHub Discussions](https://github.com/Twigpine/openclaude/discussions)
-- [X / Twitter](https://x.com/gitlawb)
+- [X / Twitter](https://x.com/twigpine)

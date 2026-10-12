@@ -3,7 +3,6 @@ import { withMockMacro } from 'src/test/mockMacro.js'
 import {
   getGlobalUpdateFailureHint,
   writePackageManagerUpdateGuidance,
-  writePackageRenamedNote,
 } from './update.js'
 
 describe('getGlobalUpdateFailureHint', () => {
@@ -59,39 +58,4 @@ describe('writePackageManagerUpdateGuidance', () => {
       }
     },
   )
-})
-
-describe('writePackageRenamedNote', () => {
-  function capture(packageUrl: string): { output: string; wrote: boolean } {
-    let output = ''
-    const wrote = withMockMacro({ PACKAGE_URL: packageUrl }, () =>
-      writePackageRenamedNote({
-        write: value => {
-          output += value
-        },
-        bold: value => value,
-        yellow: value => value,
-      }),
-    )
-    return { output, wrote }
-  }
-
-  test('tells legacy-scope installs where the package moved', () => {
-    const { output, wrote } = capture('@gitlawb/openclaude')
-
-    // update() stops after the note when this is true.
-    expect(wrote).toBe(true)
-    expect(output).toContain('OpenClaude has moved to @twigpine/openclaude.')
-    // Uninstall first: installing the new package over the old one fails.
-    expect(output.indexOf('npm uninstall -g @gitlawb/openclaude')).toBeGreaterThan(-1)
-    expect(output.indexOf('npm uninstall -g @gitlawb/openclaude')).toBeLessThan(
-      output.indexOf('npm install -g @twigpine/openclaude@latest'),
-    )
-    // The npm commands are wrong for other global package managers; say so.
-    expect(output).toContain('bun, pnpm or yarn')
-  })
-
-  test('writes nothing and lets the update proceed for the current package', () => {
-    expect(capture('@twigpine/openclaude')).toEqual({ output: '', wrote: false })
-  })
 })

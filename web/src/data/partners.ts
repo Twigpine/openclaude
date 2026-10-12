@@ -57,7 +57,7 @@ export const partners: Partner[] = [
 export const community = [
   { name: 'github', url: 'https://github.com/Twigpine/openclaude', label: 'star the repo' },
   { name: 'discord', url: 'https://discord.gg/k68zFR6AcB', label: 'join the discord' },
-  { name: 'x', url: 'https://x.com/gitlawb', label: 'follow @gitlawb' },
+  { name: 'x', url: 'https://x.com/twigpine', label: 'follow @twigpine' },
   { name: 'discussions', url: 'https://github.com/Twigpine/openclaude/discussions', label: 'open a discussion' },
   { name: 'trendshift', url: 'https://trendshift.io/repositories/25807', label: 'featured on trendshift' },
 ]

@@ -22,10 +22,6 @@ import {
 } from '../../utils/nativeInstaller/index.js'
 import type { PackageManager } from '../../utils/nativeInstaller/packageManagers.js'
 import { getPackageManagerUpdateGuidance } from '../../utils/packageManagerUpdateGuidance.js'
-import {
-  getPackageRenamedMessage,
-  isLegacyPackageBuild,
-} from '../../utils/packageRename.js'
 import { shouldRemoveInstalledSymlinkForNpmUpdate } from '../../utils/autoUpdaterRouting.js'
 import { resolveUpdateStrategy } from '../../utils/updateStrategy.js'
 
@@ -362,13 +358,6 @@ export async function call(
   _context: unknown,
   args: string,
 ): Promise<React.ReactNode> {
-  // The final build published under the pre-rename package name has nothing to
-  // update to; say where the package went instead of reporting a no-op update.
-  if (isLegacyPackageBuild()) {
-    onDone(getPackageRenamedMessage())
-    return null
-  }
-
   const tokens = (args ?? '').trim().split(/\s+/).filter(Boolean)
   const force = tokens.includes('--force')
   const nonFlag = tokens.filter(token => !token.startsWith('--'))

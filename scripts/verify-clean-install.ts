@@ -46,10 +46,8 @@ import {
   validateRuntimeDependencyContract,
 } from './externalsValidation.js'
 
-// Read from the manifest instead of repeated here: the release workflow also
-// verifies and publishes this tree once under the legacy @gitlawb scope (the
-// publish-npm-legacy-scope job in release.yml), and every check below has to
-// look for whichever name the tarball was packed with.
+// Read from the manifest instead of repeated here, so every check below looks
+// for the name the tarball was actually packed with.
 const PACKAGE_NAME: string = JSON.parse(
   readFileSync(join(import.meta.dir, '..', 'package.json'), 'utf8'),
 ).name
