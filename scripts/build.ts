@@ -18,6 +18,10 @@ import { canonicalStub, collectBundleStubs } from './stubMarkerGuard.js'
 const nodeRequire = createRequire(import.meta.url)
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
 const version = pkg.version
+// Baked into the update hints, the doctor checks and the renamed-package
+// notice, so it has to be the name the tarball is actually published under —
+// derive it instead of repeating it.
+const packageName = pkg.name
 const reactPackageDir = dirname(nodeRequire.resolve('react/package.json'))
 const reactReconcilerPackageDir = dirname(
   nodeRequire.resolve('react-reconciler/package.json'),
@@ -206,7 +210,7 @@ result = await Bun.build({
       JSON.stringify('report the issue at https://github.com/Twigpine/openclaude/issues'),
     'MACRO.FEEDBACK_CHANNEL':
       JSON.stringify('https://github.com/Twigpine/openclaude/issues'),
-    'MACRO.PACKAGE_URL': JSON.stringify('@gitlawb/openclaude'),
+    'MACRO.PACKAGE_URL': JSON.stringify(packageName),
     'MACRO.NATIVE_PACKAGE_URL': 'undefined',
     'MACRO.VERSION_CHANGELOG': 'undefined',
   },
@@ -549,7 +553,7 @@ sdkResult = await Bun.build({
       JSON.stringify('report the issue at https://github.com/Twigpine/openclaude/issues'),
     'MACRO.FEEDBACK_CHANNEL':
       JSON.stringify('https://github.com/Twigpine/openclaude/issues'),
-    'MACRO.PACKAGE_URL': JSON.stringify('@gitlawb/openclaude'),
+    'MACRO.PACKAGE_URL': JSON.stringify(packageName),
     'MACRO.NATIVE_PACKAGE_URL': 'undefined',
     'MACRO.VERSION_CHANGELOG': 'undefined',
   },

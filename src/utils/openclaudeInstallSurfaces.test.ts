@@ -179,7 +179,7 @@ test('install command displays openclaude.exe path on Windows', async () => {
 
 test('native installer uses openclaude launcher for OpenClaude package', async () => {
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
   }
 
   const { getBinaryName, getExecutableName } = await importFreshInstaller()
@@ -202,7 +202,7 @@ test('native installer preserves claude launcher for Anthropic package', async (
 
 test('deep-link protocol resolver uses openclaude launcher for OpenClaude package', async () => {
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
   }
 
   const { getProtocolBinaryName } = await importFreshProtocolRegistration()
@@ -215,8 +215,8 @@ test('install command repairs launcher after npm cleanup before final check', as
   // A native distribution must be configured for the native install flow to
   // run at all; without it the command short-circuits to the npm-only path.
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
-    NATIVE_PACKAGE_URL: '@gitlawb/openclaude-native',
+    PACKAGE_URL: '@twigpine/openclaude',
+    NATIVE_PACKAGE_URL: '@twigpine/openclaude-native',
     DISPLAY_VERSION: '0.0.0-test',
   }
 
@@ -304,8 +304,8 @@ test('cleanupNpmInstallations removes only openclaude local install dir', async 
   const openClaudeLocalDir = join(testHome, '.openclaude', 'local')
   const claudeLocalDir = join(testHome, '.claude', 'local')
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
-    NATIVE_PACKAGE_URL: '@gitlawb/openclaude-native',
+    PACKAGE_URL: '@twigpine/openclaude',
+    NATIVE_PACKAGE_URL: '@twigpine/openclaude-native',
   }
   process.env.HOME = testHome
   process.env.USERPROFILE = testHome
@@ -322,7 +322,7 @@ test('cleanupNpmInstallations removes only openclaude local install dir', async 
 
     await expect(fsPromises.stat(openClaudeLocalDir)).rejects.toThrow()
     await expect(fsPromises.stat(claudeLocalDir)).resolves.toBeTruthy()
-    expect(npmUninstallPackages).toContain('@gitlawb/openclaude')
+    expect(npmUninstallPackages).toContain('@twigpine/openclaude')
     expect(npmUninstallPackages).not.toContain('@anthropic-ai/claude-code')
   } finally {
     await fsPromises.rm(testHome, { recursive: true, force: true })
@@ -336,8 +336,8 @@ test('cleanupNpmInstallations manual fallback removes openclaude npm shim', asyn
   const npmPrefix = join(testHome, '.npm-global')
   const shimPath = join(npmPrefix, 'bin', 'openclaude')
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
-    NATIVE_PACKAGE_URL: '@gitlawb/openclaude-native',
+    PACKAGE_URL: '@twigpine/openclaude',
+    NATIVE_PACKAGE_URL: '@twigpine/openclaude-native',
   }
   process.env.HOME = testHome
   process.env.USERPROFILE = testHome
@@ -369,7 +369,7 @@ test('cleanupNpmInstallations manual fallback removes openclaude npm shim', asyn
 
 test('installLatest is inert without a native distribution', async () => {
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
     NATIVE_PACKAGE_URL: undefined,
   }
   recordedDownloadCalls = []
@@ -387,7 +387,7 @@ test('installLatest is inert without a native distribution', async () => {
 
 test('repairNativeLauncher is inert without a native distribution', async () => {
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
     NATIVE_PACKAGE_URL: undefined,
   }
 
@@ -402,7 +402,7 @@ test('cleanupNpmInstallations keeps the npm install without a native distributio
   const testHome = await fsPromises.mkdtemp(join(tmpdir(), 'openclaude-npm-only-'))
   const openClaudeLocalDir = join(testHome, '.openclaude', 'local')
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
     NATIVE_PACKAGE_URL: undefined,
   }
   process.env.HOME = testHome
@@ -426,7 +426,7 @@ test('cleanupNpmInstallations keeps the npm install without a native distributio
 
 test('checkInstall reports nothing without a native distribution', async () => {
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
     NATIVE_PACKAGE_URL: undefined,
   }
   delete process.env.DISABLE_INSTALLATION_CHECKS
@@ -438,7 +438,7 @@ test('checkInstall reports nothing without a native distribution', async () => {
 
 test('cleanupOldVersions leaves the shared versions directory alone without a native distribution', async () => {
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
     NATIVE_PACKAGE_URL: undefined,
   }
 
@@ -477,7 +477,7 @@ test('cleanupOldVersions leaves the shared versions directory alone without a na
 
 test('install command skips the native installer without a native distribution', async () => {
   ;(globalThis as Record<string, unknown>).MACRO = {
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
     NATIVE_PACKAGE_URL: undefined,
     DISPLAY_VERSION: '0.0.0-test',
   }

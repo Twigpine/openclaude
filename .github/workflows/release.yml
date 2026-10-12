@@ -29,13 +29,56 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           release-type: node
 
+  # The @gitlawb -> @twigpine package rename owes the old name exactly one
+  # final release (see publish-npm-legacy-scope below). This decides whether
+  # that is still owed, so it can never be published twice: it is owed only
+  # while the old name's latest version is still the last pre-rename one, or is
+  # this very release (a re-run after its publish already went through).
+  legacy-scope-gate:
+    name: Check whether the final @gitlawb release is still owed
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      owed: ${{ steps.gate.outputs.owed }}
+    steps:
+      - name: Compare the old package's latest version
+        id: gate
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+          LAST_PRE_RENAME_VERSION: 0.31.0
+        run: |
+          set -euo pipefail
+
+          latest=""
+          for attempt in 1 2 3; do
+            latest="$(npm view @gitlawb/openclaude@latest version 2>/dev/null || true)"
+            if [ -n "$latest" ]; then
+              break
+            fi
+            sleep 10
+          done
+          if [ -z "$latest" ]; then
+            echo "Could not read @gitlawb/openclaude@latest from the registry" >&2
+            exit 1
+          fi
+
+          if [ "$latest" = "$LAST_PRE_RENAME_VERSION" ] || [ "$latest" = "$EXPECTED_VERSION" ]; then
+            owed=true
+          else
+            owed=false
+          fi
+          echo "@gitlawb/openclaude@latest is ${latest}; final legacy release owed: ${owed}"
+          echo "owed=${owed}" >> "$GITHUB_OUTPUT"
+
   # Zero-warning install gate: pack the release tag and install it globally in
   # a sandbox (cold + upgrade scenarios) on the supported Node floor (22 →
   # npm 10) and current (24 → npm 11), whose warning output differs. Publish
   # is blocked unless the real `npm install -g` experience is clean.
   install-verify:
     name: Verify clean npm install (Node ${{ matrix.node-version }})
-    needs: release-please
+    needs: [release-please, legacy-scope-gate]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -69,6 +112,24 @@ jobs:
 
       - name: Verify zero-warning global install
         run: bun run install:verify
+
+      # The final @gitlawb release is this same tree with only the package name
+      # changed. Verify it here too, before anything is published: once the new
+      # name is out it cannot be taken back, and in the first release this is
+      # the only real upgrade test (nothing is published under the new name yet,
+      # so its own upgrade scenario is skipped).
+      - name: Rebuild under the legacy package name
+        if: ${{ needs.legacy-scope-gate.outputs.owed == 'true' }}
+        run: |
+          npm pkg set name=@gitlawb/openclaude
+          bun run build
+
+      - name: Verify the legacy build installs clean and announces the move
+        if: ${{ needs.legacy-scope-gate.outputs.owed == 'true' }}
+        run: |
+          set -euo pipefail
+          bun run install:verify
+          node dist/cli.mjs update | grep -F "OpenClaude has moved to @twigpine/openclaude"
 
   publish-npm:
     name: Publish to npm
@@ -121,8 +182,157 @@ jobs:
           unset NODE_AUTH_TOKEN
           echo "NODE_AUTH_TOKEN=" >> "$GITHUB_ENV"
 
+      # Tokenless: npm authenticates this job through trusted publishing (OIDC)
+      # and attaches provenance from the same identity. That only works for a
+      # package that already exists with a trusted publisher attached, so
+      # @twigpine/openclaude was created once by hand as an empty 0.0.0
+      # placeholder before its first release from here.
+      #
+      # --ignore-scripts publishes the dist/ that was built and verified above
+      # instead of rebuilding it in `prepack`. Skipping a version that is
+      # already published makes "Re-run failed jobs" safe.
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          if [ "$(npm view "@twigpine/openclaude@${version}" version 2>/dev/null || true)" = "${version}" ]; then
+            echo "@twigpine/openclaude@${version} is already on the registry; not publishing again."
+            exit 0
+          fi
+
+          npm publish --access public --provenance --ignore-scripts
+
+      - name: Verify npm latest dist-tag
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${EXPECTED_VERSION}" ]; then
+            echo "release-please did not provide an expected version" >&2
+            exit 1
+          fi
+
+          for attempt in $(seq 1 30); do
+            published_version="$(npm view @twigpine/openclaude version 2>/dev/null || true)"
+            latest_tag="$(npm view @twigpine/openclaude dist-tags.latest 2>/dev/null || true)"
+            latest_version="$(npm view @twigpine/openclaude@latest version 2>/dev/null || true)"
+
+            echo "Attempt ${attempt}: version=${published_version:-<empty>} latest=${latest_tag:-<empty>} @latest=${latest_version:-<empty>} expected=${EXPECTED_VERSION}"
+
+            if [ "$published_version" = "$EXPECTED_VERSION" ] && \
+               [ "$latest_tag" = "$EXPECTED_VERSION" ] && \
+               [ "$latest_version" = "$EXPECTED_VERSION" ]; then
+              echo "npm latest verified for @twigpine/openclaude@${EXPECTED_VERSION}"
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "npm latest dist-tag did not resolve to ${EXPECTED_VERSION}" >&2
+          echo "Observed package version: ${published_version:-<empty>}" >&2
+          echo "Observed dist-tags.latest: ${latest_tag:-<empty>}" >&2
+          echo "Observed @latest version: ${latest_version:-<empty>}" >&2
+          exit 1
+
+      - name: Release summary
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          {
+            echo "## Released ${{ needs.release-please.outputs.tag_name }}"
+            echo
+            echo "- npm: https://www.npmjs.com/package/@twigpine/openclaude"
+            echo "- GitHub: https://github.com/Twigpine/openclaude/releases/tag/${{ needs.release-please.outputs.tag_name }}"
+            bun scripts/npm-publish-report.ts @twigpine/openclaude "${EXPECTED_VERSION}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The one final release under the old @gitlawb name, for the @gitlawb ->
+  # @twigpine package rename. Shipped builds do not auto-update, so people
+  # update by re-running the install command — and anyone still typing the old
+  # name (habit, shell history, an old tutorial) lands on whatever is latest
+  # there. This publishes the same release once under that name, so what they
+  # land on tells them at every launch that the package moved and how to switch
+  # (src/utils/packageRename.ts). The build bakes in whatever name package.json
+  # carries, so renaming before the build is all it takes.
+  #
+  # legacy-scope-gate keeps this to a single release: once the old name's
+  # latest is no longer the pre-rename version, this job never runs again.
+  # After it ships, `npm deprecate` the old package (that warning is what
+  # people see when they run the old install command), then delete this job,
+  # the gate, and the legacy steps in install-verify.
+  publish-npm-legacy-scope:
+    name: Publish final release to npm (legacy @gitlawb scope)
+    needs: [release-please, legacy-scope-gate, publish-npm]
+    if: ${{ needs.release-please.outputs.release_created == 'true' && needs.legacy-scope-gate.outputs.owed == 'true' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Rename package to the legacy scope
+        run: npm pkg set name=@gitlawb/openclaude
+
+      # Unit tests already ran against this exact source in publish-npm; only
+      # the package name differs here, so rebuild and re-verify the artifact.
+      - name: Smoke test
+        run: bun run smoke
+
+      # The upgrade scenario is the path people on the old name actually take:
+      # the previously published @gitlawb version, then this one over it.
+      - name: Verify zero-warning global install
+        run: bun run install:verify
+
+      # Proves the old name really got baked in: only then does the build say
+      # the package moved, instead of behaving like a normal release.
+      - name: Verify the build announces the move
+        run: |
+          set -euo pipefail
+          node dist/cli.mjs update | grep -F "OpenClaude has moved to @twigpine/openclaude"
+
+      - name: Clear token auth for trusted publishing
+        run: |
+          unset NODE_AUTH_TOKEN
+          echo "NODE_AUTH_TOKEN=" >> "$GITHUB_ENV"
+
+      # Same tokenless publish and re-run rules as publish-npm. The old
+      # package's trusted publisher was set up before the GitHub org was renamed
+      # from Gitlawb to Twigpine, so it needs an entry for Twigpine/openclaude
+      # for this to authenticate.
+      - name: Publish to npm
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          if [ "$(npm view "@gitlawb/openclaude@${version}" version 2>/dev/null || true)" = "${version}" ]; then
+            echo "@gitlawb/openclaude@${version} is already on the registry; not publishing again."
+            exit 0
+          fi
+
+          npm publish --access public --provenance --ignore-scripts
 
       - name: Verify npm latest dist-tag
         env:
@@ -159,13 +369,16 @@ jobs:
           exit 1
 
       - name: Release summary
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
         run: |
           {
-            echo "## Released ${{ needs.release-please.outputs.tag_name }}"
+            echo "## Final legacy-scope release ${{ needs.release-please.outputs.tag_name }}"
             echo
-            echo "- npm: https://www.npmjs.com/package/@gitlawb/openclaude"
-            echo "- GitHub: https://github.com/Twigpine/openclaude/releases/tag/${{ needs.release-please.outputs.tag_name }}"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "- npm (legacy scope): https://www.npmjs.com/package/@gitlawb/openclaude"
+            bun scripts/npm-publish-report.ts @gitlawb/openclaude "${EXPECTED_VERSION}"
+            echo "- Next: run \`npm deprecate @gitlawb/openclaude\` with the switch commands, then delete this job and its gate"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   docker:
     name: Build & Push Docker Image

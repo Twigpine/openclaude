@@ -4,8 +4,8 @@ export const SITE = {
   title: 'openclaude — open-source coding agent CLI for any model',
   description:
     'Open-source coding agent that runs in your terminal and talks to any model: OpenAI, Gemini, Ollama, GitHub Models, and 200+ more. One install, every provider.',
-  installCommand: 'npm install -g @gitlawb/openclaude@latest',
-  npmUrl: 'https://www.npmjs.com/package/@gitlawb/openclaude',
+  installCommand: 'npm install -g @twigpine/openclaude@latest',
+  npmUrl: 'https://www.npmjs.com/package/@twigpine/openclaude',
   github: 'https://github.com/Twigpine/openclaude',
   releasesUrl: 'https://github.com/Twigpine/openclaude/releases',
   twigpine: 'https://twigpine.com',

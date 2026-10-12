@@ -1,5 +1,5 @@
 {
-  "name": "@gitlawb/openclaude",
+  "name": "@twigpine/openclaude",
   "version": "0.31.0",
   "description": "OpenClaude opens coding-agent workflows to any LLM — OpenAI, Gemini, DeepSeek, Ollama, and 200+ models",
   "type": "module",

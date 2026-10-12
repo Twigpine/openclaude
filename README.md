@@ -14,7 +14,7 @@ Use OpenAI-compatible APIs, Gemini, GitHub Models, Codex OAuth, Codex, Ollama, A
 
 [![PR Checks](https://github.com/Twigpine/openclaude/actions/workflows/pr-checks.yml/badge.svg?branch=main)](https://github.com/Twigpine/openclaude/actions/workflows/pr-checks.yml)
 [![Release](https://img.shields.io/github/v/tag/Twigpine/openclaude?label=release&color=0ea5e9)](https://github.com/Twigpine/openclaude/tags)
-[![npm downloads](https://img.shields.io/npm/dm/@gitlawb/openclaude)](https://www.npmjs.com/package/@gitlawb/openclaude)
+[![npm downloads](https://img.shields.io/npm/dm/@twigpine/openclaude)](https://www.npmjs.com/package/@twigpine/openclaude)
 [![Discussions](https://img.shields.io/badge/discussions-open-7c3aed)](https://github.com/Twigpine/openclaude/discussions)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/k68zFR6AcB)
 [![X](https://img.shields.io/badge/X-@gitlawb-000000?logo=x&logoColor=white)](https://x.com/gitlawb)
@@ -130,8 +130,23 @@ OpenClaude requires Node.js `>=22.0.0` for npm installs and runtime. Bun is
 only needed for source builds and local development.
 
 ```bash
-npm install -g @gitlawb/openclaude@latest
+npm install -g @twigpine/openclaude@latest
 ```
+
+**Upgrading from `@gitlawb/openclaude`?** The package moved to the `@twigpine`
+scope and the old one is no longer updated. Both packages provide the
+`openclaude` command, so npm refuses to install one over the other — remove
+the old one first:
+
+```bash
+npm uninstall -g @gitlawb/openclaude
+npm install -g @twigpine/openclaude@latest
+```
+
+Your settings and sessions (`~/.openclaude` and `~/.openclaude.json`) are not
+touched. Don't use `--force` to install over the old package instead: a later
+uninstall of the old one would then remove the `openclaude` command. If that
+happens, uninstall `@twigpine/openclaude` and install it again.
 
 If you're on Arch Linux, you can install OpenClaude from the community-maintained [AUR package](https://aur.archlinux.org/packages/openclaude):
 ```bash
@@ -144,8 +159,8 @@ If the install later reports `ripgrep not found`, install ripgrep system-wide an
 
 ```bash
 openclaude --version
-npm view @gitlawb/openclaude dist-tags
-npm install -g @gitlawb/openclaude@latest
+npm view @twigpine/openclaude dist-tags
+npm install -g @twigpine/openclaude@latest
 ```
 
 ### Start

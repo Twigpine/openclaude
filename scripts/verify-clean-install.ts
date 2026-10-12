@@ -1,5 +1,5 @@
 /**
- * End-to-end verification that `npm install -g @gitlawb/openclaude` is a
+ * End-to-end verification that `npm install -g @twigpine/openclaude` is a
  * zero-warning experience — the runtime half of the install contract whose
  * static half lives in externalsValidation.ts (RUNTIME_DEPENDENCY_CONTRACT).
  *
@@ -8,7 +8,7 @@
  *                       the working tree with `npm pack --ignore-scripts`
  *                       (dist/ must already be built — CI builds it first).
  *   --published [spec]  Verify the real registry artifact (default
- *                       @gitlawb/openclaude@latest). Used by the scheduled
+ *                       @twigpine/openclaude@latest). Used by the scheduled
  *                       install-hygiene workflow to catch registry drift
  *                       (e.g. a transitive dep deprecated after we shipped).
  *
@@ -46,7 +46,13 @@ import {
   validateRuntimeDependencyContract,
 } from './externalsValidation.js'
 
-const PACKAGE_NAME = '@gitlawb/openclaude'
+// Read from the manifest instead of repeated here: the release workflow also
+// verifies and publishes this tree once under the legacy @gitlawb scope (the
+// publish-npm-legacy-scope job in release.yml), and every check below has to
+// look for whichever name the tarball was packed with.
+const PACKAGE_NAME: string = JSON.parse(
+  readFileSync(join(import.meta.dir, '..', 'package.json'), 'utf8'),
+).name
 const MAX_TARBALL_BYTES = 12_000_000 // current tarball is ~8.8MB; catch payload blowups
 const INSTALL_RETRIES = 3
 const IS_WINDOWS = process.platform === 'win32'

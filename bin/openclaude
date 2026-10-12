@@ -93,7 +93,7 @@ function relaunchWithLongSessionHeapIfNeeded() {
   // Preserve the original argv[1] (which may be a symlink like
   // /usr/local/bin/openclaude) instead of resolving it via import.meta.url.
   // Resolving symlinks here defeats install-type detection downstream: a real
-  // npm global install (symlink → node_modules/@gitlawb/openclaude/bin) would
+  // npm global install (symlink → node_modules/@twigpine/openclaude/bin) would
   // resolve to the package's real path inside node_modules, which is fine, but
   // a `npm install -g .` dev symlink resolves back to the repo and looks like
   // a source-tree dev run. Using argv[1] keeps the invocation path stable so

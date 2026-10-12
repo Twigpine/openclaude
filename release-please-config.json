@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "package-name": "@gitlawb/openclaude",
+      "package-name": "@twigpine/openclaude",
       "bump-minor-pre-major": true,
       "include-v-in-tag": true
     }

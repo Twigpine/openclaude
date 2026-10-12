@@ -7,7 +7,7 @@ import {
 } from './globalPackageManager.js'
 
 describe('getGlobalInstallArgs', () => {
-  const spec = '@gitlawb/openclaude@latest'
+  const spec = '@twigpine/openclaude@latest'
   const cases: Array<[GlobalPackageManager, string[]]> = [
     ['npm', ['install', '-g', spec]],
     ['pnpm', ['add', '-g', spec]],
@@ -21,10 +21,10 @@ describe('getGlobalInstallArgs', () => {
   }
 
   test('passes an explicit version spec through unchanged', () => {
-    expect(getGlobalInstallArgs('npm', '@gitlawb/openclaude@1.2.3')).toEqual([
+    expect(getGlobalInstallArgs('npm', '@twigpine/openclaude@1.2.3')).toEqual([
       'install',
       '-g',
-      '@gitlawb/openclaude@1.2.3',
+      '@twigpine/openclaude@1.2.3',
     ])
   })
 })
@@ -46,7 +46,7 @@ describe('selectOwningPackageManager', () => {
   test('matches the package manager whose root contains the binary', () => {
     expect(
       selectOwningPackageManager(
-        '/home/u/.local/share/pnpm/global/5/node_modules/@gitlawb/openclaude/cli.js',
+        '/home/u/.local/share/pnpm/global/5/node_modules/@twigpine/openclaude/cli.js',
         [
           { pm: 'npm', root: '/usr/local/lib/node_modules' },
           {

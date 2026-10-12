@@ -56,7 +56,7 @@ export const SDK_ONLY_EXTERNALS: string[] = [
 
 // Optional runtime packages: dynamically imported only when a provider/feature
 // needs them, and NOT listed in package.json `dependencies`, so a default
-// `npm install -g @gitlawb/openclaude` stays small and warning-free.
+// `npm install -g @twigpine/openclaude` stays small and warning-free.
 //
 // Two shapes (see RUNTIME_INDIRECTION_ONLY_EXTERNALS below):
 //   - Most stay external in both bundles (in COMMON_EXTERNALS) so esbuild never

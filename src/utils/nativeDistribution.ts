@@ -2,7 +2,7 @@
  * True when this build ships its own native binary distribution, i.e. the
  * build-time `MACRO.NATIVE_PACKAGE_URL` define is set.
  *
- * OpenClaude (`@gitlawb/openclaude`) is distributed only as an npm package and
+ * OpenClaude (`@twigpine/openclaude`) is distributed only as an npm package and
  * sets `NATIVE_PACKAGE_URL` to `undefined` in both define blocks of
  * `scripts/build.ts`. Without this gate, the native installer inherited from
  * upstream downloads the first-party Claude Code binary from Anthropic's GCS

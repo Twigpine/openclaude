@@ -6,7 +6,7 @@
 # install), a platform-specific optional package (@vscode/ripgrep-*) changes,
 # or a new npm version alters behavior. None of that touches a file in this
 # repo, so no PR or release gate can catch it — only re-verifying the real
-# `npm install -g @gitlawb/openclaude@latest` against the live registry does.
+# `npm install -g @twigpine/openclaude@latest` against the live registry does.
 #
 # The OS matrix matters: each platform resolves a different ripgrep optional
 # package, so a Linux-only check is blind to what macOS/Windows users install.

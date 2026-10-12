@@ -5,6 +5,7 @@ import { SITE } from '../../data/site'
 const toc = [
   { id: 'requirements', label: 'requirements' },
   { id: 'install', label: 'install with npm' },
+  { id: 'upgrading-from-gitlawb', label: 'upgrading from @gitlawb' },
   { id: 'arch-linux', label: 'arch linux (aur)' },
   { id: 'verify', label: 'verify the install' },
   { id: 'update', label: 'update' },
@@ -34,6 +35,22 @@ const toc = [
     fnm, or Homebrew node all work).
   </p>
 
+  <h2 id="upgrading-from-gitlawb">upgrading from @gitlawb/openclaude</h2>
+  <p>
+    The package moved to the <code>@twigpine</code> scope and the old one is no longer
+    updated. Both packages provide the <code>openclaude</code> command, so npm refuses to
+    install one over the other. Remove the old package first:
+  </p>
+  <pre><code>npm uninstall -g @gitlawb/openclaude
+{SITE.installCommand}</code></pre>
+  <p>
+    Your settings and sessions (<code>~/.openclaude</code> and
+    <code>~/.openclaude.json</code>) are not touched. Don't use <code>--force</code> to
+    install over the old package instead: a later uninstall of the old one would then
+    remove the <code>openclaude</code> command. If that happens, uninstall
+    <code>@twigpine/openclaude</code> and install it again.
+  </p>
+
   <h2 id="arch-linux">arch linux (aur)</h2>
   <p>
     A community-maintained <a href="https://aur.archlinux.org/packages/openclaude" rel="noopener">AUR package</a> is available:
@@ -45,7 +62,7 @@ const toc = [
   <p>
     To check which version is the latest published release:
   </p>
-  <pre><code>npm view @gitlawb/openclaude dist-tags</code></pre>
+  <pre><code>npm view @twigpine/openclaude dist-tags</code></pre>
 
   <h2 id="update">update</h2>
   <p>Re-run the install command — <code>@latest</code> always resolves to the newest release:</p>

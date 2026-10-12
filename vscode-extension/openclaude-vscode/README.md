@@ -29,7 +29,7 @@ A practical VS Code companion for OpenClaude with a project-aware **Control Cent
 ## Requirements
 
 - VS Code `1.95+`
-- `openclaude` available in your terminal PATH (`npm install -g @gitlawb/openclaude@latest`)
+- `openclaude` available in your terminal PATH (`npm install -g @twigpine/openclaude@latest`)
 
 ## Commands
 

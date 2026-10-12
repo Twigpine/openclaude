@@ -32,6 +32,13 @@ import {
   getPackageManagerUpdateGuidance,
   type PackageManagerUpdateGuidance,
 } from 'src/utils/packageManagerUpdateGuidance.js'
+import {
+  isLegacyPackageBuild,
+  PACKAGE_RENAMED_DETAIL,
+  PACKAGE_RENAMED_HEADLINE,
+  PACKAGE_SWITCH_COMMANDS,
+  PACKAGE_SWITCH_OTHER_MANAGERS,
+} from 'src/utils/packageRename.js'
 import { writeToStdout } from 'src/utils/process.js'
 import { gte } from 'src/utils/semver.js'
 import { shouldRemoveInstalledSymlinkForNpmUpdate } from 'src/utils/autoUpdaterRouting.js'
@@ -47,6 +54,35 @@ export function getGlobalUpdateFailureHint(
   return nativeDistributionAvailable
     ? 'Or consider using native installation with: openclaude install\n'
     : `Or update manually with:\n  npm install -g ${MACRO.PACKAGE_URL}@latest\n`
+}
+
+/**
+ * The final build published under the pre-rename package name has nothing to
+ * update to, so say where the package went. Returns whether it wrote the note
+ * (false, and no output, for every other build).
+ */
+export function writePackageRenamedNote(
+  deps: {
+    isLegacyBuild?: boolean
+    write?: (value: string) => void
+    bold?: (value: string) => string
+    yellow?: (value: string) => string
+  } = {},
+): boolean {
+  if (!(deps.isLegacyBuild ?? isLegacyPackageBuild())) {
+    return false
+  }
+  const write = deps.write ?? writeToStdout
+  const bold = deps.bold ?? chalk.bold
+  const yellow = deps.yellow ?? chalk.yellow
+
+  write(yellow(`${PACKAGE_RENAMED_HEADLINE}\n`))
+  write(`${PACKAGE_RENAMED_DETAIL}\n`)
+  for (const command of PACKAGE_SWITCH_COMMANDS) {
+    write(bold(`  ${command}`) + '\n')
+  }
+  write(`${PACKAGE_SWITCH_OTHER_MANAGERS}\n`)
+  return true
 }
 
 export async function writePackageManagerUpdateGuidance(
@@ -86,11 +122,19 @@ export async function writePackageManagerUpdateGuidance(
 }
 
 export async function update() {
+  // The final build published under the pre-rename package name has nothing to
+  // update to. Say where the package went and stop, rather than run a check
+  // that can only fail or point back at the old name.
+  if (writePackageRenamedNote()) {
+    await gracefulShutdown(0)
+    return
+  }
+
   // Block updates for third-party providers using upstream Anthropic builds.
   // The update mechanism downloads from the first-party distribution bucket,
   // which would silently replace the OpenClaude build with the upstream
   // Claude Code binary. However, builds with a custom PACKAGE_URL (like
-  // OpenClaude's @gitlawb/openclaude) are safe to self-update.
+  // OpenClaude's @twigpine/openclaude) are safe to self-update.
   if (isThirdPartyBuildBlocked()) {
     writeToStdout(
       chalk.yellow(

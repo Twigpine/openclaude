@@ -34,7 +34,7 @@ beforeAll(async () => {
     BUILD_TIME: new Date().toISOString(),
     ISSUES_EXPLAINER:
       'report the issue at https://github.com/Twigpine/openclaude/issues',
-    PACKAGE_URL: '@gitlawb/openclaude',
+    PACKAGE_URL: '@twigpine/openclaude',
     NATIVE_PACKAGE_URL: undefined,
   }
 

@@ -17,6 +17,7 @@ import { isDangerousPermissionMode, type PermissionMode } from './permissions/Pe
 import { modelSupportsAutoMode } from './betas.js';
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './model/providers.js';
 import { logForDebugging } from './debug.js';
+import { isLegacyPackageBuild, PACKAGE_RENAMED_DETAIL, PACKAGE_RENAMED_HEADLINE, PACKAGE_SWITCH_COMMANDS, PACKAGE_SWITCH_OTHER_MANAGERS } from './packageRename.js';
 
 // Types
 export type StatusNoticeType = 'warning' | 'info';
@@ -333,8 +334,23 @@ const dangerouslySkipPermissionsNotice: StatusNoticeDefinition = {
   },
 };
 
+// Only the final build published under the pre-rename package name shows this
+// (see packageRename.ts). Nothing newer is ever published under that name, so
+// startup is where its users keep being told the package moved.
+const packageRenamedNotice: StatusNoticeDefinition = {
+  id: 'package-renamed',
+  type: 'warning',
+  isActive: () => isLegacyPackageBuild(),
+  render: () => <WarningNoticeRow>
+      <Text color="warning">{PACKAGE_RENAMED_HEADLINE}</Text>
+      <Text dimColor>{PACKAGE_RENAMED_DETAIL}</Text>
+      {PACKAGE_SWITCH_COMMANDS.map(command => <Text key={command}>{`  ${command}`}</Text>)}
+      <Text dimColor>{PACKAGE_SWITCH_OTHER_MANAGERS}</Text>
+    </WarningNoticeRow>,
+};
+
 // All notice definitions
-export const statusNoticeDefinitions: StatusNoticeDefinition[] = [largeMemoryFilesNotice, largeAgentDescriptionsNotice, localModelContextLoadNotice, claudeAiSubscriberExternalTokenNotice, apiKeyConflictNotice, bothAuthMethodsNotice, jetbrainsPluginNotice, thirdPartyPermissiveModeNotice, dangerouslySkipPermissionsNotice];
+export const statusNoticeDefinitions: StatusNoticeDefinition[] = [largeMemoryFilesNotice, largeAgentDescriptionsNotice, localModelContextLoadNotice, claudeAiSubscriberExternalTokenNotice, apiKeyConflictNotice, bothAuthMethodsNotice, jetbrainsPluginNotice, thirdPartyPermissiveModeNotice, dangerouslySkipPermissionsNotice, packageRenamedNotice];
 
 // Helper functions for external use
 export function getActiveNotices(context: StatusNoticeContext): StatusNoticeDefinition[] {

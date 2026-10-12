@@ -1,4 +1,4 @@
-// Type declarations for @gitlawb/openclaude SDK
+// Type declarations for @twigpine/openclaude SDK
 // Manually maintained — keep in sync with src/entrypoints/sdk/index.ts
 // Drift is caught by validate-externals.ts (runs in CI)
 
