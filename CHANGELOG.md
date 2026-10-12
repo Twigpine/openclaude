@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.32.0](https://github.com/Twigpine/openclaude/compare/v0.31.0...v0.32.0) (2026-10-12)
+
+
+### Features
+
+* add AnySearch as an explicit web search backend ([#2261](https://github.com/Twigpine/openclaude/issues/2261)) ([5bc160f](https://github.com/Twigpine/openclaude/commit/5bc160fb8bd89d18a7f75da0eef3eae5a72fbb73))
+* **gateway:** add API Route hybrid gateway ([#2225](https://github.com/Twigpine/openclaude/issues/2225)) ([9a2910d](https://github.com/Twigpine/openclaude/commit/9a2910da236395d259c72c3b4ddf92278625a6c1))
+* publish as @twigpine/openclaude ([#2269](https://github.com/Twigpine/openclaude/issues/2269)) ([50d4058](https://github.com/Twigpine/openclaude/commit/50d4058861d6fb0f2348a7836d1b80a26f70d30e))
+* **search:** make Exa the default web search backend and add /search ([#2257](https://github.com/Twigpine/openclaude/issues/2257)) ([790c009](https://github.com/Twigpine/openclaude/commit/790c009ae95bcb0cc55d85ae7c1f08f386e81214))
+
+
+### Bug Fixes
+
+* **api:** validate retry count environment values ([#2172](https://github.com/Twigpine/openclaude/issues/2172)) ([76b12a6](https://github.com/Twigpine/openclaude/commit/76b12a64fc2e2aaca1979769e084cbb04c405a6c))
+* **hooks:** match the .sh suffix case-insensitively on Windows ([#2254](https://github.com/Twigpine/openclaude/issues/2254)) ([53c7ed9](https://github.com/Twigpine/openclaude/commit/53c7ed9c51d96a81d8e38c2162f4e1fede64cbeb))
+* **openai-shim:** keep terminal usage from a repeated finish_reason ([#2252](https://github.com/Twigpine/openclaude/issues/2252)) ([10254f4](https://github.com/Twigpine/openclaude/commit/10254f4140f0eec1d2e15cee0de6020e55f288b9))
+* **openai-shim:** strip store for Anthropic models on OpenAI-compatible routes ([#2242](https://github.com/Twigpine/openclaude/issues/2242)) ([#2247](https://github.com/Twigpine/openclaude/issues/2247)) ([0bef4d2](https://github.com/Twigpine/openclaude/commit/0bef4d22309ebe9200beca75a62525ddc97b713b))
+
+
+### Performance Improvements
+
+* **read:** dedup touched-but-identical files and covered sub-ranges ([#2259](https://github.com/Twigpine/openclaude/issues/2259)) ([5ff58c4](https://github.com/Twigpine/openclaude/commit/5ff58c4ff9807b48a093a3154abb3be5e180fd3b))
+
 ## [0.31.0](https://github.com/Gitlawb/openclaude/compare/v0.30.0...v0.31.0) (2026-09-22)
 
 
