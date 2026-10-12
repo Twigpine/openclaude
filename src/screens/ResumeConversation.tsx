@@ -3,9 +3,10 @@ import { feature } from 'bun:bundle';
 import { dirname } from 'path';
 import React from 'react';
 import { useTerminalSize } from 'src/hooks/useTerminalSize.js';
-import { getOriginalCwd, switchSession } from '../bootstrap/state.js';
+import { getOriginalCwd, getSessionId, switchSession } from '../bootstrap/state.js';
 import type { Command } from '../commands.js';
-import { LogSelector } from '../components/LogSelector.js';
+import { LogSelector, getResumeLogDisplayTitle } from '../components/LogSelector.js';
+import { DeleteSessionConfirm } from '../components/DeleteSessionConfirm.js';
 import { Spinner } from '../components/Spinner.js';
 import { restoreCostStateForSession } from '../cost-tracker.js';
 import { setClipboard } from '../ink/termio/osc.js';
@@ -13,6 +14,9 @@ import { Box, Text } from '../ink.js';
 import { AlternateScreen } from '../ink/components/AlternateScreen.js';
 import useApp from '../ink/hooks/use-app.js';
 import { useKeybinding } from '../keybindings/useKeybinding.js';
+import { listBackgroundSessions } from '../cli/bgRegistry.js';
+import { deleteSession } from '../entrypoints/sdk/sessions.js';
+import { getSessionIdFromLog } from '../utils/sessionStorage.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../services/analytics/index.js';
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../services/mcp/types.js';
 import { useAppState, useSetAppState } from '../state/AppState.js';
@@ -39,6 +43,7 @@ import type { ThinkingConfig } from '../utils/thinking.js';
 import { filterContentReplacementsForMessages, type ContentReplacementRecord } from '../utils/toolResultStorage.js';
 import { REPL } from './REPL.js';
 import { filterResumeLogs } from './resumeFilters.js';
+import { getDeleteBlockReason } from './resumeDeleteGuards.js';
 type Props = {
   commands: Command[];
   worktreePaths: string[];
@@ -104,6 +109,9 @@ export function ResumeConversation({
     mainThreadAgentDefinition?: AgentDefinition;
   } | null>(null);
   const [resumeError, setResumeError] = React.useState<string | null>(null);
+  const [deletingLog, setDeletingLog] = React.useState<LogOption | null>(null);
+  const [deleteError, setDeleteError] = React.useState<string | null>(null);
+  const [deleteNotice, setDeleteNotice] = React.useState<string | null>(null);
   const [crossProjectCommand, setCrossProjectCommand] = React.useState<string | null>(null);
   const sessionLogResultRef = React.useRef<SessionLogResult | null>(null);
   // Mirror of logs.length so loadMoreLogs can compute value indices outside
@@ -313,6 +321,77 @@ export function ResumeConversation({
       setResuming(false);
     }
   }
+  function dropLogFromList(sessionId: string) {
+    setLogs(prev => prev.filter(l => getSessionIdFromLog(l) !== sessionId));
+    logCountRef.current = Math.max(0, logCountRef.current - 1);
+  }
+  async function handleDeleteRequest(log_0: LogOption) {
+    const targetId = getSessionIdFromLog(log_0);
+    setDeleteError(null);
+    setDeleteNotice(null);
+    if (!targetId) {
+      setDeleteError('Cannot determine the session id for this entry.');
+      return;
+    }
+    if (targetId === getSessionId()) {
+      setDeleteError('Cannot delete the active session.');
+      return;
+    }
+    try {
+      const bgSessions = await listBackgroundSessions();
+      const runningIds = new Set(bgSessions.filter(s => s.status === 'running' || s.status === 'unknown').map(s => s.sessionId));
+      const blockReason = getDeleteBlockReason(targetId, getSessionId(), runningIds);
+      if (blockReason) {
+        setDeleteError(blockReason);
+        return;
+      }
+    } catch (e) {
+      setDeleteError(`Failed to check background sessions: ${errorMessage(e)}`);
+      return;
+    }
+    setDeletingLog(log_0);
+  }
+  async function handleDeleteConfirm() {
+    const target = deletingLog;
+    if (!target) return;
+    const targetId = getSessionIdFromLog(target);
+    if (!targetId) {
+      setDeletingLog(null);
+      return;
+    }
+    try {
+      await deleteSession(targetId);
+      dropLogFromList(targetId);
+      setDeletingLog(null);
+      setDeleteNotice(`Deleted ${getResumeLogDisplayTitle(target)}.`);
+      logEvent('tengu_session_delete', {
+        confirmed: true,
+        success: true
+      });
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith('Session not found')) {
+        dropLogFromList(targetId);
+        setDeletingLog(null);
+        setDeleteNotice('Already deleted.');
+        logEvent('tengu_session_delete', {
+          confirmed: true,
+          success: true
+        });
+        return;
+      }
+      setDeleteError(`Failed to delete: ${errorMessage(e)}`);
+      logEvent('tengu_session_delete', {
+        confirmed: true,
+        success: false
+      });
+    }
+  }
+  function handleDeleteCancel() {
+    logEvent('tengu_session_delete', {
+      confirmed: false
+    });
+    setDeletingLog(null);
+  }
   if (crossProjectCommand) {
     return <CrossProjectMessage command={crossProjectCommand} />;
   }
@@ -336,12 +415,18 @@ export function ResumeConversation({
       <Text>{resumeError}</Text>
       <Text dimColor={true}>Choose a different conversation to continue.</Text>
     </Box> : null;
+  const deleteBanner = deleteError || deleteNotice ? <Box flexDirection="column" marginBottom={1}>
+      {deleteError && <Text color="red">{deleteError}</Text>}
+      {deleteNotice && <Text>{deleteNotice}</Text>}
+    </Box> : null;
   if (filteredLogs.length === 0) {
     return <NoConversationsMessage />;
   }
   const picker = <Box flexDirection="column">
       {resumeErrorBanner}
-      <LogSelector logs={filteredLogs} maxHeight={rows} onCancel={onCancel} onSelect={onSelect} onLogsChanged={isResumeWithRenameEnabled ? () => loadLogs(showAllProjects) : undefined} onLoadMore={loadMoreLogs} initialSearchQuery={initialSearchQuery} showAllProjects={showAllProjects} onToggleAllProjects={handleToggleAllProjects} onAgenticSearch={agenticSessionSearch} />
+      {deleteBanner}
+      {deletingLog && <DeleteSessionConfirm sessionTitle={getResumeLogDisplayTitle(deletingLog)} sessionId={getSessionIdFromLog(deletingLog) ?? ''} onConfirm={() => void handleDeleteConfirm()} onCancel={handleDeleteCancel} />}
+      <LogSelector logs={filteredLogs} maxHeight={rows} onCancel={onCancel} onSelect={onSelect} onDeleteRequest={handleDeleteRequest} isInputDisabled={deletingLog !== null} onLogsChanged={isResumeWithRenameEnabled ? () => loadLogs(showAllProjects) : undefined} onLoadMore={loadMoreLogs} initialSearchQuery={initialSearchQuery} showAllProjects={showAllProjects} onToggleAllProjects={handleToggleAllProjects} onAgenticSearch={agenticSessionSearch} />
     </Box>;
   // Run the picker on the alternate screen everywhere except tmux -CC, where
   // alt-screen is known to corrupt terminal state. Cancelling then restores

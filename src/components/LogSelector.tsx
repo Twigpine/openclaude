@@ -48,6 +48,8 @@ export type LogSelectorProps = {
   forceWidth?: number;
   onCancel?: () => void;
   onSelect: (log: LogOption) => void;
+  onDeleteRequest?: (log: LogOption) => void;
+  isInputDisabled?: boolean;
   onLogsChanged?: () => void;
   onLoadMore?: (count: number) => void;
   initialSearchQuery?: string;
@@ -239,6 +241,8 @@ export function LogSelector(t0: LogSelectorProps) {
     forceWidth,
     onCancel,
     onSelect,
+    onDeleteRequest,
+    isInputDisabled: t1a,
     onLogsChanged,
     onLoadMore,
     initialSearchQuery,
@@ -248,6 +252,7 @@ export function LogSelector(t0: LogSelectorProps) {
   } = t0;
   const maxHeight = t1 === undefined ? Infinity : t1;
   const showAllProjects = t2 === undefined ? false : t2;
+  const isInputDisabled = t1a === undefined ? false : t1a;
   const terminalSize = useTerminalSize();
   const columns = forceWidth === undefined ? terminalSize.columns : forceWidth;
   const exitState = useExitOnCtrlCDWithKeybindings(onCancel);
@@ -308,6 +313,18 @@ export function LogSelector(t0: LogSelectorProps) {
   const [viewMode, setViewMode] = React.useState<ViewMode>("list");
   const [previewLog, setPreviewLog] = React.useState<LogOption | null>(null);
   const prevFocusedIdRef = React.useRef<string | null>(null);
+  // Fresh-per-keypress view of the delete props for the memoized input
+  // handler below (t53): reading via ref avoids adding new memo slots.
+  const deleteUiRef = React.useRef({
+    onDeleteRequest,
+    isInputDisabled
+  });
+  React.useEffect(() => {
+    deleteUiRef.current = {
+      onDeleteRequest,
+      isInputDisabled
+    };
+  });
   const [selectedTagIndex, setSelectedTagIndex] = React.useState(0);
   let t8: AgenticSearchState;
   if ($[7] === Symbol.for("react.memo_cache_sentinel")) {
@@ -1120,6 +1137,9 @@ export function LogSelector(t0: LogSelectorProps) {
   let t53;
   if ($[131] !== agenticSearchState.status || $[132] !== branchFilterEnabled || $[133] !== focusedLog || $[134] !== handleAgenticSearch || $[135] !== hasMultipleWorktrees || $[136] !== hasTags || $[137] !== isAgenticSearchOptionFocused || $[138] !== onAgenticSearch || $[139] !== onToggleAllProjects || $[140] !== searchQuery || $[141] !== setSearchQuery || $[142] !== showAllProjects || $[143] !== showAllWorktrees || $[144] !== tagTabs || $[145] !== uniqueTags || $[146] !== viewMode) {
     t53 = (input, key) => {
+      if (deleteUiRef.current.isInputDisabled) {
+        return;
+      }
       if (viewMode === "preview") {
         return;
       }
@@ -1210,6 +1230,10 @@ export function LogSelector(t0: LogSelectorProps) {
                         messageCount: focusedLog.messageCount
                       });
                     } else {
+                      if (key.delete && focusedLog) {
+                        deleteUiRef.current.onDeleteRequest?.(focusedLog);
+                        return;
+                      }
                       if (focusedLog && keyIsNotCtrlOrMeta && input.length > 0 && !/^\s+$/.test(input)) {
                         setViewMode("search");
                         setSearchQuery(input);
@@ -1424,11 +1448,14 @@ export function LogSelector(t0: LogSelectorProps) {
   } else {
     t69 = $[201];
   }
+  // isInputDisabled is read directly (not in the t70 dep list below):
+  // the parent passes fresh onSelect/onLogsChanged identities every
+  // render, so t70 already recomputes on the renders that flip the flag.
   let t70;
   if ($[202] !== agenticSearchState.status || $[203] !== branchFilterEnabled || $[204] !== columns || $[205] !== displayedLogs || $[206] !== expandedGroupSessionIds || $[207] !== flatOptions || $[208] !== focusedLog || $[209] !== focusedNode?.id || $[210] !== handleFlatOptionsSelectFocus || $[211] !== handleRenameSubmit || $[212] !== handleTreeSelectFocus || $[213] !== isAgenticSearchOptionFocused || $[214] !== onCancel || $[215] !== onSelect || $[216] !== renameCursorOffset || $[217] !== renameValue || $[218] !== treeNodes || $[219] !== viewMode || $[220] !== visibleCount) {
     t70 = agenticSearchState.status === "searching" ? null : viewMode === "rename" && focusedLog ? <Box paddingLeft={2} flexDirection="column"><Text bold={true}>Rename session:</Text><Box paddingTop={1}><TextInput value={renameValue} onChange={setRenameValue} onSubmit={handleRenameSubmit} placeholder={getResumeLogDisplayTitle(focusedLog) || "Enter new session name"} columns={columns} cursorOffset={renameCursorOffset} onChangeCursorOffset={setRenameCursorOffset} showCursor={true} /></Box></Box> : isResumeWithRenameEnabled ? <TreeSelect nodes={treeNodes} onSelect={node_0 => {
       onSelect(node_0.value.log);
-    }} onFocus={handleTreeSelectFocus} onCancel={onCancel} focusNodeId={focusedNode?.id} visibleOptionCount={visibleCount} layout="expanded" isDisabled={viewMode === "search" || isAgenticSearchOptionFocused} hideIndexes={false} isNodeExpanded={nodeId => {
+    }} onFocus={handleTreeSelectFocus} onCancel={onCancel} focusNodeId={focusedNode?.id} visibleOptionCount={visibleCount} layout="expanded" isDisabled={viewMode === "search" || isAgenticSearchOptionFocused || isInputDisabled} hideIndexes={false} isNodeExpanded={nodeId => {
       if (viewMode === "search" || branchFilterEnabled) {
         return true;
       }
@@ -1455,7 +1482,7 @@ export function LogSelector(t0: LogSelectorProps) {
       if (log_13) {
         onSelect(log_13);
       }
-    }} visibleOptionCount={visibleCount} onCancel={onCancel} onFocus={handleFlatOptionsSelectFocus} defaultFocusValue={focusedNode?.id.toString()} layout="expanded" isDisabled={viewMode === "search" || isAgenticSearchOptionFocused} onUpFromFirstItem={enterSearchMode} />;
+    }} visibleOptionCount={visibleCount} onCancel={onCancel} onFocus={handleFlatOptionsSelectFocus} defaultFocusValue={focusedNode?.id.toString()} layout="expanded" isDisabled={viewMode === "search" || isAgenticSearchOptionFocused || isInputDisabled} onUpFromFirstItem={enterSearchMode} />;
     $[202] = agenticSearchState.status;
     $[203] = branchFilterEnabled;
     $[204] = columns;
@@ -1481,7 +1508,7 @@ export function LogSelector(t0: LogSelectorProps) {
   }
   let t71;
   if ($[222] !== agenticSearchState.status || $[223] !== currentBranch || $[224] !== exitState.keyName || $[225] !== exitState.pending || $[226] !== getExpandCollapseHint || $[227] !== hasMultipleWorktrees || $[228] !== isAgenticSearchOptionFocused || $[229] !== isSearching || $[230] !== onToggleAllProjects || $[231] !== showAllProjects || $[232] !== showAllWorktrees || $[233] !== viewMode) {
-    t71 = <Box paddingLeft={2}>{exitState.pending ? <Text dimColor={true}>Press {exitState.keyName} again to exit</Text> : viewMode === "rename" ? <Text dimColor={true}><Byline><KeyboardShortcutHint shortcut="Enter" action="save" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : agenticSearchState.status === "searching" ? <Text dimColor={true}><Byline><Text>Searching with Claude…</Text><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : isAgenticSearchOptionFocused ? <Text dimColor={true}><Byline><KeyboardShortcutHint shortcut="Enter" action="search" /><KeyboardShortcutHint shortcut={"\u2193"} action="skip" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : viewMode === "search" ? <Text dimColor={true}><Byline><Text>{isSearching && false ? "Searching\u2026" : "Type to Search"}</Text><KeyboardShortcutHint shortcut="Enter" action="select" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="clear" /></Byline></Text> : <Text dimColor={true}><Byline>{onToggleAllProjects && <KeyboardShortcutHint shortcut="Ctrl+A" action={`show ${showAllProjects ? "current dir" : "all projects"}`} />}{currentBranch && <KeyboardShortcutHint shortcut="Ctrl+B" action="toggle branch" />}{hasMultipleWorktrees && <KeyboardShortcutHint shortcut="Ctrl+W" action={`show ${showAllWorktrees ? "current worktree" : "all worktrees"}`} />}<KeyboardShortcutHint shortcut="Ctrl+V" action="preview" /><KeyboardShortcutHint shortcut="Ctrl+R" action="rename" /><Text>Type to search</Text><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" />{getExpandCollapseHint() && <Text>{getExpandCollapseHint()}</Text>}</Byline></Text>}</Box>;
+    t71 = <Box paddingLeft={2}>{exitState.pending ? <Text dimColor={true}>Press {exitState.keyName} again to exit</Text> : viewMode === "rename" ? <Text dimColor={true}><Byline><KeyboardShortcutHint shortcut="Enter" action="save" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : agenticSearchState.status === "searching" ? <Text dimColor={true}><Byline><Text>Searching with Claude…</Text><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : isAgenticSearchOptionFocused ? <Text dimColor={true}><Byline><KeyboardShortcutHint shortcut="Enter" action="search" /><KeyboardShortcutHint shortcut={"\u2193"} action="skip" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : viewMode === "search" ? <Text dimColor={true}><Byline><Text>{isSearching && false ? "Searching\u2026" : "Type to Search"}</Text><KeyboardShortcutHint shortcut="Enter" action="select" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="clear" /></Byline></Text> : <Text dimColor={true}><Byline>{onToggleAllProjects && <KeyboardShortcutHint shortcut="Ctrl+A" action={`show ${showAllProjects ? "current dir" : "all projects"}`} />}{currentBranch && <KeyboardShortcutHint shortcut="Ctrl+B" action="toggle branch" />}{hasMultipleWorktrees && <KeyboardShortcutHint shortcut="Ctrl+W" action={`show ${showAllWorktrees ? "current worktree" : "all worktrees"}`} />}<KeyboardShortcutHint shortcut="Ctrl+V" action="preview" /><KeyboardShortcutHint shortcut="Ctrl+R" action="rename" /><KeyboardShortcutHint shortcut="Del" action="delete" /><Text>Type to search</Text><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" />{getExpandCollapseHint() && <Text>{getExpandCollapseHint()}</Text>}</Byline></Text>}</Box>;
     $[222] = agenticSearchState.status;
     $[223] = currentBranch;
     $[224] = exitState.keyName;
