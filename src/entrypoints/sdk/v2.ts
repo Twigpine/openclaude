@@ -124,6 +124,21 @@ export type SDKSessionOptions = {
    * environment; isolating readers as well as writers would mean serialising
    * every turn in the process. So set `env` on every session that cares which
    * provider it reaches, not only on the odd one out.
+   *
+   * TWO WAYS TO DEADLOCK YOURSELF, because the lock is held for the whole
+   * turn and not just while the variables are written:
+   *
+   * 1. A PAUSED ITERATOR STILL HOLDS IT. Stopping half way through
+   *    `for await (… of session.sendMessage(…))` to await another
+   *    env-carrying turn waits forever: the first turn cannot finish while
+   *    the second waits for the lock it holds. Finish the turn, or leave the
+   *    loop with `break`/`return` — which calls the generator's `return` and
+   *    frees the lock — before awaiting another one.
+   * 2. A `canUseTool` CALLBACK IS INSIDE THE TURN. Awaiting an env-carrying
+   *    `query()` or session turn from it is the same deadlock, one level
+   *    down. Answer the permission from what the callback already has.
+   *
+   * Neither applies to sessions without `env`: they take no lock.
    */
   env?: Record<string, string | undefined>
 
