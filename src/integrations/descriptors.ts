@@ -140,13 +140,17 @@ export interface ModelCatalogConfig {
   models?: ModelCatalogEntry[]
 }
 
-export type ModelDiscoveryKind = 'openai-compatible' | 'ollama' | 'custom'
+export type ModelDiscoveryKind =
+  | 'openai-compatible'
+  | 'anthropic-compatible'
+  | 'ollama'
+  | 'custom'
 
 export interface ModelDiscoveryConfig {
   kind: ModelDiscoveryKind
   requiresAuth?: boolean
   path?: string
-  parse?: 'openai-models-list' | 'ollama-tags' | 'custom'
+  parse?: 'openai-models-list' | 'anthropic-models-list' | 'ollama-tags' | 'custom'
   mapModel?: (raw: unknown) => ModelCatalogEntry | null
 }
 

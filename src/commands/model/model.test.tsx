@@ -36,6 +36,9 @@ type SettingsModule = typeof import('../../utils/settings/settings.js')
 
 const originalEnv = {
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
+  ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
+  ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
+  ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
   CLAUDE_CODE_USE_GEMINI: process.env.CLAUDE_CODE_USE_GEMINI,
   CLAUDE_CODE_USE_GITHUB: process.env.CLAUDE_CODE_USE_GITHUB,
   CLAUDE_CODE_USE_MISTRAL: process.env.CLAUDE_CODE_USE_MISTRAL,
@@ -237,6 +240,9 @@ afterEach(() => {
     restoreEnv('COMMANDCODE_API_KEY', originalEnv.COMMANDCODE_API_KEY)
     restoreEnv('COMMAND_CODE_API_KEY', originalEnv.COMMAND_CODE_API_KEY)
     restoreEnv('ANTHROPIC_CUSTOM_HEADERS', originalEnv.ANTHROPIC_CUSTOM_HEADERS)
+    restoreEnv('ANTHROPIC_BASE_URL', originalEnv.ANTHROPIC_BASE_URL)
+    restoreEnv('ANTHROPIC_AUTH_TOKEN', originalEnv.ANTHROPIC_AUTH_TOKEN)
+    restoreEnv('ANTHROPIC_MODEL', originalEnv.ANTHROPIC_MODEL)
     restoreEnv('CLAUDE_CODE_EFFORT_LEVEL', originalEnv.CLAUDE_CODE_EFFORT_LEVEL)
     restoreEnv(
       'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
@@ -274,6 +280,7 @@ async function waitForCondition(
 type CapturedModelPickerPropsForTest = {
   discoveryState?: { message?: string; tone?: string }
   onRefresh?: () => void
+  onCheckAvailability?: () => void
   optionsOverride?: unknown
 }
 
@@ -3240,6 +3247,80 @@ test('/model refresh treats empty legacy OpenAI-compatible discovery as failed n
   expect(scopedCache.getState().additionalModelOptionsCache).toEqual(
     cachedOptions,
   )
+})
+
+test('interactive model picker wires an availability check that probes the listed models', async () => {
+  useSettings({})
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_API_BASE
+  process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:8082'
+  process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
+  process.env.ANTHROPIC_MODEL = 'anthropic/nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct'
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.CLAUDE_CODE_USE_MISTRAL
+  delete process.env.CLAUDE_CODE_USE_BEDROCK
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  delete process.env.CLAUDE_CODE_USE_FOUNDRY
+
+  mockDescriptorDiscovery({
+    cachedModels: [{ id: 'm1', apiName: 'anthropic/nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct' }],
+    discoveredModels: [{ id: 'm1', apiName: 'anthropic/nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct' }],
+  })
+
+  const probed: string[] = []
+  mock.module('../../utils/model/probeRouteAvailability.js', () => ({
+    probeRouteAvailability: mock(async (options: { models: string[] }) => {
+      probed.push(...options.models)
+      return Object.fromEntries(
+        options.models.map(model => [
+          model,
+          { state: 'unavailable', checkedAt: 1 },
+        ]),
+      )
+    }),
+    summarizeAvailability: (results: Record<string, { state: string }>) =>
+      `${Object.keys(results).length} models checked`,
+  }))
+
+  const rendered = await renderModelCommandWithCapturedPicker(
+    'descriptor-picker-availability-check',
+  )
+  try {
+    const props = rendered.getCapturedProps()
+
+    // Without an explicit action the user can never ask for a verdict, and the
+    // catalog stays a flat list of models that may all be dead.
+    expect(typeof props.onCheckAvailability).toBe('function')
+
+    props.onCheckAvailability?.()
+
+    await waitForCondition(() => probed.length > 0)
+    expect(probed).toEqual([
+      'anthropic/nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct',
+    ])
+
+    // The probed row now carries its verdict so the picker marks it.
+    await waitForCondition(() =>
+      (
+        rendered.getCapturedProps().optionsOverride as Array<{
+          availability?: { state: string }
+        }>
+      )?.[0]?.availability?.state === 'unavailable',
+    )
+
+    const options = rendered.getCapturedProps().optionsOverride as Array<{
+      value: string
+      description?: string
+      availability?: { state: string }
+    }>
+    expect(options[0]?.availability?.state).toBe('unavailable')
+    expect(options[0]?.description).toContain('✗ unavailable')
+  } finally {
+    rendered.instance.unmount()
+    rendered.stdout.end()
+  }
 })
 
 test('interactive model picker refresh keeps descriptor options allowlist-filtered', async () => {

@@ -1,82 +1,98 @@
-# CI flake/slowness — Phase 1 finding (diagnosis, not yet a fix)
+# CI flake/slowness — diagnosis
 
-Status: red-capable repro built. Root cause identified for the truncated-suite symptom.
-Not yet fixed. No production code changed.
+Status: **root cause found and causally proven on CI's exact bun version (1.3.13).**
+No production code changed. Reproducer: `/tmp/opencode/loops/flake-loop.sh`.
 
 ## The headline
 
-CI is not merely flaky — **the signal is broken**. `bun test` exits **0** while running
-only a fraction of the suite. Green CI does not mean the suite passed.
+CI is not merely flaky — **the signal is broken**. `bun test` exits **0** while
+running only a fraction of the suite. Green CI does not mean the suite passed.
 
-## Evidence (all commands run locally, bun 1.4.2, node v22.23.2)
+## Phase 1: the loop
 
-### 1. The full suite dies mid-run and reports success
+    /tmp/opencode/loops/flake-loop.sh src/cli/printMaxTurns.test.ts src/cli/bgFinalizer.test.ts
 
-    bun test --feature=UNATTENDED_RETRY --max-concurrency=1
-    # exit=0  wall=99s  no "Ran N tests across" summary line
-    # stops during src/cli/bgFinalizer.test.ts
+Asserts two things: the runner printed a `Ran N tests across` summary, and the
+exit code is non-zero when tests fail. A silently-truncated run (exit 0, no
+summary) is RED.
 
-With `--dots`: 690 tests, then the process ends. No summary.
+- **Fast**: ~2s (was 99s+ for the whole `src/cli` directory).
+- **Deterministic**: 5/5 runs RED, identical verdict, exit=0 every time.
+- **Version caveat resolved**: CI pins bun **1.3.13** (`.bun-version`); local was
+  1.4.2. Re-confirmed on 1.3.13 (`/tmp/opencode/bin1313/bun`).
 
-With `--reporter=junit --reporter-outfile=...`: the report file is **never written**,
-which rules out mere stdout truncation — the process dies before it can report.
+## Phase 2: minimised repro
 
-    723 total test files under src/
-    -> only ~28 files execute
+Two files, and both are load-bearing:
 
-### 2. `src/cli` alone reproduces the death; `src/utils` alone is healthy
+| Scenario | Result |
+|---|---|
+| `bgFinalizer` alone | green, `Ran 44 tests across 1 file` (88s) |
+| `printMaxTurns` alone | green, `Ran 2 tests` |
+| 4 print files, **no** bgFinalizer | green, `Ran 13 tests across 4 files` |
+| **`printMaxTurns` + `bgFinalizer`** | **RED** — exit 0, no summary |
+| `update` + `bgFinalizer` | green |
+| `headlessHeartbeat` + `bgFinalizer` | green |
+| whole `src/cli` (11 files) | RED — `Ran ~289`, then dies |
 
-    bun test ... src/cli     # exit=0, no summary, dies in bgFinalizer.test.ts
-    bun test ... src/utils   # exit=1, "Ran 3700 tests across 271 files" [467.07s], 38 fail
+The suite dies *at the top* of `bgFinalizer.test.ts` — zero of its tests run.
 
-So the truncation is not a runner-wide condition; it is bound to a specific file.
+## Phase 3/4: hypothesis, then proof
 
-### 3. The suspect hangs on its own, deterministically
+Instrumenting `process.exit` (tag `[DEBUG-a4f2]`, since removed) captured the killer:
 
-    timeout 75 bun test --feature=UNATTENDED_RETRY --max-concurrency=1 src/cli/bgFinalizer.test.ts
+    [DEBUG-a4f2] process.exit(0) called from:
+        at forceExit (src/utils/gracefulShutdown.ts:226:13)
+        at gracefulShutdown (src/utils/gracefulShutdown.ts:561:3)
+        at processTicksAndRejections (native:7:39)
 
-    run 1: exit=124 (timeout) wall=75s no summary
-    run 2: exit=124 (timeout) wall=76s no summary
-    run 3: exit=124 (timeout) wall=75s no summary
+Exit code **0**, not 137 — an explicit `process.exit(0)`, not an OOM or signal
+death. That ruled out the earlier "signals/OOM" theory.
 
-3/3 hang. Meanwhile the same file, running after its siblings in `src/cli`, kills the
-process outright instead of hanging. Two distinct failure modes from one file.
+**Causal chain:**
 
-## Why this explains "flaky AND slow"
+1. `src/cli/print.ts:1234` — `runHeadless` registers
+   `process.on('SIGINT', sigintHandler)` on the **shared test-runner process** and
+   never unregisters it. `printMaxTurns.test.ts` calls `runHeadless`, leaking the
+   listener into the runner.
+2. `src/cli/print.ts:1232` — that handler calls `void gracefulShutdown(0)`.
+3. `src/cli/bgFinalizer.test.ts:1326,1340` — a later test sends a **real**
+   `SIGINT` to a real child PID.
+4. The leaked handler is live on the runner; `gracefulShutdown(0)` runs and
+   `forceExit(0)` tears down the entire runner mid-suite. Exit 0. No summary.
 
-- When bgFinalizer kills the runner: job goes green in ~100s while skipping ~96% of
-  the suite. Silent false pass.
-- When bgFinalizer hangs: the job burns to the GitHub Actions 6-hour job timeout.
-  That is the "slow".
+Falsification probe: a preload that suppresses only `SIGINT` listener
+registration turns the same run green —
 
-Same root cause, different symptom, depending on ordering/timing. That also explains
-why it reads as *flaky* rather than as a stable failure.
+    Ran 45 tests across 2 files. [85.76s]
 
-`src/cli/bgFinalizer.test.ts` mutates the runner's own `process.exitCode`
-(lines 229-236, 484-519, 564-591) and sends real signals to real PIDs
-(lines 663-667, 1240-1315, 1467-1507, 1635-1655), including SIGSTOP/SIGCONT on a
-child with no guaranteed resume path.
+The 2 remaining failures in that run are a **separate, pre-existing** bug
+(`passes only settings-source inputs to the detached cleanup worker` passes alone,
+fails when run with a sibling — a second ordering dependency, not yet diagnosed).
 
-## Caveat that must be resolved before fixing
+Note this also explains the "slow" half: when the runner is killed rather than
+exiting, the job burns toward the GitHub Actions 6-hour timeout. Same root cause,
+two symptoms — which is exactly why it reads as *flaky* rather than as a stable
+failure.
 
-Local bun is **1.4.2**; CI pins **1.3.13** (`.bun-version`). The repro must be
-re-confirmed on 1.3.13 before any fix is trusted.
+## Slowness findings (verified, not yet fixed)
 
-## Independent slowness findings (not yet measured end-to-end)
-
-1. **No dependency caching.** No `actions/cache` anywhere; 5 jobs each run
-   `bun install --frozen-lockfile` cold over a ~100 devDependency tree
-   (sharp, tree-sitter-wasms, AWS/Azure/Bedrock/Foundry SDKs).
+1. **No dependency caching.** `actions/cache` appears **0 times** across all three
+   workflows; 5 jobs each run `bun install --frozen-lockfile` cold over a ~100
+   devDependency tree.
 2. **Whole-suite duplication.** `smoke-and-tests` runs `bun run check`
-   (-> `test:full` -> full 723-file suite) and then additionally runs
-   `test:provider` (73 files) and `test:provider-recommendation` (2 files).
-   All 75 are subsets of the full suite that already ran.
-3. **Matrix runs everything twice.** `smoke-and-tests` has
-   `node-version: ["22", "24.11.x"]`, so the entire suite runs twice per PR.
+   (-> `test:full` -> the full suite) and *then* additionally runs
+   `test:provider` (**73 files**, confirmed) and `test:provider-recommendation`
+   (2 files). All are subsets of the suite that already ran.
+3. **Matrix runs everything twice.** `node-version: ["22", "24.11.x"]`, so the
+   entire suite runs twice per PR.
 4. **Serial tests.** `--max-concurrency=1` on every test invocation.
 5. `fetch-depth: 0` (full-history clone) on both matrix legs.
 
-## Next measurement
+## Next steps
 
-Sample the 38 `src/utils` failures to separate genuinely flaky tests from
-environment-dependent ones.
+- Fix the SIGINT leak at its source: `runHeadless` must not attach signal
+  handlers to the host process when running under test (or must remove them on
+  teardown). The durable fix belongs in `print.ts`, not in either test.
+- Then diagnose the ordering-dependent `settings-source inputs` failure.
+- Then attack the five slowness items; items 2 and 3 are the cheapest large wins.

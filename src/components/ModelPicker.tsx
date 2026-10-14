@@ -54,6 +54,12 @@ export type Props = {
   discoveryState?: ModelPickerDiscoveryState;
   onRefresh?: () => void;
   /**
+   * Probe every listed model against the configured endpoint and mark the ones
+   * it rejects. Exposed as its own action because it costs one minimal
+   * inference call per model, unlike a plain metadata refresh.
+   */
+  onCheckAvailability?: () => void;
+  /**
    * Allow cross-profile "switch profile" options (issue #1119) to appear in the
    * list. These carry an encoded `__switch_profile__:<id>:<model>` value that
    * only the `/model` command's onSelect knows how to activate. Inline pickers
@@ -106,7 +112,8 @@ export function ModelPicker(t0) {
     optionsOverride,
     discoveryState,
     onRefresh,
-    allowProfileSwitch
+    allowProfileSwitch,
+    onCheckAvailability
   } = t0;
   const setAppState = useSetAppState();
   const exitState = useExitOnCtrlCDWithKeybindings();
@@ -281,6 +288,9 @@ export function ModelPicker(t0) {
     "modelPicker:increaseEffort": () => handleCycleEffort("right"),
     ...(onRefresh ? {
       "modelPicker:refresh": () => onRefresh()
+    } : {}),
+    ...(onCheckAvailability ? {
+      "modelPicker:checkAvailability": () => onCheckAvailability()
     } : {})
   };
   let t13;
@@ -377,7 +387,8 @@ export function ModelPicker(t0) {
     t18 = $[45];
   }
   const refreshHint = onRefresh ? <ConfigurableShortcutHint action="modelPicker:refresh" context="ModelPicker" fallback="r" description="refresh models" /> : null;
-  const discoveryLine = discoveryState ? <Text color={mapDiscoveryToneToColor(discoveryState.tone)}>{discoveryState.message}{refreshHint ? <Text color="subtle"> {" "}· {refreshHint}</Text> : null}</Text> : refreshHint ? <Text dimColor={true}>{refreshHint}</Text> : null;
+  const availabilityHint = onCheckAvailability ? <ConfigurableShortcutHint action="modelPicker:checkAvailability" context="ModelPicker" fallback="c" description="check availability" /> : null;
+  const discoveryLine = discoveryState ? <Text color={mapDiscoveryToneToColor(discoveryState.tone)}>{discoveryState.message}{refreshHint || availabilityHint ? <Text color="subtle">{" "}· {refreshHint}{availabilityHint && refreshHint ? " · " : ""}{availabilityHint}</Text> : null}</Text> : refreshHint || availabilityHint ? <Text dimColor={true}>{refreshHint}{availabilityHint && refreshHint ? " · " : ""}{availabilityHint}</Text> : null;
   const t19 = <Box marginBottom={1} flexDirection="column">{t15}{t17}{t18}{discoveryLine}</Box>;
   const t20 = onCancel ?? _temp4;
   let t21;

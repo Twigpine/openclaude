@@ -30,6 +30,17 @@ export default defineAnthropicProxy({
     anthropicProxy: { supportsCustomHeaders: true },
   },
   usage: { supported: false },
+  catalog: {
+    source: 'hybrid',
+    discovery: {
+      kind: 'anthropic-compatible',
+      parse: 'anthropic-models-list',
+    },
+    // The catalog is only as fresh as the proxy behind it, and every probe
+    // below is a real inference call — so refresh stays an explicit action
+    // rather than running on startup.
+    allowManualRefresh: true,
+  },
   preset: {
     id: 'custom-anthropic',
     description: 'Any Anthropic Messages API-compatible provider',

@@ -159,6 +159,31 @@ export function getRouteDefaultBaseUrl(
   return getRouteDescriptor(routeId)?.defaultBaseUrl
 }
 
+/**
+ * Resolve a route's base URL from the environment.
+ *
+ * Routes whose endpoint is user-supplied declare which env var carries it via
+ * `preset.baseUrlEnvVars` (ANTHROPIC_BASE_URL for custom-anthropic,
+ * OPENAI_BASE_URL for the custom OpenAI gateway). Their `defaultBaseUrl` is a
+ * documentation placeholder, never a real host. Reading the declared env var
+ * first keeps discovery and the model picker pointed at the endpoint the user
+ * actually configured.
+ */
+export function getRouteBaseUrlFromEnv(
+  routeId: string,
+  processEnv: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const descriptor = getRouteDescriptor(routeId)
+  for (const envVar of descriptor?.preset?.baseUrlEnvVars ?? []) {
+    const value = processEnv[envVar]?.trim()
+    if (value) {
+      return value
+    }
+  }
+
+  return descriptor?.defaultBaseUrl
+}
+
 export function getRouteDefaultModel(
   routeId: string,
 ): string | undefined {

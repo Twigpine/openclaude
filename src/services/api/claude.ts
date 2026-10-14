@@ -83,6 +83,7 @@ import {
 import { resolveAppliedEffort } from '../../utils/effort.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from '../../utils/envUtils.js'
 import { errorMessage } from '../../utils/errors.js'
+import { getSettings_DEPRECATED } from '../../utils/settings/settings.js'
 import { computeFingerprintFromMessages } from '../../utils/fingerprint.js'
 import { captureAPIRequest, logError } from '../../utils/log.js'
 import {
@@ -905,6 +906,23 @@ export function getNonstreamingFallbackTimeoutMs(): number {
     process.env,
     isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) ? 120_000 : 300_000,
   )
+}
+
+/**
+ * Slow-TTFT failover threshold, in milliseconds. Undefined when the
+ * `autoModelFailover` feature is off (the default) or the configured
+ * threshold is not a positive number — in both cases the stream must
+ * never be aborted for slow first-token delivery. See modelFailover.ts.
+ */
+export function getFailoverTtftThresholdMs(): number | undefined {
+  const settings = getSettings_DEPRECATED()
+  if (settings.autoModelFailover !== true) {
+    return undefined
+  }
+  const threshold = settings.failoverTtftThresholdMs
+  return typeof threshold === 'number' && threshold > 0
+    ? threshold
+    : undefined
 }
 
 /**
@@ -2408,6 +2426,27 @@ async function* queryModel(
           case 'message_start': {
             partialMessage = part.message
             ttftMs = Date.now() - start
+            // Failover: an unacceptably slow first token is a model-health
+            // signal. Abort the stream and surface the measured TTFT on the
+            // error so queryLoop can retry the turn on a fallback model.
+            const ttftThresholdMs = getFailoverTtftThresholdMs()
+            if (ttftThresholdMs !== undefined && ttftMs > ttftThresholdMs) {
+              logForDebugging(
+                `Failover: TTFT ${ttftMs}ms exceeded threshold ${ttftThresholdMs}ms - aborting stream`,
+                { level: 'warn' },
+              )
+              const slowError = new Error(
+                `Slow first token: ${ttftMs}ms exceeded ${ttftThresholdMs}ms threshold`,
+              )
+              ;(slowError as unknown as Record<string, unknown>)
+                .failoverSlowTtftMs = ttftMs
+              closeStreamIterator(
+                streamIterator,
+                slowError,
+                'claude_stream_watchdog',
+              )
+              throw slowError
+            }
             usage = updateUsage(usage, part.message?.usage)
             // Capture research from message_start if available (internal only).
             // Always overwrite with the latest value.
@@ -2766,7 +2805,13 @@ async function* queryModel(
         // Prevent double-emit: this throw lands in the catch block below,
         // whose exit_path='error' probe guards on streamWatchdogFiredAt.
         streamWatchdogFiredAt = null
-        throw new Error('Stream idle timeout - no chunks received')
+        const idleError = new Error('Stream idle timeout - no chunks received')
+        // Failover marker: survives withRetry's rethrow so queryLoop can
+        // classify this as a model-health failure and retry on a fallback
+        // model. See src/services/api/modelFailover.ts.
+        ;(idleError as unknown as Record<string, unknown>).streamIdleAborted =
+          true
+        throw idleError
       }
 
       // Detect when the stream completed without producing any assistant messages.
@@ -2925,6 +2970,17 @@ async function* queryModel(
           getClaudeStreamingAbortLogMessage(signal, streamingError),
         )
         throw new APIUserAbortError()
+      }
+
+      // Failover: a slow-TTFT abort must not fall back to non-streaming on
+      // the same slow model — propagate to withRetry (whose rethrow keeps
+      // the marker intact) so queryLoop can classify the trigger and retry
+      // the turn on an alternative model. See modelFailover.ts.
+      if (
+        (streamingError as unknown as Record<string, unknown>)
+          .failoverSlowTtftMs !== undefined
+      ) {
+        throw streamingError
       }
 
       // When the flag is enabled, skip the non-streaming fallback and let the

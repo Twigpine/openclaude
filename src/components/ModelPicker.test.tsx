@@ -300,6 +300,70 @@ test('hides cross-profile switch options when allowProfileSwitch is falsy', asyn
   }
 })
 
+test('offers a distinct availability-check action only when wired', async () => {
+  const { ModelPicker } = await import(
+    `./ModelPicker.js?availability-${Date.now()}`
+  )
+  const { stdin, stdout, getOutput } = makeStdio()
+
+  const instance = await render(
+    <AppStateProvider initialState={getDefaultAppState()}>
+      <ModelPicker
+        initial="claude-opus-4-6"
+        onSelect={() => {}}
+        onCheckAvailability={() => {}}
+      />
+    </AppStateProvider>,
+    {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+    },
+  )
+
+  try {
+    await waitForCondition(() =>
+      stripAnsi(getOutput()).includes('check availability'),
+    )
+    // Both actions are advertised so the cost of each is discoverable.
+    expect(stripAnsi(getOutput())).toContain('check availability')
+    // Refresh is not wired here, so only the availability action shows.
+    expect(stripAnsi(getOutput())).not.toContain('refresh models')
+  } finally {
+    instance.unmount()
+    stdin.end()
+    stdout.end()
+  }
+})
+
+test('hides the availability-check action when the caller has none', async () => {
+  const { ModelPicker } = await import(
+    `./ModelPicker.js?no-availability-${Date.now()}`
+  )
+  const { stdin, stdout, getOutput } = makeStdio()
+
+  const instance = await render(
+    <AppStateProvider initialState={getDefaultAppState()}>
+      <ModelPicker initial="claude-opus-4-6" onSelect={() => {}} />
+    </AppStateProvider>,
+    {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+    },
+  )
+
+  try {
+    await waitForCondition(() => stripAnsi(getOutput()).length > 0)
+    const rendered = stripAnsi(getOutput())
+    expect(rendered).not.toContain('check availability')
+  } finally {
+    instance.unmount()
+    stdin.end()
+    stdout.end()
+  }
+})
+
 test('shows cross-profile switch options when allowProfileSwitch is set', async () => {
   const { ModelPicker } = await import(
     `./ModelPicker.js?cross-profile-shown-${Date.now()}`

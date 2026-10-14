@@ -21,6 +21,7 @@ import {
 } from '../../integrations/discoveryService.js'
 import { getCommandcodeChatCompletionsModelError } from '../../integrations/gateways/commandcode.js'
 import {
+  getRouteBaseUrlFromEnv,
   getRouteDescriptor,
   isNativeVendorCatalogRoute,
   resolveRouteCredentialValue,
@@ -64,7 +65,13 @@ import {
   parseSwitchProfileValue,
   type ModelOption,
 } from '../../utils/model/modelOptions.js'
-import { buildRouteCatalogModelOptions, mergeRouteCatalogEntries } from '../../utils/model/routeCatalogOptions.js'
+import { buildRouteCatalogModelOptions, applyAvailabilityToOptions, mergeRouteCatalogEntries } from '../../utils/model/routeCatalogOptions.js'
+import {
+  probeRouteAvailability,
+  summarizeAvailability,
+} from '../../utils/model/probeRouteAvailability.js'
+import { getCachedAvailability } from '../../utils/model/modelAvailabilityCache.js'
+import type { ModelAvailability } from '../../utils/model/modelAvailability.js'
 import { discoverOpenAICompatibleModelOptions } from '../../utils/model/openaiModelDiscovery.js'
 import {
   getDefaultMainLoopModelSetting,
@@ -377,6 +384,10 @@ async function getOpenAIDiscoveryRequestOptions(
   baseUrl?: string
   headers?: Record<string, string>
 }> {
+  // The OpenAI/Codex defaults baked into resolveProviderRequest must not leak
+  // into a route with a different endpoint. A user-supplied route declares its
+  // base URL in the descriptor, so prefer it before the generic resolver.
+  const routeBaseUrl = routeId ? getRouteBaseUrlFromEnv(routeId) : undefined
   const request = resolveProviderRequest({
     model: process.env.OPENAI_MODEL,
     baseUrl:
@@ -388,11 +399,11 @@ async function getOpenAIDiscoveryRequestOptions(
     apiKey: firstUsableCredential(
       resolveRouteCredentialValue({
         routeId,
-        baseUrl: request.baseUrl,
+        baseUrl: routeBaseUrl ?? request.baseUrl,
         processEnv: process.env,
       }),
     ),
-    baseUrl: request.baseUrl,
+    baseUrl: routeBaseUrl ?? request.baseUrl,
     headers: parseCustomHeadersEnv(process.env.ANTHROPIC_CUSTOM_HEADERS),
   }, options)
 }
@@ -546,6 +557,7 @@ async function loadDescriptorDiscoveryContext(
     routeLabel,
     mergedEntries,
     routeDefaultModel,
+    getCachedAvailability(cacheKey),
   )
 
   return {
@@ -698,6 +710,15 @@ function ModelPickerWrapper({
     React.useState<ModelPickerDiscoveryState | undefined>(
       discoveryContext?.discoveryState,
     )
+  // A long probe run must not outlive the picker.
+  const availabilityAbort = React.useRef<AbortController | null>(null)
+  React.useEffect(
+    () => () => {
+      availabilityAbort.current?.abort()
+      availabilityAbort.current = null
+    },
+    [],
+  )
 
   const handleCancel = () => {
     logEvent('tengu_model_command_menu', {
@@ -887,6 +908,77 @@ function ModelPickerWrapper({
     onDone(message)
   }
 
+  /**
+   * Probe every listed model against the configured endpoint and mark the ones
+   * it rejects.
+   *
+   * Separate from `refreshAvailableModels` on purpose: a refresh is metadata
+   * only, while this spends one minimal inference call per model. The picker
+   * exposes it under its own key so the cost stays explicit.
+   */
+  async function checkModelAvailability(): Promise<void> {
+    if (!discoveryContext || discoveryContext.kind !== 'descriptor') {
+      return
+    }
+    if (isEssentialTrafficOnly()) {
+      setDiscoveryState({
+        message: 'Availability check skipped: essential-traffic-only mode is on.',
+        tone: 'warning',
+      })
+      return
+    }
+
+    availabilityAbort.current?.abort()
+    availabilityAbort.current = new AbortController()
+
+    const discoveryOptions = await getOpenAIDiscoveryRequestOptions(
+      discoveryContext.routeId,
+    )
+    // Probe the displayed rows rather than re-fetching the catalog, so the
+    // verdicts line up with what the user is looking at.
+    const probeTargets = (optionsOverride ?? [])
+      .map(option => option.value)
+      .filter((value): value is string => typeof value === 'string')
+
+    if (probeTargets.length === 0) {
+      return
+    }
+
+    setDiscoveryState({
+      message: `Checking ${probeTargets.length} models on ${discoveryContext.routeLabel}…`,
+      tone: 'info',
+    })
+
+    const availability = await probeRouteAvailability({
+      routeId: discoveryContext.routeId,
+      baseUrl: discoveryOptions.baseUrl,
+      apiKey: discoveryOptions.apiKey,
+      headers: discoveryOptions.headers,
+      models: probeTargets,
+      // Write under the same partition the picker reads from, so a probe is
+      // attached on the next open instead of being stranded on another key.
+      scopeKey: getDiscoveryCacheKey(
+        discoveryContext.routeId,
+        discoveryOptions,
+      ),
+      signal: availabilityAbort.current?.signal,
+      onProgress: (completed, total) => {
+        setDiscoveryState({
+          message: `Checking ${completed}/${total} models on ${discoveryContext.routeLabel}…`,
+          tone: 'info',
+        })
+      },
+    })
+
+    setOptionsOverride(
+      applyAvailabilityToOptions(optionsOverride ?? [], availability),
+    )
+    setDiscoveryState({
+      message: `${discoveryContext.routeLabel}: ${summarizeAvailability(availability)}`,
+      tone: 'info',
+    })
+  }
+
   async function refreshAvailableModels(manual: boolean): Promise<void> {
     if (!discoveryContext) {
       return
@@ -920,13 +1012,26 @@ function ModelPickerWrapper({
         },
       )
 
-      const nextOptions = mergeActiveProfileModelOptions(
-        discoveryContext.routeId,
+      // Availability verdicts are attached from cache here (instant, no
+      // network). Probing is a separate explicit action — see
+      // `checkModelAvailability` — because it costs one inference call per
+      // model and would otherwise make an ordinary refresh slow and chatty.
+      const availability = getCachedAvailability(
+        getDiscoveryCacheKey(discoveryContext.routeId, discoveryOptions),
+      )
+      const catalogOptions = applyAvailabilityToOptions(
         buildRouteCatalogModelOptions(
           discoveryContext.routeLabel,
           result?.models ?? [],
           discoveryContext.routeDefaultModel,
+          availability,
         ),
+        availability,
+      )
+
+      const nextOptions = mergeActiveProfileModelOptions(
+        discoveryContext.routeId,
+        catalogOptions,
         {
           profileModelSurface: discoveryContext.profileModelSurface,
         },
@@ -1046,6 +1151,13 @@ function ModelPickerWrapper({
         discoveryContext?.canRefresh
           ? () => {
               void refreshAvailableModels(true)
+            }
+          : undefined
+      }
+      onCheckAvailability={
+        discoveryContext?.canRefresh
+          ? () => {
+              void checkModelAvailability()
             }
           : undefined
       }

@@ -1,6 +1,7 @@
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import { getInitialMainLoopModel } from '../../bootstrap/state.js'
 import { getCatalogEntriesForRoute } from '../../integrations/index.js'
+import type { ModelAvailability } from './modelAvailability.js'
 import {
   getTransportKindForRoute,
   resolveActiveRouteIdFromEnv,
@@ -61,6 +62,12 @@ export type ModelOption = {
   label: string
   description: string
   descriptionForModel?: string
+  /**
+   * Live availability verdict for this model, when known. Populated from the
+   * probe cache (and refreshed by the picker's refresh action) so a model the
+   * endpoint will reject is visibly marked rather than discovered by failing.
+   */
+  availability?: ModelAvailability
   /**
    * When set, selecting this option also activates the named provider profile
    * before switching the main-loop model. Encoded into `value` as a

@@ -881,8 +881,20 @@ async function executeDebate(
       : out
   } catch (error) {
     if (error instanceof DuoAbortError) {
-      // Interrupted mid-run: the working copy may hold partial turns, so it is
-      // deliberately dropped instead of persisted.
+      // Auto-save partial session if it has a name and at least one turn
+      if (st.sessionName && (st.history.A.length > 0 || st.history.B.length > 0 || st.clTranscript.length > 0)) {
+        const { saveSession } = await import('../../services/duo/persistence.js')
+        const result = await runDebate({
+          question: '', // placeholder; we only need the session name saved
+          rounds: 0,
+          protocol: false,
+          ask: async () => '',
+          signal: context.abortController?.signal,
+          stats: createDuoStats(),
+        })
+        await saveSession(st.sessionName, st, result, stats)
+        return `duo debate interrupted — partial session saved as "${st.sessionName}" (load with /duo load ${st.sessionName})`
+      }
       return 'duo debate interrupted — nothing was saved.'
     }
     throw error

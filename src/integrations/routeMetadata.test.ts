@@ -1,10 +1,12 @@
 import { expect, test } from 'bun:test'
 
 import {
+  getRouteBaseUrlFromEnv,
   getRouteCredentialEnvVars,
   getRouteCredentialValue,
   getRouteDefaultBaseUrl,
   getRouteDefaultModel,
+  getRouteDescriptor,
   getRouteProviderTypeLabel,
   isApismartBaseUrl,
   isCanonicalApismartInferenceBaseUrl,
@@ -155,6 +157,43 @@ test('getRouteCredentialEnvVars keeps descriptor env vars and openai fallback fo
     'OPENAI_API_KEYS',
     'OPENAI_API_KEY',
   ])
+})
+
+test('custom-anthropic exposes a user-triggerable model catalog', () => {
+  const catalog = getRouteDescriptor('custom-anthropic')?.catalog
+
+  // Without `allowManualRefresh` the picker computes canRefresh === false and
+  // wires neither the refresh nor the availability-check action — the catalog
+  // exists but the user can never act on it.
+  expect(catalog?.discovery?.kind).toBe('anthropic-compatible')
+  expect(catalog?.allowManualRefresh).toBe(true)
+})
+
+test('getRouteBaseUrlFromEnv reads the route declared base URL var', () => {
+  expect(
+    getRouteBaseUrlFromEnv('custom-anthropic', {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:8082',
+    }),
+  ).toBe('http://127.0.0.1:8082')
+
+  expect(
+    getRouteBaseUrlFromEnv('custom', {
+      OPENAI_BASE_URL: 'http://127.0.0.1:11434/v1',
+    }),
+  ).toBe('http://127.0.0.1:11434/v1')
+
+  // Whitespace-only values are not a configured endpoint.
+  expect(
+    getRouteBaseUrlFromEnv('custom-anthropic', { ANTHROPIC_BASE_URL: '   ' }),
+  ).toBe('https://anthropic-proxy.example')
+
+  // An unrelated route keeps its own declared variable, so an OpenAI base URL
+  // must never leak into an Anthropic-proxy route (or vice versa).
+  expect(
+    getRouteBaseUrlFromEnv('custom-anthropic', {
+      OPENAI_BASE_URL: 'https://chatgpt.com/backend-api/codex',
+    }),
+  ).toBe('https://anthropic-proxy.example')
 })
 
 test('custom Anthropic credentials stay native and resolve to their proxy route', () => {

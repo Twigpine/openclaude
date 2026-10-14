@@ -97,6 +97,7 @@ export type KeybindingAction =
   | 'modelPicker:decreaseEffort'
   | 'modelPicker:increaseEffort'
   | 'modelPicker:refresh'
+  | 'modelPicker:checkAvailability'
   | 'select:next'
   | 'select:previous'
   | 'select:accept'

@@ -521,6 +521,29 @@ export const SettingsSchema = lazySchema(() =>
             '"provider" shows the provider catalog/discovery list plus explicit profile-only custom models; ' +
             '"auto" uses profile mode when the profile has multiple explicitly configured models, otherwise provider mode.',
         ),
+      autoModelFailover: z
+        .boolean()
+        .optional()
+        .describe(
+          'Automatically retry the current turn on an alternative model when the ' +
+            'active model exhausts API retries, stops responding mid-stream, or is ' +
+            'unacceptably slow to first token (default: false)',
+        ),
+      failoverTtftThresholdMs: z
+        .number()
+        .optional()
+        .describe(
+          'Time-to-first-token threshold in milliseconds above which an ' +
+            'autoModelFailover candidate is considered unacceptably slow ' +
+            '(default: 30000)',
+        ),
+      failoverMaxPerTurn: z
+        .number()
+        .optional()
+        .describe(
+          'Maximum number of automatic model failovers allowed within a single ' +
+            'turn (default: 1)',
+        ),
       modelOverrides: z
         .record(z.string(), z.string())
         .optional()

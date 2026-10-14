@@ -1,0 +1,11 @@
+# cline free-model candidates — one id per line.
+# These rotate, so this file is probed in the background and only survivors are
+# exposed by the bridge. Add or remove ids freely; no restart needed.
+#
+# The bridge reads this on every /v1/models call, so edits take effect within a
+# few seconds.
+
+cline-free/muse-spark-1.3-contributor
+cline-free/deepseek-v4.1-flash
+cline-free/mimo-v2.6-flash
+stealth/space-bunny-alpha

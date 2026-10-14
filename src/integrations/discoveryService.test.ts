@@ -23,6 +23,10 @@ const originalEnv = {
   OPENAI_MODEL: process.env.OPENAI_MODEL,
   APISMART_API_KEY: process.env.APISMART_API_KEY,
   ANTHROPIC_CUSTOM_HEADERS: process.env.ANTHROPIC_CUSTOM_HEADERS,
+  ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
+  ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
   CLAUDE_CODE_USE_GEMINI: process.env.CLAUDE_CODE_USE_GEMINI,
   CLAUDE_CODE_USE_MISTRAL: process.env.CLAUDE_CODE_USE_MISTRAL,
@@ -65,6 +69,10 @@ function clearProviderEnv(): void {
   delete process.env.OPENAI_MODEL
   delete process.env.APISMART_API_KEY
   delete process.env.ANTHROPIC_CUSTOM_HEADERS
+  delete process.env.ANTHROPIC_BASE_URL
+  delete process.env.ANTHROPIC_AUTH_TOKEN
+  delete process.env.ANTHROPIC_API_KEY
+  delete process.env.ANTHROPIC_MODEL
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_MISTRAL
@@ -103,6 +111,10 @@ afterEach(() => {
     restoreEnvValue('OPENAI_MODEL')
     restoreEnvValue('APISMART_API_KEY')
     restoreEnvValue('ANTHROPIC_CUSTOM_HEADERS')
+    restoreEnvValue('ANTHROPIC_BASE_URL')
+    restoreEnvValue('ANTHROPIC_AUTH_TOKEN')
+    restoreEnvValue('ANTHROPIC_API_KEY')
+    restoreEnvValue('ANTHROPIC_MODEL')
     restoreEnvValue('CLAUDE_CODE_USE_OPENAI')
     restoreEnvValue('CLAUDE_CODE_USE_GEMINI')
     restoreEnvValue('CLAUDE_CODE_USE_MISTRAL')
@@ -175,6 +187,95 @@ describe('discoverModelsForRoute', () => {
     expect(second?.source).toBe('cache')
     expect(callCount).toBe(1)
     expect(calledUrls).toEqual(['http://127.0.0.1:1337/v1/models'])
+  })
+
+  test('discovers anthropic-compatible models with version header and display names', async () => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+
+    process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:8082'
+    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
+    process.env.ANTHROPIC_MODEL = 'anthropic/proxy-model'
+
+    const calledUrls: string[] = []
+    const seenHeaders: Record<string, string>[] = []
+    setMockFetch(mock((
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calledUrls.push(url)
+      const collected: Record<string, string> = {}
+      new Headers(init?.headers).forEach((value, key) => {
+        collected[key] = value
+      })
+      seenHeaders.push(collected)
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: 'claude-sonnet-4-20250514', display_name: 'Claude Sonnet 4' },
+              // Entries without a display_name fall back to the wire id.
+              { id: 'anthropic/nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct' },
+              // Malformed entries are dropped rather than crashing the picker.
+              { display_name: 'no id' },
+              'not-an-object',
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+    }) as unknown as typeof globalThis.fetch)
+
+    const result = await discoverModelsForRoute('custom-anthropic')
+
+    expect(result?.source).toBe('network')
+    expect(result?.stale).toBe(false)
+    expect(result?.models).toEqual([
+      {
+        id: 'claude-sonnet-4-20250514',
+        apiName: 'claude-sonnet-4-20250514',
+        label: 'Claude Sonnet 4',
+      },
+      {
+        id: 'anthropic/nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct',
+        apiName: 'anthropic/nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct',
+        label: 'anthropic/nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct',
+      },
+    ])
+    // Anthropic exposes its catalog under `/v1/models`, not `/models`.
+    expect(calledUrls).toEqual(['http://127.0.0.1:8082/v1/models'])
+    expect(seenHeaders[0]?.['anthropic-version']).toBe('2023-06-01')
+    expect(seenHeaders[0]?.['x-api-key']).toBe('proxy-token')
+  })
+
+  test('resolves the custom-anthropic discovery URL from ANTHROPIC_BASE_URL instead of the placeholder default', async () => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+
+    // custom-anthropic's `defaultBaseUrl` is a documentation placeholder that is
+    // never a real host. Discovery must read the env var, or it probes a dead
+    // endpoint and the picker stays empty.
+    process.env.ANTHROPIC_BASE_URL = 'http://10.0.0.7:9000'
+    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
+    process.env.ANTHROPIC_MODEL = 'anthropic/proxy-model'
+
+    const calledUrls: string[] = []
+    setMockFetch(mock((input: string | URL | Request) => {
+      calledUrls.push(
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url,
+      )
+      return Promise.resolve(
+        new Response(JSON.stringify({ data: [{ id: 'm1' }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }) as unknown as typeof globalThis.fetch)
+
+    const result = await discoverModelsForRoute('custom-anthropic')
+
+    expect(calledUrls).toEqual(['http://10.0.0.7:9000/v1/models'])
+    expect(result?.models.map(model => model.apiName)).toEqual(['m1'])
   })
 
   test('partitions cached discovery results by endpoint base URL', async () => {

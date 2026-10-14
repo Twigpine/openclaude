@@ -154,6 +154,7 @@ export const KEYBINDING_ACTIONS = [
   'modelPicker:decreaseEffort',
   'modelPicker:increaseEffort',
   'modelPicker:refresh',
+  'modelPicker:checkAvailability',
   // Select component actions (distinct from confirm: to avoid collisions)
   'select:next',
   'select:previous',

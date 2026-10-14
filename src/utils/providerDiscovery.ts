@@ -344,8 +344,62 @@ export async function fetchOpenAICompatibleModelsRaw(options?: {
   }
 }
 
-export async function hasLocalAtomicChat(baseUrl?: string): Promise<boolean> {
-  const { signal, clear } = withTimeoutSignal(1200)
+/**
+ * Fetch the model catalog of an Anthropic-compatible endpoint.
+ *
+ * Anthropic Messages API deployments expose `GET /v1/models`, not `/models`.
+ * Auth is `x-api-key` plus `anthropic-version`; bearer-only proxies are also
+ * common, so both are sent when a credential is available. Proxies that need
+ * no credential (local gateways) simply omit them.
+ *
+ * `baseUrl` may be a root (`https://host`) or already end in `/v1`.
+ */
+export async function fetchAnthropicCompatibleModelsRaw(options?: {
+  baseUrl?: string
+  apiKey?: string
+  headers?: Record<string, string>
+}): Promise<Record<string, unknown>[] | null> {
+  const { signal, clear } = withTimeoutSignal(5000)
+  try {
+    const base = getAnthropicCompatibleModelsBaseUrl(options?.baseUrl)
+    const apiKey = options?.apiKey?.trim()
+    const headers: Record<string, string> = {
+      ...(options?.headers ?? {}),
+      'anthropic-version': '2023-06-01',
+    }
+    if (apiKey) {
+      headers['x-api-key'] = apiKey
+      headers.Authorization = `Bearer ${apiKey}`
+    }
+    const response = await fetch(`${base}/models`, {
+      method: 'GET',
+      headers,
+      signal,
+    })
+    if (!response.ok) {
+      return null
+    }
+
+    const data = (await response.json()) as {
+      data?: Array<Record<string, unknown>>
+    }
+
+    return data.data ?? null
+  } catch {
+    return null
+  } finally {
+    clear()
+  }
+}
+
+/** Resolve the `/v1`-prefixed root for an Anthropic-compatible model catalog. */
+export function getAnthropicCompatibleModelsBaseUrl(baseUrl?: string): string {
+  const raw = (baseUrl || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com')
+    .replace(/\/+$/, '')
+  return /\/v1$/.test(raw) ? raw : `${raw}/v1`
+}
+
+export async function hasLocalAtomicChat(baseUrl?: string): Promise<boolean> {  const { signal, clear } = withTimeoutSignal(1200)
   try {
     const response = await fetch(`${getAtomicChatChatBaseUrl(baseUrl)}/models`, {
       method: 'GET',

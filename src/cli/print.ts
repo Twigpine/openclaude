@@ -1231,7 +1231,11 @@ function runHeadlessStreaming(
     abortActiveQuery('print_sigint', 'interrupt')
     void gracefulShutdown(0)
   }
-  process.on('SIGINT', sigintHandler)
+  // Skip SIGINT handler registration under test to prevent leaking the handler
+  // into the shared test-runner process (see CI-FLAKE-FINDING.md).
+  if (process.env.NODE_ENV !== 'test') {
+    process.on('SIGINT', sigintHandler)
+  }
 
   // Dump run()'s state at SIGTERM so a stuck session's healthsweep can name
   // the do/while(waitingForAgents) poll without reading the transcript.

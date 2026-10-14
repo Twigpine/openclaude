@@ -15,6 +15,7 @@ import { resolveRouteIdFromBaseUrl } from './index.js'
 import { filterAvailableCatalogEntries } from './registry.js'
 import {
   getRouteDescriptor,
+  getRouteBaseUrlFromEnv,
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalXaiInferenceBaseUrl,
   resolveActiveRouteIdFromEnv,
@@ -25,6 +26,7 @@ import type {
   OllamaGenerationReadiness,
 } from '../utils/providerDiscovery.js'
 import {
+  fetchAnthropicCompatibleModelsRaw,
   fetchOpenAICompatibleModelsRaw,
   listOpenAICompatibleModels,
   probeOllamaModelCatalog,
@@ -168,7 +170,15 @@ function getRouteBaseUrl(
   routeId: string,
   options?: { baseUrl?: string },
 ): string | undefined {
-  return options?.baseUrl ?? getRouteDescriptor(routeId)?.defaultBaseUrl
+  if (options?.baseUrl) {
+    return options.baseUrl
+  }
+
+  // Routes whose endpoint is user-supplied (custom Anthropic proxy, custom
+  // OpenAI gateway) carry a placeholder `defaultBaseUrl` that is never a real
+  // host. Discovery must prefer the route's declared base-URL env var, or it
+  // probes a nonexistent endpoint and the picker stays empty.
+  return getRouteBaseUrlFromEnv(routeId)
 }
 
 function getRouteDiscoveryApiKey(
@@ -300,6 +310,29 @@ function toOllamaModelEntry(model: { name: string }): ModelCatalogEntry {
   }
 }
 
+/**
+ * Map an Anthropic `/v1/models` entry. Anthropic responses carry a human-facing
+ * `display_name` alongside the wire `id`; prefer it for the picker label while
+ * keeping `id` as the value sent on the wire.
+ */
+function toAnthropicModelEntry(raw: unknown): ModelCatalogEntry | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null
+  }
+  const record = raw as { id?: unknown; display_name?: unknown; type?: unknown }
+  const id = typeof record.id === 'string' ? record.id.trim() : ''
+  if (!id) {
+    return null
+  }
+  const displayName =
+    typeof record.display_name === 'string' ? record.display_name.trim() : ''
+  return {
+    id,
+    apiName: id,
+    label: displayName || id,
+  }
+}
+
 function mergeCatalogEntries(
   staticEntries: ModelCatalogEntry[],
   discoveredEntries: ModelCatalogEntry[],
@@ -391,6 +424,28 @@ async function runDiscovery(
         headers: getRouteDiscoveryHeaders(routeId, options),
       })
       return models?.map(model => toDiscoveredModelEntry(model)) ?? null
+    }
+
+    case 'anthropic-compatible': {
+      const rawModels = await fetchAnthropicCompatibleModelsRaw({
+        baseUrl: getRouteBaseUrl(routeId, options),
+        apiKey: getRouteDiscoveryApiKey(routeId, options),
+        headers: getRouteDiscoveryHeaders(routeId, options),
+      })
+      if (rawModels === null) {
+        return null
+      }
+
+      const entries: ModelCatalogEntry[] = []
+      for (const raw of rawModels) {
+        const entry = discovery.mapModel
+          ? discovery.mapModel(raw)
+          : toAnthropicModelEntry(raw)
+        if (entry !== null) {
+          entries.push(entry)
+        }
+      }
+      return dedupeDiscoveredEntries(entries)
     }
 
     case 'custom':
