@@ -32,15 +32,21 @@ function askQuestion(query: string): Promise<string> {
 async function main() {
   const host = process.env.GRPC_HOST || 'localhost'
   const port = process.env.GRPC_PORT || '50051'
+  const authToken = process.env.GRPC_AUTH_TOKEN || ''
   const client = new openclaudeProto.AgentService(
     `${host}:${port}`,
     grpc.credentials.createInsecure()
   )
 
+  const metadata = new grpc.Metadata()
+  if (authToken) {
+    metadata.set('authorization', `Bearer ${authToken}`)
+  }
+
   let call: grpc.ClientDuplexStream<unknown, unknown> | null = null
 
   const startStream = () => {
-    call = client.Chat()
+    call = client.Chat(metadata)
     let textStreamed = false
 
     call.on('data', async (raw: unknown) => {

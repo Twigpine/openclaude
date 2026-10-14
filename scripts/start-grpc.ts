@@ -1,4 +1,5 @@
 import { GrpcServer } from '../src/grpc/server.ts'
+import { GRPC_AUTH_TOKEN_ENV, resolveGrpcBind } from '../src/grpc/auth.ts'
 import { init } from '../src/entrypoints/init.ts'
 
 // Polyfill MACRO which is normally injected by the bundler
@@ -35,10 +36,21 @@ async function main() {
   await validateProviderEnvOrExit()
 
   const port = process.env.GRPC_PORT ? parseInt(process.env.GRPC_PORT, 10) : 50051
-  const host = process.env.GRPC_HOST || 'localhost'
-  const server = new GrpcServer()
+  const requestedHost = process.env.GRPC_HOST
+  const authToken = process.env[GRPC_AUTH_TOKEN_ENV] || undefined
 
-  server.start(port, host)
+  // Refuse to expose the agent service on a non-loopback interface unless a
+  // bearer token is configured. Binding 0.0.0.0 without auth turns any code
+  // execution in a reachable client into remote command execution here.
+  const bind = resolveGrpcBind(requestedHost, authToken)
+  if (!bind.ok) {
+    console.error(bind.reason)
+    process.exit(1)
+  }
+
+  const server = new GrpcServer(authToken)
+
+  server.start(port, bind.host)
 }
 
 main().catch((err) => {
