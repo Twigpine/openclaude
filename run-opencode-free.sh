@@ -38,7 +38,9 @@ export ANTHROPIC_MODEL="${FCC_MODEL}"
 export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 export CLAUDE_CODE_AUTO_MODE_SERVER=0
 export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1
-export CLAUDE_CODE_AUTO_COMPACT_WINDOW=190000
+# Auto-compact cap removed: it was a no-op while the window was stuck at 128K
+# (min(128000, 190000) = 128000) but would silently cap long-context models
+# (e.g. longcat 1M) at 190K. modelLimits in settings.json sets real windows now.
 export DISABLE_AUTOUPDATER=1
 export DISABLE_FEEDBACK_COMMAND=1
 export DISABLE_ERROR_REPORTING=1
