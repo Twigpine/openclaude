@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.33.0](https://github.com/Twigpine/openclaude/compare/v0.32.0...v0.33.0) (2026-10-14)
+
+
+### Features
+
+* **provider:** add GMI Cloud as a provider and official partner ([#2279](https://github.com/Twigpine/openclaude/issues/2279)) ([e736c28](https://github.com/Twigpine/openclaude/commit/e736c28257d614558e22219e138d3f984b3e658d))
+* **sessions:** add /sessions to resume or delete saved conversations ([#2262](https://github.com/Twigpine/openclaude/issues/2262)) ([fc3be25](https://github.com/Twigpine/openclaude/commit/fc3be25e2549698a21571f4f773d8b32a643bece))
+
+
+### Bug Fixes
+
+* **statusline:** reset context usage after full compaction ([#2275](https://github.com/Twigpine/openclaude/issues/2275)) ([fc82603](https://github.com/Twigpine/openclaude/commit/fc826031aef42d7d8627c48cca9159faa10146c6))
+
 ## [0.32.0](https://github.com/Twigpine/openclaude/compare/v0.31.0...v0.32.0) (2026-10-12)
 
 
