@@ -121,8 +121,10 @@ function isClineModel(model) {
   return CLINE_PREFIXES.some(p => model.startsWith(p))
 }
 
+// FCC-backed models routed through the local FCC proxy (nim AND the OpenAI
+// ChatGPT free tier — ids "anthropic/nvidia_nim/..." and "anthropic/openai/...").
 function isNimModel(model) {
-  return typeof model === "string" && model.includes("nvidia_nim/")
+  return typeof model === "string" && (model.includes("nvidia_nim/") || model.includes("openai/"))
 }
 
 function toOpencodeModel(requested) {
@@ -778,7 +780,7 @@ function anthropicError(message) {
 }
 
 // ---- Model listing ----
-const PROVIDER_ORDER = ["opencode", "cline", "nim"]
+const PROVIDER_ORDER = ["opencode", "cline", "nim", "openai"]
 
 async function listModels() {
   const out = []
@@ -817,22 +819,31 @@ async function listModels() {
     const seenReal = new Set()
     for (const m of data.data ?? []) {
       const raw = m?.id
-      if (!raw || typeof raw !== "string" || !raw.includes("nvidia_nim/")) continue
-      const real = raw.slice(raw.indexOf("nvidia_nim/"))
-      if (seenReal.has(real)) continue
+      if (!raw || typeof raw !== "string") continue
+      // FCC ids look like "<surface>/<provider>/<model>" (surfaces: anthropic,
+      // claude-3-freecc-no-thinking, ...). Advertise only the real backends —
+      // nvidia_nim and the OpenAI ChatGPT free tier — on the anthropic surface;
+      // the duplicate no-thinking surface collapses into the same real id
+      // below (first occurrence wins). Check nvidia_nim first: gpt-oss lives
+      // at nvidia_nim/openai/gpt-oss.
+      let real = null
+      if (raw.includes("nvidia_nim/")) real = raw.slice(raw.indexOf("nvidia_nim/"))
+      else if (raw.includes("openai/")) real = raw.slice(raw.indexOf("openai/"))
+      if (!real || seenReal.has(real)) continue
       seenReal.add(real)
+      const isOpenAI = real.startsWith("openai/")
       out.push({
-        provider: "nim",
+        provider: isOpenAI ? "openai" : "nim",
         object: "model",
         id: "anthropic/" + real,
         display_name: m.display_name ?? real,
         type: "model",
         created: 0,
-        owned_by: "nim",
+        owned_by: isOpenAI ? "openai" : "nim",
       })
     }
   } catch (error) {
-    console.error("[nim] catalog failed: " + (error.message || error).slice(0, 120))
+    console.error("[fcc] catalog failed: " + (error.message || error).slice(0, 120))
   }
   out.sort((a, b) => {
     const pa = PROVIDER_ORDER.indexOf(a.provider)
@@ -1013,7 +1024,7 @@ function sendStream(res, model, text, inputTokens = 0) {
 
 // ---- Boot ----
 
-if (!FCC_TOKEN) console.warn("[bridge] FCC_TOKEN not configured — nim provider disabled")
+if (!FCC_TOKEN) console.warn("[bridge] FCC_TOKEN not configured — FCC catalog disabled (nim + openai chatgpt); set FCC_TOKEN (any value when FCC auth is off)")
 refreshCline().catch(error => console.error("[cline] probe failed: " + (error.message || error).slice(0, 120)))
 setInterval(() => refreshCline().catch(() => {}), CLINE_REFRESH_MS).unref()
 ensureOcEvents().then(() => console.log("[events] /api/event stream connected")).catch(() => {})

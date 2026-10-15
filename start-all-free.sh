@@ -69,8 +69,11 @@ if ss -tln 2>/dev/null | grep -q ":${BRIDGE_PORT} "; then
   log "bridge already on ${BRIDGE_PORT}"
 else
   log "starting bridge on ${BRIDGE_PORT}"
+  # FCC (nim + openai chatgpt) needs an FCC_TOKEN for the bridge's x-api-key
+  # header even when fcc-server runs with auth disabled — any value works then;
+  # export a real one if your FCC instance enforces authentication.
   OC_BRIDGE_PORT="$BRIDGE_PORT" OC_BRIDGE_URL="http://127.0.0.1:${OC_PORT}" \
-    OC_BRIDGE_TOKEN="$OC_TOKEN" \
+    OC_BRIDGE_TOKEN="$OC_TOKEN" FCC_TOKEN="${FCC_TOKEN:-bridge}" \
     setsid nohup node "$FORK_DIR/opencode-bridge.mjs" > "$STATE_DIR/bridge.log" 2>&1 < /dev/null &
   for _ in $(seq 1 20); do
     ss -tln 2>/dev/null | grep -q ":${BRIDGE_PORT} " && break
