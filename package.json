@@ -108,6 +108,7 @@
     "@types/react": "19.2.14",
     "@typescript-eslint/eslint-plugin": "^8.69.0",
     "@typescript-eslint/parser": "^8.69.0",
+    "@xmldom/xmldom": "^0.9.12",
     "ajv": "8.18.0",
     "auto-bind": "5.0.1",
     "axios": "1.16.0",

@@ -73,6 +73,8 @@ export type ParseOptions = {
   maxSize?: number
   /** Custom format detectors to try first. */
   detectors?: FormatDetector[]
+  /** Human-readable source label recorded in provenance (e.g. file path or URL). */
+  sourceHint?: string
 }
 
 /** Format detection function — returns format or null if not matched. */

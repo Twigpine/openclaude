@@ -241,7 +241,7 @@ export class ArtefactParserImpl implements ArtefactParser {
     return this.parseBytes<T>(bytes, { ...options, sourceHint: ref.source })
   }
 
-  async parseBytes<T = unknown>(bytes: Uint8Array, options?: ParseOptions & { sourceHint?: string }): Promise<ParseResult<T>> {
+  async parseBytes<T = unknown>(bytes: Uint8Array, options?: ParseOptions): Promise<ParseResult<T>> {
     const startedAt = new Date().toISOString()
     const source = options?.sourceHint ?? '<memory>'
 
