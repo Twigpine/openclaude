@@ -26,12 +26,15 @@ import type {
 const DEFAULT_MAX_SIZE = 50 * 1024 * 1024 // 50 MB
 const PARSER_VERSION = '1.0.0'
 
+// Shared encoder/decoder — avoids re-instantiating on every call
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
+
 // ============================================================================
 // Format detectors (shared, used by registry and custom detectors)
 // ============================================================================
 
 function startsWith(bytes: Uint8Array, prefix: string): boolean {
-  const encoder = new TextEncoder()
   const pref = encoder.encode(prefix)
   if (bytes.length < pref.length) return false
   for (let i = 0; i < pref.length; i++) {
@@ -41,17 +44,12 @@ function startsWith(bytes: Uint8Array, prefix: string): boolean {
 }
 
 function contains(bytes: Uint8Array, needle: string): boolean {
-  const encoder = new TextEncoder()
   const n = encoder.encode(needle)
   if (bytes.length < n.length) return false
-  for (let i = 0; i <= bytes.length - n.length; i++) {
-    let match = true
-    for (let j = 0; j < n.length; j++) {
-      if (bytes[i + j] !== n[j]) { match = false; break }
-    }
-    if (match) return true
-  }
-  return false
+  // Use native indexOf on the decoded string for O(n) average case
+  const haystack = decoder.decode(bytes)
+  const needleStr = decoder.decode(n)
+  return haystack.includes(needleStr)
 }
 
 export const detectors = {
@@ -90,10 +88,11 @@ export const detectors = {
 
   kubernetesManifest(bytes: Uint8Array): ArtefactFormat | null {
     try {
-      const text = new TextDecoder().decode(bytes)
+      const text = decoder.decode(bytes)
       if (text.trim().startsWith('{')) {
         const obj = JSON.parse(text)
-        return obj.apiVersion && obj.kind ? 'kubernetes-manifest' : null
+        if (!obj || typeof obj !== 'object') return null
+        return (obj as Record<string, unknown>).apiVersion && (obj as Record<string, unknown>).kind ? 'kubernetes-manifest' : null
       }
       return text.includes('apiVersion:') && text.includes('kind:') ? 'kubernetes-manifest' : null
     } catch {

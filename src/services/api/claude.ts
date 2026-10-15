@@ -68,6 +68,22 @@ import {
   normalizeAbortReason,
   shouldCreateUserInterruptionMessage,
 } from '../../utils/abortReasons.js'
+import { recordPerformanceMetric } from '../../utils/model/performanceMetrics.js'
+import type { ErrorCategory } from '../../utils/model/performanceMetrics.js'
+
+function classifyErrorCategory(error: unknown): ErrorCategory {
+  if (error instanceof APIError) {
+    if (error.status === 429) return 'rate-limit'
+    if (error.status === 401 || error.status === 403) return 'auth'
+    if (error.status === 408) return 'timeout'
+  }
+  const msg = error instanceof Error ? error.message.toLowerCase() : ''
+  if (msg.includes('timeout') || msg.includes('etimedout')) return 'timeout'
+  if (msg.includes('rate limit') || msg.includes('429')) return 'rate-limit'
+  if (msg.includes('auth') || msg.includes('401') || msg.includes('403')) return 'auth'
+  if (msg.includes('network') || msg.includes('econnrefused')) return 'network'
+  return 'unknown'
+}
 import {
   getBedrockExtraBodyParamsBetas,
   getMergedBetas,
@@ -3358,6 +3374,13 @@ async function* queryModel(
           return
         }
 
+        recordPerformanceMetric({
+          model: errorModel,
+          outcome: 'failure',
+          latencyMs: Date.now() - start,
+          errorCategory: classifyErrorCategory(error),
+        })
+
         yield getAssistantMessageFromError(error, errorModel, {
           messages,
           messagesForAPI,
@@ -3415,6 +3438,13 @@ async function* queryModel(
         return
       }
 
+      recordPerformanceMetric({
+        model: errorModel,
+        outcome: 'failure',
+        latencyMs: Date.now() - start,
+        errorCategory: classifyErrorCategory(error),
+      })
+
       yield getAssistantMessageFromError(error, errorModel, {
         messages,
         messagesForAPI,
@@ -3470,6 +3500,12 @@ async function* queryModel(
   // Precompute scalars so the fire-and-forget .then() closure doesn't pin the
   // full messagesForAPI array (the entire conversation up to the context window
   // limit) until getToolPermissionContext() resolves.
+  recordPerformanceMetric({
+    model: options.model,
+    outcome: 'success',
+    latencyMs: Date.now() - start,
+  })
+
   const logMessageCount = messagesForAPI.length
   const logMessageTokens = tokenCountFromLastAPIResponse(messagesForAPI)
   void options.getToolPermissionContext().then(permissionContext => {

@@ -20,6 +20,7 @@ import {
 import { resolveActiveRouteIdFromEnv } from '../../integrations/routeMetadata.js'
 import { getActiveProviderProfile } from '../providerProfiles.js'
 import { getDiscoveryCacheKey } from '../../integrations/discoveryService.js'
+import { scoreFailoverCandidates } from './failoverScoring.js'
 
 export type RankFailoverCandidatesOptions = {
   /** Picker options, already in provider-preference order. */
@@ -89,7 +90,13 @@ export function rankFailoverCandidates(
     verified.push(model)
   }
 
-  return [...verified, ...unprobed]
+  const ranked = [...verified, ...unprobed]
+  // Score and re-rank using performance metrics when available
+  const scored = scoreFailoverCandidates({
+    candidates: ranked,
+    availability: hasVerdicts ? availability : undefined,
+  })
+  return scored.map(c => c.model)
 }
 
 /**

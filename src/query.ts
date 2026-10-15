@@ -1487,6 +1487,11 @@ async function* queryLoop(
       return { reason: 'blocking_limit' }
     }
 
+    // Auto model failover (opt-in): state that must survive the retry
+    // loop so a failing candidate is never retried and the per-turn
+    // cap actually bounds the number of switches.
+    let failoverCount = 0
+    const failoverTried: string[] = []
     let attemptWithFallback = true
     const toolsForModel = agentStepLimit?.summaryRequested
       ? []
@@ -1914,6 +1919,93 @@ async function* queryLoop(
             )
 
             continue
+          }
+          // Auto model failover (opt-in): a model that keeps failing, stops
+          // responding, or is slow to first token switches to the best-ranked
+          // alternative and retries the turn once. Reuses this same retry loop;
+          // decision logic lives in services/api/modelFailover.ts.
+          if (!(innerError instanceof FallbackTriggeredError)) {
+            {
+              const { getSettings_DEPRECATED } = await import(
+                './utils/settings/settings.js'
+              )
+              const failoverSettings = getSettings_DEPRECATED()
+              if (
+                failoverSettings.autoModelFailover === true &&
+                !toolUseContext.abortController.signal.aborted
+              ) {
+                const { resolveFailoverDecision } = await import(
+                  './services/api/modelFailover.js'
+                )
+                const {
+                  rankFailoverCandidates,
+                  resolveFailoverAvailabilityScopeKey,
+                } = await import('./utils/model/failoverCandidates.js')
+                const { getModelOptions } = await import(
+                  './utils/model/modelOptions.js'
+                )
+                const { getCachedAvailability } = await import(
+                  './utils/model/modelAvailabilityCache.js'
+                )
+                const scopeKey = resolveFailoverAvailabilityScopeKey()
+                const availability = scopeKey
+                  ? getCachedAvailability(scopeKey)
+                  : {}
+                const decision = resolveFailoverDecision(innerError, {
+                  currentModel,
+                  alreadyTried: failoverTried,
+                  failoverCount,
+                  autoModelFailover: failoverSettings.autoModelFailover,
+                  failoverTtftThresholdMs: failoverSettings.failoverTtftThresholdMs,
+                  failoverMaxPerTurn: failoverSettings.failoverMaxPerTurn,
+                  candidates: rankFailoverCandidates({
+                    options: getModelOptions(),
+                    failingModel: currentModel,
+                    alreadyTried: failoverTried,
+                    availability,
+                  }),
+                  signal: toolUseContext.abortController.signal,
+                })
+                if (decision.shouldFailover && decision.nextModel) {
+                  failoverCount++
+                  failoverTried.push(currentModel)
+                  const nextModel = decision.nextModel
+                  attemptWithFallback = true
+
+                  yield* yieldMissingToolResultBlocks(
+                    assistantMessages,
+                    'Auto model failover',
+                  )
+                  assistantMessages.length = 0
+                  toolResults.length = 0
+                  toolUseBlocks.length = 0
+                  needsFollowUp = false
+
+                  if (streamingToolExecutor) {
+                    streamingToolExecutor.discard()
+                    streamingToolExecutor = new StreamingToolExecutor(
+                      toolUseContext.options.tools,
+                      canUseTool,
+                      toolUseContext,
+                    )
+                  }
+
+                  currentModel = nextModel
+                  toolUseContext.options.mainLoopModel = nextModel
+                  // Thinking signatures are model-bound; strip before replaying
+                  // history to the alternative model.
+                  messagesForQuery = stripThinkingBlocksIfProviderAllows(
+                    messagesForQuery as unknown as Parameters<typeof stripThinkingBlocksIfProviderAllows>[0],
+                  ) as unknown as typeof messagesForQuery
+
+                  yield createSystemMessage(
+                    `Auto failover: retrying on ${renderModelName(nextModel)} (${decision.message ?? 'model unavailable'})`,
+                    'warning',
+                  )
+                  continue
+                }
+              }
+            }
           }
           // Smart-routing routed-error fallback (U4): a simple-routed call that
           // errors retries once on the strong model. Reuses this same

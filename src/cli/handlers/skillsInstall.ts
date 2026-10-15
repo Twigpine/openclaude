@@ -192,7 +192,12 @@ export async function resolveRegistrySource(registry?: string): Promise<string> 
 async function readRegistryEntries(source?: string): Promise<RegistryEntriesResult> {
   const registrySource = await resolveRegistrySource(source)
   const raw = await readSourceText(registrySource)
-  const parsed = JSON.parse(raw) as unknown
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw) as unknown
+  } catch {
+    throw new Error(`Registry at ${registrySource} is not valid JSON.`)
+  }
   return {
     entries: normalizeRegistryEntries(parsed),
     registrySource,
