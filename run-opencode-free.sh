@@ -44,6 +44,12 @@ export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1
 export DISABLE_AUTOUPDATER=1
 export DISABLE_FEEDBACK_COMMAND=1
 export DISABLE_ERROR_REPORTING=1
+# Slow free models (longcat) think in silence for minutes. The TUI's own
+# watchdogs default to 90s (stream idle) and 5min (QueryGuard idle) and killed
+# those turns with "query timed out before completion" — align them with the
+# bridge's OC_BRIDGE_DEADLINE (10 min).
+export CLAUDE_STREAM_IDLE_TIMEOUT_MS="${CLAUDE_STREAM_IDLE_TIMEOUT_MS:-600000}"
+export OPENCLAUDE_QUERY_IDLE_TIMEOUT_MS="${OPENCLAUDE_QUERY_IDLE_TIMEOUT_MS:-600000}"
 
 unset ANTHROPIC_API_KEY
 unset CLAUDE_CODE_USE_OPENAI

@@ -700,6 +700,20 @@ function createAnthropicSink(res, model, inputTokens = 0) {
   const write = (event, data) => {
     try { res.write(sseEvent(event, data)) } catch { /* client gone */ }
   }
+  // The real Anthropic API sends ping events while a model works. Free models
+  // think in silence for minutes, and a silent stream trips downstream
+  // watchdogs (the TUI's stream idle timeout defaults to 90s) — the client
+  // then aborts with "query timed out before completion" while the bridge is
+  // still waiting on the model. Relay pings once the stream is open so
+  // clients see live traffic mid-thought. OC_BRIDGE_PING_MS=0 disables.
+  const pingMs = Number(process.env.OC_BRIDGE_PING_MS ?? 15000)
+  if (Number.isFinite(pingMs) && pingMs > 0) {
+    const pinger = setInterval(() => {
+      if (finished || clientGone) { clearInterval(pinger); return }
+      if (open) write("ping", { type: "ping" })
+    }, pingMs)
+    res.on("close", () => clearInterval(pinger))
+  }
   const ensure = () => {
     if (open) return
     open = true
