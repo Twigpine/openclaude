@@ -121,10 +121,12 @@ function isClineModel(model) {
   return CLINE_PREFIXES.some(p => model.startsWith(p))
 }
 
-// FCC-backed models routed through the local FCC proxy (nim AND the OpenAI
-// ChatGPT free tier — ids "anthropic/nvidia_nim/..." and "anthropic/openai/...").
+// FCC-routed models: anything on FCC's "anthropic" surface
+// ("anthropic/<provider>/<model...>") — nim, openai chatgpt, custom providers.
+// Legacy bare forms (nvidia_nim/..., openai/...) kept for stored model specs.
 function isNimModel(model) {
-  return typeof model === "string" && (model.includes("nvidia_nim/") || model.includes("openai/"))
+  if (typeof model !== "string") return false
+  return model.startsWith("anthropic/") || model.includes("nvidia_nim/") || model.startsWith("openai/")
 }
 
 function toOpencodeModel(requested) {
@@ -819,35 +821,42 @@ async function listModels() {
     const seenReal = new Set()
     for (const m of data.data ?? []) {
       const raw = m?.id
-      if (!raw || typeof raw !== "string") continue
-      // FCC ids look like "<surface>/<provider>/<model>" (surfaces: anthropic,
-      // claude-3-freecc-no-thinking, ...). Advertise only the real backends —
-      // nvidia_nim and the OpenAI ChatGPT free tier — on the anthropic surface;
-      // the duplicate no-thinking surface collapses into the same real id
-      // below (first occurrence wins). Check nvidia_nim first: gpt-oss lives
-      // at nvidia_nim/openai/gpt-oss.
-      let real = null
-      if (raw.includes("nvidia_nim/")) real = raw.slice(raw.indexOf("nvidia_nim/"))
-      else if (raw.includes("openai/")) real = raw.slice(raw.indexOf("openai/"))
-      if (!real || seenReal.has(real)) continue
+      // FCC ids are "<surface>/<provider>/<model...>". Advertise everything on
+      // the "anthropic" surface that carries a provider segment — that covers
+      // nim, the OpenAI ChatGPT free tier, and any custom provider configured
+      // in the FCC admin (custom_<hash>/...). Bare claude-* aliases and the
+      // duplicate "claude-3-freecc-no-thinking" surface are skipped by
+      // construction, so no cross-surface dedup is needed.
+      if (!raw || typeof raw !== "string" || !raw.startsWith("anthropic/")) continue
+      const real = raw.slice("anthropic/".length)
+      if (!real.includes("/") || seenReal.has(real)) continue
       seenReal.add(real)
-      const isOpenAI = real.startsWith("openai/")
+      // Keep the historical tags for the two known backends; custom providers
+      // keep their FCC id segment so they stay recognizable in the picker.
+      const provider = real.startsWith("nvidia_nim/") ? "nim"
+        : real.startsWith("openai/") ? "openai"
+        : real.slice(0, real.indexOf("/"))
       out.push({
-        provider: isOpenAI ? "openai" : "nim",
+        provider,
         object: "model",
         id: "anthropic/" + real,
         display_name: m.display_name ?? real,
         type: "model",
         created: 0,
-        owned_by: isOpenAI ? "openai" : "nim",
+        owned_by: provider,
       })
     }
   } catch (error) {
     console.error("[fcc] catalog failed: " + (error.message || error).slice(0, 120))
   }
   out.sort((a, b) => {
-    const pa = PROVIDER_ORDER.indexOf(a.provider)
-    const pb = PROVIDER_ORDER.indexOf(b.provider)
+    // Unknown providers (custom FCC backends, ...) sort after the known ones.
+    const rank = p => {
+      const i = PROVIDER_ORDER.indexOf(p)
+      return i === -1 ? PROVIDER_ORDER.length : i
+    }
+    const pa = rank(a.provider)
+    const pb = rank(b.provider)
     if (pa !== pb) return pa - pb
     return a.id.localeCompare(b.id)
   })
