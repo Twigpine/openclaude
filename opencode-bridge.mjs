@@ -278,6 +278,7 @@ async function runTurnWithFallback(model, prompt, maxTokens, directive, convo = 
     const ms = Date.now() - t0
     if (!reply.error) {
       if (m !== model) console.log("[fallback] " + model + " failed, served by " + m + " in " + ms + "ms")
+      reply.model = m // report the model that actually served, not the requested one
       return reply
     }
     last = reply
@@ -676,6 +677,7 @@ function createAnthropicSink(res, model, inputTokens = 0) {
   const id = "msg_bridge_" + Date.now()
   const started = Date.now()
   let open = false
+  let currentModel = model
   let block = null // "thinking" | "text"
   let index = -1
   let finished = false
@@ -721,7 +723,7 @@ function createAnthropicSink(res, model, inputTokens = 0) {
     write("message_start", {
       type: "message_start",
       message: {
-        id, type: "message", role: "assistant", model,
+        id, type: "message", role: "assistant", model: currentModel,
         content: [], stop_reason: null, stop_sequence: null,
         usage: { input_tokens: 0, output_tokens: 0 },
       },
@@ -780,6 +782,12 @@ function createAnthropicSink(res, model, inputTokens = 0) {
       if (output === totals.output_tokens) return
       totals.output_tokens = output
       write("message_delta", { type: "message_delta", delta: { stop_reason: null, stop_sequence: null }, usage: { output_tokens: output } })
+    },
+    // Fallback attempts run before any byte is on the wire; name the model
+    // that ACTUALLY serves the turn in message_start so the client's display
+    // follows the real model in real time.
+    setModel(m) {
+      if (!open) currentModel = m
     },
     finish(stopReason = "end_turn") {
       if (finished) return
@@ -966,10 +974,11 @@ async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = D
     let attempt = 0
     for (;;) {
       attempt++
+      sink.setModel?.(m) // message_start must name the model that actually serves
       try {
         result = await attemptOpencodeStream(bare,
           (turnConvo?.sid ? CONTINUE_DIRECTIVE : directive) + turnPrompt,
-          sink, deadlineMs, turnConvo, !!turnConvo)
+          sink, deadlineMs, turnConvo, !!turnConvo?.entry)
       } catch (err) {
         result = { error: String(err.message || err) }
       }
@@ -977,6 +986,9 @@ async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = D
       if (attempt > retries || !transient(result.error)) break
       console.log("[retry] " + bare + " attempt " + attempt + " failed (" +
         String(result.error).slice(0, 80) + ") — same model+session in " + retryWaitMs + "ms")
+      // A per-turn session (no inherited binding) dies with its attempt —
+      // the retry must open a fresh one instead of reusing the dead sid.
+      if (turnConvo && !turnConvo.entry) turnConvo.sid = null
       await new Promise(r => setTimeout(r, retryWaitMs))
       if (sink.clientGone) return "client disconnected"
     }
@@ -988,14 +1000,19 @@ async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = D
     const error = result.ok ? "opencode turn completed without a reply" : result.error
     last = error
     console.log("[fallback] " + bare + " failed after " + ms + "ms: " + String(error).slice(0, 80))
+    // A per-turn session dies with its attempt — a hop must open a fresh one
+    // instead of reusing the deleted sid (SessionNotFoundError).
+    if (turnConvo && !turnConvo.entry) turnConvo.sid = null
     if (sink.started) return null // bytes already on the wire — no restart possible
     if (sink.clientGone) return "client disconnected"
     if (String(error).includes("timed out")) break // heavy prompt: next model would be just as slow
-    // A live conversation stays with its model. Retries are exhausted and the
-    // attempt kept the session alive (keepSessionOnError) — clean it up here
-    // and fail honestly: another model would only see the flattened 8K view,
-    // and a weak fallback's summary poisons the history worse than an error.
-    if (turnConvo?.sid) {
+    // An inherited conversation stays with its model. Retries are exhausted
+    // and the attempt kept the session alive (keepSessionOnError) — clean it
+    // up here and fail honestly: another model would only see the flattened
+    // 8K view, and a weak fallback's summary poisons the history worse than
+    // an error. (turnConvo.entry marks a binding inherited from an earlier
+    // turn — a first turn's per-turn session may hop freely.)
+    if (turnConvo?.entry) {
       abandonConvo(turnConvo)
       try { await oc("DELETE", "/api/session/" + turnConvo.sid, undefined, 5000) } catch { /* already gone */ }
       return last
@@ -1316,8 +1333,8 @@ const server = http.createServer(async (req, res) => {
       // user still gets an answer instead of "API server error".
       const reply = await runTurnWithFallback(model, prompt, body.max_tokens, directive, convo, fullPrompt)
       if (reply.error) return done(502, anthropicError(reply.error))
-      if (body.stream) return sendStream(res, model, reply.text, inputTokens)
-      return done(200, anthropicResponse({ model, text: reply.text, inputTokens }))
+      if (body.stream) return sendStream(res, reply.model ?? model, reply.text, inputTokens)
+      return done(200, anthropicResponse({ model: reply.model ?? model, text: reply.text, inputTokens }))
     } catch (err) {
       return done(502, anthropicError(String(err.message || err)))
     }
