@@ -56,6 +56,7 @@ const EXPECTED_PRESETS = [
   'longcat',
   'llmtr',
   'commandcode',
+  'requesty',
   'opencode',
   'opencode-go',
   'clinepass',
