@@ -241,6 +241,114 @@ async function runNimTurn(model, prompt, maxTokens) {
   return { text: text.trim() }
 }
 
+// ---- transparent Anthropic proxy for FCC (tool-capable turns) ----
+// A request that carries `tools` is a TUI agent turn: the model must be able
+// to return real tool_use blocks (id/name/input), get thinking blocks back,
+// and receive the tool_result on the next call. Flattening that into a text
+// prompt is exactly what made FCC models only "announce" tool calls in prose.
+// FCC speaks the Anthropic protocol natively (verified: system blocks with
+// cache_control, tool_use -> tool_result round trip, SSE with thinking and
+// input_json_delta), so these turns are proxied as-is; only
+// usage.input_tokens is rewritten to the bridge's honest request estimate
+// (FCC's own count is partial at message_start and inconsistent between
+// stream and buffered). Compaction stays on the flattened path (it must
+// never call tools) and any proxy failure falls back to it, since nothing
+// is written to the client until FCC answers 200.
+async function proxyFccTurn(body, model, res, inputTokens) {
+  if (!FCC_TOKEN) throw new Error("FCC_TOKEN not configured (set FCC_TOKEN env var)")
+  const fccModel = model.startsWith("anthropic/") ? model : `anthropic/${model}`
+  let cap = Number(process.env.OC_BRIDGE_MAXTOKENS ?? 4096)
+  if (!Number.isFinite(cap) || cap <= 0) cap = 4096
+  const payload = { ...body, model: fccModel }
+  if (typeof payload.max_tokens !== "number" || payload.max_tokens > cap) payload.max_tokens = cap
+  // Anthropic constraint: thinking.budget_tokens must stay below max_tokens.
+  const thinking = payload.thinking
+  if (thinking && typeof thinking === "object" && Number.isFinite(Number(thinking.budget_tokens)) && Number(thinking.budget_tokens) >= payload.max_tokens) {
+    payload.thinking = { ...thinking, budget_tokens: Math.max(1024, Math.floor(payload.max_tokens / 2)) }
+  }
+  const stream = body.stream !== false
+  payload.stream = stream
+  const controller = new AbortController()
+  const onClose = () => controller.abort()
+  res.on("close", onClose)
+  const timer = setTimeout(() => controller.abort(), Number(process.env.OC_BRIDGE_DEADLINE ?? 150000))
+  try {
+    const r = await fetch(FCC_URL + "/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": FCC_TOKEN, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+    if (!r.ok) {
+      const text = await r.text().catch(() => "")
+      throw new Error("fcc " + r.status + ": " + text.slice(0, 300))
+    }
+    if (!stream) {
+      const reply = JSON.parse(await r.text())
+      reply.model = model
+      if (reply.usage) {
+        reply.usage = {
+          input_tokens: Math.max(1, inputTokens | 0),
+          output_tokens: reply.usage.output_tokens ?? 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        }
+      }
+      console.log("[fcc] proxy buffered 200 " + model)
+      return send(res, 200, reply)
+    }
+    // Pipe the SSE frames through untouched except for usage bookkeeping.
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" })
+    const reader = r.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ""
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, idx)
+        buf = buf.slice(idx + 2)
+        res.write(rewriteProxyFrame(frame, model, inputTokens))
+      }
+    }
+    if (buf.trim()) res.write(rewriteProxyFrame(buf, model, inputTokens))
+    res.end()
+    console.log("[fcc] proxy stream 200 " + model)
+  } finally {
+    clearTimeout(timer)
+    res.off("close", onClose)
+  }
+}
+
+// Pass an FCC SSE frame through, rewriting only usage bookkeeping:
+// input_tokens = honest estimate of the client's request, cache = 0.
+// Everything else (thinking/text/tool_use blocks, input_json_delta,
+// stop_reason) flows verbatim so the TUI can run its own tool loop.
+function rewriteProxyFrame(frame, model, inputTokens) {
+  const lines = frame.split("\n")
+  let event = null
+  let dataIdx = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("event: ")) event = lines[i].slice(7).trim()
+    else if (lines[i].startsWith("data: ") && dataIdx === -1) dataIdx = i
+  }
+  if (dataIdx === -1) return frame + "\n\n"
+  let data
+  try { data = JSON.parse(lines[dataIdx].slice(6)) } catch { return frame + "\n\n" }
+  const estimate = Math.max(1, inputTokens | 0)
+  if (data?.type === "message_start" && data.message) {
+    data.message.model = model
+    data.message.usage = { input_tokens: estimate, output_tokens: 0 }
+  } else if (data?.type === "message_delta" && data.usage) {
+    data.usage = { input_tokens: estimate, output_tokens: data.usage.output_tokens ?? 0 }
+  } else {
+    return frame + "\n\n"
+  }
+  return "event: " + (event || data.type) + "\ndata: " + JSON.stringify(data) + "\n\n"
+}
+
 const CLINE_TIMEOUT_MS = 150000
 
 async function runClineTurn(model, prompt) {
@@ -912,6 +1020,20 @@ const server = http.createServer(async (req, res) => {
     const inputTokens = estimateRequestTokens(body)
     const compact = isCompactionRequest(body)
     const directive = compact ? COMPACT_DIRECTIVE : DIRECTIVE
+    // Tool-bearing turns on FCC models are proxied through as native
+    // Anthropic Messages (system + messages + tools intact): the TUI needs
+    // real tool_use blocks back and sends tool_result on the next call —
+    // a flattened text prompt can't carry that loop. Compaction stays on
+    // the flattened path below (summarization must never call tools), and
+    // on proxy failure we fall through to the flattened cascade.
+    const hasTools = Array.isArray(body.tools) && body.tools.length > 0
+    if (!compact && hasTools && isNimModel(model)) {
+      try {
+        return await proxyFccTurn(body, model, res, inputTokens)
+      } catch (err) {
+        console.log("[fcc] transparent proxy failed (" + String(err.message || err).slice(0, 160) + ") — flattened fallback")
+      }
+    }
     let prompt = anthropicToPrompt(body)
     if (!prompt.trim()) return done(400, anthropicError("no prompt content in request"))
     // Free-tier providers choke on multi-thousand-token generation budgets;
