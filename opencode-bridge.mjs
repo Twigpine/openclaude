@@ -819,7 +819,9 @@ function eventError(d, fallback) {
 }
 
 // ---- live streaming turn (event-driven) ----
-async function attemptOpencodeStream(model, prompt, sink, deadlineMs, convo = null) {
+// keepSessionOnError: the caller may retry this same model+session after a
+// transient failure (rate limit window); it then owns the cleanup.
+async function attemptOpencodeStream(model, prompt, sink, deadlineMs, convo = null, keepSessionOnError = false) {
   // Reuse the conversation's live session (delta turns); a fresh one is only
   // committed — and kept — on success. Failure abandons the binding: the
   // session may be wedged (429 mid-turn) and must not be inherited.
@@ -929,6 +931,9 @@ async function attemptOpencodeStream(model, prompt, sink, deadlineMs, convo = nu
       if (!commitConvo(convo)) {
         try { await oc("DELETE", "/api/session/" + sid, undefined, 5000) } catch { /* already gone */ }
       }
+    } else if (keepSessionOnError) {
+      // Caller owns cleanup — a transient failure will be retried on this
+      // same model+session to preserve the conversation binding.
     } else {
       if (convo) abandonConvo(convo)
       try { await oc("DELETE", "/api/session/" + sid, undefined, 5000) } catch { /* already gone */ }
@@ -943,6 +948,13 @@ async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = D
   const chain = [model, ...FALLBACKS.filter(m => m !== model)]
     .slice(0, Number(process.env.OC_BRIDGE_MAX_MODELS ?? 3))
   const deadlineMs = Number(process.env.OC_BRIDGE_DEADLINE ?? 150000)
+  // Free tiers rate-limit in short windows. Retrying the SAME model+session
+  // preserves the conversation binding; hopping models mid-conversation hands
+  // the next one only the truncated flattened view, and weak fallbacks answer
+  // such turns with a status summary instead of finishing the task.
+  const retries = Number(process.env.OC_BRIDGE_MODEL_RETRIES ?? 2)
+  const retryWaitMs = Number(process.env.OC_BRIDGE_RETRY_WAIT_MS ?? 30000)
+  const transient = err => /rate.?limit|429|try again later|overloaded|econnreset|socket hang up|fetch failed|network|timed out/i.test(String(err))
   let last = "no model in fallback chain"
   let turnConvo = convo
   let turnPrompt = convo?.sid ? prompt : (fullPrompt ?? prompt) // delta only with a live session
@@ -951,12 +963,22 @@ async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = D
     const bare = toOpencodeModel(m)
     const t0 = Date.now()
     let result
-    try {
-      result = await attemptOpencodeStream(bare,
-        (turnConvo?.sid ? CONTINUE_DIRECTIVE : directive) + turnPrompt,
-        sink, deadlineMs, turnConvo)
-    } catch (err) {
-      result = { error: String(err.message || err) }
+    let attempt = 0
+    for (;;) {
+      attempt++
+      try {
+        result = await attemptOpencodeStream(bare,
+          (turnConvo?.sid ? CONTINUE_DIRECTIVE : directive) + turnPrompt,
+          sink, deadlineMs, turnConvo, !!turnConvo)
+      } catch (err) {
+        result = { error: String(err.message || err) }
+      }
+      if (result.ok || sink.started || sink.clientGone) break
+      if (attempt > retries || !transient(result.error)) break
+      console.log("[retry] " + bare + " attempt " + attempt + " failed (" +
+        String(result.error).slice(0, 80) + ") — same model+session in " + retryWaitMs + "ms")
+      await new Promise(r => setTimeout(r, retryWaitMs))
+      if (sink.clientGone) return "client disconnected"
     }
     const ms = Date.now() - t0
     if (result.ok && sink.started) {
@@ -968,11 +990,17 @@ async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = D
     console.log("[fallback] " + bare + " failed after " + ms + "ms: " + String(error).slice(0, 80))
     if (sink.started) return null // bytes already on the wire — no restart possible
     if (sink.clientGone) return "client disconnected"
-    // Failed attempt already abandoned its binding — the next model rebuilds
-    // from the full history (it never saw the delta's earlier turns anyway).
-    if (turnConvo) turnConvo = { ...turnConvo, sid: null, entry: null }
-    turnPrompt = fullPrompt ?? turnPrompt
     if (String(error).includes("timed out")) break // heavy prompt: next model would be just as slow
+    // A live conversation stays with its model. Retries are exhausted and the
+    // attempt kept the session alive (keepSessionOnError) — clean it up here
+    // and fail honestly: another model would only see the flattened 8K view,
+    // and a weak fallback's summary poisons the history worse than an error.
+    if (turnConvo?.sid) {
+      abandonConvo(turnConvo)
+      try { await oc("DELETE", "/api/session/" + turnConvo.sid, undefined, 5000) } catch { /* already gone */ }
+      return last
+    }
+    turnPrompt = fullPrompt ?? turnPrompt
   }
   return last
 }
