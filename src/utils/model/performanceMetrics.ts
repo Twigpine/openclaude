@@ -39,7 +39,7 @@ export interface ModelScore {
   lastUsedAt: number
 }
 
-import { loadPersistedMetrics, persistMetrics } from './performanceMetricsCache.js'
+import { clearPersistedMetrics, loadPersistedMetrics, persistMetrics } from './performanceMetricsCache.js'
 
 const METRICS_MAX_AGE_MS = 30 * 60 * 1000 // 30 minutes
 const METRICS_MAX_ENTRIES = 500
@@ -171,4 +171,5 @@ export function getRateLimitCooldownUntil(
  */
 export function clearPerformanceMetrics(): void {
   records = []
+  clearPersistedMetrics()
 }

@@ -8,7 +8,7 @@
  * dir, mirroring modelAvailabilityCache.ts.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { getClaudeConfigHomeDir } from '../envUtils.js'
 import type { ModelMetricRecord } from './performanceMetrics.js'
@@ -28,12 +28,27 @@ function cachePath(): string {
   return join(getClaudeConfigHomeDir(), CACHE_FILENAME)
 }
 
-function isFresh(record: ModelMetricRecord, now: number): boolean {
-  return (
-    typeof record?.timestamp === 'number' &&
-    typeof record?.model === 'string' &&
-    now - record.timestamp <= CACHE_TTL_MS
-  )
+function isValidRecord(record: unknown, now: number): record is ModelMetricRecord {
+  if (record === null || typeof record !== 'object') {
+    return false
+  }
+  const r = record as Partial<ModelMetricRecord>
+  if (typeof r.model !== 'string' || r.model.length === 0) {
+    return false
+  }
+  if (r.outcome !== 'success' && r.outcome !== 'failure') {
+    return false
+  }
+  if (typeof r.latencyMs !== 'number' || !Number.isFinite(r.latencyMs)) {
+    return false
+  }
+  if (typeof r.errorCategory !== 'string') {
+    return false
+  }
+  if (typeof r.timestamp !== 'number' || !Number.isFinite(r.timestamp)) {
+    return false
+  }
+  return now - r.timestamp <= CACHE_TTL_MS
 }
 
 /**
@@ -47,11 +62,16 @@ export function loadPersistedMetrics(): ModelMetricRecord[] {
       return []
     }
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<CacheShape>
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.records)) {
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      parsed.version !== 1 ||
+      !Array.isArray(parsed.records)
+    ) {
       return []
     }
     const now = Date.now()
-    return parsed.records.filter(r => isFresh(r, now))
+    return parsed.records.filter(r => isValidRecord(r, now))
   } catch {
     return []
   }
@@ -74,3 +94,20 @@ export function persistMetrics(records: ModelMetricRecord[]): void {
     // Advisory data; ignore.
   }
 }
+
+/**
+ * Remove persisted metrics from disk, best-effort. Used by tests and by
+ * clearPerformanceMetrics() to avoid stale history bleeding across sessions.
+ */
+export function clearPersistedMetrics(): void {
+  try {
+    const path = cachePath()
+    if (existsSync(path)) {
+      unlinkSync(path)
+    }
+  } catch {
+    // Advisory data; ignore.
+  }
+}
+
+export const PERFORMANCE_METRICS_CACHE_TTL_MS = CACHE_TTL_MS
