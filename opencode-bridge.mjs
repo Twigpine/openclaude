@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import http from "node:http"
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import { readFileSync, existsSync, writeFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
@@ -136,9 +137,100 @@ function toOpencodeModel(requested) {
 }
 
 // ---- Session management ----
-// One session per turn: a reused session goes stale after a failed turn
-// (e.g. a 429 from the free tier) and then fails every later request.
-// Transient failures are handled by runTurnWithFallback (next model).
+// opencode sessions are STATEFUL: the TUI re-sends the full history every
+// turn (Anthropic protocol), but re-creating a session per turn threw away
+// everything between turns — the agent re-read a head+tail sample of a
+// flattened transcript and forgot files it had read one message earlier.
+// Instead one opencode session is bound to a TUI conversation (matched by
+// message-hash prefix) and only the NEW messages are forwarded. Compaction,
+// history edits or a 429 simply stop the match → fresh session + full
+// flatten, so a broken binding degrades to the old behavior, never worse.
+const OC_CONVOS_MAX = Number(process.env.OC_BRIDGE_CONVOS ?? 8)
+const OC_CONVO_TTL_MS = Number(process.env.OC_BRIDGE_CONVO_TTL_MS ?? 30 * 60 * 1000)
+const ocConvos = new Map() // opencode sid -> { sid, hashes, lastUse }
+
+function msgHash(msg) {
+  return createHash("sha1").update(JSON.stringify(msg)).digest("hex").slice(0, 16)
+}
+
+// Longest prefix match: an entry whose recorded history is a strict prefix
+// of the incoming one continues that session; the delta is what the model
+// has not seen yet.
+function findConvo(messages) {
+  const hashes = messages.map(msgHash)
+  const now = Date.now()
+  let best = null
+  if (process.env.OC_BRIDGE_CONVO_DEBUG) {
+    console.log("[convo][debug] findConvo: " + ocConvos.size + " entrée(s) en mémoire, " +
+      hashes.length + " message(s) reçu(s), hashes[0]=" + hashes[0])
+  }
+  for (const [sid, entry] of ocConvos) {
+    if (now - entry.lastUse > OC_CONVO_TTL_MS) {
+      ocConvos.delete(sid)
+      oc("DELETE", "/api/session/" + sid, undefined, 5000).catch(() => {})
+      continue
+    }
+    if (entry.hashes.length >= hashes.length) {
+      if (process.env.OC_BRIDGE_CONVO_DEBUG) {
+        console.log("[convo][debug] " + sid.slice(-6) + ": entrée plus longue (" +
+          entry.hashes.length + " >= " + hashes.length + ")")
+      }
+      continue
+    }
+    let i = 0
+    while (i < entry.hashes.length && entry.hashes[i] === hashes[i]) i++
+    if (process.env.OC_BRIDGE_CONVO_DEBUG) {
+      console.log("[convo][debug] " + sid.slice(-6) + ": prefix " + i + "/" + entry.hashes.length +
+        " | attendu[0]=" + entry.hashes[0] + " reçu[0]=" + hashes[0])
+    }
+    if (i === entry.hashes.length && (!best || entry.hashes.length > best.entry.hashes.length)) {
+      best = { sid, entry }
+    }
+  }
+  if (!best) return null
+  return { sid: best.sid, entry: best.entry, delta: messages.slice(best.entry.hashes.length) }
+}
+
+// A successful turn extends the binding; too many bindings evict the
+// least recently used session (and its opencode session).
+function commitConvo(convo) {
+  if (!convo || !convo.hashes || OC_CONVOS_MAX <= 0) {
+    // No binding wanted (compaction, warmup, curl): old per-turn behavior.
+    if (convo?.sid) oc("DELETE", "/api/session/" + convo.sid, undefined, 5000).catch(() => {})
+    return false
+  }
+  if (convo.entry) {
+    convo.entry.hashes = convo.hashes
+    convo.entry.lastUse = Date.now()
+    convo.entry.outBase = convo.outBase ?? convo.entry.outBase ?? 0
+    return true
+  }
+  const entry = { sid: convo.sid, hashes: convo.hashes, lastUse: Date.now(), outBase: convo.outBase ?? 0 }
+  convo.entry = entry
+  ocConvos.set(convo.sid, entry)
+  console.log("[convo] session " + convo.sid.slice(-6) + " liée à la conversation (" + convo.hashes.length + " messages)")
+  while (ocConvos.size > OC_CONVOS_MAX) {
+    let oldestSid = null
+    let oldestUse = Infinity
+    for (const [s, e] of ocConvos) {
+      if (e.lastUse < oldestUse) { oldestUse = e.lastUse; oldestSid = s }
+    }
+    ocConvos.delete(oldestSid)
+    oc("DELETE", "/api/session/" + oldestSid, undefined, 5000).catch(() => {})
+  }
+  // MUST return true: callers gate the stale-session cleanup (abandonConvo +
+  // DELETE) on this value — returning undefined silently undid the binding we
+  // had just logged, so every turn started from a fresh session again.
+  return true
+}
+
+// A failed turn leaves the session in an unknown state (the old rationale
+// for per-turn deletion): drop the binding so the next request rebuilds
+// context with a fresh session instead of inheriting a wedged one.
+function abandonConvo(convo) {
+  if (convo?.entry) ocConvos.delete(convo.entry.sid)
+}
+
 async function newSession() {
   try {
     const created = await oc("POST", "/api/session", { title: "bridge new" }, 10000)
@@ -159,12 +251,12 @@ async function setModelOnSession(sid, model) {
 }
 
 // ---- runTurn ----
-async function runTurn(model, prompt, maxTokens, directive) {
+async function runTurn(model, prompt, maxTokens, directive, convo = null) {
   if (isClineModel(model)) return runClineTurn(model, prompt)
   if (isNimModel(model)) return runNimTurn(model, prompt, maxTokens)
   // Only opencode turns receive an agent directive — cline/nim have their
   // own harness. `directive` undefined falls back to DIRECTIVE inside.
-  return runOpencodeTurn(toOpencodeModel(model), prompt, directive)
+  return runOpencodeTurn(toOpencodeModel(model), prompt, directive, convo)
 }
 
 // Ordered fallback chain (opencode free tier first — fastest — then the
@@ -173,13 +265,16 @@ const FALLBACKS = (process.env.OC_BRIDGE_FALLBACKS ??
   "opencode/cat-jam-free,opencode/muse-spark-1.3-contributor-free,opencode/step-5-preview-free,opencode/big-pickle,opencode/space-bunny-free")
   .split(",").map(s => s.trim()).filter(Boolean)
 
-async function runTurnWithFallback(model, prompt, maxTokens, directive) {
+async function runTurnWithFallback(model, prompt, maxTokens, directive, convo = null, fullPrompt = null) {
   const chain = [model, ...FALLBACKS.filter(m => m !== model)]
     .slice(0, Number(process.env.OC_BRIDGE_MAX_MODELS ?? 3)) // cap wall time
   let last = { error: "no model in fallback chain" }
+  let turnConvo = convo
+  let turnPrompt = convo?.sid ? prompt : (fullPrompt ?? prompt) // delta only with a live session
   for (const m of chain) {
     const t0 = Date.now()
-    const reply = await runTurn(m, prompt, maxTokens, directive).catch(err => ({ error: String(err.message || err) }))
+    const reply = await runTurn(m, turnPrompt, maxTokens, turnConvo?.sid ? CONTINUE_DIRECTIVE : directive, turnConvo)
+      .catch(err => ({ error: String(err.message || err) }))
     const ms = Date.now() - t0
     if (!reply.error) {
       if (m !== model) console.log("[fallback] " + model + " failed, served by " + m + " in " + ms + "ms")
@@ -187,6 +282,10 @@ async function runTurnWithFallback(model, prompt, maxTokens, directive) {
     }
     last = reply
     console.log("[fallback] " + m + " failed after " + ms + "ms: " + String(reply.error).slice(0, 80))
+    // The failed attempt abandoned its binding (runOpencodeTurn finally) —
+    // the next model must rebuild context from the full history instead.
+    if (turnConvo) turnConvo = { ...turnConvo, sid: null, entry: null }
+    turnPrompt = fullPrompt ?? turnPrompt
     // A timeout means the prompt itself is heavy (agentic tool turn) — the
     // next model would be just as slow, so fail fast instead of stacking
     // 3 x 180 s. Rate limits, on the other hand, are worth retrying.
@@ -209,18 +308,36 @@ const DIRECTIVE = "You are the executing agent. Do the work NOW with your own to
 // re-fired on every following message.
 const COMPACT_DIRECTIVE = "You are a summarization engine. Reply with ONLY the summary structure requested below — no tool calls, no questions, no preamble, no code, no commentary. Begin directly with the requested format.\n\n"
 
-async function runOpencodeTurn(model, prompt, directive = DIRECTIVE) {
+// Delta turns: the session already holds the original directive + full prior
+// context, so don't repeat "User request:" — just push the new messages.
+const CONTINUE_DIRECTIVE = "Continue this same session with the new messages below. Keep working with your own tools when needed, then reply with the final answer.\n\n"
+
+async function runOpencodeTurn(model, prompt, directive = DIRECTIVE, convo = null) {
   prompt = directive + prompt
-  // One session per request: a reused session goes stale after a failed turn
-  // (e.g. a 429 from the free tier) and then fails every later request.
-  // Transient failures are handled by runTurnWithFallback (next model).
-  const sid = await newSession()
+  // Binding (see ocConvos): reuse the conversation's session when it holds
+  // one; otherwise create — and only KEEP — a session for the caller to bind.
+  // A failed turn abandons the binding (old "stale session" rationale): the
+  // next attempt starts clean with a fresh session + full history.
+  const sid = convo?.sid ?? await newSession()
+  if (convo) convo.sid = sid
+  let ok = false
   try {
     await setModelOnSession(sid, model)
+    // Bound the scan to THIS turn: same host, same clock — the new user
+    // message is created strictly after this line, so old turns are excluded
+    // even on a reused session (no skew allowance: fast delta turns would
+    // otherwise let the previous reply leak back as a stale answer).
+    const since = Date.now()
     await oc("POST", "/api/session/" + sid + "/prompt", { text: prompt }, 15000)
-    return await waitForReply(sid, Number(process.env.OC_BRIDGE_DEADLINE ?? 150000))
+    const reply = await waitForReply(sid, Number(process.env.OC_BRIDGE_DEADLINE ?? 150000), since)
+    ok = !reply.error
+    return reply
   } finally {
-    try { await oc("DELETE", "/api/session/" + sid, undefined, 5000) } catch { /* already gone */ }
+    const keep = ok && commitConvo(convo)
+    if (!keep) {
+      if (convo) abandonConvo(convo)
+      try { await oc("DELETE", "/api/session/" + sid, undefined, 5000) } catch { /* already gone */ }
+    }
   }
 }
 
@@ -395,13 +512,18 @@ function parseClineText(stdout) {
 }
 
 // ---- waitForReply ----
-async function waitForReply(sid, deadlineMs = Number(process.env.OC_BRIDGE_DEADLINE ?? 150000)) {
+// `since` (ms epoch) bounds the scan to THIS turn's messages: a reused
+// session still holds the previous turns' assistant `finish=stop` messages
+// and idle records — without the filter waitForReply would "see" the old
+// reply instantly and return stale text.
+async function waitForReply(sid, deadlineMs = Number(process.env.OC_BRIDGE_DEADLINE ?? 150000), since = 0) {
   const started = Date.now()
   let sawAssistant = false
   let finishedText = null
   let finalText = null
   let polls = 0
   let pollErrors = 0
+  const fresh = m => !since || (m?.time?.created ?? 0) >= since
   while (Date.now() - started < deadlineMs) {
     await new Promise(r => setTimeout(r, 120))
     polls++
@@ -417,7 +539,7 @@ async function waitForReply(sid, deadlineMs = Number(process.env.OC_BRIDGE_DEADL
     // separately, so we accumulate text but never return "no reply"
     // from a finish+empty sighting — that was causing false failures.
     for (const m of data.data ?? []) {
-      if (m.type !== "assistant") continue
+      if (m.type !== "assistant" || !fresh(m)) continue
       sawAssistant = true
       if (m.error) return { error: m.error.message ?? String(m.error) }
       if (m.finish === "error") return { error: "generation failed" }
@@ -434,7 +556,7 @@ async function waitForReply(sid, deadlineMs = Number(process.env.OC_BRIDGE_DEADL
     }
     // Pass 2: idle event is the authoritative turn-completion signal.
     for (const m of data.data ?? []) {
-      if (m.type !== "idle") continue
+      if (m.type !== "idle" || !fresh(m)) continue
       const outcome = m.outcome ?? "unknown"
       if (outcome === "failed") {
         return { error: m.error?.message ? String(m.error.message) : "opencode turn failed (outcome: failed)" }
@@ -683,8 +805,18 @@ function eventError(d, fallback) {
 }
 
 // ---- live streaming turn (event-driven) ----
-async function attemptOpencodeStream(model, prompt, sink, deadlineMs) {
-  const sid = await newSession()
+async function attemptOpencodeStream(model, prompt, sink, deadlineMs, convo = null) {
+  // Reuse the conversation's live session (delta turns); a fresh one is only
+  // committed — and kept — on success. Failure abandons the binding: the
+  // session may be wedged (429 mid-turn) and must not be inherited.
+  const sid = convo?.sid ?? await newSession()
+  if (convo) convo.sid = sid
+  // opencode reports session-CUMULATIVE tokens (verified: output 7 → 15 after
+  // a 4th prompt on the same session). A reused session must subtract the
+  // previous turns' total or the TUI's live counter shows inflated output.
+  const outBase = convo?.entry?.outBase ?? 0
+  let lastOut = 0
+  let ok = false
   let offSub = () => {}
   let offAbort = () => {}
   try {
@@ -725,8 +857,14 @@ async function attemptOpencodeStream(model, prompt, sink, deadlineMs) {
           case "session.text.ended":
             syncEnded(d, t => sink.text(t), delivered)
             break
-          case "session.usage.updated":
-            sink.usage(d.tokens)
+          case "session.usage.updated": {
+            // Cumulative across the SESSION — subtract the binding's baseline
+            // so only THIS turn's tokens reach the TUI's live counter.
+            const cumOut = d.tokens?.output | 0
+            if (cumOut > lastOut) lastOut = cumOut
+            sink.usage(outBase
+              ? { ...d.tokens, output: Math.max(0, cumOut - outBase) }
+              : d.tokens)
             // The authoritative final usage lands just AFTER
             // execution.succeeded. Once we've seen success, the next
             // usage.updated is the last word — close on it (short debounce
@@ -736,6 +874,7 @@ async function attemptOpencodeStream(model, prompt, sink, deadlineMs) {
               graceTimer = setTimeout(() => finish({ ok: true }), 150)
             }
             break
+          }
           case "session.execution.succeeded":
             succeededSeen = true
             // idle may never arrive on the event stream — don't wait for it
@@ -762,29 +901,46 @@ async function attemptOpencodeStream(model, prompt, sink, deadlineMs) {
       oc("POST", "/api/session/" + sid + "/prompt", { text: prompt }, 15000)
         .catch(err => finish({ error: String(err.message || err) }))
     })
+    // Align with the caller's success criterion: a turn that "succeeded"
+    // without emitting anything is an error and must not be bound.
+    ok = !!result.ok && sink.started
+    if (ok && convo) convo.outBase = lastOut // baseline for the NEXT delta turn
     return result
   } finally {
     offAbort()
     offSub()
-    try { await oc("DELETE", "/api/session/" + sid, undefined, 5000) } catch { /* already gone */ }
+    if (ok) {
+      // Keep only if this turn extends a conversation binding — otherwise
+      // (warmup, curl, compaction) fall back to one-session-per-request.
+      if (!commitConvo(convo)) {
+        try { await oc("DELETE", "/api/session/" + sid, undefined, 5000) } catch { /* already gone */ }
+      }
+    } else {
+      if (convo) abandonConvo(convo)
+      try { await oc("DELETE", "/api/session/" + sid, undefined, 5000) } catch { /* already gone */ }
+    }
   }
 }
 
 // Cascade fallback for the LIVE path: only hops to the next model while the
 // sink has emitted nothing (no bytes = no visible glitch). Once content is on
 // the wire we stop and close gracefully with whatever we have.
-async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = DIRECTIVE) {
+async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = DIRECTIVE, convo = null, fullPrompt = null) {
   const chain = [model, ...FALLBACKS.filter(m => m !== model)]
     .slice(0, Number(process.env.OC_BRIDGE_MAX_MODELS ?? 3))
   const deadlineMs = Number(process.env.OC_BRIDGE_DEADLINE ?? 150000)
   let last = "no model in fallback chain"
+  let turnConvo = convo
+  let turnPrompt = convo?.sid ? prompt : (fullPrompt ?? prompt) // delta only with a live session
   for (const m of chain) {
     if (sink.clientGone) return "client disconnected"
     const bare = toOpencodeModel(m)
     const t0 = Date.now()
     let result
     try {
-      result = await attemptOpencodeStream(bare, directive + prompt, sink, deadlineMs)
+      result = await attemptOpencodeStream(bare,
+        (turnConvo?.sid ? CONTINUE_DIRECTIVE : directive) + turnPrompt,
+        sink, deadlineMs, turnConvo)
     } catch (err) {
       result = { error: String(err.message || err) }
     }
@@ -798,6 +954,10 @@ async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = D
     console.log("[fallback] " + bare + " failed after " + ms + "ms: " + String(error).slice(0, 80))
     if (sink.started) return null // bytes already on the wire — no restart possible
     if (sink.clientGone) return "client disconnected"
+    // Failed attempt already abandoned its binding — the next model rebuilds
+    // from the full history (it never saw the delta's earlier turns anyway).
+    if (turnConvo) turnConvo = { ...turnConvo, sid: null, entry: null }
+    turnPrompt = fullPrompt ?? turnPrompt
     if (String(error).includes("timed out")) break // heavy prompt: next model would be just as slow
   }
   return last
@@ -1038,8 +1198,6 @@ const server = http.createServer(async (req, res) => {
         console.log("[fcc] transparent proxy failed (" + String(err.message || err).slice(0, 160) + ") — flattened fallback")
       }
     }
-    let prompt = anthropicToPrompt(body)
-    if (!prompt.trim()) return done(400, anthropicError("no prompt content in request"))
     // Free-tier providers choke on multi-thousand-token generation budgets;
     // clamp to something realistic for a coding agent reply (override via env).
     let cap = Number(process.env.OC_BRIDGE_MAXTOKENS ?? 4096)
@@ -1047,6 +1205,35 @@ const server = http.createServer(async (req, res) => {
     if (typeof body.max_tokens === "number" && body.max_tokens > cap) {
       body.max_tokens = cap
     }
+    // ---- conversation binding (opencode path only) ----
+    // Match the incoming history against live bindings: a hit means this turn
+    // continues an EXISTING opencode session, so we forward only the messages
+    // the model has not seen yet (delta) instead of a truncated flatten. A
+    // miss binds a fresh session to this history (first turn, compaction,
+    // edited history, or a stale/expired binding).
+    const isOcPath = !isClineModel(model) && !isNimModel(model)
+    let convo = null
+    let fullPrompt = anthropicToPrompt(body)
+    let prompt = fullPrompt
+    if (isOcPath && !compact && Array.isArray(body.messages) && body.messages.length) {
+      const hashes = body.messages.map(msgHash)
+      const match = findConvo(body.messages)
+      if (match) {
+        const delta = anthropicToPrompt({ messages: match.delta })
+        if (delta.trim()) {
+          convo = { sid: match.sid, entry: match.entry, hashes }
+          prompt = delta
+          console.log("[convo] reprise session " + match.sid.slice(-6) + " — " + match.delta.length + " nouveau(x) message(s) seulement")
+        } else {
+          // Delta flattened to nothing (e.g. tool_result-only turn): start a
+          // fresh session with the full history rather than prompt an empty turn.
+          console.log("[convo] delta vide — nouvelle session, historique complet")
+        }
+      } else {
+        convo = { sid: null, entry: null, hashes }
+      }
+    }
+    if (!prompt.trim()) return done(400, anthropicError("no prompt content in request"))
     // OpenClaude re-sends the full system+tool catalog every turn; without
     // pruning the prompt blows past 30k chars and the turn never completes.
     // Compaction gets a much bigger budget (60k chars): its instructions are
@@ -1054,11 +1241,18 @@ const server = http.createServer(async (req, res) => {
     // a useful summary. Truncating it to 8k chars (old behavior) destroyed
     // the instructions → the summary never came back → compact loop.
     const limit = compact ? 60000 : 8000
-    if (prompt.length > limit) {
+    let truncated = false
+    const capPrompt = text => {
+      if (text.length <= limit) return text
+      truncated = true
       const headLen = compact ? 15000 : 3000
-      const head = prompt.slice(0, headLen)
-      const tail = prompt.slice(-(limit - headLen))
-      prompt = head + "\n...[bridge: middle of prompt truncated]...\n" + tail
+      const head = text.slice(0, headLen)
+      const tail = text.slice(-(limit - headLen))
+      return head + "\n...[bridge: middle of prompt truncated]...\n" + tail
+    }
+    fullPrompt = capPrompt(fullPrompt)
+    if (prompt !== fullPrompt) prompt = capPrompt(prompt) // delta turns
+    if (truncated) {
       console.log("[bridge] truncated long prompt (kept head+tail" + (compact ? ", compaction budget " + limit : "") + ")")
     }
     if (compact) console.log("[bridge] compaction request detected — summarization directive, no tools")
@@ -1067,9 +1261,9 @@ const server = http.createServer(async (req, res) => {
       // from /api/event as they happen, so the TUI shows thinking and token
       // consumption in real time. cline/nim don't expose events — they keep
       // the buffered path below.
-      if (body.stream && !isClineModel(model) && !isNimModel(model)) {
+      if (body.stream && isOcPath) {
         const sink = createAnthropicSink(res, model, inputTokens)
-        const error = await streamOpencodeTurnWithFallback(model, prompt, sink, directive)
+        const error = await streamOpencodeTurnWithFallback(model, prompt, sink, directive, convo, fullPrompt)
         if (error && !sink.started) return done(502, anthropicError(error))
         // Content already on the wire: close gracefully with what we have.
         if (!sink.clientGone) sink.finish("end_turn")
@@ -1078,7 +1272,7 @@ const server = http.createServer(async (req, res) => {
       // Cascade: free tiers 429/timeout unpredictably depending on the hour.
       // On failure, silently fall back to the next model in the chain so the
       // user still gets an answer instead of "API server error".
-      const reply = await runTurnWithFallback(model, prompt, body.max_tokens, directive)
+      const reply = await runTurnWithFallback(model, prompt, body.max_tokens, directive, convo, fullPrompt)
       if (reply.error) return done(502, anthropicError(reply.error))
       if (body.stream) return sendStream(res, model, reply.text, inputTokens)
       return done(200, anthropicResponse({ model, text: reply.text, inputTokens }))
