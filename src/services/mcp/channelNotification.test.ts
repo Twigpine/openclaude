@@ -144,14 +144,12 @@ describe('gateChannelServer', () => {
     expect(result.kind).toBe('disabled')
   })
 
-  // 3. OAuth gate — no access token blocks.
-  test('skips when no OAuth access token is present', () => {
+  // 3. Manual server channels work with API-key authentication.
+  test('registers a configured server channel without OAuth', () => {
     _mockOAuthTokens = {} // no accessToken
+    setAllowedChannels([{ kind: 'server', name: 'slack', dev: false }])
     const result = gateChannelServer('slack', cap(), undefined)
-    if (result.action !== 'skip') {
-      throw new Error(`expected skip, got ${result.action}`)
-    }
-    expect(result.kind).toBe('auth')
+    expect(result.action).toBe('register')
   })
 
   // 4. Org-policy gate — managed subscription without channelsEnabled.
@@ -174,7 +172,7 @@ describe('gateChannelServer', () => {
   })
 
   test('registers server-kind entry when present in --channels list', () => {
-    setAllowedChannels([{ kind: 'server', name: 'slack', dev: true }])
+    setAllowedChannels([{ kind: 'server', name: 'slack', dev: false }])
     const result = gateChannelServer('slack', cap(), undefined)
     expect(result.action).toBe('register')
   })
@@ -278,14 +276,11 @@ describe('gateChannelServer', () => {
     expect(result.action).toBe('register')
   })
 
-  // 8. Server-entry dev gate — server-kind entries always need dev.
-  test('skips server-kind entry without dev flag', () => {
+  // 8. Explicit server entries do not need the development bypass.
+  test('registers server-kind entry without dev flag', () => {
     setAllowedChannels([{ kind: 'server', name: 'slack' }]) // no dev
     const result = gateChannelServer('slack', cap(), undefined)
-    if (result.action !== 'skip') {
-      throw new Error(`expected skip, got ${result.action}`)
-    }
-    expect(result.kind).toBe('allowlist')
+    expect(result.action).toBe('register')
   })
 
   test('server-kind entry with dev flag bypasses the allowlist gate', () => {

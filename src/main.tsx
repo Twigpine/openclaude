@@ -3685,7 +3685,7 @@ async function run(): Promise<CommanderCommand> {
     program.addOption(new Option('--assistant', 'Force assistant mode (Agent SDK daemon use)').hideHelp());
   }
   if (feature('KAIROS') || feature('KAIROS_CHANNELS')) {
-    program.addOption(new Option('--channels <servers...>', 'MCP servers whose channel notifications (inbound push) should register this session. Space-separated server names.').hideHelp());
+    program.addOption(new Option('--channels <servers...>', 'MCP servers whose inbound messages should be delivered to this session. Use server:<name> for configured MCP servers or plugin:<name>@<marketplace> for approved plugins. Space-separated.'));
     program.addOption(new Option('--dangerously-load-development-channels <servers...>', 'Load channel servers not on the approved allowlist. For local channel development only. Shows a confirmation dialog at startup.').hideHelp());
   }
 
