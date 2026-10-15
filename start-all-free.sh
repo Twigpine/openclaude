@@ -72,8 +72,12 @@ else
   # FCC (nim + openai chatgpt) needs an FCC_TOKEN for the bridge's x-api-key
   # header even when fcc-server runs with auth disabled — any value works then;
   # export a real one if your FCC instance enforces authentication.
+  # Free models like longcat think for minutes before answering. The bridge's
+  # default reply deadline (150s) cuts them off mid-thought, which the TUI
+  # shows as the agent "stopping" mid-task — give slow turns 10 minutes.
   OC_BRIDGE_PORT="$BRIDGE_PORT" OC_BRIDGE_URL="http://127.0.0.1:${OC_PORT}" \
     OC_BRIDGE_TOKEN="$OC_TOKEN" FCC_TOKEN="${FCC_TOKEN:-bridge}" \
+    OC_BRIDGE_DEADLINE="${OC_BRIDGE_DEADLINE:-600000}" \
     setsid nohup node "$FORK_DIR/opencode-bridge.mjs" > "$STATE_DIR/bridge.log" 2>&1 < /dev/null &
   for _ in $(seq 1 20); do
     ss -tln 2>/dev/null | grep -q ":${BRIDGE_PORT} " && break
