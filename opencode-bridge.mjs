@@ -260,6 +260,10 @@ async function proxyFccTurn(body, model, res, inputTokens) {
   let cap = Number(process.env.OC_BRIDGE_MAXTOKENS ?? 4096)
   if (!Number.isFinite(cap) || cap <= 0) cap = 4096
   const payload = { ...body, model: fccModel }
+  // OpenAI upstreams reject top_k outright (400: "OpenAI Responses cannot
+  // represent these fields without data loss: ['top_k']") and FCC forwards
+  // the 400 — dropping the whole tool loop into the flattened fallback.
+  delete payload.top_k
   if (typeof payload.max_tokens !== "number" || payload.max_tokens > cap) payload.max_tokens = cap
   // Anthropic constraint: thinking.budget_tokens must stay below max_tokens.
   const thinking = payload.thinking
