@@ -8,6 +8,15 @@ import { dirname, join } from "node:path"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
+// Timestamp every console line. bridge.log is the only post-mortem record of
+// a dead turn; untimed lines made correlating it with the TUI's own logs
+// guesswork. Local time, second precision, prefix only — payloads keep their
+// exact format so existing greps ([fallback], POST /v1/messages, ...) still hit.
+for (const level of ["log", "error", "warn"]) {
+  const write = console[level].bind(console)
+  console[level] = (...args) => write(new Date().toLocaleString("sv-SE"), ...args)
+}
+
 const PORT = Number(process.env.OC_BRIDGE_PORT ?? 18095)
 const OC_URL = (process.env.OC_BRIDGE_URL ?? "http://127.0.0.1:18085").replace(/\/+$/, "")
 const OC_TOKEN = process.env.OC_BRIDGE_TOKEN
@@ -1418,6 +1427,9 @@ function sendStream(res, model, text, inputTokens = 0) {
 
 if (!FCC_TOKEN) console.warn("[bridge] FCC_TOKEN not configured — FCC catalog disabled (nim + openai chatgpt); set FCC_TOKEN (any value when FCC auth is off)")
 refreshCline().catch(error => console.error("[cline] probe failed: " + (error.message || error).slice(0, 120)))
-setInterval(() => refreshCline().catch(() => {}), CLINE_REFRESH_MS).unref()
+// Each probe is a REAL free-tier call per candidate (a full cline CLI turn), so
+// an interval of 0 must NOT mean "disable": setInterval(0) re-fires on every
+// completion and burns quota in a loop. 0 = initial probe only.
+if (CLINE_REFRESH_MS > 0) setInterval(() => refreshCline().catch(() => {}), CLINE_REFRESH_MS).unref()
 ensureOcEvents().then(() => console.log("[events] /api/event stream connected")).catch(() => {})
 warmUp().catch(() => {})
