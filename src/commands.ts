@@ -181,6 +181,10 @@ import {
 } from './skills/loadSkillsDir.js'
 import { getBundledSkills } from './skills/bundledSkills.js'
 import {
+  applySiblingSkillPrecedence,
+  getSiblingSkillsHomeId,
+} from './skills/siblingSkillHomes.js'
+import {
   getOpenClaudeCommandDescriptionKey,
   localize,
 } from './i18n/index.js'
@@ -513,7 +517,9 @@ const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
     getWorkflowCommands ? getWorkflowCommands(cwd) : Promise.resolve([]),
   ])
 
-  return [
+  // Skill-dir commands sort first and lookup is first-match, so skills read
+  // from other agents' homes are moved last and dropped on any name collision.
+  return applySiblingSkillPrecedence([
     ...skillDirCommands,
     ...workflowCommands,
     ...pluginCommands,
@@ -521,7 +527,7 @@ const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
     ...bundledSkills,
     ...builtinPluginSkills,
     ...COMMANDS(),
-  ]
+  ])
 })
 
 /**
@@ -544,8 +550,11 @@ export async function getCommands(cwd: string): Promise<Command[]> {
     return baseCommands
   }
 
-  // Dedupe dynamic skills - only add if not already present
-  const baseCommandNames = new Set(baseCommands.map(c => c.name))
+  // Dedupe dynamic skills - only add if not already present. Sibling-home
+  // skills don't count: a dynamic OpenClaude skill outranks them.
+  const baseCommandNames = new Set(
+    baseCommands.filter(c => !getSiblingSkillsHomeId(c)).map(c => c.name),
+  )
   const uniqueDynamicSkills = dynamicSkills.filter(
     s =>
       !baseCommandNames.has(s.name) &&
@@ -562,14 +571,14 @@ export async function getCommands(cwd: string): Promise<Command[]> {
   const insertIndex = baseCommands.findIndex(c => builtInNames.has(c.name))
 
   if (insertIndex === -1) {
-    return [...baseCommands, ...uniqueDynamicSkills]
+    return applySiblingSkillPrecedence([...baseCommands, ...uniqueDynamicSkills])
   }
 
-  return [
+  return applySiblingSkillPrecedence([
     ...baseCommands.slice(0, insertIndex),
     ...uniqueDynamicSkills,
     ...baseCommands.slice(insertIndex),
-  ]
+  ])
 }
 
 /**

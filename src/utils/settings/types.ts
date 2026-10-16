@@ -492,6 +492,18 @@ export const SettingsSchema = lazySchema(() =>
         .describe(
           "Include built-in commit and PR workflow instructions in Claude's system prompt (default: true)",
         ),
+      agentsSkillsEnabled: z
+        .boolean()
+        .optional()
+        .describe(
+          'Load skills read-only from the shared ~/.agents/skills directory, after all OpenClaude skills (default: true). Ignored in project settings.',
+        ),
+      claudeCodeSkillsEnabled: z
+        .boolean()
+        .optional()
+        .describe(
+          'Load skills read-only from Claude Code\'s ~/.claude/skills directory, after all OpenClaude skills (default: false). Ignored in project settings.',
+        ),
       permissions: PermissionsSchema()
         .optional()
         .describe('Tool usage permissions configuration'),

@@ -219,10 +219,29 @@ function parseSkillsCliArgs(args: string[]): {
   return { options, positionals }
 }
 
+/**
+ * The skills subcommands skip the session startup that registers bundled
+ * skills and built-in plugins. Register them so skills read from other
+ * agents' homes resolve against them the way a session does: a sibling-home
+ * skill that shares a bundled skill's name is dropped, not listed.
+ */
+async function registerBuiltinSkillSources(): Promise<void> {
+  const [{ getBundledSkills }, { initBundledSkills }, { initBuiltinPlugins }] =
+    await Promise.all([
+      import('../../skills/bundledSkills.js'),
+      import('../../skills/bundled/index.js'),
+      import('../../plugins/bundled/index.js'),
+    ])
+  if (getBundledSkills().length > 0) return
+  initBuiltinPlugins()
+  initBundledSkills()
+}
+
 export async function runSkillsCliAction(
   action: () => Promise<void>,
 ): Promise<void> {
   try {
+    await registerBuiltinSkillSources()
     await action()
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))

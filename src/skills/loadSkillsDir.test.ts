@@ -7,12 +7,18 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'bun:test'
 
+import {
+  getOriginalCwd,
+  setAllowedSettingSources,
+  setOriginalCwd,
+} from '../bootstrap/state.js'
 import {
   enableUserAndProjectSettingSources,
   restoreSettingState,
@@ -31,13 +37,18 @@ import {
   getFsImplementation,
   setFsImplementation,
 } from '../utils/fsOperations.ts'
+import { getSettingsForSource } from '../utils/settings/settings.ts'
 import { resetSettingsCache } from '../utils/settings/settingsCache.ts'
 import {
+  activateConditionalSkillsForPaths,
   clearDynamicSkills,
   clearSkillCaches,
+  getConditionalSkillCount,
   getSkillDirCommands,
   getProjectSkillsPaths,
+  getUnloadedSiblingSkillHomes,
 } from './loadSkillsDir.ts'
+import { setSiblingSkillsHomeDirForTesting } from './siblingSkillHomes.ts'
 
 function writeSkill(
   rootDir: string,
@@ -379,4 +390,261 @@ test.serial('dynamic discovery checks .openclaude skill directories', async () =
       releaseSharedMutationLock()
     }
   }
+})
+
+// --- Sibling skills homes (~/.agents/skills, ~/.claude/skills) ---
+
+type SiblingHomeFixture = {
+  homeDir: string
+  configDir: string
+  cwd: string
+}
+
+function writeSiblingSkill(
+  homeDir: string,
+  homeDirName: '.agents' | '.claude',
+  skillPath: string,
+  frontmatter = `description: ${skillPath} from ${homeDirName}`,
+): string {
+  const skillDir = join(homeDir, homeDirName, 'skills', ...skillPath.split('/'))
+  mkdirSync(skillDir, { recursive: true })
+  writeFileSync(
+    join(skillDir, 'SKILL.md'),
+    `---\n${frontmatter}\n---\n# ${skillPath}\n`,
+    'utf8',
+  )
+  return skillDir
+}
+
+function writeSettingsFile(path: string, settings: object): void {
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, JSON.stringify(settings), 'utf8')
+  clearSkillAndConfigCaches()
+}
+
+function promptSkillsNamed(
+  skills: Command[],
+  name: string,
+): Extract<Command, { type: 'prompt' }>[] {
+  return skills.filter((skill): skill is Extract<Command, { type: 'prompt' }> =>
+    isPromptSkillNamed(skill, name),
+  )
+}
+
+async function withSiblingHomeFixture(
+  run: (fixture: SiblingHomeFixture) => Promise<void>,
+): Promise<void> {
+  await acquireSharedMutationLock('loadSkillsDir.test.ts')
+  const rootDir = mkdtempSync(join(tmpdir(), 'openclaude-sibling-skills-'))
+  const homeDir = join(rootDir, 'home')
+  const configDir = join(homeDir, '.openclaude')
+  // Inside the fake home so project-dir traversal stops at it.
+  const cwd = join(homeDir, 'workspace')
+  const originalConfigDir = {
+    openClaudeConfigDir: process.env.OPENCLAUDE_CONFIG_DIR,
+    claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
+    configHomeOverride: getClaudeConfigHomeDirOverrideForTesting(),
+  }
+  const originalOriginalCwd = getOriginalCwd()
+  const originalSettingsState = enableUserAndProjectSettingSources()
+  const originalFs = setRealFilesystemForTest()
+
+  try {
+    mkdirSync(cwd, { recursive: true })
+    mkdirSync(configDir, { recursive: true })
+    setSiblingSkillsHomeDirForTesting(homeDir)
+    setConfigDirEnv(configDir)
+    setOriginalCwd(cwd)
+    clearSkillAndConfigCaches()
+    await run({ homeDir, configDir, cwd })
+  } finally {
+    try {
+      setSiblingSkillsHomeDirForTesting(undefined)
+      restoreConfigDirEnv(originalConfigDir)
+      setOriginalCwd(originalOriginalCwd)
+      setFsImplementation(originalFs)
+      restoreSettingState(originalSettingsState)
+      clearDynamicSkills()
+      clearSkillAndConfigCaches()
+      rmSync(rootDir, { recursive: true, force: true })
+    } finally {
+      releaseSharedMutationLock()
+    }
+  }
+}
+
+test.serial('loads ~/.agents/skills by default and keeps ~/.claude/skills opt-in', async () => {
+  await withSiblingHomeFixture(async ({ homeDir }) => {
+    writeSiblingSkill(homeDir, '.agents', 'agent-skill')
+    writeSiblingSkill(homeDir, '.claude', 'claude-skill')
+
+    const skills = await getSkillDirCommands(join(homeDir, 'workspace'))
+    const [agentSkill] = promptSkillsNamed(skills, 'agent-skill')
+
+    assert.equal(agentSkill?.siblingSkillsHome, 'agents')
+    assert.equal(agentSkill?.source, 'userSettings')
+    assert.equal(agentSkill?.loadedFrom, 'skills')
+    assert.equal(
+      agentSkill?.skillRoot,
+      join(homeDir, '.agents', 'skills', 'agent-skill'),
+    )
+    assert.deepEqual(promptSkillsNamed(skills, 'claude-skill'), [])
+
+    const unloaded = await getUnloadedSiblingSkillHomes()
+    assert.deepEqual(
+      unloaded.map(({ home, count }) => ({ id: home.id, count })),
+      [{ id: 'claude-code', count: 1 }],
+    )
+  })
+})
+
+test.serial('loads ~/.claude/skills after a user opt-in but not a project opt-in', async () => {
+  await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+    writeSiblingSkill(homeDir, '.claude', 'claude-skill')
+
+    writeSettingsFile(join(cwd, '.openclaude', 'settings.json'), {
+      claudeCodeSkillsEnabled: true,
+    })
+    // The project file is read, but a project cannot opt the user in.
+    assert.equal(
+      getSettingsForSource('projectSettings')?.claudeCodeSkillsEnabled,
+      true,
+    )
+    assert.deepEqual(
+      promptSkillsNamed(await getSkillDirCommands(cwd), 'claude-skill'),
+      [],
+    )
+
+    writeSettingsFile(join(configDir, 'settings.json'), {
+      claudeCodeSkillsEnabled: true,
+    })
+    const [claudeSkill] = promptSkillsNamed(
+      await getSkillDirCommands(cwd),
+      'claude-skill',
+    )
+    assert.equal(claudeSkill?.siblingSkillsHome, 'claude-code')
+    assert.deepEqual(await getUnloadedSiblingSkillHomes(), [])
+  })
+})
+
+test.serial('OpenClaude skills shadow sibling skills and the first sibling home wins', async () => {
+  await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+    writeSettingsFile(join(configDir, 'settings.json'), {
+      claudeCodeSkillsEnabled: true,
+    })
+    writeUserSkill(configDir, 'shared', 'user skill')
+    writeSkill(cwd, 'project-shared', { description: 'project skill' })
+    writeSiblingSkill(homeDir, '.agents', 'shared')
+    writeSiblingSkill(homeDir, '.agents', 'project-shared')
+    writeSiblingSkill(homeDir, '.agents', 'both')
+    writeSiblingSkill(homeDir, '.claude', 'both')
+    writeSiblingSkill(homeDir, '.claude', 'shared')
+
+    const skills = await getSkillDirCommands(cwd)
+    const summarize = (name: string) =>
+      promptSkillsNamed(skills, name).map(skill => ({
+        description: skill.description,
+        siblingSkillsHome: skill.siblingSkillsHome,
+      }))
+
+    assert.deepEqual(summarize('shared'), [
+      { description: 'user skill', siblingSkillsHome: undefined },
+    ])
+    assert.deepEqual(summarize('project-shared'), [
+      { description: 'project skill', siblingSkillsHome: undefined },
+    ])
+    assert.deepEqual(summarize('both'), [
+      { description: 'both from .agents', siblingSkillsHome: 'agents' },
+    ])
+  })
+})
+
+test.serial('keeps the OpenClaude copy of a skill symlinked into a sibling home', async () => {
+  await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+    writeSettingsFile(join(configDir, 'settings.json'), {
+      claudeCodeSkillsEnabled: true,
+    })
+    const agentsLinked = writeSiblingSkill(homeDir, '.agents', 'linked')
+    mkdirSync(join(configDir, 'skills'), { recursive: true })
+    symlinkSync(agentsLinked, join(configDir, 'skills', 'linked'), 'dir')
+
+    // `npx skills` style: ~/.claude/skills/<name> -> ~/.agents/skills/<name>
+    const agentsShared = writeSiblingSkill(homeDir, '.agents', 'npx-shared')
+    mkdirSync(join(homeDir, '.claude', 'skills'), { recursive: true })
+    symlinkSync(
+      agentsShared,
+      join(homeDir, '.claude', 'skills', 'npx-shared'),
+      'dir',
+    )
+
+    const skills = await getSkillDirCommands(cwd)
+    const linked = promptSkillsNamed(skills, 'linked')
+    assert.equal(linked.length, 1)
+    assert.equal(linked[0]?.siblingSkillsHome, undefined)
+    assert.equal(linked[0]?.skillRoot, join(configDir, 'skills', 'linked'))
+
+    const npxShared = promptSkillsNamed(skills, 'npx-shared')
+    assert.equal(npxShared.length, 1)
+    assert.equal(npxShared[0]?.siblingSkillsHome, 'agents')
+  })
+})
+
+test.serial('skips sibling homes when disabled, without user settings, and in bare mode', async () => {
+  await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+    writeSiblingSkill(homeDir, '.agents', 'agent-skill')
+    assert.equal(
+      promptSkillsNamed(await getSkillDirCommands(cwd), 'agent-skill').length,
+      1,
+    )
+
+    writeSettingsFile(join(configDir, 'settings.json'), {
+      agentsSkillsEnabled: false,
+    })
+    assert.deepEqual(
+      promptSkillsNamed(await getSkillDirCommands(cwd), 'agent-skill'),
+      [],
+    )
+
+    writeSettingsFile(join(configDir, 'settings.json'), {})
+    setAllowedSettingSources(['projectSettings', 'localSettings'])
+    clearSkillAndConfigCaches()
+    assert.deepEqual(
+      promptSkillsNamed(await getSkillDirCommands(cwd), 'agent-skill'),
+      [],
+    )
+    assert.deepEqual(await getUnloadedSiblingSkillHomes(), [])
+
+    setAllowedSettingSources([
+      'userSettings',
+      'projectSettings',
+      'localSettings',
+      'flagSettings',
+      'policySettings',
+    ])
+    process.env.CLAUDE_CODE_SIMPLE = '1'
+    clearSkillAndConfigCaches()
+    assert.deepEqual(
+      promptSkillsNamed(await getSkillDirCommands(cwd), 'agent-skill'),
+      [],
+    )
+  })
+})
+
+test.serial('stores conditional sibling skills until a matching path is touched', async () => {
+  await withSiblingHomeFixture(async ({ homeDir, cwd }) => {
+    writeSiblingSkill(
+      homeDir,
+      '.agents',
+      'docs-only',
+      'description: docs helper\npaths: docs/**',
+    )
+
+    const skills = await getSkillDirCommands(cwd)
+    assert.deepEqual(promptSkillsNamed(skills, 'docs-only'), [])
+    assert.equal(getConditionalSkillCount(), 1)
+    assert.deepEqual(
+      activateConditionalSkillsForPaths([join(cwd, 'docs', 'guide.md')], cwd),
+      ['docs-only'],
+    )
+  })
 })

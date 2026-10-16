@@ -1,9 +1,20 @@
+import {
+  getSiblingSkillsHomeDisplayPath,
+  type ResolvedSiblingSkillsHome,
+} from '../../skills/siblingSkillHomes.js'
 import { getCommandName, type Command } from '../../types/command.js'
 import { getDisplayPath } from '../../utils/file.js'
+import { plural } from '../../utils/stringUtils.js'
 
 export type SkillListCommand = Command & { type: 'prompt' }
 
+export type UnloadedSiblingSkillsHome = {
+  home: ResolvedSiblingSkillsHome
+  count: number
+}
+
 export function sourceLabel(skill: SkillListCommand): string {
+  if (skill.siblingSkillsHome) return skill.siblingSkillsHome
   if (!skill.source) return '-'
   if (skill.source === 'projectSettings') return 'project'
   if (skill.source === 'userSettings') return 'user'
@@ -145,13 +156,25 @@ function skillListJson(
     description: skill.description ?? null,
     location: locationLabel(skill),
     loadedFrom: skill.loadedFrom ?? null,
+    siblingHome: skill.siblingSkillsHome ?? null,
     userInvocable: skill.userInvocable ?? null,
     whenToUse: skill.whenToUse ?? null,
     allowedTools: skill.allowedTools ?? [],
   }
 }
 
-export function formatSkillsListJson(skills: SkillListCommand[]): string {
+/** Hint for a sibling skills home that holds skills but is switched off. */
+export function formatUnloadedSiblingSkillsHint({
+  home,
+  count,
+}: UnloadedSiblingSkillsHome): string {
+  return `${count} ${plural(count, 'skill')} in ${getSiblingSkillsHomeDisplayPath(home)} ${count === 1 ? "isn't" : "aren't"} loaded. Enable "${home.configLabel}" in /config or set "${home.settingKey}": true in user settings.`
+}
+
+export function formatSkillsListJson(
+  skills: SkillListCommand[],
+  unloadedSiblingHomes: UnloadedSiblingSkillsHome[] = [],
+): string {
   const visibleSkills = publicSkills(skills)
   const states = getResolutionState(visibleSkills)
   return JSON.stringify(
@@ -161,6 +184,11 @@ export function formatSkillsListJson(skills: SkillListCommand[]): string {
         .slice()
         .sort((a, b) => getCommandName(a).localeCompare(getCommandName(b)))
         .map(skill => skillListJson(skill, states.get(skill))),
+      unloadedSkillHomes: unloadedSiblingHomes.map(({ home, count }) => ({
+        path: getSiblingSkillsHomeDisplayPath(home),
+        setting: home.settingKey,
+        count,
+      })),
     },
     null,
     2,
@@ -170,6 +198,7 @@ export function formatSkillsListJson(skills: SkillListCommand[]): string {
 export function formatSkillsListForDisplay(
   skills: SkillListCommand[],
   columns = terminalWidth(),
+  unloadedSiblingHomes: UnloadedSiblingSkillsHome[] = [],
 ): string {
   const visibleSkills = publicSkills(skills)
   const states = getResolutionState(visibleSkills)
@@ -179,9 +208,18 @@ export function formatSkillsListForDisplay(
   const enabledCount = sortedSkills.filter(
     skill => states.get(skill) === 'enabled',
   ).length
+  const hints =
+    unloadedSiblingHomes.length > 0
+      ? ['', ...unloadedSiblingHomes.map(formatUnloadedSiblingSkillsHint)]
+      : []
 
   if (sortedSkills.length === 0) {
-    return ['Skills: 0 enabled', '', 'No installed skills found.'].join('\n')
+    return [
+      'Skills: 0 enabled',
+      '',
+      'No installed skills found.',
+      ...hints,
+    ].join('\n')
   }
 
   const nameWidth = Math.max(
@@ -214,5 +252,6 @@ export function formatSkillsListForDisplay(
     header,
     rule,
     ...rows,
+    ...hints,
   ].join('\n')
 }

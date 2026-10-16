@@ -9,6 +9,7 @@ import {
   getCommands,
   type Command,
 } from '../../commands.js'
+import { getUnloadedSiblingSkillHomes } from '../../skills/loadSkillsDir.js'
 import { getCwd } from '../../utils/cwd.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { getDisplayPath } from '../../utils/file.js'
@@ -25,6 +26,7 @@ import {
 } from './skillsListFormat.js'
 import {
   findLocalSkillForRemoval,
+  getSiblingSkillRemoveMessage,
   getSkillRemoveNotFoundMessage,
 } from './skillsRemoveMessage.js'
 import { validateSkillPath } from './skillsValidation.js'
@@ -126,14 +128,19 @@ async function existingLocalSkillRootForRemoval(
 }
 
 export async function skillsListHandler(options: ListOptions = {}): Promise<void> {
-  const skills = await loadSkills()
+  const [skills, unloadedSiblingHomes] = await Promise.all([
+    loadSkills(),
+    getUnloadedSiblingSkillHomes().catch(() => []),
+  ])
 
   if (options.json) {
-    console.log(formatSkillsListJson(skills))
+    console.log(formatSkillsListJson(skills, unloadedSiblingHomes))
     return
   }
 
-  console.log(formatSkillsListForDisplay(skills))
+  console.log(
+    formatSkillsListForDisplay(skills, undefined, unloadedSiblingHomes),
+  )
 }
 
 export async function skillsShowHandler(name: string): Promise<void> {
@@ -203,17 +210,22 @@ export async function skillsRemoveHandler(
     return
   }
 
-  const skills = (await loadSkills(options.projectDir))
-    .filter(isPublicSkill)
-    .filter(skill =>
+  const loadedSkills = (await loadSkills(options.projectDir)).filter(
+    isPublicSkill,
+  )
+  const skills = loadedSkills.filter(
+    skill =>
       isSkillInRemovalRoot(skill, options) ||
       isSkillInRemovalRoot(skill, { ...options, global: !options.global }),
-    )
+  )
   const targetSource = options.global ? 'userSettings' : 'projectSettings'
   const skill = findLocalSkillForRemoval(skills, name, targetSource)
 
   if (!skill) {
-    console.error(getSkillRemoveNotFoundMessage(skills, name, options))
+    console.error(
+      getSiblingSkillRemoveMessage(loadedSkills, name) ??
+        getSkillRemoveNotFoundMessage(skills, name, options),
+    )
     process.exitCode = 1
     return
   }

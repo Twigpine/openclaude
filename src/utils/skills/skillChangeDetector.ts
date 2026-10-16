@@ -13,6 +13,7 @@ import {
   getSkillsPath,
   onDynamicSkillsLoaded,
 } from '../../skills/loadSkillsDir.js'
+import { resolveSiblingSkillsHomes } from '../../skills/siblingSkillHomes.js'
 import { PROJECT_CONFIG_DIR_NAMES } from '../markdownConfigLoader.js'
 import { resetSentSkillNames } from '../attachments.js'
 import { registerCleanup } from '../cleanupRegistry.js'
@@ -95,6 +96,10 @@ const defaultDependencies = {
   getFsImplementation,
   getAdditionalDirectoriesForClaudeMd,
   getSkillsPath,
+  getSiblingSkillsHomePaths: (): string[] =>
+    resolveSiblingSkillsHomes()
+      .filter(home => home.enabled)
+      .map(home => home.path),
   hasBlockingResult,
   onDynamicSkillsLoaded,
   resetSentSkillNames,
@@ -236,6 +241,11 @@ async function getWatchablePaths(): Promise<string[]> {
     await pushIfExists(platformPath.resolve(configDirName, 'commands'))
   }
 
+  // Enabled sibling skills homes (~/.agents/skills, opt-in ~/.claude/skills)
+  for (const siblingSkillsPath of dependencies.getSiblingSkillsHomePaths()) {
+    await pushIfExists(siblingSkillsPath)
+  }
+
   // Additional directories (--add-dir) skills
   for (const dir of dependencies.getAdditionalDirectoriesForClaudeMd()) {
     for (const configDirName of PROJECT_CONFIG_DIR_NAMES) {
@@ -359,6 +369,29 @@ export async function resetForTesting(overrides?: {
   testOverrides = overrides ?? null
 }
 
+/**
+ * Reload skills right away after a setting changed which skill directories
+ * load (sibling skills homes toggled in /config). Newly enabled homes are
+ * added to the running watcher so later edits hot-reload too.
+ */
+export async function reloadAfterSkillSourceSettingsChange(): Promise<void> {
+  if (disposed) return
+  if (watcher) {
+    const fs = dependencies.getFsImplementation()
+    for (const path of dependencies.getSiblingSkillsHomePaths()) {
+      try {
+        await fs.stat(path)
+        watcher.add(path)
+      } catch {
+        // Home doesn't exist yet; nothing to watch
+      }
+    }
+  }
+  dependencies.clearCommandsCache()
+  dependencies.resetSentSkillNames()
+  skillsChanged.emit()
+}
+
 export const _scheduleReloadForTesting = scheduleReload
 
 export function _setDependenciesForTesting(
@@ -371,5 +404,6 @@ export const skillChangeDetector = {
   initialize,
   dispose,
   subscribe,
+  reloadAfterSkillSourceSettingsChange,
   resetForTesting,
 }

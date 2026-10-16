@@ -20,6 +20,7 @@ let executeConfigChangeHooks = mock(async () => hookResults)
 let dynamicSkillsLoadedCallback: (() => void) | undefined
 let unregisterDynamicSkillsLoaded = mock(() => {})
 let additionalDirectories: string[] = []
+let siblingSkillsHomePaths: string[] = []
 let getSkillsPathImpl = (_source: string, _dir: string) => ''
 let statImpl = mock(async (_path: string) => {})
 let chokidarWatch = mock(() => ({
@@ -39,6 +40,7 @@ function installMocks(): void {
   dynamicSkillsLoadedCallback = undefined
   unregisterDynamicSkillsLoaded = mock(() => {})
   additionalDirectories = []
+  siblingSkillsHomePaths = []
   getSkillsPathImpl = () => ''
   statImpl = mock(async () => {})
   chokidarWatch = mock(() => ({
@@ -61,6 +63,7 @@ async function importFreshModule(): Promise<SkillChangeDetectorModule> {
     getAdditionalDirectoriesForClaudeMd: () => additionalDirectories,
     getSkillsPath: (source: string, dir: string) =>
       getSkillsPathImpl(source, dir),
+    getSiblingSkillsHomePaths: () => siblingSkillsHomePaths,
     hasBlockingResult: (results: { blocked: boolean }[]) =>
       results.some(result => result.blocked),
     onDynamicSkillsLoaded: (callback: () => void) => {
@@ -184,6 +187,46 @@ describe('skillChangeDetector reload batching', () => {
       ),
     ).toBe(true)
     expect(watchOptions.depth).toBeUndefined()
+  })
+
+  test('watches enabled sibling skills homes', async () => {
+    const detector = await importFreshModule()
+    const agentsSkillsPath = platformPath.join('/tmp', 'home', '.agents', 'skills')
+    siblingSkillsHomePaths = [agentsSkillsPath]
+    statImpl = mock(async () => {})
+
+    await detector.initialize()
+
+    const [watchedPaths = []] = (
+      chokidarWatch.mock.calls as unknown as Array<[string[] | undefined]>
+    )[0] ?? []
+    expect(watchedPaths).toContain(agentsSkillsPath)
+  })
+
+  test('reloads skills and watches newly enabled homes after a settings toggle', async () => {
+    const add = mock(() => {})
+    chokidarWatch = mock(() => ({
+      on: mock(() => {}),
+      close: mock(async () => {}),
+      add,
+    }))
+    const detector = await importFreshModule()
+    const userSkillsPath = platformPath.join('/tmp', 'user', 'skills')
+    getSkillsPathImpl = (source, dir) =>
+      source === 'userSettings' && dir === 'skills' ? userSkillsPath : ''
+    statImpl = mock(async () => {})
+    await detector.initialize()
+    const onChange = mock(() => {})
+    detector.subscribe(onChange)
+
+    const claudeSkillsPath = platformPath.join('/tmp', 'home', '.claude', 'skills')
+    siblingSkillsHomePaths = [claudeSkillsPath]
+    await detector.reloadAfterSkillSourceSettingsChange()
+
+    expect(add).toHaveBeenCalledWith(claudeSkillsPath)
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+    expect(resetSentSkillNames).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledTimes(1)
   })
 
   test('batches rapid reload requests into one hook/cache clear/notification', async () => {

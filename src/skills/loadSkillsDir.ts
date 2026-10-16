@@ -64,6 +64,14 @@ import { isRestrictedToPluginOnly } from '../utils/settings/pluginOnlyPolicy.js'
 import { HooksSchema, type HooksSettings } from '../utils/settings/types.js'
 import { createSignal } from '../utils/signal.js'
 import { registerMCPSkillBuilders } from './mcpSkillBuilders.js'
+import {
+  applySiblingSkillPrecedence,
+  getSiblingSkillsHomeDisplayPath,
+  getSiblingSkillsHomeId,
+  type ResolvedSiblingSkillsHome,
+  resolveSiblingSkillsHomes,
+  type SiblingSkillsHomeId,
+} from './siblingSkillHomes.js'
 
 export type LoadedFrom =
   | 'commands_DEPRECATED'
@@ -331,6 +339,7 @@ export function createSkillCommand({
   effort,
   shell,
   skillTrust,
+  siblingSkillsHome,
 }: {
   skillName: string
   displayName: string | undefined
@@ -356,6 +365,7 @@ export function createSkillCommand({
   effort: EffortValue | undefined
   shell: FrontmatterShell | undefined
   skillTrust: string | undefined
+  siblingSkillsHome?: SiblingSkillsHomeId
 }): Command {
   return {
     type: 'prompt',
@@ -386,6 +396,7 @@ export function createSkillCommand({
     skillRoot: baseDir,
     skillFilePath,
     skillTrust,
+    siblingSkillsHome,
     async getPromptForCommand(args, toolUseContext) {
       let finalContent = baseDir
         ? `Base directory for this skill: ${baseDir}\n\n${markdownContent}`
@@ -551,6 +562,7 @@ async function findSkillMarkdownFiles(basePath: string): Promise<string[]> {
 export async function loadSkillsFromSkillsDir(
   basePath: string,
   source: SettingSource,
+  siblingSkillsHome?: SiblingSkillsHomeId,
 ): Promise<SkillWithPath[]> {
   const fs = getFsImplementation()
   const skillFiles = await findSkillMarkdownFiles(basePath)
@@ -602,6 +614,7 @@ export async function loadSkillsFromSkillsDir(
               typeof skillJsonMetadata.trust === 'string'
                 ? skillJsonMetadata.trust
                 : undefined,
+            siblingSkillsHome,
           }),
           filePath: skillFilePath,
         }
@@ -813,6 +826,15 @@ export const getSkillDirCommands = memoize(
       return additionalSkillsNested.flat().map(s => s.skill)
     }
 
+    // Other agents' skills homes (~/.agents/skills, ~/.claude/skills) are
+    // read-only, user-level, and rank below every OpenClaude-owned source.
+    const siblingHomes = resolveSiblingSkillsHomes()
+    const userSkillsEnabled =
+      isSettingSourceEnabled('userSettings') && !skillsLocked
+    const enabledSiblingHomes = userSkillsEnabled
+      ? siblingHomes.filter(home => home.enabled)
+      : []
+
     // Load from /skills/ directories, additional dirs, and legacy /commands/ in parallel
     // (all independent — different directories, no shared state)
     const [
@@ -821,11 +843,12 @@ export const getSkillDirCommands = memoize(
       projectSkillsNested,
       additionalSkillsNested,
       legacyCommands,
+      siblingSkillsNested,
     ] = await Promise.all([
       isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_POLICY_SKILLS)
         ? Promise.resolve([])
         : loadSkillsFromSkillsDir(managedSkillsDir, 'policySettings'),
-      isSettingSourceEnabled('userSettings') && !skillsLocked
+      userSkillsEnabled
         ? loadSkillsFromSkillsDir(userSkillsDir, 'userSettings')
         : Promise.resolve([]),
       projectSettingsEnabled
@@ -848,15 +871,22 @@ export const getSkillDirCommands = memoize(
       // here when skills are locked — these ARE skills, regardless of the
       // directory they load from.
       skillsLocked ? Promise.resolve([]) : loadSkillsFromCommandsDir(cwd),
+      Promise.all(
+        enabledSiblingHomes.map(home =>
+          loadSkillsFromSkillsDir(home.path, 'userSettings', home.id),
+        ),
+      ),
     ])
 
-    // Flatten and combine all skills
+    // Flatten and combine all skills. Sibling-home skills go last so the
+    // same-file dedup below keeps the OpenClaude-owned copy of a symlinked skill.
     const allSkillsWithPaths = [
       ...managedSkills,
       ...projectSkillsNested.flat(),
       ...additionalSkillsNested.flat(),
       ...userSkills,
       ...legacyCommands,
+      ...siblingSkillsNested.flat(),
     ]
 
     // Deduplicate by resolved path (handles symlinks and duplicate parent directories)
@@ -905,10 +935,20 @@ export const getSkillDirCommands = memoize(
       logForDebugging(`Deduplicated ${duplicatesRemoved} skills (same file)`)
     }
 
+    // Sibling-home skills never shadow an OpenClaude skill of the same name,
+    // and the first sibling home wins a name shared by both homes.
+    const resolvedSkills = applySiblingSkillPrecedence(deduplicatedSkills)
+    const siblingSkillCount = logSiblingSkillHomes(
+      siblingHomes,
+      userSkillsEnabled,
+      siblingSkillsNested.map(skills => skills.length),
+      resolvedSkills,
+    )
+
     // Separate conditional skills (with paths frontmatter) from unconditional ones
     const unconditionalSkills: Command[] = []
     const newConditionalSkills: Command[] = []
-    for (const skill of deduplicatedSkills) {
+    for (const skill of resolvedSkills) {
       if (
         skill.type === 'prompt' &&
         skill.paths &&
@@ -933,12 +973,71 @@ export const getSkillDirCommands = memoize(
     }
 
     logForDebugging(
-      `Loaded ${deduplicatedSkills.length} unique skills (${unconditionalSkills.length} unconditional, ${newConditionalSkills.length} conditional, managed: ${managedSkills.length}, user: ${userSkills.length}, project: ${projectSkillsNested.flat().length}, additional: ${additionalSkillsNested.flat().length}, legacy commands: ${legacyCommands.length})`,
+      `Loaded ${resolvedSkills.length} unique skills (${unconditionalSkills.length} unconditional, ${newConditionalSkills.length} conditional, managed: ${managedSkills.length}, user: ${userSkills.length}, project: ${projectSkillsNested.flat().length}, additional: ${additionalSkillsNested.flat().length}, legacy commands: ${legacyCommands.length}, sibling homes: ${siblingSkillCount})`,
     )
 
     return unconditionalSkills
   },
 )
+
+/**
+ * Logs one summary line for the sibling skills homes and returns how many
+ * sibling skills survived de-duplication.
+ */
+function logSiblingSkillHomes(
+  homes: ResolvedSiblingSkillsHome[],
+  userSkillsEnabled: boolean,
+  foundCounts: number[],
+  resolvedSkills: Command[],
+): number {
+  const loadedByHome = new Map<SiblingSkillsHomeId, number>()
+  for (const skill of resolvedSkills) {
+    const homeId = getSiblingSkillsHomeId(skill)
+    if (homeId) loadedByHome.set(homeId, (loadedByHome.get(homeId) ?? 0) + 1)
+  }
+
+  let enabledIndex = 0
+  const parts = homes.map(home => {
+    const displayPath = getSiblingSkillsHomeDisplayPath(home)
+    if (!userSkillsEnabled) return `${displayPath} skipped (user skills disabled)`
+    if (!home.enabled) return `${displayPath} disabled`
+    const found = foundCounts[enabledIndex++] ?? 0
+    const loaded = loadedByHome.get(home.id) ?? 0
+    return `${displayPath} ${loaded} loaded (${found - loaded} shadowed or duplicate)`
+  })
+  logForDebugging(`[skills] sibling homes: ${parts.join('; ')}`)
+
+  let total = 0
+  for (const count of loadedByHome.values()) total += count
+  return total
+}
+
+/**
+ * Sibling skills homes that are switched off but hold skills, for the hint in
+ * /skills and `openclaude skills list`. Homes the user cannot enable (skills
+ * locked to plugins, user settings disabled, or pinned by managed policy) are
+ * left out because the hint would be misleading.
+ */
+export async function getUnloadedSiblingSkillHomes(
+  homes: ResolvedSiblingSkillsHome[] = resolveSiblingSkillsHomes(),
+): Promise<Array<{ home: ResolvedSiblingSkillsHome; count: number }>> {
+  if (
+    isBareMode() ||
+    isRestrictedToPluginOnly('skills') ||
+    !isSettingSourceEnabled('userSettings')
+  ) {
+    return []
+  }
+  const counts = await Promise.all(
+    homes
+      .filter(home => !home.enabled && !home.lockedByPolicy)
+      .map(async home => ({
+        home,
+        count: (await findSkillMarkdownFiles(home.path)).length,
+      })),
+  )
+  return counts.filter(({ count }) => count > 0)
+}
 
 export function clearSkillCaches() {
   getSkillDirCommands.cache?.clear?.()
