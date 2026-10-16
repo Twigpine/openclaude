@@ -176,6 +176,18 @@ else
   echo "         still be warming — try again in a minute."
 fi
 
+# --- 3b. catalogue freshness ------------------------------------------------
+# freeModels.ts carries a dated snapshot of the free-model probe; past its
+# horizon the /duo verdicts drift from reality. Warn, never fail: the stack
+# stays usable until the next probe runs.
+STALE_AFTER=$(sed -n "s/.*PROBE_STALE_AFTER = '\([0-9][0-9-]*\)'.*/\1/p" \
+  "$FORK_DIR/src/services/duo/freeModels.ts" 2>/dev/null | head -1)
+if [ -n "$STALE_AFTER" ] && [ "$(date +%F)" \> "$STALE_AFTER" ]; then
+  echo ""
+  echo "WARNING: free-model catalogue is stale (probe horizon ${STALE_AFTER})."
+  echo "         Re-run: python3 ${FORK_DIR%/openclaude}/duo/probe_free.py"
+fi
+
 cat << EOF
 
 $(printf '%.0s─' {1..70})
