@@ -1969,6 +1969,7 @@ async function* queryLoop(
                 if (decision.shouldFailover && decision.nextModel) {
                   failoverCount++
                   failoverTried.push(currentModel)
+                  const originalModelForLog = currentModel
                   const nextModel = decision.nextModel
                   attemptWithFallback = true
 
@@ -1998,6 +1999,18 @@ async function* queryLoop(
                     messagesForQuery as unknown as Parameters<typeof stripThinkingBlocksIfProviderAllows>[0],
                   ) as unknown as typeof messagesForQuery
 
+                  logEvent('tengu_model_auto_failover_triggered', {
+                    original_model:
+                      originalModelForLog as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                    next_model:
+                      nextModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                    reason:
+                      (decision.reason ?? 'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                    entrypoint:
+                      'cli' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                    queryChainId: queryChainIdForAnalytics,
+                    queryDepth: queryTracking.depth,
+                  })
                   yield createSystemMessage(
                     `Auto failover: retrying on ${renderModelName(nextModel)} (${decision.message ?? 'model unavailable'})`,
                     'warning',
