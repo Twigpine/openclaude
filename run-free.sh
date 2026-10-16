@@ -1,4 +1,14 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# SUPERSEDED (2026-10-16) — kept for reference.
+# The stack now runs the Anthropic bridge (127.0.0.1:18095) in front of FCC +
+# free providers, so OpenClaude gets failover, opencode/cline routing and
+# native tool_use. Use instead:
+#   start-all-free.sh      boots FCC + bridge + opencode serve (idempotent)
+#   run-opencode-free.sh   the TUI (add --resume <id> to resume a session)
+#   continue-tui.sh        resume the last TUI session in a new terminal
+# This direct-FCC path still works when fcc-server is up, but has no failover.
+# ---------------------------------------------------------------------------
 # ============================================================================
 # OpenClaude fork — free-model launcher (no Anthropic login)
 # ============================================================================

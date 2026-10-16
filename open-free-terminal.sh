@@ -1,4 +1,7 @@
 #!/bin/bash
+# SUPERSEDED (2026-10-16) — kept for reference: this opens a TUI on the
+# direct-FCC path (see run-free.sh). Use run-opencode-free.sh (bridge-backed)
+# or continue-tui.sh to resume the last session.
 # Open the OpenClaude TUI in a new terminal window on the free model.
 # Requires: fcc-server running on 127.0.0.1:8082, DISPLAY set.
 set -euo pipefail
