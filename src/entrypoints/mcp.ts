@@ -35,6 +35,10 @@ import { getMainLoopModel } from '../utils/model/model.js'
 import { hasPermissionsToUseTool } from '../utils/permissions/permissions.js'
 import { setCwd } from '../utils/Shell.js'
 import { jsonStringify } from '../utils/slowOperations.js'
+import {
+  sanitizeMcpImageData,
+  truncateMcpToolText,
+} from '../utils/mcpToolResultSanitize.js'
 import { getErrorParts } from '../utils/toolErrors.js'
 import { zodToJsonSchema } from '../utils/zodToJsonSchema.js'
 
@@ -199,25 +203,32 @@ export async function startMCPServer(
         let content: CallToolResult['content']
         const data = finalResult.data as string | { type: string; text?: string; source?: { type: string; media_type: string; data: string } }[] | unknown
 
+        // Mill hosts (GB/Cursor) re-inject CallTool content into the next
+        // model request. Sanitize NUL/invalid UTF-8 and cap size so post-Bash
+        // follow-ups do not hit provider "token parsing" 500s.
         if (typeof data === 'string') {
-          content = [{ type: 'text', text: data }]
+          content = [{ type: 'text', text: truncateMcpToolText(data) }]
         } else if (Array.isArray(data)) {
           content = data.flatMap((block: unknown) => {
             // Boundary data — defensively skip primitives/null instead of crashing.
             if (!block || typeof block !== 'object') return []
             const b = block as { type?: unknown; text?: unknown; source?: { type?: unknown; media_type?: unknown; data?: unknown } }
             if (b.type === 'text') {
-              return [{ type: 'text', text: String(b.text ?? '') } as CallToolResult['content'][number]]
+              return [{ type: 'text', text: truncateMcpToolText(String(b.text ?? '')) } as CallToolResult['content'][number]]
             }
             if (b.type === 'image' && b.source && typeof b.source.data === 'string' && typeof b.source.media_type === 'string') {
-              return [{ type: 'image', data: b.source.data, mimeType: b.source.media_type } as CallToolResult['content'][number]]
+              const imageData = sanitizeMcpImageData(b.source.data)
+              if (!imageData) {
+                return [{ type: 'text', text: '[MCP image omitted: invalid base64]' } as CallToolResult['content'][number]]
+              }
+              return [{ type: 'image', data: imageData, mimeType: b.source.media_type } as CallToolResult['content'][number]]
             }
             // eslint-disable-next-line custom-rules/no-top-level-side-effects, no-console
             console.warn(`Unmapped content block type from tool ${name}: ${String(b.type ?? 'unknown')}`)
-            return [{ type: 'text', text: jsonStringify(block) } as CallToolResult['content'][number]]
+            return [{ type: 'text', text: truncateMcpToolText(jsonStringify(block)) } as CallToolResult['content'][number]]
           }) as CallToolResult['content']
         } else {
-          content = [{ type: 'text', text: jsonStringify(data) }]
+          content = [{ type: 'text', text: truncateMcpToolText(jsonStringify(data)) }]
         }
 
         return {
@@ -248,7 +259,7 @@ export async function startMCPServer(
           content: [
             {
               type: 'text',
-              text: errorText,
+              text: truncateMcpToolText(errorText),
             },
           ],
         }
