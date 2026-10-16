@@ -388,7 +388,11 @@ async function proxyFccTurn(body, model, res, inputTokens) {
   if (thinking && typeof thinking === "object" && Number.isFinite(Number(thinking.budget_tokens)) && Number(thinking.budget_tokens) >= payload.max_tokens) {
     payload.thinking = { ...thinking, budget_tokens: Math.max(1024, Math.floor(payload.max_tokens / 2)) }
   }
-  const stream = body.stream !== false
+  // Only stream when the client asked for SSE. The Anthropic SDK omits
+  // `stream` for buffered `messages.create` callers; streaming SSE at a
+  // non-streaming client (e.g. OMA's AgentRunner.chat) yields a content-less
+  // message downstream ("reading 'map' of undefined").
+  const stream = body.stream === true
   payload.stream = stream
   const controller = new AbortController()
   const onClose = () => controller.abort()
