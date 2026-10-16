@@ -1312,7 +1312,7 @@ const server = http.createServer(async (req, res) => {
     } catch {
       return done(400, anthropicError("invalid JSON body"))
     }
-    const model = body.model ?? FCC_MODEL
+    let model = body.model ?? FCC_MODEL
     // Honest usage for THIS request (what the TUI's auto-compact math needs)
     // and a summarization directive for compact prompts — both computed
     // BEFORE truncation, while the raw body is intact.
@@ -1326,6 +1326,22 @@ const server = http.createServer(async (req, res) => {
     // the flattened path below (summarization must never call tools), and
     // on proxy failure we fall through to the flattened cascade.
     const hasTools = Array.isArray(body.tools) && body.tools.length > 0
+    // Opt-in (OC_BRIDGE_TOOLS_PREFER_FCC=1): tool-bearing turns aimed at the
+    // flattened providers (opencode/*, cline/*) reroute onto an FCC model,
+    // whose native Messages proxy carries real tool_use loops. Off by
+    // default — the caller picked a model, and the swap changes who answers.
+    if (
+      process.env.OC_BRIDGE_TOOLS_PREFER_FCC === "1" &&
+      !compact && hasTools && !isNimModel(model)
+    ) {
+      const target = process.env.OC_BRIDGE_TOOLS_MODEL ?? "anthropic/openai/gpt-5.6-luna"
+      if (isNimModel(target) && !isProviderCooling(providerOf(target))) {
+        console.log("[tools] rerouted " + model + " -> " + target)
+        model = target
+      } else {
+        console.log("[tools] reroute skipped (" + target + " cooling) — flattened path")
+      }
+    }
     if (!compact && hasTools && isNimModel(model) && !isProviderCooling(providerOf(model))) {
       try {
         return await proxyFccTurn(body, model, res, inputTokens)

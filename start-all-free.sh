@@ -103,6 +103,9 @@ else
   # Cline availability is re-probed with REAL free-tier calls (one per
   # candidate); every 10 minutes silently burned quota around the clock, so
   # slow it to 30 minutes. 0 = probe once at startup, never again.
+  # Opt-in: with OC_BRIDGE_TOOLS_PREFER_FCC=1, tool-bearing turns aimed at the
+  # flattened providers reroute onto a native-tools FCC model
+  # (OC_BRIDGE_TOOLS_MODEL, default anthropic/openai/gpt-5.6-luna).
   rotate_log "$STATE_DIR/bridge.log"
   OC_BRIDGE_PORT="$BRIDGE_PORT" OC_BRIDGE_URL="http://127.0.0.1:${OC_PORT}" \
     OC_BRIDGE_TOKEN="$OC_TOKEN" FCC_TOKEN="${FCC_TOKEN:-bridge}" \
