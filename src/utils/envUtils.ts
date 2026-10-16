@@ -94,14 +94,248 @@ export function getProjectsDir(): string {
 
 /**
  * Check if NODE_OPTIONS contains a specific flag.
- * Splits on whitespace and checks for exact match to avoid false positives.
+ *
+ * Mirrors Node's `ParseNodeOptionsEnvVar` (src/node_options.cc):
+ * - double quotes toggle `is_in_string` and are stripped
+ * - backslash escapes the next character only when `is_in_string`
+ * - only ASCII spaces outside quotes delimit tokens (tabs are literal);
+ *   single quotes are literal
+ * - value-taking options (incl. `--loader`, `--inspect-port`,
+ *   `--inspect-publish-uid` aliases) consume the next token as a value so
+ *   `--conditions "--use-system-ca"` does not count as `--use-system-ca`;
+ *   `--experimental-import-meta-resolve` stays boolean and never consumes
+ * Handles `--flag=value` forms (e.g. `--max-old-space-size=4096`) and avoids
+ * prefix false positives (e.g. `--inspect` must not match `--inspect-brk`).
+ * Fails closed (returns false) when quoting is malformed, when a required
+ * value is missing at EOF, empty inline (`--title=`), or flag-like
+ * (`--title --use-system-ca`): Node rejects the whole NODE_OPTIONS value in
+ * all these cases, so no option is reported active regardless of whether the
+ * invalid construct appears before or after the target.
+ * For `--use-system-ca` / `--use-openssl-ca`, later `--no-*` occurrences
+ * disable earlier positives (and vice versa) in token order.
  */
 export function hasNodeOption(flag: string): boolean {
   const nodeOptions = process.env.NODE_OPTIONS
   if (!nodeOptions) {
     return false
   }
-  return nodeOptions.split(/\s+/).includes(flag)
+
+  // Node's ParseNodeOptionsEnvVar (src/node_options.cc)
+  const rawTokens: string[] = []
+  let isInString = false
+  let willStartNewArg = true
+  let malformed = false
+  for (let i = 0; i < nodeOptions.length; i++) {
+    let c = nodeOptions[i]!
+    if (c === '\\' && isInString) {
+      if (i + 1 >= nodeOptions.length) {
+        // Trailing escape with nothing to escape: Node rejects the value.
+        malformed = true
+        break
+      }
+      c = nodeOptions[++i]!
+    } else if (c === ' ' && !isInString) {
+      willStartNewArg = true
+      continue
+    } else if (c === '"') {
+      isInString = !isInString
+      continue
+    }
+
+    if (willStartNewArg) {
+      rawTokens.push(c)
+      willStartNewArg = false
+    } else {
+      rawTokens[rawTokens.length - 1] += c
+    }
+  }
+
+  // Node rejects unterminated quotes / incomplete escapes at startup. This
+  // helper can also run after bootstrap (settings re-applies NODE_OPTIONS,
+  // clears CA/proxy/mTLS caches, rebuilds agents), so fail closed here to
+  // avoid trusting system roots from an invalid option string.
+  if (malformed || isInString) {
+    return false
+  }
+
+  // Options whose value is required. The value may be supplied inline
+  // (`--opt=value`) or as the next token (`--opt value`). A separate-token
+  // value beginning with `-`, a missing value at EOF, or an empty inline
+  // value (`--opt=`) makes Node reject the whole NODE_OPTIONS stream, so the
+  // helper fails closed in all three cases. `--conditions`/`-C` follow the
+  // same rule (verified on Node 22.23.2: `--conditions -x` exits with
+  // `--conditions requires an argument`).
+  const ALWAYS_CONSUMES_NEXT = new Set(['--conditions', '-C'])
+
+  // Other value-taking options (std::string / vector / int) that require a
+  // value. Audited against the Node 22 contract: every entry here exits with
+  // `<flag> requires an argument` when the value is missing, empty inline,
+  // or flag-like (verified with NODE_OPTIONS probes on Node 22.23.2).
+  // NOTE: `--experimental-import-meta-resolve` is intentionally absent — it
+  // is a no-value boolean in Node 22 (bool backing field since v22.0.0;
+  // `--experimental-import-meta-resolve --use-system-ca` exits 0 and enables
+  // the CA flag), so it must never consume the following token.
+  const VALUE_TAKING = new Set([
+    '--allow-fs-read',
+    '--allow-fs-write',
+    '--cpu-prof-dir',
+    '--cpu-prof-interval',
+    '--cpu-prof-name',
+    '--diagnostic-dir',
+    '--disable-proto',
+    '--disable-warning',
+    '--dns-result-order',
+    '--experimental-default-type',
+    '--experimental-loader',
+    '--loader',
+    '--inspect-port',
+    '--inspect-publish-uid',
+    '--heap-prof-dir',
+    '--heap-prof-interval',
+    '--heap-prof-name',
+    '--heapsnapshot-near-heap-limit',
+    '--heapsnapshot-signal',
+    '--icu-data-dir',
+    '--import',
+    '--input-type',
+    '--localstorage-file',
+    '--max-http-header-size',
+    '--network-family-autoselection-attempt-timeout',
+    '--openssl-config',
+    '--redirect-warnings',
+    '--report-dir',
+    '--report-directory',
+    '--report-filename',
+    '--report-signal',
+    '--require',
+    '-r',
+    '--secure-heap',
+    '--secure-heap-min',
+    '--snapshot-blob',
+    '--test-coverage-branches',
+    '--test-coverage-exclude',
+    '--test-coverage-functions',
+    '--test-coverage-include',
+    '--test-coverage-lines',
+    '--test-name-pattern',
+    '--test-reporter',
+    '--test-reporter-destination',
+    '--test-shard',
+    '--test-skip-pattern',
+    '--title',
+    '--tls-cipher-list',
+    '--tls-keylog',
+    '--trace-event-categories',
+    '--trace-event-file-pattern',
+    '--trace-require-module',
+    '--unhandled-rejections',
+    '--use-largepages',
+    '--v8-pool-size',
+    '--watch-kill-signal',
+    '--watch-path',
+    '--max-old-space-size',
+    '--max-old-space-size-percentage',
+    '--max-semi-space-size',
+    '--stack-trace-limit',
+  ])
+
+  // Build the effective option stream with validity gating: required-value
+  // failure anywhere in the stream invalidates the whole NODE_OPTIONS value
+  // (Node exits with `<flag> requires an argument`), so no CA flag is
+  // reported active regardless of whether the invalid construct appears
+  // before or after the CA target. Use pending-consume flags (not raw-prev
+  // lookup) so a consumed value that happens to spell an option (e.g.
+  // `--conditions --conditions X`) cannot itself consume the next token.
+  // Inline `=` values (even flag-like, e.g. `--title=--use-system-ca`) are
+  // valid; only an empty inline value (`--title=`) fails.
+  const effectiveTokens: string[] = []
+  let pendingAlwaysConsume = false
+  let pendingValueConsume = false
+  for (const token of rawTokens) {
+    if (pendingAlwaysConsume) {
+      pendingAlwaysConsume = false
+      // `--conditions -x`: Node rejects a separate-token value beginning
+      // with `-`, so fail closed instead of exposing later tokens.
+      if (token.startsWith('-')) {
+        return false
+      }
+      continue
+    }
+    if (pendingValueConsume) {
+      pendingValueConsume = false
+      if (!token.startsWith('-')) {
+        continue
+      }
+      // Required value looks flag-like (e.g. `--title --use-system-ca`):
+      // Node rejects the whole NODE_OPTIONS value with `<flag> requires an
+      // argument`, so fail closed — no option is active.
+      return false
+    }
+    effectiveTokens.push(token)
+    const eqIndex = token.indexOf('=')
+    const base = eqIndex === -1 ? token : token.slice(0, eqIndex)
+    if (eqIndex !== -1) {
+      // Empty inline required value (e.g. `--title=`, `--conditions=`):
+      // Node exits with `--title= requires an argument`.
+      if (
+        token.slice(eqIndex + 1) === '' &&
+        (ALWAYS_CONSUMES_NEXT.has(base) || VALUE_TAKING.has(base))
+      ) {
+        return false
+      }
+      continue
+    }
+    if (ALWAYS_CONSUMES_NEXT.has(base)) {
+      pendingAlwaysConsume = true
+    } else if (VALUE_TAKING.has(base)) {
+      pendingValueConsume = true
+    }
+  }
+  // Missing value at EOF (e.g. `--use-system-ca=1 --title`): Node exits
+  // with `--title requires an argument`, so fail closed even though an
+  // earlier CA positive exists.
+  if (pendingAlwaysConsume || pendingValueConsume) {
+    return false
+  }
+
+  // CA flags are boolean options with `--no-*` negations applied in order.
+  // Later occurrences win so `--use-system-ca=1 --no-use-system-ca` disables
+  // (Node leaves bundled roots) and the reverse re-enables.
+  const CA_NEGATIONS: Record<string, string> = {
+    '--use-system-ca': '--no-use-system-ca',
+    '--use-openssl-ca': '--no-use-openssl-ca',
+  }
+  const CA_POSITIVES: Record<string, string> = {
+    '--no-use-system-ca': '--use-system-ca',
+    '--no-use-openssl-ca': '--use-openssl-ca',
+  }
+  let positive = flag
+  let negative: string | undefined
+  if (flag in CA_NEGATIONS) {
+    negative = CA_NEGATIONS[flag]
+  } else if (flag in CA_POSITIVES) {
+    positive = CA_POSITIVES[flag]!
+    negative = flag
+  }
+
+  if (negative !== undefined) {
+    let enabled = false
+    for (const token of effectiveTokens) {
+      if (token === positive || token.startsWith(positive + '=')) {
+        enabled = true
+      } else if (token === negative || token.startsWith(negative + '=')) {
+        enabled = false
+      }
+    }
+    return enabled
+  }
+
+  for (const token of effectiveTokens) {
+    if (token === flag || token.startsWith(flag + '=')) {
+      return true
+    }
+  }
+  return false
 }
 
 export function isEnvTruthy(envVar: string | boolean | undefined): boolean {
