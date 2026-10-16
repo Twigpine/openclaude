@@ -5,17 +5,40 @@
 #   2. the Anthropic bridge on 127.0.0.1:18095
 #
 # Idempotent: safe to re-run. Prints the bridge token and the free models found.
+# State (token + logs) lives in ~/.local/state/duo-stack (see STATE_DIR below):
+# /tmp proved volatile here and a reboot used to wipe the whole trail.
 # ============================================================================
 set -u
 
 OC_PORT=18085
 BRIDGE_PORT=18095
-STATE_DIR="${TMPDIR:-/tmp}/opencode"
+STATE_DIR="${DUO_STATE_DIR:-$HOME/.local/state/duo-stack}"
+LEGACY_STATE_DIR="${TMPDIR:-/tmp}/opencode"
 mkdir -p "$STATE_DIR"
 TOKEN_FILE="$STATE_DIR/bridge-token"
 FORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-log() { printf '\n=== %s ===\n' "$1"; }
+log() { printf '\n=== %s %s ===\n' "$(date +%H:%M:%S)" "$1"; }
+
+# --- 0. state migration (older TMPDIR-based layout) --------------------------
+# Carry the saved token over so re-runs still find a running server's password;
+# keep the old names working as symlinks once /tmp is wiped. A log whose writer
+# is still alive is left alone: its old inode keeps receiving the output.
+if [ "$STATE_DIR" != "$LEGACY_STATE_DIR" ]; then
+  [ -f "$LEGACY_STATE_DIR/bridge-token" ] && [ ! -e "$STATE_DIR/bridge-token" ] \
+    && cp -p "$LEGACY_STATE_DIR/bridge-token" "$STATE_DIR/bridge-token"
+  mkdir -p "$LEGACY_STATE_DIR"
+  for f in bridge-token bridge.log fcc.log opencode-serve.log; do
+    [ ! -e "$LEGACY_STATE_DIR/$f" ] && ln -sf "$STATE_DIR/$f" "$LEGACY_STATE_DIR/$f"
+  done
+fi
+
+# One previous log per service, then a dated session header (append mode: a
+# plain redirect used to erase the previous session's post-mortem trail).
+rotate_log() {
+  [ -s "$1" ] && mv -f "$1" "$1.1"
+  printf -- '--- stack session %s ---\n' "$(date -Is)" > "$1"
+}
 
 # --- 1. opencode server -----------------------------------------------------
 if ss -tln 2>/dev/null | grep -q ":${OC_PORT} "; then
@@ -28,7 +51,8 @@ if ss -tln 2>/dev/null | grep -q ":${OC_PORT} "; then
   fi
 else
   log "starting opencode serve on ${OC_PORT}"
-  setsid nohup opencode serve --port "$OC_PORT" > "$STATE_DIR/opencode-serve.log" 2>&1 < /dev/null &
+  rotate_log "$STATE_DIR/opencode-serve.log"
+  setsid nohup opencode serve --port "$OC_PORT" >> "$STATE_DIR/opencode-serve.log" 2>&1 < /dev/null &
   # The port opens before the password line is flushed, so wait on the line
   # itself rather than on the listener — reading too early saves an empty token.
   OC_TOKEN=""
@@ -53,7 +77,8 @@ if ss -tln 2>/dev/null | grep -q ":8082 "; then
 else
   if command -v fcc-server > /dev/null 2>&1; then
     log "starting FCC on 8082"
-    setsid nohup fcc-server > "$STATE_DIR/fcc.log" 2>&1 < /dev/null &
+    rotate_log "$STATE_DIR/fcc.log"
+    setsid nohup fcc-server >> "$STATE_DIR/fcc.log" 2>&1 < /dev/null &
     for _ in $(seq 1 20); do
       ss -tln 2>/dev/null | grep -q ":8082 " && break
       sleep 1
@@ -75,10 +100,15 @@ else
   # Free models like longcat think for minutes before answering. The bridge's
   # default reply deadline (150s) cuts them off mid-thought, which the TUI
   # shows as the agent "stopping" mid-task — give slow turns 10 minutes.
+  # Cline availability is re-probed with REAL free-tier calls (one per
+  # candidate); every 10 minutes silently burned quota around the clock, so
+  # slow it to 30 minutes. 0 = probe once at startup, never again.
+  rotate_log "$STATE_DIR/bridge.log"
   OC_BRIDGE_PORT="$BRIDGE_PORT" OC_BRIDGE_URL="http://127.0.0.1:${OC_PORT}" \
     OC_BRIDGE_TOKEN="$OC_TOKEN" FCC_TOKEN="${FCC_TOKEN:-bridge}" \
     OC_BRIDGE_DEADLINE="${OC_BRIDGE_DEADLINE:-600000}" \
-    setsid nohup node "$FORK_DIR/opencode-bridge.mjs" > "$STATE_DIR/bridge.log" 2>&1 < /dev/null &
+    CLINE_REFRESH_MS="${CLINE_REFRESH_MS:-1800000}" \
+    setsid nohup node "$FORK_DIR/opencode-bridge.mjs" >> "$STATE_DIR/bridge.log" 2>&1 < /dev/null &
   for _ in $(seq 1 20); do
     ss -tln 2>/dev/null | grep -q ":${BRIDGE_PORT} " && break
     sleep 1
@@ -159,6 +189,9 @@ Launch the fork with:
 
   ${FORK_DIR}/run-opencode-free.sh            # TUI
   ${FORK_DIR}/run-opencode-free.sh -p "hi"    # headless
+
+  state:  ${STATE_DIR}
+          (logs rotate to *.log.1; /tmp/opencode names are symlinks)
 
 In /model, press 'c' to probe availability — free tiers rotate, so the list and
 the verdicts are always re-read rather than trusted.
