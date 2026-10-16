@@ -149,26 +149,65 @@ describe('resolveSiblingSkillsHomes', () => {
     })
 
     expect(
-      homes.map(({ id, path, enabled, lockedByPolicy }) => ({
+      homes.map(({ id, path, enabled, pinnedBy }) => ({
         id,
         path,
         enabled,
-        lockedByPolicy,
+        pinnedBy,
       })),
     ).toEqual([
       {
         id: 'agents',
         path: join('/home/tester', '.agents', 'skills'),
         enabled: true,
-        lockedByPolicy: false,
+        pinnedBy: undefined,
       },
       {
         id: 'claude-code',
         path: join('/home/tester', '.claude', 'skills'),
         enabled: false,
-        lockedByPolicy: true,
+        pinnedBy: 'policySettings',
       },
     ])
+  })
+
+  test('reports a home pinned by any source that outranks user settings', () => {
+    const homes = resolveSiblingSkillsHomes({
+      homeDir: '/home/tester',
+      readSettingsForSource: settingsBySource({
+        flagSettings: { agentsSkillsEnabled: false },
+        localSettings: { claudeCodeSkillsEnabled: true },
+        userSettings: {
+          agentsSkillsEnabled: true,
+          claudeCodeSkillsEnabled: false,
+        },
+      }),
+      enabledSources: ALL_SOURCES,
+    })
+
+    expect(homes.map(({ id, enabled, pinnedBy }) => ({ id, enabled, pinnedBy })))
+      .toEqual([
+        { id: 'agents', enabled: false, pinnedBy: 'flagSettings' },
+        { id: 'claude-code', enabled: true, pinnedBy: 'localSettings' },
+      ])
+  })
+
+  test('leaves a home unpinned when only user settings, or a disabled source, set it', () => {
+    const homes = resolveSiblingSkillsHomes({
+      homeDir: '/home/tester',
+      readSettingsForSource: settingsBySource({
+        localSettings: { agentsSkillsEnabled: false },
+        projectSettings: { claudeCodeSkillsEnabled: true },
+        userSettings: { claudeCodeSkillsEnabled: true },
+      }),
+      enabledSources: ['userSettings', 'projectSettings', 'policySettings', 'flagSettings'],
+    })
+
+    expect(homes.map(({ id, enabled, pinnedBy }) => ({ id, enabled, pinnedBy })))
+      .toEqual([
+        { id: 'agents', enabled: true, pinnedBy: undefined },
+        { id: 'claude-code', enabled: true, pinnedBy: undefined },
+      ])
   })
 })
 

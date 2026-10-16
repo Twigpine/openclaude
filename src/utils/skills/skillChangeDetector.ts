@@ -138,11 +138,25 @@ export async function initialize(): Promise<void> {
 
   const paths = await getWatchablePaths()
   if (disposed) return
+  watchPaths(paths)
+}
+
+/**
+ * Watch the given directories, starting the watcher on first use. Startup
+ * skips the watcher when no skill directory exists, so a home enabled later
+ * from /config can be the first path watched.
+ */
+function watchPaths(paths: string[]): void {
   if (paths.length === 0) return
 
   logForDebugging(
     `Watching for changes in skill/command directories: ${paths.join(', ')}...`,
   )
+
+  if (watcher) {
+    watcher.add(paths)
+    return
+  }
 
   watcher = dependencies.watch(paths, {
     persistent: true,
@@ -376,16 +390,19 @@ export async function resetForTesting(overrides?: {
  */
 export async function reloadAfterSkillSourceSettingsChange(): Promise<void> {
   if (disposed) return
-  if (watcher) {
+  if (initialized) {
     const fs = dependencies.getFsImplementation()
+    const existingPaths: string[] = []
     for (const path of dependencies.getSiblingSkillsHomePaths()) {
       try {
         await fs.stat(path)
-        watcher.add(path)
+        existingPaths.push(path)
       } catch {
         // Home doesn't exist yet; nothing to watch
       }
     }
+    if (disposed) return
+    watchPaths(existingPaths)
   }
   dependencies.clearCommandsCache()
   dependencies.resetSentSkillNames()

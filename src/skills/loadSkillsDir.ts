@@ -1014,9 +1014,10 @@ function logSiblingSkillHomes(
 
 /**
  * Sibling skills homes that are switched off but hold skills, for the hint in
- * /skills and `openclaude skills list`. Homes the user cannot enable (skills
- * locked to plugins, user settings disabled, or pinned by managed policy) are
- * left out because the hint would be misleading.
+ * /skills and `openclaude skills list`. Homes the user cannot enable from
+ * /config (skills locked to plugins, user settings disabled, or the setting
+ * pinned by managed, `--settings`, or local settings) are left out because the
+ * hint would be misleading.
  */
 export async function getUnloadedSiblingSkillHomes(
   homes: ResolvedSiblingSkillsHome[] = resolveSiblingSkillsHomes(),
@@ -1030,7 +1031,7 @@ export async function getUnloadedSiblingSkillHomes(
   }
   const counts = await Promise.all(
     homes
-      .filter(home => !home.enabled && !home.lockedByPolicy)
+      .filter(home => !home.enabled && !home.pinnedBy)
       .map(async home => ({
         home,
         count: (await findSkillMarkdownFiles(home.path)).length,

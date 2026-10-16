@@ -497,8 +497,10 @@ export function Config({
     }
   },
   // Skills read from other agents' homes (~/.agents/skills, ~/.claude/skills).
-  // Hidden when managed policy pins the setting.
-  ...resolveSiblingSkillsHomes().filter(home => !home.lockedByPolicy).map(home => ({
+  // Hidden when a source that outranks user settings (managed policy,
+  // --settings, local settings) pins the setting: this toggle writes user
+  // settings, so it could not change the effective value.
+  ...resolveSiblingSkillsHomes().filter(home => !home.pinnedBy).map(home => ({
     id: home.settingKey,
     label: home.configLabel,
     value: home.enabled,

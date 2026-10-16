@@ -106,24 +106,40 @@ export function getSiblingSkillsHomeDisplayPath(
   return `~/${home.segments.join('/')}`
 }
 
+/** The highest-precedence trusted source that sets this home's setting. */
+function findSiblingSkillsSetting(
+  home: SiblingSkillsHome,
+  readSettingsForSource: ReadSettingsForSource,
+  enabledSources: readonly SettingSource[],
+): { source: SettingSource; value: boolean } | undefined {
+  for (const source of TRUSTED_SETTING_SOURCES) {
+    if (!enabledSources.includes(source)) continue
+    const value = readSettingsForSource(source)?.[home.settingKey]
+    if (typeof value === 'boolean') return { source, value }
+  }
+  return undefined
+}
+
 export function isSiblingSkillsHomeEnabled(
   home: SiblingSkillsHome,
   readSettingsForSource: ReadSettingsForSource = getSettingsForSource,
   enabledSources: readonly SettingSource[] = getEnabledSettingSources(),
 ): boolean {
-  for (const source of TRUSTED_SETTING_SOURCES) {
-    if (!enabledSources.includes(source)) continue
-    const value = readSettingsForSource(source)?.[home.settingKey]
-    if (typeof value === 'boolean') return value
-  }
-  return home.defaultEnabled
+  return (
+    findSiblingSkillsSetting(home, readSettingsForSource, enabledSources)
+      ?.value ?? home.defaultEnabled
+  )
 }
 
 export type ResolvedSiblingSkillsHome = SiblingSkillsHome & {
   path: string
   enabled: boolean
-  /** Managed policy pins this home's setting, so the user cannot toggle it. */
-  lockedByPolicy: boolean
+  /**
+   * The source that outranks user settings and sets this home's setting
+   * (managed policy, `--settings`, or local settings), if any. /config writes
+   * user settings, so a toggle there could not change a pinned home.
+   */
+  pinnedBy: SettingSource | undefined
 }
 
 export function resolveSiblingSkillsHomes({
@@ -135,18 +151,22 @@ export function resolveSiblingSkillsHomes({
   readSettingsForSource?: ReadSettingsForSource
   enabledSources?: readonly SettingSource[]
 } = {}): ResolvedSiblingSkillsHome[] {
-  return SIBLING_SKILL_HOMES.map(home => ({
-    ...home,
-    path: getSiblingSkillsHomePath(home, homeDir),
-    enabled: isSiblingSkillsHomeEnabled(
+  return SIBLING_SKILL_HOMES.map(home => {
+    const setting = findSiblingSkillsSetting(
       home,
       readSettingsForSource,
       enabledSources,
-    ),
-    lockedByPolicy:
-      typeof readSettingsForSource('policySettings')?.[home.settingKey] ===
-      'boolean',
-  }))
+    )
+    return {
+      ...home,
+      path: getSiblingSkillsHomePath(home, homeDir),
+      enabled: setting?.value ?? home.defaultEnabled,
+      pinnedBy:
+        setting && setting.source !== 'userSettings'
+          ? setting.source
+          : undefined,
+    }
+  })
 }
 
 export type SiblingSkillsSettings = Pick<

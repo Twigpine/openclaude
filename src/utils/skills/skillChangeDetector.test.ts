@@ -223,10 +223,40 @@ describe('skillChangeDetector reload batching', () => {
     siblingSkillsHomePaths = [claudeSkillsPath]
     await detector.reloadAfterSkillSourceSettingsChange()
 
-    expect(add).toHaveBeenCalledWith(claudeSkillsPath)
+    expect(add).toHaveBeenCalledWith([claudeSkillsPath])
+    expect(chokidarWatch).toHaveBeenCalledTimes(1)
     expect(clearCommandsCache).toHaveBeenCalledTimes(1)
     expect(resetSentSkillNames).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
+  test('starts the watcher for a newly enabled home when no skill directory existed at startup', async () => {
+    const detector = await importFreshModule()
+    const claudeSkillsPath = platformPath.join('/tmp', 'home', '.claude', 'skills')
+    statImpl = mock(async (path: string) => {
+      if (path !== claudeSkillsPath) throw new Error('ENOENT')
+    })
+    await detector.initialize()
+    expect(chokidarWatch).not.toHaveBeenCalled()
+
+    siblingSkillsHomePaths = [claudeSkillsPath]
+    await detector.reloadAfterSkillSourceSettingsChange()
+
+    const [watchedPaths = []] = (
+      chokidarWatch.mock.calls as unknown as Array<[string[] | undefined]>
+    )[0] ?? []
+    expect(watchedPaths).toEqual([claudeSkillsPath])
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+  })
+
+  test('reloads without starting a watcher before the detector is initialized', async () => {
+    const detector = await importFreshModule()
+    siblingSkillsHomePaths = [platformPath.join('/tmp', 'home', '.agents', 'skills')]
+
+    await detector.reloadAfterSkillSourceSettingsChange()
+
+    expect(chokidarWatch).not.toHaveBeenCalled()
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
   })
 
   test('batches rapid reload requests into one hook/cache clear/notification', async () => {

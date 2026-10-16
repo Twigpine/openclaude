@@ -420,7 +420,7 @@ const unloadedClaudeCodeHome = {
     ...getSiblingSkillsHome('claude-code'),
     path: '/home/tester/.claude/skills',
     enabled: false,
-    lockedByPolicy: false,
+    pinnedBy: undefined,
   },
   count: 3,
 }
