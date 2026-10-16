@@ -139,6 +139,65 @@ function isNimModel(model) {
   return model.startsWith("anthropic/") || model.includes("nvidia_nim/") || model.startsWith("openai/")
 }
 
+// ---- upstream health (per provider) ----
+// nim's upstream currently times out ~60 s per attempt, so every turn that
+// reaches it burns a minute before falling back. After HEALTH_FAILS
+// consecutive failures a provider is benched for HEALTH_COOLDOWN_MS; any
+// success resets it, and a benched provider is only skipped while a healthy
+// candidate remains. In-memory on purpose: a restart starts optimistic.
+const providerHealth = new Map() // provider -> { fails, coolingUntil }
+const HEALTH_FAILS = Math.max(1, Number(process.env.OC_BRIDGE_HEALTH_FAILS ?? 2))
+const HEALTH_COOLDOWN_MS = Math.max(1000, Number(process.env.OC_BRIDGE_HEALTH_COOLDOWN_MS ?? 10 * 60 * 1000))
+
+function providerOf(model) {
+  if (typeof model !== "string") return "unknown"
+  if (isClineModel(model)) return "cline"
+  const bare = model.startsWith("anthropic/") ? model.slice("anthropic/".length) : model
+  if (bare.includes("nvidia_nim/")) return "nim"
+  if (bare.startsWith("openai/")) return "openai"
+  return bare.split("/")[0] || "unknown"
+}
+
+function isProviderCooling(provider, now = Date.now()) {
+  const h = providerHealth.get(provider)
+  return !!h && h.coolingUntil > now
+}
+
+function markProviderFailure(model, error) {
+  const msg = String(error)
+  // A client abort says nothing about the upstream — the old TUI dying
+  // mid-turn must not put a provider on the bench.
+  if (/client disconnected/i.test(msg)) return
+  const provider = providerOf(model)
+  const h = providerHealth.get(provider) ?? { fails: 0, coolingUntil: 0 }
+  h.fails++
+  if (h.fails >= HEALTH_FAILS) {
+    if (h.coolingUntil <= Date.now()) {
+      console.log("[health] " + provider + " benched " + Math.round(HEALTH_COOLDOWN_MS / 60000) + " min: " + msg.slice(0, 80))
+    }
+    h.coolingUntil = Date.now() + HEALTH_COOLDOWN_MS
+  }
+  providerHealth.set(provider, h)
+}
+
+function markProviderSuccess(model) {
+  const provider = providerOf(model)
+  const h = providerHealth.get(provider)
+  if (!h) return
+  providerHealth.delete(provider)
+  if (h.coolingUntil > Date.now()) console.log("[health] " + provider + " recovered")
+}
+
+// Order a fallback chain so benched providers come last — the requested
+// model included, so a benched nim pick lands on the fallbacks instead of
+// burning its 60 s timeout first. All-benched chains are left untouched.
+function orderByHealth(chain) {
+  const healthy = chain.filter(m => !isProviderCooling(providerOf(m)))
+  if (healthy.length === chain.length || !healthy.length) return chain
+  console.log("[health] skipping " + chain.filter(m => isProviderCooling(providerOf(m))).join(", ") + " (benched)")
+  return healthy
+}
+
 function toOpencodeModel(requested) {
   if (typeof requested !== "string") return "space-bunny-free"
   const bare = requested.includes("/") ? requested.slice(requested.lastIndexOf("/") + 1) : requested
@@ -275,7 +334,7 @@ const FALLBACKS = (process.env.OC_BRIDGE_FALLBACKS ??
   .split(",").map(s => s.trim()).filter(Boolean)
 
 async function runTurnWithFallback(model, prompt, maxTokens, directive, convo = null, fullPrompt = null) {
-  const chain = [model, ...FALLBACKS.filter(m => m !== model)]
+  const chain = orderByHealth([model, ...FALLBACKS.filter(m => m !== model)])
     .slice(0, Number(process.env.OC_BRIDGE_MAX_MODELS ?? 3)) // cap wall time
   let last = { error: "no model in fallback chain" }
   let turnConvo = convo
@@ -286,10 +345,12 @@ async function runTurnWithFallback(model, prompt, maxTokens, directive, convo = 
       .catch(err => ({ error: String(err.message || err) }))
     const ms = Date.now() - t0
     if (!reply.error) {
+      markProviderSuccess(m)
       if (m !== model) console.log("[fallback] " + model + " failed, served by " + m + " in " + ms + "ms")
       reply.model = m // report the model that actually served, not the requested one
       return reply
     }
+    markProviderFailure(m, reply.error)
     last = reply
     console.log("[fallback] " + m + " failed after " + ms + "ms: " + String(reply.error).slice(0, 80))
     // The failed attempt abandoned its binding (runOpencodeTurn finally) —
@@ -966,7 +1027,7 @@ async function attemptOpencodeStream(model, prompt, sink, deadlineMs, convo = nu
 // sink has emitted nothing (no bytes = no visible glitch). Once content is on
 // the wire we stop and close gracefully with whatever we have.
 async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = DIRECTIVE, convo = null, fullPrompt = null) {
-  const chain = [model, ...FALLBACKS.filter(m => m !== model)]
+  const chain = orderByHealth([model, ...FALLBACKS.filter(m => m !== model)])
     .slice(0, Number(process.env.OC_BRIDGE_MAX_MODELS ?? 3))
   const deadlineMs = Number(process.env.OC_BRIDGE_DEADLINE ?? 150000)
   // Free tiers rate-limit in short windows. Retrying the SAME model+session
@@ -1007,10 +1068,12 @@ async function streamOpencodeTurnWithFallback(model, prompt, sink, directive = D
     }
     const ms = Date.now() - t0
     if (result.ok && sink.started) {
+      markProviderSuccess(m)
       if (m !== model) console.log("[fallback] " + model + " failed, served by " + m + " in " + ms + "ms")
       return null
     }
     const error = result.ok ? "opencode turn completed without a reply" : result.error
+    markProviderFailure(m, error)
     last = error
     console.log("[fallback] " + bare + " failed after " + ms + "ms: " + String(error).slice(0, 80))
     // A per-turn session dies with its attempt — a hop must open a fresh one
@@ -1263,7 +1326,7 @@ const server = http.createServer(async (req, res) => {
     // the flattened path below (summarization must never call tools), and
     // on proxy failure we fall through to the flattened cascade.
     const hasTools = Array.isArray(body.tools) && body.tools.length > 0
-    if (!compact && hasTools && isNimModel(model)) {
+    if (!compact && hasTools && isNimModel(model) && !isProviderCooling(providerOf(model))) {
       try {
         return await proxyFccTurn(body, model, res, inputTokens)
       } catch (err) {
