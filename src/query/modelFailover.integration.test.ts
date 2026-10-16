@@ -109,10 +109,13 @@ function makeParams(
   }
 }
 
-async function collect(params: QueryParams): Promise<any[]> {
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
+
+async function collect(params: QueryParams): Promise<unknown[]> {
   const previousSimple = process.env.CLAUDE_CODE_SIMPLE
   process.env.CLAUDE_CODE_SIMPLE = '1'
-  const messages: any[] = []
+  const messages: unknown[] = []
   try {
     for await (const message of query(params)) {
       messages.push(message)
@@ -125,6 +128,26 @@ async function collect(params: QueryParams): Promise<any[]> {
     }
   }
   return messages
+}
+
+// The collected stream mixes system/assistant message shapes; the assertions
+// probe a couple of optional fields through narrowing helpers rather than
+// annotations that would count against the any-usage budget.
+function isFailoverNotice(message: unknown): boolean {
+  return (
+    isRecord(message) &&
+    message.type === 'system' &&
+    typeof message.content === 'string' &&
+    message.content.includes('Auto failover')
+  )
+}
+
+function isAssistantReply(message: unknown): boolean {
+  if (!isRecord(message) || message.type !== 'assistant') return false
+  const payload = message.message
+  if (!isRecord(payload) || !Array.isArray(payload.content)) return false
+  const first = payload.content[0]
+  return isRecord(first) && first.text === 'ok after failover'
 }
 
 test('switches model, retries, and emits tengu_model_auto_failover_triggered on enriched error', async () => {
@@ -142,7 +165,7 @@ test('switches model, retries, and emits tengu_model_auto_failover_triggered on 
     seenModels.push(String(options?.model ?? ''))
     if (seenModels.length === 1) {
       const err = new Error('Stream idle timeout - no chunks received')
-      ;(err as any).streamIdleAborted = true
+      ;(err as unknown as Record<string, unknown>).streamIdleAborted = true
       throw err
     }
     yield createAssistantMessage({ content: 'ok after failover' })
@@ -152,21 +175,8 @@ test('switches model, retries, and emits tengu_model_auto_failover_triggered on 
 
   expect(seenModels.length).toBe(2)
   expect(seenModels[0]).not.toBe(seenModels[1])
-  expect(
-    messages.some(
-      (m: any) =>
-        m?.type === 'system' &&
-        typeof m?.content === 'string' &&
-        m.content.includes('Auto failover'),
-    ),
-  ).toBe(true)
-  expect(
-    messages.some(
-      (m: any) =>
-        m?.type === 'assistant' &&
-        m?.message?.content?.[0]?.text === 'ok after failover',
-    ),
-  ).toBe(true)
+  expect(messages.some(isFailoverNotice)).toBe(true)
+  expect(messages.some(isAssistantReply)).toBe(true)
 
   // The failover must be reported to analytics with both models and a reason.
   const failoverEvents = events.filter(
