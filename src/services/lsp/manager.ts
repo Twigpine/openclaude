@@ -46,7 +46,19 @@ let initializationPromise: Promise<void> | undefined
  * tests on the same shard.
  */
 export function _resetLspManagerForTesting(): void {
+  lspManagerInstance = undefined
   initializationState = 'not-started'
+  initializationError = undefined
+  initializationPromise = undefined
+  initializationGeneration++
+}
+
+/** Install a complete manager double without mutating the module graph. */
+export function _setLspManagerForTesting(
+  manager: LSPServerManager | undefined,
+): void {
+  lspManagerInstance = manager
+  initializationState = manager ? 'success' : 'not-started'
   initializationError = undefined
   initializationPromise = undefined
   initializationGeneration++
@@ -94,17 +106,15 @@ export function getInitializationStatus():
 }
 
 /**
- * Check whether at least one language server is connected and healthy.
- * Backs LSPTool.isEnabled().
+ * Check whether at least one language server is configured and can be started
+ * or restarted lazily. Backs LSPTool.isEnabled().
  */
 export function isLspConnected(): boolean {
   if (initializationState === 'failed') return false
   const manager = getLspServerManager()
   if (!manager) return false
-  const servers = manager.getAllServers()
-  if (servers.size === 0) return false
-  for (const server of servers.values()) {
-    if (server.state !== 'error') return true
+  for (const server of manager.getAllServers().values()) {
+    if (!server.isCrashRecoveryExhausted) return true
   }
   return false
 }
