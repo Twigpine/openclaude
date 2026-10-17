@@ -12,9 +12,13 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { test } from 'bun:test'
 import chokidar from 'chokidar'
+import React from 'react'
 import { clearCommandsCache, getCommands } from '../commands.js'
+import { useSkillsChange } from '../hooks/useSkillsChange.js'
+import { createRoot } from '../ink.js'
 
 import {
   getOriginalCwd,
@@ -706,6 +710,78 @@ for (const home of ['.agents', '.claude'] as const) {
     })
   })
 }
+
+test.serial('live command refresh preserves activation and revokes disabled sibling sources', async () => {
+  await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+    const detector = await import('../utils/skills/skillChangeDetector.js')
+    writeSettingsFile(join(configDir, 'settings.json'), {
+      agentsSkillsEnabled: true,
+      claudeCodeSkillsEnabled: true,
+    })
+    for (const [home, name] of [['.agents', 'agents-docs'], ['.claude', 'claude-docs']] as const) {
+      writeSiblingSkill(homeDir, home, name, 'description: docs helper\npaths: docs/**')
+    }
+    writeUserSkill(configDir, 'owned-docs')
+    writeFileSync(join(configDir, 'skills', 'owned-docs', 'SKILL.md'),
+      '---\ndescription: owned helper\npaths: docs/**\n---\nOwned docs\n')
+    const stdout = new PassThrough()
+    const stdin = new PassThrough()
+    const root = await createRoot({
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      patchConsole: false,
+    })
+    let mounted = false
+    const refreshed: Command[][] = []
+    const onCommandsChange = (commands: Command[]) => { refreshed.push(commands) }
+    function Harness() {
+      useSkillsChange(cwd, onCommandsChange)
+      React.useEffect(() => { mounted = true }, [])
+      return null
+    }
+    async function waitFor(predicate: () => boolean) {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        if (predicate()) return
+        await Bun.sleep(10)
+      }
+      assert.fail('Timed out waiting for live skill refresh')
+    }
+    try {
+      await detector.resetForTesting()
+      await detector.initialize()
+      root.render(React.createElement(Harness))
+      await waitFor(() => mounted)
+      const names = ['agents-docs', 'claude-docs', 'owned-docs']
+      const before = await getCommands(cwd)
+      for (const name of names) assert.equal(promptSkillsNamed(before, name).length, 0)
+      activateConditionalSkillsForPaths([join(cwd, 'docs', 'guide.md')], cwd)
+      await waitFor(() => refreshed.length > 0)
+      for (const name of names) {
+        assert.equal(promptSkillsNamed(refreshed.at(-1)!, name).length, 1, name)
+      }
+
+      // A real source change still invalidates activated siblings before notifying
+      // the same consumer. Owned dynamic skills must survive that refresh.
+      writeSettingsFile(join(configDir, 'settings.json'), {
+        agentsSkillsEnabled: false,
+        claudeCodeSkillsEnabled: false,
+      })
+      resetSettingsCache()
+      refreshed.length = 0
+      await detector.reloadAfterSkillSourceSettingsChange()
+      await waitFor(() => refreshed.length > 0)
+      for (const name of names.slice(0, 2)) {
+        assert.equal(promptSkillsNamed(refreshed.at(-1)!, name).length, 0, name)
+      }
+      assert.equal(promptSkillsNamed(refreshed.at(-1)!, 'owned-docs').length, 1)
+    } finally {
+      root.unmount()
+      stdin.end()
+      stdout.end()
+      await detector.resetForTesting()
+    }
+  })
+})
 
 test.serial('conditional siblings cannot replace dynamically discovered project skills', async () => {
   await withSiblingHomeFixture(async ({ homeDir, cwd }) => {

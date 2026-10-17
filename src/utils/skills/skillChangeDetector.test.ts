@@ -327,6 +327,9 @@ describe('skillChangeDetector reload batching', () => {
       siblingSkillsHomePaths = [sibling]
       await detector.initialize()
       await new Promise<void>(resolve => realWatcher!.once('ready', resolve))
+      // Chokidar's ready marks traversal completion; Bun's polling watcher
+      // still needs to establish its initial stat baseline before the edit.
+      await sleep(30)
       writeFileSync(siblingFile, 'enabled edit')
       await waitForHook(1)
       siblingSkillsHomePaths = []
@@ -339,6 +342,7 @@ describe('skillChangeDetector reload batching', () => {
       siblingSkillsHomePaths = [sibling]
       await detector.reloadAfterSkillSourceSettingsChange()
       await new Promise<void>(resolve => realWatcher!.once('ready', resolve))
+      await sleep(30)
       writeFileSync(siblingFile, 're-enabled edit')
       await waitForHook(3)
     } finally {

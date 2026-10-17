@@ -2,7 +2,6 @@ import { useCallback, useEffect } from 'react'
 import type { Command } from '../commands.js'
 import {
   clearCommandMemoizationCaches,
-  clearCommandsCache,
   getCommands,
 } from '../commands.js'
 import { onGrowthBookRefresh } from '../services/analytics/growthbook.js'
@@ -12,8 +11,8 @@ import { skillChangeDetector } from '../utils/skills/skillChangeDetector.js'
 /**
  * Keep the commands list fresh across two triggers:
  *
- * 1. Skill file changes (watcher) — full cache clear + disk re-scan, since
- *    skill content changed on disk.
+ * 1. Skill changes — the detector invalidates disk caches for source changes
+ *    and only command memoization for dynamic activation. Preserve that state.
  * 2. GrowthBook init/refresh — memo-only clear, since only `isEnabled()`
  *    predicates may have changed. Handles commands like /btw whose gate
  *    reads a flag that isn't in the disk cache yet on first session after
@@ -28,8 +27,8 @@ export function useSkillsChange(
   const handleChange = useCallback(async () => {
     if (!cwd) return
     try {
-      // Clear all command caches to ensure fresh load
-      clearCommandsCache()
+      // Preserve newly activated skills; the detector owns source invalidation.
+      clearCommandMemoizationCaches()
       const commands = await getCommands(cwd)
       onCommandsChange(commands)
     } catch (error) {
