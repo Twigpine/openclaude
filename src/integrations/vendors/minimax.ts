@@ -1,10 +1,13 @@
 import { defineVendor } from '../define.js'
 
+export const MINIMAX_GLOBAL_ANTHROPIC_BASE_URL = 'https://api.minimax.io/anthropic'
+export const MINIMAX_CHINA_ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
+
 export default defineVendor({
   id: 'minimax',
   label: 'MiniMax',
   classification: 'native',
-  defaultBaseUrl: 'https://api.minimax.io/anthropic',
+  defaultBaseUrl: MINIMAX_GLOBAL_ANTHROPIC_BASE_URL,
   defaultModel: 'MiniMax-M3',
   requiredEnvVars: ['MINIMAX_API_KEY'],
   setup: {
@@ -24,7 +27,7 @@ export default defineVendor({
     kind: 'credential-env',
     routing: {
       matchDefaultBaseUrl: true,
-      matchBaseUrlHosts: ['api.minimax.io', 'api.minimax.chat'],
+    matchBaseUrlHosts: ['api.minimax.io', 'api.minimaxi.com', 'api.minimax.chat'],
     },
     credentialEnvVars: ['MINIMAX_API_KEY'],
     missingCredentialMessage:

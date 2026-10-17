@@ -628,6 +628,16 @@ test('resolveActiveRouteIdFromEnv treats Anthropic-compatible MiniMax profile en
   ).toBe('minimax')
 })
 
+test('resolveActiveRouteIdFromEnv recognizes the mainland China MiniMax endpoint', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic',
+      ANTHROPIC_API_KEY: 'minimax-key',
+      ANTHROPIC_MODEL: 'MiniMax-M3',
+    }),
+  ).toBe('minimax')
+})
+
 test('resolveActiveRouteIdFromEnv treats Venice credential-only env as Venice', () => {
   expect(
     resolveActiveRouteIdFromEnv({
