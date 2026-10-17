@@ -213,18 +213,10 @@ export function getNvidiaNimDiscoveryCacheKeyForEnv(
   // Include custom headers in the cache key so this read lands in the
   // same partition the picker (`getOpenAIDiscoveryRequestOptions` in
   // src/commands/model/model.tsx) writes to.
-  const customHeaders: Record<string, string> = {
-    ...parseCustomHeadersEnv(processEnv.ANTHROPIC_CUSTOM_HEADERS),
-  }
-  const authHeader = processEnv.OPENAI_AUTH_HEADER?.trim()
-  const authHeaderValue = processEnv.OPENAI_AUTH_HEADER_VALUE?.trim()
-  if (authHeader && /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(authHeader) && authHeaderValue) {
-    customHeaders[authHeader] = authHeaderValue
-  }
   return getDiscoveryCacheKey('nvidia-nim', {
     baseUrl: request.baseUrl,
     apiKey,
-    headers: customHeaders,
+    headers: parseCustomHeadersEnv(processEnv.ANTHROPIC_CUSTOM_HEADERS),
   })
 }
 

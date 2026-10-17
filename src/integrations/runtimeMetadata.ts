@@ -483,19 +483,12 @@ function findCachedCatalogEntryForApiName(
     apiKey = firstUsableCredential(credentials?.accessToken)
     cacheIdentity = getXaiDiscoveryCacheIdentity(credentials) ?? apiKey
   }
-  const discoveryHeaders: Record<string, string> = {
-    ...parseCustomHeadersEnv(runtimeEnv.ANTHROPIC_CUSTOM_HEADERS),
-  }
-  const authHeader = runtimeEnv.OPENAI_AUTH_HEADER?.trim()
-  const authHeaderValue = runtimeEnv.OPENAI_AUTH_HEADER_VALUE?.trim()
-  if (authHeader && /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(authHeader) && authHeaderValue) {
-    discoveryHeaders[authHeader] = authHeaderValue
-  }
   const cacheKey = getDiscoveryCacheKey(routeId, {
+    processEnv: runtimeEnv,
     baseUrl,
     apiKey,
     cacheKey: cacheIdentity,
-    headers: discoveryHeaders,
+    headers: parseCustomHeadersEnv(runtimeEnv.ANTHROPIC_CUSTOM_HEADERS),
   })
   const cached = getCachedModelsSync(cacheKey, getDiscoveryCacheTtlMs(routeId))
 

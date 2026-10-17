@@ -285,13 +285,14 @@ type DiscoveryModelForTest = {
 }
 
 function mockDescriptorDiscovery(options: {
-  cachedModels: DiscoveryModelForTest[]
+  cachedModels: DiscoveryModelForTest[] | null
+  error?: string
   discoveredModels?: DiscoveryModelForTest[]
   routeId?: string
 }): void {
   mock.module('../../integrations/discoveryCache.js', () => ({
     clearDiscoveryCache: mock(async () => {}),
-    getCachedModels: mock(async () => ({
+    getCachedModels: mock(async () => options.cachedModels === null ? null : ({
       models: options.cachedModels,
       updatedAt: Date.now(),
       error: null,
@@ -312,7 +313,7 @@ function mockDescriptorDiscovery(options: {
     discoverModelsForRoute: mock(async () => {
       const routeId = options.routeId ?? 'openrouter'
       const rawStatic = getRouteDescriptor(routeId)?.catalog?.models ?? []
-      const discovered = (options.discoveredModels ?? options.cachedModels) as ModelCatalogEntry[]
+      const discovered = (options.discoveredModels ?? options.cachedModels ?? []) as ModelCatalogEntry[]
       const merged = filterAvailableCatalogEntries(
         mergeRouteCatalogEntries(rawStatic, discovered),
       )
@@ -320,8 +321,8 @@ function mockDescriptorDiscovery(options: {
         routeId,
         models: merged,
         stale: false,
-        error: null,
-        source: 'network',
+        error: options.error ? { message: options.error, recordedAt: Date.now() } : null,
+        source: options.error ? 'error' : 'network',
       }
     }),
     probeRouteReadiness: mock(async () => null),
@@ -2795,7 +2796,7 @@ test('/model refresh passes first pooled OpenAI credential to descriptor discove
   expect(discoverModelsForRoute).toHaveBeenCalledWith('openrouter', {
     apiKey: 'key-a',
     baseUrl: 'https://openrouter.ai/api/v1',
-    headers: {},
+    headers: undefined,
     forceRefresh: true,
   })
 })
@@ -3824,62 +3825,65 @@ test('cross-profile /model does NOT switch a literal prefixed model id lacking t
     expect(doneMessage).toContain(
       encodeSwitchProfileValue('profile_openai', 'gpt-5-mini'),
     )
-	  } finally {
-	    instance.unmount()
-	  }
-	})
+  } finally {
+    instance.unmount()
+  }
+})
 
-	test('/model remote custom route uses descriptor discovery', async () => {
-	  // Remote custom endpoint — not a local URL so no openai: cache scope.
-	  // The route resolves to 'custom' and must use descriptor discovery
-	  // since there is a real custom gateway with an OpenAI-compatible catalog.
-	  process.env.CLAUDE_CODE_USE_OPENAI = '1'
-	  process.env.OPENAI_BASE_URL = 'https://api.custom-remote.example.com/v1'
-	  process.env.OPENAI_MODEL = 'remote-model'
-	  delete process.env.OPENAI_API_KEY
-	  delete process.env.OPENROUTER_API_KEY
-	  delete process.env.CLAUDE_CODE_USE_GEMINI
-	  delete process.env.CLAUDE_CODE_USE_GITHUB
-	  delete process.env.CLAUDE_CODE_USE_MISTRAL
-	  delete process.env.CLAUDE_CODE_USE_BEDROCK
-	  delete process.env.CLAUDE_CODE_USE_VERTEX
-	  delete process.env.CLAUDE_CODE_USE_FOUNDRY
-		delete process.env.OPENAI_API_BASE
-
-		// Mock descriptor discovery for the custom route
-		mockDescriptorDiscovery({
-			cachedModels: [
-				{ id: 'remote-model', apiName: 'remote-model', label: 'Remote Model' },
-				{ id: 'model-b', apiName: 'model-b', label: 'Model B' },
-			],
-			discoveredModels: [
-				{ id: 'remote-model', apiName: 'remote-model', label: 'Remote Model' },
-			],
-			routeId: 'custom',
-		})
-
-		mockProviderProfiles({
-			getActiveOpenAIModelOptionsCache: () => [],
-			getActiveProviderProfile: () => undefined,
-			getProfileModelOptions: () => [],
-			setActiveOpenAIModelOptionsCache: () => {},
-		})
-
-		const rendered = await renderModelCommandWithCapturedPicker(
-			'remote-custom-descriptor',
-		)
-		try {
-			const props = rendered.getCapturedProps()
-			// Remote custom route: uses descriptor discovery path
-			expect(props).toBeDefined()
-			// Should show discovered models
-			expect(props.optionsOverride).toContainEqual(
-				expect.objectContaining({
-					value: 'remote-model',
-				}),
-			)
-		} finally {
-			rendered.instance.unmount()
-			rendered.stdout.end()
-		}
-	})
+for (const state of ['cold', 'warm', 'failed', 'restricted'] as const) {
+  test(`/model remote custom discovery: ${state}`, async () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://custom.example/v1'
+    process.env.OPENAI_MODEL = 'selected-model'
+    for (const key of [
+      'OPENAI_API_BASE', 'OPENROUTER_API_KEY',
+      'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GITHUB',
+      'CLAUDE_CODE_USE_MISTRAL', 'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    ]) delete process.env[key]
+    if (state === 'restricted') {
+      process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+    } else {
+      delete process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+    }
+    const model = { id: 'discovered-model', apiName: 'discovered-model', label: 'Discovered model' }
+    mockDescriptorDiscovery({
+      routeId: 'custom',
+      cachedModels: state === 'warm' ? [model] : null,
+      discoveredModels: state === 'failed' ? [] : [model],
+      error: state === 'failed' ? 'Endpoint unavailable' : undefined,
+    })
+    mockProviderProfiles()
+    const { discoverModelsForRoute } = await import('../../integrations/discoveryService.js')
+    const rendered = await renderModelCommandWithCapturedPicker(`remote-custom-${state}`)
+    try {
+      if (state === 'cold' || state === 'failed') {
+        await waitForCondition(() => rendered.getCapturedProps().discoveryState?.tone !== 'info')
+        expect(discoverModelsForRoute).toHaveBeenCalledWith('custom', expect.objectContaining({ forceRefresh: true }))
+      }
+      if (state === 'failed' || state === 'restricted') {
+        expect(rendered.getCapturedProps().optionsOverride).toContainEqual(
+          expect.objectContaining({ value: null, label: 'Default (recommended)' }),
+        )
+      } else {
+        expect(rendered.getCapturedProps().optionsOverride).toContainEqual(
+          expect.objectContaining({ value: 'discovered-model', label: 'Discovered model' }),
+        )
+      }
+      if (state === 'failed') {
+        expect(rendered.getCapturedProps().discoveryState?.message).toContain('Endpoint unavailable')
+      }
+      if (state === 'restricted') expect(discoverModelsForRoute).not.toHaveBeenCalled()
+      let message = ''
+      const { call } = await importFreshModelModule(`remote-custom-refresh-${state}`)
+      await call(value => { message = value ?? '' }, {} as never, 'refresh')
+      expect(message).toContain(
+        state === 'restricted' ? 'disabled' : state === 'failed' ? 'Endpoint unavailable' :
+          state === 'warm' ? 'No changes found' : 'Updated Custom (OpenAI-compatible) models',
+      )
+    } finally {
+      rendered.instance.unmount()
+      rendered.stdout.end()
+    }
+  })
+}
