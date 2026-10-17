@@ -112,6 +112,7 @@ async function tsc(tmpDir: string, compiler = TSC_BIN, timeout = 20_000): Promis
   }
 }
 
+/** Build the CLI and SDK when package-export validation needs missing distribution artifacts. */
 function ensureBuildArtifacts(): void {
   const distCli = join(ROOT, 'dist', 'cli.mjs')
   const distSdk = join(ROOT, 'dist', 'sdk.mjs')

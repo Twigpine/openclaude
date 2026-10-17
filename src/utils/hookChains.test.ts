@@ -14,6 +14,7 @@ type HookChainsModule = typeof import('./hookChains.js')
 const tempDirs: string[] = []
 const originalHookChainsEnabled = process.env.CLAUDE_CODE_ENABLE_HOOK_CHAINS
 
+/** Write a hook-chain fixture configuration in a temporary directory owned by the test. */
 async function makeConfigFile(config: unknown): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'openclaude-hook-chains-'))
   tempDirs.push(dir)
