@@ -679,6 +679,7 @@ describe('background session finalizer', () => {
     ]
   }
 
+  /** Await reclamation of the session record, logs, name reservation and terminal facts. */
   async function expectSessionArtifactsReclaimed(
     id: string,
     name: string,

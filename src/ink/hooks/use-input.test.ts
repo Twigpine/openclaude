@@ -77,11 +77,13 @@ test('input callbacks and active state are current during the committed layout',
   const contextValue = createStdinContextValue(() => {})
   const root = await createRoot({ stdout: createTestStdout(), patchConsole: false })
   const received: string[] = []
+  /** Build a fresh printable key event for each committed render. */
   const event = () => new InputEvent({
     kind: 'key', raw: 'x', isPasted: false,
     name: 'x', sequence: 'x', ctrl: false, meta: false, shift: false,
     option: false, fn: false, super: false,
   })
+  /** Dispatch input during layout to verify the current handler and active state. */
   function InputProbe({ label, active }: { label: string; active: boolean }) {
     useInput(() => received.push(label), { isActive: active })
     useLayoutEffect(() => {
@@ -89,6 +91,7 @@ test('input callbacks and active state are current during the committed layout',
     }, [label, active])
     return null
   }
+  /** Commit the probe with the requested handler label and activation state. */
   const draw = (label: string, active: boolean) => root.render(
     createElement(StdinContext.Provider, { value: contextValue },
       createElement(InputProbe, { label, active })),

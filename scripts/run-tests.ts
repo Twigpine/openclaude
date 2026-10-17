@@ -31,6 +31,7 @@ try {
     // parent relays their output without creating another pipe in the shard.
     const outputFiles: { fd: number; destination: number; position: number }[] = []
     let outputTimer: ReturnType<typeof setInterval> | undefined
+    /** Relay each new log byte once without blocking shard deadline delivery. */
     const flushOutput = () => {
       const buffer = Buffer.allocUnsafe(64 * 1024)
       for (const output of outputFiles) {
@@ -67,6 +68,7 @@ try {
       })
       // The deadline lives outside Bun's test process: a blocked synchronous test
       // or stuck runtime cleanup must not prevent the watchdog from firing.
+      /** Force-stop the isolated shard and its subprocess group. */
       const kill = () => {
         if (process.platform === 'win32') {
           Bun.spawnSync(['taskkill', '/pid', String(child.pid), '/T', '/F'], { stdout: 'ignore', stderr: 'ignore', timeout: 5_000 })
@@ -81,14 +83,18 @@ try {
       let interrupted = false
       let stop: (code: number) => void
       const deadline = new Promise<number>(resolve => {
+        /** Settle the watchdog after terminating and detaching the shard. */
         stop = code => { interrupted = true; kill(); child.unref(); resolve(code) }
         timer = setTimeout(() => {
           console.error(`Test shard ${shard}/${shards} timed out after ${timeoutMs}ms.`)
           stop(124)
         }, timeoutMs)
       })
+      /** Preserve the conventional interrupt exit status after cleanup. */
       const onInterrupt = () => stop(130)
+      /** Preserve the conventional termination exit status after cleanup. */
       const onTerminate = () => stop(143)
+      /** Fail the run and stop its child if forwarding diagnostics fails. */
       const onOutputError = () => stop(1)
       process.once('SIGINT', onInterrupt)
       process.once('SIGTERM', onTerminate)

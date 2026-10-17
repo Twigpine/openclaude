@@ -134,13 +134,16 @@ for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
           execFileSync(process.execPath, ['-e', ${JSON.stringify(subprocess)}], { timeout: 500 })
         }, 200)
       `)
-      child = Bun.spawn([process.execPath, runner, '--shard-timeout-ms=1500', fixture], {
-        stdout: 'pipe', stderr: 'pipe', timeout: 5000, killSignal: 'SIGKILL',
+      const shardTimeout = signal ? 4000 : 1500
+      child = Bun.spawn([process.execPath, runner, `--shard-timeout-ms=${shardTimeout}`, fixture], {
+        stdout: 'pipe', stderr: 'pipe', timeout: 6000, killSignal: 'SIGKILL',
       })
       const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
-      for (let attempt = 0; attempt < 100; attempt++) {
+      // The process deadline bounds readiness too; avoid a shorter startup race.
+      while (true) {
         const pid = await readFile(marker, 'utf8').catch(() => '')
         if (pid) { descendant = Number(pid); break }
+        if (child.exitCode !== null || child.signalCode !== null) break
         await Bun.sleep(10)
       }
       expect(descendant).toBeDefined()

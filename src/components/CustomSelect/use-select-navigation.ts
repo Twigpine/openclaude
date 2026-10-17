@@ -526,6 +526,7 @@ const createDefaultState = <T>({
   }
 }
 
+/** Manage visible options and keyboard focus, publishing the committed selection during layout. */
 export function useSelectNavigation<T>({
   visibleOptionCount = 5,
   options,

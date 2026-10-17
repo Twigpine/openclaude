@@ -92,17 +92,24 @@ function setupConsumerProject(name: string): string {
   return tmpDir
 }
 
-/** Compile consumer.ts in the given tmpDir. Returns stdout (empty = success). */
+/** Compile a consumer, rejecting failed builds with their diagnostics and exit metadata. */
 async function tsc(tmpDir: string, compiler = TSC_BIN, timeout = 20_000): Promise<string> {
   // Finish subprocess cleanup before the 30s test deadline. A synchronous wait
   // can trap Bun's isolated runner in dangling-process cleanup on timeout.
-  const { stdout } = await promisify(execFile)(process.execPath, [compiler, '-p', 'tsconfig.json', '--pretty', 'false'], {
-    cwd: tmpDir,
-    encoding: 'utf-8',
-    timeout,
-    killSignal: 'SIGKILL',
-  })
-  return stdout.trim()
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, [compiler, '-p', 'tsconfig.json', '--pretty', 'false'], {
+      cwd: tmpDir,
+      encoding: 'utf-8',
+      timeout,
+      killSignal: 'SIGKILL',
+    })
+    return stdout.trim()
+  } catch (error) {
+    if (error instanceof Error && 'stdout' in error && typeof error.stdout === 'string' && error.stdout.trim()) {
+      error.message += `\n${error.stdout.trim()}`
+    }
+    throw error
+  }
 }
 
 function ensureBuildArtifacts(): void {
@@ -129,6 +136,15 @@ afterAll(() => {
 
 // tsc compilation can be slow under CPU contention — 30s timeout per test
 describe('package consumer types', () => {
+  test('compiler failures retain their diagnostics and nonzero exit code', async () => {
+    const tmpDir = setupConsumerProject('compiler-diagnostics')
+    writeFileSync(join(tmpDir, 'consumer.ts'), 'const value: string = 123\n')
+    await expect(tsc(tmpDir)).rejects.toMatchObject({
+      code: 2,
+      message: expect.stringContaining('TS2322'),
+    })
+  }, 30_000)
+
   test('compiler deadline kills a child that ignores graceful termination', async () => {
     const tmpDir = setupConsumerProject('compiler-timeout')
     const compiler = join(tmpDir, 'stalled-compiler.cjs')
@@ -138,13 +154,13 @@ describe('package consumer types', () => {
       require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid))
       setInterval(() => {}, 1000)
     `)
-    await expect(tsc(tmpDir, compiler, 1000)).rejects.toMatchObject({
+    await expect(tsc(tmpDir, compiler, 3000)).rejects.toMatchObject({
       killed: true,
       signal: 'SIGKILL',
     })
     const pid = Number(readFileSync(pidPath, 'utf8'))
     expect(() => process.kill(pid, 0)).toThrow()
-  })
+  }, 10_000)
 
   test('SDK types compile for external consumer with skipLibCheck:false', async () => {
     const tmpDir = setupConsumerProject('basic')

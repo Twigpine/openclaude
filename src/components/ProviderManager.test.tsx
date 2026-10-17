@@ -201,6 +201,7 @@ function createDeferred<T>(): {
   return { promise, resolve }
 }
 
+/** Install profile-operation stubs and the preset defaults exercised by provider setup. */
 function mockProviderProfilesModule(options?: {
   addProviderProfile?: (...args: unknown[]) => unknown
   getActiveProviderProfile?: () => unknown

@@ -10,6 +10,7 @@ test('publishes the committed focus before subsequent layout actions', async () 
   const root = await createRoot({ stdout, patchConsole: false })
   let published: string | undefined
   const observed: Array<[string | undefined, string | undefined]> = []
+  /** Observe focus state and its published callback value in the same layout commit. */
   function Probe({ value }: { value: string }) {
     const navigation = useSelectNavigation({
       options: [{ value, label: value }],

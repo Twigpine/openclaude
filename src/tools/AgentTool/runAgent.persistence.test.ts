@@ -18,6 +18,7 @@ afterEach(() => {
   mock.restore()
 })
 
+/** Load runAgent with a failing metadata writer while retaining unrelated module exports. */
 async function importRunAgentWithMocks() {
   const sessionStorageMock = {
     ...actualSessionStorage,

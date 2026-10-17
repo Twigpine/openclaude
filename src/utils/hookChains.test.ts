@@ -22,6 +22,7 @@ async function makeConfigFile(config: unknown): Promise<string> {
   return filePath
 }
 
+/** Load a fresh hook-chain module with deterministic policy and telemetry behavior. */
 async function importHookChainsModule(options?: {
   allowRemoteSessions?: boolean
 }): Promise<HookChainsModule> {

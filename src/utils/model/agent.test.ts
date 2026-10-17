@@ -34,6 +34,7 @@ type MockProvider =
   | 'minimax'
   | 'codex'
 
+/** Override provider identity for resolver tests while preserving other provider exports. */
 function mockProvider(
   provider: MockProvider,
   isFirstPartyAnthropicBaseUrl = false,
