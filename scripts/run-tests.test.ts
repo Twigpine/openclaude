@@ -5,6 +5,55 @@ import { join } from 'node:path'
 
 const runner = join(import.meta.dir, 'run-tests.ts')
 
+test.skipIf(process.platform !== 'linux')('output backpressure does not block the shard deadline', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openclaude-runner-output-'))
+  let child: ReturnType<typeof Bun.spawn> | undefined
+  try {
+    const fixture = join(dir, 'output.test.ts')
+    await writeFile(fixture, `
+      import { test } from 'bun:test'
+      import { writeSync } from 'node:fs'
+      test('blocked test', () => {
+        writeSync(1, 'x'.repeat(1024 * 1024))
+        Bun.sleepSync(3000)
+      })
+    `)
+    // A real Node pipe is necessary: Bun.spawn eagerly buffers unread pipes.
+    const observer = `
+      const { spawn } = require('node:child_process')
+      const child = spawn(${JSON.stringify(process.execPath)}, [${JSON.stringify(runner)}, '--shard-timeout-ms=500', ${JSON.stringify(fixture)}])
+      let diagnostics = '', output = '', resumed = false, deadlineBeforeResume = false
+      child.stderr.on('data', chunk => {
+        diagnostics += chunk.toString()
+        if (!resumed && diagnostics.includes('timed out after 500ms')) deadlineBeforeResume = true
+      })
+      const timer = setTimeout(() => {
+        resumed = true
+        child.stdout.on('data', chunk => { output += chunk.toString() })
+        child.stdout.resume()
+      }, 1800)
+      child.on('close', code => {
+        clearTimeout(timer)
+        console.log(JSON.stringify({ code, deadlineBeforeResume, complete: output.endsWith('x'.repeat(1024 * 1024)), diagnostics }))
+      })
+    `
+    child = Bun.spawn(['node', '-e', observer], {
+      stdout: 'pipe', stderr: 'pipe', timeout: 6000, killSignal: 'SIGKILL',
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ])
+    expect(code, stderr).toBe(0)
+    const result = JSON.parse(stdout)
+    expect(result.deadlineBeforeResume, result.diagnostics).toBe(true)
+    expect(result.code).toBe(124)
+    expect(result.complete).toBe(true)
+  } finally {
+    child?.kill('SIGKILL')
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 8000)
+
 for (const shards of [1, 2]) {
   for (const scenario of ['pass', 'assertion', 'exit'] as const) {
     test(`test runner detects ${scenario} and verifies completion (${shards} shards)`, async () => {
@@ -15,8 +64,14 @@ for (const shards of [1, 2]) {
         const marker = join(dir, 'completed')
         await writeFile(first, `
           import { test, expect } from 'bun:test'
-          import { appendFileSync } from 'node:fs'
+          import { appendFileSync, fstatSync, writeSync } from 'node:fs'
           test('first', () => {
+            writeSync(1, 'fixture stdout\\n')
+            writeSync(2, 'fixture stderr\\n')
+            if (process.platform === 'linux') {
+              expect(fstatSync(1).isFile()).toBe(true)
+              expect(fstatSync(2).isFile()).toBe(true)
+            }
             appendFileSync(${JSON.stringify(marker)}, 'first\\n')
             ${scenario === 'exit' ? 'process.exit(0)' : `expect(1).toBe(${scenario === 'assertion' ? 2 : 1})`}
           })
@@ -35,6 +90,8 @@ for (const shards of [1, 2]) {
           new Response(child.stderr).text(),
         ])
         expect(exitCode, stdout + stderr).toBe(scenario === 'pass' ? 0 : 1)
+        expect(stdout.match(/fixture stdout/g)).toHaveLength(1)
+        expect(stderr.match(/fixture stderr/g)).toHaveLength(1)
         if (scenario === 'exit') {
           expect(stderr).toContain('without a complete JUnit report')
         }
@@ -71,7 +128,9 @@ for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
       await writeFile(fixture, `
         import { test } from 'bun:test'
         import { execFileSync } from 'node:child_process'
+        import { writeSync } from 'node:fs'
         test('stuck compiler cleanup', () => {
+          writeSync(2, 'last diagnostic before hang\\n')
           execFileSync(process.execPath, ['-e', ${JSON.stringify(subprocess)}], { timeout: 500 })
         }, 200)
       `)
@@ -88,6 +147,7 @@ for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
       if (signal) child.kill(signal)
       const exitCode = await child.exited
       const [, stderr] = await output
+      expect(stderr).toContain('last diagnostic before hang')
       expect(exitCode, stderr).toBe(signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 124)
       if (!signal) expect(stderr).toContain('Test shard 1/1 timed out after 1500ms.')
       // An orphaned compiler must not survive a timeout or cancellation.
