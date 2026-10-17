@@ -704,6 +704,11 @@ export type GlobalConfig = {
   // Use a different (e.g. cheaper/faster) model for compaction.
   // Defaults to mainLoopModel when unset.
   compactModel?: string
+
+  // Global MCP server disabled list. When a project has no disabledMcpServers
+  // configured, this list is used as the fallback so MCP state is consistent
+  // across all projects.
+  disabledMcpServers?: string[]
 }
 
 /**
@@ -817,6 +822,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'logoColor',
   'maxMessagesCompactionThreshold',
   'compactModel',
+  'disabledMcpServers',
 ] as const
 
 export type GlobalConfigKey = (typeof GLOBAL_CONFIG_KEYS)[number]
@@ -2034,11 +2040,14 @@ export function getCurrentProjectConfig(): ProjectConfig {
 }
 
 export function saveCurrentProjectConfig(
-  updater: (currentConfig: ProjectConfig) => ProjectConfig,
+  updater: (
+    currentConfig: ProjectConfig,
+    globalConfig: Readonly<GlobalConfig>,
+  ) => ProjectConfig,
 ): void {
   if (process.env.NODE_ENV === 'test') {
     const current = getTestProjectConfigForTesting()
-    const config = updater(current)
+    const config = updater(current, getTestGlobalConfigForTesting())
     // Skip if no changes (same reference returned)
     if (config === current) {
       return
@@ -2056,7 +2065,7 @@ export function saveCurrentProjectConfig(
       current => {
         const currentProjectConfig =
           current.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-        const newProjectConfig = updater(currentProjectConfig)
+        const newProjectConfig = updater(currentProjectConfig, current)
         // Skip if no changes (same reference returned)
         if (newProjectConfig === currentProjectConfig) {
           return current
@@ -2092,7 +2101,7 @@ export function saveCurrentProjectConfig(
     }
     const currentProjectConfig =
       config.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-    const newProjectConfig = updater(currentProjectConfig)
+    const newProjectConfig = updater(currentProjectConfig, config)
     // Skip if no changes (same reference returned)
     if (newProjectConfig === currentProjectConfig) {
       return

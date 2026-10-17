@@ -923,3 +923,18 @@ teammate active-message compaction, malformed hard-cap overrides, and
 pruned-history tool-call/tool-result pairing. They are not a substitute for a
 multi-hour manual soak, but they pin the bounded-history and conversion
 invariants that previously let long sessions grow until Node/V8 OOM.
+
+## MCP enable/disable scope
+
+Disabling an MCP server through `/mcp` records its name in the project's
+`disabledMcpServers` list and the global list in `.openclaude.json`. Projects
+without their own list inherit the global disables. Existing project lists,
+including an explicit empty list, take precedence over the global list.
+
+Enabling a server affects only the current project and preserves other disabled
+servers. The first state change starts from the inherited list, then saves a project
+override; that project no longer inherits later global changes. Remove the
+project's `disabledMcpServers` key to restore inheritance. Builtin servers that
+are disabled by default keep their separate project-level `enabledMcpServers`
+allowlist. Existing running sessions are not forcibly disconnected by a toggle
+in another project.

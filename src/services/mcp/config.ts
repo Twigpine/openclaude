@@ -1709,8 +1709,14 @@ export function isMcpServerDisabled(name: string): boolean {
     const enabledServers = projectConfig.enabledMcpServers || []
     return !enabledServers.includes(name)
   }
-  const disabledServers = projectConfig.disabledMcpServers || []
-  return disabledServers.includes(name)
+  // Use project-level disabledMcpServers if explicitly set (even if empty),
+  // otherwise fall back to the global list so MCP state is consistent
+  // across all projects.
+  if (projectConfig.disabledMcpServers !== undefined) {
+    return projectConfig.disabledMcpServers.includes(name)
+  }
+  const globalConfig = getGlobalConfig()
+  return (globalConfig.disabledMcpServers || []).includes(name)
 }
 
 function toggleMembership(
@@ -1732,7 +1738,7 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
   const isBuiltinStateChange =
     isDefaultDisabledBuiltin(name) && isMcpServerDisabled(name) === enabled
 
-  saveCurrentProjectConfig(current => {
+  saveCurrentProjectConfig((current, globalConfig) => {
     if (isDefaultDisabledBuiltin(name)) {
       const prev = current.enabledMcpServers || []
       const next = toggleMembership(prev, name, enabled)
@@ -1740,11 +1746,31 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
       return { ...current, enabledMcpServers: next }
     }
 
-    const prev = current.disabledMcpServers || []
+    // Inherit from the same disk snapshot as the project, so a stale global
+    // cache cannot drop another process's disables from the first override.
+    const prev =
+      current.disabledMcpServers ?? globalConfig.disabledMcpServers ?? []
     const next = toggleMembership(prev, name, !enabled)
-    if (next === prev) return current
+    // Skip only when disk and our cached predicate both match the toggle.
+    // A peer may have created a project override before our cache refreshed.
+    if (next === prev && isMcpServerDisabled(name) === !enabled) {
+      return current
+    }
     return { ...current, disabledMcpServers: next }
   })
+
+  // Propagate only the *disable* direction to global so that disabling a
+  // server in one project takes effect everywhere by default, but enabling
+  // stays project-local (avoids silently force-enabling in unrelated projects).
+  // Builtins are exempt — they track state via enabledMcpServers.
+  if (!enabled && !isDefaultDisabledBuiltin(name)) {
+    saveGlobalConfig(current => {
+      const prev = current.disabledMcpServers || []
+      const next = toggleMembership(prev, name, true)
+      if (next === prev) return current
+      return { ...current, disabledMcpServers: next }
+    })
+  }
 
   if (isBuiltinStateChange) {
     logEvent('tengu_builtin_mcp_toggle', {
