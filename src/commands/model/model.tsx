@@ -267,43 +267,35 @@ export function mergeActiveProfileModelOptions(
     profileModelSurface?: ResolvedProviderProfileModelSurface
   },
 ): ModelOption[] {
-  // Keep a selectable fallback while remote custom discovery is cold or fails.
+  const activeProfile = getActiveProviderProfile()
+  if (activeProfile && isActiveProfileAppliedToRoute(activeProfile, routeId)) {
+    const profileOptions = getConfiguredProfileModelOptions(activeProfile)
+    if (profileOptions.length > 0) {
+      const surface =
+        options?.profileModelSurface ??
+        resolveProviderProfileModelSurface({
+          activeProfile,
+          routeId,
+          settingsMode: getProviderProfileModelPickerMode(),
+        })
+      routeOptions =
+        surface === 'provider'
+          ? mergeProviderCatalogFirst(routeOptions, profileOptions)
+          : mergeProfileListFirst(routeOptions, profileOptions)
+    }
+  }
+
+  const filteredOptions = filterModelOptionsByAllowlist(routeOptions)
+  // Keep a usable fallback only when the merged, permitted custom list is empty.
   // Retain the descriptor context so initial discovery and refresh still run.
   if (
     routeId === 'custom' &&
     !getAdditionalModelOptionsCacheScope()?.startsWith('openai:') &&
-    routeOptions.length === 0
+    filteredOptions.length === 0
   ) {
-    routeOptions = [getDefaultOptionForUser()]
+    return [getDefaultOptionForUser()]
   }
-
-  const activeProfile = getActiveProviderProfile()
-  if (!activeProfile) {
-    return filterModelOptionsByAllowlist(routeOptions)
-  }
-
-  if (!isActiveProfileAppliedToRoute(activeProfile, routeId)) {
-    return filterModelOptionsByAllowlist(routeOptions)
-  }
-
-  const profileOptions = getConfiguredProfileModelOptions(activeProfile)
-  if (profileOptions.length === 0) {
-    return filterModelOptionsByAllowlist(routeOptions)
-  }
-
-  const surface =
-    options?.profileModelSurface ??
-    resolveProviderProfileModelSurface({
-      activeProfile,
-      routeId,
-      settingsMode: getProviderProfileModelPickerMode(),
-    })
-  const merged =
-    surface === 'provider'
-      ? mergeProviderCatalogFirst(routeOptions, profileOptions)
-      : mergeProfileListFirst(routeOptions, profileOptions)
-
-  return filterModelOptionsByAllowlist(merged)
+  return filteredOptions
 }
 
 function getActiveRouteId(): string | null {

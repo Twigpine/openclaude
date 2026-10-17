@@ -25,8 +25,10 @@ import { mergeRouteCatalogEntries } from '../../utils/model/routeCatalogOptions.
 import * as actualFastModeForModelTest from '../../utils/fastMode.js'
 import * as actualExtraUsageForModelTest from '../../utils/extraUsage.js'
 import * as actualDiscoveryServiceForModelTest from '../../integrations/discoveryService.js'
+import * as actualDiscoveryCacheForModelTest from '../../integrations/discoveryCache.js'
 
 const REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST = { ...actualDiscoveryServiceForModelTest }
+const REAL_DISCOVERY_CACHE_FOR_MODEL_TEST = { ...actualDiscoveryCacheForModelTest }
 
 // Snapshot the real fast-mode module up front so the cross-profile switch test
 // can mock it with a full surface and restore the real one afterwards.
@@ -3839,11 +3841,13 @@ test('cross-profile /model does NOT switch a literal prefixed model id lacking t
   }
 })
 
-for (const state of ['cold', 'warm', 'failed', 'restricted'] as const) {
+for (const state of ['cold', 'warm', 'failed', 'restricted', 'filtered-cold', 'filtered-warm'] as const) {
   test(`/model remote custom discovery: ${state}`, async () => {
     process.env.CLAUDE_CODE_USE_OPENAI = '1'
     process.env.OPENAI_BASE_URL = 'https://custom.example/v1'
-    process.env.OPENAI_MODEL = 'selected-model'
+    const filtered = state === 'filtered-cold' || state === 'filtered-warm'
+    process.env.OPENAI_MODEL = filtered ? 'allowed-private-model' : 'selected-model'
+    if (filtered) useSettings({ availableModels: ['allowed-private-model'] })
     for (const key of [
       'OPENAI_API_BASE', 'OPENROUTER_API_KEY',
       'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GITHUB',
@@ -3855,10 +3859,10 @@ for (const state of ['cold', 'warm', 'failed', 'restricted'] as const) {
     } else {
       delete process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
     }
-    const model = { id: 'discovered-model', apiName: 'discovered-model', label: 'Discovered model' }
+    const model = { id: 'discovered-model', apiName: filtered ? 'blocked-model' : 'discovered-model', label: 'Discovered model' }
     mockDescriptorDiscovery({
       routeId: 'custom',
-      cachedModels: state === 'warm' ? [model] : null,
+      cachedModels: state === 'warm' || state === 'filtered-warm' ? [model] : null,
       discoveredModels: state === 'failed' ? [] : [model],
       error: state === 'failed' ? 'Endpoint unavailable' : undefined,
     })
@@ -3866,11 +3870,11 @@ for (const state of ['cold', 'warm', 'failed', 'restricted'] as const) {
     const { discoverModelsForRoute } = await import('../../integrations/discoveryService.js')
     const rendered = await renderModelCommandWithCapturedPicker(`remote-custom-${state}`)
     try {
-      if (state === 'cold' || state === 'failed') {
+      if (state === 'cold' || state === 'failed' || state === 'filtered-cold') {
         await waitForCondition(() => rendered.getCapturedProps().discoveryState?.tone !== 'info')
         expect(discoverModelsForRoute).toHaveBeenCalledWith('custom', expect.objectContaining({ forceRefresh: true }))
       }
-      if (state === 'failed' || state === 'restricted') {
+      if (state === 'failed' || state === 'restricted' || filtered) {
         expect(rendered.getCapturedProps().optionsOverride).toContainEqual(
           expect.objectContaining({ value: null, label: 'Default (recommended)' }),
         )
@@ -3883,12 +3887,19 @@ for (const state of ['cold', 'warm', 'failed', 'restricted'] as const) {
         expect(rendered.getCapturedProps().discoveryState?.message).toContain('Endpoint unavailable')
       }
       if (state === 'restricted') expect(discoverModelsForRoute).not.toHaveBeenCalled()
+      if (filtered) {
+        rendered.getCapturedProps().onRefresh?.()
+        await waitForCondition(() => rendered.getCapturedProps().discoveryState?.message?.startsWith('No changes found') === true)
+        expect(rendered.getCapturedProps().optionsOverride).toEqual([
+          expect.objectContaining({ value: null, label: 'Default (recommended)' }),
+        ])
+      }
       let message = ''
       const { call } = await importFreshModelModule(`remote-custom-refresh-${state}`)
       await call(value => { message = value ?? '' }, {} as never, 'refresh')
       expect(message).toContain(
         state === 'restricted' ? 'disabled' : state === 'failed' ? 'Endpoint unavailable' :
-          state === 'warm' ? 'No changes found' : 'Updated Custom (OpenAI-compatible) models',
+          state === 'warm' || filtered ? 'No changes found' : 'Updated Custom (OpenAI-compatible) models',
       )
     } finally {
       rendered.instance.unmount()
@@ -3949,6 +3960,8 @@ for (const entryPoint of ['picker', 'slash'] as const) {
       expect(clearCache).toHaveBeenCalledTimes(1)
       expect(requests).toEqual([{ url: 'https://profile-a.example/v1/models', authorization: null }])
     } finally {
+      // mock.restore() does not undo module registrations; later tests need disk I/O.
+      mock.module('../../integrations/discoveryCache.js', () => REAL_DISCOVERY_CACHE_FOR_MODEL_TEST)
       globalThis.fetch = originalFetch
       rendered?.instance.unmount()
       rendered?.stdout.end()
