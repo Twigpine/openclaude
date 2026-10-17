@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import * as platformPath from 'path'
 import chokidar, { type FSWatcher } from 'chokidar'
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'fs'
+import { type Stats, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import {
   acquireSharedMutationLock,
@@ -242,6 +242,28 @@ describe('skillChangeDetector reload batching', () => {
       chokidarWatch.mock.calls as unknown as Array<[string[]]>
     ).flatMap(([paths]) => paths)
     expect(watchedPaths).toContain(agentsSkillsPath)
+  })
+
+  test('follows sibling links while preserving special-file and owned-watch exclusions', async () => {
+    const detector = await importFreshModule()
+    getSkillsPathImpl = () => '/tmp/owned-skills'
+    siblingSkillsHomePaths = ['/tmp/sibling-skills']
+    await detector.initialize()
+    const calls = chokidarWatch.mock.calls as unknown as Array<[
+      string[], { ignored: (path: string, stats: Stats) => boolean },
+    ]>
+    const link = statSync(import.meta.path)
+    link.mode = 0o120000
+    for (const [paths, options] of calls) {
+      expect(options.ignored('/tmp/linked', link)).toBe(!paths.includes('/tmp/sibling-skills'))
+      expect(options.ignored('/tmp/.git/linked', link)).toBe(true)
+      for (const mode of [0o140000, 0o010000, 0o020000, 0o060000]) {
+        const special = statSync(import.meta.path) // socket, FIFO, character and block device
+        special.mode = mode
+        expect(options.ignored('/tmp/special', special)).toBe(true)
+      }
+    }
+    expect(calls).toHaveLength(2)
   })
 
   test('reloads skills and watches newly enabled homes after a settings toggle', async () => {

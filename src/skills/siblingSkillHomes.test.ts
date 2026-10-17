@@ -240,6 +240,21 @@ describe('applySiblingSkillPrecedence', () => {
     expect(applySiblingSkillPrecedence(commands)).toBe(commands)
   })
 
+  test('uses home priority for overlapping invocation names even when input is reversed', () => {
+    const agents = skill('nested:deploy', { siblingSkillsHome: 'agents', userFacingName: 'deploy' })
+    const claude = skill('deploy', { siblingSkillsHome: 'claude-code' })
+    for (const commands of [[claude, agents], [agents, claude]]) {
+      expect(applySiblingSkillPrecedence(commands)).toEqual([agents])
+    }
+  })
+
+  test('preserves same-home invocation overlaps while excluding lower-home collisions', () => {
+    const first = skill('first', { siblingSkillsHome: 'agents', userFacingName: 'shared' })
+    const second = skill('shared', { siblingSkillsHome: 'agents' })
+    const lower = skill('renamed', { siblingSkillsHome: 'claude-code', userFacingName: 'shared' })
+    expect(applySiblingSkillPrecedence([lower, first, second, first])).toEqual([first, second])
+  })
+
   test('moves sibling skills after every other command and lets the first home win', () => {
     const resolved = applySiblingSkillPrecedence([
       skill('shared-agent', { siblingSkillsHome: 'agents' }),

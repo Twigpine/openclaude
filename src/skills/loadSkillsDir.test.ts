@@ -16,7 +16,8 @@ import { PassThrough } from 'node:stream'
 import { test } from 'bun:test'
 import chokidar from 'chokidar'
 import React from 'react'
-import { clearCommandsCache, getCommands } from '../commands.js'
+import { clearCommandsCache, findCommand, getCommands } from '../commands.js'
+import { formatCommandsWithinBudget } from '../tools/SkillTool/prompt.js'
 import { useSkillsChange } from '../hooks/useSkillsChange.js'
 import { useSettingsChange } from '../hooks/useSettingsChange.js'
 import { createRoot } from '../ink.js'
@@ -1048,6 +1049,124 @@ for (const home of ['.agents', '.claude'] as const) {
       })
     }, 30_000)
   }
+}
+
+for (const layout of ['renamed', 'nested'] as const) {
+  for (const conditionalHome of ['neither', '.agents', '.claude'] as const) {
+    test.serial(`cross-home invocation priority survives ${layout} folders and ${conditionalHome} activation`, async () => {
+      await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+        writeSettingsFile(join(configDir, 'settings.json'), {
+          agentsSkillsEnabled: true, claudeCodeSkillsEnabled: true,
+        })
+        const agentsName = layout === 'renamed' ? 'renamed-shared' : 'category/shared'
+        for (const home of ['.agents', '.claude'] as const) {
+          writeSiblingSkill(homeDir, home, home === '.agents' ? agentsName : 'shared',
+            `name: shared\ndescription: ${home} instructions${conditionalHome === home ? '\npaths: docs/**' : ''}`)
+        }
+        writeSiblingSkill(homeDir, '.claude', 'claude-only', 'description: nonconflicting control\npaths: docs/**')
+        const before = await getCommands(cwd)
+        const beforeWinner = findCommand('shared', before)
+        assert.equal(beforeWinner?.type === 'prompt' ? beforeWinner.siblingSkillsHome : undefined,
+          conditionalHome === '.agents' ? undefined : 'agents')
+        assert.equal(before.some(c => c.type === 'prompt' && c.siblingSkillsHome === 'claude-code' && c.name === 'shared'), false)
+
+        activateConditionalSkillsForPaths([join(cwd, 'docs', 'guide.md')], cwd)
+        const after = await getCommands(cwd)
+        const winner = findCommand('shared', after)
+        assert.equal(winner?.type === 'prompt' ? winner.siblingSkillsHome : undefined, 'agents')
+        assert.equal(winner?.name, agentsName.replace('/', ':'))
+        const siblings = after.filter(c => c.type === 'prompt' && c.siblingSkillsHome)
+        assert.equal(siblings.length, 2)
+        assert.equal(findCommand('claude-only', siblings)?.description, 'nonconflicting control')
+        const listing = formatCommandsWithinBudget(siblings)
+        assert.ok(listing.includes(`- ${winner!.name}: .agents instructions`))
+        assert.ok(!listing.includes('.claude instructions'))
+        // Every advertised canonical identifier selects those same instructions.
+        for (const listed of siblings) assert.equal(findCommand(listed.name, after), listed)
+      })
+    })
+  }
+}
+
+for (const home of ['.agents', '.claude'] as const) {
+  test.serial(`${home} linked target edits refresh invoked content and obey source lifetime`, async () => {
+    await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+      const detector = await import('../utils/skills/skillChangeDetector.js')
+      const settingKey = home === '.agents' ? 'agentsSkillsEnabled' : 'claudeCodeSkillsEnabled'
+      writeSettingsFile(join(configDir, 'settings.json'), {
+        agentsSkillsEnabled: false, claudeCodeSkillsEnabled: false, [settingKey]: true,
+      })
+      const target = join(homeDir, 'external-linked-skill')
+      mkdirSync(target)
+      const targetFile = join(target, 'SKILL.md')
+      writeFileSync(targetFile, '---\ndescription: initial linked\n---\nInstructions initial linked\n')
+      const plainFile = join(writeSiblingSkill(homeDir, home, 'plain'), 'SKILL.md')
+      symlinkSync(target, join(homeDir, home, 'skills', 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
+      const ready: Promise<void>[] = []
+      await detector.resetForTesting({
+        stabilityThreshold: 10, pollInterval: 10, chokidarInterval: 10,
+        reloadDebounce: 10, reloadCooldown: 10,
+      })
+      detector._setDependenciesForTesting({
+        executeConfigChangeHooks: async () => [],
+        watch: (paths, options) => {
+          const watcher = chokidar.watch(paths, options)
+          ready.push(new Promise(resolve => watcher.once('ready', resolve)))
+          return watcher
+        },
+      })
+      let notifications = 0
+      const unsubscribe = detector.subscribe(() => { notifications++ })
+      async function invokedText(name: string): Promise<string> {
+        const command = findCommand(name, await getCommands(cwd))
+        assert.ok(command?.type === 'prompt')
+        // These real skill bodies contain no shell substitutions/context access.
+        return JSON.stringify(await command.getPromptForCommand('', {} as never))
+      }
+      async function editUntilRefreshed(file: string, name: string, marker: string) {
+        const before = notifications
+        const deadline = Date.now() + 2500
+        let edit = 0
+        while (Date.now() < deadline) {
+          writeFileSync(file, `---\ndescription: ${marker}\n---\nInstructions ${marker} ${edit++}\n`)
+          await Bun.sleep(50)
+          if (notifications > before && (await invokedText(name)).includes(marker)) return
+        }
+        assert.fail(`No refreshed invocation for ${name}: ${marker}`)
+      }
+      try {
+        await detector.initialize()
+        await Promise.all(ready)
+        assert.ok((await invokedText('linked')).includes('Instructions initial linked'))
+        await editUntilRefreshed(plainFile, 'plain', 'plain control')
+        await editUntilRefreshed(targetFile, 'linked', 'revised linked')
+
+        writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ [settingKey]: false }))
+        resetSettingsCache()
+        await detector.reloadAfterSkillSourceSettingsChange()
+        const disabledCount = notifications
+        writeFileSync(targetFile, '---\ndescription: disabled edit\n---\nInstructions disabled edit\n')
+        await Bun.sleep(150)
+        assert.equal(notifications, disabledCount)
+        assert.equal(findCommand('linked', await getCommands(cwd)), undefined)
+
+        writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ [settingKey]: true }))
+        resetSettingsCache()
+        await detector.reloadAfterSkillSourceSettingsChange()
+        await Promise.all(ready)
+        await editUntilRefreshed(targetFile, 'linked', 're-enabled linked')
+        await detector.dispose()
+        const disposedCount = notifications
+        writeFileSync(targetFile, '---\ndescription: disposed edit\n---\nDisposed\n')
+        await Bun.sleep(150)
+        assert.equal(notifications, disposedCount)
+      } finally {
+        unsubscribe()
+        await detector.resetForTesting()
+        detector._setDependenciesForTesting()
+      }
+    })
+  }, 15_000)
 }
 
 test.serial('conditional siblings cannot replace dynamically discovered project skills', async () => {

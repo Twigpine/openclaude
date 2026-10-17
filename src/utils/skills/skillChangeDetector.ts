@@ -194,13 +194,13 @@ async function updateSiblingWatchPaths(): Promise<void> {
   if (previous) await previous.close()
   if (disposed) return
   siblingWatchPaths = paths
-  siblingWatcher = watchPaths(paths)
+  siblingWatcher = watchPaths(paths, true)
 }
 
 /**
  * Create a watcher for one group of skill sources. Empty groups need no watcher.
  */
-function watchPaths(paths: string[]): FSWatcher | null {
+function watchPaths(paths: string[], allowSkillLinks = false): FSWatcher | null {
   if (paths.length === 0) return null
 
   logForDebugging(
@@ -217,9 +217,11 @@ function watchPaths(paths: string[]): FSWatcher | null {
         testOverrides?.pollInterval ?? FILE_STABILITY_POLL_INTERVAL_MS,
     },
     // Ignore special file types (sockets, FIFOs, devices) - they cannot be watched
-    // and will error with EOPNOTSUPP on macOS. Only allow regular files and directories.
+    // and will error with EOPNOTSUPP on macOS. Sibling discovery also follows
+    // links; let Chokidar traverse those and check the resolved target's type.
     ignored: (path, stats) => {
-      if (stats && !stats.isFile() && !stats.isDirectory()) return true
+      if (stats && !stats.isFile() && !stats.isDirectory() &&
+        !(allowSkillLinks && stats.isSymbolicLink())) return true
       // Ignore .git directories
       return path.split(platformPath.sep).some(dir => dir === '.git')
     },

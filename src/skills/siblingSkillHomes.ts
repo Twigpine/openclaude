@@ -221,7 +221,7 @@ export function filterShadowedSiblingSkills(
 /**
  * Applies sibling-home precedence to a command list: sibling skills are
  * dropped when any other command owns their name, de-duplicated across homes
- * (earlier home wins), and moved after every other command.
+ * by invocation identity (home table order wins), and moved after other commands.
  */
 export function applySiblingSkillPrecedence(commands: Command[]): Command[] {
   const ownCommands: Command[] = []
@@ -235,18 +235,31 @@ export function applySiblingSkillPrecedence(commands: Command[]): Command[] {
   }
   if (siblingSkills.length === 0) return commands
 
+  const unshadowed = filterShadowedSiblingSkills(siblingSkills, ownCommands)
+  // Dynamic activation can put a lower home's command first. Source priority
+  // comes from the home table, while order within each home stays unchanged.
+  const ordered = SIBLING_SKILL_HOMES.flatMap(home =>
+    unshadowed.filter(skill => getSiblingSkillsHomeId(skill) === home.id),
+  )
   const winners = new Map<string, SiblingSkillsHomeId>()
+  const canonicalNames = new Set<string>()
   const keptSiblingSkills: Command[] = []
-  for (const skill of filterShadowedSiblingSkills(siblingSkills, ownCommands)) {
-    const winner = winners.get(skill.name)
-    if (winner) {
+  for (const skill of ordered) {
+    const homeId = getSiblingSkillsHomeId(skill)!
+    const identities = [skill.name, getCommandName(skill)]
+    const winner = identities.map(name => winners.get(name))
+      .find(owner => owner !== undefined && owner !== homeId)
+    // Preserve existing same-home canonical deduplication without imposing a
+    // new same-home display-name policy.
+    if (winner || canonicalNames.has(skill.name)) {
       logShadowedSiblingSkill(
         skill,
-        getSiblingSkillsHomeDisplayPath(getSiblingSkillsHome(winner)),
+        getSiblingSkillsHomeDisplayPath(getSiblingSkillsHome(winner ?? homeId)),
       )
       continue
     }
-    winners.set(skill.name, getSiblingSkillsHomeId(skill)!)
+    canonicalNames.add(skill.name)
+    for (const name of identities) winners.set(name, homeId)
     keptSiblingSkills.push(skill)
   }
 
