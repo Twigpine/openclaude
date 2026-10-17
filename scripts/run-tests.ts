@@ -5,11 +5,16 @@ import { join } from 'node:path'
 const args = process.argv.slice(2)
 const shardOptions = args.filter(arg => arg.startsWith('--shards='))
 const shards = shardOptions.length ? Number(shardOptions[0]!.slice('--shards='.length)) : 1
+const timeoutOptions = args.filter(arg => arg.startsWith('--shard-timeout-ms='))
+const timeoutMs = timeoutOptions.length ? Number(timeoutOptions[0]!.split('=')[1]) : 600_000
 if (shardOptions.length > 1 || !Number.isSafeInteger(shards) || shards < 1 ||
     args.some(arg => arg === '--shard' || arg.startsWith('--shard='))) {
   throw new Error('Use one --shards=<positive integer> option; native --shard is not supported.')
 }
-const testArgs = args.filter(arg => !arg.startsWith('--shards='))
+if (timeoutOptions.length > 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647) {
+  throw new Error('Use one --shard-timeout-ms=<positive integer up to 2147483647> option.')
+}
+const testArgs = args.filter(arg => !arg.startsWith('--shards=') && !arg.startsWith('--shard-timeout-ms='))
 // Bun can exit zero without finishing its suite if a test calls process.exit(0).
 // Its JUnit report is written only when the runner finishes; require a fresh one.
 const reportDir = await mkdtemp(join(tmpdir(), 'openclaude-test-report-'))
@@ -17,6 +22,8 @@ let exitCode = 0
 let completed = 0
 try {
   for (let shard = 1; shard <= shards; shard++) {
+    const started = performance.now()
+    console.error(`Starting test shard ${shard}/${shards} (deadline ${timeoutMs}ms).`)
     const reportPath = join(reportDir, `results-${shard}.xml`)
     const child = Bun.spawn([
       process.execPath,
@@ -26,8 +33,43 @@ try {
       ...(shards > 1 ? [`--shard=${shard}/${shards}`] : []),
       '--reporter=junit',
       `--reporter-outfile=${reportPath}`,
-    ], { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' })
-    const result = await child.exited
+    ], { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit', detached: process.platform !== 'win32' })
+    // The deadline lives outside Bun's test process: a blocked synchronous test
+    // or stuck runtime cleanup must not prevent the watchdog from firing.
+    const kill = () => {
+      if (process.platform === 'win32') {
+        Bun.spawnSync(['taskkill', '/pid', String(child.pid), '/T', '/F'], { stdout: 'ignore', stderr: 'ignore', timeout: 5_000 })
+        child.kill('SIGKILL')
+      } else {
+        try { process.kill(-child.pid, 'SIGKILL') } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+        }
+      }
+    }
+    let timer: ReturnType<typeof setTimeout>
+    let interrupted = false
+    let stop: (code: number) => void
+    const deadline = new Promise<number>(resolve => {
+      stop = code => { interrupted = true; kill(); child.unref(); resolve(code) }
+      timer = setTimeout(() => {
+        console.error(`Test shard ${shard}/${shards} timed out after ${timeoutMs}ms.`)
+        stop(124)
+      }, timeoutMs)
+    })
+    const onInterrupt = () => stop(130)
+    const onTerminate = () => stop(143)
+    process.once('SIGINT', onInterrupt)
+    process.once('SIGTERM', onTerminate)
+    const result = await Promise.race([child.exited, deadline]).finally(() => {
+      clearTimeout(timer)
+      process.off('SIGINT', onInterrupt)
+      process.off('SIGTERM', onTerminate)
+    })
+    console.error(`Finished test shard ${shard}/${shards} in ${((performance.now() - started) / 1000).toFixed(1)}s (exit ${result}).`)
+    if (interrupted) {
+      exitCode = result
+      break
+    }
     if (result !== 0 && exitCode === 0) exitCode = result
     const report = await readFile(reportPath, 'utf8').catch(() => '')
     const summary = report.match(/<testsuites\b[^>]*>/)?.[0]

@@ -5163,7 +5163,10 @@ test('ProviderManager first-run Codex OAuth switches the current session after l
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
+  await waitForFrameOutput(
+    mounted.getOutput,
+    frame => frame.split('\n').some(line => /^[ \t]*[❯>]\s+.*Codex OAuth/.test(line)),
+  )
   mounted.stdin.write('\r')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
@@ -5235,7 +5238,10 @@ test('ProviderManager Codex OAuth waiting state masks the paste field and delega
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
+  await waitForFrameOutput(
+    mounted.getOutput,
+    frame => frame.split('\n').some(line => /^[ \t]*[❯>]\s+.*Codex OAuth/.test(line)),
+  )
   mounted.stdin.write('\r')
 
   // Non-SSH session shows the generic "paste the callback URL" hint and the input.
@@ -5308,7 +5314,10 @@ test('ProviderManager Codex OAuth waiting state shows the SSH banner and surface
     )
 
     await navigateToPreset(mounted.stdin, 'Codex OAuth')
-    expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
+    await waitForFrameOutput(
+      mounted.getOutput,
+      frame => frame.split('\n').some(line => /^[ \t]*[❯>]\s+.*Codex OAuth/.test(line)),
+    )
     mounted.stdin.write('\r')
 
     // SSH session shows the dedicated banner instead of the generic hint.
@@ -5407,7 +5416,10 @@ test('ProviderManager first-run Codex OAuth surfaces credential storage warnings
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
+  await waitForFrameOutput(
+    mounted.getOutput,
+    frame => frame.split('\n').some(line => /^[ \t]*[❯>]\s+.*Codex OAuth/.test(line)),
+  )
   mounted.stdin.write('\r')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
@@ -5498,7 +5510,10 @@ test('ProviderManager first-run Codex OAuth reports next-startup fallback when s
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
+  await waitForFrameOutput(
+    mounted.getOutput,
+    frame => frame.split('\n').some(line => /^[ \t]*[❯>]\s+.*Codex OAuth/.test(line)),
+  )
   mounted.stdin.write('\r')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
@@ -5605,7 +5620,10 @@ test('ProviderManager does not hijack a manual Codex profile when OAuth credenti
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
+  await waitForFrameOutput(
+    mounted.getOutput,
+    frame => frame.split('\n').some(line => /^[ \t]*[❯>]\s+.*Codex OAuth/.test(line)),
+  )
   mounted.stdin.write('\r')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)

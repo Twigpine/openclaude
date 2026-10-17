@@ -54,3 +54,54 @@ for (const shards of [1, 2]) {
     })
   }
 }
+
+for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
+  test.skipIf(process.platform === 'win32')(`test runner kills a stuck shard and its child (${signal ?? 'deadline'})`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openclaude-runner-hang-'))
+    let child: ReturnType<typeof Bun.spawn> | undefined
+    let descendant: number | undefined
+    try {
+      const marker = join(dir, 'child-pid')
+      const fixture = join(dir, 'stuck.test.ts')
+      const subprocess = `
+        process.on('SIGTERM', () => {})
+        require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid))
+        setInterval(() => {}, 1000)
+      `
+      await writeFile(fixture, `
+        import { test } from 'bun:test'
+        import { execFileSync } from 'node:child_process'
+        test('stuck compiler cleanup', () => {
+          execFileSync(process.execPath, ['-e', ${JSON.stringify(subprocess)}], { timeout: 500 })
+        }, 200)
+      `)
+      child = Bun.spawn([process.execPath, runner, '--shard-timeout-ms=1500', fixture], {
+        stdout: 'pipe', stderr: 'pipe', timeout: 5000, killSignal: 'SIGKILL',
+      })
+      const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const pid = await readFile(marker, 'utf8').catch(() => '')
+        if (pid) { descendant = Number(pid); break }
+        await Bun.sleep(10)
+      }
+      expect(descendant).toBeDefined()
+      if (signal) child.kill(signal)
+      const exitCode = await child.exited
+      const [, stderr] = await output
+      expect(exitCode, stderr).toBe(signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 124)
+      if (!signal) expect(stderr).toContain('Test shard 1/1 timed out after 1500ms.')
+      // An orphaned compiler must not survive a timeout or cancellation.
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try { process.kill(descendant!, 0) } catch { break }
+        await Bun.sleep(10)
+      }
+      expect(() => process.kill(descendant!, 0)).toThrow()
+    } finally {
+      child?.kill('SIGKILL')
+      if (descendant) {
+        try { process.kill(descendant, 'SIGKILL') } catch {}
+      }
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 10_000)
+}

@@ -12,6 +12,7 @@ permissions:
 jobs:
   smoke-and-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         node-version: ["22", "24.11.x"]
@@ -56,6 +57,7 @@ jobs:
 
   launcher-node-floor:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Check out repository
@@ -84,6 +86,7 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Check out repository
@@ -107,6 +110,7 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Check out repository
