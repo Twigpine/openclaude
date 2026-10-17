@@ -20,6 +20,8 @@ let resetSentSkillNames = mock(() => {})
 let hookResults: { blocked: boolean }[] = []
 let executeConfigChangeHooksImpl = async () => hookResults
 let executeConfigChangeHooks = mock(async () => hookResults)
+let settingsChangedCallback: (() => void) | undefined
+let unsubscribeSettingsChanges = mock(() => {})
 let dynamicSkillsLoadedCallback: (() => void) | undefined
 let unregisterDynamicSkillsLoaded = mock(() => {})
 let additionalDirectories: string[] = []
@@ -40,6 +42,8 @@ function installMocks(): void {
   hookResults = []
   executeConfigChangeHooksImpl = async () => hookResults
   executeConfigChangeHooks = mock(() => executeConfigChangeHooksImpl())
+  settingsChangedCallback = undefined
+  unsubscribeSettingsChanges = mock(() => {})
   dynamicSkillsLoadedCallback = undefined
   unregisterDynamicSkillsLoaded = mock(() => {})
   additionalDirectories = []
@@ -72,6 +76,10 @@ async function importFreshModule(): Promise<SkillChangeDetectorModule> {
     onDynamicSkillsLoaded: (callback: () => void) => {
       dynamicSkillsLoadedCallback = callback
       return unregisterDynamicSkillsLoaded
+    },
+    subscribeToSettingsChanges: (callback: () => void) => {
+      settingsChangedCallback = callback
+      return unsubscribeSettingsChanges
     },
     resetSentSkillNames,
     watch: chokidarWatch,
@@ -117,6 +125,36 @@ describe('skillChangeDetector reload batching', () => {
     expect(unregisterDynamicSkillsLoaded).toHaveBeenCalledTimes(1)
     expect(clearCommandMemoizationCaches).not.toHaveBeenCalled()
     expect(notifications).toBe(0)
+  })
+
+  test('accepted settings changes reload only changed eligibility and unsubscribe on dispose', async () => {
+    const detector = await importFreshModule()
+    let notifications = 0
+    detector.subscribe(() => { notifications++ })
+    await detector.initialize()
+    expect(settingsChangedCallback).toBeDefined()
+    settingsChangedCallback?.()
+    await sleep(0)
+    expect(clearCommandsCache).not.toHaveBeenCalled()
+    expect(notifications).toBe(0)
+
+    siblingSkillsHomePaths = ['/tmp/sibling-skills']
+    settingsChangedCallback?.()
+    // Invalidation precedes asynchronous watch reconciliation.
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+    await sleep(0)
+    expect(notifications).toBe(1)
+    settingsChangedCallback?.()
+    await sleep(0)
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+
+    await detector.dispose()
+    expect(unsubscribeSettingsChanges).toHaveBeenCalledTimes(1)
+    siblingSkillsHomePaths = []
+    settingsChangedCallback?.()
+    await sleep(0)
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+    expect(notifications).toBe(1)
   })
 
   test('dispose during initialize prevents watcher creation after path lookup resolves', async () => {

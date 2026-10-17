@@ -20,6 +20,8 @@ import { registerCleanup } from '../cleanupRegistry.js'
 import { logForDebugging } from '../debug.js'
 import { getFsImplementation } from '../fsOperations.js'
 import { executeConfigChangeHooks, hasBlockingResult } from '../hooks.js'
+import { logError } from '../log.js'
+import { settingsChangeDetector } from '../settings/changeDetector.js'
 import { createSignal } from '../signal.js'
 
 /**
@@ -72,6 +74,8 @@ let siblingWatcher: FSWatcher | null = null
 let ownWatchPaths: string[] = []
 let siblingWatchUpdate: Promise<void> = Promise.resolve()
 let siblingWatchPaths: string[] = []
+let siblingSourcePaths: string[] = []
+let unsubscribeSettingsChanges: (() => void) | null = null
 let reloadTimer: ReturnType<typeof setTimeout> | null = null
 const pendingChangedPaths = new Set<string>()
 let lastReloadTime = 0
@@ -106,6 +110,7 @@ const defaultDependencies = {
   onDynamicSkillsLoaded,
   resetSentSkillNames,
   watch: chokidar.watch.bind(chokidar),
+  subscribeToSettingsChanges: settingsChangeDetector.subscribe,
 }
 type SkillChangeDetectorDependencies = typeof defaultDependencies
 let dependencies: SkillChangeDetectorDependencies = defaultDependencies
@@ -121,6 +126,17 @@ export async function initialize(): Promise<void> {
   // async path discovery.
   unregisterCleanup = registerCleanup(async () => {
     await dispose()
+  })
+
+  siblingSourcePaths = dependencies.getSiblingSkillsHomePaths()
+  unsubscribeSettingsChanges = dependencies.subscribeToSettingsChanges(() => {
+    if (disposed) return
+    const paths = dependencies.getSiblingSkillsHomePaths()
+    if (paths.length === siblingSourcePaths.length &&
+      paths.every((path, index) => path === siblingSourcePaths[index])) return
+    // The settings notifier has already invalidated its cache. Use effective
+    // eligibility so unrelated settings changes do not reset activated skills.
+    void reloadAfterSkillSourceSettingsChange().catch(logError)
   })
 
   // Register callback for when dynamic skills are loaded (only once)
@@ -224,6 +240,9 @@ function watchPaths(paths: string[]): FSWatcher | null {
  */
 export function dispose(): Promise<void> {
   disposed = true
+  unsubscribeSettingsChanges?.()
+  unsubscribeSettingsChanges = null
+  siblingSourcePaths = []
   if (unregisterCleanup) {
     unregisterCleanup()
     unregisterCleanup = null
@@ -387,6 +406,9 @@ export async function resetForTesting(overrides?: {
 }): Promise<void> {
   // Drain in-flight source updates before restoring test state.
   disposed = true
+  unsubscribeSettingsChanges?.()
+  unsubscribeSettingsChanges = null
+  siblingSourcePaths = []
   await siblingWatchUpdate
   await Promise.all([watcher?.close(), siblingWatcher?.close()])
   watcher = null
@@ -422,12 +444,15 @@ export async function resetForTesting(overrides?: {
  */
 export async function reloadAfterSkillSourceSettingsChange(): Promise<void> {
   if (disposed) return
+  siblingSourcePaths = dependencies.getSiblingSkillsHomePaths()
+  // Invalidate synchronously, before asynchronous watcher reconciliation, so
+  // neither cached commands nor an older sibling scan can survive the signal.
+  dependencies.clearCommandsCache()
+  dependencies.resetSentSkillNames()
   if (initialized) {
     await reconcileSiblingWatchPaths()
   }
   if (disposed) return
-  dependencies.clearCommandsCache()
-  dependencies.resetSentSkillNames()
   skillsChanged.emit()
 }
 

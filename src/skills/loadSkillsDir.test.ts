@@ -18,10 +18,20 @@ import chokidar from 'chokidar'
 import React from 'react'
 import { clearCommandsCache, getCommands } from '../commands.js'
 import { useSkillsChange } from '../hooks/useSkillsChange.js'
+import { useSettingsChange } from '../hooks/useSettingsChange.js'
 import { createRoot } from '../ink.js'
+import { getDefaultAppState } from '../state/AppStateStore.js'
+import { onChangeAppState } from '../state/onChangeAppState.js'
+import { createStore } from '../state/store.js'
+import { applySettingsChange } from '../utils/settings/applySettingsChange.js'
+import { settingsChangeDetector } from '../utils/settings/changeDetector.js'
+import { getPluginCommands } from '../utils/plugins/loadPluginCommands.js'
+import { getManagedFilePath, getManagedSettingsDropInDir } from '../utils/settings/managedPath.js'
 
 import {
   getOriginalCwd,
+  getFlagSettingsPath,
+  setFlagSettingsPath,
   setAllowedSettingSources,
   setOriginalCwd,
 } from '../bootstrap/state.js'
@@ -660,6 +670,105 @@ test.serial('stores conditional sibling skills until a matching path is touched'
 })
 
 for (const home of ['.agents', '.claude'] as const) {
+  for (const invalidation of ['disable', 'edit', 'delete'] as const) {
+    test.serial(`rejects obsolete ${home} reads after ${invalidation}`, async () => {
+      await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+        writeSettingsFile(join(configDir, 'settings.json'), {
+          agentsSkillsEnabled: true, claudeCodeSkillsEnabled: true,
+        })
+        const dirs = ['pending-docs', 'always'].map(name => writeSiblingSkill(
+          homeDir, home, name,
+          `description: original${name === 'pending-docs' ? '\npaths: docs/**' : ''}`,
+        ))
+        const paths = dirs.map(dir => join(dir, 'SKILL.md'))
+        const fs = getFsImplementation()
+        let release!: () => void
+        const held = new Promise<void>(resolve => { release = resolve })
+        let entered!: () => void
+        const reading = new Promise<void>(resolve => { entered = resolve })
+        const captured = new Set<string>()
+        setFsImplementation({ ...fs, readFile: async (path, options) => {
+          const bytes = await fs.readFile(path, options)
+          if (paths.includes(path) && !captured.has(path)) {
+            captured.add(path)
+            if (captured.size === paths.length) entered()
+            await held
+          }
+          return bytes
+        } })
+        const oldScan = getSkillDirCommands(cwd)
+        try {
+          await reading
+          if (invalidation === 'disable') {
+            writeFileSync(join(configDir, 'settings.json'), JSON.stringify({
+              agentsSkillsEnabled: false, claudeCodeSkillsEnabled: false,
+            }))
+            resetSettingsCache()
+          } else if (invalidation === 'edit') {
+            paths.forEach((path, i) => writeFileSync(path,
+              `---\ndescription: revised${i === 0 ? '\npaths: docs/**' : ''}\n---\nRevised\n`))
+          } else {
+            dirs.forEach(dir => rmSync(dir, { recursive: true }))
+          }
+          const { reloadAfterSkillSourceSettingsChange } = await import('../utils/skills/skillChangeDetector.js')
+          await reloadAfterSkillSourceSettingsChange()
+          await getCommands(cwd) // Finish a fresh scan before the obsolete read.
+          release()
+          assert.deepEqual(promptSkillsNamed(await oldScan, 'always'), [])
+          activateConditionalSkillsForPaths([join(cwd, 'docs', 'guide.md')], cwd)
+          const commands = await getCommands(cwd)
+          for (const name of ['pending-docs', 'always']) {
+            const skills = promptSkillsNamed(commands, name)
+            assert.equal(skills.length, invalidation === 'edit' ? 1 : 0, name)
+            if (invalidation === 'edit') assert.equal(skills[0]?.description, 'revised')
+          }
+        } finally {
+          release()
+          await oldScan
+          setFsImplementation(fs)
+        }
+      })
+    })
+  }
+
+  for (const invalidation of ['disable', 'edit', 'delete'] as const) {
+    test.serial(`refreshes completed ${home} scans invalidated during command aggregation (${invalidation})`, async () => {
+      await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+        writeSettingsFile(join(configDir, 'settings.json'), {
+          agentsSkillsEnabled: true, claudeCodeSkillsEnabled: true,
+        })
+        const skillDir = writeSiblingSkill(homeDir, home, 'late-skill', 'description: original')
+        let release!: () => void
+        // Hold a different real command source after the sibling scan completes.
+        getPluginCommands.cache.set(undefined, new Promise<Command[]>(resolve => {
+          release = () => resolve([])
+        }))
+        const oldCommands = getCommands(cwd)
+        try {
+          assert.equal(promptSkillsNamed(await getSkillDirCommands(cwd), 'late-skill').length, 1)
+          if (invalidation === 'disable') {
+            writeSettingsFile(join(configDir, 'settings.json'), {
+              agentsSkillsEnabled: false, claudeCodeSkillsEnabled: false,
+            })
+          } else if (invalidation === 'edit') {
+            writeSiblingSkill(homeDir, home, 'late-skill', 'description: revised')
+          } else {
+            rmSync(skillDir, { recursive: true })
+          }
+          clearCommandsCache()
+          const fresh = promptSkillsNamed(await getCommands(cwd), 'late-skill')
+          assert.equal(fresh.length, invalidation === 'edit' ? 1 : 0)
+          if (invalidation === 'edit') assert.equal(fresh[0]?.description, 'revised')
+          release()
+          assert.deepEqual(promptSkillsNamed(await oldCommands, 'late-skill'), fresh)
+        } finally {
+          release()
+          await oldCommands
+        }
+      })
+    })
+  }
+
   test.serial(`reloads activated ${home} skills after disable, edit, and deletion`, async () => {
     await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
       const settingKey = home === '.agents'
@@ -782,6 +891,153 @@ test.serial('live command refresh preserves activation and revokes disabled sibl
     }
   })
 })
+
+for (const mode of ['interactive', 'headless'] as const) {
+  for (const source of ['userSettings', 'localSettings', 'flagSettings', 'policySettings', 'plugin-only'] as const) {
+    test.serial(`${mode} accepted ${source} notifications reconcile sibling commands and watches`, async () => {
+      await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+        const detector = await import('../utils/skills/skillChangeDetector.js')
+        const managedPath = getManagedFilePath()
+        const dropInPath = getManagedSettingsDropInDir()
+        const flagPath = getFlagSettingsPath()
+        const managedDir = join(homeDir, 'managed')
+        getManagedFilePath.cache.set(undefined, managedDir)
+        getManagedSettingsDropInDir.cache.set(undefined, join(managedDir, 'managed-settings.d'))
+        setFlagSettingsPath(join(homeDir, 'flags.json'))
+        const settingsPath = source === 'userSettings' ? join(configDir, 'settings.json')
+          : source === 'localSettings' ? join(cwd, '.openclaude', 'settings.local.json')
+          : source === 'flagSettings' ? getFlagSettingsPath()!
+          : join(managedDir, 'managed-settings.json')
+        writeSettingsFile(settingsPath, {})
+        writeSiblingSkill(homeDir, '.agents', 'agent-skill')
+        writeSiblingSkill(homeDir, '.claude', 'claude-skill')
+        const store = createStore(getDefaultAppState(), onChangeAppState)
+        const apply = (changed: Parameters<typeof applySettingsChange>[0]) => applySettingsChange(changed, store.setState)
+        const refreshed: Command[][] = []
+        const onCommandsChange = (commands: Command[]) => { refreshed.push(commands) }
+        const watched: Array<{ paths: string[]; watcher: ReturnType<typeof chokidar.watch> }> = []
+        detector._setDependenciesForTesting({ watch: (paths, options) => {
+          const watcher = chokidar.watch(paths, options)
+          watched.push({ paths: typeof paths === 'string' ? [paths] : paths, watcher })
+          return watcher
+        } })
+        let mounted = false
+        function Harness() {
+          useSettingsChange(apply)
+          useSkillsChange(cwd, onCommandsChange)
+          React.useEffect(() => { mounted = true }, [])
+          return null
+        }
+        const stdout = new PassThrough()
+        const stdin = new PassThrough()
+        const root = await createRoot({
+          stdout: stdout as unknown as NodeJS.WriteStream,
+          stdin: stdin as unknown as NodeJS.ReadStream, patchConsole: false,
+        })
+        const unsubscribeSettings = mode === 'headless' ? settingsChangeDetector.subscribe(apply) : () => {}
+        const unsubscribeSkills = mode === 'headless' ? detector.subscribe(() => {
+          void getCommands(cwd).then(onCommandsChange)
+        }) : () => {}
+        async function waitFor(predicate: () => boolean) {
+          for (let i = 0; i < 200; i++) {
+            if (predicate()) return
+            await Bun.sleep(10)
+          }
+          assert.fail('Timed out waiting for accepted settings refresh')
+        }
+        try {
+          await detector.initialize()
+          if (mode === 'interactive') {
+            root.render(React.createElement(Harness))
+            await waitFor(() => mounted)
+          }
+          assert.equal(promptSkillsNamed(await getCommands(cwd), 'agent-skill').length, 1)
+          // No manual cache clear or skill reload: this is the real notifier and
+          // settings consumer used by each session mode.
+          writeFileSync(settingsPath, JSON.stringify(source === 'plugin-only'
+            ? { strictPluginOnlyCustomization: ['skills'] }
+            : { agentsSkillsEnabled: false, claudeCodeSkillsEnabled: true }))
+          settingsChangeDetector.notifyChange(source === 'plugin-only' ? 'policySettings' : source)
+          await waitFor(() => refreshed.length > 0)
+          assert.equal(promptSkillsNamed(refreshed.at(-1)!, 'agent-skill').length, 0)
+          assert.equal(promptSkillsNamed(refreshed.at(-1)!, 'claude-skill').length, source === 'plugin-only' ? 0 : 1)
+          const activePaths = watched.filter(entry => !entry.watcher.closed).flatMap(entry => entry.paths)
+          assert.equal(activePaths.includes(join(homeDir, '.agents', 'skills')), false)
+          assert.equal(activePaths.includes(join(homeDir, '.claude', 'skills')), source !== 'plugin-only')
+          if (source === 'plugin-only') assert.deepEqual(store.getState().settings.strictPluginOnlyCustomization, ['skills'])
+          else assert.equal(store.getState().settings.agentsSkillsEnabled, false)
+        } finally {
+          root.unmount()
+          stdin.end()
+          stdout.end()
+          unsubscribeSettings()
+          unsubscribeSkills()
+          await detector.resetForTesting()
+          detector._setDependenciesForTesting()
+          getManagedFilePath.cache.set(undefined, managedPath)
+          getManagedSettingsDropInDir.cache.set(undefined, dropInPath)
+          setFlagSettingsPath(flagPath)
+        }
+      })
+    })
+  }
+}
+
+for (const home of ['.agents', '.claude'] as const) {
+  test.serial(`activated ${home} skills retain disabled owned name reservations`, async () => {
+    await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+      writeSettingsFile(join(configDir, 'settings.json'), {
+        agentsSkillsEnabled: true, claudeCodeSkillsEnabled: true,
+      })
+      const names = ['loop', 'reserved-owner', 'reserved-alias', 'reserved-display', 'free-skill']
+      const files = names.map(name => join(writeSiblingSkill(homeDir, home, name), 'SKILL.md'))
+      const moduleUrl = (path: string) => JSON.stringify(new URL(path, import.meta.url).href)
+      // Isolate the bundled registry without changing another test's registrations.
+      const script = `
+        import assert from 'node:assert/strict'
+        import { writeFileSync } from 'node:fs'
+        import { clearCommandsCache, getCommands } from ${moduleUrl('../commands.ts')}
+        import { activateConditionalSkillsForPaths, clearDynamicSkills } from ${moduleUrl('./loadSkillsDir.ts')}
+        import { setSiblingSkillsHomeDirForTesting } from ${moduleUrl('./siblingSkillHomes.ts')}
+        import { enableUserAndProjectSettingSources } from ${moduleUrl('../test/settingSourceState.ts')}
+        import { setOriginalCwd } from ${moduleUrl('../bootstrap/state.ts')}
+        import { registerLoopSkill } from ${moduleUrl('./bundled/loop.ts')}
+        import { getBundledSkills, registerBundledSkill } from ${moduleUrl('./bundledSkills.ts')}
+        enableUserAndProjectSettingSources()
+        setOriginalCwd(${JSON.stringify(cwd)})
+        setSiblingSkillsHomeDirForTesting(${JSON.stringify(homeDir)})
+        registerLoopSkill()
+        registerBundledSkill({ name: 'reserved-owner', aliases: ['reserved-alias'],
+          description: 'disabled owner', isEnabled: () => false,
+          getPromptForCommand: async () => [] })
+        getBundledSkills().find(skill => skill.name === 'reserved-owner').userFacingName = () => 'reserved-display'
+        assert.equal(getBundledSkills().find(skill => skill.name === 'loop').isEnabled(), false)
+        for (const builtins of [true, false]) {
+          for (const conditional of [false, true]) {
+            clearDynamicSkills()
+            clearCommandsCache()
+            for (const file of ${JSON.stringify(files)}) {
+              writeFileSync(file, '---\\ndescription: sibling\\n' + (conditional ? 'paths: docs/**\\n' : '') + '---\\nSkill\\n')
+            }
+            const initial = await getCommands(${JSON.stringify(cwd)})
+            // No available built-ins exercises the append branch. Only this
+            // isolated child changes availability; registered owners stay put.
+            if (!builtins) for (const command of initial) {
+              if (!command.siblingSkillsHome) command.isEnabled = () => false
+            }
+            if (conditional) activateConditionalSkillsForPaths([${JSON.stringify(join(cwd, 'docs', 'guide.md'))}], ${JSON.stringify(cwd)})
+            const siblingNames = (await getCommands(${JSON.stringify(cwd)}))
+              .filter(skill => skill.siblingSkillsHome).map(skill => skill.name)
+            assert.deepEqual(siblingNames, ['free-skill'], JSON.stringify({ builtins, conditional }))
+          }
+        }
+      `
+      execFileSync(process.execPath, ['-e', script], {
+        env: { ...process.env, CLAUDE_CODE_DISABLE_CRON: '1' }, timeout: 15_000,
+      })
+    })
+  })
+}
 
 test.serial('conditional siblings cannot replace dynamically discovered project skills', async () => {
   await withSiblingHomeFixture(async ({ homeDir, cwd }) => {

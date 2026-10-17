@@ -773,6 +773,13 @@ async function loadSkillsFromCommandsDir(
   }
 }
 
+let siblingScanGeneration = 0
+
+/** Also fences command aggregation that waits on other sources after this scan. */
+export function getSiblingSkillScanGeneration(): number {
+  return siblingScanGeneration
+}
+
 /**
  * Loads all skills from both /skills/ and legacy /commands/ directories.
  *
@@ -788,6 +795,7 @@ async function loadSkillsFromCommandsDir(
  */
 export const getSkillDirCommands = memoize(
   async (cwd: string): Promise<Command[]> => {
+    const scanGeneration = siblingScanGeneration
     const userSkillsDir = join(getClaudeConfigHomeDir(), 'skills')
     const managedSkillsDir = join(getManagedFilePath(), '.openclaude', 'skills')
     const projectSkillsDirs = getProjectDirsUpToHome(
@@ -908,6 +916,9 @@ export const getSkillDirCommands = memoize(
       const entry = allSkillsWithPaths[i]
       if (entry === undefined || entry.skill.type !== 'prompt') continue
       const { skill } = entry
+      // A source clear can finish while reads or realpath calls are pending.
+      // Obsolete siblings must not return or repopulate the conditional map.
+      if (getSiblingSkillsHomeId(skill) && scanGeneration !== siblingScanGeneration) continue
 
       const fileId = fileIds[i]
       if (fileId === null || fileId === undefined) {
@@ -1053,6 +1064,7 @@ export async function getUnloadedSiblingSkillHomes(
 }
 
 export function clearSkillCaches() {
+  siblingScanGeneration++
   getSkillDirCommands.cache?.clear?.()
   loadMarkdownFilesForSubdir.cache?.clear?.()
   conditionalSkills.clear()

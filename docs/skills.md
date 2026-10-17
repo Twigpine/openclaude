@@ -75,7 +75,7 @@ Turn either directory on or off in `/config`, or set the key in your user settin
 - OpenClaude does not write to these directories. `openclaude skills remove` refuses skills that come from them and names the directory to remove them from.
 - The two settings are read from user, local, `--settings`, and managed settings only. A project's `.openclaude/settings.json` cannot change them, so a cloned repository cannot make OpenClaude read another tool's directory. `/config` writes your user settings. Managed, `--settings`, and local settings outrank user settings, so when one of them sets a directory's value, `/config` hides that directory's toggle and `/skills` shows no hint for it. Both directories are skipped with `--bare`, when `--setting-sources` leaves out `user`, and when managed settings restrict skills to plugins.
 - The model sees skills through a listing with a size budget. When the listing runs over budget, skills from these directories are listed by name only before any OpenClaude skill description is shortened.
-- When a directory that is off holds skills, `/skills` and `openclaude skills list` show how many and how to turn it on. `openclaude skills list` labels skills from these directories `agents` or `claude-code`, and `--json` adds a `siblingHome` field.
+- When a directory that is off holds skills, `/skills` and `openclaude skills list` show how many and how to turn it on. `openclaude skills list --json` and `openclaude skills show <name>` identify their source as `agents` or `claude-code`; JSON output includes a `siblingHome` field.
 
 ## What the install checks cover
 
