@@ -1411,6 +1411,8 @@ const customAuthCases: Array<{
   expected: Record<string, string>
 }> = [
   { name: 'X-API-Key', value: undefined, scheme: undefined, expected: { 'x-api-key': 'pooled-key' } },
+  { name: 'X-API-Key', value: 'explicit-key', scheme: 'raw', expected: { 'x-api-key': 'explicit-key' } },
+  { name: 'authorization', value: undefined, scheme: undefined, expected: { authorization: 'Bearer pooled-key' } },
   { name: 'Authorization', value: 'explicit-key', scheme: 'raw', expected: { authorization: 'explicit-key' } },
   { name: 'Authorization', value: 'explicit-key', scheme: undefined, expected: { authorization: 'Bearer explicit-key' } },
   { name: 'X-API-Key', value: '', scheme: 'bearer', expected: { 'x-api-key': 'Bearer pooled-key' } },
@@ -1419,7 +1421,7 @@ const customAuthCases: Array<{
 ]
 for (const auth of customAuthCases) {
   test(`custom discovery auth ${auth.name}/${auth.scheme}/${auth.value}`, async () => {
-    const { refreshStartupDiscoveryForActiveRoute, discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    const { refreshStartupDiscoveryForActiveRoute, discoverModelsForRoute, getDiscoveryCacheKey } = await loadDiscoveryServiceModule()
     const { resolveModelRuntimeLimits } = await import('./runtimeMetadata.js')
     const env: NodeJS.ProcessEnv = {
       CLAUDE_CODE_USE_OPENAI: '1',
@@ -1429,6 +1431,13 @@ for (const auth of customAuthCases) {
       OPENAI_AUTH_HEADER_VALUE: auth.value,
       OPENAI_AUTH_SCHEME: auth.scheme,
     }
+    const validName = !auth.name.includes(' ')
+    const callerHeaders = {
+      'X-Tenant': 'tenant-a',
+      ...(validName ? { [auth.name.toUpperCase()]: 'stale-key' } : {}),
+    }
+    env.ANTHROPIC_CUSTOM_HEADERS = Object.entries(callerHeaders)
+      .map(([name, value]) => `${name}: ${value}`).join('\n')
     const requests: Array<{ url: string; headers: Record<string, string> }> = []
     setMockFetch(mock((input, init) => {
       const headers: Record<string, string> = {}
@@ -1440,14 +1449,18 @@ for (const auth of customAuthCases) {
     }) as unknown as typeof globalThis.fetch)
     const first = await refreshStartupDiscoveryForActiveRoute({ processEnv: env })
     expect(first?.source).toBe('network')
-    expect(requests).toEqual([{ url: 'https://custom.example/v1/models', headers: auth.expected }])
+    expect(requests).toEqual([{ url: 'https://custom.example/v1/models', headers: { ...auth.expected, 'x-tenant': 'tenant-a' } }])
     // The picker supplies the resolved credential; startup supplies its env.
     const cached = await discoverModelsForRoute('custom', {
-      baseUrl: env.OPENAI_BASE_URL, apiKey: 'pooled-key', processEnv: env,
+      baseUrl: env.OPENAI_BASE_URL, apiKey: 'pooled-key', processEnv: env, headers: callerHeaders,
     })
     expect(cached?.source).toBe('cache')
     expect(requests).toHaveLength(1)
     expect(resolveModelRuntimeLimits({ model: 'remote-model', processEnv: env }).contextWindow).toBe(123456)
+    const identityOptions = { baseUrl: env.OPENAI_BASE_URL, apiKey: 'pooled-key', processEnv: env }
+    expect(getDiscoveryCacheKey('custom', { ...identityOptions, headers: callerHeaders })).toBe(
+      getDiscoveryCacheKey('custom', { ...identityOptions, headers: { 'X-Tenant': 'tenant-a' } }),
+    )
     // An explicit custom-auth value selects a different account/catalog.
     if (auth.name === 'Authorization') {
       expect(resolveModelRuntimeLimits({

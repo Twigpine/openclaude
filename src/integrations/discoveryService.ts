@@ -236,7 +236,8 @@ function getRouteDiscoveryApiKey(
     resolveRouteCredentialValue({
       routeId,
       baseUrl,
-      processEnv: process.env,
+      processEnv:
+        routeId === 'custom' ? options?.processEnv ?? process.env : process.env,
     }),
   )
 }
@@ -330,7 +331,15 @@ export function getRouteDiscoveryHeaders(
         }
 
   const customAuth = getCustomDiscoveryAuth(routeId, options)
-  const requestHeaders = customAuth ? { ...headers, ...customAuth } : headers
+  const requestHeaders = { ...headers }
+  for (const [name, value] of Object.entries(customAuth ?? {})) {
+    for (const existingName of Object.keys(requestHeaders)) {
+      if (existingName.toLowerCase() === name.toLowerCase()) {
+        delete requestHeaders[existingName]
+      }
+    }
+    requestHeaders[name] = value
+  }
   return Object.keys(requestHeaders).length > 0 ? requestHeaders : undefined
 }
 

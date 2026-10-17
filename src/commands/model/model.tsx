@@ -463,7 +463,8 @@ async function loadDescriptorDiscoveryContext(
     return null
   }
 
-  // Local custom routes keep their scoped cache and legacy picker semantics.
+  // Local custom chat-completions routes with an openai: scope keep their
+  // legacy picker semantics.
   if (
     routeId === 'custom' &&
     getAdditionalModelOptionsCacheScope()?.startsWith('openai:')

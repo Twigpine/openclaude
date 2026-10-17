@@ -379,7 +379,8 @@ Remote endpoints using the built-in `custom` route also use descriptor discovery
 in `/model`, including initial discovery and `/model refresh`. An empty catalog
 keeps a Default option available. Discovery honors `OPENAI_AUTH_HEADER`,
 `OPENAI_AUTH_HEADER_VALUE`, and `OPENAI_AUTH_SCHEME`, using the same auth partition
-for cached runtime limits. Local custom endpoints retain the scoped legacy picker.
+for cached runtime limits. Local custom chat-completions endpoints using the
+`openai:` scoped cache retain the legacy picker.
 
 ## `providerModelMap` in mixed gateway catalogs
 

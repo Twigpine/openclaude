@@ -24,6 +24,9 @@ import {
 import { mergeRouteCatalogEntries } from '../../utils/model/routeCatalogOptions.js'
 import * as actualFastModeForModelTest from '../../utils/fastMode.js'
 import * as actualExtraUsageForModelTest from '../../utils/extraUsage.js'
+import * as actualDiscoveryServiceForModelTest from '../../integrations/discoveryService.js'
+
+const REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST = { ...actualDiscoveryServiceForModelTest }
 
 // Snapshot the real fast-mode module up front so the cross-profile switch test
 // can mock it with a full surface and restore the real one afterwards.
@@ -46,6 +49,9 @@ const originalEnv = {
   OPENAI_API_BASE: process.env.OPENAI_API_BASE,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_API_KEYS: process.env.OPENAI_API_KEYS,
+  OPENAI_AUTH_HEADER: process.env.OPENAI_AUTH_HEADER,
+  OPENAI_AUTH_HEADER_VALUE: process.env.OPENAI_AUTH_HEADER_VALUE,
+  OPENAI_AUTH_SCHEME: process.env.OPENAI_AUTH_SCHEME,
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
   OPENAI_MODEL: process.env.OPENAI_MODEL,
   CMD_API_KEY: process.env.CMD_API_KEY,
@@ -231,6 +237,9 @@ afterEach(() => {
     restoreEnv('OPENAI_API_BASE', originalEnv.OPENAI_API_BASE)
     restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
     restoreEnv('OPENAI_API_KEYS', originalEnv.OPENAI_API_KEYS)
+    restoreEnv('OPENAI_AUTH_HEADER', originalEnv.OPENAI_AUTH_HEADER)
+    restoreEnv('OPENAI_AUTH_HEADER_VALUE', originalEnv.OPENAI_AUTH_HEADER_VALUE)
+    restoreEnv('OPENAI_AUTH_SCHEME', originalEnv.OPENAI_AUTH_SCHEME)
     restoreEnv('OPENROUTER_API_KEY', originalEnv.OPENROUTER_API_KEY)
     restoreEnv('OPENAI_MODEL', originalEnv.OPENAI_MODEL)
     restoreEnv('CMD_API_KEY', originalEnv.CMD_API_KEY)
@@ -3884,6 +3893,65 @@ for (const state of ['cold', 'warm', 'failed', 'restricted'] as const) {
     } finally {
       rendered.instance.unmount()
       rendered.stdout.end()
+    }
+  })
+}
+
+for (const entryPoint of ['picker', 'slash'] as const) {
+  test(`/model ${entryPoint} refresh preserves a missing key across a profile switch`, async () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://profile-a.example/v1'
+    process.env.OPENAI_MODEL = 'model-a'
+    for (const key of [
+      'OPENAI_API_KEY', 'OPENAI_API_KEYS', 'OPENAI_API_BASE', 'OPENROUTER_API_KEY',
+      'OPENAI_AUTH_HEADER', 'OPENAI_AUTH_HEADER_VALUE', 'OPENAI_AUTH_SCHEME',
+      'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GITHUB', 'CLAUDE_CODE_USE_MISTRAL',
+      'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+      'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'ANTHROPIC_CUSTOM_HEADERS',
+    ]) delete process.env[key]
+    mockProviderProfiles()
+    mock.module('../../integrations/discoveryService.js', () => REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST)
+    const cached = { models: [{ id: 'model-a', apiName: 'model-a' }], updatedAt: Date.now(), error: null }
+    const clearCache = mock(async () => {
+      // Profile B activates while A's manual refresh is awaiting cache I/O.
+      await Promise.resolve()
+      process.env.OPENAI_BASE_URL = 'https://profile-b.example/v1'
+      process.env.OPENAI_API_KEY = 'profile-b-secret'
+    })
+    mock.module('../../integrations/discoveryCache.js', () => ({
+      clearDiscoveryCache: clearCache,
+      getCachedModels: mock(async () => cached),
+      getCachedModelsSync: () => cached,
+      setCachedModels: mock(async () => {}),
+      recordDiscoveryError: mock(async () => {}),
+      isCacheStale: mock(async () => false),
+      parseDurationString: () => 86_400_000,
+    }))
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ url: string; authorization: string | null }> = []
+    globalThis.fetch = mock(async (input, init) => {
+      requests.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') })
+      return new Response(JSON.stringify({ data: [{ id: 'model-a' }] }), { status: 200 })
+    }) as unknown as typeof globalThis.fetch
+    let rendered: Awaited<ReturnType<typeof renderModelCommandWithCapturedPicker>> | undefined
+    try {
+      if (entryPoint === 'picker') {
+        rendered = await renderModelCommandWithCapturedPicker('custom-manual-profile-switch')
+        expect(rendered.getCapturedProps().onRefresh).toBeDefined()
+        rendered.getCapturedProps().onRefresh?.()
+        await waitForCondition(() => rendered?.getCapturedProps().discoveryState?.message?.startsWith('No changes found') === true)
+      } else {
+        const { call } = await importFreshModelModule('custom-slash-profile-switch')
+        let message = ''
+        await call(value => { message = value ?? '' }, {} as never, 'refresh')
+        expect(message).toContain('No changes found')
+      }
+      expect(clearCache).toHaveBeenCalledTimes(1)
+      expect(requests).toEqual([{ url: 'https://profile-a.example/v1/models', authorization: null }])
+    } finally {
+      globalThis.fetch = originalFetch
+      rendered?.instance.unmount()
+      rendered?.stdout.end()
     }
   })
 }
