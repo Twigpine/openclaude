@@ -1746,29 +1746,10 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
       return { ...current, enabledMcpServers: next }
     }
 
-    const prev = current.disabledMcpServers
-    if (prev === undefined) {
-      // No project-level override yet. Determine the effective inherited list
-      // so we can decide whether a write is needed.
-      const inherited = getGlobalConfig().disabledMcpServers || []
-
-      if (!enabled) {
-        // Disabling: materialize a project list that includes the inherited
-        // disables *plus* the new one so we don't silently un-disable servers
-        // that were disabled globally.
-        const next = toggleMembership(inherited, name, true)
-        return { ...current, disabledMcpServers: next }
-      }
-
-      // Enabling: if the server isn't disabled via the global fallback there
-      // is nothing to override — return early.  If it *is* globally disabled,
-      // materialize an explicit empty list so the local override takes effect.
-      if (!inherited.includes(name)) {
-        return current
-      }
-      return { ...current, disabledMcpServers: [] }
-    }
-
+    // The first project override starts from the effective inherited state,
+    // so toggling one server preserves every other disabled server.
+    const prev =
+      current.disabledMcpServers ?? getGlobalConfig().disabledMcpServers ?? []
     const next = toggleMembership(prev, name, !enabled)
     if (next === prev) return current
     return { ...current, disabledMcpServers: next }
