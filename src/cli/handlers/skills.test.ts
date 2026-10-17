@@ -474,7 +474,7 @@ test('explains that sibling-home skills are never removed by OpenClaude', () => 
 
   assert.equal(
     getSiblingSkillRemoveMessage(skills, 'agent-skill'),
-    'Skill "agent-skill" is read from ~/.agents/skills, which OpenClaude never modifies. Remove it there, or turn off "Load skills from ~/.agents/skills" in /config.',
+    'Skill "agent-skill" is read from ~/.agents/skills, which OpenClaude never modifies. Remove it there.',
   )
   assert.equal(getSiblingSkillRemoveMessage(skills, 'other'), undefined)
 })

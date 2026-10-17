@@ -63,5 +63,5 @@ export function getSiblingSkillRemoveMessage(
   )
   if (!siblingSkill?.siblingSkillsHome) return undefined
   const home = getSiblingSkillsHome(siblingSkill.siblingSkillsHome)
-  return `Skill "${name}" is read from ${getSiblingSkillsHomeDisplayPath(home)}, which OpenClaude never modifies. Remove it there, or turn off "${home.configLabel}" in /config.`
+  return `Skill "${name}" is read from ${getSiblingSkillsHomeDisplayPath(home)}, which OpenClaude never modifies. Remove it there.`
 }

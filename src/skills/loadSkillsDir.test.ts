@@ -13,6 +13,8 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'bun:test'
+import chokidar from 'chokidar'
+import { clearCommandsCache, getCommands } from '../commands.js'
 
 import {
   getOriginalCwd,
@@ -38,12 +40,16 @@ import {
   setFsImplementation,
 } from '../utils/fsOperations.ts'
 import { getSettingsForSource } from '../utils/settings/settings.ts'
-import { resetSettingsCache } from '../utils/settings/settingsCache.ts'
+import {
+  resetSettingsCache,
+  setCachedSettingsForSource,
+} from '../utils/settings/settingsCache.ts'
 import {
   activateConditionalSkillsForPaths,
+  addSkillDirectories,
   clearDynamicSkills,
-  clearSkillCaches,
   getConditionalSkillCount,
+  discoverSkillDirsForPaths,
   getSkillDirCommands,
   getProjectSkillsPaths,
   getUnloadedSiblingSkillHomes,
@@ -94,7 +100,7 @@ function writeUserSkill(
 }
 
 function clearSkillAndConfigCaches(): void {
-  clearSkillCaches()
+  clearCommandsCache()
   getClaudeConfigHomeDir.cache?.clear?.()
   resetSettingsCache()
 }
@@ -646,5 +652,132 @@ test.serial('stores conditional sibling skills until a matching path is touched'
       activateConditionalSkillsForPaths([join(cwd, 'docs', 'guide.md')], cwd),
       ['docs-only'],
     )
+  })
+})
+
+for (const home of ['.agents', '.claude'] as const) {
+  test.serial(`reloads activated ${home} skills after disable, edit, and deletion`, async () => {
+    await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+      const settingKey = home === '.agents'
+        ? 'agentsSkillsEnabled'
+        : 'claudeCodeSkillsEnabled'
+      writeSettingsFile(join(configDir, 'settings.json'), { [settingKey]: true })
+      const skillDir = writeSiblingSkill(
+        homeDir,
+        home,
+        'docs-only',
+        'description: original\npaths: docs/**',
+      )
+      const { reloadAfterSkillSourceSettingsChange } = await import(
+        '../utils/skills/skillChangeDetector.js'
+      )
+      const matchingPath = join(cwd, 'docs', 'guide.md')
+      await getCommands(cwd)
+      activateConditionalSkillsForPaths([matchingPath], cwd)
+      assert.equal(
+        promptSkillsNamed(await getCommands(cwd), 'docs-only').length,
+        1,
+      )
+
+      writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ [settingKey]: false }))
+      resetSettingsCache()
+      await reloadAfterSkillSourceSettingsChange()
+      assert.deepEqual(promptSkillsNamed(await getCommands(cwd), 'docs-only'), [])
+
+      writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ [settingKey]: true }))
+      resetSettingsCache()
+      await reloadAfterSkillSourceSettingsChange()
+      await getCommands(cwd)
+      activateConditionalSkillsForPaths([matchingPath], cwd)
+      writeSiblingSkill(
+        homeDir, home, 'docs-only', 'description: revised\npaths: docs/**',
+      )
+      clearCommandsCache() // The same invalidation used by the file watcher.
+      await getCommands(cwd)
+      activateConditionalSkillsForPaths([matchingPath], cwd)
+      assert.equal(
+        promptSkillsNamed(await getCommands(cwd), 'docs-only')[0]?.description,
+        'revised',
+      )
+
+      rmSync(skillDir, { recursive: true })
+      clearCommandsCache()
+      assert.deepEqual(promptSkillsNamed(await getCommands(cwd), 'docs-only'), [])
+    })
+  })
+}
+
+test.serial('conditional siblings cannot replace dynamically discovered project skills', async () => {
+  await withSiblingHomeFixture(async ({ homeDir, cwd }) => {
+    for (const siblingFirst of [false, true]) {
+      clearDynamicSkills()
+      clearCommandsCache()
+      writeSiblingSkill(
+        homeDir, '.agents', 'shared', 'description: sibling\npaths: docs/**',
+      )
+      const nestedDir = join(cwd, 'nested')
+      writeSkill(nestedDir, 'shared', { description: 'project winner' })
+      await getCommands(cwd)
+      const activate = () => activateConditionalSkillsForPaths(
+        [join(cwd, 'docs', 'guide.md')], cwd,
+      )
+      if (siblingFirst) activate()
+      await addSkillDirectories(
+        await discoverSkillDirsForPaths([join(nestedDir, 'other.ts')], cwd),
+      )
+      if (!siblingFirst) activate()
+      assert.equal(
+        promptSkillsNamed(await getCommands(cwd), 'shared')[0]?.description,
+        'project winner',
+      )
+      clearCommandsCache()
+      assert.equal(
+        promptSkillsNamed(await getCommands(cwd), 'shared')[0]?.description,
+        'project winner',
+      )
+    }
+  })
+})
+
+test.serial('the watcher applies the loader user-source, bare, and plugin-only gates', async () => {
+  await withSiblingHomeFixture(async ({ homeDir }) => {
+    const detector = await import('../utils/skills/skillChangeDetector.js')
+    writeSiblingSkill(homeDir, '.agents', 'agent-skill')
+    const watched: string[] = []
+    detector._setDependenciesForTesting({
+      getSkillsPath: () => '',
+      getAdditionalDirectoriesForClaudeMd: () => [],
+      watch: (paths, options) => {
+        watched.push(...(typeof paths === 'string' ? [paths] : paths))
+        return chokidar.watch(paths, options)
+      },
+    })
+    try {
+      for (const gate of ['user-source', 'bare', 'plugin-only', 'enabled']) {
+        await detector.resetForTesting()
+        watched.length = 0
+        delete process.env.CLAUDE_CODE_SIMPLE
+        setAllowedSettingSources([
+          'userSettings', 'projectSettings', 'localSettings',
+        ])
+        resetSettingsCache()
+        if (gate === 'user-source') setAllowedSettingSources(['projectSettings'])
+        if (gate === 'bare') process.env.CLAUDE_CODE_SIMPLE = '1'
+        if (gate === 'plugin-only') {
+          setCachedSettingsForSource('policySettings', {
+            strictPluginOnlyCustomization: ['skills'],
+          })
+        }
+        await detector.initialize()
+        assert.equal(
+          watched.includes(join(homeDir, '.agents', 'skills')),
+          gate === 'enabled',
+          gate,
+        )
+      }
+    } finally {
+      await detector.resetForTesting()
+      detector._setDependenciesForTesting()
+    }
   })
 })

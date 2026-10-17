@@ -831,9 +831,7 @@ export const getSkillDirCommands = memoize(
     const siblingHomes = resolveSiblingSkillsHomes()
     const userSkillsEnabled =
       isSettingSourceEnabled('userSettings') && !skillsLocked
-    const enabledSiblingHomes = userSkillsEnabled
-      ? siblingHomes.filter(home => home.enabled)
-      : []
+    const enabledSiblingHomes = getEnabledSiblingSkillsHomes(siblingHomes)
 
     // Load from /skills/ directories, additional dirs, and legacy /commands/ in parallel
     // (all independent — different directories, no shared state)
@@ -1012,6 +1010,20 @@ function logSiblingSkillHomes(
   return total
 }
 
+/** The same source eligibility governs discovery and filesystem subscriptions. */
+export function getEnabledSiblingSkillsHomes(
+  homes: ResolvedSiblingSkillsHome[] = resolveSiblingSkillsHomes(),
+): ResolvedSiblingSkillsHome[] {
+  if (
+    isBareMode() ||
+    isRestrictedToPluginOnly('skills') ||
+    !isSettingSourceEnabled('userSettings')
+  ) {
+    return []
+  }
+  return homes.filter(home => home.enabled)
+}
+
 /**
  * Sibling skills homes that are switched off but hold skills, for the hint in
  * /skills and `openclaude skills list`. Homes the user cannot enable from
@@ -1045,6 +1057,12 @@ export function clearSkillCaches() {
   loadMarkdownFilesForSubdir.cache?.clear?.()
   conditionalSkills.clear()
   activatedConditionalSkillNames.clear()
+  // Activated siblings live in the dynamic map too. Reload them from their
+  // source so disabling, editing, or deleting a home cannot retain old skills.
+  // Nested OpenClaude skills keep their existing session lifetime.
+  for (const [name, skill] of dynamicSkills) {
+    if (getSiblingSkillsHomeId(skill)) dynamicSkills.delete(name)
+  }
 }
 
 // Backwards-compatible aliases for tests
@@ -1240,6 +1258,15 @@ export function activateConditionalSkillsForPaths(
   const activated: string[] = []
 
   for (const [name, skill] of conditionalSkills) {
+    const existing = dynamicSkills.get(name)
+    if (
+      getSiblingSkillsHomeId(skill) &&
+      existing &&
+      !getSiblingSkillsHomeId(existing)
+    ) {
+      conditionalSkills.delete(name)
+      continue
+    }
     if (skill.type !== 'prompt' || !skill.paths || skill.paths.length === 0) {
       continue
     }
