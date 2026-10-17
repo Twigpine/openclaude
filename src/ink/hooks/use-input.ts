@@ -1,5 +1,4 @@
-import { useLayoutEffect, useRef } from 'react'
-import { useEventCallback } from 'usehooks-ts'
+import { useCallback, useLayoutEffect, useRef } from 'react'
 import type { InputEvent, Key } from '../events/input-event.js'
 import useStdin from './use-stdin.js'
 
@@ -41,6 +40,12 @@ type Options = {
  */
 const useInput = (inputHandler: Handler, options: Options = {}) => {
   const { setRawMode, internal_exitOnCtrlC, internal_eventEmitter } = useStdin()
+  const handlerRef = useRef({ inputHandler, isActive: options.isActive, internal_exitOnCtrlC })
+  // Isomorphic browser hooks use passive effects in Node. Input must see the
+  // committed handler before another terminal event can arrive.
+  useLayoutEffect(() => {
+    handlerRef.current = { inputHandler, isActive: options.isActive, internal_exitOnCtrlC }
+  }, [inputHandler, options.isActive, internal_exitOnCtrlC])
 
   // Timer handle for the deferred raw-mode reset. Persists across renders
   // so the setup phase of a remount can cancel a pending reset from cleanup.
@@ -89,9 +94,8 @@ const useInput = (inputHandler: Handler, options: Options = {}) => {
   // listener array is stable. If isActive were in the effect's deps, the
   // listener would re-append on false→true, moving it behind listeners
   // that registered while it was inactive — breaking
-  // stopImmediatePropagation() ordering. useEventCallback keeps the
-  // reference stable while reading latest isActive/inputHandler from
-  // closure (it syncs via useLayoutEffect, so it's compiler-safe).
+  // stopImmediatePropagation() ordering. The stable callback reads the handler
+  // and active state published by the layout effect above.
   //
   // Use useLayoutEffect (not useEffect) so the handler is registered
   // synchronously during the commit phase, before any stdin data can be
@@ -102,8 +106,9 @@ const useInput = (inputHandler: Handler, options: Options = {}) => {
   // listener but the EventEmitter has no handlers — keys are silently
   // dropped. This is safe because EventEmitter listener registration is
   // synchronous, lightweight, and has no visual side effects.
-  const handleData = useEventCallback((event: InputEvent) => {
-    if (options.isActive === false) {
+  const handleData = useCallback((event: InputEvent) => {
+    const latest = handlerRef.current
+    if (latest.isActive === false) {
       return
     }
     const { input, key } = event
@@ -111,10 +116,10 @@ const useInput = (inputHandler: Handler, options: Options = {}) => {
     // If app is not supposed to exit on Ctrl+C, then let input listener handle it
     // Note: discreteUpdates is called at the App level when emitting events,
     // so all listeners are already within a high-priority update context.
-    if (!(input === 'c' && key.ctrl) || !internal_exitOnCtrlC) {
-      inputHandler(input, key, event)
+    if (!(input === 'c' && key.ctrl) || !latest.internal_exitOnCtrlC) {
+      latest.inputHandler(input, key, event)
     }
-  })
+  }, [])
 
   useLayoutEffect(() => {
     internal_eventEmitter?.on('input', handleData)

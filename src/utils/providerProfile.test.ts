@@ -1895,11 +1895,11 @@ test('saveProfileFile defaults to user config instead of the working directory',
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-workspace-profile-'))
   const configRoot = mkdtempSync(join(tmpdir(), 'openclaude-config-profile-'))
   const configDir = join(configRoot, 'config')
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const persisted = createProfileFile('openai', {
@@ -1921,9 +1921,9 @@ test('saveProfileFile defaults to user config instead of the working directory',
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configRoot, { recursive: true, force: true })
@@ -1933,11 +1933,11 @@ test('saveProfileFile defaults to user config instead of the working directory',
 test('loadProfileFile keeps project-local files as a legacy fallback', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-legacy-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-empty-config-profile-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const legacyProfile = createProfileFile('gemini', {
@@ -1954,9 +1954,9 @@ test('loadProfileFile keeps project-local files as a legacy fallback', async () 
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -1966,11 +1966,11 @@ test('loadProfileFile keeps project-local files as a legacy fallback', async () 
 test('loadProfileFile does not fall back when user config profile is invalid', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-invalid-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-invalid-config-profile-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const legacyProfile = createProfileFile('gemini', {
@@ -1988,9 +1988,9 @@ test('loadProfileFile does not fall back when user config profile is invalid', a
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -2000,11 +2000,11 @@ test('loadProfileFile does not fall back when user config profile is invalid', a
 test('deleteProfileFile clears the default profile and legacy workspace fallback', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-delete-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-delete-config-profile-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const configProfile = createProfileFile('openai', {
@@ -2016,6 +2016,7 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
     })
 
     saveProfileFile(configProfile)
+    assert.equal(existsSync(join(configDir, PROFILE_FILE_NAME)), true)
     writeFileSync(
       join(cwd, PROFILE_FILE_NAME),
       JSON.stringify(legacyProfile, null, 2),
@@ -2030,9 +2031,9 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -2042,11 +2043,11 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
 test('deleteProfileFile with configDir and cwd clears both user config and legacy fallback', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-delete-mixed-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-delete-mixed-config-profile-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const configProfile = createProfileFile('openai', {
@@ -2072,9 +2073,9 @@ test('deleteProfileFile with configDir and cwd clears both user config and legac
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -2154,11 +2155,11 @@ test('clearPersistedCodexOAuthProfile removes only persisted Codex OAuth profile
 test('clearPersistedCodexOAuthProfile clears both default and legacy OAuth profiles', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-clear-oauth-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-clear-oauth-config-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const {
@@ -2194,9 +2195,9 @@ test('clearPersistedCodexOAuthProfile clears both default and legacy OAuth profi
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })

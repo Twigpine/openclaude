@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,6 +6,8 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
+
+import * as policyLimits from '../services/policyLimits/index.js'
 
 type HookChainsModule = typeof import('./hookChains.js')
 
@@ -35,9 +37,7 @@ async function importHookChainsModule(options?: {
     logOTelEvent: async () => {},
   }))
 
-  mock.module('../services/policyLimits/index.js', () => ({
-    isPolicyAllowed: () => allowRemoteSessions,
-  }))
+  spyOn(policyLimits, 'isPolicyAllowed').mockImplementation(() => allowRemoteSessions)
 
   return import(`./hookChains.js?test=${Date.now()}-${Math.random()}`)
 }

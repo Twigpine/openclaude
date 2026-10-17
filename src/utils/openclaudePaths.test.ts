@@ -155,6 +155,7 @@ describe('OpenClaude paths', () => {
 
   test('default plans directory normalizes generated path to NFC', async () => {
     await acquireEnvMutex()
+    delete process.env.OPENCLAUDE_CONFIG_DIR
     const { getDefaultPlansDirectory } = await importFreshPlans()
 
     expect(
