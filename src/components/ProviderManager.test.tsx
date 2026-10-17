@@ -136,6 +136,7 @@ const PRESET_ORDER = [
   'Anthropic',
   'Alibaba Coding Plan (China)',
   'Alibaba Coding Plan',
+  'API Route',
   'ApiSmart',
   'Atlas Cloud',
   'Azure OpenAI',
@@ -239,7 +240,7 @@ function mockProviderProfilesModule(options?: {
         return {
           provider: 'custom',
           name: 'Custom OpenAI-compatible',
-          baseUrl: 'http://localhost:11434/v1',
+          baseUrl: 'https://custom.example/v1',
           model: 'custom-model',
           apiKey: '',
           requiresApiKey: true,
@@ -5158,10 +5159,11 @@ test('ProviderManager first-run Codex OAuth switches the current session after l
 
   await waitForFrameOutput(
     mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
+    frame => frame.includes('Set up provider') && frame.includes('Pick a preset'),
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
+  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
   mounted.stdin.write('\r')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
@@ -5229,10 +5231,11 @@ test('ProviderManager Codex OAuth waiting state masks the paste field and delega
 
   await waitForFrameOutput(
     mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
+    frame => frame.includes('Set up provider') && frame.includes('Pick a preset'),
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
+  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
   mounted.stdin.write('\r')
 
   // Non-SSH session shows the generic "paste the callback URL" hint and the input.
@@ -5301,10 +5304,11 @@ test('ProviderManager Codex OAuth waiting state shows the SSH banner and surface
     await waitForFrameOutput(
       mounted.getOutput,
       frame =>
-        frame.includes('Set up provider') && frame.includes('Codex OAuth'),
+        frame.includes('Set up provider') && frame.includes('Pick a preset'),
     )
 
     await navigateToPreset(mounted.stdin, 'Codex OAuth')
+    expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
     mounted.stdin.write('\r')
 
     // SSH session shows the dedicated banner instead of the generic hint.
@@ -5399,10 +5403,11 @@ test('ProviderManager first-run Codex OAuth surfaces credential storage warnings
 
   await waitForFrameOutput(
     mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
+    frame => frame.includes('Set up provider') && frame.includes('Pick a preset'),
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
+  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
   mounted.stdin.write('\r')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
@@ -5489,10 +5494,11 @@ test('ProviderManager first-run Codex OAuth reports next-startup fallback when s
 
   await waitForFrameOutput(
     mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
+    frame => frame.includes('Set up provider') && frame.includes('Pick a preset'),
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
+  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
   mounted.stdin.write('\r')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
@@ -5595,10 +5601,11 @@ test('ProviderManager does not hijack a manual Codex profile when OAuth credenti
 
   await waitForFrameOutput(
     mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
+    frame => frame.includes('Set up provider') && frame.includes('Pick a preset'),
   )
 
   await navigateToPreset(mounted.stdin, 'Codex OAuth')
+  expect(stripAnsi(extractLastFrame(mounted.getOutput()))).toContain('Codex OAuth')
   mounted.stdin.write('\r')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)

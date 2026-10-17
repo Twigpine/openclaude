@@ -272,7 +272,10 @@ test('timed-out Streamable HTTP tool calls cancel the response stream after head
     )
 
     const cancellationDeadline = Date.now() + 1_000
-    while (!streamCancelled && Date.now() < cancellationDeadline) {
+    while (
+      (!streamCancelled || activeRequests.size !== 0) &&
+      Date.now() < cancellationDeadline
+    ) {
       await new Promise(resolve => setTimeout(resolve, 5))
     }
     assert.equal(streamCancelled, true)

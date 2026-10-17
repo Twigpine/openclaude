@@ -4,6 +4,8 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 
+const actualProviders = { ...await import('./providers.js') }
+
 const originalSubagentModel = process.env.CLAUDE_CODE_SUBAGENT_MODEL
 const originalOpenAIModel = process.env.OPENAI_MODEL
 const originalDefaultModelEnv = {
@@ -37,6 +39,7 @@ function mockProvider(
   isFirstPartyAnthropicBaseUrl = false,
 ): void {
   mock.module('./providers.js', () => ({
+    ...actualProviders,
     getAPIProvider: () => provider,
     getAPIProviderForStatsig: () => provider,
     isFirstPartyAnthropicBaseUrl: () => isFirstPartyAnthropicBaseUrl,

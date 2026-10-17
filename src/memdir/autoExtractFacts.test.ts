@@ -5,6 +5,24 @@ import { join } from 'path'
 import { extractFactsIntoMemdir } from './autoExtractFacts.js'
 import { setGovernancePolicySettingsForSourceForTesting } from '../utils/governancePolicy.js'
 
+let previousDisableAutoMemory: string | undefined
+let previousSimple: string | undefined
+
+beforeEach(() => {
+  previousDisableAutoMemory = process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+  previousSimple = process.env.CLAUDE_CODE_SIMPLE
+  // Extraction fixtures explicitly provision memory in the noninteractive test session.
+  process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0'
+  delete process.env.CLAUDE_CODE_SIMPLE
+})
+
+afterEach(() => {
+  if (previousDisableAutoMemory === undefined) delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+  else process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = previousDisableAutoMemory
+  if (previousSimple === undefined) delete process.env.CLAUDE_CODE_SIMPLE
+  else process.env.CLAUDE_CODE_SIMPLE = previousSimple
+})
+
 describe('autoExtractFacts', () => {
   let memDir: string
 
@@ -12,7 +30,7 @@ describe('autoExtractFacts', () => {
     memDir = mkdtempSync(join(tmpdir(), 'auto-extract-facts-test-'))
     // Extraction respects the memory-write approval policy; tests opt in so
     // facts are actually persisted.
-    delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+    process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0'
     delete process.env.CLAUDE_CODE_SIMPLE
     setGovernancePolicySettingsForSourceForTesting(() => ({
       memory: { requireApprovalBeforeWrite: false },
@@ -268,7 +286,7 @@ describe('autoExtractFacts governance gate (P1#1, P2#6)', () => {
   beforeEach(() => {
     memDir = mkdtempSync(join(tmpdir(), 'auto-extract-gate-test-'))
     setGovernancePolicySettingsForSourceForTesting(null)
-    delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+    process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0'
   })
 
   afterEach(() => {
@@ -293,7 +311,7 @@ describe('autoExtractFacts governance gate (P1#1, P2#6)', () => {
     const result = await extractFactsIntoMemdir('we use React with Redux', memDir)
     expect(result).toBe(false)
     expect(factCount()).toBe(0)
-    delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+    process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0'
   })
 
   it('degrades non-fatally when the facts directory cannot be created (P2#6)', async () => {

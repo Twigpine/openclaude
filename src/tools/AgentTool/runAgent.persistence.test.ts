@@ -2,6 +2,9 @@ import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import type { ToolUseContext } from '../../Tool.js'
 
+const actualSessionStorage = { ...await import('../../utils/sessionStorage.js') }
+const actualQuery = { ...await import('../../query.js') }
+
 // Track how many times each storage function is called
 let metadataWriteCount = 0
 let transcriptWriteCount = 0
@@ -17,6 +20,7 @@ afterEach(() => {
 
 async function importRunAgentWithMocks() {
   const sessionStorageMock = {
+    ...actualSessionStorage,
     writeAgentMetadata: async () => {
       metadataWriteCount++
       throw new Error('Simulated disk error during metadata write')
@@ -28,6 +32,7 @@ async function importRunAgentWithMocks() {
   }
 
   const queryMock = {
+    ...actualQuery,
     query: async function* () {
       yield {
         type: 'assistant',

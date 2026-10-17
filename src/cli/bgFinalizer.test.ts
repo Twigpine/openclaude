@@ -688,7 +688,12 @@ describe('background session finalizer', () => {
       const present = await Promise.all(
         artifacts.map(async path => await Bun.file(path).exists()),
       )
-      if (present.every(exists => !exists)) break
+      if (present.every(exists => !exists)) {
+        const terminalFacts = (await readdir(join(sessionsRoot, 'terminal'))).filter(
+          file => file.startsWith(`${id}~`),
+        )
+        if (terminalFacts.length === 0) break
+      }
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     expect(
