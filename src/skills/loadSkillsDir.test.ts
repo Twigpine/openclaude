@@ -984,59 +984,70 @@ for (const mode of ['interactive', 'headless'] as const) {
 }
 
 for (const home of ['.agents', '.claude'] as const) {
-  test.serial(`activated ${home} skills retain disabled owned name reservations`, async () => {
-    await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
-      writeSettingsFile(join(configDir, 'settings.json'), {
-        agentsSkillsEnabled: true, claudeCodeSkillsEnabled: true,
-      })
-      const names = ['loop', 'reserved-owner', 'reserved-alias', 'reserved-display', 'free-skill']
-      const files = names.map(name => join(writeSiblingSkill(homeDir, home, name), 'SKILL.md'))
-      const moduleUrl = (path: string) => JSON.stringify(new URL(path, import.meta.url).href)
-      // Isolate the bundled registry without changing another test's registrations.
-      const script = `
-        import assert from 'node:assert/strict'
-        import { writeFileSync } from 'node:fs'
-        import { clearCommandsCache, getCommands } from ${moduleUrl('../commands.ts')}
-        import { activateConditionalSkillsForPaths, clearDynamicSkills } from ${moduleUrl('./loadSkillsDir.ts')}
-        import { setSiblingSkillsHomeDirForTesting } from ${moduleUrl('./siblingSkillHomes.ts')}
-        import { enableUserAndProjectSettingSources } from ${moduleUrl('../test/settingSourceState.ts')}
-        import { setOriginalCwd } from ${moduleUrl('../bootstrap/state.ts')}
-        import { registerLoopSkill } from ${moduleUrl('./bundled/loop.ts')}
-        import { getBundledSkills, registerBundledSkill } from ${moduleUrl('./bundledSkills.ts')}
-        enableUserAndProjectSettingSources()
-        setOriginalCwd(${JSON.stringify(cwd)})
-        setSiblingSkillsHomeDirForTesting(${JSON.stringify(homeDir)})
-        registerLoopSkill()
-        registerBundledSkill({ name: 'reserved-owner', aliases: ['reserved-alias'],
-          description: 'disabled owner', isEnabled: () => false,
-          getPromptForCommand: async () => [] })
-        getBundledSkills().find(skill => skill.name === 'reserved-owner').userFacingName = () => 'reserved-display'
-        assert.equal(getBundledSkills().find(skill => skill.name === 'loop').isEnabled(), false)
-        for (const builtins of [true, false]) {
-          for (const conditional of [false, true]) {
-            clearDynamicSkills()
-            clearCommandsCache()
-            for (const file of ${JSON.stringify(files)}) {
-              writeFileSync(file, '---\\ndescription: sibling\\n' + (conditional ? 'paths: docs/**\\n' : '') + '---\\nSkill\\n')
+  for (const layout of ['matching', 'renamed', 'nested'] as const) {
+    test.serial(`${home} skills retain disabled owned name reservations (${layout})`, async () => {
+      await withSiblingHomeFixture(async ({ homeDir, configDir, cwd }) => {
+        writeSettingsFile(join(configDir, 'settings.json'), {
+          agentsSkillsEnabled: true, claudeCodeSkillsEnabled: true,
+        })
+        const names = ['loop', 'reserved-owner', 'reserved-alias', 'reserved-display', 'free-skill']
+        const folderName = (name: string) => layout === 'matching' ? name
+          : layout === 'renamed' ? `renamed-${name}` : `category/${name}`
+        const files = names.map(name => ({ name, file: join(
+          writeSiblingSkill(homeDir, home, folderName(name)), 'SKILL.md',
+        ) }))
+        const freeName = folderName('free-skill').replace('/', ':')
+        const moduleUrl = (path: string) => JSON.stringify(new URL(path, import.meta.url).href)
+        // Isolate the bundled registry without changing another test's registrations.
+        const script = `
+          import assert from 'node:assert/strict'
+          import { writeFileSync } from 'node:fs'
+          import { clearCommandsCache, findCommand, getCommands } from ${moduleUrl('../commands.ts')}
+          import { activateConditionalSkillsForPaths, clearDynamicSkills } from ${moduleUrl('./loadSkillsDir.ts')}
+          import { setSiblingSkillsHomeDirForTesting } from ${moduleUrl('./siblingSkillHomes.ts')}
+          import { enableUserAndProjectSettingSources } from ${moduleUrl('../test/settingSourceState.ts')}
+          import { setOriginalCwd } from ${moduleUrl('../bootstrap/state.ts')}
+          import { registerLoopSkill } from ${moduleUrl('./bundled/loop.ts')}
+          import { getBundledSkills, registerBundledSkill } from ${moduleUrl('./bundledSkills.ts')}
+          enableUserAndProjectSettingSources()
+          setOriginalCwd(${JSON.stringify(cwd)})
+          setSiblingSkillsHomeDirForTesting(${JSON.stringify(homeDir)})
+          registerLoopSkill()
+          registerBundledSkill({ name: 'reserved-owner', aliases: ['reserved-alias'],
+            description: 'disabled owner', isEnabled: () => false,
+            getPromptForCommand: async () => [] })
+          getBundledSkills().find(skill => skill.name === 'reserved-owner').userFacingName = () => 'reserved-display'
+          assert.equal(getBundledSkills().find(skill => skill.name === 'loop').isEnabled(), false)
+          for (const builtins of [true, false]) {
+            for (const conditional of [false, true]) {
+              clearDynamicSkills()
+              clearCommandsCache()
+              for (const { name, file } of ${JSON.stringify(files)}) {
+                writeFileSync(file, '---\\ndescription: sibling\\n' + (${JSON.stringify(layout)} === 'matching' ? '' : 'name: ' + name + '\\n') + (conditional ? 'paths: docs/**\\n' : '') + '---\\nSkill\\n')
+              }
+              const initial = await getCommands(${JSON.stringify(cwd)})
+              // No available built-ins exercises the append branch. Only this
+              // isolated child changes availability; registered owners stay put.
+              if (!builtins) for (const command of initial) {
+                if (!command.siblingSkillsHome) command.isEnabled = () => false
+              }
+              if (conditional) activateConditionalSkillsForPaths([${JSON.stringify(join(cwd, 'docs', 'guide.md'))}], ${JSON.stringify(cwd)})
+              const commands = await getCommands(${JSON.stringify(cwd)})
+              const siblingNames = commands.filter(skill => skill.siblingSkillsHome).map(skill => skill.name)
+              assert.deepEqual(siblingNames, [${JSON.stringify(freeName)}], JSON.stringify({ builtins, conditional }))
+              for (const reserved of ${JSON.stringify(names.slice(0, -1))}) {
+                assert.equal(findCommand(reserved, commands), undefined, reserved)
+              }
+              assert.equal(findCommand('free-skill', commands)?.name, ${JSON.stringify(freeName)})
             }
-            const initial = await getCommands(${JSON.stringify(cwd)})
-            // No available built-ins exercises the append branch. Only this
-            // isolated child changes availability; registered owners stay put.
-            if (!builtins) for (const command of initial) {
-              if (!command.siblingSkillsHome) command.isEnabled = () => false
-            }
-            if (conditional) activateConditionalSkillsForPaths([${JSON.stringify(join(cwd, 'docs', 'guide.md'))}], ${JSON.stringify(cwd)})
-            const siblingNames = (await getCommands(${JSON.stringify(cwd)}))
-              .filter(skill => skill.siblingSkillsHome).map(skill => skill.name)
-            assert.deepEqual(siblingNames, ['free-skill'], JSON.stringify({ builtins, conditional }))
           }
-        }
-      `
-      execFileSync(process.execPath, ['-e', script], {
-        env: { ...process.env, CLAUDE_CODE_DISABLE_CRON: '1' }, timeout: 15_000,
+        `
+        execFileSync(process.execPath, ['-e', script], {
+          env: { ...process.env, CLAUDE_CODE_DISABLE_CRON: '1' }, timeout: 15_000,
+        })
       })
     })
-  })
+  }
 }
 
 test.serial('conditional siblings cannot replace dynamically discovered project skills', async () => {

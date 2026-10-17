@@ -218,7 +218,11 @@ describe('filterShadowedSiblingSkills', () => {
         skill('help', { siblingSkillsHome: 'agents' }),
         skill('h', { siblingSkillsHome: 'agents' }),
         skill('pretty', { siblingSkillsHome: 'agents' }),
-        skill('unique', { siblingSkillsHome: 'agents' }),
+        skill('renamed-help', { siblingSkillsHome: 'agents', userFacingName: 'help' }),
+        skill('nested:alias', { siblingSkillsHome: 'claude-code', userFacingName: 'h' }),
+        skill('nested:display', { siblingSkillsHome: 'agents', userFacingName: 'pretty' }),
+        skill('help', { siblingSkillsHome: 'claude-code', userFacingName: 'unreserved' }),
+        skill('unique', { siblingSkillsHome: 'agents', userFacingName: 'unique-display' }),
       ],
       [
         builtin('help', ['h']),

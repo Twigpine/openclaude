@@ -211,7 +211,7 @@ export function filterShadowedSiblingSkills(
   }
 
   return siblingSkills.filter(skill => {
-    const owner = takenNames.get(skill.name)
+    const owner = takenNames.get(skill.name) ?? takenNames.get(getCommandName(skill))
     if (owner === undefined) return true
     logShadowedSiblingSkill(skill, owner)
     return false
