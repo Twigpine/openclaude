@@ -1046,7 +1046,7 @@ for (const home of ['.agents', '.claude'] as const) {
           env: { ...process.env, CLAUDE_CODE_DISABLE_CRON: '1' }, timeout: 15_000,
         })
       })
-    })
+    }, 30_000)
   }
 }
 
