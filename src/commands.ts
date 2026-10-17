@@ -178,8 +178,14 @@ import {
   getSkillDirCommands,
   clearSkillCaches,
   getDynamicSkills,
+  getSiblingSkillScanGeneration,
 } from './skills/loadSkillsDir.js'
 import { getBundledSkills } from './skills/bundledSkills.js'
+import {
+  applySiblingSkillPrecedence,
+  filterShadowedSiblingSkills,
+  getSiblingSkillsHomeId,
+} from './skills/siblingSkillHomes.js'
 import {
   getOpenClaudeCommandDescriptionKey,
   localize,
@@ -513,7 +519,9 @@ const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
     getWorkflowCommands ? getWorkflowCommands(cwd) : Promise.resolve([]),
   ])
 
-  return [
+  // Skill-dir commands sort first and lookup is first-match, so skills read
+  // from other agents' homes are moved last and dropped on any name collision.
+  return applySiblingSkillPrecedence([
     ...skillDirCommands,
     ...workflowCommands,
     ...pluginCommands,
@@ -521,7 +529,7 @@ const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
     ...bundledSkills,
     ...builtinPluginSkills,
     ...COMMANDS(),
-  ]
+  ])
 })
 
 /**
@@ -530,7 +538,14 @@ const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
  * auth changes (e.g. /login) take effect immediately.
  */
 export async function getCommands(cwd: string): Promise<Command[]> {
-  const allCommands = await loadAllCommands(cwd)
+  let allCommands: Command[]
+  let scanGeneration: number
+  do {
+    scanGeneration = getSiblingSkillScanGeneration()
+    allCommands = await loadAllCommands(cwd)
+    // Plugin/workflow loading can outlive a completed sibling scan. Reuse the
+    // current cache after invalidation so older refreshes return current skills.
+  } while (scanGeneration !== getSiblingSkillScanGeneration())
 
   // Get dynamic skills discovered during file operations
   const dynamicSkills = getDynamicSkills()
@@ -544,11 +559,21 @@ export async function getCommands(cwd: string): Promise<Command[]> {
     return baseCommands
   }
 
-  // Dedupe dynamic skills - only add if not already present
-  const baseCommandNames = new Set(baseCommands.map(c => c.name))
+  // Dedupe dynamic skills - only add if not already present. Sibling-home
+  // skills don't count: a dynamic OpenClaude skill outranks them.
+  const baseCommandNames = new Set(
+    baseCommands.filter(c => !getSiblingSkillsHomeId(c)).map(c => c.name),
+  )
+  // Registered owners reserve names even when unavailable or disabled. Apply
+  // this before either insertion branch loses those owners to availability.
+  const unshadowedSiblings = new Set(filterShadowedSiblingSkills(
+    dynamicSkills.filter(s => getSiblingSkillsHomeId(s)),
+    [...allCommands, ...dynamicSkills].filter(c => !getSiblingSkillsHomeId(c)),
+  ))
   const uniqueDynamicSkills = dynamicSkills.filter(
     s =>
       !baseCommandNames.has(s.name) &&
+      (!getSiblingSkillsHomeId(s) || unshadowedSiblings.has(s)) &&
       meetsAvailabilityRequirement(s) &&
       isCommandEnabled(s),
   )
@@ -562,14 +587,14 @@ export async function getCommands(cwd: string): Promise<Command[]> {
   const insertIndex = baseCommands.findIndex(c => builtInNames.has(c.name))
 
   if (insertIndex === -1) {
-    return [...baseCommands, ...uniqueDynamicSkills]
+    return applySiblingSkillPrecedence([...baseCommands, ...uniqueDynamicSkills])
   }
 
-  return [
+  return applySiblingSkillPrecedence([
     ...baseCommands.slice(0, insertIndex),
     ...uniqueDynamicSkills,
     ...baseCommands.slice(insertIndex),
-  ]
+  ])
 }
 
 /**

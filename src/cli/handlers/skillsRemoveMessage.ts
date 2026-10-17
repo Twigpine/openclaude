@@ -1,3 +1,7 @@
+import {
+  getSiblingSkillsHome,
+  getSiblingSkillsHomeDisplayPath,
+} from '../../skills/siblingSkillHomes.js'
 import { getCommandName } from '../../types/command.js'
 import type { SkillListCommand } from './skillsListFormat.js'
 
@@ -42,4 +46,22 @@ export function getSkillRemoveNotFoundMessage(
   }
 
   return `Skill "${name}" not found.`
+}
+
+/**
+ * Skills read from another agent's home (~/.agents/skills, ~/.claude/skills)
+ * are read-only: OpenClaude never deletes from those directories.
+ */
+export function getSiblingSkillRemoveMessage(
+  skills: SkillListCommand[],
+  name: string,
+): string | undefined {
+  const siblingSkill = skills.find(
+    skill =>
+      skill.siblingSkillsHome !== undefined &&
+      (skill.name === name || getCommandName(skill) === name),
+  )
+  if (!siblingSkill?.siblingSkillsHome) return undefined
+  const home = getSiblingSkillsHome(siblingSkill.siblingSkillsHome)
+  return `Skill "${name}" is read from ${getSiblingSkillsHomeDisplayPath(home)}, which OpenClaude never modifies. Remove it there.`
 }

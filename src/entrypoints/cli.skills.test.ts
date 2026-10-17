@@ -29,7 +29,10 @@ async function readStream(
   }
 }
 
-async function runSkillsList(args: string[]): Promise<{
+async function runSkillsList(
+  args: string[],
+  siblingSkills: string[] = [],
+): Promise<{
   exitCode: number
   stderr: string
   stdout: string
@@ -41,6 +44,14 @@ async function runSkillsList(args: string[]): Promise<{
     const configDir = join(root, 'config')
     mkdirSync(projectDir)
     mkdirSync(homeDir)
+    for (const name of siblingSkills) {
+      const skillDir = join(homeDir, '.agents', 'skills', name)
+      mkdirSync(skillDir, { recursive: true })
+      writeFileSync(
+        join(skillDir, 'SKILL.md'),
+        `---\ndescription: sibling ${name}\n---\nInstructions\n`,
+      )
+    }
 
     const proc = Bun.spawn({
       cmd: [process.execPath, cliEntrypoint, ...args],
@@ -134,10 +145,24 @@ async function runSkillsList(args: string[]): Promise<{
 test('skills list bypasses provider startup validation', async () => {
   const { exitCode, stderr, stdout } = await runSkillsList(['skills', 'list'])
 
-  expect(exitCode).toBe(0)
+  expect(exitCode, stderr).toBe(0)
   expect(stdout).toContain('Skills: 0 enabled')
   expect(stdout).toContain('No installed skills found.')
   expect(stderr).not.toContain('OPENAI_API_KEY is required')
+}, 15_000)
+
+test('source CLI reserves bundled names when listing sibling skills', async () => {
+  const { exitCode, stderr, stdout } = await runSkillsList(
+    ['skills', 'list', '--json'],
+    ['simplify', 'pdf', 'sibling-only'],
+  )
+  expect(exitCode, stderr).toBe(0)
+  const result = JSON.parse(stdout)
+  expect(result.enabledCount).toBe(1)
+  expect(result.skills.map((skill: { name: string }) => skill.name)).toEqual([
+    'sibling-only',
+  ])
+  expect(result.skills[0].source).toBe('agents')
 }, 15_000)
 
 test('skills list bypasses provider startup validation after --bare', async () => {
@@ -147,7 +172,7 @@ test('skills list bypasses provider startup validation after --bare', async () =
     'list',
   ])
 
-  expect(exitCode).toBe(0)
+  expect(exitCode, stderr).toBe(0)
   expect(stdout).toContain('Skills: 0 enabled')
   expect(stdout).toContain('No installed skills found.')
   expect(stderr).not.toContain('OPENAI_API_KEY is required')
@@ -161,7 +186,7 @@ test('skills list bypasses provider startup validation after --settings', async 
     'list',
   ])
 
-  expect(exitCode).toBe(0)
+  expect(exitCode, stderr).toBe(0)
   expect(stdout).toContain('Skills: 0 enabled')
   expect(stderr).not.toContain('OPENAI_API_KEY is required')
 }, 15_000)
@@ -174,7 +199,7 @@ test('skills list bypasses provider startup validation after --setting-sources',
     'list',
   ])
 
-  expect(exitCode).toBe(0)
+  expect(exitCode, stderr).toBe(0)
   expect(stdout).toContain('Skills: 0 enabled')
   expect(stderr).not.toContain('OPENAI_API_KEY is required')
 }, 15_000)
@@ -197,7 +222,7 @@ test('skills list honors --add-dir before provider startup validation', async ()
       'list',
     ])
 
-    expect(exitCode).toBe(0)
+    expect(exitCode, stderr).toBe(0)
     expect(stdout).toContain('addon')
     expect(stderr).not.toContain('OPENAI_API_KEY is required')
   } finally {
@@ -221,7 +246,7 @@ test('skills list accepts equals-form global flags before provider startup valid
       'list',
     ])
 
-    expect(exitCode).toBe(0)
+    expect(exitCode, stderr).toBe(0)
     expect(stdout).toContain('Skills: 0 enabled')
     expect(stderr).not.toContain('OPENAI_API_KEY is required')
   } finally {
@@ -274,7 +299,7 @@ test('skills list accepts trailing global flags', async () => {
     '--bare',
   ])
 
-  expect(exitCode).toBe(0)
+  expect(exitCode, stderr).toBe(0)
   expect(stdout).toContain('Skills: 0 enabled')
   expect(stderr).not.toContain('Unknown skills option')
 }, 15_000)
@@ -297,7 +322,7 @@ test('skills list honors trailing --add-dir', async () => {
       addDirRoot,
     ])
 
-    expect(exitCode).toBe(0)
+    expect(exitCode, stderr).toBe(0)
     expect(stdout).toContain('addon')
     expect(stderr).not.toContain('Unknown skills option')
   } finally {

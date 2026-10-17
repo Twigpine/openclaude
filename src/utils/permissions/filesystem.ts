@@ -475,7 +475,9 @@ export const getClaudeTempDir = memoize(function getClaudeTempDir(): string {
 export const getBundledSkillsRoot = memoize(
   function getBundledSkillsRoot(): string {
     const nonce = randomBytes(16).toString('hex')
-    return join(getClaudeTempDir(), 'bundled-skills', MACRO.VERSION, nonce)
+    // Source-mode management commands register bundled skills without build macros.
+    const version = typeof MACRO === 'undefined' ? 'development' : MACRO.VERSION
+    return join(getClaudeTempDir(), 'bundled-skills', version, nonce)
   },
 )
 

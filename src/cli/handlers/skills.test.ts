@@ -31,12 +31,17 @@ import {
 } from '../../utils/fsOperations.js'
 import { skillsInstallHandler } from './skillsInstall.ts'
 import { skillsRemoveHandler } from './skills.ts'
+import { getSiblingSkillsHome } from '../../skills/siblingSkillHomes.js'
 import {
   formatSkillsListForDisplay,
   formatSkillsListJson,
+  sourceLabel,
   trustLabel,
 } from './skillsListFormat.ts'
-import { getSkillRemoveNotFoundMessage } from './skillsRemoveMessage.ts'
+import {
+  getSiblingSkillRemoveMessage,
+  getSkillRemoveNotFoundMessage,
+} from './skillsRemoveMessage.ts'
 import { validateSkillPath } from './skillsValidation.ts'
 
 type SkillCommand = Command & { type: 'prompt' }
@@ -400,6 +405,78 @@ test('formats all-bundled skills as empty json', () => {
 
   assert.equal(parsed.enabledCount, 0)
   assert.deepEqual(parsed.skills, [])
+})
+
+function siblingSkill(
+  name: string,
+  description: string,
+  siblingSkillsHome: 'agents' | 'claude-code',
+): SkillCommand {
+  return { ...skill(name, description, 'userSettings'), siblingSkillsHome }
+}
+
+const unloadedClaudeCodeHome = {
+  home: {
+    ...getSiblingSkillsHome('claude-code'),
+    path: '/home/tester/.claude/skills',
+    enabled: false,
+    pinnedBy: undefined,
+  },
+  count: 3,
+}
+
+test('labels skills read from sibling homes by their home', () => {
+  const agentsSkill = siblingSkill('agent-skill', 'From agents.', 'agents')
+  const parsed = JSON.parse(formatSkillsListJson([agentsSkill])) as {
+    skills: Array<{ source: string; siblingHome: string | null }>
+    unloadedSkillHomes: unknown[]
+  }
+
+  assert.equal(sourceLabel(agentsSkill), 'agents')
+  assert.equal(parsed.skills[0]?.source, 'agents')
+  assert.equal(parsed.skills[0]?.siblingHome, 'agents')
+  assert.deepEqual(parsed.unloadedSkillHomes, [])
+})
+
+test('reports sibling homes that hold skills but are switched off', () => {
+  const parsed = JSON.parse(
+    formatSkillsListJson(
+      [skill('debug', 'Debug things.', 'projectSettings')],
+      [unloadedClaudeCodeHome],
+    ),
+  ) as { unloadedSkillHomes: unknown[] }
+  assert.deepEqual(parsed.unloadedSkillHomes, [
+    {
+      path: '~/.claude/skills',
+      setting: 'claudeCodeSkillsEnabled',
+      count: 3,
+    },
+  ])
+
+  const hint =
+    '3 skills in ~/.claude/skills aren\'t loaded. Enable "Load skills from ~/.claude/skills" in /config or set "claudeCodeSkillsEnabled": true in user settings.'
+  assert.equal(
+    formatSkillsListForDisplay(
+      [skill('debug', 'Debug things.', 'projectSettings')],
+      100,
+      [unloadedClaudeCodeHome],
+    ).endsWith(`\n\n${hint}`),
+    true,
+  )
+  assert.equal(
+    formatSkillsListForDisplay([], 100, [unloadedClaudeCodeHome]),
+    ['Skills: 0 enabled', '', 'No installed skills found.', '', hint].join('\n'),
+  )
+})
+
+test('explains that sibling-home skills are never removed by OpenClaude', () => {
+  const skills = [siblingSkill('agent-skill', 'From agents.', 'agents')]
+
+  assert.equal(
+    getSiblingSkillRemoveMessage(skills, 'agent-skill'),
+    'Skill "agent-skill" is read from ~/.agents/skills, which OpenClaude never modifies. Remove it there.',
+  )
+  assert.equal(getSiblingSkillRemoveMessage(skills, 'other'), undefined)
 })
 
 test('explains remove scope mismatch for globally installed skills', () => {

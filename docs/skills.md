@@ -1,6 +1,6 @@
 # Skills
 
-A skill is a folder with a `SKILL.md` file. OpenClaude loads every skill it finds in the project's `.openclaude/skills` directory and in your user skills directory at start, and the model can invoke them by name. This guide covers the `openclaude skills` commands, what each install path checks, and how to keep checking installed skills after that.
+A skill is a folder with a `SKILL.md` file. OpenClaude loads every skill it finds in the project's `.openclaude/skills` directory and in your user skills directory at start, and the model can invoke them by name. It also reads skills that other coding agents keep in `~/.agents/skills`, and in `~/.claude/skills` if you turn that on; see [Skills from other agents](#skills-from-other-agents). This guide covers the `openclaude skills` commands, what each install path checks, and how to keep checking installed skills after that.
 
 ## Commands
 
@@ -54,7 +54,28 @@ openclaude skills install ./my-skills/deploy
 
 ## List, show, validate, remove
 
-`list` prints every installed skill with its status and description; add `--json` for machine output. `show <name>` prints the source, trust tier, and the full skill text. `validate <path>` checks a skill directory before you publish it: the frontmatter fields, the skill name, the file size limits, and a few content patterns such as a `curl` piped to a shell. It does not compare the files with a registry digest. `remove <name>` deletes a project skill; add `--global` for a user skill.
+`list` prints every installed skill with its status and description; add `--json` for machine output. `show <name>` prints the source, trust tier, and the full skill text. `validate <path>` checks a skill directory before you publish it: the frontmatter fields, the skill name, the file size limits, and a few content patterns such as a `curl` piped to a shell. It does not compare the files with a registry digest. `remove <name>` deletes a project skill; add `--global` for a user skill. It never deletes a skill read from another agent's directory.
+
+## Skills from other agents
+
+Other coding agents keep user skills in their own directories. OpenClaude also reads two of them, read-only, after all of its own skills:
+
+| Directory | Written by | Default | Setting |
+|---|---|---|---|
+| `~/.agents/skills` | Codex and other agents that share this directory, and `npx skills` global installs | on | `agentsSkillsEnabled` |
+| `~/.claude/skills` | Claude Code | off | `claudeCodeSkillsEnabled` |
+
+Turn either directory on or off in `/config`, or set the key in your user settings file, `~/.openclaude/settings.json`:
+
+```json
+{ "claudeCodeSkillsEnabled": true }
+```
+
+- A skill from these directories never replaces anything of OpenClaude's. When a project, user, plugin, or bundled skill, or a built-in command, has the same name, the other agent's skill is skipped. When both directories hold a skill with the same name, the one in `~/.agents/skills` loads. A skill folder linked into more than one of these directories loads once, and from `~/.openclaude/skills` when it is linked there.
+- OpenClaude does not write to these directories. `openclaude skills remove` refuses skills that come from them and names the directory to remove them from.
+- The two settings are read from user, local, `--settings`, and managed settings only. A project's `.openclaude/settings.json` cannot change them, so a cloned repository cannot make OpenClaude read another tool's directory. `/config` writes your user settings. Managed, `--settings`, and local settings outrank user settings, so when one of them sets a directory's value, `/config` hides that directory's toggle and `/skills` shows no hint for it. Both directories are skipped with `--bare`, when `--setting-sources` leaves out `user`, and when managed settings restrict skills to plugins.
+- The model sees skills through a listing with a size budget. When the listing runs over budget, skills from these directories are listed by name only before any OpenClaude skill description is shortened.
+- When a directory that is off holds skills, `/skills` and `openclaude skills list` show how many and how to turn it on. `openclaude skills list --json` and `openclaude skills show <name>` identify their source as `agents` or `claude-code`; JSON output includes a `siblingHome` field.
 
 ## What the install checks cover
 

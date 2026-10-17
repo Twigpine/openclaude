@@ -11,6 +11,7 @@ import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
 } from '../../services/analytics/index.js'
+import { getSiblingSkillsHomeId } from '../../skills/siblingSkillHomes.js'
 import { count } from '../../utils/array.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { toError } from '../../utils/errors.js'
@@ -128,6 +129,15 @@ export function formatCommandsWithinBudget(
     return fullEntries.map(e => e.full).join('\n')
   }
 
+  if (restCommands.some(cmd => getSiblingSkillsHomeId(cmd))) {
+    return formatWithSiblingSkillsLast(
+      commands,
+      fullEntries,
+      bundledIndices,
+      remainingBudget,
+    )
+  }
+
   const restNameOverhead =
     restCommands.reduce((sum, cmd) => sum + stringWidth(cmd.name) + 4, 0) +
     (restCommands.length - 1)
@@ -181,6 +191,88 @@ export function formatCommandsWithinBudget(
       const description = getCommandDescription(cmd)
       return `- ${cmd.name}: ${truncate(description, maxDescLen)}`
     })
+    .join('\n')
+}
+
+/**
+ * Over-budget listing when skills from other agents' homes are present. Those
+ * rank last: they drop to names only before any OpenClaude skill description
+ * is trimmed, and only get description space that OpenClaude skills leave
+ * unused. Bundled skills keep full descriptions, as in the default path.
+ */
+function formatWithSiblingSkillsLast(
+  commands: Command[],
+  fullEntries: { cmd: Command; full: string }[],
+  bundledIndices: Set<number>,
+  remainingBudget: number,
+): string {
+  const ownIndices: number[] = []
+  const siblingIndices: number[] = []
+  for (let i = 0; i < commands.length; i++) {
+    if (bundledIndices.has(i)) continue
+    if (getSiblingSkillsHomeId(commands[i]!)) {
+      siblingIndices.push(i)
+    } else {
+      ownIndices.push(i)
+    }
+  }
+
+  const nameOnly = (cmd: Command): string => `- ${cmd.name}`
+  // +1 per entry for the joining newline
+  const siblingNamesChars = siblingIndices.reduce(
+    (sum, i) => sum + stringWidth(nameOnly(commands[i]!)) + 1,
+    0,
+  )
+  const ownBudget = remainingBudget - siblingNamesChars
+  const ownFullChars = ownIndices.reduce(
+    (sum, i) => sum + stringWidth(fullEntries[i]!.full) + 1,
+    0,
+  )
+
+  const lines = new Map<number, string>()
+  if (ownFullChars <= ownBudget) {
+    for (const i of ownIndices) lines.set(i, fullEntries[i]!.full)
+    // ": " separates a sibling skill's name from its description
+    const siblingDescLen =
+      Math.floor((ownBudget - ownFullChars) / siblingIndices.length) - 2
+    for (const i of siblingIndices) {
+      const cmd = commands[i]!
+      lines.set(
+        i,
+        siblingDescLen >= MIN_DESC_LENGTH
+          ? `- ${cmd.name}: ${truncate(getCommandDescription(cmd), siblingDescLen)}`
+          : nameOnly(cmd),
+      )
+    }
+  } else {
+    for (const i of siblingIndices) lines.set(i, nameOnly(commands[i]!))
+    // "- " + ": " + newline around each OpenClaude skill's description
+    const ownNameOverhead = ownIndices.reduce(
+      (sum, i) => sum + stringWidth(commands[i]!.name) + 5,
+      0,
+    )
+    const ownDescLen =
+      ownIndices.length > 0
+        ? Math.floor((ownBudget - ownNameOverhead) / ownIndices.length)
+        : 0
+    for (const i of ownIndices) {
+      const cmd = commands[i]!
+      lines.set(
+        i,
+        ownDescLen >= MIN_DESC_LENGTH
+          ? `- ${cmd.name}: ${truncate(getCommandDescription(cmd), ownDescLen)}`
+          : nameOnly(cmd),
+      )
+    }
+  }
+
+  logForDebugging(
+    `[skills] listing over budget; ${siblingIndices.length} sibling-home skills ranked after ${ownIndices.length} OpenClaude skills`,
+  )
+  return commands
+    .map((_, i) =>
+      bundledIndices.has(i) ? fullEntries[i]!.full : lines.get(i)!,
+    )
     .join('\n')
 }
 

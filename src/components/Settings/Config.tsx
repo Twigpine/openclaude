@@ -41,6 +41,8 @@ import { SearchBox } from '../SearchBox.js';
 import { isSupportedTerminal, hasAccessToIDEExtensionDiffFeature } from '../../utils/ide.js';
 import { getInitialSettings, getSettingsForSource, updateSettingsForSource } from '../../utils/settings/settings.js';
 import { getUserMsgOptIn, setUserMsgOptIn } from '../../bootstrap/state.js';
+import { getSiblingSkillsHomeDisplayPath, resolveSiblingSkillsHomes, SIBLING_SKILL_HOMES, siblingSkillsSettingPatch } from '../../skills/siblingSkillHomes.js';
+import { skillChangeDetector } from '../../utils/skills/skillChangeDetector.js';
 import { DEFAULT_OUTPUT_STYLE_NAME } from 'src/constants/outputStyles.js';
 import { isEnvTruthy, isRunningOnHomespace } from 'src/utils/envUtils.js';
 import type { LocalJSXCommandContext, CommandResultDisplay } from '../../commands.js';
@@ -494,6 +496,24 @@ export function Config({
       });
     }
   },
+  // Skills read from other agents' homes (~/.agents/skills, ~/.claude/skills).
+  // Hidden when a source that outranks user settings (managed policy,
+  // --settings, local settings) pins the setting: this toggle writes user
+  // settings, so it could not change the effective value.
+  ...resolveSiblingSkillsHomes().filter(home => !home.pinnedBy).map(home => ({
+    id: home.settingKey,
+    label: home.configLabel,
+    value: home.enabled,
+    type: 'boolean' as const,
+    onChange(enabled: boolean) {
+      updateSettingsForSource('userSettings', siblingSkillsSettingPatch(home, enabled));
+      setSettingsData(prev_sibling => ({
+        ...prev_sibling,
+        ...siblingSkillsSettingPatch(home, enabled)
+      }));
+      void skillChangeDetector.reloadAfterSkillSourceSettingsChange();
+    }
+  })),
   // Fast mode toggle (internal-only, eliminated from external builds)
   ...(isFastModeEnabled() && isFastModeAvailable() ? [{
     id: 'fastMode',
@@ -1347,6 +1367,11 @@ export function Config({
     if (settingsData?.autoUpdatesChannel !== initialSettingsData.current?.autoUpdatesChannel) {
       formattedChanges.push(`Set auto-update channel to ${chalk.bold(settingsData?.autoUpdatesChannel ?? 'latest')}`);
     }
+    for (const home of SIBLING_SKILL_HOMES) {
+      if (settingsData?.[home.settingKey] !== initialSettingsData.current?.[home.settingKey]) {
+        formattedChanges.push(`${settingsData?.[home.settingKey] ? 'Enabled' : 'Disabled'} skills from ${getSiblingSkillsHomeDisplayPath(home)}`);
+      }
+    }
     if (formattedChanges.length > 0) {
       onClose(formattedChanges.join('\n'));
     } else {
@@ -1354,7 +1379,7 @@ export function Config({
         display: 'system'
       });
     }
-  }, [showSubmenu, changes, globalConfig, mainLoopModel, currentOutputStyle, currentLanguage, settingsData?.autoUpdatesChannel, isFastModeEnabled() ? (settingsData as Record<string, unknown> | undefined)?.fastMode : undefined, onClose]);
+  }, [showSubmenu, changes, globalConfig, mainLoopModel, currentOutputStyle, currentLanguage, settingsData?.autoUpdatesChannel, settingsData?.agentsSkillsEnabled, settingsData?.claudeCodeSkillsEnabled, isFastModeEnabled() ? (settingsData as Record<string, unknown> | undefined)?.fastMode : undefined, onClose]);
 
   // Restore all state stores to their mount-time snapshots. Changes are
   // applied to disk/AppState immediately on toggle, so "cancel" means
@@ -1391,7 +1416,10 @@ export function Config({
       outputStyle: il?.outputStyle
     });
     const iu = initialUserSettings;
+    const siblingSkillsSettingsChanged = SIBLING_SKILL_HOMES.some(home => getSettingsForSource('userSettings')?.[home.settingKey] !== iu?.[home.settingKey]);
     updateSettingsForSource('userSettings', {
+      agentsSkillsEnabled: iu?.agentsSkillsEnabled,
+      claudeCodeSkillsEnabled: iu?.claudeCodeSkillsEnabled,
       alwaysThinkingEnabled: iu?.alwaysThinkingEnabled,
       fastMode: iu?.fastMode,
       promptSuggestionEnabled: iu?.promptSuggestionEnabled,
@@ -1417,6 +1445,9 @@ export function Config({
         defaultMode: iu.permissions.defaultMode
       }
     });
+    if (siblingSkillsSettingsChanged) {
+      void skillChangeDetector.reloadAfterSkillSourceSettingsChange();
+    }
     // AppState: batch-restore all possibly-touched fields.
     const ia = initialAppState;
     setAppState(prev_23 => ({

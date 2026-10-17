@@ -60,6 +60,10 @@ export type PromptCommand = {
   skillFilePath?: string
   // Trust metadata loaded from installed skill.json files, when present.
   skillTrust?: string
+  // Set when the skill was discovered read-only in another agent's skills
+  // home (~/.agents/skills or ~/.claude/skills). These skills rank below
+  // every OpenClaude-owned skill and command.
+  siblingSkillsHome?: 'agents' | 'claude-code'
   // Execution context: 'inline' (default) or 'fork' (run as sub-agent)
   // 'inline' = skill content expands into the current conversation
   // 'fork' = skill runs in a sub-agent with separate context and token budget

@@ -336,7 +336,7 @@ import {
 import { asSessionId } from 'src/types/ids.js'
 import { jsonStringify } from '../utils/slowOperations.js'
 import { skillChangeDetector } from '../utils/skills/skillChangeDetector.js'
-import { getCommands, clearCommandsCache } from '../commands.js'
+import { getCommands, clearCommandMemoizationCaches } from '../commands.js'
 import {
   isBareMode,
   isEnvTruthy,
@@ -2021,7 +2021,8 @@ function runHeadlessStreaming(
 
   // Subscribe to skill changes for hot reloading
   const unsubscribeSkillChanges = skillChangeDetector.subscribe(() => {
-    clearCommandsCache()
+    // Preserve newly activated skills; the detector owns source invalidation.
+    clearCommandMemoizationCaches()
     void getCommands(cwd()).then(newCommands => {
       currentCommands = newCommands
     })
