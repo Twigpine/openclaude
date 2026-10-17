@@ -1751,7 +1751,15 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
     const prev =
       current.disabledMcpServers ?? globalConfig.disabledMcpServers ?? []
     const next = toggleMembership(prev, name, !enabled)
-    if (next === prev) return current
+    // Keep coherent no-ops inherited. If disk already matches but our cached
+    // predicate disagrees, save the first override to publish the local toggle.
+    if (
+      next === prev &&
+      (current.disabledMcpServers !== undefined ||
+        isMcpServerDisabled(name) === !enabled)
+    ) {
+      return current
+    }
     return { ...current, disabledMcpServers: next }
   })
 

@@ -15,9 +15,21 @@ const mcpImports = `
 `
 
 test.each([
-  { name: 'a', enabled: true, project: ['b'], global: ['a', 'b'] },
-  { name: 'c', enabled: false, project: ['a', 'b', 'c'], global: ['a', 'b', 'c'] },
-])('first project toggle preserves concurrent global disables: %j', scenario => {
+  { cached: ['a'], written: ['a', 'b'], name: 'a', enabled: true,
+    project: ['b'], global: ['a', 'b'] },
+  { cached: ['a'], written: ['a', 'b'], name: 'c', enabled: false,
+    project: ['a', 'b', 'c'], global: ['a', 'b', 'c'] },
+  // Disk already matches the toggle, but this process still sees the opposite.
+  { cached: ['a'], written: ['a', 'b'], name: 'b', enabled: false,
+    project: ['a', 'b'], global: ['a', 'b'] },
+  { cached: ['a', 'b'], written: ['a'], name: 'b', enabled: true,
+    project: ['a'], global: ['a'] },
+  // Coherent no-ops must keep inheriting rather than pinning a project list.
+  { cached: ['a', 'b'], written: ['a', 'b'], name: 'b', enabled: false,
+    project: null, global: ['a', 'b'] },
+  { cached: ['a'], written: ['a'], name: 'b', enabled: true,
+    project: null, global: ['a'] },
+])('first inherited toggle preserves immediate and restarted state: %j', scenario => {
   const configDir = mkdtempSync(join(tmpdir(), 'mcp-persistence-'))
   const env = { ...process.env, NODE_ENV: 'production', OPENCLAUDE_CONFIG_DIR: configDir }
   const run = (script: string) => {
@@ -30,11 +42,11 @@ test.each([
   }
   try {
     const writer = `${configImports}
-      saveGlobalConfig(c => ({ ...c, disabledMcpServers: ['a', 'b'] }))
+      saveGlobalConfig(c => ({ ...c, disabledMcpServers: ${JSON.stringify(scenario.written)} }))
     `
     const toggled = run(`${configImports}${mcpImports}
       import { spawnSync } from 'node:child_process'
-      saveGlobalConfig(c => ({ ...c, disabledMcpServers: ['a'] }))
+      saveGlobalConfig(c => ({ ...c, disabledMcpServers: ${JSON.stringify(scenario.cached)} }))
       getGlobalConfig()
       // Block the watcher while another process commits through the real lock.
       const writer = spawnSync(process.execPath, ['--eval', ${JSON.stringify(writer)}], {
@@ -43,16 +55,20 @@ test.each([
       if (writer.error || writer.status !== 0) throw new Error(writer.stderr || String(writer.error))
       const cached = getGlobalConfig().disabledMcpServers
       setMcpServerEnabled(${JSON.stringify(scenario.name)}, ${scenario.enabled})
-      console.log(JSON.stringify({ cached, project: getCurrentProjectConfig().disabledMcpServers }))
+      console.log(JSON.stringify({ cached,
+        targetDisabled: isMcpServerDisabled(${JSON.stringify(scenario.name)}),
+        project: getCurrentProjectConfig().disabledMcpServers ?? null,
+      }))
     `)
-    expect(toggled.cached).toEqual(['a'])
+    expect(toggled.cached).toEqual(scenario.cached)
+    expect(toggled.targetDisabled).toBe(!scenario.enabled)
     expect(toggled.project).toEqual(scenario.project)
 
     const restarted = run(`${configImports}${mcpImports}
       console.log(JSON.stringify({
         global: getGlobalConfig().disabledMcpServers,
-        project: getCurrentProjectConfig().disabledMcpServers,
-        siblingDisabled: isMcpServerDisabled('b'),
+        project: getCurrentProjectConfig().disabledMcpServers ?? null,
+        siblingDisabled: isMcpServerDisabled(${JSON.stringify(scenario.name === 'a' ? 'b' : 'a')}),
         targetDisabled: isMcpServerDisabled(${JSON.stringify(scenario.name)}),
       }))
     `)
