@@ -24,6 +24,9 @@ test.each([
     project: ['a', 'b'], global: ['a', 'b'] },
   { cached: ['a', 'b'], written: ['a'], name: 'b', enabled: true,
     project: ['a'], global: ['a'] },
+  // A peer already enabled the target by creating an explicit project list.
+  { cached: ['a', 'b'], written: ['a', 'b'], name: 'a', enabled: true,
+    peerEnable: true, project: ['b'], global: ['a', 'b'] },
   // Coherent no-ops must keep inheriting rather than pinning a project list.
   { cached: ['a', 'b'], written: ['a', 'b'], name: 'b', enabled: false,
     project: null, global: ['a', 'b'] },
@@ -41,13 +44,15 @@ test.each([
     return JSON.parse(result.stdout)
   }
   try {
-    const writer = `${configImports}
+    const writer = `${configImports}${mcpImports}
       saveGlobalConfig(c => ({ ...c, disabledMcpServers: ${JSON.stringify(scenario.written)} }))
+      ${'peerEnable' in scenario ? "setMcpServerEnabled('a', true)" : ''}
     `
     const toggled = run(`${configImports}${mcpImports}
       import { spawnSync } from 'node:child_process'
-      saveGlobalConfig(c => ({ ...c, disabledMcpServers: ${JSON.stringify(scenario.cached)} }))
+      // Start the production watcher before seeding the write-through cache.
       getGlobalConfig()
+      saveGlobalConfig(c => ({ ...c, disabledMcpServers: ${JSON.stringify(scenario.cached)} }))
       // Block the watcher while another process commits through the real lock.
       const writer = spawnSync(process.execPath, ['--eval', ${JSON.stringify(writer)}], {
         env: process.env, encoding: 'utf8', timeout: 15_000,
