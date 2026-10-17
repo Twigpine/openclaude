@@ -319,32 +319,32 @@ describe('skillChangeDetector reload batching', () => {
       stabilityThreshold: 10, pollInterval: 10, chokidarInterval: 10,
       reloadDebounce: 10, reloadCooldown: 10,
     })
-    const waitForHook = async (count: number) => {
-      for (let i = 0; i < 100 && executeConfigChangeHooks.mock.calls.length < count; i++) await sleep(20)
+    const editUntilHook = async (path: string, content: string, count: number) => {
+      // Chokidar's ready marks traversal completion, but Bun may still be
+      // initializing its polling baseline. Retry edits until one is observed.
+      const deadline = Date.now() + 2000
+      let edit = 0
+      while (executeConfigChangeHooks.mock.calls.length < count && Date.now() < deadline) {
+        writeFileSync(path, `${content} ${edit++}`)
+        await sleep(50)
+      }
       expect(executeConfigChangeHooks).toHaveBeenCalledTimes(count)
     }
     try {
       siblingSkillsHomePaths = [sibling]
       await detector.initialize()
       await new Promise<void>(resolve => realWatcher!.once('ready', resolve))
-      // Chokidar's ready marks traversal completion; Bun's polling watcher
-      // still needs to establish its initial stat baseline before the edit.
-      await sleep(30)
-      writeFileSync(siblingFile, 'enabled edit')
-      await waitForHook(1)
+      await editUntilHook(siblingFile, 'enabled edit', 1)
       siblingSkillsHomePaths = []
       await detector.reloadAfterSkillSourceSettingsChange()
       writeFileSync(siblingFile, 'disabled edit')
       await sleep(150)
       expect(executeConfigChangeHooks).toHaveBeenCalledTimes(1)
-      writeFileSync(ownFile, 'owned edit')
-      await waitForHook(2)
+      await editUntilHook(ownFile, 'owned edit', 2)
       siblingSkillsHomePaths = [sibling]
       await detector.reloadAfterSkillSourceSettingsChange()
       await new Promise<void>(resolve => realWatcher!.once('ready', resolve))
-      await sleep(30)
-      writeFileSync(siblingFile, 're-enabled edit')
-      await waitForHook(3)
+      await editUntilHook(siblingFile, 're-enabled edit', 3)
     } finally {
       await detector.dispose()
       rmSync(root, { recursive: true, force: true })
