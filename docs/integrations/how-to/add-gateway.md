@@ -374,6 +374,15 @@ that should support `/model refresh` and in-picker refresh. The shared
 discovery cache keeps curated entries visible while refreshes fail or become
 stale.
 
+
+Remote endpoints using the built-in `custom` route also use descriptor discovery
+in `/model`, including initial discovery and `/model refresh`. If no selectable
+models remain after merging configured profile models and applying the allowlist,
+a Default option stays available. Discovery honors `OPENAI_AUTH_HEADER`,
+`OPENAI_AUTH_HEADER_VALUE`, and `OPENAI_AUTH_SCHEME`, using the same auth partition
+for cached runtime limits. Local custom chat-completions endpoints using the
+`openai:` scoped cache retain the legacy picker.
+
 ## `providerModelMap` in mixed gateway catalogs
 
 If the gateway exposes a shared model under a route-specific API name, point

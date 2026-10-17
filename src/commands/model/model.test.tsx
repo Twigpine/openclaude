@@ -24,6 +24,11 @@ import {
 import { mergeRouteCatalogEntries } from '../../utils/model/routeCatalogOptions.js'
 import * as actualFastModeForModelTest from '../../utils/fastMode.js'
 import * as actualExtraUsageForModelTest from '../../utils/extraUsage.js'
+import * as actualDiscoveryServiceForModelTest from '../../integrations/discoveryService.js'
+import * as actualDiscoveryCacheForModelTest from '../../integrations/discoveryCache.js'
+
+const REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST = { ...actualDiscoveryServiceForModelTest }
+const REAL_DISCOVERY_CACHE_FOR_MODEL_TEST = { ...actualDiscoveryCacheForModelTest }
 
 // Snapshot the real fast-mode module up front so the cross-profile switch test
 // can mock it with a full surface and restore the real one afterwards.
@@ -46,6 +51,9 @@ const originalEnv = {
   OPENAI_API_BASE: process.env.OPENAI_API_BASE,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_API_KEYS: process.env.OPENAI_API_KEYS,
+  OPENAI_AUTH_HEADER: process.env.OPENAI_AUTH_HEADER,
+  OPENAI_AUTH_HEADER_VALUE: process.env.OPENAI_AUTH_HEADER_VALUE,
+  OPENAI_AUTH_SCHEME: process.env.OPENAI_AUTH_SCHEME,
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
   OPENAI_MODEL: process.env.OPENAI_MODEL,
   CMD_API_KEY: process.env.CMD_API_KEY,
@@ -231,6 +239,9 @@ afterEach(() => {
     restoreEnv('OPENAI_API_BASE', originalEnv.OPENAI_API_BASE)
     restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
     restoreEnv('OPENAI_API_KEYS', originalEnv.OPENAI_API_KEYS)
+    restoreEnv('OPENAI_AUTH_HEADER', originalEnv.OPENAI_AUTH_HEADER)
+    restoreEnv('OPENAI_AUTH_HEADER_VALUE', originalEnv.OPENAI_AUTH_HEADER_VALUE)
+    restoreEnv('OPENAI_AUTH_SCHEME', originalEnv.OPENAI_AUTH_SCHEME)
     restoreEnv('OPENROUTER_API_KEY', originalEnv.OPENROUTER_API_KEY)
     restoreEnv('OPENAI_MODEL', originalEnv.OPENAI_MODEL)
     restoreEnv('CMD_API_KEY', originalEnv.CMD_API_KEY)
@@ -285,13 +296,14 @@ type DiscoveryModelForTest = {
 }
 
 function mockDescriptorDiscovery(options: {
-  cachedModels: DiscoveryModelForTest[]
+  cachedModels: DiscoveryModelForTest[] | null
+  error?: string
   discoveredModels?: DiscoveryModelForTest[]
   routeId?: string
 }): void {
   mock.module('../../integrations/discoveryCache.js', () => ({
     clearDiscoveryCache: mock(async () => {}),
-    getCachedModels: mock(async () => ({
+    getCachedModels: mock(async () => options.cachedModels === null ? null : ({
       models: options.cachedModels,
       updatedAt: Date.now(),
       error: null,
@@ -312,7 +324,7 @@ function mockDescriptorDiscovery(options: {
     discoverModelsForRoute: mock(async () => {
       const routeId = options.routeId ?? 'openrouter'
       const rawStatic = getRouteDescriptor(routeId)?.catalog?.models ?? []
-      const discovered = (options.discoveredModels ?? options.cachedModels) as ModelCatalogEntry[]
+      const discovered = (options.discoveredModels ?? options.cachedModels ?? []) as ModelCatalogEntry[]
       const merged = filterAvailableCatalogEntries(
         mergeRouteCatalogEntries(rawStatic, discovered),
       )
@@ -320,8 +332,8 @@ function mockDescriptorDiscovery(options: {
         routeId,
         models: merged,
         stale: false,
-        error: null,
-        source: 'network',
+        error: options.error ? { message: options.error, recordedAt: Date.now() } : null,
+        source: options.error ? 'error' : 'network',
       }
     }),
     probeRouteReadiness: mock(async () => null),
@@ -3828,3 +3840,131 @@ test('cross-profile /model does NOT switch a literal prefixed model id lacking t
     instance.unmount()
   }
 })
+
+for (const state of ['cold', 'warm', 'failed', 'restricted', 'filtered-cold', 'filtered-warm'] as const) {
+  test(`/model remote custom discovery: ${state}`, async () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://custom.example/v1'
+    const filtered = state === 'filtered-cold' || state === 'filtered-warm'
+    process.env.OPENAI_MODEL = filtered ? 'allowed-private-model' : 'selected-model'
+    if (filtered) useSettings({ availableModels: ['allowed-private-model'] })
+    for (const key of [
+      'OPENAI_API_BASE', 'OPENROUTER_API_KEY',
+      'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GITHUB',
+      'CLAUDE_CODE_USE_MISTRAL', 'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    ]) delete process.env[key]
+    if (state === 'restricted') {
+      process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+    } else {
+      delete process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+    }
+    const model = { id: 'discovered-model', apiName: filtered ? 'blocked-model' : 'discovered-model', label: 'Discovered model' }
+    mockDescriptorDiscovery({
+      routeId: 'custom',
+      cachedModels: state === 'warm' || state === 'filtered-warm' ? [model] : null,
+      discoveredModels: state === 'failed' ? [] : [model],
+      error: state === 'failed' ? 'Endpoint unavailable' : undefined,
+    })
+    mockProviderProfiles()
+    const { discoverModelsForRoute } = await import('../../integrations/discoveryService.js')
+    const rendered = await renderModelCommandWithCapturedPicker(`remote-custom-${state}`)
+    try {
+      if (state === 'cold' || state === 'failed' || state === 'filtered-cold') {
+        await waitForCondition(() => rendered.getCapturedProps().discoveryState?.tone !== 'info')
+        expect(discoverModelsForRoute).toHaveBeenCalledWith('custom', expect.objectContaining({ forceRefresh: true }))
+      }
+      if (state === 'failed' || state === 'restricted' || filtered) {
+        expect(rendered.getCapturedProps().optionsOverride).toContainEqual(
+          expect.objectContaining({ value: null, label: 'Default (recommended)' }),
+        )
+      } else {
+        expect(rendered.getCapturedProps().optionsOverride).toContainEqual(
+          expect.objectContaining({ value: 'discovered-model', label: 'Discovered model' }),
+        )
+      }
+      if (state === 'failed') {
+        expect(rendered.getCapturedProps().discoveryState?.message).toContain('Endpoint unavailable')
+      }
+      if (state === 'restricted') expect(discoverModelsForRoute).not.toHaveBeenCalled()
+      if (filtered) {
+        rendered.getCapturedProps().onRefresh?.()
+        await waitForCondition(() => rendered.getCapturedProps().discoveryState?.message?.startsWith('No changes found') === true)
+        expect(rendered.getCapturedProps().optionsOverride).toEqual([
+          expect.objectContaining({ value: null, label: 'Default (recommended)' }),
+        ])
+      }
+      let message = ''
+      const { call } = await importFreshModelModule(`remote-custom-refresh-${state}`)
+      await call(value => { message = value ?? '' }, {} as never, 'refresh')
+      expect(message).toContain(
+        state === 'restricted' ? 'disabled' : state === 'failed' ? 'Endpoint unavailable' :
+          state === 'warm' || filtered ? 'No changes found' : 'Updated Custom (OpenAI-compatible) models',
+      )
+    } finally {
+      rendered.instance.unmount()
+      rendered.stdout.end()
+    }
+  })
+}
+
+for (const entryPoint of ['picker', 'slash'] as const) {
+  test(`/model ${entryPoint} refresh preserves a missing key across a profile switch`, async () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://profile-a.example/v1'
+    process.env.OPENAI_MODEL = 'model-a'
+    for (const key of [
+      'OPENAI_API_KEY', 'OPENAI_API_KEYS', 'OPENAI_API_BASE', 'OPENROUTER_API_KEY',
+      'OPENAI_AUTH_HEADER', 'OPENAI_AUTH_HEADER_VALUE', 'OPENAI_AUTH_SCHEME',
+      'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GITHUB', 'CLAUDE_CODE_USE_MISTRAL',
+      'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+      'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'ANTHROPIC_CUSTOM_HEADERS',
+    ]) delete process.env[key]
+    mockProviderProfiles()
+    mock.module('../../integrations/discoveryService.js', () => REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST)
+    const cached = { models: [{ id: 'model-a', apiName: 'model-a' }], updatedAt: Date.now(), error: null }
+    const clearCache = mock(async () => {
+      // Profile B activates while A's manual refresh is awaiting cache I/O.
+      await Promise.resolve()
+      process.env.OPENAI_BASE_URL = 'https://profile-b.example/v1'
+      process.env.OPENAI_API_KEY = 'profile-b-secret'
+    })
+    mock.module('../../integrations/discoveryCache.js', () => ({
+      clearDiscoveryCache: clearCache,
+      getCachedModels: mock(async () => cached),
+      getCachedModelsSync: () => cached,
+      setCachedModels: mock(async () => {}),
+      recordDiscoveryError: mock(async () => {}),
+      isCacheStale: mock(async () => false),
+      parseDurationString: () => 86_400_000,
+    }))
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ url: string; authorization: string | null }> = []
+    globalThis.fetch = mock(async (input, init) => {
+      requests.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') })
+      return new Response(JSON.stringify({ data: [{ id: 'model-a' }] }), { status: 200 })
+    }) as unknown as typeof globalThis.fetch
+    let rendered: Awaited<ReturnType<typeof renderModelCommandWithCapturedPicker>> | undefined
+    try {
+      if (entryPoint === 'picker') {
+        rendered = await renderModelCommandWithCapturedPicker('custom-manual-profile-switch')
+        expect(rendered.getCapturedProps().onRefresh).toBeDefined()
+        rendered.getCapturedProps().onRefresh?.()
+        await waitForCondition(() => rendered?.getCapturedProps().discoveryState?.message?.startsWith('No changes found') === true)
+      } else {
+        const { call } = await importFreshModelModule('custom-slash-profile-switch')
+        let message = ''
+        await call(value => { message = value ?? '' }, {} as never, 'refresh')
+        expect(message).toContain('No changes found')
+      }
+      expect(clearCache).toHaveBeenCalledTimes(1)
+      expect(requests).toEqual([{ url: 'https://profile-a.example/v1/models', authorization: null }])
+    } finally {
+      // mock.restore() does not undo module registrations; later tests need disk I/O.
+      mock.module('../../integrations/discoveryCache.js', () => REAL_DISCOVERY_CACHE_FOR_MODEL_TEST)
+      globalThis.fetch = originalFetch
+      rendered?.instance.unmount()
+      rendered?.stdout.end()
+    }
+  })
+}

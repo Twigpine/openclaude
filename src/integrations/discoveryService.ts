@@ -143,6 +143,7 @@ function fingerprintDiscoveryCachePartition(value: unknown): string {
 export function getDiscoveryCacheKey(
   routeId: string,
   options?: {
+    processEnv?: NodeJS.ProcessEnv
     baseUrl?: string
     apiKey?: string
     cacheKey?: string
@@ -171,10 +172,46 @@ function getRouteBaseUrl(
   return options?.baseUrl ?? getRouteDescriptor(routeId)?.defaultBaseUrl
 }
 
+// Keep custom endpoint authentication identical for requests and cache readers.
+function getCustomDiscoveryAuth(
+  routeId: string,
+  options?: { apiKey?: string; baseUrl?: string; processEnv?: NodeJS.ProcessEnv },
+): Record<string, string> | undefined {
+  if (routeId !== 'custom') return undefined
+  const env = options?.processEnv ?? process.env
+  const name = env.OPENAI_AUTH_HEADER?.trim()
+  if (!name || !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(name)) return undefined
+  const explicitValue = env.OPENAI_AUTH_HEADER_VALUE?.trim()
+  if (explicitValue && /[\r\n]/.test(explicitValue)) {
+    throw new Error('OPENAI_AUTH_HEADER_VALUE must not contain CR/LF characters')
+  }
+  const value =
+    explicitValue ||
+    firstUsableCredential(options?.apiKey) ||
+    firstUsableCredential(
+      resolveRouteCredentialValue({
+        routeId,
+        baseUrl: options?.baseUrl,
+        processEnv: env,
+      }),
+    )
+  const scheme = env.OPENAI_AUTH_SCHEME
+  const bearer =
+    scheme === 'bearer' ||
+    (scheme !== 'raw' && name.toLowerCase() === 'authorization')
+  return value ? { [name]: bearer ? `Bearer ${value}` : value } : {}
+}
+
 function getRouteDiscoveryApiKey(
   routeId: string,
-  options?: { baseUrl?: string; apiKey?: string },
+  options?: {
+    processEnv?: NodeJS.ProcessEnv
+    baseUrl?: string
+    apiKey?: string
+  },
 ): string | undefined {
+  if (getCustomDiscoveryAuth(routeId, options)) return undefined
+
   const baseUrl = getRouteBaseUrl(routeId, options)
   // ApiSmart's dedicated token must never be used for an overridden discovery
   // URL. Apply the same exact inference-endpoint boundary used by requests and
@@ -199,13 +236,15 @@ function getRouteDiscoveryApiKey(
     resolveRouteCredentialValue({
       routeId,
       baseUrl,
-      processEnv: process.env,
+      processEnv:
+        routeId === 'custom' ? options?.processEnv ?? process.env : process.env,
     }),
   )
 }
 
 export async function resolveDiscoveryRequestOptions<
   T extends {
+    processEnv?: NodeJS.ProcessEnv
     apiKey?: string
     cacheKey?: string
     baseUrl?: string
@@ -217,6 +256,11 @@ export async function resolveDiscoveryRequestOptions<
   resolverOptions?: { refreshXaiOAuth?: boolean },
 ): Promise<T> {
   const next = { ...(options ?? {}) } as T
+  if (routeId === 'custom') {
+    // Profile activation can change the global env while cache I/O is pending.
+    next.processEnv = { ...(next.processEnv ?? process.env) }
+    return next
+  }
   if (getRouteDiscoveryApiKey(routeId, next) || routeId !== 'xai') {
     return next
   }
@@ -248,7 +292,12 @@ export async function resolveDiscoveryRequestOptions<
 
 export function getRouteDiscoveryHeaders(
   routeId: string,
-  options?: { baseUrl?: string; headers?: Record<string, string> },
+  options?: {
+    processEnv?: NodeJS.ProcessEnv
+    apiKey?: string
+    baseUrl?: string
+    headers?: Record<string, string>
+  },
 ): Record<string, string> | undefined {
   const transportConfig = getRouteDescriptor(routeId)?.transportConfig
   // Descriptor headers are attribution, not transport plumbing: an `aimlapi`
@@ -281,7 +330,17 @@ export function getRouteDiscoveryHeaders(
           ...callerHeaders,
         }
 
-  return Object.keys(headers).length > 0 ? headers : undefined
+  const customAuth = getCustomDiscoveryAuth(routeId, options)
+  const requestHeaders = { ...headers }
+  for (const [name, value] of Object.entries(customAuth ?? {})) {
+    for (const existingName of Object.keys(requestHeaders)) {
+      if (existingName.toLowerCase() === name.toLowerCase()) {
+        delete requestHeaders[existingName]
+      }
+    }
+    requestHeaders[name] = value
+  }
+  return Object.keys(requestHeaders).length > 0 ? requestHeaders : undefined
 }
 
 function toDiscoveredModelEntry(modelId: string): ModelCatalogEntry {
@@ -343,6 +402,7 @@ function dedupeDiscoveredEntries(
 async function runDiscovery(
   routeId: string,
   options?: {
+    processEnv?: NodeJS.ProcessEnv
     baseUrl?: string
     apiKey?: string
     headers?: Record<string, string>
@@ -401,6 +461,7 @@ async function runDiscovery(
 export async function discoverModelsForRoute(
   routeId: string,
   options?: {
+    processEnv?: NodeJS.ProcessEnv
     baseUrl?: string
     apiKey?: string
     headers?: Record<string, string>
@@ -476,7 +537,10 @@ export async function discoverModelsForRoute(
   }
 
   try {
-    const discoveryOptions = await resolveDiscoveryRequestOptions(routeId, options)
+    const discoveryOptions = await resolveDiscoveryRequestOptions(
+      routeId,
+      routeId === 'custom' ? cachedOptions : options,
+    )
     const discoveryCacheKey = getDiscoveryCacheKey(routeId, discoveryOptions)
     const discovered = await runDiscovery(routeId, discoveryOptions)
     if (discovered === null) {
@@ -530,6 +594,7 @@ export async function discoverModelsForRoute(
 export async function refreshStartupDiscoveryForRoute(
   routeId: string,
   options?: {
+    processEnv?: NodeJS.ProcessEnv
     baseUrl?: string
     apiKey?: string
     headers?: Record<string, string>
@@ -561,7 +626,7 @@ export async function refreshStartupDiscoveryForRoute(
   }
 
   return discoverModelsForRoute(routeId, {
-    ...options,
+    ...(routeId === 'custom' ? cachedOptions : options),
     forceRefresh: true,
   })
 }
@@ -591,6 +656,7 @@ export async function refreshStartupDiscoveryForActiveRoute(
   }
 
   return refreshStartupDiscoveryForRoute(routeId, {
+    processEnv,
     baseUrl,
     headers:
       options?.headers ??

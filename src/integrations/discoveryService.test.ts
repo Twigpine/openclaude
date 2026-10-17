@@ -21,6 +21,9 @@ const originalEnv = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_API_KEYS: process.env.OPENAI_API_KEYS,
   OPENAI_MODEL: process.env.OPENAI_MODEL,
+  OPENAI_AUTH_HEADER: process.env.OPENAI_AUTH_HEADER,
+  OPENAI_AUTH_HEADER_VALUE: process.env.OPENAI_AUTH_HEADER_VALUE,
+  OPENAI_AUTH_SCHEME: process.env.OPENAI_AUTH_SCHEME,
   APISMART_API_KEY: process.env.APISMART_API_KEY,
   ANTHROPIC_CUSTOM_HEADERS: process.env.ANTHROPIC_CUSTOM_HEADERS,
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
@@ -63,6 +66,9 @@ function clearProviderEnv(): void {
   delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_API_KEYS
   delete process.env.OPENAI_MODEL
+  delete process.env.OPENAI_AUTH_HEADER
+  delete process.env.OPENAI_AUTH_HEADER_VALUE
+  delete process.env.OPENAI_AUTH_SCHEME
   delete process.env.APISMART_API_KEY
   delete process.env.ANTHROPIC_CUSTOM_HEADERS
   delete process.env.CLAUDE_CODE_USE_OPENAI
@@ -101,6 +107,9 @@ afterEach(() => {
     restoreEnvValue('OPENAI_API_KEY')
     restoreEnvValue('OPENAI_API_KEYS')
     restoreEnvValue('OPENAI_MODEL')
+    restoreEnvValue('OPENAI_AUTH_HEADER')
+    restoreEnvValue('OPENAI_AUTH_HEADER_VALUE')
+    restoreEnvValue('OPENAI_AUTH_SCHEME')
     restoreEnvValue('APISMART_API_KEY')
     restoreEnvValue('ANTHROPIC_CUSTOM_HEADERS')
     restoreEnvValue('CLAUDE_CODE_USE_OPENAI')
@@ -1391,4 +1400,102 @@ describe('resolveDiscoveryRouteIdFromBaseUrl', () => {
       resolveDiscoveryRouteIdFromBaseUrl('http://127.0.0.1:11434/v1'),
     ).toBe('ollama')
   })
+})
+
+// Exercise the real custom descriptor, HTTP request construction, disk cache,
+// and runtime-limit reader. Only the remote HTTP response is simulated.
+const customAuthCases: Array<{
+  name: string
+  value: string | undefined
+  scheme: string | undefined
+  expected: Record<string, string>
+}> = [
+  { name: 'X-API-Key', value: undefined, scheme: undefined, expected: { 'x-api-key': 'pooled-key' } },
+  { name: 'X-API-Key', value: 'explicit-key', scheme: 'raw', expected: { 'x-api-key': 'explicit-key' } },
+  { name: 'authorization', value: undefined, scheme: undefined, expected: { authorization: 'Bearer pooled-key' } },
+  { name: 'Authorization', value: 'explicit-key', scheme: 'raw', expected: { authorization: 'explicit-key' } },
+  { name: 'Authorization', value: 'explicit-key', scheme: undefined, expected: { authorization: 'Bearer explicit-key' } },
+  { name: 'X-API-Key', value: '', scheme: 'bearer', expected: { 'x-api-key': 'Bearer pooled-key' } },
+  { name: 'invalid header', value: 'explicit-key', scheme: undefined, expected: { authorization: 'Bearer pooled-key' } },
+  { name: 'invalid header', value: undefined, scheme: undefined, expected: { authorization: 'Bearer pooled-key' } },
+]
+for (const auth of customAuthCases) {
+  test(`custom discovery auth ${auth.name}/${auth.scheme}/${auth.value}`, async () => {
+    const { refreshStartupDiscoveryForActiveRoute, discoverModelsForRoute, getDiscoveryCacheKey } = await loadDiscoveryServiceModule()
+    const { resolveModelRuntimeLimits } = await import('./runtimeMetadata.js')
+    const env: NodeJS.ProcessEnv = {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://custom.example/v1',
+      OPENAI_API_KEYS: 'pooled-key,second-key',
+      OPENAI_AUTH_HEADER: auth.name,
+      OPENAI_AUTH_HEADER_VALUE: auth.value,
+      OPENAI_AUTH_SCHEME: auth.scheme,
+    }
+    const validName = !auth.name.includes(' ')
+    const callerHeaders = {
+      'X-Tenant': 'tenant-a',
+      ...(validName ? { [auth.name.toUpperCase()]: 'stale-key' } : {}),
+    }
+    env.ANTHROPIC_CUSTOM_HEADERS = Object.entries(callerHeaders)
+      .map(([name, value]) => `${name}: ${value}`).join('\n')
+    const requests: Array<{ url: string; headers: Record<string, string> }> = []
+    setMockFetch(mock((input, init) => {
+      const headers: Record<string, string> = {}
+      new Headers(init?.headers).forEach((value, name) => { headers[name] = value })
+      requests.push({ url: String(input), headers })
+      return Promise.resolve(new Response(JSON.stringify({
+        data: [{ id: 'remote-model', context_window: 123456 }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    }) as unknown as typeof globalThis.fetch)
+    const first = await refreshStartupDiscoveryForActiveRoute({ processEnv: env })
+    expect(first?.source).toBe('network')
+    expect(requests).toEqual([{ url: 'https://custom.example/v1/models', headers: { ...auth.expected, 'x-tenant': 'tenant-a' } }])
+    // The picker supplies the resolved credential; startup supplies its env.
+    const cached = await discoverModelsForRoute('custom', {
+      baseUrl: env.OPENAI_BASE_URL, apiKey: 'pooled-key', processEnv: env, headers: callerHeaders,
+    })
+    expect(cached?.source).toBe('cache')
+    expect(requests).toHaveLength(1)
+    expect(resolveModelRuntimeLimits({ model: 'remote-model', processEnv: env }).contextWindow).toBe(123456)
+    const identityOptions = { baseUrl: env.OPENAI_BASE_URL, apiKey: 'pooled-key', processEnv: env }
+    expect(getDiscoveryCacheKey('custom', { ...identityOptions, headers: callerHeaders })).toBe(
+      getDiscoveryCacheKey('custom', { ...identityOptions, headers: { 'X-Tenant': 'tenant-a' } }),
+    )
+    // An explicit custom-auth value selects a different account/catalog.
+    if (auth.name === 'Authorization') {
+      expect(resolveModelRuntimeLimits({
+        model: 'remote-model', processEnv: { ...env, OPENAI_AUTH_HEADER_VALUE: 'another-account' },
+      }).contextWindow).toBeUndefined()
+    }
+  })
+}
+
+test('custom startup discovery retains its auth when another profile activates', async () => {
+  const { refreshStartupDiscoveryForRoute } = await loadDiscoveryServiceModule()
+  const { resolveModelRuntimeLimits } = await import('./runtimeMetadata.js')
+  process.env.OPENAI_AUTH_HEADER = 'X-Profile-Key'
+  process.env.OPENAI_AUTH_HEADER_VALUE = 'profile-a-secret'
+  const requests: Array<{ url: string; secret: string | null }> = []
+  setMockFetch(mock((input, init) => {
+    requests.push({ url: String(input), secret: new Headers(init?.headers).get('X-Profile-Key') })
+    return Promise.resolve(new Response(JSON.stringify({
+      data: [{ id: 'model-a', context_window: 123456 }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+  }) as unknown as typeof globalThis.fetch)
+  // Profile activation applies env and starts discovery without awaiting it.
+  const pending = refreshStartupDiscoveryForRoute('custom', {
+    baseUrl: 'https://profile-a.example/v1',
+  })
+  process.env.OPENAI_AUTH_HEADER_VALUE = 'profile-b-secret'
+  expect((await pending)?.source).toBe('network')
+  expect(requests).toEqual([{ url: 'https://profile-a.example/v1/models', secret: 'profile-a-secret' }])
+  expect(resolveModelRuntimeLimits({
+    model: 'model-a',
+    processEnv: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://profile-a.example/v1',
+      OPENAI_AUTH_HEADER: 'X-Profile-Key',
+      OPENAI_AUTH_HEADER_VALUE: 'profile-a-secret',
+    },
+  }).contextWindow).toBe(123456)
 })

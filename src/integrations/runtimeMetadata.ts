@@ -484,6 +484,7 @@ function findCachedCatalogEntryForApiName(
     cacheIdentity = getXaiDiscoveryCacheIdentity(credentials) ?? apiKey
   }
   const cacheKey = getDiscoveryCacheKey(routeId, {
+    processEnv: runtimeEnv,
     baseUrl,
     apiKey,
     cacheKey: cacheIdentity,
