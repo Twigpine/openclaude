@@ -1738,7 +1738,7 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
   const isBuiltinStateChange =
     isDefaultDisabledBuiltin(name) && isMcpServerDisabled(name) === enabled
 
-  saveCurrentProjectConfig(current => {
+  saveCurrentProjectConfig((current, globalConfig) => {
     if (isDefaultDisabledBuiltin(name)) {
       const prev = current.enabledMcpServers || []
       const next = toggleMembership(prev, name, enabled)
@@ -1746,10 +1746,10 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
       return { ...current, enabledMcpServers: next }
     }
 
-    // The first project override starts from the effective inherited state,
-    // so toggling one server preserves every other disabled server.
+    // Inherit from the same disk snapshot as the project, so a stale global
+    // cache cannot drop another process's disables from the first override.
     const prev =
-      current.disabledMcpServers ?? getGlobalConfig().disabledMcpServers ?? []
+      current.disabledMcpServers ?? globalConfig.disabledMcpServers ?? []
     const next = toggleMembership(prev, name, !enabled)
     if (next === prev) return current
     return { ...current, disabledMcpServers: next }

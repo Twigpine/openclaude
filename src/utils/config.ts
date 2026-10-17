@@ -2040,11 +2040,14 @@ export function getCurrentProjectConfig(): ProjectConfig {
 }
 
 export function saveCurrentProjectConfig(
-  updater: (currentConfig: ProjectConfig) => ProjectConfig,
+  updater: (
+    currentConfig: ProjectConfig,
+    globalConfig: Readonly<GlobalConfig>,
+  ) => ProjectConfig,
 ): void {
   if (process.env.NODE_ENV === 'test') {
     const current = getTestProjectConfigForTesting()
-    const config = updater(current)
+    const config = updater(current, getTestGlobalConfigForTesting())
     // Skip if no changes (same reference returned)
     if (config === current) {
       return
@@ -2062,7 +2065,7 @@ export function saveCurrentProjectConfig(
       current => {
         const currentProjectConfig =
           current.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-        const newProjectConfig = updater(currentProjectConfig)
+        const newProjectConfig = updater(currentProjectConfig, current)
         // Skip if no changes (same reference returned)
         if (newProjectConfig === currentProjectConfig) {
           return current
@@ -2098,7 +2101,7 @@ export function saveCurrentProjectConfig(
     }
     const currentProjectConfig =
       config.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-    const newProjectConfig = updater(currentProjectConfig)
+    const newProjectConfig = updater(currentProjectConfig, config)
     // Skip if no changes (same reference returned)
     if (newProjectConfig === currentProjectConfig) {
       return
