@@ -1,12 +1,18 @@
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { call as knowledgeCall } from './knowledge.js'
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
-import { getArc, addEntity, resetArc } from '../../utils/conversationArc.js'
+import { getArc, resetArc, initializeArc, addGoal } from '../../utils/conversationArc.js'
 import { getGlobalGraph, resetGlobalGraph } from '../../utils/knowledgeGraph.js'
+import {
+  getMultiTurnStats,
+  getTurnHistory,
+  startNewTurn,
+} from '../../utils/multiTurnContext.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
+import { getAutoMemPath } from '../../memdir/paths.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -22,6 +28,7 @@ describe('knowledge command', () => {
     configDir = mkdtempSync(join(tmpdir(), 'openclaude-knowledge-command-'))
     process.env.CLAUDE_CONFIG_DIR = configDir
     setClaudeConfigHomeDirForTesting(configDir)
+    getAutoMemPath.cache?.clear?.()
     resetArc()
     resetGlobalGraph()
   })
@@ -36,6 +43,7 @@ describe('knowledge command', () => {
         process.env.CLAUDE_CONFIG_DIR = originalConfigDir
       }
       setClaudeConfigHomeDirForTesting(undefined)
+      getAutoMemPath.cache?.clear?.()
     } finally {
       const dirToRemove = configDir
       configDir = undefined
@@ -91,17 +99,51 @@ describe('knowledge command', () => {
     }
   })
 
-  it('clears the knowledge graph', async () => {
-    // Add a fact first
-    await addEntity('test', 'fact')
-    const graph = getGlobalGraph()
-    expect(Object.keys(graph.entities).length).toBe(1)
+  it('clears the knowledge graph and arc state', async () => {
+    // Seed a fact file so we have state to clear
+    const memDir = getAutoMemPath()
+    const factsDir = join(memDir, '.facts')
+    mkdirSync(factsDir, { recursive: true })
+    writeFileSync(join(factsDir, 'test-fact.md'), `---
+title: Test Fact
+type: reference
+factType: test
+description: A seeded fact
+---
 
-    // Clear it
+Test content
+`)
+
+    const graph = getGlobalGraph()
+    const countBefore = Object.keys(graph.entities).length
+    expect(countBefore).toBeGreaterThan(0)
+
+    // Seed arc state: initialize arc and add a goal
+    initializeArc(memDir)
+    addGoal('Test goal for clear')
+    expect(getArc()).not.toBeNull()
+    expect(getArc()!.goals.length).toBeGreaterThan(0)
+    expect(getArc()!.decisions.length).toBe(0)
+
+    // Seed multi-turn state: start a turn so it survives and must be reset
+    startNewTurn()
+    expect(getTurnHistory().length).toBeGreaterThan(0)
+    expect(getMultiTurnStats().totalTurns).toBeGreaterThan(0)
+
     const res = await knowledgeCallWithCapture('clear')
     const graphAfter = getGlobalGraph()
-    expect(Object.keys(graphAfter.entities).length).toBe(0)
     expect(res.toLowerCase()).toContain('cleared')
+    expect(Object.keys(graphAfter.entities).length).toBe(0)
+
+    // Multi-turn tracking must not inject prior tool-call context after clear
+    expect(getTurnHistory().length).toBe(0)
+    expect(getMultiTurnStats().totalTurns).toBe(0)
+
+    // Arc state should be reset (getArc re-initializes an empty arc
+    // since clear deletes the .arc.json file from disk)
+    expect(getArc()).not.toBeNull()
+    expect(getArc()!.goals.length).toBe(0)
+    expect(getArc()!.currentPhase).toBe('init')
   })
 
   it('shows error on unknown subcommand', async () => {

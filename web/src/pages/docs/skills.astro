@@ -37,11 +37,20 @@ const toc = [
 
   <h2 id="your-own">writing your own</h2>
   <p>
-    Project skills live in <code>.claude/skills/&lt;name&gt;/SKILL.md</code>; user-level
+    Project skills live in <code>.openclaude/skills/&lt;name&gt;/SKILL.md</code>; user-level
     skills default to <code>~/.openclaude/skills/</code> and follow
     <code>OPENCLAUDE_CONFIG_DIR</code> when it is set. Each SKILL.md has frontmatter
     (<code>name</code>, <code>description</code>) followed by the instructions the
     agent loads when the skill is invoked. Plugins can ship skills too — manage
     them with <code>/plugin</code>.
+  </p>
+  <p>
+    openclaude also reads skills that other coding agents keep in
+    <code>~/.agents/skills</code> (on by default) and Claude Code's
+    <code>~/.claude/skills</code> (off by default). It never writes to either
+    directory, and their skills never replace an openclaude skill or command with
+    the same name. Turn each one on or off in <code>/config</code>, or with
+    <code>agentsSkillsEnabled</code> and <code>claudeCodeSkillsEnabled</code> in
+    your user settings.
   </p>
 </DocsLayout>

@@ -1,4 +1,4 @@
-import { execaSync } from 'execa'
+import { execa, execaSync } from 'execa'
 import { join } from 'path'
 import { getClaudeConfigHomeDir } from '../envUtils.js'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
@@ -37,7 +37,7 @@ function shouldUseLegacyPasswordVault(): boolean {
 function runPowerShell(
   script: string,
   options?: { input?: string },
-): ReturnType<typeof execaSync> | null {
+): PowerShellResult | null {
   try {
     return execaSync('powershell.exe', ['-Command', script], {
       input: options?.input,
@@ -48,12 +48,27 @@ function runPowerShell(
   }
 }
 
-function commandOutputToString(
-  output:
-    | ReturnType<typeof execaSync>['stdout']
-    | ReturnType<typeof execaSync>['stderr']
-    | undefined,
-): string {
+async function runPowerShellAsync(
+  script: string,
+  options?: { input?: string },
+): Promise<PowerShellResult | null> {
+  try {
+    return await execa('powershell.exe', ['-Command', script], {
+      input: options?.input,
+      reject: false,
+    })
+  } catch {
+    return null
+  }
+}
+
+type PowerShellResult = {
+  exitCode?: number
+  stdout?: unknown
+  stderr?: unknown
+}
+
+function commandOutputToString(output: unknown): string {
   if (typeof output === 'string') {
     return output
   }
@@ -70,7 +85,7 @@ function commandOutputToString(
 }
 
 function getFailureWarning(
-  result: ReturnType<typeof execaSync> | null,
+  result: PowerShellResult | null,
   fallback: string,
 ): string {
   const stderr = commandOutputToString(result?.stderr).trim()
@@ -85,14 +100,10 @@ function getFailureWarning(
   return fallback
 }
 
-function readLegacyPasswordVault(): SecureStorageData | null {
-  if (!shouldUseLegacyPasswordVault()) {
-    return null
-  }
-
+function getLegacyPasswordVaultScript(): string {
   const resourceName = getLegacyResourceName().replace(/"/g, '`"')
   const username = getUsername().replace(/"/g, '`"')
-  const script = `
+  return `
     Add-Type -AssemblyName System.Runtime.WindowsRuntime
     try {
       $vault = New-Object Windows.Security.Credentials.PasswordVault
@@ -103,8 +114,11 @@ function readLegacyPasswordVault(): SecureStorageData | null {
       exit 1
     }
   `
+}
 
-  const result = runPowerShell(script)
+function parseCredentialOutput(
+  result: PowerShellResult | null,
+): SecureStorageData | null {
   const stdout = commandOutputToString(result?.stdout)
   if (result?.exitCode === 0 && stdout) {
     try {
@@ -113,62 +127,77 @@ function readLegacyPasswordVault(): SecureStorageData | null {
       return null
     }
   }
-
   return null
+}
+
+function readLegacyPasswordVault(): SecureStorageData | null {
+  if (!shouldUseLegacyPasswordVault()) {
+    return null
+  }
+
+  return parseCredentialOutput(runPowerShell(getLegacyPasswordVaultScript()))
+}
+
+async function readLegacyPasswordVaultAsync(): Promise<SecureStorageData | null> {
+  if (!shouldUseLegacyPasswordVault()) {
+    return null
+  }
+
+  return parseCredentialOutput(
+    await runPowerShellAsync(getLegacyPasswordVaultScript()),
+  )
+}
+
+function getDpapiReadScript(): string {
+  const filePath = escapePowerShellSingleQuoted(
+    getWindowsSecureStorageFilePath(),
+  )
+  const entropy = escapePowerShellSingleQuoted(
+    getWindowsSecureStorageEntropy(),
+  )
+  return `
+    try {
+      Add-Type -AssemblyName System.Security
+      $path = '${filePath}'
+      if (!(Test-Path -LiteralPath $path)) {
+        exit 1
+      }
+
+      $protectedBase64 = [System.IO.File]::ReadAllText(
+        $path,
+        [System.Text.Encoding]::UTF8
+      ).Trim()
+      if (-not $protectedBase64) {
+        exit 1
+      }
+
+      $protectedBytes = [Convert]::FromBase64String($protectedBase64)
+      $entropyBytes = [System.Text.Encoding]::UTF8.GetBytes('${entropy}')
+      $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+        $protectedBytes,
+        $entropyBytes,
+        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+      )
+      [Console]::Out.Write([System.Text.Encoding]::UTF8.GetString($bytes))
+    } catch {
+      exit 1
+    }
+  `
 }
 
 export const windowsCredentialStorage: SecureStorage = {
   name: 'credential-locker-dpapi',
   read(): SecureStorageData | null {
-    const filePath = escapePowerShellSingleQuoted(
-      getWindowsSecureStorageFilePath(),
+    return (
+      parseCredentialOutput(runPowerShell(getDpapiReadScript())) ??
+      readLegacyPasswordVault()
     )
-    const entropy = escapePowerShellSingleQuoted(
-      getWindowsSecureStorageEntropy(),
-    )
-    const script = `
-      try {
-        Add-Type -AssemblyName System.Security
-        $path = '${filePath}'
-        if (!(Test-Path -LiteralPath $path)) {
-          exit 1
-        }
-
-        $protectedBase64 = [System.IO.File]::ReadAllText(
-          $path,
-          [System.Text.Encoding]::UTF8
-        ).Trim()
-        if (-not $protectedBase64) {
-          exit 1
-        }
-
-        $protectedBytes = [Convert]::FromBase64String($protectedBase64)
-        $entropyBytes = [System.Text.Encoding]::UTF8.GetBytes('${entropy}')
-        $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
-          $protectedBytes,
-          $entropyBytes,
-          [System.Security.Cryptography.DataProtectionScope]::CurrentUser
-        )
-        [Console]::Out.Write([System.Text.Encoding]::UTF8.GetString($bytes))
-      } catch {
-        exit 1
-      }
-    `
-
-    const result = runPowerShell(script)
-    const stdout = commandOutputToString(result?.stdout)
-    if (result?.exitCode === 0 && stdout) {
-      try {
-        return jsonParse(stdout)
-      } catch {
-        return readLegacyPasswordVault()
-      }
-    }
-
-    return readLegacyPasswordVault()
   },
   async readAsync(): Promise<SecureStorageData | null> {
-    return this.read()
+    return (
+      parseCredentialOutput(await runPowerShellAsync(getDpapiReadScript())) ??
+      (await readLegacyPasswordVaultAsync())
+    )
   },
   update(data: SecureStorageData): { success: boolean; warning?: string } {
     const filePath = escapePowerShellSingleQuoted(

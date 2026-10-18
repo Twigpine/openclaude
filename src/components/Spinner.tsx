@@ -46,6 +46,7 @@ type Props = {
   pauseStartTimeRef: React.RefObject<number | null>;
   spinnerTip?: string;
   responseLengthRef: React.RefObject<number>;
+  responseLength?: number;
   overrideColor?: keyof Theme | null;
   overrideShimmerColor?: keyof Theme | null;
   overrideMessage?: string | null;
@@ -86,6 +87,7 @@ function SpinnerWithVerbInner({
   pauseStartTimeRef,
   spinnerTip,
   responseLengthRef,
+  responseLength,
   overrideColor,
   overrideShimmerColor,
   overrideMessage,
@@ -100,7 +102,7 @@ function SpinnerWithVerbInner({
   // NOTE: useAnimationFrame(50) lives in SpinnerAnimationRow, not here.
   // This component only re-renders when props or app state change —
   // it is no longer on the 50ms clock. All `time`-derived values
-  // (frame, glimmer, stalled intensity, token counter, thinking shimmer,
+  // (frame, glimmer, stalled intensity, token display, thinking shimmer,
   // elapsed-time timer) are computed inside the child.
 
   const tasks = useAppState(s => s.tasks);
@@ -269,7 +271,7 @@ function SpinnerWithVerbInner({
     }
   }
   return <Box flexDirection="column" width="100%" alignItems="flex-start">
-      <SpinnerAnimationRow mode={mode} reducedMotion={reducedMotion} hasActiveTools={hasActiveTools} responseLengthRef={responseLengthRef} message={message} messageColor={messageColor} shimmerColor={shimmerColor} overrideColor={overrideColor} loadingStartTimeRef={loadingStartTimeRef} totalPausedMsRef={totalPausedMsRef} pauseStartTimeRef={pauseStartTimeRef} spinnerSuffix={spinnerSuffix} verbose={verbose} columns={columns} hasRunningTeammates={hasRunningTeammates} teammateTokens={teammateTokens} foregroundedTeammate={foregroundedTeammate} leaderIsIdle={leaderIsIdle} thinkingStatus={thinkingStatus} effortSuffix={effortSuffix} />
+      <SpinnerAnimationRow mode={mode} reducedMotion={reducedMotion} hasActiveTools={hasActiveTools} responseLengthRef={responseLengthRef} responseLength={responseLength} message={message} messageColor={messageColor} shimmerColor={shimmerColor} overrideColor={overrideColor} loadingStartTimeRef={loadingStartTimeRef} totalPausedMsRef={totalPausedMsRef} pauseStartTimeRef={pauseStartTimeRef} spinnerSuffix={spinnerSuffix} verbose={verbose} columns={columns} hasRunningTeammates={hasRunningTeammates} teammateTokens={teammateTokens} foregroundedTeammate={foregroundedTeammate} leaderIsIdle={leaderIsIdle} thinkingStatus={thinkingStatus} effortSuffix={effortSuffix} />
       {showSpinnerTree && hasRunningTeammates ? <TeammateSpinnerTree selectedIndex={selectedIPAgentIndex} isInSelectionMode={viewSelectionMode === 'selecting-agent'} allIdle={allIdle} leaderVerb={leaderIsIdle ? undefined : leaderVerb} leaderIdleText={leaderIsIdle ? 'Idle' : undefined} leaderTokenCount={leaderTokenCount} /> : showExpandedTodos && tasksV2 && tasksV2.length > 0 ? <Box width="100%" flexDirection="column">
           <MessageResponse>
             <TaskListV2 tasks={tasksV2} />

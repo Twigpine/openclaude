@@ -1,6 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import {
+  bindSdkContextToAsyncGenerator,
   runWithSdkContext,
+  runOutsideSdkContext,
   getSessionId,
   regenerateSessionId,
   switchSession,
@@ -41,6 +43,123 @@ describe('SDK context isolation', () => {
     } finally {
       releaseSharedMutationLock()
     }
+  })
+
+  describe('lazy async generators', () => {
+    function bindSessionGenerator<T>(
+      sessionId: SessionId,
+      generator: AsyncGenerator<T>,
+    ): AsyncGenerator<T> {
+      return bindSdkContextToAsyncGenerator(
+        {
+          sessionId,
+          sessionProjectDir: null,
+          cwd: process.cwd(),
+          originalCwd: process.cwd(),
+        },
+        generator,
+      )
+    }
+
+    test('isolates concurrent lazy iterations', async () => {
+      const sessionA = '00000000-0000-4000-8000-00000000000a' as SessionId
+      const sessionB = '00000000-0000-4000-8000-00000000000b' as SessionId
+
+      const makeGenerator = (sessionId: SessionId) =>
+        bindSessionGenerator(
+          sessionId,
+          (async function* () {
+            await Promise.resolve()
+            yield getSessionId()
+          })(),
+        )
+
+      const [resultA, resultB] = await Promise.all([
+        makeGenerator(sessionA).next(),
+        makeGenerator(sessionB).next(),
+      ])
+
+      expect(resultA).toEqual({ value: sessionA, done: false })
+      expect(resultB).toEqual({ value: sessionB, done: false })
+      expect(getSessionId()).toBe(originalSessionId)
+    })
+
+    test('scopes return and throw cleanup', async () => {
+      const returnSession = '00000000-0000-4000-8000-00000000000c' as SessionId
+      const throwSession = '00000000-0000-4000-8000-00000000000d' as SessionId
+      let returnCleanupSession: SessionId | undefined
+      let throwCleanupSession: SessionId | undefined
+
+      const returnGenerator = bindSessionGenerator(
+        returnSession,
+        (async function* () {
+          try {
+            yield 'ready'
+          } finally {
+            returnCleanupSession = getSessionId()
+          }
+        })(),
+      )
+      const throwGenerator = bindSessionGenerator(
+        throwSession,
+        (async function* () {
+          try {
+            yield 'ready'
+          } catch {
+            throwCleanupSession = getSessionId()
+          }
+        })(),
+      )
+
+      await returnGenerator.next()
+      await returnGenerator.return(undefined)
+      await throwGenerator.next()
+      await throwGenerator.throw(new Error('stop'))
+
+      expect(returnCleanupSession).toBe(returnSession)
+      expect(throwCleanupSession).toBe(throwSession)
+    })
+
+    test('falls back to return when async disposal is unavailable', async () => {
+      const sdkSession = '00000000-0000-4000-8000-00000000000f' as SessionId
+      let cleanupSession: SessionId | undefined
+      const generator = {
+        next: async () => ({ value: 'ready', done: false as const }),
+        return: async () => {
+          cleanupSession = getSessionId()
+          return { value: undefined, done: true as const }
+        },
+        throw: async (error?: unknown) => { throw error },
+        [Symbol.asyncIterator]() { return this },
+      } as AsyncGenerator<string, void, unknown>
+      const bound = bindSessionGenerator(sdkSession, generator)
+
+      await bound[Symbol.asyncDispose]()
+
+      expect(cleanupSession).toBe(sdkSession)
+      expect(getSessionId()).toBe(originalSessionId)
+    })
+
+    test('keeps process-global async setup outside the SDK context', async () => {
+      const sdkSession = '00000000-0000-4000-8000-00000000000e' as SessionId
+      const observedSession = await runWithSdkContext(
+        {
+          sessionId: sdkSession,
+          sessionProjectDir: null,
+          cwd: process.cwd(),
+          originalCwd: process.cwd(),
+        },
+        () =>
+          runOutsideSdkContext(
+            () => new Promise<SessionId>(resolve => {
+              setTimeout(() => resolve(getSessionId()), 0)
+            }),
+          ),
+      )
+
+      expect(observedSession).toBe(originalSessionId)
+      expect(observedSession).not.toBe(sdkSession)
+    })
   })
 
   describe('setCwdState', () => {

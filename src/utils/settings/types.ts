@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import { z } from 'zod/v4'
+import { toJSONSchema, z } from 'zod/v4'
 import { SandboxSettingsSchema } from '../../entrypoints/sandboxTypes.js'
 import { isEnvTruthy } from '../envUtils.js'
 import { lazySchema } from '../lazySchema.js'
@@ -29,6 +29,103 @@ export {
 import { type HookCommand, HooksSchema } from '../../schemas/hooks.js'
 import { AutoFixConfigSchema } from '../../services/autoFix/autoFixConfig.js'
 import { count } from '../array.js'
+
+export const MAX_MODEL_PRICING_ENTRIES = 256
+export const MAX_MODEL_PRICING_ID_LENGTH = 512
+export const MAX_MODEL_TOKEN_RATE_USD_PER_MILLION = 100_000
+export const MAX_MODEL_WEB_SEARCH_RATE_USD_PER_REQUEST = 1_000
+
+const ModelTokenRateSchema = z
+  .number()
+  .finite()
+  .nonnegative()
+  .max(MAX_MODEL_TOKEN_RATE_USD_PER_MILLION)
+
+export const ModelPricingEntrySchema = z
+  .object({
+    inputTokens: ModelTokenRateSchema.describe(
+      'Input-token price in USD per 1,000,000 tokens.',
+    ),
+    outputTokens: ModelTokenRateSchema.describe(
+      'Output-token price in USD per 1,000,000 tokens.',
+    ),
+    promptCacheReadTokens: ModelTokenRateSchema.describe(
+      'Prompt-cache read price in USD per 1,000,000 tokens.',
+    ),
+    promptCacheWriteTokens: ModelTokenRateSchema.describe(
+      'Prompt-cache write price in USD per 1,000,000 tokens.',
+    ),
+    webSearchRequests: z
+      .number()
+      .finite()
+      .nonnegative()
+      .max(MAX_MODEL_WEB_SEARCH_RATE_USD_PER_REQUEST)
+      .optional()
+      .describe(
+        'Web-search price in USD per request. Defaults to $0.01 when omitted.',
+      ),
+  })
+  .strict()
+
+const MODEL_PRICING_KEY_PREFIX = '\0'
+
+const ModelPricingJSONSchema = z.record(
+  z.string().min(1).max(MAX_MODEL_PRICING_ID_LENGTH),
+  ModelPricingEntrySchema,
+)
+
+const ModelPricingSchema = z.preprocess(
+  value => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return value
+    }
+    // Zod's record parser treats Object.prototype names as structural record
+    // members. Prefix every raw own key before validation so arbitrary exact
+    // model ids such as `constructor`, `toString`, and `__proto__` stay data.
+    const entries = Object.entries(value)
+    if (
+      entries.length > MAX_MODEL_PRICING_ENTRIES ||
+      entries.some(
+        ([model]) =>
+          model.length < 1 || model.length > MAX_MODEL_PRICING_ID_LENGTH,
+      )
+    ) {
+      return null
+    }
+    const encoded: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >
+    for (const [model, entry] of entries) {
+      encoded[MODEL_PRICING_KEY_PREFIX + model] = entry
+    }
+    return encoded
+  },
+  z
+    .record(z.string(), ModelPricingEntrySchema)
+    .transform(value => {
+      const decoded = Object.create(null) as Record<
+        string,
+        z.infer<typeof ModelPricingEntrySchema>
+      >
+      for (const [encodedModel, entry] of Object.entries(value)) {
+        decoded[encodedModel.slice(MODEL_PRICING_KEY_PREFIX.length)] = entry
+      }
+      return decoded
+    }),
+)
+
+export const ModelPricingDiagnosticSchema = z.unknown().superRefine(
+  (value, context) => {
+    if (!ModelPricingSchema.safeParse(value).success) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Invalid modelPricing value was ignored',
+        params: { received: value },
+      })
+    }
+  },
+)
 
 /**
  * Schema for environment variables
@@ -114,6 +211,19 @@ export const ExtraKnownMarketplaceSchema = lazySchema(() =>
       ),
   }),
 )
+
+// The prefix transform above is deliberately invisible to settings authors,
+// so expose the equivalent public input contract to JSON Schema consumers.
+// Zod documents this hook for schemas whose runtime representation needs a
+// custom JSON Schema (the preprocess itself is otherwise unrepresentable).
+ModelPricingSchema._zod.toJSONSchema = () => {
+  const schema = toJSONSchema(ModelPricingJSONSchema, {
+    unrepresentable: 'any',
+  }) as Record<string, unknown>
+  delete schema.$schema
+  schema.maxProperties = MAX_MODEL_PRICING_ENTRIES
+  return schema
+}
 
 /**
  * Schema for allowed MCP server entry in enterprise allowlist.
@@ -341,7 +451,7 @@ export const SettingsSchema = lazySchema(() =>
         .int()
         .optional()
         .describe(
-          'Number of days to retain chat transcripts (default: 30). Setting to 0 disables session persistence entirely: no transcripts are written and existing transcripts are deleted at startup.',
+          'Number of days to retain local session artifacts, including chat transcripts and completed background-session metadata and logs (default: 30). Setting to 0 disables transcript persistence entirely and removes completed background-session artifacts after they finish.',
         ),
       env: EnvironmentVariablesSchema()
         .optional()
@@ -381,6 +491,18 @@ export const SettingsSchema = lazySchema(() =>
         .optional()
         .describe(
           "Include built-in commit and PR workflow instructions in Claude's system prompt (default: true)",
+        ),
+      agentsSkillsEnabled: z
+        .boolean()
+        .optional()
+        .describe(
+          'Load skills read-only from the shared ~/.agents/skills directory, after all OpenClaude skills (default: true). Ignored in project settings.',
+        ),
+      claudeCodeSkillsEnabled: z
+        .boolean()
+        .optional()
+        .describe(
+          'Load skills read-only from Claude Code\'s ~/.claude/skills directory, after all OpenClaude skills (default: false). Ignored in project settings.',
         ),
       permissions: PermissionsSchema()
         .optional()
@@ -465,11 +587,11 @@ export const SettingsSchema = lazySchema(() =>
           'and feed errors back for self-repair.',
         ),
       worktree: z
-        .preprocess((val: any) => {
+        .preprocess((val: unknown) => {
           if (val && typeof val === 'object') {
-            const copy = { ...val }
+            const copy: Record<string, unknown> = { ...(val as Record<string, unknown>) }
             if ('enableGitLongPaths' in val && !('autoConfigureLongPaths' in val)) {
-              copy.autoConfigureLongPaths = val.enableGitLongPaths
+              copy.autoConfigureLongPaths = (val as Record<string, unknown>).enableGitLongPaths
             }
             return copy
           }
@@ -866,6 +988,17 @@ export const SettingsSchema = lazySchema(() =>
             'Keys are matched against the model name (exact match preferred, then prefix). ' +
             'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS / CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS env vars take precedence. ' +
             'Example: { "qwen3.6-plus": { "contextWindow": 1048576, "maxOutputTokens": 32768 } }',
+        ),
+      modelPricing: ModelPricingSchema.optional()
+        // One malformed pricing map must not invalidate unrelated settings in
+        // the same source. Drop the whole field so callers never combine a
+        // partially-trusted price with built-in cache rates.
+        .catch(undefined)
+        .describe(
+          'Exact-model pricing overrides. Token fields are USD per 1,000,000 tokens; ' +
+            'webSearchRequests is USD per request and defaults to $0.01 when omitted. ' +
+            'All four token fields are required. Keys are exact, case-sensitive resolved model ids. ' +
+            'Shared project settings are ignored for personal USD accounting.',
         ),
       fastMode: z
         .boolean()
@@ -1306,6 +1439,7 @@ export type DeniedMcpServerEntry = z.infer<
   ReturnType<typeof DeniedMcpServerEntrySchema>
 >
 export type SettingsJson = z.infer<ReturnType<typeof SettingsSchema>>
+export type ModelPricingEntry = z.infer<typeof ModelPricingEntrySchema>
 
 /**
  * Type guard for MCP server entry with serverName

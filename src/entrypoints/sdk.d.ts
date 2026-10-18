@@ -1,4 +1,4 @@
-// Type declarations for @gitlawb/openclaude SDK
+// Type declarations for @twigpine/openclaude SDK
 // Manually maintained — keep in sync with src/entrypoints/sdk/index.ts
 // Drift is caught by validate-externals.ts (runs in CI)
 
@@ -186,6 +186,26 @@ export type SessionMessage = {
 
 // Re-export precise SDK message types from generated types
 // These use camelCase field names and discriminated unions for full IntelliSense
+// Note: ToolAnnotations and CallToolResult shapes mirror the MCP SDK but are
+// declared locally to keep the public SDK declarations free of the optional
+// `@modelcontextprotocol/sdk` peer dependency. They are stable SDK shapes.
+type ToolAnnotations = {
+  title?: string
+  readOnlyHint?: boolean
+  destructiveHint?: boolean
+  idempotentHint?: boolean
+  openWorldHint?: boolean
+}
+type CallToolResult = {
+  content?: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; data: string; mimeType: string }
+    | { type: 'resource'; resource: { uri: string; text?: string; mimeType?: string } }
+    | { type: string; [key: string]: unknown }
+  >
+  isError?: boolean
+  [key: string]: unknown
+}
 import type {
   AccountInfo,
   AgentInfo,
@@ -441,12 +461,12 @@ export interface SDKSession {
 // MCP tool types
 // ============================================================================
 
-export interface SdkMcpToolDefinition<Schema = any> {
+export interface SdkMcpToolDefinition<Schema = unknown> {
   name: string
   description: string
   inputSchema: Schema
-  handler: (args: any, extra: unknown) => Promise<any>
-  annotations?: any
+  handler: (args: any, extra: unknown) => Promise<CallToolResult>
+  annotations?: ToolAnnotations
   searchHint?: string
   alwaysLoad?: boolean
 }
@@ -525,13 +545,13 @@ export function unstable_v2_prompt(
 // MCP tool functions
 // ============================================================================
 
-export function tool<Schema = any>(
+export function tool<Schema = unknown>(
   name: string,
   description: string,
   inputSchema: Schema,
-  handler: (args: any, extra: unknown) => Promise<any>,
+  handler: (args: any, extra: unknown) => Promise<CallToolResult>,
   extras?: {
-    annotations?: any
+    annotations?: ToolAnnotations
     searchHint?: string
     alwaysLoad?: boolean
   },

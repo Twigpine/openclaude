@@ -11,7 +11,7 @@ import { useAppState, useSetAppState } from '../state/AppState.js';
 import { convertEffortValueToLevel, type EffortLevel, getAvailableEffortLevels, getDefaultEffortForModel, modelSupportsEffort, modelSupportsMaxEffort, resolvePickerEffortPersistence, toPersistableEffort } from '../utils/effort.js';
 import { isModelAllowed } from '../utils/model/modelAllowlist.js';
 import { getDefaultMainLoopModel, type ModelSetting, modelDisplayString, parseUserSpecifiedModel } from '../utils/model/model.js';
-import { getModelOptions, type ModelOption, parseSwitchProfileValue, resolveSelectedSwitchProfileId } from '../utils/model/modelOptions.js';
+import { getModelOptions, SWITCH_PROFILE_VALUE_PREFIX, type ModelOption, parseSwitchProfileValue, resolveSelectedSwitchProfileId } from '../utils/model/modelOptions.js';
 import { getSettingsForSource, updateSettingsForSource } from '../utils/settings/settings.js';
 import { ConfigurableShortcutHint } from './ConfigurableShortcutHint.js';
 import { Select } from './CustomSelect/index.js';
@@ -496,7 +496,17 @@ function _temp(s) {
 // options share the value (a literal id colliding with an encoded switch
 // value), the match is ambiguous, so require exactly one option and treat that
 // lone option's marker as authoritative.
-function isGenuineSwitchProfileValue(value: string): boolean {
+//
+// Values that don't start with the switch prefix can never match a switch
+// option (switch values are always prefix-encoded), so short-circuit before
+// rebuilding the full getModelOptions() list — this runs on every render and
+// every focus change while the picker is open, and the rebuild is the dominant
+// cost with large model catalogs (e.g. hundreds of discovered/catalogued
+// models).
+export function isGenuineSwitchProfileValue(value: string): boolean {
+  if (!value.startsWith(SWITCH_PROFILE_VALUE_PREFIX)) {
+    return false
+  }
   return resolveSelectedSwitchProfileId(getModelOptions(), value) !== undefined;
 }
 function resolveOptionModel(value?: string): string | undefined {

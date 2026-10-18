@@ -3,10 +3,11 @@ import { SITE } from '../data/site'
 
 const links = [
   { href: '/docs/', label: 'docs' },
-  { href: '/docs/slash-commands/', label: 'commands' },
   { href: '/docs/providers/', label: 'providers' },
+  { href: '/buddy/', label: 'buddy' },
+  { href: SITE.releasesUrl, label: "what's new", newTab: true },
   { href: SITE.github, label: 'github' },
-  { href: SITE.gitlawb, label: 'gitlawb' },
+  { href: SITE.twigpine, label: 'twigpine' },
 ]
 
 const path = Astro.url.pathname
@@ -17,7 +18,6 @@ const path = Astro.url.pathname
     <a class="brand" href="/" aria-label="openclaude home">
       <img src="/openclaude.png" alt="" width="22" height="22" />
       <span>openclaude</span>
-      <span class="ver">v{SITE.version}</span>
     </a>
     <nav class="nav-links" aria-label="primary">
       {links.map(l => (
@@ -25,6 +25,7 @@ const path = Astro.url.pathname
           href={l.href}
           aria-current={path === l.href ? 'page' : undefined}
           rel={l.href.startsWith('http') ? 'noopener' : undefined}
+          target={l.newTab ? '_blank' : undefined}
         >{l.label}</a>
       ))}
       <button type="button" class="theme-toggle" data-theme-toggle aria-live="polite">[light]</button>
@@ -35,7 +36,7 @@ const path = Astro.url.pathname
   </div>
   <div class="mobile-menu" id="mobile-menu">
     {links.map(l => (
-      <a href={l.href} rel={l.href.startsWith('http') ? 'noopener' : undefined}>{l.label}</a>
+      <a href={l.href} rel={l.href.startsWith('http') ? 'noopener' : undefined} target={l.newTab ? '_blank' : undefined}>{l.label}</a>
     ))}
     <a href="#" data-theme-toggle role="button">[light]</a>
   </div>

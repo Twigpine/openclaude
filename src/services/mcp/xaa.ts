@@ -25,7 +25,6 @@ import { z } from 'zod/v4'
 import { createCombinedAbortSignal } from '../../utils/combinedAbortSignal.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { logMCPDebug } from '../../utils/log.js'
-import { jsonStringify } from '../../utils/slowOperations.js'
 
 const XAA_REQUEST_TIMEOUT_MS = 30000
 
@@ -81,19 +80,6 @@ export class XaaTokenExchangeError extends Error {
     this.name = 'XaaTokenExchangeError'
     this.shouldClearIdToken = shouldClearIdToken
   }
-}
-
-// Matches quoted values for known token-bearing keys regardless of nesting
-// depth. Works on both parsed-then-stringified bodies AND raw text() error
-// bodies from !res.ok paths — a misbehaving AS that echoes the request's
-// subject_token/assertion/client_secret in a 4xx error envelope must not leak
-// into debug logs.
-const SENSITIVE_TOKEN_RE =
-  /"(access_token|refresh_token|id_token|assertion|subject_token|client_secret)"\s*:\s*"[^"]*"/g
-
-function redactTokens(raw: unknown): string {
-  const s = typeof raw === 'string' ? raw : jsonStringify(raw)
-  return s.replace(SENSITIVE_TOKEN_RE, (_, k) => `"${k}":"[REDACTED]"`)
 }
 
 // ─── Zod Schemas ────────────────────────────────────────────────────────────
@@ -263,12 +249,12 @@ export async function requestJwtAuthorizationGrant(opts: {
     body: params,
   })
   if (!res.ok) {
-    const body = redactTokens(await res.text()).slice(0, 200)
+    await res.body?.cancel().catch(() => {})
     // 4xx → id_token rejected (invalid_grant etc.), clear cache.
     // 5xx → IdP outage, id_token may still be valid, preserve it.
     const shouldClear = res.status < 500
     throw new XaaTokenExchangeError(
-      `XAA: token exchange failed: HTTP ${res.status}: ${body}`,
+      `XAA: token exchange failed: HTTP ${res.status}`,
       shouldClear,
     )
   }
@@ -285,20 +271,20 @@ export async function requestJwtAuthorizationGrant(opts: {
   const exchangeParsed = TokenExchangeResponseSchema().safeParse(rawExchange)
   if (!exchangeParsed.success) {
     throw new XaaTokenExchangeError(
-      `XAA: token exchange response did not match expected shape: ${redactTokens(rawExchange)}`,
+      'XAA: token exchange response did not match expected shape',
       true,
     )
   }
   const result = exchangeParsed.data
   if (!result.access_token) {
     throw new XaaTokenExchangeError(
-      `XAA: token exchange response missing access_token: ${redactTokens(result)}`,
+      'XAA: token exchange response missing access_token',
       true,
     )
   }
   if (result.issued_token_type !== ID_JAG_TOKEN_TYPE) {
     throw new XaaTokenExchangeError(
-      `XAA: token exchange returned unexpected issued_token_type: ${result.issued_token_type}`,
+      'XAA: token exchange returned unexpected issued_token_type',
       true,
     )
   }
@@ -373,8 +359,8 @@ export async function exchangeJwtAuthGrant(opts: {
     body: params,
   })
   if (!res.ok) {
-    const body = redactTokens(await res.text()).slice(0, 200)
-    throw new Error(`XAA: jwt-bearer grant failed: HTTP ${res.status}: ${body}`)
+    await res.body?.cancel().catch(() => {})
+    throw new Error(`XAA: jwt-bearer grant failed: HTTP ${res.status}`)
   }
   let rawTokens: unknown
   try {
@@ -387,7 +373,7 @@ export async function exchangeJwtAuthGrant(opts: {
   const tokensParsed = JwtBearerResponseSchema().safeParse(rawTokens)
   if (!tokensParsed.success) {
     throw new Error(
-      `XAA: jwt-bearer response did not match expected shape: ${redactTokens(rawTokens)}`,
+      'XAA: jwt-bearer response did not match expected shape',
     )
   }
   return tokensParsed.data

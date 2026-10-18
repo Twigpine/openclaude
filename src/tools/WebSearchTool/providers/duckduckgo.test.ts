@@ -40,6 +40,24 @@ describe('DuckDuckGo SafeSearchType', () => {
 })
 
 describe('duckduckgoProvider retry cancellation', () => {
+  test('anomaly hint includes local and hosted Ollama configuration', async () => {
+    mock.module('duck-duck-scrape', () => ({
+      SafeSearchType: {
+        STRICT: 0,
+        MODERATE: -1,
+        OFF: -2,
+      },
+      search: async () => {
+        throw new Error('anomaly in the request')
+      },
+    }))
+
+    const { duckduckgoProvider } = await import('./duckduckgo.js')
+    await expect(
+      duckduckgoProvider.search({ query: 'blocked search' }),
+    ).rejects.toThrow(/OLLAMA_BASE_URL, OLLAMA_API_KEY/)
+  })
+
   test('provider-level timeout stops after one scrape attempt', async () => {
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
 

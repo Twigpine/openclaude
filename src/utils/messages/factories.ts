@@ -202,6 +202,7 @@ export function createUserMessage({
   isCollapseSummary,
   summarizeMetadata,
   toolUseResult,
+  imagePermissionToolUseIds,
   isAgentStepLimitToolResult,
   mcpMeta,
   uuid,
@@ -218,6 +219,7 @@ export function createUserMessage({
   isCompactSummary?: boolean
   isCollapseSummary?: boolean
   toolUseResult?: unknown // Matches tool's `Output` type
+  imagePermissionToolUseIds?: Array<string | null>
   isAgentStepLimitToolResult?: boolean
   /** MCP protocol metadata to pass through to SDK consumers (never sent to model) */
   mcpMeta?: {
@@ -259,6 +261,7 @@ export function createUserMessage({
     uuid: (uuid as UUID | undefined) || randomUUID(),
     timestamp: timestamp ?? new Date().toISOString(),
     toolUseResult,
+    imagePermissionToolUseIds,
     isAgentStepLimitToolResult,
     mcpMeta,
     imagePasteIds,

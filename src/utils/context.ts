@@ -223,6 +223,7 @@ function warnUnknownIntegrationRuntimeLimits(model: string): void {
 export function getContextWindowForModel(
   model: string,
   betas?: string[],
+  runtimeLimits?: { contextWindow?: number },
 ): number {
   // Allow override via environment variable (internal-only)
   // This takes precedence over all other context window resolution, including 1M detection,
@@ -254,13 +255,13 @@ export function getContextWindowForModel(
   // Unknown models get a conservative 128k default. This was previously 8k,
   // but that caused auto-compact to fire on every turn because the effective
   // context (8k minus output reservation) became negative (issue #635).
-  if (shouldUseIntegrationRuntimeLimits()) {
-    const runtimeLimits = resolveModelRuntimeLimits({
+  if (runtimeLimits?.contextWindow !== undefined || shouldUseIntegrationRuntimeLimits()) {
+    const resolvedRuntimeLimits = runtimeLimits ?? resolveModelRuntimeLimits({
       model,
       activeProfileProvider: getAppliedActiveProfileProvider(),
     })
-    if (runtimeLimits.contextWindow !== undefined) {
-      return runtimeLimits.contextWindow
+    if (resolvedRuntimeLimits.contextWindow !== undefined) {
+      return resolvedRuntimeLimits.contextWindow
     }
     warnUnknownIntegrationRuntimeLimits(model)
     return OPENAI_FALLBACK_CONTEXT_WINDOW

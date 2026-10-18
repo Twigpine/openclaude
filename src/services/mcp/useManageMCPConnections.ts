@@ -13,6 +13,7 @@ import {
   reconnectMcpServerImpl,
 } from './client.js'
 import type {
+  ConnectedMCPServer,
   MCPServerConnection,
   ScopedMcpServerConfig,
   ServerResource,
@@ -88,6 +89,159 @@ import { commandBelongsToServer, excludeStalePluginClients } from './utils.js'
 const MAX_RECONNECT_ATTEMPTS = 5
 const INITIAL_BACKOFF_MS = 1000
 const MAX_BACKOFF_MS = 30000
+
+type PendingUpdate = MCPServerConnection & {
+  tools?: Tool[]
+  commands?: Command[]
+  resources?: ServerResource[]
+}
+type ConnectedListUpdate = ConnectedMCPServer & {
+  tools?: Tool[]
+  commands?: Command[]
+  resources?: ServerResource[]
+}
+
+/**
+ * Register the production list-changed handlers at one testable seam. Keeping
+ * cache invalidation and refetch here ensures tests exercise the same closures
+ * the hook installs rather than reimplementing notification behavior.
+ */
+export function registerMcpListChangedHandlers(
+  client: ConnectedMCPServer,
+  updateServer: (update: ConnectedListUpdate) => void,
+): void {
+  if (client.capabilities?.tools?.listChanged) {
+    client.client.setNotificationHandler(
+      ToolListChangedNotificationSchema,
+      async () => {
+        logMCPDebug(
+          client.name,
+          `Received tools/list_changed notification, refreshing tools`,
+        )
+        try {
+          // Grab cached promise before invalidating to log previous count
+          const previousToolsPromise = fetchToolsForClient.cache.get(client.name)
+          fetchToolsForClient.cache.delete(client.name)
+          const newTools = await fetchToolsForClient(client)
+          const newCount = newTools.length
+          if (previousToolsPromise) {
+            previousToolsPromise.then(
+              (previousTools: Tool[]) => {
+                logEvent('tengu_mcp_list_changed', {
+                  type: 'tools' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                  previousCount: previousTools.length,
+                  newCount,
+                })
+              },
+              () => {
+                logEvent('tengu_mcp_list_changed', {
+                  type: 'tools' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                  newCount,
+                })
+              },
+            )
+          } else {
+            logEvent('tengu_mcp_list_changed', {
+              type: 'tools' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+              newCount,
+            })
+          }
+          updateServer({ ...client, tools: newTools })
+        } catch (error) {
+          logMCPError(
+            client.name,
+            `Failed to refresh tools after list_changed notification: ${errorMessage(error)}`,
+          )
+        }
+      },
+    )
+  }
+
+  if (client.capabilities?.prompts?.listChanged) {
+    client.client.setNotificationHandler(
+      PromptListChangedNotificationSchema,
+      async () => {
+        logMCPDebug(
+          client.name,
+          `Received prompts/list_changed notification, refreshing prompts`,
+        )
+        logEvent('tengu_mcp_list_changed', {
+          type: 'prompts' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        })
+        try {
+          // Skills come from resources, not prompts — don't invalidate their
+          // cache here. fetchMcpSkillsForClient returns the cached result.
+          fetchCommandsForClient.cache.delete(client.name)
+          const [mcpPrompts, mcpSkills] = await Promise.all([
+            fetchCommandsForClient(client),
+            feature('MCP_SKILLS')
+              ? fetchMcpSkillsForClient!(client)
+              : Promise.resolve([]),
+          ])
+          updateServer({
+            ...client,
+            commands: [...mcpPrompts, ...mcpSkills],
+          })
+          // MCP skills changed — invalidate skill-search index so next
+          // discovery rebuilds with the new set.
+          clearSkillIndexCache?.()
+        } catch (error) {
+          logMCPError(
+            client.name,
+            `Failed to refresh prompts after list_changed notification: ${errorMessage(error)}`,
+          )
+        }
+      },
+    )
+  }
+
+  if (client.capabilities?.resources?.listChanged) {
+    client.client.setNotificationHandler(
+      ResourceListChangedNotificationSchema,
+      async () => {
+        logMCPDebug(
+          client.name,
+          `Received resources/list_changed notification, refreshing resources`,
+        )
+        logEvent('tengu_mcp_list_changed', {
+          type: 'resources' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        })
+        try {
+          fetchResourcesForClient.cache.delete(client.name)
+          if (feature('MCP_SKILLS')) {
+            // Skills are discovered from resources, so refresh them too.
+            // Invalidate prompts cache as well: we write commands here, and a
+            // concurrent prompts/list_changed could otherwise have us stomp
+            // its fresh result with our cached stale one.
+            fetchMcpSkillsForClient!.cache.delete(client.name)
+            fetchCommandsForClient.cache.delete(client.name)
+            const [newResources, mcpPrompts, mcpSkills] = await Promise.all([
+              fetchResourcesForClient(client),
+              fetchCommandsForClient(client),
+              fetchMcpSkillsForClient!(client),
+            ])
+            updateServer({
+              ...client,
+              resources: newResources,
+              commands: [...mcpPrompts, ...mcpSkills],
+            })
+            // MCP skills changed — invalidate skill-search index so next
+            // discovery rebuilds with the new set.
+            clearSkillIndexCache?.()
+          } else {
+            const newResources = await fetchResourcesForClient(client)
+            updateServer({ ...client, resources: newResources })
+          }
+        } catch (error) {
+          logMCPError(
+            client.name,
+            `Failed to refresh resources after list_changed notification: ${errorMessage(error)}`,
+          )
+        }
+      },
+    )
+  }
+}
 
 /**
  * Create a unique key for a plugin error to enable deduplication
@@ -205,11 +359,6 @@ export function useManageMCPConnections(
   // (instead of queueMicrotask) ensures updates are batched even when
   // connection callbacks arrive at different times due to network I/O.
   const MCP_BATCH_FLUSH_MS = 100
-  type PendingUpdate = MCPServerConnection & {
-    tools?: Tool[]
-    commands?: Command[]
-    resources?: ServerResource[]
-  }
   const pendingUpdatesRef = useRef<PendingUpdate[]>([])
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -610,142 +759,9 @@ export function useManageMCPConnections(
             }
           }
 
-          // Register notification handlers for list_changed notifications
-          // These allow the server to notify us when tools, prompts, or resources change
-          if (client.capabilities?.tools?.listChanged) {
-            client.client.setNotificationHandler(
-              ToolListChangedNotificationSchema,
-              async () => {
-                logMCPDebug(
-                  client.name,
-                  `Received tools/list_changed notification, refreshing tools`,
-                )
-                try {
-                  // Grab cached promise before invalidating to log previous count
-                  const previousToolsPromise = fetchToolsForClient.cache.get(
-                    client.name,
-                  )
-                  fetchToolsForClient.cache.delete(client.name)
-                  const newTools = await fetchToolsForClient(client)
-                  const newCount = newTools.length
-                  if (previousToolsPromise) {
-                    previousToolsPromise.then(
-                      (previousTools: Tool[]) => {
-                        logEvent('tengu_mcp_list_changed', {
-                          type: 'tools' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                          previousCount: previousTools.length,
-                          newCount,
-                        })
-                      },
-                      () => {
-                        logEvent('tengu_mcp_list_changed', {
-                          type: 'tools' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                          newCount,
-                        })
-                      },
-                    )
-                  } else {
-                    logEvent('tengu_mcp_list_changed', {
-                      type: 'tools' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                      newCount,
-                    })
-                  }
-                  updateServer({ ...client, tools: newTools })
-                } catch (error) {
-                  logMCPError(
-                    client.name,
-                    `Failed to refresh tools after list_changed notification: ${errorMessage(error)}`,
-                  )
-                }
-              },
-            )
-          }
-
-          if (client.capabilities?.prompts?.listChanged) {
-            client.client.setNotificationHandler(
-              PromptListChangedNotificationSchema,
-              async () => {
-                logMCPDebug(
-                  client.name,
-                  `Received prompts/list_changed notification, refreshing prompts`,
-                )
-                logEvent('tengu_mcp_list_changed', {
-                  type: 'prompts' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                })
-                try {
-                  // Skills come from resources, not prompts — don't invalidate their
-                  // cache here. fetchMcpSkillsForClient returns the cached result.
-                  fetchCommandsForClient.cache.delete(client.name)
-                  const [mcpPrompts, mcpSkills] = await Promise.all([
-                    fetchCommandsForClient(client),
-                    feature('MCP_SKILLS')
-                      ? fetchMcpSkillsForClient!(client)
-                      : Promise.resolve([]),
-                  ])
-                  updateServer({
-                    ...client,
-                    commands: [...mcpPrompts, ...mcpSkills],
-                  })
-                  // MCP skills changed — invalidate skill-search index so
-                  // next discovery rebuilds with the new set.
-                  clearSkillIndexCache?.()
-                } catch (error) {
-                  logMCPError(
-                    client.name,
-                    `Failed to refresh prompts after list_changed notification: ${errorMessage(error)}`,
-                  )
-                }
-              },
-            )
-          }
-
-          if (client.capabilities?.resources?.listChanged) {
-            client.client.setNotificationHandler(
-              ResourceListChangedNotificationSchema,
-              async () => {
-                logMCPDebug(
-                  client.name,
-                  `Received resources/list_changed notification, refreshing resources`,
-                )
-                logEvent('tengu_mcp_list_changed', {
-                  type: 'resources' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                })
-                try {
-                  fetchResourcesForClient.cache.delete(client.name)
-                  if (feature('MCP_SKILLS')) {
-                    // Skills are discovered from resources, so refresh them too.
-                    // Invalidate prompts cache as well: we write commands here,
-                    // and a concurrent prompts/list_changed could otherwise have
-                    // us stomp its fresh result with our cached stale one.
-                    fetchMcpSkillsForClient!.cache.delete(client.name)
-                    fetchCommandsForClient.cache.delete(client.name)
-                    const [newResources, mcpPrompts, mcpSkills] =
-                      await Promise.all([
-                        fetchResourcesForClient(client),
-                        fetchCommandsForClient(client),
-                        fetchMcpSkillsForClient!(client),
-                      ])
-                    updateServer({
-                      ...client,
-                      resources: newResources,
-                      commands: [...mcpPrompts, ...mcpSkills],
-                    })
-                    // MCP skills changed — invalidate skill-search index so
-                    // next discovery rebuilds with the new set.
-                    clearSkillIndexCache?.()
-                  } else {
-                    const newResources = await fetchResourcesForClient(client)
-                    updateServer({ ...client, resources: newResources })
-                  }
-                } catch (error) {
-                  logMCPError(
-                    client.name,
-                    `Failed to refresh resources after list_changed notification: ${errorMessage(error)}`,
-                  )
-                }
-              },
-            )
-          }
+          // These handlers invalidate their list cache and run a complete
+          // pagination traversal before updating server state.
+          registerMcpListChangedHandlers(client, updateServer)
           break
         }
 

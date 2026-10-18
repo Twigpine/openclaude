@@ -591,8 +591,9 @@ test('Escape goes back from filename to method before exporting', async () => {
     await waitForCondition(() => getOutput().includes('Save to file'))
     stdin.write('2')
     await waitForCondition(() => getOutput().includes('Enter filename:'))
+    const beforeBack = getOutput().length
     stdin.write('\u001B')
-    await Bun.sleep(150)
+    await waitForCondition(() => getOutput().slice(beforeBack).includes('Select export method:'))
     stdin.write('1')
     await waitForCondition(() => doneMessages.length === 1)
 
@@ -639,10 +640,12 @@ test('Escape goes back from method to format before exporting', async () => {
     await waitForCondition(() => getOutput().includes('Plain Text (.txt)'))
     stdin.write('1')
     await waitForCondition(() => getOutput().includes('Copy to clipboard'))
+    const beforeBack = getOutput().length
     stdin.write('\u001B')
-    await Bun.sleep(150)
+    await waitForCondition(() => getOutput().slice(beforeBack).includes('Select export format:'))
+    const beforeFormat = getOutput().length
     stdin.write('3')
-    await Bun.sleep(20)
+    await waitForCondition(() => getOutput().slice(beforeFormat).includes('Select export method:'))
     stdin.write('1')
     await waitForCondition(() => doneMessages.length === 1)
 

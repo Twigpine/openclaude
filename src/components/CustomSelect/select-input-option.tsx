@@ -4,7 +4,7 @@ import React, { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from '../../ink.js';
 import { useKeybinding, useKeybindings } from '../../keybindings/useKeybinding.js';
 import type { PastedContent } from '../../utils/config.js';
-import { getImageFromClipboard } from '../../utils/imagePaste.js';
+import { getImageFromClipboard, logClipboardImagePasteRejection } from '../../utils/imagePaste.js';
 import type { ImageDimensions } from '../../utils/imageResizer.js';
 import { ClickableImageRef } from '../ClickableImageRef.js';
 import { ConfigurableShortcutHint } from '../ConfigurableShortcutHint.js';
@@ -181,6 +181,8 @@ export function SelectInputOption(t0) {
         if (imageData) {
           onImagePaste(imageData.base64, imageData.mediaType, undefined, imageData.dimensions);
         }
+      }).catch(error => {
+        logClipboardImagePasteRejection(error);
       });
     };
     $[16] = onImagePaste;

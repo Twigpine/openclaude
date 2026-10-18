@@ -2,7 +2,7 @@
  * OpenClaude startup screen — filled-block text logo with sunset gradient.
  * Called once at CLI startup before the Ink UI renders.
  *
- * Addresses: https://github.com/Gitlawb/openclaude/issues/55
+ * Addresses: https://github.com/Twigpine/openclaude/issues/55
  */
 
 import { isLocalProviderUrl, resolveProviderRequest } from '../services/api/providerConfig.js'
@@ -56,22 +56,23 @@ export function paintLine(text: string, stops: readonly RGB[], lineT: number): s
 
 // ─── Filled Block Text Logo ───────────────────────────────────────────────────
 
+// ANSI Shadow figlet letterforms, one space between letters.
 const LOGO_OPEN = [
-  `  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2557  \u2588\u2588\u2557`,
-  `  \u2588\u2588\u2554\u2550\u2550\u2550\u2588\u2588\u2551 \u2588\u2588\u2554\u2550\u2550\u2550\u2588\u2588\u2551 \u2588\u2588\u2554\u2550\u2550\u2550\u2550\u2550\u255d \u2588\u2588\u2588\u2557 \u2588\u2588\u2551`,
-  `  \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551 \u2588\u2588\u2588\u2588\u2588\u2588\u2557   \u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2551`,
-  `  \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2554\u2550\u2550\u2550\u2550\u2550\u255d \u2588\u2588\u2554\u2550\u2550\u2550\u255d   \u2588\u2588\u2554\u2588\u2588\u2588\u2588\u2551`,
-  `  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551 \u2588\u2588\u2551       \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2551 \u255a\u2588\u2588\u2588\u2551`,
-  `  \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u255d       \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u255d  \u255a\u2550\u2550\u255d`,
+  ' \u2588\u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2557   \u2588\u2588\u2557',
+  '\u2588\u2588\u2554\u2550\u2550\u2550\u2588\u2588\u2557 \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557 \u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d \u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2551',
+  '\u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2588\u2588\u2588\u2557   \u2588\u2588\u2554\u2588\u2588\u2557 \u2588\u2588\u2551',
+  '\u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2554\u2550\u2550\u2550\u255d  \u2588\u2588\u2554\u2550\u2550\u255d   \u2588\u2588\u2551\u255a\u2588\u2588\u2557\u2588\u2588\u2551',
+  '\u255a\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2551      \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2551 \u255a\u2588\u2588\u2588\u2588\u2551',
+  ' \u255a\u2550\u2550\u2550\u2550\u2550\u255d  \u255a\u2550\u255d      \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u255d  \u255a\u2550\u2550\u2550\u255d',
 ]
 
 const LOGO_CLAUDE = [
-  `  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2557      \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2557   \u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557`,
-  `  \u2588\u2588\u2554\u2550\u2550\u2550\u2550\u2550\u255d \u2588\u2588\u2551      \u2588\u2588\u2554\u2550\u2550\u2550\u2588\u2588\u2551 \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2554\u2550\u2550\u2550\u2588\u2588\u2557 \u2588\u2588\u2554\u2550\u2550\u2550\u2550\u2550\u255d`,
-  `  \u2588\u2588\u2551       \u2588\u2588\u2551      \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551 \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2588\u2588\u2588\u2588\u2557  `,
-  `  \u2588\u2588\u2551       \u2588\u2588\u2551      \u2588\u2588\u2554\u2550\u2550\u2550\u2588\u2588\u2551 \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2554\u2550\u2550\u2550\u255d  `,
-  `  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2551   \u2588\u2588\u2551 \u255a\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557`,
-  `  \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d\u255a\u2550\u255d   \u255a\u2550\u255d  \u255a\u2550\u2550\u2550\u2550\u2550\u255d  \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d  \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d`,
+  ' \u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2557       \u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2557   \u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557',
+  '\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d \u2588\u2588\u2551      \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557 \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557 \u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d',
+  '\u2588\u2588\u2551      \u2588\u2588\u2551      \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551 \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2551  \u2588\u2588\u2551 \u2588\u2588\u2588\u2588\u2588\u2557  ',
+  '\u2588\u2588\u2551      \u2588\u2588\u2551      \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551 \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2588\u2551  \u2588\u2588\u2551 \u2588\u2588\u2554\u2550\u2550\u255d  ',
+  '\u255a\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2551  \u2588\u2588\u2551 \u255a\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557',
+  ' \u255a\u2550\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u255d  \u255a\u2550\u255d  \u255a\u2550\u2550\u2550\u2550\u2550\u255d  \u255a\u2550\u2550\u2550\u2550\u2550\u255d  \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d',
 ]
 
 // ─── Provider detection ───────────────────────────────────────────────────────
@@ -191,30 +192,51 @@ export function printStartupScreen(modelOverride?: string): void {
 
   const p = detectProvider(modelOverride)
   const W = 62
+  const columns = process.stdout.columns || 80
+  const centerPad = (visibleLen: number): string =>
+    ' '.repeat(Math.max(0, Math.floor((columns - visibleLen) / 2)))
   const out: string[] = []
 
   out.push('')
 
-  // Gradient logo
-  const allLogo = [...LOGO_OPEN, '', ...LOGO_CLAUDE]
-  const total = allLogo.length
+  // Gradient logo \u2014 OPEN and CLAUDE side by side on one centered row; falls
+  // back to the stacked two-block layout when the terminal is too narrow.
+  // Each block is centered as a unit (one pad per block) so rows stay aligned.
+  const open = LOGO_OPEN
+  const claude = LOGO_CLAUDE
+  const openWidth = Math.max(...open.map(row => row.length))
+  const claudeWidth = Math.max(...claude.map(row => row.length))
+  const oneRowWidth = openWidth + 2 + claudeWidth
+  const fitsOneRow = columns >= oneRowWidth
+  const logoLines = fitsOneRow
+    ? open.map((row, i) => ({
+        pad: centerPad(oneRowWidth),
+        text: `${row.padEnd(openWidth)}  ${claude[i]}`.trimEnd(),
+      }))
+    : [
+        ...open.map(row => ({ pad: centerPad(openWidth), text: row })),
+        { pad: '', text: '' },
+        ...claude.map(row => ({ pad: centerPad(claudeWidth), text: row.trimEnd() })),
+      ]
+  const total = logoLines.length
   for (let i = 0; i < total; i++) {
     const t = total > 1 ? i / (total - 1) : 0
-    if (allLogo[i] === '') {
+    if (logoLines[i].text === '') {
       out.push('')
     } else {
-      out.push(paintLine(allLogo[i], GRAD, t))
+      out.push(logoLines[i].pad + paintLine(logoLines[i].text, GRAD, t))
     }
   }
 
   out.push('')
 
   // Tagline
-  out.push(`  ${ansiRgb(...ACCENT)}\u2726${RESET} ${ansiRgb(...CREAM)}${BRAND_TAGLINE}${RESET} ${ansiRgb(...ACCENT)}\u2726${RESET}`)
+  out.push(`${centerPad(BRAND_TAGLINE.length + 4)}${ansiRgb(...ACCENT)}\u2726${RESET} ${ansiRgb(...CREAM)}${BRAND_TAGLINE}${RESET} ${ansiRgb(...ACCENT)}\u2726${RESET}`)
   out.push('')
 
   // Provider info box
-  out.push(`${ansiRgb(...BORDER)}\u2554${'\u2550'.repeat(W - 2)}\u2557${RESET}`)
+  const boxPad = centerPad(W)
+  out.push(`${boxPad}${ansiRgb(...BORDER)}\u2554${'\u2550'.repeat(W - 2)}\u2557${RESET}`)
 
   const lbl = (k: string, v: string, c: RGB = CREAM): [string, number] => {
     const padK = k.padEnd(9)
@@ -223,23 +245,24 @@ export function printStartupScreen(modelOverride?: string): void {
 
   const provC: RGB = p.isLocal ? [130, 175, 130] : ACCENT
   let [r, l] = lbl('Provider', p.name, provC)
-  out.push(boxRow(r, W, l, BORDER))
+  out.push(boxPad + boxRow(r, W, l, BORDER))
   ;[r, l] = lbl('Model', p.model)
-  out.push(boxRow(r, W, l, BORDER))
+  out.push(boxPad + boxRow(r, W, l, BORDER))
   const ep = p.baseUrl.length > 38 ? p.baseUrl.slice(0, 35) + '...' : p.baseUrl
   ;[r, l] = lbl('Endpoint', ep)
-  out.push(boxRow(r, W, l, BORDER))
+  out.push(boxPad + boxRow(r, W, l, BORDER))
 
-  out.push(`${ansiRgb(...BORDER)}\u2560${'\u2550'.repeat(W - 2)}\u2563${RESET}`)
+  out.push(`${boxPad}${ansiRgb(...BORDER)}\u2560${'\u2550'.repeat(W - 2)}\u2563${RESET}`)
 
   const sC: RGB = p.isLocal ? [130, 175, 130] : ACCENT
   const sL = p.isLocal ? 'local' : 'cloud'
   const sRow = ` ${ansiRgb(...sC)}\u25cf${RESET} ${DIM}${ansiRgb(...DIMCOL)}${sL}${RESET}    ${DIM}${ansiRgb(...DIMCOL)}Ready \u2014 type ${RESET}${ansiRgb(...ACCENT)}/help${RESET}${DIM}${ansiRgb(...DIMCOL)} to begin${RESET}`
   const sLen = ` \u25cf ${sL}    Ready \u2014 type /help to begin`.length
-  out.push(boxRow(sRow, W, sLen, BORDER))
+  out.push(boxPad + boxRow(sRow, W, sLen, BORDER))
 
-  out.push(`${ansiRgb(...BORDER)}\u255a${'\u2550'.repeat(W - 2)}\u255d${RESET}`)
-  out.push(`  ${DIM}${ansiRgb(...DIMCOL)}openclaude ${RESET}${ansiRgb(...ACCENT)}v${MACRO.DISPLAY_VERSION ?? MACRO.VERSION}${RESET}`)
+  out.push(`${boxPad}${ansiRgb(...BORDER)}\u255a${'\u2550'.repeat(W - 2)}\u255d${RESET}`)
+  const versionText = `openclaude v${MACRO.DISPLAY_VERSION ?? MACRO.VERSION}`
+  out.push(`${centerPad(versionText.length)}${DIM}${ansiRgb(...DIMCOL)}openclaude ${RESET}${ansiRgb(...ACCENT)}v${MACRO.DISPLAY_VERSION ?? MACRO.VERSION}${RESET}`)
   out.push('')
 
   process.stdout.write(out.join('\n') + '\n')

@@ -39,6 +39,26 @@ function expectEquivalent(messages: Message[]): void {
   expect(normalizeMessagesCached(messages)).toEqual(normalizeMessages(messages))
 }
 
+describe('normalizeMessages', () => {
+  test('keeps each split permission image paired with its own tool result', () => {
+    const message = withUuid(createUserMessage({
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'one' } },
+        { type: 'text', text: 'between images' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'two' } },
+      ],
+      imagePermissionToolUseIds: ['toolu_one', 'toolu_two'],
+    }))
+
+    const normalized = normalizeMessages([message])
+    expect(normalized.map(item => item.imagePermissionToolUseIds)).toEqual([
+      ['toolu_one'],
+      undefined,
+      ['toolu_two'],
+    ])
+  })
+})
+
 describe('normalizeMessagesCached', () => {
   test('matches normalizeMessages for single-block messages', () => {
     expectEquivalent([user('hi'), assistant('hello'), user('bye')])

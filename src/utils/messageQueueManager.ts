@@ -134,6 +134,22 @@ export function enqueue(command: QueuedCommand): void {
 }
 
 /**
+ * Restore commands ahead of commands added after they were claimed, without
+ * changing their priority. Commands in the supplied array retain FIFO order.
+ */
+export function prepend(commands: readonly QueuedCommand[]): void {
+  if (commands.length === 0) return
+  commandQueue.unshift(...commands)
+  notifySubscribers()
+  for (const command of commands) {
+    logOperation(
+      'enqueue',
+      typeof command.value === 'string' ? command.value : undefined,
+    )
+  }
+}
+
+/**
  * Add a task notification to the queue.
  * Convenience wrapper that defaults priority to 'later' so user input
  * is never starved by system messages.

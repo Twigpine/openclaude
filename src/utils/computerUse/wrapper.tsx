@@ -22,6 +22,7 @@ import { getSessionId } from '../../bootstrap/state.js';
 import { ComputerUseApproval } from '../../components/permissions/ComputerUseApproval/ComputerUseApproval.js';
 import type { Tool, ToolUseContext } from '../../Tool.js';
 import { logForDebugging } from '../debug.js';
+import { requestAbort } from '../interruptionTrace.js';
 import { checkComputerUseLock, tryAcquireComputerUseLock } from './computerUseLock.js';
 import { registerEscHotkey } from './escHotkey.js';
 import { getChicagoCoordinateMode } from './gates.js';
@@ -219,7 +220,11 @@ export function buildSessionContext(): ComputerUseSessionContext {
         // holds a pump retain until unregisterEscHotkey() in cleanup.ts.
         const escRegistered = registerEscHotkey(() => {
           logForDebugging('[cu-esc] user escape, aborting turn');
-          tuc().abortController.abort();
+          requestAbort(tuc().abortController, undefined, {
+            source: 'computer_use_escape',
+            subsystem: 'computer_use',
+            controllerRole: 'tool',
+          });
         });
         tuc().sendOSNotification?.({
           message: escRegistered ? 'Claude is using your computer · press Esc to stop' : 'Claude is using your computer · press Ctrl+C to stop',

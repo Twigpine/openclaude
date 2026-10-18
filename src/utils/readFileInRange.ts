@@ -148,6 +148,7 @@ function readFileInRangeFast(
       totalLines: 0,
       totalBytes: 0,
       readBytes: 0,
+      truncatedByBytes: false,
       mtimeMs,
     }
   }

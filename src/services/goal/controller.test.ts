@@ -8,6 +8,17 @@ import {
 } from './controller.js'
 import type { GoalState } from './types.js'
 import type { AssistantMessage } from '../../types/message.js'
+import {
+  __getInterruptionTraceSnapshotForTests,
+  __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
+  registerInterruptionController,
+  requestAbort,
+} from '../../utils/interruptionTrace.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
 
 function assistant(uuid: string, text: string) {
   // Minimal fixture — cast rather than fabricate the full envelope.
@@ -57,6 +68,66 @@ async function drain(
 }
 
 describe('goal continuation controller', () => {
+  test.serial('traces goal evaluation start and completion', async () => {
+    await acquireSharedMutationLock('goal/controller trace')
+    const originalTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
+    try {
+      const { context, abortController } = makeContext()
+      registerInterruptionController(abortController, {
+        controllerRole: 'query-root',
+      })
+      await drain(
+        evaluateGoalAfterTurn({
+          messagesForQuery: [],
+          assistantMessages: [assistant('assistant-trace', 'Done.')],
+          toolUseContext: context,
+          querySource: 'repl_main_thread',
+          deps: {
+            evaluateGoal: async () => {
+              requestAbort(abortController, 'user-cancel', {
+                source: 'cancel_keybinding',
+                controllerRole: 'query-root',
+              })
+              return {
+                complete: false,
+                confidence: 0,
+                decision: 'error',
+                reason: 'cancelled',
+                nextInstruction: null,
+              }
+            },
+            saveGoalState: async () => {},
+          },
+        }),
+      )
+
+      const trace = __getInterruptionTraceSnapshotForTests()
+      expect(trace.map(entry => entry.event)).toEqual(
+        expect.arrayContaining([
+          'goal.evaluation_started',
+          'goal.evaluation_completed',
+        ]),
+      )
+      const rootAbort = trace.find(entry => entry.event === 'abort.requested')
+      const completed = trace.find(
+        entry => entry.event === 'goal.evaluation_completed',
+      )
+      expect(rootAbort).toBeDefined()
+      expect(completed).toBeDefined()
+      expect(typeof rootAbort!.eventId).toBe('string')
+      expect(typeof completed!.causalEventId).toBe('string')
+      expect(completed!.causalEventId).toBe(rootAbort!.eventId)
+    } finally {
+      await __waitForInterruptionTraceFlushForTests()
+      __resetInterruptionTraceForTests()
+      if (originalTrace === undefined) delete process.env.OPENCLAUDE_INTERRUPT_TRACE
+      else process.env.OPENCLAUDE_INTERRUPT_TRACE = originalTrace
+      releaseSharedMutationLock()
+    }
+  })
+
   test('evaluator complete => no blocking error, goal achieved', async () => {
     const { context, getState } = makeContext()
     const deps: GoalEvaluationDeps = {

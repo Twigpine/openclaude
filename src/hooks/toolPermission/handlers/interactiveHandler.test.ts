@@ -1,4 +1,12 @@
 import { describe, expect, test, vi } from 'vitest'
+import { getSessionId, switchSession } from '../../../bootstrap/state.js'
+import { asSessionId } from '../../../types/ids.js'
+import {
+  __getInterruptionTraceSnapshotForTests,
+  __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
+  requestAbort,
+} from '../../../utils/interruptionTrace.js'
 import {
   handleInteractivePermission,
   type InteractivePermissionParams,
@@ -9,7 +17,8 @@ import {
 // bypasses resolveOnce fails here instead of silently stranding the watchdog.
 
 type QueueItem = {
-  onAbort: () => void
+  permissionSessionId?: string
+  onAbort: (source?: string, causalEventId?: string) => void
   onAllow: (
     updatedInput: Record<string, unknown>,
     permissionUpdates: unknown[],
@@ -22,6 +31,9 @@ function setup(opts?: {
   preAbort?: boolean
   throwOnPush?: boolean
   bridge?: unknown
+  permissionSessionId?: string
+  awaitAutomatedChecksBeforeDialog?: boolean
+  hookDecision?: Promise<{ behavior: 'allow' } | null>
 }) {
   // Plain (non-idempotent) spy: a double-call fails the exactly-once assertions,
   // so the handler can't lean on QueryGuard's internal idempotence.
@@ -38,6 +50,9 @@ function setup(opts?: {
     assistantMessage: { message: { id: 'msg-1' } },
     toolUseID: 'tu-1',
     toolUseContext: {
+      options: opts?.permissionSessionId
+        ? { permissionSessionId: opts.permissionSessionId }
+        : {},
       queryActivity: {
         registerActivity: vi.fn(),
         acquireLease: vi.fn(() => ({ id: '', release() {} })),
@@ -64,7 +79,7 @@ function setup(opts?: {
       updatedInput: input,
     })),
     persistPermissions: vi.fn(),
-    runHooks: vi.fn(async () => null),
+    runHooks: vi.fn(async () => opts?.hookDecision?.then(result => result) ?? null),
   }
 
   const resolve = vi.fn()
@@ -73,7 +88,8 @@ function setup(opts?: {
     description: 'desc',
     result: { behavior: 'ask' },
     // Skip the async hook/classifier races so only the dialog callbacks resolve.
-    awaitAutomatedChecksBeforeDialog: true,
+    awaitAutomatedChecksBeforeDialog:
+      opts?.awaitAutomatedChecksBeforeDialog ?? true,
     bridgeCallbacks: opts?.bridge,
     channelCallbacks: undefined,
   } as unknown as InteractivePermissionParams
@@ -97,6 +113,11 @@ function setup(opts?: {
 }
 
 describe('handleInteractivePermission watchdog suspension', () => {
+  test('tags the queued prompt with its originating session', () => {
+    const { getQueueItem } = setup({ permissionSessionId: 'session-a' })
+    expect(getQueueItem().permissionSessionId).toBe('session-a')
+  })
+
   test('suspends once when the dialog is shown, before any resolution', () => {
     const { beginUserInteraction, resume } = setup()
     expect(beginUserInteraction).toHaveBeenCalledTimes(1)
@@ -118,10 +139,19 @@ describe('handleInteractivePermission watchdog suspension', () => {
   })
 
   test('resumes exactly once on abort', () => {
-    const { getQueueItem, resume, resolve } = setup()
-    getQueueItem().onAbort()
+    const { ctx, getQueueItem, resume, resolve } = setup()
+    getQueueItem().onAbort('cancel_keybinding', 'input-event-1')
     expect(resume).toHaveBeenCalledTimes(1)
     expect(resolve).toHaveBeenCalledTimes(1)
+    expect(ctx.cancelAndAbort).toHaveBeenCalledWith(
+      undefined,
+      true,
+      undefined,
+      {
+        source: 'cancel_keybinding',
+        causalEventId: 'input-event-1',
+      },
+    )
   })
 
   test('resumes only once when two resolution paths race', async () => {
@@ -164,6 +194,55 @@ describe('handleInteractivePermission watchdog suspension', () => {
     expect(resolve).toHaveBeenCalledTimes(1)
     // Stale prompt must be removed from the queue on external abort.
     expect(ctx.removeFromQueue).toHaveBeenCalledTimes(1)
+  })
+
+  test('preserves the originating trace when an external abort closes the dialog', async () => {
+    const originalTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
+    const { ctx, abortController } = setup()
+
+    try {
+      requestAbort(abortController, undefined, {
+        source: 'cancel_keybinding',
+        subsystem: 'query_engine',
+        controllerRole: 'query-root',
+      })
+
+      const trace = __getInterruptionTraceSnapshotForTests()
+      const originatingAbort = trace.find(
+        entry =>
+          entry.event === 'abort.requested' &&
+          entry.source === 'cancel_keybinding',
+      )
+      const permissionResolution = trace.find(
+        entry => entry.event === 'permission.abort_resolved',
+      )
+      expect(typeof originatingAbort?.eventId).toBe('string')
+      expect(permissionResolution).toMatchObject({
+        source: 'cancel_keybinding',
+        subsystem: 'tool_permission',
+        causalEventId: originatingAbort!.eventId,
+        outcome: 'denied',
+      })
+      expect(ctx.cancelAndAbort).toHaveBeenCalledWith(
+        undefined,
+        true,
+        undefined,
+        {
+          source: 'cancel_keybinding',
+          causalEventId: originatingAbort!.eventId,
+        },
+      )
+    } finally {
+      await __waitForInterruptionTraceFlushForTests()
+      __resetInterruptionTraceForTests()
+      if (originalTrace === undefined) {
+        delete process.env.OPENCLAUDE_INTERRUPT_TRACE
+      } else {
+        process.env.OPENCLAUDE_INTERRUPT_TRACE = originalTrace
+      }
+    }
   })
 
   test('resolves and resumes immediately if already aborted when shown', () => {
@@ -225,10 +304,110 @@ describe('handleInteractivePermission watchdog suspension', () => {
       [],
       undefined,
       expect.any(Number),
+      undefined,
+      undefined,
+      true,
     )
     expect(resolve).toHaveBeenCalledWith(
       expect.objectContaining({ behavior: 'deny' }),
     )
+  })
+
+  test('retains an owner prompt when a stale local action arrives in another session', async () => {
+    const ownerSessionId = getSessionId()
+    const { ctx, getQueueItem, resolve } = setup({
+      permissionSessionId: ownerSessionId,
+    })
+
+    try {
+      switchSession(asSessionId('inactive-owner-test-session'))
+      await getQueueItem().onAllow({}, [])
+      getQueueItem().onReject('stale rejection')
+
+      expect(resolve).not.toHaveBeenCalled()
+      expect(ctx.handleUserAllow).not.toHaveBeenCalled()
+
+      switchSession(ownerSessionId)
+      await getQueueItem().onAllow({}, [])
+      expect(resolve).toHaveBeenCalledTimes(1)
+      expect(ctx.handleUserAllow).toHaveBeenCalledTimes(1)
+    } finally {
+      switchSession(ownerSessionId)
+    }
+  })
+
+  test('settles an exact bridge response even when the prompt owner is hidden', async () => {
+    const ownerSessionId = getSessionId()
+    let respond:
+      | ((response: {
+          behavior: 'allow'
+          updatedInput: Record<string, unknown>
+          updatedPermissions: unknown[]
+        }) => Promise<void>)
+      | undefined
+    const bridge = {
+      sendRequest: vi.fn(),
+      onResponse: vi.fn(
+        (
+          _requestId: string,
+          callback: NonNullable<typeof respond>,
+        ) => {
+          respond = callback
+          return () => {}
+        },
+      ),
+      cancelRequest: vi.fn(),
+      sendResponse: vi.fn(),
+    }
+    const { ctx, getQueueItem, resolve } = setup({
+      bridge,
+      permissionSessionId: ownerSessionId,
+    })
+
+    try {
+      switchSession(asSessionId('inactive-bridge-owner-test-session'))
+      await respond?.({
+        behavior: 'allow',
+        updatedInput: { command: 'touch deferred' },
+        updatedPermissions: [],
+      })
+      expect(resolve).toHaveBeenCalledTimes(1)
+      expect(ctx.handleUserAllow).toHaveBeenCalledWith(
+        { command: 'touch deferred' },
+        [],
+        undefined,
+        expect.any(Number),
+        undefined,
+        undefined,
+        true,
+      )
+      expect(getQueueItem()).toBeDefined()
+    } finally {
+      switchSession(ownerSessionId)
+    }
+  })
+
+  test('settles an owner-scoped hook that finishes after its owner becomes inactive', async () => {
+    const ownerSessionId = getSessionId()
+    let finishHook: ((decision: { behavior: 'allow' }) => void) | undefined
+    const hookDecision = new Promise<{ behavior: 'allow' }>(resolve => {
+      finishHook = resolve
+    })
+    const { getQueueItem, resolve } = setup({
+      permissionSessionId: ownerSessionId,
+      awaitAutomatedChecksBeforeDialog: false,
+      hookDecision,
+    })
+
+    try {
+      switchSession(asSessionId('inactive-hook-owner-test-session'))
+      finishHook?.({ behavior: 'allow' })
+      await Bun.sleep(10)
+      expect(resolve).toHaveBeenCalledTimes(1)
+      expect(getQueueItem()).toBeDefined()
+    } finally {
+      switchSession(ownerSessionId)
+    }
   })
 
   test('abort after a normal resolution does not double-resolve or double-resume', () => {

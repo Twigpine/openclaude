@@ -13,10 +13,11 @@ import {
   convertEffortValueToLevel,
   type EffortValue,
   resolveAppliedEffort,
+  resolveModelReasoningControl,
   modelSupportsShimReasoningEffort,
   modelSupportsWireEffort,
   standardEffortToOpenAI,
-  type OpenAIEffortLevel,
+  type OpenAIShimEffortLevel,
 } from 'src/utils/effort.js'
 import { getUserAgent } from 'src/utils/http.js'
 import { getSmallFastModel } from 'src/utils/model/model.js'
@@ -39,8 +40,14 @@ import {
 } from '../../utils/envUtils.js'
 import {
   getFireworksBaseUrlOverride,
+  getLongcatBaseUrlOverride,
   getMiniMaxBaseUrlOverride,
+  getMiniMaxBaseUrlValidationError,
+  isMiniMaxBaseUrl,
   getNearaiBaseUrlOverride,
+  isCanonicalApiRouteInferenceBaseUrl,
+  isCanonicalApismartInferenceBaseUrl,
+  isCanonicalConcentrateInferenceBaseUrl,
   getRouteDefaultBaseUrl,
   getRouteDefaultModel,
   getXaiBaseUrlOverride,
@@ -53,6 +60,8 @@ import {
   shouldUseFirstPartyAnthropicAuthForProvider,
   type ProviderOverride,
 } from './authRouting.js'
+import { hasUsableOpenAICredential } from './credentialPool.js'
+import { getApiTimeoutMs } from './openaiShim/transport.js'
 import { AnthropicVertex } from './vertexClient.js'
 import { importOptionalRuntimeModule } from '../../utils/optionalRuntimeModule.js'
 
@@ -142,13 +151,24 @@ function hasMiniMaxModelIntent(model: string | undefined): boolean {
 function hasConflictingOpenAIBaseUrlForMiniMax(): boolean {
   const openAIBaseUrl =
     process.env.OPENAI_BASE_URL?.trim() || process.env.OPENAI_API_BASE?.trim()
-  return Boolean(openAIBaseUrl && getMiniMaxBaseUrlOverride() === undefined)
+  return Boolean(openAIBaseUrl && !isMiniMaxBaseUrl(openAIBaseUrl))
 }
 
 function shouldUseMiniMaxEnvOnlyProvider(
   model: string | undefined,
   envOnlyProviderRouteId: string | null,
 ): boolean {
+  // An explicit OpenAI endpoint selects its wire protocol, even with a
+  // dedicated MiniMax key. Native defaults must not rewrite that request.
+  if (
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI) &&
+    isMiniMaxBaseUrl(
+      process.env.OPENAI_BASE_URL?.trim() || process.env.OPENAI_API_BASE?.trim(),
+    )
+  ) {
+    return false
+  }
+
   const hasMiniMaxCredential =
     process.env.MINIMAX_API_KEY?.trim() ||
     (getMiniMaxBaseUrlOverride() !== undefined &&
@@ -177,6 +197,17 @@ function isXaiModelName(value: string | undefined): boolean {
 }
 
 function applyMiniMaxEnvOnlyDefaults(model: string | undefined): void {
+  const baseUrlOverride = getMiniMaxBaseUrlOverride()
+  const validationError = getMiniMaxBaseUrlValidationError(baseUrlOverride)
+  if (validationError) throw new Error(validationError)
+  // ANTHROPIC_BASE_URL already describes the native endpoint. Legacy OpenAI
+  // URL hints select the region, but still need the native /anthropic path.
+  const baseUrl = isMiniMaxBaseUrl(process.env.ANTHROPIC_BASE_URL)
+    ? process.env.ANTHROPIC_BASE_URL!.trim()
+    : baseUrlOverride
+      ? new URL('/anthropic', baseUrlOverride).toString()
+      : getRouteDefaultBaseUrl('minimax')
+
   const modelOverride =
     (isMiniMaxModelName(model) ? model?.trim() : undefined) ??
     process.env.OPENAI_MODEL?.trim() ??
@@ -190,7 +221,7 @@ function applyMiniMaxEnvOnlyDefaults(model: string | undefined): void {
     process.env.ANTHROPIC_API_KEY = apiKey
   }
 
-  process.env.ANTHROPIC_BASE_URL = 'https://api.minimax.io/anthropic'
+  process.env.ANTHROPIC_BASE_URL = baseUrl
   process.env.ANTHROPIC_MODEL =
     (isMiniMaxModelName(modelOverride)
       ? modelOverride
@@ -198,6 +229,7 @@ function applyMiniMaxEnvOnlyDefaults(model: string | undefined): void {
     getRouteDefaultModel('minimax')
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
   delete process.env.OPENAI_AUTH_HEADER
   delete process.env.OPENAI_AUTH_SCHEME
   delete process.env.OPENAI_AUTH_HEADER_VALUE
@@ -226,6 +258,7 @@ function applyXiaomiMimoEnvOnlyDefaults(): void {
     getRouteDefaultModel('xiaomi-mimo')
   process.env.OPENAI_API_KEY = process.env.MIMO_API_KEY
   delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
   delete process.env.OPENAI_AUTH_HEADER
   delete process.env.OPENAI_AUTH_SCHEME
   delete process.env.OPENAI_AUTH_HEADER_VALUE
@@ -246,6 +279,7 @@ function applyXaiEnvOnlyDefaults(): void {
     getRouteDefaultModel('xai')
   process.env.OPENAI_API_KEY = process.env.XAI_API_KEY
   delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
   delete process.env.OPENAI_AUTH_HEADER
   delete process.env.OPENAI_AUTH_SCHEME
   delete process.env.OPENAI_AUTH_HEADER_VALUE
@@ -281,6 +315,7 @@ function applyNearaiEnvOnlyDefaults(): void {
     getRouteDefaultModel('nearai')
   process.env.OPENAI_API_KEY = process.env.NEARAI_API_KEY
   delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
   delete process.env.OPENAI_AUTH_HEADER
   delete process.env.OPENAI_AUTH_SCHEME
   delete process.env.OPENAI_AUTH_HEADER_VALUE
@@ -317,6 +352,33 @@ function applyFireworksEnvOnlyDefaults(): void {
     getRouteDefaultModel('fireworks')
   process.env.OPENAI_API_KEY = process.env.FIREWORKS_API_KEY
   delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
+  delete process.env.OPENAI_AUTH_HEADER
+  delete process.env.OPENAI_AUTH_SCHEME
+  delete process.env.OPENAI_AUTH_HEADER_VALUE
+}
+
+function isLongcatModelName(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase()
+  return Boolean(normalized && normalized.startsWith('longcat'))
+}
+
+function applyLongcatEnvOnlyDefaults(): void {
+  const baseUrlOverride = getLongcatBaseUrlOverride()
+  const hasLongcatBaseOverride = baseUrlOverride !== undefined
+  const modelOverride = process.env.OPENAI_MODEL?.trim() || undefined
+
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL =
+    baseUrlOverride ?? getRouteDefaultBaseUrl('longcat')
+  process.env.OPENAI_MODEL =
+    (hasLongcatBaseOverride || isLongcatModelName(modelOverride)
+      ? modelOverride
+      : undefined) ??
+    getRouteDefaultModel('longcat')
+  process.env.OPENAI_API_KEY = process.env.LONGCAT_API_KEY
+  delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
   delete process.env.OPENAI_AUTH_HEADER
   delete process.env.OPENAI_AUTH_SCHEME
   delete process.env.OPENAI_AUTH_HEADER_VALUE
@@ -335,9 +397,126 @@ function applyAimlapiEnvOnlyDefaults(): void {
   process.env.OPENAI_MODEL = modelOverride ?? getRouteDefaultModel('aimlapi')
   process.env.OPENAI_API_KEY = process.env.AIMLAPI_API_KEY
   delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
   delete process.env.OPENAI_AUTH_HEADER
   delete process.env.OPENAI_AUTH_SCHEME
   delete process.env.OPENAI_AUTH_HEADER_VALUE
+}
+
+function applyApismartEnvOnlyDefaults(): void {
+  const baseUrlOverride =
+    usableProviderConfigEnvValue(process.env.OPENAI_BASE_URL) ||
+    usableProviderConfigEnvValue(process.env.OPENAI_API_BASE) ||
+    undefined
+  const modelOverride =
+    usableProviderConfigEnvValue(process.env.APISMART_MODEL) ||
+    usableProviderConfigEnvValue(process.env.OPENAI_MODEL) ||
+    undefined
+  const apiKey = process.env.APISMART_API_KEY
+
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL =
+    baseUrlOverride ?? getRouteDefaultBaseUrl('apismart')
+  process.env.OPENAI_MODEL = modelOverride ?? getRouteDefaultModel('apismart')
+  // Mirror only a usable dedicated key. Template placeholders must not become
+  // OPENAI_API_KEY side effects for later routes in this process. A same-host
+  // URL alone is not enough: the dedicated key belongs only to ApiSmart's
+  // documented /v1 inference endpoint.
+  if (
+    hasUsableOpenAICredential(apiKey) &&
+    isCanonicalApismartInferenceBaseUrl(process.env.OPENAI_BASE_URL)
+  ) {
+    process.env.OPENAI_API_KEY = apiKey
+  } else {
+    delete process.env.OPENAI_API_KEY
+  }
+  delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
+  delete process.env.OPENAI_AUTH_HEADER
+  delete process.env.OPENAI_AUTH_SCHEME
+  delete process.env.OPENAI_AUTH_HEADER_VALUE
+  delete process.env.ANTHROPIC_CUSTOM_HEADERS
+}
+
+function applyConcentrateEnvOnlyDefaults(): void {
+  const baseUrlOverride =
+    usableProviderConfigEnvValue(process.env.CONCENTRATE_BASE_URL) ||
+    usableProviderConfigEnvValue(process.env.OPENAI_BASE_URL) ||
+    usableProviderConfigEnvValue(process.env.OPENAI_API_BASE) ||
+    undefined
+  const modelOverride =
+    usableProviderConfigEnvValue(process.env.CONCENTRATE_MODEL) ||
+    usableProviderConfigEnvValue(process.env.OPENAI_MODEL) ||
+    undefined
+  const apiKey = process.env.CONCENTRATE_API_KEY
+
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL =
+    baseUrlOverride ?? getRouteDefaultBaseUrl('concentrate')
+  process.env.OPENAI_MODEL = modelOverride ?? getRouteDefaultModel('concentrate')
+  // A dedicated key explicitly selects Concentrate. Mirror it into
+  // OPENAI_API_KEY for the shared transport and avoid forwarding a stale
+  // generic credential. Generic OpenAI credentials remain supported when the
+  // user explicitly configures the canonical Concentrate base URL without the
+  // dedicated selection key.
+  if (
+    hasUsableOpenAICredential(apiKey) &&
+    isCanonicalConcentrateInferenceBaseUrl(process.env.OPENAI_BASE_URL)
+  ) {
+    process.env.OPENAI_API_KEY = apiKey
+  } else {
+    delete process.env.OPENAI_API_KEY
+  }
+  delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
+  delete process.env.OPENAI_AUTH_HEADER
+  delete process.env.OPENAI_AUTH_SCHEME
+  delete process.env.OPENAI_AUTH_HEADER_VALUE
+  delete process.env.ANTHROPIC_CUSTOM_HEADERS
+}
+
+function applyApiRouteEnvOnlyDefaults(): void {
+  const baseUrlOverride =
+    usableProviderConfigEnvValue(process.env.OPENAI_BASE_URL) ||
+    usableProviderConfigEnvValue(process.env.OPENAI_API_BASE) ||
+    undefined
+  const modelOverride =
+    usableProviderConfigEnvValue(process.env.API_ROUTE_MODEL) ||
+    usableProviderConfigEnvValue(process.env.OPENAI_MODEL) ||
+    undefined
+  const apiKey = process.env.API_ROUTE_API_KEY
+
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL =
+    baseUrlOverride ?? getRouteDefaultBaseUrl('api-route')
+  process.env.OPENAI_MODEL = modelOverride ?? getRouteDefaultModel('api-route')
+  if (
+    hasUsableOpenAICredential(apiKey) &&
+    isCanonicalApiRouteInferenceBaseUrl(process.env.OPENAI_BASE_URL)
+  ) {
+    process.env.OPENAI_API_KEY = apiKey
+    delete process.env.OPENAI_API_KEYS
+  } else {
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_API_KEYS
+  }
+  delete process.env.OPENAI_API_FORMAT
+  delete process.env.OPENAI_AZURE_STYLE
+  delete process.env.OPENAI_AUTH_HEADER
+  delete process.env.OPENAI_AUTH_SCHEME
+  delete process.env.OPENAI_AUTH_HEADER_VALUE
+  delete process.env.ANTHROPIC_CUSTOM_HEADERS
+}
+
+function usableProviderConfigEnvValue(
+  value: string | undefined,
+): string | undefined {
+  const trimmed = value?.trim()
+  if (!trimmed) return undefined
+  const normalized = trimmed.toLowerCase()
+  return normalized === 'undefined' || normalized === 'null'
+    ? undefined
+    : trimmed
 }
 
 export async function getAnthropicClient({
@@ -359,49 +538,113 @@ export async function getAnthropicClient({
 }): Promise<Anthropic> {
   // Convert the runtime effort value to the OpenAI-shaped enum the shim
   // expects. Undefined → shim falls back to descriptor/alias defaults.
+  const effortProcessEnv = providerOverride
+    ? { ...process.env, OPENAI_AZURE_STYLE: undefined }
+    : process.env
   const effortModel = providerOverride?.model ?? model
-  const providerOverrideRuntimeContext = providerOverride && effortModel
+  const effortBaseUrl =
+    providerOverride?.baseURL ??
+    process.env.OPENAI_BASE_URL ??
+    process.env.OPENAI_API_BASE
+  const effortRuntimeContext = effortModel
     ? resolveOpenAIShimRuntimeContext({
-      processEnv: process.env,
-      baseUrl: providerOverride.baseURL,
+      processEnv: effortProcessEnv,
+      baseUrl: effortBaseUrl,
       model: effortModel,
-      preferBaseUrlRoute: true,
+      preferBaseUrlRoute:
+        providerOverride !== undefined || isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI),
     })
     : undefined
-  const providerOverrideShimConfig = providerOverrideRuntimeContext?.openaiShimConfig
-  const providerOverrideEffortContext = providerOverrideRuntimeContext
-    ? {
-        routeId: providerOverrideRuntimeContext.routeId,
+  const effortShimConfig = effortRuntimeContext?.openaiShimConfig
+  const effortContext = effortRuntimeContext
+      ? {
+        routeId: effortRuntimeContext.routeId ?? 'custom',
         useRuntimeFallback: false,
-        openaiShimConfig: providerOverrideShimConfig,
-        apiProvider: providerOverrideRuntimeContext.routeId === 'openai'
-          ? 'openai' as const
-          : providerOverrideRuntimeContext.routeId === 'codex'
-            ? 'codex' as const
-            : undefined,
+        openaiShimConfig: effortShimConfig,
+        baseUrl: effortBaseUrl,
+        processEnv: effortProcessEnv,
+        // Per-agent overrides always use the OpenAI-compatible shim, regardless
+        // of the parent session's provider.
+        apiProvider: providerOverride ? 'openai' as const : getAPIProvider(),
       }
     : undefined
   const supportsShimReasoningEffort = effortModel
-    ? providerOverrideShimConfig
+    ? effortShimConfig
       ? modelSupportsShimReasoningEffort(
         effortModel,
-        providerOverrideShimConfig.thinkingRequestFormat,
-        providerOverrideShimConfig.removeBodyFields,
-        providerOverrideEffortContext,
+        effortShimConfig.thinkingRequestFormat,
+        effortShimConfig.removeBodyFields,
+        effortContext,
       )
-      : modelSupportsWireEffort(effortModel)
+      : modelSupportsWireEffort(effortModel, effortContext)
     : false
-  const appliedProviderOverrideEffort = effortModel && effortValue !== undefined
+  const reasoningControl = effortModel
+    ? resolveModelReasoningControl(effortModel, effortContext)
+    : undefined
+  const k3ReasoningControl =
+    reasoningControl?.source === 'metadata' &&
+    reasoningControl.wireFormat === 'reasoning_effort' &&
+    reasoningControl.levels.length === 3 &&
+    reasoningControl.levels.includes('low') &&
+    reasoningControl.levels.includes('high') &&
+    reasoningControl.levels.includes('max')
+  const appliedEffort = effortModel && effortValue !== undefined
     ? resolveAppliedEffort(
       effortModel,
       effortValue,
-      providerOverrideEffortContext,
+      effortContext,
     )
     : undefined
-  const shimReasoningEffort: OpenAIEffortLevel | undefined =
-    appliedProviderOverrideEffort !== undefined && supportsShimReasoningEffort
-      ? standardEffortToOpenAI(convertEffortValueToLevel(appliedProviderOverrideEffort))
+  const appliedEffortLevel = appliedEffort === undefined
+    ? undefined
+    : convertEffortValueToLevel(appliedEffort)
+  const shimReasoningEffort: OpenAIShimEffortLevel | undefined =
+    appliedEffortLevel !== undefined && supportsShimReasoningEffort
+      ? (reasoningControl?.source === 'metadata' &&
+          reasoningControl.wireFormat === 'reasoning_effort' &&
+          appliedEffortLevel === 'max' &&
+          k3ReasoningControl
+            ? 'max'
+          : standardEffortToOpenAI(appliedEffortLevel))
       : undefined
+  // Normalize env-only routes before snapshotting custom headers. Dedicated
+  // routes such as Concentrate deliberately clear inherited proxy headers;
+  // doing that after getCustomHeaders() would leave a copied secret in the
+  // request defaults.
+  const envOnlyProviderRouteId = resolveEnvOnlyProviderRouteId(process.env)
+  const useMiniMaxEnvOnlyProvider = shouldUseMiniMaxEnvOnlyProvider(
+    model,
+    envOnlyProviderRouteId,
+  )
+  const useXiaomiMimoEnvOnlyProvider =
+    envOnlyProviderRouteId === 'xiaomi-mimo' && !useMiniMaxEnvOnlyProvider
+  const useXaiEnvOnlyProvider =
+    envOnlyProviderRouteId === 'xai' && !useMiniMaxEnvOnlyProvider
+  const useNearaiEnvOnlyProvider =
+    envOnlyProviderRouteId === 'nearai' && !useMiniMaxEnvOnlyProvider
+  const useFireworksEnvOnlyProvider =
+    envOnlyProviderRouteId === 'fireworks' && !useMiniMaxEnvOnlyProvider
+  const useLongcatEnvOnlyProvider =
+    envOnlyProviderRouteId === 'longcat' && !useMiniMaxEnvOnlyProvider
+  const useAimlapiEnvOnlyProvider =
+    envOnlyProviderRouteId === 'aimlapi' && !useMiniMaxEnvOnlyProvider
+  const useApismartEnvOnlyProvider =
+    envOnlyProviderRouteId === 'apismart' && !useMiniMaxEnvOnlyProvider
+  const useConcentrateEnvOnlyProvider =
+    envOnlyProviderRouteId === 'concentrate' && !useMiniMaxEnvOnlyProvider
+  const useApiRouteEnvOnlyProvider =
+    envOnlyProviderRouteId === 'api-route' && !useMiniMaxEnvOnlyProvider
+  if (useMiniMaxEnvOnlyProvider) applyMiniMaxEnvOnlyDefaults(model)
+  if (useXiaomiMimoEnvOnlyProvider) applyXiaomiMimoEnvOnlyDefaults()
+  if (useXaiEnvOnlyProvider) applyXaiEnvOnlyDefaults()
+  if (useNearaiEnvOnlyProvider) applyNearaiEnvOnlyDefaults()
+  if (useFireworksEnvOnlyProvider) applyFireworksEnvOnlyDefaults()
+  if (useLongcatEnvOnlyProvider) applyLongcatEnvOnlyDefaults()
+  if (useAimlapiEnvOnlyProvider) applyAimlapiEnvOnlyDefaults()
+  if (useApismartEnvOnlyProvider) applyApismartEnvOnlyDefaults()
+  if (useConcentrateEnvOnlyProvider) applyConcentrateEnvOnlyDefaults()
+  if (useApiRouteEnvOnlyProvider) applyApiRouteEnvOnlyDefaults()
+
   const containerId = process.env.CLAUDE_CODE_CONTAINER_ID
   const remoteSessionId = process.env.CLAUDE_CODE_REMOTE_SESSION_ID
   const clientApp = process.env.CLAUDE_AGENT_SDK_CLIENT_APP
@@ -430,40 +673,6 @@ export async function getAnthropicClient({
   )
   if (additionalProtectionEnabled) {
     defaultHeaders['x-anthropic-additional-protection'] = 'true'
-  }
-
-  const envOnlyProviderRouteId = resolveEnvOnlyProviderRouteId(process.env)
-  const useMiniMaxEnvOnlyProvider = shouldUseMiniMaxEnvOnlyProvider(
-    model,
-    envOnlyProviderRouteId,
-  )
-  const useXiaomiMimoEnvOnlyProvider =
-    envOnlyProviderRouteId === 'xiaomi-mimo' && !useMiniMaxEnvOnlyProvider
-  const useXaiEnvOnlyProvider =
-    envOnlyProviderRouteId === 'xai' && !useMiniMaxEnvOnlyProvider
-  const useNearaiEnvOnlyProvider =
-    envOnlyProviderRouteId === 'nearai' && !useMiniMaxEnvOnlyProvider
-  const useFireworksEnvOnlyProvider =
-    envOnlyProviderRouteId === 'fireworks' && !useMiniMaxEnvOnlyProvider
-  const useAimlapiEnvOnlyProvider =
-    envOnlyProviderRouteId === 'aimlapi' && !useMiniMaxEnvOnlyProvider
-  if (useMiniMaxEnvOnlyProvider) {
-    applyMiniMaxEnvOnlyDefaults(model)
-  }
-  if (useXiaomiMimoEnvOnlyProvider) {
-    applyXiaomiMimoEnvOnlyDefaults()
-  }
-  if (useXaiEnvOnlyProvider) {
-    applyXaiEnvOnlyDefaults()
-  }
-  if (useNearaiEnvOnlyProvider) {
-    applyNearaiEnvOnlyDefaults()
-  }
-  if (useFireworksEnvOnlyProvider) {
-    applyFireworksEnvOnlyDefaults()
-  }
-  if (useAimlapiEnvOnlyProvider) {
-    applyAimlapiEnvOnlyDefaults()
   }
 
   const apiProvider = getAPIProvider()
@@ -516,7 +725,7 @@ export async function getAnthropicClient({
   const ARGS = {
     defaultHeaders,
     maxRetries,
-    timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
+    timeout: getApiTimeoutMs(),
     dangerouslyAllowBrowser: true,
     fetchOptions: getProxyFetchOptions({
       forAnthropicAPI: true,
@@ -539,7 +748,7 @@ export async function getAnthropicClient({
     return createOpenAIShimClient({
       defaultHeaders: safeHeaders,
       maxRetries,
-      timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
+      timeout: getApiTimeoutMs(),
       providerOverride,
       reasoningEffort: shimReasoningEffort,
     }) as unknown as Anthropic
@@ -569,6 +778,8 @@ export async function getAnthropicClient({
     useNearaiEnvOnlyProvider ||
     useFireworksEnvOnlyProvider ||
     useAimlapiEnvOnlyProvider ||
+    useApismartEnvOnlyProvider ||
+    useConcentrateEnvOnlyProvider ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI) ||
@@ -578,7 +789,7 @@ export async function getAnthropicClient({
     return createOpenAIShimClient({
       defaultHeaders,
       maxRetries,
-      timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
+      timeout: getApiTimeoutMs(),
       reasoningEffort: shimReasoningEffort,
     }) as unknown as Anthropic
   }

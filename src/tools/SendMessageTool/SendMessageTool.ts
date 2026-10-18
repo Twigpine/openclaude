@@ -40,6 +40,7 @@ import {
 } from '../../utils/teammateMailbox.js'
 import { resumeAgentBackground } from '../AgentTool/resumeAgent.js'
 import { SEND_MESSAGE_TOOL_NAME } from './constants.js'
+import { abortApprovedInProcessTeammate } from './shutdownInterruptionTrace.js'
 import { DESCRIPTION, getPrompt } from './prompt.js'
 import { renderToolResultMessage, renderToolUseMessage } from './UI.js'
 
@@ -354,7 +355,9 @@ async function handleShutdownApproval(
       const appState = context.getAppState()
       const task = findTeammateTaskByAgentId(agentId, appState.tasks)
       if (task?.abortController) {
-        task.abortController.abort()
+        abortApprovedInProcessTeammate(task.abortController, {
+          agentId,
+        })
         logForDebugging(
           `[SendMessageTool] Aborted controller for in-process teammate ${agentName}`,
         )
@@ -372,7 +375,9 @@ async function handleShutdownApproval(
         logForDebugging(
           `[SendMessageTool] Fallback: Found in-process task for ${agentName} via AppState, aborting`,
         )
-        task.abortController.abort()
+        abortApprovedInProcessTeammate(task.abortController, {
+          agentId,
+        })
 
         return {
           data: {

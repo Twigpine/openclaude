@@ -154,4 +154,56 @@ describe('formatTotalCost — token bar output (PR #1610)', () => {
     expect(out).toMatch(/Total duration \(wall\):/)
     expect(out).toMatch(/7 lines added, 3 lines removed/)
   })
+
+  // A custom-provider model id can be an arbitrary string. `formatModelUsage`
+  // accumulates into a per-short-name map; on a plain object an id that
+  // canonicalizes to `__proto__` / `constructor` reads an inherited
+  // Object.prototype member, skips initialization, and mutates it -- for
+  // `__proto__` that lands on Object.prototype process-wide -- while dropping the
+  // model from the breakdown. Drive the real addToTotalSessionCost -> /cost path.
+  test('aggregates prototype-member model ids without polluting Object.prototype', async () => {
+    const { addToTotalSessionCost } = await import('./cost-tracker.js')
+    // Snapshot any pre-existing descriptors so cleanup restores shared
+    // Object.prototype state exactly instead of blindly deleting keys that
+    // another module may legitimately own.
+    const guardedKeys = [
+      'inputTokens',
+      'outputTokens',
+      'cacheReadInputTokens',
+      'cacheCreationInputTokens',
+      'webSearchRequests',
+      'costUSD',
+    ]
+    const savedDescriptors = new Map(
+      guardedKeys.map(k => [
+        k,
+        Object.getOwnPropertyDescriptor(Object.prototype, k),
+      ]),
+    )
+    try {
+      addToTotalSessionCost(1, anthropicUsage({ input: 1000, output: 500 }), '__proto__')
+      addToTotalSessionCost(1, anthropicUsage({ input: 2000, output: 800 }), 'constructor')
+
+      const out = stripAnsi(formatTotalCost())
+
+      // No global prototype pollution from the `__proto__` accumulator write.
+      expect(
+        (Object.prototype as Record<string, unknown>).inputTokens,
+      ).toBeUndefined()
+      // Both ids appear in the per-model breakdown instead of being dropped.
+      expect(out).toContain('__proto__:')
+      expect(out).toContain('constructor:')
+    } finally {
+      // Belt-and-suspenders: if a regression polluted the prototype, restore the
+      // saved descriptor (or delete keys that were originally absent) so this
+      // suite cannot corrupt others sharing the process.
+      for (const [k, descriptor] of savedDescriptors) {
+        if (descriptor) {
+          Object.defineProperty(Object.prototype, k, descriptor)
+        } else {
+          delete (Object.prototype as Record<string, unknown>)[k]
+        }
+      }
+    }
+  })
 })

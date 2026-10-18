@@ -120,9 +120,9 @@ function formatProviderOutput(po: ProviderOutput, query: string): Output {
 function buildEmptyAdapterResultHint(provider: string, providerName: string): string {
   return (
     `No results from "${providerName}" search backend for provider "${provider}". ` +
-    `The default DuckDuckGo backend is rate-limited from many networks (datacenter IPs, VPNs, repeated requests) and returns 0 results when blocked. ` +
-    `For reliable web search on this provider, set one of: ` +
-    `FIRECRAWL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, JINA_API_KEY, BING_API_KEY, MOJEEK_API_KEY, LINKUP_API_KEY, YOU_API_KEY — ` +
+    `The keyless search backends (the Exa free tier and DuckDuckGo) are rate-limited, so searches can fail or come back empty once a limit is hit or the network is blocked. ` +
+    `For reliable web search on this provider, run /search to add an Exa API key, or set EXA_API_KEY (recommended) or one of: ` +
+    `OLLAMA_BASE_URL, OLLAMA_API_KEY, FIRECRAWL_API_KEY, TAVILY_API_KEY, JINA_API_KEY, BING_API_KEY, MOJEEK_API_KEY, LINKUP_API_KEY, YOU_API_KEY — ` +
     `or switch to an Anthropic / Vertex / Foundry provider that supports the native web_search tool.`
   )
 }
@@ -254,20 +254,16 @@ function addCodexSource(
   })
 }
 
-function getCodexSources(item: Record<string, any>): unknown[] {
-  if (Array.isArray(item.action?.sources)) {
-    return item.action.sources
-  }
-  if (Array.isArray(item.sources)) {
-    return item.sources
-  }
-  if (Array.isArray(item.result?.sources)) {
-    return item.result.sources
-  }
+function getCodexSources(item: Record<string, unknown>): unknown[] {
+  const action = (item.action ?? {}) as Record<string, unknown>
+  const result = (item.result ?? {}) as Record<string, unknown>
+  if (Array.isArray(action.sources)) return action.sources
+  if (Array.isArray(item.sources)) return item.sources as unknown[]
+  if (Array.isArray(result.sources)) return result.sources
   return []
 }
 
-function extractCodexWebSearchFailure(item: Record<string, any>): string | undefined {
+function extractCodexWebSearchFailure(item: Record<string, unknown>): string | undefined {
   // Codex web_search_call items can carry a status field. When the tool
   // call fails (rate limit, upstream error, model-side guardrail), the
   // parser should surface a meaningful error rather than the generic
@@ -275,10 +271,12 @@ function extractCodexWebSearchFailure(item: Record<string, any>): string | undef
   //   { type: 'web_search_call', status: 'failed', error: { message?: string } }
   //   { type: 'web_search_call', status: 'failed', action: { error?: { message?: string } } }
   if (item?.status !== 'failed') return undefined
+  const error = (item.error ?? {}) as Record<string, unknown>
+  const action = (item.action ?? {}) as Record<string, unknown>
+  const actionError = (action.error ?? {}) as Record<string, unknown>
   const reason =
-    (typeof item.error?.message === 'string' && item.error.message) ||
-    (typeof item.action?.error?.message === 'string' &&
-      item.action.error.message) ||
+    (typeof error.message === 'string' && error.message) ||
+    (typeof actionError.message === 'string' && actionError.message) ||
     (typeof item.error === 'string' && item.error) ||
     undefined
   return reason ? `Web search failed: ${reason}` : 'Web search failed.'
@@ -563,7 +561,7 @@ function shouldUseAdapterProvider(): boolean {
  * Anthropic's web_search_20250305 tool, so falling through to the native
  * path silently produces "Did 0 searches".
  */
-function hasNativeSearchFallback(): boolean {
+export function hasNativeSearchFallback(): boolean {
   if (isCodexResponsesWebSearchEnabled()) return true
   const provider = getAPIProvider()
   return (provider === 'firstParty' && isFirstPartyAnthropicBaseUrl()) || provider === 'vertex' || provider === 'foundry'

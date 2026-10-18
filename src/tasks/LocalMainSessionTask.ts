@@ -48,7 +48,11 @@ import {
   getTaskOutputPath,
   initTaskOutputAsSymlink,
 } from '../utils/task/diskOutput.js'
-import { registerTask, updateTaskState } from '../utils/task/framework.js'
+import {
+  PANEL_GRACE_MS,
+  registerTask,
+  updateTaskState,
+} from '../utils/task/framework.js'
 import type { LocalAgentTaskState } from './LocalAgentTask/LocalAgentTask.js'
 
 // Main session tasks use LocalAgentTaskState with agentType='main-session'
@@ -88,15 +92,16 @@ function generateMainSessionTaskId(): string {
  * @param setAppState - State setter function
  * @param mainThreadAgentDefinition - Optional agent definition if running with --agent
  * @param existingAbortController - Optional abort controller to reuse (for backgrounding an active query)
- * @returns Object with task ID and abort signal for stopping the background query
+ * @returns Object with task ID and the controller that owns background cancellation
  */
 export function registerMainSessionTask(
   description: string,
   setAppState: SetAppState,
   mainThreadAgentDefinition?: AgentDefinition,
   existingAbortController?: AbortController,
-): { taskId: string; abortSignal: AbortSignal } {
-  const taskId = generateMainSessionTaskId()
+  existingTaskId?: string,
+): { taskId: string; abortController: AbortController } {
+  const taskId = existingTaskId ?? generateMainSessionTaskId()
 
   // Link output to an isolated per-task transcript file (same layout as
   // sub-agents). Do NOT use getTranscriptPath() — that's the main session's
@@ -157,7 +162,7 @@ export function registerMainSessionTask(
     return prev
   })
 
-  return { taskId, abortSignal: abortController.signal }
+  return { taskId, abortController }
 }
 
 /**
@@ -328,37 +333,99 @@ type ToolActivity = {
   input: Record<string, unknown>
 }
 
+export type BackgroundSessionHandle = {
+  taskId: string
+  abortController: AbortController
+}
+
 /**
  * Start a fresh background session with the given messages.
  *
- * Spawns an independent query() call with the current messages and registers it
- * as a background task. The caller's foreground query continues running normally.
+ * Prepares the continuation first, then registers the background task and
+ * starts an independent query() call. A foreground that settles without a
+ * successor therefore never publishes a task.
  */
 export function startBackgroundSession({
-  messages,
-  queryParams,
+  prepare,
   description,
   setAppState,
   agentDefinition,
+  queryImpl = query,
+  onPreparationError,
+  onContinuationCancelled,
+  onRegistered,
+  onSettled,
 }: {
-  messages: Message[]
-  queryParams: Omit<QueryParams, 'messages'>
+  prepare: (abortController: AbortController) => Promise<
+    | {
+      messages: Message[]
+      restoreNotificationsIfUnsent?: () => void
+      commitNotificationOwnership?: () => void
+      queryParams: Omit<QueryParams, 'messages'>
+    }
+    | null
+  >
   description: string
   setAppState: SetAppState
   agentDefinition?: AgentDefinition
-}): string {
-  const { taskId, abortSignal } = registerMainSessionTask(
-    description,
-    setAppState,
-    agentDefinition,
-  )
+  queryImpl?: typeof query
+  onPreparationError?: (error: unknown) => void
+  onContinuationCancelled?: () => void
+  onRegistered?: (abortController: AbortController) => void
+  onSettled?: (abortController: AbortController) => void
+}): BackgroundSessionHandle {
+  // Keep a controller while preparation waits for the foreground settlement,
+  // but do not publish a task until a successor is actually required. A
+  // settled foreground can complete normally after Ctrl+B is pressed.
+  const taskId = generateMainSessionTaskId()
+  const abortController = createAbortController()
+  const abortSignal = abortController.signal
+  let taskRegistered = false
+  let providerRequestStarted = false
+  let restoreNotificationsIfUnsent: (() => void) | undefined
+  let commitNotificationOwnership: (() => void) | undefined
 
-  // Persist the pre-backgrounding conversation to the task's isolated
-  // transcript so TaskOutput shows context immediately. Subsequent messages
-  // are written incrementally below.
-  void recordSidechainTranscript(messages, taskId).catch(err =>
-    logForDebugging(`bg-session initial transcript write failed: ${err}`),
-  )
+  const restorePreDispatchNotifications = (): void => {
+    if (providerRequestStarted) return
+    const restore = restoreNotificationsIfUnsent
+    restoreNotificationsIfUnsent = undefined
+    restore?.()
+  }
+
+  const finishAbortedTask = (): void => {
+    restorePreDispatchNotifications()
+    onContinuationCancelled?.()
+    // chat:killAgents already marks the task notified and emits this event.
+    // stopTask kills it without doing either for local-agent tasks, so close
+    // the SDK lifecycle exactly once no matter which phase observed abort.
+    let alreadyNotified = false
+    let shouldEvictOutput = false
+    updateTaskState<LocalMainSessionTaskState>(taskId, setAppState, task => {
+      alreadyNotified = task.notified === true
+      if (task.status === 'running') {
+        shouldEvictOutput = true
+        task.unregisterCleanup?.()
+        const endTime = Date.now()
+        return {
+          ...task,
+          status: 'killed',
+          endTime,
+          evictAfter: task.retain ? undefined : endTime + PANEL_GRACE_MS,
+          abortController: undefined,
+          unregisterCleanup: undefined,
+          selectedAgent: undefined,
+          notified: true,
+        }
+      }
+      return alreadyNotified ? task : { ...task, notified: true }
+    })
+    if (shouldEvictOutput) void evictTaskOutput(taskId)
+    if (!alreadyNotified) {
+      emitTaskTerminatedSdk(taskId, 'stopped', {
+        summary: description,
+      })
+    }
+  }
 
   // Wrap in agent context so skill invocations scope to this task's agentId
   // (not null). This lets clearInvokedSkills(preservedAgentIds) selectively
@@ -373,36 +440,73 @@ export function startBackgroundSession({
 
   void runWithAgentContext(agentContext, async () => {
     try {
+      // Wait for the foreground settlement before publishing a task. This
+      // keeps a completion race from producing a phantom background task.
+      const prepared = await prepare(abortController)
+      if (prepared === null) {
+        return
+      }
+      restoreNotificationsIfUnsent = prepared.restoreNotificationsIfUnsent
+      commitNotificationOwnership = prepared.commitNotificationOwnership
+      if (abortSignal.aborted) {
+        restorePreDispatchNotifications()
+        onContinuationCancelled?.()
+        return
+      }
+      try {
+        registerMainSessionTask(
+          description,
+          setAppState,
+          agentDefinition,
+          abortController,
+          taskId,
+        )
+      } catch (error) {
+        restorePreDispatchNotifications()
+        if (abortSignal.aborted) {
+          onContinuationCancelled?.()
+          return
+        }
+        throw error
+      }
+      taskRegistered = true
+      onRegistered?.(abortController)
+      const { messages, queryParams } = prepared
+
+      // Persist the pre-backgrounding conversation to the task's isolated
+      // transcript so TaskOutput shows context immediately. Subsequent
+      // messages are written incrementally below.
+      void recordSidechainTranscript(messages, taskId).catch(err =>
+        logForDebugging(`bg-session initial transcript write failed: ${err}`),
+      )
+
       const bgMessages: Message[] = [...messages]
       const recentActivities: ToolActivity[] = []
       let toolCount = 0
       let tokenCount = 0
       let lastRecordedUuid: UUID | null = messages.at(-1)?.uuid ?? null
 
-      for await (const event of query({
+      for await (const event of queryImpl({
         messages: bgMessages,
         ...queryParams,
+        onProviderDispatchAccepted: () => {
+          providerRequestStarted = true
+          commitNotificationOwnership?.()
+        },
       })) {
         if (abortSignal.aborted) {
-          // Aborted mid-stream — completeMainSessionTask won't be reached.
-          // chat:killAgents path already marked notified + emitted; stopTask path did not.
-          let alreadyNotified = false
-          updateTaskState(taskId, setAppState, task => {
-            alreadyNotified = task.notified === true
-            return alreadyNotified ? task : { ...task, notified: true }
-          })
-          if (!alreadyNotified) {
-            emitTaskTerminatedSdk(taskId, 'stopped', {
-              summary: description,
-            })
-          }
+          finishAbortedTask()
           return
         }
 
         if (
           event.type !== 'user' &&
           event.type !== 'assistant' &&
-          event.type !== 'system'
+          event.type !== 'system' &&
+          !(
+            event.type === 'attachment' &&
+            event.attachment.type === 'max_turns_reached'
+          )
         ) {
           continue
         }
@@ -467,12 +571,39 @@ export function startBackgroundSession({
         })
       }
 
+      if (abortSignal.aborted) {
+        finishAbortedTask()
+        return
+      }
+      if (providerRequestStarted) {
+        commitNotificationOwnership?.()
+      }
       completeMainSessionTask(taskId, true, setAppState)
     } catch (error) {
+      if (abortSignal.aborted) {
+        if (taskRegistered) {
+          finishAbortedTask()
+        } else {
+          restorePreDispatchNotifications()
+          onContinuationCancelled?.()
+        }
+        return
+      }
       logError(error)
-      completeMainSessionTask(taskId, false, setAppState)
+      if (taskRegistered) {
+        if (providerRequestStarted) {
+          commitNotificationOwnership?.()
+        }
+        completeMainSessionTask(taskId, false, setAppState)
+      } else {
+        restorePreDispatchNotifications()
+        onPreparationError?.(error)
+        onContinuationCancelled?.()
+      }
+    } finally {
+      onSettled?.(abortController)
     }
   })
 
-  return taskId
+  return { taskId, abortController }
 }

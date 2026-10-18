@@ -1,0 +1,16 @@
+{
+  "redirects": [
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "openclaude.gitlawb.com" }],
+      "destination": "https://openclaude.twigpine.com/",
+      "permanent": true
+    },
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "openclaude.gitlawb.com" }],
+      "destination": "https://openclaude.twigpine.com/:path*",
+      "permanent": true
+    }
+  ]
+}

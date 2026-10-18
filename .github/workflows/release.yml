@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   release-please:
-    if: ${{ github.repository == 'Gitlawb/openclaude' }}
+    if: ${{ github.repository == 'Twigpine/openclaude' }}
     name: Release Please
     runs-on: ubuntu-latest
     permissions:
@@ -29,9 +29,50 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           release-type: node
 
+  # Zero-warning install gate: pack the release tag and install it globally in
+  # a sandbox (cold + upgrade scenarios) on the supported Node floor (22 →
+  # npm 10) and current (24 → npm 11), whose warning output differs. Publish
+  # is blocked unless the real `npm install -g` experience is clean.
+  install-verify:
+    name: Verify clean npm install (Node ${{ matrix.node-version }})
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24]
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Verify zero-warning global install
+        run: bun run install:verify
+
   publish-npm:
     name: Publish to npm
-    needs: release-please
+    needs: [release-please, install-verify]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     environment: release
@@ -68,16 +109,35 @@ jobs:
       - name: Smoke test
         run: bun run smoke
 
-      - name: Dry-run package
-        run: npm pack --dry-run
+      # Final install-hygiene gate on the publishing machine itself (the
+      # install-verify job covered Node 22/24 already); packs with
+      # --ignore-scripts to reuse the dist/ built above. Supersedes the old
+      # `npm pack --dry-run` (contents are asserted inside the verify).
+      - name: Verify zero-warning global install
+        run: bun run install:verify
 
       - name: Clear token auth for trusted publishing
         run: |
           unset NODE_AUTH_TOKEN
           echo "NODE_AUTH_TOKEN=" >> "$GITHUB_ENV"
 
+      # Tokenless: npm authenticates this job through trusted publishing (OIDC)
+      # and attaches provenance from the same identity.
+      #
+      # --ignore-scripts publishes the dist/ that was built and verified above
+      # instead of rebuilding it in `prepack`. Skipping a version that is
+      # already published makes "Re-run failed jobs" safe.
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          if [ "$(npm view "@twigpine/openclaude@${version}" version 2>/dev/null || true)" = "${version}" ]; then
+            echo "@twigpine/openclaude@${version} is already on the registry; not publishing again."
+            exit 0
+          fi
+
+          npm publish --access public --provenance --ignore-scripts
 
       - name: Verify npm latest dist-tag
         env:
@@ -91,16 +151,16 @@ jobs:
           fi
 
           for attempt in $(seq 1 30); do
-            published_version="$(npm view @gitlawb/openclaude version 2>/dev/null || true)"
-            latest_tag="$(npm view @gitlawb/openclaude dist-tags.latest 2>/dev/null || true)"
-            latest_version="$(npm view @gitlawb/openclaude@latest version 2>/dev/null || true)"
+            published_version="$(npm view @twigpine/openclaude version 2>/dev/null || true)"
+            latest_tag="$(npm view @twigpine/openclaude dist-tags.latest 2>/dev/null || true)"
+            latest_version="$(npm view @twigpine/openclaude@latest version 2>/dev/null || true)"
 
             echo "Attempt ${attempt}: version=${published_version:-<empty>} latest=${latest_tag:-<empty>} @latest=${latest_version:-<empty>} expected=${EXPECTED_VERSION}"
 
             if [ "$published_version" = "$EXPECTED_VERSION" ] && \
                [ "$latest_tag" = "$EXPECTED_VERSION" ] && \
                [ "$latest_version" = "$EXPECTED_VERSION" ]; then
-              echo "npm latest verified for @gitlawb/openclaude@${EXPECTED_VERSION}"
+              echo "npm latest verified for @twigpine/openclaude@${EXPECTED_VERSION}"
               exit 0
             fi
 
@@ -114,13 +174,16 @@ jobs:
           exit 1
 
       - name: Release summary
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
         run: |
           {
             echo "## Released ${{ needs.release-please.outputs.tag_name }}"
             echo
-            echo "- npm: https://www.npmjs.com/package/@gitlawb/openclaude"
-            echo "- GitHub: https://github.com/Gitlawb/openclaude/releases/tag/${{ needs.release-please.outputs.tag_name }}"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "- npm: https://www.npmjs.com/package/@twigpine/openclaude"
+            echo "- GitHub: https://github.com/Twigpine/openclaude/releases/tag/${{ needs.release-please.outputs.tag_name }}"
+            bun scripts/npm-publish-report.ts @twigpine/openclaude "${EXPECTED_VERSION}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   docker:
     name: Build & Push Docker Image

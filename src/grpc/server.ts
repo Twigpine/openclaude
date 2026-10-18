@@ -20,8 +20,31 @@ const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
   oneofs: true,
 })
 
-const protoDescriptor = grpc.loadPackageDefinition(packageDefinition) as any
+// proto-loader returns a deeply-nested untyped shape; we only need the AgentService
+// definition from the OpenClaude v1 package, so narrow to that. The implementation
+// map declares the method names; ServiceDefinition<T> requires T to be a record
+// keyed by method name.
+const protoDescriptor = grpc.loadPackageDefinition(packageDefinition) as unknown as {
+  openclaude: {
+    v1: {
+      AgentService: { service: grpc.ServiceDefinition<{ Chat: never }> }
+    }
+  }
+}
 const openclaudeProto = protoDescriptor.openclaude.v1
+
+// Shape of a single client message on the duplex Chat stream. Matches the
+// `oneof` payload in openclaude.proto (ChatRequest | ToolInput | CancelRequest).
+type ClientMessage = {
+  request?: {
+    session_id?: unknown
+    message?: unknown
+    working_directory?: unknown
+    model?: unknown
+  } | null
+  input?: { prompt_id?: unknown; reply?: unknown } | null
+  cancel?: unknown
+}
 
 const MAX_SESSIONS = 1000
 
@@ -108,7 +131,7 @@ export class GrpcServer {
     )
   }
 
-  private handleChat(call: grpc.ServerDuplexStream<any, any>) {
+  private handleChat(call: grpc.ServerDuplexStream<ClientMessage, unknown>) {
     let engine: QueryEngine | null = null
     let appState: AppState = getDefaultAppState()
     const fileCache: FileStateCache = new FileStateCache(READ_FILE_STATE_CACHE_SIZE, 25 * 1024 * 1024)
@@ -117,7 +140,7 @@ export class GrpcServer {
     const pendingRequests = new Map<string, (reply: string) => void>()
 
     // Accumulated messages from previous turns for multi-turn context
-    let previousMessages: any[] = []
+    let previousMessages: Message[] = []
     let sessionId = ''
     let interrupted = false
 
@@ -289,15 +312,15 @@ export class GrpcServer {
         } else if (clientMessage.cancel) {
           interrupted = true
           if (engine) {
-            engine.interrupt()
+            engine.interrupt('grpc_cancel')
           }
           call.end()
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error('Error processing stream')
         call.write({
           error: {
-            message: err.message || "Internal server error",
+            message: err instanceof Error ? err.message : "Internal server error",
             code: "INTERNAL"
           }
         })
@@ -312,7 +335,7 @@ export class GrpcServer {
         resolve('no')
       }
       if (engine) {
-        engine.interrupt()
+        engine.interrupt('grpc_stream_end')
       }
       engine = null
       pendingRequests.clear()

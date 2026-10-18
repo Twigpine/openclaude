@@ -93,6 +93,10 @@ export default [
   qwenModel('qwen3-coder-next', 'Qwen 3 Coder Next', 262_144, 65_536),
   qwenModel('qwen3-max', 'Qwen 3 Max', 262_144, 32_768),
   qwenModel('Qwen/Qwen3.5-9B', 'Qwen 3.5 9B', 128_000, 32_768),
+  // Limits as served by GMI Cloud's /v1/models (context); output is a
+  // conservative cap since GMI does not publish one.
+  qwenTextModel('qwen3.8-max', 'Qwen 3.8 Max', 262_144, 65_536),
+  qwenTextModel('qwen3.8-flash', 'Qwen 3.8 Flash', 1_048_575, 65_536),
   // Text-only (no vision per the OpenRouter catalog), so it skips the
   // qwenModel helper's vision defaults.
   defineModel({

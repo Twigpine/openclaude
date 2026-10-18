@@ -423,6 +423,10 @@ export async function generateSessionTitle(
       },
     })
 
+    if (result.isApiErrorMessage) {
+      throw new Error('Session title query returned an API error')
+    }
+
     const text = extractTextContent(result.message.content)
     const parsed = parseSessionTitleResponse(text)
 

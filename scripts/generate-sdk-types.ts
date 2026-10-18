@@ -55,12 +55,12 @@ const TypeOverrideMap: Record<string, string> = {
 
 // Materialize placeholder schemas once so we can detect them by identity (===)
 // when they appear as fields inside other schemas.
-const placeholderInstances = new Map<any, string>()
+const placeholderInstances = new Map<unknown, string>()
 for (const name of Object.keys(TypeOverrideMap)) {
-  const thunk = (schemas as any)[name]
-  if (typeof thunk === 'function') {
+  const candidate = (schemas as Record<string, unknown>)[name]
+  if (typeof candidate === 'function') {
     try {
-      placeholderInstances.set(thunk(), TypeOverrideMap[name])
+      placeholderInstances.set((candidate as () => unknown)(), TypeOverrideMap[name])
     } catch { /* ignore */ }
   }
 }
@@ -228,15 +228,16 @@ const EXPORT_ORDER = [
 // Zod v4 uses schema.def.type as the discriminator (lowercase strings).
 // All schemas have .def with { type: string, ... }.
 
-function convert(schema: any, depth = 0): string {
-  if (!schema || !schema.def) return 'unknown'
+function convert(schema: unknown, depth = 0): string {
+  if (!schema || typeof schema !== 'object' || !('def' in schema)) return 'unknown'
 
   // Check if this schema is a known placeholder (identity comparison)
   const override = placeholderInstances.get(schema)
   if (override) return override
 
-  const def = schema.def
-  const type: string = def.type
+  const def = (schema as { def: unknown }).def as Record<string, unknown> | null
+  if (!def || typeof def !== 'object') return 'unknown'
+  const type = typeof def.type === 'string' ? def.type : ''
 
   switch (type) {
     case 'string':
@@ -259,16 +260,16 @@ function convert(schema: any, depth = 0): string {
       return 'never'
     case 'literal': {
       // def.values is an array of literal values
-      const vals = def.values as any[]
+      const vals = Array.isArray(def.values) ? def.values : []
       return vals.map(v => JSON.stringify(v)).join(' | ')
     }
     case 'enum': {
       // def.entries is { key: value } or an array
       const entries = def.entries
       if (Array.isArray(entries)) {
-        return entries.map((v: any) => JSON.stringify(v)).join(' | ')
+        return entries.map(v => JSON.stringify(v)).join(' | ')
       }
-      return Object.values(entries)
+      return Object.values(entries as Record<string, unknown>)
         .filter((v): v is string => typeof v === 'string')
         .map(v => JSON.stringify(v))
         .join(' | ')
@@ -285,7 +286,7 @@ function convert(schema: any, depth = 0): string {
       return `${needsArrayElementParens(element) ? `(${element})` : element}[]`
     }
     case 'tuple': {
-      const items = (def.items as any[]).map(t => convert(t, depth))
+      const items = (Array.isArray(def.items) ? def.items : []).map(t => convert(t, depth))
       return `[${items.join(', ')}]`
     }
     case 'record':
@@ -295,7 +296,7 @@ function convert(schema: any, depth = 0): string {
     case 'union':
     case 'discriminated_union': {
       // def.options for discriminated, def.options for plain union
-      const members = (def.options as any[]).map(t => {
+      const members = (Array.isArray(def.options) ? def.options : []).map(t => {
         const ts = convert(t, depth)
         return needsParens(ts) ? `(${ts})` : ts
       })
@@ -309,8 +310,11 @@ function convert(schema: any, depth = 0): string {
       return `${convert(def.innerType, depth)} | null`
     case 'default':
       return convert(def.innerType, depth)
-    case 'lazy':
-      return convert(def.getter(), depth)
+    case 'lazy': {
+      const getter = def.getter
+      if (typeof getter !== 'function') return 'unknown'
+      return convert((getter as () => unknown)(), depth)
+    }
     case 'transform':
     case 'effects':
       return convert(def.schema, depth)
@@ -334,12 +338,12 @@ function convert(schema: any, depth = 0): string {
   }
 }
 
-function convertObject(def: any, depth: number): string {
-  let shape: Record<string, any>
+function convertObject(def: Record<string, unknown>, depth: number): string {
+  let shape: Record<string, unknown>
   if (typeof def.shape === 'function') {
-    shape = def.shape()
+    shape = (def.shape as () => Record<string, unknown>)()
   } else if (typeof def.shape === 'object' && def.shape !== null) {
-    shape = def.shape
+    shape = def.shape as Record<string, unknown>
   } else {
     return 'Record<string, unknown>'
   }
@@ -359,9 +363,12 @@ function convertObject(def: any, depth: number): string {
   return '{\n' + fields.join('\n') + '\n' + closeIndent + '}'
 }
 
-function isOptional(schema: any): boolean {
-  if (!schema?.def) return false
-  return schema.def.type === 'optional' || schema.def.type === 'default'
+function isOptional(schema: unknown): boolean {
+  if (!schema || typeof schema !== 'object' || !('def' in schema)) return false
+  const def = (schema as { def: unknown }).def
+  if (!def || typeof def !== 'object') return false
+  const defType = (def as { type?: unknown }).type
+  return defType === 'optional' || defType === 'default'
 }
 
 function needsParens(ts: string): boolean {
@@ -388,7 +395,7 @@ export function generateSdkTypes(): string {
   let errors = 0
 
   for (const schemaName of EXPORT_ORDER) {
-    const thunk = (schemas as any)[schemaName]
+    const thunk = (schemas as Record<string, unknown>)[schemaName]
     if (typeof thunk !== 'function') {
       console.warn(`  ⚠ Not found: ${schemaName}`)
       errors++
@@ -403,11 +410,12 @@ export function generateSdkTypes(): string {
       continue
     }
 
-    let schema: any
+    let schema: unknown
     try {
-      schema = thunk()
-    } catch (e: any) {
-      console.warn(`  ⚠ Materialize failed: ${schemaName}: ${e.message}`)
+      schema = (thunk as () => unknown)()
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.warn(`  ⚠ Materialize failed: ${schemaName}: ${msg}`)
       errors++
       continue
     }
@@ -417,14 +425,18 @@ export function generateSdkTypes(): string {
     try {
       const ts = convert(schema)
       // Check for top-level description
-      const desc = Reflect.get(schema, 'description') as string | undefined
+      const desc =
+        schema && typeof schema === 'object'
+          ? (Reflect.get(schema, 'description') as string | undefined)
+          : undefined
       if (desc) {
         lines.push(`/** ${desc} */`)
       }
       lines.push(`export type ${typeName} = ${ts}`)
       lines.push('')
-    } catch (e: any) {
-      console.warn(`  ⚠ Convert failed: ${schemaName}: ${e.message}`)
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.warn(`  ⚠ Convert failed: ${schemaName}: ${msg}`)
       errors++
       lines.push(`// ⚠ Failed: ${schemaName}`)
       lines.push(`export type ${typeName} = any`)

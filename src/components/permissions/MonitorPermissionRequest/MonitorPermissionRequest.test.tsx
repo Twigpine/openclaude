@@ -34,6 +34,11 @@ import type {
 } from '../../../utils/permissions/PermissionResult.js'
 import type { PermissionUpdate } from '../../../utils/permissions/PermissionUpdateSchema.js'
 import type { ToolUseConfirm } from '../PermissionRequest.js'
+import {
+  __getInterruptionTraceSnapshotForTests,
+  __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
+} from '../../../utils/interruptionTrace.js'
 
 function createTestStreams(): {
   stdout: PassThrough
@@ -198,12 +203,21 @@ function createInteractiveMonitorPermission(): {
       push(item) {
         queue = [...queue, item]
       },
-      remove(toolUseID) {
-        queue = queue.filter(item => item.toolUseID !== toolUseID)
+      remove(toolUseID, permissionSessionId, agentId) {
+        queue = queue.filter(
+          item =>
+            item.toolUseID !== toolUseID ||
+            item.permissionSessionId !== permissionSessionId ||
+            item.toolUseContext.agentId !== agentId,
+        )
       },
-      update(toolUseID, patch) {
+      update(toolUseID, permissionSessionId, agentId, patch) {
         queue = queue.map(item =>
-          item.toolUseID === toolUseID ? { ...item, ...patch } : item,
+          item.toolUseID === toolUseID &&
+          item.permissionSessionId === permissionSessionId &&
+          item.toolUseContext.agentId === agentId
+            ? { ...item, ...patch }
+            : item,
         )
       },
     },
@@ -344,6 +358,8 @@ async function renderMonitorPermission(
   }
 }
 
+const originalInterruptionTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
+
 beforeEach(async () => {
   await acquireSharedMutationLock(
     'components/permissions/MonitorPermissionRequest.test.tsx',
@@ -353,9 +369,16 @@ beforeEach(async () => {
   }))
 })
 
-afterEach(() => {
+afterEach(async () => {
   try {
     mock.restore()
+    await __waitForInterruptionTraceFlushForTests()
+    __resetInterruptionTraceForTests()
+    if (originalInterruptionTrace === undefined) {
+      delete process.env.OPENCLAUDE_INTERRUPT_TRACE
+    } else {
+      process.env.OPENCLAUDE_INTERRUPT_TRACE = originalInterruptionTrace
+    }
   } finally {
     releaseSharedMutationLock()
   }
@@ -486,6 +509,8 @@ describe('MonitorPermissionRequest', () => {
   })
 
   test('escape cancels the pending permission request and closes the dialog', async () => {
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
     const onDone = mock(() => {})
     const onReject = mock(() => {})
     const { toolUseConfirm, toolUseContext, decisionPromise } =
@@ -504,6 +529,16 @@ describe('MonitorPermissionRequest', () => {
       expect(decision.behavior).toBe('ask')
       expect(toolUseContext.abortController.signal.aborted).toBe(true)
       expect(onReject).toHaveBeenCalledTimes(1)
+      expect(
+        __getInterruptionTraceSnapshotForTests().find(
+          entry =>
+            entry.event === 'abort.requested' &&
+            entry.source === 'permission_abort',
+        ),
+      ).toMatchObject({
+        subsystem: 'tool_permission',
+        controllerRole: 'query-root',
+      })
     } finally {
       mounted.cleanup()
     }

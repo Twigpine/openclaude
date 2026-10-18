@@ -153,10 +153,10 @@ If you want source builds, advanced provider profiles, diagnostics, or Bun-based
 
 ## Getting Help
 
-- **GitHub Discussions**: https://github.com/Gitlawb/openclaude/discussions
+- **GitHub Discussions**: https://github.com/Twigpine/openclaude/discussions
   Use this for Q&A, setup help, and community conversation.
 
-- **GitHub Issues**: https://github.com/Gitlawb/openclaude/issues
+- **GitHub Issues**: https://github.com/Twigpine/openclaude/issues
   Use this for confirmed bugs and feature requests.
 
 ### Quick diagnostic check

@@ -6,7 +6,7 @@ export type Theme = {
   bashBorder: string
   claude: string
   claudeShimmer: string // Lighter version of claude color for shimmer effect
-  // OpenClaude brand accent (gitlawb orange). Values MUST be rgb() strings in
+  // OpenClaude brand accent (twigpine orange). Values MUST be rgb() strings in
   // truecolor themes — spinner shimmer/stall interpolation parses them with
   // parseRGB, which silently fails on hex.
   brand: string
@@ -91,6 +91,9 @@ export type Theme = {
   rainbow_blue_shimmer: string
   rainbow_indigo_shimmer: string
   rainbow_violet_shimmer: string
+  // Ultracode mode colors (blue/cyan code-oriented visual)
+  ultracode: string
+  ultracodeShimmer: string
 }
 
 export const THEME_NAMES = [
@@ -195,6 +198,8 @@ const lightTheme: Theme = {
   rainbow_blue_shimmer: 'rgb(180,205,240)',
   rainbow_indigo_shimmer: 'rgb(195,180,230)',
   rainbow_violet_shimmer: 'rgb(230,180,210)',
+  ultracode: 'rgb(0,180,216)', // Cyan-blue for ultracode mode
+  ultracodeShimmer: 'rgb(77,215,255)', // Brighter cyan-blue shimmer
 }
 
 /**
@@ -278,6 +283,8 @@ const lightAnsiTheme: Theme = {
   rainbow_blue_shimmer: 'ansi:cyanBright',
   rainbow_indigo_shimmer: 'ansi:blueBright',
   rainbow_violet_shimmer: 'ansi:magentaBright',
+  ultracode: 'ansi:cyanBright',
+  ultracodeShimmer: 'ansi:cyanBright',
 }
 
 /**
@@ -361,6 +368,8 @@ const darkAnsiTheme: Theme = {
   rainbow_blue_shimmer: 'ansi:cyanBright',
   rainbow_indigo_shimmer: 'ansi:blueBright',
   rainbow_violet_shimmer: 'ansi:magentaBright',
+  ultracode: 'ansi:cyanBright',
+  ultracodeShimmer: 'ansi:cyanBright',
 }
 
 /**
@@ -444,6 +453,8 @@ const lightDaltonizedTheme: Theme = {
   rainbow_blue_shimmer: 'rgb(180,205,240)',
   rainbow_indigo_shimmer: 'rgb(195,180,230)',
   rainbow_violet_shimmer: 'rgb(230,180,210)',
+  ultracode: 'rgb(0,180,216)', // Cyan-blue for ultracode mode
+  ultracodeShimmer: 'rgb(77,215,255)', // Brighter cyan-blue shimmer
 }
 
 /**
@@ -527,6 +538,8 @@ const darkTheme: Theme = {
   rainbow_blue_shimmer: 'rgb(180,205,240)',
   rainbow_indigo_shimmer: 'rgb(195,180,230)',
   rainbow_violet_shimmer: 'rgb(230,180,210)',
+  ultracode: 'rgb(0,180,216)', // Cyan-blue for ultracode mode
+  ultracodeShimmer: 'rgb(77,215,255)', // Brighter cyan-blue shimmer
 }
 
 /**
@@ -610,6 +623,8 @@ const darkDaltonizedTheme: Theme = {
   rainbow_blue_shimmer: 'rgb(180,205,240)',
   rainbow_indigo_shimmer: 'rgb(195,180,230)',
   rainbow_violet_shimmer: 'rgb(230,180,210)',
+  ultracode: 'rgb(0,180,216)', // Cyan-blue for ultracode mode
+  ultracodeShimmer: 'rgb(77,215,255)', // Brighter cyan-blue shimmer
 }
 
 export function getTheme(themeName: ThemeName): Theme {

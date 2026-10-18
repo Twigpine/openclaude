@@ -2,6 +2,7 @@ import type { Tool, ToolUseContext } from 'src/Tool.js'
 import z from 'zod/v4'
 import { logForDebugging } from '../debug.js'
 import { lazySchema } from '../lazySchema.js'
+import { requestAbort } from '../interruptionTrace.js'
 import type {
   PermissionDecision,
   PermissionDecisionReason,
@@ -159,7 +160,11 @@ export async function permissionPromptToolResultToPermissionDecision(
     logForDebugging(
       `SDK permission prompt deny+interrupt: tool=${tool.name} message=${result.message}`,
     )
-    toolUseContext.abortController.abort('interrupt')
+    requestAbort(toolUseContext.abortController, 'interrupt', {
+      source: 'sdk_permission_interrupt',
+      subsystem: 'tool_permission',
+      controllerRole: 'query-root',
+    })
   }
   return {
     ...result,

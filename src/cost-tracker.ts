@@ -206,11 +206,18 @@ function formatModelUsage(): string {
     return 'Usage:                 0 input, 0 output'
   }
 
-  // Accumulate usage by short name
-  const usageByShortName: { [shortName: string]: ModelUsage } = {}
+  // Accumulate usage by short name. Null-prototype so an unrecognised custom
+  // provider id that canonicalizes to `__proto__` / `constructor` becomes an
+  // ordinary own key: on a plain object the truthiness check below would read an
+  // inherited Object.prototype member, skip initialization, and mutate it (for
+  // `__proto__`, polluting Object.prototype process-wide), while dropping the
+  // model from the displayed breakdown.
+  const usageByShortName: { [shortName: string]: ModelUsage } = Object.create(
+    null,
+  ) as { [shortName: string]: ModelUsage }
   for (const [model, usage] of Object.entries(modelUsageMap)) {
     const shortName = getCanonicalName(model)
-    if (!usageByShortName[shortName]) {
+    if (!Object.hasOwn(usageByShortName, shortName)) {
       usageByShortName[shortName] = {
         inputTokens: 0,
         outputTokens: 0,

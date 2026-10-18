@@ -11,6 +11,49 @@ const grokCapabilities = {
 
 export default [
   defineModel({
+    id: 'grok-4.6',
+    label: 'Grok 4.6',
+    brandId: 'xai',
+    vendorId: 'xai',
+    classification: ['chat', 'reasoning', 'vision', 'coding'],
+    defaultModel: 'grok-4.6',
+    providerModelMap: {
+      openrouter: 'x-ai/grok-4.6',
+      'atlas-cloud': 'xai/grok-4.6',
+      hicap: 'grok-4.6',
+    },
+    capabilities: grokCapabilities,
+    reasoning: {
+      mode: 'levels',
+      levels: ['low', 'medium', 'high', 'xhigh'],
+      defaultLevel: 'high',
+      wireFormat: 'reasoning_effort',
+    },
+    contextWindow: 500_000,
+  }),
+  defineModel({
+    id: 'grok-4.5',
+    label: 'Grok 4.5',
+    brandId: 'xai',
+    vendorId: 'xai',
+    classification: ['chat', 'reasoning', 'vision', 'coding'],
+    defaultModel: 'grok-4.5',
+    providerModelMap: {
+      openrouter: 'x-ai/grok-4.5',
+      'atlas-cloud': 'xai/grok-4.5',
+      hicap: 'grok-4.5',
+    },
+    capabilities: grokCapabilities,
+    reasoning: {
+      mode: 'levels',
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'high',
+      wireFormat: 'reasoning_effort',
+    },
+    contextWindow: 500_000,
+    maxOutputTokens: 32_768,
+  }),
+  defineModel({
     id: 'grok-4.3',
     label: 'Grok 4.3',
     brandId: 'xai',

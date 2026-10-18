@@ -355,7 +355,7 @@ test('compacts and retries once for context overflow errors', async () => {
   const messages = await collect(params)
 
   expect(callCount).toBe(2)
-  expect(seenForceReasons).toEqual([undefined, 'memory-pressure'])
+  expect(seenForceReasons).toEqual([undefined, 'context-overflow'])
   const retryMessages = seenRequestMessages[1] ?? []
   expect(
     retryMessages.some(

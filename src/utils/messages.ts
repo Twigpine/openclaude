@@ -24,7 +24,10 @@ import { sanitizeToolNameForAnalytics } from 'src/services/analytics/metadata.js
 import type { AgentId } from 'src/types/ids.js'
 import { companionIntroText } from '../buddy/prompt.js'
 import { NO_CONTENT_MESSAGE } from '../constants/messages.js'
-import { OUTPUT_STYLE_CONFIG } from '../constants/outputStyles.js'
+import {
+  OUTPUT_STYLE_CONFIG,
+  resolveOutputStyle,
+} from '../constants/outputStyles.js'
 import { isAutoMemoryEnabled } from '../memdir/paths.js'
 import {
   checkStatsigFeatureGate_CACHED_MAY_BE_STALE,
@@ -1381,6 +1384,68 @@ export function normalizeMessagesForAPI(
   messages: Message[],
   tools: Tools = [],
 ): (UserMessage | AssistantMessage)[] {
+  const containsStripTarget = (
+    content: ContentBlockParam[],
+    types: Set<string>,
+  ): boolean => content.some(block =>
+    types.has(block.type) ||
+    (block.type === 'tool_result' &&
+      Array.isArray(block.content) &&
+      containsStripTarget(block.content as ContentBlockParam[], types)),
+  )
+  const stripTargetsFromContent = (
+    content: ContentBlockParam[],
+    types: Set<string>,
+  ): ContentBlockParam[] => content
+    .filter(block => !types.has(block.type))
+    .map(block => {
+      if (block.type !== 'tool_result' || !Array.isArray(block.content)) {
+        return block
+      }
+      const strippedContent = stripTargetsFromContent(
+        block.content as ContentBlockParam[],
+        types,
+      )
+      return {
+        ...block,
+        // A tool result must retain content to preserve the paired tool-use
+        // contract and avoid OpenAI-compatible providers rejecting an empty
+        // role: tool message after media is removed.
+        content: (strippedContent.length > 0
+          ? strippedContent
+          : [{ type: 'text', text: '[Media removed after provider rejection.]' }]
+        ) as typeof block.content,
+      }
+    })
+  const stripMediaFromUserMessage = (
+    message: UserMessage,
+    types: Set<string>,
+  ): UserMessage => {
+    const content = message.message.content
+    if (!Array.isArray(content)) return message
+    let imageIndex = 0
+    const imageOwners: Array<string | null> = []
+    for (const block of content) {
+      if (block.type !== 'image') continue
+      const owner = message.imagePermissionToolUseIds?.[imageIndex++] ?? null
+      if (!types.has(block.type)) imageOwners.push(owner)
+    }
+    const filtered = stripTargetsFromContent(content, types)
+    return {
+      ...message,
+      imagePermissionToolUseIds:
+        imageOwners.length > 0 ? imageOwners : undefined,
+      message: {
+        ...message.message,
+        content: filtered.length > 0
+          ? filtered
+          : [{
+              type: 'text',
+              text: '[Media removed after provider rejection.]',
+            }],
+      },
+    }
+  }
   // Build set of available tool names for filtering unavailable tool references
   const availableToolNames = new Set(tools.map(t => t.name))
 
@@ -1426,6 +1491,16 @@ export function normalizeMessagesForAPI(
   // Walk the reordered messages to build a targeted strip map:
   // userMessageUUID → set of block types to strip from that message.
   const stripTargets = new Map<string, Set<string>>()
+  const addStripTarget = (uuid: string, types: Set<string>): void => {
+    const existing = stripTargets.get(uuid)
+    if (existing) {
+      for (const type of types) {
+        existing.add(type)
+      }
+      return
+    }
+    stripTargets.set(uuid, new Set(types))
+  }
   for (let i = 0; i < reorderedMessages.length; i++) {
     const msg = reorderedMessages[i]!
     if (!isSyntheticApiErrorMessage(msg)) {
@@ -1444,26 +1519,43 @@ export function normalizeMessagesForAPI(
     if (!blockTypesToStrip) {
       continue
     }
-    // Walk backward to find the nearest preceding isMeta user message
+    // Provider errors do not identify the rejected attachment. Strip the
+    // matching block type from every contiguous user message in this failed
+    // turn: choosing only one adjacent message can retain the bad payload and
+    // make every retry fail again.
     for (let j = i - 1; j >= 0; j--) {
       const candidate = reorderedMessages[j]!
-      if (candidate.type === 'user' && candidate.isMeta) {
-        const existing = stripTargets.get(candidate.uuid)
-        if (existing) {
-          for (const t of blockTypesToStrip) {
-            existing.add(t)
-          }
-        } else {
-          stripTargets.set(candidate.uuid, new Set(blockTypesToStrip))
+      if (candidate.type === 'user') {
+        const content = candidate.message.content
+        if (
+          !Array.isArray(content) ||
+          !containsStripTarget(content, blockTypesToStrip)
+        ) {
+          continue
         }
-        break
+        addStripTarget(candidate.uuid, blockTypesToStrip)
+        continue
       }
-      // Skip over other synthetic error messages or non-meta messages
+      if (candidate.type === 'attachment') {
+        const normalized = normalizeAttachmentForAPI(candidate.attachment)
+        if (normalized.some(message =>
+          Array.isArray(message.message.content) &&
+          containsStripTarget(message.message.content, blockTypesToStrip)
+        )) {
+          addStripTarget(candidate.uuid, blockTypesToStrip)
+        }
+        continue
+      }
+      // Skip over other synthetic error messages.
       if (isSyntheticApiErrorMessage(candidate)) {
         continue
       }
-      // Stop if we hit an assistant message or non-meta user message
-      break
+      // Only an assistant message starts an earlier API turn. Progress and
+      // filtered system records are not sent to the provider and must not
+      // prevent cleanup of media in the failed request.
+      if (candidate.type === 'assistant') {
+        break
+      }
     }
   }
 
@@ -1541,30 +1633,15 @@ export function normalizeMessagesForAPI(
             )
           }
 
-          // Strip document/image blocks from the specific meta user message that
+          // Strip document/image blocks from the specific user message that
           // preceded a PDF/image/request-too-large error, to prevent re-sending
           // the problematic content on every subsequent API call.
           const typesToStrip = stripTargets.get(normalizedMessage.uuid)
-          if (typesToStrip && normalizedMessage.isMeta) {
-            const content = normalizedMessage.message.content
-            if (Array.isArray(content)) {
-              const filtered = content.filter(
-                block => !typesToStrip.has(block.type),
-              )
-              if (filtered.length === 0) {
-                // All content blocks were stripped; skip this message entirely
-                return
-              }
-              if (filtered.length < content.length) {
-                normalizedMessage = {
-                  ...normalizedMessage,
-                  message: {
-                    ...normalizedMessage.message,
-                    content: filtered,
-                  },
-                }
-              }
-            }
+          if (typesToStrip) {
+            normalizedMessage = stripMediaFromUserMessage(
+              normalizedMessage,
+              typesToStrip,
+            )
           }
 
           // Server renders tool_reference expansion as <functions>...</functions>
@@ -1668,25 +1745,27 @@ export function normalizeMessagesForAPI(
 
                   // When tool search is enabled, preserve all fields including 'caller'
                   if (toolSearchEnabled) {
-                    const { extra_content, ...restBlock } = block as any
+                    const blockWithExtra = block as unknown as { extra_content?: unknown } & Record<string, unknown>
+                    const { extra_content, ...restBlock } = blockWithExtra
                     return {
                       ...restBlock,
                       name: canonicalName,
                       input: normalizedInput,
-                      ...(extra_content ? { extra_content } : {})
-                    }
+                      ...(extra_content ? { extra_content } : {}),
+                    } as BetaContentBlock
                   }
 
                   // When tool search is NOT enabled, explicitly construct tool_use
                   // block with only standard API fields to avoid sending fields like
                   // 'caller' that may be stored in sessions from tool search runs
-                    return {
+                  const blockExtra = (block as unknown as { extra_content?: unknown }).extra_content
+                  return {
                     type: 'tool_use' as const,
                     id: block.id,
                     name: canonicalName,
                     input: normalizedInput,
-                    ...((block as any).extra_content ? { extra_content: (block as any).extra_content } : {})
-                  }
+                    ...(blockExtra ? { extra_content: blockExtra } : {}),
+                  } as BetaContentBlock
                 }
                 return block
               }),
@@ -1720,11 +1799,20 @@ export function normalizeMessagesForAPI(
           const rawAttachmentMessage = normalizeAttachmentForAPI(
             message.attachment,
           )
+          const typesToStrip = stripTargets.get(message.uuid)
+          const strippedAttachmentMessage = typesToStrip
+            ? rawAttachmentMessage.map(attachmentMessage => {
+                return stripMediaFromUserMessage(
+                  attachmentMessage,
+                  typesToStrip,
+                )
+              })
+            : rawAttachmentMessage
           const attachmentMessage = checkStatsigFeatureGate_CACHED_MAY_BE_STALE(
             'tengu_chair_sermon',
           )
-            ? rawAttachmentMessage.map(ensureSystemReminderWrap)
-            : rawAttachmentMessage
+            ? strippedAttachmentMessage.map(ensureSystemReminderWrap)
+            : strippedAttachmentMessage
 
           // If the last message is also a user message, merge them
           const lastMessage = last(result)
@@ -1822,6 +1910,7 @@ export function mergeUserMessagesAndToolResults(
   const currentContent = normalizeUserTextContent(b.message.content)
   return {
     ...a,
+    imagePermissionToolUseIds: mergeImagePermissionToolUseIds(a, b),
     message: {
       ...a.message,
       content: hoistToolResults(
@@ -1829,6 +1918,20 @@ export function mergeUserMessagesAndToolResults(
       ),
     },
   }
+}
+
+function mergeImagePermissionToolUseIds(
+  a: UserMessage,
+  b: UserMessage,
+): Array<string | null> | undefined {
+  const getImageOwners = (message: UserMessage): Array<string | null> => {
+    if (message.imagePermissionToolUseIds) return message.imagePermissionToolUseIds
+    const content = message.message.content
+    if (!Array.isArray(content)) return []
+    return content.filter(block => block.type === 'image').map(() => null)
+  }
+  const ids = [...getImageOwners(a), ...getImageOwners(b)]
+  return ids.length > 0 ? ids : undefined
 }
 
 export function mergeAssistantMessages(
@@ -1870,15 +1973,15 @@ export function mergeUserMessages(a: UserMessage, b: UserMessage): UserMessage {
     // operand is real user content, the result must not be flagged isMeta
     // (so internal snip ids get injected and it's treated as user-visible content).
     // Gated behind the full runtime check because changing isMeta semantics
-    // affects downstream callers (e.g., VCR fixture hashing in SDK harness
-    // tests), so this must only fire when snip is actually enabled — not
-    // for all ants.
+    // affects downstream callers (including attachment error recovery), so it
+    // must only fire when snip is actually enabled.
     const { isSnipRuntimeEnabled } =
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       require('../services/compact/snipCompact.js') as typeof import('../services/compact/snipCompact.js')
     if (isSnipRuntimeEnabled()) {
       return {
         ...a,
+        imagePermissionToolUseIds: mergeImagePermissionToolUseIds(a, b),
         isMeta: a.isMeta && b.isMeta ? (true as const) : undefined,
         isCollapseSummary,
         uuid: a.isMeta ? b.uuid : a.uuid,
@@ -1893,6 +1996,7 @@ export function mergeUserMessages(a: UserMessage, b: UserMessage): UserMessage {
   }
   return {
     ...a,
+    imagePermissionToolUseIds: mergeImagePermissionToolUseIds(a, b),
     isCollapseSummary,
     // Preserve the non-meta message's uuid so snip ids (derived from uuid)
     // stay stable across API calls (meta messages like system context get fresh uuids each call)
@@ -2086,11 +2190,12 @@ export function mergeUserContentBlocks(
     return [...a, ...b]
   }
 
-  // Universal smoosh (gated): fold all non-tool_result block types (text,
-  // image, document, search_result) into tool_result.content. tool_result
-  // blocks stay as siblings (hoisted later by hoistToolResults).
-  const toSmoosh = b.filter(x => x.type !== 'tool_result')
+  // Universal smoosh (gated): fold textual/document siblings into the result,
+  // but keep images top-level. Compression must retain their provenance so an
+  // independent attachment is never mistaken for tool-result payload.
+  const toSmoosh = b.filter(x => x.type !== 'tool_result' && x.type !== 'image')
   const toolResults = b.filter(x => x.type === 'tool_result')
+  const images = b.filter(x => x.type === 'image')
   if (toSmoosh.length === 0) {
     return [...a, ...b]
   }
@@ -2101,7 +2206,7 @@ export function mergeUserContentBlocks(
     return [...a, ...b]
   }
 
-  return [...a.slice(0, -1), smooshed, ...toolResults]
+  return [...a.slice(0, -1), smooshed, ...toolResults, ...images]
 }
 
 // Sometimes the API returns empty messages (eg. "\n\n"). We need to filter these out,
@@ -2651,10 +2756,15 @@ Read the team config to discover your teammates' names. Check the task list peri
       ])
     }
     case 'output_style': {
-      const outputStyle =
-        OUTPUT_STYLE_CONFIG[
-          attachment.style as keyof typeof OUTPUT_STYLE_CONFIG
-        ]
+      // Own-property lookup: OUTPUT_STYLE_CONFIG is a plain object and
+      // `attachment.style` carries the free-form settings value, so a bare
+      // index resolves inherited Object.prototype members. Those are truthy, so
+      // the guard below would pass and the reminder would announce a style that
+      // does not exist ("Object output style is active").
+      const outputStyle = resolveOutputStyle(
+        OUTPUT_STYLE_CONFIG,
+        attachment.style,
+      )
       if (!outputStyle) {
         return []
       }

@@ -18,7 +18,7 @@ export const linkupProvider: SearchProvider = {
   async search(input: SearchInput, signal?: AbortSignal): Promise<ProviderOutput> {
     const start = performance.now()
 
-    const data = await fetchJsonWithWebSearchTimeout(
+    const data = (await fetchJsonWithWebSearchTimeout(
       'https://api.linkup.so/v1/search',
       {
         method: 'POST',
@@ -34,14 +34,27 @@ export const linkupProvider: SearchProvider = {
       },
       signal,
       { providerName: 'Linkup' },
-    )
+    )) as { results?: unknown } | undefined
 
-    const hits = (data.results ?? []).map((r: any) => ({
-      title: r.name ?? r.title ?? '',
-      url: r.url ?? '',
-      description: r.snippet ?? r.description ?? r.content,
-      source: r.url ? safeHostname(r.url) : undefined,
-    }))
+    const rawResults = Array.isArray(data?.results) ? data.results : []
+    const hits = (rawResults as unknown[]).map((r) => {
+      const rec = (r ?? {}) as Record<string, unknown>
+      const url = typeof rec.url === 'string' ? rec.url : ''
+      const desc =
+        typeof rec.snippet === 'string'
+          ? rec.snippet
+          : typeof rec.description === 'string'
+            ? rec.description
+            : typeof rec.content === 'string'
+              ? rec.content
+              : undefined
+      return {
+        title: typeof rec.name === 'string' ? rec.name : (typeof rec.title === 'string' ? rec.title : ''),
+        url,
+        description: desc,
+        source: url ? safeHostname(url) : undefined,
+      }
+    })
 
     return {
       hits: applyDomainFilters(hits, input),

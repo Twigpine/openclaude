@@ -14,11 +14,14 @@ import {
   adoptResumedSessionFile,
   buildConversationChain,
   getProjectDir,
+  isEphemeralToolProgress,
   loadSameRepoMessageLogsProgressive,
   loadTranscriptFile,
   loadTranscriptFromFile,
   recordGoalState,
   recordTranscript,
+  recordSidechainTranscript,
+  getAgentTranscriptPath,
   flushSessionStorage,
   resetProjectForTesting,
   resetSessionFilePointer,
@@ -40,6 +43,9 @@ import {
   getClaudeConfigHomeDir,
   setClaudeConfigHomeDirForTesting,
 } from './envUtils.js'
+import { asAgentId } from '../types/ids.js'
+import { withTranscriptFileLock } from './transcriptFileLock.js'
+import { dirname } from 'node:path'
 import { resetSettingsCache } from './settings/settingsCache.js'
 
 const tempDirs: string[] = []
@@ -888,4 +894,50 @@ test('convertToLogOption throws for empty transcript', async () => {
   await expect(loadTranscriptFromFile(filePath)).rejects.toThrow(
     'convertToLogOption: cannot convert empty transcript',
   )
+})
+
+test('recurring heartbeat progress types are ephemeral', () => {
+  expect(isEphemeralToolProgress('bash_progress')).toBe(true)
+  expect(isEphemeralToolProgress('powershell_progress')).toBe(true)
+  expect(isEphemeralToolProgress('mcp_progress')).toBe(true)
+  expect(isEphemeralToolProgress('waiting_for_task')).toBe(true)
+  expect(isEphemeralToolProgress('agent_progress')).toBe(false)
+  expect(isEphemeralToolProgress(undefined)).toBe(false)
+})
+
+// The producer promise, not a global flush, must establish agent output readiness.
+test('sidechain write resolves only after its file is readable, without a session flush', async () => {
+  await withSessionPersistence(async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'agent-output-barrier-'))
+    tempDirs.push(configDir)
+    setClaudeConfigHomeDirForTesting(configDir)
+    resetProjectForTesting()
+    const path = getAgentTranscriptPath(asAgentId('durable-agent'))
+    await mkdir(dirname(path), { recursive: true })
+    let unlock!: () => void
+    let acquired!: () => void
+    const locked = new Promise<void>(resolve => { acquired = resolve })
+    const release = new Promise<void>(resolve => { unlock = resolve })
+    const holding = withTranscriptFileLock(path, async () => { acquired(); await release })
+    await locked
+    let settled = false
+    const writing = recordSidechainTranscript([{ uuid: id(998), type: 'user', message: { role: 'user', content: 'durable output' }, timestamp: ts, isMeta: false }], 'durable-agent')
+      .then(() => { settled = true })
+    try {
+      // The storage queue's timer can run, but the physical file is locked.
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(settled).toBe(false)
+      unlock()
+      await holding
+      await writing
+      expect(await readFile(path, 'utf8')).toContain('durable output')
+    } finally {
+      unlock()
+      await holding
+      await writing
+      await flushSessionStorage()
+      resetProjectForTesting()
+      setClaudeConfigHomeDirForTesting(undefined)
+    }
+  })
 })

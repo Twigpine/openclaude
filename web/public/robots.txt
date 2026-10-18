@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://openclaude.gitlawb.com/sitemap-index.xml
+Sitemap: https://openclaude.twigpine.com/sitemap-index.xml

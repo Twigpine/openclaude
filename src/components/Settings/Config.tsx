@@ -10,6 +10,10 @@ import figures from 'figures';
 import { type GlobalConfig, saveGlobalConfig, getCurrentProjectConfig, type OutputStyle, MAX_MESSAGES_COMPACTION_THRESHOLDS, normalizeMaxMessagesCompactionThreshold } from '../../utils/config.js';
 import { normalizeApiKeyForConfig } from '../../utils/authPortable.js';
 import { getGlobalConfig, getAutoUpdaterDisabledReason, formatAutoUpdaterDisabledReason, getRemoteControlAtStartup } from '../../utils/config.js';
+import { normalizeCompactTailTurns } from '../../utils/relevancePruning.js';
+import { normalizeReplMaxTurns, REPL_MAX_TURNS_OPTIONS } from '../../utils/replMaxTurns.js';
+import { formatQueryIdleTimeoutMs } from '../../utils/queryGuardConfig.js';
+import { createQueryIdleTimeoutSetting } from './queryIdleTimeoutSetting.js';
 import chalk from 'chalk';
 import { getModeColor, permissionModeTitle, permissionModeFromString, toExternalPermissionMode, isExternalPermissionMode, PERMISSION_MODES, type ExternalPermissionMode, type PermissionMode } from '../../utils/permissions/PermissionMode.js';
 import { getAutoModeEnabledState, hasAutoModeOptInAnySource, transitionPlanAutoMode } from '../../utils/permissions/permissionSetup.js';
@@ -37,6 +41,8 @@ import { SearchBox } from '../SearchBox.js';
 import { isSupportedTerminal, hasAccessToIDEExtensionDiffFeature } from '../../utils/ide.js';
 import { getInitialSettings, getSettingsForSource, updateSettingsForSource } from '../../utils/settings/settings.js';
 import { getUserMsgOptIn, setUserMsgOptIn } from '../../bootstrap/state.js';
+import { getSiblingSkillsHomeDisplayPath, resolveSiblingSkillsHomes, SIBLING_SKILL_HOMES, siblingSkillsSettingPatch } from '../../skills/siblingSkillHomes.js';
+import { skillChangeDetector } from '../../utils/skills/skillChangeDetector.js';
 import { DEFAULT_OUTPUT_STYLE_NAME } from 'src/constants/outputStyles.js';
 import { isEnvTruthy, isRunningOnHomespace } from 'src/utils/envUtils.js';
 import type { LocalJSXCommandContext, CommandResultDisplay } from '../../commands.js';
@@ -312,6 +318,61 @@ export function Config({
       });
     }
   }, {
+    id: 'compactTailTurns',
+    label: 'Compaction: recent messages kept',
+    // Display and persist through the SAME normalization autoCompact applies,
+    // so a hand-edited 2.5 or 0 shows (and saves) as what actually runs.
+    value: String(normalizeCompactTailTurns(globalConfig.compactTailTurns)),
+    // Include a hand-edited config value so it round-trips through the picker.
+    options: [...new Set(['2', '3', '5', '8', String(normalizeCompactTailTurns(globalConfig.compactTailTurns))])],
+    type: 'enum' as const,
+    onChange(compactTailTurnsValue: string) {
+      const compactTailTurns = normalizeCompactTailTurns(compactTailTurnsValue);
+      saveGlobalConfig(current => ({
+        ...current,
+        compactTailTurns
+      }));
+      setGlobalConfig({
+        ...getGlobalConfig(),
+        compactTailTurns
+      });
+      logEvent('tengu_compact_tail_turns_changed', {
+        value: compactTailTurnsValue as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
+      });
+    }
+  }, {
+    id: 'replMaxTurns',
+    label: 'Max turns (interactive)',
+    // Display/persist the saved preference (normalized). Effective runtime cap
+    // may still be overridden by CLI `--max-turns` or OPENCLAUDE_MAX_TURNS.
+    value: String(normalizeReplMaxTurns(globalConfig.replMaxTurns)),
+    // Include a hand-edited config value so it round-trips through the picker.
+    options: [...new Set([...REPL_MAX_TURNS_OPTIONS.map(String), String(normalizeReplMaxTurns(globalConfig.replMaxTurns))])],
+    type: 'enum' as const,
+    onChange(replMaxTurnsValue: string) {
+      const replMaxTurns = normalizeReplMaxTurns(replMaxTurnsValue);
+      saveGlobalConfig(current => ({
+        ...current,
+        replMaxTurns
+      }));
+      setGlobalConfig({
+        ...getGlobalConfig(),
+        replMaxTurns
+      });
+      logEvent('tengu_repl_max_turns_changed', {
+        value: replMaxTurnsValue as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
+      });
+    }
+  }, createQueryIdleTimeoutSetting(globalConfig, {
+    saveGlobalConfig,
+    getGlobalConfig,
+    setGlobalConfig,
+    logChange(queryIdleTimeoutMs) {
+      logEvent('tengu_query_idle_timeout_changed', {
+        value: String(queryIdleTimeoutMs) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
+      });
+    }
+  }), {
     id: 'toolHistoryCompressionEnabled',
     label: 'Tool history compression',
     value: globalConfig.toolHistoryCompressionEnabled,
@@ -435,6 +496,24 @@ export function Config({
       });
     }
   },
+  // Skills read from other agents' homes (~/.agents/skills, ~/.claude/skills).
+  // Hidden when a source that outranks user settings (managed policy,
+  // --settings, local settings) pins the setting: this toggle writes user
+  // settings, so it could not change the effective value.
+  ...resolveSiblingSkillsHomes().filter(home => !home.pinnedBy).map(home => ({
+    id: home.settingKey,
+    label: home.configLabel,
+    value: home.enabled,
+    type: 'boolean' as const,
+    onChange(enabled: boolean) {
+      updateSettingsForSource('userSettings', siblingSkillsSettingPatch(home, enabled));
+      setSettingsData(prev_sibling => ({
+        ...prev_sibling,
+        ...siblingSkillsSettingPatch(home, enabled)
+      }));
+      void skillChangeDetector.reloadAfterSkillSourceSettingsChange();
+    }
+  })),
   // Fast mode toggle (internal-only, eliminated from external builds)
   ...(isFastModeEnabled() && isFastModeAvailable() ? [{
     id: 'fastMode',
@@ -1245,6 +1324,15 @@ export function Config({
       const threshold = normalizeMaxMessagesCompactionThreshold(globalConfig.maxMessagesCompactionThreshold);
       formattedChanges.push(threshold === 'off' ? 'Disabled message-count compaction' : `Set message-count compaction to ${threshold}`);
     }
+    if (globalConfig.compactTailTurns !== initialConfig.current.compactTailTurns) {
+      formattedChanges.push(`Set compaction recent messages kept to ${normalizeCompactTailTurns(globalConfig.compactTailTurns)}`);
+    }
+    if (globalConfig.replMaxTurns !== initialConfig.current.replMaxTurns) {
+      formattedChanges.push(`Set interactive max turns to ${normalizeReplMaxTurns(globalConfig.replMaxTurns)}`);
+    }
+    if (globalConfig.queryIdleTimeoutMs !== initialConfig.current.queryIdleTimeoutMs) {
+      formattedChanges.push(`Set query idle timeout to ${formatQueryIdleTimeoutMs(globalConfig.queryIdleTimeoutMs)}`);
+    }
     if (globalConfig.toolHistoryCompressionEnabled !== initialConfig.current.toolHistoryCompressionEnabled) {
       formattedChanges.push(`${globalConfig.toolHistoryCompressionEnabled ? 'Enabled' : 'Disabled'} tool history compression`);
     }
@@ -1279,6 +1367,11 @@ export function Config({
     if (settingsData?.autoUpdatesChannel !== initialSettingsData.current?.autoUpdatesChannel) {
       formattedChanges.push(`Set auto-update channel to ${chalk.bold(settingsData?.autoUpdatesChannel ?? 'latest')}`);
     }
+    for (const home of SIBLING_SKILL_HOMES) {
+      if (settingsData?.[home.settingKey] !== initialSettingsData.current?.[home.settingKey]) {
+        formattedChanges.push(`${settingsData?.[home.settingKey] ? 'Enabled' : 'Disabled'} skills from ${getSiblingSkillsHomeDisplayPath(home)}`);
+      }
+    }
     if (formattedChanges.length > 0) {
       onClose(formattedChanges.join('\n'));
     } else {
@@ -1286,7 +1379,7 @@ export function Config({
         display: 'system'
       });
     }
-  }, [showSubmenu, changes, globalConfig, mainLoopModel, currentOutputStyle, currentLanguage, settingsData?.autoUpdatesChannel, isFastModeEnabled() ? (settingsData as Record<string, unknown> | undefined)?.fastMode : undefined, onClose]);
+  }, [showSubmenu, changes, globalConfig, mainLoopModel, currentOutputStyle, currentLanguage, settingsData?.autoUpdatesChannel, settingsData?.agentsSkillsEnabled, settingsData?.claudeCodeSkillsEnabled, isFastModeEnabled() ? (settingsData as Record<string, unknown> | undefined)?.fastMode : undefined, onClose]);
 
   // Restore all state stores to their mount-time snapshots. Changes are
   // applied to disk/AppState immediately on toggle, so "cancel" means
@@ -1323,7 +1416,10 @@ export function Config({
       outputStyle: il?.outputStyle
     });
     const iu = initialUserSettings;
+    const siblingSkillsSettingsChanged = SIBLING_SKILL_HOMES.some(home => getSettingsForSource('userSettings')?.[home.settingKey] !== iu?.[home.settingKey]);
     updateSettingsForSource('userSettings', {
+      agentsSkillsEnabled: iu?.agentsSkillsEnabled,
+      claudeCodeSkillsEnabled: iu?.claudeCodeSkillsEnabled,
       alwaysThinkingEnabled: iu?.alwaysThinkingEnabled,
       fastMode: iu?.fastMode,
       promptSuggestionEnabled: iu?.promptSuggestionEnabled,
@@ -1349,6 +1445,9 @@ export function Config({
         defaultMode: iu.permissions.defaultMode
       }
     });
+    if (siblingSkillsSettingsChanged) {
+      void skillChangeDetector.reloadAfterSkillSourceSettingsChange();
+    }
     // AppState: batch-restore all possibly-touched fields.
     const ia = initialAppState;
     setAppState(prev_23 => ({

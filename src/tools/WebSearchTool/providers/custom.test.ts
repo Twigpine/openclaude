@@ -3,7 +3,12 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../../test/sharedMutationLock.js'
-import { extractHits, customProvider, isPrivateHostname } from './custom.js'
+import {
+  extractHits,
+  customProvider,
+  isPrivateHostname,
+  readPositiveEnvNumber,
+} from './custom.js'
 
 async function importFreshCustomProvider() {
   const stamp = `${Date.now()}-${Math.random()}`
@@ -418,5 +423,35 @@ describe('isPrivateHostname — IPv6', () => {
 
   test('malformed IPv6 is not classified as private (URL parser rejects it upstream)', () => {
     expect(isPrivateHostname('not:an:ipv6')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// readPositiveEnvNumber — WEB_CUSTOM_TIMEOUT_SEC / WEB_CUSTOM_MAX_BODY_KB
+// ---------------------------------------------------------------------------
+
+describe('readPositiveEnvNumber', () => {
+  test('parses a valid positive override', () => {
+    expect(readPositiveEnvNumber('45', 120)).toBe(45)
+    expect(readPositiveEnvNumber('0.5', 120)).toBe(0.5)
+  })
+
+  test('falls back for missing / empty / non-numeric input', () => {
+    expect(readPositiveEnvNumber(undefined, 120)).toBe(120)
+    expect(readPositiveEnvNumber('', 120)).toBe(120)
+    expect(readPositiveEnvNumber('fast', 120)).toBe(120)
+  })
+
+  test('falls back for zero and negative values instead of passing them through', () => {
+    // The old `Number(x) || DEFAULT` idiom rescued 0 but let negatives past —
+    // a negative timeout aborts every request and a negative body cap makes the
+    // size guard reject every POST.
+    expect(readPositiveEnvNumber('0', 120)).toBe(120)
+    expect(readPositiveEnvNumber('-1', 120)).toBe(120)
+    expect(readPositiveEnvNumber('-9999', 300)).toBe(300)
+  })
+
+  test('falls back for non-finite values (Infinity)', () => {
+    expect(readPositiveEnvNumber('1e999', 120)).toBe(120)
   })
 })

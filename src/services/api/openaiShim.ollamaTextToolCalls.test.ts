@@ -10,7 +10,8 @@
  *   5. P1 context guard — bare JSON in explanatory prose is skipped
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { createOpenAIShimClient, parseTextToolCalls } from './openaiShim.js'
+import { createOpenAIShimClient } from './openaiShim.js'
+import { parseTextToolCalls } from './openaiShim/rawToolCallParsing.js'
 
 type FetchType = typeof globalThis.fetch
 

@@ -59,6 +59,28 @@ describe('QueryGuard', () => {
     expect(guard.isActive).toBe(false)
   })
 
+  test('updates the next query idle timeout without mutating an active query', () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const guard = new QueryGuard({ idleTimeoutMs: 100 })
+
+    expect(guard.setIdleTimeoutMs(500)).toBe(true)
+    const firstGeneration = guard.tryStart()!
+    expect(guard.setIdleTimeoutMs(1_000)).toBe(false)
+    vi.advanceTimersByTime(499)
+    expect(guard.isActive).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(guard.isActive).toBe(false)
+
+    expect(guard.setIdleTimeoutMs(1_000)).toBe(true)
+    const secondGeneration = guard.tryStart()!
+    expect(secondGeneration).toBeGreaterThan(firstGeneration)
+    vi.advanceTimersByTime(999)
+    expect(guard.isActive).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(guard.isActive).toBe(false)
+  })
+
   test('timeout notifies owner with lifecycle context and timeout reason', () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -239,6 +261,56 @@ describe('QueryGuard', () => {
 
     vi.advanceTimersByTime(100)
 
+    expect(guard.isActive).toBe(false)
+  })
+
+  test('forward wall-clock jumps do not trigger an immediate timeout', () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const baseline = new Date('2026-08-10T00:00:00.000Z').getTime()
+    let nowMs = baseline
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const guard = new QueryGuard({
+      idleTimeoutMs: 100,
+      hardMaxQueryMs: 1_000,
+    })
+    const onTimeout = vi.fn()
+    guard.setTimeoutHandler(onTimeout)
+    const generation = guard.tryStart()!
+
+    nowMs = baseline + 60 * 60 * 1_000
+    guard.registerActivity('clock-jump-probe', generation)
+    vi.advanceTimersByTime(99)
+
+    expect(onTimeout).not.toHaveBeenCalled()
+    expect(guard.isActive).toBe(true)
+
+    vi.advanceTimersByTime(1)
+    expect(onTimeout).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'idle', elapsedMs: 100 }),
+    )
+  })
+
+  test('backward wall-clock jumps do not delay the scheduled timeout', () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const baseline = new Date('2026-08-10T00:00:00.000Z').getTime()
+    let nowMs = baseline
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const guard = new QueryGuard({
+      idleTimeoutMs: 100,
+      hardMaxQueryMs: 1_000,
+    })
+    const onTimeout = vi.fn()
+    guard.setTimeoutHandler(onTimeout)
+    guard.tryStart()
+
+    nowMs = baseline - 60 * 60 * 1_000
+    vi.advanceTimersByTime(100)
+
+    expect(onTimeout).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'idle', elapsedMs: 100 }),
+    )
     expect(guard.isActive).toBe(false)
   })
 

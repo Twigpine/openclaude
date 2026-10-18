@@ -66,6 +66,13 @@ export function getEnterpriseMcpFilePath(): string {
 /**
  * Internal utility: Add scope to server configs
  */
+/**
+ * Server names that cannot survive a write/read round trip, so they are refused
+ * at every ingress rather than accepted and lost. See addMcpConfig and
+ * parseMcpConfig for what each one does.
+ */
+const RESERVED_MCP_SERVER_NAMES: readonly string[] = ['__proto__', 'constructor']
+
 function addScopeToServers(
   servers: Record<string, McpServerConfig> | undefined,
   scope: ConfigScope,
@@ -622,6 +629,28 @@ function expandEnvVars(config: McpServerConfig): {
  * @param scope The configuration scope
  * @throws Error if name is invalid or server already exists, or if the config is invalid
  */
+/**
+ * A fatal parse of a scope's MCP config (a reserved server name such as
+ * `__proto__`, or a schema violation) returns `config: null`, so the scope
+ * reports an empty server map even though the entries are still on disk.
+ * Rebuilding from that empty snapshot would drop every valid sibling, and an
+ * add would report success for a scope that then loads nothing -- so refuse to
+ * mutate a fatally poisoned scope and point the user at the entry to fix.
+ */
+function assertMcpScopeWritable(
+  errors: ValidationError[],
+  scopeLabel: string,
+): void {
+  const fatal = errors.filter(e => e.mcpErrorMetadata?.severity === 'fatal')
+  if (fatal.length === 0) {
+    return
+  }
+  const detail = fatal.map(e => e.message).join(' ')
+  throw new Error(
+    `Cannot modify ${scopeLabel}: ${detail} Fix or remove the offending entry, then retry.`,
+  )
+}
+
 export async function addMcpConfig(
   name: string,
   config: unknown,
@@ -631,6 +660,16 @@ export async function addMcpConfig(
     throw new Error(
       `Invalid name ${name}. Names can only contain letters, numbers, hyphens, and underscores.`,
     )
+  }
+
+  // These pass the character check but cannot be stored and read back.
+  // "__proto__" assigns through the prototype setter instead of creating an own
+  // property, so the server would be reported as added and silently vanish.
+  // "constructor" persists, but the config schema then rejects the entire
+  // mcpServers object on the next read -- so adding it takes down every other
+  // server in that scope as well.
+  if (RESERVED_MCP_SERVER_NAMES.includes(name)) {
+    throw new Error(`Cannot add MCP server "${name}": this name is reserved.`)
   }
 
   // Block reserved server name "claude-in-chrome"
@@ -681,22 +720,27 @@ export async function addMcpConfig(
   // Check if server already exists in the target scope
   switch (scope) {
     case 'project': {
-      const { servers } = getProjectMcpConfigsFromCwd()
-      if (servers[name]) {
+      const { servers, errors } = getProjectMcpConfigsFromCwd()
+      assertMcpScopeWritable(errors, '.mcp.json')
+      if (Object.hasOwn(servers, name)) {
         throw new Error(`MCP server ${name} already exists in .mcp.json`)
       }
       break
     }
     case 'user': {
+      // A fatally poisoned user scope parses to an empty map, so the add would
+      // silently write into a config that then loads no servers at all.
+      assertMcpScopeWritable(getScopeMutationErrors('user'), 'user config')
       const globalConfig = getGlobalConfig()
-      if (globalConfig.mcpServers?.[name]) {
+      if (Object.hasOwn(globalConfig.mcpServers ?? {}, name)) {
         throw new Error(`MCP server ${name} already exists in user config`)
       }
       break
     }
     case 'local': {
+      assertMcpScopeWritable(getScopeMutationErrors('local'), 'local config')
       const projectConfig = getCurrentProjectConfig()
-      if (projectConfig.mcpServers?.[name]) {
+      if (Object.hasOwn(projectConfig.mcpServers ?? {}, name)) {
         throw new Error(`MCP server ${name} already exists in local config`)
       }
       break
@@ -712,7 +756,11 @@ export async function addMcpConfig(
   // Add based on scope
   switch (scope) {
     case 'project': {
-      const { servers: existingServers } = getProjectMcpConfigsFromCwd()
+      const { servers: existingServers, errors } = getProjectMcpConfigsFromCwd()
+      // Re-check the exact snapshot we are about to rebuild from: the file may
+      // have become fatally invalid since the existence check above, and writing
+      // from the resulting empty map would drop every valid sibling.
+      assertMcpScopeWritable(errors, '.mcp.json')
 
       const mcpServers: Record<string, McpServerConfig> = {}
       for (const [serverName, serverConfig] of Object.entries(
@@ -772,9 +820,13 @@ export async function removeMcpConfig(
 ): Promise<void> {
   switch (scope) {
     case 'project': {
-      const { servers: existingServers } = getProjectMcpConfigsFromCwd()
+      const { servers: existingServers, errors } = getProjectMcpConfigsFromCwd()
+      // A fatally poisoned file parses to an empty map, so an empty result is
+      // not proof the server is absent -- refuse rather than treat it as such
+      // (which would also clobber every valid sibling on write-back).
+      assertMcpScopeWritable(errors, '.mcp.json')
 
-      if (!existingServers[name]) {
+      if (!Object.hasOwn(existingServers, name)) {
         throw new Error(`No MCP server found with name: ${name} in .mcp.json`)
       }
 
@@ -798,8 +850,12 @@ export async function removeMcpConfig(
     }
 
     case 'user': {
+      // An empty parsed map from a fatally poisoned scope is not proof of
+      // absence; refuse rather than mutate a sibling in the raw map while the
+      // scope stays unloadable.
+      assertMcpScopeWritable(getScopeMutationErrors('user'), 'user config')
       const config = getGlobalConfig()
-      if (!config.mcpServers?.[name]) {
+      if (!Object.hasOwn(config.mcpServers ?? {}, name)) {
         throw new Error(`No user-scoped MCP server found with name: ${name}`)
       }
       saveGlobalConfig(current => {
@@ -813,9 +869,10 @@ export async function removeMcpConfig(
     }
 
     case 'local': {
+      assertMcpScopeWritable(getScopeMutationErrors('local'), 'local config')
       // Check if server exists before updating
       const config = getCurrentProjectConfig()
-      if (!config.mcpServers?.[name]) {
+      if (!Object.hasOwn(config.mcpServers ?? {}, name)) {
         throw new Error(`No project-local MCP server found with name: ${name}`)
       }
       saveCurrentProjectConfig(current => {
@@ -838,17 +895,19 @@ export async function removeMcpConfig(
  * Used by addMcpConfig and removeMcpConfig to modify the local .mcp.json file.
  * Exported for testing purposes.
  *
+ * This is a *mutation-path* read, so it deliberately does NOT gate on
+ * isSettingSourceEnabled('projectSettings'): add/remove rebuild .mcp.json from
+ * the servers it returns, and suppressing them to an empty map when the source
+ * is disabled would drop every valid sibling on write-back (and hide a fatally
+ * poisoned file from the write guard). The load-time source filter is applied
+ * by getMcpConfigsByScope('project') instead, which this never feeds.
+ *
  * @returns Servers with scope information and any validation errors from current directory's .mcp.json
  */
 export function getProjectMcpConfigsFromCwd(): {
   servers: Record<string, ScopedMcpServerConfig>
   errors: ValidationError[]
 } {
-  // Check if project source is enabled
-  if (!isSettingSourceEnabled('projectSettings')) {
-    return { servers: {}, errors: [] }
-  }
-
   const mcpJsonPath = join(getCwd(), '.mcp.json')
 
   const { config, errors } = parseMcpConfigFromFilePath({
@@ -1026,34 +1085,98 @@ export function getMcpConfigsByScope(
 }
 
 /**
+ * Fatal parse errors for the user/local scope's *raw* config, independent of
+ * whether that setting source is currently enabled.
+ *
+ * getMcpConfigsByScope() suppresses errors to an empty list when
+ * isSettingSourceEnabled() is false for the scope. That is correct for loading
+ * -- a disabled source contributes no servers -- but addMcpConfig()/
+ * removeMcpConfig() still mutate the raw mcpServers maps via getGlobalConfig()/
+ * getCurrentProjectConfig(). Reusing the load-time helper for the write guard
+ * means a fatally poisoned scope can be written or deleted (clobbering valid
+ * siblings on write-back) while the CLI reports success whenever the user runs
+ * with a narrowed --setting-sources set. Parse the raw source directly so the
+ * mutation guards fire regardless of the load-time source filter.
+ *
+ * The project scope is not handled here: getProjectMcpConfigsFromCwd() is
+ * already an ungated mutation-path read and returns both the raw servers and
+ * their errors together, so the project mutations use it directly.
+ */
+function getScopeMutationErrors(scope: 'user' | 'local'): ValidationError[] {
+  switch (scope) {
+    case 'user': {
+      const mcpServers = getGlobalConfig().mcpServers
+      if (!mcpServers) {
+        return []
+      }
+      return parseMcpConfig({
+        configObject: { mcpServers },
+        expandVars: true,
+        scope: 'user',
+      }).errors
+    }
+    case 'local': {
+      const mcpServers = getCurrentProjectConfig().mcpServers
+      if (!mcpServers) {
+        return []
+      }
+      return parseMcpConfig({
+        configObject: { mcpServers },
+        expandVars: true,
+        scope: 'local',
+      }).errors
+    }
+  }
+}
+
+/**
  * Get an MCP server configuration by name
  * @param name The name of the server
  * @returns The server configuration with scope, or undefined if not found
  */
 export function getMcpConfigByName(name: string): ScopedMcpServerConfig | null {
+  // The `servers` maps are plain object literals populated from JSON config, so
+  // a bare `servers[name]` lookup resolves inherited Object.prototype members
+  // (`constructor`, `toString`, `__proto__`, …) as truthy values. `mcp get
+  // constructor` would then skip the not-found guard and pass the Object
+  // constructor on as a server config. Gate every lookup on own-property.
   const { servers: enterpriseServers } = getMcpConfigsByScope('enterprise')
+
+  // A present managed-mcp.json takes exclusive, fail-closed control of MCP
+  // (even when malformed — its mere presence engages the policy). Named lookups
+  // must honor the same boundary getClaudeCodeMcpConfigs() enforces, or a
+  // user/local server could still be resolved by name (mcp get <server>, an
+  // agent's named-server reference) and connected, bypassing the policy. Return
+  // only an enterprise-owned entry (or null).
+  if (doesEnterpriseMcpConfigExist()) {
+    return Object.hasOwn(enterpriseServers, name)
+      ? enterpriseServers[name]!
+      : null
+  }
 
   // When MCP is locked to plugin-only, only enterprise servers are reachable
   // by name. User/project/local servers are blocked — same as getClaudeCodeMcpConfigs().
   if (isRestrictedToPluginOnly('mcp')) {
-    return enterpriseServers[name] ?? null
+    return Object.hasOwn(enterpriseServers, name)
+      ? enterpriseServers[name]!
+      : null
   }
 
   const { servers: userServers } = getMcpConfigsByScope('user')
   const { servers: projectServers } = getMcpConfigsByScope('project')
   const { servers: localServers } = getMcpConfigsByScope('local')
 
-  if (enterpriseServers[name]) {
-    return enterpriseServers[name]
+  if (Object.hasOwn(enterpriseServers, name)) {
+    return enterpriseServers[name]!
   }
-  if (localServers[name]) {
-    return localServers[name]
+  if (Object.hasOwn(localServers, name)) {
+    return localServers[name]!
   }
-  if (projectServers[name]) {
-    return projectServers[name]
+  if (Object.hasOwn(projectServers, name)) {
+    return projectServers[name]!
   }
-  if (userServers[name]) {
-    return userServers[name]
+  if (Object.hasOwn(userServers, name)) {
+    return userServers[name]!
   }
 
   return null
@@ -1077,7 +1200,8 @@ export async function getClaudeCodeMcpConfigs(
   servers: Record<string, ScopedMcpServerConfig>
   errors: PluginError[]
 }> {
-  const { servers: enterpriseServers } = getMcpConfigsByScope('enterprise')
+  const { servers: enterpriseServers, errors: enterpriseErrors } =
+    getMcpConfigsByScope('enterprise')
 
   // If an enterprise mcp config exists, do not use any others; this has exclusive control over all MCP servers
   // (enterprise customers often do not want their users to be able to add their own MCP servers).
@@ -1092,7 +1216,19 @@ export async function getClaudeCodeMcpConfigs(
       filtered[name] = serverConfig
     }
 
-    return { servers: filtered, errors: [] }
+    // Enterprise mode is fail-closed: a malformed or reserved-name
+    // managed-mcp.json disables every other MCP source and blocks dynamic
+    // configuration. Propagate its parse errors instead of a silent empty list
+    // so startup and the MCP UI can diagnose why no servers loaded.
+    const errors: PluginError[] = enterpriseErrors.map(error => ({
+      type: 'generic-error',
+      source: getEnterpriseMcpFilePath(),
+      error: `Managed MCP config is invalid${
+        error.path ? ` (${error.path})` : ''
+      }: ${error.message}`,
+    }))
+
+    return { servers: filtered, errors }
   }
 
   // Load other scopes — unless the managed policy locks MCP to plugin-only.
@@ -1304,24 +1440,57 @@ export function parseMcpConfig(params: {
   errors: ValidationError[]
 } {
   const { configObject, expandVars, scope, filePath } = params
+
+  // A hand-authored .mcp.json can contain one of these names, and neither
+  // survives being read back. "__proto__" cannot be copied onto a plain object
+  // -- the assignment invokes the prototype setter instead of creating an own
+  // property -- so the schema's rebuild drops it silently. "constructor" is
+  // worse: the schema rejects the whole mcpServers object, so every other
+  // server in that scope stops loading too. Either way nothing said which
+  // entry was at fault. Name it.
+  const reservedNameErrors: ValidationError[] = []
+  const rawServers = (configObject as { mcpServers?: unknown } | null)
+    ?.mcpServers
+  if (rawServers !== null && typeof rawServers === 'object') {
+    for (const reserved of RESERVED_MCP_SERVER_NAMES) {
+      if (!Object.hasOwn(rawServers, reserved)) continue
+      reservedNameErrors.push({
+        ...(filePath && { file: filePath }),
+        path: `mcpServers.${reserved}`,
+        message: `Invalid MCP server name "${reserved}": this name is reserved.`,
+        suggestion: `Rename the "${reserved}" entry under mcpServers.`,
+        mcpErrorMetadata: {
+          scope,
+          serverName: reserved,
+          severity: 'fatal',
+        },
+      })
+    }
+  }
+
   const schemaResult = McpJsonConfigSchema().safeParse(configObject)
   if (!schemaResult.success) {
     return {
       config: null,
-      errors: schemaResult.error.issues.map(issue => ({
-        ...(filePath && { file: filePath }),
-        path: issue.path.join('.'),
-        message: 'Does not adhere to MCP server configuration schema',
-        mcpErrorMetadata: {
-          scope,
-          severity: 'fatal',
-        },
-      })),
+      errors: [
+        ...reservedNameErrors,
+        ...schemaResult.error.issues.map(
+          (issue): ValidationError => ({
+            ...(filePath && { file: filePath }),
+            path: issue.path.join('.'),
+            message: 'Does not adhere to MCP server configuration schema',
+            mcpErrorMetadata: {
+              scope,
+              severity: 'fatal',
+            },
+          }),
+        ),
+      ],
     }
   }
 
   // Validate each server and expand variables if requested
-  const errors: ValidationError[] = []
+  const errors: ValidationError[] = [...reservedNameErrors]
   const validatedServers: Record<string, McpServerConfig> = {}
 
   for (const [name, config] of Object.entries(schemaResult.data.mcpServers)) {
@@ -1369,6 +1538,15 @@ export function parseMcpConfig(params: {
     }
 
     validatedServers[name] = configToCheck
+  }
+  // A reserved name is fatal. For "constructor" the schema already failed and
+  // returned config: null above, but "__proto__" passes the schema (zod's
+  // rebuild silently drops the key), so without this the parse would succeed
+  // with a partial config and callers that branch on config -- e.g. the
+  // --mcp-config ingress in main.tsx -- would start with the bad entry quietly
+  // dropped and the error discarded. Reject the whole input either way.
+  if (reservedNameErrors.length > 0) {
+    return { config: null, errors }
   }
   return {
     config: { mcpServers: validatedServers },
@@ -1468,12 +1646,12 @@ export function parseMcpConfigFromFilePath(params: {
 }
 
 export const doesEnterpriseMcpConfigExist = memoize((): boolean => {
-  const { config } = parseMcpConfigFromFilePath({
-    filePath: getEnterpriseMcpFilePath(),
-    expandVars: true,
-    scope: 'enterprise',
-  })
-  return config !== null
+  // Engage enterprise exclusive control on the managed file's PRESENCE, not on a
+  // successful parse. A fatally poisoned managed-mcp.json (e.g. a reserved
+  // `__proto__` entry now rejects the whole file) must not silently disable the
+  // policy lock and let user/project/local servers take over -- fail safe by
+  // keeping enterprise mode engaged while the file exists on disk.
+  return getFsImplementation().existsSync(getEnterpriseMcpFilePath())
 })
 
 /**
@@ -1531,8 +1709,14 @@ export function isMcpServerDisabled(name: string): boolean {
     const enabledServers = projectConfig.enabledMcpServers || []
     return !enabledServers.includes(name)
   }
-  const disabledServers = projectConfig.disabledMcpServers || []
-  return disabledServers.includes(name)
+  // Use project-level disabledMcpServers if explicitly set (even if empty),
+  // otherwise fall back to the global list so MCP state is consistent
+  // across all projects.
+  if (projectConfig.disabledMcpServers !== undefined) {
+    return projectConfig.disabledMcpServers.includes(name)
+  }
+  const globalConfig = getGlobalConfig()
+  return (globalConfig.disabledMcpServers || []).includes(name)
 }
 
 function toggleMembership(
@@ -1554,7 +1738,7 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
   const isBuiltinStateChange =
     isDefaultDisabledBuiltin(name) && isMcpServerDisabled(name) === enabled
 
-  saveCurrentProjectConfig(current => {
+  saveCurrentProjectConfig((current, globalConfig) => {
     if (isDefaultDisabledBuiltin(name)) {
       const prev = current.enabledMcpServers || []
       const next = toggleMembership(prev, name, enabled)
@@ -1562,11 +1746,31 @@ export function setMcpServerEnabled(name: string, enabled: boolean): void {
       return { ...current, enabledMcpServers: next }
     }
 
-    const prev = current.disabledMcpServers || []
+    // Inherit from the same disk snapshot as the project, so a stale global
+    // cache cannot drop another process's disables from the first override.
+    const prev =
+      current.disabledMcpServers ?? globalConfig.disabledMcpServers ?? []
     const next = toggleMembership(prev, name, !enabled)
-    if (next === prev) return current
+    // Skip only when disk and our cached predicate both match the toggle.
+    // A peer may have created a project override before our cache refreshed.
+    if (next === prev && isMcpServerDisabled(name) === !enabled) {
+      return current
+    }
     return { ...current, disabledMcpServers: next }
   })
+
+  // Propagate only the *disable* direction to global so that disabling a
+  // server in one project takes effect everywhere by default, but enabling
+  // stays project-local (avoids silently force-enabling in unrelated projects).
+  // Builtins are exempt — they track state via enabledMcpServers.
+  if (!enabled && !isDefaultDisabledBuiltin(name)) {
+    saveGlobalConfig(current => {
+      const prev = current.disabledMcpServers || []
+      const next = toggleMembership(prev, name, true)
+      if (next === prev) return current
+      return { ...current, disabledMcpServers: next }
+    })
+  }
 
   if (isBuiltinStateChange) {
     logEvent('tengu_builtin_mcp_toggle', {

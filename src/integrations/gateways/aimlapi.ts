@@ -1,5 +1,6 @@
 import { defineGateway } from '../define.js'
 import { publicBuildVersion } from '../../utils/version.js'
+import { withResolvedPartnerHeader } from '../aimlapi/config.js'
 
 const AIMLAPI_CHAT_MODEL_TYPES = new Set([
   'openai/chat-completions',
@@ -57,7 +58,7 @@ function mapAimlapiModel(raw: unknown) {
 
 export default defineGateway({
   id: 'aimlapi',
-  label: 'AI/ML API',
+  label: 'aimlapi.com',
   category: 'aggregating',
   defaultBaseUrl: 'https://api.aimlapi.com/v1',
   defaultModel: 'gpt-4o',
@@ -73,15 +74,15 @@ export default defineGateway({
   transportConfig: {
     kind: 'openai-compatible',
     openaiShim: {
-      headers: {
+      headers: withResolvedPartnerHeader({
         'X-AIMLAPI-Partner-ID': 'part_62yQoGYDq4Yqnrj2R1iGrDNJ',
-        'X-AIMLAPI-Integration-Repo': 'Gitlawb/openclaude',
+        'X-AIMLAPI-Integration-Repo': 'Twigpine/openclaude',
         'X-AIMLAPI-Integration-Version': publicBuildVersion,
         // Attribution headers AI/ML API records for api.aimlapi.com requests
         // (issue #835). `HTTP-Referer`/`X-Title` identify the referring app.
         'HTTP-Referer': 'OpenClaude',
         'X-Title': 'OpenClaude',
-      },
+      }),
       supportsAuthHeaders: false,
     },
   },

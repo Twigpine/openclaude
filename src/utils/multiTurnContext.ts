@@ -7,6 +7,7 @@
 
 import { roughTokenCountEstimation } from '../services/tokenEstimation.js'
 import type { Message } from '../types/message.js'
+import { getAutoMemPath } from '../memdir/paths.js'
 
 export interface TurnContext {
   turnId: string
@@ -38,8 +39,24 @@ let turnHistory: TurnContext[] = []
 let currentTurn: TurnContext | null = null
 let turnCounter = 0
 let activeOptions: Required<MultiTurnOptions> = { ...DEFAULT_OPTIONS }
+let activeProjectKey = ''
+
+function currentProjectKeyForMultiTurn(): string {
+  return getAutoMemPath() || ''
+}
+
+function ensureProjectScope(): void {
+  const key = currentProjectKeyForMultiTurn()
+  if (key !== activeProjectKey) {
+    turnHistory = []
+    currentTurn = null
+    turnCounter = 0
+    activeProjectKey = key
+  }
+}
 
 export function startNewTurn(): TurnContext {
+  ensureProjectScope()
   const turn: TurnContext = {
     turnId: `turn_${++turnCounter}_${Date.now()}`,
     startTime: Date.now(),
@@ -60,10 +77,12 @@ export function startNewTurn(): TurnContext {
 }
 
 export function getCurrentTurn(): TurnContext | null {
+  ensureProjectScope()
   return currentTurn
 }
 
 export function addMessageToTurn(message: Message): void {
+  ensureProjectScope()
   const turn = currentTurn || startNewTurn()
   turn.messages.push(message)
   
@@ -75,28 +94,34 @@ export function addMessageToTurn(message: Message): void {
 }
 
 export function addToolCallToTurn(call: TurnContext['toolCalls'][0]): void {
+  ensureProjectScope()
   const turn = currentTurn || startNewTurn()
   turn.toolCalls.push(call)
 }
 
 export function setTurnState(key: string, value: unknown): void {
+  ensureProjectScope()
   const turn = currentTurn || startNewTurn()
   turn.state.set(key, value)
 }
 
 export function getTurnState<T>(key: string): T | undefined {
+  ensureProjectScope()
   return currentTurn?.state.get(key) as T
 }
 
 export function getTurnHistory(): TurnContext[] {
+  ensureProjectScope()
   return turnHistory
 }
 
 export function getRecentTurns(n: number): TurnContext[] {
+  ensureProjectScope()
   return turnHistory.slice(-n)
 }
 
 export function getMultiTurnStats() {
+  ensureProjectScope()
   return {
     totalTurns: turnHistory.length,
     totalTokens: turnHistory.reduce((acc, t) => acc + t.tokens, 0),

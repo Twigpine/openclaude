@@ -11,15 +11,17 @@ import {
   enterTeammateView,
   exitTeammateView,
 } from '../state/teammateViewHelpers.js'
-import {
-  getRunningTeammatesSorted,
-  InProcessTeammateTask,
-} from '../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
+import { getRunningTeammatesSorted } from '../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
 import {
   type InProcessTeammateTaskState,
   isInProcessTeammateTask,
 } from '../tasks/InProcessTeammateTask/types.js'
 import { isBackgroundTask } from '../tasks/types.js'
+import {
+  requestAbort,
+  traceInterruptionEvent,
+} from '../utils/interruptionTrace.js'
+import { killInProcessTeammate } from '../utils/swarm/spawnInProcess.js'
 
 // Step teammate selection by delta, wrapping across leader(-1)..teammates(0..n-1)..hide(n).
 // First step from a collapsed tree expands it and parks on leader.
@@ -155,7 +157,23 @@ export function useBackgroundTaskNavigation(options?: {
         const task = tasks[taskId]
         if (isInProcessTeammateTask(task) && task.status === 'running') {
           // Abort currentWorkAbortController (stops current turn) NOT abortController (kills teammate)
-          task.currentWorkAbortController?.abort()
+          const causalEventId = traceInterruptionEvent(
+            'input.teammate_escape',
+            {
+              source: 'teammate_escape',
+              subsystem: 'in_process_teammate',
+              subagentId: task.identity.agentId,
+            },
+          )
+          if (task.currentWorkAbortController) {
+            requestAbort(task.currentWorkAbortController, undefined, {
+              source: 'teammate_escape',
+              subsystem: 'in_process_teammate',
+              controllerRole: 'subagent-turn',
+              subagentId: task.identity.agentId,
+              causalEventId,
+            })
+          }
           return
         }
       }
@@ -233,7 +251,15 @@ export function useBackgroundTaskNavigation(options?: {
       e.preventDefault()
       const selected = getSelectedTeammate()
       if (selected && selected.task.status === 'running') {
-        void InProcessTeammateTask.kill(selected.taskId, setAppState)
+        const causalEventId = traceInterruptionEvent('input.teammate_kill', {
+          source: 'teammate_kill',
+          subsystem: 'in_process_teammate',
+          subagentId: selected.task.identity.agentId,
+        })
+        killInProcessTeammate(selected.taskId, setAppState, {
+          source: 'teammate_kill',
+          causalEventId,
+        })
       }
       return
     }

@@ -9,9 +9,11 @@ import { CLI_EXTERNALS, SDK_EXTERNALS, SDK_ONLY_EXTERNALS, INTENTIONALLY_BUNDLED
 import {
   bundledExemptionFor,
   validateBundleExternals,
+  validateInstallHygieneFields,
   validateIntentionallyBundled,
   validateOptionalPeers,
   validateOptionalRuntimeExternals,
+  validateRuntimeDependencyContract,
 } from './externalsValidation.js'
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
@@ -70,8 +72,17 @@ for (const [name, externals] of [
   }
 }
 
+const depContractOk = report(validateRuntimeDependencyContract(pkg))
+const installHygieneOk = report(validateInstallHygieneFields(pkg))
+
 const allOk =
-  cliOk && sdkOk && intentionallyBundledOk && optionalPeersOk && optionalExternalsOk
+  cliOk &&
+  sdkOk &&
+  intentionallyBundledOk &&
+  optionalPeersOk &&
+  optionalExternalsOk &&
+  depContractOk &&
+  installHygieneOk
 
 if (allOk) {
   console.log(

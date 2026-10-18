@@ -22,21 +22,26 @@ export const bingProvider: SearchProvider = {
     url.searchParams.set('q', input.query)
     url.searchParams.set('count', '15')
 
-    const data = await fetchJsonWithWebSearchTimeout(
+    const data = (await fetchJsonWithWebSearchTimeout(
       url.toString(),
       {
         headers: { 'Ocp-Apim-Subscription-Key': process.env.BING_API_KEY! },
       },
       signal,
       { providerName: 'Bing' },
-    )
+    )) as { webPages?: { value?: unknown } } | undefined
 
-    const hits = (data.webPages?.value ?? []).map((r: any) => ({
-      title: r.name ?? '',
-      url: r.url ?? '',
-      description: r.snippet,
-      source: r.displayUrl,
-    }))
+    const rawResults = data?.webPages?.value
+    const results = Array.isArray(rawResults) ? rawResults : []
+    const hits = (results as unknown[]).map((r) => {
+      const rec = (r ?? {}) as Record<string, unknown>
+      return {
+        title: typeof rec.name === 'string' ? rec.name : '',
+        url: typeof rec.url === 'string' ? rec.url : '',
+        description: typeof rec.snippet === 'string' ? rec.snippet : undefined,
+        source: typeof rec.displayUrl === 'string' ? rec.displayUrl : undefined,
+      }
+    })
 
     return {
       hits: applyDomainFilters(hits, input),

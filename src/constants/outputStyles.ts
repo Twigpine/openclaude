@@ -207,7 +207,27 @@ export async function getOutputStyleConfig(): Promise<OutputStyleConfig | null> 
   const outputStyle = (settings?.outputStyle ||
     DEFAULT_OUTPUT_STYLE_NAME) as string
 
-  return allStyles[outputStyle] ?? null
+  return resolveOutputStyle(allStyles, outputStyle)
+}
+
+/**
+ * Look up a style by name, returning null for anything that is not a real,
+ * configured style.
+ *
+ * `settings.outputStyle` is a free-form string with no enum, and the style maps
+ * are plain objects, so a bare index resolves inherited Object.prototype
+ * members. A trailing `?? null` does not neutralize that — `styles.constructor`
+ * is the Object constructor, which is not nullish — so the "unknown style falls
+ * back to the default" contract is skipped and a function is handed on as if it
+ * were a config.
+ *
+ * exported for testing
+ */
+export function resolveOutputStyle<T>(
+  styles: Record<string, T | null>,
+  name: string,
+): T | null {
+  return Object.hasOwn(styles, name) ? (styles[name] ?? null) : null
 }
 
 export function hasCustomOutputStyle(): boolean {

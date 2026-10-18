@@ -46,7 +46,9 @@ Use `mode: 'always-on'` with `wireFormat: 'none'` for models that emit reasoning
 
 Currently wired metadata formats are `reasoning_effort`, `deepseek_compatible`, and `zai_compatible`. The descriptor type also reserves `reasoning_object` and `thinking_type`, but those formats are not request-plumbed yet and should not be used to enable `/effort`.
 
-For `deepseek_compatible` and `zai_compatible`, metadata levels must be limited to `high` and/or `xhigh`. These serializers emit provider `high` for `high` and provider `max` for `xhigh`; they cannot faithfully represent `low`, `medium`, or standard `max` as distinct UI levels.
+For `deepseek_compatible`, metadata levels must be limited to `high` and/or `xhigh`. The serializer emits provider `high` for OpenClaude `high` and provider `max` for OpenClaude `xhigh`; it cannot represent `low`, `medium`, or standard `max` as distinct levels.
+
+For `zai_compatible`, exact route/model entries may expose verified `low`, `high`, and `xhigh` levels. These serialize as provider `low`, `high`, and `max`, respectively. `medium` is not a distinct GLM-5.3-Flash level, and standard OpenClaude `max` is not added as another picker level. Disabling thinking must be verified separately; low effort is not equivalent to no reasoning.
 
 ## Adding Support
 

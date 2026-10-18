@@ -82,6 +82,9 @@ const ENV_KEYS = [
   'VENICE_API_KEY',
   'MIMO_API_KEY',
   'ATLAS_CLOUD_API_KEY',
+  'GMI_API_KEY',
+  'APISMART_API_KEY',
+  'APISMART_MODEL',
   'NEARAI_API_KEY',
   'FIREWORKS_API_KEY',
   'CLINE_API_KEY',
@@ -101,6 +104,8 @@ const ENV_KEYS = [
   'GOOGLE_CSE_ID',
   'FIRECRAWL_API_KEY',
   'FIRECRAWL_API_URL',
+  'OLLAMA_API_KEY',
+  'OLLAMA_BASE_URL',
   'TAVILY_API_KEY',
   'EXA_API_KEY',
   'YOU_API_KEY',
@@ -348,7 +353,7 @@ describe('system-check provider diagnostics', () => {
 
 describe('system-check WebSearch diagnostics', () => {
   const reliableBackendHint =
-    'FIRECRAWL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, YOU_API_KEY, JINA_API_KEY, BRAVE_API_KEY, BING_API_KEY, MOJEEK_API_KEY, or LINKUP_API_KEY'
+    'OLLAMA_BASE_URL, OLLAMA_API_KEY, FIRECRAWL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, YOU_API_KEY, JINA_API_KEY, BRAVE_API_KEY, BING_API_KEY, MOJEEK_API_KEY, or LINKUP_API_KEY'
 
   function expectWebSearchBackend(
     ok: boolean,
@@ -479,6 +484,74 @@ describe('system-check WebSearch diagnostics', () => {
     )
   })
 
+  test('reports the active Ollama search adapter in auto mode', () => {
+    useOpenAICompatibleProvider()
+    process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=auto; configured providers: ollama; fallback includes duckduckgo.',
+    )
+  })
+
+  test('reports malformed Ollama local configuration in auto mode', () => {
+    useOpenAICompatibleProvider()
+    process.env.OLLAMA_BASE_URL = 'not a url'
+
+    expectWebSearchBackend(
+      true,
+      `WEB_SEARCH_PROVIDER=auto; only DuckDuckGo fallback is available. DuckDuckGo scraping can be rate-limited from datacenter/VPN/repeated-request networks. Configure ${reliableBackendHint} for reliable search. OLLAMA_BASE_URL is invalid; runtime will skip ollama and fall through to the next provider in auto mode.`,
+    )
+  })
+
+  test('reports hosted Ollama fallback when its local URL is malformed in auto mode', () => {
+    useOpenAICompatibleProvider()
+    process.env.OLLAMA_BASE_URL = 'not a url'
+    process.env.OLLAMA_API_KEY = 'ollama-secret-value-123'
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=auto; configured providers: ollama; fallback includes duckduckgo. OLLAMA_BASE_URL is invalid; runtime will skip local Ollama search and use the hosted Ollama API.',
+    )
+  })
+
+  test.each(['undefined', 'null', 'SUA_CHAVE', ' sua_chave '])(
+    'does not report hosted fallback for an %s Ollama key placeholder in auto mode',
+    placeholder => {
+      useOpenAICompatibleProvider()
+      process.env.OLLAMA_BASE_URL = 'not a url'
+      process.env.OLLAMA_API_KEY = placeholder
+
+      expectWebSearchBackend(
+        true,
+        `WEB_SEARCH_PROVIDER=auto; only DuckDuckGo fallback is available. DuckDuckGo scraping can be rate-limited from datacenter/VPN/repeated-request networks. Configure ${reliableBackendHint} for reliable search. OLLAMA_BASE_URL is invalid; runtime will skip ollama and fall through to the next provider in auto mode.`,
+      )
+    },
+  )
+
+  test('reports a malformed active Ollama endpoint in auto mode', () => {
+    useOpenAICompatibleProvider()
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+    process.env.OPENAI_BASE_URL = 'ftp://ollama.internal/v1'
+
+    expectWebSearchBackend(
+      true,
+      `WEB_SEARCH_PROVIDER=auto; only DuckDuckGo fallback is available. DuckDuckGo scraping can be rate-limited from datacenter/VPN/repeated-request networks. Configure ${reliableBackendHint} for reliable search. Active Ollama provider endpoint is invalid; runtime will skip ollama and fall through to the next provider in auto mode.`,
+    )
+  })
+
+  test('reports hosted fallback for a malformed active Ollama endpoint in auto mode', () => {
+    useOpenAICompatibleProvider()
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+    process.env.OPENAI_BASE_URL = 'ftp://ollama.internal/v1'
+    process.env.OLLAMA_API_KEY = 'ollama-secret-value-123'
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=auto; configured providers: ollama; fallback includes duckduckgo. Active Ollama provider endpoint is invalid; runtime will skip local Ollama search and use the hosted Ollama API.',
+    )
+  })
+
   test('fails explicit provider mode when required credentials are missing', () => {
     process.env.WEB_SEARCH_PROVIDER = 'brave'
 
@@ -495,6 +568,151 @@ describe('system-check WebSearch diagnostics', () => {
     expectWebSearchBackend(
       true,
       'WEB_SEARCH_PROVIDER=brave; BRAVE_API_KEY configured.',
+    )
+  })
+
+  test('passes explicit Ollama mode with the active local provider endpoint', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+    process.env.OPENAI_BASE_URL = 'https://models.example.com/v1'
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=ollama; active Ollama provider endpoint configured.',
+    )
+  })
+
+  test.each(['undefined', 'null'])(
+    'uses OPENAI_API_BASE when OPENAI_BASE_URL is the %s placeholder',
+    placeholder => {
+      process.env.WEB_SEARCH_PROVIDER = 'ollama'
+      process.env.CLAUDE_CODE_USE_OPENAI = '1'
+      process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+      process.env.OPENAI_BASE_URL = placeholder
+      process.env.OPENAI_API_BASE = 'http://localhost:11434/v1'
+
+      expectWebSearchBackend(
+        true,
+        'WEB_SEARCH_PROVIDER=ollama; active Ollama provider endpoint configured.',
+      )
+    },
+  )
+
+  test('passes explicit Ollama mode with local and hosted fallback configuration', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.OLLAMA_BASE_URL = 'http://localhost:11434'
+    process.env.OLLAMA_API_KEY = 'ollama-secret-value-123'
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=ollama; OLLAMA_BASE_URL and OLLAMA_API_KEY configured.',
+    )
+  })
+
+  test('fails explicit Ollama mode without a local endpoint or hosted credential', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+
+    expectWebSearchBackend(
+      false,
+      'WEB_SEARCH_PROVIDER=ollama but an active Ollama provider, OLLAMA_BASE_URL, or OLLAMA_API_KEY is missing.',
+    )
+  })
+
+  test('diagnoses malformed Ollama local configuration without throwing', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.OLLAMA_BASE_URL = 'not a url'
+
+    expectWebSearchBackend(
+      false,
+      'WEB_SEARCH_PROVIDER=ollama but OLLAMA_BASE_URL is not a valid HTTP(S) URL.',
+    )
+  })
+
+  test('reports hosted fallback when the Ollama local URL is malformed', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.OLLAMA_BASE_URL = 'not a url'
+    process.env.OLLAMA_API_KEY = 'ollama-secret-value-123'
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=ollama; OLLAMA_API_KEY configured; OLLAMA_BASE_URL is invalid and local search will be skipped.',
+    )
+  })
+
+  test('does not treat a whitespace-only Ollama key as hosted fallback', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.OLLAMA_BASE_URL = 'not a url'
+    process.env.OLLAMA_API_KEY = '   '
+
+    expectWebSearchBackend(
+      false,
+      'WEB_SEARCH_PROVIDER=ollama but OLLAMA_BASE_URL is not a valid HTTP(S) URL.',
+    )
+  })
+
+  test.each(['undefined', 'null', 'SUA_CHAVE', ' sua_chave '])(
+    'does not treat an %s Ollama key placeholder as hosted fallback',
+    placeholder => {
+      process.env.WEB_SEARCH_PROVIDER = 'ollama'
+      process.env.OLLAMA_BASE_URL = 'not a url'
+      process.env.OLLAMA_API_KEY = placeholder
+
+      expectWebSearchBackend(
+        false,
+        'WEB_SEARCH_PROVIDER=ollama but OLLAMA_BASE_URL is not a valid HTTP(S) URL.',
+      )
+    },
+  )
+
+  test('does not report whitespace-only Ollama endpoints as configured', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.OLLAMA_BASE_URL = '   '
+    process.env.OLLAMA_API_KEY = 'ollama-secret-value-123'
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+    process.env.OPENAI_BASE_URL = '   '
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=ollama; OLLAMA_API_KEY configured.',
+    )
+  })
+
+  test('diagnoses a malformed active Ollama endpoint without a hosted key', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+    process.env.OPENAI_BASE_URL = 'ftp://ollama.internal/v1'
+
+    expectWebSearchBackend(
+      false,
+      'WEB_SEARCH_PROVIDER=ollama but active Ollama provider endpoint is not a valid HTTP(S) URL.',
+    )
+  })
+
+  test('reports hosted fallback for a malformed active Ollama endpoint', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+    process.env.OPENAI_BASE_URL = 'ftp://ollama.internal/v1'
+    process.env.OLLAMA_API_KEY = 'ollama-secret-value-123'
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=ollama; OLLAMA_API_KEY configured; active Ollama provider endpoint is invalid and local search will be skipped.',
+    )
+  })
+
+  test('does not infer an active Ollama endpoint from a hostname substring', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'ollama'
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://my-ollama.internal/v1'
+    process.env.OLLAMA_API_KEY = 'ollama-secret-value-123'
+
+    expectWebSearchBackend(
+      true,
+      'WEB_SEARCH_PROVIDER=ollama; OLLAMA_API_KEY configured.',
     )
   })
 

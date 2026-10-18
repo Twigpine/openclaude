@@ -11,7 +11,7 @@ import {
 
 describe('isThirdPartyBuildBlockedFor', () => {
   const UPSTREAM = '@anthropic-ai/claude-code'
-  const OPENCLAUDE = '@gitlawb/openclaude'
+  const OPENCLAUDE = '@twigpine/openclaude'
 
   test('blocks a third-party provider running the upstream build', () => {
     for (const provider of [

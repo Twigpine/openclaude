@@ -1,4 +1,4 @@
-import { execaSync } from 'execa'
+import { execa, execaSync } from 'execa'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
 import {
   CREDENTIALS_SERVICE_SUFFIX,
@@ -35,8 +35,24 @@ export const linuxSecretStorage: SecureStorage = {
     return null
   },
   async readAsync(): Promise<SecureStorageData | null> {
-    // Reusing sync implementation for simplicity as it wraps a CLI call
-    return this.read()
+    try {
+      const username = getUsername()
+      const serviceName = getSecureStorageServiceName(
+        CREDENTIALS_SERVICE_SUFFIX,
+      )
+      const result = await execa(
+        'secret-tool',
+        ['lookup', 'service', serviceName, 'account', username],
+        { reject: false },
+      )
+
+      if (result.exitCode === 0 && result.stdout) {
+        return jsonParse(result.stdout)
+      }
+    } catch {
+      // fall through
+    }
+    return null
   },
   update(data: SecureStorageData): { success: boolean; warning?: string } {
     try {

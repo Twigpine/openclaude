@@ -29,6 +29,13 @@ export interface ProviderOutput {
   providerName: string
   /** Duration of the provider call in seconds */
   durationSeconds: number
+  /**
+   * In auto mode, continue to the next provider instead of returning this
+   * output — e.g. when client-side domain filtering removed every hit and a
+   * later backend may honor the filter server-side. Explicit modes return
+   * the output as-is.
+   */
+  fallbackInAuto?: boolean
 }
 
 export interface SearchProvider {
@@ -53,15 +60,18 @@ const SOURCE_KEYS = [
   'source', 'domain', 'displayLink', 'displayed_link', 'engine',
 ] as const
 
-function firstMatch(obj: any, keys: readonly string[]): string | undefined {
+function firstMatch(obj: unknown, keys: readonly string[]): string | undefined {
+  if (!obj || typeof obj !== 'object') return undefined
+  const record = obj as Record<string, unknown>
   for (const k of keys) {
-    if (typeof obj?.[k] === 'string' && obj[k]) return obj[k]
+    const v = record[k]
+    if (typeof v === 'string' && v) return v
   }
   return undefined
 }
 
 /** Extract a SearchHit from any object shape using well-known field aliases. */
-export function normalizeHit(raw: any): SearchHit | null {
+export function normalizeHit(raw: unknown): SearchHit | null {
   if (!raw || typeof raw !== 'object') return null
   const title = firstMatch(raw, TITLE_KEYS)
   const url = firstMatch(raw, URL_KEYS)

@@ -6,6 +6,17 @@ import {
   evaluateGoal,
   type GoalModelCaller,
 } from './evaluator.js'
+import {
+  __getInterruptionTraceSnapshotForTests,
+  __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
+  registerInterruptionController,
+  requestAbort,
+} from '../../utils/interruptionTrace.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
 
 function user(uuid: string, content: string) {
   return {
@@ -27,6 +38,52 @@ function assistant(uuid: string, content: string) {
 }
 
 describe('goal evaluator', () => {
+  test.serial('traces provider failures without serializing the error message', async () => {
+    await acquireSharedMutationLock('goal/evaluator trace')
+    const originalTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
+    try {
+      const controller = new AbortController()
+      registerInterruptionController(controller, {
+        controllerRole: 'query-root',
+      })
+      await evaluateGoal({
+        goal: createGoalState('finish implementation'),
+        messages: [],
+        signal: controller.signal,
+        isNonInteractiveSession: false,
+        modelCaller: async () => {
+          requestAbort(controller, 'user-cancel', {
+            source: 'cancel_keybinding',
+            controllerRole: 'query-root',
+          })
+          throw new Error('private provider detail')
+        },
+      })
+
+      const trace = __getInterruptionTraceSnapshotForTests()
+      const serialized = JSON.stringify(trace)
+      expect(serialized).toContain('goal.evaluation_failed')
+      expect(serialized).not.toContain('private provider detail')
+      const rootAbort = trace.find(entry => entry.event === 'abort.requested')
+      const failed = trace.find(
+        entry => entry.event === 'goal.evaluation_failed',
+      )
+      expect(rootAbort).toBeDefined()
+      expect(failed).toBeDefined()
+      expect(typeof rootAbort!.eventId).toBe('string')
+      expect(typeof failed!.causalEventId).toBe('string')
+      expect(failed!.causalEventId).toBe(rootAbort!.eventId)
+    } finally {
+      await __waitForInterruptionTraceFlushForTests()
+      __resetInterruptionTraceForTests()
+      if (originalTrace === undefined) delete process.env.OPENCLAUDE_INTERRUPT_TRACE
+      else process.env.OPENCLAUDE_INTERRUPT_TRACE = originalTrace
+      releaseSharedMutationLock()
+    }
+  })
+
   test('valid complete JSON', async () => {
     const caller: GoalModelCaller = async () =>
       JSON.stringify({

@@ -13,7 +13,7 @@ import { getAgentDescriptionsTotalTokens, AGENT_DESCRIPTIONS_THRESHOLD } from '.
 import { isSupportedJetBrainsTerminal, toIDEDisplayName, getTerminalIdeType } from './ide.js';
 import { isJetBrainsPluginInstalledCachedSync } from './jetbrains.js';
 import type { LocalModelContextWarning } from './statusNoticeLocalModel.js';
-import type { PermissionMode } from './permissions/PermissionMode.js';
+import { isDangerousPermissionMode, type PermissionMode } from './permissions/PermissionMode.js';
 import { modelSupportsAutoMode } from './betas.js';
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './model/providers.js';
 import { logForDebugging } from './debug.js';
@@ -284,31 +284,53 @@ const thirdPartyPermissiveModeNotice: StatusNoticeDefinition = {
       </WarningNoticeRow>;
   }
 };
-// `--dangerously-skip-permissions` (a.k.a. bypassPermissions) auto-approves
-// every tool call. On first-party builds an employee-only sandbox check
-// (Docker/Bubblewrap + no internet) gates this flag; external users skip the
-// check entirely (setup.ts), so the flag is effectively "run any command with
-// no review". Warn loudly. Detection reads from process.argv so the notice
-// fires from the first frame, before any AppState mode change propagates.
-// See issue #244 finding 2.
-function hasDangerouslySkipPermissionsArg(): boolean {
-  return process.argv.includes('--dangerously-skip-permissions');
+// `--dangerously-skip-permissions` (a.k.a. bypassPermissions) and `fullAccess`
+// suppress the normal per-tool consent prompt, but they differ in what
+// guardrails remain:
+//
+// - bypassPermissions still honors deny rules, user-interaction prompts,
+//   content-specific ask rules, and safety-check guardrails (e.g. .git/,
+//   .claude/, shell configs).
+// - fullAccess skips those safety-check prompts too and is the stronger bypass.
+//
+// The SDK also accepts the kebab-case `full-access` alias and normalizes it to
+// the internal camelCase mode, but a context may carry the external spelling
+// directly. Treat both spellings as the stronger bypass so the warning does not
+// accidentally downgrade to the weaker message.
+//
+// On first-party builds an employee-only sandbox check (Docker/Bubblewrap + no
+// internet) gates these modes; external users skip the check entirely
+// (setup.ts), so they are effectively "run any command with no review". Warn
+// loudly. Commander resolves `--dangerously-skip-permissions` (and its `--yolo`
+// alias) into the permission mode during startup, while `fullAccess` can be set
+// via `--permission-mode` or settings, so this notice keys off the resolved
+// `ctx.permissionMode` rather than re-scanning raw argv. That keeps it
+// authoritative and avoids re-implementing commander's option arity / `--`
+// semantics. See issue #244 finding 2.
+function isDangerousMode(mode: PermissionMode | undefined): boolean {
+  return isDangerousPermissionMode(mode) || (mode as string) === 'full-access'
+}
+function isFullAccessMode(mode: PermissionMode | undefined): boolean {
+  return mode === 'fullAccess' || (mode as string) === 'full-access'
 }
 const dangerouslySkipPermissionsNotice: StatusNoticeDefinition = {
   id: 'dangerously-skip-permissions-no-sandbox',
   type: 'warning',
-  isActive: ctx =>
-    hasDangerouslySkipPermissionsArg() ||
-    ctx.permissionMode === 'bypassPermissions',
-  render: () => <WarningNoticeRow>
-      <Text color="warning">
-        <Text bold>--dangerously-skip-permissions</Text> is active.
-      </Text>
-      <Text dimColor>
-        Every tool consent check is bypassed. Only use inside a sandbox with no internet access.
-        Restart without the flag to re-enable prompts.
-      </Text>
-    </WarningNoticeRow>
+  isActive: ctx => isDangerousMode(ctx.permissionMode),
+  render: ctx => {
+    const mode = ctx.permissionMode;
+    const isFullAccess = isFullAccessMode(mode);
+    return <WarningNoticeRow>
+        <Text color="warning">
+          <Text bold>{mode}</Text> mode is active.
+        </Text>
+        <Text dimColor>
+          {isFullAccess
+            ? 'Most tool consent checks are bypassed, including safety-check prompts. Hard deny rules and user-interaction prompts still apply. Only use inside a sandbox with no internet access. Restart without the bypass flag/mode to re-enable prompts.'
+            : 'Most tool consent checks are bypassed. Deny rules, user-interaction prompts, content-specific ask rules, and safety-check guardrails still apply. Only use inside a sandbox with no internet access.'}
+        </Text>
+      </WarningNoticeRow>
+  },
 };
 
 // All notice definitions

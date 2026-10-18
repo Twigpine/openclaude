@@ -11,56 +11,71 @@ import { existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 import { spawnSync } from 'child_process'
+import { enableNodeCompileCacheIfAvailable } from './node-compile-cache.mjs'
+import {
+  HEAP_SIZE_ENV,
+  HEAP_SIZE_FLAG,
+  formatPercentageUnavailableStderr,
+  hasHeapLimitFlag,
+  hasNodeFlag,
+  nodeOptionArgs,
+  resolveHeapSizeMb,
+  stripLauncherHeapArgs,
+} from './heap-limit.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const distPath = join(__dirname, '..', 'dist', 'cli.mjs')
 
 const HEAP_RELAUNCHED_ENV = 'OPENCLAUDE_HEAP_RELAUNCHED'
 const DISABLE_HEAP_RELAUNCH_ENV = 'OPENCLAUDE_DISABLE_HEAP_RELAUNCH'
-const HEAP_SIZE_ENV = 'OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_MB'
-const DEFAULT_HEAP_SIZE_MB = 8192
 
-function hasNodeFlag(args, flag) {
-  return args.some(arg => arg === flag || arg.startsWith(`${flag}=`))
+function currentNodeOptionArgs() {
+  return [...process.execArgv, ...nodeOptionArgs(process.env.NODE_OPTIONS)]
 }
 
-function hasNodeOptionFlag(flag) {
-  return hasNodeFlag([
-    ...process.execArgv,
-    ...(process.env.NODE_OPTIONS || '').split(/\s+/).filter(Boolean),
-  ], flag)
-}
-
-function getHeapSizeMb() {
-  // --max-memory flag overrides env var
-  const maxMemArg = process.argv.find(a => a.startsWith('--max-memory='))
-  if (maxMemArg) {
-    const mb = Number.parseInt(maxMemArg.split('=')[1] || '0', 10)
-    if (Number.isSafeInteger(mb) && mb > 0) {
-      process.env[HEAP_SIZE_ENV] = String(mb)
-      process.env.OPENCLAUDE_MAX_MEMORY_MB = String(mb)
-      return mb
-    }
+function applyResolvedHeapEnv(resolved) {
+  process.env[HEAP_SIZE_ENV] = String(resolved.mb)
+  if (resolved.setMaxMemoryEnv) {
+    process.env.OPENCLAUDE_MAX_MEMORY_MB = String(resolved.mb)
   }
+}
 
-  const raw = process.env[HEAP_SIZE_ENV]
-  if (!raw) return DEFAULT_HEAP_SIZE_MB
-  const parsed = Number.parseInt(raw, 10)
-  return Number.isSafeInteger(parsed) && parsed > 0
-    ? parsed
-    : DEFAULT_HEAP_SIZE_MB
+function replaceProcessArgvWithStrippedLauncherArgs() {
+  process.argv = [
+    process.argv[0],
+    process.argv[1],
+    ...stripLauncherHeapArgs(process.argv.slice(2)),
+  ]
 }
 
 function relaunchWithLongSessionHeapIfNeeded() {
-  if (process.env[DISABLE_HEAP_RELAUNCH_ENV] === '1') return
-  if (process.env[HEAP_RELAUNCHED_ENV] === '1') return
-  const hasHeapLimit = hasNodeOptionFlag('--max-old-space-size')
-  const hasExplicitGc = hasNodeOptionFlag('--expose-gc')
-  if (hasHeapLimit && hasExplicitGc) return
+  if (process.env[DISABLE_HEAP_RELAUNCH_ENV] === '1') {
+    replaceProcessArgvWithStrippedLauncherArgs()
+    return
+  }
+  if (process.env[HEAP_RELAUNCHED_ENV] === '1') {
+    replaceProcessArgvWithStrippedLauncherArgs()
+    return
+  }
+  const nodeArgs = currentNodeOptionArgs()
+  const hasHeapLimit = hasHeapLimitFlag(nodeArgs)
+  const hasExplicitGc = hasNodeFlag(nodeArgs, '--expose-gc')
+  if (hasHeapLimit && hasExplicitGc) {
+    replaceProcessArgvWithStrippedLauncherArgs()
+    return
+  }
 
   const execArgv = [...process.execArgv]
   if (!hasHeapLimit) {
-    execArgv.push(`--max-old-space-size=${getHeapSizeMb()}`)
+    const resolved = resolveHeapSizeMb({
+      argv: process.argv.slice(2),
+      env: process.env,
+    })
+    if (resolved.source === 'percentage-unavailable') {
+      console.error(formatPercentageUnavailableStderr(resolved.percentage))
+    }
+    applyResolvedHeapEnv(resolved)
+    execArgv.push(`${HEAP_SIZE_FLAG}=${resolved.mb}`)
   }
 
   // Expose explicit GC for long interactive sessions. NODE_OPTIONS cannot
@@ -69,16 +84,16 @@ function relaunchWithLongSessionHeapIfNeeded() {
     execArgv.push('--expose-gc')
   }
 
-  // Strip --max-memory flag before relaunching — it's a launcher-only arg
-  // that Commander in the built CLI would reject as unknown.
-  const childArgs = process.argv.slice(2).filter(
-    arg => !arg.startsWith('--max-memory=') && arg !== '--max-memory',
-  )
+  // Strip launcher-only heap args before relaunching — Commander in the built
+  // CLI would reject them as unknown. The native Node percentage flag in
+  // execArgv/NODE_OPTIONS is left untouched because this process already
+  // started with a Node that accepted it.
+  const childArgs = stripLauncherHeapArgs(process.argv.slice(2))
 
   // Preserve the original argv[1] (which may be a symlink like
   // /usr/local/bin/openclaude) instead of resolving it via import.meta.url.
   // Resolving symlinks here defeats install-type detection downstream: a real
-  // npm global install (symlink → node_modules/@gitlawb/openclaude/bin) would
+  // npm global install (symlink → node_modules/@twigpine/openclaude/bin) would
   // resolve to the package's real path inside node_modules, which is fine, but
   // a `npm install -g .` dev symlink resolves back to the repo and looks like
   // a source-tree dev run. Using argv[1] keeps the invocation path stable so
@@ -107,6 +122,7 @@ function relaunchWithLongSessionHeapIfNeeded() {
 
 if (existsSync(distPath)) {
   relaunchWithLongSessionHeapIfNeeded()
+  enableNodeCompileCacheIfAvailable()
   await import(pathToFileURL(distPath).href)
 } else {
   console.error(`

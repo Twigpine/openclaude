@@ -6,11 +6,21 @@ import {
   getRouteDefaultBaseUrl,
   getRouteDefaultModel,
   getRouteProviderTypeLabel,
+  isApismartBaseUrl,
+  isCanonicalApismartInferenceBaseUrl,
   isCloudflareBaseUrl,
+  isConcentrateBaseUrl,
+  isLongcatBaseUrl,
   resolveActiveRouteIdFromEnv,
   resolveRouteCredentialValue,
   resolveRouteIdFromBaseUrl,
 } from './routeMetadata.js'
+import { ensureIntegrationsLoaded } from './index.js'
+import { _clearRegistryForTesting, registerGateway } from './registry.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../test/sharedMutationLock.js'
 
 test('isCloudflareBaseUrl matches Workers AI host but not the shared AI Gateway', () => {
   // Workers AI lives on api.cloudflare.com.
@@ -65,6 +75,28 @@ test('isCloudflareBaseUrl matches Workers AI host but not the shared AI Gateway'
       'http://api.cloudflare.com/client/v4/accounts/abc123/ai/v1',
     ),
   ).toBe(false)
+})
+
+test('isLongcatBaseUrl requires the documented HTTPS OpenAI API path', () => {
+  expect(isLongcatBaseUrl('https://api.longcat.chat/openai')).toBe(true)
+  expect(isLongcatBaseUrl('https://api.longcat.chat/openai/')).toBe(true)
+  expect(isLongcatBaseUrl('https://api.longcat.chat/openai/v1')).toBe(true)
+  expect(isLongcatBaseUrl('https://api.longcat.chat/openai/v1/chat/completions')).toBe(true)
+  expect(isLongcatBaseUrl('https://api.longcat.chat/openai/chat/completions')).toBe(true)
+  expect(isLongcatBaseUrl('https://api.longcat.chat/openai/other')).toBe(false)
+  expect(isLongcatBaseUrl('https://api.longcat.chat/openai/v1?query=value')).toBe(false)
+  expect(isLongcatBaseUrl('https://api.longcat.chat/openai/v1#fragment')).toBe(false)
+  expect(isLongcatBaseUrl('https://api.longcat.chat:8443/openai/v1')).toBe(false)
+  expect(isLongcatBaseUrl('http://api.longcat.chat/openai/v1')).toBe(false)
+  expect(isLongcatBaseUrl('https://api.longcat.chat/v1')).toBe(false)
+  expect(isLongcatBaseUrl('https://api.longcat.chat.evil.test/openai/v1')).toBe(false)
+})
+
+test('resolveActiveRouteIdFromEnv keeps generic OpenAI credentials ahead of env-only LongCat', () => {
+  expect(resolveActiveRouteIdFromEnv({
+    OPENAI_API_KEY: 'generic-key',
+    LONGCAT_API_KEY: 'longcat-key',
+  })).not.toBe('longcat')
 })
 
 test('getRouteProviderTypeLabel uses descriptor transport kinds for provider labels', () => {
@@ -181,6 +213,20 @@ test('custom Anthropic credentials stay native and resolve to their proxy route'
       ANTHROPIC_AUTH_TOKEN: 'tenant-token',
     }),
   ).toBe('custom-anthropic')
+
+  expect(
+    resolveActiveRouteIdFromEnv(
+      {
+        ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+        ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+        ANTHROPIC_API_KEY: 'first-party-key',
+      },
+      {
+        activeProfileProvider: 'zai',
+        activeProfileBaseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      },
+    ),
+  ).toBe('anthropic')
 })
 
 test('getRouteCredentialEnvVars omits the openai fallback for dedicatedCredentialsOnly routes', () => {
@@ -198,6 +244,58 @@ test('getRouteCredentialEnvVars omits the openai fallback for dedicatedCredentia
       ATLAS_CLOUD_API_KEY: 'atlas-key',
     }),
   ).toBe('atlas-key')
+  expect(getRouteCredentialEnvVars('gmi-cloud')).toEqual(['GMI_API_KEY'])
+  expect(
+    getRouteCredentialValue('gmi-cloud', {
+      OPENAI_API_KEY: 'sk-openai-generic',
+    }),
+  ).toBeUndefined()
+  expect(getRouteCredentialEnvVars('apismart')).toEqual(['APISMART_API_KEY'])
+  expect(
+    getRouteCredentialValue('apismart', {
+      OPENAI_API_KEY: 'sk-openai-generic',
+    }),
+  ).toBeUndefined()
+  expect(
+    getRouteCredentialValue('apismart', {
+      OPENAI_API_KEY: 'sk-openai-generic',
+      APISMART_API_KEY: 'apismart-key',
+    }),
+  ).toBe('apismart-key')
+  expect(getRouteCredentialEnvVars('commandcode')).toEqual([
+    'CMD_API_KEY',
+    'COMMANDCODE_API_KEY',
+    'COMMAND_CODE_API_KEY',
+  ])
+  expect(
+    getRouteCredentialValue('commandcode', {
+      OPENAI_API_KEY: 'sk-openai-generic',
+    }),
+  ).toBeUndefined()
+  expect(
+    getRouteCredentialValue('commandcode', {
+      OPENAI_API_KEY: 'sk-openai-generic',
+      CMD_API_KEY: 'cmd-key',
+    }),
+  ).toBe('cmd-key')
+  expect(
+    getRouteCredentialValue('commandcode', {
+      CMD_API_KEY: 'SUA_CHAVE',
+    }),
+  ).toBeUndefined()
+  expect(
+    getRouteCredentialValue('commandcode', {
+      CMD_API_KEY: 'SUA_CHAVE',
+      COMMANDCODE_API_KEY: 'fallback-key',
+    }),
+  ).toBe('fallback-key')
+  expect(
+    getRouteCredentialValue('commandcode', {
+      CMD_API_KEY: 'SUA_CHAVE',
+      COMMANDCODE_API_KEY: 'undefined',
+      COMMAND_CODE_API_KEY: 'official-key',
+    }),
+  ).toBe('official-key')
 })
 
 test('getRouteCredentialValue reads the first configured route credential', () => {
@@ -268,6 +366,32 @@ test('route credential discovery ignores mixed placeholder OpenAI pools before s
   ).toBe('sk-openai-single')
 })
 
+test('ApiSmart dedicated credential is limited to the canonical inference base URL', () => {
+  const processEnv = { APISMART_API_KEY: 'apismart-secret' }
+
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'apismart',
+      baseUrl: 'https://gw.apismart.ai/v1',
+      processEnv,
+    }),
+  ).toBe('apismart-secret')
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'apismart',
+      baseUrl: 'https://gw.apismart.ai/v1/models',
+      processEnv,
+    }),
+  ).toBeUndefined()
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'apismart',
+      baseUrl: 'https://gw.apismart.ai/v2',
+      processEnv,
+    }),
+  ).toBeUndefined()
+})
+
 test('Venice route metadata uses official OpenAI-compatible defaults', () => {
   expect(getRouteDefaultBaseUrl('venice')).toBe('https://api.venice.ai/api/v1')
   expect(getRouteDefaultModel('venice')).toBe('venice-uncensored')
@@ -275,11 +399,116 @@ test('Venice route metadata uses official OpenAI-compatible defaults', () => {
   expect(resolveRouteIdFromBaseUrl('https://api.venice.ai/api/v1/chat/completions')).toBe('venice')
 })
 
+test('Z.AI route metadata is limited to the canonical Coding Plan endpoint', () => {
+  expect(
+    resolveRouteIdFromBaseUrl('https://api.z.ai/api/coding/paas/v4'),
+  ).toBe('zai')
+  expect(
+    resolveRouteIdFromBaseUrl('https://api.z.ai/api/paas/v4'),
+  ).toBeNull()
+})
+
+test('active Z.AI profiles honor the Coding Plan endpoint boundary', () => {
+  const codingPlanUrl = 'https://api.z.ai/api/coding/paas/v4'
+  const generalUrl = 'https://api.z.ai/api/paas/v4'
+  const customUrl = 'https://proxy.example.test/v1'
+
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: codingPlanUrl },
+      { activeProfileProvider: 'zai', activeProfileBaseUrl: codingPlanUrl },
+    ),
+  ).toBe('zai')
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: generalUrl },
+      { activeProfileProvider: 'zai', activeProfileBaseUrl: generalUrl },
+    ),
+  ).toBe('custom')
+  for (const invalidPrimary of [' ', 'undefined', 'null']) {
+    expect(
+      resolveActiveRouteIdFromEnv(
+        {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: invalidPrimary,
+          OPENAI_API_BASE: generalUrl,
+        },
+        { activeProfileProvider: 'zai', activeProfileBaseUrl: codingPlanUrl },
+      ),
+    ).toBe('custom')
+  }
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: generalUrl },
+      { activeProfileProvider: 'zai', activeProfileBaseUrl: codingPlanUrl },
+    ),
+  ).toBe('custom')
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: customUrl },
+      { activeProfileProvider: 'zai', activeProfileBaseUrl: codingPlanUrl },
+    ),
+  ).toBe('custom')
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1' },
+      { activeProfileProvider: 'zai' },
+    ),
+  ).toBe('zai')
+})
+
 test('AI/ML API route metadata uses official OpenAI-compatible defaults', () => {
   expect(getRouteDefaultBaseUrl('aimlapi')).toBe('https://api.aimlapi.com/v1')
   expect(getRouteDefaultModel('aimlapi')).toBe('gpt-4o')
   expect(resolveRouteIdFromBaseUrl('https://api.aimlapi.com/v1')).toBe('aimlapi')
   expect(resolveRouteIdFromBaseUrl('https://api.aimlapi.com/v1/chat/completions')).toBe('aimlapi')
+})
+
+test('ApiSmart route metadata uses official OpenAI-compatible defaults', () => {
+  expect(getRouteDefaultBaseUrl('apismart')).toBe('https://gw.apismart.ai/v1')
+  expect(getRouteDefaultModel('apismart')).toBe('DEEPSEEK_V4_FLASH')
+  expect(resolveRouteIdFromBaseUrl('https://gw.apismart.ai/v1')).toBe('apismart')
+  expect(resolveRouteIdFromBaseUrl('https://gw.apismart.ai/v1/chat/completions')).toBe(
+    'apismart',
+  )
+})
+
+test('isApismartBaseUrl requires the documented HTTPS endpoint', () => {
+  expect(isApismartBaseUrl('https://gw.apismart.ai/v1')).toBe(true)
+  expect(isApismartBaseUrl('http://gw.apismart.ai/v1')).toBe(false)
+  expect(isApismartBaseUrl('https://gw.apismart.ai:8443/v1')).toBe(false)
+  expect(resolveRouteIdFromBaseUrl('http://gw.apismart.ai/v1')).toBe(null)
+  expect(resolveRouteIdFromBaseUrl('https://gw.apismart.ai:8443/v1')).toBe(null)
+})
+
+test('isCanonicalApismartInferenceBaseUrl requires the exact /v1 inference path', () => {
+  expect(isCanonicalApismartInferenceBaseUrl('https://gw.apismart.ai/v1')).toBe(
+    true,
+  )
+  expect(isCanonicalApismartInferenceBaseUrl('https://gw.apismart.ai/v1/')).toBe(
+    true,
+  )
+  expect(isCanonicalApismartInferenceBaseUrl('https://gw.apismart.ai/v1?x=1')).toBe(
+    false,
+  )
+  expect(isCanonicalApismartInferenceBaseUrl('https://gw.apismart.ai/v1#fragment')).toBe(
+    false,
+  )
+  expect(isCanonicalApismartInferenceBaseUrl('https://gw.apismart.ai')).toBe(
+    false,
+  )
+  expect(
+    isCanonicalApismartInferenceBaseUrl('https://gw.apismart.ai/v1/models'),
+  ).toBe(false)
+  expect(
+    isCanonicalApismartInferenceBaseUrl('https://gw.apismart.ai/staging/v1'),
+  ).toBe(false)
+  expect(isCanonicalApismartInferenceBaseUrl('https://gw.apismart.ai/v2')).toBe(
+    false,
+  )
+  // Host-scoped route match still accepts path suffixes for identity.
+  expect(isApismartBaseUrl('https://gw.apismart.ai/v1/models')).toBe(true)
+  expect(isApismartBaseUrl('https://gw.apismart.ai')).toBe(true)
 })
 
 test('AI/ML API route credential discovery ignores placeholder dedicated key', () => {
@@ -399,6 +628,16 @@ test('resolveActiveRouteIdFromEnv treats Anthropic-compatible MiniMax profile en
   ).toBe('minimax')
 })
 
+test('resolveActiveRouteIdFromEnv recognizes the mainland China MiniMax endpoint', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic',
+      ANTHROPIC_API_KEY: 'minimax-key',
+      ANTHROPIC_MODEL: 'MiniMax-M3',
+    }),
+  ).toBe('minimax')
+})
+
 test('resolveActiveRouteIdFromEnv treats Venice credential-only env as Venice', () => {
   expect(
     resolveActiveRouteIdFromEnv({
@@ -411,6 +650,110 @@ test('resolveActiveRouteIdFromEnv treats AI/ML API credential-only env as AI/ML 
   expect(
     resolveActiveRouteIdFromEnv({
       AIMLAPI_API_KEY: 'aimlapi-key',
+    }),
+  ).toBe('aimlapi')
+})
+
+test('resolveActiveRouteIdFromEnv treats ApiSmart credential-only env as ApiSmart', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'apismart-key',
+    }),
+  ).toBe('apismart')
+})
+
+test('resolveActiveRouteIdFromEnv ignores placeholder ApiSmart credentials', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'SUA_CHAVE',
+    }),
+  ).not.toBe('apismart')
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'null',
+    }),
+  ).not.toBe('apismart')
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'undefined',
+    }),
+  ).not.toBe('apismart')
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'sua_chave',
+      AIMLAPI_API_KEY: 'aimlapi-key',
+    }),
+  ).toBe('aimlapi')
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'null',
+      AIMLAPI_API_KEY: 'aimlapi-key',
+    }),
+  ).toBe('aimlapi')
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'SUA_CHAVE',
+      AIMLAPI_API_KEY: 'aimlapi-key',
+    }),
+  ).toBe('aimlapi')
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'apismart',
+      processEnv: { APISMART_API_KEY: 'SUA_CHAVE' },
+    }),
+  ).toBeUndefined()
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'apismart',
+      processEnv: { APISMART_API_KEY: 'null' },
+    }),
+  ).toBeUndefined()
+})
+
+test('resolveActiveRouteIdFromEnv prefers ApiSmart over ClinePass when both dedicated keys are set', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'apismart-key',
+      CLINE_API_KEY: 'cline-key',
+    }),
+  ).toBe('apismart')
+})
+
+test('resolveActiveRouteIdFromEnv prefers ApiSmart over AI/ML API when both dedicated keys are set', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'apismart-key',
+      AIMLAPI_API_KEY: 'aimlapi-key',
+    }),
+  ).toBe('apismart')
+})
+
+test('resolveActiveRouteIdFromEnv refines generic OpenAI profile by ApiSmart base URL', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_API_KEY: 'sk-openai-generic',
+      OPENAI_BASE_URL: 'https://gw.apismart.ai/v1',
+    }),
+  ).toBe('apismart')
+})
+
+test('resolveActiveRouteIdFromEnv does not retain ApiSmart identity for a retargeted profile', () => {
+  const baseUrl = 'https://proxy.example/v1'
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: baseUrl },
+      { activeProfileProvider: 'apismart', activeProfileBaseUrl: baseUrl },
+    ),
+  ).toBe('custom')
+})
+
+test('resolveActiveRouteIdFromEnv honors an explicit competing route over an ambient ApiSmart key', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'apismart-key',
+      AIMLAPI_API_KEY: 'aimlapi-key',
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
     }),
   ).toBe('aimlapi')
 })
@@ -442,6 +785,15 @@ test('resolveActiveRouteIdFromEnv keeps explicit OpenAI mode compatible with AI/
       CLAUDE_CODE_USE_OPENAI: '1',
     }),
   ).toBe('aimlapi')
+})
+
+test('resolveActiveRouteIdFromEnv keeps explicit OpenAI mode compatible with ApiSmart key-only setup', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      APISMART_API_KEY: 'apismart-key',
+      CLAUDE_CODE_USE_OPENAI: '1',
+    }),
+  ).toBe('apismart')
 })
 
 test('resolveActiveRouteIdFromEnv does not infer AI/ML API with a conflicting OpenAI base URL', () => {
@@ -556,7 +908,7 @@ test.each([
   ['OpenRouter', 'https://openrouter.ai/api/v1', 'openai/gpt-5-mini', 'openrouter'],
   ['DeepSeek', 'https://api.deepseek.com/v1', 'deepseek-v4-pro', 'deepseek'],
   ['Hicap', 'https://api.hicap.ai/v1', 'claude-opus-4.8', 'hicap'],
-  ['AI/ML API', 'https://api.aimlapi.com/v1', 'gpt-4o', 'aimlapi'],
+  ['aimlapi.com', 'https://api.aimlapi.com/v1', 'gpt-4o', 'aimlapi'],
   ['Xiaomi MiMo', 'https://api.xiaomimimo.com/v1', 'mimo-v2.5-pro', 'xiaomi-mimo'],
   ['Venice', 'https://api.venice.ai/api/v1', 'venice-uncensored', 'venice'],
 ])(
@@ -670,6 +1022,18 @@ test('resolveActiveRouteIdFromEnv lets explicit OPENAI_BASE_URL override saved C
       },
     ),
   ).toBe('openrouter')
+  expect(
+    resolveActiveRouteIdFromEnv(
+      {
+        CLAUDE_CODE_USE_OPENAI: '1',
+        OPENAI_BASE_URL: 'https://proxy.example.test/v1',
+      },
+      {
+        activeProfileProvider: 'clinepass',
+        activeProfileBaseUrl: 'https://api.cline.bot/api/v1',
+      },
+    ),
+  ).toBe('custom')
 })
 
 test('resolveActiveRouteIdFromEnv does not infer MiniMax with OpenAI credentials', () => {
@@ -717,4 +1081,208 @@ test('resolveActiveRouteIdFromEnv does not infer Near AI with explicit provider 
       CLAUDE_CODE_USE_GEMINI: '1',
     }),
   ).toBe('gemini')
+})
+
+test('getRouteDefaultModel skips hidden and expired catalog entries in the fallback', async () => {
+  // Self-contained registry mutation (same lock + clear + reload pattern as
+  // registry.test.ts) so the synthetic gateway never leaks into other tests.
+  await acquireSharedMutationLock('integrations/routeMetadata.test.ts')
+  try {
+    _clearRegistryForTesting()
+    registerGateway({
+      id: 'gw-default-fallback',
+      label: 'gw-default-fallback',
+      setup: { requiresAuth: true, authMode: 'api-key' },
+      transportConfig: { kind: 'openai-compatible' },
+      // No defaultModel on the descriptor → the catalog fallback path runs.
+      catalog: {
+        source: 'static',
+        models: [
+          // Marked default, but hidden — must be skipped.
+          { id: 'hidden-default', apiName: 'model-hidden', default: true, hidden: true },
+          // availableUntil already past its cutoff — must be skipped.
+          {
+            id: 'expired',
+            apiName: 'model-expired',
+            availableUntil: '2020-01-01T00:00:00Z',
+          },
+          { id: 'valid', apiName: 'model-valid' },
+        ],
+      },
+    })
+    expect(getRouteDefaultModel('gw-default-fallback')).toBe('model-valid')
+
+    // Every entry filtered out → no implicit default at all, rather than an
+    // id the route would reject.
+    _clearRegistryForTesting()
+    registerGateway({
+      id: 'gw-default-fallback-empty',
+      label: 'gw-default-fallback-empty',
+      setup: { requiresAuth: true, authMode: 'api-key' },
+      transportConfig: { kind: 'openai-compatible' },
+      catalog: {
+        source: 'static',
+        models: [
+          { id: 'hidden-only', apiName: 'model-hidden', hidden: true },
+          {
+            id: 'expired-only',
+            apiName: 'model-expired',
+            availableUntil: '2020-01-01T00:00:00Z',
+          },
+        ],
+      },
+    })
+    expect(getRouteDefaultModel('gw-default-fallback-empty')).toBeUndefined()
+  } finally {
+    // Nested so the lock is released even if the registry restore throws
+    // (same shape as registry.test.ts's afterEach).
+    try {
+      _clearRegistryForTesting()
+      ensureIntegrationsLoaded()
+    } finally {
+      releaseSharedMutationLock()
+    }
+  }
+})
+
+test('isConcentrateBaseUrl matches the Concentrate API host', () => {
+  expect(isConcentrateBaseUrl('https://api.concentrate.ai/v1')).toBe(true)
+  expect(isConcentrateBaseUrl('https://api.concentrate.ai/v1/chat/completions')).toBe(true)
+  expect(isConcentrateBaseUrl('http://api.concentrate.ai/v1')).toBe(false)
+  expect(isConcentrateBaseUrl('https://api.concentrate.ai:8443/v1')).toBe(false)
+  expect(isConcentrateBaseUrl('https://api.concentrate.ai.evil.test/v1')).toBe(false)
+  expect(isConcentrateBaseUrl(undefined)).toBe(false)
+})
+
+test('resolveActiveRouteIdFromEnv treats Concentrate credential-only env as Concentrate', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'concentrate-key',
+    }),
+  ).toBe('concentrate')
+})
+
+test('resolveActiveRouteIdFromEnv uses CONCENTRATE_BASE_URL with a dedicated credential', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'concentrate-key',
+      CONCENTRATE_BASE_URL: 'https://api.concentrate.ai/v1',
+    }),
+  ).toBe('concentrate')
+})
+
+test('resolveActiveRouteIdFromEnv uses CONCENTRATE_MODEL with a dedicated credential', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'concentrate-key',
+      CONCENTRATE_MODEL: 'claude-sonnet-5',
+    }),
+  ).toBe('concentrate')
+})
+
+test('resolveActiveRouteIdFromEnv ignores placeholder Concentrate credentials', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'SUA_CHAVE',
+    }),
+  ).not.toBe('concentrate')
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'null',
+    }),
+  ).not.toBe('concentrate')
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'undefined',
+    }),
+  ).not.toBe('concentrate')
+})
+
+test('resolveActiveRouteIdFromEnv prefers Concentrate dedicated key over ambient OpenAI credentials', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'concentrate-key',
+      OPENAI_API_KEY: 'ambient-openai-key',
+      OPENAI_API_KEYS: 'ambient-openai-key-a,ambient-openai-key-b',
+    }),
+  ).toBe('concentrate')
+})
+
+test('resolveActiveRouteIdFromEnv does not infer Concentrate with a conflicting OpenAI base URL', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'concentrate-key',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+    }),
+  ).toBe('anthropic')
+})
+
+test('resolveActiveRouteIdFromEnv does not infer Concentrate from a same-host noncanonical base URL', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/staging/v1',
+    }),
+  ).toBe('custom')
+})
+
+test('resolveActiveRouteIdFromEnv keeps an explicit non-OpenAI provider over Concentrate key-only setup', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CONCENTRATE_API_KEY: 'concentrate-key',
+      CLAUDE_CODE_USE_GEMINI: '1',
+    }),
+  ).toBe('gemini')
+})
+
+test('resolveActiveRouteIdFromEnv honors an explicit OpenAI opt-out over Concentrate', () => {
+  expect(resolveActiveRouteIdFromEnv({ CLAUDE_CODE_USE_OPENAI: '0', CONCENTRATE_API_KEY: 'concentrate-key' })).not.toBe('concentrate')
+})
+
+test('resolveActiveRouteIdFromEnv honors an explicit OpenAI opt-out over API Route', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CLAUDE_CODE_USE_OPENAI: '0',
+      API_ROUTE_API_KEY: 'api-route-key',
+    }),
+  ).not.toBe('api-route')
+})
+
+test('resolveActiveRouteIdFromEnv refines generic OpenAI profile by Concentrate base URL', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/v1',
+    }),
+  ).toBe('concentrate')
+})
+
+test('getRouteCredentialEnvVars supports documented generic OpenAI Concentrate setup', () => {
+  expect(getRouteCredentialEnvVars('concentrate')).toEqual([
+    'CONCENTRATE_API_KEY',
+    'OPENAI_API_KEYS',
+    'OPENAI_API_KEY',
+  ])
+  expect(
+    getRouteCredentialValue('concentrate', {
+      OPENAI_API_KEY: 'generic-openai-key',
+    }),
+  ).toBe('generic-openai-key')
+  expect(
+    getRouteCredentialValue('concentrate', {
+      OPENAI_API_KEY: 'generic-openai-key',
+      CONCENTRATE_API_KEY: 'concentrate-key',
+    }),
+  ).toBe('concentrate-key')
+})
+
+test('resolveActiveRouteIdFromEnv does not let a stale Concentrate model override generic OpenAI', () => {
+  expect(
+    resolveActiveRouteIdFromEnv({
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_API_KEY: 'generic-openai-key',
+      CONCENTRATE_MODEL: 'deepseek-v4-flash-0731',
+    }),
+  ).toBe('openai')
 })

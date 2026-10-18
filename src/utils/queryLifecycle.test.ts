@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import {
   formatQueryLifecycleAbortSignalReason,
   formatQueryLifecycleLogMessage,
+  getQueryTerminalOutcome,
   getQueryTerminalReason,
   type QueryLifecycleContext,
 } from './queryLifecycle.js'
@@ -47,6 +48,13 @@ describe('query lifecycle log formatting', () => {
 })
 
 describe('query terminal reason classification', () => {
+  test('classifies coarse terminal outcomes with abort precedence', () => {
+    expect(getQueryTerminalOutcome({ aborted: false }, false)).toBe('completed')
+    expect(getQueryTerminalOutcome({ aborted: false }, true)).toBe('failed')
+    expect(getQueryTerminalOutcome({ aborted: true }, false)).toBe('aborted')
+    expect(getQueryTerminalOutcome({ aborted: true }, true)).toBe('aborted')
+  })
+
   test('classifies non-aborted completion from throw state', () => {
     expect(
       getQueryTerminalReason({ aborted: false, reason: undefined }, false),

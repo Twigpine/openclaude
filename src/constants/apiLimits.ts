@@ -42,6 +42,29 @@ export const IMAGE_TARGET_RAW_SIZE = (API_IMAGE_MAX_BASE64_SIZE * 3) / 4 // 3.75
 export const IMAGE_MAX_WIDTH = 1568
 export const IMAGE_MAX_HEIGHT = 1568
 
+/**
+ * Stricter dimension limit enforced by the API for requests carrying many
+ * images (vs. a single image, which the API resizes server-side). A single
+ * oversized image is tolerated, but an oversized image that remains in
+ * conversation history later breaks many-image requests with a 400
+ * "image dimensions exceed ... many-image" error (see src/services/api/errors.ts).
+ *
+ * This is distinct from IMAGE_MAX_WIDTH/HEIGHT (1568px) which governs the
+ * normal client-side downsample target.
+ */
+export const IMAGE_MANY_IMAGE_MAX_WIDTH = 2000
+export const IMAGE_MANY_IMAGE_MAX_HEIGHT = 2000
+
+/**
+ * Absolute per-image edge limit enforced by the Claude API. Images with any
+ * side above this value are rejected with `invalid_request_error` rather than
+ * downscaled. This is distinct from IMAGE_MANY_IMAGE_MAX_* (2000px, only when
+ * a request carries many images) and from IMAGE_MAX_* (1568px client target).
+ *
+ * Source: https://platform.claude.com/docs/en/build-with-claude/vision
+ */
+export const IMAGE_API_MAX_EDGE = 8000
+
 // =============================================================================
 // PDF LIMITS
 // =============================================================================

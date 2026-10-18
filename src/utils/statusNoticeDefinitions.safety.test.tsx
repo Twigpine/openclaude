@@ -41,7 +41,11 @@ const SAVED_API_KEY = process.env.ANTHROPIC_API_KEY
 beforeEach(() => {
   // Reset argv each test so the dangerously-skip-permissions detector starts
   // from a known baseline.
-  process.argv = [...SAVED_ARGV.filter(a => a !== '--dangerously-skip-permissions')]
+  process.argv = [
+    ...SAVED_ARGV.filter(
+      a => a !== '--dangerously-skip-permissions' && a !== '--yolo',
+    ),
+  ]
   // Other status notices read auth state via getAnthropicApiKeyWithSource,
   // which throws when no key/token is present. Seed a dummy so getActiveNotices
   // can iterate every notice without unrelated failures crashing the test.
@@ -136,15 +140,82 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 })
 
 describe('dangerously-skip-permissions sandbox notice (#244 finding 2)', () => {
-  test('fires when --dangerously-skip-permissions is in argv', () => {
-    process.argv = [...process.argv, '--dangerously-skip-permissions']
-    expect(activeIds(buildContext())).toContain('dangerously-skip-permissions-no-sandbox')
-  })
-
-  test('fires when permission mode is bypassPermissions (e.g. settings defaultMode)', () => {
+  // The notice is Commander-authoritative: both --dangerously-skip-permissions
+  // and its --yolo alias are resolved into permissionMode === 'bypassPermissions'
+  // during startup, while --permission-mode fullAccess resolves to 'fullAccess'.
+  // The notice keys off the resolved mode, not raw argv.
+  test('fires when permission mode is bypassPermissions (either spelling, or settings defaultMode)', () => {
     expect(activeIds(buildContext({ permissionMode: 'bypassPermissions' }))).toContain(
       'dangerously-skip-permissions-no-sandbox',
     )
+  })
+
+  test('fires when permission mode is fullAccess', () => {
+    expect(activeIds(buildContext({ permissionMode: 'fullAccess' }))).toContain(
+      'dangerously-skip-permissions-no-sandbox',
+    )
+  })
+
+  test('rendered notice names the mode, not a specific flag, so settings-driven bypass is not mislabeled', async () => {
+    const notice = await renderNoticePlainText(
+      'dangerously-skip-permissions-no-sandbox',
+      buildContext({ permissionMode: 'bypassPermissions' }),
+    )
+    // The notice fires whenever permissionMode is bypassPermissions, which can
+    // come from the CLI flags or from a settings defaultMode.
+    expect(notice).toContain('bypassPermissions')
+    expect(notice).not.toContain('--dangerously-skip-permissions')
+    expect(notice).not.toContain('--yolo')
+  })
+
+  test('rendered notice names fullAccess when that mode is active', async () => {
+    const notice = await renderNoticePlainText(
+      'dangerously-skip-permissions-no-sandbox',
+      buildContext({ permissionMode: 'fullAccess' }),
+    )
+    expect(notice).toContain('fullAccess')
+    expect(notice).not.toContain('--dangerously-skip-permissions')
+    expect(notice).not.toContain('--yolo')
+  })
+
+  test('bypassPermissions notice describes bypassed checks with remaining guardrails', async () => {
+    const notice = await renderNoticePlainText(
+      'dangerously-skip-permissions-no-sandbox',
+      buildContext({ permissionMode: 'bypassPermissions' }),
+    )
+    expect(notice).toContain('Most tool consent checks are bypassed')
+    expect(notice).toContain('safety-check guardrails still apply')
+    expect(notice).not.toContain('All tool consent checks are bypassed')
+  })
+
+  test('fullAccess notice describes the stronger bypass without overstating it', async () => {
+    const notice = await renderNoticePlainText(
+      'dangerously-skip-permissions-no-sandbox',
+      buildContext({ permissionMode: 'fullAccess' }),
+    )
+    const normalized = notice.replace(/\s+/g, ' ')
+    expect(normalized).toContain('Most tool consent checks are bypassed')
+    expect(normalized).toContain('including safety-check prompts')
+    expect(normalized).toContain('Hard deny rules and user-interaction prompts still apply')
+    expect(normalized).not.toContain('All tool consent checks are bypassed')
+  })
+
+  test('treats the SDK full-access spelling as the stronger fullAccess bypass', async () => {
+    const ctx = buildContext({
+      permissionMode: 'full-access' as unknown as StatusNoticeContext['permissionMode'],
+    })
+    expect(activeIds(ctx)).toContain('dangerously-skip-permissions-no-sandbox')
+
+    const notice = await renderNoticePlainText(
+      'dangerously-skip-permissions-no-sandbox',
+      ctx,
+    )
+    const normalized = notice.replace(/\s+/g, ' ')
+    expect(normalized).toContain('full-access')
+    expect(normalized).toContain('Most tool consent checks are bypassed')
+    expect(normalized).toContain('including safety-check prompts')
+    expect(normalized).toContain('Hard deny rules and user-interaction prompts still apply')
+    expect(normalized).not.toContain('All tool consent checks are bypassed')
   })
 
   test('does not fire in default mode without the flag', () => {
@@ -175,10 +246,10 @@ describe('safety notice rendering', () => {
       `${figures.warning}bypassPermissions`,
     )
     expect(dangerouslySkipNotice).toContain(
-      `${figures.warning} --dangerously-skip-permissions`,
+      `${figures.warning} bypassPermissions`,
     )
     expect(dangerouslySkipNotice).not.toContain(
-      `${figures.warning}--dangerously-skip-permissions`,
+      `${figures.warning}bypassPermissions`,
     )
     expect(
       thirdPartyNotice

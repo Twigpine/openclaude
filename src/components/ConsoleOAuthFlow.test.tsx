@@ -135,10 +135,10 @@ test('third-party provider branch opens the first-run provider manager', async (
   expect(output).toContain('Set up provider')
   // Keep the sentinels near the top of the preset list so adding another
   // provider does not push the assertion outside the 13-row test frame.
-  expect(output).toContain('AI/ML API')
+  expect(output).toContain('aimlapi.com')
   expect(output).toContain('Anthropic')
   expect(output).toContain('Azure OpenAI')
-  expect(output).toContain('DeepSeek')
+  expect(output).toContain('Command Code')
   // The Cloudflare Workers AI preset must be offered in the first-run picker
   // (it sorts ahead of DeepSeek, so it is within the visible frame).
   expect(output).toContain('Cloudflare Workers AI')

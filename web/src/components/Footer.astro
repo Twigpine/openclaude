@@ -24,19 +24,22 @@ const columns = [
   {
     title: 'project',
     links: [
+      { href: SITE.releasesUrl, label: "what's new", newTab: true },
+      { href: '/buddy/', label: 'buddy' },
       { href: SITE.github, label: 'github' },
       { href: SITE.npmUrl, label: 'npm' },
+      { href: 'https://discord.gg/k68zFR6AcB', label: 'discord' },
       { href: `${SITE.github}/blob/main/LICENSE`, label: 'license' },
       { href: `${SITE.github}/issues`, label: 'issues' },
     ],
   },
   {
-    title: 'gitlawb',
+    title: 'Twigpine',
     links: [
-      { href: SITE.gitlawb, label: 'gitlawb.com' },
+      { href: SITE.twigpine, label: 'twigpine.com' },
       { href: SITE.gitlawbRepo, label: 'repo mirror' },
-      { href: `${SITE.gitlawb}/architecture`, label: 'architecture' },
-      { href: `${SITE.gitlawb}/agents`, label: 'agents' },
+      { href: `${SITE.twigpine}/architecture`, label: 'architecture' },
+      { href: `${SITE.twigpine}/agents`, label: 'agents' },
     ],
   },
 ]
@@ -51,7 +54,7 @@ const columns = [
           <ul>
             {col.links.map(l => (
               <li>
-                <a href={l.href} rel={l.href.startsWith('http') ? 'noopener' : undefined}>{l.label}</a>
+                <a href={l.href} rel={l.href.startsWith('http') ? 'noopener' : undefined} target={l.newTab ? '_blank' : undefined}>{l.label}</a>
               </li>
             ))}
           </ul>
@@ -62,10 +65,9 @@ const columns = [
       <span class="brand">
         <img src="/openclaude.png" alt="" width="18" height="18" />
         <span>openclaude</span>
-        <span class="ver">v{SITE.version}</span>
       </span>
       <span class="sep">·</span>
-      <span>open source coding agent, aligned with <a href={SITE.gitlawb} rel="noopener">gitlawb</a></span>
+      <span>open source coding agent, aligned with <a href={SITE.twigpine} rel="noopener">Twigpine</a></span>
       <span class="sep">·</span>
       <span>runs anywhere. uses anything.</span>
     </div>

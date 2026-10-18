@@ -1,6 +1,9 @@
+import { SITE } from './site'
+
 export interface DocsNavItem {
   title: string
   href: string
+  newTab?: boolean
 }
 
 export interface DocsNavGroup {
@@ -28,9 +31,16 @@ export const docsNav: DocsNavGroup[] = [
       { title: 'Skills', href: '/docs/skills/' },
     ],
   },
+  {
+    group: 'more',
+    items: [
+      { title: "What's new", href: SITE.releasesUrl, newTab: true },
+      { title: 'Buddy', href: '/buddy/' },
+    ],
+  },
 ]
 
-export const docsPages: DocsNavItem[] = docsNav.flatMap(g => g.items)
+export const docsPages: DocsNavItem[] = docsNav.flatMap(g => g.items).filter(item => !item.newTab)
 
 export function pagerFor(href: string): { prev?: DocsNavItem; next?: DocsNavItem } {
   const i = docsPages.findIndex(p => p.href === href)

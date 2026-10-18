@@ -99,5 +99,14 @@ export function isBashPrefixTool(toolName: string): boolean {
 
 // Helper to get custom validation for a tool
 export function getCustomValidation(toolName: string) {
-  return TOOL_VALIDATION_CONFIG.customValidation[toolName]
+  // customValidation is a plain object, so a bracket lookup keyed by a
+  // caller-supplied tool name resolves inherited Object.prototype members. A
+  // permission-rule name like `__proto__` (or `__defineGetter__`, which slips
+  // past the uppercase-first gate because `'_'.toUpperCase() === '_'`) would
+  // otherwise return a truthy inherited value that the caller then invokes as a
+  // function, throwing and aborting settings validation. Only treat own tools
+  // as configured — mirrors normalizeLegacyToolName in permissionRuleParser.
+  return Object.hasOwn(TOOL_VALIDATION_CONFIG.customValidation, toolName)
+    ? TOOL_VALIDATION_CONFIG.customValidation[toolName]
+    : undefined
 }

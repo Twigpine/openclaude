@@ -162,3 +162,76 @@ test('resolveModelRuntimeLimits lets a broad env-prefix override win over an exa
   expect(limits.contextWindow).toBe(111_111)
   expect(limits.maxOutputTokens).toBe(4_096)
 })
+
+test('resolveModelRuntimeLimits lets settings modelLimits beat discovery cache', async () => {
+  const { clearDiscoveryCache, setCachedModels } = await import(
+    `./discoveryCache.js?ts=${Date.now()}`
+  )
+  const { getDiscoveryCacheKey } = await import(
+    `./discoveryService.js?ts=${Date.now()}`
+  )
+  // The discovery cache path comes from getClaudeConfigHomeDir(), which ignores
+  // CLAUDE_CONFIG_DIR by design. Without this override the fixture below would
+  // be written into the caller's real ~/.openclaude.
+  const {
+    getClaudeConfigHomeDirOverrideForTesting,
+    setClaudeConfigHomeDirForTesting,
+  } = await import('../utils/envUtils.js')
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const previousOverride = getClaudeConfigHomeDirOverrideForTesting()
+  const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-model-limits-'))
+  setClaudeConfigHomeDirForTesting(tempDir)
+  try {
+    const baseUrl = 'http://localhost:20128/v1'
+    await setCachedModels(
+      getDiscoveryCacheKey('custom', { baseUrl }),
+      {
+        models: [
+          {
+            id: 'my-codex-combo',
+            apiName: 'my-codex-combo',
+            label: 'my-codex-combo',
+            contextWindow: 128_000,
+            maxOutputTokens: 8_192,
+          },
+        ],
+      },
+    )
+
+    const { resolveModelRuntimeLimits } = await importFresh()
+    const resolveWithDiscovery = () =>
+      resolveModelRuntimeLimits({
+        model: 'my-codex-combo',
+        processEnv: {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: baseUrl,
+        },
+      })
+
+    // Establish that the isolated cache is observable first, so the override
+    // assertion below proves precedence rather than passing on a missing fixture.
+    mockSettings = {}
+    const discovered = resolveWithDiscovery()
+    expect(discovered.contextWindow).toBe(128_000)
+    expect(discovered.maxOutputTokens).toBe(8_192)
+
+    mockSettings = {
+      modelLimits: {
+        'my-codex-combo': { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+      },
+    }
+    const overridden = resolveWithDiscovery()
+
+    expect(overridden.contextWindow).toBe(1_000_000)
+    expect(overridden.maxOutputTokens).toBe(32_768)
+  } finally {
+    // Clears the module-level sync snapshot as well, so the fixture cannot leak
+    // into a later suite once the temp dir is removed.
+    await clearDiscoveryCache()
+    setClaudeConfigHomeDirForTesting(previousOverride)
+    rmSync(tempDir, { recursive: true, force: true })
+  }
+})

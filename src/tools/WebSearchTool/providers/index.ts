@@ -5,9 +5,12 @@
  *
  *   "auto"      (default) — try providers in priority order, fall through on failure
  *   "custom"    — use WEB_SEARCH_API / WEB_PROVIDER preset only (fail loudly)
+ *   "ollama"    — use Ollama local/hosted Web Search API only (fail loudly)
  *   "firecrawl" — use Firecrawl only (fail loudly)
  *   "tavily"    — use Tavily only (fail loudly)
- *   "exa"       — use Exa only (fail loudly)
+ *   "anysearch" — use AnySearch only, with an optional API key (fail loudly)
+ *   "exa"       — use Exa only (fail loudly): the keyed API when EXA_API_KEY
+ *                 is set, otherwise the keyless free tier
  *   "you"       — use You.com only (fail loudly)
  *   "jina"      — use Jina only (fail loudly)
  *   "brave"     — use Brave only (fail loudly)
@@ -31,13 +34,16 @@ import { customProvider } from './custom.js'
 import { duckduckgoProvider } from './duckduckgo.js'
 import { firecrawlProvider } from './firecrawl.js'
 import { tavilyProvider } from './tavily.js'
+import { anysearchProvider } from './anysearch.js'
 import { exaProvider } from './exa.js'
+import { exaFreeProvider } from './exaFree.js'
 import { youProvider } from './you.js'
 import { jinaProvider } from './jina.js'
 import { braveProvider } from './brave.js'
 import { bingProvider } from './bing.js'
 import { mojeekProvider } from './mojeek.js'
 import { linkupProvider } from './linkup.js'
+import { ollamaProvider } from './ollama.js'
 
 export { type SearchInput, type SearchProvider, type ProviderOutput, type SearchHit } from './types.js'
 export { applyDomainFilters, safeHostname, hostMatchesDomain } from './types.js'
@@ -46,8 +52,12 @@ export { extractHits } from './custom.js'
 // ---------------------------------------------------------------------------
 // All registered providers — order matters for auto mode
 // ---------------------------------------------------------------------------
-// Priority: firecrawl → tavily → exa → you → jina → brave → bing → mojeek → linkup → ddg
-// DDG is last because it's free but rate-limited.
+// Priority: exa → ollama → firecrawl → tavily → you → jina → brave → bing → mojeek → linkup → exa-free → ddg
+// Exa is the default search backend: the keyed API leads the chain whenever
+// EXA_API_KEY is set. Any other backend the user configured with a key comes
+// next, so an explicit setup still beats a free tier. The keyless Exa free
+// tier is the zero-config default (per-second and daily limits), and DDG
+// stays last because its scraper is the most aggressively rate-limited.
 // Brave sits ahead of Bing because it runs an independent index (not Google/Bing
 // dependent) and has a usable free tier; Bing's hosted API was sunsetted in 2025
 // for new users, so it's a worse fallback in practice.
@@ -56,15 +66,17 @@ export { extractHits } from './custom.js'
 //       This prevents the generic outbound provider from silently becoming the default backend.
 
 const ALL_PROVIDERS: SearchProvider[] = [
+  exaProvider,
+  ollamaProvider,
   firecrawlProvider,
   tavilyProvider,
-  exaProvider,
   youProvider,
   jinaProvider,
   braveProvider,
   bingProvider,
   mojeekProvider,
   linkupProvider,
+  exaFreeProvider,
   duckduckgoProvider,
 ]
 
@@ -79,9 +91,11 @@ export function getAvailableProviders(): SearchProvider[] {
 export type ProviderMode =
   | 'auto'
   | 'custom'
+  | 'ollama'
   | 'firecrawl'
   | 'ddg'
   | 'tavily'
+  | 'anysearch'
   | 'exa'
   | 'you'
   | 'jina'
@@ -93,9 +107,11 @@ export type ProviderMode =
 
 const PROVIDER_BY_NAME: Record<string, SearchProvider> = {
   custom: customProvider,
+  ollama: ollamaProvider,
   firecrawl: firecrawlProvider,
   ddg: duckduckgoProvider,
   tavily: tavilyProvider,
+  anysearch: anysearchProvider,
   exa: exaProvider,
   you: youProvider,
   jina: jinaProvider,
@@ -125,6 +141,9 @@ export function getProviderChain(mode: ProviderMode): SearchProvider[] {
   if (mode === 'native') {
     return []
   }
+  if (mode === 'exa' && !exaProvider.isConfigured() && exaFreeProvider.isConfigured()) {
+    return [exaFreeProvider]
+  }
   const provider = PROVIDER_BY_NAME[mode]
   if (!provider) return []
   return [provider]
@@ -153,6 +172,10 @@ export async function runSearch(
   }
 
   const errors: Error[] = []
+  // Output from a provider that asked auto mode to keep going (e.g. domain
+  // filtering removed every hit). Returned if no later provider does better,
+  // so a legitimately empty result is not reported as a failure.
+  let filteredEmptyOutput: ProviderOutput | undefined
 
   // Explicit provider mode: fail fast if the provider isn't configured
   if (mode !== 'auto' && mode !== 'native') {
@@ -168,7 +191,15 @@ export async function runSearch(
 
   for (const provider of chain) {
     try {
-      return await provider.search(input, signal)
+      const { fallbackInAuto, ...output } = await provider.search(input, signal)
+      if (mode === 'auto' && fallbackInAuto) {
+        console.error(
+          `[web-search] ${provider.name} returned no hits after domain filtering; trying the next backend`,
+        )
+        filteredEmptyOutput ??= output
+        continue
+      }
+      return output
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
 
@@ -188,6 +219,10 @@ export async function runSearch(
       console.error(`[web-search] ${provider.name} failed: ${error.message}`)
     }
   }
+
+  // Every later provider failed or was skipped: the filtered-empty result
+  // is the best answer we have.
+  if (filteredEmptyOutput) return filteredEmptyOutput
 
   // All providers failed in auto mode
   const lastErr = errors[errors.length - 1]

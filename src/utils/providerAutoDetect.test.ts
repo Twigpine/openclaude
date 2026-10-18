@@ -148,6 +148,13 @@ describe('detectProviderFromEnv — priority order', () => {
     })
   })
 
+  test('LONGCAT_API_KEY detected', () => {
+    expect(scan({ LONGCAT_API_KEY: 'lc-key' })).toEqual({
+      kind: 'longcat',
+      source: 'LONGCAT_API_KEY set',
+    })
+  })
+
   test('empty-string values are ignored', () => {
     expect(
       scan({

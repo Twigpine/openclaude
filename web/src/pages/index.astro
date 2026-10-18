@@ -3,6 +3,7 @@ import BaseLayout from '../layouts/BaseLayout.astro'
 import CopyCommand from '../components/CopyCommand.astro'
 import Terminal from '../components/Terminal.astro'
 import { SITE } from '../data/site'
+import { partners, community } from '../data/partners'
 
 const features = [
   {
@@ -44,8 +45,9 @@ const features = [
 ]
 
 const providers = [
-  'OpenAI', 'Gemini', 'Ollama', 'GitHub Models', 'OpenRouter', 'DeepSeek',
-  'Groq', 'Mistral', 'LM Studio', 'NEAR AI', 'Xiaomi MiMo', 'LiteLLM',
+  'OpenAI', 'Gemini', 'Grok', 'Ollama', 'GitHub Models', 'OpenRouter',
+  'DeepSeek', 'Kimi', 'GLM', 'Cloudflare', 'NVIDIA NIM', 'AI/ML API',
+  'Groq', 'Mistral', 'LM Studio', 'Xiaomi MiMo',
 ]
 
 const jsonLd = [
@@ -55,12 +57,11 @@ const jsonLd = [
     name: 'openclaude',
     applicationCategory: 'DeveloperApplication',
     operatingSystem: 'macOS, Linux, Windows',
-    softwareVersion: SITE.version,
     url: SITE.url,
     downloadUrl: SITE.npmUrl,
     description: SITE.description,
     offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
-    author: { '@type': 'Organization', name: 'GitLawb', url: SITE.gitlawb },
+    author: { '@type': 'Organization', name: 'Twigpine', url: SITE.twigpine },
   },
   {
     '@context': 'https://schema.org',
@@ -74,7 +75,7 @@ const jsonLd = [
 <BaseLayout title={SITE.title} description={SITE.description} jsonLd={jsonLd}>
   <section class="hero grid-bg" aria-labelledby="hero-heading">
     <div class="container hero-inner">
-      <p class="pill fade-up"><span class="dot" aria-hidden="true"></span>open source · gitlawb-aligned · model-neutral</p>
+      <p class="pill fade-up"><span class="dot" aria-hidden="true"></span>open source · twigpine-aligned · model-neutral</p>
       <h1 id="hero-heading" class="text-hero fade-up fade-up-1">
         runs anywhere.<br />uses anything.
       </h1>
@@ -87,7 +88,7 @@ const jsonLd = [
         <a class="button button-ghost" href="/docs/quickstart/">read the docs →</a>
       </div>
       <p class="hero-foot fade-up fade-up-4">
-        works with openai, gemini, codex, ollama, lm studio, litellm, and 200+ models.
+        works with openai, gemini, codex, grok, ollama, lm studio, and 200+ models.
       </p>
     </div>
   </section>
@@ -100,7 +101,7 @@ const jsonLd = [
       </div>
       <Terminal>
         <span class="ln"><span class="t-prompt">$</span> openclaude</span>
-        <span class="ln t-dim">openclaude v{SITE.version} · provider: ollama · model: qwen3-coder</span>
+        <span class="ln t-dim">openclaude · provider: ollama · model: qwen3-coder</span>
         <span class="ln">&nbsp;</span>
         <span class="ln"><span class="t-prompt">&gt;</span> add retry with backoff to the fetch client</span>
         <span class="ln">&nbsp;</span>
@@ -153,7 +154,56 @@ const jsonLd = [
     </div>
   </section>
 
-  <section class="section section-tint" aria-labelledby="install-heading">
+  <section class="section" aria-labelledby="buddy-heading">
+    <div class="container buddy-teaser">
+      <div class="buddy-copy">
+        <p class="eyebrow">// buddy</p>
+        <h2 id="buddy-heading">ship with a hero at your side.</h2>
+        <p class="lede">
+          hatch a pixel-art companion who lives beside your prompt and fires an arrow —
+          or an energy wave, or dragon fire — every time you press enter. seven heroes,
+          rarity rolls, zero tokens.
+        </p>
+        <a class="button button-ghost" href="/buddy/">meet the heroes →</a>
+      </div>
+      <div class="buddy-art">
+        <img src="/buddy/robinhood-action.svg" alt="Robin Hood pixel-art buddy firing an arrow" width="368" height="128" loading="lazy" />
+      </div>
+    </div>
+  </section>
+
+  <section class="section section-tint" aria-labelledby="partners-heading">
+    <div class="container">
+      <div class="section-head">
+        <p class="eyebrow">// partners</p>
+        <h2 id="partners-heading">backed by teams betting on open agents.</h2>
+      </div>
+      <ul class="partner-strip" aria-label="partners">
+        {partners.map(p => (
+          <li>
+            <a href={p.url} rel="noopener sponsored" aria-label={p.name}>
+              {p.logoDark ? (
+                <>
+                  <img class="logo-light" src={p.logo} alt={`${p.name} logo`} style={`height:${p.height}px`} loading="lazy" />
+                  <img class="logo-dark" src={p.logoDark} alt={`${p.name} logo`} style={`height:${p.height}px`} loading="lazy" />
+                </>
+              ) : (
+                <img src={p.logo} alt={`${p.name} logo`} style={`height:${p.height}px`} loading="lazy" />
+              )}
+              <span>{p.name}</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+      <ul class="community-strip" aria-label="community links">
+        {community.map(c => (
+          <li><a href={c.url} rel="noopener">[{c.label}]</a></li>
+        ))}
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="install-heading">
     <div class="container">
       <div class="section-head">
         <p class="eyebrow">// install</p>
@@ -166,7 +216,7 @@ const jsonLd = [
             <span class="step-num">01</span>
             <div>
               <strong>install</strong>
-              <p>requires node ≥ 20. <a href="/docs/installation/">platform guides →</a></p>
+              <p>requires node ≥ 22. <a href="/docs/installation/">platform guides →</a></p>
             </div>
           </li>
           <li>
@@ -280,4 +330,78 @@ const jsonLd = [
   }
   .install-steps p { margin: 0; color: var(--muted); font-size: 0.85rem; line-height: 1.6; }
   .install-steps a { color: var(--accent); }
+
+  .buddy-teaser {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    align-items: center;
+  }
+  @media (min-width: 56rem) {
+    .buddy-teaser { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }
+  }
+  .buddy-copy h2 { margin: 0.85rem 0 0; }
+  .buddy-copy .lede { margin: 0.85rem 0 1.25rem; color: var(--muted); }
+  .buddy-art {
+    display: flex;
+    justify-content: center;
+    padding: 1.25rem;
+    border: 1px solid var(--line);
+    background: var(--background);
+  }
+  .buddy-art img {
+    width: min(368px, 70vw);
+    height: auto;
+    image-rendering: pixelated;
+  }
+
+  .partner-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: 1px solid var(--line);
+    background: var(--line);
+  }
+  .partner-strip li { flex: 1 1 9rem; background: var(--background); }
+  .partner-strip a {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    height: 100%;
+    padding: 1.4rem 1rem;
+    text-decoration: none;
+  }
+  .partner-strip img { max-width: 8.5rem; width: auto; object-fit: contain; }
+  .partner-strip span {
+    color: var(--faint);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+  }
+  .partner-strip a:hover span { color: var(--ink); }
+  .logo-dark { display: none; }
+  :global([data-theme='light']) .logo-dark { display: none !important; }
+  :global([data-theme='light']) .logo-light { display: block; }
+  :global(html:not([data-theme='light'])) .logo-dark { display: block; }
+  :global(html:not([data-theme='light'])) .logo-light { display: none; }
+
+  .community-strip {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.75rem 1.75rem;
+    margin: 1.5rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .community-strip a {
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-decoration: none;
+  }
+  .community-strip a:hover { color: var(--accent); }
 </style>

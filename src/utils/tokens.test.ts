@@ -6,6 +6,7 @@ import {
 import { getCurrentUsage, getUnreportedSessionUsage } from './tokens.js'
 import { IncrementalTokenCounter } from './incrementalTokenCounter.js'
 import type { AssistantMessage, Message } from '../types/message.js'
+import { createCompactBoundaryMessage } from './messages/systemFactories.js'
 
 interface FakeUsage {
   input_tokens: number
@@ -63,6 +64,58 @@ describe('tokens', () => {
       output_tokens: 30,
       cache_creation_input_tokens: 10,
       cache_read_input_tokens: 5,
+    })
+  })
+
+  it('does not report pre-compact usage before the next assistant response', () => {
+    const archived = assistantMessage({ input_tokens: 90000, output_tokens: 500 })
+    const boundary = createCompactBoundaryMessage('manual', 90500)
+    const summary = userMessage('Compacted conversation summary.')
+
+    expect(getCurrentUsage([archived, boundary, summary])).toBeNull()
+  })
+
+  it('estimates only the active context after compaction for all-zero usage', () => {
+    const archived = userMessage('Archived context. '.repeat(1000))
+    const boundary = createCompactBoundaryMessage('manual', 90000)
+    const summary = userMessage('Compacted conversation summary.')
+    const prompt = userMessage('Continue from the summary.')
+    const reply = assistantMessage({ input_tokens: 0, output_tokens: 0 })
+    const activeMessages = [boundary, summary, prompt, reply]
+
+    expect(getCurrentUsage([archived, ...activeMessages])).toEqual(
+      getCurrentUsage(activeMessages),
+    )
+    expect(getCurrentUsage(activeMessages)?.input_tokens).toBe(
+      roughTokenCountEstimationForMessages([summary, prompt]),
+    )
+  })
+
+  it('uses the latest compact boundary after repeated compaction', () => {
+    const firstBoundary = createCompactBoundaryMessage('manual', 90000)
+    const oldSummary = userMessage('Previous summary. '.repeat(1000))
+    const oldReply = assistantMessage({ input_tokens: 0, output_tokens: 0 }, 'Old reply.', 'old')
+    const latestBoundary = createCompactBoundaryMessage('auto', 50000)
+    const summary = userMessage('Latest summary.')
+    const reply = assistantMessage({ input_tokens: 0, output_tokens: 0 }, 'Latest reply.', 'latest')
+    const activeMessages = [latestBoundary, summary, reply]
+
+    expect(getCurrentUsage([firstBoundary, oldSummary, oldReply, ...activeMessages])).toEqual(
+      getCurrentUsage(activeMessages),
+    )
+  })
+
+  it('preserves reported usage after compaction', () => {
+    const archived = assistantMessage({ input_tokens: 90000, output_tokens: 500 }, 'Archived.', 'old')
+    const boundary = createCompactBoundaryMessage('manual', 90500)
+    const summary = userMessage('Summary.')
+    const reply = assistantMessage({ input_tokens: 800, output_tokens: 30, cache_read_input_tokens: 200 }, 'Fresh.', 'fresh')
+
+    expect(getCurrentUsage([archived, boundary, summary, reply])).toEqual({
+      input_tokens: 800,
+      output_tokens: 30,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 200,
     })
   })
 

@@ -16,6 +16,7 @@ import {
 } from 'src/commands.js'
 import { createStreamlinedTransformer } from 'src/utils/streamlinedTransform.js'
 import { installStreamJsonStdoutGuard } from 'src/utils/streamJsonStdoutGuard.js'
+import { noteBackgroundSessionTerminationSignal } from 'src/utils/backgroundSessionTermination.js'
 import type { ToolPermissionContext } from 'src/Tool.js'
 import type { ThinkingConfig } from 'src/utils/thinking.js'
 import { assembleToolPool, filterToolsByDenyRules } from 'src/tools.js'
@@ -148,6 +149,10 @@ import {
   permissionPromptToolResultToPermissionDecision,
 } from 'src/utils/permissions/PermissionPromptToolResultSchema.js'
 import { createAbortController } from 'src/utils/abortController.js'
+import {
+  registerInterruptionController,
+  requestAbort,
+} from 'src/utils/interruptionTrace.js'
 import { createCombinedAbortSignal } from 'src/utils/combinedAbortSignal.js'
 import {
   generateSessionTitle,
@@ -331,7 +336,7 @@ import {
 import { asSessionId } from 'src/types/ids.js'
 import { jsonStringify } from '../utils/slowOperations.js'
 import { skillChangeDetector } from '../utils/skills/skillChangeDetector.js'
-import { getCommands, clearCommandsCache } from '../commands.js'
+import { getCommands, clearCommandMemoizationCaches } from '../commands.js'
 import {
   isBareMode,
   isEnvTruthy,
@@ -348,6 +353,7 @@ import {
   type HeadlessHeartbeatEvent,
   type HeadlessHeartbeatState,
 } from './headlessHeartbeat.js'
+import { abortPrintModeControlRequest } from './printInterruption.js'
 import {
   isTeamLead,
   hasActiveInProcessTeammates,
@@ -1204,6 +1210,14 @@ function runHeadlessStreaming(
   let shutdownPromptInjected = false
   let heldBackResult: StdoutMessage | null = null
   let abortController: AbortController | undefined
+  const abortActiveQuery = (source: string, reason: unknown): void => {
+    if (!abortController || abortController.signal.aborted) return
+    requestAbort(abortController, reason, {
+      source,
+      subsystem: 'print_mode',
+      controllerRole: 'query-root',
+    })
+  }
   // Same queue sendRequest() enqueues to — one FIFO for everything.
   const output = structuredIO.outbound
 
@@ -1211,11 +1225,10 @@ function runHeadlessStreaming(
   // gracefulShutdown persists session state and flushes analytics, with a
   // failsafe timer that force-exits if cleanup hangs.
   const sigintHandler = () => {
+    noteBackgroundSessionTerminationSignal('SIGINT')
     logForDiagnosticsNoPII('info', 'shutdown_signal', { signal: 'SIGINT' })
     options.heartbeat?.setPhase('shutting_down')
-    if (abortController && !abortController.signal.aborted) {
-      abortController.abort('interrupt')
-    }
+    abortActiveQuery('print_sigint', 'interrupt')
     void gracefulShutdown(0)
   }
   process.on('SIGINT', sigintHandler)
@@ -2008,7 +2021,8 @@ function runHeadlessStreaming(
 
   // Subscribe to skill changes for hot reloading
   const unsubscribeSkillChanges = skillChangeDetector.subscribe(() => {
-    clearCommandsCache()
+    // Preserve newly activated skills; the detector owns source invalidation.
+    clearCommandMemoizationCaches()
     void getCommands(cwd()).then(newCommands => {
       currentCommands = newCommands
     })
@@ -2044,7 +2058,7 @@ function runHeadlessStreaming(
   // Abort the current operation when a 'now' priority message arrives.
   subscribeToCommandQueue(() => {
     if (abortController && getCommandsByMaxPriority('now').length > 0) {
-      abortController.abort('interrupt')
+      abortActiveQuery('priority_now', 'interrupt')
     }
   })
 
@@ -2318,6 +2332,10 @@ function runHeadlessStreaming(
           }
 
           abortController = createAbortController()
+          registerInterruptionController(abortController, {
+            subsystem: 'print_mode',
+            controllerRole: 'query-root',
+          })
           const turnStartTime = feature('FILE_PERSISTENCE')
             ? Date.now()
             : undefined
@@ -3029,10 +3047,12 @@ function runHeadlessStreaming(
               },
             }))
           }
-          if (abortController) {
-            abortController.abort('interrupt')
-          }
-          suggestionState.abortController?.abort()
+          abortPrintModeControlRequest(
+            abortController,
+            suggestionState.abortController,
+            'sdk_control_interrupt',
+            'interrupt',
+          )
           suggestionState.abortController = null
           suggestionState.lastEmitted = null
           suggestionState.pendingSuggestion = null
@@ -3041,10 +3061,12 @@ function runHeadlessStreaming(
           logForDebugging(
             `[print.ts] end_session received, reason=${message.request.reason ?? 'unspecified'}`,
           )
-          if (abortController) {
-            abortController.abort()
-          }
-          suggestionState.abortController?.abort()
+          abortPrintModeControlRequest(
+            abortController,
+            suggestionState.abortController,
+            'sdk_end_session',
+            undefined,
+          )
           suggestionState.abortController = null
           suggestionState.lastEmitted = null
           suggestionState.pendingSuggestion = null
@@ -4127,7 +4149,7 @@ function runHeadlessStreaming(
                     structuredIO.injectControlResponse(response)
                   },
                   onInterrupt() {
-                    abortController?.abort('interrupt')
+                    abortActiveQuery('bridge_interrupt', 'interrupt')
                   },
                   onSetModel(model) {
                     const resolved =

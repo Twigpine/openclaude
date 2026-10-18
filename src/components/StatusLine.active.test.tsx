@@ -15,7 +15,9 @@ import {
 import type { Message } from '../types/message.js'
 import type { StatusLineCommandInput } from '../types/statusLine.js'
 import type { executeStatusLineCommand } from '../utils/hooks.js'
-import { StatusLine } from './StatusLine.js'
+import { createUserMessage } from '../utils/messages.js'
+import { createCompactBoundaryMessage } from '../utils/messages/systemFactories.js'
+import { getLastAssistantMessageId, StatusLine } from './StatusLine.js'
 
 type MacroGlobal = typeof globalThis & { MACRO?: { VERSION: string } }
 const macroGlobal = globalThis as MacroGlobal
@@ -249,6 +251,90 @@ test('cancels hidden statusline work and refreshes once reactivated', async () =
   } finally {
     jest.restoreAllMocks()
     root.unmount()
+    stdout.end()
+    setSessionTrustAccepted(originalTrust)
+  }
+})
+
+test('refreshes mounted statusline with null usage after full compaction', async () => {
+  const stdout = new PassThrough()
+  ;(stdout as unknown as { columns: number }).columns = 80
+  const root = await createRoot({
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    patchConsole: false,
+  })
+  const originalTrust = getSessionTrustAccepted()
+  const calls: StatusLineCommandInput[] = []
+  const archived = assistantMessage('archived-response')
+  if (archived.type !== 'assistant') throw new Error('Expected assistant fixture')
+  archived.message.usage.input_tokens = 90000
+  const boundary = createCompactBoundaryMessage('manual', 90000)
+  const summary = createUserMessage({
+    content: 'Compacted conversation summary.',
+    isCompactSummary: true,
+  })
+  const messagesRef: RefObject<Message[]> = { current: [archived] }
+  const initialState: AppState = {
+    ...getDefaultAppState(),
+    settings: {
+      statusLine: { type: 'command', command: 'test-statusline' },
+    },
+  }
+  let latestState = initialState
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined
+  const executeCommand: typeof executeStatusLineCommand = async input => {
+    calls.push(input)
+    return input.context_window.current_usage === null ? 'compacted' : 'archived'
+  }
+  const render = (messages: Message[]) => {
+    messagesRef.current = messages
+    root.render(
+      <AppStateProvider
+        initialState={initialState}
+        onChangeAppState={({ newState }) => {
+          latestState = newState
+        }}
+      >
+        <StatusLine
+          messagesRef={messagesRef}
+          lastAssistantMessageId={getLastAssistantMessageId(messages)}
+          executeCommand={executeCommand}
+        />
+      </AppStateProvider>,
+    )
+  }
+
+  setSessionTrustAccepted(true)
+  try {
+    render([archived])
+    await waitFor(
+      () => calls.length === 1 && latestState.statusLineText === 'archived',
+      'initial statusline with archived usage',
+    )
+    expect(calls[0]!.context_window.current_usage?.input_tokens).toBe(90000)
+
+    const setTimeoutSpy = jest.spyOn(globalThis, 'setTimeout')
+    render([archived, boundary, summary])
+    await waitFor(
+      () => setTimeoutSpy.mock.calls.some(call => call[1] === 300),
+      'debounced compact statusline refresh',
+    )
+    const timerIndex = setTimeoutSpy.mock.calls.findIndex(call => call[1] === 300)
+    debounceTimer = setTimeoutSpy.mock.results[timerIndex]!
+      .value as ReturnType<typeof setTimeout>
+    expect(calls).toHaveLength(1)
+
+    await waitFor(
+      () => calls.length === 2 && latestState.statusLineText === 'compacted',
+      'statusline execution after full compaction',
+    )
+    expect(calls[1]!.context_window.current_usage).toBeNull()
+    expect(calls[1]!.context_window.used_percentage).toBeNull()
+    expect(calls[1]!.context_window.remaining_percentage).toBeNull()
+  } finally {
+    root.unmount()
+    if (debounceTimer !== undefined) clearTimeout(debounceTimer)
+    jest.restoreAllMocks()
     stdout.end()
     setSessionTrustAccepted(originalTrust)
   }

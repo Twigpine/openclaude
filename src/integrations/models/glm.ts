@@ -1,4 +1,5 @@
 import { defineModel } from '../define.js'
+import type { ModelDescriptor } from '../descriptors.js'
 
 const glmCapabilities = {
   supportsVision: false,
@@ -14,6 +15,7 @@ function glmModel(
   label: string,
   contextWindow: number,
   maxOutputTokens: number,
+  runtimeMetadataScope?: ModelDescriptor['runtimeMetadataScope'],
 ) {
   return defineModel({
     id,
@@ -25,10 +27,27 @@ function glmModel(
     capabilities: glmCapabilities,
     contextWindow,
     maxOutputTokens,
+    ...(runtimeMetadataScope ? { runtimeMetadataScope } : {}),
   })
 }
 
 export default [
+  defineModel({
+    id: 'glm-5.3-flash',
+    label: 'GLM 5.3 Flash',
+    brandId: 'glm',
+    vendorId: 'zai',
+    classification: ['chat', 'reasoning', 'vision', 'coding'],
+    defaultModel: 'glm-5.3-flash',
+    capabilities: {
+      ...glmCapabilities,
+      supportsVision: true,
+    },
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    runtimeMetadataScope: 'catalog',
+  }),
+  glmModel('glm-5.3', 'GLM 5.3', 1_000_000, 131_072, 'catalog'),
   defineModel({
     id: 'glm-5v-turbo',
     label: 'GLM 5V Turbo',

@@ -133,7 +133,7 @@ export async function fetchJsonWithWebSearchTimeout(
   init: Parameters<typeof fetch>[1],
   signal: AbortSignal | undefined,
   options: WebSearchTimeoutOptions = {},
-): Promise<any> {
+): Promise<unknown> {
   const providerName = options.providerName ?? 'Web search provider'
 
   return withWebSearchTimeout(

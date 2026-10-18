@@ -1,8 +1,12 @@
 import { describe, expect, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import {
+  createAssistantAPIErrorMessage,
   createUserMessage,
   mergeUserMessages,
+  normalizeMessagesForAPI,
 } from '../messages.js'
+import { getImageTooLargeErrorMessage } from '../../services/api/errors.js'
 import {
   appendMessageTagToUserMessage,
   deriveShortMessageId,
@@ -10,6 +14,7 @@ import {
   stripToolReferenceBlocksFromUserMessage,
 } from './apiTransform.js'
 import type { UserMessage } from '../../types/message.js'
+import { createAttachmentMessage } from '../attachments.js'
 
 const UUID = 'a1b2c3d4-0000-0000-0000-000000000099'
 const UUID_B = 'b2c3d4e5-0000-0000-0000-000000000088'
@@ -25,6 +30,205 @@ function countTags(out: UserMessage): number {
 }
 
 describe('appendMessageTagToUserMessage', () => {
+  test('normalizing meta context honors snip merge semantics', () => {
+    const reminder = createUserMessage({ content: 'context', isMeta: true })
+    const correction = createUserMessage({ content: 'do Y instead' })
+
+    const [merged] = normalizeMessagesForAPI([reminder, correction])
+
+    expect(merged?.isMeta).toBe(feature('HISTORY_SNIP') ? undefined : true)
+    expect(JSON.stringify(merged?.message.content)).toContain('context')
+    expect(JSON.stringify(merged?.message.content)).toContain('do Y instead')
+  })
+
+  test(
+    'retries strip a rejected image after it merged with a prompt',
+    () => {
+      const attachment = createUserMessage({
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: 'image/png',
+              data: 'oversized-image',
+            },
+          },
+        ],
+        isMeta: true,
+      })
+      const prompt = createUserMessage({ content: 'describe this image' })
+      const imageError = createAssistantAPIErrorMessage({
+        content: getImageTooLargeErrorMessage(),
+      })
+
+      const retry = normalizeMessagesForAPI([attachment, prompt, imageError])
+      const retryContent = JSON.stringify(retry[0]?.message.content)
+
+      expect(retryContent).toContain('describe this image')
+      expect(retryContent).not.toContain('oversized-image')
+      expect(retryContent).not.toContain('"type":"image"')
+    },
+  )
+
+  test('retries strip an oversized pasted image on an ordinary user prompt', () => {
+    const prompt = createUserMessage({
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'oversized-pasted-image' } }, { type: 'text', text: 'describe this image' }],
+    })
+    const retry = normalizeMessagesForAPI([
+      prompt,
+      createAssistantAPIErrorMessage({ content: getImageTooLargeErrorMessage() }),
+    ])
+    const retryContent = JSON.stringify(retry[0]?.message.content)
+
+    expect(retryContent).toContain('describe this image')
+    expect(retryContent).not.toContain('oversized-pasted-image')
+  })
+
+  test('keeps a placeholder for an image-only pasted prompt on retry', () => {
+    const prompt = createUserMessage({
+      content: [{
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/png',
+          data: 'image-only-prompt',
+        },
+      }],
+    })
+    const retry = normalizeMessagesForAPI([
+      prompt,
+      createAssistantAPIErrorMessage({ content: getImageTooLargeErrorMessage() }),
+    ])
+    const retryContent = JSON.stringify(retry[0]?.message.content)
+
+    expect(retryContent).toContain('Media removed after provider rejection.')
+    expect(retryContent).not.toContain('image-only-prompt')
+  })
+
+  test('retries strip rejected media from a file attachment', () => {
+    const attachment = createAttachmentMessage({
+      type: 'file',
+      filename: '/tmp/oversized.png',
+      displayPath: 'oversized.png',
+      content: {
+        type: 'image',
+        file: {
+          base64: 'attachment-image',
+          type: 'image/png',
+          originalSize: 1,
+        },
+      },
+    })
+    const retry = normalizeMessagesForAPI([
+      createUserMessage({ content: 'describe this file' }),
+      attachment,
+      createAssistantAPIErrorMessage({ content: getImageTooLargeErrorMessage() }),
+    ])
+    const retryContent = JSON.stringify(retry.map(message => message.message.content))
+
+    expect(retryContent).toContain('Media removed after provider rejection.')
+    expect(retryContent).not.toContain('attachment-image')
+  })
+
+  test('retries strip rejected media nested in a tool result', () => {
+    const toolResult = createUserMessage({
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'toolu_oversized_image',
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: 'image/png',
+              data: 'nested-oversized-image',
+            },
+          },
+          { type: 'text', text: 'remaining tool output' },
+        ],
+      }],
+    })
+    const retry = normalizeMessagesForAPI([
+      toolResult,
+      createAssistantAPIErrorMessage({ content: getImageTooLargeErrorMessage() }),
+    ])
+    const retryContent = JSON.stringify(retry[0]?.message.content)
+
+    expect(retryContent).toContain('remaining tool output')
+    expect(retryContent).not.toContain('nested-oversized-image')
+    expect(retryContent).not.toContain('"type":"image"')
+  })
+
+  test('keeps a placeholder when nested media is the only tool result', () => {
+    const toolResult = createUserMessage({
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'toolu_image_only',
+        content: [{
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: 'only-nested-image',
+          },
+        }],
+      }],
+    })
+    const retry = normalizeMessagesForAPI([
+      toolResult,
+      createAssistantAPIErrorMessage({ content: getImageTooLargeErrorMessage() }),
+    ])
+    const retryContent = JSON.stringify(retry[0]?.message.content)
+
+    expect(retryContent).toContain('Media removed after provider rejection.')
+    expect(retryContent).not.toContain('only-nested-image')
+    expect(retryContent).not.toContain('"type":"image"')
+  })
+
+  test('strips every ambiguous image attachment in the failed turn', () => {
+    const oldAttachment = createUserMessage({
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'old-invalid-image' } }],
+      isMeta: true,
+    })
+    const laterAttachment = createUserMessage({
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'latest-valid-image' } }, { type: 'text', text: 'describe this screenshot' }],
+    })
+    const retry = normalizeMessagesForAPI([
+      oldAttachment,
+      laterAttachment,
+      createAssistantAPIErrorMessage({ content: getImageTooLargeErrorMessage() }),
+    ])
+    const retryContent = JSON.stringify(retry[0]?.message.content)
+
+    expect(retryContent).toContain('describe this screenshot')
+    expect(retryContent).not.toContain('old-invalid-image')
+    expect(retryContent).not.toContain('latest-valid-image')
+  })
+
+  test('strips an earlier image past a different meta attachment', () => {
+    const image = createUserMessage({
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'oversized-image' } }],
+      isMeta: true,
+    })
+    const pdf = createUserMessage({
+      content: [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'valid-pdf' } }],
+      isMeta: true,
+    })
+    const prompt = createUserMessage({ content: 'describe both attachments' })
+    const retry = normalizeMessagesForAPI([
+      image,
+      pdf,
+      prompt,
+      createAssistantAPIErrorMessage({ content: getImageTooLargeErrorMessage() }),
+    ])
+    const retryContent = JSON.stringify(retry[0]?.message.content)
+
+    expect(retryContent).toContain('valid-pdf')
+    expect(retryContent).toContain('describe both attachments')
+    expect(retryContent).not.toContain('oversized-image')
+  })
+
   test('appends internal snip metadata to string content', () => {
     const msg = { ...createUserMessage({ content: 'hello' }), uuid: UUID }
     const out = appendMessageTagToUserMessage(msg as UserMessage)
@@ -156,6 +360,19 @@ describe('appendMessageTagToUserMessage', () => {
     // Both tool_result blocks are preserved for snip pairing.
     const blocks = merged.message.content as any[]
     expect(blocks.filter(b => b.type === 'tool_result').length).toBe(2)
+  })
+
+  test('merging tool-result siblings keeps permission attachment ownership', () => {
+    const resultA = createUserMessage({
+      content: [{ type: 'tool_result', tool_use_id: 'tu-A', content: 'a' }],
+    })
+    const resultB = createUserMessage({
+      content: [{ type: 'tool_result', tool_use_id: 'tu-B', content: 'b' }],
+      imagePermissionToolUseIds: ['tu-B'],
+    })
+
+    expect(mergeUserMessages(resultA, resultB).imagePermissionToolUseIds)
+      .toEqual(['tu-B'])
   })
 })
 

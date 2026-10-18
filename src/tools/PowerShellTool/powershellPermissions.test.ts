@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
+import { mkdtemp, mkdir, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -9,7 +9,13 @@ import {
   setOriginalCwd,
 } from '../../bootstrap/state.js'
 import type { ToolPermissionContext } from '../../types/permissions.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
+import { setGovernancePolicySettingsForSourceForTesting } from '../../utils/governancePolicy.js'
 import { SETTING_SOURCES } from '../../utils/settings/constants.js'
+import type { SettingsJson } from '../../utils/settings/types.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import { isUnsafeDotGitWritePathForPowerShell } from './powershellPermissions.js'
 
@@ -97,22 +103,15 @@ describe('PowerShell .git write safety', () => {
 })
 
 describe('PowerShell git commit governance policy', () => {
-  let originalCwd: string
-  let projectDir: string
-
   async function withProjectSettings(
     settings: Record<string, unknown>,
     fn: (checkPowerShellCommitMessagePolicy: CheckPowerShellCommitMessagePolicy) => void,
   ): Promise<void> {
-    originalCwd = getOriginalCwd()
-    projectDir = await mkdtemp(join(tmpdir(), 'openclaude-ps-policy-'))
+    await acquireSharedMutationLock('PowerShell git commit governance policy')
     try {
-      setOriginalCwd(projectDir)
       setAllowedSettingSources([...SETTING_SOURCES])
-      await mkdir(join(projectDir, '.openclaude'), { recursive: true })
-      await writeFile(
-        join(projectDir, '.openclaude', 'settings.local.json'),
-        JSON.stringify(settings),
+      setGovernancePolicySettingsForSourceForTesting(
+        source => (source === 'localSettings' ? settings as SettingsJson : null),
       )
       resetSettingsCache()
       const { checkPowerShellCommitMessagePolicy } = await import(
@@ -120,10 +119,10 @@ describe('PowerShell git commit governance policy', () => {
       )
       fn(checkPowerShellCommitMessagePolicy)
     } finally {
-      setOriginalCwd(originalCwd)
       setAllowedSettingSources([...SETTING_SOURCES])
+      setGovernancePolicySettingsForSourceForTesting(null)
       resetSettingsCache()
-      await rm(projectDir, { recursive: true, force: true })
+      releaseSharedMutationLock()
     }
   }
 

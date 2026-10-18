@@ -5,6 +5,7 @@ import type { AssistantMessage } from '../types/message.js'
 import type { PermissionAskDecision } from '../types/permissions.js'
 import { jsonStringify } from '../utils/slowOperations.js'
 import type { ToolUseConfirm } from '../components/permissions/PermissionRequest.js'
+import { tracePermissionAbortResolution } from '../utils/interruptionTrace.js'
 
 /**
  * Create a synthetic AssistantMessage for remote permission requests.
@@ -123,7 +124,12 @@ export function createRemotePermissionQueueItem({
     onUserInteraction() {
       // No-op for remote permission prompts.
     },
-    onAbort() {
+    onAbort(source, causalEventId) {
+      tracePermissionAbortResolution(
+        source,
+        causalEventId,
+        'remote_permission_bridge',
+      )
       respond({
         behavior: 'deny',
         message: 'User aborted',

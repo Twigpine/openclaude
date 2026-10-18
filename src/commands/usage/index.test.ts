@@ -58,6 +58,56 @@ describe('getUsageDescriptor', () => {
     ).toBe('openrouter')
   })
 
+  test('resolveActiveUsageId prefers explicit runtime URLs over a saved Z.AI profile URL', () => {
+    const profile = {
+      activeProfileProvider: 'zai',
+      activeProfileBaseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      providerCategory: 'openai',
+    }
+
+    expect(
+      resolveActiveUsageId(
+        {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: 'https://api.z.ai/api/paas/v4',
+        } as NodeJS.ProcessEnv,
+        profile,
+      ),
+    ).toBe('custom')
+    expect(
+      resolveActiveUsageId(
+        {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: 'https://proxy.example.test/v1',
+        } as NodeJS.ProcessEnv,
+        profile,
+      ),
+    ).toBe('custom')
+    expect(
+      resolveActiveUsageId(
+        {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: profile.activeProfileBaseUrl,
+        } as NodeJS.ProcessEnv,
+        profile,
+      ),
+    ).toBe('zai')
+
+    expect(
+      resolveActiveUsageId(
+        {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: 'https://proxy.example.test/v1',
+        } as NodeJS.ProcessEnv,
+        {
+          activeProfileProvider: 'clinepass',
+          activeProfileBaseUrl: 'https://api.cline.bot/api/v1',
+          providerCategory: 'openai',
+        },
+      ),
+    ).toBe('custom')
+  })
+
   test('resolves first-party usage support through the Anthropic vendor descriptor', () => {
     const descriptor = getUsageDescriptor('firstParty')
 

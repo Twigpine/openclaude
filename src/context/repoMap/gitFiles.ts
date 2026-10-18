@@ -38,8 +38,20 @@ const EXCLUDED_FILES = new Set([
 ])
 
 export function getLanguageForFile(filePath: string): SupportedLanguage | null {
-  const ext = filePath.substring(filePath.lastIndexOf('.'))
-  return SUPPORTED_EXTENSIONS[ext] ?? null
+  const dotIndex = filePath.lastIndexOf('.')
+  // No dot means no extension to match. Guard this explicitly: substring(-1)
+  // falls back to substring(0) and uses the whole path as the lookup key, which
+  // both misclassifies extensionless files and, for a root file named after an
+  // Object.prototype member (`constructor`, `__proto__`, `toString`, …), reads
+  // an inherited member that a bare `?? null` guard treats as a supported
+  // language. Gate the lookup on own-property for the same reason.
+  if (dotIndex === -1) {
+    return null
+  }
+  const ext = filePath.substring(dotIndex)
+  return Object.hasOwn(SUPPORTED_EXTENSIONS, ext)
+    ? SUPPORTED_EXTENSIONS[ext]!
+    : null
 }
 
 export function isSupportedFile(filePath: string): boolean {

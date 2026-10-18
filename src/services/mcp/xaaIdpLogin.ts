@@ -205,10 +205,11 @@ export function clearIdpClientSecret(idpIssuer: string): void {
 // the fix. Exported because auth.ts needs the same discovery.
 export async function discoverOidc(
   idpIssuer: string,
+  abortSignal?: AbortSignal,
 ): Promise<OpenIdProviderDiscoveryMetadata> {
   const base = idpIssuer.endsWith('/') ? idpIssuer : idpIssuer + '/'
   const url = new URL('.well-known/openid-configuration', base)
-  const { signal, cleanup } = createCombinedAbortSignal(undefined, {
+  const { signal, cleanup } = createCombinedAbortSignal(abortSignal, {
     timeoutMs: IDP_REQUEST_TIMEOUT_MS,
   })
   try {

@@ -158,6 +158,47 @@ test('classifies tool_stream rejection as tool_stream_unsupported (#1950)', () =
   expect(failure.retryable).toBe(false)
 })
 
+test.each([
+  'Unsupported parameter: stream_options',
+  'Unrecognized request argument supplied: stream_options',
+  'Parameter stream_options is not supported',
+  'stream_options is not supported by this API',
+  '{"error":{"message":"Unknown parameter","param":"stream_options"}}',
+  '{"error":{"message":"Unknown parameter","param":"`stream_options`"}}',
+  '{"error":{"message":"Invalid parameter: stream_options","type":"invalid_request_error","param":"stream_options"}}',
+  '{"detail":[{"type":"extra_forbidden","loc":["body","stream_options"],"msg":"Extra inputs are not permitted"}]}',
+  '{"detail":[{"type":"extra_forbidden","loc":["stream_options"],"msg":"Extra inputs are not permitted"}]}',
+])('classifies top-level stream_options rejections: %s', body => {
+  const failure = classifyOpenAIHttpFailure({ status: 400, body })
+
+  expect(failure.category).toBe('stream_options_unsupported')
+  expect(failure.retryable).toBe(false)
+})
+
+test('classifies a FastAPI stream_options rejection at status 422', () => {
+  const failure = classifyOpenAIHttpFailure({
+    status: 422,
+    body: '{"detail":[{"type":"value_error.extra","loc":["body","stream_options"],"msg":"extra fields not permitted"}]}',
+  })
+
+  expect(failure.category).toBe('stream_options_unsupported')
+})
+
+test.each([
+  'Invalid request for model local-model; received stream_options in the request body',
+  'Unsupported parameter: stream_options.include_usage',
+  'Unknown parameter: stream_options[include_usage]',
+  'Invalid parameter: stream_options/include_usage must be a boolean',
+  '{"error":{"message":"Invalid parameter: stream_options.include_usage must be a boolean","param":"stream_options.include_usage"}}',
+  '{"error":{"message":"stream_options.include_usage must be a boolean","param":"stream_options.include_usage"}}',
+  '{"detail":[{"type":"bool_type","loc":["body","stream_options","include_usage"],"msg":"Input should be a valid boolean"}]}',
+  '{"detail":[{"type":"dict_type","loc":["body","stream_options"],"msg":"Input should be an object"},{"type":"bool_type","loc":["body","stream_options","include_usage"],"msg":"Input should be a valid boolean"}]}',
+])('does not classify unrelated or nested stream_options validation failures: %s', body => {
+  const failure = classifyOpenAIHttpFailure({ status: 400, body })
+
+  expect(failure.category).not.toBe('stream_options_unsupported')
+})
+
 test('prioritizes tool_stream rejection over accompanying tool-call wording', () => {
   const failure = classifyOpenAIHttpFailure({
     status: 400,

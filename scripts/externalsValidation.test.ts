@@ -3,9 +3,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   bundledExemptionFor,
   validateBundleExternals,
+  validateInstallHygieneFields,
   validateIntentionallyBundled,
   validateOptionalPeers,
   validateOptionalRuntimeExternals,
+  validateRuntimeDependencyContract,
   type PkgDeps,
 } from './externalsValidation.js'
 
@@ -248,5 +250,95 @@ describe('validateOptionalRuntimeExternals', () => {
       ['@example/transitive-optional'],
     )
     expect(r.ok).toBe(true)
+  })
+})
+
+describe('validateRuntimeDependencyContract', () => {
+  const CONTRACT = { '@example/a': '1.2.3', '@example/b': '4.5.6' } as const
+
+  test('passes when dependencies exactly match the contract', () => {
+    const r = validateRuntimeDependencyContract(
+      { dependencies: { '@example/a': '1.2.3', '@example/b': '4.5.6' } },
+      CONTRACT,
+    )
+    expect(r.ok).toBe(true)
+  })
+
+  test('FAILS on a new runtime dependency not in the contract', () => {
+    const r = validateRuntimeDependencyContract(
+      {
+        dependencies: {
+          '@example/a': '1.2.3',
+          '@example/b': '4.5.6',
+          'left-pad': '1.0.0',
+        },
+      },
+      CONTRACT,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.errors.join(' ')).toMatch(/not in RUNTIME_DEPENDENCY_CONTRACT.*left-pad/)
+  })
+
+  test('FAILS when a contract entry is missing from dependencies', () => {
+    const r = validateRuntimeDependencyContract(
+      { dependencies: { '@example/a': '1.2.3' } },
+      CONTRACT,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.errors.join(' ')).toMatch(/missing from dependencies.*@example\/b/)
+  })
+
+  test('FAILS when a caret range sneaks back in', () => {
+    const r = validateRuntimeDependencyContract(
+      { dependencies: { '@example/a': '^1.2.3', '@example/b': '4.5.6' } },
+      CONTRACT,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.errors.join(' ')).toMatch(/@example\/a/)
+  })
+
+  test('the real package.json satisfies the real contract', async () => {
+    const pkg = (await import('../package.json')) as PkgDeps
+    expect(validateRuntimeDependencyContract(pkg).ok).toBe(true)
+  })
+})
+
+describe('validateInstallHygieneFields', () => {
+  const CLEAN = { engines: { node: '>=22.0.0' } }
+
+  test('passes for a clean manifest', () => {
+    expect(validateInstallHygieneFields(CLEAN).ok).toBe(true)
+  })
+
+  test('FAILS on consumer-run install hooks but allows publisher hooks', () => {
+    const withPublisherHooks = validateInstallHygieneFields({
+      ...CLEAN,
+      scripts: { prepack: 'npm run build', prepare: 'true' },
+    })
+    expect(withPublisherHooks.ok).toBe(true)
+
+    const withPostinstall = validateInstallHygieneFields({
+      ...CLEAN,
+      scripts: { postinstall: 'node download.js' },
+    })
+    expect(withPostinstall.ok).toBe(false)
+    expect(withPostinstall.errors.join(' ')).toMatch(/postinstall/)
+  })
+
+  test('FAILS on a funding field', () => {
+    const r = validateInstallHygieneFields({ ...CLEAN, funding: 'https://x' })
+    expect(r.ok).toBe(false)
+    expect(r.errors.join(' ')).toMatch(/funding/)
+  })
+
+  test('FAILS when engines.node drifts from the contract', () => {
+    const r = validateInstallHygieneFields({ engines: { node: '>=24.0.0' } })
+    expect(r.ok).toBe(false)
+    expect(r.errors.join(' ')).toMatch(/EBADENGINE/)
+  })
+
+  test('the real package.json passes install hygiene', async () => {
+    const pkg = await import('../package.json')
+    expect(validateInstallHygieneFields(pkg as never).ok).toBe(true)
   })
 })

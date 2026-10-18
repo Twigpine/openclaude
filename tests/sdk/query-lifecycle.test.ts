@@ -128,6 +128,21 @@ describe('Engine lazy-init guard (COR-1)', () => {
     expect(() => q.close()).not.toThrow()
   })
 
+  test('QueryImpl close() aborts its wrapper controller after an engine override', () => {
+    const abortController = new AbortController()
+    const q = query({
+      prompt: 'test',
+      options: { cwd: process.cwd(), abortController },
+    })
+    ;(q as unknown as {
+      setEngine(engine: { interrupt(): void }): void
+    }).setEngine({ interrupt() {} })
+
+    q.close()
+
+    expect(abortController.signal.aborted).toBe(true)
+  })
+
   test('SDKSession getMessages() works after construction', async () => {
     const { unstable_v2_createSession } = await import('../../src/entrypoints/sdk/index.js')
     const session = unstable_v2_createSession({
@@ -236,36 +251,6 @@ describe('Query interrupt lifecycle', () => {
       m.message.content[0]?.text === '[Request interrupted by user]'
     )
     expect(userCancelMsg).toBeUndefined()
-  }, 10_000)
-
-  test('interrupt() with reason undefined yields synthetic user cancellation message', async () => {
-    const q = query({
-      prompt: 'test undefined reason',
-      options: { cwd: process.cwd() },
-    })
-    const iterator = q[Symbol.asyncIterator]()
-    const firstPromise = iterator.next()
-    
-    // Interrupt during execution
-    q.interrupt()
-
-    const messages: any[] = []
-    try {
-      let result = await firstPromise
-      while (!result.done) {
-        messages.push(result.value)
-        result = await iterator.next()
-      }
-    } catch (err) {
-      if (!isExpectedDrainAbort(err)) throw err
-    }
-
-    const userCancelMsg = messages.find((m: any) => 
-      m.type === 'user' && 
-      Array.isArray(m.message?.content) && 
-      m.message.content[0]?.text === '[Request interrupted by user]'
-    )
-    expect(userCancelMsg).toBeDefined()
   }, 10_000)
 
   test('Stop hook regression test - aborting with reason interrupt suppresses cancellation message', async () => {

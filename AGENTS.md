@@ -16,6 +16,8 @@ The installed CLI runs on Node.js `>=22.0.0`. Bun is used for source builds, scr
 - Add or update tests when behavior changes.
 - Update docs when setup, commands, provider behavior, or user-facing behavior changes.
 - For new features, larger refactors, dependencies, or runtime changes, follow the issue-first guidance in [CONTRIBUTING.md](CONTRIBUTING.md).
+- Keep PR branches current with `main` using the synchronization and guarded-push workflow in [CONTRIBUTING.md § Keep Your Branch Current](CONTRIBUTING.md#keep-your-branch-current). Rebase whenever resuming work or pushing follow-up fixes, but never overwrite remote PR-head updates with an unguarded force-push.
+- Run the authoritative local pre-push validation contract defined in [CONTRIBUTING.md § Validation](CONTRIBUTING.md#validation) before every push to a PR, not just the first one. CI adds clean-runner and supported-Node-matrix coverage that is not practical to reproduce in one local shell.
 
 ## Stack And Conventions
 
@@ -46,7 +48,7 @@ Common libraries and patterns:
 
 ## Validation
 
-Run the narrowest useful checks for your change, and list the exact commands in the PR.
+The authoritative local pre-push validation contract lives in [CONTRIBUTING.md § Validation](CONTRIBUTING.md#validation) and must be run before every push to a PR, including follow-up fixes during review. It covers the same command families as `.github/workflows/pr-checks.yml`; CI remains authoritative for clean-runner, supported-Node-matrix, and platform-specific coverage. The lists below are for narrowing checks while you iterate; they do not replace the pre-push contract.
 
 Core checks:
 
@@ -67,19 +69,22 @@ bun run test:provider
 bun run test:provider-recommendation
 ```
 
-Web checks, when touching `web/`:
+Web checks, when changes can affect the site:
 
 ```bash
 bun run web:typecheck
 bun run web:build
 ```
 
+Website release notes live on GitHub Releases; do not add a manually maintained release-notes data source to the static site.
+
 Diagnostics and PR hygiene:
 
 ```bash
 bun run doctor:runtime
-bun run security:pr-scan
 ```
+
+For PR intent scanning, use the canonical upstream fetch and explicit-ref invocation in [CONTRIBUTING.md § Validation](CONTRIBUTING.md#validation); the scanner's default `origin/main` base is not portable to fork checkouts.
 
 ## Provider Changes
 
@@ -98,4 +103,8 @@ When modifying provider behavior:
 - Do not introduce dependencies without clear project benefit.
 - Do not skip tests for behavior changes.
 - Do not silently change provider tags; maintainers control them during review.
-- Do not ignore CodeRabbit or maintainer feedback; address it before requesting more review.
+- Do not ignore CodeRabbit or maintainer feedback; address it before requesting more review. Before applying an automated review suggestion, verify it does not pull the PR away from its stated scope or intent — decline out-of-scope suggestions with justification, or ask a maintainer when unsure. Never silently ignore findings.
+- Do not push commits with failing, incomplete, or unrun local checks unless an exception in [CONTRIBUTING.md § Validation](CONTRIBUTING.md#validation) applies. Verify pre-existing failures against the current PR base and document the evidence in the PR; PR-owned failures must still be fixed.
+- Do not submit a PR whose description still contains template placeholder text; fill in every section of the [PR template](.github/pull_request_template.md) for the actual change.
+- Do not surface-patch recurring review findings; repeated fix requests usually indicate a core design issue — investigate and fix the root cause instead of the reported symptom.
+- Do not add a manually maintained release-notes data source to the static site; link to GitHub Releases instead.

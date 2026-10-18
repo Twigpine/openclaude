@@ -11,7 +11,7 @@ import {
 } from '../../../services/mcp/channelNotification.js'
 import type { ChannelPermissionCallbacks } from '../../../services/mcp/channelPermissions.js'
 import {
-  shortRequestId,
+  channelPermissionRequestId,
   truncateForPreview,
 } from '../../../services/mcp/channelPermissions.js'
 import type { ConnectedMCPServer } from '../../../services/mcp/types.js'
@@ -27,8 +27,13 @@ import { errorMessage } from '../../../utils/errors.js'
 import type { PermissionDecision } from '../../../utils/permissions/PermissionResult.js'
 import type { PermissionUpdate } from '../../../utils/permissions/PermissionUpdateSchema.js'
 import { hasPermissionsToUseTool } from '../../../utils/permissions/permissions.js'
+import {
+  getInterruptionSignalAbortTrace,
+  tracePermissionAbortResolution,
+} from '../../../utils/interruptionTrace.js'
 import type { PermissionContext } from '../PermissionContext.js'
 import { createResolveOnce } from '../PermissionContext.js'
+import { isPermissionSessionActive } from '../permissionSessionOwnership.js'
 
 type InteractivePermissionParams = {
   ctx: PermissionContext
@@ -65,6 +70,10 @@ function handleInteractivePermission(
     bridgeCallbacks,
     channelCallbacks,
   } = params
+  const permissionSessionIsActive = () =>
+    isPermissionSessionActive(
+      ctx.toolUseContext.options.permissionSessionId,
+    )
 
   // Suspend the watchdog for the dialog window so human think-time isn't counted
   // toward the idle/hard-max timeout. Scoped here, not around the whole
@@ -127,12 +136,23 @@ function handleInteractivePermission(
     const abortSignal = ctx.toolUseContext.abortController.signal
     const onExternalAbort = () => {
       if (!claim()) return
+      const abortTrace = getInterruptionSignalAbortTrace(abortSignal)
+      tracePermissionAbortResolution(
+        abortTrace.source,
+        abortTrace.causalEventId,
+        'tool_permission',
+      )
       if (bridgeCallbacks && bridgeRequestId) {
         bridgeCallbacks.cancelRequest(bridgeRequestId)
       }
       channelUnsubscribe?.()
       ctx.removeFromQueue()
-      resolveOnce(ctx.cancelAndAbort(undefined, true))
+      resolveOnce(
+        ctx.cancelAndAbort(undefined, true, undefined, {
+          source: abortTrace.source ?? 'permission_abort',
+          causalEventId: abortTrace.causalEventId,
+        }),
+      )
     }
     if (abortSignal.aborted) {
       // Already aborted: cancel and stop setup so we never enqueue a stale prompt.
@@ -152,6 +172,10 @@ function handleInteractivePermission(
       input: displayInput,
       toolUseContext: ctx.toolUseContext,
       toolUseID: ctx.toolUseID,
+      ...(ctx.toolUseContext.options?.permissionSessionId && {
+        permissionSessionId:
+          ctx.toolUseContext.options.permissionSessionId,
+      }),
       permissionResult: result,
       permissionPromptStartTimeMs,
       ...(feature('BASH_CLASSIFIER')
@@ -190,7 +214,7 @@ function handleInteractivePermission(
           ctx.removeFromQueue()
         }
       },
-      onAbort() {
+      onAbort(source, causalEventId) {
         if (!claim()) return
         if (bridgeCallbacks && bridgeRequestId) {
           bridgeCallbacks.sendResponse(bridgeRequestId, {
@@ -205,7 +229,12 @@ function handleInteractivePermission(
           { decision: 'reject', source: { type: 'user_abort' } },
           { permissionPromptStartTimeMs },
         )
-        resolveOnce(ctx.cancelAndAbort(undefined, true))
+        resolveOnce(
+          ctx.cancelAndAbort(undefined, true, undefined, {
+            source: source ?? 'permission_dialog',
+            causalEventId,
+          }),
+        )
       },
       async onAllow(
         updatedInput,
@@ -213,6 +242,7 @@ function handleInteractivePermission(
         feedback?: string,
         contentBlocks?: ContentBlockParam[],
       ) {
+        if (!permissionSessionIsActive()) return
         if (!claim()) return // atomic check-and-mark before await
 
         if (bridgeCallbacks && bridgeRequestId) {
@@ -233,10 +263,12 @@ function handleInteractivePermission(
             permissionPromptStartTimeMs,
             contentBlocks,
             result.decisionReason,
+            true,
           ),
         )
       },
       onReject(feedback?: string, contentBlocks?: ContentBlockParam[]) {
+        if (!permissionSessionIsActive()) return
         if (!claim()) return
 
         if (bridgeCallbacks && bridgeRequestId) {
@@ -266,7 +298,10 @@ function handleInteractivePermission(
           ctx.assistantMessage,
           ctx.toolUseID,
         )
-        if (freshResult.behavior === 'allow') {
+        if (
+          freshResult.behavior === 'allow' &&
+          permissionSessionIsActive()
+        ) {
           // claim() (atomic check-and-mark), not isResolved() — the async
           // hasPermissionsToUseTool call above opens a window where CCR
           // could have responded in flight. Matches onAllow/onReject/hook
@@ -326,6 +361,9 @@ function handleInteractivePermission(
                 response.updatedPermissions ?? [],
                 undefined,
                 permissionPromptStartTimeMs,
+                undefined,
+                undefined,
+                true,
               ),
             )
           } else {
@@ -368,7 +406,11 @@ function handleInteractivePermission(
       channelCallbacks &&
       !ctx.tool.requiresUserInteraction?.()
     ) {
-      const channelRequestId = shortRequestId(ctx.toolUseID)
+      const channelRequestId = channelPermissionRequestId(
+        ctx.toolUseID,
+        ctx.toolUseContext.options.permissionSessionId,
+        ctx.toolUseContext.agentId,
+      )
       const channelClients = ctx.toolUseContext
         .getAppState()
         .mcp.clients.filter(
@@ -436,6 +478,9 @@ function handleInteractivePermission(
                   [],
                   undefined,
                   permissionPromptStartTimeMs,
+                  undefined,
+                  undefined,
+                  true,
                 ),
               )
             } else {
@@ -464,7 +509,7 @@ function handleInteractivePermission(
     }
 
     // Skip hooks if they were already awaited in the coordinator branch above
-    if (!awaitAutomatedChecksBeforeDialog) {
+    if (!awaitAutomatedChecksBeforeDialog && permissionSessionIsActive()) {
       // Execute PermissionRequest hooks asynchronously
       // If hook returns a decision before user responds, apply it
       void (async () => {
@@ -475,8 +520,13 @@ function handleInteractivePermission(
           result.suggestions,
           result.updatedInput,
           permissionPromptStartTimeMs,
+          true,
         )
-        if (!hookDecision || !claim()) return
+        if (
+          !hookDecision ||
+          !claim()
+        )
+          return
         if (bridgeCallbacks && bridgeRequestId) {
           bridgeCallbacks.cancelRequest(bridgeRequestId)
         }
@@ -491,7 +541,8 @@ function handleInteractivePermission(
       feature('BASH_CLASSIFIER') &&
       result.pendingClassifierCheck &&
       ctx.tool.name === BASH_TOOL_NAME &&
-      !awaitAutomatedChecksBeforeDialog
+      !awaitAutomatedChecksBeforeDialog &&
+      permissionSessionIsActive()
     ) {
       const classifierPlanModeWasActive =
         ctx.toolUseContext.getAppState().toolPermissionContext.mode === 'plan'
@@ -504,12 +555,16 @@ function handleInteractivePermission(
         ctx.toolUseContext.abortController.signal,
         ctx.toolUseContext.options.isNonInteractiveSession,
         {
-          shouldContinue: () => !isResolved() && !userInteracted,
+          shouldContinue: () =>
+            !isResolved() &&
+            !userInteracted &&
+            permissionSessionIsActive(),
           onComplete: () => {
             clearClassifierChecking(ctx.toolUseID)
             clearClassifierIndicator()
           },
           onAllow: async decisionReason => {
+            if (!permissionSessionIsActive()) return
             if (!claim()) return
             if (bridgeCallbacks && bridgeRequestId) {
               bridgeCallbacks.cancelRequest(bridgeRequestId)

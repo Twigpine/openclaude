@@ -1,4 +1,11 @@
 import { setMaxListeners } from 'events'
+import {
+  getInterruptionSignalAbortEventId,
+  getInterruptionSignalId,
+  registerInterruptionController,
+  requestAbort,
+  type InterruptionTraceFields,
+} from './interruptionTrace.js'
 
 /**
  * Default max listeners for standard operations
@@ -32,7 +39,19 @@ function propagateAbort(
   weakChild: WeakRef<AbortController>,
 ): void {
   const parent = this.deref()
-  weakChild.deref()?.abort(parent?.signal.reason)
+  const child = weakChild.deref()
+  if (!child) return
+  requestAbort(child, parent?.signal.reason, {
+    source: 'parent_signal',
+    subsystem: 'abort_controller',
+    controllerRole: 'child',
+    ...(parent && {
+      causalEventId: getInterruptionSignalAbortEventId(parent.signal),
+    }),
+    ...(parent && {
+      parentControllerIds: [getInterruptionSignalId(parent.signal) ?? 'unregistered-parent'],
+    }),
+  })
 }
 
 /**
@@ -63,17 +82,40 @@ function removeAbortHandler(
  *
  * @param parent - The parent AbortController
  * @param maxListeners - Maximum number of listeners (default: 50)
+ * @param traceFields - Owning lifecycle identity for interruption diagnostics
  * @returns Child AbortController
  */
 export function createChildAbortController(
   parent: AbortController,
   maxListeners?: number,
+  traceFields: InterruptionTraceFields = {},
 ): AbortController {
   const child = createAbortController(maxListeners)
+  const parentId = registerInterruptionController(parent, {
+    subsystem: 'abort_controller',
+    controllerRole: 'parent',
+  }, { provisionalRole: true })
+  const hasOwningRole = traceFields.controllerRole !== undefined
+  registerInterruptionController(
+    child,
+    {
+      subsystem: 'abort_controller',
+      controllerRole: 'child',
+      ...traceFields,
+      ...(parentId && { parentControllerIds: [parentId] }),
+    },
+    { provisionalRole: !hasOwningRole },
+  )
 
   // Fast path: parent already aborted, no listener setup needed
   if (parent.signal.aborted) {
-    child.abort(parent.signal.reason)
+    requestAbort(child, parent.signal.reason, {
+      source: 'already_aborted_parent',
+      subsystem: 'abort_controller',
+      controllerRole: 'child',
+      causalEventId: getInterruptionSignalAbortEventId(parent.signal),
+      ...(parentId && { parentControllerIds: [parentId] }),
+    })
     return child
   }
 

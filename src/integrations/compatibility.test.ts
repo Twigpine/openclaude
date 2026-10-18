@@ -19,6 +19,8 @@ import type { ProviderPreset } from '../utils/providerProfiles.js'
 const EXPECTED_PRESETS = [
   'anthropic',
   'atlas-cloud',
+  'gmi-cloud',
+  'apismart',
   'aimlapi',
   'openai',
   'ollama',
@@ -48,11 +50,16 @@ const EXPECTED_PRESETS = [
   'atomic-chat',
   'cloudflare',
   'gitlawb-opengateway',
+  'concentrate',
   'nearai',
   'fireworks',
+  'longcat',
+  'llmtr',
+  'commandcode',
   'opencode',
   'opencode-go',
   'clinepass',
+  'api-route',
 ] as const satisfies readonly ProviderPreset[]
 
 describe('compatibility mappings', () => {

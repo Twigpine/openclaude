@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, test } from 'bun:test'
 import {
+  DEFAULT_COMPACT_TAIL_TURNS,
+  normalizeCompactTailTurns,
   pruneByRelevance,
   getTopRelevantMessages,
   getRelevanceStats,
@@ -162,5 +164,30 @@ describe('relevancePruning', () => {
       const result = pruneByRelevance(messages, { targetTokens: 1_000_000 })
       expect(result.map(m => m.message.id)).toEqual(messages.map(m => m.message.id))
     })
+  })
+})
+describe('normalizeCompactTailTurns', () => {
+  test('valid values floor to integers', () => {
+    expect(normalizeCompactTailTurns(5)).toBe(5)
+    expect(normalizeCompactTailTurns(2.5)).toBe(2)
+    expect(normalizeCompactTailTurns('8')).toBe(8)
+    expect(normalizeCompactTailTurns(1)).toBe(1)
+  })
+
+  test('invalid or dangerous values fall back to the default', () => {
+    // 0.5 previously passed a `> 0` check and floored to a ZERO-message tail.
+    expect(normalizeCompactTailTurns(0.5)).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns(0)).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns(-3)).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns(NaN)).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns(Infinity)).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns('abc')).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns(undefined)).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns(null)).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    // Non-string non-number shapes must not coerce (Number(true) === 1,
+    // Number([2]) === 2) into a tiny tail.
+    expect(normalizeCompactTailTurns(true)).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns([2])).toBe(DEFAULT_COMPACT_TAIL_TURNS)
+    expect(normalizeCompactTailTurns({})).toBe(DEFAULT_COMPACT_TAIL_TURNS)
   })
 })

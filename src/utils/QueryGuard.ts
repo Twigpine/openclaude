@@ -29,6 +29,10 @@
  *   )
  */
 import { createSignal } from './signal.js'
+import {
+  flushInterruptionTrace,
+  traceInterruptionEvent,
+} from './interruptionTrace.js'
 import type {
   QueryActiveOperationSnapshot,
   QueryGuardMetadata,
@@ -119,18 +123,22 @@ export class QueryGuard {
   private _changed = createSignal()
   private _timeoutId: ReturnType<typeof setTimeout> | null = null
   private _timeoutHandler: QueryTimeoutHandler | null = null
+  // Deadline arithmetic is monotonic so NTP/manual wall-clock jumps cannot
+  // manufacture an immediate timeout or postpone an already-scheduled one.
   private _queryStartedAt = 0
   private _lastActivityAt = 0
   private _suspendCount = 0
   private _suspendedAt = 0
   private _totalSuspendedMs = 0
   private _leaseCounter = 0
+  private _traceActivityCount = 0
+  private _lastTraceActivityAt = 0
   private _activeLeases = new Map<string, LeaseRecord>()
   private _context: QueryLifecycleContext | null = null
   private _lastContext: QueryLifecycleContext | null = null
   private _getActiveOperations: (() => QueryActiveOperationSnapshot) | null =
     null
-  private readonly _idleTimeoutMs: number
+  private _idleTimeoutMs: number
   private readonly _hardMaxQueryMs: number
   private readonly _toolLeaseGraceMs: number
 
@@ -147,6 +155,19 @@ export class QueryGuard {
       0,
       positiveOrDefault(options.toolLeaseGraceMs, DEFAULT_TOOL_LEASE_GRACE_MS),
     )
+  }
+
+  /**
+   * Update the idle deadline for the next query. Active queries retain the
+   * timeout they started with so a concurrent submission cannot mutate them.
+   */
+  setIdleTimeoutMs(idleTimeoutMs: number | undefined): boolean {
+    if (this._status === 'running') return false
+    this._idleTimeoutMs = positiveOrDefault(
+      idleTimeoutMs,
+      DEFAULT_QUERY_IDLE_TIMEOUT_MS,
+    )
+    return true
   }
 
   /**
@@ -187,9 +208,18 @@ export class QueryGuard {
     this._suspendedAt = 0
     this._totalSuspendedMs = 0
     this._lastContext = null
-    this._queryStartedAt = Date.now()
+    this._queryStartedAt = performance.now()
+    this._traceActivityCount = 0
+    this._lastTraceActivityAt = 0
     this._lastActivityAt = this._queryStartedAt
     this._context = this._createContext(metadata)
+    traceInterruptionEvent('query_guard.started', {
+      subsystem: 'query_guard',
+      phase: 'running',
+      queryId: this._context.queryId,
+      queryGeneration: this._generation,
+      querySource: this._context.querySource,
+    })
     this._getActiveOperations = metadata?.getActiveOperations ?? null
     this._startTimeout()
     this._notify()
@@ -219,7 +249,16 @@ export class QueryGuard {
     this._suspendCount = 0
     this._suspendedAt = 0
     this._totalSuspendedMs = 0
+    const context = this._context
     this._completeContext(terminalReason, abortReason)
+    traceInterruptionEvent('query_guard.ended', {
+      subsystem: 'query_guard',
+      phase: terminalReason,
+      queryId: context?.queryId,
+      queryGeneration: generation,
+      querySource: context?.querySource,
+      reason: abortReason,
+    })
     this._status = 'idle'
     this._getActiveOperations = null
     this._notify()
@@ -242,7 +281,16 @@ export class QueryGuard {
     this._suspendCount = 0
     this._suspendedAt = 0
     this._totalSuspendedMs = 0
+    const context = this._context
     this._completeContext(terminalReason, abortReason)
+    traceInterruptionEvent('query_guard.force_ended', {
+      subsystem: 'query_guard',
+      phase: terminalReason,
+      queryId: context?.queryId,
+      queryGeneration: this._generation,
+      querySource: context?.querySource,
+      reason: abortReason,
+    })
     this._status = 'idle'
     this._getActiveOperations = null
     ++this._generation
@@ -258,7 +306,22 @@ export class QueryGuard {
     void reason
     if (this._status !== 'running') return
     if (generation !== undefined && generation !== this._generation) return
-    this._lastActivityAt = Date.now()
+    const now = performance.now()
+    this._lastActivityAt = now
+    this._traceActivityCount++
+    if (
+      this._traceActivityCount === 1 ||
+      now - this._lastTraceActivityAt >= 5_000
+    ) {
+      this._lastTraceActivityAt = now
+      traceInterruptionEvent('query_guard.activity', {
+        subsystem: 'query_guard',
+        queryId: this._context?.queryId,
+        queryGeneration: this._generation,
+        querySource: this._context?.querySource,
+        yieldedEventCount: this._traceActivityCount,
+      })
+    }
     this._scheduleTimeout()
   }
 
@@ -279,7 +342,7 @@ export class QueryGuard {
       }
     }
 
-    const now = Date.now()
+    const now = performance.now()
     const leaseTimeoutMs =
       typeof input.timeoutMs === 'number' &&
       Number.isFinite(input.timeoutMs) &&
@@ -312,6 +375,13 @@ export class QueryGuard {
       deadlineAt: leaseDeadlineAt,
       description: input.description,
     })
+    traceInterruptionEvent('query_guard.lease_acquired', {
+      subsystem: 'query_guard',
+      queryId: this._context?.queryId,
+      queryGeneration: this._generation,
+      source: input.owner,
+      leaseCount: this._activeLeases.size,
+    })
     this._lastActivityAt = now
     this._scheduleTimeout()
 
@@ -329,6 +399,13 @@ export class QueryGuard {
     const lease = this._activeLeases.get(leaseId)
     if (!lease || lease.generation !== generation) return
     this._activeLeases.delete(leaseId)
+    traceInterruptionEvent('query_guard.lease_released', {
+      subsystem: 'query_guard',
+      queryId: this._context?.queryId,
+      queryGeneration: this._generation,
+      source: lease.owner,
+      leaseCount: this._activeLeases.size,
+    })
     this._scheduleTimeout()
   }
 
@@ -347,9 +424,15 @@ export class QueryGuard {
       return () => {}
     }
     if (this._suspendCount === 0) {
-      this._suspendedAt = Date.now()
+      this._suspendedAt = performance.now()
     }
     this._suspendCount++
+    traceInterruptionEvent('query_guard.suspended', {
+      subsystem: 'query_guard',
+      queryId: this._context?.queryId,
+      queryGeneration: this._generation,
+      suspendCount: this._suspendCount,
+    })
     this._scheduleTimeout()
 
     let resumed = false
@@ -360,6 +443,12 @@ export class QueryGuard {
       if (generation !== this._generation) return
       if (this._suspendCount === 0) return
       this._suspendCount--
+      traceInterruptionEvent('query_guard.resumed', {
+        subsystem: 'query_guard',
+        queryId: this._context?.queryId,
+        queryGeneration: this._generation,
+        suspendCount: this._suspendCount,
+      })
       if (this._suspendCount === 0) {
         this._resumeAfterInteraction()
       }
@@ -373,7 +462,7 @@ export class QueryGuard {
    */
   private _resumeAfterInteraction(): void {
     if (this._status !== 'running') return
-    const now = Date.now()
+    const now = performance.now()
     const suspendedStartedAt = this._suspendedAt
     const suspendedMs = Math.max(0, now - suspendedStartedAt)
     this._suspendedAt = 0
@@ -493,7 +582,7 @@ export class QueryGuard {
     this._clearTimeout()
     if (this._status !== 'running') return
 
-    const now = Date.now()
+    const now = performance.now()
     const reason = this._getTimeoutReason(now)
     if (reason) {
       this._timeoutId = setTimeout(() => this._handleTimeout(), 0)
@@ -512,7 +601,7 @@ export class QueryGuard {
     this._timeoutId = null
     if (this._status !== 'running') return
 
-    const now = Date.now()
+    const now = performance.now()
     const reason = this._getTimeoutReason(now)
     if (!reason) {
       this._scheduleTimeout()
@@ -528,10 +617,25 @@ export class QueryGuard {
       generation: this._generation,
       reason,
       timeoutMs: this._getTimeoutMsForReason(reason, now),
-      elapsedMs: now - context.startedAt,
+      elapsedMs: now - this._queryStartedAt,
       context,
       activeOperations: this._snapshotActiveOperations(),
     }
+    const causalEventId = traceInterruptionEvent('query_guard.fired', {
+      subsystem: 'query_guard',
+      phase: terminalReason,
+      queryId: context.queryId,
+      queryGeneration: context.queryGeneration,
+      querySource: context.querySource,
+      trigger: reason,
+      elapsedQueryMs: timeout.elapsedMs,
+      sinceLastActivityMs: now - this._lastActivityAt,
+      activeApiCallCount: timeout.activeOperations.apiCalls.length,
+      activeToolUseCount: timeout.activeOperations.toolUses.length,
+      leaseCount: this._activeLeases.size,
+      suspendCount: this._suspendCount,
+    })
+    if (causalEventId) timeout.causalEventId = causalEventId
 
     console.error(
       `[QueryGuard] Query ${reason} timeout - force-ending to prevent infinite spinner`,
@@ -542,6 +646,7 @@ export class QueryGuard {
       console.error('[QueryGuard] Timeout handler failed', error)
     } finally {
       this.forceEnd(terminalReason, reason)
+      flushInterruptionTrace('query_guard_timeout')
     }
   }
 

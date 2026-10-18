@@ -1831,14 +1831,37 @@ async function loadAndCacheMarketplace(
           // Rename temp cache to final name
           try {
             await fs.rename(temporaryCachePath, finalCachePath)
+            temporaryCachePath = finalCachePath
           } catch (renameError) {
             // Rename may fail for cross-device moves (EXDEV). Fall back to
-            // copy + delete.
-            await fs.cp(temporaryCachePath, finalCachePath, { recursive: true })
-            await fs.rm(temporaryCachePath, { recursive: true, force: true })
+            // copy + delete. Recursive copy can still throw ENOENT on Windows
+            // for dangling symlinks or unreadable nested files in large
+            // clones (ChromeDevTools/chrome-devtools-mcp third_party trees,
+            // issue #2183). The clone already succeeded and marketplace.json
+            // was parsed from temporaryCachePath — keep that directory rather
+            // than failing the add.
+            try {
+              await fs.cp(temporaryCachePath, finalCachePath, {
+                recursive: true,
+              })
+              await fs.rm(temporaryCachePath, { recursive: true, force: true })
+              temporaryCachePath = finalCachePath
+            } catch (copyError) {
+              try {
+                await fs.rm(finalCachePath, { recursive: true, force: true })
+              } catch (cleanupError) {
+                logForDebugging(
+                  `Failed to remove partial marketplace cache at ${finalCachePath}: ${errorMessage(cleanupError)}`,
+                  { level: 'warn' },
+                )
+              }
+              logForDebugging(
+                `Marketplace cache rename and copy failed; keeping ${temporaryCachePath}. rename=${errorMessage(renameError)} copy=${errorMessage(copyError)}`,
+                { level: 'warn' },
+              )
+            }
           }
-          temporaryCachePath = finalCachePath
-          cleanupNeeded = false // Successfully renamed, no cleanup needed
+          cleanupNeeded = false // Clone is the live cache (renamed, copied, or kept)
         } catch (error) {
           const errorMsg = errorMessage(error)
           throw new Error(
@@ -2271,16 +2294,28 @@ export const getMarketplace = memoize(
 
     // Cache doesn't exist or is invalid, fetch from source
     let marketplace: PluginMarketplace
+    let cachePath: string
     try {
-      ;({ marketplace } = await loadAndCacheMarketplace(entry.source))
+      ;({ marketplace, cachePath } = await loadAndCacheMarketplace(
+        entry.source,
+      ))
     } catch (error) {
       throw new Error(
         `Failed to load marketplace "${name}" from source (${entry.source.source}): ${errorMessage(error)}`,
       )
     }
 
-    // Update lastUpdated only when we actually fetch
+    // Persist cachePath for remote sources: keep-temp recovery (#2183) may
+    // leave the live clone at temporaryCachePath instead of the canonical
+    // marketplace-name directory already stored in installLocation.
+    // Local file/directory sources do not go through rename/copy; cachePath is
+    // the user's marketplace root. Overwriting a stored manifest path with that
+    // root would make removeMarketplaceSource recursively delete the user's
+    // directory.
     config[name]!.lastUpdated = new Date().toISOString()
+    if (!isLocalMarketplaceSource(entry.source)) {
+      config[name]!.installLocation = cachePath
+    }
     await saveKnownMarketplacesConfig(config)
 
     return marketplace
@@ -2376,9 +2411,16 @@ export async function getPluginById(pluginId: string): Promise<{
       return null
     }
 
+    // getMarketplace refetch may persist a keep-temp cachePath (#2183) that
+    // differs from the snapshot loaded above.
+    const refreshedConfig = await loadKnownMarketplacesConfig()
+    const installLocation =
+      refreshedConfig[marketplaceName]?.installLocation ??
+      marketplaceConfig.installLocation
+
     return {
       entry: plugin,
-      marketplaceInstallLocation: marketplaceConfig.installLocation,
+      marketplaceInstallLocation: installLocation,
     }
   } catch (error) {
     logForDebugging(

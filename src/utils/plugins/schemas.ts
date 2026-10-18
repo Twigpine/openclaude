@@ -1030,7 +1030,11 @@ export const MarketplaceSourceSchema = lazySchema(() =>
           'Regex pattern to match the host/domain extracted from any marketplace source type. ' +
             'For github sources, matches against "github.com". For git sources (SSH or HTTPS), ' +
             'extracts the hostname from the URL. Use in strictKnownMarketplaces to allow all ' +
-            'marketplaces from a specific host (e.g., "^github\\.mycompany\\.com$").',
+            'marketplaces from a specific host (e.g., "^github\\.mycompany\\.com$"). ' +
+            'The pattern must match the ENTIRE host: it is anchored before use, so ' +
+            '"github\\.mycompany\\.com" cannot be satisfied by a lookalike host such as ' +
+            '"github.mycompany.com.evil.example". Use an explicit wildcard (e.g. ' +
+            '".*\\.mycompany\\.com") to allow subdomains.',
         ),
     }),
     z.object({

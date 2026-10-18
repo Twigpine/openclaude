@@ -168,7 +168,7 @@ export {
  * )
  * ```
  */
-export function tool<Schema = any>(
+export function tool<Schema = unknown>(
   name: string,
   description: string,
   inputSchema: Schema,

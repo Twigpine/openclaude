@@ -45,7 +45,7 @@ import {
   getConditionalRulesForCwdLevelDirectory,
   type MemoryFileInfo,
 } from './claudemd.js'
-import { dirname, parse, relative, resolve } from 'path'
+import nodePath, { dirname, parse, relative, resolve } from 'path'
 import { getCwd } from 'src/utils/cwd.js'
 import { getViewedTeammateTask } from '../state/selectors.js'
 import { logError } from './log.js'
@@ -1513,7 +1513,18 @@ export function getDateChangeAttachments(
   return [{ type: 'date_change', newDate: currentDate }]
 }
 
-function getUltrathinkEffortAttachment(input: string | null): Attachment[] {
+export function getUltrathinkEffortAttachment(
+  input: string | null,
+  logActivation: boolean = true,
+): Attachment[] {
+  // This helper is also used by speculative paths, which do not call
+  // getAttachments(). Keep their behavior aligned with its global opt-out.
+  if (
+    isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS) ||
+    isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)
+  ) {
+    return []
+  }
   // Gate the model-facing attachment behind the same rollout flag as the UI.
   // Without this, the hidden `ultrathink_effort` attachment would still raise
   // the turn to high effort even when the ULTRATHINK build flag / GrowthBook
@@ -1521,7 +1532,9 @@ function getUltrathinkEffortAttachment(input: string | null): Attachment[] {
   if (!input || !isUltrathinkEnabled() || !hasUltrathinkKeyword(input)) {
     return []
   }
-  logEvent('tengu_ultrathink', {})
+  if (logActivation) {
+    logEvent('tengu_ultrathink', {})
+  }
   return [{ type: 'ultrathink_effort', level: 'high' }]
 }
 
@@ -1756,6 +1769,57 @@ async function getSelectedLinesFromIDE(
  * @param originalCwd The original current working directory
  * @returns Object with nestedDirs and cwdLevelDirs arrays, both ordered from parent to child
  */
+/**
+ * True when `child` sits strictly beneath `parent`, compared on path
+ * boundaries.
+ *
+ * Deliberately not the permissions predicate (`pathInWorkingPath`): that one
+ * case-folds both operands on every platform to stop case-variant spellings
+ * from slipping past a security check. Applying it here would go the wrong way
+ * — on a case-sensitive filesystem `/work/MyApp` and `/work/myapp` are two
+ * unrelated projects, and folding them together would load the other project's
+ * CLAUDE.md/AGENTS.md as nested memory.
+ *
+ * `relative()` gets the boundary right but is not case-faithful on Windows: it
+ * compares components case-insensitively, so `C:\work\MyApp` -> `C:\work\myapp\src`
+ * returns `src` as though it were nested. NTFS supports per-directory case
+ * sensitivity, so those can be distinct trees there too. Rebuilding the child
+ * from the parent and comparing exactly keeps the boundary logic while
+ * restoring the lexical case distinction.
+ *
+ * `pathApi` is injectable so the Windows semantics can be covered from any
+ * host. Exported for testing.
+ */
+export function isPathUnder(
+  child: string,
+  parent: string,
+  pathApi: Pick<
+    typeof nodePath,
+    'relative' | 'join' | 'normalize' | 'isAbsolute' | 'sep'
+  > = nodePath,
+): boolean {
+  const rel = pathApi.relative(parent, child)
+  // Compare on segment boundaries, not a string prefix: a directory legitimately
+  // named `..hello` yields the relative path `..hello`, which starts with `..`
+  // without being an upward traversal.
+  if (
+    rel === '' ||
+    rel === '..' ||
+    rel.startsWith('..' + pathApi.sep) ||
+    pathApi.isAbsolute(rel)
+  ) {
+    return false
+  }
+  const stripTrailingSep = (value: string): string =>
+    value.length > 1 && value.endsWith(pathApi.sep)
+      ? value.slice(0, -pathApi.sep.length)
+      : value
+  return (
+    stripTrailingSep(pathApi.join(parent, rel)) ===
+    stripTrailingSep(pathApi.normalize(child))
+  )
+}
+
 export function getDirectoriesToProcess(
   targetPath: string,
   originalCwd: string,
@@ -1765,9 +1829,14 @@ export function getDirectoriesToProcess(
   const nestedDirs: string[] = []
   let currentDir = targetDir
 
-  // Walk up from target directory to original CWD
+  // Walk up from target directory to original CWD.
+  // Containment must be tested on path boundaries, not string prefixes: a
+  // sibling whose name merely starts with the CWD's name (cwd `/work/myapp`,
+  // target in `/work/myapp-backend`) is not "between CWD and targetPath", but
+  // startsWith accepts it — so its CLAUDE.md loaded as Project memory purely
+  // because of how the directory happened to be spelled.
   while (currentDir !== originalCwd && currentDir !== parse(currentDir).root) {
-    if (currentDir.startsWith(originalCwd)) {
+    if (isPathUnder(currentDir, originalCwd)) {
       nestedDirs.push(currentDir)
     }
     currentDir = dirname(currentDir)
@@ -2630,7 +2699,14 @@ export function startRelevantMemoryPrefetch(
 
   // Chained to the turn-level abort so user Escape cancels the sideQuery
   // immediately, not just on [Symbol.dispose] when queryLoop exits.
-  const controller = createChildAbortController(toolUseContext.abortController)
+  const controller = createChildAbortController(
+    toolUseContext.abortController,
+    undefined,
+    {
+      subsystem: 'memory_attachments',
+      controllerRole: 'memory-prefetch',
+    },
+  )
   const firedAt = Date.now()
   const promise = getRelevantMemoryAttachments(
     input,

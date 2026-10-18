@@ -49,6 +49,7 @@ import {
 import { getAgentContext } from '../../utils/agentContext.js'
 import { errorMessage } from '../../utils/errors.js'
 import {
+  createRootAppStateGetter,
   extractResultText,
   prepareForkedCommandContext,
 } from '../../utils/forkedAgent.js'
@@ -226,6 +227,7 @@ async function executeForkedSkill(
       toolUseContext: {
         ...context,
         getAppState: modifiedGetAppState,
+        getRootAppState: createRootAppStateGetter(context),
       },
       canUseTool,
       isAsync: false,

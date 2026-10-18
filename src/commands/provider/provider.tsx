@@ -1181,7 +1181,7 @@ function CodexOAuthStep({
   )
 }
 
-function CodexCredentialStep({
+export function CodexCredentialStep({
   onSave,
   onBack,
   onCancel,
@@ -1216,7 +1216,7 @@ function CodexCredentialStep({
     {
       label: 'codexplan',
       value: 'codexplan',
-      description: 'GPT-5.4 with higher reasoning on the Codex backend',
+      description: 'GPT-5.6 Sol with higher reasoning on the Codex backend',
     },
     {
       label: 'codexspark',

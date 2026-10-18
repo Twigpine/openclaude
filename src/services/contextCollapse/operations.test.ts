@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import type { UUID } from 'crypto'
 import type { Message } from '../../types/message.js'
 
@@ -93,12 +94,11 @@ describe('projectView', () => {
     expect(serialized).toContain('<collapsed')
   })
 
-  test('collapsed summary stays meta so the snip sweep cannot remove it', async () => {
-    // Regression: the system->user conversion in normalizeMessagesForAPI must
-    // preserve isMeta on the collapse placeholder. The snip-tag sweep
-    // (appendMessageTagToUserMessage) skips isMeta messages; if the conversion
-    // drops the flag, HISTORY_SNIP tags the summary with a snip_id and SnipTool
-    // can remove the only replacement for the archived span.
+  test('collapsed summary merged with real input stays non-snippable', async () => {
+    // The system->user conversion preserves isMeta on the collapse placeholder.
+    // An active HISTORY_SNIP runtime clears it when adjacent real input merges;
+    // otherwise the legacy meta contract remains. The isCollapseSummary marker
+    // independently keeps the archived-span replacement out of the snip sweep.
     const mod = await import('./operations.js')
     const { normalizeMessagesForAPI, appendMessageTagToUserMessage } =
       await import('../../utils/messages.js')
@@ -110,9 +110,14 @@ describe('projectView', () => {
     )
     expect(summaryMsg).toBeDefined()
     expect(summaryMsg!.type).toBe('user')
-    expect((summaryMsg as { isMeta?: boolean }).isMeta).toBe(true)
+    expect((summaryMsg as { isMeta?: boolean }).isMeta).toBe(
+      feature('HISTORY_SNIP') ? undefined : true,
+    )
+    expect(
+      (summaryMsg as { isCollapseSummary?: boolean }).isCollapseSummary,
+    ).toBe(true)
 
-    // With snip injection enabled the sweep leaves the meta summary untagged...
+    // With snip injection enabled the sweep leaves the collapse summary untagged...
     const swept = appendMessageTagToUserMessage(summaryMsg as never)
     expect(JSON.stringify(swept.message.content)).not.toContain('snip_id=')
     // ...while a normal (non-meta) user message still gets a snip id, so the

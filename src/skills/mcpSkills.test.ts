@@ -111,4 +111,63 @@ describe('fetchMcpSkillsForClient privilege stripping', () => {
     }
     expect(command.allowedTools).toEqual([])
   })
+
+  test('discovers and reads a skill resource that appears only on page two', async () => {
+    const listRequests: Array<{
+      method: string
+      params?: { cursor?: string }
+    }> = []
+    const client = {
+      type: 'connected',
+      name: 'page-two-skill-server',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { resources: {} },
+      client: {
+        request: async (request: {
+          method: string
+          params?: { cursor?: string; uri?: string }
+        }) => {
+          if (request.method === 'resources/list') {
+            listRequests.push(request)
+            return request.params?.cursor === undefined
+              ? {
+                  resources: [{ uri: 'file:///ordinary', name: 'ordinary' }],
+                  nextCursor: 'skill-page',
+                }
+              : {
+                  resources: [{ uri: 'skill://page-two', name: 'page-two' }],
+                }
+          }
+          if (request.method === 'resources/read') {
+            return {
+              contents: [
+                {
+                  uri: 'skill://page-two',
+                  mimeType: 'text/markdown',
+                  text: [
+                    '---',
+                    'name: page-two',
+                    'description: Paginated skill',
+                    '---',
+                    '# Page two',
+                  ].join('\n'),
+                },
+              ],
+            }
+          }
+          throw new Error(`unexpected method ${request.method}`)
+        },
+      },
+      cleanup: async () => {},
+    } as unknown as MCPServerConnection
+
+    const commands = await fetchMcpSkillsForClient(client)
+
+    expect(commands).toHaveLength(1)
+    expect(commands[0]?.name).toBe('mcp__page-two-skill-server__page-two')
+    expect(listRequests).toEqual([
+      { method: 'resources/list' },
+      { method: 'resources/list', params: { cursor: 'skill-page' } },
+    ])
+  })
 })

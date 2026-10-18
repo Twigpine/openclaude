@@ -43,7 +43,7 @@ describe('package-manager update surfaces', () => {
     async (manager, managerName) => {
       const { slash, passive } = await renderSurfaces(
         manager,
-        '@gitlawb/openclaude',
+        '@twigpine/openclaude',
       )
       const sharedGuidance = `OpenClaude is managed by ${managerName}. Use ${managerName} to update OpenClaude.`
 

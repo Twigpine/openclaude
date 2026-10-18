@@ -1,4 +1,5 @@
 import { expect, test, describe } from 'bun:test'
+import { hasPrintFlag } from './printFlag.js'
 import { isInteractiveSession } from './interactivity.js'
 
 describe('isInteractiveSession', () => {
@@ -75,5 +76,35 @@ describe('isInteractiveSession', () => {
         env: { SSH_TTY: '/dev/pts/0' },
       }),
     ).toBe(false)
+  })
+
+  test('agrees with hasPrintFlag on value-consumed and genuine print argv', () => {
+    // If hasPrintFlag says the argv is not print mode, isInteractiveSession
+    // must not treat it as non-interactive just because a -p/--print token
+    // appears as a value.
+    const rows = [
+      { args: [], print: false },
+      { args: ['-p'], print: true },
+      { args: ['--print'], print: true },
+      { args: ['cc://host', '--print'], print: true },
+      { args: ['--system-prompt', '--print'], print: false },
+      { args: ['--system-prompt', '-p'], print: false },
+      { args: ['--model', '-p'], print: false },
+      { args: ['--permission-mode', '--print'], print: false },
+      { args: ['--add-dir', '--print'], print: false },
+      { args: ['--resume', '--print'], print: true },
+      { args: ['--debug', '-p'], print: true },
+    ]
+
+    for (const { args, print } of rows) {
+      expect(hasPrintFlag(args)).toBe(print)
+      expect(
+        isInteractiveSession({
+          stdoutIsTTY: true,
+          args,
+          env: { SSH_TTY: '/dev/pts/0' },
+        }),
+      ).toBe(!print)
+    }
   })
 })

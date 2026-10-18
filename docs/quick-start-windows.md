@@ -18,8 +18,22 @@ npm --version
 ## 2. Install OpenClaude
 
 ```powershell
-npm install -g @gitlawb/openclaude@latest
+npm install -g @twigpine/openclaude@latest
 ```
+
+Upgrading from `@gitlawb/openclaude`? The package moved to the `@twigpine`
+scope and the old one is no longer updated. npm will not install one over the
+other because both provide the `openclaude` command, so remove the old package
+first:
+
+```powershell
+npm uninstall -g @gitlawb/openclaude
+npm install -g @twigpine/openclaude@latest
+```
+
+If you set up the optional PowerShell aliases, your `$PROFILE` still loads them
+from the old package folder and will show an error in every new window. See
+[Upgrading from `@gitlawb/openclaude`](windows-aliases-and-launchers.md#upgrading-from-gitlawbopenclaude).
 
 ## 3. Pick One Provider
 
@@ -173,13 +187,13 @@ Check the basics:
 ## 6. Updating OpenClaude
 
 ```powershell
-npm install -g @gitlawb/openclaude@latest
+npm install -g @twigpine/openclaude@latest
 ```
 
 ## 7. Uninstalling OpenClaude
 
 ```powershell
-npm uninstall -g @gitlawb/openclaude
+npm uninstall -g @twigpine/openclaude
 ```
 
 

@@ -1,0 +1,290 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro'
+import Terminal from '../components/Terminal.astro'
+import { SITE } from '../data/site'
+import { heroes, buddyCommands, rarities, statNames } from '../data/buddy'
+
+const title = 'buddy — pixel-art hero companions for your terminal | openclaude'
+const description =
+  'Hatch a truecolor pixel-art hero who lives in your openclaude prompt and fires an arrow, energy wave, or fireball every time you press Enter. Seven heroes, rarity rolls, and zero effect on your tokens.'
+
+const jsonLd = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'WebPage',
+    name: 'openclaude buddy — pixel-art hero companions',
+    url: `${SITE.url}/buddy/`,
+    description,
+    isPartOf: { '@type': 'WebSite', name: SITE.name, url: SITE.url },
+  },
+  {
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement: [
+      { '@type': 'ListItem', position: 1, name: 'openclaude', item: SITE.url },
+      { '@type': 'ListItem', position: 2, name: 'buddy', item: `${SITE.url}/buddy/` },
+    ],
+  },
+]
+---
+
+<BaseLayout title={title} description={description} ogImage="/og/buddy.png" jsonLd={jsonLd}>
+  <section class="hero grid-bg" aria-labelledby="buddy-heading">
+    <div class="container hero-inner">
+      <p class="pill"><span class="dot" aria-hidden="true"></span>ships with every install · pure fun · zero tokens</p>
+      <h1 id="buddy-heading" class="text-hero">meet your buddy.</h1>
+      <p class="hero-sub">
+        a truecolor pixel-art hero who stands guard beside your prompt — and fires an
+        arrow, an energy wave, or a fireball every time you press enter. really.
+      </p>
+      <div class="showcase" role="img" aria-label="Robin Hood buddy firing an arrow toward the prompt">
+        <img src="/buddy/robinhood-action.svg" alt="" width="460" height="160" loading="eager" />
+      </div>
+      <p class="hero-foot">type <code>/buddy</code> in any openclaude session to hatch yours.</p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="heroes-heading">
+    <div class="container">
+      <div class="section-head">
+        <p class="eyebrow">// the heroes</p>
+        <h2 id="heroes-heading">seven forms. seven signature attacks.</h2>
+        <p class="lede">
+          every buddy can take any form with <code>/buddy set</code>. each one has its own
+          enter animation, drawn frame-by-frame in the footer while your message goes out.
+        </p>
+      </div>
+      <div class="hero-grid">
+        {heroes.map(h => (
+          <article class="hero-card" style={`--hero-accent: ${h.accent}`}>
+            <div class="sprite">
+              <img src={`/buddy/${h.id}.svg`} alt={`${h.name} pixel-art sprite`} width="110" height="80" loading="lazy" />
+            </div>
+            <h3>{h.name}</h3>
+            <p class="attack"><span class="attack-name">{h.attack}</span> — {h.attackDetail}</p>
+            <p class="flavor">“{h.flavor}.”</p>
+            <code class="set-cmd">/buddy set {h.id}</code>
+          </article>
+        ))}
+        <article class="hero-card hero-card-mystery">
+          <div class="sprite mystery" aria-hidden="true">?</div>
+          <h3>your roll</h3>
+          <p class="attack"><span class="attack-name">the rolled form</span> — every buddy hatches as one of the seven, rolled fair from your user id.</p>
+          <p class="flavor">“which one will you get?”</p>
+          <code class="set-cmd">/buddy set random</code>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section-tint" aria-labelledby="hatch-heading">
+    <div class="container">
+      <div class="section-head">
+        <p class="eyebrow">// how it works</p>
+        <h2 id="hatch-heading">hatched once, yours forever.</h2>
+      </div>
+      <div class="hatch-grid">
+        <Terminal>
+          <span class="ln"><span class="t-prompt">&gt;</span> /buddy</span>
+          <span class="ln">&nbsp;</span>
+          <span class="ln"><span class="t-ok">●</span> an egg wobbles… and hatches!</span>
+          <span class="ln">&nbsp;</span>
+          <span class="ln">Novaspark is your <span class="t-warn">Rare</span> robinhood.</span>
+          <span class="ln t-dim">DEBUGGING ▮▮▮▮▮▮▮░░░ · PATIENCE ▮▮▮░░░░░░░ · CHAOS ▮▮▮▮▮▮▮▮▮░</span>
+          <span class="ln t-dim">Submit any message to see the arrow fly.</span>
+          <span class="ln cursor">&nbsp;</span>
+        </Terminal>
+        <div class="hatch-facts">
+          <ul>
+            <li>
+              <strong>a fair roll.</strong> rarity, stats, and looks are rolled once from your
+              user id — {rarities.map(r => `${r.name} ${r.weight}`).join(', ')}. there's a 1%
+              shiny chance, and no, you can't edit the config file to fake a legendary.
+            </li>
+            <li>
+              <strong>five stats.</strong> every companion rolls {statNames.join(', ').toLowerCase()} —
+              purely cosmetic, deeply important.
+            </li>
+            <li>
+              <strong>a generated name.</strong> names like Bytebean and Novaspark, plus one of
+              five personalities. rename anytime with <code>/buddy name</code>.
+            </li>
+            <li>
+              <strong>zero overhead.</strong> the buddy is pure terminal rendering — it never
+              touches your context window, tokens, or requests.
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="commands-heading">
+    <div class="container">
+      <div class="section-head">
+        <p class="eyebrow">// commands</p>
+        <h2 id="commands-heading">the whole api is one slash command.</h2>
+      </div>
+      <table class="cmd-table">
+        <thead>
+          <tr><th scope="col">command</th><th scope="col">what it does</th></tr>
+        </thead>
+        <tbody>
+          {buddyCommands.map(c => (
+            <tr>
+              <td><code>{c.cmd}</code></td>
+              <td>{c.desc}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p class="text-body-dim table-foot">
+        pixel art needs a truecolor-capable terminal; on low-color terminals the buddy
+        gracefully falls back to line-art sprites. muting hides everything instantly.
+      </p>
+    </div>
+  </section>
+
+  <section class="section section-tint" aria-labelledby="get-heading">
+    <div class="container">
+      <div class="section-head">
+        <p class="eyebrow">// get one</p>
+        <h2 id="get-heading">your prompt is lonely.</h2>
+        <p class="lede">
+          install openclaude, open any repo, and type <code>/buddy</code>.
+          <a href="/docs/installation/"> installation guide →</a>
+        </p>
+      </div>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    padding: calc(var(--nav-h) + clamp(3.5rem, 10vh, 6rem)) 0 clamp(3rem, 8vh, 5rem);
+  }
+  .hero-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 1.4rem;
+  }
+  .hero-sub {
+    max-width: 34rem;
+    margin: 0;
+    color: var(--muted);
+    font-size: clamp(0.9rem, 1.4vw, 1rem);
+    line-height: 1.7;
+  }
+  .hero-foot { margin: 0; color: var(--faint); font-size: 0.78rem; }
+  .hero-foot code { color: var(--accent); }
+  .showcase {
+    margin-top: 0.5rem;
+    padding: 1.25rem 1.5rem;
+    border: 1px solid var(--line);
+    background: var(--background);
+  }
+  .showcase img {
+    display: block;
+    width: min(460px, 80vw);
+    height: auto;
+    image-rendering: pixelated;
+  }
+
+  .hero-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+    gap: 1px;
+    border: 1px solid var(--line);
+    background: var(--line);
+  }
+  .hero-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 1.5rem;
+    background: var(--background);
+  }
+  .sprite {
+    display: flex;
+    justify-content: center;
+    padding: 0.75rem 0 0.5rem;
+  }
+  .sprite img {
+    width: 110px;
+    height: auto;
+    image-rendering: pixelated;
+  }
+  .sprite.mystery {
+    align-items: center;
+    height: 92px;
+    color: var(--faint);
+    font-size: 3rem;
+    font-weight: 700;
+  }
+  .hero-card-mystery { --hero-accent: var(--faint); }
+  .hero-card-mystery h3 { color: var(--muted); }
+  .hero-card h3 {
+    margin: 0;
+    color: var(--hero-accent);
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .attack { margin: 0; color: var(--muted); font-size: 0.82rem; line-height: 1.6; }
+  .attack-name { color: var(--ink); font-weight: 600; }
+  .flavor { margin: 0; color: var(--faint); font-size: 0.78rem; font-style: italic; }
+  .set-cmd {
+    margin-top: auto;
+    padding-top: 0.6rem;
+    color: var(--accent);
+    font-size: 0.78rem;
+  }
+
+  .hatch-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    align-items: start;
+  }
+  @media (min-width: 60rem) {
+    .hatch-grid { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+  }
+  .hatch-facts ul { margin: 0; padding: 0; list-style: none; }
+  .hatch-facts li {
+    padding: 0.9rem 0;
+    border-bottom: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.85rem;
+    line-height: 1.7;
+  }
+  .hatch-facts li:first-child { padding-top: 0; }
+  .hatch-facts strong { color: var(--ink); font-weight: 600; }
+  .hatch-facts code { color: var(--accent); }
+
+  .cmd-table {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  .cmd-table th, .cmd-table td {
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    vertical-align: top;
+  }
+  .cmd-table th {
+    color: var(--faint);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .cmd-table td { color: var(--muted); line-height: 1.6; }
+  .cmd-table td code { color: var(--ink); white-space: nowrap; }
+  .table-foot { margin-top: 1rem; font-size: 0.8rem; }
+
+  .lede a { color: var(--accent); }
+</style>

@@ -153,6 +153,21 @@ export function shortRequestId(toolUseID: string): string {
 }
 
 /**
+ * Build a channel request ID from the complete local owner identity. Tool-use
+ * IDs are only conversation-scoped, so concurrent subagents can legitimately
+ * reuse one without being the same pending permission request.
+ */
+export function channelPermissionRequestId(
+  toolUseID: string,
+  permissionSessionId?: string,
+  agentId?: string,
+): string {
+  return shortRequestId(
+    JSON.stringify([permissionSessionId ?? null, agentId ?? null, toolUseID]),
+  )
+}
+
+/**
  * Truncate tool input to a phone-sized JSON preview. 200 chars is
  * roughly 3 lines on a narrow phone screen. Full input is in the local
  * terminal dialog; the channel gets a summary so Write(5KB-file) doesn't

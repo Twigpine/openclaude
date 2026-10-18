@@ -121,8 +121,13 @@ export default class App extends PureComponent<Props, State> {
   // where startup input appears frozen when data mode is the default.
   stdinMode: 'readable' | 'data' = process.env.OPENCLAUDE_USE_DATA_STDIN === '1' || process.env.OPENCLAUDE_USE_READABLE_STDIN === '0' ? 'data' : 'readable';
   // Timeout durations for incomplete sequences (ms)
-  readonly NORMAL_TIMEOUT = 50; // Short timeout for regular esc sequences
-  readonly PASTE_TIMEOUT = 500; // Longer timeout for paste operations
+  // NORMAL_TIMEOUT must exceed IME composition gaps: Vietnamese Telex/VNI
+  // and CJK IMEs emit multi-byte UTF-8 / CSI-u sequences whose halves can
+  // arrive with inter-chunk pauses. Flushing at 50ms split those sequences
+  // into garbage keys (#2018); 300ms gives composition room while keeping
+  // lone-escape detection acceptable.
+  readonly NORMAL_TIMEOUT = 300;
+  readonly PASTE_TIMEOUT = 1000; // Longer timeout for paste operations
 
   // Terminal query/response dispatch. Responses arrive on stdin (parsed
   // out by parse-keypress) and are routed to pending promise resolvers.

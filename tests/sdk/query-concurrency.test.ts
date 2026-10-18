@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { query } from '../../src/entrypoints/sdk/index.js'
+import { query, queryAsync } from '../../src/entrypoints/sdk/index.js'
 import { getSessionId, getSessionProjectDir, runWithSdkContext } from '../../src/bootstrap/state.js'
+import { init } from '../../src/entrypoints/init.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -8,6 +9,7 @@ import {
 import { randomUUID } from 'crypto'
 import type { SessionId } from '../../src/types/ids.js'
 import { drainQuery, UUID_REGEX } from './helpers/query-test-doubles.js'
+import { MockQueryEngine } from './helpers/mock-engine.js'
 
 // Drain tests trigger init(), which checks auth. Stub it for CI.
 const AUTH_KEY = 'ANTHROPIC_API_KEY'
@@ -111,6 +113,88 @@ describe('SEC-1: env override isolation', () => {
 })
 
 describe('CON-1: CWD and session isolation between concurrent queries', () => {
+  test('queryAsync keeps eager process-global initialization detached', async () => {
+    const globalId = getSessionId()
+    const sdkSession = '00000000-0000-4000-8000-0000000000aa' as SessionId
+    const memoizedInit = init as typeof init & {
+      cache: { has(key: unknown): boolean; get(key: unknown): Promise<void> }
+    }
+    const originalCache = memoizedInit.cache
+    let observedDuringInit: SessionId | undefined
+    const probeCache = {
+      has: () => true,
+      get: () => {
+        observedDuringInit = getSessionId()
+        return Promise.resolve()
+      },
+      set() {
+        return this
+      },
+      delete() {
+        return true
+      },
+      clear() {},
+    }
+    memoizedInit.cache = probeCache as typeof originalCache
+
+    let created: ReturnType<typeof query> | undefined
+    try {
+      await runWithSdkContext(
+        {
+          sessionId: sdkSession,
+          sessionProjectDir: null,
+          cwd: process.cwd(),
+          originalCwd: process.cwd(),
+        },
+        async () => {
+          created = await queryAsync({
+            prompt: 'init-scope',
+            options: { cwd: process.cwd() },
+          })
+        },
+      )
+
+      expect(observedDuringInit).toBe(globalId)
+      expect(observedDuringInit).not.toBe(sdkSession)
+      expect(getSessionId()).toBe(globalId)
+    } finally {
+      created?.close()
+      memoizedInit.cache = originalCache
+    }
+  })
+
+  test('lazy query iteration keeps each query session scoped to its engine work', async () => {
+    const globalId = getSessionId()
+    let arrivals = 0
+    let release!: () => void
+    const bothStarted = new Promise<void>(resolve => { release = resolve })
+
+    class ContextCapturingEngine extends MockQueryEngine {
+      observedSessionId: SessionId | undefined
+
+      override async *submitMessage(): AsyncGenerator<never, void, unknown> {
+        arrivals += 1
+        if (arrivals === 2) release()
+        await bothStarted
+        this.observedSessionId = getSessionId()
+      }
+    }
+
+    const q1 = query({ prompt: 'context-a', options: { cwd: process.cwd() } })
+    const q2 = query({ prompt: 'context-b', options: { cwd: process.cwd() } })
+    const engine1 = new ContextCapturingEngine()
+    const engine2 = new ContextCapturingEngine()
+    ;(q1 as unknown as { setEngine(engine: MockQueryEngine): void }).setEngine(engine1)
+    ;(q2 as unknown as { setEngine(engine: MockQueryEngine): void }).setEngine(engine2)
+
+    await Promise.all([drainQuery(q1), drainQuery(q2)])
+
+    expect(engine1.observedSessionId).toBe(q1.sessionId)
+    expect(engine2.observedSessionId).toBe(q2.sessionId)
+    expect(engine1.observedSessionId).not.toBe(engine2.observedSessionId)
+    expect(getSessionId()).toBe(globalId)
+  })
+
   test('AsyncLocalStorage context returns query-specific sessionId, not global', () => {
     // Simulate what the SDK query does: set up a context and verify reads
     const globalId = getSessionId()

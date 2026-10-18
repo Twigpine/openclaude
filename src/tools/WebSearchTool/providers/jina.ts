@@ -22,7 +22,7 @@ export const jinaProvider: SearchProvider = {
     url.searchParams.set('q', input.query)
     url.searchParams.set('count', '10')
 
-    const data = await fetchJsonWithWebSearchTimeout(
+    const data = (await fetchJsonWithWebSearchTimeout(
       url.toString(),
       {
         headers: {
@@ -32,14 +32,27 @@ export const jinaProvider: SearchProvider = {
       },
       signal,
       { providerName: 'Jina' },
-    )
+    )) as { data?: unknown; results?: unknown } | undefined
 
-    const hits = (data.data ?? data.results ?? []).map((r: any) => ({
-      title: r.title ?? '',
-      url: r.url ?? '',
-      description: r.description ?? r.snippet ?? r.content,
-      source: r.url ? safeHostname(r.url) : undefined,
-    }))
+    const rawResults = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.results) ? data.results : [])
+    const hits = (rawResults as unknown[]).map((r) => {
+      const rec = (r ?? {}) as Record<string, unknown>
+      const url = typeof rec.url === 'string' ? rec.url : ''
+      const desc =
+        typeof rec.description === 'string'
+          ? rec.description
+          : typeof rec.snippet === 'string'
+            ? rec.snippet
+            : typeof rec.content === 'string'
+              ? rec.content
+              : undefined
+      return {
+        title: typeof rec.title === 'string' ? rec.title : '',
+        url,
+        description: desc,
+        source: url ? safeHostname(url) : undefined,
+      }
+    })
 
     return {
       hits: applyDomainFilters(hits, input),

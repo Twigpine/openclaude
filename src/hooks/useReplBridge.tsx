@@ -20,6 +20,7 @@ import type { Message } from '../types/message.js';
 import { getCwd } from '../utils/cwd.js';
 import { logForDebugging } from '../utils/debug.js';
 import { errorMessage } from '../utils/errors.js';
+import { requestBridgeInterrupt } from '../utils/replInterruption.js';
 import { enqueue } from '../utils/messageQueueManager.js';
 import { buildSystemInitMessage } from '../utils/messages/systemInit.js';
 import { createBridgeStatusMessage, createSystemMessage } from '../utils/messages.js';
@@ -393,7 +394,7 @@ export function useReplBridge(messages: Message[], setMessages: (action: React.S
             onInboundMessage: handleInboundMessage,
             onPermissionResponse: handlePermissionResponse,
             onInterrupt() {
-              abortControllerRef.current?.abort('interrupt');
+              requestBridgeInterrupt(abortControllerRef);
             },
             onSetModel(model) {
               const resolved = model === 'default' ? null : model ?? null;

@@ -4,7 +4,15 @@ import { closeSync, openSync } from 'node:fs'
 import { open, unlink } from 'node:fs/promises'
 import { basename } from 'node:path'
 import treeKill from 'tree-kill'
-import { argsBeforeDelimiter } from '../utils/cliArgs.js'
+import {
+  argsBeforeDelimiter,
+  parseModelFlagValue,
+} from '../utils/cliArgs.js'
+import {
+  argsBeforeModelOwningSubcommand,
+  hasPrintFlag,
+  parseRootOptionValue,
+} from '../utils/printFlag.js'
 import { isProcessRunning } from '../utils/genericProcessUtils.js'
 import {
   assertBackgroundSessionNameAvailable,
@@ -23,6 +31,13 @@ import {
   type BackgroundSessionProcessIdentity,
   type BackgroundSessionProcessIdentityOptions,
 } from './bgRegistry.js'
+import {
+  backgroundProcessMarkerToken,
+  BACKGROUND_SESSION_ID_ENV,
+  BACKGROUND_SESSION_LAUNCHER_PID_ENV,
+  generateBackgroundProcessMarker,
+  stripBackgroundProcessMarkerArgs,
+} from './bgRouting.js'
 
 export type ParsedBackgroundInvocation = {
   name?: string
@@ -50,6 +65,9 @@ export type BuildBackgroundChildProcessConfigInput = {
   processEnv: NodeJS.ProcessEnv
   sessionName?: string
   stdoutLogPath: string
+  backgroundSessionId: string
+  processMarker: string
+  launcherPid?: number
 }
 
 type PrResumeSelector = true | string
@@ -61,6 +79,8 @@ export type BuildBackgroundSessionLaunchDeps = {
 }
 
 const HEAP_RELAUNCHED_ENV = 'OPENCLAUDE_HEAP_RELAUNCHED'
+const HEAP_SIZE_ENV = 'OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_MB'
+const DEFAULT_HEAP_SIZE_MB = 8192
 const DEFAULT_TERM_GRACE_MS = 2_000
 const DEFAULT_KILL_GRACE_MS = 2_000
 const DEFAULT_KILL_POLL_INTERVAL_MS = 100
@@ -165,13 +185,71 @@ const SPACE_OPTIONAL_VALUE_FLAGS = new Set([
   '-r',
 ])
 
-function safeNodeExecArgvForBackground(execArgv: string[]): string[] {
-  return execArgv.filter(
-    arg =>
-      arg === '--expose-gc' ||
-      arg.startsWith('--max-old-space-size') ||
-      arg.startsWith('--heapsnapshot-near-heap-limit'),
+function isNodeExecutable(execPath: string): boolean {
+  return /^node(?:\.exe)?$/i.test(basename(execPath))
+}
+
+function hasNodeFlag(args: string[], flag: string): boolean {
+  return args.some(arg => arg === flag || arg.startsWith(`${flag}=`))
+}
+
+function hasHeapLimitFlag(args: string[]): boolean {
+  return (
+    hasNodeFlag(args, '--max-old-space-size') ||
+    hasNodeFlag(args, '--max-old-space-size-percentage')
   )
+}
+
+function keepBackgroundNodeExecArg(arg: string): boolean {
+  return (
+    arg === '--expose-gc' ||
+    arg.startsWith('--max-old-space-size') ||
+    arg.startsWith('--heapsnapshot-near-heap-limit')
+  )
+}
+
+function isValueTakingHeapExecArg(arg: string): boolean {
+  return (
+    arg === '--max-old-space-size' ||
+    arg === '--max-old-space-size-percentage' ||
+    arg === '--heapsnapshot-near-heap-limit'
+  )
+}
+
+function safeNodeExecArgvForBackground(
+  execPath: string,
+  execArgv: string[],
+  processEnv: NodeJS.ProcessEnv,
+): string[] {
+  const safeArgs: string[] = []
+  for (let i = 0; i < execArgv.length; i++) {
+    const arg = execArgv[i]
+    if (!keepBackgroundNodeExecArg(arg)) continue
+    safeArgs.push(arg)
+    const next = execArgv[i + 1]
+    if (isValueTakingHeapExecArg(arg) && next && !next.startsWith('-')) {
+      i += 1
+      safeArgs.push(next)
+    }
+  }
+  if (!isNodeExecutable(execPath)) return safeArgs
+
+  const nodeOptions = (processEnv.NODE_OPTIONS ?? '')
+    .split(/\s+/)
+    .filter(Boolean)
+  const effectiveArgs = [...safeArgs, ...nodeOptions]
+  if (!hasHeapLimitFlag(effectiveArgs)) {
+    const configuredHeap = Number.parseInt(processEnv[HEAP_SIZE_ENV] ?? '', 10)
+    const heapSize =
+      Number.isSafeInteger(configuredHeap) && configuredHeap > 0
+        ? configuredHeap
+        : DEFAULT_HEAP_SIZE_MB
+    safeArgs.push(`--max-old-space-size=${heapSize}`)
+  }
+  if (!hasNodeFlag(effectiveArgs, '--expose-gc')) {
+    safeArgs.push('--expose-gc')
+  }
+  return safeArgs
 }
 
 export function buildBackgroundChildProcessConfig(
@@ -185,15 +263,28 @@ export function buildBackgroundChildProcessConfig(
     ...(input.sessionName
       ? { CLAUDE_CODE_SESSION_NAME: input.sessionName }
       : {}),
+    [BACKGROUND_SESSION_ID_ENV]: input.backgroundSessionId,
+    [BACKGROUND_SESSION_LAUNCHER_PID_ENV]: String(
+      input.launcherPid ?? process.pid,
+    ),
   }
-  delete env[HEAP_RELAUNCHED_ENV]
+  // Keep the registered detached PID stable under every runtime. The installed
+  // launcher otherwise relaunches itself before finalizer ownership is checked.
+  // Node-only heap flags are still supplied by safeNodeExecArgvForBackground.
+  env[HEAP_RELAUNCHED_ENV] = '1'
+  const childArgs = stripBackgroundProcessMarkerArgs(input.childArgs)
 
   return {
     command: input.execPath,
     args: [
-      ...safeNodeExecArgvForBackground(input.execArgv),
+      ...safeNodeExecArgvForBackground(
+        input.execPath,
+        input.execArgv,
+        input.processEnv,
+      ),
       input.entrypoint,
-      ...input.childArgs,
+      backgroundProcessMarkerToken(input.processMarker),
+      ...childArgs,
     ],
     env,
   }
@@ -285,9 +376,26 @@ function findSessionName(args: string[]): string | undefined {
   return findFlagValue(args, '--name') ?? findFlagValue(args, '-n')
 }
 
+/**
+ * Background session metadata must record the same root `--model` that CLI
+ * startup applies. Nested `aimlapi topup` / `auto-mode critique` flags are not
+ * the session model.
+ */
+export function resolveBackgroundSessionModel(
+  childArgs: readonly string[],
+): string | undefined {
+  return parseModelFlagValue(argsBeforeModelOwningSubcommand(childArgs))
+}
+
+/** Keep registry metadata aligned with the provider selected by CLI startup. */
+export function resolveBackgroundSessionProvider(
+  childArgs: readonly string[],
+): string | undefined {
+  return parseRootOptionValue(childArgs, '--provider')
+}
+
 function hasPrintMode(args: string[]): boolean {
-  const searchable = argsBeforeDelimiter(args)
-  return searchable.includes('--print') || searchable.includes('-p')
+  return hasPrintFlag(args)
 }
 
 function insertBeforePrompt(args: string[], values: string[]): string[] {
@@ -383,7 +491,7 @@ export async function buildBackgroundSessionLaunch(
 export function parseBackgroundInvocation(
   args: string[],
 ): ParsedBackgroundInvocation {
-  let childArgs = stripBackgroundFlag(args)
+  let childArgs = stripBackgroundProcessMarkerArgs(stripBackgroundFlag(args))
   const name = findSessionName(childArgs)?.trim() || undefined
   const promptIndex = findPromptIndex(childArgs)
   const prompt = promptIndex === -1 ? undefined : childArgs[promptIndex]
@@ -431,6 +539,21 @@ function formatCommand(command: string[]): string {
   return command
     .map(part => (/\s/.test(part) ? JSON.stringify(part) : part))
     .join(' ')
+}
+
+export function buildBackgroundSessionDisplayCommand(
+  command: string[],
+  processMarker: string,
+): string[] {
+  const markerToken = backgroundProcessMarkerToken(processMarker)
+  const delimiterIndex = command.indexOf('--')
+  const optionEnd = delimiterIndex === -1 ? command.length : delimiterIndex
+  const markerIndex = command.findIndex(
+    (arg, index) => index < optionEnd && arg === markerToken,
+  )
+  return markerIndex === -1
+    ? [...command]
+    : [...command.slice(0, markerIndex), ...command.slice(markerIndex + 1)]
 }
 
 function printSessionTable(
@@ -790,8 +913,12 @@ function unverifiedProcessError(
   session: BackgroundSession,
   reason: string,
 ): Error {
+  const action =
+    session.processMarker === undefined
+      ? `This older background session could not be verified safely. Restart it to use stronger process identity, or terminate PID ${session.pid} manually after confirming ownership.`
+      : 'Re-run `openclaude ps` and retry after confirming the session identity.'
   return new Error(
-    `OpenClaude refused to signal an unverified process for background session ${session.id} (PID ${session.pid}): ${reason}. Re-run \`openclaude ps\` and retry after confirming the session identity.`,
+    `OpenClaude refused to signal an unverified process for background session ${session.id} (PID ${session.pid}): ${reason}. ${action}`,
   )
 }
 
@@ -872,14 +999,52 @@ export async function killBackgroundSession(
     (async (selected: BackgroundSession) =>
       await markBackgroundSessionKilled(selected.id))
 
-  if (isTerminalBackgroundSession(session)) return await markKilled(session)
+  if (session.status !== 'stale' && isTerminalBackgroundSession(session)) {
+    return await markKilled(session)
+  }
 
   const identity = verifySelectedBackgroundSessionIdentity(session, options)
-  if (authorizeBackgroundSessionSignal(session, identity) === 'matches') {
+  const authorization = authorizeBackgroundSessionSignal(session, identity)
+  if (
+    authorization === 'matches' &&
+    session.status === 'stale' &&
+    session.processMarker === undefined
+  ) {
+    throw unverifiedProcessError(
+      session,
+      'this older session was already stale, so its PID ownership cannot be re-established safely',
+    )
+  }
+  if (authorization === 'matches') {
     await terminateBackgroundSessionProcessTree(session, options)
   }
 
   return await markKilled(session)
+}
+
+type ConfirmBackgroundSessionLaunchOptions = {
+  isProcessAlive?: (pid: number) => boolean
+  refreshStatuses?: () => Promise<BackgroundSession[]>
+  resolveSession?: (id: string) => Promise<BackgroundSession>
+}
+
+export async function confirmBackgroundSessionLaunch(
+  session: BackgroundSession,
+  options: ConfirmBackgroundSessionLaunchOptions = {},
+): Promise<BackgroundSession> {
+  if ((options.isProcessAlive ?? isProcessRunning)(session.pid)) return session
+
+  await (options.refreshStatuses ?? refreshBackgroundSessionStatuses)()
+  const resolved = await (
+    options.resolveSession ?? resolveBackgroundSession
+  )(session.id)
+  if (resolved.status === 'stale') {
+    throw new Error(
+      `Background session ${session.id} exited before finalization was installed. ` +
+        `Logs were retained at ${session.stdoutLogPath} and ${session.stderrLogPath}.`,
+    )
+  }
+  return resolved
 }
 
 export async function psHandler(_args: string[]): Promise<void> {
@@ -931,6 +1096,7 @@ export async function attachHandler(
 
 export async function killHandler(
   args: string[] | string | undefined,
+  options: { retentionSettingsReady?: boolean } = {},
 ): Promise<void> {
   const target = normalizeArgs(args)[0]
   if (!target) fail('Usage: openclaude kill <id-or-name>')
@@ -942,6 +1108,19 @@ export async function killHandler(
       `Failed to kill background session ${session.id}: ${errorMessage(error)}`,
     )
   })
+  if (options.retentionSettingsReady !== false) {
+    try {
+      const { runBackgroundSessionRetention } = await import(
+        '../utils/cleanup.js'
+      )
+      await runBackgroundSessionRetention({
+        trigger: 'explicit-kill',
+        sessionId: killed.id,
+      })
+    } catch {
+      // A retention failure must not replace the successful kill outcome.
+    }
+  }
   console.log(`Killed background session ${killed.id}.`)
 }
 
@@ -958,6 +1137,7 @@ export async function handleBgFlag(args: string[]): Promise<void> {
   }
 
   const id = backgroundSessionId()
+  const processMarker = generateBackgroundProcessMarker()
   const { childArgs, sessionId } = await buildBackgroundSessionLaunch(
     parsed.childArgs,
     randomUUID(),
@@ -978,6 +1158,9 @@ export async function handleBgFlag(args: string[]): Promise<void> {
     processEnv: process.env,
     sessionName: parsed.name,
     stdoutLogPath: logPaths.stdoutLogPath,
+    backgroundSessionId: id,
+    processMarker,
+    launcherPid: process.pid,
   })
 
   let stdoutFd: number | undefined
@@ -1023,15 +1206,16 @@ export async function handleBgFlag(args: string[]): Promise<void> {
   }
 
   const command = [childConfig.command, ...childConfig.args]
-  const session = await createBackgroundSession({
+  let session = await createBackgroundSession({
     id,
     name: parsed.name,
     pid: child.pid,
     cwd: process.cwd(),
     command,
-    provider: findFlagValue(childArgs, '--provider'),
-    model: findFlagValue(childArgs, '--model'),
+    provider: resolveBackgroundSessionProvider(childArgs),
+    model: resolveBackgroundSessionModel(childArgs),
     sessionId,
+    processMarker,
     stdoutLogPath: logPaths.stdoutLogPath,
     stderrLogPath: logPaths.stderrLogPath,
     logFilesPrecreated: true,
@@ -1041,12 +1225,25 @@ export async function handleBgFlag(args: string[]): Promise<void> {
     fail(errorMessage(error))
   })
 
-  console.log(`Started background session ${session.id}.`)
+  session = await confirmBackgroundSessionLaunch(session).catch(error => {
+    fail(errorMessage(error))
+  })
+
+  console.log(
+    isTerminalBackgroundSession(session)
+      ? `Background session ${session.id} finished with status ${session.status}.`
+      : `Started background session ${session.id}.`,
+  )
   if (session.name) console.log(`Name: ${session.name}`)
   console.log(`PID: ${session.pid}`)
   console.log(`Logs: ${session.stdoutLogPath}`)
   console.log(`Follow: openclaude logs ${session.id} -f`)
   console.log(
-    `Command: ${formatCommand([basename(childConfig.command), ...childConfig.args])}`,
+    `Command: ${formatCommand(
+      buildBackgroundSessionDisplayCommand([
+        basename(childConfig.command),
+        ...childConfig.args,
+      ], processMarker),
+    )}`,
   )
 }

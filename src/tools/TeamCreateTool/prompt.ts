@@ -13,13 +13,11 @@ When in doubt about whether a task warrants a team, prefer spawning a team.
 
 ## Choosing Agent Types for Teammates
 
-When spawning teammates via the Agent tool, choose the \`subagent_type\` based on what tools the agent needs for its task. Each agent type has a different set of available tools — match the agent to the work:
+When spawning teammates via the Agent tool (with \`team_name\` and \`name\`), follow these rules:
 
-- **Read-only agents** (e.g., Explore, Plan) cannot edit or write files. Only assign them research, search, or planning tasks. Never assign them implementation work.
-- **Full-capability agents** (e.g., general-purpose) have access to all tools including file editing, writing, and bash. Use these for tasks that require making changes.
-- **Custom agents** defined in \`.openclaude/agents/\` may have their own tool restrictions. Check their descriptions to understand what they can and cannot do.
-
-Always review the agent type descriptions and their available tools listed in the Agent tool prompt before selecting a \`subagent_type\` for a teammate.
+- **Omit \`subagent_type\`** to spawn a default full-capability teammate. This is the standard choice for tasks that require making changes — editing files, running bash, writing code.
+- **Set a custom \`subagent_type\`** only when you have a custom agent defined in \`.openclaude/agents/\` that fits the task. Check the agent's description and tool restrictions before selecting it.
+- **Do NOT use built-in types** (e.g., \`Explore\`, \`Plan\`, \`code-reviewer\`, \`general-purpose\`) as \`subagent_type\` on a teammate spawn. Built-in types are rejected with an error on the teammate path. To use Explore, Plan, or code-reviewer, call the Agent tool without \`name\` and \`team_name\` so it runs as a standard subagent, not a teammate.
 
 Create a new team to coordinate multiple agents working on a project. Teams have a 1:1 correspondence with task lists (Team = TaskList).
 

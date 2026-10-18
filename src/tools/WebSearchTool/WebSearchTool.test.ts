@@ -18,6 +18,8 @@ describe('buildEmptyAdapterResultHint', () => {
   test('includes the actionable env-var list so the user can pick one', () => {
     const msg = buildEmptyAdapterResultHint('moonshot', 'duckduckgo')
     for (const key of [
+      'OLLAMA_BASE_URL',
+      'OLLAMA_API_KEY',
       'FIRECRAWL_API_KEY',
       'TAVILY_API_KEY',
       'EXA_API_KEY',

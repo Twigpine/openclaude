@@ -83,6 +83,19 @@ describe('Claude stream abort classification wiring', () => {
     )
   })
 
+  test('does not infer user intent from an external AbortError while root is active', () => {
+    const activeRoot = new AbortController()
+    const externalAbort = new APIUserAbortError()
+
+    expect(activeRoot.signal.aborted).toBe(false)
+    expect(shouldCreateUserInterruptionMessage(activeRoot.signal.reason)).toBe(
+      false,
+    )
+    expect(
+      getClaudeStreamingAbortLogMessage(activeRoot.signal, externalAbort),
+    ).toBe('Streaming aborted by parent signal: Request was aborted.')
+  })
+
   test('labels expected side-task retry aborts without reclassifying user aborts', () => {
     const expectedAbort = new AbortController()
     expectedAbort.abort('agent-summary-superseded')

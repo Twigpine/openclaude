@@ -48,3 +48,10 @@ test('getHardcodedTeammateModelFallback is provider-aware (Bedrock gets the Opus
     'us.anthropic.claude-opus-4-8-v1',
   )
 })
+
+test('getHardcodedTeammateModelFallback returns the Codex default (GPT-5.6 Sol) for codex', async () => {
+  const { getHardcodedTeammateModelFallback } =
+    await importFreshTeammateModelModule('codex')
+
+  expect(getHardcodedTeammateModelFallback()).toBe('gpt-5.6-sol')
+})

@@ -348,7 +348,9 @@ export async function installPluginOp(
         if (pluginEntry) {
           foundPlugin = pluginEntry
           foundMarketplace = mktName
-          marketplaceInstallLocation = mktConfig.installLocation
+          const refreshed = await loadKnownMarketplacesConfig()
+          marketplaceInstallLocation =
+            refreshed[mktName]?.installLocation ?? mktConfig.installLocation
           break
         }
       } catch (error) {

@@ -45,6 +45,7 @@ import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
 import { isEnvTruthy } from './envUtils.js'
 import { createUserMessage } from './messages.js'
+import { isAnthropicBillingAttributionBlock } from './anthropicAttribution.js'
 import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
@@ -94,11 +95,20 @@ const SWARM_FIELDS_BY_TOOL: Record<string, string[]> = {
  * Filter swarm-related fields from a tool's input schema.
  * Called at runtime when isAgentSwarmsEnabled() returns false.
  */
-function filterSwarmFieldsFromSchema(
+export function filterSwarmFieldsFromSchema(
   toolName: string,
   schema: Anthropic.Tool.InputSchema,
 ): Anthropic.Tool.InputSchema {
-  const fieldsToRemove = SWARM_FIELDS_BY_TOOL[toolName]
+  // Guard with Object.hasOwn: a bare `SWARM_FIELDS_BY_TOOL[toolName]` lookup
+  // resolves inherited Object.prototype members for names like `constructor` or
+  // `hasOwnProperty` to their functions. Those are truthy with `.length === 1`,
+  // so the guard below is bypassed and the `for...of` on line ~111 throws
+  // "is not iterable", breaking schema construction for the whole request.
+  // Mirrors the own-key guard already used for provider-supplied tool names in
+  // services/api/toolArgumentNormalization.ts.
+  const fieldsToRemove = Object.hasOwn(SWARM_FIELDS_BY_TOOL, toolName)
+    ? SWARM_FIELDS_BY_TOOL[toolName]
+    : undefined
   if (!fieldsToRemove || fieldsToRemove.length === 0) {
     return schema
   }
@@ -328,8 +338,16 @@ function logStripOnce(stripped: string[]): void {
  * Log stats about first block for analyzing prefix matching config
  * (see https://console.statsig.com/4aF3Ewatb6xPVpCwxb5nA3/dynamic_configs/claude_cli_system_prompt_prefixes)
  */
+export function getSystemPromptTelemetryBlock(
+  systemPrompt: SystemPrompt,
+): SystemPromptBlock | undefined {
+  return splitSysPromptPrefix(systemPrompt).find(
+    block => !isAnthropicBillingAttributionBlock(block.text),
+  )
+}
+
 export function logAPIPrefix(systemPrompt: SystemPrompt): void {
-  const [firstSyspromptBlock] = splitSysPromptPrefix(systemPrompt)
+  const firstSyspromptBlock = getSystemPromptTelemetryBlock(systemPrompt)
   const firstSystemPrompt = firstSyspromptBlock?.text
   logEvent('tengu_sysprompt_block', {
     snippet: firstSystemPrompt?.slice(
@@ -386,7 +404,7 @@ export function splitSysPromptPrefix(
     for (const prompt of systemPrompt) {
       if (!prompt) continue
       if (prompt === SYSTEM_PROMPT_DYNAMIC_BOUNDARY) continue // Skip boundary
-      if (prompt.startsWith('x-anthropic-billing-header')) {
+      if (isAnthropicBillingAttributionBlock(prompt)) {
         attributionHeader = prompt
       } else if (CLI_SYSPROMPT_PREFIXES.has(prompt)) {
         systemPromptPrefix = prompt
@@ -423,7 +441,7 @@ export function splitSysPromptPrefix(
         const block = systemPrompt[i]
         if (!block || block === SYSTEM_PROMPT_DYNAMIC_BOUNDARY) continue
 
-        if (block.startsWith('x-anthropic-billing-header')) {
+        if (isAnthropicBillingAttributionBlock(block)) {
           attributionHeader = block
         } else if (CLI_SYSPROMPT_PREFIXES.has(block)) {
           systemPromptPrefix = block
@@ -465,7 +483,7 @@ export function splitSysPromptPrefix(
   for (const block of systemPrompt) {
     if (!block) continue
 
-    if (block.startsWith('x-anthropic-billing-header')) {
+    if (isAnthropicBillingAttributionBlock(block)) {
       attributionHeader = block
     } else if (CLI_SYSPROMPT_PREFIXES.has(block)) {
       systemPromptPrefix = block

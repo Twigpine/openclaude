@@ -22,7 +22,7 @@ const FALLBACK_PRIORITY: GlobalPackageManager[] = ['npm', 'bun', 'pnpm', 'yarn']
 
 /**
  * Build the argv (after the binary name) to globally install `spec`
- * (e.g. "@gitlawb/openclaude@latest") with the given package manager.
+ * (e.g. "@twigpine/openclaude@latest") with the given package manager.
  */
 export function getGlobalInstallArgs(
   pm: GlobalPackageManager,

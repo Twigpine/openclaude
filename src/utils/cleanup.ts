@@ -1,6 +1,13 @@
 import * as fs from 'fs/promises'
 import { homedir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
+import {
+  cleanupBackgroundSessionsBefore,
+  reconcileBackgroundSessionTerminalFacts,
+  snapshotBackgroundSessionRecoveryJournal,
+  takeBackgroundSessionRecoveryBatch,
+  type BackgroundSessionRecoveryTarget,
+} from '../cli/bgRegistry.js'
 import { logEvent } from '../services/analytics/index.js'
 import { CACHE_PATHS } from './cachePaths.js'
 import { logForDebugging } from './debug.js'
@@ -15,12 +22,49 @@ import { getDefaultPlansDirectory } from './plans.js'
 import { getSettingsWithAllErrors } from './settings/allErrors.js'
 import {
   getSettings_DEPRECATED,
+  getSettingsWithErrors,
   rawSettingsContainsKey,
 } from './settings/settings.js'
+import { resetSettingsCache } from './settings/settingsCache.js'
 import { TOOL_RESULTS_SUBDIR } from './toolResultStorage.js'
 import { cleanupStaleAgentWorktrees } from './worktree.js'
 
 const DEFAULT_CLEANUP_PERIOD_DAYS = 30
+const BACKGROUND_RECOVERY_INTERVAL_MS = 60 * 1000
+const BACKGROUND_RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
+const BACKGROUND_RECOVERY_ENTRY_LIMIT = 256
+
+export type BackgroundSessionRetentionTrigger =
+  | 'natural-finalization'
+  | 'explicit-kill'
+  | 'periodic-recovery'
+  | 'periodic-retention'
+
+export type BackgroundSessionRetentionResult =
+  | 'ran'
+  | 'partial'
+  | 'failed'
+  | 'skipped'
+  | 'invalid-policy'
+
+type BackgroundSessionRetentionRequest =
+  | {
+      trigger: 'natural-finalization'
+      sessionId: string
+      waitForProcessesToExit: () => Promise<boolean>
+      reloadSettings?: () => boolean
+    }
+  | { trigger: 'explicit-kill'; sessionId: string }
+  | {
+      trigger: 'periodic-recovery'
+      _afterThrottleLockForTesting?: () => Promise<void>
+      _recoveryBatchLimitForTesting?: number
+    }
+  | {
+      trigger: 'periodic-retention'
+      _afterThrottleLockForTesting?: () => Promise<void>
+      _afterJournalSnapshotForTesting?: () => Promise<void>
+    }
 
 function getCutoffDate(): Date {
   const settings = getSettings_DEPRECATED() || {}
@@ -588,8 +632,7 @@ export async function cleanupOldMessageFilesInBackground(): Promise<void> {
   // If settings have validation errors but the user explicitly set cleanupPeriodDays,
   // skip cleanup entirely rather than falling back to the default (30 days).
   // This prevents accidentally deleting files when the user intended a different retention period.
-  const { errors } = getSettingsWithAllErrors()
-  if (errors.length > 0 && rawSettingsContainsKey('cleanupPeriodDays')) {
+  if (cleanupPeriodSettingIsInvalid()) {
     logForDebugging(
       'Skipping cleanup: settings have validation errors but cleanupPeriodDays was explicitly set. Fix settings errors to enable cleanup.',
     )
@@ -598,6 +641,7 @@ export async function cleanupOldMessageFilesInBackground(): Promise<void> {
 
   await cleanupOldMessageFiles()
   await cleanupOldSessionFiles()
+  await runBackgroundSessionRetention({ trigger: 'periodic-retention' })
   await cleanupOldPlanFiles()
   await cleanupOldFileHistoryBackups()
   await cleanupOldSessionEnvDirs()
@@ -611,4 +655,266 @@ export async function cleanupOldMessageFilesInBackground(): Promise<void> {
   if (process.env.USER_TYPE === 'ant') {
     await cleanupNpmCacheForAnthropicPackages()
   }
+}
+
+function readBackgroundRetentionPeriod(
+  options: { fresh?: boolean } = {},
+):
+  | { state: 'valid'; days: number }
+  | { state: 'invalid' } {
+  try {
+    if (options.fresh) resetSettingsCache()
+    const { errors } = getSettingsWithErrors()
+    if (errors.length > 0 && rawSettingsContainsKey('cleanupPeriodDays')) {
+      return { state: 'invalid' }
+    }
+    const days =
+      getSettings_DEPRECATED()?.cleanupPeriodDays ??
+      DEFAULT_CLEANUP_PERIOD_DAYS
+    return Number.isFinite(days) && days >= 0
+      ? { state: 'valid', days }
+      : { state: 'invalid' }
+  } catch {
+    return { state: 'invalid' }
+  }
+}
+
+function logBackgroundReconciliation(
+  reconciliation: Awaited<
+    ReturnType<typeof reconcileBackgroundSessionTerminalFacts>
+  >,
+): void {
+  if (reconciliation.errors > 0) {
+    logForDebugging(
+      `Background session reconciliation: ${reconciliation.sessionsUpdated} sessions, ${reconciliation.errors} errors`,
+    )
+  }
+}
+
+function logBackgroundCleanup(
+  backgroundResult: Awaited<
+    ReturnType<typeof cleanupBackgroundSessionsBefore>
+  >,
+): void {
+  if (
+    backgroundResult.sessionsRemoved > 0 ||
+    backgroundResult.artifactsRemoved > 0 ||
+    backgroundResult.errors > 0
+  ) {
+    logForDebugging(
+      `Background session cleanup: ${backgroundResult.sessionsRemoved} sessions, ${backgroundResult.artifactsRemoved} artifacts, ${backgroundResult.errors} errors`,
+    )
+  }
+}
+
+async function runWithBackgroundRetentionThrottle(
+  markerName: string,
+  intervalMs: number,
+  operation: () => Promise<
+    Exclude<BackgroundSessionRetentionResult, 'skipped'>
+  >,
+  afterLock?: () => Promise<void>,
+): Promise<BackgroundSessionRetentionResult> {
+  const markerPath = join(
+    getClaudeConfigHomeDir(),
+    'bg-sessions',
+    markerName,
+  )
+  const markerIsFresh = async (): Promise<boolean> => {
+    try {
+      return Date.now() - (await fs.stat(markerPath)).mtimeMs < intervalMs
+    } catch {
+      return false
+    }
+  }
+  let locked = false
+  try {
+    if (await markerIsFresh()) return 'skipped'
+    await fs.mkdir(dirname(markerPath), { recursive: true })
+    await lockfile.lock(markerPath, { retries: 0, realpath: false })
+    locked = true
+  } catch {
+    return 'skipped'
+  }
+  try {
+    if (await markerIsFresh()) return 'skipped'
+    await afterLock?.()
+    const outcome = await operation()
+    if (outcome !== 'ran' && outcome !== 'partial') return outcome
+    try {
+      await fs.writeFile(markerPath, new Date().toISOString())
+    } catch (error) {
+      logError(error instanceof Error ? error : new Error(String(error)))
+    }
+    return outcome
+  } catch (error) {
+    logError(error instanceof Error ? error : new Error(String(error)))
+    return 'failed'
+  } finally {
+    if (locked) {
+      await lockfile.unlock(markerPath, { realpath: false }).catch(() => {})
+    }
+  }
+}
+
+export async function runBackgroundSessionRetention(
+  request: BackgroundSessionRetentionRequest,
+): Promise<BackgroundSessionRetentionResult> {
+  let policy = readBackgroundRetentionPeriod()
+  if (policy.state === 'invalid') return 'invalid-policy'
+
+  if (request.trigger === 'natural-finalization') {
+    if (policy.days !== 0) return 'skipped'
+    if (!(await request.waitForProcessesToExit())) return 'skipped'
+    if (request.reloadSettings && !request.reloadSettings()) {
+      return 'invalid-policy'
+    }
+    policy = readBackgroundRetentionPeriod()
+    if (policy.state === 'invalid') return 'invalid-policy'
+    if (policy.days !== 0) return 'skipped'
+  }
+
+  if (
+    request.trigger === 'natural-finalization' ||
+    request.trigger === 'explicit-kill'
+  ) {
+    const reconciliation = await reconcileBackgroundSessionTerminalFacts({
+      sessionIds: [request.sessionId],
+    })
+    logBackgroundReconciliation(reconciliation)
+    if (policy.days === 0) {
+      const cleanup = await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() + 1),
+        { sessionIds: [request.sessionId] },
+      )
+      logBackgroundCleanup(cleanup)
+    }
+    return 'ran'
+  }
+
+  if (request.trigger === 'periodic-recovery') {
+    return await runWithBackgroundRetentionThrottle(
+      '.recovery-pass',
+      BACKGROUND_RECOVERY_INTERVAL_MS,
+      async () => {
+        const currentPolicy = readBackgroundRetentionPeriod({ fresh: true })
+        if (currentPolicy.state === 'invalid') return 'invalid-policy'
+        if (currentPolicy.days !== 0) return 'ran'
+        const batch = await takeBackgroundSessionRecoveryBatch(
+          request._recoveryBatchLimitForTesting ??
+            BACKGROUND_RECOVERY_ENTRY_LIMIT,
+        )
+        const retrySessionIds: string[] = []
+        const retryTerminalFacts: typeof batch.terminalFacts = []
+        for (const id of batch.sessionIds) {
+          // Attribute retryable errors to their ID, so retained entries cannot
+          // hold unrelated work at the front of the bounded journal.
+          const reconciliation =
+            await reconcileBackgroundSessionTerminalFacts({
+              sessionIds: [id],
+            })
+          logBackgroundReconciliation(reconciliation)
+          const cleanup = await cleanupBackgroundSessionsBefore(
+            new Date(Date.now() + 1),
+            {
+              sessionIds: [id],
+              orphanedTerminalFacts: batch.terminalFacts.filter(
+                target => target.id === id,
+              ),
+              onRetry: target => {
+                if (target) retryTerminalFacts.push(target)
+              },
+            },
+          )
+          logBackgroundCleanup(cleanup)
+          if (reconciliation.errors > 0 || cleanup.errors > 0) {
+            retrySessionIds.push(id)
+          }
+        }
+        // Save retries before publishing the cursor that acknowledges this batch.
+        await batch.commit(retrySessionIds, retryTerminalFacts)
+        return retrySessionIds.length > 0 ? 'partial' : 'ran'
+      },
+      request._afterThrottleLockForTesting,
+    )
+  }
+
+  return await runWithBackgroundRetentionThrottle(
+    '.retention-pass',
+    BACKGROUND_RETENTION_SWEEP_INTERVAL_MS,
+    async () => {
+      resetSettingsCache()
+      if (cleanupPeriodSettingIsInvalid()) return 'invalid-policy'
+      const currentPolicy = readBackgroundRetentionPeriod({ fresh: true })
+      if (currentPolicy.state === 'invalid') return 'invalid-policy'
+      const cutoff = new Date(
+        Date.now() - currentPolicy.days * 24 * 60 * 60 * 1000,
+      )
+      const journal = await snapshotBackgroundSessionRecoveryJournal()
+      await request._afterJournalSnapshotForTesting?.()
+      const retryTargets: BackgroundSessionRecoveryTarget[] = []
+      let retryInventoryComplete = true
+      const onRetry = (target?: BackgroundSessionRecoveryTarget) => {
+        if (target) retryTargets.push(target)
+        else retryInventoryComplete = false
+      }
+      const reconciliation = await reconcileBackgroundSessionTerminalFacts({
+        onRetry,
+      })
+      logBackgroundReconciliation(reconciliation)
+      const cleanup = await cleanupBackgroundSessionsBefore(cutoff, {
+        onRetry,
+      })
+      logBackgroundCleanup(cleanup)
+      // A full sweep owns the snapshot only when all its work succeeded.
+      // On partial failure leave it discoverable by a later process.
+      if (reconciliation.errors > 0 || cleanup.errors > 0) {
+        await journal.retry(retryTargets)
+        return retryInventoryComplete ? 'partial' : 'failed'
+      }
+      await journal.commit()
+      return 'ran'
+    },
+    request._afterThrottleLockForTesting,
+  )
+}
+
+function cleanupPeriodSettingIsInvalid(): boolean {
+  try {
+    const { errors } = getSettingsWithAllErrors()
+    return errors.length > 0 && rawSettingsContainsKey('cleanupPeriodDays')
+  } catch {
+    return true
+  }
+}
+
+export async function cleanupBackgroundSessionsInBackground(): Promise<
+  BackgroundSessionRetentionResult
+> {
+  return await runBackgroundSessionRetention({
+    trigger: 'periodic-recovery',
+  })
+}
+
+export async function cleanupBackgroundSessionRetentionInBackground(): Promise<
+  BackgroundSessionRetentionResult
+> {
+  resetSettingsCache()
+  if (cleanupPeriodSettingIsInvalid()) return 'invalid-policy'
+  return await runBackgroundSessionRetention({
+    trigger: 'periodic-retention',
+  })
+}
+
+export async function cleanupBackgroundSessionsAfterFinalization(
+  sessionId: string,
+  waitForProcessesToExit: () => Promise<boolean>,
+  reloadSettings?: () => boolean,
+): Promise<BackgroundSessionRetentionResult> {
+  return await runBackgroundSessionRetention({
+    trigger: 'natural-finalization',
+    sessionId,
+    waitForProcessesToExit,
+    ...(reloadSettings ? { reloadSettings } : {}),
+  })
 }

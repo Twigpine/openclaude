@@ -68,6 +68,8 @@ export const en = {
   'commands.request-size.description':
     'Show estimated request context load and top contributors',
   'commands.resume.description': 'Resume a previous conversation',
+  'commands.sessions.description':
+    'List saved conversations to resume or delete them',
   'commands.review.description': 'Review a pull request',
   'commands.rewind.description':
     'Restore the code and/or conversation to a previous point',

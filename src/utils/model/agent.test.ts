@@ -4,6 +4,8 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 
+const actualProviders = { ...await import('./providers.js') }
+
 const originalSubagentModel = process.env.CLAUDE_CODE_SUBAGENT_MODEL
 const originalOpenAIModel = process.env.OPENAI_MODEL
 const originalDefaultModelEnv = {
@@ -32,11 +34,13 @@ type MockProvider =
   | 'minimax'
   | 'codex'
 
+/** Override provider identity for resolver tests while preserving other provider exports. */
 function mockProvider(
   provider: MockProvider,
   isFirstPartyAnthropicBaseUrl = false,
 ): void {
   mock.module('./providers.js', () => ({
+    ...actualProviders,
     getAPIProvider: () => provider,
     getAPIProviderForStatsig: () => provider,
     isFirstPartyAnthropicBaseUrl: () => isFirstPartyAnthropicBaseUrl,

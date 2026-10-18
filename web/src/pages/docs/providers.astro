@@ -1,19 +1,19 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro'
-import { providers } from '../../data/providers'
+import { providerGroups, providersInGroup, providers } from '../../data/providers'
 
 const toc = [
   { id: 'how-it-works', label: 'how provider setup works' },
-  { id: 'supported-providers', label: 'supported providers' },
+  ...providerGroups.map(g => ({ id: g.id, label: g.label })),
   { id: 'env-setup', label: 'env-var setup' },
 ]
 ---
 
 <DocsLayout
-  title="openclaude providers — OpenAI, Gemini, Ollama & 13+ backends"
-  description="Connect openclaude to any model provider: Anthropic, OpenAI-compatible APIs, OpenRouter, Gemini, GitHub Models, Codex OAuth, Ollama, LM Studio, Bedrock, Vertex, and more."
+  title={`openclaude providers — ${providers.length}+ backends: OpenAI, Gemini, Grok, Ollama & more`}
+  description="Connect openclaude to any model provider: Anthropic, OpenAI, Codex OAuth, xAI Grok, Gemini, DeepSeek, Kimi, GLM, Cloudflare Workers AI, NVIDIA NIM, Ollama, LM Studio, Bedrock, Vertex, and any OpenAI-compatible endpoint."
   heading="model providers"
-  lede="One agent, every backend. Wire a provider once and switch models mid-session."
+  lede={`One agent, every backend — ${providers.length} first-class providers plus any compatible endpoint. Wire one once and switch models mid-session.`}
   toc={toc}
 >
   <h2 id="how-it-works">how provider setup works</h2>
@@ -27,33 +27,43 @@ const toc = [
   <p>
     Switch models any time with <code>/model</code>, or pass
     <code>--provider</code> / <code>--model</code> on the command line — see the
-    <a href="/docs/cli-reference/">CLI reference</a>.
+    <a href="/docs/cli-reference/">CLI reference</a>. If a provider rate-limits you,
+    a <code>providerFallbackChain</code> in settings retries the turn on the next
+    profile automatically.
   </p>
 
-  <h2 id="supported-providers">supported providers</h2>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th scope="col">provider</th>
-          <th scope="col">setup</th>
-          <th scope="col">notes</th>
-        </tr>
-      </thead>
-      <tbody>
-        {providers.map(p => (
-          <tr id={p.id}>
-            <td>{p.name}</td>
-            <td>{p.setup}</td>
-            <td>
-              {p.notes}
-              {p.envVars && <span class="env-list"> uses <code>{p.envVars.join(', ')}</code></span>}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  </div>
+  {providerGroups.map(g => (
+    <>
+      <h2 id={g.id}>{g.label}</h2>
+      <p>{g.blurb}</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">provider</th>
+              <th scope="col">setup</th>
+              <th scope="col">notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {providersInGroup(g.id).map(p => (
+              <tr id={p.id}>
+                <td>
+                  {p.name}
+                  {p.badge && <span class={`badge badge-${p.badge}`}>{p.badge}</span>}
+                </td>
+                <td>{p.setup}</td>
+                <td>
+                  {p.notes}
+                  {p.envVars && <span class="env-list"> uses <code>{p.envVars.join(', ')}</code></span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  ))}
 
   <h2 id="env-setup">env-var setup</h2>
   <p>The fastest OpenAI-compatible setup (works for OpenRouter, DeepSeek, Groq, LM Studio, LiteLLM, and any /v1 server):</p>
@@ -69,3 +79,19 @@ openclaude</code></pre>
     <a href="/docs/configuration/#environment-variables">configuration page</a>.
   </p>
 </DocsLayout>
+
+<style>
+  .badge {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.1rem 0.4rem;
+    border: 1px solid var(--line);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+  .badge-recommended { color: var(--green); border-color: var(--green); }
+  .badge-sponsor { color: var(--accent); border-color: var(--accent); }
+</style>

@@ -3,6 +3,7 @@ import { getIsNonInteractiveSession } from '../../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { CLAUDE_CODE_GUIDE_AGENT } from './built-in/claudeCodeGuideAgent.js'
+import { CODE_REVIEWER_AGENT } from './built-in/codeReviewerAgent.js'
 import { EXPLORE_AGENT } from './built-in/exploreAgent.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
 import { PLAN_AGENT } from './built-in/planAgent.js'
@@ -45,6 +46,7 @@ export function getBuiltInAgents(): AgentDefinition[] {
   const agents: AgentDefinition[] = [
     GENERAL_PURPOSE_AGENT,
     STATUSLINE_SETUP_AGENT,
+    CODE_REVIEWER_AGENT,
   ]
 
   if (areExplorePlanAgentsEnabled()) {
@@ -69,4 +71,18 @@ export function getBuiltInAgents(): AgentDefinition[] {
   }
 
   return agents
+}
+
+const BUILT_IN_AGENT_TYPES = new Set([
+  GENERAL_PURPOSE_AGENT.agentType,
+  STATUSLINE_SETUP_AGENT.agentType,
+  CODE_REVIEWER_AGENT.agentType,
+  EXPLORE_AGENT.agentType,
+  PLAN_AGENT.agentType,
+  CLAUDE_CODE_GUIDE_AGENT.agentType,
+  VERIFICATION_AGENT.agentType
+])
+
+export function isBuiltInAgentType(agentType: string): boolean {
+  return BUILT_IN_AGENT_TYPES.has(agentType)
 }

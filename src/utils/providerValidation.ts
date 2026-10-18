@@ -1,4 +1,5 @@
 import { resolve } from 'node:path'
+import { hasPrintFlag } from './printFlag.js'
 import '../integrations/index.js'
 import {
   ensureIntegrationsLoaded,
@@ -11,11 +12,18 @@ import type {
   VendorDescriptor,
 } from '../integrations/descriptors.js'
 import {
+  getMiniMaxBaseUrlOverride,
+  getMiniMaxBaseUrlValidationError,
   getRouteCredentialEnvVars,
   getRouteCredentialValue,
   getRouteDescriptor,
   getRouteDefaultModel,
+  isCanonicalApiRouteInferenceBaseUrl,
+  isCanonicalApismartInferenceBaseUrl,
+  isCanonicalConcentrateInferenceBaseUrl,
+  isCanonicalCommandcodeInferenceBaseUrl,
   isCloudflareBaseUrl,
+  isLongcatBaseUrl,
   matchHostnameAgainstRouteHosts,
   resolveActiveRouteIdFromEnv,
   resolveRouteIdFromBaseUrl,
@@ -35,6 +43,7 @@ import {
   type GeminiResolvedCredential,
   resolveGeminiCredential,
 } from './geminiAuth.js'
+import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
 import { readXaiCredentialsAsync } from './xaiCredentials.js'
 
 async function defaultHasStoredXaiOAuthCredentials(): Promise<boolean> {
@@ -133,7 +142,18 @@ function hasUsableCredentialEnvValue(
     return false
   }
 
-  if (envVar === 'OPENAI_API_KEYS' || envVar === 'OPENAI_API_KEY') {
+  if (
+    envVar === 'OPENAI_API_KEYS' ||
+    envVar === 'OPENAI_API_KEY' ||
+    envVar === 'AIMLAPI_API_KEY' ||
+    envVar === 'APISMART_API_KEY' ||
+    envVar === 'API_ROUTE_API_KEY' ||
+    envVar === 'CONCENTRATE_API_KEY' ||
+    envVar === 'LLMTR_API_KEY' ||
+    envVar === 'CMD_API_KEY' ||
+    envVar === 'COMMANDCODE_API_KEY' ||
+    envVar === 'COMMAND_CODE_API_KEY'
+  ) {
     return hasUsableOpenAICredential(value)
   }
 
@@ -254,13 +274,22 @@ function getRuntimeValidationTarget(
     return enabledTarget
   }
 
+  // The documented CONCENTRATE_API_KEY-only and API_ROUTE_API_KEY-only setup
+  // is routed before the client applies its default base URL. Select its descriptor
+  // directly so startup validates the dedicated credential, including a noncanonical
+  // dedicated base URL, instead of returning early for an unset OpenAI mode.
+  const activeRouteId = resolveActiveRouteIdFromEnv(env)
+  if (activeRouteId === 'concentrate' || activeRouteId === 'api-route') {
+    return validationTargets.find(target => target.descriptor.id === activeRouteId)
+  }
+
   if (!useOpenAI) {
     return undefined
   }
 
   const request = resolveProviderRequest({
     model: env.OPENAI_MODEL,
-    baseUrl: env.OPENAI_BASE_URL,
+    baseUrl: env.OPENAI_BASE_URL?.trim() || env.OPENAI_API_BASE?.trim(),
     fallbackModel: getRouteDefaultModel('openai'),
   })
 
@@ -270,15 +299,22 @@ function getRuntimeValidationTarget(
       return false
     }
 
-    // The Cloudflare Workers AI route is path-scoped, not just host-scoped:
-    // `api.cloudflare.com` also serves the REST management API. A host-only
-    // match on a non-Workers path (e.g. `.../client/v4/user/tokens/verify`)
-    // would pick the Cloudflare validation target and demand its Workers-AI
-    // auth instead of falling back to generic OpenAI validation. Mirror the
-    // runtime route resolver's boundary here.
+    // Some routes have stricter endpoint boundaries than a host match. Keep
+    // validation aligned with the runtime resolver so a custom endpoint on a
+    // shared host is not forced through a dedicated-credential contract.
     if (
-      target.descriptor.id === 'cloudflare' &&
-      !isCloudflareBaseUrl(request.baseUrl)
+      ((target.descriptor.id === 'cloudflare' &&
+        !isCloudflareBaseUrl(request.baseUrl)) ||
+        (target.descriptor.id === 'longcat' &&
+          !isLongcatBaseUrl(request.baseUrl)) ||
+        (target.descriptor.id === 'apismart' &&
+          !isCanonicalApismartInferenceBaseUrl(request.baseUrl)) ||
+        (target.descriptor.id === 'concentrate' &&
+          !isCanonicalConcentrateInferenceBaseUrl(request.baseUrl)) ||
+        (target.descriptor.id === 'api-route' &&
+          !isCanonicalApiRouteInferenceBaseUrl(request.baseUrl)) ||
+        (target.descriptor.id === 'commandcode' &&
+          !isCanonicalCommandcodeInferenceBaseUrl(request.baseUrl)))
     ) {
       return false
     }
@@ -323,11 +359,21 @@ function getCredentialEnvValidationError(
   if (usesOpenAIFallback) {
     const openAIState = resolveOpenAICredentialEnvState(env)
     if (openAIState.invalid) {
-      return (
-        validation.invalidCredentialValues?.find(
-          invalidValue => invalidValue.envVar === openAIState.envVar,
-        )?.message ?? null
+      const hasUsableDedicatedCredential = credentialEnvVars.some(
+        envVar =>
+          envVar !== 'OPENAI_API_KEYS' &&
+          envVar !== 'OPENAI_API_KEY' &&
+          hasUsableCredentialEnvValue(env, envVar),
       )
+      if (!hasUsableDedicatedCredential) {
+        return (
+          validation.invalidCredentialValues?.find(
+            invalidValue => invalidValue.envVar === openAIState.envVar,
+          )?.message ??
+          validation.missingCredentialMessage ??
+          null
+        )
+      }
     }
   }
 
@@ -379,6 +425,32 @@ async function getDescriptorValidationError(
   const validation = target.descriptor.validation
   if (!validation) {
     return null
+  }
+
+  // An explicit Concentrate credential carries the dedicated contract. A
+  // same-host proxy with only generic OpenAI variables is not selected as this
+  // route, but once Concentrate is selected its base must be canonical.
+  const concentrateBaseUrl =
+    env.CONCENTRATE_BASE_URL?.trim() ||
+    env.OPENAI_BASE_URL?.trim() ||
+    env.OPENAI_API_BASE?.trim()
+  if (
+    target.descriptor.id === 'concentrate' &&
+    concentrateBaseUrl &&
+    !isCanonicalConcentrateInferenceBaseUrl(concentrateBaseUrl)
+  ) {
+    return 'Concentrate credentials require the canonical https://api.concentrate.ai/v1 endpoint.'
+  }
+
+  const apiRouteBaseUrl =
+    env.OPENAI_BASE_URL?.trim() ||
+    env.OPENAI_API_BASE?.trim()
+  if (
+    target.descriptor.id === 'api-route' &&
+    apiRouteBaseUrl &&
+    !isCanonicalApiRouteInferenceBaseUrl(apiRouteBaseUrl)
+  ) {
+    return 'API Route credentials require the canonical https://global.api-route.com/v1 endpoint.'
   }
 
   switch (validation.kind) {
@@ -524,6 +596,14 @@ export async function getProviderValidationError(
   const useOpenAI = isEnvTruthy(env.CLAUDE_CODE_USE_OPENAI)
   const validationTarget = getRuntimeValidationTarget(env)
 
+  if (resolveActiveRouteIdFromEnv(env) === 'minimax') {
+    const baseUrl = useOpenAI
+      ? env.OPENAI_BASE_URL?.trim() || env.OPENAI_API_BASE?.trim()
+      : getMiniMaxBaseUrlOverride(env)
+    const validationError = getMiniMaxBaseUrlValidationError(baseUrl)
+    if (validationError) return validationError
+  }
+
   if (!useOpenAI && !validationTarget) {
     return null
   }
@@ -567,6 +647,12 @@ export async function getProviderValidationError(
   }
 
   const activeRouteId = resolveActiveRouteIdFromEnv(env)
+  if (activeRouteId === 'commandcode') {
+    const modelError = getCommandcodeChatCompletionsModelError(
+      request.resolvedModel,
+    )
+    if (modelError) return modelError
+  }
   const shouldPreferGenericRouteValidation =
     validationTarget?.kind === 'vendor' &&
     validationTarget.descriptor.id === 'openai' &&
@@ -656,8 +742,7 @@ export function shouldExitForStartupProviderValidationError(options: {
   }
 
   return (
-    args.includes('-p') ||
-    args.includes('--print') ||
+    hasPrintFlag(args) ||
     args.includes('--init-only') ||
     args.some(arg => arg.startsWith('--sdk-url'))
   )

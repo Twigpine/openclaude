@@ -118,6 +118,16 @@ routes. Fixed direct vendors usually set both to `false`; broad custom routes
 or gateways that intentionally accept user-supplied auth/header details set the
 relevant flag to `true`.
 
+OpenAI-compatible streaming chat-completions routes request a terminal usage
+chunk with `stream_options: { include_usage: true }` by default. Network
+location does not change that protocol behavior. If a server explicitly rejects
+the top-level `stream_options` field, the shim retries once without it; user
+cancellations and unrelated client errors are not retried. Known routes that
+reject the field should still declare `removeBodyFields: ['stream_options']` in
+their `transportConfig.openaiShim` so the first request is compatible. Native
+transports such as direct Ollama build their own request payloads and are
+unaffected.
+
 ### Reasoning support is per model and per route
 
 `capabilities.supportsReasoning` is descriptive. It says the model is known to
@@ -125,6 +135,29 @@ reason or think, but it does not by itself authorize `/effort` to add request
 fields. Only add `reasoning` metadata when the exact route/model request shape,
 accepted levels, and disable behavior have been verified. See
 `docs/integrations/reasoning-effort.md`.
+
+### Moonshot and Kimi K3 catalogs
+
+The direct Moonshot API exposes Kimi K3 as `kimi-k3`, with a 1,048,576-token
+context window, 32,768 maximum output tokens, and `reasoning_effort` levels
+`low`, `high`, and `max` (defaulting to `max`). Kimi Code K3 uses the same
+controls for two catalog selections: `k3` provides the 1M Allegretto+ window, while
+`k3-256k` keeps Moderato+ sessions within their 256K limit.
+
+Kimi Code also lists `kimi-for-coding-highspeed` for eligible Allegretto+
+subscriptions. [Kimi documents](https://www.kimi.com/code/docs/en/kimi-code/models.html)
+it as HighSpeed with approximately 6× output speed and 3× quota usage; plan
+availability can vary. Retain the selected catalog ID in client-side routing so
+its route-specific limits and capabilities are not lost when the outbound API
+model is normalized.
+
+### Public aggregator model discovery
+
+OpenRouter and Twigpine Opengateway use public model-list endpoints to keep their
+hybrid catalogs current. Listing models does not require credentials, but chat
+and other inference requests still require the provider's API key. OpenRouter
+refreshes stale discovery data in the background. Opengateway refreshes once at
+startup and uses that request instead of a separate readiness probe.
 
 ## Descriptor Authoring Pattern
 

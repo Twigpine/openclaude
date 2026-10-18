@@ -5,6 +5,7 @@ import type { PermissionResult } from '../entrypoints/agentSdkTypes.js'
 import type { Command } from '../commands.js'
 import type { Key } from '../ink.js'
 import type { PastedContent } from '../utils/config.js'
+import type { Cursor } from '../utils/Cursor.js'
 import type { ImageDimensions } from '../utils/imageResizer.js'
 import type { TextHighlight } from '../utils/textHighlighting.js'
 import type { AgentId } from './ids.js'
@@ -20,6 +21,15 @@ export type InlineGhostText = {
   readonly fullCommand: string
   /** Position in the input where the ghost text should appear */
   readonly insertPosition: number
+}
+
+export type TextInputChangeContext = {
+  /** Value visible to the input immediately before this change. */
+  readonly previousValue: string
+  /** Cursor offset immediately before this change. */
+  readonly cursorOffset: number
+  /** This change is immediately followed by a coalesced Enter submission. */
+  readonly willSubmit?: boolean
 }
 
 /**
@@ -75,7 +85,7 @@ export type BaseTextInputProps = {
   /**
    * Function to call when value updates.
    */
-  readonly onChange: (value: string) => void
+  readonly onChange: (value: string, context?: TextInputChangeContext) => void
 
   /**
    * Function to call when `Enter` is pressed, where first argument is a value of the input.
@@ -252,12 +262,15 @@ export type BaseInputState = {
 /**
  * State for text input
  */
-export type TextInputState = BaseInputState
+export type TextInputState = BaseInputState & {
+  /** Read the synchronous cursor mirror, including earlier parser-batch items. */
+  getCursor: () => Cursor
+}
 
 /**
  * State for vim input with mode
  */
-export type VimInputState = BaseInputState & {
+export type VimInputState = TextInputState & {
   mode: VimMode
   setMode: (mode: VimMode) => void
 }
@@ -322,6 +335,11 @@ export type QueuedCommand = {
    */
   skipSlashCommands?: boolean
   slashCommandOverride?: Command
+  /**
+   * False for programmatic submissions that should not arm or consume local
+   * interruption-correction context. Undefined preserves keyboard behavior.
+   */
+  allowInterruptionCorrection?: boolean
   /**
    * When true, slash commands are dispatched but filtered through
    * isBridgeSafeCommand() — 'local-jsx' and terminal-only commands return

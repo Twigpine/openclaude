@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from 'bun:test'
 import { resetStateForTests } from '../cost-tracker.js'
 import { getUnreportedSessionUsage } from '../utils/tokens.js'
+import { createCompactBoundaryMessage } from '../utils/messages/systemFactories.js'
 import {
   buildStatusLineCommandInput,
+  getLastAssistantMessageId,
   resolveStatusLineUpdateAction,
   resolveStatusLineTokenTotals,
 } from './StatusLine.js'
@@ -47,6 +49,23 @@ const userMessage = (content: string): Message =>
       content,
     },
   }) as Message
+
+describe('getLastAssistantMessageId', () => {
+  it('invalidates the status line at compaction before a new response arrives', () => {
+    const archived = assistantMessage('Archived response.')
+    const boundary = createCompactBoundaryMessage('manual', 90000)
+    const summary = userMessage('Compacted summary.')
+
+    expect(getLastAssistantMessageId([archived])).toBe(archived.uuid)
+    expect(getLastAssistantMessageId([archived, boundary, summary])).toBeNull()
+
+    const reply: AssistantMessage = {
+      ...assistantMessage('Fresh response.'),
+      uuid: '00000000-0000-0000-0000-000000000003',
+    }
+    expect(getLastAssistantMessageId([archived, boundary, summary, reply])).toBe(reply.uuid)
+  })
+})
 
 describe('resolveStatusLineTokenTotals', () => {
   it('keeps reported usage totals unchanged', () => {

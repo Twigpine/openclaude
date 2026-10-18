@@ -118,7 +118,7 @@ test('detects AI/ML API from descriptor route metadata', async () => {
 
   expect(
     getLocalOpenAICompatibleProviderLabel('https://api.aimlapi.com/v1'),
-  ).toBe('AI/ML API')
+  ).toBe('aimlapi.com')
 })
 
 test('detects Z.AI from descriptor route metadata', async () => {

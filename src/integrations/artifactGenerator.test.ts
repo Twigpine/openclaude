@@ -69,6 +69,25 @@ describe('integration artifact generator', () => {
     await expect(generatedIntegrationArtifactsAreCurrent()).resolves.toBe(true)
   })
 
+  test('pins aimlapi.com as the second provider preset', async () => {
+    const { manifestContent } = splitGeneratedArtifacts(
+      await generateIntegrationArtifacts(),
+    )
+    const orderedMatch = manifestContent.match(
+      /export const ORDERED_PROVIDER_PRESETS = \[\n([\s\S]*?)\n\] as const/,
+    )
+    expect(orderedMatch).not.toBeNull()
+    const orderedPresetIds = Array.from(
+      orderedMatch![1]!.matchAll(/"([^"]+)"/g),
+      match => match[1]!,
+    )
+    expect(orderedPresetIds.slice(0, 3)).toEqual([
+      'gitlawb-opengateway',
+      'aimlapi',
+      'anthropic',
+    ])
+  })
+
   test('derives loader and preset manifest entries for a preset gateway from descriptor files', async () => {
     await withFixtureRepo(
       {

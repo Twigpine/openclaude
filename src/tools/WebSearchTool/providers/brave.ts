@@ -25,7 +25,7 @@ export const braveProvider: SearchProvider = {
     url.searchParams.set('q', input.query)
     url.searchParams.set('count', '15')
 
-    const data = await fetchJsonWithWebSearchTimeout(
+    const data = (await fetchJsonWithWebSearchTimeout(
       url.toString(),
       {
         headers: {
@@ -35,14 +35,20 @@ export const braveProvider: SearchProvider = {
       },
       signal,
       { providerName: 'Brave' },
-    )
+    )) as { web?: { results?: unknown } } | undefined
 
-    const hits = (data.web?.results ?? []).map((r: any) => ({
-      title: r.title ?? '',
-      url: r.url ?? '',
-      description: r.description,
-      source: r.url ? safeHostname(r.url) : undefined,
-    }))
+    const rawResults = data?.web?.results
+    const results = Array.isArray(rawResults) ? rawResults : []
+    const hits = (results as unknown[]).map((r) => {
+      const rec = (r ?? {}) as Record<string, unknown>
+      const url = typeof rec.url === 'string' ? rec.url : ''
+      return {
+        title: typeof rec.title === 'string' ? rec.title : '',
+        url,
+        description: typeof rec.description === 'string' ? rec.description : undefined,
+        source: url ? safeHostname(url) : undefined,
+      }
+    })
 
     return {
       hits: applyDomainFilters(hits, input),

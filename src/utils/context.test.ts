@@ -29,8 +29,11 @@ const originalEnv = {
     process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID,
   MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
   XAI_API_KEY: process.env.XAI_API_KEY,
+  LONGCAT_API_KEY: process.env.LONGCAT_API_KEY,
   CLAUDE_CODE_MAX_CONTEXT_TOKENS: process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
   USER_TYPE: process.env.USER_TYPE,
+  OPENCLAUDE_MAX_TURNS: process.env.OPENCLAUDE_MAX_TURNS,
+  CLAUDE_CODE_MAX_TURNS: process.env.CLAUDE_CODE_MAX_TURNS,
 }
 
 beforeEach(async () => {
@@ -49,8 +52,11 @@ beforeEach(async () => {
   delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
   delete process.env.MINIMAX_API_KEY
   delete process.env.XAI_API_KEY
+  delete process.env.LONGCAT_API_KEY
   delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
   delete process.env.USER_TYPE
+  delete process.env.OPENCLAUDE_MAX_TURNS
+  delete process.env.CLAUDE_CODE_MAX_TURNS
 })
 
 afterEach(() => {
@@ -125,6 +131,11 @@ afterEach(() => {
     } else {
       process.env.XAI_API_KEY = originalEnv.XAI_API_KEY
     }
+    if (originalEnv.LONGCAT_API_KEY === undefined) {
+      delete process.env.LONGCAT_API_KEY
+    } else {
+      process.env.LONGCAT_API_KEY = originalEnv.LONGCAT_API_KEY
+    }
     if (originalEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS === undefined) {
       delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
     } else {
@@ -134,6 +145,16 @@ afterEach(() => {
       delete process.env.USER_TYPE
     } else {
       process.env.USER_TYPE = originalEnv.USER_TYPE
+    }
+    if (originalEnv.OPENCLAUDE_MAX_TURNS === undefined) {
+      delete process.env.OPENCLAUDE_MAX_TURNS
+    } else {
+      process.env.OPENCLAUDE_MAX_TURNS = originalEnv.OPENCLAUDE_MAX_TURNS
+    }
+    if (originalEnv.CLAUDE_CODE_MAX_TURNS === undefined) {
+      delete process.env.CLAUDE_CODE_MAX_TURNS
+    } else {
+      process.env.CLAUDE_CODE_MAX_TURNS = originalEnv.CLAUDE_CODE_MAX_TURNS
     }
   } finally {
     clearSessionContextWindowOverride()
@@ -404,6 +425,39 @@ test('gpt-5.5 uses conservative Codex-route context window (issue #1118)', () =>
   expect(getContextWindowForModel('gpt-5.5')).toBe(272_000)
 })
 
+test('gpt-5.6 family pins the Codex effective input limit on the Codex route', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://chatgpt.com/backend-api/codex'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+  delete process.env.OPENAI_MODEL
+
+  // Same rationale as gpt-5.5 above, but scoped to the Codex transport: the
+  // Codex base URL resolves to a catalog-less route, so the gpt.ts
+  // descriptor (pinned to the ~272k effective input boundary, issue #1118)
+  // is what sizes the context there.
+  for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    expect(getContextWindowForModel(model)).toBe(272_000)
+    expect(getModelMaxOutputTokens(model)).toEqual({
+      default: 128_000,
+      upperLimit: 128_000,
+    })
+  }
+})
+
+test('gpt-5.6 family keeps the full window on the direct-OpenAI route', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+  delete process.env.OPENAI_MODEL
+
+  // Unlike gpt-5.5 (Codex-only, blanket-capped in the vendor catalog), the
+  // gpt-5.6 family is also served directly by api.openai.com /v1/responses
+  // at its true 1.05M window; the openai-route catalog entry preserves it.
+  for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    expect(getContextWindowForModel(model)).toBe(1_050_000)
+  }
+})
+
 test('gpt-5.4 family uses provider-specific context and output caps', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
@@ -450,6 +504,21 @@ test('MiniMax-M2.7 uses the shared gateway-safe context cap by default', () => {
   expect(getMaxOutputTokensForModel('MiniMax-M2.7')).toBe(131_072)
 })
 
+test('MiniMax China uses the M3 context limit before client setup', () => {
+  const savedBaseUrl = process.env.ANTHROPIC_BASE_URL
+  const savedApiKey = process.env.ANTHROPIC_API_KEY
+  try {
+    process.env.ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
+    process.env.ANTHROPIC_API_KEY = 'china-test-key'
+    expect(getContextWindowForModel('MiniMax-M3')).toBe(1_048_576)
+  } finally {
+    if (savedBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL
+    else process.env.ANTHROPIC_BASE_URL = savedBaseUrl
+    if (savedApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+    else process.env.ANTHROPIC_API_KEY = savedApiKey
+  }
+})
+
 test('env-only MiniMax key uses provider-specific context and output caps before client setup', () => {
   process.env.MINIMAX_API_KEY = 'minimax-test-key'
   delete process.env.CLAUDE_CODE_USE_OPENAI
@@ -471,6 +540,9 @@ test('env-only xAI key uses provider-specific context and output caps before cli
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
   delete process.env.OPENAI_MODEL
 
+  expect(getContextWindowForModel('grok-4.6')).toBe(500_000)
+  expect(getModelMaxOutputTokens('grok-4.6').upperLimit).toBe(500_000)
+  expect(getContextWindowForModel('grok-4.5')).toBe(500_000)
   expect(getContextWindowForModel('grok-4.3')).toBe(1_000_000)
   expect(getModelMaxOutputTokens('grok-4.3')).toEqual({
     default: 32_768,
@@ -519,8 +591,13 @@ test('unknown openai-compatible model fallback logs one debug warning and no con
       contextModule.getContextWindowForModel('another-unknown-3p-model'),
     ).toBe(128_000)
     expect(consoleError).not.toHaveBeenCalled()
-    expect(logForDebugging).toHaveBeenCalledTimes(1)
-    expect(logForDebugging.mock.calls[0]?.[1]).toEqual({ level: 'warn' })
+    const contextWarnings = logForDebugging.mock.calls.filter(
+      ([message, options]) =>
+        typeof message === 'string' &&
+        message.startsWith('[context] Warning:') &&
+        options?.level === 'warn',
+    )
+    expect(contextWarnings).toHaveLength(1)
   } finally {
     console.error = originalConsoleError
     mock.restore()
@@ -801,6 +878,26 @@ test('Kimi Code kimi-for-coding uses provider-specific context and output caps',
   })
 })
 
+test('Kimi Code K3 1M choice uses the Allegretto cap', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.kimi.com/coding/v1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+
+  expect(getContextWindowForModel('k3')).toBe(1_048_576)
+  expect(getModelMaxOutputTokens('k3')).toEqual({
+    default: 32_768,
+    upperLimit: 32_768,
+  })
+})
+
+test('Kimi Code K3 256K catalog choice uses the Moderato cap', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.kimi.com/coding/v1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+
+  expect(getContextWindowForModel('k3-256k')).toBe(262_144)
+})
+
 test('DashScope glm-5 uses provider-specific context and output caps', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
@@ -825,8 +922,28 @@ test('DashScope glm-4.7 uses provider-specific context and output caps', () => {
 
 test('Z.AI GLM models use Coding Plan output caps', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4'
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
 
+  for (const model of [
+    'glm-5.3-flash',
+    'glm-5.3-flash?reasoning=low',
+    'glm-5.3-flash?reasoning=high',
+    'glm-5.3-flash?reasoning=xhigh',
+    'glm-5.3-flash?thinking=disabled',
+  ]) {
+    expect(getContextWindowForModel(model)).toBe(1_000_000)
+    expect(getModelMaxOutputTokens(model)).toEqual({
+      default: 131_072,
+      upperLimit: 131_072,
+    })
+  }
+
+  expect(getContextWindowForModel('glm-5.3')).toBe(1_000_000)
+  expect(getModelMaxOutputTokens('glm-5.3')).toEqual({
+    default: 131_072,
+    upperLimit: 131_072,
+  })
   expect(getContextWindowForModel('glm-5.2')).toBe(1_000_000)
   expect(getModelMaxOutputTokens('glm-5.2')).toEqual({
     default: 131_072,
@@ -844,6 +961,18 @@ test('Z.AI GLM models use Coding Plan output caps', () => {
   expect(getModelMaxOutputTokens('GLM-4.5-Air')).toEqual({
     default: 65_536,
     upperLimit: 65_536,
+  })
+})
+
+test('GLM-5.3-Flash direct limits do not leak to OpenRouter', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://openrouter.ai/api/v1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+
+  expect(getContextWindowForModel('glm-5.3-flash')).toBe(128_000)
+  expect(getModelMaxOutputTokens('glm-5.3-flash')).toEqual({
+    default: 32_000,
+    upperLimit: 128_000,
   })
 })
 

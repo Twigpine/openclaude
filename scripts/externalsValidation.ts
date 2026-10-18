@@ -14,6 +14,117 @@ export type PkgDeps = {
   devDependencies?: Record<string, string>
 }
 
+export type PkgInstallHygiene = PkgDeps & {
+  scripts?: Record<string, string>
+  engines?: Record<string, string>
+  funding?: unknown
+}
+
+/**
+ * The exact runtime dependency set shipped to `npm install -g` users — the
+ * zero-warning install contract. Every entry is EXACT-pinned on purpose: the
+ * published tarball carries no lockfile, so any semver range would re-resolve
+ * on every end-user install and the version we verified as warning-free would
+ * not be the version users get. Changing this list (or bumping a pin) is a
+ * deliberate act: update package.json and this contract together, and re-run
+ * `bun run install:verify` so the new resolution is certified clean.
+ *
+ * Note: package.json `overrides` do NOT apply to consumers of the published
+ * tarball — install-noise regressions must be fixed by changing the dependency
+ * itself, never papered over with an override.
+ */
+export const RUNTIME_DEPENDENCY_CONTRACT: Readonly<Record<string, string>> = {
+  '@orama/orama': '3.1.18',
+  '@orama/plugin-data-persistence': '3.1.18',
+  '@vscode/ripgrep': '1.18.0',
+}
+
+/** Node range advertised to installers; changing it changes who gets EBADENGINE. */
+export const ENGINES_NODE_CONTRACT = '>=22.0.0'
+
+const EXACT_VERSION_RE = /^\d+\.\d+\.\d+(?:-[\w.]+)?$/
+
+/**
+ * `dependencies` must equal the contract exactly — same names, same exact-pinned
+ * versions. A new runtime dep, a dropped one, or a caret/tilde range sneaking
+ * back in all fail the build instead of silently changing what users install.
+ */
+export function validateRuntimeDependencyContract(
+  pkg: PkgDeps,
+  contract: Readonly<Record<string, string>> = RUNTIME_DEPENDENCY_CONTRACT,
+): ValidationResult {
+  const deps = pkg.dependencies ?? {}
+  const errors: string[] = []
+
+  const unexpected = Object.keys(deps).filter(d => !(d in contract))
+  if (unexpected.length > 0) {
+    errors.push(
+      `Runtime dependencies not in RUNTIME_DEPENDENCY_CONTRACT (new deps change the zero-warning install surface — verify and update the contract): ${unexpected.join(', ')}`,
+    )
+  }
+
+  const missing = Object.keys(contract).filter(d => !(d in deps))
+  if (missing.length > 0) {
+    errors.push(
+      `RUNTIME_DEPENDENCY_CONTRACT entries missing from dependencies: ${missing.join(', ')}`,
+    )
+  }
+
+  for (const [name, version] of Object.entries(deps)) {
+    const expected = contract[name]
+    if (expected === undefined) continue
+    if (version !== expected) {
+      errors.push(
+        `${name}: dependencies has "${version}" but RUNTIME_DEPENDENCY_CONTRACT pins "${expected}" (update both together + re-verify).`,
+      )
+    } else if (!EXACT_VERSION_RE.test(version)) {
+      errors.push(
+        `${name}: "${version}" is not an exact version — ranges re-resolve per user install and void the verified zero-warning contract.`,
+      )
+    }
+  }
+
+  return { ok: errors.length === 0, errors }
+}
+
+/**
+ * Install-hygiene fields: nothing in our own package.json may run code or print
+ * extra lines during a consumer install.
+ *  - preinstall/install/postinstall execute on every `npm install -g` (script
+ *    output + a trust prompt surface); prepack/prepare only run for publishers
+ *    and git installs, so they stay allowed.
+ *  - a `funding` field adds "looking for funding" lines on some npm configs.
+ *  - engines.node is pinned so the EBADENGINE boundary only moves deliberately.
+ */
+export function validateInstallHygieneFields(pkg: PkgInstallHygiene): ValidationResult {
+  const errors: string[] = []
+  const scripts = pkg.scripts ?? {}
+
+  const consumerHooks = ['preinstall', 'install', 'postinstall'].filter(
+    hook => hook in scripts,
+  )
+  if (consumerHooks.length > 0) {
+    errors.push(
+      `package.json must not declare consumer-run install hooks (they execute and print on every user install): ${consumerHooks.join(', ')}`,
+    )
+  }
+
+  if (pkg.funding !== undefined) {
+    errors.push(
+      'package.json must not declare a `funding` field (it adds funding lines to user installs).',
+    )
+  }
+
+  const enginesNode = pkg.engines?.node
+  if (enginesNode !== ENGINES_NODE_CONTRACT) {
+    errors.push(
+      `engines.node must stay "${ENGINES_NODE_CONTRACT}" (found ${enginesNode === undefined ? 'none' : `"${enginesNode}"`}); changing it moves the EBADENGINE boundary for installers — update ENGINES_NODE_CONTRACT deliberately if intended.`,
+    )
+  }
+
+  return { ok: errors.length === 0, errors }
+}
+
 /**
  * The set of INTENTIONALLY_BUNDLED packages that are genuinely inlined into a
  * given bundle. A package declared as a peerDependency is provided by the

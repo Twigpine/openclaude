@@ -1,0 +1,38 @@
+# OpenClaude
+
+> OpenClaude is an open-source coding-agent CLI for cloud and local model providers. It is an independent community project — not affiliated with, endorsed by, or sponsored by Anthropic. The CLI lets you use OpenAI, Gemini, DeepSeek, Ollama, and 200+ other models through one terminal-first workflow: prompts, tools, agents, MCP, slash commands, and streaming output.
+
+OpenClaude originated from the Claude Code codebase and has since been substantially modified to support multiple providers and open use. "Claude" and "Claude Code" are trademarks of Anthropic PBC.
+
+## Project
+
+- [GitHub repository](https://github.com/Twigpine/openclaude): source code, releases, and issue tracker
+- [npm package](https://www.npmjs.com/package/@twigpine/openclaude): `@twigpine/openclaude`
+- [Twigpine mirror](https://explorer.twigpine.com/repos/z6MkqDnb7Siv3Cwj7pGJq4T5EsUisECqR8KpnDLwcaZq5TPr/openclaude)
+- [Security policy](https://github.com/Twigpine/openclaude/security/policy)
+- [License notice](https://github.com/Twigpine/openclaude/blob/main/LICENSE): MIT applies only to OpenClaude contributors' modifications; the underlying Claude Code code is Anthropic's proprietary software.
+
+## Install
+
+- [Quick start (Mac/Linux)](https://github.com/Twigpine/openclaude/blob/main/docs/quick-start-mac-linux.md)
+- [Quick start (Windows)](https://github.com/Twigpine/openclaude/blob/main/docs/quick-start-windows.md)
+- [Non-technical setup](https://github.com/Twigpine/openclaude/blob/main/docs/non-technical-setup.md)
+- [Android install](https://github.com/Twigpine/openclaude/blob/main/ANDROID_INSTALL.md)
+- [npm install](https://www.npmjs.com/package/@twigpine/openclaude): `npm install -g @twigpine/openclaude@latest` (requires Node >= 22)
+- [AUR package: openclaude](https://aur.archlinux.org/packages/openclaude)
+
+## Documentation
+
+- [README](https://github.com/Twigpine/openclaude/blob/main/README.md): overview, supported providers, features
+- [Advanced setup](https://github.com/Twigpine/openclaude/blob/main/docs/advanced-setup.md)
+- [Smart routing](https://github.com/Twigpine/openclaude/blob/main/docs/smart-routing.md)
+- [Agent routing](https://github.com/Twigpine/openclaude/blob/main/docs/agent-routing.md)
+- [Headless gRPC server](https://github.com/Twigpine/openclaude/blob/main/docs/grpc-server.md)
+- [Repository map](https://github.com/Twigpine/openclaude/blob/main/docs/repo-map.md)
+- [VS Code extension](https://github.com/Twigpine/openclaude/blob/main/vscode-extension/openclaude-vscode/README.md)
+
+## Community
+
+- [Discord](https://discord.gg/k68zFR6AcB)
+- [GitHub Discussions](https://github.com/Twigpine/openclaude/discussions)
+- [X / Twitter](https://x.com/twigpine)

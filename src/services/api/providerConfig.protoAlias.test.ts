@@ -111,11 +111,17 @@ describe('providerConfig — Codex alias lookup is prototype-safe', () => {
   })
 
   test('resolveProviderRequest query branch still resolves a genuine Codex alias', () => {
-    const { resolvedModel } = resolveProviderRequest({
+    const request = resolveProviderRequest({
       model: 'codexplan?reasoning=medium',
       processEnv: {},
     })
-    expect(resolvedModel).toBe('gpt-5.5')
+    expect(request).toMatchObject({
+      requestedModel: 'codexplan?reasoning=medium',
+      resolvedModel: 'gpt-5.6-sol',
+      transport: 'codex_responses',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      reasoning: { effort: 'medium' },
+    })
   })
 
   test('resolveProviderRequest still resolves a genuine Codex alias', () => {
@@ -123,6 +129,6 @@ describe('providerConfig — Codex alias lookup is prototype-safe', () => {
       model: 'codexplan',
       processEnv: {},
     })
-    expect(resolvedModel).toBe('gpt-5.5')
+    expect(resolvedModel).toBe('gpt-5.6-sol')
   })
 })

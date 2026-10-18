@@ -31,7 +31,7 @@ function Invoke-OpenClaude {
     [string[]]$OpenClaudeArgs
   )
 
-  Assert-OpenClaudeCommand -Name "openclaude" -InstallHint "Install with: npm install -g @gitlawb/openclaude"
+  Assert-OpenClaudeCommand -Name "openclaude" -InstallHint "Install with: npm install -g @twigpine/openclaude"
 
   & openclaude @OpenClaudeArgs
 

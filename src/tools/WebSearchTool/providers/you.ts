@@ -22,24 +22,42 @@ export const youProvider: SearchProvider = {
     url.searchParams.set('query', input.query)
     url.searchParams.set('num_web_results', '10')
 
-    const data = await fetchJsonWithWebSearchTimeout(
+    const data = (await fetchJsonWithWebSearchTimeout(
       url.toString(),
       {
         headers: { 'X-API-Key': process.env.YOU_API_KEY! },
       },
       signal,
       { providerName: 'You.com' },
-    )
+    )) as { results?: { web?: unknown } | unknown } | undefined
 
-    const webResults = data?.results?.web ?? data?.results ?? []
+    const resultsField = data?.results
+    const nestedWeb =
+      resultsField && typeof resultsField === 'object' && 'web' in resultsField
+        ? (resultsField as { web?: unknown }).web
+        : undefined
+    const rawResults = Array.isArray(nestedWeb)
+      ? nestedWeb
+      : Array.isArray(resultsField)
+        ? resultsField
+        : []
 
-    const hits = webResults.map((r: any) => {
-      const snippet = Array.isArray(r.snippets) ? r.snippets[0] : r.snippet
+    const hits = (rawResults as unknown[]).map((r) => {
+      const rec = (r ?? {}) as Record<string, unknown>
+      const url = typeof rec.url === 'string' ? rec.url : ''
+      const snippets = Array.isArray(rec.snippets) ? rec.snippets : []
+      const snippet = snippets.length > 0 && typeof snippets[0] === 'string' ? snippets[0] : undefined
       return {
-        title: r.title ?? '',
-        url: r.url ?? '',
-        description: snippet ?? r.description,
-        source: r.url ? safeHostname(r.url) : undefined,
+        title: typeof rec.title === 'string' ? rec.title : '',
+        url,
+        description:
+          snippet ??
+          (typeof rec.snippet === 'string'
+            ? rec.snippet
+            : typeof rec.description === 'string'
+              ? rec.description
+              : undefined),
+        source: url ? safeHostname(url) : undefined,
       }
     })
 

@@ -1,19 +1,16 @@
 import { getSessionId } from '../../bootstrap/state.js'
 import { firstUsableCredential } from '../../services/api/credentialPool.js'
 import { resolveOpenAICredentialEnvState } from '../../utils/providerProfile.js'
-import { resolveProviderRequest } from '../../services/api/providerConfig.js'
+import {
+  isAzureStyleBaseUrl,
+  resolveProviderRequest,
+} from '../../services/api/providerConfig.js'
 import type { LocalCommandCall } from '../../types/command.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
+import { COPILOT_HEADERS } from '../../services/github/deviceFlow.js'
 import { hydrateGithubModelsTokenFromSecureStorage } from '../../utils/githubModelsCredentials.js'
 import { getMainLoopModel } from '../../utils/model/model.js'
-
-const COPILOT_HEADERS: Record<string, string> = {
-  'User-Agent': 'GitHubCopilotChat/0.26.7',
-  'Editor-Version': 'vscode/1.99.3',
-  'Editor-Plugin-Version': 'copilot-chat/0.26.7',
-  'Copilot-Integration-Id': 'vscode-chat',
-}
 
 // Large system prompt (~6000 chars, ~1500 tokens) to cross the 1024-token cache threshold
 const SYSTEM_PROMPT = [
@@ -39,6 +36,26 @@ function getModelFamily(model: string | undefined): string {
     .replace(/-\d{4,}$/, '')
     .replace(/-latest$/, '')
     .replace(/-preview$/, '')
+}
+
+/**
+ * `prompt_cache_*` and `store` are OpenAI/Azure OpenAI request extensions.
+ * This command sends requests directly (rather than through the OpenAI shim),
+ * so descriptor-level `removeBodyFields` rules do not protect strict
+ * compatible endpoints such as NVIDIA NIM.
+ */
+export function supportsCacheProbeFields(
+  baseUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase()
+    return hostname === 'api.openai.com' ||
+      hostname.endsWith('.api.openai.com') ||
+      isAzureStyleBaseUrl(baseUrl, env)
+  } catch {
+    return false
+  }
 }
 
 
@@ -79,7 +96,7 @@ export function resolveCacheProbeRequestApiKey(
 function getField(obj: unknown, path: string): unknown {
   return path
     .split('.')
-    .reduce((o: any, k: string) => (o != null ? o[k] : undefined), obj)
+    .reduce((o: unknown, k: string) => (o != null && typeof o === 'object' ? (o as Record<string, unknown>)[k] : undefined), obj)
 }
 
 interface ProbeResult {
@@ -106,7 +123,7 @@ async function sendProbe(
       headers,
       body: JSON.stringify(body),
     })
-  } catch (err: any) {
+  } catch (err: unknown) {
     return {
       label,
       status: 0,
@@ -114,7 +131,7 @@ async function sendProbe(
       headers: {},
       usage: null,
       responseId: null,
-      error: err.message,
+      error: err instanceof Error ? err.message : String(err),
     }
   }
   const elapsed = Date.now() - start
@@ -239,11 +256,16 @@ export const call: LocalCommandCall = async (args) => {
     }
   }
 
-  const useResponses = request.transport === 'codex_responses'
+  const useResponses =
+    request.transport === 'codex_responses' ||
+    request.transport === 'responses' ||
+    request.transport === 'responses_compat'
   const endpoint = useResponses ? '/responses' : '/chat/completions'
   const url = `${request.baseUrl}${endpoint}`
   const family = getModelFamily(request.resolvedModel)
   const cacheKey = `${getSessionId()}:${family}`
+  const includeCacheProbeFields =
+    !noKey && supportsCacheProbeFields(request.baseUrl)
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -263,15 +285,20 @@ export const call: LocalCommandCall = async (args) => {
         {
           type: 'message',
           role: 'user',
-          content: [{ type: 'input_text', text: USER_MESSAGE }],
+          content: [{
+            type: request.transport === 'responses_compat' ? 'text' : 'input_text',
+            text: USER_MESSAGE,
+          }],
         },
       ],
       stream: true,
-      ...(noKey ? {} : {
-        store: false,
-        prompt_cache_key: cacheKey,
-        prompt_cache_retention: '24h',
-      }),
+      ...(includeCacheProbeFields
+        ? {
+            store: false,
+            prompt_cache_key: cacheKey,
+            prompt_cache_retention: '24h',
+          }
+        : {}),
     }
   } else {
     body = {
@@ -283,21 +310,23 @@ export const call: LocalCommandCall = async (args) => {
       stream: true,
       stream_options: { include_usage: true },
       max_tokens: 20,
-      ...(noKey ? {} : {
-        store: false,
-        prompt_cache_key: cacheKey,
-      }),
+      ...(includeCacheProbeFields
+        ? {
+            store: false,
+            prompt_cache_key: cacheKey,
+          }
+        : {}),
     }
   }
 
   // Log configuration
   const config = [
-    `[cache-probe] Starting cache probe${noKey ? ' (--no-key: cache params OMITTED)' : ''}`,
+    `[cache-probe] Starting cache probe${!includeCacheProbeFields ? ' (cache params OMITTED)' : ''}`,
     `  model: ${request.resolvedModel} (family: ${family})`,
     `  transport: ${request.transport}`,
     `  endpoint: ${url}`,
-    `  prompt_cache_key: ${noKey ? 'NOT SENT' : cacheKey}`,
-    `  store: ${noKey ? 'NOT SENT' : 'false'}`,
+    `  prompt_cache_key: ${includeCacheProbeFields ? cacheKey : 'NOT SENT'}`,
+    `  store: ${includeCacheProbeFields ? 'false' : 'NOT SENT'}`,
     `  system prompt: ~${Math.round(SYSTEM_PROMPT.length / 4)} tokens`,
     `  delay between calls: ${DELAY_MS}ms`,
   ].join('\n')
@@ -390,21 +419,24 @@ export const call: LocalCommandCall = async (args) => {
 
   // --- Simulate what main's shim code does with this usage ---
   // codexShim.ts makeUsage() — used for Responses API (GPT-5+/Codex)
-  function mainMakeUsage(u: any) {
+  function mainMakeUsage(u: unknown) {
+    const rec = (u ?? {}) as Record<string, unknown>
     return {
-      input_tokens: u?.input_tokens ?? 0,
-      output_tokens: u?.output_tokens ?? 0,
+      input_tokens: typeof rec.input_tokens === 'number' ? rec.input_tokens : 0,
+      output_tokens: typeof rec.output_tokens === 'number' ? rec.output_tokens : 0,
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 0,  // ← main hardcodes this to 0
     }
   }
   // openaiShim.ts convertChunkUsage() — used for Chat Completions
-  function mainConvertChunkUsage(u: any) {
+  function mainConvertChunkUsage(u: unknown) {
+    const rec = (u ?? {}) as Record<string, unknown>
+    const details = (rec.prompt_tokens_details ?? {}) as Record<string, unknown>
     return {
-      input_tokens: u?.prompt_tokens ?? 0,
-      output_tokens: u?.completion_tokens ?? 0,
+      input_tokens: typeof rec.prompt_tokens === 'number' ? rec.prompt_tokens : 0,
+      output_tokens: typeof rec.completion_tokens === 'number' ? rec.completion_tokens : 0,
       cache_creation_input_tokens: 0,
-      cache_read_input_tokens: u?.prompt_tokens_details?.cached_tokens ?? 0,
+      cache_read_input_tokens: typeof details.cached_tokens === 'number' ? details.cached_tokens : 0,
     }
   }
 

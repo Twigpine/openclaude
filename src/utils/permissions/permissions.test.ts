@@ -753,7 +753,7 @@ describe('plan mode mechanical read-only policy', () => {
   })
 
   test.each([
-    { description: 'General', prompt: 'Work', subagent_type: 'general-purpose' },
+    { description: 'General', prompt: 'Work' },
     { description: 'Fork', prompt: 'Work' },
     { description: 'Team', prompt: 'Work', subagent_type: 'Explore', name: 'worker' },
     { description: 'Team', prompt: 'Work', subagent_type: 'Plan', team_name: 'team' },

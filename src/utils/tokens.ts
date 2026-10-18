@@ -5,7 +5,11 @@ import {
   roughTokenCountEstimationForMessages,
 } from '../services/tokenEstimation.js'
 import type { AssistantMessage, Message } from '../types/message.js'
-import { SYNTHETIC_MESSAGES, SYNTHETIC_MODEL } from './messages.js'
+import {
+  getMessagesAfterCompactBoundary,
+  SYNTHETIC_MESSAGES,
+  SYNTHETIC_MODEL,
+} from './messages.js'
 import { jsonStringify } from './slowOperations.js'
 import { IncrementalTokenCounter } from './incrementalTokenCounter.js'
 
@@ -276,6 +280,9 @@ export function messageTokenCountFromLastAPIResponse(
 }
 
 export function getCurrentUsage(messages: Message[]): CurrentUsage | null {
+  // Scrollback retains pre-compact messages, but current usage must describe
+  // only the context sent to the model, including all-zero usage estimates.
+  messages = getMessagesAfterCompactBoundary(messages)
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]
     const usage = message ? getTokenUsage(message) : undefined

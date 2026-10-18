@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro check && astro build",
+    "build": "astro check && astro build && bun scripts/verify-dist.ts",
     "preview": "astro preview",
     "typecheck": "astro check"
   },

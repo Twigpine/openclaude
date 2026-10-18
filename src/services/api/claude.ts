@@ -21,6 +21,10 @@ import type { TextBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { Stream } from '@anthropic-ai/sdk/streaming.mjs'
 import { randomUUID } from 'crypto'
 import {
+  prepareImagesForAnthropicRequest,
+  usesAnthropicImageLimits,
+} from '../../utils/requestImageValidation.js'
+import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
   isGithubNativeAnthropicMode,
@@ -28,6 +32,7 @@ import {
 import {
   getAttributionHeader,
   getCLISyspromptPrefix,
+  isAttributionHeaderEnabled,
 } from '../../constants/system.js'
 import {
   getEmptyToolPermissionContext,
@@ -108,7 +113,7 @@ import {
   extractQuotaStatusFromHeaders,
 } from '../claudeAiLimits.js'
 import { getAPIContextManagement } from '../compact/apiMicrocompact.js'
-import { getStreamIdleTimeoutMs } from './openaiShim.js'
+import { getApiTimeoutMs, getStreamIdleTimeoutMs } from './openaiShim.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const autoModeStateModule = feature('TRANSCRIPT_CLASSIFIER')
@@ -163,6 +168,7 @@ import {
   modelSupportsAdvisor,
 } from 'src/utils/advisor.js'
 import { getAgentContext } from 'src/utils/agentContext.js'
+import { applyAnthropicAttributionPolicy } from 'src/utils/anthropicAttribution.js'
 import { isClaudeAISubscriber } from 'src/utils/auth.js'
 import {
   getToolSearchBetaHeader,
@@ -175,6 +181,13 @@ import { CHROME_TOOL_SEARCH_INSTRUCTIONS } from 'src/utils/claudeInChrome/prompt
 import { COMPACT_MAX_OUTPUT_TOKENS, getContextWindowForModel, getMaxThinkingTokensForModel } from 'src/utils/context.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { logForDiagnosticsNoPII } from 'src/utils/diagLogs.js'
+import {
+  flushInterruptionTrace,
+  getInterruptionErrorCausalEventId,
+  getInterruptionSignalAbortEventId,
+  requestAbort,
+  traceInterruptionEvent,
+} from 'src/utils/interruptionTrace.js'
 import { type EffortValue, modelSupportsEffort } from 'src/utils/effort.js'
 import type { QueryLifecycleOperationTracker } from 'src/utils/queryLifecycle.js'
 import {
@@ -233,6 +246,7 @@ import {
 import { getInitializationStatus } from '../lsp/manager.js'
 import { isToolFromMcpServer } from '../mcp/utils.js'
 import { withStreamingVCR, withVCR } from '../vcr.js'
+import { resolveCurrentAnthropicAttributionPolicy } from './authRouting.js'
 import { CLIENT_REQUEST_ID_HEADER, getAnthropicClient } from './client.js'
 import {
   API_ERROR_MESSAGE_PREFIX,
@@ -706,6 +720,8 @@ export function assistantMessageToMessageParam(
 export type Options = {
   getToolPermissionContext: () => Promise<ToolPermissionContext>
   model: string
+  /** Original selection used only for provider-side alias routing. */
+  requestModel?: string
   toolChoice?: BetaToolChoiceTool | BetaToolChoiceAuto | undefined
   isNonInteractiveSession: boolean
   extraToolSchemas?: BetaToolUnion[]
@@ -737,6 +753,11 @@ export type Options = {
   providerOverride?: { model: string; baseURL: string; apiKey: string }
   queryLifecycle?: QueryLifecycleOperationTracker
   messageNormalizationTools?: Tools
+  /**
+   * Synchronous ownership check invoked immediately before an outbound
+   * provider request. Returning false skips the request without retrying.
+   */
+  onProviderRequestStart?: () => boolean
 }
 
 export async function queryModelWithoutStreaming({
@@ -876,10 +897,14 @@ function shouldDeferLspTool(tool: Tool): boolean {
  * Otherwise defaults to 300s — long enough for slow backends without
  * approaching the API's 10-minute non-streaming boundary.
  */
-function getNonstreamingFallbackTimeoutMs(): number {
-  const override = parseInt(process.env.API_TIMEOUT_MS || '', 10)
-  if (override) return override
-  return isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) ? 120_000 : 300_000
+export function getNonstreamingFallbackTimeoutMs(): number {
+  // Validate and clamp API_TIMEOUT_MS through the shared parser so a malformed
+  // or negative override cannot yield a NaN/negative timeout; fall back to the
+  // context-specific default (shorter on remote to stay under CCR's idle-kill).
+  return getApiTimeoutMs(
+    process.env,
+    isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) ? 120_000 : 300_000,
+  )
 }
 
 /**
@@ -913,7 +938,8 @@ export async function* executeNonStreamingRequest(
    */
   originatingRequestId?: string | null,
   queryLifecycle?: QueryLifecycleOperationTracker,
-): AsyncGenerator<SystemAPIErrorMessage, BetaMessage> {
+  onProviderRequestStart?: () => boolean,
+): AsyncGenerator<SystemAPIErrorMessage, BetaMessage | null> {
   const fallbackTimeoutMs = getNonstreamingFallbackTimeoutMs()
   const generator = withRetry(
     () =>
@@ -927,6 +953,7 @@ export async function* executeNonStreamingRequest(
       }),
     async (anthropic, attempt, context) => {
       const start = Date.now()
+      if (onProviderRequestStart?.() === false) return null
       const retryParams = paramsFromContext(context)
       captureRequest(retryParams)
       onAttempt(attempt, start, retryParams.max_tokens)
@@ -1000,7 +1027,7 @@ export async function* executeNonStreamingRequest(
     }
   } while (!e.done)
 
-  return e.value as BetaMessage
+  return e.value as BetaMessage | null
 }
 
 /**
@@ -1103,6 +1130,39 @@ export function stripExcessMediaItems(
   }) as (UserMessage | AssistantMessage)[]
 }
 
+/**
+ * Tool-history compression routing for Anthropic-native transports (exported
+ * for focused tests — queryModel itself needs a live client to exercise).
+ * Native transports (first-party, Bedrock, Vertex, GitHub-native-Anthropic)
+ * compress only while prompt caching is inactive: retroactive tier rewrites
+ * diverge the cached request prefix and cost more than they save. Requests
+ * carrying a per-agent providerOverride are shim-routed and compress at the
+ * shim layer instead.
+ */
+export function shouldCompressNativeToolHistory(options: {
+  apiProvider: string
+  // firstParty alone is not enough: a custom ANTHROPIC_BASE_URL (proxy /
+  // compatible endpoint) also reports firstParty, but getPromptCachingEnabled
+  // already returns false there — treating it as native would compress every
+  // request against an endpoint we make no assumptions about. Mirror the
+  // same base-URL guard prompt caching itself uses.
+  isFirstPartyBaseUrl: boolean
+  isGithubNativeAnthropic: boolean
+  hasProviderOverride: boolean
+  promptCachingEnabled: boolean
+}): boolean {
+  const isNativeTransport =
+    (options.apiProvider === 'firstParty' && options.isFirstPartyBaseUrl) ||
+    options.apiProvider === 'bedrock' ||
+    options.apiProvider === 'vertex' ||
+    options.isGithubNativeAnthropic
+  return (
+    isNativeTransport &&
+    !options.hasProviderOverride &&
+    !options.promptCachingEnabled
+  )
+}
+
 async function* queryModel(
   messages: Message[],
   systemPrompt: SystemPrompt,
@@ -1114,6 +1174,22 @@ async function* queryModel(
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
 > {
+  const providerRequestModel = options.requestModel ?? options.model
+  function traceFallbackSettlement(
+    outcome: 'superseded' | 'aborted' | 'failed' | 'completed',
+    causalEventId: string | undefined,
+    error?: unknown,
+  ): void {
+    traceInterruptionEvent('claude_stream.fallback_settled', {
+      subsystem: 'claude_stream',
+      transport: 'anthropic_messages',
+      model: options.model,
+      outcome,
+      causalEventId,
+      ...(error === undefined ? {} : { error }),
+    })
+    flushInterruptionTrace('claude_stream_fallback_settled')
+  }
   // Check cheap conditions first — the off-switch await blocks on GrowthBook
   // init (~10ms). For non-Opus models (haiku, sonnet) this skips the await
   // entirely. Subscribers don't hit this path at all.
@@ -1346,6 +1422,32 @@ async function* queryModel(
 
   queryCheckpoint('query_tool_schema_build_end')
 
+  // Compress old tool outputs for Anthropic-native transports, but only when
+  // prompt caching is inactive. Rewriting old messages as they cross tier
+  // boundaries diverges the request prefix on every call, which breaks the
+  // prompt cache and costs more than the compression saves — cached native
+  // sessions rely on microCompact (cache-aware) instead. Shim-routed traffic
+  // (OpenAI-compatible env providers, per-agent providerOverride, Codex)
+  // compresses at its own layer, where the local fast-path opt-out applies.
+  // compressToolHistory is generic over AnyMessage — cast to satisfy the type
+  // checker since OpenClaude's Message union is a superset of what the
+  // function actually inspects.
+  const compressNativeToolHistory = shouldCompressNativeToolHistory({
+    apiProvider: getAPIProvider(),
+    isFirstPartyBaseUrl: isFirstPartyAnthropicBaseUrl(),
+    isGithubNativeAnthropic: isGithubNativeAnthropicMode(options.model),
+    hasProviderOverride: Boolean(options.providerOverride),
+    promptCachingEnabled: getPromptCachingEnabled(options.model),
+  })
+  if (compressNativeToolHistory) {
+    const { compressToolHistory } = await import('./compressToolHistory.js')
+    messages = compressToolHistory(
+      messages as unknown as Parameters<typeof compressToolHistory>[0],
+      options.model,
+      { effectiveContextWindowSize: getContextWindowForModel(options.model, getSdkBetas()) },
+    ) as typeof messages
+  }
+
   // Normalize messages before building system prompt (needed for fingerprinting)
   // Instrumentation: Track message count before normalization
   logEvent('tengu_api_before_normalize', {
@@ -1473,10 +1575,12 @@ async function* queryModel(
   const injectChromeHere =
     useToolSearch && hasChromeTools && !isMcpInstructionsDeltaEnabled()
 
-  // filter(Boolean) works by converting each element to a boolean - empty strings become false and are filtered out.
+  const attributionEnabled = isAttributionHeaderEnabled()
+
+  // Build the stable prompt here, but delay attribution and request blocks
+  // until client creation has normalized the effective provider route.
   systemPrompt = asSystemPrompt(
     [
-      getAttributionHeader(fingerprint),
       getCLISyspromptPrefix({
         isNonInteractive: options.isNonInteractiveSession,
         hasAppendSystemPrompt: options.hasAppendSystemPrompt,
@@ -1486,16 +1590,6 @@ async function* queryModel(
       ...(injectChromeHere ? [CHROME_TOOL_SEARCH_INSTRUCTIONS] : []),
     ].filter(Boolean),
   )
-
-  // Prepend system prompt block for easy API identification
-  logAPIPrefix(systemPrompt)
-
-  const enablePromptCaching =
-    options.enablePromptCaching ?? getPromptCachingEnabled(options.model)
-  const system = buildSystemPromptBlocks(systemPrompt, enablePromptCaching, {
-    skipGlobalCacheForSystemPrompt: needsToolBasedCacheMarker,
-    querySource: options.querySource,
-  })
   const useBetas = betas.length > 0
 
   const extraToolSchemas = [...(options.extraToolSchemas ?? [])]
@@ -1578,34 +1672,6 @@ async function* queryModel(
 
   const effort = resolveAppliedEffort(options.model, options.effortValue)
 
-  if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
-    // Exclude defer_loading tools from the hash -- the API strips them from the
-    // prompt, so they never affect the actual cache key. Including them creates
-    // false-positive "tool schemas changed" breaks when tools are discovered or
-    // MCP servers reconnect.
-    const toolsForCacheDetection = allTools.filter(
-      t => !('defer_loading' in t && t.defer_loading),
-    )
-    // Capture everything that could affect the server-side cache key.
-    // Pass latched header values (not live state) so break detection
-    // reflects what we actually send, not what the user toggled.
-    recordPromptState({
-      system,
-      toolSchemas: toolsForCacheDetection,
-      querySource: options.querySource,
-      model: options.model,
-      agentId: options.agentId,
-      fastMode: fastModeHeaderLatched,
-      globalCacheStrategy,
-      betas,
-      autoModeActive: afkHeaderLatched,
-      isUsingOverage: currentLimits.isUsingOverage ?? false,
-      cachedMCEnabled: cacheEditingHeaderLatched,
-      effortValue: effort,
-      extraBodyParams: getExtraBodyParams(),
-    })
-  }
-
   const startIncludingRetries = Date.now()
   let start = Date.now()
   let attemptNumber = 0
@@ -1653,6 +1719,8 @@ async function* queryModel(
   // Capture the betas sent in the last API request, including the ones that
   // were dynamically added, so we can log and send it to telemetry.
   let lastRequestBetas: string[] | undefined
+  let apiPrefixLogged = false
+  let promptStateRecorded = false
 
   const paramsFromContext = (retryContext: RetryContext) => {
     const betasParams = [...betas]
@@ -1753,6 +1821,54 @@ async function* queryModel(
 
     const enablePromptCaching =
       options.enablePromptCaching ?? getPromptCachingEnabled(retryContext.model)
+    const attributionPolicy = resolveCurrentAnthropicAttributionPolicy({
+      attributionEnabled,
+      providerOverride: options.providerOverride,
+    })
+    const requestSystemPrompt = asSystemPrompt(
+      applyAnthropicAttributionPolicy(
+        [
+          getAttributionHeader(fingerprint, attributionPolicy),
+          ...systemPrompt,
+        ].filter(Boolean),
+        attributionPolicy,
+      ),
+    )
+    const system = buildSystemPromptBlocks(
+      requestSystemPrompt,
+      enablePromptCaching,
+      {
+        skipGlobalCacheForSystemPrompt: needsToolBasedCacheMarker,
+        querySource: options.querySource,
+      },
+    )
+    if (!apiPrefixLogged) {
+      apiPrefixLogged = true
+      logAPIPrefix(requestSystemPrompt)
+    }
+    if (feature('PROMPT_CACHE_BREAK_DETECTION') && !promptStateRecorded) {
+      promptStateRecorded = true
+      // Exclude defer_loading tools from the hash. The API strips them from
+      // the prompt, so they never affect the actual cache key.
+      const toolsForCacheDetection = allTools.filter(
+        t => !('defer_loading' in t && t.defer_loading),
+      )
+      recordPromptState({
+        system,
+        toolSchemas: toolsForCacheDetection,
+        querySource: options.querySource,
+        model: options.model,
+        agentId: options.agentId,
+        fastMode: fastModeHeaderLatched,
+        globalCacheStrategy,
+        betas,
+        autoModeActive: afkHeaderLatched,
+        isUsingOverage: currentLimits.isUsingOverage ?? false,
+        cachedMCEnabled: cacheEditingHeaderLatched,
+        effortValue: effort,
+        extraBodyParams: getExtraBodyParams(),
+      })
+    }
 
     // Fast mode: header is latched session-stable (cache-safe), but
     // `speed='fast'` stays dynamic so cooldown still suppresses the actual
@@ -1814,7 +1930,7 @@ async function* queryModel(
     lastRequestBetas = betasParams
 
     return {
-      model: normalizeModelStringForAPI(options.model),
+      model: normalizeModelStringForAPI(providerRequestModel),
       // IMPORTANT: `system` must appear before `messages` in the object literal.
       // JSON.stringify preserves insertion order. The native Bun attestation
       // (Attestation.zig) overwrites the FIRST `cch=00000` sentinel in the
@@ -1854,36 +1970,6 @@ async function* queryModel(
     }
   }
 
-  // Compute log scalars synchronously so the fire-and-forget .then() closure
-  // captures only primitives instead of paramsFromContext's full closure scope
-  // (messagesForAPI, system, allTools, betas — the entire request-building
-  // context), which would otherwise be pinned until the promise resolves.
-  {
-    const queryParams = paramsFromContext({
-      model: options.model,
-      thinkingConfig,
-    })
-    const logMessagesLength = queryParams.messages.length
-    const logBetas = useBetas ? (queryParams.betas ?? []) : []
-    const logThinkingType = queryParams.thinking?.type ?? 'disabled'
-    const logEffortValue = queryParams.output_config?.effort
-    void options.getToolPermissionContext().then(permissionContext => {
-      logAPIQuery({
-        model: options.model,
-        messagesLength: logMessagesLength,
-        temperature: options.temperatureOverride ?? 1,
-        betas: logBetas,
-        permissionMode: permissionContext.mode,
-        querySource: options.querySource,
-        queryTracking: options.queryTracking,
-        thinkingType: logThinkingType,
-        effortValue: logEffortValue,
-        fastMode: isFastMode,
-        previousRequestId,
-      })
-    })
-  }
-
   const newMessages: AssistantMessage[] = []
   let ttftMs = 0
   let partialMessage: BetaMessage | undefined = undefined
@@ -1898,14 +1984,27 @@ async function* queryModel(
   let research: unknown = undefined
   let isFastModeRequest = isFastMode // Keep separate state as it may change if falling back
   let isAdvisorInProgress = false
+  let apiQueryLogged = false
 
   try {
+    const apiProvider = getAPIProvider()
+    if (usesAnthropicImageLimits({
+      apiProvider,
+      isFirstPartyBaseUrl: isFirstPartyAnthropicBaseUrl(),
+      isGithubNativeAnthropic: isGithubNativeAnthropicMode(options.model),
+      hasProviderOverride: Boolean(options.providerOverride),
+    })) {
+      messagesForAPI = await prepareImagesForAnthropicRequest(messagesForAPI, {
+        // These partners count document blocks toward the many-image threshold.
+        countDocuments: apiProvider === 'bedrock' || apiProvider === 'vertex',
+      })
+    }
     queryCheckpoint('query_client_creation_start')
-    const generator = withRetry(
+    const generator = withRetry<Stream<BetaRawMessageStreamEvent> | null>(
       () =>
         getAnthropicClient({
           maxRetries: 0, // Disabled auto-retry in favor of manual implementation
-          model: options.model,
+          model: providerRequestModel,
           fetchOverride: options.fetchOverride,
           source: options.querySource,
           providerOverride: options.providerOverride,
@@ -1922,10 +2021,43 @@ async function* queryModel(
         // client_creation_start is meaningful on attempt 1.
         queryCheckpoint('query_client_creation_end')
 
+        // Keep this immediately adjacent to the SDK call below. query.ts uses
+        // it to atomically reserve a shared foreground/background turn only
+        // after every asynchronous provider-preparation step has completed.
+        if (options.onProviderRequestStart?.() === false) {
+          return null
+        }
+
+        // Everything below is synchronous until the SDK request is created,
+        // so ownership cannot change between this request build and dispatch.
         const params = paramsFromContext(context)
         captureAPIRequest(params, options.querySource) // Capture for bug reports
-
         maxOutputTokens = params.max_tokens
+
+        if (!apiQueryLogged) {
+          apiQueryLogged = true
+          // Capture primitives only: the fire-and-forget permission lookup
+          // must not retain the full request-building closure.
+          const logMessagesLength = params.messages.length
+          const logBetas = useBetas ? (params.betas ?? []) : []
+          const logThinkingType = params.thinking?.type ?? 'disabled'
+          const logEffortValue = params.output_config?.effort
+          void options.getToolPermissionContext().then(permissionContext => {
+            logAPIQuery({
+              model: options.model,
+              messagesLength: logMessagesLength,
+              temperature: options.temperatureOverride ?? 1,
+              betas: logBetas,
+              permissionMode: permissionContext.mode,
+              querySource: options.querySource,
+              queryTracking: options.queryTracking,
+              thinkingType: logThinkingType,
+              effortValue: logEffortValue,
+              fastMode: isFastMode,
+              previousRequestId,
+            })
+          })
+        }
 
         // Fire immediately before the fetch is dispatched. .withResponse() below
         // awaits until response headers arrive, so this MUST be before the await
@@ -1994,10 +2126,11 @@ async function* queryModel(
       e = await generator.next()
 
       // yield API error messages (the stream has a 'controller' property, error messages don't)
-      if (!('controller' in e.value)) {
+      if (!e.done && !('controller' in e.value)) {
         yield e.value
       }
     } while (!e.done)
+    if (e.value === null) return
     stream = e.value as Stream<BetaRawMessageStreamEvent>
 
     // reset state
@@ -2027,6 +2160,7 @@ async function* queryModel(
     const STREAM_IDLE_TIMEOUT_MS = getStreamIdleTimeoutMs()
     const STREAM_IDLE_WARNING_MS = STREAM_IDLE_TIMEOUT_MS / 2
     let streamIdleAborted = false
+    let streamSettlementCausalEventId: string | undefined
     // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
     let streamWatchdogFiredAt: number | null = null
     let streamIdleWarningTimer: ReturnType<typeof setTimeout> | null = null
@@ -2049,19 +2183,36 @@ async function* queryModel(
         { level: 'warn' },
       )
       logForDiagnosticsNoPII('warn', 'cli_streaming_idle_warning')
+      traceInterruptionEvent('claude_stream.idle_warning', {
+        subsystem: 'claude_stream',
+        transport: 'anthropic_messages',
+        model: options.model,
+        sinceLastYieldMs: warnMs,
+      })
     }
 
     function closeStreamIterator(
       iterator: AsyncIterator<BetaRawMessageStreamEvent>,
       reason: Error,
+      source: 'claude_stream_watchdog' | 'claude_stream_parent',
+      causalEventId?: string,
     ): void {
       const activeStream = stream
-      releaseStreamResources()
       try {
-        activeStream?.controller?.abort(reason)
+        if (activeStream?.controller) {
+          requestAbort(activeStream.controller, reason, {
+            source,
+            causalEventId,
+            subsystem: 'claude_stream',
+            transport: 'anthropic_messages',
+            model: options.model,
+            controllerRole: 'provider-stream',
+          })
+        }
       } catch {
         // Ignore - the stream may already be closed by the SDK.
       }
+      releaseStreamResources()
 
       try {
         const returned = iterator.return?.()
@@ -2084,6 +2235,14 @@ async function* queryModel(
         { level: 'error' },
       )
       logForDiagnosticsNoPII('error', 'cli_streaming_idle_timeout')
+      const causalEventId = traceInterruptionEvent('claude_stream.idle_timeout', {
+        subsystem: 'claude_stream',
+        transport: 'anthropic_messages',
+        model: options.model,
+        sinceLastYieldMs: STREAM_IDLE_TIMEOUT_MS,
+      })
+      streamSettlementCausalEventId = causalEventId
+      flushInterruptionTrace('claude_stream_idle_timeout')
       logEvent('tengu_streaming_idle_timeout', {
         model:
           options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -2092,7 +2251,12 @@ async function* queryModel(
         timeout_ms: STREAM_IDLE_TIMEOUT_MS,
       })
 
-      closeStreamIterator(iterator, timeoutError)
+      closeStreamIterator(
+        iterator,
+        timeoutError,
+        'claude_stream_watchdog',
+        causalEventId,
+      )
     }
 
     function readNextStreamPart(
@@ -2100,7 +2264,14 @@ async function* queryModel(
     ): Promise<IteratorResult<BetaRawMessageStreamEvent>> {
       if (signal.aborted) {
         const abortError = new APIUserAbortError()
-        closeStreamIterator(iterator, abortError)
+        streamSettlementCausalEventId =
+          getInterruptionSignalAbortEventId(signal)
+        closeStreamIterator(
+          iterator,
+          abortError,
+          'claude_stream_parent',
+          getInterruptionSignalAbortEventId(signal),
+        )
         return Promise.reject(abortError)
       }
 
@@ -2126,7 +2297,22 @@ async function* queryModel(
         }
         const onAbort = () => {
           const abortError = new APIUserAbortError()
-          closeStreamIterator(iterator, abortError)
+          const parentCausalEventId = getInterruptionSignalAbortEventId(signal)
+          const causalEventId = traceInterruptionEvent('claude_stream.parent_abort', {
+            subsystem: 'claude_stream',
+            transport: 'anthropic_messages',
+            model: options.model,
+            reason: signal.reason,
+            causalEventId: parentCausalEventId,
+          })
+          streamSettlementCausalEventId =
+            causalEventId ?? parentCausalEventId
+          closeStreamIterator(
+            iterator,
+            abortError,
+            'claude_stream_parent',
+            causalEventId ?? parentCausalEventId,
+          )
           settleReject(abortError)
         }
 
@@ -2556,6 +2742,14 @@ async function* queryModel(
           streamWatchdogFiredAt !== null
             ? Math.round(performance.now() - streamWatchdogFiredAt)
             : -1
+        traceInterruptionEvent('claude_stream.loop_settled', {
+          subsystem: 'claude_stream',
+          transport: 'anthropic_messages',
+          model: options.model,
+          outcome: 'clean',
+          causalEventId: streamSettlementCausalEventId,
+          sinceLastYieldMs: exitDelayMs,
+        })
         logForDiagnosticsNoPII(
           'info',
           'cli_stream_loop_exited_after_watchdog_clean',
@@ -2645,6 +2839,20 @@ async function* queryModel(
     } catch (streamingError) {
       // Clear the idle timeout watchdog on error path too
       clearStreamIdleTimers()
+      streamSettlementCausalEventId =
+        getInterruptionErrorCausalEventId(streamingError) ??
+        streamSettlementCausalEventId
+      traceInterruptionEvent('claude_stream.error', {
+        subsystem: 'claude_stream',
+        transport: 'anthropic_messages',
+        model: options.model,
+        outcome: signal.aborted ? 'root_aborted' : 'external_error',
+        reason: signal.reason,
+        causalEventId:
+          getInterruptionSignalAbortEventId(signal) ??
+          streamSettlementCausalEventId,
+        error: streamingError,
+      })
 
       // Instrumentation: if the watchdog had already fired and the for-await
       // threw (rather than exiting cleanly), record that the loop DID exit and
@@ -2653,6 +2861,15 @@ async function* queryModel(
         const exitDelayMs = Math.round(
           performance.now() - streamWatchdogFiredAt,
         )
+        traceInterruptionEvent('claude_stream.loop_settled', {
+          subsystem: 'claude_stream',
+          transport: 'anthropic_messages',
+          model: options.model,
+          outcome: 'error',
+          causalEventId: streamSettlementCausalEventId,
+          error: streamingError,
+          sinceLastYieldMs: exitDelayMs,
+        })
         logForDiagnosticsNoPII(
           'info',
           'cli_stream_loop_exited_after_watchdog_error',
@@ -2788,6 +3005,16 @@ async function* queryModel(
       // Instrumentation: proves executeNonStreamingRequest was entered (vs. the
       // fallback event firing but the call itself hanging at dispatch).
       logForDiagnosticsNoPII('info', 'cli_nonstreaming_fallback_started')
+      const fallbackStartedEventId = traceInterruptionEvent(
+        'claude_stream.fallback_started', {
+        subsystem: 'claude_stream',
+        transport: 'anthropic_messages',
+        model: options.model,
+        trigger: streamIdleAborted ? 'watchdog' : 'other',
+        causalEventId: streamSettlementCausalEventId,
+        },
+      )
+      flushInterruptionTrace('claude_stream_fallback_started')
       logEvent('tengu_nonstreaming_fallback_started', {
         request_id: (streamRequestId ??
           'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -2798,51 +3025,69 @@ async function* queryModel(
           : 'other') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
       endActiveApiCall()
-      const result = yield* executeNonStreamingRequest(
-        { model: options.model, source: options.querySource, providerOverride: options.providerOverride, effortValue: effort },
-        {
-          model: options.model,
-          fallbackModel: options.fallbackModel,
-          thinkingConfig,
-          ...(isFastModeEnabled() && { fastMode: isFastMode }),
-          signal,
-          initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0,
-          querySource: options.querySource,
-        },
-        paramsFromContext,
-        (attempt, _startTime, tokens) => {
-          attemptNumber = attempt
-          maxOutputTokens = tokens
-        },
-        params => captureAPIRequest(params, options.querySource),
-        streamRequestId,
-        options.queryLifecycle,
-      )
+      let result: BetaMessage | null
+      let fallbackResultMessage: AssistantMessage | undefined
+      try {
+        result = yield* executeNonStreamingRequest(
+          { model: providerRequestModel, source: options.querySource, providerOverride: options.providerOverride, effortValue: effort },
+          {
+            model: providerRequestModel,
+            fallbackModel: options.fallbackModel,
+            thinkingConfig,
+            ...(isFastModeEnabled() && { fastMode: isFastMode }),
+            signal,
+            initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0,
+            querySource: options.querySource,
+          },
+          paramsFromContext,
+          (attempt, _startTime, tokens) => {
+            attemptNumber = attempt
+            maxOutputTokens = tokens
+          },
+          params => captureAPIRequest(params, options.querySource),
+          streamRequestId,
+          options.queryLifecycle,
+          options.onProviderRequestStart,
+        )
 
-      const m: AssistantMessage = {
-        message: {
-          ...result,
-          content: normalizeContentFromAPI(
-            result.content,
-            tools,
-            options.agentId,
-          ),
-        },
-        requestId: streamRequestId ?? undefined,
-        type: 'assistant',
-        uuid: randomUUID(),
-        timestamp: new Date().toISOString(),
-        ...(process.env.USER_TYPE === 'ant' &&
-          research !== undefined && {
-            research,
+        if (result === null) {
+          traceFallbackSettlement('superseded', fallbackStartedEventId)
+          return
+        }
+
+        fallbackResultMessage = {
+          message: {
+            ...result,
+            content: normalizeContentFromAPI(
+              result.content,
+              tools,
+              options.agentId,
+            ),
+          },
+          requestId: streamRequestId ?? undefined,
+          type: 'assistant',
+          uuid: randomUUID(),
+          timestamp: new Date().toISOString(),
+          ...(process.env.USER_TYPE === 'ant' &&
+            research !== undefined && {
+              research,
+            }),
+          ...(advisorModel && {
+            advisorModel,
           }),
-        ...(advisorModel && {
-          advisorModel,
-        }),
+        }
+        newMessages.push(fallbackResultMessage)
+        fallbackMessage = fallbackResultMessage
+      } catch (error) {
+        traceFallbackSettlement(
+          signal.aborted ? 'aborted' : 'failed',
+          fallbackStartedEventId,
+          error,
+        )
+        throw error
       }
-      newMessages.push(m)
-      fallbackMessage = m
-      yield m
+      traceFallbackSettlement('completed', fallbackStartedEventId)
+      yield fallbackResultMessage
     } finally {
       clearStreamIdleTimers()
     }
@@ -2882,6 +3127,16 @@ async function* queryModel(
       errorFromRetry.originalError.status === 404
 
     if (is404StreamCreationError) {
+      const streamCreationErrorEventId = traceInterruptionEvent(
+        'claude_stream.error',
+        {
+          subsystem: 'claude_stream',
+          phase: 'stream_creation',
+          transport: 'anthropic_messages',
+          model: options.model,
+          error: errorFromRetry,
+        },
+      )
       // 404 is thrown at .withResponse() before streamRequestId is assigned,
       // and CannotRetryError means every retry failed — so grab the failed
       // request's ID from the error header instead.
@@ -2911,18 +3166,30 @@ async function* queryModel(
           '404_stream_creation' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
 
+      const fallbackStartedEventId = traceInterruptionEvent(
+        'claude_stream.fallback_started',
+        {
+          subsystem: 'claude_stream',
+          transport: 'anthropic_messages',
+          model: options.model,
+          trigger: '404_stream_creation',
+          causalEventId: streamCreationErrorEventId,
+        },
+      )
+      flushInterruptionTrace('claude_stream_fallback_started')
+
       try {
         // Fall back to non-streaming mode
         endActiveApiCall()
         const result = yield* executeNonStreamingRequest(
           {
-            model: options.model,
+            model: providerRequestModel,
             source: options.querySource,
             providerOverride: options.providerOverride,
             effortValue: effort,
           },
           {
-            model: options.model,
+            model: providerRequestModel,
             fallbackModel: options.fallbackModel,
             thinkingConfig,
             ...(isFastModeEnabled() && { fastMode: isFastMode }),
@@ -2937,7 +3204,13 @@ async function* queryModel(
           params => captureAPIRequest(params, options.querySource),
           failedRequestId,
           options.queryLifecycle,
+          options.onProviderRequestStart,
         )
+
+        if (result === null) {
+          traceFallbackSettlement('superseded', fallbackStartedEventId)
+          return
+        }
 
         const m: AssistantMessage = {
           message: {
@@ -2958,10 +3231,16 @@ async function* queryModel(
         }
         newMessages.push(m)
         fallbackMessage = m
+        traceFallbackSettlement('completed', fallbackStartedEventId)
         yield m
 
         // Continue to success logging below
       } catch (fallbackError) {
+        traceFallbackSettlement(
+          signal.aborted ? 'aborted' : 'failed',
+          fallbackStartedEventId,
+          fallbackError,
+        )
         // Propagate model-fallback signal to query.ts (see comment above).
         if (fallbackError instanceof FallbackTriggeredError) {
           throw fallbackError
@@ -3185,7 +3464,11 @@ export function cleanupStream(
   try {
     // Abort the stream via its controller if not already aborted
     if (!stream.controller.signal.aborted) {
-      stream.controller.abort()
+      requestAbort(stream.controller, undefined, {
+        source: 'claude_stream_cleanup',
+        subsystem: 'claude_stream',
+        controllerRole: 'provider-stream',
+      })
     }
   } catch {
     // Ignore - stream may already be closed

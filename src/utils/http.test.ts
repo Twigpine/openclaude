@@ -38,7 +38,7 @@ test('WebFetch identifies a custom Anthropic endpoint as third-party', () => {
   process.env.ANTHROPIC_BASE_URL = 'https://proxy.example/v1'
 
   expect(getWebFetchUserAgent()).toContain(
-    '+https://github.com/Gitlawb/openclaude',
+    '+https://github.com/Twigpine/openclaude',
   )
 })
 

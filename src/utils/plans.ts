@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto'
+import type { Stats } from 'fs'
 import { copyFile, writeFile } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
 import { homedir } from 'os'
-import { join, resolve, sep } from 'path'
+import { dirname, join, resolve, sep } from 'path'
 import type { AgentId, SessionId } from 'src/types/ids.js'
 import type { LogOption } from 'src/types/logs.js'
 import type {
@@ -24,6 +25,20 @@ import { getInitialSettings } from './settings/settings.js'
 import { generateWordSlug } from './words.js'
 
 const MAX_SLUG_RETRIES = 10
+
+/**
+ * Encoded agent plans live in this dedicated subdirectory of the plans dir so
+ * their filenames can never collide with a legacy (pre-escape) plan written
+ * directly under it. Two distinct teammates `writer@a/b` and `writer@a%2Fb`
+ * otherwise both map onto `{slug}-agent-writer@a%2Fb.md` -- one as the new
+ * escaped name, the other as its raw legacy name -- and read or clobber each
+ * other's plan. A real path separator is the one thing a raw single-component
+ * legacy name can never contain, so a subdirectory is what makes the escaped
+ * and legacy namespaces provably disjoint.
+ *
+ * Exported so the permission carve-out recognizes the same location.
+ */
+export const AGENT_PLANS_SUBDIR = 'agents'
 
 export function getDefaultPlansDirectory({
   configDirEnv = resolveConfigDirEnv({
@@ -128,10 +143,66 @@ export const getPlansDirectory = memoize(function getPlansDirectory(): string {
 })
 
 /**
+ * Escape the path separators an agent ID may legitimately contain so it always
+ * lands in a single filename component.
+ *
+ * A teammate's ID is `{name}@{teamName}`, and neither producer strips
+ * separators from the team name, so a team called `a/b` would otherwise emit
+ * `{slug}-agent-writer@a/b.md` -- a path in a *subdirectory* of the plans dir,
+ * not a plan file. Percent-escaping is reversible and leaves every ordinary ID
+ * (which contains none of these characters) byte-identical, so existing plan
+ * files keep their paths.
+ *
+ * Exported for testing.
+ */
+export function encodeAgentIdForPlanFile(agentId: string): string {
+  return agentId
+    .replaceAll('%', '%25')
+    .replaceAll('/', '%2F')
+    .replaceAll('\\', '%5C')
+}
+
+/**
+ * Inverse of {@link encodeAgentIdForPlanFile}. The escapes must be undone in the
+ * reverse order they were applied -- `%25` last -- so a literal `%2F` in the id
+ * (encoded as `%252F`) is not mis-decoded to `/`.
+ *
+ * Exported for testing.
+ */
+export function decodeAgentIdForPlanFile(encoded: string): string {
+  return encoded
+    .replaceAll('%5C', '\\')
+    .replaceAll('%2F', '/')
+    .replaceAll('%25', '%')
+}
+
+/**
+ * Whether a `{slug}-agent-` filename component is exactly what
+ * {@link encodeAgentIdForPlanFile} would emit -- i.e. a canonical plan path.
+ *
+ * The encoder only ever produces the escapes `%25`, `%2F`, `%5C` and no raw
+ * separators, so a component is canonical iff re-encoding its decode reproduces
+ * it byte-for-byte. This rejects lookalikes that `getPlanFilePath` never emits:
+ * a raw separator (`writer@a%2Fb` decodes to `writer@a/b`, whose canonical form
+ * is `writer@a%252Fb`), or a raw/partial `%` such as `writer@100%` (canonical
+ * form `writer@100%25`). Both would otherwise pass a naive separator-only check
+ * and grant unprompted read/write to a sibling `.md` outside this session's plan.
+ *
+ * Exported for testing.
+ */
+export function isCanonicalPlanFileEncoding(component: string): boolean {
+  return (
+    component.length > 0 &&
+    encodeAgentIdForPlanFile(decodeAgentIdForPlanFile(component)) === component
+  )
+}
+
+/**
  * Get the file path for a session's plan
  * @param agentId Optional agent ID for subagents. If not provided, returns main session plan.
  * For main conversation (no agentId), returns {planSlug}.md
- * For subagents (agentId provided), returns {planSlug}-agent-{agentId}.md
+ * For subagents (agentId provided), returns
+ * {AGENT_PLANS_SUBDIR}/{planSlug}-agent-{encodedAgentId}.md
  */
 export function getPlanFilePath(agentId?: AgentId): string {
   const planSlug = getPlanSlug(getSessionId())
@@ -141,8 +212,18 @@ export function getPlanFilePath(agentId?: AgentId): string {
     return join(getPlansDirectory(), `${planSlug}.md`)
   }
 
-  // Subagents: include agent ID
-  return join(getPlansDirectory(), `${planSlug}-agent-${agentId}.md`)
+  // Subagents: include agent ID, in the dedicated subdirectory that keeps the
+  // escaped filename namespace disjoint from legacy plans (see AGENT_PLANS_SUBDIR).
+  const agentPlansDir = join(getPlansDirectory(), AGENT_PLANS_SUBDIR)
+  try {
+    getFsImplementation().mkdirSync(agentPlansDir)
+  } catch (error) {
+    logError(error)
+  }
+  return join(
+    agentPlansDir,
+    `${planSlug}-agent-${encodeAgentIdForPlanFile(agentId)}.md`,
+  )
 }
 
 /**
@@ -151,13 +232,258 @@ export function getPlanFilePath(agentId?: AgentId): string {
  */
 export function getPlan(agentId?: AgentId): string | null {
   const filePath = getPlanFilePath(agentId)
+  let contents: string
   try {
-    return getFsImplementation().readFileSync(filePath, { encoding: 'utf-8' })
+    contents = getFsImplementation().readFileSync(filePath, {
+      encoding: 'utf-8',
+    })
   } catch (error) {
-    if (isENOENT(error)) return null
-    logError(error)
+    if (!isENOENT(error)) {
+      logError(error)
+      return null
+    }
+    return readLegacyUnescapedPlan(agentId, filePath)
+  }
+  // An empty/whitespace escaped file is not a real plan. isPlanFilePath allows a
+  // direct FileWrite/FileEdit to the canonical escaped path before migration has
+  // run, and such a stub would otherwise permanently shadow a legacy plan that
+  // still holds the real content. Fall through to legacy recovery in that case;
+  // recovery's no-clobber guard returns the legacy contents without renaming
+  // over the stub, so a genuine concurrent escaped write is never lost.
+  if (contents.trim() === '') {
+    const legacy = readLegacyUnescapedPlan(agentId, filePath)
+    if (legacy !== null) return legacy
+  }
+  return contents
+}
+
+/**
+ * Whether a legacy plan path (built from an unescaped, attacker-influenced
+ * agent id) still resolves inside the plans directory after `..` collapse.
+ *
+ * Exported for testing.
+ */
+export function isPathWithinPlansDir(
+  candidatePath: string,
+  plansDir: string,
+): boolean {
+  return candidatePath === plansDir || candidatePath.startsWith(plansDir + sep)
+}
+
+/**
+ * Like {@link isPathWithinPlansDir} but resolves symlinks. The lexical check
+ * above cannot see a symlinked intermediate directory (e.g. a slash-bearing
+ * legacy id `writer@a/b` whose `{slug}-agent-writer@a` parent is a symlink to
+ * outside the plans dir); recovery would then read/migrate through it. Resolve
+ * the deepest existing ancestor of the legacy path and require it to stay inside
+ * the resolved plans directory.
+ *
+ * Exported for testing.
+ */
+export function isResolvedPathWithinPlansDir(
+  candidatePath: string,
+  plansDir: string,
+): boolean {
+  const fs = getFsImplementation()
+  let realPlansDir: string
+  try {
+    realPlansDir = fs.realpathSync(plansDir)
+  } catch {
+    return false
+  }
+  let probe = candidatePath
+  for (;;) {
+    try {
+      const real = fs.realpathSync(probe)
+      return real === realPlansDir || real.startsWith(realPlansDir + sep)
+    } catch (error) {
+      if (!isENOENT(error)) return false
+      const parent = dirname(probe)
+      if (parent === probe) return false
+      probe = parent
+    }
+  }
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : undefined
+}
+
+/**
+ * Read a path that must be a regular file, proving the object did not change
+ * across the read. A pathname pre-check (`lstat`) followed by a separate
+ * `readFileSync` is a TOCTOU: an attacker who can write the plans directory can
+ * swap the checked regular file for a symlink in the gap, so recovery would
+ * read the link target. Without a no-follow file handle in the fs abstraction we
+ * instead bracket the read with `lstat` and require the same inode/device and a
+ * regular file both before and after -- so a swap in the window is detected and
+ * the read is discarded rather than trusted.
+ */
+function readRegularFileStable(path: string): string | null {
+  const fs = getFsImplementation()
+  let before: Stats
+  try {
+    before = fs.lstatSync(path)
+  } catch (error) {
+    if (!isENOENT(error)) logError(error)
     return null
   }
+  if (!before.isFile()) return null
+
+  let contents: string
+  try {
+    contents = fs.readFileSync(path, { encoding: 'utf-8' })
+  } catch (error) {
+    if (!isENOENT(error)) logError(error)
+    return null
+  }
+
+  let after: Stats
+  try {
+    after = fs.lstatSync(path)
+  } catch (error) {
+    if (!isENOENT(error)) logError(error)
+    return null
+  }
+  if (
+    !after.isFile() ||
+    after.ino !== before.ino ||
+    after.dev !== before.dev
+  ) {
+    return null
+  }
+  return contents
+}
+
+export function readAndMigrateLegacyPlan(
+  legacyPath: string,
+  escapedPath: string,
+): string | null {
+  if (legacyPath === escapedPath) return null
+
+  const fs = getFsImplementation()
+
+  // SECURITY: recovery reads and then migrates this path, so it must be a real
+  // regular file. A symlink planted at the legacy slot would otherwise let
+  // recovery return the contents of an arbitrary target outside the plans
+  // directory. Capture the file identity up front; the migration below pins that
+  // inode via an atomic hard link so a later swap cannot redirect the read.
+  let legacyStat: Stats
+  try {
+    legacyStat = fs.lstatSync(legacyPath)
+  } catch (error) {
+    if (!isENOENT(error)) logError(error)
+    return null
+  }
+  if (!legacyStat.isFile()) return null
+
+  // Genuine no-clobber move: `linkSync` fails with EEXIST if the escaped path
+  // already exists, so it never replaces a live plan the way a check-then-act
+  // `existsSync` + `renameSync` would under a concurrent writer. On success the
+  // escaped name is a hard link to the exact inode we just lstat'd, immune to a
+  // symlink swap of the legacy pathname.
+  try {
+    fs.linkSync(legacyPath, escapedPath)
+  } catch (error) {
+    const code = errorCode(error)
+    if (code === 'ENOENT') return null
+    if (code === 'EEXIST') {
+      // A live plan is already at the escaped path: do not migrate. Return the
+      // legacy contents (read with swap detection) without touching either file.
+      return readRegularFileStable(legacyPath)
+    }
+    // Hard links may be unsupported (e.g. cross-device, some Windows FS). Fall
+    // back to reading the legacy file in place without migrating.
+    logForDebugging(
+      `Could not link legacy plan file ${legacyPath} to ${escapedPath}: ${error instanceof Error ? error.message : error}`,
+      { level: 'warn' },
+    )
+    return readRegularFileStable(legacyPath)
+  }
+
+  // Confirm the linked inode is the regular file we captured -- a swap between
+  // the lstat and the link would otherwise pin an attacker's object.
+  try {
+    const linked = fs.lstatSync(escapedPath)
+    if (
+      !linked.isFile() ||
+      linked.ino !== legacyStat.ino ||
+      linked.dev !== legacyStat.dev
+    ) {
+      try {
+        fs.unlinkSync(escapedPath)
+      } catch {
+        // best effort
+      }
+      return null
+    }
+  } catch (error) {
+    if (!isENOENT(error)) logError(error)
+    return null
+  }
+
+  // Read from the pinned escaped hard link, then drop the legacy name to
+  // complete the move. Reading the link (not legacyPath) means a swap of the
+  // legacy pathname after this point cannot affect the returned contents.
+  let contents: string
+  try {
+    contents = fs.readFileSync(escapedPath, { encoding: 'utf-8' })
+  } catch (error) {
+    if (!isENOENT(error)) logError(error)
+    return null
+  }
+  try {
+    fs.unlinkSync(legacyPath)
+  } catch (error) {
+    logForDebugging(
+      `Could not remove legacy plan file ${legacyPath} after migration: ${error instanceof Error ? error.message : error}`,
+      { level: 'warn' },
+    )
+  }
+  return contents
+}
+
+/**
+ * Recover a plan written before agent IDs were escaped into the filename,
+ * confining the read/rename to a legitimate per-agent slot inside the plans dir.
+ *
+ * Exported for testing.
+ */
+export function readLegacyUnescapedPlan(
+  agentId: AgentId | undefined,
+  escapedPath: string,
+  plansDir: string = getPlansDirectory(),
+  slug: string = getPlanSlug(getSessionId()),
+): string | null {
+  if (!agentId) return null
+  // SECURITY: agentId is intentionally left unescaped here so the pre-escape
+  // filename can be recovered, so it can still carry `/`, `\`, or `..`. A `..`
+  // segment lets join() climb back into the plans dir onto a *different* plan
+  // (`a/../{slug}` -> the main plan; `a/../{slug}-agent-victim` -> a sibling),
+  // which the migrate step would then read and rename -- moving another agent's
+  // file. Reject any traversal segment before building the path.
+  //
+  // Split on the host platform's real separators: on POSIX only `/` is a
+  // separator, and `\` is a legal filename character, so a legitimate legacy id
+  // such as `a\..\b` was persisted as one flat filename and must still recover.
+  // On Windows both `/` and `\` are separators (keep that safeguard).
+  const traversalSeparators = sep === '\\' ? /[/\\]/ : /\//
+  if (agentId.split(traversalSeparators).includes('..')) return null
+
+  const legacyPath = join(plansDir, `${slug}-agent-${agentId}.md`)
+  // Defense in depth: the legacy file must still sit inside the plans dir and
+  // under this session's `{slug}-agent-` prefix after separator collapse, so a
+  // stray path can never resolve onto the main plan or another agent's file.
+  const agentPrefix = join(plansDir, `${slug}-agent-`)
+  if (!isPathWithinPlansDir(legacyPath, plansDir)) return null
+  if (!legacyPath.startsWith(agentPrefix)) return null
+  // SECURITY: a slash-bearing legacy id lands the file under an intermediate
+  // directory; if that directory is a symlink the lexical checks above still
+  // pass. Require the resolved path to stay inside the plans dir before reading.
+  if (!isResolvedPathWithinPlansDir(legacyPath, plansDir)) return null
+  return readAndMigrateLegacyPlan(legacyPath, escapedPath)
 }
 
 /**

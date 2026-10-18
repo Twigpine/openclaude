@@ -1,5 +1,5 @@
 /**
- * Client for the Gitlawb Ads service (ads.gitlawb.com).
+ * Client for the Twigpine Ads service (ads.gitlawb.com).
  *
  * openclaude shows opt-in "sponsored tips" during inference waits; a viewer who
  * dwells on one earns opengateway credits. This module is the thin HTTP client:

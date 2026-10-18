@@ -146,3 +146,19 @@ test('maps tool_stream_unsupported without promising a retry after failure', () 
   expect(text).toMatch(/(\/model|--model)/)
   expect(text).not.toContain('Retrying')
 })
+
+test('maps stream_options_unsupported after the bounded fallback is exhausted', () => {
+  const error = APIError.generate(
+    400,
+    undefined,
+    'OpenAI API error 400: stream_options is unsupported [openai_category=stream_options_unsupported]',
+    new Headers(),
+  )
+
+  const message = getAssistantMessageFromError(error, 'local-model')
+  const text = getFirstText(message)
+
+  expect(text).toContain('rejected the `stream_options` parameter')
+  expect(text).toContain('without usage reporting')
+  expect(text).not.toContain('Retrying')
+})

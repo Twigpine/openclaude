@@ -20,6 +20,7 @@ import { onChangeAppState } from './state/onChangeAppState.js';
 import { normalizeApiKeyForConfig } from './utils/authPortable.js';
 import { getExternalClaudeMdIncludes, getMemoryFiles, shouldShowClaudeMdExternalIncludesWarning } from './utils/claudemd.js';
 import { checkHasTrustDialogAccepted, getCustomApiKeyStatus, getGlobalConfig, saveGlobalConfig } from './utils/config.js';
+import { getRequiredSetupScreens } from './utils/setupScreenGates.js';
 import { updateDeepLinkTerminalPreference } from './utils/deepLink/terminalPreference.js';
 import { isEnvTruthy, isRunningOnHomespace } from './utils/envUtils.js';
 import { type FpsMetrics, FpsTracker } from './utils/fpsTracker.js';
@@ -114,9 +115,20 @@ export async function showSetupScreens(root: Root, permissionMode: PermissionMod
   const config = getGlobalConfig();
   let onboardingShown = false;
 
-  // Skip onboarding dialog for third-party providers (no Anthropic account needed)
-  if (usesAnthropicSetup && (!config.theme || !config.hasCompletedOnboarding) // always show onboarding at least once
-  ) {
+  // Onboarding runs for ALL providers: theme + security notes are universal,
+  // and the component itself drops the preflight/OAuth steps when Anthropic
+  // auth is not enabled (see oauthEnabled in Onboarding.tsx). Gating this on
+  // the Anthropic account flow left third-party users with no theme choice
+  // and, worse, no prompt-injection/safety notes. The decisions live in the
+  // provider-free setupScreenGates seam (behaviorally tested there — this
+  // module's import chain cannot be loaded under bun test).
+  const setupScreens = getRequiredSetupScreens({
+    theme: config.theme,
+    hasCompletedOnboarding: config.hasCompletedOnboarding,
+    trustDialogAccepted: checkHasTrustDialogAccepted(),
+    isClaubbit: isEnvTruthy(process.env.CLAUBBIT),
+  });
+  if (setupScreens.onboarding) {
     onboardingShown = true;
     const {
       Onboarding
@@ -136,9 +148,11 @@ export async function showSetupScreens(root: Root, permissionMode: PermissionMod
   // Note: non-interactive sessions (CI/CD with -p) never reach showSetupScreens at all.
   // Skip permission checks in claubbit
   if (!isEnvTruthy(process.env.CLAUBBIT)) {
-    // Skip trust dialog UI for third-party providers (no Anthropic auth), but still
-    // run trust state initialization below so the REPL mounts correctly.
-    if (usesAnthropicSetup && !checkHasTrustDialogAccepted()) {
+    // The trust dialog is the workspace trust boundary — it has nothing to do
+    // with which API provider is configured, so it runs for third-party
+    // providers too (an untrusted repo is exactly as dangerous over Ollama as
+    // over Anthropic).
+    if (setupScreens.trustDialog) {
       const {
         TrustDialog
       } = await import('./components/TrustDialog/TrustDialog.js');

@@ -347,7 +347,11 @@ export function parseMultipleKeypresses(
         const mouse = parseMouseEvent(resynthesized)
         keys.push(mouse ?? parseKeypress(resynthesized))
       } else {
-        keys.push(parseKeypress(token.value))
+        // IMEs and some terminals emit decomposed Unicode (NFD) — e.g.
+        // U+0061 + U+0306 instead of precomposed U+0103 (ă). Normalize
+        // typed text to NFC here so a decomposed pair parses as one
+        // composed character instead of arriving as separate keys (#2018).
+        keys.push(parseKeypress(token.value.normalize('NFC')))
       }
     }
   }
@@ -830,6 +834,15 @@ function parseKeypress(s: string = ''): ParsedKey {
   } else if (s.length === 1 && s >= 'A' && s <= 'Z') {
     key.name = s.toLowerCase()
     key.shift = true
+  } else if ([...s].length === 1 && (s.codePointAt(0) ?? 0) > 127) {
+    // Printable non-ASCII character (accented Latin, CJK, astral emoji,
+    // etc.). Count code points, not UTF-16 units, so a single astral code
+    // point (UTF-16 length 2, e.g. 😀) is still recognized. Assign it as the
+    // key name so downstream consumers (keybindings, vim mode, DOM keyboard
+    // dispatch) can identify it; text insertion still flows through
+    // `sequence`. Without this, Vietnamese precomposed characters like
+    // ă/ơ/ư fall through unnamed (#2018).
+    key.name = s
   } else if ((parts = META_KEY_CODE_RE.exec(s))) {
     key.meta = true
     key.shift = /^[A-Z]$/.test(parts[1]!)

@@ -237,6 +237,63 @@ describe('catalog helpers', () => {
     expect(getModelsForBrand('claude')).toHaveLength(1)
     expect(getModelsForBrand('claude')[0]!.id).toBe('m-claude')
   })
+
+  test('hidden entries are dropped from catalog resolution', () => {
+    registerGateway(
+      makeGateway('gw-1', {
+        catalog: {
+          source: 'static',
+          models: [
+            { id: 'visible', apiName: 'model-visible' },
+            { id: 'invisible', apiName: 'model-hidden', hidden: true },
+          ],
+        },
+      }),
+    )
+    const entries = getCatalogEntriesForRoute('gw-1')
+    expect(entries.map(e => e.id)).toEqual(['visible'])
+  })
+
+  test('availableUntil expires entries at the cutoff instant, exclusive', () => {
+    registerGateway(
+      makeGateway('gw-1', {
+        catalog: {
+          source: 'static',
+          models: [
+            { id: 'evergreen', apiName: 'model-evergreen' },
+            {
+              id: 'time-boxed',
+              apiName: 'model-window',
+              availableUntil: '2026-08-13T10:00:00Z',
+            },
+          ],
+        },
+      }),
+    )
+    const before = getCatalogEntriesForRoute('gw-1', new Date('2026-08-13T09:59:59Z'))
+    expect(before.map(e => e.id)).toEqual(['evergreen', 'time-boxed'])
+
+    const atCutoff = getCatalogEntriesForRoute('gw-1', new Date('2026-08-13T10:00:00Z'))
+    expect(atCutoff.map(e => e.id)).toEqual(['evergreen'])
+
+    const after = getCatalogEntriesForRoute('gw-1', new Date('2026-08-13T10:00:01Z'))
+    expect(after.map(e => e.id)).toEqual(['evergreen'])
+  })
+
+  test('a malformed availableUntil fails open (entry stays visible)', () => {
+    registerGateway(
+      makeGateway('gw-1', {
+        catalog: {
+          source: 'static',
+          models: [
+            { id: 'typo', apiName: 'model-typo', availableUntil: 'not-a-date' },
+          ],
+        },
+      }),
+    )
+    const entries = getCatalogEntriesForRoute('gw-1', new Date('2099-01-01T00:00:00Z'))
+    expect(entries.map(e => e.id)).toEqual(['typo'])
+  })
 })
 
 // ---------------------------------------------------------------------------

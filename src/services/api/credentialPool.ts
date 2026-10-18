@@ -3,6 +3,7 @@ export type CredentialPoolFailureKind = 'auth' | 'cooldown'
 export type CredentialLease = {
   value: string
   index: number
+  generation: number
 }
 
 type CredentialState = {
@@ -10,6 +11,7 @@ type CredentialState = {
   disabled: boolean
   cooldownUntil: number
   lastFailureAt: number
+  generation: number
 }
 
 export class CredentialPool {
@@ -23,6 +25,7 @@ export class CredentialPool {
       disabled: false,
       cooldownUntil: 0,
       lastFailureAt: 0,
+      generation: 0,
     }))
     this.now = now
   }
@@ -44,7 +47,7 @@ export class CredentialPool {
         continue
       }
       this.cursor = (index + 1) % this.credentials.length
-      return { value: candidate.value, index }
+      return { value: candidate.value, index, generation: candidate.generation }
     }
 
     let leastRecentlyFailedIndex = -1
@@ -66,13 +69,30 @@ export class CredentialPool {
 
     const fallback = this.credentials[leastRecentlyFailedIndex]
     this.cursor = (leastRecentlyFailedIndex + 1) % this.credentials.length
-    return { value: fallback.value, index: leastRecentlyFailedIndex }
+    return {
+      value: fallback.value,
+      index: leastRecentlyFailedIndex,
+      generation: fallback.generation,
+    }
+  }
+
+  hasAvailableCredential(): boolean {
+    const now = this.now()
+    return this.credentials.some(
+      credential => !credential.disabled && credential.cooldownUntil <= now,
+    )
   }
 
   reportSuccess(lease: CredentialLease | null): void {
     if (!lease) return
     const credential = this.credentials[lease.index]
-    if (!credential || credential.value !== lease.value) return
+    if (
+      !credential ||
+      credential.value !== lease.value ||
+      credential.generation !== lease.generation
+    ) {
+      return
+    }
     credential.cooldownUntil = 0
   }
 
@@ -83,9 +103,16 @@ export class CredentialPool {
   ): void {
     if (!lease) return
     const credential = this.credentials[lease.index]
-    if (!credential || credential.value !== lease.value) return
+    if (!credential || credential.value !== lease.value) {
+      return
+    }
+    // Auth failures must evict a key even when a newer cooldown advanced its lease.
+    if (kind !== 'auth' && credential.generation !== lease.generation) {
+      return
+    }
 
     const now = this.now()
+    credential.generation += 1
     credential.lastFailureAt = now
     if (kind === 'auth') {
       credential.disabled = true
@@ -103,15 +130,34 @@ export function parseCredentialList(value: string | undefined): string[] {
     .filter(Boolean)
 }
 
+// Template/dotenv sentinels that must never authenticate or win route
+// precedence. Keep this list case-insensitive and shared so dedicated-key
+// providers (ApiSmart, AIMLAPI, OpenAI pools) agree with profile sanitizers.
+const INVALID_CREDENTIAL_PLACEHOLDERS = new Set([
+  'sua_chave',
+  'null',
+  'undefined',
+])
+
+export function isCredentialPlaceholder(value: string | undefined): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+  return INVALID_CREDENTIAL_PLACEHOLDERS.has(trimmed.toLowerCase())
+}
+
 export function hasInvalidCredentialPlaceholder(value: string | undefined): boolean {
-  return parseCredentialList(value).some(credential => credential === 'SUA_CHAVE')
+  return parseCredentialList(value).some(credential =>
+    isCredentialPlaceholder(credential),
+  )
 }
 
 export function hasUsableOpenAICredential(value: string | undefined): boolean {
   const credentials = parseCredentialList(value)
   return (
     credentials.length > 0 &&
-    credentials.every(credential => credential !== 'SUA_CHAVE')
+    credentials.every(credential => !isCredentialPlaceholder(credential))
   )
 }
 

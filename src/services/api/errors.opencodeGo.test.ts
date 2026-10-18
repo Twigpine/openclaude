@@ -1,6 +1,10 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { APIError } from '@anthropic-ai/sdk'
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 
+import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import {
   classifyAPIError,
   getAssistantMessageFromError,
@@ -18,8 +22,20 @@ function getFirstText(message: ReturnType<typeof getAssistantMessageFromError>):
 }
 
 const originalBaseUrl = process.env.OPENAI_BASE_URL
+let tempDir: string
+
+beforeEach(() => {
+  tempDir = mkdtempSync(join(tmpdir(), 'openclaude-opencode-go-error-test-'))
+  setClaudeConfigHomeDirForTesting(tempDir)
+})
 
 afterEach(() => {
+  setClaudeConfigHomeDirForTesting(undefined)
+  try {
+    rmSync(tempDir, { recursive: true, force: true })
+  } catch {
+    // ignore
+  }
   if (originalBaseUrl === undefined) {
     delete process.env.OPENAI_BASE_URL
   } else {

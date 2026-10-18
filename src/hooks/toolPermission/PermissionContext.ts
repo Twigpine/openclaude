@@ -22,6 +22,7 @@ import type {
 } from '../../types/permissions.js'
 import { setClassifierApproval } from '../../utils/classifierApprovals.js'
 import { logForDebugging } from '../../utils/debug.js'
+import { requestAbort } from '../../utils/interruptionTrace.js'
 import { executePermissionRequestHooks } from '../../utils/hooks.js'
 import {
   REJECT_MESSAGE,
@@ -53,6 +54,10 @@ import {
   logPermissionDecision,
   type PermissionDecisionArgs,
 } from './permissionLogging.js'
+import {
+  buildInactivePermissionSessionDecision,
+  isPermissionSessionActive,
+} from './permissionSessionOwnership.js'
 
 type PermissionApprovalSource =
   | { type: 'hook'; permanent?: boolean }
@@ -68,8 +73,33 @@ type PermissionRejectionSource =
 // In the REPL, these are backed by React state.
 type PermissionQueueOps = {
   push(item: ToolUseConfirm): void
-  remove(toolUseID: string): void
-  update(toolUseID: string, patch: Partial<ToolUseConfirm>): void
+  remove(
+    toolUseID: string,
+    permissionSessionId: ToolUseConfirm['permissionSessionId'],
+    agentId: ToolUseContext['agentId'],
+  ): void
+  update(
+    toolUseID: string,
+    permissionSessionId: ToolUseConfirm['permissionSessionId'],
+    agentId: ToolUseContext['agentId'],
+    patch: Partial<ToolUseConfirm>,
+  ): void
+}
+
+function isSamePermissionQueueEntry(
+  item: Pick<
+    ToolUseConfirm,
+    'toolUseID' | 'permissionSessionId' | 'toolUseContext'
+  >,
+  toolUseID: string,
+  permissionSessionId: ToolUseConfirm['permissionSessionId'],
+  agentId: ToolUseContext['agentId'],
+): boolean {
+  return (
+    item.toolUseID === toolUseID &&
+    item.permissionSessionId === permissionSessionId &&
+    item.toolUseContext.agentId === agentId
+  )
 }
 
 type ResolveOnce<T> = {
@@ -152,10 +182,19 @@ function createPermissionContext(
       updates: PermissionUpdate[],
       hookPlanModeWasActive?: boolean,
     ) {
+      if (
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return false
+      }
       if (updates.length === 0) return false
-      const appState = toolUseContext.getAppState()
+      const validationRootState =
+        toolUseContext.getRootAppState?.() ?? toolUseContext.getAppState()
       const validatedUpdates: PermissionUpdate[] = []
-      let nextContextForValidation = appState.toolPermissionContext
+      let nextContextForValidation =
+        validationRootState.toolPermissionContext
       for (const update of updates) {
         if (update.type === 'setMode') {
           const modeDecision = await getPermissionModeChangeRequestDecision({
@@ -181,17 +220,27 @@ function createPermissionContext(
       }
       if (validatedUpdates.length === 0) return false
       const latestAppState = toolUseContext.getAppState()
+      const rootAppState =
+        toolUseContext.getRootAppState?.() ?? latestAppState
       const updatesToApply =
         hookPlanModeWasActive === undefined
           ? validatedUpdates
           : filterPermissionRequestHookUpdates(
               validatedUpdates,
               hookPlanModeWasActive ||
-                latestAppState.toolPermissionContext.mode === 'plan',
+                latestAppState.toolPermissionContext.mode === 'plan' ||
+                rootAppState.toolPermissionContext.mode === 'plan',
             )
       if (updatesToApply.length === 0) return false
+      if (
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return false
+      }
       const updatedContext = applyPermissionUpdatesToLiveContext(
-        latestAppState.toolPermissionContext,
+        rootAppState.toolPermissionContext,
         updatesToApply,
       )
       persistPermissionUpdates(updatesToApply)
@@ -210,6 +259,7 @@ function createPermissionContext(
       feedback?: string,
       isAbort?: boolean,
       contentBlocks?: ContentBlockParam[],
+      abortTrace?: { source: string; causalEventId?: string },
     ): PermissionDecision {
       const sub = !!toolUseContext.agentId
       const baseMessage = feedback
@@ -222,7 +272,12 @@ function createPermissionContext(
         logForDebugging(
           `Aborting: tool=${tool.name} isAbort=${isAbort} hasFeedback=${!!feedback} isSubagent=${sub}`,
         )
-        toolUseContext.abortController.abort('interrupt')
+        requestAbort(toolUseContext.abortController, 'interrupt', {
+          source: abortTrace?.source ?? 'permission_abort',
+          causalEventId: abortTrace?.causalEventId,
+          subsystem: 'tool_permission',
+          controllerRole: 'query-root',
+        })
       }
       return { behavior: 'ask', message, contentBlocks }
     },
@@ -288,6 +343,7 @@ function createPermissionContext(
       suggestions: PermissionUpdate[] | undefined,
       updatedInput?: Record<string, unknown>,
       permissionPromptStartTimeMs?: number,
+      ownerDecisionAuthorized = false,
     ): Promise<PermissionDecision | null> {
       const enforcePlanMode =
         toolUseContext.getAppState().toolPermissionContext.mode === 'plan'
@@ -357,6 +413,7 @@ function createPermissionContext(
               ),
               permissionPromptStartTimeMs,
               enforcePlanMode,
+              ownerDecisionAuthorized,
             )
           } else if (decision.behavior === 'deny') {
             this.logDecision(
@@ -367,7 +424,11 @@ function createPermissionContext(
               logForDebugging(
                 `Hook interrupt: tool=${tool.name} hookMessage=${decision.message}`,
               )
-              toolUseContext.abortController.abort('interrupt')
+              requestAbort(toolUseContext.abortController, 'interrupt', {
+                source: 'permission_hook',
+                subsystem: 'tool_permission',
+                controllerRole: 'query-root',
+              })
             }
             return this.buildDeny(
               decision.message || 'Permission denied by hook',
@@ -416,7 +477,19 @@ function createPermissionContext(
       permissionPromptStartTimeMs?: number,
       contentBlocks?: ContentBlockParam[],
       decisionReason?: PermissionDecisionReason,
+      // Set only after an exact owner-scoped user/remote decision is claimed.
+      // Persistence keeps its own active-session guard; this token prevents a
+      // later UI switch from rewriting the already-authorized one-time result.
+      ownerDecisionAuthorized = false,
     ): Promise<PermissionDecision> {
+      if (
+        !ownerDecisionAuthorized &&
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return buildInactivePermissionSessionDecision()
+      }
       const planModeWasActive =
         toolUseContext.getAppState().toolPermissionContext.mode === 'plan'
       const revalidation =
@@ -443,6 +516,14 @@ function createPermissionContext(
       if (finalRevalidation) {
         return finalRevalidation
       }
+      if (
+        !ownerDecisionAuthorized &&
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return buildInactivePermissionSessionDecision()
+      }
       this.logDecision(
         {
           decision: 'accept',
@@ -466,7 +547,16 @@ function createPermissionContext(
       permissionUpdates: PermissionUpdate[],
       permissionPromptStartTimeMs?: number,
       planModeWasActive = false,
+      ownerDecisionAuthorized = false,
     ): Promise<PermissionDecision> {
+      if (
+        !ownerDecisionAuthorized &&
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return buildInactivePermissionSessionDecision()
+      }
       const acceptedPermanentUpdates =
         await this.persistPermissions(permissionUpdates, planModeWasActive)
       const postUpdatePlanModeDecision =
@@ -480,6 +570,14 @@ function createPermissionContext(
         )
       if (postUpdatePlanModeDecision) {
         return postUpdatePlanModeDecision
+      }
+      if (
+        !ownerDecisionAuthorized &&
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return buildInactivePermissionSessionDecision()
       }
       this.logDecision(
         {
@@ -498,6 +596,13 @@ function createPermissionContext(
       permissionPromptStartTimeMs?: number,
       planModeWasActive = false,
     ): Promise<PermissionDecision> {
+      if (
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return buildInactivePermissionSessionDecision()
+      }
       const planModeDecision =
         await revalidatePlanModePermissionAllowWithRaceGuard(
           tool,
@@ -509,6 +614,13 @@ function createPermissionContext(
       if (planModeDecision) {
         return planModeDecision
       }
+      if (
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return buildInactivePermissionSessionDecision()
+      }
       this.logDecision(
         { decision: 'accept', source: { type: 'classifier' } },
         { input: finalInput, permissionPromptStartTimeMs },
@@ -519,10 +631,19 @@ function createPermissionContext(
       queueOps?.push(item)
     },
     removeFromQueue() {
-      queueOps?.remove(toolUseID)
+      queueOps?.remove(
+        toolUseID,
+        toolUseContext.options.permissionSessionId,
+        toolUseContext.agentId,
+      )
     },
     updateQueueItem(patch: Partial<ToolUseConfirm>) {
-      queueOps?.update(toolUseID, patch)
+      queueOps?.update(
+        toolUseID,
+        toolUseContext.options.permissionSessionId,
+        toolUseContext.agentId,
+        patch,
+      )
     },
   }
   return Object.freeze(ctx)
@@ -544,22 +665,51 @@ function createPermissionQueueOps(
     push(item: ToolUseConfirm) {
       setToolUseConfirmQueue(queue => [...queue, item])
     },
-    remove(toolUseID: string) {
+    remove(
+      toolUseID: string,
+      permissionSessionId: ToolUseConfirm['permissionSessionId'],
+      agentId: ToolUseContext['agentId'],
+    ) {
       setToolUseConfirmQueue(queue =>
-        queue.filter(item => item.toolUseID !== toolUseID),
+        queue.filter(
+          item =>
+            !isSamePermissionQueueEntry(
+              item,
+              toolUseID,
+              permissionSessionId,
+              agentId,
+            ),
+        ),
       )
     },
-    update(toolUseID: string, patch: Partial<ToolUseConfirm>) {
+    update(
+      toolUseID: string,
+      permissionSessionId: ToolUseConfirm['permissionSessionId'],
+      agentId: ToolUseContext['agentId'],
+      patch: Partial<ToolUseConfirm>,
+    ) {
       setToolUseConfirmQueue(queue =>
         queue.map(item =>
-          item.toolUseID === toolUseID ? { ...item, ...patch } : item,
+          isSamePermissionQueueEntry(
+            item,
+            toolUseID,
+            permissionSessionId,
+            agentId,
+          )
+            ? { ...item, ...patch }
+            : item,
         ),
       )
     },
   }
 }
 
-export { createPermissionContext, createPermissionQueueOps, createResolveOnce }
+export {
+  createPermissionContext,
+  createPermissionQueueOps,
+  createResolveOnce,
+  isSamePermissionQueueEntry,
+}
 export type {
   PermissionContext,
   PermissionApprovalSource,

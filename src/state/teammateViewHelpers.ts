@@ -1,6 +1,10 @@
 import { logEvent } from '../services/analytics/index.js'
 import { isTerminalTaskStatus } from '../Task.js'
 import type { LocalAgentTaskState } from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import {
+  requestAbort,
+  traceInterruptionEvent,
+} from '../utils/interruptionTrace.js'
 
 // Inlined from framework.ts — importing creates a cycle through
 // BackgroundTasksDialog. Keep in sync with PANEL_GRACE_MS there.
@@ -121,7 +125,20 @@ export function stopOrDismissAgent(
     const task = prev.tasks[taskId]
     if (!isLocalAgent(task)) return prev
     if (task.status === 'running') {
-      task.abortController?.abort()
+      const causalEventId = traceInterruptionEvent('input.agent_panel_stop', {
+        source: 'agent_panel_stop',
+        subsystem: 'local_agent_task',
+        subagentId: taskId,
+      })
+      if (task.abortController) {
+        requestAbort(task.abortController, undefined, {
+          source: 'agent_panel_stop',
+          subsystem: 'local_agent_task',
+          controllerRole: 'background-agent',
+          subagentId: taskId,
+          causalEventId,
+        })
+      }
       return prev
     }
     if (task.evictAfter === 0) return prev

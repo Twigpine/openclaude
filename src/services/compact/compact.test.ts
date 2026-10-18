@@ -7,8 +7,12 @@ import {
   expect,
   mock,
   test,
+  vi,
 } from 'bun:test'
 import { randomUUID } from 'crypto'
+import { unlink } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 
 import {
   acquireSharedMutationLock,
@@ -16,6 +20,11 @@ import {
 } from '../../test/sharedMutationLock.js'
 import type { Message } from '../../types/message.js'
 import * as realConfig from '../../utils/config.js'
+import {
+  __getInterruptionTraceSnapshotForTests,
+  __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
+} from '../../utils/interruptionTrace.js'
 
 // Several earlier test files in the smoke suite call
 // mock.module('../../utils/model/providers.js', ...) to stub getAPIProvider.
@@ -23,23 +32,12 @@ import * as realConfig from '../../utils/config.js'
 // NOT clear it, so the cached bare-path import of providers.js inside betas.ts
 // (which compact.ts transitively imports) resolves to that stub unless we
 // override it. We import the real providers module through a cache-busting URL
-// and re-register it under the bare specifier at module level.
+// and register it under the bare specifier while this suite holds the shared
+// mutation lock.
 const _realProvidersModule = await import(
   `../../utils/model/providers.js?real=${Date.now()}-${Math.random()}`
 )
-mock.module('../../utils/model/providers.js', () => ({
-  getAPIProvider: _realProvidersModule.getAPIProvider,
-  usesAnthropicAccountFlow: _realProvidersModule.usesAnthropicAccountFlow,
-  isGithubNativeAnthropicMode: _realProvidersModule.isGithubNativeAnthropicMode,
-  getAPIProviderForStatsig: _realProvidersModule.getAPIProviderForStatsig,
-  isFirstPartyAnthropicBaseUrl: _realProvidersModule.isFirstPartyAnthropicBaseUrl,
-}))
 
-// Pre-import the real diskOutput module so we can restore it in afterAll
-// (compact's mock of getTaskOutputPath leaks and breaks BashTool tests).
-const _realDiskOutputModule = await import(
-  `../../utils/task/diskOutput.js?real=${Date.now()}-${Math.random()}`
-)
 // Pre-import real modules that compact stubs but downstream tests need
 // (goal continuation controller, runAgent provider routing).
 const _realMessagesModule = await import(
@@ -90,6 +88,10 @@ const _realErrorsModule = await import(
 const _realTokensModule = await import(
   `../../utils/tokens.js?real=${Date.now()}-${Math.random()}`
 )
+const compactTestTaskOutputPath = join(
+  tmpdir(),
+  `openclaude-compact-test-${process.pid}-${randomUUID()}`,
+)
 
 const COMPACT_STUB_MODULES = [
   '../analytics/growthbook.js',
@@ -118,6 +120,7 @@ const COMPACT_STUB_MODULES = [
   '../../utils/messages.js',
   '../../utils/messages/systemFactories.js',
   '../../utils/model/model.js',
+  '../../utils/model/providers.js',
   '../../utils/model/modelSupportOverrides.js',
   '../../utils/path.js',
   '../../utils/plans.js',
@@ -135,6 +138,24 @@ const COMPACT_STUB_MODULES = [
   './grouping.js',
   './prompt.js',
 ] as const
+let realCompactStubModules: Map<string, object> | undefined
+let hasSharedMutationLock = false
+
+async function captureRealCompactStubModules(): Promise<Map<string, object>> {
+  if (!realCompactStubModules) {
+    realCompactStubModules = new Map(
+      await Promise.all(
+        COMPACT_STUB_MODULES.map(async specifier =>
+          [
+            specifier,
+            await import(`${specifier}?real=${Date.now()}-${Math.random()}`),
+          ] as const,
+        ),
+      ),
+    )
+  }
+  return realCompactStubModules
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -278,6 +299,7 @@ const PROVIDER_ENV_KEYS = [
   // key is interpreted as 'firstParty' by getAPIProvider because the
   // 'fireworks' route has no switch case in that function.
   'FIREWORKS_API_KEY',
+  'LONGCAT_API_KEY',
   'OPENAI_API_KEY',
   'OPENAI_BASE_URL',
   'OPENAI_API_BASE',
@@ -606,7 +628,7 @@ function registerCommonCompactStubs(options: CompactMockOptions = {}) {
 
   // --- Task output (DEFENSIVE) ---
   mock.module('../../utils/task/diskOutput.js', () => ({
-    getTaskOutputPath: mock(() => '/tmp/task'),
+    getTaskOutputPath: mock(() => compactTestTaskOutputPath),
   }))
 
   // --- Errors (DEFENSIVE) ---
@@ -674,57 +696,47 @@ async function importCompact(options: CompactMockOptions = {}) {
 
 beforeEach(async () => {
   await acquireSharedMutationLock('services/compact/compact.test.ts')
-  clearProviderEnv()
+  hasSharedMutationLock = true
+  try {
+    await captureRealCompactStubModules()
+    mock.module('../../utils/model/providers.js', () => ({
+      ..._realProvidersModule,
+    }))
+    clearProviderEnv()
+  } catch (error) {
+    releaseSharedMutationLock()
+    hasSharedMutationLock = false
+    throw error
+  }
 })
 
-afterEach(() => {
+afterEach(async () => {
+  if (!hasSharedMutationLock) {
+    return
+  }
   try {
-    mock.restore()
-    clearProviderEnv()
-    // mock.module() persists process-wide in bun:test. Restore the message
-    // helpers after each compact test so downstream test files do not import
-    // the compact-only createUserMessage stub.
-    mock.module('../../utils/messages.js', () => ({ ..._realMessagesModule }))
-    mock.module('../../utils/messages/systemFactories.js', () => ({
-      ..._realSystemFactoriesModule,
-    }))
+    await restoreCompactTestMocks()
   } finally {
     releaseSharedMutationLock()
+    hasSharedMutationLock = false
   }
 })
 
 // Safety net: scrub provider env vars and restore mocks after all tests in
 // this file finish, so nothing leaks into subsequent test files.
-afterAll(async () => {
+async function restoreCompactTestMocks() {
   mock.restore()
   clearProviderEnv()
+  const realCompactStubModules = await captureRealCompactStubModules()
   for (const specifier of COMPACT_STUB_MODULES) {
-    const realModule = await import(
-      `${specifier}?real=${Date.now()}-${Math.random()}`
-    )
+    const realModule = realCompactStubModules.get(specifier)
+    if (!realModule) {
+      throw new Error(`Missing real compact stub module: ${specifier}`)
+    }
     mock.module(specifier, () => ({ ...realModule }))
   }
-  // The compact test registers many mock.module() stubs that persist
-  // process-wide. Restore the real implementations so downstream test files
-  // (goal controller, runAgent routing, BashTool) get correct behaviour.
-  mock.module('../../utils/task/diskOutput.js', () => ({
-    getTaskOutputDir: _realDiskOutputModule.getTaskOutputDir,
-    getTaskOutputPath: _realDiskOutputModule.getTaskOutputPath,
-    initTaskOutput: _realDiskOutputModule.initTaskOutput,
-    initTaskOutputAsSymlink: _realDiskOutputModule.initTaskOutputAsSymlink,
-    appendTaskOutput: _realDiskOutputModule.appendTaskOutput,
-    flushTaskOutput: _realDiskOutputModule.flushTaskOutput,
-    evictTaskOutput: _realDiskOutputModule.evictTaskOutput,
-    getTaskOutputDelta: _realDiskOutputModule.getTaskOutputDelta,
-    getTaskOutput: _realDiskOutputModule.getTaskOutput,
-    getTaskOutputSize: _realDiskOutputModule.getTaskOutputSize,
-    cleanupTaskOutput: _realDiskOutputModule.cleanupTaskOutput,
-    _clearOutputsForTest: _realDiskOutputModule._clearOutputsForTest,
-    _resetTaskOutputDirForTest: _realDiskOutputModule._resetTaskOutputDirForTest,
-    DiskTaskOutput: _realDiskOutputModule.DiskTaskOutput,
-    MAX_TASK_OUTPUT_BYTES: _realDiskOutputModule.MAX_TASK_OUTPUT_BYTES,
-    MAX_TASK_OUTPUT_BYTES_DISPLAY: _realDiskOutputModule.MAX_TASK_OUTPUT_BYTES_DISPLAY,
-  }))
+  // The generic loop above restores the full diskOutput module contract for
+  // downstream tests (goal controller, runAgent routing, BashTool).
   mock.module('../../utils/messages.js', () => ({ ..._realMessagesModule }))
   mock.module('../../utils/messages/systemFactories.js', () => ({
     ..._realSystemFactoriesModule,
@@ -788,14 +800,72 @@ afterAll(async () => {
   mock.module('../../utils/projectInstructions.js', () => ({
     ..._realProjectInstructionsModule,
   }))
-  // Clean up the stale /tmp/task symlink left by the mock path.
+  // Clean up only the unique test-owned path returned by the mock above.
   try {
-    const { unlink } = await import('fs/promises')
-    await unlink('/tmp/task').catch(() => {})
-  } catch {}
+    await unlink(compactTestTaskOutputPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error
+    }
+  }
+}
+
+afterAll(async () => {
+  await acquireSharedMutationLock('services/compact/compact.test.ts teardown')
+  try {
+    await captureRealCompactStubModules()
+    await restoreCompactTestMocks()
+  } finally {
+    releaseSharedMutationLock()
+  }
 })
 
 describe('compactConversation provider gate', () => {
+  test('attributes cache-sharing timeout aborts to the compact fork', async () => {
+    const originalTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
+    vi.useFakeTimers()
+    try {
+      const runForkedAgent = mock(() => new Promise(() => {}))
+      const { compactConversation } = await importCompact({ runForkedAgent })
+      const messages = [userMessage('Hello'), assistantMessage('Hi there!')]
+      const compactPromise = compactConversation(
+        messages,
+        toolUseContext(),
+        cacheSafeParams(messages),
+        false,
+      )
+
+      for (let attempt = 0; attempt < 10 && runForkedAgent.mock.calls.length === 0; attempt++) {
+        await Promise.resolve()
+      }
+      expect(runForkedAgent).toHaveBeenCalledTimes(1)
+
+      vi.advanceTimersByTime(120_000)
+      await compactPromise
+
+      expect(
+        __getInterruptionTraceSnapshotForTests().find(
+          entry => entry.event === 'abort.requested',
+        ),
+      ).toMatchObject({
+        source: 'compact_timeout',
+        subsystem: 'compact',
+        controllerRole: 'compact-fork',
+      })
+    } finally {
+      vi.useRealTimers()
+      await __waitForInterruptionTraceFlushForTests()
+      __resetInterruptionTraceForTests()
+      if (originalTrace === undefined) {
+        delete process.env.OPENCLAUDE_INTERRUPT_TRACE
+      } else {
+        process.env.OPENCLAUDE_INTERRUPT_TRACE = originalTrace
+      }
+    }
+  })
+
   test('skips forked-agent cache-sharing for non-Anthropic providers', async () => {
     // Simulate a non-Anthropic provider (e.g. OpenAI) via env vars.
     // The real isAnthropicProvider() reads from process.env and returns false.

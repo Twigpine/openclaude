@@ -11,6 +11,7 @@
  * 3. stopCapturingEarlyInput() is called automatically when input is consumed
  */
 
+import { hasPrintFlag } from './printFlag.js'
 import { lastGrapheme } from './intl.js'
 
 // Buffer for early input characters
@@ -33,8 +34,7 @@ export function startCapturingEarlyInput(): void {
   if (
     !process.stdin.isTTY ||
     isCapturing ||
-    process.argv.includes('-p') ||
-    process.argv.includes('--print')
+    hasPrintFlag(process.argv)
   ) {
     return
   }

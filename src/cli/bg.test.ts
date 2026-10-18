@@ -6,6 +6,8 @@ import { describe, expect, it } from 'bun:test'
 import {
   buildBackgroundSessionLaunch,
   buildBackgroundChildProcessConfig,
+  buildBackgroundSessionDisplayCommand,
+  confirmBackgroundSessionLaunch,
   followLogFile,
   killBackgroundSession,
   printExistingLog,
@@ -14,11 +16,25 @@ import {
   LOG_STREAM_CHUNK_SIZE,
   parseBackgroundInvocation,
   parseLogsInvocation,
+  resolveBackgroundSessionModel,
+  resolveBackgroundSessionProvider,
 } from './bg.js'
+import {
+  BACKGROUND_SESSION_ID_ENV,
+  BACKGROUND_SESSION_LAUNCHER_PID_ENV,
+} from './bgFinalizer.js'
+import {
+  BACKGROUND_PROCESS_MARKER_FLAG,
+  backgroundProcessMarkerToken,
+  generateBackgroundProcessMarker,
+} from './bgRouting.js'
 import type {
   BackgroundSession,
   BackgroundSessionProcessIdentity,
 } from './bgRegistry.js'
+
+const TEST_PROCESS_MARKER = 'a'.repeat(64)
+const OTHER_PROCESS_MARKER = 'b'.repeat(64)
 
 class TestOutput extends EventEmitter {
   chunks: Buffer[] = []
@@ -93,6 +109,134 @@ async function withTempFile<T>(
 }
 
 describe('background session CLI parsing', () => {
+  it('records the final root provider selected by CLI startup', async () => {
+    const parsed = parseBackgroundInvocation([
+      '--provider',
+      'anthropic',
+      '--provider=commandcode',
+      '--bg',
+      'do the work',
+    ])
+    const launch = await buildBackgroundSessionLaunch(
+      parsed.childArgs,
+      '00000000-0000-4000-8000-000000000001',
+    )
+
+    expect(resolveBackgroundSessionProvider(launch.childArgs)).toBe(
+      'commandcode',
+    )
+  })
+
+  it('does not record provider-looking text consumed by a root option', async () => {
+    const parsed = parseBackgroundInvocation([
+      '--system-prompt',
+      '--provider=commandcode',
+      '--bg',
+      'do the work',
+    ])
+    const launch = await buildBackgroundSessionLaunch(
+      parsed.childArgs,
+      '00000000-0000-4000-8000-000000000001',
+    )
+
+    expect(resolveBackgroundSessionProvider(launch.childArgs)).toBeUndefined()
+  })
+
+  it('records the root session model when a nested command also has --model', async () => {
+    const generatedSessionId = '00000000-0000-4000-8000-000000000001'
+
+    for (const nested of [
+      ['aimlapi', 'topup'],
+      ['auto-mode', 'critique'],
+    ] as const) {
+      const parsed = parseBackgroundInvocation([
+        '--model',
+        'deepseek/deepseek-v4-flash',
+        ...nested,
+        '--model',
+        'anthropic/claude-sonnet-4-6',
+        '--bg',
+        'do the work',
+      ])
+      const launch = await buildBackgroundSessionLaunch(
+        parsed.childArgs,
+        generatedSessionId,
+      )
+
+      expect(resolveBackgroundSessionModel(launch.childArgs)).toBe(
+        'deepseek/deepseek-v4-flash',
+      )
+    }
+  })
+
+  it('does not record a nested --model as the background session model', async () => {
+    const parsed = parseBackgroundInvocation([
+      'aimlapi',
+      'topup',
+      '--model',
+      'anthropic/claude-sonnet-4-6',
+      '--bg',
+      'do the work',
+    ])
+    const launch = await buildBackgroundSessionLaunch(
+      parsed.childArgs,
+      '00000000-0000-4000-8000-000000000001',
+    )
+
+    expect(resolveBackgroundSessionModel(launch.childArgs)).toBeUndefined()
+  })
+
+  it('generates a fresh bounded lower-case hex marker from 32 random bytes', () => {
+    const first = generateBackgroundProcessMarker(size => {
+      expect(size).toBe(32)
+      return new Uint8Array(size).fill(0x11)
+    })
+    const second = generateBackgroundProcessMarker(size =>
+      new Uint8Array(size).fill(0x22),
+    )
+
+    expect(first).toBe('11'.repeat(32))
+    expect(second).toBe('22'.repeat(32))
+    expect(second).not.toBe(first)
+  })
+
+  it('strips inherited marker options before -- but preserves prompt text after it', () => {
+    const inline = backgroundProcessMarkerToken(TEST_PROCESS_MARKER)
+    for (const inherited of [
+      [inline],
+      [BACKGROUND_PROCESS_MARKER_FLAG, TEST_PROCESS_MARKER],
+    ]) {
+      const parsed = parseBackgroundInvocation([
+        '--bg',
+        ...inherited,
+        '--print',
+        '--',
+        inline,
+      ])
+
+      expect(parsed.prompt).toBe(inline)
+      expect(parsed.childArgs).toEqual(['--print', '--', inline])
+    }
+  })
+
+  it('preserves marker-looking required-option values', () => {
+    const markerLookingValue = backgroundProcessMarkerToken(TEST_PROCESS_MARKER)
+    const parsed = parseBackgroundInvocation([
+      '--bg',
+      '--system-prompt',
+      markerLookingValue,
+      'actual prompt',
+    ])
+
+    expect(parsed.prompt).toBe('actual prompt')
+    expect(parsed.childArgs).toEqual([
+      '--system-prompt',
+      markerLookingValue,
+      '--print',
+      'actual prompt',
+    ])
+  })
+
   it('builds a print-mode child command and preserves provider/model flags', () => {
     const parsed = parseBackgroundInvocation([
       '--provider',
@@ -453,7 +597,7 @@ describe('background session CLI parsing', () => {
     })
   })
 
-  it('preserves Node exec flags and lets the launcher manage heap relaunch state', () => {
+  it('preserves Node exec flags while keeping the registered child PID stable', () => {
     const config = buildBackgroundChildProcessConfig({
       execPath: '/usr/bin/node',
       execArgv: ['--max-old-space-size=8192', '--expose-gc'],
@@ -465,6 +609,9 @@ describe('background session CLI parsing', () => {
       },
       sessionName: 'tests',
       stdoutLogPath: '/tmp/bg.out.log',
+      backgroundSessionId: 'bg-tests',
+      processMarker: TEST_PROCESS_MARKER,
+      launcherPid: 700,
     })
 
     expect(config.command).toBe('/usr/bin/node')
@@ -472,14 +619,220 @@ describe('background session CLI parsing', () => {
       '--max-old-space-size=8192',
       '--expose-gc',
       '/repo/bin/openclaude',
+      backgroundProcessMarkerToken(TEST_PROCESS_MARKER),
       '--print',
       'fix failing tests',
     ])
-    expect(config.env.OPENCLAUDE_HEAP_RELAUNCHED).toBeUndefined()
+    expect(config.env.OPENCLAUDE_HEAP_RELAUNCHED).toBe('1')
     expect(config.env.OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_MB).toBe('8192')
     expect(config.env.CLAUDE_CODE_SESSION_KIND).toBe('bg')
     expect(config.env.CLAUDE_CODE_SESSION_LOG).toBe('/tmp/bg.out.log')
     expect(config.env.CLAUDE_CODE_SESSION_NAME).toBe('tests')
+    expect(config.env[BACKGROUND_SESSION_ID_ENV]).toBe('bg-tests')
+    expect(config.env[BACKGROUND_SESSION_LAUNCHER_PID_ENV]).toBe('700')
+  })
+
+  it('does not add a fixed heap cap when NODE_OPTIONS already has a percentage limit', () => {
+    const config = buildBackgroundChildProcessConfig({
+      execPath: '/usr/bin/node',
+      execArgv: [],
+      entrypoint: '/repo/bin/openclaude',
+      childArgs: ['--print', 'fix failing tests'],
+      processEnv: {
+        NODE_OPTIONS: '--max-old-space-size-percentage=50',
+      },
+      stdoutLogPath: '/tmp/bg.out.log',
+      backgroundSessionId: 'bg-percentage-node-options',
+      processMarker: TEST_PROCESS_MARKER,
+      launcherPid: 705,
+    })
+
+    expect(config.args.filter(arg => arg.startsWith('--max-old-space-size='))).toEqual(
+      [],
+    )
+    expect(config.args[0]).toBe('--expose-gc')
+  })
+
+  it('preserves an execArgv percentage heap flag instead of appending 8192', () => {
+    const config = buildBackgroundChildProcessConfig({
+      execPath: '/usr/bin/node',
+      execArgv: ['--max-old-space-size-percentage=75'],
+      entrypoint: '/repo/bin/openclaude',
+      childArgs: ['--print', 'fix failing tests'],
+      processEnv: {},
+      stdoutLogPath: '/tmp/bg.out.log',
+      backgroundSessionId: 'bg-percentage-execargv',
+      processMarker: TEST_PROCESS_MARKER,
+      launcherPid: 706,
+    })
+
+    expect(config.args.slice(0, 2)).toEqual([
+      '--max-old-space-size-percentage=75',
+      '--expose-gc',
+    ])
+  })
+
+  it('preserves a spaced execArgv percentage value so Node still receives the argument', () => {
+    const config = buildBackgroundChildProcessConfig({
+      execPath: '/usr/bin/node',
+      execArgv: ['--max-old-space-size-percentage', '75'],
+      entrypoint: '/repo/bin/openclaude',
+      childArgs: ['--print', 'fix failing tests'],
+      processEnv: {},
+      stdoutLogPath: '/tmp/bg.out.log',
+      backgroundSessionId: 'bg-percentage-spaced-execargv',
+      processMarker: TEST_PROCESS_MARKER,
+      launcherPid: 707,
+    })
+
+    expect(config.args.slice(0, 3)).toEqual([
+      '--max-old-space-size-percentage',
+      '75',
+      '--expose-gc',
+    ])
+  })
+
+  it('supplies launcher heap flags instead of relaunching to a different PID', () => {
+    const config = buildBackgroundChildProcessConfig({
+      execPath: '/usr/bin/node',
+      execArgv: [],
+      entrypoint: '/repo/bin/openclaude',
+      childArgs: ['--print', 'fix failing tests'],
+      processEnv: {
+        OPENCLAUDE_HEAP_RELAUNCHED: '1',
+        OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_MB: '4096',
+      },
+      stdoutLogPath: '/tmp/bg.out.log',
+      backgroundSessionId: 'bg-no-wrapper',
+      processMarker: TEST_PROCESS_MARKER,
+      launcherPid: 701,
+    })
+
+    expect(config.args.slice(0, 2)).toEqual([
+      '--max-old-space-size=4096',
+      '--expose-gc',
+    ])
+    expect(config.env.OPENCLAUDE_HEAP_RELAUNCHED).toBe('1')
+  })
+
+  it('prevents the installed launcher from replacing a non-Node registered PID', () => {
+    const config = buildBackgroundChildProcessConfig({
+      execPath: '/usr/local/bin/bun',
+      execArgv: [],
+      entrypoint: '/repo/bin/openclaude',
+      childArgs: ['--print', 'work'],
+      processEnv: {},
+      stdoutLogPath: '/tmp/bg.out.log',
+      backgroundSessionId: 'bg-bun-owner',
+      processMarker: TEST_PROCESS_MARKER,
+      launcherPid: 702,
+    })
+
+    expect(config.command).toBe('/usr/local/bin/bun')
+    expect(config.env.OPENCLAUDE_HEAP_RELAUNCHED).toBe('1')
+    expect(config.env[BACKGROUND_SESSION_ID_ENV]).toBe('bg-bun-owner')
+    expect(config.env[BACKGROUND_SESSION_LAUNCHER_PID_ENV]).toBe('702')
+  })
+
+  it('injects one fresh marker immediately after a spaced entrypoint', () => {
+    const inherited = backgroundProcessMarkerToken(OTHER_PROCESS_MARKER)
+    const promptMarker = backgroundProcessMarkerToken(OTHER_PROCESS_MARKER)
+    const config = buildBackgroundChildProcessConfig({
+      execPath: 'C:\\Program Files\\nodejs\\node.exe',
+      execArgv: ['--expose-gc'],
+      entrypoint: 'C:\\repo path\\dist\\cli.mjs',
+      childArgs: [
+        inherited,
+        '--provider',
+        'openai',
+        '--model',
+        'gpt-5',
+        '--session-id',
+        '550e8400-e29b-41d4-a716-446655440000',
+        '--from-pr',
+        '1642',
+        '--print',
+        '--',
+        promptMarker,
+      ],
+      processEnv: {},
+      stdoutLogPath: 'C:\\logs path\\bg.out.log',
+      backgroundSessionId: 'bg-spaced-paths',
+      processMarker: TEST_PROCESS_MARKER,
+      launcherPid: 703,
+    })
+    const markerToken = backgroundProcessMarkerToken(TEST_PROCESS_MARKER)
+    const entrypointIndex = config.args.indexOf('C:\\repo path\\dist\\cli.mjs')
+
+    expect(config.args[entrypointIndex + 1]).toBe(markerToken)
+    expect(config.args.filter(arg => arg === markerToken)).toHaveLength(1)
+    expect(config.args.slice(0, config.args.indexOf('--'))).not.toContain(
+      inherited,
+    )
+    expect(config.args.slice(config.args.indexOf('--'))).toEqual([
+      '--',
+      promptMarker,
+    ])
+  })
+
+  it('keeps marker-looking required-option values during defensive injection', () => {
+    const markerLookingValue = backgroundProcessMarkerToken(OTHER_PROCESS_MARKER)
+    const config = buildBackgroundChildProcessConfig({
+      execPath: '/usr/bin/node',
+      execArgv: [],
+      entrypoint: '/repo/bin/openclaude',
+      childArgs: [
+        '--system-prompt',
+        markerLookingValue,
+        '--print',
+        'work',
+      ],
+      processEnv: {},
+      stdoutLogPath: '/tmp/bg.out.log',
+      backgroundSessionId: 'bg-marker-looking-value',
+      processMarker: TEST_PROCESS_MARKER,
+      launcherPid: 704,
+    })
+
+    expect(config.args).toEqual([
+      '--max-old-space-size=8192',
+      '--expose-gc',
+      '/repo/bin/openclaude',
+      backgroundProcessMarkerToken(TEST_PROCESS_MARKER),
+      '--system-prompt',
+      markerLookingValue,
+      '--print',
+      'work',
+    ])
+  })
+
+  it('omits only the internal marker from the displayed launch command', () => {
+    const markerToken = backgroundProcessMarkerToken(TEST_PROCESS_MARKER)
+    const promptMarker = backgroundProcessMarkerToken(OTHER_PROCESS_MARKER)
+
+    expect(
+      buildBackgroundSessionDisplayCommand(
+        [
+          'node',
+          '/repo path/dist/cli.mjs',
+          markerToken,
+          '--provider',
+          'openai',
+          '--print',
+          '--',
+          promptMarker,
+        ],
+        TEST_PROCESS_MARKER,
+      ),
+    ).toEqual([
+      'node',
+      '/repo path/dist/cli.mjs',
+      '--provider',
+      'openai',
+      '--print',
+      '--',
+      promptMarker,
+    ])
   })
 
   it('escalates process-tree termination and waits for exit before returning', async () => {
@@ -502,6 +855,118 @@ describe('background session CLI parsing', () => {
 
     expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
   })
+
+  it('fails a detached launch that becomes stale before finalizer installation', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-finalizer-not-installed',
+      pid: 4243,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-10T08:00:00.000Z',
+      updatedAt: '2026-07-10T08:00:00.000Z',
+      sessionId: 'conversation-finalizer-not-installed',
+      command: ['node', 'openclaude', '--print', 'work'],
+      stdoutLogPath: '/tmp/bg-finalizer-not-installed.out.log',
+      stderrLogPath: '/tmp/bg-finalizer-not-installed.err.log',
+    }
+    const calls: string[] = []
+
+    await expect(
+      confirmBackgroundSessionLaunch(session, {
+        isProcessAlive: () => false,
+        refreshStatuses: async () => {
+          calls.push('refresh')
+          return []
+        },
+        resolveSession: async id => {
+          calls.push(`resolve:${id}`)
+          return { ...session, status: 'stale' }
+        },
+      }),
+    ).rejects.toThrow(
+      'Background session bg-finalizer-not-installed exited before finalization was installed. ' +
+        'Logs were retained at /tmp/bg-finalizer-not-installed.out.log and /tmp/bg-finalizer-not-installed.err.log.',
+    )
+    expect(calls).toEqual([
+      'refresh',
+      'resolve:bg-finalizer-not-installed',
+    ])
+  })
+
+  it('returns a live launch without consulting the registry', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-live-confirmation',
+      pid: 4244,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-10T08:00:00.000Z',
+      updatedAt: '2026-07-10T08:00:00.000Z',
+      sessionId: 'conversation-live-confirmation',
+      command: ['node', 'openclaude', '--print', 'work'],
+      stdoutLogPath: '/tmp/bg-live-confirmation.out.log',
+      stderrLogPath: '/tmp/bg-live-confirmation.err.log',
+    }
+    const calls: string[] = []
+
+    const confirmed = await confirmBackgroundSessionLaunch(session, {
+      isProcessAlive: () => true,
+      refreshStatuses: async () => {
+        calls.push('refresh')
+        return []
+      },
+      resolveSession: async id => {
+        calls.push(`resolve:${id}`)
+        return session
+      },
+    })
+
+    expect(confirmed).toBe(session)
+    expect(calls).toEqual([])
+  })
+
+  it('returns an authoritative terminal launch after refreshing a dead PID', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-terminal-confirmation',
+      pid: 4245,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-10T08:00:00.000Z',
+      updatedAt: '2026-07-10T08:00:00.000Z',
+      sessionId: 'conversation-terminal-confirmation',
+      command: ['node', 'openclaude', '--print', 'work'],
+      stdoutLogPath: '/tmp/bg-terminal-confirmation.out.log',
+      stderrLogPath: '/tmp/bg-terminal-confirmation.err.log',
+    }
+    const terminal: BackgroundSession = {
+      ...session,
+      status: 'failed',
+      updatedAt: '2026-07-10T08:00:01.000Z',
+      finishedAt: '2026-07-10T08:00:01.000Z',
+      exitCode: 23,
+      terminalReason: 'exit_code',
+    }
+    const calls: string[] = []
+
+    const confirmed = await confirmBackgroundSessionLaunch(session, {
+      isProcessAlive: () => false,
+      refreshStatuses: async () => {
+        calls.push('refresh')
+        return [terminal]
+      },
+      resolveSession: async id => {
+        calls.push(`resolve:${id}`)
+        return terminal
+      },
+    })
+
+    expect(confirmed).toMatchObject({
+      status: 'failed',
+      finishedAt: '2026-07-10T08:00:01.000Z',
+      exitCode: 23,
+      terminalReason: 'exit_code',
+    })
+    expect(calls).toEqual(['refresh', 'resolve:bg-terminal-confirmation'])
+  })
 })
 
 describe('background session process termination safety', () => {
@@ -517,6 +982,17 @@ describe('background session process termination safety', () => {
     command: ['node', 'openclaude', '--session-id', 'conversation-safety'],
     stdoutLogPath: '/tmp/stdout.log',
     stderrLogPath: '/tmp/stderr.log',
+  }
+  const markedSession: BackgroundSession = {
+    ...session,
+    processMarker: TEST_PROCESS_MARKER,
+    command: [
+      'node',
+      'openclaude',
+      backgroundProcessMarkerToken(TEST_PROCESS_MARKER),
+      '--session-id',
+      'conversation-safety',
+    ],
   }
 
   function identity(
@@ -540,6 +1016,30 @@ describe('background session process termination safety', () => {
       getProcessCommand: pid => {
         calls.push(`verify:${pid}`)
         return 'node openclaude --session-id conversation-safety'
+      },
+      killTree: async (pid, signal) => {
+        calls.push(`signal:${pid}:${signal}`)
+      },
+      sleep: async () => {},
+      termGraceMs: 1,
+      pollIntervalMs: 1,
+    })
+
+    expect(calls).toEqual([
+      'verify:4242',
+      'signal:4242:SIGTERM',
+    ])
+  })
+
+  it('signals a marked session only after its exact token is freshly verified', async () => {
+    const calls: string[] = []
+    let aliveChecks = 0
+
+    await terminateBackgroundSessionProcessTree(markedSession, {
+      isProcessAlive: () => ++aliveChecks <= 2,
+      getProcessCommand: pid => {
+        calls.push(`verify:${pid}`)
+        return `node openclaude ${backgroundProcessMarkerToken(TEST_PROCESS_MARKER)} --session-id conversation-safety`
       },
       killTree: async (pid, signal) => {
         calls.push(`signal:${pid}:${signal}`)
@@ -583,12 +1083,37 @@ describe('background session process termination safety', () => {
     }
 
     expect(String(refusal)).toContain('refused to signal an unverified process')
+    expect(String(refusal)).toContain(
+      'This older background session could not be verified safely',
+    )
+    expect(String(refusal)).toContain('terminate PID 4242 manually')
     expect(String(refusal)).not.toContain('private prompt value')
     expect(calls).toEqual([])
   })
 
-  it('does not verify or signal terminal records when a reused PID would match', async () => {
-    for (const status of ['stale', 'killed', 'exited', 'failed'] as const) {
+  it('does not signal or mark a marked session whose token mismatches', async () => {
+    const calls: string[] = []
+
+    await expect(
+      killBackgroundSession(markedSession, {
+        isProcessAlive: () => true,
+        getProcessCommand: () =>
+          `node openclaude ${backgroundProcessMarkerToken(OTHER_PROCESS_MARKER)} --session-id conversation-safety`,
+        killTree: async (_pid, signal) => {
+          calls.push(`signal:${signal}`)
+        },
+        markKilled: async selected => {
+          calls.push(`mark:${selected.id}`)
+          return { ...selected, status: 'killed' }
+        },
+      }),
+    ).rejects.toThrow('refused to signal an unverified process')
+
+    expect(calls).toEqual([])
+  })
+
+  it('does not verify or signal authoritative terminal records when a reused PID would match', async () => {
+    for (const status of ['killed', 'exited', 'failed'] as const) {
       const calls: string[] = []
 
       const killed = await killBackgroundSession(
@@ -611,6 +1136,110 @@ describe('background session process termination safety', () => {
       expect(killed.status).toBe('killed')
       expect(calls).toEqual(['mark:bg-safety'])
     }
+  })
+
+  it('fails closed instead of marking a stale session whose identity mismatches', async () => {
+    const calls: string[] = []
+
+    await expect(
+      killBackgroundSession(
+        { ...markedSession, status: 'stale' },
+        {
+          isProcessAlive: () => true,
+          getProcessCommand: () =>
+            `node openclaude ${backgroundProcessMarkerToken(OTHER_PROCESS_MARKER)} --session-id conversation-safety`,
+          killTree: async (_pid, signal) => {
+            calls.push(`signal:${signal}`)
+          },
+          markKilled: async selected => {
+            calls.push(`mark:${selected.id}`)
+            return { ...selected, status: 'killed' }
+          },
+        },
+      ),
+    ).rejects.toThrow('refused to signal an unverified process')
+
+    expect(calls).toEqual([])
+  })
+
+  it('refuses a matching legacy identity after the session was already stale', async () => {
+    const calls: string[] = []
+
+    await expect(
+      killBackgroundSession(
+        { ...session, status: 'stale' },
+        {
+          isProcessAlive: () => true,
+          getProcessCommand: () =>
+            'node openclaude --resume conversation-safety',
+          killTree: async (_pid, signal) => {
+            calls.push(`signal:${signal}`)
+          },
+          markKilled: async selected => {
+            calls.push(`mark:${selected.id}`)
+            return { ...selected, status: 'killed' }
+          },
+        },
+      ),
+    ).rejects.toThrow('PID ownership cannot be re-established safely')
+
+    expect(calls).toEqual([])
+  })
+
+  it('allows an exact marked identity to authorize a previously stale session', async () => {
+    const calls: string[] = []
+    const states: BackgroundSessionProcessIdentity['state'][] = [
+      'matches',
+      'matches',
+    ]
+
+    const killed = await killBackgroundSession(
+      { ...markedSession, status: 'stale' },
+      {
+        isProcessAlive: () => false,
+        verifySessionIdentity: () => {
+          const state = states.shift()!
+          calls.push(`verify:${state}`)
+          return identity(state)
+        },
+        killTree: async (_pid, signal) => {
+          calls.push(`signal:${signal}`)
+        },
+        markKilled: async selected => {
+          calls.push(`mark:${selected.id}`)
+          return { ...selected, status: 'killed' }
+        },
+      },
+    )
+
+    expect(killed.status).toBe('killed')
+    expect(calls).toEqual([
+      'verify:matches',
+      'verify:matches',
+      'signal:SIGTERM',
+      'mark:bg-safety',
+    ])
+  })
+
+  it('marks a stale session killed without signalling when its PID is gone', async () => {
+    const calls: string[] = []
+
+    const killed = await killBackgroundSession(
+      { ...session, status: 'stale' },
+      {
+        isProcessAlive: () => false,
+        killTree: async (_pid, signal) => {
+          calls.push(`signal:${signal}`)
+        },
+        markKilled: async selected => {
+          calls.push(`mark:${selected.id}`)
+          return { ...selected, status: 'killed' }
+        },
+      },
+    )
+
+    expect(killed.status).toBe('killed')
+    expect(calls).toEqual(['mark:bg-safety'])
   })
 
   it('freshly verifies an unknown session that becomes readable before killing', async () => {
@@ -705,6 +1334,39 @@ describe('background session process termination safety', () => {
     ])
   })
 
+  it('does not send SIGKILL when a marked token changes after SIGTERM', async () => {
+    const calls: string[] = []
+    const commands = [
+      `node openclaude ${backgroundProcessMarkerToken(TEST_PROCESS_MARKER)} --session-id conversation-safety`,
+      `node openclaude ${backgroundProcessMarkerToken(OTHER_PROCESS_MARKER)} --session-id conversation-safety`,
+    ]
+
+    await expect(
+      terminateBackgroundSessionProcessTree(markedSession, {
+        isProcessAlive: () => true,
+        getProcessCommand: () => {
+          calls.push('verify')
+          return commands.shift()!
+        },
+        killTree: async (_pid, signal) => {
+          calls.push(`signal:${signal}`)
+        },
+        sleep: async () => {
+          calls.push('sleep')
+        },
+        termGraceMs: 1,
+        pollIntervalMs: 1,
+      }),
+    ).rejects.toThrow('refused to signal an unverified process')
+
+    expect(calls).toEqual([
+      'verify',
+      'signal:SIGTERM',
+      'sleep',
+      'verify',
+    ])
+  })
+
   it('fails closed when the live process identity is unreadable', async () => {
     const signals: Array<string | number> = []
 
@@ -719,6 +1381,26 @@ describe('background session process termination safety', () => {
     ).rejects.toThrow('refused to signal an unverified process')
 
     expect(signals).toEqual([])
+  })
+
+  it('does not mark a marked session killed when identity is unreadable', async () => {
+    const calls: string[] = []
+
+    await expect(
+      killBackgroundSession(markedSession, {
+        isProcessAlive: () => true,
+        getProcessCommand: () => null,
+        killTree: async (_pid, signal) => {
+          calls.push(`signal:${signal}`)
+        },
+        markKilled: async selected => {
+          calls.push(`mark:${selected.id}`)
+          return { ...selected, status: 'killed' }
+        },
+      }),
+    ).rejects.toThrow('refused to signal an unverified process')
+
+    expect(calls).toEqual([])
   })
 
   it('refuses signalling when liveness becomes unreadable during command lookup', async () => {

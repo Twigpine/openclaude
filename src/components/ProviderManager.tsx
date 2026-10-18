@@ -1,7 +1,7 @@
 import figures from 'figures'
 import * as React from 'react'
 import { DEFAULT_CODEX_BASE_URL } from '../services/api/providerConfig.js'
-import { Box, Text } from '../ink.js'
+import { Box, Text, useInput } from '../ink.js'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { useKeybinding } from '../keybindings/useKeybinding.js'
 import { useSetAppState } from '../state/AppState.js'
@@ -15,6 +15,7 @@ import {
 } from '../utils/codexCredentials.js'
 import { isBareMode, isEnvTruthy } from '../utils/envUtils.js'
 import { isFirstPartyAnthropicBaseUrlForEnv } from '../utils/anthropicBaseUrl.js'
+import { logForDebugging } from '../utils/debug.js'
 import {
   parseProfileCustomHeadersInput,
   serializeProfileCustomHeaders,
@@ -44,19 +45,42 @@ import {
   routeShowsAuthHeaderValue,
   routeShowsCustomHeaders,
   resolveProfileRoute,
+  resolveRouteCredentialValue,
   resolveRouteIdFromBaseUrl,
 } from '../integrations/index.js'
 import {
   provisionAimlapiKey,
+  topUpAimlapiByApiKey,
+  parseAimlapiAmountUsd,
+  isValidAimlapiEmail,
+  isValidAimlapiSignInCode,
+  beginAimlapiEmailOnboarding,
+  completeAimlapiCodeSignIn,
+  validateAimlapiApiKey,
+  AimlapiApiError,
+  AIMLAPI_MESSAGES,
+  claimAimlapiTopupStateAsync,
+  clearAimlapiTopupStateAsync,
+  recordAimlapiCheckoutSessionAsync,
+  resetAimlapiCheckoutSessionAsync,
+  saveAimlapiTopupStateAsync,
+  reconcileSettledAimlapiTopupStateAsync,
+  aimlapiByKeyIdentity,
+  loadAimlapiSignInKey,
+  saveAimlapiSignInKeyAsync,
+  clearAimlapiSignInKeyAsync,
+  type AimlapiTopupIntent,
   type AimlapiTopupStatus,
-} from '../integrations/aimlapi/index.js'
+} from './providerManagerAimlapi.js'
 import {
   DEFAULT_AMOUNT_USD_MINOR,
-  MAX_AMOUNT_USD_MINOR,
-  MIN_AMOUNT_USD_MINOR,
+  DEFAULT_PARTNER_NAME,
+  isCanonicalAimlapiInferenceBaseUrl,
+  resolveEndpoints,
+  resolvePartnerId,
 } from '../integrations/aimlapi/config.js'
-import type { PaymentMethod } from '../integrations/aimlapi/client.js'
 import { openAIShimSupportsApiFormatForModel } from '../integrations/runtimeMetadata.js'
+import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
 import { probeRouteReadiness } from '../integrations/discoveryService.js'
 import {
   addProviderProfile,
@@ -67,6 +91,7 @@ import {
   getActiveProviderProfile,
   getProviderPresetDefaults,
   getProviderProfiles,
+  resolveProfileCapabilityRouteId,
   setActiveProviderProfile,
   type ProviderPreset,
   type ProviderProfileInput,
@@ -90,13 +115,15 @@ import {
   recommendOllamaModel,
 } from '../utils/providerRecommendation.js'
 import { clearStartupProviderOverrides } from '../utils/providerStartupOverrides.js'
-import { redactUrlForDisplay } from '../utils/redaction.js'
+import { redactSensitiveInfo, redactUrlForDisplay } from '../utils/redaction.js'
+import { registerCleanup } from '../utils/cleanupRegistry.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import {
   type OptionWithDescription,
   Select,
 } from './CustomSelect/index.js'
 import { Pane } from './design-system/Pane.js'
+import { Spinner } from './Spinner.js'
 import TextInput from './TextInput.js'
 import { useCodexOAuthFlow } from './useCodexOAuthFlow.js'
 import { useXaiOAuthFlow } from './useXaiOAuthFlow.js'
@@ -124,11 +151,13 @@ type Screen =
   | 'form'
   | 'preset-model'
   | 'aimlapi-api-key-choice'
+  | 'aimlapi-configured'
   | 'aimlapi-topup-email'
-  | 'aimlapi-topup-password'
+  | 'aimlapi-signin-code'
+  | 'aimlapi-low-balance'
   | 'aimlapi-topup-amount'
-  | 'aimlapi-topup-method'
   | 'aimlapi-topup-progress'
+  | 'aimlapi-done'
   | 'preset-api-key'
   | 'select-active'
   | 'select-edit'
@@ -199,8 +228,8 @@ const FORM_STEPS: Array<{
   {
     key: 'apiFormat',
     label: 'API mode',
-    placeholder: 'chat_completions',
-    helpText: 'Choose the OpenAI-compatible API surface for this provider.',
+    placeholder: 'automatic',
+    helpText: 'Automatically select the API surface, or choose one explicitly.',
     optional: true,
   },
   {
@@ -241,7 +270,7 @@ const GITHUB_PROVIDER_DEFAULT_BASE_URL = 'https://models.github.ai/inference'
 const CODEX_OAUTH_PROVIDER_NAME = 'Codex OAuth'
 const CODEX_OAUTH_PROVIDER_MODEL = 'codexplan'
 const XAI_OAUTH_PROVIDER_NAME = 'xAI OAuth'
-const XAI_OAUTH_PROVIDER_MODEL = 'grok-4.3'
+const XAI_OAUTH_PROVIDER_MODEL = 'grok-4.6'
 const XAI_OAUTH_PROVIDER_BASE_URL = 'https://api.x.ai/v1'
 type GithubCredentialSource = 'stored' | 'env' | 'none'
 
@@ -251,7 +280,7 @@ function toDraft(profile: ProviderProfile): ProviderDraft {
     baseUrl: profile.baseUrl,
     model: profile.model,
     apiKey: profile.apiKey ?? '',
-    apiFormat: profile.apiFormat ?? 'chat_completions',
+    apiFormat: profile.apiFormat ?? 'auto',
     authHeader: profile.authHeader ?? '',
     authHeaderValue: profile.authHeaderValue ?? '',
     customHeaders: serializeProfileCustomHeaders(profile.customHeaders) ?? '',
@@ -319,7 +348,7 @@ function profileSummary(profile: ProviderProfile, isActive: boolean): string {
       : `${models[0]}, ${models[1]} + ${models.length - 2} more`
   const modeInfo =
     routeSupportsApiFormatSelection(routeId)
-      ? ` · ${profile.apiFormat === 'responses_compat' ? 'responses (compat)' : profile.apiFormat === 'responses' ? 'responses' : 'chat/completions'}`
+      ? ` · ${profile.apiFormat === 'responses_compat' ? 'responses (compat)' : profile.apiFormat === 'responses' ? 'responses' : profile.apiFormat === 'chat_completions' ? 'chat/completions' : 'automatic'}`
       : ''
   const authInfo =
     routeSupportsAuthHeaders(routeId) && profile.authHeader
@@ -341,12 +370,7 @@ function resolveProviderEditorRouteId(
   provider: ProviderProfile['provider'],
   baseUrl?: string,
 ): string {
-  const route = resolveProfileRoute(provider).routeId
-  if (route !== 'openai') {
-    return route
-  }
-
-  return resolveRouteIdFromBaseUrl(baseUrl) ?? route
+  return resolveProfileCapabilityRouteId(provider, baseUrl)
 }
 
 function routeSupportsResponsesModel(routeId: string, model: string): boolean {
@@ -789,6 +813,129 @@ function CodexOAuthSetup({
   )
 }
 
+type AimlapiTopupFormProps = {
+  amountUsd: string
+  autoTopUp: boolean
+  columns: number
+  cursorOffset: number
+  onAmountChange: (value: string) => void
+  onCursorOffsetChange: (offset: number) => void
+  onAutoTopUpChange: (enabled: boolean) => void
+  onSubmit: () => void
+}
+
+function wrapAimlapiCheckoutUrl(url: string, width: number): string[] {
+  const characters = Array.from(url.trim())
+  const chunkSize = Math.max(20, width)
+  const lines: string[] = []
+  for (let offset = 0; offset < characters.length; offset += chunkSize) {
+    lines.push(characters.slice(offset, offset + chunkSize).join(''))
+  }
+  return lines
+}
+
+// Structural, not `instanceof AimlapiApiError`: some callers surface a
+// duck-typed error (e.g. an Error with a bolted-on `status`) instead of the
+// real class, and this still needs to recognize its HTTP status.
+function aimlapiApiErrorStatus(error: unknown): number | undefined {
+  return typeof error === 'object' && error !== null && 'status' in error
+    ? Number((error as { status: unknown }).status)
+    : undefined
+}
+
+function safeAimlapiErrorMessage(
+  error: unknown,
+  secrets: Array<string | undefined> = [],
+): string {
+  // AimlapiApiError.message deliberately excludes its server-controlled body.
+  // Redact exact active values as well as keys matching known credential shapes.
+  let message = error instanceof Error ? error.message : String(error)
+  for (const secret of secrets) {
+    const value = secret?.trim()
+    if (value) message = message.split(value).join('[REDACTED]')
+  }
+  return redactSensitiveInfo(message)
+}
+
+function AimlapiTopupForm({
+  amountUsd,
+  autoTopUp,
+  columns,
+  cursorOffset,
+  onAmountChange,
+  onCursorOffsetChange,
+  onAutoTopUpChange,
+  onSubmit,
+}: AimlapiTopupFormProps): React.ReactNode {
+  const [focusedField, setFocusedField] = React.useState<'amount' | 'auto'>(
+    'amount',
+  )
+
+  // This small form intentionally mirrors Zero's two-row top-up control while
+  // keeping OpenClaude's native input and event system.
+  useInput((input, key, event) => {
+    if (key.tab || key.upArrow || key.downArrow) {
+      setFocusedField(field => (field === 'amount' ? 'auto' : 'amount'))
+      event.stopImmediatePropagation()
+      return
+    }
+    if (focusedField !== 'auto') return
+    if (key.leftArrow || key.rightArrow || input === ' ') {
+      onAutoTopUpChange(!autoTopUp)
+      event.stopImmediatePropagation()
+      return
+    }
+    if (key.return) {
+      onSubmit()
+      event.stopImmediatePropagation()
+      return
+    }
+    if (!key.escape) event.stopImmediatePropagation()
+  })
+
+  const amountFocused = focusedField === 'amount'
+  const autoFocused = focusedField === 'auto'
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Box flexDirection="row">
+        <Text color={amountFocused ? 'suggestion' : undefined} bold={amountFocused}>
+          {amountFocused ? `${figures.pointer} ` : '  '}Amount: $
+        </Text>
+        <TextInput
+          value={amountUsd}
+          onChange={onAmountChange}
+          onSubmit={() => onSubmit()}
+          focus={amountFocused}
+          showCursor={amountFocused}
+          columns={columns}
+          cursorOffset={cursorOffset}
+          onChangeCursorOffset={onCursorOffsetChange}
+        />
+      </Box>
+      <Box flexDirection="row">
+        <Text color={autoFocused ? 'suggestion' : undefined} bold={autoFocused}>
+          {autoFocused ? `${figures.pointer} ` : '  '}Auto top up:{' '}
+        </Text>
+        <Text
+          color={autoFocused ? 'suggestion' : undefined}
+          dimColor={!autoTopUp}
+          bold={autoFocused && autoTopUp}
+        >
+          on
+        </Text>
+        <Text color={autoFocused ? 'suggestion' : undefined}>/</Text>
+        <Text
+          color={autoFocused ? 'suggestion' : undefined}
+          dimColor={autoTopUp}
+          bold={autoFocused && !autoTopUp}
+        >
+          off
+        </Text>
+      </Box>
+    </Box>
+  )
+}
+
 export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   const { columns: terminalColumns } = useTerminalSize()
   const inputColumns = Math.max(20, Math.min(80, terminalColumns - 4))
@@ -833,13 +980,91 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   const [aimlapiTopupAmountUsd, setAimlapiTopupAmountUsd] = React.useState(
     String(DEFAULT_AMOUNT_USD_MINOR / 100),
   )
-  const [aimlapiTopupMethod, setAimlapiTopupMethod] =
-    React.useState<PaymentMethod>('card')
-  const [aimlapiTopupPassword, setAimlapiTopupPassword] = React.useState('')
+  const [aimlapiSignInCode, setAimlapiSignInCode] = React.useState('')
+  const [aimlapiSessionToken, setAimlapiSessionToken] = React.useState('')
+  const [aimlapiIssuedKey, setAimlapiIssuedKey] = React.useState('')
+  const [aimlapiIssuedKeyId, setAimlapiIssuedKeyId] = React.useState('')
+  const [aimlapiTopupByKey, setAimlapiTopupByKey] = React.useState(false)
+  const [aimlapiResumeSessionToken, setAimlapiResumeSessionToken] = React.useState('')
+  const [aimlapiExistingProfileId, setAimlapiExistingProfileId] = React.useState<string | null>(null)
+  const [aimlapiExistingUsesEnv, setAimlapiExistingUsesEnv] = React.useState(false)
+  const [aimlapiInferenceBaseUrl, setAimlapiInferenceBaseUrl] = React.useState(
+    () => resolveEndpoints().inferenceBaseUrl,
+  )
+  const [aimlapiNewAccount, setAimlapiNewAccount] = React.useState(false)
+  const [aimlapiAutoTopUp, setAimlapiAutoTopUp] = React.useState(true)
   const [aimlapiTopupStatus, setAimlapiTopupStatus] =
     React.useState<AimlapiTopupStatus | undefined>()
   const [aimlapiTopupDetail, setAimlapiTopupDetail] = React.useState<string | undefined>()
-  const [isAimlapiTopupRunning, setIsAimlapiTopupRunning] = React.useState(false)
+  const [aimlapiDoneKind, setAimlapiDoneKind] = React.useState<'ready' | 'topup'>(
+    'ready',
+  )
+  const [isAimlapiKeyValidating, setIsAimlapiKeyValidating] = React.useState(false)
+  const aimlapiAbortRef = React.useRef<AbortController | null>(null)
+  const aimlapiPersistedIntentRef = React.useRef<
+    (AimlapiTopupIntent & { paymentSessionId: string }) | null
+  >(null)
+  // True only once a top-up payment actually completes. `aimlapiTopupByKey`
+  // marks that the flow is driven by a saved key, not that money changed hands,
+  // so the done screen must key off this instead to avoid showing the "Top-up
+  // successful" copy when the user merely continued with a saved key.
+  const aimlapiTopupPaidRef = React.useRef(false)
+  // A checkout URL that has already been opened in the browser (and is therefore
+  // chargeable). Submitting a changed amount/auto-top-up would start a NEW
+  // payment session, abandoning this one — which no endpoint can cancel — so
+  // that submit must be explicitly confirmed first (startAimlapiTopup's
+  // abandon-ack gate). A mere draft edit (typing) does NOT touch this: the
+  // durable receipt must stay resumable until the user actually confirms.
+  const aimlapiOpenedCheckoutRef = React.useRef<{
+    amountUsdMinor: number
+    autoTopUp: boolean
+  } | null>(null)
+  const aimlapiAbandonAckRef = React.useRef(false)
+  // Set when the user explicitly chose "switch account" from the configured
+  // screen. Unlike the ack ref above (which confirms abandoning a checkout
+  // THIS mount opened), a stale on-disk receipt here can be from an earlier,
+  // separate process — this mount's refs are never populated for it, so the
+  // normal ref-based abandon detection can't see the conflict at all. Forces
+  // the next claim to override it unconditionally, once.
+  const aimlapiForceAbandonExistingRef = React.useRef(false)
+
+  function resetAimlapiCheckoutIntent(): void {
+    // NOTE: the opened-checkout tracking (aimlapiOpenedCheckoutRef /
+    // aimlapiAbandonAckRef) is deliberately NOT cleared here — callers are a
+    // fresh flow entry or a completed/terminal outcome, and a confirmed
+    // abandonment (startAimlapiTopup, via claimAimlapiTopupStateAsync's
+    // abandonExisting) still needs the opened-checkout record until it takes
+    // over the slot itself.
+    const intent = aimlapiPersistedIntentRef.current
+    if (intent) {
+      aimlapiPersistedIntentRef.current = null
+      // This runs in a synchronous Ink save callback after the profile is written.
+      // Fire the clear on the ASYNC lock and do not await it, so a contended lock
+      // never freezes the UI; best-effort — a stale receipt is reconciled on the
+      // next run, so a failure must not turn a successful configuration into one.
+      void clearAimlapiTopupStateAsync(intent).catch(() => {})
+    }
+    setAimlapiResumeSessionToken('')
+  }
+
+  function resetAimlapiOnboardingIdentity(): void {
+    resetAimlapiCheckoutIntent()
+    setAimlapiSessionToken('')
+    setAimlapiIssuedKey('')
+    setAimlapiIssuedKeyId('')
+    setAimlapiTopupByKey(false)
+    aimlapiTopupPaidRef.current = false
+    setAimlapiNewAccount(false)
+  }
+
+  React.useEffect(() => {
+    const cancelAimlapi = (): void => aimlapiAbortRef.current?.abort()
+    const unregister = registerCleanup(cancelAimlapi)
+    return () => {
+      unregister()
+      cancelAimlapi()
+    }
+  }, [])
   const [menuFocusValue, setMenuFocusValue] = React.useState<string | undefined>()
   const [hasStoredCodexOAuthCredentials, setHasStoredCodexOAuthCredentials] =
     React.useState(false)
@@ -1477,6 +1702,8 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   }
 
   function closeWithCancelled(message: string): void {
+    aimlapiAbortRef.current?.abort()
+    aimlapiAbortRef.current = null
     onDone({
       action: 'cancelled',
       message:
@@ -1491,18 +1718,21 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
       env: {
         CLAUDE_CODE_USE_GITHUB: '1',
         OPENAI_MODEL: GITHUB_PROVIDER_DEFAULT_MODEL,
-        OPENAI_API_KEYS: undefined as any,
-        OPENAI_API_KEY: undefined as any,
-        OPENAI_ORG: undefined as any,
-        OPENAI_PROJECT: undefined as any,
-        OPENAI_ORGANIZATION: undefined as any,
-        OPENAI_BASE_URL: undefined as any,
-        OPENAI_API_BASE: undefined as any,
-        CLAUDE_CODE_USE_OPENAI: undefined as any,
-        CLAUDE_CODE_USE_GEMINI: undefined as any,
-        CLAUDE_CODE_USE_BEDROCK: undefined as any,
-        CLAUDE_CODE_USE_VERTEX: undefined as any,
-        CLAUDE_CODE_USE_FOUNDRY: undefined as any,
+        // `undefined` instructs the merge to clear these keys from saved
+        // settings. EnvironmentVariablesSchema coerces to string, so we route
+        // through `unknown` instead of `any` for the literal assignment.
+        OPENAI_API_KEYS: undefined as unknown as string,
+        OPENAI_API_KEY: undefined as unknown as string,
+        OPENAI_ORG: undefined as unknown as string,
+        OPENAI_PROJECT: undefined as unknown as string,
+        OPENAI_ORGANIZATION: undefined as unknown as string,
+        OPENAI_BASE_URL: undefined as unknown as string,
+        OPENAI_API_BASE: undefined as unknown as string,
+        CLAUDE_CODE_USE_OPENAI: undefined as unknown as string,
+        CLAUDE_CODE_USE_GEMINI: undefined as unknown as string,
+        CLAUDE_CODE_USE_BEDROCK: undefined as unknown as string,
+        CLAUDE_CODE_USE_VERTEX: undefined as unknown as string,
+        CLAUDE_CODE_USE_FOUNDRY: undefined as unknown as string,
       },
     })
     if (error) {
@@ -1540,10 +1770,10 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
 
     const { error } = updateSettingsForSource('userSettings', {
       env: {
-        CLAUDE_CODE_USE_GITHUB: undefined as any,
-        OPENAI_MODEL: undefined as any,
-        OPENAI_BASE_URL: undefined as any,
-        OPENAI_API_BASE: undefined as any,
+        CLAUDE_CODE_USE_GITHUB: undefined as unknown as string,
+        OPENAI_MODEL: undefined as unknown as string,
+        OPENAI_BASE_URL: undefined as unknown as string,
+        OPENAI_API_BASE: undefined as unknown as string,
       },
     })
     if (error) {
@@ -1578,10 +1808,13 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     const provider = defaults.provider ?? 'openai'
     const nextDraft = {
       name: defaults.name,
-      baseUrl: defaults.baseUrl,
+      baseUrl:
+        preset === 'aimlapi'
+          ? resolveEndpoints().inferenceBaseUrl
+          : defaults.baseUrl,
       model: defaults.model,
       apiKey: defaults.apiKey ?? '',
-      apiFormat: 'chat_completions',
+      apiFormat: preset === 'custom' ? 'auto' : 'chat_completions',
       authHeader: '',
       authHeaderValue: '',
       customHeaders: '',
@@ -1592,14 +1825,44 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     setPresetRequiresApiKey(defaults.requiresApiKey)
     setAimlapiTopupEmail('')
     setAimlapiTopupAmountUsd(String(DEFAULT_AMOUNT_USD_MINOR / 100))
-    setAimlapiTopupMethod('card')
-    setAimlapiTopupPassword('')
+    aimlapiAbortRef.current?.abort()
+    aimlapiAbortRef.current = null
+    setAimlapiSignInCode('')
+    setAimlapiSessionToken('')
+    setAimlapiIssuedKey('')
+    setAimlapiIssuedKeyId('')
+    setAimlapiTopupByKey(false)
+    aimlapiTopupPaidRef.current = false
+    // Fresh flow entry: no open checkout to warn about yet. Drop the tracked
+    // intent too (in-memory only — do NOT clear its on-disk receipt, which may be
+    // a resumable paid checkout) so a later resetAimlapiCheckoutIntent can never
+    // clear a previous flow's record against a stale payment id.
+    aimlapiOpenedCheckoutRef.current = null
+    aimlapiAbandonAckRef.current = false
+    aimlapiPersistedIntentRef.current = null
+    // A confirmation armed in an earlier flow (e.g. the user confirmed an
+    // email switch, then backed out before that claim ever consumed the
+    // flag) must not authorize THIS flow's first claim — it was never
+    // confirmed against this flow's receipt.
+    aimlapiForceAbandonExistingRef.current = false
+    setAimlapiResumeSessionToken('')
+    setAimlapiExistingProfileId(null)
+    setAimlapiExistingUsesEnv(false)
+    setAimlapiInferenceBaseUrl(
+      preset === 'aimlapi' ? nextDraft.baseUrl : resolveEndpoints().inferenceBaseUrl,
+    )
+    setAimlapiNewAccount(false)
+    setAimlapiAutoTopUp(true)
     setAimlapiTopupStatus(undefined)
     setAimlapiTopupDetail(undefined)
-    setIsAimlapiTopupRunning(false)
+    setAimlapiDoneKind('ready')
     setFormStepIndex(0)
     setCursorOffset(nextDraft.name.length)
     setErrorMessage(undefined)
+
+    if (preset === 'aimlapi' && mode === 'manage' && startExistingAimlapi(nextDraft)) {
+      return
+    }
 
     if (preset === 'ollama') {
       setOllamaSelection({ state: 'loading' })
@@ -1647,6 +1910,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     nextDraft: ProviderDraft = draft,
     provider: ProviderProfile['provider'] = draftProvider,
     profileId: string | null = editingProfileId,
+    options: { deferNavigation?: boolean; onSaved?: () => void } = {},
   ): void {
     if (
       provider === 'custom-anthropic' &&
@@ -1660,6 +1924,15 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
       return
     }
     const routeId = resolveProviderEditorRouteId(provider, nextDraft.baseUrl)
+    if (routeId === 'commandcode') {
+      const modelError = parseModelList(nextDraft.model)
+        .map(model => getCommandcodeChatCompletionsModelError(model))
+        .find((error): error is string => error !== null)
+      if (modelError) {
+        setErrorMessage(modelError)
+        return
+      }
+    }
     const supportsApiFormat = routeSupportsApiFormatSelection(routeId)
     const showsAuthHeader = routeShowsAuthHeader(routeId)
     const showsAuthHeaderValue = routeShowsAuthHeaderValue(routeId)
@@ -1674,17 +1947,21 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
 
     const requestedResponses =
       supportsApiFormat && (nextDraft.apiFormat === 'responses' || nextDraft.apiFormat === 'responses_compat')
-    const shouldUseChatCompletions =
-      !supportsApiFormat ||
-      (nextDraft.apiFormat !== 'responses' && nextDraft.apiFormat !== 'responses_compat') ||
-      !routeSupportsResponsesModel(routeId, nextDraft.model)
+    const selectedApiFormat =
+      !supportsApiFormat
+        ? 'chat_completions'
+        : nextDraft.apiFormat === 'auto'
+          ? undefined
+        : requestedResponses && !routeSupportsResponsesModel(routeId, nextDraft.model)
+          ? 'chat_completions'
+          : nextDraft.apiFormat as OpenAICompatibleApiFormat
     const payload: ProviderProfileInput = {
       provider,
       name: nextDraft.name,
       baseUrl: nextDraft.baseUrl,
       model: nextDraft.model,
       apiKey: nextDraft.apiKey,
-      apiFormat: shouldUseChatCompletions ? 'chat_completions' : (nextDraft.apiFormat as OpenAICompatibleApiFormat),
+      apiFormat: selectedApiFormat,
       authHeader:
         showsAuthHeader && nextDraft.authHeader
           ? nextDraft.authHeader
@@ -1744,6 +2021,11 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         ? `${finalSuccessMessage}. Warning: could not clear startup provider override (${settingsOverrideError}).`
         : finalSuccessMessage,
     )
+
+    if (options.deferNavigation) {
+      options.onSaved?.()
+      return
+    }
 
     if (mode === 'first-run') {
       onDone({
@@ -1988,6 +2270,21 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
 
   function handleBackFromPresetModel(): void {
     setErrorMessage(undefined)
+    // A by-key top-up payment already settled and its receipt was persisted
+    // (checkoutState.settled/apiKey) before routing here to confirm the
+    // model — Back cannot "cancel" a payment that already cleared. Complete
+    // the pending profile update with the current model instead of
+    // abandoning it: leaving without saving strands the settled receipt,
+    // which then refuses any later, differently-amounted top-up until it is
+    // recovered (by re-running this exact amount) or manually deleted.
+    if (
+      aimlapiTopupPaidRef.current &&
+      aimlapiPersistedIntentRef.current &&
+      (aimlapiExistingProfileId || aimlapiExistingUsesEnv)
+    ) {
+      persistExistingAimlapi()
+      return
+    }
     setScreen('select-preset')
   }
 
@@ -1997,6 +2294,11 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   })
 
   function handleBackFromPresetApiKey(): void {
+    if (draftProvider === 'aimlapi') {
+      aimlapiAbortRef.current?.abort()
+      aimlapiAbortRef.current = null
+      setIsAimlapiKeyValidating(false)
+    }
     setErrorMessage(undefined)
     setCursorOffset(draft.model.length)
     setScreen(draftProvider === 'aimlapi' ? 'aimlapi-api-key-choice' : 'preset-model')
@@ -2018,7 +2320,27 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     isActive: screen === 'aimlapi-api-key-choice',
   })
 
+  function handleBackFromAimlapiConfigured(): void {
+    aimlapiAbortRef.current?.abort()
+    aimlapiAbortRef.current = null
+    setIsAimlapiKeyValidating(false)
+    setErrorMessage(undefined)
+    setScreen('select-preset')
+  }
+
+  useKeybinding('confirm:no', handleBackFromAimlapiConfigured, {
+    context: 'Settings',
+    // The balance check (and, past it, the stale-receipt reconcile) has no
+    // abort-and-stop-the-underlying-work guarantee for the reconcile part —
+    // aborting only stops THIS flow from acting on the result. Esc must stay
+    // inactive throughout so a user can't escape to select-preset and start
+    // a competing top-up for the same credential while that reconcile is
+    // still running unattended.
+    isActive: screen === 'aimlapi-configured' && !isAimlapiKeyValidating,
+  })
+
   function handleBackFromAimlapiTopupEmail(): void {
+    aimlapiAbortRef.current?.abort()
     setErrorMessage(undefined)
     setCursorOffset(0)
     setScreen('aimlapi-api-key-choice')
@@ -2030,9 +2352,14 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   })
 
   function handleBackFromAimlapiTopupAmount(): void {
+    // Cancel a startAimlapiTopup invocation that may still be in its preflight
+    // (claiming/saving checkout state can contend for the state lock for up
+    // to 15s before the screen would otherwise change) — without this, that
+    // stale invocation can still resolve after navigating away and barge
+    // back onto the progress screen to start provisioning.
+    aimlapiAbortRef.current?.abort()
     setErrorMessage(undefined)
-    setCursorOffset(aimlapiTopupPassword.length)
-    setScreen('aimlapi-topup-password')
+    setScreen(aimlapiNewAccount ? 'aimlapi-topup-email' : 'aimlapi-low-balance')
   }
 
   useKeybinding('confirm:no', handleBackFromAimlapiTopupAmount, {
@@ -2040,40 +2367,77 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     isActive: screen === 'aimlapi-topup-amount',
   })
 
-  function handleBackFromAimlapiTopupPassword(): void {
+  function handleBackFromAimlapiSignInCode(): void {
+    aimlapiAbortRef.current?.abort()
     setErrorMessage(undefined)
-    setAimlapiTopupPassword('')
+    setAimlapiSignInCode('')
     setCursorOffset(aimlapiTopupEmail.length)
     setScreen('aimlapi-topup-email')
   }
 
-  useKeybinding('confirm:no', handleBackFromAimlapiTopupPassword, {
+  useKeybinding('confirm:no', handleBackFromAimlapiSignInCode, {
     context: 'Settings',
-    isActive: screen === 'aimlapi-topup-password',
+    isActive: screen === 'aimlapi-signin-code',
   })
 
-  function handleBackFromAimlapiTopupMethod(): void {
+  function handleBackFromAimlapiLowBalance(): void {
     setErrorMessage(undefined)
-    setCursorOffset(aimlapiTopupAmountUsd.length)
-    setScreen('aimlapi-topup-amount')
+    setScreen(
+      aimlapiExistingProfileId || aimlapiExistingUsesEnv
+        ? 'aimlapi-configured'
+        : 'aimlapi-api-key-choice',
+    )
   }
 
-  useKeybinding('confirm:no', handleBackFromAimlapiTopupMethod, {
+  useKeybinding('confirm:no', handleBackFromAimlapiLowBalance, {
     context: 'Settings',
-    isActive: screen === 'aimlapi-topup-method',
+    isActive: screen === 'aimlapi-low-balance',
   })
 
   function handleCancelAimlapiTopupProgress(): void {
-    if (isAimlapiTopupRunning) {
-      return
-    }
+    aimlapiAbortRef.current?.abort()
+    aimlapiAbortRef.current = null
     setErrorMessage(undefined)
-    setScreen('aimlapi-api-key-choice')
+    setScreen(
+      aimlapiTopupStatus === 'checking-account' ||
+        aimlapiTopupStatus === 'sending-code' ||
+        aimlapiTopupStatus === 'creating-account'
+        ? 'aimlapi-topup-email'
+        : aimlapiTopupStatus === 'verifying-code' ||
+            aimlapiTopupStatus === 'creating-key'
+          ? 'aimlapi-signin-code'
+          : 'aimlapi-topup-amount',
+    )
   }
 
   useKeybinding('confirm:no', handleCancelAimlapiTopupProgress, {
     context: 'Settings',
     isActive: screen === 'aimlapi-topup-progress',
+  })
+
+  function finishAimlapiDone(): void {
+    if (mode === 'first-run') {
+      const active = getActiveProviderProfile()
+      onDone({
+        action: 'saved',
+        activeProfileId: active?.id,
+        activeProviderName: active?.name,
+        activeProviderModel: active ? getPrimaryModel(active.model) : undefined,
+        message: `Provider configured: ${active?.name ?? 'aimlapi.com'}`,
+      })
+      return
+    }
+    returnToMenu()
+  }
+
+  useKeybinding('confirm:yes', finishAimlapiDone, {
+    context: 'Confirmation',
+    isActive: screen === 'aimlapi-done',
+  })
+
+  useKeybinding('confirm:no', finishAimlapiDone, {
+    context: 'Confirmation',
+    isActive: screen === 'aimlapi-done',
   })
 
   // xAI OAuth setup renders a TextInput for the manual-code recovery
@@ -2184,6 +2548,10 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   }
 
   function renderForm(): React.ReactNode {
+    const editorRouteId = resolveProviderEditorRouteId(
+      draftProvider,
+      draft.baseUrl,
+    )
     return (
       <Box flexDirection="column" gap={1}>
         <Text color="remember" bold>
@@ -2192,9 +2560,9 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         <Text dimColor>{displayStep.helpText}</Text>
         <Text dimColor>
           Provider type:{' '}
-          {getRouteProviderTypeLabel(resolveProfileRoute(draftProvider).routeId)}
+          {getRouteProviderTypeLabel(editorRouteId)}
         </Text>
-        {routeSupportsCustomHeaders(resolveProfileRoute(draftProvider).routeId) ? (
+        {routeSupportsCustomHeaders(editorRouteId) ? (
           <Text dimColor>
             Advanced: this provider supports custom request headers when you
             need them.
@@ -2206,6 +2574,11 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         {currentStepKey === 'apiFormat' ? (
           <Select
             options={[
+              {
+                value: 'auto',
+                label: 'Automatic',
+                description: 'Use the provider and model defaults',
+              },
               {
                 value: 'chat_completions',
                 label: 'Chat Completions',
@@ -2223,14 +2596,14 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
               },
             ]}
             defaultValue={
-              currentValue === 'responses_compat' ? 'responses_compat' : currentValue === 'responses' ? 'responses' : 'chat_completions'
+              currentValue === 'responses_compat' ? 'responses_compat' : currentValue === 'responses' ? 'responses' : currentValue === 'chat_completions' ? 'chat_completions' : 'auto'
             }
             defaultFocusValue={
-              currentValue === 'responses_compat' ? 'responses_compat' : currentValue === 'responses' ? 'responses' : 'chat_completions'
+              currentValue === 'responses_compat' ? 'responses_compat' : currentValue === 'responses' ? 'responses' : currentValue === 'chat_completions' ? 'chat_completions' : 'auto'
             }
             onChange={(value: string) => handleFormSubmit(value)}
             onCancel={handleBackFromForm}
-            visibleOptionCount={3}
+            visibleOptionCount={4}
           />
         ) : (
           <Box flexDirection="row" gap={1}>
@@ -2313,6 +2686,40 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
               setDraft(nextDraft)
               setErrorMessage(undefined)
 
+              if (draftProvider === 'aimlapi') {
+                // An already-resolved existing credential (saved profile or an
+                // ambient env key adopted earlier, e.g. after a top-up) must
+                // complete through persistExistingAimlapi so the paid-completion
+                // path (aimlapiTopupPaidRef) is honored, instead of being
+                // re-detected into the plain "ready" flow below.
+                if (aimlapiExistingProfileId || aimlapiExistingUsesEnv) {
+                  persistExistingAimlapi(nextDraft.model)
+                  return
+                }
+                const envKey = resolveRouteCredentialValue({
+                  routeId: 'aimlapi',
+                  baseUrl: nextDraft.baseUrl,
+                })?.trim()
+                if (
+                  mode === 'first-run' &&
+                  envKey &&
+                  isCanonicalAimlapiInferenceBaseUrl(nextDraft.baseUrl)
+                ) {
+                  setAimlapiIssuedKey(envKey)
+                  setAimlapiExistingUsesEnv(true)
+                  void validateAndPersistAimlapiKey(
+                    envKey,
+                    nextDraft.baseUrl,
+                    nextDraft.model,
+                    { preserveEnv: true },
+                  )
+                  return
+                }
+                if (mode === 'manage' && startExistingAimlapi(nextDraft)) {
+                  return
+                }
+              }
+
               if (needsApiKey) {
                 setCursorOffset(0)
                 setScreen(
@@ -2342,14 +2749,72 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   }
 
   function renderPresetApiKey(): React.ReactNode {
+    const submitApiKey = (value: string): void => {
+      const apiKey = value.trim()
+      if (!apiKey) {
+        setErrorMessage(`API key is required for ${draft.name}.`)
+        return
+      }
+
+      const nextDraft = applyPresetApiFormat(
+        {
+          ...draft,
+          apiKey,
+        },
+        draftProvider,
+      )
+      setDraft(nextDraft)
+      setErrorMessage(undefined)
+      if (draftProvider === 'aimlapi') {
+        void validateAndPersistAimlapiKey(apiKey, nextDraft.baseUrl, nextDraft.model)
+        return
+      }
+      persistDraft(nextDraft, draftProvider, null)
+    }
+
+    if (draftProvider === 'aimlapi') {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text color="remember" bold>
+            {AIMLAPI_MESSAGES.apiKeyInputPrompt}
+          </Text>
+          <Text dimColor>{AIMLAPI_MESSAGES.apiKeyHiddenHint}</Text>
+          <Box flexDirection="row">
+            <Text>API key: </Text>
+            <TextInput
+              value={draft.apiKey}
+              onChange={value =>
+                setDraft(prev => ({
+                  ...prev,
+                  apiKey: value,
+                }))
+              }
+              onSubmit={submitApiKey}
+              focus={!isAimlapiKeyValidating}
+              showCursor={!isAimlapiKeyValidating}
+              placeholder={`Paste your key${figures.ellipsis}`}
+              mask="*"
+              columns={inputColumns}
+              cursorOffset={cursorOffset}
+              onChangeCursorOffset={setCursorOffset}
+            />
+          </Box>
+          {isAimlapiKeyValidating ? <Spinner /> : null}
+          {errorMessage && <Text color="error">{errorMessage}</Text>}
+          <Text dimColor>
+            Press Enter to save. Press Esc to go back.
+          </Text>
+        </Box>
+      )
+    }
+
     return (
       <Box flexDirection="column" gap={1}>
         <Text color="remember" bold>
           Create provider profile
         </Text>
         <Text dimColor>
-          Enter the API key for {draft.name}. Other preset details are already
-          configured.
+          Enter the API key for {draft.name}. Other preset details are already configured.
         </Text>
         <Text dimColor>
           Provider type:{' '}
@@ -2366,24 +2831,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
                 apiKey: value,
               }))
             }
-            onSubmit={value => {
-              const apiKey = value.trim()
-              if (!apiKey) {
-                setErrorMessage(`API key is required for ${draft.name}.`)
-                return
-              }
-
-              const nextDraft = applyPresetApiFormat(
-                {
-                  ...draft,
-                  apiKey,
-                },
-                draftProvider,
-              )
-              setDraft(nextDraft)
-              setErrorMessage(undefined)
-              persistDraft(nextDraft, draftProvider, null)
-            }}
+            onSubmit={submitApiKey}
             focus={true}
             showCursor={true}
             placeholder={`Enter API key${figures.ellipsis}`}
@@ -2401,125 +2849,922 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     )
   }
 
-  function startAimlapiTopup(
-    email: string,
-    password: string,
-    method: PaymentMethod = aimlapiTopupMethod,
+  async function validateAndPersistAimlapiKey(
+    apiKey: string,
+    baseUrl: string,
+    model: string,
+    options: { preserveEnv?: boolean } = {},
+  ): Promise<void> {
+    aimlapiAbortRef.current?.abort()
+    const controller = new AbortController()
+    aimlapiAbortRef.current = controller
+    setIsAimlapiKeyValidating(true)
+    setErrorMessage(undefined)
+
+    try {
+      const balance = await validateAimlapiApiKey(
+        apiKey,
+        controller.signal,
+        baseUrl,
+      )
+      if (controller.signal.aborted) return
+      if (balance.lowBalance) {
+        setAimlapiIssuedKey(apiKey.trim())
+        setAimlapiIssuedKeyId('')
+        setAimlapiTopupByKey(true)
+        setAimlapiExistingUsesEnv(options.preserveEnv === true)
+        // Carry the endpoint this key was actually validated against into the
+        // top-up flow — without this, a non-canonical baseUrl here (e.g. a
+        // manually entered key against an overridden AIMLAPI_INFERENCE_URL)
+        // leaves aimlapiInferenceBaseUrl at its stale default, so the later
+        // by-key top-up and profile save would charge/persist against the
+        // wrong endpoint.
+        setAimlapiInferenceBaseUrl(baseUrl)
+        setIsAimlapiKeyValidating(false)
+        setScreen('aimlapi-low-balance')
+        return
+      }
+      persistAimlapiKey(apiKey, baseUrl, model, 'ready', options)
+    } catch (error) {
+      if (controller.signal.aborted) return
+      if (options.preserveEnv) {
+        // Validation failed for the ambient env key: drop the adoption markers so
+        // the next Enter re-validates instead of short-circuiting into persisting
+        // the unvalidated key.
+        setAimlapiExistingUsesEnv(false)
+        setAimlapiIssuedKey('')
+      }
+      const status = aimlapiApiErrorStatus(error)
+      if (status === 401 || status === 403) {
+        setDraft(prev => ({ ...prev, apiKey: '' }))
+        setCursorOffset(0)
+        setErrorMessage(AIMLAPI_MESSAGES.apiKeyInvalid)
+        return
+      }
+      const detail = safeAimlapiErrorMessage(error, [apiKey])
+      setErrorMessage(detail)
+    } finally {
+      if (aimlapiAbortRef.current === controller) aimlapiAbortRef.current = null
+      if (!controller.signal.aborted) setIsAimlapiKeyValidating(false)
+    }
+  }
+
+  function existingAimlapiCredential(): {
+    apiKey: string
+    profile?: ProviderProfile
+    usesEnv: boolean
+    inferenceBaseUrl: string
+  } | null {
+    const isAimlapiProfile = (profile: ProviderProfile): boolean =>
+      profile.provider === 'aimlapi' ||
+      resolveRouteIdFromBaseUrl(profile.baseUrl) === 'aimlapi'
+    const inferenceBaseUrl = resolveEndpoints().inferenceBaseUrl
+    // Discovering an already-saved profile must not depend on the AMBIENT
+    // endpoint: a saved production-endpoint profile is still eligible even
+    // while AIMLAPI_INFERENCE_URL currently points elsewhere (e.g. staging) —
+    // the per-profile canonical check below is what actually enforces "never
+    // send a saved key to another environment". The ambient env's key is a
+    // different matter: it's only valid to read AT the ambient endpoint, so
+    // it stays gated on the ambient endpoint being canonical.
+    const ambientIsCanonical = isCanonicalAimlapiInferenceBaseUrl(inferenceBaseUrl)
+    const envKey = ambientIsCanonical
+      ? resolveRouteCredentialValue({
+          routeId: 'aimlapi',
+          baseUrl: inferenceBaseUrl,
+        })?.trim()
+      : undefined
+    const active = profiles.find(profile => profile.id === activeProfileId)
+    const candidates = active
+      ? [active, ...profiles.filter(profile => profile.id !== active.id)]
+      : profiles
+    for (const profile of candidates) {
+      if (!isAimlapiProfile(profile)) continue
+      // Saved credentials are eligible for the guided balance/top-up preflight
+      // only on the production catalog endpoint. A proxy/staging profile remains
+      // usable normally, but its key must never be sent to another environment.
+      if (!isCanonicalAimlapiInferenceBaseUrl(profile.baseUrl)) continue
+      const apiKey = profile.apiKey?.trim()
+      if (apiKey) {
+        return {
+          apiKey,
+          profile,
+          usesEnv: false,
+          inferenceBaseUrl: profile.baseUrl,
+        }
+      }
+      if (envKey) {
+        return {
+          apiKey: envKey,
+          profile,
+          usesEnv: true,
+          inferenceBaseUrl: profile.baseUrl,
+        }
+      }
+    }
+    return envKey
+      ? {
+          apiKey: envKey,
+          usesEnv: true,
+          inferenceBaseUrl,
+        }
+      : null
+  }
+
+  function persistExistingAimlapi(model = draft.model): void {
+    const profile = aimlapiExistingProfileId
+      ? profiles.find(candidate => candidate.id === aimlapiExistingProfileId)
+      : undefined
+    if (profile) {
+      const nextDraft = applyPresetApiFormat(
+        { ...toDraft(profile), model },
+        profile.provider,
+      )
+      setDraft(nextDraft)
+      persistDraft(nextDraft, profile.provider, profile.id, {
+        deferNavigation: true,
+        onSaved: () => {
+          resetAimlapiCheckoutIntent()
+          // onSaved runs synchronously from persistDraft, so this can only be
+          // fire-and-forget (best-effort) here, not awaited — but it must
+          // still be the async, lock-yielding variant: the sync one's
+          // Atomics.wait retry would otherwise freeze Ink rendering, timers,
+          // Esc, and SIGINT right at completion on a contended cache lock.
+          void clearAimlapiSignInKeyAsync(aimlapiTopupEmail, aimlapiIssuedKeyId).catch(() => {})
+          setAimlapiDoneKind(aimlapiTopupPaidRef.current ? 'topup' : 'ready')
+          setErrorMessage(undefined)
+          setScreen('aimlapi-done')
+        },
+      })
+      return
+    }
+    persistAimlapiKey(
+      aimlapiIssuedKey,
+      aimlapiInferenceBaseUrl,
+      model,
+      aimlapiTopupPaidRef.current ? 'topup' : 'ready',
+      { preserveEnv: aimlapiExistingUsesEnv },
+    )
+  }
+
+  function startExistingAimlapi(nextDraft: ProviderDraft): boolean {
+    const existing = existingAimlapiCredential()
+    if (!existing) return false
+    setDraft({
+      ...nextDraft,
+      baseUrl: existing.profile?.baseUrl ?? existing.inferenceBaseUrl,
+    })
+    setAimlapiIssuedKey(existing.apiKey)
+    setAimlapiIssuedKeyId('')
+    setAimlapiExistingProfileId(existing.profile?.id ?? null)
+    setAimlapiExistingUsesEnv(existing.usesEnv)
+    setAimlapiInferenceBaseUrl(existing.inferenceBaseUrl)
+    setAimlapiTopupByKey(true)
+    setScreen('aimlapi-configured')
+    return true
+  }
+
+  function useExistingAimlapi(): void {
+    const apiKey = aimlapiIssuedKey.trim()
+    if (!apiKey) {
+      setErrorMessage('The existing AI/ML API key is unavailable. Configure again.')
+      return
+    }
+    // Continuing with a saved key is not a payment; clear any stale paid flag
+    // from an earlier top-up so the done screen shows "Everything is ready."
+    aimlapiTopupPaidRef.current = false
+    aimlapiAbortRef.current?.abort()
+    const controller = new AbortController()
+    aimlapiAbortRef.current = controller
+    setIsAimlapiKeyValidating(true)
+    setErrorMessage(undefined)
+    void (async () => {
+      try {
+        const balance = await validateAimlapiApiKey(
+          apiKey,
+          controller.signal,
+          aimlapiInferenceBaseUrl,
+        )
+        if (controller.signal.aborted) return
+        if (balance.lowBalance) {
+          setIsAimlapiKeyValidating(false)
+          setScreen('aimlapi-low-balance')
+        } else {
+          // This path reuses an already-funded credential without claiming a
+          // checkout, so it never runs startAimlapiTopup's own settled-receipt
+          // recovery. An earlier top-up for this SAME credential may still be
+          // sitting settled-but-unsaved (its model picker was backed out of or
+          // closed before this fix) and would otherwise refuse any later,
+          // differently-amounted top-up. Nothing new is being paid for here —
+          // the balance just confirmed above already reflects it — so clearing
+          // that leftover marker is safe and unblocks a future top-up.
+          //
+          // Awaited (not fire-and-forget): a by-key top-up reuses this same
+          // apiKey, so a genuinely NEW settlement for this credential landing
+          // between this call and the user's next action here could otherwise
+          // be swept up by a still-in-flight reconcile from THIS call. Waiting
+          // for it to finish under its own lock before moving on keeps the two
+          // from interleaving. Crucially, isAimlapiKeyValidating (and with it
+          // the aimlapi-configured Select and its Esc binding, see the
+          // isActive guard below) also stays true for the whole wait: this
+          // reconcile has no abort signal of its own, so it keeps running
+          // regardless of what the UI does — leaving the Select reachable
+          // here would let the user start a genuinely NEW top-up for this
+          // same credential (e.g. "Set up a new key or switch account", or
+          // Esc then back in) whose fresh settlement could then be caught and
+          // deleted by this still-in-flight reconcile.
+          await reconcileSettledAimlapiTopupStateAsync(apiKey).catch(() => {})
+          if (controller.signal.aborted) return
+          setIsAimlapiKeyValidating(false)
+          setCursorOffset(draft.model.length)
+          setScreen('preset-model')
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setIsAimlapiKeyValidating(false)
+        const status = aimlapiApiErrorStatus(error)
+        setErrorMessage(
+          status === 401 || status === 403
+            ? 'The existing AI/ML API key is invalid. Configure again.'
+            : safeAimlapiErrorMessage(error, [apiKey]),
+        )
+      } finally {
+        if (aimlapiAbortRef.current === controller) aimlapiAbortRef.current = null
+      }
+    })()
+  }
+
+  function persistAimlapiKey(
+    apiKey: string,
+    baseUrl: string,
+    model = draft.model,
+    doneKind: 'ready' | 'topup' = 'ready',
+    options: { preserveEnv?: boolean; signInKeyId?: string } = {},
   ): void {
+    const nextDraft = applyPresetApiFormat(
+      {
+        ...draft,
+        apiKey: options.preserveEnv ? '' : apiKey.trim(),
+        baseUrl,
+        model,
+      },
+      draftProvider,
+    )
+    setDraft(nextDraft)
+    // persistDraft invokes onSaved synchronously, so read the just-minted key id
+    // from the caller rather than the aimlapiIssuedKeyId state, whose setter may
+    // not have applied yet — otherwise the sign-in cache record is never cleared.
+    const signInKeyId = options.signInKeyId ?? aimlapiIssuedKeyId
+    persistDraft(nextDraft, draftProvider, null, {
+      deferNavigation: true,
+      onSaved: () => {
+        resetAimlapiCheckoutIntent()
+        // Fire-and-forget: see the matching comment in persistExistingAimlapi.
+        void clearAimlapiSignInKeyAsync(aimlapiTopupEmail, signInKeyId).catch(() => {})
+        setAimlapiDoneKind(doneKind)
+        setErrorMessage(undefined)
+        setScreen('aimlapi-done')
+      },
+    })
+  }
+
+  // A checkout that is already chargeable (a resume token recorded, a key
+  // minted, or a browser tab opened) must not be silently abandoned by
+  // navigating elsewhere in the guided flow — e.g. an accidental Esc-back
+  // through the email/amount screens to an earlier choice screen and
+  // resubmitting. A never-advanced claim (nothing paid or minted yet) is
+  // safe to drop without confirmation.
+  function hasChargeableAimlapiCheckout(): boolean {
+    return Boolean(
+      aimlapiPersistedIntentRef.current &&
+        (aimlapiResumeSessionToken.trim() ||
+          aimlapiIssuedKey.trim() ||
+          aimlapiOpenedCheckoutRef.current),
+    )
+  }
+
+  function startAimlapiEmailOnboarding(email: string): void {
     const trimmedEmail = email.trim()
+    if (!isValidAimlapiEmail(trimmedEmail)) {
+      setErrorMessage(AIMLAPI_MESSAGES.emailInvalid)
+      return
+    }
+    // Submitting the email starts a fresh account-bound flow. Retaining a
+    // checkout from an earlier email/key path could poll or exchange the wrong
+    // payment intent, so retries that should resume stay on the amount screen.
+    // Require the same explicit confirmation an amount edit does before
+    // dropping a chargeable one.
+    const hadChargeableCheckout = hasChargeableAimlapiCheckout()
+    if (hadChargeableCheckout && !aimlapiAbandonAckRef.current) {
+      aimlapiAbandonAckRef.current = true
+      setErrorMessage(
+        'A checkout from a previous email is still pending — if a browser tab for it is open, do NOT pay it. Press Enter again to abandon it and continue with this email.',
+      )
+      return
+    }
+    aimlapiAbandonAckRef.current = false
+    resetAimlapiOnboardingIdentity()
+    if (hadChargeableCheckout) {
+      // The user just confirmed abandoning it (reaching here on the second
+      // Enter, past the gate above). resetAimlapiOnboardingIdentity's clear
+      // is un-awaited and best-effort, so a contended/failed lock must not
+      // leave the abandoned receipt still enforced — make the confirmation
+      // authoritative at claimAimlapiTopupStateAsync itself instead, the same
+      // one-shot signal the "switch account" flow uses for its own on-disk,
+      // this-mount-invisible conflicts.
+      aimlapiForceAbandonExistingRef.current = true
+    }
+    aimlapiAbortRef.current?.abort()
+    const controller = new AbortController()
+    aimlapiAbortRef.current = controller
+    setAimlapiTopupEmail(trimmedEmail)
+    setAimlapiTopupStatus('checking-account')
+    setAimlapiTopupDetail(undefined)
+    setErrorMessage(undefined)
+    setScreen('aimlapi-topup-progress')
+
+    void (async () => {
+      try {
+        const account = await beginAimlapiEmailOnboarding(
+          trimmedEmail,
+          controller.signal,
+        )
+        if (account.action === 'code-sent') {
+          setAimlapiTopupStatus('sending-code')
+          if (controller.signal.aborted) return
+          setAimlapiNewAccount(false)
+          setAimlapiSignInCode('')
+          setCursorOffset(0)
+          setScreen('aimlapi-signin-code')
+          return
+        }
+        setAimlapiTopupStatus('creating-account')
+        if (controller.signal.aborted) return
+        setAimlapiNewAccount(true)
+        setAimlapiSessionToken(account.sessionToken)
+        setCursorOffset(aimlapiTopupAmountUsd.length)
+        setScreen('aimlapi-topup-amount')
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setErrorMessage(
+          safeAimlapiErrorMessage(error, [trimmedEmail]),
+        )
+        setCursorOffset(trimmedEmail.length)
+        setScreen('aimlapi-topup-email')
+      } finally {
+        if (aimlapiAbortRef.current === controller) aimlapiAbortRef.current = null
+      }
+    })()
+  }
+
+  function verifyAimlapiSignInCode(code: string): void {
+    const trimmedCode = code.trim()
+    if (!isValidAimlapiSignInCode(trimmedCode)) {
+      setErrorMessage(AIMLAPI_MESSAGES.codeIncorrect)
+      return
+    }
+    aimlapiAbortRef.current?.abort()
+    const controller = new AbortController()
+    aimlapiAbortRef.current = controller
+    setAimlapiTopupStatus('verifying-code')
+    setErrorMessage(undefined)
+    setScreen('aimlapi-topup-progress')
+
+    void (async () => {
+      try {
+        // Reuse a key already minted for this email (e.g. after closing before
+        // amount entry or restarting a checkout) instead of creating another.
+        const retainedSignInKey = loadAimlapiSignInKey(aimlapiTopupEmail)
+        const result = await completeAimlapiCodeSignIn(
+          aimlapiTopupEmail,
+          trimmedCode,
+          controller.signal,
+          aimlapiInferenceBaseUrl,
+          retainedSignInKey ?? undefined,
+        )
+        // Copy into memory BEFORE persisting so a cache-write failure cannot
+        // discard the just-minted key — otherwise the catch below returns to code
+        // entry with neither the key nor a cache record and a retry mints another.
+        setAimlapiSessionToken(result.sessionToken)
+        setAimlapiIssuedKey(result.apiKey)
+        setAimlapiIssuedKeyId(result.apiKeyId)
+        // Recovery aid so an abort/restart reuses this key; best-effort — a lock,
+        // permission, or disk failure must not lose the key retained above. Async
+        // so a contended lock yields to the event loop instead of freezing Ink
+        // rendering, timers, Esc, and SIGINT via the sync lock's Atomics.wait.
+        try {
+          await saveAimlapiSignInKeyAsync(aimlapiTopupEmail, result.apiKey, result.apiKeyId)
+        } catch {
+          // Retained in component state above; the cache is only a recovery aid.
+        }
+        if (controller.signal.aborted) return
+        if (result.balanceStatus === 'unknown') {
+          setDraft(prev => ({ ...prev, apiKey: result.apiKey }))
+          setCursorOffset(result.apiKey.length)
+          setErrorMessage(
+            safeAimlapiErrorMessage(result.balanceError, [result.apiKey]),
+          )
+          setScreen('preset-api-key')
+          return
+        }
+        if (result.lowBalance) {
+          setScreen('aimlapi-low-balance')
+        } else {
+          persistAimlapiKey(result.apiKey, aimlapiInferenceBaseUrl, draft.model, 'ready', {
+            signInKeyId: result.apiKeyId,
+          })
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setErrorMessage(
+          error instanceof AimlapiApiError && error.status === 400
+            ? AIMLAPI_MESSAGES.codeIncorrect
+            : safeAimlapiErrorMessage(error, [
+                aimlapiTopupEmail,
+                trimmedCode,
+                aimlapiSessionToken,
+              ]),
+        )
+        setCursorOffset(trimmedCode.length)
+        setScreen('aimlapi-signin-code')
+      } finally {
+        if (aimlapiAbortRef.current === controller) aimlapiAbortRef.current = null
+      }
+    })()
+  }
+
+  async function startAimlapiTopup(autoTopUp = aimlapiAutoTopUp): Promise<void> {
     const amountUsd = aimlapiTopupAmountUsd.trim()
-    const parsedAmountUsd = Number(amountUsd)
-    if (!trimmedEmail) {
-      setErrorMessage('AI/ML API email is required.')
+    if (!amountUsd) {
+      setErrorMessage(AIMLAPI_MESSAGES.amountRequired)
+      setScreen('aimlapi-topup-amount')
+      return
+    }
+    let amountUsdMinor: number
+    try {
+      amountUsdMinor = parseAimlapiAmountUsd(amountUsd)
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error))
+      setScreen('aimlapi-topup-amount')
+      return
+    }
+    if (!aimlapiTopupByKey && !aimlapiSessionToken.trim()) {
+      setErrorMessage('Your AI/ML API session expired. Enter your email again.')
       setScreen('aimlapi-topup-email')
       return
     }
-    if (!Number.isFinite(parsedAmountUsd) || parsedAmountUsd <= 0) {
-      setErrorMessage('Enter a valid top-up amount in USD.')
+
+    // A checkout URL was already opened for a different amount/auto-top-up:
+    // starting a new payment session abandons that still-chargeable browser tab
+    // (no endpoint can cancel it), so require an explicit acknowledgement first.
+    const openedCheckout = aimlapiOpenedCheckoutRef.current
+    const abandoningOpenedCheckout = Boolean(
+      openedCheckout &&
+        (openedCheckout.amountUsdMinor !== amountUsdMinor ||
+          openedCheckout.autoTopUp !== autoTopUp),
+    )
+    // A session can already be recorded on disk (elected via onSession, inside
+    // resolveTopupSession) before a checkout URL ever surfaces — e.g. the user
+    // backed out while createSession was still in flight, so opening-checkout
+    // never ran and aimlapiOpenedCheckoutRef was never armed. claimAimlapiTopupState
+    // still refuses a differing intent against that record, so it needs the same
+    // confirmed-abandon path, just without the "do NOT pay it" browser-tab wording.
+    const persistedIntent = aimlapiPersistedIntentRef.current
+    const abandoningPersistedIntent = Boolean(
+      persistedIntent &&
+        (persistedIntent.amountUsdMinor !== amountUsdMinor ||
+          persistedIntent.autoTopUp !== autoTopUp),
+    )
+    if (
+      (abandoningOpenedCheckout || abandoningPersistedIntent) &&
+      !aimlapiAbandonAckRef.current
+    ) {
+      aimlapiAbandonAckRef.current = true
+      setErrorMessage(
+        abandoningOpenedCheckout
+          ? 'An unpaid checkout is still open in your browser — do NOT pay it. Press Enter again to abandon it and start a new checkout.'
+          : 'A checkout for the previous amount is still pending. Press Enter again to abandon it and start a new one.',
+      )
       setScreen('aimlapi-topup-amount')
       return
     }
-    if (Math.round(parsedAmountUsd * 100) < MIN_AMOUNT_USD_MINOR) {
-      setErrorMessage(`Minimum AI/ML API top-up is $${MIN_AMOUNT_USD_MINOR / 100}.`)
+
+    const endpoints = resolveEndpoints()
+    const intentIdentity = aimlapiTopupByKey
+      ? aimlapiByKeyIdentity(aimlapiIssuedKey)
+      : aimlapiTopupEmail.trim().toLowerCase()
+    const intent: AimlapiTopupIntent = {
+      email: intentIdentity,
+      amountUsdMinor,
+      autoTopUp,
+      partnerId: resolvePartnerId(),
+      partnerName: DEFAULT_PARTNER_NAME,
+      appBaseUrl: endpoints.appBaseUrl.trim().replace(/\/+$/, ''),
+      inferenceBaseUrl: aimlapiInferenceBaseUrl.trim().replace(/\/+$/, ''),
+      payBaseUrl: endpoints.payBaseUrl.trim().replace(/\/+$/, ''),
+      verificationBaseUrl: endpoints.verificationBaseUrl.trim().replace(/\/+$/, ''),
+    }
+    // Single-use: consume it for this claim regardless of outcome, so it can
+    // never leak into a later, unrelated claim in the same mount.
+    const forceAbandonExisting = aimlapiForceAbandonExistingRef.current
+    aimlapiForceAbandonExistingRef.current = false
+
+    // Own this invocation's cancellation from here, BEFORE the first async
+    // boundary: claimAimlapiTopupStateAsync below can contend for the state
+    // lock for up to LOCK_TIMEOUT_ASYNC_MS (15s) while the screen is still
+    // aimlapi-topup-amount, so a stale run must not resume unattended after
+    // that wait — reaffirmed after every awaited preflight step below, before
+    // any ref/state mutation or network/payment work.
+    aimlapiAbortRef.current?.abort()
+    const controller = new AbortController()
+    aimlapiAbortRef.current = controller
+
+    let checkoutState: Awaited<ReturnType<typeof claimAimlapiTopupStateAsync>>
+    try {
+      // The abandon-ack gate above already made the user explicitly confirm
+      // giving up the retained checkout when one conflicts with this intent
+      // (abandoningOpenedCheckout / abandoningPersistedIntent), so this claim
+      // may overwrite it instead of refusing. forceAbandonExisting covers the
+      // "switch account" case: an on-disk record from an earlier process that
+      // this mount's refs were never populated for, so the checks above can't
+      // see it, but the user already agreed to abandon whatever's there.
+      // Async: the sync lock's Atomics.wait retry would otherwise freeze Ink
+      // rendering, Esc, and SIGINT for up to LOCK_TIMEOUT_MS on contention.
+      checkoutState = await claimAimlapiTopupStateAsync(intent, {
+        abandonExisting:
+          abandoningOpenedCheckout || abandoningPersistedIntent || forceAbandonExisting,
+      })
+    } catch (error) {
+      if (controller.signal.aborted) return
+      setErrorMessage(safeAimlapiErrorMessage(error, [aimlapiIssuedKey]))
       setScreen('aimlapi-topup-amount')
       return
     }
-    if (Math.round(parsedAmountUsd * 100) > MAX_AMOUNT_USD_MINOR) {
-      setErrorMessage(`Maximum AI/ML API top-up is $${MAX_AMOUNT_USD_MINOR / 100}.`)
-      setScreen('aimlapi-topup-amount')
+    // Esc/unmount during the wait above aborted this controller — a screen
+    // navigated away from (or a manager closed during) that wait must not
+    // have this now-resolved claim barge back in and mutate state or start
+    // provisioning as if it were still the active operation.
+    if (controller.signal.aborted) return
+
+    aimlapiPersistedIntentRef.current = {
+      ...intent,
+      paymentSessionId: checkoutState.paymentSessionId,
+    }
+    setAimlapiResumeSessionToken(checkoutState.resumeSessionToken)
+
+    // Resume: a prior run paid + exchanged the key and saved the settled receipt
+    // but was interrupted before the profile write. Finish that last step with
+    // the retained key instead of re-entering provisioning against a now-
+    // exchanged session (which fails in resolveTopupSession and strands the paid
+    // one-shot credential). Mirrors the CLI's settled-receipt recovery.
+    if (checkoutState.settled && checkoutState.apiKey) {
+      aimlapiTopupPaidRef.current = true
+      // An existing saved profile or an ambient env key must complete through
+      // persistExistingAimlapi — update the selected profile / keep preserveEnv —
+      // instead of minting a new profile and copying the env credential into it.
+      if (aimlapiExistingProfileId || aimlapiExistingUsesEnv) {
+        persistExistingAimlapi(checkoutState.model?.trim() || draft.model)
+      } else {
+        persistAimlapiKey(
+          checkoutState.apiKey,
+          aimlapiInferenceBaseUrl,
+          checkoutState.model?.trim() || draft.model,
+          'topup',
+          { signInKeyId: checkoutState.apiKeyId },
+        )
+      }
       return
     }
-    if (!password) {
-      setErrorMessage('AI/ML API password is required.')
-      setScreen('aimlapi-topup-password')
-      return
+
+    // Persist whether this checkout must be exchanged, so a retry that now
+    // resolves to sign-in still exchanges the paid sign-up session instead of
+    // minting an unrelated key (mirrors the CLI). By-key top-ups never exchange.
+    if (!aimlapiTopupByKey && checkoutState.exchange === undefined) {
+      checkoutState.exchange = aimlapiNewAccount
+      // Mirror the CLI (topup.ts): an existing-account key already minted at
+      // sign-in is otherwise only recorded in the separate sign-in-key cache,
+      // not in this receipt. A restart before settlement would then depend on
+      // BOTH files staying consistent to resume; persisting it here too makes
+      // the receipt self-contained, matching the CLI's recovery guarantee.
+      if (aimlapiIssuedKey.trim()) {
+        checkoutState.apiKey = aimlapiIssuedKey
+        checkoutState.apiKeyId = aimlapiIssuedKeyId
+      }
+      try {
+        await saveAimlapiTopupStateAsync({ ...intent, ...checkoutState })
+      } catch {
+        // Retained in memory; persistence is only a resume aid.
+      }
+      if (controller.signal.aborted) return
     }
 
     setScreen('aimlapi-topup-progress')
     setErrorMessage(undefined)
-    setAimlapiTopupStatus('signing-in')
+    setAimlapiTopupStatus('creating-session')
     setAimlapiTopupDetail(undefined)
-    setIsAimlapiTopupRunning(true)
 
     void (async () => {
       try {
-        const provisioned = await provisionAimlapiKey({
-          email: trimmedEmail,
-          password,
-          amountUsd,
-          method,
-          model: draft.model,
-          onStatus: (status, detail) => {
-            setAimlapiTopupStatus(status)
-            setAimlapiTopupDetail(detail)
-          },
-        })
-        const nextDraft = applyPresetApiFormat(
-          {
-            ...draft,
-            apiKey: provisioned.apiKey,
-            baseUrl: provisioned.baseUrl,
-            model: provisioned.model,
-          },
-          draftProvider,
-        )
-        setDraft(nextDraft)
-        setAimlapiTopupPassword('')
-        setIsAimlapiTopupRunning(false)
-        persistDraft(nextDraft, draftProvider, null)
+        const reportStatus = (status: AimlapiTopupStatus, detail?: string): void => {
+          if (status === 'opening-checkout') {
+            // A checkout URL is now live in the browser; remember its intent so a
+            // later edit that starts a new payment must be confirmed first. Reset
+            // the acknowledgement: the confirmation is single-use, so a further
+            // edit to a different intent must be confirmed again rather than
+            // silently abandoning THIS freshly-opened, still-chargeable tab.
+            aimlapiOpenedCheckoutRef.current = { amountUsdMinor, autoTopUp }
+            aimlapiAbandonAckRef.current = false
+          }
+          setAimlapiTopupStatus(status)
+          if (detail?.trim()) setAimlapiTopupDetail(detail)
+        }
+        const reportSession = async (sessionToken: string): Promise<string | undefined> => {
+          if (!sessionToken) {
+            // Mirrors the CLI's persistSession: a terminal checkout invalidates
+            // the payment session but not an already-minted existing-account
+            // key, so try to retain it (with a fresh payment session) before
+            // falling back to a full clear. Awaited (not fire-and-forget) so
+            // the poll loop this onSession callback resolves for only reaches
+            // the amount screen once the durable receipt is actually reset or
+            // cleared — otherwise an immediate retry can still observe the
+            // stale resume token and reject the "already abandoned" checkout.
+            // Async on the lock either way, so this never blocks Ink.
+            const stale = aimlapiPersistedIntentRef.current
+            if (stale) {
+              try {
+                const reset = await resetAimlapiCheckoutSessionAsync(stale)
+                if (!reset) await clearAimlapiTopupStateAsync(stale)
+                // Only drop ownership once the durable transition actually
+                // committed. On failure, keep the ref instead of discarding it
+                // and silently reporting success — the on-disk receipt is
+                // still the stale one, so the next claim must go through the
+                // normal chargeable-checkout confirmation gate against it
+                // (this ref is what that gate compares against) rather than
+                // being rejected by the CAS with no ownership left to retry
+                // cleanup, or worse, silently proceeding as if abandoned.
+                aimlapiPersistedIntentRef.current = null
+              } catch (cleanupError) {
+                logForDebugging(
+                  `Failed to reset/clear the AI/ML API checkout receipt: ${String(cleanupError)}`,
+                  { level: 'warn' },
+                )
+              }
+            }
+            setAimlapiResumeSessionToken('')
+            return undefined
+          }
+          // Atomic election: a peer that already opened a payable checkout for
+          // this payment id wins; adopt its token so concurrent runs never leave
+          // two chargeable checkouts. Async so lock contention on this CAS never
+          // freezes Ink while a payment session is being created.
+          const recorded = await recordAimlapiCheckoutSessionAsync({
+            ...intent,
+            ...checkoutState,
+            resumeSessionToken: sessionToken,
+          })
+          if (!recorded) {
+            // The stored checkout was cleared/reset meanwhile — a sibling run
+            // already completed (or invalidated) this top-up. Abort rather than
+            // pay a second, unrecorded checkout.
+            throw new Error(
+              'This top-up was already completed or cancelled elsewhere. Re-run to try again.',
+            )
+          }
+          const elected = recorded.resumeSessionToken || sessionToken
+          checkoutState.resumeSessionToken = elected
+          setAimlapiResumeSessionToken(elected)
+          return elected
+        }
+        const provisioned = aimlapiTopupByKey
+          ? await topUpAimlapiByApiKey({
+              apiKey: aimlapiIssuedKey,
+              inferenceBaseUrl: aimlapiInferenceBaseUrl,
+              amountUsd,
+              autoTopUp,
+              model: draft.model,
+              paymentSessionId: checkoutState.paymentSessionId,
+              resumeSessionToken: checkoutState.resumeSessionToken,
+              signal: controller.signal,
+              onStatus: reportStatus,
+              onSession: reportSession,
+            })
+          : await provisionAimlapiKey({
+              amountUsd,
+              autoTopUp,
+              model: draft.model,
+              sessionToken: aimlapiSessionToken,
+              inferenceBaseUrl: aimlapiInferenceBaseUrl,
+              exchange: checkoutState.exchange ?? aimlapiNewAccount,
+              intent,
+              paymentSessionId: checkoutState.paymentSessionId,
+              existingApiKey: aimlapiIssuedKey,
+              existingApiKeyId: aimlapiIssuedKeyId,
+              resumeSessionToken: checkoutState.resumeSessionToken,
+              signal: controller.signal,
+              onStatus: reportStatus,
+              onSession: reportSession,
+            })
+        if (controller.signal.aborted) return
+        // Record the settled receipt BEFORE the profile write, so an interruption
+        // or a failed save resumes with the paid key instead of stranding a
+        // one-shot exchanged credential in resolveTopupSession (mirrors the CLI).
+        // This receipt is the ONLY durable record of that key until the profile
+        // write below lands, and /exchange cannot be retried to recover it — so
+        // a failure here must stop the flow (caught by this function's own
+        // catch below, which reports the error and returns to the amount
+        // screen) rather than risk losing the key silently if the profile write
+        // also fails or the app is closed before it runs.
+        // saveAimlapiTopupStateAsync already retries internally on lock
+        // contention (withStateLockAsync, up to LOCK_TIMEOUT_ASYNC_MS), so a
+        // failure this deep signals a real problem, not a transient blip.
+        checkoutState.apiKey = provisioned.apiKey
+        checkoutState.apiKeyId = provisioned.apiKeyId
+        checkoutState.model = provisioned.model
+        checkoutState.settled = true
+        try {
+          // An ambient env key (aimlapiExistingUsesEnv) is `provisioned.apiKey`
+          // verbatim here — never persist it: it's already available from the
+          // environment on any resume, and the eventual profile write for it is
+          // deliberately keyless (persistExistingAimlapi's preserveEnv), so
+          // writing it to the receipt would be pure exposure surface with no
+          // recovery benefit. A by-key resume without a locally-stored key still
+          // completes correctly (just via the normal, idempotent session
+          // resolution instead of the local settled-shortcut above).
+          await saveAimlapiTopupStateAsync({
+            ...intent,
+            ...checkoutState,
+            ...(aimlapiExistingUsesEnv ? { apiKey: undefined, apiKeyId: undefined } : {}),
+          })
+        } catch (error) {
+          throw new Error(
+            `Payment succeeded and a key was issued (id ${provisioned.apiKeyId}), but the ` +
+              `local recovery receipt could not be saved (${error instanceof Error ? error.message : String(error)}). ` +
+              `Open https://aimlapi.com/app and rotate the issued key to recover access.`,
+            { cause: error },
+          )
+        }
+        // A payment just cleared, so the done screen should report the top-up
+        // regardless of whether we route through the model picker first.
+        aimlapiTopupPaidRef.current = true
+        // The tracked checkout has been paid and settled: there is no longer a
+        // chargeable tab to guard, so a later re-edit (e.g. the by-key route that
+        // stops at the model picker) must not warn "do NOT pay it" for it.
+        aimlapiOpenedCheckoutRef.current = null
+        aimlapiAbandonAckRef.current = false
+        if (aimlapiTopupByKey) {
+          if (aimlapiExistingProfileId || aimlapiExistingUsesEnv) {
+            setCursorOffset(provisioned.model.length)
+            setScreen('preset-model')
+          } else {
+            persistExistingAimlapi(provisioned.model)
+          }
+        } else {
+          persistAimlapiKey(
+            provisioned.apiKey,
+            provisioned.baseUrl,
+            provisioned.model,
+            'topup',
+          )
+        }
       } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error)
-        setIsAimlapiTopupRunning(false)
-        setErrorMessage(`Could not finish AI/ML API top-up: ${detail}`)
+        if (controller.signal.aborted) return
+        const detail = safeAimlapiErrorMessage(error, [
+          aimlapiIssuedKey,
+          aimlapiTopupEmail,
+          aimlapiSignInCode,
+          aimlapiSessionToken,
+          aimlapiResumeSessionToken,
+        ])
+        setErrorMessage(`${AIMLAPI_MESSAGES.topUpFailed} ${detail}`)
+        setCursorOffset(amountUsd.length)
+        setScreen('aimlapi-topup-amount')
+      } finally {
+        if (aimlapiAbortRef.current === controller) aimlapiAbortRef.current = null
       }
     })()
+  }
+
+  function renderAimlapiConfigured(): React.ReactNode {
+    if (isAimlapiKeyValidating) {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text color="remember" bold>aimlapi.com account is already configured</Text>
+          <Box flexDirection="row" gap={1}>
+            <Spinner />
+            <Text dimColor>Checking balance...</Text>
+          </Box>
+        </Box>
+      )
+    }
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text color="remember" bold>aimlapi.com account is already configured</Text>
+        <Select
+          options={[
+            {
+              value: 'existing',
+              label: 'Continue with your saved API key',
+            },
+            {
+              value: 'again',
+              label: 'Set up a new key or switch account',
+            },
+          ]}
+          onChange={(value: string) => {
+            setErrorMessage(undefined)
+            if (value === 'existing') {
+              useExistingAimlapi()
+              return
+            }
+            setAimlapiExistingProfileId(null)
+            setAimlapiExistingUsesEnv(false)
+            setAimlapiTopupByKey(false)
+            setAimlapiIssuedKey('')
+            setAimlapiInferenceBaseUrl(resolveEndpoints().inferenceBaseUrl)
+            setAimlapiResumeSessionToken('')
+            setDraft(previous => ({ ...previous, apiKey: '' }))
+            // Explicit user-initiated "start over" — unlike an accidental
+            // re-submit elsewhere, no confirmation is needed here. But it must
+            // still abandon a durable receipt from an earlier interrupted
+            // top-up: this only clears the fields above, so without either of
+            // the next two lines a stale on-disk record for a DIFFERENT
+            // email/key would otherwise make the very next onboarding attempt
+            // hit claimAimlapiTopupState's refusal with no way to recover
+            // short of deleting the file by hand. resetAimlapiCheckoutIntent
+            // covers a checkout interrupted earlier in THIS mount; the force
+            // flag covers one already on disk from an earlier process, which
+            // this mount's refs were never populated for and so can't detect.
+            resetAimlapiCheckoutIntent()
+            aimlapiForceAbandonExistingRef.current = true
+            setScreen('aimlapi-api-key-choice')
+          }}
+          onCancel={handleBackFromAimlapiConfigured}
+          visibleOptionCount={2}
+        />
+        {errorMessage && <Text color="error">{errorMessage}</Text>}
+      </Box>
+    )
   }
 
   function renderAimlapiApiKeyChoice(): React.ReactNode {
     return (
       <Box flexDirection="column" gap={1}>
         <Text color="remember" bold>
-          Create provider profile
+          {AIMLAPI_MESSAGES.pickPathPrompt}
         </Text>
-        <Text dimColor>
-          Choose how to configure AI/ML API. Endpoint and model are already
-          configured.
-        </Text>
-        <Text dimColor>
-          Provider type:{' '}
-          {getRouteProviderTypeLabel(resolveProfileRoute(draftProvider).routeId)}
-        </Text>
-        <Text dimColor>Step 2 of 2: API key</Text>
         <Select
           options={[
             {
               value: 'topup',
-              label: 'Top up and get API key',
-              description: 'Open checkout, wait for payment, then save the issued key',
+              label: AIMLAPI_MESSAGES.pickPathNewUser,
             },
             {
               value: 'manual',
-              label: 'Enter existing API key',
-              description: 'Paste a key you already have from AI/ML API',
+              label: AIMLAPI_MESSAGES.pickPathHaveKey,
             },
           ]}
           onChange={(value: string) => {
             setErrorMessage(undefined)
+            // Either choice below abandons whatever onboarding identity is
+            // currently held (resetAimlapiOnboardingIdentity). Esc can reach
+            // this screen after a checkout was already opened further along
+            // (email -> amount -> Esc, Esc), so that must not happen silently.
+            const hadChargeableCheckout = hasChargeableAimlapiCheckout()
+            if (hadChargeableCheckout && !aimlapiAbandonAckRef.current) {
+              aimlapiAbandonAckRef.current = true
+              setErrorMessage(
+                'A checkout from this account is still pending — if a browser tab for it is open, do NOT pay it. Press Enter again to abandon it and continue.',
+              )
+              return
+            }
+            aimlapiAbandonAckRef.current = false
             if (value === 'manual') {
+              resetAimlapiOnboardingIdentity()
               setCursorOffset(draft.apiKey.length)
               setScreen('preset-api-key')
               return
             }
 
-            const envEmail = process.env.AIMLAPI_EMAIL?.trim() ?? ''
-            const envPassword = process.env.AIMLAPI_PASSWORD ?? ''
-            if (envEmail && envPassword) {
-              setAimlapiTopupEmail(envEmail)
-              setAimlapiTopupPassword(envPassword)
-              setCursorOffset(aimlapiTopupAmountUsd.length)
-              setScreen('aimlapi-topup-amount')
+            // Guided provisioning mints a production-account key via production
+            // auth; it must never be written against a non-canonical inference
+            // endpoint. Pasting an existing key stays allowed for custom
+            // endpoints (handled by the 'manual' branch above).
+            if (!isCanonicalAimlapiInferenceBaseUrl(aimlapiInferenceBaseUrl)) {
+              setErrorMessage(AIMLAPI_MESSAGES.guidedNeedsCanonicalEndpoint)
               return
             }
+
+            resetAimlapiOnboardingIdentity()
+            if (hadChargeableCheckout) {
+              // The user just confirmed abandoning it (reaching here on the
+              // second Enter, past the gate above). resetAimlapiOnboardingIdentity's
+              // clear is un-awaited and best-effort, so a contended/failed lock
+              // must not leave the abandoned receipt still enforced — make the
+              // confirmation authoritative at claimAimlapiTopupStateAsync itself
+              // instead, the same one-shot signal the email-switch and "switch
+              // account" flows use for this exact transition.
+              aimlapiForceAbandonExistingRef.current = true
+            }
+            const envEmail = process.env.AIMLAPI_EMAIL?.trim() ?? ''
             setCursorOffset(envEmail.length)
             setAimlapiTopupEmail(envEmail)
             setScreen('aimlapi-topup-email')
@@ -2539,13 +3784,8 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     return (
       <Box flexDirection="column" gap={1}>
         <Text color="remember" bold>
-          AI/ML API top-up
+          {AIMLAPI_MESSAGES.enterEmail}
         </Text>
-        <Text dimColor>
-          Enter your AI/ML API account email. The checkout flow will use it to
-          register or sign in.
-        </Text>
-        <Text dimColor>Step 2 of 2: Top up account</Text>
         <Box flexDirection="row" gap={1}>
           <Text>{figures.pointer}</Text>
           <TextInput
@@ -2553,14 +3793,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
             onChange={setAimlapiTopupEmail}
             onSubmit={value => {
               const email = value.trim()
-              if (!email) {
-                setErrorMessage('AI/ML API email is required.')
-                return
-              }
-              setAimlapiTopupEmail(email)
-              setErrorMessage(undefined)
-              setCursorOffset(0)
-              setScreen('aimlapi-topup-password')
+              startAimlapiEmailOnboarding(email)
             }}
             focus={true}
             showCursor={true}
@@ -2578,169 +3811,160 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     )
   }
 
+  function renderAimlapiSignInCode(): React.ReactNode {
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text color="remember" bold>
+          {AIMLAPI_MESSAGES.codeSent(aimlapiTopupEmail)}
+        </Text>
+        <Box flexDirection="row" gap={1}>
+          <Text>{figures.pointer}</Text>
+          <TextInput
+            value={aimlapiSignInCode}
+            onChange={setAimlapiSignInCode}
+            onSubmit={verifyAimlapiSignInCode}
+            focus={true}
+            showCursor={true}
+            mask="*"
+            placeholder={`6-digit code${figures.ellipsis}`}
+            columns={inputColumns}
+            cursorOffset={cursorOffset}
+            onChangeCursorOffset={setCursorOffset}
+          />
+        </Box>
+        {errorMessage && <Text color="error">{errorMessage}</Text>}
+        <Text dimColor>Press Enter to continue. Press Esc to go back.</Text>
+      </Box>
+    )
+  }
+
+  function renderAimlapiLowBalance(): React.ReactNode {
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text color="remember" bold>{AIMLAPI_MESSAGES.lowBalance}</Text>
+        <Select
+          options={[
+            { value: 'topup', label: AIMLAPI_MESSAGES.lowBalanceTopUp },
+            { value: 'skip', label: AIMLAPI_MESSAGES.lowBalanceSkip },
+          ]}
+          onChange={(value: string) => {
+            setErrorMessage(undefined)
+            if (value === 'skip') {
+              if (aimlapiExistingProfileId || aimlapiExistingUsesEnv) {
+                setCursorOffset(draft.model.length)
+                setScreen('preset-model')
+              } else if (aimlapiTopupByKey) {
+                persistExistingAimlapi()
+              } else {
+                persistAimlapiKey(aimlapiIssuedKey, aimlapiInferenceBaseUrl)
+              }
+              return
+            }
+            setCursorOffset(aimlapiTopupAmountUsd.length)
+            setScreen('aimlapi-topup-amount')
+          }}
+          onCancel={handleBackFromAimlapiLowBalance}
+          visibleOptionCount={2}
+        />
+      </Box>
+    )
+  }
+
   function renderAimlapiTopupAmount(): React.ReactNode {
     return (
       <Box flexDirection="column" gap={1}>
         <Text color="remember" bold>
-          AI/ML API top-up
+          {AIMLAPI_MESSAGES.topUpPrompt}
         </Text>
-        <Text dimColor>
-          Choose a top-up amount in USD. Minimum is ${MIN_AMOUNT_USD_MINOR / 100}.
-        </Text>
-        <Text dimColor>Step 2 of 2: Top up account</Text>
-        <Box flexDirection="row" gap={1}>
-          <Text>{figures.pointer}</Text>
-          <TextInput
-            value={aimlapiTopupAmountUsd}
-            onChange={setAimlapiTopupAmountUsd}
-            onSubmit={value => {
-              const amountUsd = value.trim()
-              const parsedAmountUsd = Number(amountUsd)
-              if (!Number.isFinite(parsedAmountUsd) || parsedAmountUsd <= 0) {
-                setErrorMessage('Enter a valid top-up amount in USD.')
-                return
-              }
-              if (Math.round(parsedAmountUsd * 100) < MIN_AMOUNT_USD_MINOR) {
-                setErrorMessage(`Minimum AI/ML API top-up is $${MIN_AMOUNT_USD_MINOR / 100}.`)
-                return
-              }
-              if (Math.round(parsedAmountUsd * 100) > MAX_AMOUNT_USD_MINOR) {
-                setErrorMessage(`Maximum AI/ML API top-up is $${MAX_AMOUNT_USD_MINOR / 100}.`)
-                return
-              }
-              setAimlapiTopupAmountUsd(amountUsd)
-              setErrorMessage(undefined)
-              setScreen('aimlapi-topup-method')
-            }}
-            focus={true}
-            showCursor={true}
-            placeholder={`Enter amount${figures.ellipsis}`}
-            columns={inputColumns}
-            cursorOffset={cursorOffset}
-            onChangeCursorOffset={setCursorOffset}
-          />
-        </Box>
-        {errorMessage && <Text color="error">{errorMessage}</Text>}
-        <Text dimColor>
-          Press Enter to continue. Press Esc to go back.
-        </Text>
-      </Box>
-    )
-  }
-
-  function renderAimlapiTopupPassword(): React.ReactNode {
-    return (
-      <Box flexDirection="column" gap={1}>
-        <Text color="remember" bold>
-          AI/ML API top-up
-        </Text>
-        <Text dimColor>
-          Enter your AI/ML API password. The CLI will open checkout and save the
-          issued API key after payment.
-        </Text>
-        <Text dimColor>Step 2 of 2: Top up account</Text>
-        <Box flexDirection="row" gap={1}>
-          <Text>{figures.pointer}</Text>
-          <TextInput
-            value={aimlapiTopupPassword}
-            onChange={setAimlapiTopupPassword}
-            onSubmit={value => {
-              if (!value) {
-                setErrorMessage('AI/ML API password is required.')
-                return
-              }
-              setAimlapiTopupPassword(value)
-              setErrorMessage(undefined)
-              setCursorOffset(aimlapiTopupAmountUsd.length)
-              setScreen('aimlapi-topup-amount')
-            }}
-            focus={true}
-            showCursor={true}
-            placeholder={`Enter password${figures.ellipsis}`}
-            mask="*"
-            columns={inputColumns}
-            cursorOffset={cursorOffset}
-            onChangeCursorOffset={setCursorOffset}
-          />
-        </Box>
-        {errorMessage && <Text color="error">{errorMessage}</Text>}
-        <Text dimColor>
-          Press Enter to continue. Press Esc to go back.
-        </Text>
-      </Box>
-    )
-  }
-
-  function renderAimlapiTopupMethod(): React.ReactNode {
-    return (
-      <Box flexDirection="column" gap={1}>
-        <Text color="remember" bold>
-          AI/ML API top-up
-        </Text>
-        <Text dimColor>
-          Choose how to pay. The selected method decides which checkout invoice
-          AI/ML API opens.
-        </Text>
-        <Text dimColor>Step 2 of 2: Payment method</Text>
-        <Select
-          options={[
-            {
-              value: 'card',
-              label: 'Card',
-              description: 'Open a Stripe card checkout invoice',
-            },
-            {
-              value: 'crypto',
-              label: 'Crypto',
-              description: 'Open a crypto checkout invoice',
-            },
-          ]}
-          defaultValue={aimlapiTopupMethod}
-          defaultFocusValue={aimlapiTopupMethod}
-          onChange={(value: string) => {
-            const method: PaymentMethod = value === 'crypto' ? 'crypto' : 'card'
-            setAimlapiTopupMethod(method)
-            startAimlapiTopup(aimlapiTopupEmail, aimlapiTopupPassword, method)
+        <AimlapiTopupForm
+          amountUsd={aimlapiTopupAmountUsd}
+          autoTopUp={aimlapiAutoTopUp}
+          columns={inputColumns}
+          cursorOffset={cursorOffset}
+          onAmountChange={value => {
+            // Do NOT reset the persisted checkout intent here: while a checkout
+            // is still open in the browser, this is just a draft edit, and the
+            // durable receipt must survive it until the user explicitly confirms
+            // abandoning that checkout (see startAimlapiTopup's abandon-ack gate).
+            setAimlapiTopupAmountUsd(value)
+            setErrorMessage(undefined)
           }}
-          onCancel={handleBackFromAimlapiTopupMethod}
-          visibleOptionCount={2}
+          onCursorOffsetChange={setCursorOffset}
+          onAutoTopUpChange={value => {
+            setAimlapiAutoTopUp(value)
+          }}
+          onSubmit={startAimlapiTopup}
         />
         {errorMessage && <Text color="error">{errorMessage}</Text>}
-        <Text dimColor>
-          Press Enter to open checkout. Press Esc to go back.
-        </Text>
       </Box>
     )
   }
 
   function renderAimlapiTopupProgress(): React.ReactNode {
-    const labels: Record<AimlapiTopupStatus, string> = {
-      registering: 'Registering AI/ML API account...',
-      registered: 'Account registered.',
-      'signing-in': 'Signing in to AI/ML API...',
-      'signed-in': 'Signed in.',
-      'creating-session': 'Creating checkout session...',
-      'opening-checkout': 'Opening checkout...',
-      'waiting-payment': 'Waiting for payment...',
-      'provisioning-key': 'Issuing API key...',
-    }
-    const status = aimlapiTopupStatus
-      ? labels[aimlapiTopupStatus]
-      : 'Preparing AI/ML API top-up...'
-
     return (
       <Box flexDirection="column" gap={1}>
-        <Text color="remember" bold>
-          AI/ML API top-up
-        </Text>
-        <Text dimColor>{status}</Text>
-        {aimlapiTopupDetail ? <Text>{aimlapiTopupDetail}</Text> : null}
+        {aimlapiTopupDetail ? (
+          <>
+            <Text color="remember" bold>Opening checkout in browser...</Text>
+            <Text dimColor>{AIMLAPI_MESSAGES.topUpBrowserFallback}</Text>
+            {/* Stripe Checkout URLs are signed and can require their query and
+                fragment verbatim. This is an explicit user-facing fallback,
+                not a log field, so redacting it would make the link unusable. */}
+            <Box flexDirection="column">
+              {wrapAimlapiCheckoutUrl(
+                aimlapiTopupDetail,
+                terminalColumns - 4,
+              ).map((line, index) => (
+                <Text key={`${index}:${line}`} color="suggestion">{line}</Text>
+              ))}
+            </Box>
+          </>
+        ) : (
+          <Spinner />
+        )}
         {errorMessage ? <Text color="error">{errorMessage}</Text> : null}
-        <Text dimColor>
-          {isAimlapiTopupRunning
-            ? 'Complete checkout in the browser. This screen will continue automatically.'
-            : 'Press Esc to go back.'}
-        </Text>
+      </Box>
+    )
+  }
+
+  function renderAimlapiDone(): React.ReactNode {
+    // Only parse the amount for the top-up screen. The parse can only reach this
+    // screen with a valid amount, but the payment has already cleared here, so a
+    // format edge must never crash the success render — fall back to the raw
+    // entered value instead of throwing.
+    let topUpBody: React.ReactNode = null
+    if (aimlapiDoneKind === 'topup') {
+      let amountUsd = aimlapiTopupAmountUsd.trim()
+      try {
+        const amountUsdMinor = parseAimlapiAmountUsd(aimlapiTopupAmountUsd)
+        amountUsd =
+          amountUsdMinor % 100 === 0
+            ? String(amountUsdMinor / 100)
+            : (amountUsdMinor / 100).toFixed(2)
+      } catch {
+        // Keep the raw amount; never fail the success screen on a format edge.
+      }
+      topUpBody = (
+        <>
+          <Text color="success" bold>{AIMLAPI_MESSAGES.topUpSuccess(amountUsd)}</Text>
+          {aimlapiNewAccount ? (
+            <>
+              <Text> </Text>
+              <Text>{AIMLAPI_MESSAGES.successMagicLink(aimlapiTopupEmail)}</Text>
+            </>
+          ) : null}
+        </>
+      )
+    }
+    return (
+      <Box flexDirection="column">
+        {aimlapiDoneKind === 'topup' ? (
+          topUpBody
+        ) : (
+          <Text color="success" bold>{AIMLAPI_MESSAGES.everythingRuns}</Text>
+        )}
+        <Text> </Text>
+        <Text dimColor>Press Enter to continue.</Text>
       </Box>
     )
   }
@@ -3175,20 +4399,26 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     case 'aimlapi-api-key-choice':
       content = renderAimlapiApiKeyChoice()
       break
+    case 'aimlapi-configured':
+      content = renderAimlapiConfigured()
+      break
     case 'aimlapi-topup-email':
       content = renderAimlapiTopupEmail()
+      break
+    case 'aimlapi-signin-code':
+      content = renderAimlapiSignInCode()
+      break
+    case 'aimlapi-low-balance':
+      content = renderAimlapiLowBalance()
       break
     case 'aimlapi-topup-amount':
       content = renderAimlapiTopupAmount()
       break
-    case 'aimlapi-topup-password':
-      content = renderAimlapiTopupPassword()
-      break
-    case 'aimlapi-topup-method':
-      content = renderAimlapiTopupMethod()
-      break
     case 'aimlapi-topup-progress':
       content = renderAimlapiTopupProgress()
+      break
+    case 'aimlapi-done':
+      content = renderAimlapiDone()
       break
     case 'preset-api-key':
       content = renderPresetApiKey()

@@ -90,6 +90,7 @@ export async function startXaiOAuthCallback(params: {
   port: number
   host: string
   callbackPath: string
+  expectedState: string
   successTitle?: string
   corsOriginAllowlist?: readonly string[]
 }): Promise<XaiOAuthCallbackHandle> {
@@ -153,6 +154,16 @@ export async function startXaiOAuthCallback(params: {
         return
       }
 
+      // Unauthenticated requests must not consume the pending OAuth flow.
+      // Check the exact state before either error or code can settle it.
+      const state = url.searchParams.get('state')
+      if (!state || state !== params.expectedState) {
+        res.statusCode = 400
+        res.setHeader('Content-Type', 'text/plain')
+        res.end('Invalid state')
+        return
+      }
+
       const error = url.searchParams.get('error')
       if (error) {
         res.statusCode = 400
@@ -166,9 +177,8 @@ export async function startXaiOAuthCallback(params: {
       }
 
       const code = url.searchParams.get('code')?.trim()
-      const state = url.searchParams.get('state')?.trim()
 
-      if (!code || !state) {
+      if (!code) {
         res.statusCode = 400
         res.setHeader('Content-Type', 'text/plain')
         res.end('Missing code or state')

@@ -14,6 +14,7 @@ export default defineBrand({
   },
   modelIds: [
     'nvidia/nemotron-3-ultra-550b-a55b:free',
+    'nvidia/nemotron-3-ultra-550b-a55b',
     'nvidia/llama-3.1-nemotron-70b-instruct',
   ],
 })

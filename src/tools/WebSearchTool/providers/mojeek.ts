@@ -30,23 +30,37 @@ export const mojeekProvider: SearchProvider = {
       headers['Authorization'] = `Bearer ${process.env.MOJEEK_API_KEY}`
     }
 
-    const data = await fetchJsonWithWebSearchTimeout(
+    const data = (await fetchJsonWithWebSearchTimeout(
       url.toString(),
       {
         headers,
       },
       signal,
       { providerName: 'Mojeek' },
-    )
+    )) as { response?: { results?: unknown }; results?: unknown } | undefined
 
-    const rawResults = data?.response?.results ?? data?.results ?? []
+    const nestedResults = data?.response?.results
+    const rawResults = Array.isArray(nestedResults)
+      ? nestedResults
+      : Array.isArray(data?.results)
+        ? data.results
+        : []
 
-    const hits = rawResults.map((r: any) => ({
-      title: r.title ?? '',
-      url: r.url ?? '',
-      description: r.snippet ?? r.desc,
-      source: r.url ? safeHostname(r.url) : undefined,
-    }))
+    const hits = (rawResults as unknown[]).map((r) => {
+      const rec = (r ?? {}) as Record<string, unknown>
+      const url = typeof rec.url === 'string' ? rec.url : ''
+      return {
+        title: typeof rec.title === 'string' ? rec.title : '',
+        url,
+        description:
+          typeof rec.snippet === 'string'
+            ? rec.snippet
+            : typeof rec.desc === 'string'
+              ? rec.desc
+              : undefined,
+        source: url ? safeHostname(url) : undefined,
+      }
+    })
 
     return {
       hits: applyDomainFilters(hits, input),

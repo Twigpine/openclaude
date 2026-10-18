@@ -1,4 +1,6 @@
+import { stripVTControlCharacters as stripAnsi } from 'node:util'
 import React, { useCallback, useState } from 'react'
+import { isInputModeCharacter } from '../components/PromptInput/inputModes.js'
 import type { Key } from '../ink.js'
 import type { VimInputState, VimMode } from '../types/textInputTypes.js'
 import { Cursor } from '../utils/Cursor.js'
@@ -23,7 +25,13 @@ import {
   type RecordedChange,
   type VimState,
 } from '../vim/types.js'
-import { type UseTextInputProps, useTextInput } from './useTextInput.js'
+import {
+  applyCoalescedDelInput,
+  applyPrintableInput,
+  prepareTextInputEvent,
+  type UseTextInputProps,
+  useTextInput,
+} from './useTextInput.js'
 
 type UseVimInputProps = Omit<UseTextInputProps, 'inputFilter'> & {
   onModeChange?: (mode: VimMode) => void
@@ -69,9 +77,9 @@ export function useVimInput(props: UseVimInputProps): VimInputState {
 
     // Vim behavior: move cursor left by 1 when exiting insert mode
     // (unless at beginning of line or at offset 0)
-    const offset = textInput.offset
-    if (offset > 0 && textInput.value[offset - 1] !== '\n') {
-      textInput.setOffset(offset - 1)
+    const cursor = textInput.getCursor()
+    if (cursor.offset > 0 && cursor.text[cursor.offset - 1] !== '\n') {
+      textInput.setOffset(cursor.offset - 1)
     }
 
     vimStateRef.current = { mode: 'NORMAL', command: { type: 'idle' } }
@@ -85,7 +93,7 @@ export function useVimInput(props: UseVimInputProps): VimInputState {
   ): OperatorContext {
     return {
       cursor,
-      text: textInput.value,
+      text: cursor.text,
       setText: (newText: string) => textInput.setValue(newText),
       setOffset: (offset: number) => textInput.setOffset(offset),
       enterInsert: (offset: number) => switchToInsertMode(offset),
@@ -110,11 +118,7 @@ export function useVimInput(props: UseVimInputProps): VimInputState {
     const change = persistentRef.current.lastChange
     if (!change) return
 
-    const cursor = Cursor.fromText(
-      textInput.value,
-      props.columns,
-      textInput.offset,
-    )
+    const cursor = textInput.getCursor()
     const ctx = createOperatorContext(cursor, true)
 
     switch (change.type) {
@@ -182,11 +186,7 @@ export function useVimInput(props: UseVimInputProps): VimInputState {
     // lookups expect single chars and a prepended space would break them.
     const filtered = inputFilter ? inputFilter(rawInput, key) : rawInput
     const input = state.mode === 'INSERT' ? filtered : rawInput
-    const cursor = Cursor.fromText(
-      textInput.value,
-      props.columns,
-      textInput.offset,
-    )
+    const cursor = textInput.getCursor()
 
     if (key.ctrl) {
       textInput.onInput(input, key)
@@ -225,10 +225,64 @@ export function useVimInput(props: UseVimInputProps): VimInputState {
             ),
           }
         }
-      } else {
+      } else if (input.includes('\x7f')) {
+        const preparedInput = prepareTextInputEvent(input)
+        let insertedTextCursor = Cursor.fromText(
+          state.insertedText,
+          props.columns,
+          state.insertedText.length,
+        )
+        let recordedModeEntry = false
+        applyCoalescedDelInput(
+          cursor,
+          preparedInput.input,
+          (visibleCursor, text) => {
+            const visibleResult = applyPrintableInput(visibleCursor, text, {
+              modeCharacterIsText: preparedInput.shouldSubmit,
+            })
+            if (
+              visibleResult &&
+              visibleResult.text !== visibleCursor.text
+            ) {
+              const modeCharacter = visibleResult.text[0]
+              const isModeEntry =
+                !recordedModeEntry &&
+                visibleCursor.text.length === 0 &&
+                visibleCursor.isAtStart() &&
+                modeCharacter !== undefined &&
+                isInputModeCharacter(modeCharacter)
+              recordedModeEntry ||= isModeEntry
+              const recordedText = isModeEntry
+                ? visibleResult.text.slice(modeCharacter.length)
+                : text
+              insertedTextCursor =
+                applyPrintableInput(insertedTextCursor, recordedText, {
+                  modeCharacterIsText: true,
+                }) ?? insertedTextCursor
+            }
+            return visibleResult
+          },
+          count => {
+            insertedTextCursor = insertedTextCursor.deleteManyBefore(count)
+          },
+        )
         vimStateRef.current = {
           mode: 'INSERT',
-          insertedText: state.insertedText + input,
+          insertedText: insertedTextCursor.text,
+        }
+      } else {
+        const visibleInput = stripAnsi(input)
+        const modeCharacter = visibleInput[0]
+        const recordedInput =
+          cursor.text.length === 0 &&
+          cursor.isAtStart() &&
+          modeCharacter !== undefined &&
+          isInputModeCharacter(modeCharacter)
+            ? visibleInput.slice(modeCharacter.length)
+            : input
+        vimStateRef.current = {
+          mode: 'INSERT',
+          insertedText: state.insertedText + recordedInput,
         }
       }
       textInput.onInput(input, key)

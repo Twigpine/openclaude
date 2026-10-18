@@ -22,8 +22,10 @@ import type { SettingsWithErrors } from './validation.js'
  */
 export function getSettingsWithAllErrors(): SettingsWithErrors {
   const result = getSettingsWithErrors()
-  // 'dynamic' scope does not have errors returned; it throws and is set on cli startup
-  const scopes = ['user', 'project', 'local'] as const
+  // 'dynamic' scope does not have errors returned; it throws and is set on cli
+  // startup. 'enterprise' is included so a malformed managed-mcp.json — which
+  // fail-closes MCP entirely — surfaces here instead of silently blanking it.
+  const scopes = ['user', 'project', 'local', 'enterprise'] as const
   const mcpErrors = scopes.flatMap(scope => getMcpConfigsByScope(scope).errors)
   return {
     settings: result.settings,

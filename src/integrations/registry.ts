@@ -163,17 +163,43 @@ export function getCatalogForVendor(vendorId: string): import('./descriptors.js'
   return _vendors.get(vendorId)?.catalog
 }
 
-export function getCatalogEntriesForRoute(routeId: string): ModelCatalogEntry[] {
+/**
+ * True when a catalog entry should currently be exposed: not `hidden`, and
+ * not past its `availableUntil` expiry. An unparseable `availableUntil`
+ * fails open so a typo can't silently drop a model.
+ */
+function catalogEntryAvailable(entry: ModelCatalogEntry, now: Date): boolean {
+  if (entry.hidden) return false
+  if (entry.availableUntil !== undefined) {
+    const cutoff = Date.parse(entry.availableUntil)
+    if (Number.isFinite(cutoff) && now.getTime() >= cutoff) return false
+  }
+  return true
+}
+
+/**
+ * Drop `hidden` and expired (`availableUntil`) entries. Every surface that
+ * turns catalog entries into something selectable — route resolution here,
+ * the /model picker's static path, and static+discovery merges — must pass
+ * through this filter, or an expired entry resurfaces on that surface.
+ */
+export function filterAvailableCatalogEntries(
+  entries: ModelCatalogEntry[],
+  now: Date = new Date(),
+): ModelCatalogEntry[] {
+  return entries.filter(entry => catalogEntryAvailable(entry, now))
+}
+
+export function getCatalogEntriesForRoute(
+  routeId: string,
+  now: Date = new Date(),
+): ModelCatalogEntry[] {
   ensureLoaded()
   const gateway = _gateways.get(routeId)
-  if (gateway?.catalog?.models) {
-    return gateway.catalog.models
-  }
-  const vendor = _vendors.get(routeId)
-  if (vendor?.catalog?.models) {
-    return vendor.catalog.models
-  }
-  return []
+  const models =
+    gateway?.catalog?.models ?? _vendors.get(routeId)?.catalog?.models
+  if (!models) return []
+  return filterAvailableCatalogEntries(models, now)
 }
 
 export function getModelsForBrand(brandId: string): ModelDescriptor[] {

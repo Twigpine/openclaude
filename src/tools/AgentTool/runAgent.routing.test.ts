@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type { ToolUseContext } from '../../Tool.js'
+import type { AppState } from '../../state/AppStateStore.js'
+import { asSessionId } from '../../types/ids.js'
+import { getSessionId, switchSession } from '../../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -232,6 +235,237 @@ describe('runAgent provider routing', () => {
 
     expect(capturedContext?.queryLifecycle).toBeUndefined()
     expect(queryLifecycle.snapshot()).toEqual({ apiCalls: [], toolUses: [] })
+  })
+
+  test('keeps root dontAsk authoritative over an async agent mode', async () => {
+    const runAgent = await importRunAgent()
+    for (const permissionMode of [
+      'acceptEdits',
+      'bubble',
+      'bypassPermissions',
+    ] as const) {
+      const parentContext = createToolUseContext('parent-model')
+      const parentState = parentContext.getAppState()
+      parentContext.getAppState = () => ({
+        ...parentState,
+        toolPermissionContext: {
+          ...parentState.toolPermissionContext,
+          mode: 'dontAsk',
+        },
+      })
+      const stop = new Error(`stop after ${permissionMode}`)
+      let capturedContext: ToolUseContext | undefined
+      const generator = runAgent({
+        agentDefinition: {
+          ...createAgentDefinition(),
+          permissionMode,
+        },
+        promptMessages: [createUserMessage({ content: 'inspect this' })],
+        toolUseContext: parentContext,
+        canUseTool: async () => ({ behavior: 'allow' }),
+        isAsync: true,
+        querySource: 'agent:builtin:general-purpose',
+        availableTools: [],
+        onCacheSafeParams: params => {
+          capturedContext = params.toolUseContext
+          throw stop
+        },
+      })
+
+      await expect(generator.next()).rejects.toBe(stop)
+      expect(
+        capturedContext?.getAppState().toolPermissionContext
+          .shouldAvoidPermissionPrompts,
+      ).toBe(true)
+      expect(capturedContext?.getAppState().toolPermissionContext.mode).toBe(
+        'dontAsk',
+      )
+    }
+  })
+
+  test('keeps root dontAsk authoritative through a nested agent context', async () => {
+    const parentContext = createToolUseContext('parent-model')
+    const transformedState = parentContext.getAppState()
+    const rootState = {
+      ...transformedState,
+      toolPermissionContext: {
+        ...transformedState.toolPermissionContext,
+        mode: 'dontAsk' as const,
+      },
+    }
+    parentContext.getRootAppState = () => rootState
+    parentContext.options.permissionSessionId = asSessionId('session-a')
+    const stop = new Error('stop after cache-safe params')
+    let capturedContext: ToolUseContext | undefined
+    const runAgent = await importRunAgent()
+
+    const generator = runAgent({
+      agentDefinition: {
+        ...createAgentDefinition(),
+        permissionMode: 'acceptEdits',
+      },
+      promptMessages: [createUserMessage({ content: 'inspect this' })],
+      toolUseContext: parentContext,
+      canUseTool: async () => ({ behavior: 'allow' }),
+      isAsync: true,
+      querySource: 'agent:builtin:general-purpose',
+      availableTools: [],
+      onCacheSafeParams: params => {
+        capturedContext = params.toolUseContext
+        throw stop
+      },
+    })
+
+    await expect(generator.next()).rejects.toBe(stop)
+    expect(
+      capturedContext?.getAppState().toolPermissionContext
+        .shouldAvoidPermissionPrompts,
+    ).toBe(true)
+    expect(capturedContext?.getAppState().toolPermissionContext.mode).toBe(
+      'dontAsk',
+    )
+    expect(capturedContext?.options.permissionSessionId).toBe(
+      asSessionId('session-a'),
+    )
+  })
+
+  test('keeps the origin permission state after the active session switches', async () => {
+    const originSessionId = getSessionId()
+    const parentContext = createToolUseContext('parent-model')
+    parentContext.options.permissionSessionId = originSessionId
+    const initialState = parentContext.getAppState()
+    const originState = {
+      ...initialState,
+      toolPermissionContext: {
+        ...initialState.toolPermissionContext,
+        mode: 'dontAsk' as const,
+      },
+    }
+    let liveState: AppState = originState
+    parentContext.getAppState = () => liveState
+    const stop = new Error('stop after cache-safe params')
+    let capturedContext: ToolUseContext | undefined
+    const runAgent = await importRunAgent()
+
+    try {
+      const generator = runAgent({
+        agentDefinition: createAgentDefinition(),
+        promptMessages: [createUserMessage({ content: 'inspect this' })],
+        toolUseContext: parentContext,
+        canUseTool: async () => ({ behavior: 'allow' }),
+        isAsync: true,
+        querySource: 'agent:builtin:general-purpose',
+        availableTools: [],
+        onCacheSafeParams: params => {
+          capturedContext = params.toolUseContext
+          throw stop
+        },
+      })
+
+      await expect(generator.next()).rejects.toBe(stop)
+      switchSession(asSessionId('session-b'))
+      liveState = {
+        ...originState,
+        toolPermissionContext: {
+          ...originState.toolPermissionContext,
+          mode: 'fullAccess',
+        },
+      }
+
+      expect(capturedContext?.getAppState().toolPermissionContext.mode).toBe(
+        'dontAsk',
+      )
+      expect(
+        capturedContext?.getRootAppState?.().toolPermissionContext.mode,
+      ).toBe('dontAsk')
+    } finally {
+      switchSession(originSessionId)
+    }
+  })
+
+  test('seeds a delayed run from the captured origin permission state', async () => {
+    const originSessionId = getSessionId()
+    const parentContext = createToolUseContext('parent-model')
+    parentContext.options.permissionSessionId = originSessionId
+    const baseState = parentContext.getAppState()
+    const originAppState: AppState = {
+      ...baseState,
+      toolPermissionContext: {
+        ...baseState.toolPermissionContext,
+        mode: 'default',
+      },
+    }
+    const originRootState: AppState = {
+      ...originAppState,
+      toolPermissionContext: {
+        ...originAppState.toolPermissionContext,
+        mode: 'dontAsk',
+      },
+    }
+    let liveAppState = originAppState
+    let liveRootState = originRootState
+    parentContext.getAppState = () => liveAppState
+    parentContext.getRootAppState = () => liveRootState
+    const permissionSessionState = {
+      appState: liveAppState,
+      rootAppState: liveRootState,
+    }
+    const stop = new Error('stop after cache-safe params')
+    let capturedContext: ToolUseContext | undefined
+    const runAgent = await importRunAgent()
+
+    try {
+      const generator = runAgent({
+        agentDefinition: createAgentDefinition(),
+        promptMessages: [createUserMessage({ content: 'inspect this' })],
+        toolUseContext: parentContext,
+        canUseTool: async () => ({ behavior: 'allow' }),
+        isAsync: true,
+        querySource: 'agent:builtin:general-purpose',
+        availableTools: [],
+        permissionSessionState,
+        onCacheSafeParams: params => {
+          capturedContext = params.toolUseContext
+          throw stop
+        },
+      })
+
+      switchSession(asSessionId('session-b'))
+      liveAppState = {
+        ...originAppState,
+        toolPermissionContext: {
+          ...originAppState.toolPermissionContext,
+          mode: 'fullAccess',
+        },
+      }
+      liveRootState = liveAppState
+
+      await expect(generator.next()).rejects.toBe(stop)
+      expect(capturedContext?.getAppState().toolPermissionContext.mode).toBe(
+        'dontAsk',
+      )
+      expect(
+        capturedContext?.getRootAppState?.().toolPermissionContext.mode,
+      ).toBe('dontAsk')
+
+      switchSession(originSessionId)
+      liveAppState = {
+        ...originAppState,
+        toolPermissionContext: {
+          ...originAppState.toolPermissionContext,
+          mode: 'acceptEdits',
+        },
+      }
+      liveRootState = liveAppState
+      expect(capturedContext?.getAppState().toolPermissionContext.mode).toBe(
+        'acceptEdits',
+      )
+      expect(
+        capturedContext?.getRootAppState?.().toolPermissionContext.mode,
+      ).toBe('acceptEdits')
+    } finally {
+      switchSession(originSessionId)
+    }
   })
 })
 

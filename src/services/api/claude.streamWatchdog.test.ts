@@ -11,7 +11,7 @@ import type {
   BetaRawMessageStreamEvent,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { Stream } from '@anthropic-ai/sdk/streaming.mjs'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -22,6 +22,13 @@ import { getEmptyToolPermissionContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
 import { QueryLifecycleOperationTracker } from '../../utils/queryLifecycle.js'
+import {
+  __getInterruptionTraceSnapshotForTests,
+  __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
+  registerInterruptionController,
+  requestAbort,
+} from '../../utils/interruptionTrace.js'
 import { EMPTY_USAGE } from './emptyUsage.js'
 import type { Options } from './claude.js'
 
@@ -39,6 +46,8 @@ const envKeys = [
   'CLAUDE_ENABLE_STREAM_WATCHDOG',
   'CLAUDE_STREAM_IDLE_TIMEOUT_MS',
   'OPENCLAUDE_MAX_RETRIES',
+  'OPENCLAUDE_INTERRUPT_TRACE',
+  'OPENCLAUDE_INTERRUPT_TRACE_FILE',
   'VCR_RECORD',
 ] as const
 
@@ -295,6 +304,8 @@ beforeEach(async () => {
   await acquireSharedMutationLock('claude.streamWatchdog.test.ts')
   installClientSpy()
   setTestMacro()
+  await __waitForInterruptionTraceFlushForTests()
+  __resetInterruptionTraceForTests()
   for (const key of envKeys) {
     delete process.env[key]
   }
@@ -306,11 +317,13 @@ beforeEach(async () => {
   process.env.VCR_RECORD = '1'
 })
 
-afterEach(() => {
+afterEach(async () => {
   try {
     restoreClientSpy?.()
     restoreClientSpy = undefined
     createHandler = undefined
+    await __waitForInterruptionTraceFlushForTests()
+    __resetInterruptionTraceForTests()
     for (const key of envKeys) {
       const envKey: string = key
       if (
@@ -343,6 +356,9 @@ afterEach(() => {
 
 describe('Claude stream watchdog', () => {
   test('falls back when the top-level stream iterator never settles', async () => {
+    const traceFile = join(fixturesRoot!, 'interruption-trace.jsonl')
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    process.env.OPENCLAUDE_INTERRUPT_TRACE_FILE = traceFile
     const wedged = makeWedgedStream()
     const streamModes: unknown[] = []
     createHandler = params => {
@@ -369,6 +385,64 @@ describe('Claude stream watchdog', () => {
       expect(streamModes).toEqual([true, undefined])
       expect(wedged.abortSignal.aborted).toBe(true)
       expect(wedged.returnCalled()).toBe(true)
+      await __waitForInterruptionTraceFlushForTests()
+      const trace = readFileSync(traceFile, 'utf8')
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line) as {
+          event: string
+          eventId?: string
+          causalEventId?: string
+          source?: string
+          outcome?: string
+        })
+      const events = trace.map(entry => entry.event)
+      expect(events.indexOf('claude_stream.idle_timeout')).toBeGreaterThanOrEqual(0)
+      expect(events.indexOf('claude_stream.loop_settled')).toBeGreaterThan(
+        events.indexOf('claude_stream.idle_timeout'),
+      )
+      expect(events.indexOf('claude_stream.fallback_started')).toBeGreaterThan(
+        events.indexOf('claude_stream.loop_settled'),
+      )
+      expect(trace).toContainEqual(
+        expect.objectContaining({
+          event: 'abort.requested',
+          source: 'claude_stream_watchdog',
+        }),
+      )
+      const idleTimeout = trace.find(
+        entry => entry.event === 'claude_stream.idle_timeout',
+      )
+      const providerAbort = trace.find(
+        entry =>
+          entry.event === 'abort.requested' &&
+          entry.source === 'claude_stream_watchdog',
+      )
+      const loopSettled = trace.find(
+        entry => entry.event === 'claude_stream.loop_settled',
+      )
+      const fallbackStarted = trace.find(
+        entry => entry.event === 'claude_stream.fallback_started',
+      )
+      const fallbackSettled = trace.find(
+        entry => entry.event === 'claude_stream.fallback_settled',
+      )
+      expect(idleTimeout).toBeDefined()
+      expect(providerAbort).toBeDefined()
+      expect(loopSettled).toBeDefined()
+      expect(fallbackStarted).toBeDefined()
+      expect(fallbackSettled).toBeDefined()
+      expect(typeof idleTimeout!.eventId).toBe('string')
+      expect(typeof providerAbort!.causalEventId).toBe('string')
+      expect(typeof loopSettled!.causalEventId).toBe('string')
+      expect(typeof fallbackStarted!.causalEventId).toBe('string')
+      expect(providerAbort!.causalEventId).toBe(idleTimeout!.eventId)
+      expect(loopSettled!.causalEventId).toBe(idleTimeout!.eventId)
+      expect(fallbackStarted!.causalEventId).toBe(idleTimeout!.eventId)
+      expect(fallbackSettled).toMatchObject({
+        causalEventId: fallbackStarted!.eventId,
+        outcome: 'completed',
+      })
       expect(
         (result as unknown[]).some(
           message =>
@@ -385,8 +459,10 @@ describe('Claude stream watchdog', () => {
 
   test('does not attempt fallback when the parent signal aborts first', async () => {
     process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS = '250'
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
     const wedged = makeWedgedStream()
     const controller = new AbortController()
+    registerInterruptionController(controller, { controllerRole: 'query-root' })
     const streamModes: unknown[] = []
     createHandler = params => {
       streamModes.push(params.stream)
@@ -406,7 +482,10 @@ describe('Claude stream watchdog', () => {
         error instanceof Error ? error.name : String(error),
       )
     await wedged.nextStarted
-    controller.abort()
+    requestAbort(controller, undefined, {
+      source: 'cancel_keybinding',
+      controllerRole: 'query-root',
+    })
 
     try {
       const result = await Promise.race([request, delay(150)])
@@ -414,6 +493,97 @@ describe('Claude stream watchdog', () => {
       expect(streamModes).toEqual([true])
       expect(wedged.abortSignal.aborted).toBe(true)
       expect(wedged.returnCalled()).toBe(true)
+      const trace = __getInterruptionTraceSnapshotForTests()
+      const rootAbort = trace.find(
+        entry =>
+          entry.event === 'abort.requested' &&
+          entry.controllerRole === 'query-root',
+      )
+      const parentAbort = trace.find(
+        entry => entry.event === 'claude_stream.parent_abort',
+      )
+      const providerAbort = trace.find(
+        entry =>
+          entry.event === 'abort.requested' &&
+          entry.source === 'claude_stream_parent',
+      )
+      expect(rootAbort).toBeDefined()
+      expect(parentAbort).toBeDefined()
+      expect(providerAbort).toBeDefined()
+      expect(typeof rootAbort!.eventId).toBe('string')
+      expect(typeof parentAbort!.eventId).toBe('string')
+      expect(typeof parentAbort!.causalEventId).toBe('string')
+      expect(typeof providerAbort!.causalEventId).toBe('string')
+      expect(parentAbort!.causalEventId).toBe(rootAbort!.eventId)
+      expect(providerAbort!.causalEventId).toBe(parentAbort!.eventId)
+    } finally {
+      wedged.rejectPendingNext(new Error('test cleanup'))
+      await settleForCleanup(request)
+    }
+  })
+
+  test('records a terminal failed outcome when non-streaming fallback rejects', async () => {
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    const wedged = makeWedgedStream()
+    createHandler = params => {
+      if (params.stream === true) return makeWithResponse(wedged.stream)
+      return Promise.reject(new Error('synthetic fallback failure'))
+    }
+
+    const request = collectStreamingMessages(
+      new AbortController().signal,
+      makeOptions(),
+    )
+    await wedged.nextStarted
+    try {
+      await Promise.race([request, delay(250)])
+      const trace = __getInterruptionTraceSnapshotForTests()
+      const started = trace.find(
+        entry => entry.event === 'claude_stream.fallback_started',
+      )
+      const settled = trace.find(
+        entry => entry.event === 'claude_stream.fallback_settled',
+      )
+      expect(started).toBeDefined()
+      expect(settled).toMatchObject({
+        outcome: 'failed',
+        causalEventId: started!.eventId,
+      })
+    } finally {
+      wedged.rejectPendingNext(new Error('test cleanup'))
+      await settleForCleanup(request)
+    }
+  })
+
+  test('records fallback failure when the returned message cannot be normalized', async () => {
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    const wedged = makeWedgedStream()
+    createHandler = params => {
+      if (params.stream === true) return makeWithResponse(wedged.stream)
+      return Promise.resolve(
+        makeBetaMessage('msg-invalid-fallback', [null] as never),
+      )
+    }
+
+    const request = collectStreamingMessages(
+      new AbortController().signal,
+      makeOptions(),
+    )
+    await wedged.nextStarted
+    try {
+      const result = await Promise.race([
+        request.then(
+          () => 'resolved',
+          error => error,
+        ),
+        delay(250),
+      ])
+      expect(result).not.toBe('timeout')
+      const settlements = __getInterruptionTraceSnapshotForTests().filter(
+        entry => entry.event === 'claude_stream.fallback_settled',
+      )
+      expect(settlements).toHaveLength(1)
+      expect(settlements[0]?.outcome).toBe('failed')
     } finally {
       wedged.rejectPendingNext(new Error('test cleanup'))
       await settleForCleanup(request)

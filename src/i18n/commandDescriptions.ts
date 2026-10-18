@@ -47,6 +47,7 @@ const openClaudeCommandDescriptionKeys: Record<string, LocalizationKey> = {
   rename: 'commands.rename.description',
   'request-size': 'commands.request-size.description',
   resume: 'commands.resume.description',
+  sessions: 'commands.sessions.description',
   review: 'commands.review.description',
   rewind: 'commands.rewind.description',
   'security-review': 'commands.security-review.description',

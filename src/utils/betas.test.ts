@@ -43,6 +43,7 @@ const PROVIDER_ENV_KEYS = [
   // the getAPIProvider switch, so a leaked key is interpreted as the
   // default anthropic provider.
   'FIREWORKS_API_KEY',
+  'LONGCAT_API_KEY',
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',

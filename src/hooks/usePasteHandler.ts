@@ -14,6 +14,7 @@ import { getPlatform } from '../utils/platform.js'
 
 const CLIPBOARD_CHECK_DEBOUNCE_MS = 50
 const PASTE_COMPLETION_TIMEOUT_MS = 100
+const IMAGE_PATH_READ_FAILED = Symbol('image-path-read-failed')
 
 export function supportsClipboardImageFallback(
   platform: ReturnType<typeof getPlatform>,
@@ -165,10 +166,25 @@ export function usePasteHandler({
 
               // Process all image paths
               void Promise.all(
-                imagePaths.map(imagePath => tryReadImageFromPath(imagePath)),
+                imagePaths.map(imagePath =>
+                  tryReadImageFromPath(imagePath).catch(error => {
+                    logError(error as Error)
+                    return IMAGE_PATH_READ_FAILED
+                  }),
+                ),
               ).then(results => {
+                const hadImageReadFailure = results.includes(
+                  IMAGE_PATH_READ_FAILED,
+                )
                 const validImages = results.filter(
-                  (r): r is NonNullable<typeof r> => r !== null,
+                  (
+                    r,
+                  ): r is NonNullable<
+                    Awaited<ReturnType<typeof tryReadImageFromPath>>
+                  > => r !== null && r !== IMAGE_PATH_READ_FAILED,
+                )
+                const nonImageLines = lines.filter(
+                  line => !isImageFilePath(line),
                 )
 
                 if (validImages.length > 0) {
@@ -184,9 +200,6 @@ export function usePasteHandler({
                     )
                   }
                   // If some paths weren't images, paste them as text
-                  const nonImageLines = lines.filter(
-                    line => !isImageFilePath(line),
-                  )
                   if (nonImageLines.length > 0 && onPaste) {
                     onPaste(nonImageLines.join('\n'))
                   }
@@ -196,7 +209,12 @@ export function usePasteHandler({
                   checkClipboardForImage()
                 } else {
                   if (onPaste) {
-                    onPaste(pastedText)
+                    const fallbackText = hadImageReadFailure
+                      ? nonImageLines.join('\n')
+                      : pastedText
+                    if (fallbackText.length > 0) {
+                      onPaste(fallbackText)
+                    }
                   }
                   setIsPasting(false)
                 }

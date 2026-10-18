@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import * as platformPath from 'path'
+import chokidar, { type FSWatcher } from 'chokidar'
+import { type Stats, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -17,9 +20,12 @@ let resetSentSkillNames = mock(() => {})
 let hookResults: { blocked: boolean }[] = []
 let executeConfigChangeHooksImpl = async () => hookResults
 let executeConfigChangeHooks = mock(async () => hookResults)
+let settingsChangedCallback: (() => void) | undefined
+let unsubscribeSettingsChanges = mock(() => {})
 let dynamicSkillsLoadedCallback: (() => void) | undefined
 let unregisterDynamicSkillsLoaded = mock(() => {})
 let additionalDirectories: string[] = []
+let siblingSkillsHomePaths: string[] = []
 let getSkillsPathImpl = (_source: string, _dir: string) => ''
 let statImpl = mock(async (_path: string) => {})
 let chokidarWatch = mock(() => ({
@@ -36,9 +42,12 @@ function installMocks(): void {
   hookResults = []
   executeConfigChangeHooksImpl = async () => hookResults
   executeConfigChangeHooks = mock(() => executeConfigChangeHooksImpl())
+  settingsChangedCallback = undefined
+  unsubscribeSettingsChanges = mock(() => {})
   dynamicSkillsLoadedCallback = undefined
   unregisterDynamicSkillsLoaded = mock(() => {})
   additionalDirectories = []
+  siblingSkillsHomePaths = []
   getSkillsPathImpl = () => ''
   statImpl = mock(async () => {})
   chokidarWatch = mock(() => ({
@@ -61,11 +70,16 @@ async function importFreshModule(): Promise<SkillChangeDetectorModule> {
     getAdditionalDirectoriesForClaudeMd: () => additionalDirectories,
     getSkillsPath: (source: string, dir: string) =>
       getSkillsPathImpl(source, dir),
+    getSiblingSkillsHomePaths: () => siblingSkillsHomePaths,
     hasBlockingResult: (results: { blocked: boolean }[]) =>
       results.some(result => result.blocked),
     onDynamicSkillsLoaded: (callback: () => void) => {
       dynamicSkillsLoadedCallback = callback
       return unregisterDynamicSkillsLoaded
+    },
+    subscribeToSettingsChanges: (callback: () => void) => {
+      settingsChangedCallback = callback
+      return unsubscribeSettingsChanges
     },
     resetSentSkillNames,
     watch: chokidarWatch,
@@ -111,6 +125,36 @@ describe('skillChangeDetector reload batching', () => {
     expect(unregisterDynamicSkillsLoaded).toHaveBeenCalledTimes(1)
     expect(clearCommandMemoizationCaches).not.toHaveBeenCalled()
     expect(notifications).toBe(0)
+  })
+
+  test('accepted settings changes reload only changed eligibility and unsubscribe on dispose', async () => {
+    const detector = await importFreshModule()
+    let notifications = 0
+    detector.subscribe(() => { notifications++ })
+    await detector.initialize()
+    expect(settingsChangedCallback).toBeDefined()
+    settingsChangedCallback?.()
+    await sleep(0)
+    expect(clearCommandsCache).not.toHaveBeenCalled()
+    expect(notifications).toBe(0)
+
+    siblingSkillsHomePaths = ['/tmp/sibling-skills']
+    settingsChangedCallback?.()
+    // Invalidation precedes asynchronous watch reconciliation.
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+    await sleep(0)
+    expect(notifications).toBe(1)
+    settingsChangedCallback?.()
+    await sleep(0)
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+
+    await detector.dispose()
+    expect(unsubscribeSettingsChanges).toHaveBeenCalledTimes(1)
+    siblingSkillsHomePaths = []
+    settingsChangedCallback?.()
+    await sleep(0)
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+    expect(notifications).toBe(1)
   })
 
   test('dispose during initialize prevents watcher creation after path lookup resolves', async () => {
@@ -184,6 +228,187 @@ describe('skillChangeDetector reload batching', () => {
       ),
     ).toBe(true)
     expect(watchOptions.depth).toBeUndefined()
+  })
+
+  test('watches enabled sibling skills homes', async () => {
+    const detector = await importFreshModule()
+    const agentsSkillsPath = platformPath.join('/tmp', 'home', '.agents', 'skills')
+    siblingSkillsHomePaths = [agentsSkillsPath]
+    statImpl = mock(async () => {})
+
+    await detector.initialize()
+
+    const watchedPaths = (
+      chokidarWatch.mock.calls as unknown as Array<[string[]]>
+    ).flatMap(([paths]) => paths)
+    expect(watchedPaths).toContain(agentsSkillsPath)
+  })
+
+  test('follows sibling links while preserving special-file and owned-watch exclusions', async () => {
+    const detector = await importFreshModule()
+    getSkillsPathImpl = () => '/tmp/owned-skills'
+    siblingSkillsHomePaths = ['/tmp/sibling-skills']
+    await detector.initialize()
+    const calls = chokidarWatch.mock.calls as unknown as Array<[
+      string[], { ignored: (path: string, stats: Stats) => boolean },
+    ]>
+    const link = statSync(import.meta.path)
+    link.mode = 0o120000
+    for (const [paths, options] of calls) {
+      expect(options.ignored('/tmp/linked', link)).toBe(!paths.includes('/tmp/sibling-skills'))
+      expect(options.ignored('/tmp/.git/linked', link)).toBe(true)
+      for (const mode of [0o140000, 0o010000, 0o020000, 0o060000]) {
+        const special = statSync(import.meta.path) // socket, FIFO, character and block device
+        special.mode = mode
+        expect(options.ignored('/tmp/special', special)).toBe(true)
+      }
+    }
+    expect(calls).toHaveLength(2)
+  })
+
+  test('reloads skills and watches newly enabled homes after a settings toggle', async () => {
+    const detector = await importFreshModule()
+    const userSkillsPath = platformPath.join('/tmp', 'user', 'skills')
+    getSkillsPathImpl = (source, dir) =>
+      source === 'userSettings' && dir === 'skills' ? userSkillsPath : ''
+    statImpl = mock(async () => {})
+    await detector.initialize()
+    const onChange = mock(() => {})
+    detector.subscribe(onChange)
+
+    const claudeSkillsPath = platformPath.join('/tmp', 'home', '.claude', 'skills')
+    siblingSkillsHomePaths = [claudeSkillsPath]
+    await detector.reloadAfterSkillSourceSettingsChange()
+
+    expect(chokidarWatch).toHaveBeenLastCalledWith([claudeSkillsPath], expect.anything())
+    expect(chokidarWatch).toHaveBeenCalledTimes(2)
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+    expect(resetSentSkillNames).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
+  test('starts the watcher for a newly enabled home when no skill directory existed at startup', async () => {
+    const detector = await importFreshModule()
+    const claudeSkillsPath = platformPath.join('/tmp', 'home', '.claude', 'skills')
+    statImpl = mock(async (path: string) => {
+      if (path !== claudeSkillsPath) throw new Error('ENOENT')
+    })
+    await detector.initialize()
+    expect(chokidarWatch).not.toHaveBeenCalled()
+
+    siblingSkillsHomePaths = [claudeSkillsPath]
+    await detector.reloadAfterSkillSourceSettingsChange()
+
+    const [watchedPaths = []] = (
+      chokidarWatch.mock.calls as unknown as Array<[string[] | undefined]>
+    )[0] ?? []
+    expect(watchedPaths).toEqual([claudeSkillsPath])
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+  })
+
+  test('reloads without starting a watcher before the detector is initialized', async () => {
+    const detector = await importFreshModule()
+    siblingSkillsHomePaths = [platformPath.join('/tmp', 'home', '.agents', 'skills')]
+
+    await detector.reloadAfterSkillSourceSettingsChange()
+
+    expect(chokidarWatch).not.toHaveBeenCalled()
+    expect(clearCommandsCache).toHaveBeenCalledTimes(1)
+  })
+
+  test('overlapping toggles and disposal cannot leave a stale sibling watcher', async () => {
+    const detector = await importFreshModule()
+    const sibling = platformPath.join('/tmp', 'sibling', 'skills')
+    const close = mock(async () => {})
+    chokidarWatch = mock(() => ({ on: mock(() => {}), close }))
+    detector._setDependenciesForTesting({
+      getSkillsPath: () => '',
+      getAdditionalDirectoriesForClaudeMd: () => [],
+      getSiblingSkillsHomePaths: () => siblingSkillsHomePaths,
+      getFsImplementation: () => ({ stat: (path: string) => statImpl(path) }),
+      watch: chokidarWatch,
+      clearCommandsCache,
+      resetSentSkillNames,
+    })
+    statImpl = mock(async () => { throw new Error('ENOENT') })
+    await detector.initialize()
+    for (const disposeDuringLookup of [false, true]) {
+      let releaseStat: (() => void) | undefined
+      statImpl = mock(async () => new Promise<void>(resolve => { releaseStat = resolve }))
+      siblingSkillsHomePaths = [sibling]
+      const enable = detector.reloadAfterSkillSourceSettingsChange()
+      await sleep(0)
+      siblingSkillsHomePaths = []
+      const disable = detector.reloadAfterSkillSourceSettingsChange()
+      const disposal = disposeDuringLookup ? detector.dispose() : Promise.resolve()
+      releaseStat?.()
+      await Promise.all([enable, disable, disposal])
+      // First iteration closes the briefly enabled source; disposal prevents
+      // the second lookup from creating a replacement at all.
+      expect(chokidarWatch).toHaveBeenCalledTimes(1)
+      expect(close).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  test('disabled sibling edits stop triggering hooks while owned roots and re-enabling still work', async () => {
+    const root = mkdtempSync(platformPath.join(tmpdir(), 'skill-watch-'))
+    const own = platformPath.join(root, 'owned')
+    const sibling = platformPath.join(root, 'sibling')
+    const ownFile = platformPath.join(own, 'SKILL.md')
+    const siblingFile = platformPath.join(sibling, 'SKILL.md')
+    mkdirSync(own)
+    mkdirSync(sibling)
+    writeFileSync(ownFile, 'owned')
+    writeFileSync(siblingFile, 'sibling')
+    const detector = await importFreshModule()
+    let realWatcher: FSWatcher | undefined
+    detector._setDependenciesForTesting({
+      getSkillsPath: () => own,
+      getAdditionalDirectoriesForClaudeMd: () => [],
+      getSiblingSkillsHomePaths: () => siblingSkillsHomePaths,
+      getFsImplementation: () => ({ stat: async (path: string) => statSync(path) }),
+      executeConfigChangeHooks,
+      clearCommandsCache,
+      resetSentSkillNames,
+      watch: (paths: string[], options: Parameters<typeof chokidar.watch>[1]) => {
+        realWatcher = chokidar.watch(paths, options)
+        return realWatcher
+      },
+    })
+    await detector.resetForTesting({
+      stabilityThreshold: 10, pollInterval: 10, chokidarInterval: 10,
+      reloadDebounce: 10, reloadCooldown: 10,
+    })
+    const editUntilHook = async (path: string, content: string, count: number) => {
+      // Chokidar's ready marks traversal completion, but Bun may still be
+      // initializing its polling baseline. Retry edits until one is observed.
+      const deadline = Date.now() + 2000
+      let edit = 0
+      while (executeConfigChangeHooks.mock.calls.length < count && Date.now() < deadline) {
+        writeFileSync(path, `${content} ${edit++}`)
+        await sleep(50)
+      }
+      expect(executeConfigChangeHooks).toHaveBeenCalledTimes(count)
+    }
+    try {
+      siblingSkillsHomePaths = [sibling]
+      await detector.initialize()
+      await new Promise<void>(resolve => realWatcher!.once('ready', resolve))
+      await editUntilHook(siblingFile, 'enabled edit', 1)
+      siblingSkillsHomePaths = []
+      await detector.reloadAfterSkillSourceSettingsChange()
+      writeFileSync(siblingFile, 'disabled edit')
+      await sleep(150)
+      expect(executeConfigChangeHooks).toHaveBeenCalledTimes(1)
+      await editUntilHook(ownFile, 'owned edit', 2)
+      siblingSkillsHomePaths = [sibling]
+      await detector.reloadAfterSkillSourceSettingsChange()
+      await new Promise<void>(resolve => realWatcher!.once('ready', resolve))
+      await editUntilHook(siblingFile, 're-enabled edit', 3)
+    } finally {
+      await detector.dispose()
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test('batches rapid reload requests into one hook/cache clear/notification', async () => {

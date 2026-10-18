@@ -45,8 +45,30 @@ type RegistryEntriesResult = {
   registrySource: string
 }
 
+export type SkillRevocation = {
+  id?: unknown
+  version?: unknown
+  sha256?: unknown
+  reason?: unknown
+}
+
+/**
+ * A remote source answered with a non-success status. Carries the status
+ * so callers can tell a confirmed-absent source (404) from a failing one
+ * without parsing the message.
+ */
+class RemoteSourceHttpError extends Error {
+  status: number
+
+  constructor(source: string, status: number) {
+    super(`Failed to fetch ${source}: HTTP ${status}`)
+    this.name = 'RemoteSourceHttpError'
+    this.status = status
+  }
+}
+
 const DEFAULT_SKILLS_REGISTRY_URL =
-  'https://raw.githubusercontent.com/Gitlawb/openclaude-skills/main/registry.json'
+  'https://raw.githubusercontent.com/Twigpine/openclaude-skills/main/registry.json'
 const VALID_INSTALL_SKILL_NAME = /^[a-z0-9][a-z0-9-]*(?::[a-z0-9][a-z0-9-]*)*$/
 const MAX_INSTALL_SKILL_NAME_LENGTH = 120
 const REMOTE_SOURCE_TIMEOUT_MS = 30_000
@@ -105,7 +127,7 @@ async function readSourceText(source: string): Promise<string> {
     try {
       const response = await fetch(url, { signal })
       if (!response.ok) {
-        throw new Error(`Failed to fetch ${source}: HTTP ${response.status}`)
+        throw new RemoteSourceHttpError(source, response.status)
       }
 
       const contentLength = response.headers.get('content-length')
@@ -145,20 +167,30 @@ async function readSourceText(source: string): Promise<string> {
   return getFsImplementation().readFile(resolve(source), { encoding: 'utf8' })
 }
 
-async function readRegistryEntries(source: string): Promise<RegistryEntriesResult> {
-  let registrySource = source
-  if (!isUrl(source)) {
-    const resolved = resolve(source)
-    try {
-      const sourceStats = await getFsImplementation().stat(resolved)
-      registrySource = sourceStats.isDirectory()
-        ? join(resolved, 'registry.json')
-        : resolved
-    } catch {
-      registrySource = resolved
-    }
+/**
+ * The registry an install or verify reads: the given value, then the
+ * OPENCLAUDE_SKILLS_REGISTRY_URL env var, then the default registry. A
+ * local directory resolves to the registry.json inside it.
+ */
+export async function resolveRegistrySource(registry?: string): Promise<string> {
+  const source =
+    registry ??
+    process.env.OPENCLAUDE_SKILLS_REGISTRY_URL ??
+    DEFAULT_SKILLS_REGISTRY_URL
+  if (isUrl(source)) {
+    return source
   }
+  const resolved = resolve(source)
+  try {
+    const sourceStats = await getFsImplementation().stat(resolved)
+    return sourceStats.isDirectory() ? join(resolved, 'registry.json') : resolved
+  } catch {
+    return resolved
+  }
+}
 
+async function readRegistryEntries(source?: string): Promise<RegistryEntriesResult> {
+  const registrySource = await resolveRegistrySource(source)
   const raw = await readSourceText(registrySource)
   const parsed = JSON.parse(raw) as unknown
   return {
@@ -182,15 +214,114 @@ function resolveRegistryEntrySource(
   return resolve(dirname(registrySource), entrySource)
 }
 
+/**
+ * Resolves where the revocation list lives: the
+ * OPENCLAUDE_SKILLS_REVOCATIONS_URL env var when set, otherwise a
+ * revocations.json sibling of the registry (URL or local file).
+ */
+export function resolveRevocationsSource(registrySource: string): string {
+  return (
+    process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL ??
+    resolveRegistryEntrySource('revocations.json', registrySource)
+  )
+}
+
+/**
+ * True when an error means the source does not exist (local ENOENT or
+ * remote HTTP 404), as opposed to existing but being unreadable.
+ */
+function isAbsentSourceError(error: unknown): boolean {
+  if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+    return true
+  }
+  return error instanceof RemoteSourceHttpError && error.status === 404
+}
+
+/**
+ * Validates one revocation entry: optional non-empty id/version strings,
+ * an optional 64-hex sha256, an optional reason string, and at least an
+ * id or a digest to pin on. Throws naming the entry index otherwise.
+ */
+function parseRevocation(
+  value: unknown,
+  index: number,
+  source: string,
+): SkillRevocation {
+  function reject(problem: string): never {
+    throw new Error(
+      `Revocation list at ${source} has an invalid entry at index ${index}: ${problem}.`,
+    )
+  }
+  if (!isPlainObject(value)) {
+    reject('not an object')
+  }
+  const entry = value as SkillRevocation
+  if (
+    entry.id !== undefined &&
+    (typeof entry.id !== 'string' || entry.id.trim() === '')
+  ) {
+    reject('id must be a non-empty string')
+  }
+  if (
+    entry.version !== undefined &&
+    (typeof entry.version !== 'string' || entry.version.trim() === '')
+  ) {
+    reject('version must be a non-empty string')
+  }
+  if (
+    entry.sha256 !== undefined &&
+    (typeof entry.sha256 !== 'string' ||
+      !/^[a-fA-F0-9]{64}$/.test(entry.sha256.trim()))
+  ) {
+    reject('sha256 must be a 64-character hex digest')
+  }
+  if (entry.reason !== undefined && typeof entry.reason !== 'string') {
+    reject('reason must be a string')
+  }
+  if (entry.id === undefined && entry.sha256 === undefined) {
+    reject('must pin at least an id or a sha256')
+  }
+  return entry
+}
+
+/**
+ * Reads and validates the registry's revocation list. A confirmed-absent
+ * list revokes nothing; any other read, parse, or schema failure throws
+ * so the install fails closed.
+ */
+export async function readRevocations(registrySource: string): Promise<SkillRevocation[]> {
+  const source = resolveRevocationsSource(registrySource)
+  let raw: string
+  try {
+    raw = await readSourceText(source)
+  } catch (error) {
+    // A registry may publish no revocation list at all, so a confirmed
+    // absence revokes nothing and the sha256 pin is still enforced. Any
+    // other failure fails closed: an unreachable kill switch must not
+    // read as an empty one.
+    if (isAbsentSourceError(error)) {
+      return []
+    }
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Failed to read revocation list at ${source}: ${message}`)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw) as unknown
+  } catch {
+    throw new Error(`Revocation list at ${source} is not valid JSON.`)
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Revocation list at ${source} must be a JSON array.`)
+  }
+  return parsed.map((entry, index) => parseRevocation(entry, index, source))
+}
+
 async function resolveRegistryEntry(
   idOrName: string,
   options: InstallOptions,
 ): Promise<{ entry: SkillRegistryEntry; registrySource: string } | null> {
-  const registrySource =
-    options.registry ??
-    process.env.OPENCLAUDE_SKILLS_REGISTRY_URL ??
-    DEFAULT_SKILLS_REGISTRY_URL
-  const registry = await readRegistryEntries(registrySource)
+  const registry = await readRegistryEntries(options.registry)
   const entry = registry.entries.find(
     candidate =>
       candidate.id === idOrName ||
@@ -263,6 +394,61 @@ function assertSha256Matches(text: string, expectedSha256: string, spec: string)
       `Checksum mismatch for "${spec}". Expected ${expectedSha256}, got ${actual}.`,
     )
   }
+}
+
+/**
+ * True when a revocation entry matches the skill: every field the entry
+ * specifies must match (id alone covers all versions, sha256 covers the
+ * exact content under any id).
+ */
+export function revocationApplies(
+  revocation: SkillRevocation,
+  skill: { id?: string; version?: string; sha256: string },
+): boolean {
+  const revokedId = typeof revocation.id === 'string' ? revocation.id : undefined
+  const revokedVersion =
+    typeof revocation.version === 'string' ? revocation.version : undefined
+  const revokedSha256 =
+    typeof revocation.sha256 === 'string'
+      ? revocation.sha256.trim().toLowerCase()
+      : undefined
+  // An entry must pin at least an id or a digest; every field it does
+  // specify has to match.
+  if (revokedId === undefined && revokedSha256 === undefined) {
+    return false
+  }
+  if (revokedId !== undefined && revokedId !== skill.id) {
+    return false
+  }
+  if (revokedVersion !== undefined && revokedVersion !== skill.version) {
+    return false
+  }
+  if (revokedSha256 !== undefined && revokedSha256 !== skill.sha256) {
+    return false
+  }
+  return true
+}
+
+/**
+ * Throws with the entry's reason when any revocation entry applies to
+ * the skill being installed.
+ */
+function assertNotRevoked(
+  revocations: SkillRevocation[],
+  skill: { id?: string; version?: string; sha256: string },
+  spec: string,
+): void {
+  const match = revocations.find(entry => revocationApplies(entry, skill))
+  if (!match) {
+    return
+  }
+  const reason =
+    typeof match.reason === 'string' && match.reason.trim() !== ''
+      ? ` Reason: ${match.reason.trim()}`
+      : ''
+  throw new Error(
+    `Skill "${spec}" is revoked in the registry. Refusing to install.${reason}`,
+  )
 }
 
 function assertCompatibleOpenClaudeVersion(entry: SkillRegistryEntry, spec: string): string | undefined {
@@ -513,6 +699,16 @@ async function prepareInstallCandidate(
 
   const expectedSha256 = requireRegistrySha256(entry, spec)
   const minOpenClaudeVersion = assertCompatibleOpenClaudeVersion(entry, spec)
+  const revocations = await readRevocations(registryMatch.registrySource)
+  assertNotRevoked(
+    revocations,
+    {
+      id: typeof entry.id === 'string' ? entry.id : undefined,
+      version: typeof entry.version === 'string' ? entry.version : undefined,
+      sha256: expectedSha256,
+    },
+    spec,
+  )
   const entrySource = resolveRegistryEntrySource(
     entry.source,
     registryMatch.registrySource,

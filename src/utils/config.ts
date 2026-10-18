@@ -227,6 +227,7 @@ export type ProviderProfile = {
   model: string
   apiKey?: string
   apiFormat?: OpenAICompatibleApiFormat
+  azureStyle?: boolean
   authHeader?: string
   authScheme?: OpenAICompatibleAuthScheme
   authHeaderValue?: string
@@ -291,7 +292,15 @@ export type GlobalConfig = {
   hasUsedBackslashReturn?: boolean
   autoCompactEnabled: boolean // Controls whether auto-compact is enabled
   contextCollapseEnabled: boolean // Opt-in: collapse old transcript spans into summaries (lossy; off by default)
-  toolHistoryCompressionEnabled: boolean // Compress old tool_result content for small-context providers
+  toolHistoryCompressionEnabled: boolean // Compress old tool_result content (shim providers; Anthropic-native only while prompt caching is inactive)
+  compactTailTurns?: number // Recent messages preserved verbatim by auto-compact's relevance pruning (default: 3)
+  /**
+   * Per-prompt local interactive REPL turn cap (default: 50).
+   * Overridden by CLI `--max-turns` and OPENCLAUDE_MAX_TURNS / CLAUDE_CODE_MAX_TURNS.
+   */
+  replMaxTurns?: number
+  /** Foreground QueryGuard inactivity timeout in milliseconds (default: 5 minutes). */
+  queryIdleTimeoutMs?: number
   showTurnDuration: boolean // Controls whether to show turn duration message (e.g., "Cooked for 1m 6s")
   // Controls whether to show per-query cache hit/miss stats at the end of each turn.
   // 'off'     — no display
@@ -695,6 +704,11 @@ export type GlobalConfig = {
   // Use a different (e.g. cheaper/faster) model for compaction.
   // Defaults to mainLoopModel when unset.
   compactModel?: string
+
+  // Global MCP server disabled list. When a project has no disabledMcpServers
+  // configured, this list is used as the fallback so MCP state is consistent
+  // across all projects.
+  disabledMcpServers?: string[]
 }
 
 /**
@@ -768,6 +782,9 @@ export const GLOBAL_CONFIG_KEYS = [
   'editorMode',
   'hasUsedBackslashReturn',
   'autoCompactEnabled',
+  'compactTailTurns',
+  'replMaxTurns',
+  'queryIdleTimeoutMs',
   'contextCollapseEnabled',
   'toolHistoryCompressionEnabled',
   'showTurnDuration',
@@ -805,6 +822,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'logoColor',
   'maxMessagesCompactionThreshold',
   'compactModel',
+  'disabledMcpServers',
 ] as const
 
 export type GlobalConfigKey = (typeof GLOBAL_CONFIG_KEYS)[number]
@@ -2022,11 +2040,14 @@ export function getCurrentProjectConfig(): ProjectConfig {
 }
 
 export function saveCurrentProjectConfig(
-  updater: (currentConfig: ProjectConfig) => ProjectConfig,
+  updater: (
+    currentConfig: ProjectConfig,
+    globalConfig: Readonly<GlobalConfig>,
+  ) => ProjectConfig,
 ): void {
   if (process.env.NODE_ENV === 'test') {
     const current = getTestProjectConfigForTesting()
-    const config = updater(current)
+    const config = updater(current, getTestGlobalConfigForTesting())
     // Skip if no changes (same reference returned)
     if (config === current) {
       return
@@ -2044,7 +2065,7 @@ export function saveCurrentProjectConfig(
       current => {
         const currentProjectConfig =
           current.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-        const newProjectConfig = updater(currentProjectConfig)
+        const newProjectConfig = updater(currentProjectConfig, current)
         // Skip if no changes (same reference returned)
         if (newProjectConfig === currentProjectConfig) {
           return current
@@ -2080,7 +2101,7 @@ export function saveCurrentProjectConfig(
     }
     const currentProjectConfig =
       config.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-    const newProjectConfig = updater(currentProjectConfig)
+    const newProjectConfig = updater(currentProjectConfig, config)
     // Skip if no changes (same reference returned)
     if (newProjectConfig === currentProjectConfig) {
       return

@@ -25,6 +25,7 @@ import { extractOutputRedirections } from '../bash/commands.js'
 import { logForDebugging } from '../debug.js'
 import { AbortError, toError } from '../errors.js'
 import { logError } from '../log.js'
+import { requestAbort } from '../interruptionTrace.js'
 import { SandboxManager } from '../sandbox/sandbox-adapter.js'
 import {
   getSettingSourceDisplayNameLowercase,
@@ -524,7 +525,11 @@ async function runPermissionRequestHooksForHeadlessAgent(
           logForDebugging(
             `Hook interrupt: tool=${tool.name} hookMessage=${decision.message}`,
           )
-          context.abortController.abort('interrupt')
+          requestAbort(context.abortController, 'interrupt', {
+            source: 'permission_hook',
+            subsystem: 'tool_permission',
+            controllerRole: 'query-root',
+          })
         }
         return {
           behavior: 'deny',
@@ -1319,7 +1324,8 @@ export async function revalidatePlanModePermissionAllow(
   }
   if (
     !planModeWasActive &&
-    context.getAppState().toolPermissionContext.mode !== 'plan'
+    context.getAppState().toolPermissionContext.mode !== 'plan' &&
+    context.getRootAppState?.().toolPermissionContext.mode !== 'plan'
   ) {
     return null
   }
@@ -1373,7 +1379,8 @@ export async function revalidatePlanModePermissionAllowWithRaceGuard(
   context: ToolUseContext,
   planModeWasActive =
     typeof context.getAppState === 'function' &&
-    context.getAppState().toolPermissionContext.mode === 'plan',
+    (context.getAppState().toolPermissionContext.mode === 'plan' ||
+      context.getRootAppState?.().toolPermissionContext.mode === 'plan'),
 ): Promise<PermissionDecision | null> {
   let revalidation = await revalidatePlanModePermissionAllow(
     tool,
@@ -1385,7 +1392,8 @@ export async function revalidatePlanModePermissionAllowWithRaceGuard(
   const enforcePlanMode =
     planModeWasActive ||
     (typeof context.getAppState === 'function' &&
-      context.getAppState().toolPermissionContext.mode === 'plan')
+      (context.getAppState().toolPermissionContext.mode === 'plan' ||
+        context.getRootAppState?.().toolPermissionContext.mode === 'plan'))
   if (!revalidation && enforcePlanMode && !planModeWasActive) {
     revalidation = await revalidatePlanModePermissionAllow(
       tool,

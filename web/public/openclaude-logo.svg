@@ -1,21 +1,20 @@
-<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
-  <!-- black square ground, matching gitlawb's white-on-black mark -->
-  <rect width="1024" height="1024" fill="#000000"/>
-
-  <!-- terminal window: sharp corners, thick uniform stroke -->
-  <rect x="292" y="180" width="440" height="400" fill="none" stroke="#ffffff" stroke-width="36"/>
-
-  <!-- eyes: hollow circuit nodes -->
-  <circle cx="432" cy="330" r="32" fill="none" stroke="#ffffff" stroke-width="28"/>
-  <circle cx="592" cy="330" r="32" fill="none" stroke="#ffffff" stroke-width="28"/>
-
-  <!-- mouth: >_ prompt -->
-  <polyline points="424,420 482,460 424,500" fill="none" stroke="#ffffff" stroke-width="30" stroke-linecap="square"/>
-  <line x1="520" y1="500" x2="600" y2="500" stroke="#ffffff" stroke-width="30" stroke-linecap="square"/>
-
-  <!-- git-fork trace descending from the terminal: openclaude on the gitlawb network -->
-  <polyline points="512,598 512,688 416,784" fill="none" stroke="#ff7a1a" stroke-width="36" stroke-linejoin="miter"/>
-  <line x1="512" y1="688" x2="608" y2="784" stroke="#ff7a1a" stroke-width="36" stroke-linecap="butt"/>
-  <circle cx="384" cy="816" r="46" fill="none" stroke="#ff7a1a" stroke-width="36"/>
-  <circle cx="640" cy="816" r="46" fill="none" stroke="#ff7a1a" stroke-width="36"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Ember Block O: the ANSI-Shadow figlet "O" from the CLI startup screen,
+       banded with the ember gradient (StartupScreen.palettes.ts) and carrying
+       the thin offset shadow of the README pixel wordmark. -->
+  <rect width="64" height="64" rx="7" fill="#0a0a0a"/>
+  <defs>
+    <clipPath id="o-cells">
+      <path clip-rule="evenodd" d="M13 6 H49 V16 H55 V46 H49 V56 H13 V46 H7 V16 H13 Z M19 16 H43 V46 H19 Z"/>
+    </clipPath>
+  </defs>
+  <path d="M13 6 H49 V16 H55 V46 H49 V56 H13 V46 H7 V16 H13 Z M19 16 H43 V46 H19 Z"
+        transform="translate(3.4 3.6)" fill="none" stroke="#913c08" stroke-width="1.8" opacity="0.9"/>
+  <g clip-path="url(#o-cells)">
+    <rect x="7" y="6"  width="48" height="10" fill="#ffb15f"/>
+    <rect x="7" y="16" width="48" height="10" fill="#ff963c"/>
+    <rect x="7" y="26" width="48" height="10" fill="#ff7a1a"/>
+    <rect x="7" y="36" width="48" height="10" fill="#e6640a"/>
+    <rect x="7" y="46" width="48" height="10" fill="#be5008"/>
+  </g>
 </svg>

@@ -16,6 +16,10 @@ import {
   type ProviderProfile,
 } from '../src/utils/providerProfile.ts'
 import {
+  getRouteCredentialValue,
+  resolveActiveRouteIdFromEnv,
+} from '../src/integrations/routeMetadata.ts'
+import {
   getAtomicChatChatBaseUrl,
   getOllamaChatBaseUrl,
   hasLocalAtomicChat,
@@ -156,7 +160,22 @@ function hasUsableGeminiLaunchAuth(env: NodeJS.ProcessEnv): boolean {
 export function hasUsableOpenAILaunchCredential(
   env: NodeJS.ProcessEnv,
 ): boolean {
-  return resolveOpenAICredentialEnvState(env).configured
+  return getOpenAILaunchCredentialError(env) === null
+}
+
+export function getOpenAILaunchCredentialError(
+  env: NodeJS.ProcessEnv,
+): string | null {
+  if (resolveActiveRouteIdFromEnv(env) === 'commandcode') {
+    if (getRouteCredentialValue('commandcode', env)) {
+      return null
+    }
+    return 'CMD_API_KEY is required for the Command Code route (fallbacks: COMMANDCODE_API_KEY or COMMAND_CODE_API_KEY) and cannot include placeholder values such as SUA_CHAVE. Set one of those environment variables, rerun the launcher, then use /provider to save the Command Code profile.'
+  }
+  if (resolveOpenAICredentialEnvState(env).configured) {
+    return null
+  }
+  return 'OPENAI_API_KEYS or OPENAI_API_KEY is required for openai profile and cannot include SUA_CHAVE. Run: bun run profile:init -- --provider openai --api-key <key>'
 }
 
 async function main(): Promise<void> {
@@ -234,10 +253,10 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  if (profile === 'openai' && !hasUsableOpenAILaunchCredential(env)) {
-    console.error(
-      'OPENAI_API_KEYS or OPENAI_API_KEY is required for openai profile and cannot include SUA_CHAVE. Run: bun run profile:init -- --provider openai --api-key <key>',
-    )
+  const openAICredentialError =
+    profile === 'openai' ? getOpenAILaunchCredentialError(env) : null
+  if (openAICredentialError) {
+    console.error(openAICredentialError)
     process.exit(1)
   }
 

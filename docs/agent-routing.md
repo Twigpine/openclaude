@@ -29,7 +29,9 @@ OpenClaude can route different agents to different models through
 settings-based routing. This is useful for cost optimization or splitting work
 by model strength.
 
-Add to `~/.openclaude.json`:
+Add to `~/.openclaude/settings.json`:
+
+> **Note:** `api_key` values in `settings.json` are stored in plaintext. Keep this file private and do not commit it to version control.
 
 ```json
 {
@@ -88,10 +90,25 @@ no credential duplication:
 ```
 
 **Built-in agents are routable by their type name.** Useful keys:
-`verification` (the read-only auditor that runs before completion), `Explore`,
-and `Plan`. For example, `"agentRouting": { "verification": "mini" }` runs the
-verifier on `gpt-5-mini` while your main session stays on its model. Absent
+`verification` (the read-only auditor that runs before completion; **feature-gated**: requires `VERIFICATION_AGENT` and `tengu_hive_evidence` flag), `Explore`
+and `Plan` (if feature-gated on), and `code-reviewer` (requires diff inline). For example, `"agentRouting": { "verification": "mini" }` runs the
+verifier on `gpt-5-mini` while your main session stays on its model, but only when the verification gate is active. Absent
 any entry, the verifier inherits the main-loop model.
+
+## Sub-agent permission prompts
+
+In an interactive session, an ordinary foreground or background Agent tool
+sub-agent that reaches an unresolved tool permission request forwards it to
+the main session. The user can approve or deny the request there, and the
+sub-agent continues with that decision. Existing allow and deny rules are
+still evaluated first. Background agents and their pending permission prompts
+remain owned by the session that spawned them; switching sessions never moves
+a prompt or approval into the newly active session. Unattended scheduled
+commands remain fail-closed.
+
+Non-interactive sessions remain fail-closed: unresolved requests are denied
+unless a configured permission rule resolves them. You do not need to
+enable `--dangerously-skip-permissions` for interactive sub-agent verification.
 
 ## GitHub Copilot sub-agent optimization
 

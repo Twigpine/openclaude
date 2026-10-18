@@ -71,7 +71,7 @@ For each agent, the prompt must be fully self-contained. Include:
 ${WORKER_INSTRUCTIONS}
 \`\`\`
 
-Use \`subagent_type: "general-purpose"\` unless a more specific agent type fits.
+Use a specific custom agent type if one fits the work unit, or \`subagent_type: "general-purpose"\` for default workers. Do NOT omit \`subagent_type\` — batch requires fresh, isolated subprocesses, and omitting the type routes to a fork (which inherits the coordinator's context) when the fork gate is on, which breaks the self-contained worktree invariant.
 
 ## Phase 3: Track Progress
 

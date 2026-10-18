@@ -47,6 +47,8 @@ export function SessionBackgroundHint(t0) {
           saveGlobalConfig(_temp2);
         }
       } else {
+        // Session backgrounding remains intentionally disabled until the
+        // handoff path is ready to ship; shell/agent backgrounding still runs.
         if (isEnvTruthy("false") && isLoading) {
           handleDoublePress();
         }

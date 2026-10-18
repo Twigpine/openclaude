@@ -1,4 +1,12 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { z } from 'zod/v4'
 import type { ToolPermissionContext, ToolUseContext } from '../../Tool.js'
 import { createToolFixture } from '../../test/toolFixtures.js'
@@ -6,13 +14,15 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import type { PermissionDecision } from './PermissionResult.js'
+import type { PermissionRequestResult } from '../../types/hooks.js'
+import {
+  __getInterruptionTraceSnapshotForTests,
+  __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
+} from '../interruptionTrace.js'
 import { permissionPromptToolResultToPermissionDecision } from './PermissionPromptToolResultSchema.js'
-import type { PermissionUpdate } from './PermissionUpdateSchema.js'
 
-type HookDecision = PermissionDecision & {
-  updatedPermissions?: PermissionUpdate[]
-}
+type HookDecision = PermissionRequestResult
 
 let hookDecision: HookDecision
 let hasPermissionsToUseTool: typeof import('./permissions.js').hasPermissionsToUseTool
@@ -20,6 +30,7 @@ let createPermissionContext: typeof import('../../hooks/toolPermission/Permissio
 let StructuredIO: typeof import('../../cli/structuredIO.js').StructuredIO
 let actualHooks: typeof import('../hooks.js')
 let beforeHookDecision: (() => void) | undefined
+const originalInterruptionTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
 
 beforeAll(async () => {
   await acquireSharedMutationLock(
@@ -52,6 +63,16 @@ afterAll(() => {
     mock.module('../hooks.js', () => actualHooks)
   } finally {
     releaseSharedMutationLock()
+  }
+})
+
+afterEach(async () => {
+  await __waitForInterruptionTraceFlushForTests()
+  __resetInterruptionTraceForTests()
+  if (originalInterruptionTrace === undefined) {
+    delete process.env.OPENCLAUDE_INTERRUPT_TRACE
+  } else {
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = originalInterruptionTrace
   }
 })
 
@@ -99,6 +120,199 @@ const assistantMessage = {} as Parameters<
 >[3]
 
 describe('headless plan-mode PermissionRequest hooks', () => {
+  test('agent permission updates persist against untransformed root state', async () => {
+    const readTool = createToolFixture(z.object({}), {
+      name: 'AgentPersistentReadTool',
+      isReadOnly: () => true,
+    })
+    const rootPermissionContext: ToolPermissionContext = {
+      mode: 'default',
+      additionalWorkingDirectories: new Map(),
+      alwaysAllowRules: {
+        session: ['ExistingRootTool'],
+      },
+      alwaysDenyRules: {},
+      alwaysAskRules: {},
+      isBypassPermissionsModeAvailable: true,
+    }
+    const childPermissionContext: ToolPermissionContext = {
+      ...rootPermissionContext,
+      mode: 'plan',
+      alwaysAllowRules: {
+        session: ['ChildScopedTool'],
+      },
+      shouldAvoidPermissionPrompts: false,
+      awaitAutomatedChecksBeforeDialog: true,
+    }
+    let persistedContext: ToolPermissionContext | undefined
+    const context = {
+      abortController: new AbortController(),
+      getAppState: () => ({ toolPermissionContext: childPermissionContext }),
+      getRootAppState: () => ({
+        toolPermissionContext: rootPermissionContext,
+      }),
+      options: {},
+    } as unknown as ToolUseContext
+    const permissionContext = createPermissionContext(
+      readTool,
+      {},
+      context,
+      { message: { id: 'assistant-message' } } as never,
+      'agent-root-permission-persistence',
+      nextContext => {
+        persistedContext = nextContext
+      },
+    )
+
+    await permissionContext.persistPermissions([
+      {
+        type: 'addRules',
+        rules: [{ toolName: 'ApprovedFromAgent' }],
+        behavior: 'allow',
+        destination: 'session',
+      },
+    ])
+
+    expect(persistedContext?.mode).toBe('default')
+    expect(persistedContext?.shouldAvoidPermissionPrompts).toBeUndefined()
+    expect(persistedContext?.awaitAutomatedChecksBeforeDialog).toBeUndefined()
+    expect(persistedContext?.alwaysAllowRules.session).toEqual([
+      'ExistingRootTool',
+      'ApprovedFromAgent',
+    ])
+  })
+
+  test('agent setMode cannot enable bypass when root availability is disabled', async () => {
+    const readTool = createToolFixture(z.object({}), {
+      name: 'AgentRootBypassAvailabilityReadTool',
+      isReadOnly: () => true,
+    })
+    const rootPermissionContext: ToolPermissionContext = {
+      mode: 'default',
+      additionalWorkingDirectories: new Map(),
+      alwaysAllowRules: {},
+      alwaysDenyRules: {},
+      alwaysAskRules: {},
+      isBypassPermissionsModeAvailable: false,
+    }
+    const childPermissionContext: ToolPermissionContext = {
+      ...rootPermissionContext,
+      isBypassPermissionsModeAvailable: true,
+    }
+    let persistedContext: ToolPermissionContext | undefined
+    const context = {
+      abortController: new AbortController(),
+      getAppState: () => ({ toolPermissionContext: childPermissionContext }),
+      getRootAppState: () => ({
+        toolPermissionContext: rootPermissionContext,
+      }),
+      options: {},
+    } as unknown as ToolUseContext
+    const permissionContext = createPermissionContext(
+      readTool,
+      {},
+      context,
+      { message: { id: 'assistant-message' } } as never,
+      'agent-root-bypass-availability',
+      nextContext => {
+        persistedContext = nextContext
+      },
+    )
+
+    const persisted = await permissionContext.persistPermissions([
+      {
+        type: 'setMode',
+        mode: 'fullAccess',
+        destination: 'session',
+      },
+      {
+        type: 'setMode',
+        mode: 'bypassPermissions',
+        destination: 'session',
+      },
+    ])
+
+    expect(persisted).toBe(false)
+    expect(persistedContext).toBeUndefined()
+  })
+
+  test('agent permission updates cannot escape root plan mode', async () => {
+    const readTool = createToolFixture(z.object({}), {
+      name: 'AgentRootPlanReadTool',
+      isReadOnly: () => true,
+    })
+    const rootPermissionContext: ToolPermissionContext = {
+      mode: 'plan',
+      additionalWorkingDirectories: new Map(),
+      alwaysAllowRules: {},
+      alwaysDenyRules: {},
+      alwaysAskRules: {},
+      isBypassPermissionsModeAvailable: true,
+    }
+    const childPermissionContext: ToolPermissionContext = {
+      ...rootPermissionContext,
+      mode: 'acceptEdits',
+    }
+    let persistedContext: ToolPermissionContext | undefined
+    const context = {
+      abortController: new AbortController(),
+      getAppState: () => ({ toolPermissionContext: childPermissionContext }),
+      getRootAppState: () => ({ toolPermissionContext: rootPermissionContext }),
+      options: {},
+    } as unknown as ToolUseContext
+    const permissionContext = createPermissionContext(
+      readTool,
+      {},
+      context,
+      { message: { id: 'assistant-message' } } as never,
+      'agent-root-plan-permission-persistence',
+      nextContext => {
+        persistedContext = nextContext
+      },
+    )
+
+    const result = await permissionContext.handleUserAllow({}, [
+      {
+        type: 'addRules',
+        rules: [{ toolName: 'ApprovedFromAgent' }],
+        behavior: 'allow',
+        destination: 'session',
+      },
+    ])
+
+    expect(result.behavior).toBe('allow')
+    expect(persistedContext).toBeUndefined()
+  })
+
+  test('agent mutation approval respects root plan mode', async () => {
+    const mutationTool = createToolFixture(z.object({}), {
+      name: 'AgentRootPlanMutationTool',
+      isReadOnly: () => false,
+    })
+    const state = planContext({ mode: 'acceptEdits' })
+    state.context.getRootAppState = () => ({
+      toolPermissionContext: {
+        ...state.getPermissionContext(),
+        mode: 'plan',
+      },
+    }) as never
+    const permissionContext = createPermissionContext(
+      mutationTool,
+      {},
+      state.context,
+      { message: { id: 'assistant-message' } } as never,
+      'agent-root-plan-mutation',
+      state.setPermissionContext,
+    )
+
+    const result = await permissionContext.handleUserAllow({}, [])
+
+    expect(result).toMatchObject({
+      behavior: 'deny',
+      decisionReason: { type: 'mode', mode: 'plan' },
+    })
+  })
+
   test('interactive user approval cannot rewrite a read into a mutation', async () => {
     const conditionalTool = createToolFixture(
       z.object({ operation: z.enum(['read', 'write']) }),
@@ -367,6 +581,82 @@ describe('headless plan-mode PermissionRequest hooks', () => {
     expect(state.getPermissionContext().mode).toBe('plan')
   })
 
+  test('labels SDK permission prompt interrupts as query-root aborts', async () => {
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
+    const tool = createToolFixture(z.object({}), {
+      name: 'SDKPromptInterruptTool',
+      isReadOnly: () => true,
+    })
+    const state = planContext({ mode: 'default' })
+
+    const result = await permissionPromptToolResultToPermissionDecision(
+      {
+        behavior: 'deny',
+        message: 'Stop the query',
+        interrupt: true,
+      },
+      tool,
+      {},
+      state.context,
+    )
+
+    expect(result.behavior).toBe('deny')
+    expect(state.context.abortController.signal.aborted).toBe(true)
+    expect(
+      __getInterruptionTraceSnapshotForTests().find(
+        entry =>
+          entry.event === 'abort.requested' &&
+          entry.source === 'sdk_permission_interrupt',
+      ),
+    ).toMatchObject({
+      subsystem: 'tool_permission',
+      controllerRole: 'query-root',
+    })
+  })
+
+  test('labels headless permission hook interrupts as query-root aborts', async () => {
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
+    const tool = createToolFixture(z.object({}), {
+      name: 'HeadlessHookInterruptTool',
+      isReadOnly: () => true,
+      async checkPermissions() {
+        return { behavior: 'ask' as const, message: 'Review read' }
+      },
+    })
+    const state = planContext({
+      mode: 'default',
+      shouldAvoidPermissionPrompts: true,
+    })
+    hookDecision = {
+      behavior: 'deny',
+      message: 'Stop the query',
+      interrupt: true,
+    }
+
+    const result = await hasPermissionsToUseTool(
+      tool,
+      {},
+      state.context,
+      assistantMessage,
+      'headless-hook-interrupt',
+    )
+
+    expect(result.behavior).toBe('deny')
+    expect(state.context.abortController.signal.aborted).toBe(true)
+    expect(
+      __getInterruptionTraceSnapshotForTests().find(
+        entry =>
+          entry.event === 'abort.requested' &&
+          entry.source === 'permission_hook',
+      ),
+    ).toMatchObject({
+      subsystem: 'tool_permission',
+      controllerRole: 'query-root',
+    })
+  })
+
   test('SDK permission prompt rechecks plan mode after approval normalization', async () => {
     const conditionalTool = createToolFixture(
       z.object({ operation: z.enum(['read', 'write']) }),
@@ -595,6 +885,47 @@ describe('headless plan-mode PermissionRequest hooks', () => {
     expect(state.getPermissionContext().alwaysAskRules.session).toEqual([
       'InteractiveReadTool',
     ])
+  })
+
+  test('labels interactive permission hook interrupts as query-root aborts', async () => {
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
+    const tool = createToolFixture(z.object({}), {
+      name: 'InteractiveHookInterruptTool',
+      isReadOnly: () => true,
+    })
+    const state = planContext({ mode: 'default' })
+    const permissionContext = createPermissionContext(
+      tool,
+      {},
+      state.context,
+      { message: { id: 'assistant-message' } } as never,
+      'interactive-hook-interrupt',
+      state.setPermissionContext,
+    )
+    hookDecision = {
+      behavior: 'deny',
+      message: 'Stop the query',
+      interrupt: true,
+    }
+
+    const result = await permissionContext.runHooks(undefined, undefined)
+
+    expect(result).toMatchObject({
+      behavior: 'deny',
+      message: 'Stop the query',
+    })
+    expect(state.context.abortController.signal.aborted).toBe(true)
+    expect(
+      __getInterruptionTraceSnapshotForTests().find(
+        entry =>
+          entry.event === 'abort.requested' &&
+          entry.source === 'permission_hook',
+      ),
+    ).toMatchObject({
+      subsystem: 'tool_permission',
+      controllerRole: 'query-root',
+    })
   })
 
   test('interactive PermissionRequest hooks cannot rewrite a read into a mutation', async () => {

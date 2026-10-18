@@ -43,6 +43,8 @@ export interface OpenAIShimTransportConfig {
   enableToolStreaming?: boolean
   maxTokensField?: OpenAIShimTokenField
   removeBodyFields?: string[]
+  /** Whether the endpoint accepts image content parts. Defaults to true. */
+  supportsImageInputs?: boolean
   /** Override the endpoint path for this model (e.g., '/responses', '/messages'). */
   endpointPath?: string
 }
@@ -112,6 +114,14 @@ export interface ModelCatalogEntry {
   label?: string
   default?: boolean
   hidden?: boolean
+  /**
+   * ISO-8601 instant after which the entry is dropped from catalog
+   * resolution (model picker, gateway catalogs, runtime limits). For
+   * time-boxed launches — e.g. a free window the gateway delists
+   * server-side — so the picker never offers a model the gateway will
+   * reject. An unparseable date fails open (the entry stays visible).
+   */
+  availableUntil?: string
   modelDescriptorId?: string
   capabilities?: CapabilityFlags
   reasoning?: ReasoningControlMetadata
@@ -345,6 +355,11 @@ export interface ModelDescriptor {
   reasoning?: ReasoningControlMetadata
   contextWindow?: number
   maxOutputTokens?: number
+  /**
+   * Restrict shared runtime metadata to catalog entries that explicitly
+   * reference this descriptor. Omit for the legacy global model-name fallback.
+   */
+  runtimeMetadataScope?: 'global' | 'catalog'
   cacheConfig?: CacheConfig
 }
 

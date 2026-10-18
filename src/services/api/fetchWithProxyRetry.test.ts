@@ -143,3 +143,120 @@ test('fetchWithProxyRetry retries and disables keepalive after receiving a 504 r
   expect((calls[0] as RequestInit).keepalive).toBeUndefined()
   expect((calls[1] as RequestInit).keepalive).toBe(false)
 })
+
+test('fetchWithProxyRetry retries when cancelling a discarded 504 body stalls', async () => {
+  let attempts = 0
+
+  globalThis.fetch = (async () => {
+    attempts++
+    if (attempts === 1) {
+      return new Response(new ReadableStream({
+        cancel() {
+          return new Promise(() => {})
+        },
+      }), { status: 504 })
+    }
+    return new Response('ok')
+  }) as unknown as FetchType
+
+  const response = await fetchWithProxyRetry('https://example.com/search')
+
+  expect(response.status).toBe(200)
+  expect(attempts).toBe(2)
+})
+
+test('fetchWithProxyRetry does not retry a 504 after the request is aborted', async () => {
+  const controller = new AbortController()
+  const abortReason = new DOMException('Deadline exceeded', 'TimeoutError')
+  let attempts = 0
+  let bodyCancelled = false
+
+  globalThis.fetch = (async () => {
+    attempts++
+    controller.abort(abortReason)
+    return new Response(new ReadableStream({
+      cancel() {
+        bodyCancelled = true
+      },
+    }), { status: 504 })
+  }) as unknown as FetchType
+
+  await expect(
+    fetchWithProxyRetry('https://example.com/generate', {
+      method: 'POST',
+      signal: controller.signal,
+    }),
+  ).rejects.toBe(abortReason)
+
+  expect(attempts).toBe(1)
+  await Promise.resolve()
+  expect(bodyCancelled).toBe(true)
+})
+
+test('fetchWithProxyRetry honors an aborted Request signal without replaying', async () => {
+  const controller = new AbortController()
+  const abortReason = new DOMException('Deadline exceeded', 'TimeoutError')
+  let attempts = 0
+
+  globalThis.fetch = (async () => {
+    attempts++
+    controller.abort(abortReason)
+    return new Response('Gateway Timeout', { status: 504 })
+  }) as unknown as FetchType
+
+  const request = new Request('https://example.com/generate', {
+    method: 'POST',
+    signal: controller.signal,
+  })
+
+  await expect(fetchWithProxyRetry(request)).rejects.toBe(abortReason)
+  expect(attempts).toBe(1)
+})
+
+test('fetchWithProxyRetry preserves the abort reason for a generic fetch failure', async () => {
+  for (const message of ['fetch failed', 'invalid_argument']) {
+    const controller = new AbortController()
+    const abortReason = new DOMException('Deadline exceeded', 'TimeoutError')
+    let attempts = 0
+
+    globalThis.fetch = (async () => {
+      attempts++
+      controller.abort(abortReason)
+      throw new TypeError(message)
+    }) as unknown as FetchType
+
+    await expect(
+      fetchWithProxyRetry('https://example.com/generate', {
+        method: 'POST',
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(abortReason)
+
+    expect(attempts).toBe(1)
+  }
+})
+
+test('fetchWithProxyRetry preserves an explicit AbortError from fetch', async () => {
+  const controller = new AbortController()
+  const abortReason = new DOMException('Caller cancelled', 'AbortError')
+  const fetchAbortError = new DOMException(
+    'The operation was aborted.',
+    'AbortError',
+  )
+  let attempts = 0
+
+  globalThis.fetch = (async () => {
+    attempts++
+    controller.abort(abortReason)
+    throw fetchAbortError
+  }) as unknown as FetchType
+
+  await expect(
+    fetchWithProxyRetry('https://example.com/generate', {
+      method: 'POST',
+      signal: controller.signal,
+    }),
+  ).rejects.toBe(fetchAbortError)
+
+  expect(attempts).toBe(1)
+})

@@ -25,6 +25,84 @@ function createMessage(role: string, content: string): any {
 }
 
 describe('multiTurnContext', () => {
+  describe('production pipeline integration', () => {
+    // Exercises the same calls query.ts makes when
+    // MULTI_TURN_CONTEXT + knowledgeGraphEnabled are both on:
+    //   startNewTurn (query start) → addMessageToTurn + addToolCallToTurn (post-tool)
+
+    it('processes a full tool cycle through multi-turn context', async () => {
+      resetMultiTurnState()
+
+      // query.ts calls startNewTurn at the start of each query
+      const turn1 = startNewTurn()
+      expect(turn1.turnId).toContain('turn_1')
+
+      // query.ts calls addMessageToTurn for each assistant message after tool execution
+      addMessageToTurn(createMessage('assistant', 'Let me check the codebase'))
+      addMessageToTurn(createMessage('assistant', 'I found the relevant file'))
+
+      // query.ts calls addToolCallToTurn for each tool use
+      addToolCallToTurn({
+        id: 'call_1',
+        name: 'read_file',
+        input: { path: '/src/index.ts' },
+        timestamp: Date.now(),
+      })
+      addToolCallToTurn({
+        id: 'call_2',
+        name: 'grep_search',
+        input: { pattern: 'TODO' },
+        timestamp: Date.now(),
+      })
+
+      // Verify turn state after query.ts hooks complete
+      const currentTurn = getCurrentTurn()
+      expect(currentTurn).not.toBeNull()
+      expect(currentTurn!.messages.length).toBe(2)
+      expect(currentTurn!.toolCalls.length).toBe(2)
+      expect(currentTurn!.toolCalls[0].name).toBe('read_file')
+      expect(currentTurn!.tokens).toBeGreaterThan(0)
+
+      // getRecentTurns and getMultiTurnStats are used downstream for context
+      const recent = getRecentTurns(1)
+      expect(recent.length).toBe(1)
+      expect(recent[0].turnId).toBe(turn1.turnId)
+
+      const stats = getMultiTurnStats()
+      expect(stats.totalTurns).toBe(1)
+      expect(stats.totalTokens).toBeGreaterThan(0)
+    })
+
+    it('tracks multiple turn cycles across consecutive tool rounds', async () => {
+      resetMultiTurnState()
+
+      // Round 1
+      const turn1 = startNewTurn()
+      addMessageToTurn(createMessage('assistant', 'Checking file'))
+      addToolCallToTurn({ id: 'call_1', name: 'read_file', input: {}, timestamp: Date.now() })
+
+      // Round 2
+      const turn2 = startNewTurn()
+      addMessageToTurn(createMessage('assistant', 'Fixing bug'))
+      addToolCallToTurn({ id: 'call_2', name: 'edit_file', input: {}, timestamp: Date.now() })
+
+      // Verify history across both turns
+      const history = getTurnHistory()
+      expect(history.length).toBe(2)
+      expect(history[0].turnId).toBe(turn1.turnId)
+      expect(history[1].turnId).toBe(turn2.turnId)
+
+      // getRecentTurns returns most recent N
+      const recent = getRecentTurns(1)
+      expect(recent.length).toBe(1)
+      expect(recent[0].turnId).toBe(turn2.turnId)
+
+      const stats = getMultiTurnStats()
+      expect(stats.totalTurns).toBe(2)
+      expect(stats.totalTokens).toBeGreaterThan(0)
+    })
+  })
+
   beforeEach(async () => {
     await acquireSharedMutationLock('utils/multiTurnContext.test.ts')
     createMultiTurnTracker()

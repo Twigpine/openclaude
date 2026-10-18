@@ -5,6 +5,7 @@ import { SITE } from '../../data/site'
 const toc = [
   { id: 'requirements', label: 'requirements' },
   { id: 'install', label: 'install with npm' },
+  { id: 'upgrading-from-gitlawb', label: 'upgrading from @gitlawb' },
   { id: 'arch-linux', label: 'arch linux (aur)' },
   { id: 'verify', label: 'verify the install' },
   { id: 'update', label: 'update' },
@@ -21,7 +22,7 @@ const toc = [
 >
   <h2 id="requirements">requirements</h2>
   <ul>
-    <li><strong>Node.js 20 or newer</strong> — grab it from <a href="https://nodejs.org/" rel="noopener">nodejs.org</a> and confirm with <code>node --version</code>.</li>
+    <li><strong>Node.js 22 or newer</strong> — grab it from <a href="https://nodejs.org/" rel="noopener">nodejs.org</a> and confirm with <code>node --version</code>.</li>
     <li>A terminal: Terminal/iTerm on macOS, any shell on Linux, PowerShell or Windows Terminal on Windows.</li>
     <li><code>ripgrep</code> is bundled; if startup reports <code>ripgrep not found</code>, install it system-wide and confirm <code>rg --version</code> works.</li>
   </ul>
@@ -32,6 +33,22 @@ const toc = [
     This installs the <code>openclaude</code> binary globally. On macOS/Linux you may need
     a Node installation that doesn't require <code>sudo</code> for global installs (nvm,
     fnm, or Homebrew node all work).
+  </p>
+
+  <h2 id="upgrading-from-gitlawb">upgrading from @gitlawb/openclaude</h2>
+  <p>
+    The package moved to the <code>@twigpine</code> scope and the old one is no longer
+    updated. Both packages provide the <code>openclaude</code> command, so npm refuses to
+    install one over the other. Remove the old package first:
+  </p>
+  <pre><code>npm uninstall -g @gitlawb/openclaude
+{SITE.installCommand}</code></pre>
+  <p>
+    Your settings and sessions (<code>~/.openclaude</code> and
+    <code>~/.openclaude.json</code>) are not touched. Don't use <code>--force</code> to
+    install over the old package instead: a later uninstall of the old one would then
+    remove the <code>openclaude</code> command. If that happens, uninstall
+    <code>@twigpine/openclaude</code> and install it again.
   </p>
 
   <h2 id="arch-linux">arch linux (aur)</h2>
@@ -45,7 +62,7 @@ const toc = [
   <p>
     To check which version is the latest published release:
   </p>
-  <pre><code>npm view @gitlawb/openclaude dist-tags</code></pre>
+  <pre><code>npm view @twigpine/openclaude dist-tags</code></pre>
 
   <h2 id="update">update</h2>
   <p>Re-run the install command — <code>@latest</code> always resolves to the newest release:</p>

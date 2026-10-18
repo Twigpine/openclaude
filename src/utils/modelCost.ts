@@ -3,6 +3,7 @@ import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from 
 import { logEvent } from 'src/services/analytics/index.js'
 import { setHasUnknownModelCost } from '../bootstrap/state.js'
 import { isFastModeEnabled } from './fastMode.js'
+import { getModelPricingOverride } from './settings/modelPricing.js'
 import {
   CLAUDE_3_5_HAIKU_CONFIG,
   CLAUDE_3_5_V2_SONNET_CONFIG,
@@ -87,7 +88,7 @@ export const COST_HAIKU_45 = {
   webSearchRequests: 0.01,
 } as const satisfies ModelCosts
 
-const DEFAULT_UNKNOWN_MODEL_COST = COST_TIER_5_25
+export const DEFAULT_UNKNOWN_MODEL_COST = COST_TIER_5_25
 
 /**
  * Get the cost tier for Opus 4.6 based on fast mode.
@@ -146,7 +147,18 @@ function tokensToUSDCost(modelCosts: ModelCosts, usage: Usage): number {
   )
 }
 
-export function getModelCosts(model: string, usage: Usage): ModelCosts {
+function getKnownModelCosts(
+  model: string,
+  usage: { speed?: Usage['speed'] },
+): ModelCosts | undefined {
+  // Custom prices match the exact resolved model id before any canonical
+  // first-party fallback. This intentionally does not normalize case, aliases,
+  // prefixes, route names, or provider-specific identifiers.
+  const override = getModelPricingOverride(model)
+  if (override) {
+    return override
+  }
+
   const shortName = getCanonicalName(model)
 
   // Check if this is a fast-mode-capable Opus model (4.8/4.7/4.6) with fast mode
@@ -162,12 +174,25 @@ export function getModelCosts(model: string, usage: Usage): ModelCosts {
     return getOpus46CostTier(isFastMode)
   }
 
-  const costs = MODEL_COSTS[shortName]
-  if (!costs) {
-    trackUnknownModelCost(model, shortName)
-    return DEFAULT_UNKNOWN_MODEL_COST
+  // MODEL_COSTS is a plain object, so a bare `MODEL_COSTS[shortName]` inherits
+  // Object.prototype members: a model id like `constructor` or `__proto__`
+  // (arbitrary strings for custom/OpenAI-compatible providers, and lowercase so
+  // getCanonicalName passes them through unchanged) would return a truthy
+  // prototype value, skip the unknown-model path, and yield NaN costs downstream.
+  // Match on own properties only.
+  return Object.hasOwn(MODEL_COSTS, shortName)
+    ? MODEL_COSTS[shortName]
+    : undefined
+}
+
+export function getModelCosts(model: string, usage: Usage): ModelCosts {
+  const costs = getKnownModelCosts(model, usage)
+  if (costs) {
+    return costs
   }
-  return costs
+
+  trackUnknownModelCost(model, getCanonicalName(model))
+  return DEFAULT_UNKNOWN_MODEL_COST
 }
 
 function trackUnknownModelCost(model: string, shortName: ModelShortName): void {
@@ -231,9 +256,10 @@ export function formatModelPricing(costs: ModelCosts): string {
  * Accepts either a short name or full model name
  * Returns undefined if model is not found
  */
-export function getModelPricingString(model: string): string | undefined {
-  const shortName = getCanonicalName(model)
-  const costs = MODEL_COSTS[shortName]
-  if (!costs) return undefined
-  return formatModelPricing(costs)
+export function getModelPricingString(
+  model: string,
+  usage: { speed?: Usage['speed'] } = {},
+): string | undefined {
+  const costs = getKnownModelCosts(model, usage)
+  return costs ? formatModelPricing(costs) : undefined
 }

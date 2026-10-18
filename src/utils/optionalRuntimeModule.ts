@@ -15,7 +15,7 @@
 const runtimeImport = new Function(
   'specifier',
   'return import(specifier)',
-) as (specifier: string) => Promise<any>
+) as (specifier: string) => Promise<unknown>
 
 export class OptionalRuntimeModuleUnavailableError extends Error {
   constructor(
@@ -37,7 +37,7 @@ export function isOptionalRuntimeModuleUnavailableError(
 }
 
 /** Raw runtime import — rejects with the underlying error if the module is missing. */
-export function importRuntimeModule(specifier: string): Promise<any> {
+export function importRuntimeModule(specifier: string): Promise<unknown> {
   return runtimeImport(specifier)
 }
 

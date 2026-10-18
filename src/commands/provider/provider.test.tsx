@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import React from 'react'
 import { stripVTControlCharacters as stripAnsi } from 'node:util'
 
-import { createRoot, render, useApp } from '../../ink.js'
+import { type Instance, createRoot, render, useApp } from '../../ink.js'
 import { AppStateProvider } from '../../state/AppState.js'
 import {
   applySavedProfileToCurrentSession,
@@ -12,6 +12,7 @@ import {
   buildCurrentProviderSummary,
   buildProfileSaveMessage,
   buildProviderManagerCompletion,
+  CodexCredentialStep,
   getProviderWizardDefaults,
   ProviderWizard,
   TextEntryDialog,
@@ -63,8 +64,9 @@ function extractLastFrame(output: string): string {
   return lastFrame ?? output
 }
 
-async function renderFinalFrame(node: React.ReactNode): Promise<string> {
-  let output = ''
+async function renderFinalFrame(
+  node: React.ReactNode,
+): Promise<{ output: string; instance: Instance }> {
   const { stdout, stdin, getOutput } = createTestStreams()
 
   const instance = await render(node, {
@@ -78,7 +80,7 @@ async function renderFinalFrame(node: React.ReactNode): Promise<string> {
     instance.waitUntilExit(),
     new Promise<void>(resolve => setTimeout(resolve, 3000)),
   ])
-  return stripAnsi(extractLastFrame(getOutput()))
+  return { output: stripAnsi(extractLastFrame(getOutput())), instance }
 }
 
 async function waitForOutput(
@@ -226,7 +228,7 @@ function StepChangeHarness(): React.ReactNode {
 }
 
 test('TextEntryDialog resets its input state when initialValue changes', async () => {
-  const output = await renderFinalFrame(<StepChangeHarness />)
+  const { output } = await renderFinalFrame(<StepChangeHarness />)
 
   expect(output).toContain('Model step')
   expect(output).toContain('fresh-model-name')
@@ -768,6 +770,35 @@ test('getProviderWizardDefaults ignores poisoned current provider values', () =>
   expect(defaults.openAIModel).toBe('gpt-4o')
   expect(defaults.openAIBaseUrl).toBe('https://api.openai.com/v1')
   expect(defaults.geminiModel).toBe('gemini-3-flash-preview')
+})
+
+test('CodexCredentialStep renders the codexplan Sol description', async () => {
+  const previousApiKey = process.env.CODEX_API_KEY
+  const previousAccountId = process.env.CHATGPT_ACCOUNT_ID
+  let instance: Instance | undefined
+  try {
+    process.env.CODEX_API_KEY = 'codex-test-key'
+    process.env.CHATGPT_ACCOUNT_ID = 'acct_test'
+    const result = await renderFinalFrame(
+      <CodexCredentialStep
+        onSave={() => {}}
+        onBack={() => {}}
+        onCancel={() => {}}
+      />,
+    )
+    instance = result.instance
+
+    expect(result.output).toContain(
+      'GPT-5.6 Sol with higher reasoning on the Codex backend',
+    )
+  } finally {
+    instance?.unmount()
+    if (previousApiKey === undefined) delete process.env.CODEX_API_KEY
+    else process.env.CODEX_API_KEY = previousApiKey
+
+    if (previousAccountId === undefined) delete process.env.CHATGPT_ACCOUNT_ID
+    else process.env.CHATGPT_ACCOUNT_ID = previousAccountId
+  }
 })
 
 test('ProviderWizard hides Codex OAuth while running in bare mode', async () => {

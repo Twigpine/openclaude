@@ -1,4 +1,5 @@
 import { dirname } from 'path'
+import { getErrnoCode } from './errors.js'
 import { getFsImplementation } from './fsOperations.js'
 import { jsonStringify } from './slowOperations.js'
 
@@ -9,6 +10,40 @@ type DiagnosticLogEntry = {
   level: DiagnosticLogLevel
   event: string
   data: Record<string, unknown>
+}
+
+export type DiagnosticAppendResult =
+  | 'committed'
+  | 'unsupported'
+  | 'retryable_failure'
+  | 'uncertain_failure'
+
+/**
+ * Append already-sanitized diagnostic records to an explicit file.
+ *
+ * This is the shared filesystem boundary for opt-in diagnostic streams. Callers
+ * must rebuild records from an allowlist before using it; arbitrary runtime
+ * objects, messages, prompts, and file paths are not safe inputs.
+ */
+export async function appendDiagnosticsNoPII(
+  logFile: string,
+  entries: readonly Record<string, unknown>[],
+): Promise<DiagnosticAppendResult> {
+  if (entries.length === 0) return 'committed'
+  // Node exposes the descriptor-relative namespace required by the secure
+  // append implementation through /proc/self/fd on Linux only.
+  if (process.platform !== 'linux') return 'unsupported'
+
+  try {
+    const fs = getFsImplementation()
+    const lines = entries.map(entry => jsonStringify(entry)).join('\n') + '\n'
+    await fs.appendRegularFile(logFile, lines, { mode: 0o600 })
+    return 'committed'
+  } catch (error) {
+    return getErrnoCode(error) === 'ERR_DIAGNOSTIC_APPEND_UNCERTAIN'
+      ? 'uncertain_failure'
+      : 'retryable_failure'
+  }
 }
 
 /**
@@ -46,12 +81,12 @@ export function logForDiagnosticsNoPII(
   try {
     fs.appendFileSync(logFile, line)
   } catch {
-    // If append fails, try creating the directory first
+    // Preserve the legacy diagnostic logger's append-through-symlink contract.
     try {
       fs.mkdirSync(dirname(logFile))
       fs.appendFileSync(logFile, line)
     } catch {
-      // Silently fail if logging is not possible
+      // Silently fail if logging is not possible.
     }
   }
 }

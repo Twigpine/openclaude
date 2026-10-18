@@ -5,7 +5,7 @@ This page documents optional PowerShell helper functions for launching OpenClaud
 These helpers are designed for the installed package workflow:
 
 ~~~powershell
-npm install -g @gitlawb/openclaude
+npm install -g @twigpine/openclaude
 ~~~
 
 The helpers use the installed `openclaude` CLI command. They do not require a source checkout and do not call source-only `bun run scripts/*.ts` entrypoints.
@@ -15,11 +15,11 @@ The helpers use the installed `openclaude` CLI command. They do not require a so
 Run this once in PowerShell:
 
 ~~~powershell
-$packageRoot = Join-Path (npm root -g) "@gitlawb/openclaude"
+$packageRoot = Join-Path (npm root -g) "@twigpine/openclaude"
 $aliases = Join-Path $packageRoot "scripts\windows\openclaude-aliases.ps1"
 
 if (-not (Test-Path $aliases)) {
-  throw "Alias script not found at $aliases. Update or reinstall @gitlawb/openclaude."
+  throw "Alias script not found at $aliases. Update or reinstall @twigpine/openclaude."
 }
 
 if (-not (Test-Path $PROFILE)) {
@@ -40,6 +40,20 @@ Open a new PowerShell window after setup, or dot-source the profile:
 
 ~~~powershell
 . $PROFILE
+~~~
+
+### Upgrading from `@gitlawb/openclaude`
+
+The setup above adds a line to `$PROFILE` that loads the helpers from the
+installed package folder. If you ran it while the package was still named
+`@gitlawb/openclaude`, that line points at a folder that no longer exists once
+you switch packages, and every new PowerShell window reports an error.
+
+After installing `@twigpine/openclaude`, remove the old line and run the
+one-time setup again:
+
+~~~powershell
+(Get-Content $PROFILE) | Where-Object { $_ -notmatch '@gitlawb[\\/]openclaude' } | Set-Content $PROFILE
 ~~~
 
 ## Daily commands

@@ -154,7 +154,7 @@ test('local OpenAI bootstrap falls back when route discovery has only static mod
   }
 })
 
-test('AIMLAPI discovery omits credentials on the public /models route', async () => {
+test('AIMLAPI discovery passes credentials and headers on the bootstrap route', async () => {
   const envKeys = [
     'ANTHROPIC_CUSTOM_HEADERS',
     'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
@@ -211,18 +211,83 @@ test('AIMLAPI discovery omits credentials on the public /models route', async ()
       },
     })
 
-    // Public `/models`: no apiKey and no env-sourced headers reach the probe;
-    // only the route's attribution headers ride along on the fallback.
-    expect(discoveryOptions?.apiKey).toBeUndefined()
-    expect(discoveryOptions?.headers).toBeUndefined()
-    expect(fallbackOptions?.apiKey).toBeUndefined()
+    expect(discoveryOptions?.apiKey).toBe('sk-aimlapi-test')
+    expect(discoveryOptions?.headers).toEqual({
+      Authorization: 'Bearer leaked',
+      'X-API-Key': 'leaked-key',
+    })
+    expect(fallbackOptions?.apiKey).toBe('sk-aimlapi-test')
     expect(fallbackOptions?.headers).toEqual({
+      'X-AIMLAPI-Source': 'agent/openclaude',
       'X-AIMLAPI-Partner-ID': 'part_62yQoGYDq4Yqnrj2R1iGrDNJ',
-      'X-AIMLAPI-Integration-Repo': 'Gitlawb/openclaude',
+      'X-AIMLAPI-Integration-Repo': 'Twigpine/openclaude',
       'X-AIMLAPI-Integration-Version': publicBuildVersion,
       'HTTP-Referer': 'OpenClaude',
       'X-Title': 'OpenClaude',
+      Authorization: 'Bearer leaked',
+      'X-API-Key': 'leaked-key',
     })
+  } finally {
+    for (const key of envKeys) {
+      const value = savedEnv.get(key)
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+  }
+})
+
+test('OpenGateway discovery filters expired models from bootstrap additionalModelOptions', async () => {
+  const envKeys = [
+    'ANTHROPIC_CUSTOM_HEADERS',
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+    'CLAUDE_CODE_USE_OPENAI',
+    'OPENAI_API_KEY',
+    'OPENAI_API_KEYS',
+    'OPENAI_BASE_URL',
+    'OPENAI_MODEL',
+    'OPENGATEWAY_API_KEY',
+  ] as const
+  const savedEnv = new Map<string, string | undefined>(
+    envKeys.map(key => [key, process.env[key]]),
+  )
+
+  try {
+    delete process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://opengateway.gitlawb.com/v1'
+    process.env.OPENAI_MODEL = 'auto'
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_API_KEYS
+    delete process.env.OPENGATEWAY_API_KEY
+
+    const payload = await fetchLocalOpenAIModelOptions({
+      getAdditionalModelOptionsCacheScope: () =>
+        'openai:https://opengateway.gitlawb.com/v1',
+      resolveProviderRequest: () =>
+        ({
+          baseUrl: 'https://opengateway.gitlawb.com/v1',
+        }) as ReturnType<typeof import('./providerConfig.js').resolveProviderRequest>,
+      discoverModelsForRoute: async () => ({
+        routeId: 'gitlawb-opengateway',
+        models: [
+          { id: 'mimo-v2.5-pro', apiName: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro' },
+          { id: 'moonshotai/kimi-k3', apiName: 'moonshotai/kimi-k3', label: 'Kimi K3' },
+        ],
+        discoveredModelCount: 2,
+        stale: false,
+        error: null,
+        source: 'network',
+      }),
+      listOpenAICompatibleModels: async () => ['mimo-v2.5-pro', 'moonshotai/kimi-k3'],
+    })
+
+    const modelValues = payload?.additionalModelOptions.map(opt => opt.value)
+    expect(modelValues).toContain('mimo-v2.5-pro')
+    expect(modelValues).toContain('moonshotai/kimi-k3')
+    expect(modelValues).not.toContain('inclusionai/ling-3.0-tiny:free')
   } finally {
     for (const key of envKeys) {
       const value = savedEnv.get(key)

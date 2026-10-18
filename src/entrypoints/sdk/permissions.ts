@@ -449,10 +449,22 @@ export function createExternalCanUseTool(
         'Denying by default. Provide a canUseTool callback or respond to permission_request ' +
         'messages within the timeout window.',
       )
-      permissionTarget.denyPendingPermission(
-        toolUseID,
-        `SDK: Permission resolution timed out for tool "${tool.name}". Pass canUseTool in options to control tool permissions.`,
-      )
+      const timeoutMessage = `SDK: Permission resolution timed out for tool "${tool.name}". Pass canUseTool in options to control tool permissions.`
+      permissionTarget.denyPendingPermission(toolUseID, timeoutMessage)
+      // Return the timeout decision rather than falling through. The deny above
+      // resolves the promise registered by registerPendingPermission, but the
+      // race has already settled with {timedOut: true}, so nothing is awaiting
+      // it -- the decision would be discarded. The fallback is
+      // createDefaultCanUseTool, whose contract is "the host provided no
+      // permission callback at all": it reports that as the reason the tool was
+      // denied even though onPermissionRequest was wired up, and it burns the
+      // one-shot warning latch so a genuinely misconfigured later query in the
+      // same process is never warned.
+      return {
+        behavior: 'deny' as const,
+        message: timeoutMessage,
+        decisionReason: { type: 'mode' as const, mode: 'default' },
+      }
     }
 
     // No callback or no toolUseID — fall through to default permission logic

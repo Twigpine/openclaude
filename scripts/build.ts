@@ -18,6 +18,10 @@ import { canonicalStub, collectBundleStubs } from './stubMarkerGuard.js'
 const nodeRequire = createRequire(import.meta.url)
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
 const version = pkg.version
+// Baked into the update hints and the doctor checks, so it has to be the
+// name the tarball is actually published under — derive it instead of
+// repeating it.
+const packageName = pkg.name
 const reactPackageDir = dirname(nodeRequire.resolve('react/package.json'))
 const reactReconcilerPackageDir = dirname(
   nodeRequire.resolve('react-reconciler/package.json'),
@@ -127,6 +131,8 @@ const featureFlags: Record<string, boolean> = {
   VERIFICATION_AGENT: true,           // Built-in read-only agent for test/verification
   PROMPT_CACHE_BREAK_DETECTION: true, // Detect & log unexpected prompt cache invalidations
   HOOK_PROMPTS: true,                 // Allow tools to request interactive user prompts
+  CONVERSATION_ARC: true,             // Conversation arc tracking (goals/decisions/phases)
+  MULTI_TURN_CONTEXT: true,           // Multi-turn context tracking across tool cycles
 }
 
 // ── Pre-process: replace feature() calls with boolean literals ──────
@@ -201,10 +207,10 @@ result = await Bun.build({
     'MACRO.DISPLAY_VERSION': JSON.stringify(version),
     'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
     'MACRO.ISSUES_EXPLAINER':
-      JSON.stringify('report the issue at https://github.com/Gitlawb/openclaude/issues'),
+      JSON.stringify('report the issue at https://github.com/Twigpine/openclaude/issues'),
     'MACRO.FEEDBACK_CHANNEL':
-      JSON.stringify('https://github.com/Gitlawb/openclaude/issues'),
-    'MACRO.PACKAGE_URL': JSON.stringify('@gitlawb/openclaude'),
+      JSON.stringify('https://github.com/Twigpine/openclaude/issues'),
+    'MACRO.PACKAGE_URL': JSON.stringify(packageName),
     'MACRO.NATIVE_PACKAGE_URL': 'undefined',
     'MACRO.VERSION_CHANGELOG': 'undefined',
   },
@@ -544,10 +550,10 @@ sdkResult = await Bun.build({
     'MACRO.DISPLAY_VERSION': JSON.stringify(version),
     'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
     'MACRO.ISSUES_EXPLAINER':
-      JSON.stringify('report the issue at https://github.com/Gitlawb/openclaude/issues'),
+      JSON.stringify('report the issue at https://github.com/Twigpine/openclaude/issues'),
     'MACRO.FEEDBACK_CHANNEL':
-      JSON.stringify('https://github.com/Gitlawb/openclaude/issues'),
-    'MACRO.PACKAGE_URL': JSON.stringify('@gitlawb/openclaude'),
+      JSON.stringify('https://github.com/Twigpine/openclaude/issues'),
+    'MACRO.PACKAGE_URL': JSON.stringify(packageName),
     'MACRO.NATIVE_PACKAGE_URL': 'undefined',
     'MACRO.VERSION_CHANGELOG': 'undefined',
   },

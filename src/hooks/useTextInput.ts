@@ -7,6 +7,7 @@ import { addToHistory } from '../history.js'
 import type { Key } from '../ink.js'
 import type {
   InlineGhostText,
+  TextInputChangeContext,
   TextInputState,
 } from '../types/textInputTypes.js'
 import {
@@ -36,9 +37,191 @@ function mapInput(input_map: Array<[string, InputHandler]>): InputMapper {
   }
 }
 
+// Any Unicode combining mark (general category M) — covers Vietnamese
+// tone/breath marks plus marks outside the U+0300-U+036F block (Hebrew
+// points, Devanagari matras, ...) when an IME emits NFD instead of
+// precomposed forms.
+const COMBINING_MARK_RE = /^\p{M}/u
+
+export type ComposedTextEdit = {
+  text: string
+  offset: number
+}
+
+/**
+ * Compose a standalone combining mark (NFD input) onto the character before
+ * the cursor. Returns null when the input is not a combining mark or there
+ * is nothing to compose with (#2018).
+ */
+export function composeCombiningMark(
+  text: string,
+  offset: number,
+  input: string,
+): ComposedTextEdit | null {
+  if (!COMBINING_MARK_RE.test(input) || offset <= 0 || offset > text.length) {
+    return null
+  }
+  const newBefore = (text.slice(0, offset) + input).normalize('NFC')
+  return {
+    text: newBefore + text.slice(offset),
+    offset: newBefore.length,
+  }
+}
+
+/**
+ * Telex/VNI compose pattern: some IMEs/terminals deliver composition as a
+ * backspace-flagged event carrying the precomposed replacement character.
+ * Replace the previous character instead of treating the pair as delete
+ * plus literal insert. Returns null when the input is not a printable
+ * non-ASCII replacement (#2018).
+ */
+export function replacePreviousWithChar(
+  text: string,
+  offset: number,
+  input: string,
+): ComposedTextEdit | null {
+  if (
+    input.length !== 1 ||
+    (input.codePointAt(0) ?? 0) <= 127 ||
+    offset <= 0 ||
+    offset > text.length
+  ) {
+    return null
+  }
+  const newBefore = text.slice(0, offset - 1) + input
+  return {
+    text: (newBefore + text.slice(offset)).normalize('NFC'),
+    offset: newBefore.normalize('NFC').length,
+  }
+}
+
+export function prepareTextInputEvent(input: string): {
+  input: string
+  shouldSubmit: boolean
+} {
+  // SSH-coalesced Enter: on slow links, "o" + Enter can arrive as one
+  // chunk "o\r". Text with exactly one trailing \r is coalesced Enter;
+  // lone \r is Alt+Enter (newline), embedded \r is multi-line paste, and
+  // backslash+CR is a stale VS Code Shift+Enter binding.
+  const visibleInput = stripAnsi(input)
+  const shouldSubmit =
+    input.endsWith('\r') &&
+    visibleInput.length > 1 &&
+    !visibleInput.slice(0, -1).includes('\r') &&
+    visibleInput[visibleInput.length - 2] !== '\\'
+  const shouldStripTrailingCr =
+    visibleInput.endsWith('\r') &&
+    visibleInput.length > 1 &&
+    !['\\', '\r', '\n'].includes(visibleInput[visibleInput.length - 2]!)
+  const editableInput = shouldStripTrailingCr
+    ? input.endsWith('\r')
+      ? input.slice(0, -1)
+      : visibleInput.slice(0, -1)
+    : input
+
+  return {
+    input: editableInput.replace(/\r/g, '\n'),
+    shouldSubmit,
+  }
+}
+
+type ApplyPrintableInputOptions = {
+  modeCharacterIsText?: boolean
+  onModeCharacter?: (text: string, context: TextInputChangeContext) => void
+}
+
+export function applyPrintableInput(
+  cursor: Cursor,
+  input: string,
+  options: ApplyPrintableInputOptions = {},
+): MaybeCursor {
+  if (input === '\x1b[H' || input === '\x1b[1~') {
+    return cursor.startOfLine()
+  }
+  if (input === '\x1b[F' || input === '\x1b[4~') {
+    return cursor.endOfLine()
+  }
+
+  // Normalize to NFC so decomposed IME input composes into exactly what
+  // the cursor's MeasuredText stores, keeping returned offsets aligned
+  // when normalization shrinks code-unit length (#2018).
+  const text = stripAnsi(input).normalize('NFC')
+  if (
+    !options.modeCharacterIsText &&
+    cursor.text.length === 0 &&
+    cursor.isAtStart() &&
+    isInputModeCharacter(text)
+  ) {
+    options.onModeCharacter?.(text, {
+      previousValue: cursor.text,
+      cursorOffset: cursor.offset,
+    })
+    return undefined
+  }
+
+  return cursor.insert(text)
+}
+
+export function applyCoalescedDelInput(
+  cursor: Cursor,
+  input: string,
+  insert: (cursor: Cursor, text: string) => MaybeCursor,
+  onDelete?: (count: number, before: Cursor, after: Cursor) => void,
+): { cursor: Cursor; shouldCommit: boolean } {
+  let nextCursor = cursor
+  let segmentStart = 0
+  let shouldCommit = true
+
+  for (let index = 0; index < input.length; index++) {
+    // Both DEL bytes arrive from IMEs/terminals: \x7f is the common
+    // backspace, \b (Ctrl-H) is emitted by some Vietnamese IME setups.
+    if (input[index] !== '\x7f' && input[index] !== '\b') continue
+
+    if (index > segmentStart) {
+      const insertedCursor = insert(
+        nextCursor,
+        input.slice(segmentStart, index),
+      )
+      if (insertedCursor) {
+        nextCursor = insertedCursor
+        shouldCommit = true
+      } else {
+        shouldCommit = false
+      }
+    }
+
+    let delEnd = index + 1
+    while (
+      delEnd < input.length &&
+      (input[delEnd] === '\x7f' || input[delEnd] === '\b')
+    ) {
+      delEnd++
+    }
+    const delCount = delEnd - index
+    const beforeDelete = nextCursor
+    nextCursor = nextCursor.deleteManyBefore(delCount)
+    onDelete?.(delCount, beforeDelete, nextCursor)
+    shouldCommit = true
+    segmentStart = delEnd
+    index = delEnd - 1
+  }
+
+  if (segmentStart < input.length) {
+    const insertedCursor = insert(nextCursor, input.slice(segmentStart))
+    if (insertedCursor) {
+      nextCursor = insertedCursor
+      shouldCommit = true
+    } else {
+      shouldCommit = false
+    }
+  }
+
+  return { cursor: nextCursor, shouldCommit }
+}
+
 export type UseTextInputProps = {
   value: string
-  onChange: (value: string) => void
+  onChange: (value: string, context?: TextInputChangeContext) => void
   onSubmit?: (value: string) => void
   onExit?: () => void
   onExitMessage?: (show: boolean, key?: string) => void
@@ -142,7 +325,11 @@ export function useTextInput({
   const getLiveValue = (): string => liveValueRef.current
   const getLiveCursor = (): Cursor =>
     Cursor.fromText(liveValueRef.current, columns, liveOffsetRef.current)
-  const setValue = (nextValue: string, nextOffset = liveOffsetRef.current): void => {
+  const commitValue = (
+    nextValue: string,
+    nextOffset = liveOffsetRef.current,
+    changeContext?: TextInputChangeContext,
+  ): void => {
     const previousValue = liveValueRef.current
     const previousOffset = liveOffsetRef.current
 
@@ -152,13 +339,16 @@ export function useTextInput({
 
     updateRenderedInput(nextValue, nextOffset)
 
-    if (previousValue !== nextValue) {
-      onChange(nextValue)
-    }
-
     if (previousOffset !== nextOffset) {
       onOffsetChange(nextOffset)
     }
+
+    if (previousValue !== nextValue) {
+      onChange(nextValue, changeContext)
+    }
+  }
+  const setValue = (nextValue: string, nextOffset = liveOffsetRef.current): void => {
+    commitValue(nextValue, nextOffset)
   }
   const setOffset = (nextOffset: number): void => {
     if (nextOffset === liveOffsetRef.current) {
@@ -399,7 +589,11 @@ export function useTextInput({
     return cursor
   }
 
-  function mapKey(key: Key, cursor: Cursor): InputMapper {
+  function mapKey(
+    key: Key,
+    cursor: Cursor,
+    modeCharacterIsText = false,
+  ): InputMapper {
     switch (true) {
       case key.escape:
         return () => {
@@ -462,53 +656,16 @@ export function useTextInput({
         return () => cursor.left()
       case key.rightArrow:
         return () => cursor.right()
-      default: {
-        return function (input: string) {
-          switch (true) {
-            // Home key
-            case input === '\x1b[H' || input === '\x1b[1~':
-              return cursor.startOfLine()
-            // End key
-            case input === '\x1b[F' || input === '\x1b[4~':
-              return cursor.endOfLine()
-            default: {
-              // Trailing \r after text is SSH-coalesced Enter ("o\r") —
-              // strip it so the Enter isn't inserted as content. Lone \r
-              // here is Alt+Enter leaking through (META_KEY_CODE_RE doesn't
-              // match \x1b\r) — leave it for the \r→\n below. Embedded \r
-              // is multi-line paste from a terminal without bracketed
-              // paste — convert to \n. Backslash+\r is a stale VS Code
-              // Shift+Enter binding (pre-#8991 /terminal-setup wrote
-              // args.text "\\\r\n" to keybindings.json); keep the \r so
-              // it becomes \n below (anthropics/claude-code#31316).
-              const text = stripAnsi(input)
-                // eslint-disable-next-line custom-rules/no-lookbehind-regex -- .replace(re, str) on 1-2 char keystrokes: no-match returns same string (Object.is), regex never runs
-                .replace(/(?<=[^\\\r\n])\r$/, '')
-                .replace(/\r/g, '\n')
-              if (
-                cursor.text.length === 0 &&
-                cursor.isAtStart() &&
-                isInputModeCharacter(input)
-              ) {
-                // Issue #1179: emit the mode character as a one-shot
-                // onChange notification but do NOT advance the local cursor
-                // mirror. Returning undefined here means setValue is not
-                // called, so liveValueRef="" / liveOffsetRef=0 stay clean
-                // and the parent's strip handler operates on (and renders
-                // into) an empty buffer. Previous behaviour was
-                // `cursor.insert(text).left()` which left `!` in the local
-                // mirror, and because the parent's strip leaves controlled
-                // props numerically equal to what they were before the
-                // keystroke, useLayoutEffect never resynced the mirror — so
-                // the next character landed beside the retained `!`.
-                onChange(text)
-                return undefined
-              }
-              return cursor.insert(text)
-            }
-          }
-        }
-      }
+      default:
+        return input =>
+          applyPrintableInput(cursor, input, {
+            modeCharacterIsText,
+            // Issue #1179: emit the mode character as a one-shot onChange
+            // notification without inserting it into the local cursor. The
+            // effective pre-insertion cursor lets controlled consumers make
+            // the same decision after earlier edits in this raw event.
+            onModeCharacter: (text, context) => onChange(text, context),
+          })
     }
   }
 
@@ -540,25 +697,169 @@ export function useTextInput({
       return
     }
 
-    // Fix Issue #1853: Filter DEL characters that interfere with backspace in SSH/tmux
-    // In SSH/tmux environments, backspace generates both key events and raw DEL chars
-    if (!key.backspace && !key.delete && input.includes('\x7f')) {
-      const delCount = (input.match(/\x7f/g) || []).length
-
-      // Apply all DEL characters as backspace operations synchronously
-      // Try to delete tokens first, fall back to character backspace
-      let nextCursor = currentCursor
-      for (let i = 0; i < delCount; i++) {
-        nextCursor =
-          nextCursor.deleteTokenBefore() ?? nextCursor.backspace()
+    // Vietnamese/CJK IME composition paths (#2018). Both bypass the \r /
+    // coalesced-Enter handling in prepareTextInputEvent, so they only run
+    // on inputs that carry no carriage returns.
+    if (!filteredInput.includes('\r')) {
+      // Telex/VNI backspace+replacement compose: a backspace-flagged event
+      // carrying a printable non-ASCII character replaces the previous one
+      // (a → ă) instead of deleting it.
+      if (key.backspace && !key.ctrl && !key.meta) {
+        const replaced = replacePreviousWithChar(
+          currentCursor.text,
+          currentCursor.offset,
+          filteredInput,
+        )
+        if (replaced) {
+          resetKillAccumulation()
+          resetYankState()
+          setValue(replaced.text, replaced.offset)
+          return
+        }
       }
 
+      // Standalone combining mark (NFD input): compose onto the preceding
+      // character rather than inserting a bare mark that later renders,
+      // measures, and deletes as a separate unit.
+      const markComposed = composeCombiningMark(
+        currentCursor.text,
+        currentCursor.offset,
+        filteredInput,
+      )
+      if (markComposed) {
+        resetKillAccumulation()
+        resetYankState()
+        setValue(markComposed.text, markComposed.offset)
+        return
+      }
+    }
+
+    const preparedInput = prepareTextInputEvent(filteredInput)
+
+    // Fix Issue #1853: Filter DEL characters that interfere with backspace in SSH/tmux
+    // In SSH/tmux environments, backspace generates both key events and raw DEL chars.
+    // \b (Ctrl-H) is included because Vietnamese IME setups emit it as the
+    // backside of their Telex/VNI backspace+replacement compose pattern (#2018).
+    if (
+      !key.backspace &&
+      !key.delete &&
+      /[\x7f\b]/.test(filteredInput)
+    ) {
+      let finalChangeContext: TextInputChangeContext | undefined
+      let modeEntryChangeContext:
+        | {
+            context: TextInputChangeContext
+            character: string
+            representedInCursor: boolean
+          }
+        | undefined
+      const result = applyCoalescedDelInput(
+        currentCursor,
+        preparedInput.input,
+        (segmentCursor, segment) => {
+          const nextCursor = mapKey(
+            key,
+            segmentCursor,
+            preparedInput.shouldSubmit,
+          )(segment)
+          const visibleSegment = stripAnsi(segment)
+          const firstVisibleCharacter = visibleSegment[0]
+          if (
+            !modeEntryChangeContext &&
+            nextCursor &&
+            segmentCursor.text.length === 0 &&
+            segmentCursor.isAtStart() &&
+            firstVisibleCharacter !== undefined &&
+            isInputModeCharacter(firstVisibleCharacter)
+          ) {
+            modeEntryChangeContext = {
+              context: {
+                previousValue: segmentCursor.text,
+                cursorOffset: segmentCursor.offset,
+                willSubmit: preparedInput.shouldSubmit,
+              },
+              character: firstVisibleCharacter,
+              representedInCursor: true,
+            }
+          }
+          finalChangeContext =
+            nextCursor && nextCursor.text !== segmentCursor.text
+              ? {
+                  previousValue: segmentCursor.text,
+                  cursorOffset: segmentCursor.offset,
+                  willSubmit: preparedInput.shouldSubmit,
+                }
+              : undefined
+          return nextCursor
+        },
+        (_count, beforeDelete, afterDelete) => {
+          finalChangeContext = undefined
+          if (
+            modeEntryChangeContext?.representedInCursor &&
+            beforeDelete.text.startsWith(modeEntryChangeContext.character) &&
+            !afterDelete.text.startsWith(modeEntryChangeContext.character)
+          ) {
+            modeEntryChangeContext.representedInCursor = false
+          }
+        },
+      )
+
       // Update state once with the final result
-      if (!currentCursor.equals(nextCursor)) {
-        setValue(nextCursor.text, nextCursor.offset)
+      if (!currentCursor.equals(result.cursor)) {
+        if (result.shouldCommit) {
+          const changeContext = modeEntryChangeContext?.context ?? finalChangeContext
+          const committedCursor =
+            modeEntryChangeContext &&
+            !modeEntryChangeContext.representedInCursor
+              ? Cursor.fromText(
+                  modeEntryChangeContext.character + result.cursor.text,
+                  columns,
+                  modeEntryChangeContext.character.length +
+                    result.cursor.offset,
+                  )
+                : result.cursor
+          const acceptedCursor =
+            modeEntryChangeContext?.representedInCursor
+              ? Cursor.fromText(
+                  result.cursor.text.slice(
+                    modeEntryChangeContext.character.length,
+                  ),
+                  columns,
+                  Math.max(
+                    0,
+                    result.cursor.offset -
+                      modeEntryChangeContext.character.length,
+                  ),
+                )
+              : result.cursor
+          commitValue(
+            committedCursor.text,
+            committedCursor.offset,
+            changeContext,
+          )
+          if (modeEntryChangeContext) {
+            // onChange consumes the mode sentinel. Keep the synchronous mirror
+            // on that accepted value for later keys from the same stdin read.
+            updateRenderedInput(acceptedCursor.text, acceptedCursor.offset)
+          }
+        } else {
+          // A final mode-character notification owns the parent value update,
+          // but preceding DELs must still advance the synchronous local mirror.
+          const previousOffset = liveOffsetRef.current
+          updateRenderedInput(result.cursor.text, result.cursor.offset)
+          if (previousOffset !== result.cursor.offset) {
+            onOffsetChange(result.cursor.offset)
+          }
+        }
       }
       resetKillAccumulation()
       resetYankState()
+      if (result.shouldCommit && preparedInput.shouldSubmit) {
+        // committedCursor may contain a synthetic mode sentinel used only to
+        // notify onChange. Submit the actual final cursor; PromptInput carries
+        // the detected mode separately through its pending submission state.
+        onSubmit?.(result.cursor.text)
+      }
       return
     }
 
@@ -572,24 +873,26 @@ export function useTextInput({
       resetYankState()
     }
 
-    const nextCursor = mapKey(key, currentCursor)(filteredInput)
+    const nextCursor = mapKey(
+      key,
+      currentCursor,
+      preparedInput.shouldSubmit,
+    )(preparedInput.input)
     if (nextCursor) {
       if (!currentCursor.equals(nextCursor)) {
-        setValue(nextCursor.text, nextCursor.offset)
+        commitValue(
+          nextCursor.text,
+          nextCursor.offset,
+          preparedInput.shouldSubmit
+            ? {
+                previousValue: currentCursor.text,
+                cursorOffset: currentCursor.offset,
+                willSubmit: true,
+              }
+            : undefined,
+        )
       }
-      // SSH-coalesced Enter: on slow links, "o" + Enter can arrive as one
-      // chunk "o\r". parseKeypress only matches s === '\r', so it hit the
-      // default handler above (which stripped the trailing \r). Text with
-      // exactly one trailing \r is coalesced Enter; lone \r is Alt+Enter
-      // (newline); embedded \r is multi-line paste.
-      if (
-        filteredInput.length > 1 &&
-        filteredInput.endsWith('\r') &&
-        !filteredInput.slice(0, -1).includes('\r') &&
-        // Backslash+CR is a stale VS Code Shift+Enter binding, not
-        // coalesced Enter. See default handler above.
-        filteredInput[filteredInput.length - 2] !== '\\'
-      ) {
+      if (preparedInput.shouldSubmit) {
         onSubmit?.(nextCursor.text)
       }
     }
@@ -618,6 +921,7 @@ export function useTextInput({
     offset,
     setValue,
     setOffset,
+    getCursor: getLiveCursor,
     cursorLine: cursorPos.line - cursor.getViewportStartLine(maxVisibleLines),
     cursorColumn: cursorPos.column,
     viewportCharOffset: cursor.getViewportCharOffset(maxVisibleLines),

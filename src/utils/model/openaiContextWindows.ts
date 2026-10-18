@@ -9,8 +9,8 @@
  * This module only produces the *override candidates* (exact/prefix env-var
  * matches and the settings `modelLimits` match); it does not decide the overall
  * precedence. The authoritative runtime chain — exact env override, then the
- * catalog/discovery cache, then the prefix env override, then settings
- * `modelLimits`, then the descriptor default — is applied by
+ * built-in catalog, then the prefix env override, then settings `modelLimits`,
+ * then the discovery cache, then the descriptor default — is applied by
  * resolveModelRuntimeLimits in integrations/runtimeMetadata.ts. Keep precedence
  * changes there, not duplicated here.
  */
@@ -27,7 +27,7 @@ export type OpenAILimitOverrideMatches = {
   // settings.json `modelLimits` match (exact or prefix). Just a candidate here;
   // its position in the overall precedence is decided by resolveModelRuntimeLimits
   // (integrations/runtimeMetadata.ts), which applies settings after the exact and
-  // prefix env overrides and the catalog/discovery cache.
+  // prefix env overrides and catalog, but before the discovery cache.
   settings?: number
   // Prefix env-var override match.
   prefix?: number

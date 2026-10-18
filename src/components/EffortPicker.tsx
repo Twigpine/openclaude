@@ -34,7 +34,7 @@ type Props = {
 
 export function EffortPicker({ onSelect, onCancel }: Props) {
   const model = useMainLoopModel()
-  const appStateEffort = useAppState((s: any) => s.effortValue)
+  const appStateEffort = useAppState((s) => s.effortValue)
   const setAppState = useSetAppState()
   const provider = getAPIProvider()
   const usesOpenAIEffort = modelUsesOpenAIEffort(model)

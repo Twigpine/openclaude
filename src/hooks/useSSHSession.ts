@@ -28,6 +28,7 @@ import type { Message as MessageType } from '../types/message.js'
 import type { PermissionAskDecision } from '../types/permissions.js'
 import { logForDebugging } from '../utils/debug.js'
 import { gracefulShutdown } from '../utils/gracefulShutdown.js'
+import { tracePermissionAbortResolution } from '../utils/interruptionTrace.js'
 import type { RemoteMessageContent } from '../utils/teleport/api.js'
 
 type UseSSHSessionResult = {
@@ -121,7 +122,12 @@ export function useSSHSession({
           permissionResult,
           permissionPromptStartTimeMs: Date.now(),
           onUserInteraction() {},
-          onAbort() {
+          onAbort(source, causalEventId) {
+            tracePermissionAbortResolution(
+              source,
+              causalEventId,
+              'ssh_permission_bridge',
+            )
             manager.respondToPermissionRequest(requestId, {
               behavior: 'deny',
               message: 'User aborted',

@@ -22,11 +22,30 @@ import {
   getGateway,
   getVendor,
   isCloudflareBaseUrl,
+  isLongcatBaseUrl,
+  routeSupportsApiFormatSelection,
+  routeSupportsAuthHeaders,
   resolveProfileRoute,
   resolveRouteIdFromBaseUrl,
 } from '../integrations/index.js'
 import { PRESET_VENDOR_MAP } from '../integrations/compatibility.js'
+import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
+import {
+  isCanonicalApiRouteInferenceBaseUrl,
+  isCanonicalApismartInferenceBaseUrl,
+  isCanonicalConcentrateInferenceBaseUrl,
+  isCanonicalLlmtrInferenceBaseUrl,
+  isCanonicalCommandcodeInferenceBaseUrl,
+  isGmiCloudBaseUrl,
+  resolveActiveRouteIdFromEnv,
+} from '../integrations/routeMetadata.js'
+import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { isFirstPartyAnthropicBaseUrlForEnv } from './anthropicBaseUrl.js'
+import { parseModelFlagValue } from './cliArgs.js'
+import {
+  argsBeforeModelOwningSubcommand,
+  parseRootOptionValue,
+} from './printFlag.js'
 
 const PREFERRED_PROVIDER_ORDER = [
   'anthropic',
@@ -45,8 +64,10 @@ const PREFERRED_PROVIDER_ORDER = [
   'minimax',
   'venice',
   'atlas-cloud',
+  'gmi-cloud',
   'nearai',
   'fireworks',
+  'longcat',
 ] as const
 
 function buildValidProviders(): string[] {
@@ -85,11 +106,7 @@ let rememberedProviderFlag:
  * Returns null if the flag is absent or has no value.
  */
 export function parseProviderFlag(args: string[]): string | null {
-  const idx = args.indexOf('--provider')
-  if (idx === -1) return null
-  const value = args[idx + 1]
-  if (!value || value.startsWith('--')) return null
-  return value
+  return parseRootOptionValue(args, '--provider') ?? null
 }
 
 /**
@@ -106,7 +123,7 @@ export function applyProviderFlagFromArgs(
   if (!provider) return undefined
   const result = applyProviderFlag(provider, args)
   if (!result.error && options?.rememberForSettingsEnv) {
-    const model = parseModelFlag(args)
+    const model = parseProviderModelFlag(args)
     rememberedProviderFlag = model ? { provider, model } : { provider }
   }
   return result
@@ -134,11 +151,11 @@ export function clearRememberedProviderFlagForTests(): void {
  * Returns null if absent.
  */
 export function parseModelFlag(args: string[]): string | null {
-  const idx = args.indexOf('--model')
-  if (idx === -1) return null
-  const value = args[idx + 1]
-  if (!value || value.startsWith('--')) return null
-  return value
+  return parseModelFlagValue(args) ?? null
+}
+
+function parseProviderModelFlag(args: string[]): string | null {
+  return parseModelFlag(argsBeforeModelOwningSubcommand(args))
 }
 
 function getRouteDefaults(provider: string): {
@@ -166,7 +183,16 @@ function getRouteDefaults(provider: string): {
 
 function normalizeBaseUrlEnv(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
-  return trimmed && trimmed !== 'undefined' ? trimmed : undefined
+  if (!trimmed) {
+    return undefined
+  }
+  const normalized = trimmed.toLowerCase()
+  // dotenv / shell sentinels are not usable endpoints. Treating them as
+  // configured would preserve an invalid OPENAI_BASE_URL and block dedicated
+  // provider defaults (for example ApiSmart key mirroring).
+  return normalized === 'undefined' || normalized === 'null'
+    ? undefined
+    : trimmed
 }
 
 function getConfiguredOpenAIBaseUrl(): string | undefined {
@@ -188,7 +214,6 @@ function shouldReplaceStaleKnownBaseUrl(provider: string): boolean {
 
   const targetRouteId = resolveProfileRoute(provider).routeId
   return (
-    targetRouteId !== 'openai' &&
     targetRouteId !== 'custom' &&
     targetRouteId !== 'unknown-fallback' &&
     currentRouteId !== targetRouteId
@@ -226,6 +251,34 @@ function applyOpenAIBaseUrlDefault(provider: string, baseUrl?: string): void {
   }
 }
 
+function clearUnsupportedOpenAIShimSettings(routeId: string): void {
+  if (!routeSupportsApiFormatSelection(routeId)) {
+    delete process.env.OPENAI_API_FORMAT
+  }
+  if (!routeSupportsAuthHeaders(routeId)) {
+    delete process.env.OPENAI_AUTH_HEADER
+    delete process.env.OPENAI_AUTH_SCHEME
+    delete process.env.OPENAI_AUTH_HEADER_VALUE
+  }
+}
+
+function clearConcentrateProviderState(): void {
+  delete process.env.CONCENTRATE_API_KEY
+  delete process.env.CONCENTRATE_BASE_URL
+  delete process.env.CONCENTRATE_MODEL
+}
+
+function usableProviderModelEnvValue(
+  value: string | undefined,
+): string | undefined {
+  const trimmed = value?.trim()
+  if (!trimmed) return undefined
+  const normalized = trimmed.toLowerCase()
+  return normalized === 'undefined' || normalized === 'null'
+    ? undefined
+    : trimmed
+}
+
 /**
  * Apply --model (without --provider) to process.env for the current process only.
  *
@@ -240,10 +293,23 @@ function applyOpenAIBaseUrlDefault(provider: string, baseUrl?: string): void {
  * undefined when --model is absent or --provider is present (that path is
  * handled by applyProviderFlagFromArgs).
  */
-export function applyModelFlagFromArgs(args: string[]): void {
-  if (args.includes('--provider')) return
+export function applyModelFlagFromArgs(
+  args: string[],
+): { error?: string } | undefined {
+  if (parseProviderFlag(args)) return
   const model = parseModelFlag(args)
   if (!model) return
+
+  const activeRouteId = resolveActiveRouteIdFromEnv(process.env)
+  const effectiveModel =
+    activeRouteId === 'commandcode' && model === 'default'
+      ? getRouteDefaults('commandcode').defaultModel ?? model
+      : model
+
+  if (activeRouteId === 'commandcode') {
+    const error = getCommandcodeChatCompletionsModelError(effectiveModel)
+    if (error) return { error }
+  }
 
   const useGemini =
     process.env.CLAUDE_CODE_USE_GEMINI === '1' ||
@@ -259,14 +325,16 @@ export function applyModelFlagFromArgs(args: string[]): void {
     process.env.CLAUDE_CODE_USE_GITHUB === 'true'
 
   if (useGemini) {
-    process.env.GEMINI_MODEL = model
+    process.env.GEMINI_MODEL = effectiveModel
   } else if (useMistral) {
-    process.env.MISTRAL_MODEL = model
+    process.env.MISTRAL_MODEL = effectiveModel
   } else if (useOpenAI || useGithub) {
-    process.env.OPENAI_MODEL = model
+    process.env.OPENAI_MODEL = effectiveModel
   } else {
-    process.env.ANTHROPIC_MODEL = model
+    process.env.ANTHROPIC_MODEL = effectiveModel
   }
+
+  return {}
 }
 
 /**
@@ -287,6 +355,26 @@ export function applyProviderFlag(
     return {
       error: `Unknown provider "${provider}". Valid providers: ${VALID_PROVIDERS.join(', ')}`,
     }
+  }
+
+  const model = parseProviderModelFlag(args)
+  const { defaultBaseUrl, defaultModel } = getRouteDefaults(provider)
+  const effectiveModel =
+    provider === 'commandcode' && model === 'default'
+      ? defaultModel ?? model
+      : model
+  if (provider === 'commandcode') {
+    const currentBaseUrl = getConfiguredOpenAIBaseUrl()
+    const willUseCommandcodeEndpoint =
+      !currentBaseUrl ||
+      shouldReplaceStaleKnownBaseUrl(provider) ||
+      isCanonicalCommandcodeInferenceBaseUrl(currentBaseUrl)
+    const error = willUseCommandcodeEndpoint
+      ? getCommandcodeChatCompletionsModelError(
+          effectiveModel ?? process.env.OPENAI_MODEL ?? defaultModel,
+        )
+      : null
+    if (error) return { error }
   }
 
   const opengatewayApiKey = process.env.OPENGATEWAY_API_KEY?.trim()
@@ -313,12 +401,37 @@ export function applyProviderFlag(
                   : process.env.OPENAI_API_KEY !== undefined &&
                       process.env.OPENAI_API_KEY === process.env.ATLAS_CLOUD_API_KEY
                     ? 'atlas-cloud'
-                    : process.env.OPENAI_API_KEY !== undefined &&
-                        process.env.OPENAI_API_KEY === process.env.NEARAI_API_KEY
-                      ? 'nearai'
                       : process.env.OPENAI_API_KEY !== undefined &&
-                        process.env.OPENAI_API_KEY === process.env.FIREWORKS_API_KEY
-                      ? 'fireworks'
+                          process.env.OPENAI_API_KEY === process.env.GMI_API_KEY
+                        ? 'gmi-cloud'
+                      : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.APISMART_API_KEY
+                        ? 'apismart'
+                        : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.API_ROUTE_API_KEY
+                        ? 'api-route'
+                        : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.CONCENTRATE_API_KEY
+                        ? 'concentrate'
+                        : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.LLMTR_API_KEY
+                        ? 'llmtr'
+                        : process.env.OPENAI_API_KEY !== undefined &&
+                          (process.env.OPENAI_API_KEY === process.env.CMD_API_KEY ||
+                            process.env.OPENAI_API_KEY ===
+                              process.env.COMMANDCODE_API_KEY ||
+                            process.env.OPENAI_API_KEY ===
+                              process.env.COMMAND_CODE_API_KEY)
+                        ? 'commandcode'
+                        : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.NEARAI_API_KEY
+                        ? 'nearai'
+                        : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.FIREWORKS_API_KEY
+                        ? 'fireworks'
+                        : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.LONGCAT_API_KEY
+                        ? 'longcat'
                       : process.env.OPENAI_API_KEY !== undefined &&
                       opengatewayApiKey !== undefined &&
                       opengatewayApiKey.length > 0 &&
@@ -341,8 +454,12 @@ export function applyProviderFlag(
     delete process.env.OPENAI_API_KEY
   }
 
-  const model = parseModelFlag(args)
-  const { defaultBaseUrl, defaultModel } = getRouteDefaults(provider)
+  // Azure-style routing changes both request paths and authentication. It is
+  // only meaningful for an explicit OpenAI/Azure configuration, so never let
+  // it follow a provider switch to another OpenAI-compatible endpoint.
+  if (provider !== 'openai') {
+    delete process.env.OPENAI_AZURE_STYLE
+  }
 
   switch (provider) {
     case 'anthropic': {
@@ -357,6 +474,13 @@ export function applyProviderFlag(
       if (hadCustomAnthropicEndpoint) {
         delete process.env.ANTHROPIC_API_KEY
       }
+      // `--provider anthropic` is an explicit selection even though the
+      // default provider has no positive mode flag. Do not let a dedicated
+      // OpenAI-compatible env-only route override it later in startup.
+      delete process.env.APISMART_API_KEY
+      delete process.env.APISMART_MODEL
+      delete process.env.API_ROUTE_API_KEY
+      delete process.env.API_ROUTE_MODEL
       delete process.env.ANTHROPIC_AUTH_TOKEN
       delete process.env.ANTHROPIC_CUSTOM_HEADERS
       break
@@ -389,6 +513,7 @@ export function applyProviderFlag(
       delete process.env.OPENAI_API_BASE
       delete process.env.OPENAI_MODEL
       delete process.env.OPENAI_API_FORMAT
+      delete process.env.OPENAI_AZURE_STYLE
       delete process.env.OPENAI_AUTH_HEADER
       delete process.env.OPENAI_AUTH_SCHEME
       delete process.env.OPENAI_AUTH_HEADER_VALUE
@@ -398,7 +523,15 @@ export function applyProviderFlag(
 
     case 'openai':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
-      if (model) process.env.OPENAI_MODEL = model
+      // An explicit generic OpenAI selection must not be reclassified as a
+      // dedicated env-only gateway during client startup. Replace a previous
+      // known gateway endpoint, but preserve a user-supplied custom endpoint.
+      delete process.env.APISMART_API_KEY
+      delete process.env.APISMART_MODEL
+      delete process.env.API_ROUTE_API_KEY
+      delete process.env.API_ROUTE_MODEL
+      applyOpenAIBaseUrlDefault(provider, defaultBaseUrl)
+      if (effectiveModel) process.env.OPENAI_MODEL = effectiveModel
       break
 
     case 'gemini':
@@ -426,7 +559,10 @@ export function applyProviderFlag(
 
     case 'ollama':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
-      process.env.OPENAI_BASE_URL ??= defaultBaseUrl ?? 'http://localhost:11434/v1'
+      applyOpenAIBaseUrlDefault(
+        provider,
+        defaultBaseUrl ?? 'http://localhost:11434/v1',
+      )
       if (!process.env.OPENAI_API_KEY) {
         process.env.OPENAI_API_KEY = 'ollama'
       }
@@ -435,7 +571,10 @@ export function applyProviderFlag(
 
     case 'nvidia-nim':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
-      process.env.OPENAI_BASE_URL ??= defaultBaseUrl ?? 'https://integrate.api.nvidia.com/v1'
+      applyOpenAIBaseUrlDefault(
+        provider,
+        defaultBaseUrl ?? 'https://integrate.api.nvidia.com/v1',
+      )
       process.env.NVIDIA_NIM = '1'
       if (process.env.NVIDIA_API_KEY && !process.env.OPENAI_API_KEY) {
         process.env.OPENAI_API_KEY = process.env.NVIDIA_API_KEY
@@ -446,7 +585,10 @@ export function applyProviderFlag(
 
     case 'bankr':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
-      process.env.OPENAI_BASE_URL ??= defaultBaseUrl ?? 'https://llm.bankr.bot/v1'
+      applyOpenAIBaseUrlDefault(
+        provider,
+        defaultBaseUrl ?? 'https://llm.bankr.bot/v1',
+      )
       process.env.OPENAI_MODEL ??= 'claude-opus-4.6'
       if (model) process.env.OPENAI_MODEL = model
       if (process.env.BNKR_API_KEY && !process.env.OPENAI_API_KEY) {
@@ -459,6 +601,7 @@ export function applyProviderFlag(
       delete process.env.OPENAI_API_BASE
       delete process.env.OPENAI_MODEL
       delete process.env.OPENAI_API_FORMAT
+      delete process.env.OPENAI_AZURE_STYLE
       delete process.env.OPENAI_AUTH_HEADER
       delete process.env.OPENAI_AUTH_SCHEME
       delete process.env.OPENAI_AUTH_HEADER_VALUE
@@ -506,8 +649,8 @@ export function applyProviderFlag(
 
     case 'xai':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
-      process.env.OPENAI_BASE_URL ??= 'https://api.x.ai/v1'
-      process.env.OPENAI_MODEL ??= defaultModel ?? 'grok-4.3'
+      applyOpenAIBaseUrlDefault(provider, defaultBaseUrl ?? 'https://api.x.ai/v1')
+      process.env.OPENAI_MODEL ??= defaultModel ?? 'grok-4.6'
       if (model) process.env.OPENAI_MODEL = model
       if (process.env.XAI_API_KEY && !process.env.OPENAI_API_KEY) {
         process.env.OPENAI_API_KEY = process.env.XAI_API_KEY
@@ -516,7 +659,10 @@ export function applyProviderFlag(
 
     case 'xiaomi-mimo':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
-      process.env.OPENAI_BASE_URL ??= defaultBaseUrl ?? 'https://api.xiaomimimo.com/v1'
+      applyOpenAIBaseUrlDefault(
+        provider,
+        defaultBaseUrl ?? 'https://api.xiaomimimo.com/v1',
+      )
       process.env.OPENAI_MODEL ??= defaultModel ?? 'mimo-v2.5-pro'
       if (model) process.env.OPENAI_MODEL = model
       if (process.env.MIMO_API_KEY && !process.env.OPENAI_API_KEY) {
@@ -539,7 +685,10 @@ export function applyProviderFlag(
 
     case 'venice':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
-      process.env.OPENAI_BASE_URL ??= defaultBaseUrl ?? 'https://api.venice.ai/api/v1'
+      applyOpenAIBaseUrlDefault(
+        provider,
+        defaultBaseUrl ?? 'https://api.venice.ai/api/v1',
+      )
       process.env.OPENAI_MODEL ??= defaultModel ?? 'venice-uncensored'
       if (model) process.env.OPENAI_MODEL = model
       if (process.env.VENICE_API_KEY && !process.env.OPENAI_API_KEY) {
@@ -566,6 +715,140 @@ export function applyProviderFlag(
       }
       break
 
+    case 'gmi-cloud':
+      process.env.CLAUDE_CODE_USE_OPENAI = '1'
+      // GMI Cloud is Bearer-only chat completions: drop an API format or
+      // custom auth header left over from another provider.
+      clearUnsupportedOpenAIShimSettings('gmi-cloud')
+      delete process.env.ANTHROPIC_CUSTOM_HEADERS
+      applyOpenAIBaseUrlDefault(
+        provider,
+        defaultBaseUrl ?? 'https://api.gmi-serving.com/v1',
+      )
+      {
+        const gmiModel = usableProviderModelEnvValue(process.env.GMI_MODEL)
+        if (gmiModel) {
+          process.env.OPENAI_MODEL = gmiModel
+        } else {
+          process.env.OPENAI_MODEL ??=
+            defaultModel ?? 'Qwen/Qwen3.8-Max'
+        }
+      }
+      if (model) process.env.OPENAI_MODEL = model
+      // DedicatedCredentialsOnly: only GMI_API_KEY authenticates this route.
+      // Mirror it into OPENAI_API_KEY for the shared shim transport, and clear
+      // any stale generic key so another provider's credential is never
+      // forwarded to GMI Cloud. A preserved custom base URL never receives
+      // the GMI key.
+      if (
+        process.env.GMI_API_KEY &&
+        isGmiCloudBaseUrl(getConfiguredOpenAIBaseUrl())
+      ) {
+        process.env.OPENAI_API_KEY = process.env.GMI_API_KEY
+      } else {
+        delete process.env.OPENAI_API_KEY
+      }
+      break
+
+    case 'apismart':
+      process.env.CLAUDE_CODE_USE_OPENAI = '1'
+      // Keep provider-flag selection on the same descriptor-declared wire
+      // contract as env-only setup and saved profiles. ApiSmart does not
+      // support alternate API formats or custom auth headers.
+      clearUnsupportedOpenAIShimSettings('apismart')
+      delete process.env.ANTHROPIC_CUSTOM_HEADERS
+      applyOpenAIBaseUrlDefault(
+        provider,
+        defaultBaseUrl ?? 'https://gw.apismart.ai/v1',
+      )
+      {
+        const apismartModel = usableProviderModelEnvValue(
+          process.env.APISMART_MODEL,
+        )
+        if (apismartModel) {
+          process.env.OPENAI_MODEL = apismartModel
+        } else {
+          process.env.OPENAI_MODEL ??=
+            usableProviderModelEnvValue(process.env.OPENAI_MODEL) ||
+            defaultModel ||
+            'DEEPSEEK_V4_FLASH'
+        }
+      }
+      if (model) {
+        process.env.OPENAI_MODEL = model
+        process.env.APISMART_MODEL = model
+      }
+      // DedicatedCredentialsOnly: only APISMART_API_KEY authenticates this
+      // route. Mirror it into OPENAI_API_KEY for the shared shim transport,
+      // and clear any stale generic key so another provider's credential is
+      // never forwarded to ApiSmart. Only the documented `/v1` inference URL
+      // is eligible for mirroring (AIMLAPI canonical-host parity).
+      if (
+        hasUsableOpenAICredential(process.env.APISMART_API_KEY) &&
+        isCanonicalApismartInferenceBaseUrl(getConfiguredOpenAIBaseUrl())
+      ) {
+        process.env.OPENAI_API_KEY = process.env.APISMART_API_KEY
+      } else {
+        delete process.env.OPENAI_API_KEY
+      }
+      break
+
+    case 'concentrate':
+      process.env.CLAUDE_CODE_USE_OPENAI = '1'
+      // Concentrate uses the standard OpenAI-compatible wire contract with no
+      // alternate API formats or custom auth headers.
+      clearUnsupportedOpenAIShimSettings('concentrate')
+      delete process.env.ANTHROPIC_CUSTOM_HEADERS
+      {
+        const baseUrlOverride = usableProviderModelEnvValue(
+          process.env.CONCENTRATE_BASE_URL,
+        )
+        if (baseUrlOverride) {
+          process.env.OPENAI_BASE_URL = baseUrlOverride
+        } else {
+          // An explicit Concentrate selection must not retain an unrelated
+          // custom OpenAI endpoint from the preceding provider. Users can
+          // deliberately select a different Concentrate endpoint through
+          // CONCENTRATE_BASE_URL above.
+          process.env.OPENAI_BASE_URL =
+            defaultBaseUrl ?? 'https://api.concentrate.ai/v1'
+        }
+      }
+      {
+        const concentrateModel = usableProviderModelEnvValue(
+          process.env.CONCENTRATE_MODEL,
+        )
+        if (concentrateModel) {
+          process.env.OPENAI_MODEL = concentrateModel
+        } else {
+          process.env.OPENAI_MODEL ??=
+            usableProviderModelEnvValue(process.env.OPENAI_MODEL) ||
+            defaultModel ||
+            'deepseek-v4-flash'
+        }
+      }
+      if (model) {
+        // Runtime model resolution gives CONCENTRATE_MODEL priority over the
+        // shared shim setting. An explicit CLI selection must supersede that
+        // ambient provider default all the way through client normalization.
+        delete process.env.CONCENTRATE_MODEL
+        process.env.OPENAI_MODEL = model
+      }
+      // This explicit dedicated selection mirrors CONCENTRATE_API_KEY into the
+      // shared shim transport and clears a stale generic key. A generic
+      // OpenAI-compatible Concentrate setup remains supported when selected
+      // through OPENAI_BASE_URL instead. Do not mirror the dedicated key to a
+      // same-host proxy or alternate path supplied through CONCENTRATE_BASE_URL.
+      if (
+        hasUsableOpenAICredential(process.env.CONCENTRATE_API_KEY) &&
+        isCanonicalConcentrateInferenceBaseUrl(getConfiguredOpenAIBaseUrl())
+      ) {
+        process.env.OPENAI_API_KEY = process.env.CONCENTRATE_API_KEY
+      } else {
+        delete process.env.OPENAI_API_KEY
+      }
+      break
+
     case 'fireworks':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
       applyOpenAIBaseUrlDefault(provider, defaultBaseUrl)
@@ -575,6 +858,34 @@ export function applyProviderFlag(
       if (model) process.env.OPENAI_MODEL = model
       if (process.env.FIREWORKS_API_KEY) {
         process.env.OPENAI_API_KEY = process.env.FIREWORKS_API_KEY
+      } else {
+        delete process.env.OPENAI_API_KEY
+      }
+      break
+
+    case 'longcat':
+      process.env.CLAUDE_CODE_USE_OPENAI = '1'
+      // LongCat only implements its documented chat-completions endpoint and
+      // Bearer authentication. Do not let stale OpenAI-compatible settings
+      // from a previously selected provider change that wire contract.
+      delete process.env.OPENAI_API_FORMAT
+      delete process.env.OPENAI_AUTH_HEADER
+      delete process.env.OPENAI_AUTH_SCHEME
+      delete process.env.OPENAI_AUTH_HEADER_VALUE
+      applyOpenAIBaseUrlDefault(
+        provider,
+        defaultBaseUrl ?? 'https://api.longcat.chat/openai/v1',
+      )
+      process.env.OPENAI_MODEL ??= defaultModel ?? 'LongCat-2.0'
+      if (model) process.env.OPENAI_MODEL = model
+      // Do not copy a dedicated LongCat credential to a stale custom URL.
+      // applyOpenAIBaseUrlDefault preserves an existing base URL, so only
+      // expose this key when that URL is the documented HTTPS LongCat API.
+      if (
+        process.env.LONGCAT_API_KEY &&
+        isLongcatBaseUrl(getConfiguredOpenAIBaseUrl())
+      ) {
+        process.env.OPENAI_API_KEY = process.env.LONGCAT_API_KEY
       } else {
         delete process.env.OPENAI_API_KEY
       }
@@ -621,11 +932,91 @@ export function applyProviderFlag(
     default:
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
       applyOpenAIBaseUrlDefault(provider, defaultBaseUrl)
+      if (
+        (provider === 'llmtr' &&
+          isCanonicalLlmtrInferenceBaseUrl(getConfiguredOpenAIBaseUrl())) ||
+        (provider === 'commandcode' &&
+          isCanonicalCommandcodeInferenceBaseUrl(getConfiguredOpenAIBaseUrl())) ||
+        (provider === 'api-route' &&
+          isCanonicalApiRouteInferenceBaseUrl(getConfiguredOpenAIBaseUrl()))
+      ) {
+        clearUnsupportedOpenAIShimSettings(provider)
+        delete process.env.ANTHROPIC_CUSTOM_HEADERS
+      }
+      // DedicatedCredentialsOnly: only Command Code-owned credential aliases
+      // authenticate this route. Mirror the resolved dedicated key into
+      // OPENAI_API_KEY for the shared shim, and clear any unrelated generic
+      // key so another provider's credential is never left in-process
+      // (spawn forwarding, copied-key switch-away, other OPENAI_API_KEY
+      // readers). LLMTR stays on the default generic-fallback path.
+      if (
+        provider === 'commandcode' &&
+        isCanonicalCommandcodeInferenceBaseUrl(getConfiguredOpenAIBaseUrl())
+      ) {
+        const dedicatedCommandcodeKey = hasUsableOpenAICredential(
+          process.env.CMD_API_KEY,
+        )
+          ? process.env.CMD_API_KEY
+          : hasUsableOpenAICredential(process.env.COMMANDCODE_API_KEY)
+            ? process.env.COMMANDCODE_API_KEY
+            : hasUsableOpenAICredential(process.env.COMMAND_CODE_API_KEY)
+              ? process.env.COMMAND_CODE_API_KEY
+              : undefined
+        if (dedicatedCommandcodeKey) {
+          process.env.OPENAI_API_KEY = dedicatedCommandcodeKey
+        } else {
+          delete process.env.OPENAI_API_KEY
+        }
+      }
+      if (
+        provider === 'api-route' &&
+        isCanonicalApiRouteInferenceBaseUrl(getConfiguredOpenAIBaseUrl())
+      ) {
+        const dedicatedApiRouteKey = hasUsableOpenAICredential(
+          process.env.API_ROUTE_API_KEY,
+        )
+          ? process.env.API_ROUTE_API_KEY
+          : undefined
+        if (dedicatedApiRouteKey) {
+          process.env.OPENAI_API_KEY = dedicatedApiRouteKey
+          delete process.env.OPENAI_API_KEYS
+        } else {
+          delete process.env.OPENAI_API_KEY
+        }
+      }
+      if (provider === 'api-route') {
+        const apiRouteModel = usableProviderModelEnvValue(
+          process.env.API_ROUTE_MODEL,
+        )
+        if (apiRouteModel) {
+          process.env.OPENAI_MODEL = apiRouteModel
+        } else {
+          process.env.OPENAI_MODEL ??=
+            usableProviderModelEnvValue(process.env.OPENAI_MODEL) ||
+            defaultModel ||
+            'claude-sonnet-4-6'
+        }
+      }
       if (defaultModel) {
         process.env.OPENAI_MODEL ??= defaultModel
       }
-      if (model) process.env.OPENAI_MODEL = model
+      if (effectiveModel) process.env.OPENAI_MODEL = effectiveModel
       break
+  }
+
+  // A provider flag selects a complete route for this process. Dedicated
+  // variables are another source of route identity, so leaving them
+  // behind can re-select a provider after a later OpenAI-compatible provider
+  // has applied its defaults. Keep their lifecycle at the selection boundary,
+  // rather than relying on individual switch branches to remember cleanup.
+  // This runs only after the selected branch succeeds, so an invalid
+  // custom-anthropic request remains non-mutating.
+  if (provider !== 'concentrate') {
+    clearConcentrateProviderState()
+  }
+  if (provider !== 'api-route') {
+    delete process.env.API_ROUTE_API_KEY
+    delete process.env.API_ROUTE_MODEL
   }
 
   return {}

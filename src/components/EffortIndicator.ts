@@ -3,6 +3,7 @@ import {
   EFFORT_LOW,
   EFFORT_MAX,
   EFFORT_MEDIUM,
+  EFFORT_ULTRACODE,
 } from '../constants/figures.js'
 import {
   type EffortLevel,
@@ -34,6 +35,8 @@ export function effortLevelToSymbol(level: EffortLevel): string {
       return EFFORT_HIGH
     case 'max':
       return EFFORT_MAX
+    case 'ultracode':
+      return EFFORT_ULTRACODE
     default:
       // Defensive: level can originate from remote config. If an unknown
       // value slips through, render the high symbol rather than undefined.

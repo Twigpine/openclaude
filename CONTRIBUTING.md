@@ -10,6 +10,7 @@ OpenClaude is a rapidly evolving open-source coding-agent CLI with support for m
 - [Proposing New Features](#proposing-new-features)
 - [Pull Requests](#pull-requests)
   - [Automated Review (CodeRabbit)](#automated-review-coderabbit)
+  - [Keep Your Branch Current](#keep-your-branch-current)
   - [PR Follow-Up Requirements](#pr-follow-up-requirements)
   - [Duplicate PRs](#duplicate-prs)
   - [What Gets Closed Without Review](#what-gets-closed-without-review)
@@ -25,8 +26,8 @@ OpenClaude is a rapidly evolving open-source coding-agent CLI with support for m
 
 ## Before You Start
 
-- Search existing [issues](https://github.com/Gitlawb/openclaude/issues) and [discussions](https://github.com/Gitlawb/openclaude/discussions) before opening a new thread.
-- Check [open pull requests](https://github.com/Gitlawb/openclaude/pulls) for work that overlaps with your contribution. If a PR already exists that addresses the same change, open an issue or discussion first to align on direction — duplicate PRs may be closed without review.
+- Search existing [issues](https://github.com/Twigpine/openclaude/issues) and [discussions](https://github.com/Twigpine/openclaude/discussions) before opening a new thread.
+- Check [open pull requests](https://github.com/Twigpine/openclaude/pulls) for work that overlaps with your contribution. If a PR already exists that addresses the same change, open an issue or discussion first to align on direction — duplicate PRs may be closed without review.
 - Use issues for confirmed bugs and actionable feature work.
 - Use discussions for setup help, ideas, and general community conversation.
 - For larger changes, open an issue first so the scope is clear before implementation.
@@ -52,7 +53,7 @@ Before opening a PR:
 - Read [`AGENTS.md`](AGENTS.md) for repo-specific coding-agent conventions, validation commands, provider guidance, and architecture rules.
 - Re-check open and recently closed PRs for duplicates.
 - Keep the branch focused on one issue or one clearly scoped improvement.
-- Run the narrowest meaningful validation command for the touched area.
+- Run narrow checks while iterating, then complete the required [Validation](#validation) contract before opening the PR.
 
 Every PR needs a reason. Your PR description must include:
 
@@ -74,9 +75,32 @@ We use [CodeRabbit](https://coderabbit.ai) to assist with PR reviews. CodeRabbit
 
 **PR authors must address CodeRabbit findings** — do not ignore its comments and wait for a maintainer override. If you're waiting for a maintainer review and CodeRabbit has completed its review with findings, fix those findings first. Maintainer reviews will not proceed until automated review feedback has been addressed.
 
+One important caveat: **verify each suggested change against your PR's stated scope and intent before applying it.** Automated reviewers can suggest fixes that accidentally force changes to surfaces you never intended to touch, or that quietly pull the PR away from its original framing. When a suggestion would cause that kind of drift:
+
+- you may decline it with a brief justification in the comment thread
+- when unsure whether a suggestion is in scope, ask a maintainer before applying or declining it
+
+Declining an out-of-scope suggestion with a clear reason is acceptable. Silently ignoring findings is not — every finding should end up either fixed, declined with justification, or escalated to a maintainer.
+
+### Keep Your Branch Current
+
+The PR author is responsible for keeping their branch current with `main`. Rebase onto `main` whenever you resume work on a PR, and before pushing follow-up fixes.
+
+Stale branches cause real problems: maintainers end up requesting fixes for issues that are already resolved on `main`, which produces endless fix-churn requests for work nobody needs to do again. A quick rebase before each update keeps review feedback relevant and avoids wasted rounds on both sides.
+
+Before rebasing an already-pushed PR branch, fetch the current remote PR head, record its exact commit SHA, and incorporate any commits that were added to the remote branch. Then fetch upstream `main` and rebase. Publish with an explicit lease pinned to the PR-head SHA you recorded, never an unguarded `--force` or an unqualified lease:
+
+```bash
+git push --force-with-lease=refs/heads/<pr-branch>:<recorded-pr-head-sha> <pr-remote> HEAD:refs/heads/<pr-branch>
+```
+
+Pinning the expected SHA prevents a background fetch from silently moving a remote-tracking ref and weakening the lease. If the lease is rejected, stop: fetch and inspect the new remote PR head, incorporate its commits, redo the rebase, and retry with that newly recorded SHA. If the branch is shared or does not allow force-pushes, coordinate with a maintainer and use a repository-approved non-rewriting update path instead of discarding remote work.
+
+Note that PRs with merge conflicts will not be reviewed or approved regardless (see [Pull Requests](#pull-requests)) — staying current prevents that state entirely.
+
 ### PR Follow-Up Requirements
 
-Submitting a PR is a commitment to see it through. Please be prepared to:
+Submitting a PR is a commitment to see it through to the end. Review here is in-depth and can take multiple rounds — do not be surprised if every review pass results in follow-up fix requests; that is the normal shape of this project's review process, not a signal that your PR is unwelcome. Please be prepared to:
 
 - **Respond to review feedback within 1 week** of a maintainer or CodeRabbit review request
 - **If you need more time**, leave a comment explaining your situation and expected timeline
@@ -84,12 +108,14 @@ Submitting a PR is a commitment to see it through. Please be prepared to:
 
 This policy ensures the project stays maintainable and that contributor queue doesn't grow stale. We understand life happens — a quick note explaining a delay goes a long way.
 
+If you find yourself getting fix requests on every round, treat that as a signal rather than noise: repeated findings on the same PR usually trace back to a core design issue, with each surface-level patch exposing another symptom. Investigate the root cause of what reviewers are flagging instead of patching the reported problem. And if you are driving the work with an AI agent, this is also the moment to re-evaluate how you are prompting it — vague or narrow prompts produce surface fixes; detailed instructions to investigate the requested change and its surrounding design produce fixes that hold up under review.
+
 ### Duplicate PRs
 
 We are proactive about closing duplicate PRs. Before submitting, **it is your responsibility to check** whether a similar PR already exists:
 
-- Search [open pull requests](https://github.com/Gitlawb/openclaude/pulls) for related work
-- Check [closed pull requests](https://github.com/Gitlawb/openclaude/pulls?q=is%3Apr+is%3Aclosed) to see if similar work was previously addressed or declined
+- Search [open pull requests](https://github.com/Twigpine/openclaude/pulls) for related work
+- Check [closed pull requests](https://github.com/Twigpine/openclaude/pulls?q=is%3Apr+is%3Aclosed) to see if similar work was previously addressed or declined
 - If you find an existing PR, engage in that thread rather than opening a new one
 
 Duplicate PRs will likely be closed without review or follow-up. This isn't personal — it's about keeping the review queue focused and efficient.
@@ -104,6 +130,7 @@ PRs may be closed without review if they:
 - drift from the approved scope of a linked issue
 - change the project's language, core runtime, or dependency stack without prior maintainer agreement
 - are drive-by contributions with no context, no tests, and no clear purpose
+- submit a PR with the [PR template](.github/pull_request_template.md) ignored — generic filler text or leftover template placeholders (`what changed`, `provider/model path tested:`, etc.) show the description was not written for your PR. These will not be reviewed until corrected and risk being closed without review
 - are automated bounty-hunting or mass-submitted PRs that provide little meaningful value to the codebase
 - are advertisements, sales pitches, or promotional submissions for a product or service — open an issue first to discuss with maintainers if you believe your product or service is relevant to this project
 
@@ -133,6 +160,7 @@ Dependency changes need a clear project benefit — fixing a bug, addressing a s
 - Preserve existing repo patterns unless the change is intentionally refactoring them.
 - Add or update tests when the change affects behavior.
 - Update docs when setup, commands, or user-facing behavior changes.
+- Website release notes live on GitHub Releases. Do not add manually maintained release-note data to the static site.
 
 AI-assisted and vibe-coded contributions are welcome, but please review your own changes thoroughly before opening a PR. Even frontier models produce subtle bugs, incorrect assumptions, and code that looks right but isn't.
 
@@ -149,6 +177,8 @@ Self-review up front saves everyone time and reduces back-and-forth during maint
 ## AI Agent Guidelines
 
 If you are an AI agent (Copilot, Cursor, Claude, etc.) working on this codebase, refer to [AGENTS.md](AGENTS.md) for project-specific coding guidelines, conventions, and validation commands. Following these guidelines will help your contributions align with the project's patterns and reduce review friction.
+
+In particular: link release-notes navigation to GitHub Releases rather than adding a local changelog page or manually maintained release data.
 
 ## Code Style
 
@@ -214,53 +244,87 @@ bun run dev:profile
 
 ## Validation
 
-CI runs the following checks on every PR. Run the relevant ones locally before pushing.
+CI runs a fixed set of checks on every PR (see `.github/workflows/pr-checks.yml`). This section is the **authoritative local pre-push validation contract** — `AGENTS.md` defers to it. **Run every locally applicable check before every push to an open PR, including follow-up pushes during review.** Do not wait for GitHub CI to discover failures you could have caught locally — wasted Actions minutes are a real cost on this repo.
 
-Full check (smoke + unit tests):
+The security scan requires the commit ancestry needed to find the PR's merge base. Check whether your clone is shallow:
 
 ```bash
+git rev-parse --is-shallow-repository
+```
+
+If that prints `true`, fetch the rest of the current branch's history before running the preflight (replace the default remote if your PR branch is tracked elsewhere):
+
+```bash
+git fetch --unshallow
+```
+
+Required local preflight:
+
+```bash
+bun install --frozen-lockfile
 bun run check
-```
-
-Full test pass (single concurrency, matches CI):
-
-```bash
-bun run test:full
-```
-
-Provider tests:
-
-```bash
-bun run test:provider
-```
-
-Provider recommendation tests:
-
-```bash
-bun run test:provider-recommendation
-```
-
-Typecheck (enforced by the dedicated `typecheck` CI job):
-
-```bash
 bun run typecheck
 bun run typecheck:type-tests
+node bin/openclaude --version
+bun run test:provider
+npm run test:provider-recommendation
+git fetch https://github.com/Twigpine/openclaude.git main
+bun run security:pr-scan -- --base FETCH_HEAD --head HEAD
 ```
 
-PR intent scan:
+Also run the compile-cache-disabled launcher check using the syntax for your shell.
+
+Bash, zsh, and similar shells:
 
 ```bash
-bun run security:pr-scan
+NODE_DISABLE_COMPILE_CACHE=1 node bin/openclaude --version
 ```
 
-Web (if touching `web/`):
+PowerShell:
+
+```powershell
+& {
+  $previousValue = [Environment]::GetEnvironmentVariable('NODE_DISABLE_COMPILE_CACHE', 'Process')
+  try {
+    $env:NODE_DISABLE_COMPILE_CACHE = '1'
+    node bin/openclaude --version
+    $launcherExitCode = $LASTEXITCODE
+    if ($launcherExitCode -ne 0) {
+      throw "Launcher compatibility check failed with exit code $launcherExitCode"
+    }
+  } finally {
+    [Environment]::SetEnvironmentVariable('NODE_DISABLE_COMPILE_CACHE', $previousValue, 'Process')
+  }
+}
+```
+
+If the PR can affect the website — including changes under `web/`, root or web dependency and lock files, shared site assets or content, or build/toolchain configuration used by the site — also run:
 
 ```bash
+bun install --cwd web --frozen-lockfile
 bun run web:typecheck
 bun run web:build
 ```
 
-PRs that fail CI checks will not be merged.
+Notes on the local preflight:
+
+- `bun run check` already builds the CLI and includes smoke, deadcode, and the full unit pass (`test:full`) — do not run those separately, or you execute work twice.
+- `bun run test` isolates each test file's globals and requires Bun's completed JUnit report as well as a successful exit. `test:full` runs all eight native Bun shards serially to release memory between groups, then applies the same completion check to the conversation-arc pass. Every shard must produce a complete report; a failed shard does not prevent the remaining shards from running. A test that terminates the runner early fails the command, even if it exits with code zero. Each shard has a ten-minute deadline (override with `--shard-timeout-ms=<milliseconds>`), reports its start/end and elapsed time, and kills its process group on timeout or cancellation. A timeout stops the remaining shards and exits nonzero. On Linux, shard output is relayed from temporary regular files to avoid Bun’s isolated-stdio pipe registration bug; diagnostics remain visible during execution. Temporary reports and logs are removed after the check. CI additionally caps each smoke/test job at 15 minutes and the other jobs at five minutes.
+- Fetching upstream `main` by URL avoids assuming that a fork checkout's `origin` points at Twigpine/openclaude. `FETCH_HEAD` is the fetched upstream tip. The scan deliberately uses local `HEAD` so it includes commits that have not been pushed yet; CI uses the pushed PR head SHA after the push.
+- The web CI job remains unconditional as an integration backstop. Contributors do not need to run the web suite locally for changes that cannot affect the site.
+- This preflight covers the same command families as CI, but it does not reproduce CI exactly in one shell. CI runs the main checks under Node 22 and 24.11.x, separately builds and launches under exact Node 22.0.0, and executes every job on a clean runner.
+
+If a local or GitHub CI check fails, first determine whether the PR owns the failure. Treat a failure as pre-existing only when you can reproduce it on the PR's current base (or link to the same failure on a current `main` CI run) and the PR neither changes the causal surface nor claims to fix that problem.
+
+For a verified pre-existing failure:
+
+- record the failing check, relevant output, and base commit or `main` CI run in the PR
+- note the pre-existing failure in the PR summary or testing notes so maintainers can track it separately; link an existing issue when one is already available
+- explain briefly why the failure is unrelated to the PR
+
+The contributor may then proceed and is not responsible for repairing that failure in the current PR. A maintainer may still need to rerun or waive a required GitHub check, or land the separate fix, before branch protection permits a merge. Failures caused by the PR, or in behavior the PR claims to fix, remain the author's responsibility and must be resolved.
+
+PRs with unresolved PR-owned CI failures will not be merged. Verified pre-existing failures follow the exception above.
 
 ### Recommended Local Checks
 

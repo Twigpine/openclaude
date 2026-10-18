@@ -275,7 +275,7 @@ export function extractHostFromSource(
  * @param pattern - The hostPattern entry from strictKnownMarketplaces
  * @returns true if the source's host matches the pattern
  */
-function doesSourceMatchHostPattern(
+export function doesSourceMatchHostPattern(
   source: MarketplaceSource,
   pattern: MarketplaceSource & { source: 'hostPattern' },
 ): boolean {
@@ -285,7 +285,16 @@ function doesSourceMatchHostPattern(
   }
 
   try {
-    const regex = new RegExp(pattern.hostPattern)
+    // Anchor the admin-supplied pattern so it must match the WHOLE host.
+    // `RegExp.test` is a substring search, so an unanchored pattern like
+    // `github\.mycompany\.com` also matches an attacker-controlled host such
+    // as `github.mycompany.com.evil.example` (or `evil-github.mycompany.com`),
+    // silently defeating the strictKnownMarketplaces allowlist. Host authority
+    // reads right-to-left, so a leading `^` alone is not sufficient either.
+    // The non-capturing group keeps a top-level alternation intact
+    // (`a\.com|b\.com` must not become `^a\.com|b\.com$`), and a pattern
+    // that is already fully anchored still behaves identically.
+    const regex = new RegExp(`^(?:${pattern.hostPattern})$`)
     return regex.test(host)
   } catch {
     // Invalid regex - log and return false

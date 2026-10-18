@@ -53,6 +53,7 @@ import { REPEATED_529_ERROR_MESSAGE, isOpenCodeGoQuotaError } from './errors.js'
 import { extractConnectionErrorDetails } from './errorUtils.js'
 import {
   extractOpenAICategoryMarker,
+  isOpenAIRequestNonReplayable,
   isRetryableOpenAICompatibilityFailureCategory,
 } from './openaiErrorClassification.js'
 
@@ -121,19 +122,21 @@ function isPersistentRetryEnabled(): boolean {
     : false
 }
 
-function isQuotaExhausted(error: any): boolean {
-  const msg = (error?.message || '').toLowerCase()
+function isQuotaExhausted(error: unknown): boolean {
+  const errObj = error as { message?: unknown; status?: unknown } | null | undefined
+  const msg = String(errObj?.message ?? '').toLowerCase()
+  const status = errObj?.status
 
   // OpenRouter (and other gateways) return 402 with instructions to adjust max_tokens.
   // If the 402 is retryable via token adjustment, do not treat it as exhausted.
-  if (error?.status === 402 && error instanceof APIError && parseOpenRouterAffordableMaxTokensError(error) !== undefined) {
+  if (status === 402 && error instanceof APIError && parseOpenRouterAffordableMaxTokensError(error) !== undefined) {
     return false
   }
 
   return (
-    error?.status === 402 ||
+    status === 402 ||
     msg.includes('quota_exhausted') ||
-    ((error?.status === 429 || error?.status === 403 || error?.status === 400) &&
+    ((status === 429 || status === 403 || status === 400) &&
       (msg.includes('limit: 0') ||
         msg.includes('exceeded your current quota') ||
         msg.includes('credit') ||
@@ -856,6 +859,10 @@ function shouldRetry(error: APIError, persistentRetryEnabled: boolean): boolean 
     return false
   }
 
+  if (isOpenAIRequestNonReplayable(error)) {
+    return false
+  }
+
   // OpenCode Go subscription quota exhaustion is terminal — retrying burns
   // the same 429 and confuses the user with repeated "mysterious stop"
   // failures. getAssistantMessageFromError surfaces the actionable message.
@@ -1007,8 +1014,10 @@ function validateRetryAttemptsEnvVar(
   if (!value) {
     return DEFAULT_MAX_RETRIES
   }
-  const parsed = parseInt(value, 10)
-  if (isNaN(parsed) || parsed < 0) {
+  const normalized = value.trim()
+  const isDecimalInteger = /^\d+$/.test(normalized)
+  const parsed = isDecimalInteger ? Number(normalized) : Number.NaN
+  if (!Number.isFinite(parsed)) {
     logForDebugging(
       `${envVarName} Invalid value "${value}" (using default: ${DEFAULT_MAX_RETRIES})`,
     )

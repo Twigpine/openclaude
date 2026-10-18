@@ -60,7 +60,10 @@ This policy applies to:
 
 - the Open Claude source code in this repository
 - official release artifacts published from this repository
-- the `@gitlawb/openclaude` npm package
+- the `@twigpine/openclaude` npm package
+
+The package was previously published as `@gitlawb/openclaude`. That name is no
+longer updated and receives no fixes; switch to `@twigpine/openclaude`.
 
 This policy does not cover:
 

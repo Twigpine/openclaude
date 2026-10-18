@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { rm } from 'fs'
-import { appendFile, copyFile, mkdir } from 'fs/promises'
+import { copyFile, mkdir } from 'fs/promises'
 import { dirname, isAbsolute, join, relative } from 'path'
 import { getCwdState } from '../../bootstrap/state.js'
 import type { CompletionBoundary } from '../../state/AppStateStore.js'
@@ -15,6 +15,10 @@ import { checkReadOnlyConstraints } from '../../tools/BashTool/readOnlyValidatio
 import type { SpeculationAcceptMessage } from '../../types/logs.js'
 import type { Message } from '../../types/message.js'
 import { createChildAbortController } from '../../utils/abortController.js'
+import {
+  createAttachmentMessage,
+  getUltrathinkEffortAttachment,
+} from '../../utils/attachments.js'
 import { count } from '../../utils/array.js'
 import { getGlobalConfig } from '../../utils/config.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -32,6 +36,7 @@ import {
 import { formatDuration, formatNumber } from '../../utils/format.js'
 import type { REPLHookContext } from '../../utils/hooks/postSamplingHooks.js'
 import { logError } from '../../utils/log.js'
+import { requestAbort } from '../../utils/interruptionTrace.js'
 import type { SetAppState } from '../../utils/messageQueueManager.js'
 import {
   createSystemMessage,
@@ -41,8 +46,7 @@ import {
 } from '../../utils/messages.js'
 import { getClaudeTempDir } from '../../utils/permissions/filesystem.js'
 import { extractReadFilesFromMessages } from '../../utils/queryHelpers.js'
-import { getTranscriptPath } from '../../utils/sessionStorage.js'
-import { jsonStringify } from '../../utils/slowOperations.js'
+import { recordSpeculationAccept } from '../../utils/sessionStorage.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -57,6 +61,17 @@ import {
 
 const MAX_SPECULATION_TURNS = 20
 const MAX_SPECULATION_MESSAGES = 100
+
+function requestSpeculationAbort(
+  controller: AbortController,
+  source: string,
+): void {
+  requestAbort(controller, undefined, {
+    source,
+    subsystem: 'prompt_suggestion',
+    controllerRole: 'speculation',
+  })
+}
 
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 const SAFE_READ_ONLY_TOOLS = new Set([
@@ -368,6 +383,11 @@ async function generatePipelinedSuggestion(
 
     const pipelineAbortController = createChildAbortController(
       parentAbortController,
+      undefined,
+      {
+        subsystem: 'prompt_suggestion',
+        controllerRole: 'suggestion-pipeline',
+      },
     )
     if (pipelineAbortController.signal.aborted) return
 
@@ -415,6 +435,11 @@ export async function startSpeculation(
 
   const abortController = createChildAbortController(
     context.toolUseContext.abortController,
+    undefined,
+    {
+      subsystem: 'prompt_suggestion',
+      controllerRole: 'speculation',
+    },
   )
 
   if (abortController.signal.aborted) return
@@ -439,7 +464,7 @@ export async function startSpeculation(
     speculation: {
       status: 'active',
       id,
-      abort: () => abortController.abort(),
+      abort: () => requestSpeculationAbort(abortController, 'speculation_cancelled'),
       startTime,
       messagesRef,
       writtenPathsRef,
@@ -454,8 +479,16 @@ export async function startSpeculation(
   logForDebugging(`[Speculation] Starting speculation ${id}`)
 
   try {
+    const promptMessages = [
+      createUserMessage({ content: suggestionText }),
+      // Prefetch must carry the effort to its provider request but is not a
+      // user activation. handleSpeculationAccept logs the real submission.
+      ...getUltrathinkEffortAttachment(suggestionText, false).map(
+        createAttachmentMessage,
+      ),
+    ]
     const result = await runForkedAgent({
-      promptMessages: [createUserMessage({ content: suggestionText })],
+      promptMessages,
       cacheSafeParams: cacheSafeParams ?? createCacheSafeParams(context),
       skipTranscript: true,
       canUseTool: async (tool, input) => {
@@ -484,7 +517,10 @@ export async function startSpeculation(
                 completedAt: Date.now(),
               },
             }))
-            abortController.abort()
+            requestSpeculationAbort(
+              abortController,
+              'speculation_edit_boundary',
+            )
             return denySpeculation(
               'Speculation paused: file edit requires permission',
               'speculation_edit_boundary',
@@ -588,7 +624,10 @@ export async function startSpeculation(
             updateActiveSpeculationState(setAppState, () => ({
               boundary: { type: 'bash', command, completedAt: Date.now() },
             }))
-            abortController.abort()
+            requestSpeculationAbort(
+              abortController,
+              'speculation_bash_boundary',
+            )
             return denySpeculation(
               'Speculation paused: bash boundary',
               'speculation_bash_boundary',
@@ -622,7 +661,7 @@ export async function startSpeculation(
             completedAt: Date.now(),
           },
         }))
-        abortController.abort()
+        requestSpeculationAbort(abortController, 'speculation_unknown_tool')
         return denySpeculation(
           `Tool ${tool.name} not allowed during speculation`,
           'speculation_unknown_tool',
@@ -636,7 +675,10 @@ export async function startSpeculation(
         if (msg.type === 'assistant' || msg.type === 'user') {
           messagesRef.current.push(msg)
           if (messagesRef.current.length >= MAX_SPECULATION_MESSAGES) {
-            abortController.abort()
+            requestSpeculationAbort(
+              abortController,
+              'speculation_message_limit',
+            )
           }
           if (isUserMessageWithArrayContent(msg)) {
             const newTools = count(
@@ -676,7 +718,7 @@ export async function startSpeculation(
       abortController,
     )
   } catch (error) {
-    abortController.abort()
+    requestSpeculationAbort(abortController, 'speculation_failure')
 
     if (error instanceof Error && error.name === 'AbortError') {
       safeRemoveOverlay(overlayPath)
@@ -785,11 +827,9 @@ export async function acceptSpeculation(
       timestamp: new Date().toISOString(),
       timeSavedMs,
     }
-    void appendFile(getTranscriptPath(), jsonStringify(entry) + '\n', {
-      mode: 0o600,
-    }).catch(() => {
+    void recordSpeculationAccept(entry).catch(() => {
       logForDebugging(
-        '[Speculation] Failed to write speculation-accept to transcript',
+        '[Speculation] Failed to queue speculation-accept for transcript',
       )
     })
   }
@@ -871,7 +911,13 @@ export async function handleSpeculationAccept(
 
     // Inject user message first for instant visual feedback before any async work
     const userMessage = createUserMessage({ content: input })
-    setMessages(prev => [...prev, userMessage])
+    // Accepted suggestions bypass processUserInput(), so create the same
+    // keyword attachment it normally would. This keeps the model reminder and
+    // the request-level effort override in query.ts aligned for this path.
+    const ultrathinkAttachments = getUltrathinkEffortAttachment(input).map(
+      createAttachmentMessage,
+    )
+    setMessages(prev => [...prev, userMessage, ...ultrathinkAttachments])
 
     const result = await acceptSpeculation(
       speculationState,
@@ -947,6 +993,7 @@ export async function handleSpeculationAccept(
         messages: [
           ...speculationState.contextRef.current.messages,
           createUserMessage({ content: input }),
+          ...ultrathinkAttachments,
           ...cleanMessages,
         ],
       }

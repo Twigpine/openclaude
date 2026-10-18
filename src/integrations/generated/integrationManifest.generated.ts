@@ -14,9 +14,9 @@ export const PROVIDER_PRESET_MANIFEST = [
     "routeId": "gitlawb-opengateway",
     "vendorId": "openai",
     "gatewayId": "gitlawb-opengateway",
-    "description": "Gitlawb Opengateway - (API key required, signup at https://gitlawb.com/opengateway/keys)",
-    "label": "Gitlawb Opengateway",
-    "name": "Gitlawb Opengateway",
+    "description": "Twigpine Opengateway - (API key required, signup at https://gitlawb.com/opengateway/keys)",
+    "label": "Twigpine Opengateway",
+    "name": "Twigpine Opengateway",
     "apiKeyEnvVars": [
       "OPENGATEWAY_API_KEY"
     ],
@@ -29,6 +29,24 @@ export const PROVIDER_PRESET_MANIFEST = [
     ],
     "fallbackBaseUrl": "https://opengateway.gitlawb.com/v1",
     "fallbackModel": "mimo-v2.5-pro",
+    "badge": {
+      "text": "Recommended",
+      "color": "success"
+    }
+  },
+  {
+    "preset": "aimlapi",
+    "routeKind": "gateway",
+    "routeId": "aimlapi",
+    "vendorId": "openai",
+    "gatewayId": "aimlapi",
+    "description": "1,000+ models OpenAI compatible endpoint",
+    "apiKeyEnvVars": [
+      "AIMLAPI_API_KEY"
+    ],
+    "modelEnvVars": [
+      "OPENAI_MODEL"
+    ],
     "badge": {
       "text": "Recommended",
       "color": "success"
@@ -51,24 +69,6 @@ export const PROVIDER_PRESET_MANIFEST = [
     ]
   },
   {
-    "preset": "aimlapi",
-    "routeKind": "gateway",
-    "routeId": "aimlapi",
-    "vendorId": "openai",
-    "gatewayId": "aimlapi",
-    "description": "1,000+ models OpenAI compatible endpoint",
-    "apiKeyEnvVars": [
-      "AIMLAPI_API_KEY"
-    ],
-    "modelEnvVars": [
-      "OPENAI_MODEL"
-    ],
-    "badge": {
-      "text": "Recommended",
-      "color": "success"
-    }
-  },
-  {
     "preset": "dashscope-cn",
     "routeKind": "gateway",
     "routeId": "dashscope-cn",
@@ -88,6 +88,36 @@ export const PROVIDER_PRESET_MANIFEST = [
     "description": "Alibaba DashScope International endpoint",
     "apiKeyEnvVars": [
       "DASHSCOPE_API_KEY"
+    ]
+  },
+  {
+    "preset": "api-route",
+    "routeKind": "gateway",
+    "routeId": "api-route",
+    "vendorId": "openai",
+    "gatewayId": "api-route",
+    "description": "API Route OpenAI-compatible multi-model gateway",
+    "apiKeyEnvVars": [
+      "API_ROUTE_API_KEY"
+    ],
+    "modelEnvVars": [
+      "API_ROUTE_MODEL",
+      "OPENAI_MODEL"
+    ]
+  },
+  {
+    "preset": "apismart",
+    "routeKind": "gateway",
+    "routeId": "apismart",
+    "vendorId": "openai",
+    "gatewayId": "apismart",
+    "description": "ApiSmart unified OpenAI-compatible gateway",
+    "apiKeyEnvVars": [
+      "APISMART_API_KEY"
+    ],
+    "modelEnvVars": [
+      "APISMART_MODEL",
+      "OPENAI_MODEL"
     ]
   },
   {
@@ -162,6 +192,40 @@ export const PROVIDER_PRESET_MANIFEST = [
     ]
   },
   {
+    "preset": "commandcode",
+    "routeKind": "gateway",
+    "routeId": "commandcode",
+    "vendorId": "openai",
+    "gatewayId": "commandcode",
+    "description": "Command Code hybrid OpenAI-compatible gateway",
+    "apiKeyEnvVars": [
+      "CMD_API_KEY",
+      "COMMANDCODE_API_KEY",
+      "COMMAND_CODE_API_KEY"
+    ],
+    "modelEnvVars": [
+      "OPENAI_MODEL"
+    ]
+  },
+  {
+    "preset": "concentrate",
+    "routeKind": "gateway",
+    "routeId": "concentrate",
+    "vendorId": "openai",
+    "gatewayId": "concentrate",
+    "description": "Concentrate AI — 150+ models via OpenAI-compatible API",
+    "apiKeyEnvVars": [
+      "CONCENTRATE_API_KEY"
+    ],
+    "baseUrlEnvVars": [
+      "CONCENTRATE_BASE_URL"
+    ],
+    "modelEnvVars": [
+      "CONCENTRATE_MODEL",
+      "OPENAI_MODEL"
+    ]
+  },
+  {
     "preset": "deepseek",
     "routeKind": "vendor",
     "routeId": "deepseek",
@@ -181,6 +245,21 @@ export const PROVIDER_PRESET_MANIFEST = [
       "FIREWORKS_API_KEY"
     ],
     "modelEnvVars": [
+      "OPENAI_MODEL"
+    ]
+  },
+  {
+    "preset": "gmi-cloud",
+    "routeKind": "gateway",
+    "routeId": "gmi-cloud",
+    "vendorId": "openai",
+    "gatewayId": "gmi-cloud",
+    "description": "GMI Cloud inference (OpenAI-compatible)",
+    "apiKeyEnvVars": [
+      "GMI_API_KEY"
+    ],
+    "modelEnvVars": [
+      "GMI_MODEL",
       "OPENAI_MODEL"
     ]
   },
@@ -220,6 +299,21 @@ export const PROVIDER_PRESET_MANIFEST = [
     ]
   },
   {
+    "preset": "llmtr",
+    "routeKind": "gateway",
+    "routeId": "llmtr",
+    "vendorId": "openai",
+    "gatewayId": "llmtr",
+    "description": "LLMTR OpenAI-compatible multi-model gateway",
+    "apiKeyEnvVars": [
+      "LLMTR_API_KEY",
+      "OPENAI_API_KEY"
+    ],
+    "modelEnvVars": [
+      "OPENAI_MODEL"
+    ]
+  },
+  {
     "preset": "lmstudio",
     "routeKind": "gateway",
     "routeId": "lmstudio",
@@ -248,6 +342,21 @@ export const PROVIDER_PRESET_MANIFEST = [
     "vendorId": "openai",
     "gatewayId": "ollama",
     "description": "Local or remote Ollama endpoint",
+    "modelEnvVars": [
+      "OPENAI_MODEL"
+    ]
+  },
+  {
+    "preset": "longcat",
+    "routeKind": "vendor",
+    "routeId": "longcat",
+    "vendorId": "longcat",
+    "description": "LongCat OpenAI-compatible API (Meituan)",
+    "label": "LongCat",
+    "name": "LongCat",
+    "apiKeyEnvVars": [
+      "LONGCAT_API_KEY"
+    ],
     "modelEnvVars": [
       "OPENAI_MODEL"
     ]
@@ -508,23 +617,30 @@ export const PROVIDER_PRESET_MANIFEST = [
 export type ProviderPreset = (typeof PROVIDER_PRESET_MANIFEST)[number]['preset']
 export const ORDERED_PROVIDER_PRESETS = [
   "gitlawb-opengateway",
-  "anthropic",
   "aimlapi",
+  "anthropic",
   "dashscope-cn",
   "dashscope-intl",
+  "api-route",
+  "apismart",
   "atlas-cloud",
   "azure-openai",
   "bankr",
   "clinepass",
   "cloudflare",
+  "commandcode",
+  "concentrate",
   "deepseek",
   "fireworks",
+  "gmi-cloud",
   "gemini",
   "groq",
   "hicap",
+  "llmtr",
   "lmstudio",
   "atomic-chat",
   "ollama",
+  "longcat",
   "minimax",
   "mistral",
   "moonshotai",

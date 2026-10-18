@@ -1,14 +1,16 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { connect } from 'node:net'
 
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import { startXaiOAuthCallback } from './xaiOAuthCallback.js'
+import { XaiOAuthService } from './xaiOAuth.js'
 
 async function startTestServer() {
   const handle = await startXaiOAuthCallback({
     port: 0,
     host: '127.0.0.1',
     callbackPath: '/callback',
+    expectedState: 'xyz',
     successTitle: 'xAI OAuth complete',
   })
   return { handle, port: handle.port }
@@ -235,15 +237,130 @@ describe.serial('startXaiOAuthCallback (CORS-aware loopback for xAI auth)', () =
     expect(result).toEqual({ code: 'ABC123', state: 'xyz' })
   })
 
-  test('GET with ?error=access_denied rejects with a clear message', async () => {
+  test('GET with a matching state and OAuth error rejects with a clear message', async () => {
     const { handle, port } = await startTestServer()
     cleanup = () => handle.close()
 
     const callbackPromise = handle.waitForCallback()
-    const res = await requestLoopback(port, '/callback?error=access_denied')
+    const res = await requestLoopback(port, '/callback?error=access_denied&state=xyz')
     expect(res.status).toBe(400)
     await expect(callbackPromise).rejects.toThrow(/access_denied/)
   })
+
+  for (const query of [
+    'error=access_denied',
+    'error=access_denied&state=wrong',
+    'error=access_denied&state=',
+    'code=forged&state=wrong',
+    'code=forged',
+    'state=wrong',
+    '',
+    'code=forged&state=%20xyz%20',
+  ]) {
+    test(`invalid state does not consume the callback: ${query || '(empty query)'}`, async () => {
+      const { handle, port } = await startTestServer()
+      cleanup = () => handle.close()
+      let settled = false
+      const callbackPromise = handle.waitForCallback()
+      void callbackPromise.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
+
+      const rejected = await requestLoopback(port, `/callback?${query}`)
+      expect(rejected.status).toBe(400)
+      expect(settled).toBe(false)
+
+      const accepted = await requestLoopback(
+        port,
+        '/callback?code=legitimate&state=xyz',
+      )
+      expect(accepted.status).toBe(200)
+      await expect(callbackPromise).resolves.toEqual({
+        code: 'legitimate',
+        state: 'xyz',
+      })
+    })
+  }
+
+  for (const completion of ['callback', 'manual', 'cancel'] as const) {
+    test(`OAuth service survives an invalid request before ${completion}`, async () => {
+      const exchangedCodes: string[] = []
+      const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(
+        Object.assign(
+          async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+            const url = String(input)
+            if (url.endsWith('/.well-known/openid-configuration')) {
+              return Response.json({
+                authorization_endpoint: 'https://auth.x.ai/authorize',
+                token_endpoint: 'https://auth.x.ai/token',
+              })
+            }
+            expect(url).toBe('https://auth.x.ai/token')
+            const body = new URLSearchParams(String(init?.body))
+            exchangedCodes.push(body.get('code') ?? '')
+            return Response.json({
+              access_token: 'test-access',
+              refresh_token: 'test-refresh',
+            })
+          },
+          { preconnect: globalThis.fetch.preconnect },
+        ),
+      )
+      const service = new XaiOAuthService({
+        callbackPort: 0,
+        callbackHost: '127.0.0.1',
+      })
+      try {
+        const flow = await service.beginOAuthFlow()
+        const authUrl = new URL(flow.authUrl)
+        const state = authUrl.searchParams.get('state')!
+        const redirect = new URL(authUrl.searchParams.get('redirect_uri')!)
+        const pending = flow.waitForTokens()
+        let settled = false
+        void pending.then(
+          () => {
+            settled = true
+          },
+          () => {
+            settled = true
+          },
+        )
+        const invalid = await requestLoopback(
+          Number(redirect.port),
+          '/callback?error=access_denied',
+        )
+        expect(invalid.status).toBe(400)
+        expect(settled).toBe(false)
+        expect(exchangedCodes).toEqual([])
+
+        if (completion === 'cancel') {
+          flow.cancel()
+          await expect(pending).rejects.toThrow(/cancelled|closed/)
+          expect(exchangedCodes).toEqual([])
+        } else {
+          if (completion === 'callback') {
+            const res = await requestLoopback(
+              Number(redirect.port),
+              `/callback?code=legitimate&state=${encodeURIComponent(state)}`,
+            )
+            expect(res.status).toBe(200)
+          } else {
+            flow.submitManualCode('legitimate')
+          }
+          expect((await pending).accessToken).toBe('test-access')
+          expect(exchangedCodes).toEqual(['legitimate'])
+        }
+      } finally {
+        service.cleanup()
+        fetchSpy.mockRestore()
+      }
+    })
+  }
 
   test('GET to wrong path returns 404 and does not settle the callback', async () => {
     const { handle, port } = await startTestServer()
@@ -282,6 +399,7 @@ describe.serial('startXaiOAuthCallback (CORS-aware loopback for xAI auth)', () =
       port: 0,
       host: '127.0.0.1',
       callbackPath: '/callback',
+      expectedState: 'B',
       successTitle: '<script>alert(1)</script>',
     })
     cleanup = () => handle.close()

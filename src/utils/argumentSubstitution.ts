@@ -10,6 +10,7 @@
  * Arguments are parsed using shell-quote for proper shell argument handling.
  */
 
+import { randomBytes } from 'crypto'
 import { tryParseShellCommand } from './bash/shellQuote.js'
 import { escapeRegExp } from './stringUtils.js'
 
@@ -107,6 +108,21 @@ export function substituteArguments(
   const parsedArgs = parseArguments(args)
   const originalContent = content
 
+  // Each pass below substitutes into `content`, and the passes that follow it
+  // then re-scan whatever it inserted. Argument text legitimately containing a
+  // placeholder token (`$1`, `$ARGUMENTS[0]`, ...) would therefore be rewritten
+  // again by a later pass — e.g. `$name` = `$1` used to come back as the *second*
+  // argument. Park every substituted value behind an opaque slot token and swap
+  // the real values back in once all passes are done, so a value is only ever
+  // inserted, never interpreted. The token is NUL-delimited and salted, so it
+  // cannot collide with (or be forged by) user text and adds no visible output.
+  const slots: string[] = []
+  const slotSalt = randomBytes(8).toString('hex')
+  const slotToken = (value: string): string => {
+    slots.push(value)
+    return `\x00ARG_${slotSalt}_${slots.length - 1}\x00`
+  }
+
   // Replace named arguments (e.g., $foo, $bar) with their values
   // Named arguments map to positions: argumentNames[0] -> parsedArgs[0], etc.
   for (let i = 0; i < argumentNames.length; i++) {
@@ -119,26 +135,35 @@ export function substituteArguments(
     // containing regex metacharacters would otherwise throw (unbalanced `(`/`[`)
     // or over-match (`a.` matching `$ab`) — parseArgumentNames does not restrict
     // the character set beyond rejecting empty/numeric-only names.
+    const value = parsedArgs[i] ?? ''
     content = content.replace(
       new RegExp(`\\$${escapeRegExp(name)}(?![\\[\\w])`, 'g'),
-      parsedArgs[i] ?? '',
+      () => slotToken(value),
     )
   }
 
   // Replace indexed arguments ($ARGUMENTS[0], $ARGUMENTS[1], etc.)
   content = content.replace(/\$ARGUMENTS\[(\d+)\]/g, (_, indexStr: string) => {
     const index = parseInt(indexStr, 10)
-    return parsedArgs[index] ?? ''
+    return slotToken(parsedArgs[index] ?? '')
   })
 
   // Replace shorthand indexed arguments ($0, $1, etc.)
   content = content.replace(/\$(\d+)(?!\w)/g, (_, indexStr: string) => {
     const index = parseInt(indexStr, 10)
-    return parsedArgs[index] ?? ''
+    return slotToken(parsedArgs[index] ?? '')
   })
 
   // Replace $ARGUMENTS with the full arguments string
-  content = content.replaceAll('$ARGUMENTS', args)
+  content = content.replaceAll('$ARGUMENTS', () => slotToken(args))
+
+  // Swap the parked values back in. A function replacer keeps `$`-sequences in
+  // the user's argument text (`$$`, `$&`, `` $` ``, `$'`, `$n`) literal instead
+  // of letting String.replace treat them as match references.
+  content = content.replace(
+    new RegExp(`\x00ARG_${slotSalt}_(\\d+)\x00`, 'g'),
+    (_, indexStr: string) => slots[Number(indexStr)] ?? '',
+  )
 
   // If no placeholders were found and appendIfNoPlaceholder is true, append
   // But only if args is non-empty (empty string means command invoked with no args)

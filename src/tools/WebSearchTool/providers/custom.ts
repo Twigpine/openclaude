@@ -47,7 +47,7 @@ interface ProviderPreset {
   authHeader?: string
   authScheme?: string
   jsonPath?: string
-  responseAdapter?: (data: any) => SearchHit[]
+  responseAdapter?: (data: unknown) => SearchHit[]
   /**
    * When set, the API key (WEB_KEY) is sent as this query parameter instead
    * of in an HTTP header. Auth headers are suppressed automatically unless
@@ -70,13 +70,24 @@ const BUILT_IN_PROVIDERS: Record<string, ProviderPreset> = {
     urlTemplate: 'https://localhost:8080/search',
     queryParam: 'q',
     jsonPath: 'results',
-    responseAdapter(data: any) {
-      return (data.results ?? []).map((r: any) => ({
-        title: r.title ?? r.url,
-        url: r.url,
-        description: r.content,
-        source: r.engine ?? r.source,
-      }))
+    responseAdapter(data: unknown) {
+      const rec = (data ?? {}) as Record<string, unknown>
+      const rawResults = Array.isArray(rec.results) ? rec.results : []
+      return (rawResults as unknown[]).map((r) => {
+        const item = (r ?? {}) as Record<string, unknown>
+        const url = typeof item.url === 'string' ? item.url : ''
+        return {
+          title: typeof item.title === 'string' ? item.title : url,
+          url,
+          description: typeof item.content === 'string' ? item.content : undefined,
+          source:
+            typeof item.engine === 'string'
+              ? item.engine
+              : typeof item.source === 'string'
+                ? item.source
+                : undefined,
+        }
+      })
     },
   },
   google: {
@@ -91,13 +102,18 @@ const BUILT_IN_PROVIDERS: Record<string, ProviderPreset> = {
     queryParam: 'q',
     authQueryParam: 'key',
     envQueryParams: { cx: 'GOOGLE_CSE_ID' },
-    responseAdapter(data: any) {
-      return (data.items ?? []).map((r: any) => ({
-        title: r.title ?? '',
-        url: r.link ?? '',
-        description: r.snippet,
-        source: r.displayLink,
-      }))
+    responseAdapter(data: unknown) {
+      const rec = (data ?? {}) as Record<string, unknown>
+      const rawItems = Array.isArray(rec.items) ? rec.items : []
+      return (rawItems as unknown[]).map((r) => {
+        const item = (r ?? {}) as Record<string, unknown>
+        return {
+          title: typeof item.title === 'string' ? item.title : '',
+          url: typeof item.link === 'string' ? item.link : '',
+          description: typeof item.snippet === 'string' ? item.snippet : undefined,
+          source: typeof item.displayLink === 'string' ? item.displayLink : undefined,
+        }
+      })
     },
   },
   brave: {
@@ -107,13 +123,20 @@ const BUILT_IN_PROVIDERS: Record<string, ProviderPreset> = {
     // Brave wants the bare token in X-Subscription-Token, NOT "Bearer <token>".
     // Empty scheme overrides the default 'Bearer' applied by buildAuthHeadersForPreset.
     authScheme: '',
-    responseAdapter(data: any) {
-      return (data.web?.results ?? []).map((r: any) => ({
-        title: r.title ?? '',
-        url: r.url ?? '',
-        description: r.description,
-        source: safeHostname(r.url),
-      }))
+    responseAdapter(data: unknown) {
+      const rec = (data ?? {}) as Record<string, unknown>
+      const web = (rec.web ?? {}) as Record<string, unknown>
+      const rawResults = Array.isArray(web.results) ? web.results : []
+      return (rawResults as unknown[]).map((r) => {
+        const item = (r ?? {}) as Record<string, unknown>
+        const url = typeof item.url === 'string' ? item.url : ''
+        return {
+          title: typeof item.title === 'string' ? item.title : '',
+          url,
+          description: typeof item.description === 'string' ? item.description : undefined,
+          source: url ? safeHostname(url) : undefined,
+        }
+      })
     },
   },
   serpapi: {
@@ -121,13 +144,18 @@ const BUILT_IN_PROVIDERS: Record<string, ProviderPreset> = {
     queryParam: 'q',
     authHeader: 'Authorization',
     authScheme: 'Bearer',
-    responseAdapter(data: any) {
-      return (data.organic_results ?? []).map((r: any) => ({
-        title: r.title ?? '',
-        url: r.link ?? '',
-        description: r.snippet,
-        source: r.displayed_link,
-      }))
+    responseAdapter(data: unknown) {
+      const rec = (data ?? {}) as Record<string, unknown>
+      const rawResults = Array.isArray(rec.organic_results) ? rec.organic_results : []
+      return (rawResults as unknown[]).map((r) => {
+        const item = (r ?? {}) as Record<string, unknown>
+        return {
+          title: typeof item.title === 'string' ? item.title : '',
+          url: typeof item.link === 'string' ? item.link : '',
+          description: typeof item.snippet === 'string' ? item.snippet : undefined,
+          source: typeof item.displayed_link === 'string' ? item.displayed_link : undefined,
+        }
+      })
     },
   },
 }
@@ -141,6 +169,24 @@ const DEFAULT_MAX_BODY_KB = 300
 
 /** Default request timeout in seconds. */
 const DEFAULT_TIMEOUT_SECONDS = 120
+
+/**
+ * Read a positive numeric env override, falling back to `fallback` for
+ * missing, empty, non-finite, or non-positive values.
+ *
+ * `Number(raw) || fallback` alone only rescues 0 and NaN — a negative or
+ * Infinity value is truthy and passes straight through. That silently breaks
+ * the size/timeout guards downstream: a negative WEB_CUSTOM_MAX_BODY_KB makes
+ * the "body exceeds N bytes" check fire for every POST, and a negative
+ * WEB_CUSTOM_TIMEOUT_SEC aborts every request immediately.
+ */
+export function readPositiveEnvNumber(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
 
 /** Header names that are always allowed (case-insensitive). */
 const SAFE_HEADER_NAMES = new Set([
@@ -357,7 +403,7 @@ function auditLogCustomSearch(url: string): void {
     `[web-search] ⚠️  Custom search provider is active. ` +
     `Outbound requests go to: ${safeHostname(url) ?? url}. ` +
     `Ensure this endpoint is trusted. ` +
-    `See: https://github.com/Gitlawb/openclaude/pull/512#security`,
+    `See: https://github.com/Twigpine/openclaude/pull/512#security`,
   )
 }
 
@@ -398,7 +444,7 @@ function resolveConfig(): {
   queryParam: string
   method: string
   jsonPath?: string
-  responseAdapter?: (data: any) => SearchHit[]
+  responseAdapter?: (data: unknown) => SearchHit[]
   preset?: ProviderPreset
 } {
   const providerName = process.env.WEB_PROVIDER
@@ -515,7 +561,7 @@ function buildRequest(query: string) {
     const bodyTemplate = process.env.WEB_BODY_TEMPLATE
     if (bodyTemplate) {
       const body = bodyTemplate.replace(/\{query\}/g, query)
-      const maxBodyBytes = (Number(process.env.WEB_CUSTOM_MAX_BODY_KB) || DEFAULT_MAX_BODY_KB) * 1024
+      const maxBodyBytes = readPositiveEnvNumber(process.env.WEB_CUSTOM_MAX_BODY_KB, DEFAULT_MAX_BODY_KB) * 1024
       if (Buffer.byteLength(body) > maxBodyBytes) {
         throw new Error(
           `POST body exceeds ${maxBodyBytes} bytes. ` +
@@ -535,18 +581,18 @@ function buildRequest(query: string) {
 // Response parsing — flexible, handles many shapes
 // ---------------------------------------------------------------------------
 
-function walkJsonPath(obj: any, path: string): any {
-  let current = obj
+function walkJsonPath(obj: unknown, path: string): unknown {
+  let current: unknown = obj
   for (const seg of path.split('.')) {
     if (current == null || typeof current !== 'object') return undefined
-    current = current[seg]
+    current = (current as Record<string, unknown>)[seg]
   }
   return current
 }
 
-function extractFromNode(node: any): SearchHit[] {
+function extractFromNode(node: unknown): SearchHit[] {
   if (!node) return []
-  if (Array.isArray(node)) return node.map(normalizeHit).filter(Boolean) as SearchHit[]
+  if (Array.isArray(node)) return (node as unknown[]).map(normalizeHit).filter(Boolean) as SearchHit[]
   if (typeof node === 'object') {
     const all: SearchHit[] = []
     for (const sub of Object.values(node)) all.push(...extractFromNode(sub))
@@ -556,19 +602,20 @@ function extractFromNode(node: any): SearchHit[] {
   return []
 }
 
-export function extractHits(raw: any, jsonPath?: string): SearchHit[] {
+export function extractHits(raw: unknown, jsonPath?: string): SearchHit[] {
   if (jsonPath) return extractFromNode(walkJsonPath(raw, jsonPath))
-  if (Array.isArray(raw)) return raw.map(normalizeHit).filter(Boolean) as SearchHit[]
+  if (Array.isArray(raw)) return (raw as unknown[]).map(normalizeHit).filter(Boolean) as SearchHit[]
   if (!raw || typeof raw !== 'object') return []
 
   const arrayKeys = ['results', 'items', 'data', 'web', 'organic_results', 'hits', 'entries']
+  const obj = raw as Record<string, unknown>
   for (const key of arrayKeys) {
-    const val = raw[key]
-    if (Array.isArray(val)) return val.map(normalizeHit).filter(Boolean) as SearchHit[]
+    const val = obj[key]
+    if (Array.isArray(val)) return (val as unknown[]).map(normalizeHit).filter(Boolean) as SearchHit[]
     if (val && typeof val === 'object' && !Array.isArray(val)) {
       const all: SearchHit[] = []
-      for (const sub of Object.values(val)) {
-        if (Array.isArray(sub)) all.push(...(sub.map(normalizeHit).filter(Boolean) as SearchHit[]))
+      for (const sub of Object.values(val as Record<string, unknown>)) {
+        if (Array.isArray(sub)) all.push(...((sub as unknown[]).map(normalizeHit).filter(Boolean) as SearchHit[]))
       }
       if (all.length > 0) return all
     }
@@ -581,8 +628,8 @@ export function extractHits(raw: any, jsonPath?: string): SearchHit[] {
 // Fetch with one retry + timeout
 // ---------------------------------------------------------------------------
 
-async function fetchWithRetry(url: string, init: RequestInit, signal?: AbortSignal): Promise<any> {
-  const timeoutSec = Number(process.env.WEB_CUSTOM_TIMEOUT_SEC) || DEFAULT_TIMEOUT_SECONDS
+async function fetchWithRetry(url: string, init: RequestInit, signal?: AbortSignal): Promise<unknown> {
+  const timeoutSec = readPositiveEnvNumber(process.env.WEB_CUSTOM_TIMEOUT_SEC, DEFAULT_TIMEOUT_SECONDS)
   const timeoutMs = timeoutSec * 1000
   let lastErr: Error | undefined
   let lastStatus: number | undefined

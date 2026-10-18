@@ -125,7 +125,9 @@ test('buildAPIProviderProperties keeps Codex-specific labels on the shared OpenA
   expect(await readPropertyValue('Codex base URL', 'codex')).toBe(
     DEFAULT_CODEX_BASE_URL,
   )
-  expect(await readPropertyValue('Model', 'codex')).toBe('gpt-5.5 (high)')
+  expect(await readPropertyValue('Model', 'codex')).toBe(
+    'gpt-5.6-sol (high)',
+  )
 })
 
 test('buildAPIProviderProperties redacts credentials in OpenAI-compatible base URLs', async () => {
@@ -143,7 +145,7 @@ test('buildAPIProviderProperties uses the resolved route label for AI/ML API ses
   process.env.OPENAI_BASE_URL = 'https://api.aimlapi.com/v1'
   process.env.OPENAI_MODEL = 'gpt-4o'
 
-  expect(await readPropertyValue('Provider route', 'openai')).toBe('AI/ML API')
+  expect(await readPropertyValue('Provider route', 'openai')).toBe('aimlapi.com')
   expect(await readPropertyValue('OpenAI base URL', 'openai')).toBe(
     'https://api.aimlapi.com/v1',
   )

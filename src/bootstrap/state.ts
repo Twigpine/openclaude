@@ -279,7 +279,7 @@ function getInitialState(): State {
     totalLinesRemoved: 0,
     hasUnknownModelCost: false,
     cwd: resolvedCwd,
-    modelUsage: {},
+    modelUsage: emptyModelUsage(),
     mainLoopModelOverride: undefined,
     initialMainLoopModel: null,
     modelStrings: null,
@@ -432,6 +432,48 @@ const sdkContextStorage = new AsyncLocalStorage<SdkContext>()
  */
 export function runWithSdkContext<T>(context: SdkContext, fn: () => T): T {
   return sdkContextStorage.run(context, fn)
+}
+
+/** Run process-global setup without inheriting the active SDK session. */
+export function runOutsideSdkContext<T>(fn: () => T): T {
+  return sdkContextStorage.exit(fn)
+}
+
+/**
+ * Bind every continuation of a lazy async generator to one SDK context.
+ * Creating a generator inside `AsyncLocalStorage.run()` is insufficient:
+ * its body executes later, when `next()`, `return()`, or `throw()` is called.
+ */
+export function bindSdkContextToAsyncGenerator<
+  TYield,
+  TReturn = void,
+  TNext = unknown,
+>(
+  context: SdkContext,
+  generator: AsyncGenerator<TYield, TReturn, TNext>,
+): AsyncGenerator<TYield, TReturn, TNext> {
+  const bound = {
+    next: (value?: TNext) =>
+      runWithSdkContext(context, () => generator.next(value as TNext)),
+    return: (value: TReturn | PromiseLike<TReturn>) =>
+      runWithSdkContext(context, () => generator.return(value)),
+    throw: (error?: unknown) =>
+      runWithSdkContext(context, () => generator.throw(error)),
+    [Symbol.asyncDispose]: () =>
+      runWithSdkContext(context, async () => {
+        const dispose = generator[Symbol.asyncDispose]
+        if (typeof dispose === 'function') {
+          await dispose.call(generator)
+          return
+        }
+        await generator.return(undefined as TReturn)
+      }),
+    [Symbol.asyncIterator]() {
+      return this
+    },
+  }
+
+  return bound as AsyncGenerator<TYield, TReturn, TNext>
 }
 
 function getSdkContext(): SdkContext | undefined {
@@ -870,12 +912,31 @@ export async function waitForScrollIdle(): Promise<void> {
   }
 }
 
+/**
+ * A null-prototype map for per-model usage. Model ids are arbitrary strings for
+ * custom/OpenAI-compatible providers, so `__proto__` and `constructor` can reach
+ * `STATE.modelUsage[model] = ...`. On a normal object `map['__proto__'] = obj`
+ * invokes the prototype setter (corrupting the map's chain) and a later read of
+ * an absent key returns an inherited member; with a null prototype both become
+ * ordinary own-key operations, so cost accounting stays correct and, critically,
+ * Object.prototype is never polluted.
+ */
+function emptyModelUsage(): { [modelName: string]: ModelUsage } {
+  return Object.create(null) as { [modelName: string]: ModelUsage }
+}
+
 export function getModelUsage(): { [modelName: string]: ModelUsage } {
   return STATE.modelUsage
 }
 
 export function getUsageForModel(model: string): ModelUsage | undefined {
-  return STATE.modelUsage[model]
+  // Own-property lookup: a model id of `constructor` / `__proto__` (arbitrary
+  // for custom/OpenAI-compatible providers) must not resolve to an inherited
+  // Object.prototype member, which callers would then mutate -- for `__proto__`
+  // that mutation lands on Object.prototype itself. See emptyModelUsage.
+  return Object.hasOwn(STATE.modelUsage, model)
+    ? STATE.modelUsage[model]
+    : undefined
 }
 
 /**
@@ -917,7 +978,7 @@ export function resetCostState(): void {
   STATE.totalLinesAdded = 0
   STATE.totalLinesRemoved = 0
   STATE.hasUnknownModelCost = false
-  STATE.modelUsage = {}
+  STATE.modelUsage = emptyModelUsage()
   STATE.promptId = null
 }
 
@@ -951,9 +1012,16 @@ export function setCostStateForRestore({
   STATE.totalLinesAdded = totalLinesAdded
   STATE.totalLinesRemoved = totalLinesRemoved
 
-  // Restore per-model usage breakdown
+  // Restore per-model usage breakdown. Re-key into a null-prototype map: a
+  // persisted breakdown deserialized from JSON can carry an own `__proto__`
+  // key, and assigning that object wholesale would reintroduce the prototype
+  // hazard emptyModelUsage exists to avoid.
   if (modelUsage) {
-    STATE.modelUsage = modelUsage
+    const restored = emptyModelUsage()
+    for (const [name, usage] of Object.entries(modelUsage)) {
+      restored[name] = usage
+    }
+    STATE.modelUsage = restored
   }
 
   // Adjust startTime to make wall duration accumulate

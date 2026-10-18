@@ -1,8 +1,7 @@
 import { BROWSER_TOOLS } from '@ant/claude-for-chrome-mcp'
-import { chmod, mkdir, readFile, writeFile } from 'fs/promises'
+import { mkdir, readFile, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import { fileURLToPath } from 'url'
 import {
   getSessionDangerousPermissionMode,
   getIsInteractive,
@@ -13,11 +12,7 @@ import type { ScopedMcpServerConfig } from '../../services/mcp/types.js'
 import { isInBundledMode } from '../bundledMode.js'
 import { getGlobalConfig, saveGlobalConfig } from '../config.js'
 import { logForDebugging } from '../debug.js'
-import {
-  getClaudeConfigHomeDir,
-  isEnvDefinedFalsy,
-  isEnvTruthy,
-} from '../envUtils.js'
+import { isEnvDefinedFalsy, isEnvTruthy } from '../envUtils.js'
 import { execFileNoThrowWithCwd } from '../execFileNoThrow.js'
 import { getPlatform } from '../platform.js'
 import { jsonStringify } from '../slowOperations.js'
@@ -28,6 +23,10 @@ import {
   getAllWindowsRegistryKeys,
   openInChrome,
 } from './common.js'
+import {
+  createWrapperScript,
+  resolveClaudeInChromeLaunches,
+} from './launch.js'
 import { getChromeSystemPrompt } from './prompt.js'
 import { isChromeExtensionInstalledPortable } from './setupPortable.js'
 
@@ -68,6 +67,7 @@ export function shouldEnableClaudeInChrome(chromeFlag?: boolean): boolean {
 }
 
 let shouldAutoEnable: boolean | undefined = undefined
+let pendingClaudeInChromeSetup: Promise<void> | null = null
 
 export function shouldAutoEnableClaudeInChrome(): boolean {
   if (shouldAutoEnable !== undefined) {
@@ -82,6 +82,10 @@ export function shouldAutoEnableClaudeInChrome(): boolean {
   return shouldAutoEnable
 }
 
+export function waitForClaudeInChromeSetup(): Promise<void> {
+  return pendingClaudeInChromeSetup ?? Promise.resolve()
+}
+
 /**
  * Setup Claude in Chrome MCP server and tools
  *
@@ -93,6 +97,7 @@ export function setupClaudeInChrome(): {
   systemPrompt: string
 } {
   const isNativeBuild = isInBundledMode()
+  const launches = resolveClaudeInChromeLaunches({ isNativeBuild })
   const allowedTools = BROWSER_TOOLS.map(
     tool => `mcp__claude-in-chrome__${tool.name}`,
   )
@@ -103,69 +108,42 @@ export function setupClaudeInChrome(): {
   }
   const hasEnv = Object.keys(env).length > 0
 
-  if (isNativeBuild) {
-    // Create a wrapper script that calls the same binary with --chrome-native-host. This
-    // is needed because the native host manifest "path" field cannot contain arguments.
-    const execCommand = `"${process.execPath}" --chrome-native-host`
-
-    // Run asynchronously without blocking; best-effort so swallow errors
-    void createWrapperScript(execCommand)
-      .then(manifestBinaryPath =>
-        installChromeNativeHostManifest(manifestBinaryPath),
+  // The manifest path cannot contain arguments, so both runtime modes need a
+  // wrapper. Launch selection above keeps the native mode flag-only and gives
+  // non-native mode the validated current CLI entrypoint.
+  pendingClaudeInChromeSetup = createWrapperScript(launches.nativeHost)
+    .then(manifestBinaryPath => {
+      logForDebugging(
+        `[Claude in Chrome] Setup launch configuration: ${jsonStringify(launches)}`,
       )
-      .catch(e =>
-        logForDebugging(
-          `[Claude in Chrome] Failed to install native host: ${e}`,
-          { level: 'error' },
-        ),
-      )
-
-    return {
-      mcpConfig: {
-        [CLAUDE_IN_CHROME_MCP_SERVER_NAME]: {
-          type: 'stdio' as const,
-          command: process.execPath,
-          args: ['--claude-in-chrome-mcp'],
-          scope: 'dynamic' as const,
-          ...(hasEnv && { env }),
-        },
-      },
-      allowedTools,
-      systemPrompt: getChromeSystemPrompt(),
-    }
-  } else {
-    const __filename = fileURLToPath(import.meta.url)
-    const __dirname = join(__filename, '..')
-    const cliPath = join(__dirname, 'cli.js')
-
-    void createWrapperScript(
-      `"${process.execPath}" "${cliPath}" --chrome-native-host`,
+      if (
+        isEnvTruthy(
+          process.env.OPENCLAUDE_SKIP_CHROME_NATIVE_HOST_REGISTRATION,
+        )
+      ) {
+        return
+      }
+      return installChromeNativeHostManifest(manifestBinaryPath)
+    })
+    .catch(e =>
+      logForDebugging(
+        `[Claude in Chrome] Failed to install native host: ${e}`,
+        { level: 'error' },
+      ),
     )
-      .then(manifestBinaryPath =>
-        installChromeNativeHostManifest(manifestBinaryPath),
-      )
-      .catch(e =>
-        logForDebugging(
-          `[Claude in Chrome] Failed to install native host: ${e}`,
-          { level: 'error' },
-        ),
-      )
 
-    const mcpConfig = {
+  return {
+    mcpConfig: {
       [CLAUDE_IN_CHROME_MCP_SERVER_NAME]: {
         type: 'stdio' as const,
-        command: process.execPath,
-        args: [`${cliPath}`, '--claude-in-chrome-mcp'],
+        command: launches.mcpServer.command,
+        args: launches.mcpServer.args,
         scope: 'dynamic' as const,
         ...(hasEnv && { env }),
       },
-    }
-
-    return {
-      mcpConfig,
-      allowedTools,
-      systemPrompt: getChromeSystemPrompt(),
-    }
+    },
+    allowedTools,
+    systemPrompt: getChromeSystemPrompt(),
   }
 }
 
@@ -295,53 +273,6 @@ function registerWindowsNativeHosts(manifestPath: string): void {
       }
     })
   }
-}
-
-/**
- * Create a wrapper script in ~/.claude/chrome/ that invokes the given command. This is
- * necessary because Chrome's native host manifest "path" field cannot contain arguments.
- *
- * @param command - The full command to execute (e.g., "/path/to/claude --chrome-native-host")
- * @returns The path to the wrapper script
- */
-async function createWrapperScript(command: string): Promise<string> {
-  const platform = getPlatform()
-  const chromeDir = join(getClaudeConfigHomeDir(), 'chrome')
-  const wrapperPath =
-    platform === 'windows'
-      ? join(chromeDir, 'chrome-native-host.bat')
-      : join(chromeDir, 'chrome-native-host')
-
-  const scriptContent =
-    platform === 'windows'
-      ? `@echo off
-REM Chrome native host wrapper script
-REM Generated by Claude Code - do not edit manually
-${command}
-`
-      : `#!/bin/sh
-# Chrome native host wrapper script
-# Generated by Claude Code - do not edit manually
-exec ${command}
-`
-
-  // Check if content matches to avoid unnecessary writes
-  const existingContent = await readFile(wrapperPath, 'utf-8').catch(() => null)
-  if (existingContent === scriptContent) {
-    return wrapperPath
-  }
-
-  await mkdir(chromeDir, { recursive: true })
-  await writeFile(wrapperPath, scriptContent)
-
-  if (platform !== 'windows') {
-    await chmod(wrapperPath, 0o755)
-  }
-
-  logForDebugging(
-    `[Claude in Chrome] Created Chrome native host wrapper script: ${wrapperPath}`,
-  )
-  return wrapperPath
 }
 
 /**

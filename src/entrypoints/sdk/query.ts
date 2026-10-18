@@ -6,7 +6,7 @@
  */
 
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
-import { randomUUID } from 'crypto'
+import { randomUUID, type UUID } from 'crypto'
 import { dirname } from 'path'
 import { QueryEngine } from '../../QueryEngine.js'
 import {
@@ -20,6 +20,7 @@ import {
 } from '../../Tool.js'
 import { assembleToolPool, getTools } from '../../tools.js'
 import { createFileStateCacheWithSizeLimit } from '../../utils/fileStateCache.js'
+import { requestSdkRootAbort } from './interruption.js'
 import { init } from '../init.js'
 import {
   resolveSessionFilePath,
@@ -32,7 +33,8 @@ import {
   switchSession,
   regenerateSessionId,
   getSessionId,
-  runWithSdkContext,
+  bindSdkContextToAsyncGenerator,
+  runOutsideSdkContext,
 } from '../../bootstrap/state.js'
 import type { SessionId } from '../../types/ids.js'
 import {
@@ -509,8 +511,9 @@ class QueryImpl implements Query {
     }
 
     const self = this
-    const inner = runWithSdkContext(sdkContext, () => {
-      return (async function* (): AsyncGenerator<SDKMessage> {
+    const inner = bindSdkContextToAsyncGenerator(
+      sdkContext,
+      (async function* (): AsyncGenerator<SDKMessage> {
         // Fast exit: if interrupt()/close() was called before iteration
         // started, skip init entirely — avoids auth/network side-effects.
         if (self.abortController.signal.aborted) return
@@ -518,7 +521,7 @@ class QueryImpl implements Query {
         // Skip init for mock/host-injected engines; they are self-contained.
         const engineWasOverridden = self._engineWasInjected
         if (!engineWasOverridden) {
-          await init()
+          await runOutsideSdkContext(init)
         }
 
         // Load agent definitions BEFORE creating engine context
@@ -720,8 +723,8 @@ class QueryImpl implements Query {
               releaseEnvMutex()
             }
           }
-      })()
-    })
+      })(),
+    )
 
     yield* inner
   }
@@ -756,8 +759,9 @@ class QueryImpl implements Query {
   }
 
   close(): void {
-    this.interrupt()
-    this.abortController.abort()
+    const wrapperController = this.abortController
+    this.interruptWithSource('sdk_close')
+    requestSdkRootAbort(wrapperController, 'sdk_close', 'sdk_query')
     // Disconnect MCP clients to prevent resource leaks
     const mcpClients = this._engine?.getMcpClients?.() ?? []
     for (const client of mcpClients) {
@@ -773,8 +777,14 @@ class QueryImpl implements Query {
   }
 
   interrupt(): void {
+    this.interruptWithSource('sdk_interrupt')
+  }
+
+  private interruptWithSource(source: string): void {
     if (this._engine) {
-      this._engine.interrupt()
+      this._engine.interrupt(source)
+    } else {
+      requestSdkRootAbort(this.abortController, source, 'sdk_query')
     }
     // Deny all pending permission prompts before clearing
     for (const [toolUseId, pending] of this.pendingPermissionPrompts) {
@@ -814,11 +824,11 @@ class QueryImpl implements Query {
     // Find the last assistant message UUID that has a file-history snapshot
     const fileHistory = state.fileHistory
     for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]
-      const messageId = (msg as any)?.uuid as string | undefined
+      const msg = messages[i] as { uuid?: string } | undefined
+      const messageId = msg?.uuid
       if (!messageId) continue
 
-      if (fileHistoryCanRestore(fileHistory, messageId as any)) {
+      if (fileHistoryCanRestore(fileHistory, messageId as UUID)) {
         // Synchronous check — return canRewind: true with the messageId.
         // Use rewindFilesAsync() to actually perform the rewind.
         return { canRewind: true }
@@ -840,11 +850,11 @@ class QueryImpl implements Query {
     const fileHistory = state.fileHistory
     let targetMessageId: string | undefined
     for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]
-      const messageId = (msg as any)?.uuid as string | undefined
+      const msg = messages[i] as { uuid?: string } | undefined
+      const messageId = msg?.uuid
       if (!messageId) continue
 
-      if (fileHistoryCanRestore(fileHistory, messageId as any)) {
+      if (fileHistoryCanRestore(fileHistory, messageId as UUID)) {
         targetMessageId = messageId
         break
       }
@@ -855,7 +865,7 @@ class QueryImpl implements Query {
     }
 
     // Get diff stats before rewinding (async)
-    const diffStats = await fileHistoryGetDiffStats(fileHistory, targetMessageId as any)
+    const diffStats = await fileHistoryGetDiffStats(fileHistory, targetMessageId as UUID)
 
     // Perform the actual rewind
     try {
@@ -864,7 +874,7 @@ class QueryImpl implements Query {
           ...prev,
           fileHistory: updater(prev.fileHistory),
         })),
-        targetMessageId as any,
+        targetMessageId as UUID,
       )
 
       return {
@@ -900,7 +910,7 @@ class QueryImpl implements Query {
   supportedAgents(): string[] {
     const state = this.appStateStore.getState()
     const agents = state.agentDefinitions?.activeAgents
-    return agents?.map((a: any) => a.agentType).filter(Boolean) ?? []
+    return agents?.map((a) => a.agentType).filter(Boolean) ?? []
   }
 
   mcpServerStatus(): McpServerStatus[] {
@@ -915,10 +925,10 @@ class QueryImpl implements Query {
         base.serverInfo = client.serverInfo
       }
       if (client.type === 'failed') {
-        base.error = (client as any).error
+        base.error = client.error
       }
       if ('config' in client) {
-        const cfg = (client as any).config
+        const cfg = client.config
         if (cfg?.scope) base.scope = cfg.scope
       }
       return base
@@ -1166,6 +1176,6 @@ export async function queryAsync(params: {
   prompt: string | AsyncIterable<SDKUserMessage>
   options?: QueryOptions
 }): Promise<Query> {
-  await init()
+  await runOutsideSdkContext(init)
   return query(params)
 }

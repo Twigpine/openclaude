@@ -10,6 +10,7 @@ import {
   logEvent,
 } from '../../services/analytics/index.js'
 import {
+  getEnabledSiblingSkillsHomes,
   getSkillsPath,
   onDynamicSkillsLoaded,
 } from '../../skills/loadSkillsDir.js'
@@ -19,6 +20,8 @@ import { registerCleanup } from '../cleanupRegistry.js'
 import { logForDebugging } from '../debug.js'
 import { getFsImplementation } from '../fsOperations.js'
 import { executeConfigChangeHooks, hasBlockingResult } from '../hooks.js'
+import { logError } from '../log.js'
+import { settingsChangeDetector } from '../settings/changeDetector.js'
 import { createSignal } from '../signal.js'
 
 /**
@@ -67,6 +70,12 @@ const POLLING_INTERVAL_MS = 2000
 const USE_POLLING = typeof Bun !== 'undefined'
 
 let watcher: FSWatcher | null = null
+let siblingWatcher: FSWatcher | null = null
+let ownWatchPaths: string[] = []
+let siblingWatchUpdate: Promise<void> = Promise.resolve()
+let siblingWatchPaths: string[] = []
+let siblingSourcePaths: string[] = []
+let unsubscribeSettingsChanges: (() => void) | null = null
 let reloadTimer: ReturnType<typeof setTimeout> | null = null
 const pendingChangedPaths = new Set<string>()
 let lastReloadTime = 0
@@ -95,10 +104,13 @@ const defaultDependencies = {
   getFsImplementation,
   getAdditionalDirectoriesForClaudeMd,
   getSkillsPath,
+  getSiblingSkillsHomePaths: (): string[] =>
+    getEnabledSiblingSkillsHomes().map(home => home.path),
   hasBlockingResult,
   onDynamicSkillsLoaded,
   resetSentSkillNames,
   watch: chokidar.watch.bind(chokidar),
+  subscribeToSettingsChanges: settingsChangeDetector.subscribe,
 }
 type SkillChangeDetectorDependencies = typeof defaultDependencies
 let dependencies: SkillChangeDetectorDependencies = defaultDependencies
@@ -114,6 +126,17 @@ export async function initialize(): Promise<void> {
   // async path discovery.
   unregisterCleanup = registerCleanup(async () => {
     await dispose()
+  })
+
+  siblingSourcePaths = dependencies.getSiblingSkillsHomePaths()
+  unsubscribeSettingsChanges = dependencies.subscribeToSettingsChanges(() => {
+    if (disposed) return
+    const paths = dependencies.getSiblingSkillsHomePaths()
+    if (paths.length === siblingSourcePaths.length &&
+      paths.every((path, index) => path === siblingSourcePaths[index])) return
+    // The settings notifier has already invalidated its cache. Use effective
+    // eligibility so unrelated settings changes do not reset activated skills.
+    void reloadAfterSkillSourceSettingsChange().catch(logError)
   })
 
   // Register callback for when dynamic skills are loaded (only once)
@@ -133,13 +156,58 @@ export async function initialize(): Promise<void> {
 
   const paths = await getWatchablePaths()
   if (disposed) return
-  if (paths.length === 0) return
+  ownWatchPaths = paths
+  watcher = watchPaths(paths)
+  await reconcileSiblingWatchPaths()
+}
+
+/** Serialize live toggles so a slower path lookup cannot restore an old source. */
+function reconcileSiblingWatchPaths(): Promise<void> {
+  const update = siblingWatchUpdate.then(updateSiblingWatchPaths)
+  siblingWatchUpdate = update.catch(() => {})
+  return update
+}
+
+async function updateSiblingWatchPaths(): Promise<void> {
+  if (disposed) return
+  const fs = dependencies.getFsImplementation()
+  const paths: string[] = []
+  for (const path of dependencies.getSiblingSkillsHomePaths()) {
+    if (ownWatchPaths.includes(path)) continue
+    try {
+      await fs.stat(path)
+      paths.push(path)
+    } catch {
+      // Only existing skill homes are watched, as at startup.
+    }
+  }
+  if (disposed) return
+  if (
+    paths.length === siblingWatchPaths.length &&
+    paths.every(path => siblingWatchPaths.includes(path))
+  ) return
+  // Chokidar unwatch(root) leaves existing descendant file watchers active.
+  // Give sibling subscriptions their own lifetime so closing them fully does
+  // not interrupt OpenClaude-owned watches.
+  const previous = siblingWatcher
+  siblingWatcher = null
+  if (previous) await previous.close()
+  if (disposed) return
+  siblingWatchPaths = paths
+  siblingWatcher = watchPaths(paths, true)
+}
+
+/**
+ * Create a watcher for one group of skill sources. Empty groups need no watcher.
+ */
+function watchPaths(paths: string[], allowSkillLinks = false): FSWatcher | null {
+  if (paths.length === 0) return null
 
   logForDebugging(
     `Watching for changes in skill/command directories: ${paths.join(', ')}...`,
   )
 
-  watcher = dependencies.watch(paths, {
+  const sourceWatcher = dependencies.watch(paths, {
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: {
@@ -149,9 +217,11 @@ export async function initialize(): Promise<void> {
         testOverrides?.pollInterval ?? FILE_STABILITY_POLL_INTERVAL_MS,
     },
     // Ignore special file types (sockets, FIFOs, devices) - they cannot be watched
-    // and will error with EOPNOTSUPP on macOS. Only allow regular files and directories.
+    // and will error with EOPNOTSUPP on macOS. Sibling discovery also follows
+    // links; let Chokidar traverse those and check the resolved target's type.
     ignored: (path, stats) => {
-      if (stats && !stats.isFile() && !stats.isDirectory()) return true
+      if (stats && !stats.isFile() && !stats.isDirectory() &&
+        !(allowSkillLinks && stats.isSymbolicLink())) return true
       // Ignore .git directories
       return path.split(platformPath.sep).some(dir => dir === '.git')
     },
@@ -161,9 +231,10 @@ export async function initialize(): Promise<void> {
     atomic: true,
   })
 
-  watcher.on('add', handleChange)
-  watcher.on('change', handleChange)
-  watcher.on('unlink', handleChange)
+  sourceWatcher.on('add', handleChange)
+  sourceWatcher.on('change', handleChange)
+  sourceWatcher.on('unlink', handleChange)
+  return sourceWatcher
 }
 
 /**
@@ -171,6 +242,9 @@ export async function initialize(): Promise<void> {
  */
 export function dispose(): Promise<void> {
   disposed = true
+  unsubscribeSettingsChanges?.()
+  unsubscribeSettingsChanges = null
+  siblingSourcePaths = []
   if (unregisterCleanup) {
     unregisterCleanup()
     unregisterCleanup = null
@@ -180,11 +254,11 @@ export function dispose(): Promise<void> {
     unregisterDynamicSkillsCallback = null
     dynamicSkillsCallbackRegistered = false
   }
-  let closePromise: Promise<void> = Promise.resolve()
-  if (watcher) {
-    closePromise = watcher.close()
-    watcher = null
-  }
+  const closing = [watcher?.close(), siblingWatcher?.close(), siblingWatchUpdate]
+  watcher = null
+  siblingWatcher = null
+  ownWatchPaths = []
+  siblingWatchPaths = []
   if (reloadTimer) {
     clearTimeout(reloadTimer)
     reloadTimer = null
@@ -193,7 +267,7 @@ export function dispose(): Promise<void> {
   lastReloadTime = 0
   reloadInProgress = false
   skillsChanged.clear()
-  return closePromise
+  return Promise.all(closing).then(() => {})
 }
 
 /**
@@ -332,11 +406,17 @@ export async function resetForTesting(overrides?: {
   reloadCooldown?: number
   chokidarInterval?: number
 }): Promise<void> {
-  // Clean up existing watcher if present to avoid resource leaks
-  if (watcher) {
-    await watcher.close()
-    watcher = null
-  }
+  // Drain in-flight source updates before restoring test state.
+  disposed = true
+  unsubscribeSettingsChanges?.()
+  unsubscribeSettingsChanges = null
+  siblingSourcePaths = []
+  await siblingWatchUpdate
+  await Promise.all([watcher?.close(), siblingWatcher?.close()])
+  watcher = null
+  siblingWatcher = null
+  ownWatchPaths = []
+  siblingWatchPaths = []
   if (unregisterCleanup) {
     unregisterCleanup()
     unregisterCleanup = null
@@ -359,6 +439,25 @@ export async function resetForTesting(overrides?: {
   testOverrides = overrides ?? null
 }
 
+/**
+ * Reload skills right away after a setting changed which skill directories
+ * load (sibling skills homes toggled in /config). Add enabled homes and stop
+ * watching disabled homes so only eligible sources trigger later reloads.
+ */
+export async function reloadAfterSkillSourceSettingsChange(): Promise<void> {
+  if (disposed) return
+  siblingSourcePaths = dependencies.getSiblingSkillsHomePaths()
+  // Invalidate synchronously, before asynchronous watcher reconciliation, so
+  // neither cached commands nor an older sibling scan can survive the signal.
+  dependencies.clearCommandsCache()
+  dependencies.resetSentSkillNames()
+  if (initialized) {
+    await reconcileSiblingWatchPaths()
+  }
+  if (disposed) return
+  skillsChanged.emit()
+}
+
 export const _scheduleReloadForTesting = scheduleReload
 
 export function _setDependenciesForTesting(
@@ -371,5 +470,6 @@ export const skillChangeDetector = {
   initialize,
   dispose,
   subscribe,
+  reloadAfterSkillSourceSettingsChange,
   resetForTesting,
 }

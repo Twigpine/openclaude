@@ -14,6 +14,7 @@ const originalEnv = {
   CLAUDE_CODE_USE_FOUNDRY: process.env.CLAUDE_CODE_USE_FOUNDRY,
   NVIDIA_NIM: process.env.NVIDIA_NIM,
   MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
+  LONGCAT_API_KEY: process.env.LONGCAT_API_KEY,
   ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
@@ -62,6 +63,7 @@ function clearProviderEnv(): void {
   delete process.env.CLAUDE_CODE_USE_FOUNDRY
   delete process.env.NVIDIA_NIM
   delete process.env.MINIMAX_API_KEY
+  delete process.env.LONGCAT_API_KEY
   delete process.env.ANTHROPIC_BASE_URL
   delete process.env.ANTHROPIC_API_KEY
   delete process.env.ANTHROPIC_AUTH_TOKEN

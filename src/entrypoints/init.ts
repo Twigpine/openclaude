@@ -41,6 +41,7 @@ import {
 } from '../utils/permissions/filesystem.js'
 import { configureGlobalAgents } from '../utils/proxy.js'
 import { setShellIfWindows } from '../utils/windowsPaths.js'
+import { initializeSentry } from '../utils/sentry.js'
 
 
 export const init = memoize(async (): Promise<void> => {
@@ -216,9 +217,10 @@ export const init = memoize(async (): Promise<void> => {
 })
 
 /**
- * No-op — telemetry initialization has been removed.
- * Kept as an empty function for API compatibility with callers.
+ * Initializes optional, env-driven Sentry error reporting after the user
+ * has trusted the working directory. No-op unless SENTRY_DSN is set and
+ * telemetry is not disabled.
  */
 export function initializeTelemetryAfterTrust(): void {
-  // Telemetry is no longer initialized; this is a no-op.
+  void initializeSentry()
 }

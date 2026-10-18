@@ -21,6 +21,7 @@ import {
   handlePlanApprovalResponse,
 } from '../utils/inProcessTeammateHelpers.js'
 import { createAssistantMessage } from '../utils/messages.js'
+import { tracePermissionAbortResolution } from '../utils/interruptionTrace.js'
 import { requestPermissionModeChange } from '../utils/permissions/permissionModeChange.js'
 import {
   applyPermissionModeChange,
@@ -313,7 +314,12 @@ export function useInboxPoller({
             onUserInteraction() {
               // No-op for tmux workers (no classifier auto-approval)
             },
-            onAbort() {
+            onAbort(source, causalEventId) {
+              tracePermissionAbortResolution(
+                source,
+                causalEventId,
+                'tmux_permission_bridge',
+              )
               void sendPermissionResponseViaMailbox(
                 parsed.agent_id,
                 { decision: 'rejected', resolvedBy: 'leader' },

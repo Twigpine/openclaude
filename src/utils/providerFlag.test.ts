@@ -13,6 +13,7 @@ import {
   applyModelFlagFromArgs,
   VALID_PROVIDERS,
 } from './providerFlag.js'
+import { resolveActiveRouteIdFromEnv } from '../integrations/routeMetadata.js'
 
 const ENV_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',
@@ -27,9 +28,14 @@ const ENV_KEYS = [
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'OPENAI_API_FORMAT',
+  'OPENAI_AZURE_STYLE',
   'OPENAI_AUTH_HEADER',
   'OPENAI_AUTH_SCHEME',
   'OPENAI_AUTH_HEADER_VALUE',
+  'LLMTR_API_KEY',
+  'CMD_API_KEY',
+  'COMMANDCODE_API_KEY',
+  'COMMAND_CODE_API_KEY',
   'GEMINI_MODEL',
   'NVIDIA_API_KEY',
   'NVIDIA_NIM',
@@ -39,6 +45,16 @@ const ENV_KEYS = [
   'VENICE_API_KEY',
   'MIMO_API_KEY',
   'ATLAS_CLOUD_API_KEY',
+  'GMI_API_KEY',
+  'GMI_MODEL',
+  'APISMART_API_KEY',
+  'APISMART_MODEL',
+  'API_ROUTE_API_KEY',
+  'API_ROUTE_MODEL',
+  'CONCENTRATE_API_KEY',
+  'CONCENTRATE_BASE_URL',
+  'CONCENTRATE_MODEL',
+  'LONGCAT_API_KEY',
   'OPENGATEWAY_API_KEY',
   'OPENGATEWAY_BASE_URL',
   'CLOUDFLARE_API_TOKEN',
@@ -74,6 +90,7 @@ const RESET_KEYS = [
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'OPENAI_API_FORMAT',
+  'OPENAI_AZURE_STYLE',
   'OPENAI_AUTH_HEADER',
   'OPENAI_AUTH_SCHEME',
   'OPENAI_AUTH_HEADER_VALUE',
@@ -86,6 +103,16 @@ const RESET_KEYS = [
   'VENICE_API_KEY',
   'MIMO_API_KEY',
   'ATLAS_CLOUD_API_KEY',
+  'GMI_API_KEY',
+  'GMI_MODEL',
+  'APISMART_API_KEY',
+  'APISMART_MODEL',
+  'API_ROUTE_API_KEY',
+  'API_ROUTE_MODEL',
+  'CONCENTRATE_API_KEY',
+  'CONCENTRATE_BASE_URL',
+  'CONCENTRATE_MODEL',
+  'LONGCAT_API_KEY',
   'OPENGATEWAY_API_KEY',
   'OPENGATEWAY_BASE_URL',
   'CLOUDFLARE_API_TOKEN',
@@ -127,6 +154,19 @@ describe('parseProviderFlag', () => {
     expect(parseProviderFlag(['--provider', 'openai'])).toBe('openai')
   })
 
+  test('returns provider name when --provider uses inline syntax', () => {
+    expect(parseProviderFlag(['--provider=anthropic'])).toBe('anthropic')
+  })
+
+  test('uses the final provider occurrence across spaced and inline syntax', () => {
+    expect(
+      parseProviderFlag(['--provider', 'anthropic', '--provider=openai']),
+    ).toBe('openai')
+    expect(
+      parseProviderFlag(['--provider=commandcode', '--provider', 'anthropic']),
+    ).toBe('anthropic')
+  })
+
   test('returns provider name with --model alongside', () => {
     expect(parseProviderFlag(['--provider', 'gemini', '--model', 'gemini-2.0-flash'])).toBe('gemini')
   })
@@ -141,6 +181,20 @@ describe('parseProviderFlag', () => {
 
   test('returns null when --provider has no value', () => {
     expect(parseProviderFlag(['--provider'])).toBeNull()
+  })
+
+  test('returns null when inline --provider has no value', () => {
+    expect(parseProviderFlag(['--provider='])).toBeNull()
+  })
+
+  test('ignores provider-looking values consumed by another root option', () => {
+    expect(
+      parseProviderFlag(['--system-prompt', '--provider=commandcode']),
+    ).toBeNull()
+  })
+
+  test('ignores provider-looking prompt text after the option delimiter', () => {
+    expect(parseProviderFlag(['--', '--provider=commandcode'])).toBeNull()
   })
 
   test('returns null when --provider value starts with --', () => {
@@ -182,6 +236,26 @@ describe('applyProviderFlag - anthropic', () => {
 
     expect(result.error).toBeUndefined()
     expect(process.env.ANTHROPIC_API_KEY).toBe('first-party-key')
+  })
+
+  test('does not leave ApiSmart env-only selection active', () => {
+    process.env.APISMART_API_KEY = 'apismart-key'
+    process.env.APISMART_MODEL = 'KIMI_K3'
+
+    applyProviderFlag('anthropic', [])
+
+    expect(process.env.APISMART_API_KEY).toBeUndefined()
+    expect(process.env.APISMART_MODEL).toBeUndefined()
+  })
+
+  test('does not leave Concentrate env-only selection active', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-key'
+    process.env.CONCENTRATE_BASE_URL = 'https://api.concentrate.ai/v1'
+    process.env.CONCENTRATE_MODEL = 'claude-sonnet-5'
+    applyProviderFlag('anthropic', [])
+    expect(process.env.CONCENTRATE_API_KEY).toBeUndefined()
+    expect(process.env.CONCENTRATE_BASE_URL).toBeUndefined()
+    expect(process.env.CONCENTRATE_MODEL).toBeUndefined()
   })
 })
 
@@ -243,6 +317,21 @@ describe('applyProviderFlag - custom Anthropic-compatible', () => {
     expect(process.env.ANTHROPIC_MODEL).toBe('proxy-model')
   })
 
+  test('does not leave Concentrate env-only selection active', () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example/v1'
+    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
+    process.env.CONCENTRATE_API_KEY = 'concentrate-key'
+    process.env.CONCENTRATE_BASE_URL = 'https://api.concentrate.ai/v1'
+    process.env.CONCENTRATE_MODEL = 'claude-sonnet-5'
+
+    const result = applyProviderFlag('custom-anthropic', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.CONCENTRATE_API_KEY).toBeUndefined()
+    expect(process.env.CONCENTRATE_BASE_URL).toBeUndefined()
+    expect(process.env.CONCENTRATE_MODEL).toBeUndefined()
+  })
+
   test('accepts native x-api-key authentication', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://proxy.example/v1'
     process.env.ANTHROPIC_API_KEY = 'stale-first-party-key'
@@ -265,6 +354,8 @@ describe('VALID_PROVIDERS', () => {
     expect(VALID_PROVIDERS).toContain('venice')
     expect(VALID_PROVIDERS).toContain('xiaomi-mimo')
     expect(VALID_PROVIDERS).toContain('xiaomi-mimo-token')
+    expect(VALID_PROVIDERS).toContain('longcat')
+    expect(VALID_PROVIDERS).toContain('commandcode')
     expect(VALID_PROVIDERS).toContain('custom-anthropic')
   })
 })
@@ -279,6 +370,26 @@ describe('applyProviderFlag - openai', () => {
   test('sets OPENAI_MODEL when --model is provided', () => {
     applyProviderFlag('openai', ['--model', 'gpt-4o'])
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
+  })
+
+  test('does not leave ApiSmart env-only selection active', () => {
+    process.env.APISMART_API_KEY = 'apismart-key'
+    process.env.APISMART_MODEL = 'KIMI_K3'
+
+    applyProviderFlag('openai', [])
+
+    expect(process.env.APISMART_API_KEY).toBeUndefined()
+    expect(process.env.APISMART_MODEL).toBeUndefined()
+  })
+
+  test('does not leave Concentrate env-only selection active', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-key'
+    process.env.CONCENTRATE_BASE_URL = 'https://api.concentrate.ai/v1'
+    process.env.CONCENTRATE_MODEL = 'claude-sonnet-5'
+    applyProviderFlag('openai', [])
+    expect(process.env.CONCENTRATE_API_KEY).toBeUndefined()
+    expect(process.env.CONCENTRATE_BASE_URL).toBeUndefined()
+    expect(process.env.CONCENTRATE_MODEL).toBeUndefined()
   })
 })
 
@@ -450,6 +561,14 @@ describe('applyProviderFlag - ollama', () => {
     expect(process.env.OPENAI_MODEL).toBe('llama3.2')
   })
 
+  test('clears Azure-only routing mode', () => {
+    process.env.OPENAI_AZURE_STYLE = '1'
+
+    applyProviderFlag('ollama', [])
+
+    expect(process.env.OPENAI_AZURE_STYLE).toBeUndefined()
+  })
+
   test('does not override existing OPENAI_BASE_URL when user set a custom one', () => {
     process.env.OPENAI_BASE_URL = 'http://my-ollama:11434/v1'
     applyProviderFlag('ollama', [])
@@ -493,6 +612,232 @@ describe('applyProviderFlag - descriptor-backed openai-compatible routes', () =>
     expect(result.error).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
     expect(process.env.OPENAI_BASE_URL).toBe('http://proxy.local:8080/v1')
+  })
+
+  test('LLMTR clears stale custom auth only on its canonical endpoint', () => {
+    process.env.LLMTR_API_KEY = 'llmtr-key'
+    process.env.OPENAI_API_FORMAT = 'responses'
+    process.env.OPENAI_AUTH_HEADER = 'X-Proxy-Key'
+    process.env.OPENAI_AUTH_SCHEME = 'raw'
+    process.env.OPENAI_AUTH_HEADER_VALUE = 'proxy-secret'
+    process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Tenant-Secret: tenant-secret'
+
+    const result = applyProviderFlag('llmtr', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://llmtr.com/v1')
+    expect(process.env.OPENAI_API_FORMAT).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_SCHEME).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
+    expect(process.env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+  })
+
+  test('LLMTR preserves custom endpoint auth settings when the endpoint is explicit', () => {
+    process.env.OPENAI_BASE_URL = 'https://proxy.example/v1'
+    process.env.OPENAI_API_FORMAT = 'responses'
+    process.env.OPENAI_AUTH_HEADER = 'X-Proxy-Key'
+    process.env.OPENAI_AUTH_SCHEME = 'raw'
+    process.env.OPENAI_AUTH_HEADER_VALUE = 'proxy-secret'
+    process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Tenant-Secret: tenant-secret'
+
+    const result = applyProviderFlag('llmtr', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://proxy.example/v1')
+    expect(process.env.OPENAI_API_FORMAT).toBe('responses')
+    expect(process.env.OPENAI_AUTH_HEADER).toBe('X-Proxy-Key')
+    expect(process.env.OPENAI_AUTH_SCHEME).toBe('raw')
+    expect(process.env.OPENAI_AUTH_HEADER_VALUE).toBe('proxy-secret')
+    expect(process.env.ANTHROPIC_CUSTOM_HEADERS).toBe(
+      'X-Tenant-Secret: tenant-secret',
+    )
+  })
+
+  test('clears an LLMTR key copied into OPENAI_API_KEY when switching routes', () => {
+    process.env.LLMTR_API_KEY = 'llmtr-secret'
+    process.env.OPENAI_API_KEY = 'llmtr-secret'
+    process.env.OPENAI_BASE_URL = 'https://llmtr.com/v1'
+
+    const result = applyProviderFlag('openrouter', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://openrouter.ai/api/v1')
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    expect(process.env.LLMTR_API_KEY).toBe('llmtr-secret')
+  })
+
+  test('preserves an independent generic OPENAI_API_KEY when switching from LLMTR', () => {
+    process.env.LLMTR_API_KEY = 'llmtr-secret'
+    process.env.OPENAI_API_KEY = 'generic-openai-secret'
+    process.env.OPENAI_BASE_URL = 'https://llmtr.com/v1'
+
+    const result = applyProviderFlag('openrouter', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://openrouter.ai/api/v1')
+    expect(process.env.OPENAI_API_KEY).toBe('generic-openai-secret')
+  })
+
+  test('Command Code clears stale custom auth only on its canonical endpoint', () => {
+    process.env.CMD_API_KEY = 'cmd-key'
+    process.env.OPENAI_API_FORMAT = 'responses'
+    process.env.OPENAI_AUTH_HEADER = 'X-Proxy-Key'
+    process.env.OPENAI_AUTH_SCHEME = 'raw'
+    process.env.OPENAI_AUTH_HEADER_VALUE = 'proxy-secret'
+    process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Tenant-Secret: tenant-secret'
+
+    const result = applyProviderFlag('commandcode', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe(
+      'https://api.commandcode.ai/provider/v1',
+    )
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-flash')
+    expect(process.env.OPENAI_API_FORMAT).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_SCHEME).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
+    expect(process.env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+  })
+
+  test('clears a Command Code key copied into OPENAI_API_KEY when switching routes', () => {
+    process.env.CMD_API_KEY = 'cmd-secret'
+    process.env.OPENAI_API_KEY = 'cmd-secret'
+    process.env.OPENAI_BASE_URL = 'https://api.commandcode.ai/provider/v1'
+
+    const result = applyProviderFlag('openrouter', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://openrouter.ai/api/v1')
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    expect(process.env.CMD_API_KEY).toBe('cmd-secret')
+  })
+
+  test('Command Code dedicated key overrides a lingering OPENAI_API_KEY from another provider', () => {
+    process.env.OPENAI_API_KEY = 'generic-openai-secret'
+    process.env.CMD_API_KEY = 'cmd-key'
+
+    const result = applyProviderFlag('commandcode', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBe('cmd-key')
+  })
+
+  test('Command Code clears a distinct generic OPENAI_API_KEY when no dedicated key is set', () => {
+    process.env.OPENAI_API_KEY = 'generic-openai-secret'
+
+    const result = applyProviderFlag('commandcode', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('Command Code keeps a copied dedicated key in OPENAI_API_KEY when selecting commandcode', () => {
+    process.env.CMD_API_KEY = 'cmd-key'
+    process.env.OPENAI_API_KEY = 'cmd-key'
+
+    const result = applyProviderFlag('commandcode', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBe('cmd-key')
+  })
+
+  test('Command Code uses COMMANDCODE_API_KEY when CMD_API_KEY is absent', () => {
+    process.env.OPENAI_API_KEY = 'generic-openai-secret'
+    process.env.COMMANDCODE_API_KEY = 'commandcode-key'
+
+    const result = applyProviderFlag('commandcode', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBe('commandcode-key')
+  })
+
+  test('Command Code uses the official client key when other aliases are absent', () => {
+    process.env.OPENAI_API_KEY = 'generic-openai-secret'
+    process.env.COMMAND_CODE_API_KEY = 'official-command-code-key'
+
+    const result = applyProviderFlag('commandcode', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBe('official-command-code-key')
+  })
+
+  test('Command Code rejects an incompatible stale model before changing provider state', () => {
+    process.env.OPENAI_BASE_URL = 'https://openrouter.ai/api/v1'
+    process.env.OPENAI_MODEL = 'anthropic/claude-sonnet-4.6'
+
+    const result = applyProviderFlag('commandcode', [])
+
+    expect(result.error).toContain('requires the Anthropic Messages protocol')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://openrouter.ai/api/v1')
+    expect(process.env.OPENAI_MODEL).toBe('anthropic/claude-sonnet-4.6')
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+  })
+
+  test('Command Code rejects an explicit incompatible model', () => {
+    const result = applyProviderFlag('commandcode', [
+      '--model',
+      'claude-sonnet-5',
+    ])
+
+    expect(result.error).toContain('requires the Anthropic Messages protocol')
+    expect(process.env.OPENAI_BASE_URL).toBeUndefined()
+  })
+
+  test('Command Code resolves the reserved default model before applying it', () => {
+    const result = applyProviderFlag('commandcode', [
+      '--model',
+      'default',
+    ])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-flash')
+  })
+
+  test('Command Code ignores nested model-owning subcommand --model', () => {
+    const result = applyProviderFlag('commandcode', [
+      '--provider',
+      'commandcode',
+      '--model',
+      'deepseek/deepseek-v4-flash',
+      'aimlapi',
+      'topup',
+      '--model',
+      'anthropic/claude-sonnet-4-6',
+    ])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-flash')
+  })
+
+  test('Command Code ignores nested-only --model when selecting the provider', () => {
+    const result = applyProviderFlag('commandcode', [
+      '--provider',
+      'commandcode',
+      'auto-mode',
+      'critique',
+      '--model=anthropic/claude-sonnet-4-6',
+    ])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-flash')
+  })
+
+  test('Command Code still rejects a root incompatible --model before a nested command', () => {
+    const result = applyProviderFlag('commandcode', [
+      '--provider',
+      'commandcode',
+      '--model',
+      'anthropic/claude-sonnet-4-6',
+      'aimlapi',
+      'topup',
+      '--model',
+      'deepseek/deepseek-v4-flash',
+    ])
+
+    expect(result.error).toContain('requires the Anthropic Messages protocol')
+    expect(process.env.OPENAI_BASE_URL).toBeUndefined()
   })
 
   test('descriptor-backed provider selection preserves custom OPENAI_API_BASE alias', () => {
@@ -750,6 +1095,68 @@ describe('applyProviderFlag - zai', () => {
   })
 })
 
+describe('applyProviderFlag - longcat', () => {
+  test('sets LongCat OpenAI-compatible defaults and mirrors LONGCAT_API_KEY', () => {
+    process.env.LONGCAT_API_KEY = 'longcat-secret-key'
+
+    const result = applyProviderFlag('longcat', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.longcat.chat/openai/v1')
+    expect(process.env.OPENAI_MODEL).toBe('LongCat-2.0')
+    expect(process.env.OPENAI_API_KEY).toBe('longcat-secret-key')
+  })
+
+  test('sets LongCat OPENAI_MODEL when --model is provided', () => {
+    applyProviderFlag('longcat', ['--model', 'LongCat-2.0'])
+
+    expect(process.env.OPENAI_MODEL).toBe('LongCat-2.0')
+  })
+
+  test('clears incompatible OpenAI transport and auth overrides', () => {
+    process.env.LONGCAT_API_KEY = 'longcat-secret-key'
+    process.env.OPENAI_API_FORMAT = 'responses'
+    process.env.OPENAI_AUTH_HEADER = 'api-key'
+    process.env.OPENAI_AUTH_SCHEME = 'token'
+    process.env.OPENAI_AUTH_HEADER_VALUE = 'stale-secret'
+
+    const result = applyProviderFlag('longcat', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_API_FORMAT).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_SCHEME).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
+  })
+
+  test('does not mirror LONGCAT_API_KEY to a preserved custom base URL', () => {
+    process.env.OPENAI_BASE_URL = 'https://untrusted.example/v1'
+    process.env.LONGCAT_API_KEY = 'longcat-secret-key'
+
+    const result = applyProviderFlag('longcat', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://untrusted.example/v1')
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('clears LONGCAT_API_KEY copied into OPENAI_API_KEY when switching routes', () => {
+    process.env.LONGCAT_API_KEY = 'longcat-live-key'
+
+    const longcatResult = applyProviderFlag('longcat', [])
+    expect(longcatResult.error).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBe('longcat-live-key')
+
+    process.env.OPENAI_BASE_URL = 'https://openrouter.ai/api/v1'
+    const openrouterResult = applyProviderFlag('openrouter', [])
+
+    expect(openrouterResult.error).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://openrouter.ai/api/v1')
+  })
+})
+
 describe('applyProviderFlag - xiaomi-mimo', () => {
   test('sets Xiaomi MiMo OpenAI-compatible defaults and mirrors MIMO_API_KEY', () => {
     process.env.MIMO_API_KEY = 'mimo-secret-key'
@@ -893,6 +1300,229 @@ describe('applyProviderFlag - atlas-cloud', () => {
   })
 })
 
+describe('applyProviderFlag - gmi-cloud', () => {
+  test('sets GMI Cloud OpenAI-compatible defaults and mirrors GMI_API_KEY', () => {
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+
+    const result = applyProviderFlag('gmi-cloud', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.gmi-serving.com/v1')
+    expect(process.env.OPENAI_MODEL).toBe('Qwen/Qwen3.8-Max')
+    expect(process.env.OPENAI_API_KEY).toBe('gmi-secret-key')
+  })
+
+  test('dedicated key overrides a lingering OPENAI_API_KEY from another provider', () => {
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+
+    applyProviderFlag('gmi-cloud', [])
+
+    expect(process.env.OPENAI_API_KEY).toBe('gmi-secret-key')
+  })
+
+  test('clears a stale OPENAI_API_KEY when no GMI Cloud key is set', () => {
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+
+    applyProviderFlag('gmi-cloud', [])
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('clears a copied GMI key from OPENAI_API_KEY when switching to another provider', () => {
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+    process.env.OPENAI_API_KEY = 'gmi-secret-key'
+
+    applyProviderFlag('openai', [])
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('replaces a stale base URL belonging to another known provider', () => {
+    process.env.OPENAI_BASE_URL = 'https://api.venice.ai/api/v1'
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+
+    applyProviderFlag('gmi-cloud', [])
+
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.gmi-serving.com/v1')
+  })
+
+  test('preserves a custom base URL but never mirrors the GMI key to it', () => {
+    process.env.OPENAI_BASE_URL = 'https://llm-proxy.internal.example/v1'
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+
+    applyProviderFlag('gmi-cloud', [])
+
+    expect(process.env.OPENAI_BASE_URL).toBe('https://llm-proxy.internal.example/v1')
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('drops an API format and custom auth header left by another provider', () => {
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+    process.env.OPENAI_API_FORMAT = 'responses'
+    process.env.OPENAI_AUTH_HEADER = 'api-key'
+    process.env.OPENAI_AUTH_SCHEME = 'raw'
+    process.env.OPENAI_AUTH_HEADER_VALUE = 'other-provider-secret'
+    process.env.ANTHROPIC_CUSTOM_HEADERS = 'x-other: secret'
+
+    applyProviderFlag('gmi-cloud', [])
+
+    expect(process.env.OPENAI_API_FORMAT).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_SCHEME).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
+    expect(process.env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBe('gmi-secret-key')
+  })
+
+  test('GMI_MODEL selects the model over a lingering OPENAI_MODEL', () => {
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+    process.env.OPENAI_MODEL = 'stale-openai-model'
+    process.env.GMI_MODEL = 'moonshotai/kimi-k2.7-code'
+
+    applyProviderFlag('gmi-cloud', [])
+
+    expect(process.env.OPENAI_MODEL).toBe('moonshotai/kimi-k2.7-code')
+  })
+
+  test('a placeholder GMI_MODEL falls back to the default model', () => {
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+    process.env.GMI_MODEL = 'undefined'
+
+    applyProviderFlag('gmi-cloud', [])
+
+    expect(process.env.OPENAI_MODEL).toBe('Qwen/Qwen3.8-Max')
+  })
+
+  test('--model wins over GMI_MODEL', () => {
+    process.env.GMI_API_KEY = 'gmi-secret-key'
+    process.env.GMI_MODEL = 'moonshotai/kimi-k2.7-code'
+
+    applyProviderFlag('gmi-cloud', ['--model', 'deepseek-ai/DeepSeek-V4-Flash'])
+
+    expect(process.env.OPENAI_MODEL).toBe('deepseek-ai/DeepSeek-V4-Flash')
+  })
+})
+
+describe('applyProviderFlag - apismart', () => {
+  test('sets ApiSmart OpenAI-compatible defaults and mirrors APISMART_API_KEY', () => {
+    process.env.APISMART_API_KEY = 'apismart-secret-key'
+
+    const result = applyProviderFlag('apismart', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://gw.apismart.ai/v1')
+    expect(process.env.OPENAI_MODEL).toBe('DEEPSEEK_V4_FLASH')
+    expect(process.env.OPENAI_API_KEY).toBe('apismart-secret-key')
+  })
+
+  test('does not forward the dedicated key to a preserved custom base URL', () => {
+    process.env.APISMART_API_KEY = 'apismart-secret-key'
+    process.env.OPENAI_BASE_URL = 'https://llm-proxy.internal.example/v1'
+
+    applyProviderFlag('apismart', [])
+
+    expect(process.env.OPENAI_BASE_URL).toBe('https://llm-proxy.internal.example/v1')
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test.each(['null', 'undefined', ' NULL ', ' Undefined '])(
+    'treats placeholder OPENAI_BASE_URL %s as unset and applies ApiSmart defaults',
+    sentinel => {
+      process.env.APISMART_API_KEY = 'apismart-secret-key'
+      process.env.OPENAI_BASE_URL = sentinel
+
+      applyProviderFlag('apismart', [])
+
+      expect(process.env.OPENAI_BASE_URL).toBe('https://gw.apismart.ai/v1')
+      expect(process.env.OPENAI_API_KEY).toBe('apismart-secret-key')
+    },
+  )
+
+  test('clears unsupported OpenAI shim settings from a previous route', () => {
+    process.env.APISMART_API_KEY = 'apismart-secret-key'
+    process.env.OPENAI_API_FORMAT = 'responses'
+    process.env.OPENAI_AUTH_HEADER = 'x-api-key'
+    process.env.OPENAI_AUTH_SCHEME = 'raw'
+    process.env.OPENAI_AUTH_HEADER_VALUE = 'stale-value'
+
+    applyProviderFlag('apismart', [])
+
+    expect(process.env.OPENAI_API_FORMAT).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_SCHEME).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
+  })
+
+  test('clears inherited Anthropic custom headers', () => {
+    process.env.APISMART_API_KEY = 'apismart-secret-key'
+    process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Proxy-Auth: proxy-secret'
+
+    applyProviderFlag('apismart', [])
+
+    expect(process.env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+  })
+
+  test('uses APISMART_MODEL from env when --model is not provided', () => {
+    process.env.APISMART_API_KEY = 'apismart-secret-key'
+    process.env.APISMART_MODEL = 'KIMI_K3'
+
+    applyProviderFlag('apismart', [])
+
+    expect(process.env.OPENAI_MODEL).toBe('KIMI_K3')
+  })
+
+  test('makes an explicit --model override APISMART_MODEL', () => {
+    process.env.APISMART_API_KEY = 'apismart-secret-key'
+    process.env.APISMART_MODEL = 'KIMI_K3'
+
+    applyProviderFlag('apismart', ['--model', 'GLM_5.2'])
+
+    expect(process.env.OPENAI_MODEL).toBe('GLM_5.2')
+    expect(process.env.APISMART_MODEL).toBe('GLM_5.2')
+  })
+
+  test('dedicated key overrides a lingering OPENAI_API_KEY from another provider', () => {
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+    process.env.APISMART_API_KEY = 'apismart-secret-key'
+
+    applyProviderFlag('apismart', [])
+
+    expect(process.env.OPENAI_API_KEY).toBe('apismart-secret-key')
+  })
+
+  test('clears a stale OPENAI_API_KEY when no ApiSmart key is set', () => {
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+
+    applyProviderFlag('apismart', [])
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test.each(['SUA_CHAVE', 'sua_chave', 'null', 'undefined', ' NULL '])(
+    'does not mirror placeholder ApiSmart credential %s',
+    placeholder => {
+      process.env.APISMART_API_KEY = placeholder
+
+      applyProviderFlag('apismart', [])
+
+      expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    },
+  )
+
+  test('clears a copied ApiSmart key from OPENAI_API_KEY when switching to another provider', () => {
+    process.env.APISMART_API_KEY = 'apismart-secret-key'
+    process.env.OPENAI_API_KEY = 'apismart-secret-key'
+
+    applyProviderFlag('openai', [])
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+})
+
 describe('applyProviderFlag - xai', () => {
   test('sets CLAUDE_CODE_USE_OPENAI=1 with xAI defaults when unset', () => {
     delete process.env.OPENAI_BASE_URL
@@ -902,7 +1532,7 @@ describe('applyProviderFlag - xai', () => {
     expect(result.error).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
     expect(process.env.OPENAI_BASE_URL as string | undefined).toBe('https://api.x.ai/v1')
-    expect(process.env.OPENAI_MODEL).toBe('grok-4.3')
+    expect(process.env.OPENAI_MODEL).toBe('grok-4.6')
   })
 
   test('sets OPENAI_MODEL when --model is provided', () => {
@@ -1013,6 +1643,31 @@ describe('applyProviderFlagFromArgs', () => {
     )
     expect(process.env.OPENAI_MODEL).toBe('custom-ogw-model')
   })
+
+  test('remembered Command Code --model ignores nested subcommand --model', () => {
+    const result = applyProviderFlagFromArgs(
+      [
+        '--provider',
+        'commandcode',
+        '--model',
+        'deepseek/deepseek-v4-pro',
+        'aimlapi',
+        'topup',
+        '--model',
+        'anthropic/claude-sonnet-4-6',
+      ],
+      { rememberForSettingsEnv: true },
+    )
+
+    expect(result?.error).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-pro')
+
+    process.env.OPENAI_MODEL = 'stale-openai-model'
+    const lateResult = reapplyRememberedProviderFlag()
+
+    expect(lateResult?.error).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-pro')
+  })
 })
 
 // --- parseModelFlag ---
@@ -1020,6 +1675,48 @@ describe('applyProviderFlagFromArgs', () => {
 describe('parseModelFlag', () => {
   test('returns model value when --model is present', () => {
     expect(parseModelFlag(['--model', 'gpt-4o-mini'])).toBe('gpt-4o-mini')
+  })
+
+  test('returns model value from equals-separated syntax', () => {
+    expect(parseModelFlag(['--model=deepseek/deepseek-v4-flash'])).toBe(
+      'deepseek/deepseek-v4-flash',
+    )
+  })
+
+  test('ignores model-looking text consumed by another root option', () => {
+    expect(
+      parseModelFlag([
+        '--system-prompt',
+        '--model=anthropic/claude-sonnet-4-6',
+      ]),
+    ).toBeNull()
+  })
+
+  test('returns null for an empty equals-separated value', () => {
+    expect(parseModelFlag(['--model='])).toBeNull()
+  })
+
+  test('ignores model-looking positional text after the option delimiter', () => {
+    expect(
+      parseModelFlag(['--', '--model=anthropic/claude-sonnet-4-6']),
+    ).toBeNull()
+  })
+
+  test('uses the final model occurrence like Commander', () => {
+    expect(
+      parseModelFlag([
+        '--model=anthropic/claude-sonnet-4-6',
+        '--model',
+        'deepseek/deepseek-v4-flash',
+      ]),
+    ).toBe('deepseek/deepseek-v4-flash')
+    expect(
+      parseModelFlag([
+        '--model',
+        'deepseek/deepseek-v4-flash',
+        '--model=anthropic/claude-sonnet-4-6',
+      ]),
+    ).toBe('anthropic/claude-sonnet-4-6')
   })
 
   test('returns null when --model is absent', () => {
@@ -1051,10 +1748,57 @@ describe('applyModelFlagFromArgs', () => {
     expect(process.env.OPENAI_MODEL).toBeUndefined()
   })
 
+  test('is a no-op when inline --provider is present', () => {
+    const result = applyModelFlagFromArgs([
+      '--provider=anthropic',
+      '--model=sonnet',
+    ])
+    expect(result).toBeUndefined()
+    expect(process.env.ANTHROPIC_MODEL).toBeUndefined()
+  })
+
   test('sets OPENAI_MODEL when CLAUDE_CODE_USE_OPENAI is active', () => {
     process.env.CLAUDE_CODE_USE_OPENAI = '1'
     applyModelFlagFromArgs(['--model', 'gpt-4o-mini'])
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o-mini')
+  })
+
+  test('resolves default for an active Command Code route', () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'commandcode'
+    process.env.OPENAI_BASE_URL = 'https://api.commandcode.ai/provider/v1'
+
+    const result = applyModelFlagFromArgs(['--model', 'default'])
+
+    expect(result?.error).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-flash')
+  })
+
+  test('rejects an incompatible model override on the active Command Code route', () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://api.commandcode.ai/provider/v1'
+    process.env.OPENAI_MODEL = 'deepseek/deepseek-v4-flash'
+
+    const result = applyModelFlagFromArgs([
+      '--model',
+      'anthropic/claude-sonnet-4-6',
+    ])
+
+    expect(result?.error).toContain('requires the Anthropic Messages protocol')
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-flash')
+  })
+
+  test('rejects an incompatible equals-separated model on the active Command Code route', () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://api.commandcode.ai/provider/v1'
+    process.env.OPENAI_MODEL = 'deepseek/deepseek-v4-flash'
+
+    const result = applyModelFlagFromArgs([
+      '--model=anthropic/claude-sonnet-4-6',
+    ])
+
+    expect(result?.error).toContain('Anthropic Messages protocol')
+    expect(process.env.OPENAI_MODEL).toBe('deepseek/deepseek-v4-flash')
   })
 
   test('sets GEMINI_MODEL when CLAUDE_CODE_USE_GEMINI is active', () => {
@@ -1093,3 +1837,275 @@ describe('applyModelFlagFromArgs', () => {
     expect(process.env.OPENAI_MODEL).toBe('qwen2.5-coder:14b')
   })
 })
+
+describe('applyProviderFlag - concentrate', () => {
+  test('sets Concentrate OpenAI-compatible defaults and mirrors CONCENTRATE_API_KEY', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+
+    const result = applyProviderFlag('concentrate', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.concentrate.ai/v1')
+    expect(process.env.OPENAI_MODEL).toBe('deepseek-v4-flash')
+    expect(process.env.OPENAI_API_KEY).toBe('concentrate-secret-key')
+  })
+
+  test('uses CONCENTRATE_BASE_URL and CONCENTRATE_MODEL from env', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+    process.env.CONCENTRATE_BASE_URL = 'https://api.concentrate.ai/v1'
+    process.env.CONCENTRATE_MODEL = 'claude-sonnet-5'
+
+    applyProviderFlag('concentrate', [])
+
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.concentrate.ai/v1')
+    expect(process.env.OPENAI_MODEL).toBe('claude-sonnet-5')
+  })
+
+  test('does not mirror the dedicated key to a noncanonical Concentrate URL', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+    process.env.CONCENTRATE_BASE_URL = 'https://api.concentrate.ai/staging/v1'
+
+    applyProviderFlag('concentrate', [])
+
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.concentrate.ai/staging/v1')
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('explicit --model overrides CONCENTRATE_MODEL and OPENAI_MODEL', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+    process.env.CONCENTRATE_MODEL = 'claude-sonnet-5'
+
+    applyProviderFlag('concentrate', ['--model', 'deepseek-v4-pro-0731'])
+
+    expect(process.env.OPENAI_MODEL).toBe('deepseek-v4-pro-0731')
+    expect(process.env.CONCENTRATE_MODEL).toBeUndefined()
+  })
+
+  test('dedicated key overrides a lingering OPENAI_API_KEY from another provider', () => {
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+
+    applyProviderFlag('concentrate', [])
+
+    expect(process.env.OPENAI_API_KEY).toBe('concentrate-secret-key')
+  })
+
+  test('clears a stale OPENAI_API_KEY when no Concentrate key is set', () => {
+    delete process.env.CONCENTRATE_API_KEY
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+
+    applyProviderFlag('concentrate', [])
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test.each(['SUA_CHAVE', 'sua_chave', 'null', 'undefined', ' NULL '])(
+    'does not mirror placeholder Concentrate credential %s',
+    placeholder => {
+      process.env.CONCENTRATE_API_KEY = placeholder
+
+      applyProviderFlag('concentrate', [])
+
+      expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    },
+  )
+
+  test('clears a copied Concentrate key from OPENAI_API_KEY when switching to another provider', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+    process.env.OPENAI_API_KEY = 'concentrate-secret-key'
+
+    applyProviderFlag('openai', [])
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('switching from Concentrate to Ollama replaces the route identity and credentials', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+
+    applyProviderFlag('concentrate', [])
+    applyProviderFlag('ollama', [])
+
+    expect(process.env.CONCENTRATE_API_KEY).toBeUndefined()
+    expect(process.env.CONCENTRATE_BASE_URL).toBeUndefined()
+    expect(process.env.CONCENTRATE_MODEL).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('http://localhost:11434/v1')
+    expect(process.env.OPENAI_API_KEY).toBe('ollama')
+    expect(resolveActiveRouteIdFromEnv(process.env)).toBe('ollama')
+  })
+
+  test('switching from Concentrate to OpenAI replaces the known gateway endpoint', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+
+    applyProviderFlag('concentrate', [])
+    applyProviderFlag('openai', [])
+
+    expect(process.env.CONCENTRATE_API_KEY).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
+    expect(resolveActiveRouteIdFromEnv(process.env)).toBe('openai')
+  })
+
+  test('clears unsupported OpenAI shim settings from a previous route', () => {
+    process.env.CONCENTRATE_API_KEY = 'concentrate-secret-key'
+    process.env.OPENAI_API_FORMAT = 'responses'
+    process.env.OPENAI_AUTH_HEADER = 'x-api-key'
+    process.env.OPENAI_AUTH_SCHEME = 'raw'
+    process.env.OPENAI_AUTH_HEADER_VALUE = 'stale-value'
+    process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Proxy-Auth: proxy-secret'
+
+    applyProviderFlag('concentrate', [])
+
+    expect(process.env.OPENAI_API_FORMAT).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_SCHEME).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
+    expect(process.env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+  })
+})
+
+describe('applyProviderFlag - api-route', () => {
+  test('sets API Route OpenAI-compatible defaults and mirrors API_ROUTE_API_KEY', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+
+    const result = applyProviderFlag('api-route', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://global.api-route.com/v1')
+    expect(process.env.OPENAI_API_KEY).toBe('api-route-secret-key')
+    expect(process.env.OPENAI_MODEL).toBe('claude-sonnet-4-6')
+  })
+
+  test('uses API_ROUTE_MODEL from env when --model is not provided', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+    process.env.API_ROUTE_MODEL = 'custom-api-route-model'
+
+    applyProviderFlag('api-route', [])
+
+    expect(process.env.OPENAI_MODEL).toBe('custom-api-route-model')
+  })
+
+  test('explicit --model overrides API_ROUTE_MODEL', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+    process.env.API_ROUTE_MODEL = 'custom-api-route-model'
+
+    applyProviderFlag('api-route', ['--model', 'flag-model'])
+
+    expect(process.env.OPENAI_MODEL).toBe('flag-model')
+  })
+
+  test.each(['', '   ', 'null', 'undefined', ' NULL '])(
+    'does not contaminate OPENAI_MODEL with unusable API_ROUTE_MODEL %j',
+    placeholder => {
+      process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+      process.env.API_ROUTE_MODEL = placeholder
+
+      applyProviderFlag('api-route', [])
+
+      expect(process.env.OPENAI_MODEL).toBe('claude-sonnet-4-6')
+    },
+  )
+
+  test('does not forward the dedicated key to a preserved custom base URL', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+    process.env.OPENAI_BASE_URL = 'https://custom-proxy.example.com/v1'
+
+    applyProviderFlag('api-route', [])
+
+    expect(process.env.OPENAI_BASE_URL).toBe(
+      'https://custom-proxy.example.com/v1',
+    )
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('dedicated key overrides a lingering OPENAI_API_KEY from another provider', () => {
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+
+    applyProviderFlag('api-route', [])
+
+    expect(process.env.OPENAI_API_KEY).toBe('api-route-secret-key')
+  })
+
+  test('clears OPENAI_API_KEYS when dedicated API Route key is set on canonical endpoint', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+    process.env.OPENAI_API_KEYS = 'stale-key-1,stale-key-2'
+
+    applyProviderFlag('api-route', [])
+
+    expect(process.env.OPENAI_API_KEY).toBe('api-route-secret-key')
+    expect(process.env.OPENAI_API_KEYS).toBeUndefined()
+  })
+
+  test('clears a stale OPENAI_API_KEY when no API Route key is set', () => {
+    delete process.env.API_ROUTE_API_KEY
+    process.env.OPENAI_API_KEY = 'existing-openai-key'
+
+    applyProviderFlag('api-route', [])
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test.each(['SUA_CHAVE', 'sua_chave', 'null', 'undefined', ' NULL '])(
+    'does not mirror placeholder API Route credential %s',
+    placeholder => {
+      process.env.API_ROUTE_API_KEY = placeholder
+
+      applyProviderFlag('api-route', [])
+
+      expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    },
+  )
+
+  test('clears unsupported OpenAI shim settings from a previous route', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+    process.env.OPENAI_API_FORMAT = 'responses'
+    process.env.OPENAI_AUTH_HEADER = 'x-api-key'
+    process.env.OPENAI_AUTH_SCHEME = 'raw'
+    process.env.OPENAI_AUTH_HEADER_VALUE = 'stale-value'
+    process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Proxy-Auth: proxy-secret'
+
+    applyProviderFlag('api-route', [])
+
+    expect(process.env.OPENAI_API_FORMAT).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_SCHEME).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
+    expect(process.env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+  })
+
+  test('clears a copied API Route key from OPENAI_API_KEY when switching to another provider', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+    process.env.OPENAI_API_KEY = 'api-route-secret-key'
+
+    applyProviderFlag('openai', [])
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  })
+
+  test('switching from API Route to Ollama replaces the route identity and credentials', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+
+    applyProviderFlag('api-route', [])
+    applyProviderFlag('ollama', [])
+
+    expect(process.env.API_ROUTE_API_KEY).toBeUndefined()
+    expect(process.env.API_ROUTE_MODEL).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('http://localhost:11434/v1')
+    expect(process.env.OPENAI_API_KEY).toBe('ollama')
+    expect(resolveActiveRouteIdFromEnv(process.env)).toBe('ollama')
+  })
+
+  test('switching from API Route to OpenAI replaces the known gateway endpoint', () => {
+    process.env.API_ROUTE_API_KEY = 'api-route-secret-key'
+
+    applyProviderFlag('api-route', [])
+    applyProviderFlag('openai', [])
+
+    expect(process.env.API_ROUTE_API_KEY).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
+    expect(resolveActiveRouteIdFromEnv(process.env)).toBe('openai')
+  })
+})
+
+

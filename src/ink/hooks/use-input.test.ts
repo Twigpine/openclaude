@@ -1,9 +1,10 @@
 import { PassThrough } from 'node:stream'
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { createElement } from 'react'
+import { createElement, useLayoutEffect } from 'react'
 
 import { EventEmitter } from '../events/emitter.js'
+import { InputEvent } from '../events/input-event.js'
 import StdinContext, { type Props } from '../components/StdinContext.js'
 import { createRoot, type Root } from '../root.js'
 import useInput from './use-input.js'
@@ -71,6 +72,39 @@ async function renderProbe(
 function tick(): Promise<void> {
   return Bun.sleep(5)
 }
+
+test('input callbacks and active state are current during the committed layout', async () => {
+  const contextValue = createStdinContextValue(() => {})
+  const root = await createRoot({ stdout: createTestStdout(), patchConsole: false })
+  const received: string[] = []
+  /** Build a fresh printable key event for each committed render. */
+  const event = () => new InputEvent({
+    kind: 'key', raw: 'x', isPasted: false,
+    name: 'x', sequence: 'x', ctrl: false, meta: false, shift: false,
+    option: false, fn: false, super: false,
+  })
+  /** Dispatch input during layout to verify the current handler and active state. */
+  function InputProbe({ label, active }: { label: string; active: boolean }) {
+    useInput(() => received.push(label), { isActive: active })
+    useLayoutEffect(() => {
+      contextValue.internal_eventEmitter.emit('input', event())
+    }, [label, active])
+    return null
+  }
+  /** Commit the probe with the requested handler label and activation state. */
+  const draw = (label: string, active: boolean) => root.render(
+    createElement(StdinContext.Provider, { value: contextValue },
+      createElement(InputProbe, { label, active })),
+  )
+  try {
+    draw('first', true)
+    draw('inactive', false)
+    draw('latest', true)
+    expect(received).toEqual(['first', 'latest'])
+  } finally {
+    root.unmount()
+  }
+})
 
 describe('useInput — raw mode lifecycle', () => {
   let setRawMode: ReturnType<typeof mock>

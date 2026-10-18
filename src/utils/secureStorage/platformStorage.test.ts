@@ -37,11 +37,20 @@ function execaResult(overrides: Partial<MockExecaResult> = {}): MockExecaResult 
   };
 }
 
-// Mock execaSync
+// Mock execa process launches.
 const mockExecaSync = mock((..._args: MockExecaArgs) => execaResult());
+const mockExeca = mock((..._args: MockExecaArgs) =>
+  Promise.resolve(execaResult()),
+);
 
 function getExecaCall(index: number): MockExecaArgs {
   const call = mockExecaSync.mock.calls[index];
+  expect(call).toBeDefined();
+  return call;
+}
+
+function getAsyncExecaCall(index: number): MockExecaArgs {
+  const call = mockExeca.mock.calls[index];
   expect(call).toBeDefined();
   return call;
 }
@@ -90,6 +99,7 @@ describe("Secure Storage Platform Implementations", () => {
     mock.restore();
     mock.module("execa", () => ({
       ...realExeca,
+      execa: mockExeca,
       execaSync: mockExecaSync,
     }));
     const moduleSuffix = `?platformStorageTest=${Date.now()}-${Math.random()}`;
@@ -107,8 +117,10 @@ describe("Secure Storage Platform Implementations", () => {
     process.env = { ...originalEnv };
     setClaudeConfigHomeDirForTesting(undefined);
     mockExecaSync.mockClear();
+    mockExeca.mockClear();
     // Default mock behavior
     mockExecaSync.mockImplementation(() => execaResult());
+    mockExeca.mockImplementation(() => Promise.resolve(execaResult()));
   });
 
   afterEach(() => {
@@ -372,6 +384,19 @@ describe("Secure Storage Platform Implementations", () => {
         warning: "dpapi failed",
       });
     });
+
+    test("readAsync uses the asynchronous PowerShell path", async () => {
+      mockExeca.mockResolvedValueOnce(
+        execaResult({ stdout: JSON.stringify(testData) }),
+      );
+
+      const result = await windowsCredentialStorage.readAsync();
+
+      expect(result).toEqual(testData);
+      expect(mockExeca).toHaveBeenCalledTimes(1);
+      expect(mockExecaSync).not.toHaveBeenCalled();
+      expect(getAsyncExecaCall(0)[0]).toBe("powershell.exe");
+    });
   });
 
   describe("Linux secret-tool Interaction", () => {
@@ -387,6 +412,20 @@ describe("Secure Storage Platform Implementations", () => {
 
       expect(result).toEqual(testData);
     });
+
+    test("readAsync parses stdout without using the synchronous process path", async () => {
+      mockExeca.mockResolvedValueOnce(
+        execaResult({ stdout: JSON.stringify(testData) }),
+      );
+
+      const result = await linuxSecretStorage.readAsync();
+
+      expect(result).toEqual(testData);
+      expect(mockExeca).toHaveBeenCalledTimes(1);
+      expect(mockExecaSync).not.toHaveBeenCalled();
+      expect(getAsyncExecaCall(0)[0]).toBe("secret-tool");
+    });
+
   });
 
   describe("Platform Selection", () => {

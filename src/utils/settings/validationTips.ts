@@ -47,7 +47,7 @@ const TIP_MATCHERS: TipMatcher[] = [
       ctx.expected === '0',
     tip: {
       suggestion:
-        'Must be 0 or greater. Set a positive number for days to retain transcripts (default is 30). Setting 0 disables session persistence entirely: no transcripts are written and existing transcripts are deleted at startup.',
+        'Must be 0 or greater. Set a positive number for days to retain local session artifacts, including transcripts and completed background sessions (default is 30). Setting 0 disables transcript persistence and removes completed background-session artifacts after they finish.',
     },
   },
   {

@@ -12,7 +12,7 @@ const path = Astro.url.pathname
         <ul>
           {group.items.map(item => (
             <li>
-              <a href={item.href} aria-current={path === item.href ? 'page' : undefined}>
+              <a href={item.href} aria-current={path === item.href ? 'page' : undefined} rel={item.newTab ? 'noopener' : undefined} target={item.newTab ? '_blank' : undefined}>
                 {item.title}
               </a>
             </li>

@@ -77,7 +77,6 @@ test('normal subagent prompt metadata uses routed effective model', async () => 
     {
       description: 'Inspect implementation',
       prompt: 'Find the bug',
-      subagent_type: 'general-purpose',
     },
     createToolUseContext('parent-model', [createAgentDefinition()]),
     mock(async () => ({ behavior: 'allow' })) as never,
@@ -124,7 +123,6 @@ test('agent invocation entering plan mode during MCP wait stays synchronous', as
     {
       description: 'Inspect implementation',
       prompt: 'Find the bug',
-      subagent_type: 'general-purpose',
     },
     createToolUseContext('parent-model', [agent], 'default', 'plan'),
     mock(async () => ({ behavior: 'allow' })) as never,
@@ -157,7 +155,101 @@ test('agent invocation leaving plan mode during MCP wait stays synchronous', asy
   expect(result.data.status).toBe('completed')
 })
 
-async function importAgentToolWithRoutingMocks(): Promise<{
+test('sync agents forward long-running tool progress to the parent tool call', async () => {
+  const mcpProgress = {
+    type: 'progress' as const,
+    uuid: 'progress-1',
+    timestamp: new Date().toISOString(),
+    toolUseID: 'toolu_child_mcp',
+    parentToolUseID: 'toolu_agent',
+    data: {
+      type: 'mcp_progress',
+      status: 'progress',
+      serverName: 'demo',
+      toolName: 'slow-tool',
+    },
+  }
+  const taskOutputProgress = {
+    type: 'progress' as const,
+    uuid: 'progress-2',
+    timestamp: new Date().toISOString(),
+    toolUseID: 'toolu_child_task_output',
+    parentToolUseID: 'toolu_agent',
+    data: {
+      type: 'waiting_for_task',
+      taskDescription: 'long-running task',
+      taskType: 'local_bash',
+    },
+  }
+  const { AgentTool } = await importAgentToolWithRoutingMocks([
+    mcpProgress,
+    taskOutputProgress,
+  ])
+  const onProgress = mock(() => {})
+
+  await AgentTool.call(
+    {
+      description: 'Inspect implementation',
+      prompt: 'Find the bug',
+    },
+    createToolUseContext('parent-model', [createAgentDefinition()]),
+    mock(async () => ({ behavior: 'allow' })) as never,
+    { message: { id: 'parent-message' } } as never,
+    onProgress as never,
+  )
+
+  expect(onProgress).toHaveBeenCalledWith({
+    toolUseID: 'toolu_child_mcp',
+    data: mcpProgress.data,
+  })
+  expect(onProgress).toHaveBeenCalledWith({
+    toolUseID: 'toolu_child_task_output',
+    data: taskOutputProgress.data,
+  })
+})
+
+test('a throwing parent progress consumer does not change the subagent outcome', async () => {
+  const mcpProgress = {
+    type: 'progress' as const,
+    uuid: 'progress-throw-1',
+    timestamp: new Date().toISOString(),
+    toolUseID: 'toolu_child_mcp',
+    parentToolUseID: 'toolu_agent',
+    data: {
+      type: 'mcp_progress',
+      status: 'progress',
+      serverName: 'demo',
+      toolName: 'slow-tool',
+    },
+  }
+  const { AgentTool } = await importAgentToolWithRoutingMocks([mcpProgress])
+  const onProgress = mock(({ data }: { data: { type: string } }) => {
+    if (data.type === 'mcp_progress' || data.type === 'waiting_for_task') {
+      throw new Error('progress consumer failure')
+    }
+  })
+
+  const result = await AgentTool.call(
+    {
+      description: 'Inspect implementation',
+      prompt: 'Find the bug',
+    },
+    createToolUseContext('parent-model', [createAgentDefinition()]),
+    mock(async () => ({ behavior: 'allow' })) as never,
+    { message: { id: 'parent-message' } } as never,
+    onProgress as never,
+  )
+
+  expect(onProgress).toHaveBeenCalledWith({
+    toolUseID: 'toolu_child_mcp',
+    data: mcpProgress.data,
+  })
+  expect(result.data.status).toBe('completed')
+})
+
+async function importAgentToolWithRoutingMocks(
+  messages?: Array<Record<string, unknown>>,
+): Promise<{
   AgentTool: AgentToolModule['AgentTool']
   promptModels: string[]
   getRunAgentParams: () => Parameters<RunAgentModule['runAgent']>[0] | undefined
@@ -188,6 +280,9 @@ async function importAgentToolWithRoutingMocks(): Promise<{
       params: Parameters<RunAgentModule['runAgent']>[0],
     ) {
       runAgentParams = params
+      for (const message of messages ?? []) {
+        yield message as never
+      }
       yield {
         type: 'assistant',
         uuid: 'assistant-1',

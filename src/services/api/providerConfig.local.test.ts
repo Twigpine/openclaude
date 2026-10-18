@@ -4,7 +4,9 @@ import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test
 import {
   getAdditionalModelOptionsCacheScope,
   getLocalProviderRetryBaseUrls,
+  isAzureStyleBaseUrl,
   isLocalProviderUrl,
+  modelRequiresResponsesApi,
   resolveProviderRequest,
   shouldAttemptLocalToollessRetry,
 } from './providerConfig.js'
@@ -20,6 +22,7 @@ const originalEnv = {
   ANTHROPIC_CUSTOM_HEADERS: process.env.ANTHROPIC_CUSTOM_HEADERS,
   OPENAI_MODEL: process.env.OPENAI_MODEL,
   OPENAI_API_FORMAT: process.env.OPENAI_API_FORMAT,
+  OPENAI_AZURE_STYLE: process.env.OPENAI_AZURE_STYLE,
 }
 
 function restoreEnv(key: string, value: string | undefined): void {
@@ -46,6 +49,7 @@ afterEach(() => {
     restoreEnv('ANTHROPIC_CUSTOM_HEADERS', originalEnv.ANTHROPIC_CUSTOM_HEADERS)
     restoreEnv('OPENAI_MODEL', originalEnv.OPENAI_MODEL)
     restoreEnv('OPENAI_API_FORMAT', originalEnv.OPENAI_API_FORMAT)
+    restoreEnv('OPENAI_AZURE_STYLE', originalEnv.OPENAI_AZURE_STYLE)
   } finally {
     releaseSharedMutationLock()
   }
@@ -112,7 +116,7 @@ test('keeps codex alias models on chat completions for local openai-compatible p
   )).toBe(true)
 })
 
-test('normalizes legacy Gitlawb Opengateway provider-prefixed base URLs to the smart route', () => {
+test('normalizes legacy Twigpine Opengateway provider-prefixed base URLs to the smart route', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = 'https://opengateway.gitlawb.com/v1/xiaomi-mimo'
   process.env.OPENAI_MODEL = 'zai-org/GLM-5.1-FP8'
@@ -316,7 +320,7 @@ test('keeps Codex backend on Codex responses transport even when API format is s
   expect(resolveProviderRequest()).toMatchObject({
     transport: 'codex_responses',
     requestedModel: 'codexplan',
-    resolvedModel: 'gpt-5.5',
+    resolvedModel: 'gpt-5.6-sol',
     baseUrl: 'https://chatgpt.com/backend-api/codex',
   })
 })
@@ -366,4 +370,191 @@ test('disables local toolless retry for non-Ollama local endpoints', () => {
       hasTools: true,
     }),
   ).toBe(false)
+})
+
+test('modelRequiresResponsesApi matches gpt-5.4/5.5/5.6 (excl. mini/nano) only', () => {
+  for (const model of [
+    'gpt-5.4',
+    'gpt-5.5',
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'GPT-5.6-SOL',
+    // patch releases of a verified family stay routed
+    'gpt-5.4.1',
+  ]) {
+    expect(modelRequiresResponsesApi(model)).toBe(true)
+  }
+  for (const model of [
+    'gpt-4.1',
+    'gpt-5',
+    'gpt-5-mini',
+    'gpt-5.4-mini',
+    'gpt-5.4-nano',
+    'gpt-5.5-mini',
+    'gpt-5.5-nano',
+    'gpt-5.6-mini-high',
+    'gpt-5.4-2026-01-01-mini',
+    'gpt-5.6.1-nano',
+    'gpt-5.10',
+    'gpt-5.41',
+    // unverified future minors are deliberately not auto-routed
+    'gpt-5.7',
+    'gpt-5.8-preview',
+    'gpt-5.9',
+    'o3',
+    'claude-opus-4-8',
+  ]) {
+    expect(modelRequiresResponsesApi(model)).toBe(false)
+  }
+})
+
+test('keeps gpt-5.4-mini on chat completions on the OpenAI base', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+  process.env.OPENAI_MODEL = 'gpt-5.4-mini'
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'chat_completions',
+    resolvedModel: 'gpt-5.4-mini',
+  })
+})
+
+test('auto-routes gpt-5.6 to responses on the default OpenAI base', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+  process.env.OPENAI_MODEL = 'gpt-5.6-sol'
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'responses',
+    resolvedModel: 'gpt-5.6-sol',
+    baseUrl: 'https://api.openai.com/v1',
+  })
+})
+
+test('auto-routes gpt-5.6 to responses on regional OpenAI subdomains', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://eu.api.openai.com/v1'
+  process.env.OPENAI_MODEL = 'gpt-5.6-sol'
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'responses',
+    resolvedModel: 'gpt-5.6-sol',
+    baseUrl: 'https://eu.api.openai.com/v1',
+  })
+})
+
+test('explicit chat_completions overrides the gpt-5.6 responses auto-route', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+  process.env.OPENAI_MODEL = 'gpt-5.6-sol'
+  process.env.OPENAI_API_FORMAT = 'chat_completions'
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'chat_completions',
+    resolvedModel: 'gpt-5.6-sol',
+  })
+})
+
+test('leaves gpt-4-class models on chat completions for the OpenAI base', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+  process.env.OPENAI_MODEL = 'gpt-4o'
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'chat_completions',
+    resolvedModel: 'gpt-4o',
+  })
+})
+
+test('does not auto-route gpt-5.6 on an arbitrary non-OpenAI gateway base', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://gateway.example/v1'
+  process.env.OPENAI_MODEL = 'gpt-5.6-sol'
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'chat_completions',
+    baseUrl: 'https://gateway.example/v1',
+  })
+})
+
+test('auto-routes gpt-5.6 to responses on an Azure OpenAI v1 base', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://myres.openai.azure.com/openai/v1'
+  process.env.OPENAI_MODEL = 'gpt-5.6-terra'
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'responses',
+    resolvedModel: 'gpt-5.6-terra',
+  })
+})
+
+test('OPENAI_AZURE_STYLE extends the gpt-5.6 responses auto-route to non-azure.com hosts', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://apim.contoso.example/azure-openai'
+  process.env.OPENAI_MODEL = 'gpt-5.6-sol'
+  process.env.OPENAI_AZURE_STYLE = '1'
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'responses',
+    resolvedModel: 'gpt-5.6-sol',
+  })
+})
+
+test('without OPENAI_AZURE_STYLE the same non-azure.com host stays on chat completions', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://apim.contoso.example/azure-openai'
+  process.env.OPENAI_MODEL = 'gpt-5.6-sol'
+  delete process.env.OPENAI_AZURE_STYLE
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'chat_completions',
+    resolvedModel: 'gpt-5.6-sol',
+  })
+})
+
+test('does not auto-route an Azure-hosted custom gateway based on its resource name', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://openai-proxy.web.azure.com/v1'
+  process.env.OPENAI_MODEL = 'gpt-5.6-sol'
+  delete process.env.OPENAI_AZURE_STYLE
+  delete process.env.OPENAI_API_FORMAT
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'chat_completions',
+    resolvedModel: 'gpt-5.6-sol',
+  })
+})
+
+test('isAzureStyleBaseUrl honors the OPENAI_AZURE_STYLE override before hostname detection', () => {
+  const overrideEnv = { OPENAI_AZURE_STYLE: '1' } as NodeJS.ProcessEnv
+  const plainEnv = {} as NodeJS.ProcessEnv
+
+  expect(isAzureStyleBaseUrl('https://apim.contoso.example/azure-openai', overrideEnv)).toBe(true)
+  expect(isAzureStyleBaseUrl('https://apim.contoso.example/azure-openai', plainEnv)).toBe(false)
+  // Override precedes URL parsing, so even a malformed base is Azure-style.
+  expect(isAzureStyleBaseUrl('not a url', overrideEnv)).toBe(true)
+  expect(isAzureStyleBaseUrl('not a url', plainEnv)).toBe(false)
+})
+
+test('isAzureStyleBaseUrl matches Azure OpenAI service hostnames only', () => {
+  const plainEnv = {} as NodeJS.ProcessEnv
+
+  expect(isAzureStyleBaseUrl('https://myres.openai.azure.com/openai/v1', plainEnv)).toBe(true)
+  expect(isAzureStyleBaseUrl('https://myres.cognitiveservices.azure.com', plainEnv)).toBe(true)
+  expect(isAzureStyleBaseUrl('https://myres.services.ai.azure.com/models', plainEnv)).toBe(true)
+  expect(isAzureStyleBaseUrl('https://myres.inference.ml.azure.com', plainEnv)).toBe(true)
+  // Azure-hosted custom gateways are not Azure OpenAI endpoints merely because
+  // their resource name contains an Azure marker.
+  expect(isAzureStyleBaseUrl('https://openai-proxy.web.azure.com/v1', plainEnv)).toBe(false)
+  // .azure.com alone is not enough without a supported service suffix.
+  expect(isAzureStyleBaseUrl('https://myapp.web.azure.com', plainEnv)).toBe(false)
 })

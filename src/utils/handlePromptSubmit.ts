@@ -24,6 +24,7 @@ import type { EffortValue } from './effort.js'
 import type { FileHistoryState } from './fileHistory.js'
 import { fileHistoryEnabled, fileHistoryMakeSnapshot } from './fileHistory.js'
 import { gracefulShutdownSync } from './gracefulShutdown.js'
+import { requestAbort, traceInterruptionEvent } from './interruptionTrace.js'
 import { enqueue } from './messageQueueManager.js'
 import { resolveSkillModelOverride } from './model/model.js'
 import type { ProcessUserInputContext } from './processUserInput/processUserInput.js'
@@ -38,6 +39,36 @@ import { runWithWorkload } from './workloadContext.js'
 
 function exit(): void {
   gracefulShutdownSync(0)
+}
+
+export function isNormalLocalUserPrompt(command: QueuedCommand): boolean {
+  return (
+    command.mode === 'prompt' &&
+    typeof command.value === 'string' &&
+    !command.value.trimStart().startsWith('/') &&
+    typeof command.preExpansionValue === 'string' &&
+    !command.preExpansionValue.trimStart().startsWith('/') &&
+    command.skipSlashCommands !== true &&
+    command.bridgeOrigin !== true &&
+    command.isMeta !== true &&
+    command.origin === undefined &&
+    command.slashCommandOverride === undefined &&
+    command.workload === undefined &&
+    command.agentId === undefined &&
+    command.allowInterruptionCorrection !== false
+  )
+}
+
+export function buildConcurrentRequeuedPrompt(
+  value: string,
+  isInterruptionCorrectionEligible: boolean,
+): QueuedCommand {
+  return {
+    value,
+    preExpansionValue: isInterruptionCorrectionEligible ? value : undefined,
+    allowInterruptionCorrection: isInterruptionCorrectionEligible,
+    mode: 'prompt',
+  }
 }
 
 type BaseExecutionParams = {
@@ -73,11 +104,15 @@ type BaseExecutionParams = {
     onBeforeQuery?: (input: string, newMessages: Message[]) => Promise<boolean>,
     input?: string,
     effort?: EffortValue,
+    isInterruptionCorrectionEligible?: boolean,
+    onModelRequestStart?: () => void,
     // Return false when the query guard declines ownership before a turn starts.
   ) => Promise<void | false>
   setAppState: (updater: (prev: AppState) => AppState) => void
   onBeforeQuery?: (input: string, newMessages: Message[]) => Promise<boolean>
   canUseTool?: CanUseToolFn
+  takeInterruptionCorrectionReminder?: () => Message | null
+  restoreInterruptionCorrectionReminder?: () => void
 }
 
 /**
@@ -121,6 +156,7 @@ export type HandlePromptSubmitParams = BaseExecutionParams & {
    */
   skipSlashCommands?: boolean
   slashCommandOverride?: Command
+  allowInterruptionCorrection?: boolean
 }
 
 export async function handlePromptSubmit(
@@ -145,9 +181,12 @@ export async function handlePromptSubmit(
     onBeforeQuery,
     canUseTool,
     queuedCommands,
+    takeInterruptionCorrectionReminder,
+    restoreInterruptionCorrectionReminder,
     uuid,
     skipSlashCommands,
     slashCommandOverride,
+    allowInterruptionCorrection,
   } = params
 
   const { setCursorOffset, clearBuffer, resetHistory } = helpers
@@ -174,6 +213,8 @@ export async function handlePromptSubmit(
       resetHistory,
       canUseTool,
       onInputChange,
+      takeInterruptionCorrectionReminder,
+      restoreInterruptionCorrectionReminder,
     })
     return
   }
@@ -336,7 +377,18 @@ export async function handlePromptSubmit(
         streamMode:
           params.streamMode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
-      params.abortController?.abort('interrupt')
+      if (params.abortController) {
+        const causalEventId = traceInterruptionEvent('input.submit_interrupt', {
+          source: 'interrupt_on_submit',
+          subsystem: 'prompt_submit',
+        })
+        requestAbort(params.abortController, 'interrupt', {
+          source: 'interrupt_on_submit',
+          subsystem: 'prompt_submit',
+          controllerRole: 'query-root',
+          causalEventId,
+        })
+      }
     }
 
     // Enqueue with string value + raw pastedContents. Images will be resized
@@ -348,6 +400,7 @@ export async function handlePromptSubmit(
       pastedContents: hasImages ? pastedContents : undefined,
       skipSlashCommands,
       slashCommandOverride,
+      allowInterruptionCorrection,
       uuid,
     })
 
@@ -372,6 +425,7 @@ export async function handlePromptSubmit(
     pastedContents: hasImages ? pastedContents : undefined,
     skipSlashCommands,
     slashCommandOverride,
+    allowInterruptionCorrection,
     uuid,
   }
 
@@ -393,6 +447,8 @@ export async function handlePromptSubmit(
     resetHistory,
     canUseTool,
     onInputChange,
+    takeInterruptionCorrectionReminder,
+    restoreInterruptionCorrectionReminder,
   })
 }
 
@@ -420,6 +476,8 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
     resetHistory,
     canUseTool,
     queuedCommands,
+    takeInterruptionCorrectionReminder,
+    restoreInterruptionCorrectionReminder,
   } = params
 
   // Note: paste references are already processed before calling this function
@@ -438,6 +496,8 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
   // which transitions running→idle; cancelReservation() below is a no-op in
   // that case (only acts on dispatching state).
   let queryProfileOwnedByOnQuery = false
+  let interruptionCorrectionReminder: Message | null | undefined
+  let interruptionCorrectionReminderOwnedByModel = false
   try {
     // Reserve the guard BEFORE processUserInput — processBashCommand awaits
     // BashTool.call() and processSlashCommand awaits getMessagesForSlashCommand,
@@ -460,6 +520,11 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
     // ideSelection + pastedContents, rest skip attachments to avoid
     // duplicating turn-level context (IDE selection, todos, diffs).
     const commands = queuedCommands ?? []
+    const isInterruptionCorrectionEligible =
+      commands.length > 0 && commands.every(isNormalLocalUserPrompt)
+    interruptionCorrectionReminder = isInterruptionCorrectionEligible
+      ? takeInterruptionCorrectionReminder?.()
+      : undefined
 
     // Compute the workload tag for this turn. queueProcessor can batch a
     // cron prompt with a same-tick human prompt; only tag when EVERY
@@ -506,6 +571,13 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
           isMeta: cmd.isMeta,
           skipAttachments: !isFirst,
         })
+        if (
+          isFirst &&
+          result.shouldQuery &&
+          interruptionCorrectionReminder
+        ) {
+          newMessages.push(interruptionCorrectionReminder)
+        }
         // Stamp origin here rather than threading another arg through
         // processUserInput → processUserInputBase → processTextPrompt → createUserMessage.
         // Derive origin from mode for task-notifications — mirrors the origin
@@ -581,6 +653,12 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
           shouldCallBeforeQuery ? onBeforeQuery : undefined,
           primaryInput,
           effort,
+          // Fail closed for mixed-provenance batches: only an entirely local
+          // human turn may arm interruption-correction context.
+          isInterruptionCorrectionEligible,
+          () => {
+            interruptionCorrectionReminderOwnedByModel = true
+          },
         )
         if (queryOwnershipResult === false) {
           queryProfileOwnedByOnQuery = false
@@ -611,6 +689,13 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
       }
     }) // end runWithWorkload — ALS context naturally scoped, no finally needed
   } finally {
+    // Keep the reminder until an actual model request takes ownership.
+    if (
+      interruptionCorrectionReminder &&
+      !interruptionCorrectionReminderOwnedByModel
+    ) {
+      restoreInterruptionCorrectionReminder?.()
+    }
     // Safety net: release the guard reservation if processUserInput threw
     // or onQuery was skipped. No-op if onQuery already ran (guard is idle
     // via end(), or running — cancelReservation only acts on dispatching).

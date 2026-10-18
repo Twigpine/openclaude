@@ -61,6 +61,7 @@ import {
 } from '../../utils/hooks.js'
 import { logError } from '../../utils/log.js'
 import { MEMORY_TYPE_VALUES } from '../../utils/memory/types.js'
+import { requestAbort } from '../../utils/interruptionTrace.js'
 import {
   createCompactBoundaryMessage,
   createUserMessage,
@@ -138,6 +139,14 @@ export const POST_COMPACT_MAX_TOKENS_PER_SKILL = 5_000
 export const POST_COMPACT_SKILLS_TOKEN_BUDGET = 25_000
 const MAX_COMPACT_STREAMING_RETRIES = 2
 const COMPACT_TIMEOUT_MS = 120_000
+
+function requestCompactTimeoutAbort(controller: AbortController): void {
+  requestAbort(controller, undefined, {
+    source: 'compact_timeout',
+    subsystem: 'compact',
+    controllerRole: 'compact-fork',
+  })
+}
 
 /**
  * Strip image blocks from user messages before sending for compaction.
@@ -1268,7 +1277,10 @@ async function streamCompactSummary({
         // Use a child AbortController that properly propagates parent aborts
         // (user ESC) and cleans up listeners automatically via createChildAbortController.
         const forkAbortController = context.abortController
-          ? createChildAbortController(context.abortController)
+          ? createChildAbortController(context.abortController, undefined, {
+              subsystem: 'compact',
+              controllerRole: 'compact-fork',
+            })
           : new AbortController()
 
         let timeoutId: ReturnType<typeof setTimeout> | undefined
@@ -1298,7 +1310,7 @@ async function streamCompactSummary({
             }),
             new Promise<never>((_, reject) => {
               timeoutId = setTimeout(() => {
-                forkAbortController.abort()
+                requestCompactTimeoutAbort(forkAbortController)
                 reject(new Error('Compaction timed out'))
               }, COMPACT_TIMEOUT_MS)
             }),

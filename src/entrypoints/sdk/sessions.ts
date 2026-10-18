@@ -18,6 +18,7 @@ import {
   resolveSessionFilePath,
 } from '../../utils/sessionStoragePortable.js'
 import { readJSONLFile } from '../../utils/json.js'
+import { withTranscriptFileLock } from '../../utils/transcriptFileLock.js'
 import {
   assertValidSessionId,
   type JsonlEntry,
@@ -222,12 +223,11 @@ async function appendJsonlEntry(
   entry: Record<string, unknown>,
 ): Promise<void> {
   const line = JSON.stringify(entry) + '\n'
-  try {
+  await mkdir(dirname(filePath), { mode: 0o700, recursive: true })
+  await withTranscriptFileLock(filePath, async signal => {
+    signal.throwIfAborted()
     await appendFile(filePath, line, { mode: 0o600 })
-  } catch {
-    await mkdir(dirname(filePath), { mode: 0o700, recursive: true })
-    await appendFile(filePath, line, { mode: 0o600 })
-  }
+  })
 }
 
 // ============================================================================

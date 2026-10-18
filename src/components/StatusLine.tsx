@@ -21,7 +21,7 @@ import { getCwd } from '../utils/cwd.js';
 import { logForDebugging } from '../utils/debug.js';
 import { isFullscreenEnvEnabled } from '../utils/fullscreen.js';
 import { createBaseHookInput, executeStatusLineCommand } from '../utils/hooks.js';
-import { getLastAssistantMessage } from '../utils/messages.js';
+import { getLastAssistantMessage, getMessagesAfterCompactBoundary } from '../utils/messages.js';
 import { getRuntimeMainLoopModel, type ModelName, renderModelName } from '../utils/model/model.js';
 import { getCurrentSessionTitle } from '../utils/sessionStorage.js';
 import { doesMostRecentAssistantMessageExceed200k, getCurrentUsage, getUnreportedSessionUsage, type SessionUsage } from '../utils/tokens.js';
@@ -199,7 +199,9 @@ type Props = {
   executeCommand?: typeof executeStatusLineCommand;
 };
 export function getLastAssistantMessageId(messages: Message[]): string | null {
-  return getLastAssistantMessage(messages)?.uuid ?? null;
+  // Returning null at a new compact boundary also invalidates the built-in
+  // and custom status lines before the next assistant response arrives.
+  return getLastAssistantMessage(getMessagesAfterCompactBoundary(messages))?.uuid ?? null;
 }
 function StatusLineInner({
   messagesRef,

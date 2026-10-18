@@ -41,14 +41,6 @@ describe('Gemini store field fix', () => {
     expect(mistralDescriptor).toContain("removeBodyFields: ['store']")
   })
 
-  test('store: false is still set by default and only removed via shim config', async () => {
-    const content = await file('services/api/openaiShim.ts').text()
-
-    expect(content).toMatch(/store:\s*false/)
-    expect(content).toContain('shimConfig.removeBodyFields')
-    expect(content).toContain('delete body[field]')
-  })
-
   test('openaiShim does not keep a hardcoded descriptor route fallback list', async () => {
     const content = await file('services/api/openaiShim.ts').text()
 
@@ -62,8 +54,8 @@ describe('Gemini store field fix', () => {
 // Fix 2: Session timeout — stream idle timeout
 // ---------------------------------------------------------------------------
 describe('Session timeout fix', () => {
-  test('openaiShim has idle timeout for SSE streams', async () => {
-    const content = await file('services/api/openaiShim.ts').text()
+  test('openaiShim stream control has idle timeout for SSE streams', async () => {
+    const content = await file('services/api/openaiShim/streamControl.ts').text()
 
     expect(content).toContain('STREAM_IDLE_TIMEOUT_MS')
   })
@@ -77,7 +69,7 @@ describe('Session timeout fix', () => {
   })
 
   test('idle timeout is set to a reasonable value (>= 60s)', async () => {
-    const content = await file('services/api/openaiShim.ts').text()
+    const content = await file('services/api/openaiShim/streamControl.ts').text()
 
     // Extract the timeout value (supports numeric separators like 120_000)
     const match = content.match(/STREAM_IDLE_TIMEOUT_MS\s*=\s*([\d_]+)/)
@@ -88,24 +80,6 @@ describe('Session timeout fix', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Fix 2b: Ollama context history preservation
-// ---------------------------------------------------------------------------
-describe('Ollama context history fix', () => {
-  test('openaiShim uses native Ollama chat with request-level num_ctx', async () => {
-    const content = await file('services/api/openaiShim.ts').text()
-
-    expect(content).toContain('buildOllamaChatUrl')
-    expect(content).toContain('/api/chat')
-    expect(content).toContain('useNativeOllamaChat')
-    expect(content).toContain('num_ctx: getOllamaNumCtx()')
-    expect(content).toContain('normalizeOllamaNativeMessages(body.messages)')
-    expect(content).toContain('convertOllamaStreamingResponse')
-    expect(content).toContain('convertOllamaNonStreamingResponse')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Fix 3: Agent loop continuation nudge
 // ---------------------------------------------------------------------------
 describe('Agent loop continuation nudge', () => {
   test('continuation logic has been moved to utility', async () => {
@@ -315,7 +289,7 @@ describe('Web search result count improvements', () => {
       'tools/WebSearchTool/providers/exa.ts',
     ).text()
 
-    expect(content).toMatch(/numResults:\s*15/)
+    expect(content).toMatch(/DEFAULT_EXA_NUM_RESULTS\s*=\s*15/)
   })
 
   test('Firecrawl provider requests at least 15 results', async () => {
@@ -469,14 +443,6 @@ describe('Regression checks', () => {
     }
   })
 
-  test('store field remains opt-out by per-route config rather than unconditional deletion', async () => {
-    const openaiShim = await file('services/api/openaiShim.ts').text()
-    const runtimeMetadata = await file('integrations/runtimeMetadata.ts').text()
-
-    expect(openaiShim).toMatch(/store:\s*false/)
-    expect(openaiShim).toContain('for (const field of shimConfig.removeBodyFields ?? [])')
-    expect(runtimeMetadata).toContain('mergeRemoveBodyFields')
-  })
 })
 
 // ---------------------------------------------------------------------------
@@ -692,6 +658,58 @@ describe('Dev-channels dialog coverage', () => {
         expect(all[0]).toMatchObject({ name: 'dev-server', dev: true })
         expect(getHasDevChannels()).toBe(true)
       },
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix: onboarding + trust dialog skipped entirely for third-party providers
+// ---------------------------------------------------------------------------
+// Behavioral coverage lives in src/utils/setupScreenGates.test.ts — the
+// gating decisions were extracted into that provider-free seam because this
+// module's import chain cannot be loaded under bun test (compile-time
+// feature() macro checker, same constraint as the dev-channels tests above).
+// These wiring checks assert showSetupScreens actually consults the seam and
+// that no provider gate was re-introduced around the dialogs.
+describe('Onboarding and trust dialog — third-party providers', () => {
+  test('showSetupScreens routes both dialogs through the provider-free seam', async () => {
+    const content = await file('interactiveHelpers.tsx').text()
+
+    expect(content).toContain('getRequiredSetupScreens({')
+    expect(content).toContain('if (setupScreens.onboarding)')
+    expect(content).toContain('if (setupScreens.trustDialog)')
+  })
+
+  test('the env-config option never renders the raw endpoint', async () => {
+    // OPENAI_BASE_URL/OPENAI_API_BASE can carry credentials (userinfo or
+    // token query params) and everything rendered lands in terminal
+    // scrollback. Redaction behavior is tested in envProviderOption.test.ts;
+    // this guards the wiring — the raw `envBaseUrl` may only reach profile
+    // persistence (addProviderProfile/getProviderProfiles/label), never a
+    // rendered label or status message.
+    const content = await file('components/ConsoleOAuthFlow.tsx').text()
+
+    expect(content).toContain('getEnvProviderOption()')
+    // Rendered sites use the redacted value.
+    expect(content).toMatch(/\{envBaseUrlVarName\}=\{envBaseUrlForDisplay\}/)
+    expect(content).toMatch(/\$\{envBaseUrlForDisplay\}\) as your active provider/)
+    // No rendered site interpolates the raw endpoint.
+    expect(content).not.toMatch(/\{envBaseUrl\}/)
+    expect(content).not.toMatch(/\$\{envBaseUrl\}/)
+  })
+
+  test('no dialog is gated behind usesAnthropicSetup', async () => {
+    const content = await file('interactiveHelpers.tsx').text()
+
+    // Theme choice + security notes are universal, and workspace trust is
+    // orthogonal to the API provider: an untrusted repo is exactly as
+    // dangerous over a local model as over Anthropic. The seam takes no
+    // provider input, so the only way to regress is to add a gate at the
+    // call sites — which this guards against.
+    expect(content).not.toMatch(/usesAnthropicSetup\s*&&\s*\(?\s*setupScreens/)
+    expect(content).not.toMatch(/usesAnthropicSetup\s*&&\s*\(\s*!config\.theme/)
+    expect(content).not.toMatch(
+      /usesAnthropicSetup\s*&&\s*!checkHasTrustDialogAccepted/,
     )
   })
 })

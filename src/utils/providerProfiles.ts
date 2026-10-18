@@ -1,7 +1,9 @@
 import { randomBytes } from 'crypto'
 import {
   getAdditionalModelOptionsCacheScope,
+  isCodexAlias,
   isCodexBaseUrl,
+  isCodexEligibleGpt5Model,
   parseOpenAICompatibleApiFormat,
 } from '../services/api/providerConfig.js'
 import {
@@ -16,6 +18,7 @@ import {
   createProfileFile,
   saveProfileFile,
   buildBedrockProfileEnv,
+  buildConcentrateProfileEnv,
   buildGeminiProfileEnv,
   buildGithubProfileEnv,
   buildMiniMaxProfileEnv,
@@ -26,6 +29,8 @@ import {
   buildXaiOAuthProfileEnv,
   buildXiaomiMimoProfileEnv,
   buildAtlasCloudProfileEnv,
+  buildGmiCloudProfileEnv,
+  buildApismartProfileEnv,
   buildVertexProfileEnv,
   clearManagedProfileEnv,
   deleteProfileFile,
@@ -33,6 +38,7 @@ import {
   type ProfileEnv,
   type ProviderProfile as ProviderProfileStartup,
 } from './providerProfile.js'
+import { isCanonicalAimlapiInferenceBaseUrl } from '../integrations/aimlapi/config.js'
 import { refreshStartupDiscoveryForRoute } from '../integrations/discoveryService.js'
 import {
   getCatalogEntriesForRoute,
@@ -47,19 +53,30 @@ import {
   type ProviderPreset,
 } from '../integrations/index.js'
 import {
+  getRouteDefaultBaseUrl,
   isCloudflareBaseUrl,
   isClinePassBaseUrl,
+  isCanonicalApiRouteInferenceBaseUrl,
+  isCanonicalApismartInferenceBaseUrl,
+  isCanonicalConcentrateInferenceBaseUrl,
+  isCanonicalLlmtrInferenceBaseUrl,
+  isCanonicalCommandcodeInferenceBaseUrl,
   isFireworksBaseUrl,
+  isGmiCloudBaseUrl,
+  isLongcatBaseUrl,
   isNearaiBaseUrl,
   isXaiBaseUrl,
   isXiaomiMimoBaseUrl,
   resolveEnvOnlyProviderRouteId,
+  resolveRouteCredentialValue,
 } from '../integrations/routeMetadata.js'
+import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
 import { logForDebugging } from './debug.js'
 import {
   sanitizeProfileCustomHeaders,
   serializeProfileCustomHeaders,
 } from './providerCustomHeaders.js'
+import { sanitizeApiKey } from './providerSecrets.js'
 import { getSettings_DEPRECATED } from './settings/settings.js'
 
 export type { ProviderPreset } from '../integrations/index.js'
@@ -71,11 +88,17 @@ export type ProviderProfileInput = {
   model: string
   apiKey?: string
   apiFormat?: ProviderProfile['apiFormat']
+  azureStyle?: ProviderProfile['azureStyle']
   authHeader?: ProviderProfile['authHeader']
   authScheme?: ProviderProfile['authScheme']
   authHeaderValue?: ProviderProfile['authHeaderValue']
   customHeaders?: ProviderProfile['customHeaders']
   maxContextLength?: ProviderProfile['maxContextLength']
+}
+
+export type ProviderProfileWriteOptions = {
+  /** Marks credentials adopted from process env rather than entered by a user. */
+  credentialSource?: 'environment'
 }
 
 export type ProviderPresetDefaults = Omit<ProviderProfileInput, 'provider'> & {
@@ -144,6 +167,59 @@ function isClinePassProfile(profile: ProviderProfile): boolean {
   return route.routeId === 'clinepass' || isClinePassBaseUrl(profile.baseUrl)
 }
 
+function isApismartProfile(profile: ProviderProfile): boolean {
+  const baseUrl = profile.baseUrl?.trim()
+  // Missing base URL resolves to the ApiSmart default, which is canonical.
+  // Only the documented `/v1` inference URL may carry the dedicated key —
+  // host-only or path-suffixed ApiSmart URLs are treated as retargeted.
+  return !baseUrl || isCanonicalApismartInferenceBaseUrl(baseUrl)
+}
+
+function isConcentrateProfile(profile: ProviderProfile): boolean {
+  const { route } = resolveProfileCompatibility(profile.provider)
+  if (route.routeId !== 'concentrate') {
+    return false
+  }
+  const baseUrl = profile.baseUrl?.trim()
+  // Missing base URL resolves to the Concentrate default, which is canonical.
+  // Only the documented `/v1` inference URL may carry the dedicated key —
+  // host-only or path-suffixed Concentrate URLs are treated as retargeted.
+  return !baseUrl || isCanonicalConcentrateInferenceBaseUrl(baseUrl)
+}
+
+function isApiRouteProfile(profile: ProviderProfile): boolean {
+  const { route } = resolveProfileCompatibility(profile.provider)
+  if (route.routeId !== 'api-route') {
+    return false
+  }
+  const baseUrl = profile.baseUrl?.trim()
+  return !baseUrl || isCanonicalApiRouteInferenceBaseUrl(baseUrl)
+}
+
+function isLlmtrProfile(profile: ProviderProfile): boolean {
+  const { route } = resolveProfileCompatibility(profile.provider)
+  if (route.routeId !== 'llmtr') {
+    return false
+  }
+  const baseUrl = profile.baseUrl?.trim()
+  return !baseUrl || isCanonicalLlmtrInferenceBaseUrl(baseUrl)
+}
+
+function isCommandcodeProfile(profile: ProviderProfile): boolean {
+  const { route, compatibilityMode } = resolveProfileCompatibility(
+    profile.provider,
+  )
+  if (compatibilityMode !== 'openai') return false
+  const baseUrl = profile.baseUrl?.trim()
+  if (route.routeId === 'commandcode') {
+    return !baseUrl || isCanonicalCommandcodeInferenceBaseUrl(baseUrl)
+  }
+  // Legacy generic OpenAI profiles are runtime-classified by their endpoint.
+  // Treat only the exact canonical inference URL as Command Code ownership;
+  // generic or retargeted URLs must never receive the dedicated credential.
+  return Boolean(baseUrl && isCanonicalCommandcodeInferenceBaseUrl(baseUrl))
+}
+
 function deriveGithubEnterpriseUrl(baseUrl: string | undefined): string | undefined {
   if (!baseUrl?.trim()) return undefined
   try {
@@ -208,7 +284,7 @@ function normalizeBaseUrl(value: string): string {
   return trimValue(value).replace(/\/+$/, '')
 }
 
-function resolveProfileCapabilityRouteId(
+export function resolveProfileCapabilityRouteId(
   provider: string,
   baseUrl?: string,
 ): string {
@@ -222,18 +298,32 @@ function resolveProfileCapabilityRouteId(
     return routeIdFromBaseUrl
   }
 
-  // A cloudflare profile retargeted away from the real Workers AI endpoint
-  // (e.g. to gateway.ai.cloudflare.com or another OpenAI-compatible host) is
-  // run generically at runtime — resolveActiveRouteIdFromEnv no longer resolves
-  // it to the cloudflare route. Mirror that boundary here so capability-driven
-  // surfaces (apiFormat, custom auth headers, custom request headers) are not
-  // stripped based on the stale cloudflare route id. Keep the cloudflare route
-  // only when the base URL is the real Workers AI URL (already handled above) or
-  // unset (the descriptor default); any other base URL falls back to generic.
+  if (providerRouteId === 'zai' && baseUrl) {
+    return 'custom'
+  }
+
+  // Dedicated-route profiles retargeted away from their documented endpoints
+  // run generically at runtime. Mirror that boundary here so capability-driven
+  // surfaces are not stripped based on stale route ids.
   if (
-    providerRouteId === 'cloudflare' &&
+    (providerRouteId === 'cloudflare' ||
+      providerRouteId === 'longcat' ||
+      providerRouteId === 'concentrate' ||
+      providerRouteId === 'api-route' ||
+      providerRouteId === 'llmtr' ||
+      providerRouteId === 'commandcode') &&
     baseUrl &&
-    !isCloudflareBaseUrl(baseUrl)
+    !(providerRouteId === 'cloudflare'
+      ? isCloudflareBaseUrl(baseUrl)
+      : providerRouteId === 'longcat'
+        ? isLongcatBaseUrl(baseUrl)
+        : providerRouteId === 'concentrate'
+          ? isCanonicalConcentrateInferenceBaseUrl(baseUrl)
+          : providerRouteId === 'api-route'
+            ? isCanonicalApiRouteInferenceBaseUrl(baseUrl)
+          : providerRouteId === 'commandcode'
+            ? isCanonicalCommandcodeInferenceBaseUrl(baseUrl)
+            : isCanonicalLlmtrInferenceBaseUrl(baseUrl))
   ) {
     return 'custom'
   }
@@ -242,7 +332,13 @@ function resolveProfileCapabilityRouteId(
 }
 
 function normalizeProfileModelLookupKey(model: string | undefined): string {
-  return model?.trim().split('?', 1)[0]?.trim().toLowerCase() ?? ''
+  // Strip a trailing [1m] tag along with any ?query suffix: the tag is a
+  // client-side context opt-in, not part of the model's identity, so a saved
+  // `codexplan[1m]` must still match a profile/catalog entry of `codexplan`.
+  return (
+    model?.trim().split('?', 1)[0]?.trim().toLowerCase().replace(/\[1m]$/, '') ??
+    ''
+  )
 }
 
 function profileSupportsModel(profile: ProviderProfile, model: string): boolean {
@@ -257,6 +353,26 @@ function profileSupportsModel(profile: ProviderProfile, model: string): boolean 
     )
   ) {
     return true
+  }
+
+  // Codex-backend profiles (ChatGPT OAuth) are created with a single
+  // `codexplan` entry, but the backend accepts every Codex alias model and
+  // the wider gpt-5.x family (free-text /model picks like `gpt-5.1-codex`
+  // pass live validation before being persisted). Without this, a saved
+  // pick like `gpt-5.6-terra` is rejected here at the next startup, so the
+  // profile's default silently wins and the choice appears to not stick.
+  // Deliberately NOT a blanket allow: a stale non-GPT model saved under a
+  // different provider (e.g. `kimi-k2.6`) — or an API-only gpt-5-mini/-nano
+  // tier the Codex backend does not serve — must still fall back to the
+  // profile default rather than 400 against the Codex backend. The gate is
+  // authoritative for Codex profiles: falling through to the catalog check
+  // would consult the `openai` route catalog (the profile's provider is
+  // 'openai'), which describes api.openai.com's model set, not the ChatGPT
+  // Codex backend's.
+  if (isCodexBaseUrl(profile.baseUrl)) {
+    return (
+      isCodexAlias(normalizedModel) || isCodexEligibleGpt5Model(normalizedModel)
+    )
   }
 
   const routeId = resolveProfileCapabilityRouteId(profile.provider, profile.baseUrl)
@@ -296,6 +412,7 @@ function sanitizeProfile(profile: ProviderProfile): ProviderProfile | null {
   const baseUrl = normalizeBaseUrl(profile.baseUrl)
   const model = trimValue(profile.model)
   const apiFormat = parseOpenAICompatibleApiFormat(profile.apiFormat)
+  const azureStyle = profile.azureStyle === true
   const authHeader = sanitizeAuthHeader(profile.authHeader)
   const authScheme = sanitizeAuthScheme(profile.authScheme)
   const authHeaderValue = trimOrUndefined(profile.authHeaderValue)
@@ -324,10 +441,14 @@ function sanitizeProfile(profile: ProviderProfile): ProviderProfile | null {
     provider,
     baseUrl,
     model,
-    apiKey: trimOrUndefined(profile.apiKey),
+    // Drop template/dotenv sentinels so placeholders never persist as keys.
+    apiKey: sanitizeApiKey(trimOrUndefined(profile.apiKey)),
   }
   if (supportsApiFormat && apiFormat) {
     sanitized.apiFormat = apiFormat
+  }
+  if (azureStyle) {
+    sanitized.azureStyle = true
   }
   if (supportsAuthHeaders && authHeader) {
     sanitized.authHeader = authHeader
@@ -365,11 +486,46 @@ function nextProfileId(): string {
   return `provider_${randomBytes(6).toString('hex')}`
 }
 
+function applyCommandcodeProfileWriteContract(
+  profile: ProviderProfile,
+  options?: ProviderProfileWriteOptions,
+): ProviderProfile | null {
+  if (!isCommandcodeProfile(profile)) {
+    return profile
+  }
+
+  // Command Code is Chat Completions only. Reject the write so Console OAuth
+  // env adoption, /provider, and any future caller share one gate instead of
+  // persisting Claude/alias models that later startup and /model paths inherit.
+  if (getCommandcodeChatCompletionsModelError(profile.model)) {
+    return null
+  }
+
+  // Dedicated env keys are the Command Code credential. Generic OPENAI_API_KEY
+  // is never route auth, so environment-sourced writes must persist the
+  // dedicated secret or fail without mutating a profile. Explicit setup keeps
+  // accepting the credential the user entered.
+  const dedicatedKey = sanitizeApiKey(
+    resolveRouteCredentialValue({
+      routeId: 'commandcode',
+      baseUrl: profile.baseUrl,
+    }),
+  )
+  if (options?.credentialSource === 'environment') {
+    return dedicatedKey ? { ...profile, apiKey: dedicatedKey } : null
+  }
+  if (dedicatedKey && !profile.apiKey) {
+    return { ...profile, apiKey: dedicatedKey }
+  }
+  return profile
+}
+
 function toProfile(
   input: ProviderProfileInput,
   id: string = nextProfileId(),
+  options?: ProviderProfileWriteOptions,
 ): ProviderProfile | null {
-  return sanitizeProfile({
+  const profile = sanitizeProfile({
     id,
     provider: input.provider ?? 'openai',
     name: input.name,
@@ -377,12 +533,14 @@ function toProfile(
     model: input.model,
     apiKey: input.apiKey,
     apiFormat: input.apiFormat,
+    azureStyle: input.azureStyle,
     authHeader: input.authHeader,
     authScheme: input.authScheme,
     authHeaderValue: input.authHeaderValue,
     customHeaders: input.customHeaders,
     maxContextLength: input.maxContextLength,
   })
+  return profile ? applyCommandcodeProfileWriteContract(profile, options) : null
 }
 
 function getSupportedProfileCustomHeadersEnv(
@@ -592,6 +750,34 @@ function sameOptionalEnvValue(
   return trimOrUndefined(left) === trimOrUndefined(right)
 }
 
+function serializeProfileContextWindows(
+  modelField: string,
+  maxContextLength: number,
+  activeModel?: string,
+): string {
+  const models = parseModelList(modelField)
+  const configuredModels =
+    models.length > 0 ? models : [getPrimaryModel(modelField)]
+  // A saved /model choice can be valid for the provider catalog without
+  // being listed in profile.model. Include the model that will actually run
+  // so it does not fall back to a different context limit.
+  const selectedModel = trimOrUndefined(activeModel)
+  const contextModels = selectedModel
+    ? [...new Set([...configuredModels, selectedModel])]
+    : configuredModels
+
+  return JSON.stringify(
+    Object.fromEntries(
+      // Match resolveModelRuntimeLimits' query-stripped lookup key without
+      // changing case, [1m] tags, or the raw model selection and its options.
+      contextModels.map(model => [
+        model.split('?', 1)[0]?.trim() || model,
+        maxContextLength,
+      ]),
+    ),
+  )
+}
+
 function isProcessEnvAlignedWithProfile(
   processEnv: NodeJS.ProcessEnv,
   profile: ProviderProfile,
@@ -707,9 +893,11 @@ function isProcessEnvAlignedWithProfile(
   }
 
   const expectedContextWindows = profile.maxContextLength
-    ? JSON.stringify({
-        [primaryModel]: profile.maxContextLength,
-      })
+    ? serializeProfileContextWindows(
+        profile.model,
+        profile.maxContextLength,
+        primaryModel,
+      )
     : undefined
   const isAimlapiRoute =
     profile.provider === 'aimlapi' ||
@@ -726,6 +914,10 @@ function isProcessEnvAlignedWithProfile(
     sameOptionalEnvValue(processEnv.OPENAI_BASE_URL, profile.baseUrl) &&
     sameOptionalEnvValue(processEnv.OPENAI_MODEL, primaryModel) &&
     sameOptionalEnvValue(processEnv.OPENAI_API_FORMAT, profile.apiFormat) &&
+    sameOptionalEnvValue(
+      processEnv.OPENAI_AZURE_STYLE,
+      profile.azureStyle ? '1' : undefined,
+    ) &&
     sameOptionalEnvValue(processEnv.OPENAI_AUTH_HEADER, profile.authHeader) &&
     sameOptionalEnvValue(processEnv.OPENAI_AUTH_SCHEME, profile.authScheme) &&
     sameOptionalEnvValue(processEnv.OPENAI_AUTH_HEADER_VALUE, profile.authHeaderValue) &&
@@ -760,6 +952,27 @@ function isProcessEnvAlignedWithProfile(
       ? !includeApiKey ||
         sameOptionalEnvValue(processEnv.ATLAS_CLOUD_API_KEY, profile.apiKey)
       : true) &&
+    (isGmiCloudBaseUrl(profile.baseUrl)
+      ? !includeApiKey ||
+        sameOptionalEnvValue(processEnv.GMI_API_KEY, profile.apiKey)
+      : true) &&
+    (isApismartProfile(profile)
+      ? !includeApiKey ||
+        sameOptionalEnvValue(processEnv.APISMART_API_KEY, profile.apiKey)
+      : true) &&
+    (isApiRouteProfile(profile)
+      ? !includeApiKey ||
+        sameOptionalEnvValue(processEnv.API_ROUTE_API_KEY, profile.apiKey)
+      : true) &&
+    (isCommandcodeProfile(profile)
+      ? !includeApiKey ||
+        sameOptionalEnvValue(
+          processEnv.CMD_API_KEY ??
+            processEnv.COMMANDCODE_API_KEY ??
+            processEnv.COMMAND_CODE_API_KEY,
+          profile.apiKey,
+        )
+      : true) &&
     (isClinePassProfile(profile)
       ? !includeApiKey ||
         sameOptionalEnvValue(processEnv.CLINE_API_KEY, profile.apiKey)
@@ -771,6 +984,10 @@ function isProcessEnvAlignedWithProfile(
     (isFireworksBaseUrl(profile.baseUrl)
       ? !includeApiKey ||
         sameOptionalEnvValue(processEnv.FIREWORKS_API_KEY, profile.apiKey)
+      : true) &&
+    (isLongcatBaseUrl(profile.baseUrl)
+      ? !includeApiKey ||
+        sameOptionalEnvValue(processEnv.LONGCAT_API_KEY, profile.apiKey)
       : true) &&
     (isCloudflareBaseUrl(profile.baseUrl)
       ? !includeApiKey ||
@@ -912,7 +1129,17 @@ export function applyProviderProfileToProcessEnv(
     const normalizedProfileBaseUrl =
       route.routeId === 'xiaomi-mimo' || route.routeId === 'xiaomi-mimo-token'
         ? normalizeXiaomiMimoBaseUrl(profile.baseUrl) ?? profile.baseUrl
-        : profile.baseUrl
+        : route.routeId === 'apismart' && !profile.baseUrl?.trim()
+          ? getRouteDefaultBaseUrl('apismart') ?? profile.baseUrl
+          : route.routeId === 'concentrate' && !profile.baseUrl?.trim()
+            ? getRouteDefaultBaseUrl('concentrate') ?? profile.baseUrl
+            : route.routeId === 'api-route' && !profile.baseUrl?.trim()
+              ? getRouteDefaultBaseUrl('api-route') ?? profile.baseUrl
+              : route.routeId === 'commandcode' && !profile.baseUrl?.trim()
+                ? getRouteDefaultBaseUrl('commandcode') ?? profile.baseUrl
+                : route.routeId === 'gmi-cloud' && !profile.baseUrl?.trim()
+                  ? getRouteDefaultBaseUrl('gmi-cloud') ?? profile.baseUrl
+                  : profile.baseUrl
     const openAIProfileEnv: ProfileEnv = {
       OPENAI_BASE_URL: normalizedProfileBaseUrl,
       OPENAI_MODEL: primaryModel,
@@ -923,6 +1150,9 @@ export function applyProviderProfileToProcessEnv(
       resolveRouteIdFromBaseUrl(profile.baseUrl) === 'aimlapi'
     if (supportsApiFormat && profile.apiFormat) {
       openAIProfileEnv.OPENAI_API_FORMAT = profile.apiFormat
+    }
+    if (profile.azureStyle) {
+      openAIProfileEnv.OPENAI_AZURE_STYLE = '1'
     }
     if (supportsAuthHeaders && profile.authHeader) {
       openAIProfileEnv.OPENAI_AUTH_HEADER = profile.authHeader
@@ -936,19 +1166,40 @@ export function applyProviderProfileToProcessEnv(
       }
     }
 
-    if (profile.apiKey) {
+    const withholdRetargetedApismartCredential =
+      route.routeId === 'apismart' && !isApismartProfile(profile)
+    const withholdRetargetedConcentrateCredential =
+      route.routeId === 'concentrate' && !isConcentrateProfile(profile)
+    const withholdRetargetedApiRouteCredential =
+      route.routeId === 'api-route' && !isApiRouteProfile(profile)
+    const withholdRetargetedLlmtrCredential =
+      route.routeId === 'llmtr' && !isLlmtrProfile(profile)
+    const withholdRetargetedCommandcodeCredential =
+      route.routeId === 'commandcode' && !isCommandcodeProfile(profile)
+    // A gmi-cloud profile's key belongs to GMI: never install it for another URL.
+    const withholdRetargetedGmiCloudCredential =
+      route.routeId === 'gmi-cloud' && !isGmiCloudBaseUrl(normalizedProfileBaseUrl)
+    if (
+      profile.apiKey &&
+      !withholdRetargetedApismartCredential &&
+      !withholdRetargetedConcentrateCredential &&
+      !withholdRetargetedApiRouteCredential &&
+      !withholdRetargetedLlmtrCredential &&
+      !withholdRetargetedCommandcodeCredential &&
+      !withholdRetargetedGmiCloudCredential
+    ) {
       openAIProfileEnv.OPENAI_API_KEY = profile.apiKey
-      if (route.vendorId === 'minimax' || profile.baseUrl.toLowerCase().includes('minimax')) {
+      if (route.vendorId === 'minimax' || normalizedProfileBaseUrl.toLowerCase().includes('minimax')) {
         openAIProfileEnv.MINIMAX_API_KEY = profile.apiKey
       }
       if (
         route.gatewayId === 'nvidia-nim' ||
-        profile.baseUrl.toLowerCase().includes('nvidia') ||
-        profile.baseUrl.toLowerCase().includes('integrate.api.nvidia')
+        normalizedProfileBaseUrl.toLowerCase().includes('nvidia') ||
+        normalizedProfileBaseUrl.toLowerCase().includes('integrate.api.nvidia')
       ) {
         openAIProfileEnv.NVIDIA_API_KEY = profile.apiKey
       }
-      if (route.routeId === 'bankr' || profile.baseUrl.toLowerCase().includes('bankr')) {
+      if (route.routeId === 'bankr' || normalizedProfileBaseUrl.toLowerCase().includes('bankr')) {
         openAIProfileEnv.BNKR_API_KEY = profile.apiKey
       }
       if (route.routeId === 'xai' || isXaiBaseUrl(profile.baseUrl)) {
@@ -957,7 +1208,7 @@ export function applyProviderProfileToProcessEnv(
       if (isAimlapiProfile) {
         openAIProfileEnv.AIMLAPI_API_KEY = profile.apiKey
       }
-      if (route.routeId === 'venice' || profile.baseUrl.toLowerCase().includes('api.venice.ai')) {
+      if (route.routeId === 'venice' || normalizedProfileBaseUrl.toLowerCase().includes('api.venice.ai')) {
         openAIProfileEnv.VENICE_API_KEY = profile.apiKey
       }
       if (
@@ -967,8 +1218,23 @@ export function applyProviderProfileToProcessEnv(
       ) {
         openAIProfileEnv.MIMO_API_KEY = profile.apiKey
       }
-      if (route.routeId === 'atlas-cloud' || profile.baseUrl.toLowerCase().includes('atlascloud')) {
+      if (route.routeId === 'atlas-cloud' || normalizedProfileBaseUrl.toLowerCase().includes('atlascloud')) {
         openAIProfileEnv.ATLAS_CLOUD_API_KEY = profile.apiKey
+      }
+      if (isGmiCloudBaseUrl(normalizedProfileBaseUrl)) {
+        openAIProfileEnv.GMI_API_KEY = profile.apiKey
+      }
+      if (isApismartProfile(profile)) {
+        openAIProfileEnv.APISMART_API_KEY = profile.apiKey
+      }
+      if (isConcentrateProfile(profile)) {
+        openAIProfileEnv.CONCENTRATE_API_KEY = profile.apiKey
+      }
+      if (isApiRouteProfile(profile)) {
+        openAIProfileEnv.API_ROUTE_API_KEY = profile.apiKey
+      }
+      if (isCommandcodeProfile(profile)) {
+        openAIProfileEnv.CMD_API_KEY = profile.apiKey
       }
       if (isClinePassProfile(profile)) {
         openAIProfileEnv.CLINE_API_KEY = profile.apiKey
@@ -978,6 +1244,9 @@ export function applyProviderProfileToProcessEnv(
       }
       if (route.routeId === 'fireworks' || isFireworksBaseUrl(profile.baseUrl)) {
         openAIProfileEnv.FIREWORKS_API_KEY = profile.apiKey
+      }
+      if (isLongcatBaseUrl(profile.baseUrl)) {
+        openAIProfileEnv.LONGCAT_API_KEY = profile.apiKey
       }
       // Gate on the Workers AI path predicate (isCloudflareBaseUrl: exact
       // api.cloudflare.com host AND the `/client/v4/accounts/<id>/ai/v1` path),
@@ -994,20 +1263,118 @@ export function applyProviderProfileToProcessEnv(
       }
     }
     if (isAimlapiProfile) {
-      const ambientOpenAIKey = trimOrUndefined(process.env.OPENAI_API_KEY)
       openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
-      openAIProfileEnv.OPENAI_API_KEY =
-        openAIProfileEnv.OPENAI_API_KEY ?? ambientOpenAIKey
-      openAIProfileEnv.AIMLAPI_API_KEY =
-        openAIProfileEnv.AIMLAPI_API_KEY ?? ambientOpenAIKey
+      // The ambient AIMLAPI_API_KEY is the canonical aimlapi.com credential.
+      // Only forward it when the profile targets the canonical inference host;
+      // a keyless `aimlapi` profile can point at a user-controlled proxy, and
+      // injecting the credential there would leak it. This mirrors the
+      // guided-flow validation, which also gates on the canonical URL. A missing
+      // base URL resolves to the aimlapi default (which is canonical), so treat
+      // it as canonical rather than passing undefined into the string helper.
+      if (!profile.baseUrl || isCanonicalAimlapiInferenceBaseUrl(profile.baseUrl)) {
+        const ambientAimlapiKey =
+          trimOrUndefined(process.env.AIMLAPI_API_KEY) ??
+          trimOrUndefined(process.env.OPENAI_API_KEY)
+        openAIProfileEnv.OPENAI_API_KEY =
+          openAIProfileEnv.OPENAI_API_KEY ?? ambientAimlapiKey
+        openAIProfileEnv.AIMLAPI_API_KEY =
+          openAIProfileEnv.AIMLAPI_API_KEY ?? ambientAimlapiKey
+      }
+    }
+    // Preserve the selected Ollama route even when the profile points at a
+    // reverse proxy whose URL has no Ollama-specific hostname or port. Web
+    // search discovery uses this marker to distinguish that endpoint from a
+    // generic OpenAI-compatible profile.
+    if (route.routeId === 'ollama') {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+    }
+    // Keep ApiSmart route identity even when the profile is retargeted to a
+    // proxy. Dedicated credentials stay withheld above; the route id is what
+    // lets buildLaunchEnv refuse ambient APISMART_API_KEY / mirrored
+    // OPENAI_API_KEY on relaunch (AIMLAPI parity).
+    if (route.routeId === 'apismart') {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'apismart'
+      // Keyless canonical ApiSmart profiles resolve ambient dedicated
+      // credentials the same way AIMLAPI does. Proxy / non-canonical hosts
+      // must not receive the ambient key.
+      if (isApismartProfile(profile)) {
+        const ambientApismartKey = sanitizeApiKey(process.env.APISMART_API_KEY)
+        if (ambientApismartKey) {
+          openAIProfileEnv.OPENAI_API_KEY =
+            openAIProfileEnv.OPENAI_API_KEY ?? ambientApismartKey
+          openAIProfileEnv.APISMART_API_KEY =
+            openAIProfileEnv.APISMART_API_KEY ?? ambientApismartKey
+        }
+      }
+    }
+    // Stamp dedicated Concentrate profile identity and mirror its credential so
+    // the saved profile relaunches authenticated.
+    if (route.routeId === 'concentrate') {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'concentrate'
+      // Keyless canonical Concentrate profiles may resolve the ambient dedicated
+      // credential the same way ApiSmart does.
+      if (isConcentrateProfile(profile) && !profile.apiKey) {
+        const ambientConcentrateKey = sanitizeApiKey(
+          process.env.CONCENTRATE_API_KEY,
+        )
+        if (ambientConcentrateKey) {
+          openAIProfileEnv.OPENAI_API_KEY =
+            openAIProfileEnv.OPENAI_API_KEY ?? ambientConcentrateKey
+          openAIProfileEnv.CONCENTRATE_API_KEY = ambientConcentrateKey
+        }
+      }
+    }
+    if (route.routeId === 'api-route') {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'api-route'
+      if (isApiRouteProfile(profile) && !profile.apiKey) {
+        const ambientApiRouteKey = sanitizeApiKey(process.env.API_ROUTE_API_KEY)
+        if (ambientApiRouteKey) {
+          openAIProfileEnv.OPENAI_API_KEY =
+            openAIProfileEnv.OPENAI_API_KEY ?? ambientApiRouteKey
+          openAIProfileEnv.API_ROUTE_API_KEY = ambientApiRouteKey
+        }
+      }
+    }
+    // A keyless canonical LLMTR profile may use the dedicated credential from
+    // the ambient environment. Profile application clears all managed provider
+    // variables before installing this object, so adopt it here while the
+    // canonical endpoint boundary is still known. Never carry it to a
+    // retargeted profile.
+    if (route.routeId === 'llmtr') {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'llmtr'
+      if (isLlmtrProfile(profile) && !profile.apiKey) {
+        const ambientLlmtrKey = sanitizeApiKey(process.env.LLMTR_API_KEY)
+        if (ambientLlmtrKey) {
+          openAIProfileEnv.OPENAI_API_KEY =
+            openAIProfileEnv.OPENAI_API_KEY ?? ambientLlmtrKey
+          openAIProfileEnv.LLMTR_API_KEY = ambientLlmtrKey
+        }
+      }
+    }
+    if (isCommandcodeProfile(profile)) {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'commandcode'
+      if (!profile.apiKey) {
+        const ambientCommandcodeKey =
+          sanitizeApiKey(process.env.CMD_API_KEY) ||
+          sanitizeApiKey(process.env.COMMANDCODE_API_KEY) ||
+          sanitizeApiKey(process.env.COMMAND_CODE_API_KEY)
+        if (ambientCommandcodeKey) {
+          openAIProfileEnv.OPENAI_API_KEY =
+            openAIProfileEnv.OPENAI_API_KEY ?? ambientCommandcodeKey
+          openAIProfileEnv.CMD_API_KEY = ambientCommandcodeKey
+        }
+      }
     }
     if (route.gatewayId === 'nvidia-nim') {
       openAIProfileEnv.NVIDIA_NIM = '1'
     }
     if (profile.maxContextLength) {
-      openAIProfileEnv.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS = JSON.stringify({
-        [primaryModel]: profile.maxContextLength,
-      })
+      openAIProfileEnv.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS =
+        serializeProfileContextWindows(
+          profile.model,
+          profile.maxContextLength,
+          primaryModel,
+        )
     }
 
     profileEnv = openAIProfileEnv
@@ -1041,7 +1408,7 @@ export function applyActiveProviderProfileFromConfig(
   // to undefined, so without this guard we would return below without marking
   // provider env as handled; buildStartupEnvFromProfile() then treats the
   // profile mirror that clearActiveProviderProfile() deleted as a fresh install
-  // and synthesizes the default Gitlawb OpenGateway env, bouncing the user off
+  // and synthesizes the default Twigpine OpenGateway env, bouncing the user off
   // built-in Anthropic on the next launch (#1429). Clear any managed provider
   // env and set the applied flag so the legacy/fresh-install fallback is
   // suppressed. An explicit startup provider selection still wins for the
@@ -1102,9 +1469,9 @@ export function applyActiveProviderProfileFromConfig(
 
 export function addProviderProfile(
   input: ProviderProfileInput,
-  options?: { makeActive?: boolean },
+  options?: { makeActive?: boolean } & ProviderProfileWriteOptions,
 ): ProviderProfile | null {
-  const profile = toProfile(input)
+  const profile = toProfile(input, undefined, options)
   if (!profile) {
     return null
   }
@@ -1157,8 +1524,9 @@ export function addProviderProfile(
 export function updateProviderProfile(
   profileId: string,
   input: ProviderProfileInput,
+  options?: ProviderProfileWriteOptions,
 ): ProviderProfile | null {
-  const updatedProfile = toProfile(input, profileId)
+  const updatedProfile = toProfile(input, profileId, options)
   if (!updatedProfile) {
     return null
   }
@@ -1282,17 +1650,47 @@ function buildOpenAICompatibleStartupEnv(
   if (isCodexBaseUrl(activeProfile.baseUrl)) {
     return null
   }
+  const activeProfileRouteId = resolveProfileRoute(activeProfile.provider).routeId
+  const normalizedBaseUrl =
+    activeProfileRouteId === 'api-route' && !activeProfile.baseUrl?.trim()
+      ? getRouteDefaultBaseUrl('api-route') ?? activeProfile.baseUrl
+      : activeProfile.baseUrl
+  const withholdRetargetedApismartCredential =
+    activeProfileRouteId === 'apismart' &&
+    !isApismartProfile(activeProfile)
+  const withholdRetargetedConcentrateCredential =
+    activeProfileRouteId === 'concentrate' &&
+    !isConcentrateProfile(activeProfile)
+  const withholdRetargetedApiRouteCredential =
+    activeProfileRouteId === 'api-route' && !isApiRouteProfile(activeProfile)
+  const withholdRetargetedLlmtrCredential =
+    activeProfileRouteId === 'llmtr' && !isLlmtrProfile(activeProfile)
+  const withholdRetargetedCommandcodeCredential =
+    activeProfileRouteId === 'commandcode' &&
+    !isCommandcodeProfile(activeProfile)
   const isAimlapiProfile =
     activeProfile.provider === 'aimlapi' ||
     resolveRouteIdFromBaseUrl(activeProfile.baseUrl) === 'aimlapi'
+  const isConcentrateProfileFlag = isConcentrateProfile(activeProfile)
+  const isApiRouteProfileFlag = isApiRouteProfile(activeProfile)
+  const isLlmtrProfileFlag = isLlmtrProfile(activeProfile)
+  const isCommandcodeProfileFlag = isCommandcodeProfile(activeProfile)
 
-  if (activeProfile.apiKey) {
+  if (
+    activeProfile.apiKey &&
+    !withholdRetargetedApismartCredential &&
+    !withholdRetargetedConcentrateCredential &&
+    !withholdRetargetedApiRouteCredential &&
+    !withholdRetargetedLlmtrCredential &&
+    !withholdRetargetedCommandcodeCredential
+  ) {
     const strictEnv = buildOpenAIProfileEnv({
       goal: 'balanced',
       model: activeProfile.model,
-      baseUrl: activeProfile.baseUrl,
+      baseUrl: normalizedBaseUrl,
       apiKey: activeProfile.apiKey,
       apiFormat: activeProfile.apiFormat,
+      azureStyle: activeProfile.azureStyle ? '1' : undefined,
       authHeader: activeProfile.authHeader,
       authScheme: activeProfile.authScheme,
       authHeaderValue: activeProfile.authHeaderValue,
@@ -1300,15 +1698,45 @@ function buildOpenAICompatibleStartupEnv(
       processEnv: {},
     })
     if (strictEnv) {
+      if (activeProfile.maxContextLength) {
+        strictEnv.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS =
+          serializeProfileContextWindows(
+            activeProfile.model,
+            activeProfile.maxContextLength,
+          )
+      }
       if (isAimlapiProfile) {
         strictEnv.AIMLAPI_API_KEY = activeProfile.apiKey
         strictEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+      }
+      if (activeProfileRouteId === 'ollama') {
+        strictEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
       }
       // Atlas Cloud is dedicatedCredentialsOnly: its route ignores
       // OPENAI_API_KEY, so a generic OpenAI profile pointed at Atlas must
       // persist the dedicated key too or it relaunches unauthenticated.
       if (activeProfile.baseUrl?.toLowerCase().includes('atlascloud')) {
         strictEnv.ATLAS_CLOUD_API_KEY = activeProfile.apiKey
+      }
+      // GMI Cloud is dedicatedCredentialsOnly too.
+      if (isGmiCloudBaseUrl(activeProfile.baseUrl)) {
+        strictEnv.GMI_API_KEY = activeProfile.apiKey
+      }
+      if (isApismartProfile(activeProfile)) {
+        strictEnv.APISMART_API_KEY = activeProfile.apiKey
+      }
+      if (isConcentrateProfileFlag) {
+        strictEnv.CONCENTRATE_API_KEY = activeProfile.apiKey
+      }
+      if (isApiRouteProfileFlag) {
+        strictEnv.API_ROUTE_API_KEY = activeProfile.apiKey
+        strictEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'api-route'
+      }
+      if (isLlmtrProfileFlag) {
+        strictEnv.LLMTR_API_KEY = activeProfile.apiKey
+      }
+      if (isCommandcodeProfileFlag) {
+        strictEnv.CMD_API_KEY = activeProfile.apiKey
       }
       if (isClinePassProfile(activeProfile)) {
         strictEnv.CLINE_API_KEY = activeProfile.apiKey
@@ -1318,6 +1746,9 @@ function buildOpenAICompatibleStartupEnv(
       }
       if (isFireworksBaseUrl(activeProfile.baseUrl)) {
         strictEnv.FIREWORKS_API_KEY = activeProfile.apiKey
+      }
+      if (isLongcatBaseUrl(activeProfile.baseUrl)) {
+        strictEnv.LONGCAT_API_KEY = activeProfile.apiKey
       }
       // Cloudflare's transport reads the dedicated CLOUDFLARE_API_TOKEN; mirror
       // it like nearai/fireworks, but only when the base URL is a real Workers
@@ -1334,17 +1765,19 @@ function buildOpenAICompatibleStartupEnv(
   }
 
   const env: ProfileEnv = {
-    OPENAI_BASE_URL: activeProfile.baseUrl,
+    OPENAI_BASE_URL: normalizedBaseUrl,
     OPENAI_MODEL: getPrimaryModel(activeProfile.model),
     ...(activeProfile.apiFormat ? { OPENAI_API_FORMAT: activeProfile.apiFormat } : {}),
+    ...(activeProfile.azureStyle ? { OPENAI_AZURE_STYLE: '1' } : {}),
     ...(activeProfile.authHeader ? { OPENAI_AUTH_HEADER: activeProfile.authHeader } : {}),
     ...(activeProfile.authScheme ? { OPENAI_AUTH_SCHEME: activeProfile.authScheme } : {}),
     ...(activeProfile.authHeaderValue ? { OPENAI_AUTH_HEADER_VALUE: activeProfile.authHeaderValue } : {}),
     ...(activeProfile.maxContextLength
       ? {
-          CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS: JSON.stringify({
-            [getPrimaryModel(activeProfile.model)]: activeProfile.maxContextLength,
-          }),
+          CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS: serializeProfileContextWindows(
+            activeProfile.model,
+            activeProfile.maxContextLength,
+          ),
         }
       : {}),
   }
@@ -1352,7 +1785,37 @@ function buildOpenAICompatibleStartupEnv(
   if (isAimlapiProfile) {
     env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
   }
-  if (activeProfile.apiKey) {
+  if (activeProfileRouteId === 'ollama') {
+    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'ollama'
+  }
+  // Preserve ApiSmart identity on retargeted/proxy startup envs so relaunch
+  // withholding can refuse ambient dedicated credentials. Canonical profiles
+  // already stamp this via buildApismartProfileEnv.
+  if (activeProfileRouteId === 'apismart') {
+    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'apismart'
+  }
+  // Preserve Concentrate identity for retargeted profiles too, so a later
+  // launch can apply the same dedicated-credential boundary.
+  if (activeProfileRouteId === 'concentrate') {
+    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'concentrate'
+  }
+  if (activeProfileRouteId === 'api-route') {
+    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'api-route'
+  }
+  if (activeProfileRouteId === 'llmtr') {
+    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'llmtr'
+  }
+  if (activeProfileRouteId === 'commandcode') {
+    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'commandcode'
+  }
+  if (
+    activeProfile.apiKey &&
+    !withholdRetargetedApismartCredential &&
+    !withholdRetargetedConcentrateCredential &&
+    !withholdRetargetedApiRouteCredential &&
+    !withholdRetargetedLlmtrCredential &&
+    !withholdRetargetedCommandcodeCredential
+  ) {
     env.OPENAI_API_KEY = activeProfile.apiKey
     if (activeProfile.baseUrl?.toLowerCase().includes('bankr')) {
       env.BNKR_API_KEY = activeProfile.apiKey
@@ -1375,6 +1838,24 @@ function buildOpenAICompatibleStartupEnv(
     if (activeProfile.baseUrl?.toLowerCase().includes('atlascloud')) {
       env.ATLAS_CLOUD_API_KEY = activeProfile.apiKey
     }
+    if (isGmiCloudBaseUrl(activeProfile.baseUrl)) {
+      env.GMI_API_KEY = activeProfile.apiKey
+    }
+    if (isApismartProfile(activeProfile)) {
+      env.APISMART_API_KEY = activeProfile.apiKey
+    }
+    if (isConcentrateProfileFlag) {
+      env.CONCENTRATE_API_KEY = activeProfile.apiKey
+    }
+    if (isApiRouteProfileFlag) {
+      env.API_ROUTE_API_KEY = activeProfile.apiKey
+    }
+    if (isLlmtrProfileFlag) {
+      env.LLMTR_API_KEY = activeProfile.apiKey
+    }
+    if (isCommandcodeProfileFlag) {
+      env.CMD_API_KEY = activeProfile.apiKey
+    }
     if (isClinePassProfile(activeProfile)) {
       env.CLINE_API_KEY = activeProfile.apiKey
     }
@@ -1383,6 +1864,9 @@ function buildOpenAICompatibleStartupEnv(
     }
     if (isFireworksBaseUrl(activeProfile.baseUrl)) {
       env.FIREWORKS_API_KEY = activeProfile.apiKey
+    }
+    if (isLongcatBaseUrl(activeProfile.baseUrl)) {
+      env.LONGCAT_API_KEY = activeProfile.apiKey
     }
     // Cloudflare Workers AI authenticates over the generic OpenAI-compatible
     // header, so mirror the saved key into CLOUDFLARE_API_TOKEN only when the
@@ -1393,6 +1877,12 @@ function buildOpenAICompatibleStartupEnv(
     // providers (#1100 review).
     if (isCloudflareBaseUrl(activeProfile.baseUrl)) {
       env.CLOUDFLARE_API_TOKEN = activeProfile.apiKey
+    }
+  } else if (isApiRouteProfileFlag) {
+    const ambientApiRouteKey = sanitizeApiKey(process.env.API_ROUTE_API_KEY)
+    if (ambientApiRouteKey) {
+      env.OPENAI_API_KEY = ambientApiRouteKey
+      env.API_ROUTE_API_KEY = ambientApiRouteKey
     }
   } else {
     delete env.OPENAI_API_KEY
@@ -1561,6 +2051,45 @@ function buildStartupProfileFromActiveProfile(
           : null
       }
 
+      if (route.routeId === 'gmi-cloud') {
+        const env =
+          buildGmiCloudProfileEnv({
+            model: getPrimaryModel(activeProfile.model),
+            baseUrl: activeProfile.baseUrl,
+            apiKey: activeProfile.apiKey,
+            processEnv: process.env,
+          }) ?? null
+        return env
+          ? { profile: 'openai', env: applySupportedProfileCustomHeaders(activeProfile, env) }
+          : null
+      }
+
+      if (route.routeId === 'apismart' && isApismartProfile(activeProfile)) {
+        const env =
+          buildApismartProfileEnv({
+            model: getPrimaryModel(activeProfile.model),
+            baseUrl: activeProfile.baseUrl,
+            apiKey: activeProfile.apiKey,
+            processEnv: process.env,
+          }) ?? null
+        return env
+          ? { profile: 'openai', env: applySupportedProfileCustomHeaders(activeProfile, env) }
+          : null
+      }
+
+      if (route.routeId === 'concentrate' && isConcentrateProfile(activeProfile)) {
+        const env =
+          buildConcentrateProfileEnv({
+            model: getPrimaryModel(activeProfile.model),
+            baseUrl: activeProfile.baseUrl,
+            apiKey: activeProfile.apiKey,
+            processEnv: process.env,
+          }) ?? null
+        return env
+          ? { profile: 'openai', env: applySupportedProfileCustomHeaders(activeProfile, env) }
+          : null
+      }
+
       if (route.vendorId === 'nearai') {
         const env = buildOpenAICompatibleStartupEnv(activeProfile)
         return env ? { profile: 'openai', env } : null
@@ -1595,6 +2124,18 @@ function triggerStartupDiscoveryRefreshForProfile(
 ): void {
   const route = resolveProfileRoute(profile.provider)
   if (route.routeId === 'unknown-fallback') {
+    return
+  }
+  if (route.routeId === 'apismart' && !isApismartProfile(profile)) {
+    return
+  }
+  if (route.routeId === 'api-route' && !isApiRouteProfile(profile)) {
+    return
+  }
+  if (route.routeId === 'llmtr' && !isLlmtrProfile(profile)) {
+    return
+  }
+  if (route.routeId === 'commandcode' && !isCommandcodeProfile(profile)) {
     return
   }
 

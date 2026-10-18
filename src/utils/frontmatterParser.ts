@@ -120,7 +120,40 @@ function quoteProblematicValues(frontmatterText: string): string {
   return result.join('\n')
 }
 
-export const FRONTMATTER_REGEX = /^---\s*\n([\s\S]*?)---\s*\n?/
+/**
+ * The opening delimiter is anchored but the closing one must be too.
+ *
+ * `[\s\S]*?` is lazy, so an unanchored close stops at the first `---` appearing
+ * anywhere -- including in the middle of a value. `description: Reviews code
+ * --- thoroughly` ends the block early: the description is truncated to
+ * "Reviews code", and the rest of the frontmatter plus the real delimiter leak
+ * into the body that is sent to the model. A `---` line inside a block scalar
+ * has the same effect.
+ *
+ * Requiring the captured block to be empty or to end at a line break pins the
+ * close to the start of a line. The `m` flag would do the same for the close
+ * but would also un-anchor the open, letting a horizontal rule partway down a
+ * body be read as frontmatter. Only spaces and tabs may sit between the close
+ * `---` and its line terminator -- letting `\s*` match the terminator itself
+ * accepted a bare `---` with no line ending mid-document.
+ *
+ * Once that terminator (or EOF) is confirmed, the trailing `\s*` consumes the
+ * conventional blank separator line(s) between frontmatter and body, matching
+ * the pre-anchor behavior. Skill and plugin-command bodies are passed into
+ * prompts untrimmed, so leaving that blank line in would prepend a stray
+ * newline to the model instructions. This consumption runs only after a valid
+ * line-terminated close, so it cannot revive the mid-document false close.
+ *
+ * The captured block is lazy at the outer level too (`)??`). A greedy `)?`
+ * consumes one YAML line before trying empty, so empty frontmatter followed by
+ * a body horizontal rule (`---\n---\n---\nBody`) reads the second `---` as YAML
+ * and closes on the third, swallowing the rule into the frontmatter. Preferring
+ * the empty capture closes at the first `---` line, as it did before the block
+ * was anchored, while real frontmatter still matches by taking the non-empty
+ * branch on backtrack.
+ */
+export const FRONTMATTER_REGEX =
+  /^---[ \t]*\r?\n((?:[\s\S]*?\r?\n)??)---[ \t]*(?:\r?\n\s*|$)/
 
 /**
  * Parses markdown content to extract frontmatter and content

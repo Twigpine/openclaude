@@ -120,6 +120,7 @@ import type {
   SkillHookMatcher,
 } from './settings/types.js'
 import { getHookDisplayText } from './hooks/hooksSettings.js'
+import { getWindowsBashHookCommand } from './hooks/windowsBashCommand.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { firstLineOf } from './stringUtils.js'
@@ -1048,10 +1049,8 @@ async function execCommandHook(
   // On Windows (bash only), auto-prepend `bash` for .sh scripts so they
   // execute instead of opening in the default file handler. PowerShell
   // runs .ps1 files natively — no prepend needed.
-  if (isWindows && !isPowerShell && command.trim().match(/\.sh(\s|$|")/)) {
-    if (!command.trim().startsWith('bash ')) {
-      command = `bash ${command}`
-    }
+  if (isWindows && !isPowerShell) {
+    command = getWindowsBashHookCommand(command)
   }
 
   // CLAUDE_CODE_SHELL_PREFIX wraps the command via POSIX quoting
@@ -5184,9 +5183,11 @@ export function hasWorktreeCreateHook(): boolean {
  */
 export async function executeWorktreeCreateHook(
   name: string,
+  options?: { cwd?: string },
 ): Promise<{ worktreePath: string }> {
   const hookInput = {
     ...createBaseHookInput(undefined),
+    ...(options?.cwd ? { cwd: options.cwd } : {}),
     hook_event_name: 'WorktreeCreate' as const,
     name,
   }

@@ -26,17 +26,14 @@ import {
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import axios from 'axios'
 import { createHash, randomBytes, randomUUID } from 'crypto'
-import { mkdir } from 'fs/promises'
 import { createServer, type Server } from 'http'
-import { join } from 'path'
 import { parse } from 'url'
 import xss from 'xss'
 import { MCP_CLIENT_METADATA_URL } from '../../constants/oauth.js'
 import { openBrowser } from '../../utils/browser.js'
+import { throwIfAborted } from '../../utils/boundedAsync.js'
 import { createCombinedAbortSignal } from '../../utils/combinedAbortSignal.js'
-import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
-import { errorMessage, getErrnoCode } from '../../utils/errors.js'
-import * as lockfile from '../../utils/lockfile.js'
+import { errorMessage, isAbortError } from '../../utils/errors.js'
 import { logMCPDebug } from '../../utils/log.js'
 import { getPlatform } from '../../utils/platform.js'
 import { getSecureStorage } from '../../utils/secureStorage/index.js'
@@ -51,6 +48,11 @@ import { buildRedirectUri, findAvailablePort } from './oauthPort.js'
 import type { McpHTTPServerConfig, McpSSEServerConfig } from './types.js'
 import { getLoggingSafeMcpBaseUrl } from './utils.js'
 import { performCrossAppAccess, XaaTokenExchangeError } from './xaa.js'
+import {
+  MCP_REFRESH_FRESHNESS_SECONDS,
+  McpRefreshLockUnavailableError,
+  withMcpRefreshLock,
+} from './refreshLock.js'
 import {
   acquireIdpIdToken,
   clearIdpIdToken,
@@ -92,8 +94,6 @@ type MCPOAuthFlowErrorReason =
   | 'sdk_auth_failed'
   | 'token_exchange_failed'
   | 'unknown'
-
-const MAX_LOCK_RETRIES = 5
 
 /**
  * OAuth query parameters that should be redacted from logs.
@@ -265,12 +265,16 @@ export async function normalizeOAuthErrorBody(
  * Used by ClaudeAuthProvider for metadata discovery and token refresh.
  * Prevents stale timeout signals from affecting auth operations.
  */
-function createAuthFetch(): FetchLike {
+function createAuthFetch(abortSignal?: AbortSignal): FetchLike {
   return async (url: string | URL, init?: RequestInit) => {
     const isPost = init?.method?.toUpperCase() === 'POST'
-    const { signal, cleanup } = createCombinedAbortSignal(init?.signal ?? undefined, {
-      timeoutMs: AUTH_REQUEST_TIMEOUT_MS,
-    })
+    const { signal, cleanup } = createCombinedAbortSignal(
+      init?.signal ?? undefined,
+      {
+        signalB: abortSignal,
+        timeoutMs: AUTH_REQUEST_TIMEOUT_MS,
+      },
+    )
     try {
       // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
       const response = await fetch(url, { ...init, signal })
@@ -1395,9 +1399,87 @@ export async function performMCPOAuthFlow(
 export function wrapFetchWithStepUpDetection(
   baseFetch: FetchLike,
   provider: ClaudeAuthProvider,
+  options?: {
+    allowUnauthorizedRefresh?: boolean
+    resourceUrl?: string
+    providerOwnsAuthorization?: boolean
+  },
 ): FetchLike {
   return async (url, init) => {
-    const response = await baseFetch(url, init)
+    const initialAuthorization = new Headers(init?.headers)
+      .get('Authorization')
+      ?.trim()
+    const initialBearer = getBearerAccessToken(init?.headers)
+    const providerOwnsAuthorization =
+      initialAuthorization === undefined ||
+      (options?.providerOwnsAuthorization === true &&
+        initialBearer !== undefined)
+    const allowRefresh =
+      options?.allowUnauthorizedRefresh !== false &&
+      providerOwnsAuthorization &&
+      isMcpResourceRequest(url, options?.resourceUrl, initialBearer !== undefined)
+    let requestInit = init
+
+    // The MCP SDK asks tokens() for request headers without passing the
+    // request's AbortSignal. Perform proactive refresh here instead, where
+    // cancellation can cover lock waits and the complete network chain.
+    if (allowRefresh) {
+      const prepared = await provider.prepareRequest(init?.signal ?? undefined)
+      if (prepared?.access_token) {
+        const headers = new Headers(init?.headers)
+        headers.set('Authorization', `Bearer ${prepared.access_token}`)
+        requestInit = { ...init, headers }
+      }
+    }
+
+    let response = await baseFetch(url, requestInit)
+    if (response.status === 401 && allowRefresh) {
+      const rejectedAccessToken = getBearerAccessToken(requestInit?.headers)
+      let refreshed: OAuthTokens | undefined
+      try {
+        refreshed = await provider.refreshAfterUnauthorized(
+          requestInit?.signal ?? undefined,
+          rejectedAccessToken,
+        )
+      } catch (error) {
+        if (requestInit?.signal?.aborted || isAbortError(error)) {
+          await cancelResponseBody(response)
+        }
+        throwIfAborted(
+          requestInit?.signal ?? undefined,
+          'MCP token refresh aborted',
+        )
+        if (isAbortError(error)) throw error
+        return response
+      }
+      if (
+        refreshed?.access_token &&
+        refreshed.access_token !== rejectedAccessToken
+      ) {
+        const headers = new Headers(requestInit?.headers)
+        headers.set('Authorization', `Bearer ${refreshed.access_token}`)
+        let retryResponse: Response
+        try {
+          retryResponse = await baseFetch(url, { ...requestInit, headers })
+        } catch (error) {
+          if (requestInit?.signal?.aborted || isAbortError(error)) {
+            await cancelResponseBody(response)
+          }
+          throwIfAborted(
+            requestInit?.signal ?? undefined,
+            'MCP token refresh aborted',
+          )
+          if (isAbortError(error)) throw error
+          return response
+        }
+        if (retryResponse.status === 401) {
+          await cancelResponseBody(retryResponse)
+        } else {
+          await cancelResponseBody(response)
+          response = retryResponse
+        }
+      }
+    }
     if (response.status === 403) {
       const wwwAuth = response.headers.get('WWW-Authenticate')
       if (wwwAuth?.includes('insufficient_scope')) {
@@ -1414,6 +1496,122 @@ export function wrapFetchWithStepUpDetection(
   }
 }
 
+function isMcpResourceRequest(
+  requestUrl: string | URL,
+  resourceUrl: string | undefined,
+  hasBearerAuthorization: boolean,
+): boolean {
+  if (!resourceUrl) return true
+  try {
+    const request = new URL(requestUrl)
+    const resource = new URL(resourceUrl)
+    const normalizedPath = (path: string): string =>
+      path.length > 1 ? path.replace(/\/+$/, '') : path
+    if (
+      request.origin === resource.origin &&
+      normalizedPath(request.pathname) === normalizedPath(resource.pathname)
+    ) {
+      return true
+    }
+    // Legacy SSE POST endpoints differ from the configured EventSource path,
+    // but the SDK supplies its provider-managed bearer and enforces same-origin.
+    return hasBearerAuthorization && request.origin === resource.origin
+  } catch {
+    return false
+  }
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // Response cleanup must not replace the authentication result.
+  }
+}
+
+function getBearerAccessToken(
+  headers: HeadersInit | undefined,
+): string | undefined {
+  const authorization = new Headers(headers).get('Authorization')?.trim()
+  const match = authorization?.match(/^Bearer\s+(.+)$/i)
+  return match?.[1]
+}
+
+type StoredMcpOAuthToken = NonNullable<SecureStorageData['mcpOAuth']>[string]
+
+type InProcessMcpRefresh = {
+  controller: AbortController
+  promise: Promise<OAuthTokens | undefined>
+  settled: boolean
+  waiters: number
+}
+
+function getFreshStoredOAuthTokens(
+  tokenData: StoredMcpOAuthToken | undefined,
+): OAuthTokens | undefined {
+  return getStoredOAuthTokensAboveThreshold(
+    tokenData,
+    MCP_REFRESH_FRESHNESS_SECONDS,
+  )
+}
+
+function getUsableStoredOAuthTokens(
+  tokenData: StoredMcpOAuthToken | undefined,
+): OAuthTokens | undefined {
+  return getStoredOAuthTokensAboveThreshold(tokenData, 0)
+}
+
+function getStoredOAuthTokensAboveThreshold(
+  tokenData: StoredMcpOAuthToken | undefined,
+  thresholdSeconds: number,
+): OAuthTokens | undefined {
+  if (
+    !tokenData ||
+    typeof tokenData.accessToken !== 'string' ||
+    tokenData.accessToken.length === 0 ||
+    typeof tokenData.expiresAt !== 'number' ||
+    !Number.isFinite(tokenData.expiresAt)
+  ) {
+    return undefined
+  }
+
+  const expiresIn = (tokenData.expiresAt - Date.now()) / 1000
+  if (expiresIn <= thresholdSeconds) {
+    return undefined
+  }
+
+  return {
+    access_token: tokenData.accessToken,
+    refresh_token:
+      typeof tokenData.refreshToken === 'string' &&
+      tokenData.refreshToken.length > 0
+        ? tokenData.refreshToken
+        : undefined,
+    expires_in: expiresIn,
+    scope: typeof tokenData.scope === 'string' ? tokenData.scope : undefined,
+    token_type: 'Bearer',
+  }
+}
+
+function getStoredRefreshToken(
+  tokenData: StoredMcpOAuthToken | undefined,
+): string | undefined {
+  return typeof tokenData?.refreshToken === 'string' &&
+    tokenData.refreshToken.length > 0
+    ? tokenData.refreshToken
+    : undefined
+}
+
+async function readFreshSecureStorage(
+  storage: ReturnType<typeof getSecureStorage>,
+  signal?: AbortSignal,
+): Promise<SecureStorageData | null> {
+  clearKeychainCache()
+  const data = await storage.readAsync()
+  throwIfAborted(signal, 'MCP token refresh aborted')
+  return data
+}
+
 export class ClaudeAuthProvider implements OAuthClientProvider {
   private serverName: string
   private serverConfig: McpSSEServerConfig | McpHTTPServerConfig
@@ -1426,7 +1624,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   private _metadata?: Awaited<
     ReturnType<typeof discoverAuthorizationServerMetadata>
   >
-  private _refreshInProgress?: Promise<OAuthTokens | undefined>
+  private _refreshInProgress?: InProcessMcpRefresh
   private _pendingStepUpScope?: string
   private onAuthorizationUrlCallback?: (url: string) => void
   private skipBrowserOpen: boolean
@@ -1511,6 +1709,119 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     logMCPDebug(this.serverName, `Marked step-up pending: ${scope}`)
   }
 
+  async refreshAfterUnauthorized(
+    abortSignal?: AbortSignal,
+    rejectedAccessToken?: string,
+  ): Promise<OAuthTokens | undefined> {
+    return this.prepareRequest(abortSignal, rejectedAccessToken, true)
+  }
+
+  private async refreshRejectedCredential(
+    tokenData: StoredMcpOAuthToken,
+    rejectedAccessToken: string | undefined,
+    abortSignal: AbortSignal | undefined,
+  ): Promise<OAuthTokens | undefined> {
+    const latestRefreshToken = getStoredRefreshToken(tokenData)
+    if (
+      !latestRefreshToken &&
+      (!isXaaEnabled() || !this.serverConfig.oauth?.xaa)
+    ) {
+      return undefined
+    }
+    const refreshed = await this.runInProcessRefresh(
+      abortSignal,
+      sharedSignal =>
+        latestRefreshToken
+          ? this.refreshAuthorization(sharedSignal, rejectedAccessToken)
+          : this.xaaRefresh(sharedSignal, rejectedAccessToken),
+    )
+    return refreshed?.access_token !== rejectedAccessToken
+      ? refreshed
+      : undefined
+  }
+
+  private async runInProcessRefresh(
+    signal: AbortSignal | undefined,
+    operation: (sharedSignal: AbortSignal) => Promise<OAuthTokens | undefined>,
+  ): Promise<OAuthTokens | undefined> {
+    let refresh = this._refreshInProgress
+    if (!refresh) {
+      const controller = new AbortController()
+      let refreshState!: InProcessMcpRefresh
+      const promise = Promise.resolve()
+        .then(() => operation(controller.signal))
+        .finally(() => {
+          refreshState.settled = true
+          if (this._refreshInProgress === refreshState) {
+            this._refreshInProgress = undefined
+          }
+        })
+      refreshState = {
+        controller,
+        promise,
+        settled: false,
+        waiters: 0,
+      }
+      this._refreshInProgress = refreshState
+      refresh = refreshState
+    }
+
+    refresh.waiters++
+    try {
+      if (!signal) return await refresh.promise
+
+      const getAbortReason = (): Error =>
+        signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException('MCP token refresh aborted', 'AbortError')
+      if (signal.aborted) {
+        const reason = getAbortReason()
+        if (refresh.waiters > 1) throw reason
+        refresh.controller.abort(reason)
+        return await refresh.promise
+      }
+
+      return await new Promise<OAuthTokens | undefined>((resolve, reject) => {
+        const cleanup = (): void => {
+          signal.removeEventListener('abort', onAbort)
+        }
+        const onAbort = (): void => {
+          cleanup()
+          const reason = getAbortReason()
+          if (refresh.waiters > 1) {
+            // This caller can stop waiting without cancelling the refresh that
+            // another caller still needs.
+            reject(reason)
+          } else {
+            // The final waiter owns cancellation of the shared operation. Let
+            // its promise settle so a token persisted before a bounded lock
+            // release was interrupted can still be returned.
+            refresh.controller.abort(reason)
+          }
+        }
+
+        signal.addEventListener('abort', onAbort, { once: true })
+        refresh.promise.then(
+          value => {
+            cleanup()
+            resolve(value)
+          },
+          error => {
+            cleanup()
+            reject(error)
+          },
+        )
+      })
+    } finally {
+      refresh.waiters--
+      if (refresh.waiters === 0 && !refresh.settled) {
+        refresh.controller.abort(
+          signal?.reason ?? new DOMException('Refresh abandoned', 'AbortError'),
+        )
+      }
+    }
+  }
+
   async state(): Promise<string> {
     // Generate state if not already generated for this instance
     if (!this._state) {
@@ -1578,173 +1889,183 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     storage.update(updatedData)
   }
 
+  /**
+   * Storage-only SDK view. Refresh credentials deliberately stay private so
+   * the SDK cannot run its own uncoordinated refresh path.
+   */
   async tokens(): Promise<OAuthTokens | undefined> {
-    // Cross-process token changes (another CC instance refreshed or invalidated)
-    // are picked up via the keychain cache TTL (see macOsKeychainStorage.ts).
-    // In-process writes already invalidate the cache via storage.update().
-    // We do NOT clearKeychainCache() here — tokens() is called by the MCP SDK's
-    // _commonHeaders on every request, and forcing a cache miss would trigger
-    // a blocking spawnSync(`security find-generic-password`) 30-40x/sec.
-    // See CPU profile: spawnSync was 7.2% of total CPU after PR #19436.
     const storage = getSecureStorage()
     const data = await storage.readAsync()
     const serverKey = getServerKey(this.serverName, this.serverConfig)
-
     const tokenData = data?.mcpOAuth?.[serverKey]
-
-    // XAA: a cached id_token plays the same UX role as a refresh_token — run
-    // the silent exchange to get a fresh access_token without a browser. The
-    // id_token does expire (we re-acquire via `xaa login` when it does); the
-    // point is that while it's valid, re-auth is zero-interaction.
-    //
-    // Only fire when we don't have a refresh_token. If the AS returned one,
-    // the normal refresh path (below) is cheaper — 1 request vs the 4-request
-    // XAA chain. If that refresh is revoked, refreshAuthorization() clears it
-    // (invalidateCredentials('tokens')), and the next tokens() falls through
-    // to here.
-    //
-    // Fires on:
-    //   - never authed (!tokenData)                 → first connect, auto-auth
-    //   - SDK partial write {accessToken:''}        → stale from past session
-    //   - expired/expiring, no refresh_token        → proactive XAA re-auth
-    //
-    // No special-casing of {accessToken:'', expiresAt:0}. Yes, SDK auth()
-    // writes that mid-flow (saveClientInformation defaults). But with this
-    // auto-auth branch, the *first* tokens() call — before auth() writes
-    // anything — fires xaaRefresh. If id_token is cached, SDK short-circuits
-    // there and never reaches the write. If id_token isn't cached, xaaRefresh
-    // returns undefined in ~1 keychain read, auth() proceeds, writes the
-    // marker, calls tokens() again, xaaRefresh fails again identically.
-    // Harmless redundancy, not a wasted exchange. And guarding on `!==''`
-    // permanently bricks auto-auth when a *prior* session left that marker
-    // in keychain — real bug seen with xaa.dev.
-    //
-    // xaaRefresh() internally short-circuits to undefined when the id_token
-    // isn't cached (or settings.xaaIdp is gone) → we fall through to the
-    // existing needs-auth path → user runs `xaa login`.
-    //
     if (
-      isXaaEnabled() &&
-      this.serverConfig.oauth?.xaa &&
-      !tokenData?.refreshToken &&
-      (!tokenData?.accessToken ||
-        (tokenData.expiresAt - Date.now()) / 1000 <= 300)
+      !tokenData ||
+      typeof tokenData.accessToken !== 'string' ||
+      tokenData.accessToken.length === 0 ||
+      typeof tokenData.expiresAt !== 'number' ||
+      !Number.isFinite(tokenData.expiresAt)
     ) {
-      if (!this._refreshInProgress) {
-        logMCPDebug(
-          this.serverName,
-          tokenData
-            ? `XAA: access_token expiring, attempting silent exchange`
-            : `XAA: no access_token yet, attempting silent exchange`,
-        )
-        this._refreshInProgress = this.xaaRefresh().finally(() => {
-          this._refreshInProgress = undefined
-        })
-      }
-      try {
-        const refreshed = await this._refreshInProgress
-        if (refreshed) return refreshed
-      } catch (e) {
-        logMCPDebug(
-          this.serverName,
-          `XAA silent exchange failed: ${errorMessage(e)}`,
-        )
-      }
-      // Fall through. Either id_token isn't cached (xaaRefresh returned
-      // undefined) or the exchange errored. Normal path below handles both:
-      // !tokenData → undefined → 401 → needs-auth; expired → undefined → same.
-    }
-
-    if (!tokenData) {
-      logMCPDebug(this.serverName, `No token data found`)
       return undefined
     }
 
-    // Check if token is expired
     const expiresIn = (tokenData.expiresAt - Date.now()) / 1000
-
-    // Step-up check: if a 403 insufficient_scope was detected and the current
-    // token doesn't have the requested scope, omit refresh_token below so the
-    // SDK skips refresh and falls through to the PKCE flow.
-    const currentScopes = tokenData.scope?.split(' ') ?? []
-    const needsStepUp =
-      this._pendingStepUpScope !== undefined &&
-      this._pendingStepUpScope.split(' ').some(s => !currentScopes.includes(s))
-    if (needsStepUp) {
-      logMCPDebug(
-        this.serverName,
-        `Step-up pending (${this._pendingStepUpScope}), omitting refresh_token`,
-      )
-    }
-
-    // If token is expired and we don't have a refresh token, return undefined
-    if (expiresIn <= 0 && !tokenData.refreshToken) {
-      logMCPDebug(this.serverName, `Token expired without refresh token`)
+    if (expiresIn <= 0 && !getStoredRefreshToken(tokenData)) {
       return undefined
     }
-
-    // If token is expired or about to expire (within 5 minutes) and we have a refresh token, refresh it proactively.
-    // This proactive refresh is a UX improvement - it avoids the latency of a failed request followed by token refresh.
-    // While MCP servers should return 401 for expired tokens (which triggers SDK-level refresh), proactively refreshing
-    // before expiry provides a smoother user experience.
-    // Skip when step-up is pending — refreshing can't elevate scope (RFC 6749 §6).
-    if (expiresIn <= 300 && tokenData.refreshToken && !needsStepUp) {
-      // Reuse existing refresh promise if one is in progress to prevent concurrent refreshes
-      if (!this._refreshInProgress) {
-        logMCPDebug(
-          this.serverName,
-          `Token expires in ${Math.floor(expiresIn)}s, attempting proactive refresh`,
-        )
-        this._refreshInProgress = this.refreshAuthorization(
-          tokenData.refreshToken,
-        ).finally(() => {
-          this._refreshInProgress = undefined
-        })
-      } else {
-        logMCPDebug(
-          this.serverName,
-          `Token refresh already in progress, reusing existing promise`,
-        )
-      }
-
-      try {
-        const refreshed = await this._refreshInProgress
-        if (refreshed) {
-          logMCPDebug(this.serverName, `Token refreshed successfully`)
-          return refreshed
-        }
-        logMCPDebug(
-          this.serverName,
-          `Token refresh failed, returning current tokens`,
-        )
-      } catch (error) {
-        logMCPDebug(
-          this.serverName,
-          `Token refresh error: ${errorMessage(error)}`,
-        )
-      }
-    }
-
-    // Return current tokens (may be expired if refresh failed or not needed yet)
-    const tokens = {
+    return {
       access_token: tokenData.accessToken,
-      refresh_token: needsStepUp ? undefined : tokenData.refreshToken,
+      refresh_token: undefined,
       expires_in: expiresIn,
       scope: tokenData.scope,
       token_type: 'Bearer',
     }
+  }
 
-    logMCPDebug(this.serverName, `Returning tokens`)
-    logMCPDebug(this.serverName, `Token length: ${tokens.access_token?.length}`)
-    logMCPDebug(this.serverName, `Has refresh token: ${!!tokens.refresh_token}`)
-    logMCPDebug(this.serverName, `Expires in: ${Math.floor(expiresIn)}s`)
+  /**
+   * Prepares credentials for one transport request. Unlike tokens(), this is
+   * called where the request AbortSignal is available, so proactive and
+   * reactive refresh share the same cancellable coordination path.
+   */
+  async prepareRequest(
+    abortSignal?: AbortSignal,
+    rejectedAccessToken?: string,
+    forceFreshStorage = false,
+  ): Promise<OAuthTokens | undefined> {
+    throwIfAborted(abortSignal, 'MCP token refresh aborted')
+    const storage = getSecureStorage()
+    let data: SecureStorageData | null
+    if (forceFreshStorage) {
+      data = await readFreshSecureStorage(storage, abortSignal)
+    } else {
+      data = await storage.readAsync()
+      throwIfAborted(abortSignal, 'MCP token refresh aborted')
+    }
+    const serverKey = getServerKey(this.serverName, this.serverConfig)
+    let tokenData = data?.mcpOAuth?.[serverKey]
+    let freshTokens = getFreshStoredOAuthTokens(tokenData)
+    if (
+      !forceFreshStorage &&
+      rejectedAccessToken !== undefined &&
+      (!freshTokens || freshTokens.access_token === rejectedAccessToken)
+    ) {
+      // A reactive request can arrive with a keychain-cached null/stale record
+      // after another process has already persisted the winner.
+      tokenData = (await readFreshSecureStorage(storage, abortSignal))
+        ?.mcpOAuth?.[serverKey]
+      freshTokens = getFreshStoredOAuthTokens(tokenData)
+    }
+    if (
+      freshTokens &&
+      freshTokens.access_token !== rejectedAccessToken
+    ) {
+      return { ...freshTokens, refresh_token: undefined }
+    }
 
-    return tokens
+    const usableStoredTokens = getUsableStoredOAuthTokens(tokenData)
+    const storedTokens = usableStoredTokens
+      ? { ...usableStoredTokens, refresh_token: undefined }
+      : undefined
+    const currentScopes = tokenData?.scope?.split(' ') ?? []
+    const needsStepUp =
+      this._pendingStepUpScope !== undefined &&
+      this._pendingStepUpScope
+        .split(' ')
+        .some(scope => !currentScopes.includes(scope))
+    if (needsStepUp) {
+      return rejectedAccessToken === undefined ? storedTokens : undefined
+    }
+
+    const latestRefreshToken = getStoredRefreshToken(tokenData)
+    const canUseXaa = isXaaEnabled() && this.serverConfig.oauth?.xaa
+    if (!latestRefreshToken && !canUseXaa) {
+      return rejectedAccessToken === undefined ? storedTokens : undefined
+    }
+
+    let sharedReturnedRejectedToken = false
+    try {
+      const refreshed = await this.runInProcessRefresh(
+        abortSignal,
+        sharedSignal =>
+          latestRefreshToken
+            ? this.refreshAuthorization(sharedSignal, rejectedAccessToken)
+            : this.xaaRefresh(
+                sharedSignal,
+                rejectedAccessToken,
+                tokenData !== undefined,
+              ),
+      )
+      if (
+        refreshed &&
+        refreshed.access_token !== rejectedAccessToken
+      ) {
+        return { ...refreshed, refresh_token: undefined }
+      }
+      sharedReturnedRejectedToken =
+        refreshed?.access_token === rejectedAccessToken
+    } catch (error) {
+      throwIfAborted(abortSignal, 'MCP token refresh aborted')
+      if (isAbortError(error)) throw error
+      if (error instanceof McpRefreshLockUnavailableError) {
+        return undefined
+      }
+      // Provider-controlled OAuth bodies can echo submitted credentials.
+      logMCPDebug(this.serverName, 'MCP credential refresh failed')
+    }
+
+    // A joined in-process refresh can legitimately return the exact bearer
+    // rejected by this request. Re-read, then run one new coordinated refresh
+    // with the latest credential state rather than retrying that bearer.
+    const latestTokenData = (
+      await readFreshSecureStorage(storage, abortSignal)
+    )?.mcpOAuth?.[serverKey]
+    const latestFreshTokens = getFreshStoredOAuthTokens(latestTokenData)
+    if (
+      latestFreshTokens &&
+      latestFreshTokens.access_token !== rejectedAccessToken
+    ) {
+      return { ...latestFreshTokens, refresh_token: undefined }
+    }
+    if (
+      rejectedAccessToken !== undefined &&
+      sharedReturnedRejectedToken &&
+      latestTokenData
+    ) {
+      throwIfAborted(abortSignal, 'MCP token refresh aborted')
+      try {
+        const refreshed = await this.refreshRejectedCredential(
+          latestTokenData,
+          rejectedAccessToken,
+          abortSignal,
+        )
+        return refreshed
+          ? { ...refreshed, refresh_token: undefined }
+          : undefined
+      } catch (error) {
+        throwIfAborted(abortSignal, 'MCP token refresh aborted')
+        if (isAbortError(error)) throw error
+        if (!(error instanceof McpRefreshLockUnavailableError)) {
+          logMCPDebug(this.serverName, 'MCP credential refresh failed')
+        }
+        return undefined
+      }
+    }
+
+    if (rejectedAccessToken === undefined) {
+      const latestUsableTokens = getUsableStoredOAuthTokens(latestTokenData)
+      if (latestUsableTokens) {
+        return { ...latestUsableTokens, refresh_token: undefined }
+      }
+    }
+    return undefined
   }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
     this._pendingStepUpScope = undefined
     const storage = getSecureStorage()
+    // Keep the final whole-record read and synchronous update adjacent. An
+    // await here would let another in-process server write between them and
+    // lose one side of the merge.
+    clearKeychainCache()
     const existingData = storage.read() || {}
     const serverKey = getServerKey(this.serverName, this.serverConfig)
 
@@ -1768,7 +2089,10 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       },
     }
 
-    storage.update(updatedData)
+    const result = storage.update(updatedData)
+    if (!result.success) {
+      throw new Error('Failed to persist MCP OAuth tokens to secure storage')
+    }
   }
 
   /**
@@ -1781,113 +2105,182 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
    * On exchange failure, clears the id_token cache so the next interactive
    * auth does a fresh IdP login (the cached id_token is likely stale/revoked).
    *
-   * TODO(xaa-ga): add cross-process lockfile before GA. `_refreshInProgress`
-   * only dedupes within one process — two CC instances with expiring tokens
-   * both fire the full 4-request XAA chain and race on storage.update().
-   * Unlike inc-4829 the id_token is not single-use so both access_tokens
-   * stay valid (wasted round-trips + keychain write race, not brickage),
-   * but this is the shape CLAUDE.md flags under "Token/auth caching across
-   * process boundaries". Mirror refreshAuthorization()'s lockfile pattern.
+   * `_refreshInProgress` dedupes callers on this provider instance; the shared
+   * server lock below coordinates independent OpenClaude processes/providers.
    */
-  private async xaaRefresh(): Promise<OAuthTokens | undefined> {
-    const idp = getXaaIdpSettings()
-    if (!idp) return undefined // config was removed mid-session
+  private async xaaRefresh(
+    abortSignal?: AbortSignal,
+    rejectedAccessToken?: string,
+    requireExistingRecord = true,
+  ): Promise<OAuthTokens | undefined> {
+    const serverKey = getServerKey(this.serverName, this.serverConfig)
+    const result = await withMcpRefreshLock(
+      this.serverName,
+      serverKey,
+      abortSignal,
+      async ({ acquired, signal }) => {
+        // Another process may have refreshed while this one waited. Bypass the
+        // keychain cache before checking the shared credential record.
+        const storage = getSecureStorage()
+        const existingData =
+          (await readFreshSecureStorage(storage, signal)) || {}
+        const tokenData = existingData.mcpOAuth?.[serverKey]
+        const freshTokens = getFreshStoredOAuthTokens(tokenData)
+        if (
+          freshTokens &&
+          freshTokens.access_token !== rejectedAccessToken
+        ) {
+          logMCPDebug(
+            this.serverName,
+            'Another process already refreshed tokens',
+          )
+          return freshTokens
+        }
 
-    const idToken = getCachedIdpIdToken(idp.issuer)
-    if (!idToken) {
-      logMCPDebug(
-        this.serverName,
-        'XAA: id_token not cached, needs interactive re-auth',
-      )
-      return undefined
-    }
+        if (!acquired) {
+          throw new McpRefreshLockUnavailableError()
+        }
+        if (requireExistingRecord && !tokenData) {
+          return undefined
+        }
 
-    const clientId = this.serverConfig.oauth?.clientId
-    const clientConfig = getMcpClientConfig(this.serverName, this.serverConfig)
-    if (!clientId || !clientConfig?.clientSecret) {
-      logMCPDebug(
-        this.serverName,
-        'XAA: missing clientId or clientSecret in config — skipping silent refresh',
-      )
-      return undefined // shouldn't happen if `mcp add` was correct
-    }
+        // A normal refresh token may have appeared while XAA waited. Prefer
+        // the one-request normal flow, under the same already-held lock.
+        const latestRefreshToken = getStoredRefreshToken(tokenData)
+        if (latestRefreshToken) {
+          return this._doRefresh(
+            latestRefreshToken,
+            signal,
+            rejectedAccessToken,
+          )
+        }
 
-    const idpClientSecret = getIdpClientSecret(idp.issuer)
+        // Configuration and credentials can change while the lock is held by
+        // another process, so re-check every XAA prerequisite only now.
+        throwIfAborted(signal, 'MCP token refresh aborted')
+        if (!isXaaEnabled() || !this.serverConfig.oauth?.xaa) {
+          return undefined
+        }
+        const idp = getXaaIdpSettings()
+        if (!idp) return undefined
 
-    // Discover IdP token endpoint. Could cache (fetchCache.ts already
-    // caches /.well-known/ requests), but OIDC metadata is cheap + idempotent.
-    // xaaRefresh is the silent tokens() path — soft-fail to undefined so the
-    // caller falls through to needs-authentication instead of throwing mid-connect.
-    let oidc
-    try {
-      oidc = await discoverOidc(idp.issuer)
-    } catch (e) {
-      logMCPDebug(
-        this.serverName,
-        `XAA: OIDC discovery failed in silent refresh: ${errorMessage(e)}`,
-      )
-      return undefined
-    }
+        const idToken = getCachedIdpIdToken(idp.issuer)
+        if (!idToken) {
+          logMCPDebug(
+            this.serverName,
+            'XAA: id_token not cached, needs interactive re-auth',
+          )
+          return undefined
+        }
 
-    try {
-      const tokens = await performCrossAppAccess(
-        this.serverConfig.url,
-        {
-          clientId,
-          clientSecret: clientConfig.clientSecret,
-          idpClientId: idp.clientId,
-          idpClientSecret,
-          idpIdToken: idToken,
-          idpTokenEndpoint: oidc.token_endpoint,
-        },
-        this.serverName,
-      )
-      // Write directly (not via saveTokens) so clientId + clientSecret land in
-      // storage even when this is the first write for serverKey. saveTokens
-      // only spreads existing data; if no prior performMCPXaaAuth ran,
-      // revokeServerTokens would later read tokenData.clientId as undefined
-      // and send a client_id-less RFC 7009 request that strict ASes reject.
-      const storage = getSecureStorage()
-      const existingData = storage.read() || {}
-      const serverKey = getServerKey(this.serverName, this.serverConfig)
-      const prev = existingData.mcpOAuth?.[serverKey]
-      storage.update({
-        ...existingData,
-        mcpOAuth: {
-          ...existingData.mcpOAuth,
-          [serverKey]: {
-            ...prev,
-            serverName: this.serverName,
-            serverUrl: this.serverConfig.url,
-            accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token ?? prev?.refreshToken,
-            expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
-            scope: tokens.scope,
-            clientId,
-            clientSecret: clientConfig.clientSecret,
-            discoveryState: {
-              authorizationServerUrl: tokens.authorizationServerUrl,
-            },
-          },
-        },
-      })
-      return {
-        access_token: tokens.access_token,
-        token_type: 'Bearer',
-        expires_in: tokens.expires_in,
-        scope: tokens.scope,
-        refresh_token: tokens.refresh_token,
-      }
-    } catch (e) {
-      if (e instanceof XaaTokenExchangeError && e.shouldClearIdToken) {
-        clearIdpIdToken(idp.issuer)
-        logMCPDebug(
+        const clientId = this.serverConfig.oauth.clientId
+        const clientConfig = getMcpClientConfig(
           this.serverName,
-          'XAA: cleared id_token after exchange failure',
+          this.serverConfig,
         )
-      }
-      throw e
-    }
+        if (!clientId || !clientConfig?.clientSecret) {
+          logMCPDebug(
+            this.serverName,
+            'XAA: missing clientId or clientSecret in config — skipping silent refresh',
+          )
+          return undefined
+        }
+
+        const idpClientSecret = getIdpClientSecret(idp.issuer)
+        let oidc
+        try {
+          oidc = await discoverOidc(idp.issuer, signal)
+        } catch (error) {
+          throwIfAborted(signal, 'MCP token refresh aborted')
+          if (isAbortError(error)) throw error
+          logMCPDebug(
+            this.serverName,
+            `XAA: OIDC discovery failed in silent refresh: ${errorMessage(error)}`,
+          )
+          return undefined
+        }
+
+        try {
+          const tokens = await performCrossAppAccess(
+            this.serverConfig.url,
+            {
+              clientId,
+              clientSecret: clientConfig.clientSecret,
+              idpClientId: idp.clientId,
+              idpClientSecret,
+              idpIdToken: idToken,
+              idpTokenEndpoint: oidc.token_endpoint,
+            },
+            this.serverName,
+            signal,
+          )
+          throwIfAborted(signal, 'MCP token refresh aborted')
+
+          // Persist client credentials with the token so later refresh and
+          // revocation retain the same final-boundary behavior as XAA login.
+          // Re-read once more to narrow the merge window for unrelated secure
+          // storage updates that are intentionally outside this server lock.
+          throwIfAborted(signal, 'MCP token refresh aborted')
+          // Keep this final whole-record merge adjacent to update(), as in
+          // saveTokens(), so concurrent servers in this process cannot both
+          // write snapshots captured before either update.
+          clearKeychainCache()
+          const latestData = storage.read() || {}
+          const latestTokenData = latestData.mcpOAuth?.[serverKey]
+          const updatedData: SecureStorageData = {
+            ...latestData,
+            mcpOAuth: {
+              ...latestData.mcpOAuth,
+              [serverKey]: {
+                ...latestTokenData,
+                serverName: this.serverName,
+                serverUrl: this.serverConfig.url,
+                accessToken: tokens.access_token,
+                refreshToken:
+                  tokens.refresh_token ?? latestTokenData?.refreshToken,
+                expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
+                scope: tokens.scope,
+                clientId,
+                clientSecret: clientConfig.clientSecret,
+                discoveryState: {
+                  ...latestTokenData?.discoveryState,
+                  authorizationServerUrl: tokens.authorizationServerUrl,
+                },
+              },
+            },
+          }
+          throwIfAborted(signal, 'MCP token refresh aborted')
+          const updateResult = storage.update(updatedData)
+          if (!updateResult.success) {
+            throw new Error(
+              'Failed to persist MCP XAA tokens to secure storage',
+            )
+          }
+          return {
+            access_token: tokens.access_token,
+            token_type: 'Bearer',
+            expires_in: tokens.expires_in,
+            scope: tokens.scope,
+            refresh_token:
+              tokens.refresh_token ?? latestTokenData?.refreshToken,
+          }
+        } catch (error) {
+          throwIfAborted(signal, 'MCP token refresh aborted')
+          if (
+            error instanceof XaaTokenExchangeError &&
+            error.shouldClearIdToken
+          ) {
+            clearIdpIdToken(idp.issuer)
+            logMCPDebug(
+              this.serverName,
+              'XAA: cleared id_token after exchange failure',
+            )
+          }
+          throw error
+        }
+      },
+    )
+    return result.value
   }
 
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
@@ -2075,7 +2468,9 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     storage.update(updatedData)
   }
 
-  async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
+  async discoveryState(
+    abortSignal?: AbortSignal,
+  ): Promise<OAuthDiscoveryState | undefined> {
     const storage = getSecureStorage()
     const data = storage.read()
     const serverKey = getServerKey(this.serverName, this.serverConfig)
@@ -2105,6 +2500,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           this.serverName,
           this.serverConfig.url,
           metadataUrl,
+          createAuthFetch(abortSignal),
         )
         if (metadata) {
           return {
@@ -2114,6 +2510,8 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           }
         }
       } catch (error) {
+        throwIfAborted(abortSignal, 'MCP token refresh aborted')
+        if (isAbortError(error)) throw error
         logMCPDebug(
           this.serverName,
           `Failed to fetch from configured metadata URL: ${errorMessage(error)}`,
@@ -2125,94 +2523,59 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   }
 
   async refreshAuthorization(
-    refreshToken: string,
+    abortSignal?: AbortSignal,
+    rejectedAccessToken?: string,
   ): Promise<OAuthTokens | undefined> {
     const serverKey = getServerKey(this.serverName, this.serverConfig)
-    const claudeDir = getClaudeConfigHomeDir()
-    await mkdir(claudeDir, { recursive: true })
-    const sanitizedKey = serverKey.replace(/[^a-zA-Z0-9]/g, '_')
-    const lockfilePath = join(claudeDir, `mcp-refresh-${sanitizedKey}.lock`)
-
-    let release: (() => Promise<void>) | undefined
-    for (let retry = 0; retry < MAX_LOCK_RETRIES; retry++) {
-      try {
-        logMCPDebug(
-          this.serverName,
-          `Acquiring refresh lock (attempt ${retry + 1})`,
-        )
-        release = await lockfile.lock(lockfilePath, {
-          realpath: false,
-          onCompromised: () => {
-            logMCPDebug(this.serverName, `Refresh lock was compromised`)
-          },
-        })
-        logMCPDebug(this.serverName, `Acquired refresh lock`)
-        break
-      } catch (e: unknown) {
-        const code = getErrnoCode(e)
-        if (code === 'ELOCKED') {
+    const result = await withMcpRefreshLock(
+      this.serverName,
+      serverKey,
+      abortSignal,
+      async ({ acquired, signal }) => {
+        // Re-read after acquisition or bounded fallback. Never use the token
+        // captured before waiting: logout or another refresh may have rotated
+        // or removed it in the meantime.
+        const storage = getSecureStorage()
+        const data = await readFreshSecureStorage(storage, signal)
+        const tokenData = data?.mcpOAuth?.[serverKey]
+        const freshTokens = getFreshStoredOAuthTokens(tokenData)
+        if (
+          freshTokens &&
+          freshTokens.access_token !== rejectedAccessToken
+        ) {
           logMCPDebug(
             this.serverName,
-            `Refresh lock held by another process, waiting (attempt ${retry + 1}/${MAX_LOCK_RETRIES})`,
+            `Another process already refreshed tokens (expires in ${Math.floor(freshTokens.expires_in ?? 0)}s)`,
           )
-          await sleep(1000 + Math.random() * 1000)
-          continue
+          return freshTokens
         }
-        logMCPDebug(
-          this.serverName,
-          `Failed to acquire refresh lock: ${code}, proceeding without lock`,
-        )
-        break
-      }
-    }
-    if (!release) {
-      logMCPDebug(
-        this.serverName,
-        `Could not acquire refresh lock after ${MAX_LOCK_RETRIES} retries, proceeding without lock`,
-      )
-    }
 
-    try {
-      // Re-read tokens after acquiring lock — another process may have refreshed
-      clearKeychainCache()
-      const storage = getSecureStorage()
-      const data = storage.read()
-      const tokenData = data?.mcpOAuth?.[serverKey]
-      if (tokenData) {
-        const expiresIn = (tokenData.expiresAt - Date.now()) / 1000
-        if (expiresIn > 300) {
+        if (!acquired) {
+          throw new McpRefreshLockUnavailableError()
+        }
+
+        const latestRefreshToken = getStoredRefreshToken(tokenData)
+        if (!latestRefreshToken) {
           logMCPDebug(
             this.serverName,
-            `Another process already refreshed tokens (expires in ${Math.floor(expiresIn)}s)`,
+            'No current refresh token remains after acquiring refresh lock',
           )
-          return {
-            access_token: tokenData.accessToken,
-            refresh_token: tokenData.refreshToken,
-            expires_in: expiresIn,
-            scope: tokenData.scope,
-            token_type: 'Bearer',
-          }
+          return undefined
         }
-        // Use the freshest refresh token from storage
-        if (tokenData.refreshToken) {
-          refreshToken = tokenData.refreshToken
-        }
-      }
-      return await this._doRefresh(refreshToken)
-    } finally {
-      if (release) {
-        try {
-          await release()
-          logMCPDebug(this.serverName, `Released refresh lock`)
-        } catch {
-          logMCPDebug(this.serverName, `Failed to release refresh lock`)
-        }
-      }
-    }
+        return this._doRefresh(
+          latestRefreshToken,
+          signal,
+          rejectedAccessToken,
+        )
+      },
+    )
+    return result.value
   }
 
   private async _doRefresh(
     refreshToken: string,
+    abortSignal?: AbortSignal,
+    rejectedAccessToken?: string,
   ): Promise<OAuthTokens | undefined> {
     const MAX_ATTEMPTS = 3
 
@@ -2247,7 +2610,8 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
         logMCPDebug(this.serverName, `Starting token refresh`)
-        const authFetch = createAuthFetch()
+        throwIfAborted(abortSignal, 'MCP token refresh aborted')
+        const authFetch = createAuthFetch(abortSignal)
 
         // Reuse cached metadata from the initial OAuth flow if available,
         // since metadata (token endpoint URL, etc.) is static per auth server.
@@ -2258,7 +2622,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
         // 3. Full RFC 9728 → RFC 8414 re-discovery via fetchAuthServerMetadata.
         let metadata = this._metadata
         if (!metadata) {
-          const cached = await this.discoveryState()
+          const cached = await this.discoveryState(abortSignal)
           if (cached?.authorizationServerMetadata) {
             logMCPDebug(
               this.serverName,
@@ -2312,6 +2676,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
 
         if (newTokens) {
           logMCPDebug(this.serverName, `Token refresh successful`)
+          throwIfAborted(abortSignal, 'MCP token refresh aborted')
           await this.saveTokens(newTokens)
           emitRefreshEvent('success')
           return newTokens
@@ -2321,36 +2686,32 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
         emitRefreshEvent('failure', 'no_tokens_returned')
         return undefined
       } catch (error) {
+        throwIfAborted(abortSignal, 'MCP token refresh aborted')
+        if (isAbortError(error)) throw error
         // Invalid grant means the refresh token itself is invalid/revoked/expired.
         // But another process may have already refreshed successfully — check first.
         if (error instanceof InvalidGrantError) {
-          logMCPDebug(
-            this.serverName,
-            `Token refresh failed with invalid_grant: ${error.message}`,
-          )
-          clearKeychainCache()
+          // OAuth error descriptions are provider-controlled and may echo the
+          // submitted refresh token. Never persist them in MCP diagnostics.
+          logMCPDebug(this.serverName, 'Token refresh failed with invalid_grant')
           const storage = getSecureStorage()
-          const data = storage.read()
+          const data = await readFreshSecureStorage(storage, abortSignal)
           const serverKey = getServerKey(this.serverName, this.serverConfig)
           const tokenData = data?.mcpOAuth?.[serverKey]
-          if (tokenData) {
-            const expiresIn = (tokenData.expiresAt - Date.now()) / 1000
-            if (expiresIn > 300) {
-              logMCPDebug(
-                this.serverName,
-                `Another process refreshed tokens, using those`,
-              )
-              // Not emitted as success: this process did not perform a
-              // refresh, and the winning process already emitted its own
-              // success event. Emitting here would double-count.
-              return {
-                access_token: tokenData.accessToken,
-                refresh_token: tokenData.refreshToken,
-                expires_in: expiresIn,
-                scope: tokenData.scope,
-                token_type: 'Bearer',
-              }
-            }
+          const freshTokens = getFreshStoredOAuthTokens(tokenData)
+          if (
+            freshTokens &&
+            (rejectedAccessToken === undefined ||
+              freshTokens.access_token !== rejectedAccessToken)
+          ) {
+            logMCPDebug(
+              this.serverName,
+              `Another process refreshed tokens, using those`,
+            )
+            // Not emitted as success: this process did not perform a
+            // refresh, and the winning process already emitted its own
+            // success event. Emitting here would double-count.
+            return freshTokens
           }
           logMCPDebug(
             this.serverName,
@@ -2372,10 +2733,9 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
         const isRetryable = isTimeoutError || isTransientServerError
 
         if (!isRetryable || attempt >= MAX_ATTEMPTS) {
-          logMCPDebug(
-            this.serverName,
-            `Token refresh failed: ${errorMessage(error)}`,
-          )
+          // The generic SDK/fetch error message may include a token endpoint
+          // response body, so retain only the stable outcome diagnostic.
+          logMCPDebug(this.serverName, 'Token refresh failed')
           emitRefreshEvent(
             'failure',
             isRetryable ? 'transient_retries_exhausted' : 'request_failed',
@@ -2388,7 +2748,8 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           this.serverName,
           `Token refresh failed, retrying in ${delayMs}ms (attempt ${attempt}/${MAX_ATTEMPTS})`,
         )
-        await sleep(delayMs)
+        await sleep(delayMs, abortSignal)
+        throwIfAborted(abortSignal, 'MCP token refresh aborted')
       }
     }
 

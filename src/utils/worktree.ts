@@ -1062,14 +1062,16 @@ export async function createAgentWorktree(
 }> {
   validateWorktreeSlug(slug)
 
-  // Resolve the parent session's working directory once. Defaults to the
-  // ambient session cwd; callers (and tests) may pin it explicitly so both the
-  // canonical-root and parent-HEAD lookups below stay consistent.
   const sessionCwd = options?.cwd ?? getCwd()
 
-  // Try hook-based worktree creation first (allows user-configured VCS)
+  // Try hook-based worktree creation first (allows user-configured VCS).
+  // Forward sessionCwd so hooks operating from a multi-repo parent can target
+  // the selected child repository (#2052). Hook failure remains terminal here —
+  // AgentTool decides whether to fall back to a cwd override.
   if (hasWorktreeCreateHook()) {
-    const hookResult = await executeWorktreeCreateHook(slug)
+    const hookResult = await executeWorktreeCreateHook(slug, {
+      cwd: sessionCwd,
+    })
     logForDebugging(
       `Created hook-based agent worktree at: ${hookResult.worktreePath}`,
     )

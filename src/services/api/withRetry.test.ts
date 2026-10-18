@@ -3,6 +3,7 @@ import type Anthropic from '@anthropic-ai/sdk'
 import { APIError, APIUserAbortError } from '@anthropic-ai/sdk'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import * as debugNs from '../../utils/debug.js'
+import { markOpenAIRequestNonReplayable } from './openaiErrorClassification.js'
 type ProvidersModule = typeof import('../../utils/model/providers.js')
 
 // Helper to build a mock APIError with specific headers
@@ -148,10 +149,54 @@ describe('retry configuration', () => {
     expect(getDefaultMaxRetries()).toBe(3)
   })
 
-  test('falls back to default retry attempts for invalid values', async () => {
-    process.env.OPENCLAUDE_MAX_RETRIES = 'nope'
+  test('falls back to default retry attempts for malformed values', async () => {
     const { getDefaultMaxRetries } = await importFreshWithRetryModule()
+    const malformedValues = [
+      'nope',
+      '   ',
+      '5abc',
+      '2.5',
+      '-1',
+      'Infinity',
+      '9'.repeat(400),
+    ]
+    for (const value of malformedValues) {
+      process.env.OPENCLAUDE_MAX_RETRIES = value
+      expect(getDefaultMaxRetries()).toBe(10)
+    }
+  })
+
+  test('uses default retries for a whitespace-only legacy setting', async () => {
+    process.env.CLAUDE_CODE_MAX_RETRIES = '   '
+    process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+    const { getDefaultMaxRetries, withRetry } =
+      await importFreshWithRetryModule()
+    const retryableError = APIError.generate(
+      500,
+      undefined,
+      'internal server error',
+      new Headers(),
+    )
+    let attempts = 0
+
     expect(getDefaultMaxRetries()).toBe(10)
+    const result = await drainAsyncGenerator(
+      withRetry(
+        async () => ({} as Anthropic),
+        async () => {
+          attempts++
+          if (attempts === 1) throw retryableError
+          return { ok: true }
+        },
+        {
+          model: 'test-model',
+          thinkingConfig: { type: 'disabled' },
+        },
+      ),
+    )
+
+    expect(result).toEqual({ ok: true })
+    expect(attempts).toBe(2)
   })
 
   test('caps retry attempts to a bounded value', async () => {
@@ -299,6 +344,45 @@ describe('abort retry classification', () => {
 })
 
 describe('OpenAI-compatible retry classification', () => {
+  test('does not retry request timeouts marked as non-replayable', async () => {
+    process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+    const { CannotRetryError, withRetry } =
+      await importFreshWithRetryModule('openai')
+    const error = markOpenAIRequestNonReplayable(
+      APIError.generate(
+        0,
+        undefined,
+        'OpenAI API transport error: no response headers [openai_category=request_timeout,host=slow.example.test]',
+        new Headers(),
+      ),
+    )
+    let attempts = 0
+
+    let caught: unknown
+    try {
+      await drainAsyncGenerator(
+        withRetry(
+          async () => ({} as Anthropic),
+          async () => {
+            attempts++
+            throw error
+          },
+          {
+            maxRetries: 2,
+            model: 'gpt-4o-mini',
+            thinkingConfig: { type: 'disabled' },
+          },
+        ),
+      )
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(CannotRetryError)
+    expect((caught as { originalError?: unknown }).originalError).toBe(error)
+    expect(attempts).toBe(1)
+  })
+
   test('does not retry marked non-retryable auth failures', async () => {
     process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
     const { CannotRetryError, withRetry } =

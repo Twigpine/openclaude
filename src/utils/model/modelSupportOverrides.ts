@@ -27,7 +27,9 @@ const TIERS = [
 function buildCapabilityOverrideCacheKey(
   model: string,
   capability: ModelCapabilityOverride,
+  apiProvider?: ReturnType<typeof getAPIProvider>,
 ): string {
+  const resolvedApiProvider = apiProvider ?? getAPIProvider()
   const envParts = TIERS.flatMap(tier => [
     process.env[tier.modelEnvVar] ?? '',
     process.env[tier.capabilitiesEnvVar] ?? '',
@@ -36,7 +38,7 @@ function buildCapabilityOverrideCacheKey(
   return [
     model.toLowerCase(),
     capability,
-    getAPIProvider(),
+    resolvedApiProvider,
     process.env.ANTHROPIC_BASE_URL ?? '',
     process.env.USER_TYPE ?? '',
     ...envParts,
@@ -48,9 +50,14 @@ function buildCapabilityOverrideCacheKey(
  * the pinned ANTHROPIC_DEFAULT_*_MODEL env vars.
  */
 export const get3PModelCapabilityOverride = memoize(
-  (model: string, capability: ModelCapabilityOverride): boolean | undefined => {
+  (
+    model: string,
+    capability: ModelCapabilityOverride,
+    apiProvider?: ReturnType<typeof getAPIProvider>,
+  ): boolean | undefined => {
+    const resolvedApiProvider = apiProvider ?? getAPIProvider()
     if (
-      getAPIProvider() === 'firstParty' &&
+      resolvedApiProvider === 'firstParty' &&
       isFirstPartyAnthropicBaseUrl()
     ) {
       return undefined

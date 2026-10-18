@@ -24,6 +24,7 @@ const PROVIDER_ENV_PREFIXES = [
   'GITHUB_',
   'GOOGLE_',
   'GROQ_',
+  'LONGCAT_',
   'MINIMAX_',
   'MIMO_',
   'MISTRAL_',

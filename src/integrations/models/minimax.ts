@@ -70,9 +70,13 @@ export default [
     label: 'MiniMax M2.7',
     brandId: 'minimax',
     vendorId: 'minimax',
-    classification: ['chat', 'reasoning', 'vision', 'coding'],
+    // Text-only model: accepts text input, no image/vision inputs.
+    classification: ['chat', 'reasoning', 'coding'],
     defaultModel: 'MiniMax-M2.7',
-    capabilities: minimaxM2Capabilities,
+    capabilities: {
+      ...minimaxM2Capabilities,
+      supportsVision: false,
+    },
     contextWindow: 196_608,
     maxOutputTokens: 131_072,
   }),

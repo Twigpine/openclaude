@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { discoverOidc } from './xaaIdpLogin.js'
 import {
   shouldCompleteXaaIdpCallback,
   validateXaaIdpCallbackParams,
@@ -59,4 +60,39 @@ test('XAA IdP callback accepts authorization codes only when state matches', () 
     ),
     { type: 'state_mismatch' },
   )
+})
+
+test('discoverOidc aborts a pending discovery request', async () => {
+  const originalFetch = globalThis.fetch
+  const controller = new AbortController()
+  let markFetchStarted!: () => void
+  const fetchStarted = new Promise<void>(resolve => {
+    markFetchStarted = resolve
+  })
+
+  globalThis.fetch = ((_input: string | URL, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      markFetchStarted()
+      const signal = init?.signal
+      if (signal?.aborted) {
+        reject(signal.reason)
+        return
+      }
+      signal?.addEventListener('abort', () => reject(signal.reason), {
+        once: true,
+      })
+    })) as typeof globalThis.fetch
+
+  try {
+    const discovery = discoverOidc(
+      'https://idp.example.test',
+      controller.signal,
+    )
+    await fetchStarted
+    controller.abort(new DOMException('cancelled', 'AbortError'))
+
+    await assert.rejects(discovery, { name: 'AbortError' })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })

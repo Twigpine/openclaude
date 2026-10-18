@@ -1,5 +1,5 @@
 /* ════════════════════════════════════════════════════════════════════════
-   openclaude — gitlawb-aligned design tokens
+   openclaude — twigpine-aligned design tokens
    Monochrome surface system driven by --surface-rgb (inverts under light
    theme) + openclaude orange accent. Dark is the default theme.
    ════════════════════════════════════════════════════════════════════════ */
@@ -20,7 +20,7 @@
   --accent-soft: rgba(255, 122, 26, 0.14);
   --accent-line: rgba(255, 122, 26, 0.4);
 
-  /* gitlawb semantic colors */
+  /* twigpine semantic colors */
   --green: #4ade80;
   --red: #f87171;
   --yellow: #facc15;
@@ -136,7 +136,7 @@ h1[id], h2[id], h3[id], h4[id] { scroll-margin-top: calc(var(--nav-h) + 24px); }
 }
 .skip-link:focus { left: 0; }
 
-/* ── type scale (gitlawb) ─────────────────────────────────────────────── */
+/* ── type scale (twigpine) ─────────────────────────────────────────────── */
 
 .text-hero {
   font-size: clamp(2.5rem, 6vw, 3.75rem);

@@ -33,15 +33,37 @@ import {
   hasCommandsInQueue,
 } from '../utils/messageQueueManager.js'
 import { emitTaskTerminatedSdk } from '../utils/sdkEventQueue.js'
+import {
+  requestAbort,
+  traceInterruptionEvent,
+} from '../utils/interruptionTrace.js'
 
 /** Time window in ms during which a second press kills all background agents. */
 const KILL_AGENTS_CONFIRM_WINDOW_MS = 3000
 
+export type CancelRequestSource = 'cancel_keybinding' | 'ctrl_c'
+
+export function abortPendingToolPermissionRequests(
+  queue: ReadonlyArray<Pick<ToolUseConfirm, 'onAbort'>>,
+  source?: string,
+  causalEventId?: string,
+  activeQueryController?: AbortController | null,
+): void {
+  for (const item of queue) {
+    item.onAbort(source, causalEventId)
+  }
+  if (activeQueryController && !activeQueryController.signal.aborted) {
+    requestAbort(activeQueryController, 'user-cancel', {
+      source: source ?? 'permission_dialog',
+      causalEventId,
+      subsystem: 'repl',
+      controllerRole: 'query-root',
+    })
+  }
+}
+
 type CancelRequestHandlerProps = {
-  setToolUseConfirmQueue: (
-    f: (toolUseConfirmQueue: ToolUseConfirm[]) => ToolUseConfirm[],
-  ) => void
-  onCancel: () => void
+  onCancel: (source: CancelRequestSource, causalEventId?: string) => void
   onAgentsKilled: () => void
   isMessageSelectorVisible: boolean
   screen: Screen
@@ -62,7 +84,6 @@ type CancelRequestHandlerProps = {
  */
 export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
   const {
-    setToolUseConfirmQueue,
     onCancel,
     onAgentsKilled,
     isMessageSelectorVisible,
@@ -84,7 +105,10 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
   const lastKillAgentsPressRef = useRef<number>(0)
   const viewSelectionMode = useAppState(s => s.viewSelectionMode)
 
-  const handleCancel = useCallback(() => {
+  const handleCancel = useCallback((
+    source: CancelRequestSource,
+    causalEventId?: string,
+  ) => {
     const cancelProps = {
       source:
         'escape' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -96,8 +120,7 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
     // This takes precedence over queue management so users can always interrupt Claude
     if (abortSignal !== undefined && !abortSignal.aborted) {
       logEvent('tengu_cancel', cancelProps)
-      setToolUseConfirmQueue(() => [])
-      onCancel()
+      onCancel(source, causalEventId)
       return
     }
 
@@ -111,12 +134,10 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
 
     // Fallback: nothing to cancel or pop (shouldn't reach here if isActive is correct)
     logEvent('tengu_cancel', cancelProps)
-    setToolUseConfirmQueue(() => [])
-    onCancel()
+    onCancel(source, causalEventId)
   }, [
     abortSignal,
     popCommandFromQueue,
-    setToolUseConfirmQueue,
     onCancel,
     streamMode,
   ])
@@ -161,7 +182,18 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
     isContextActive &&
     (canCancelRunningTask || hasQueuedCommands || isViewingTeammate)
 
-  useKeybinding('chat:cancel', handleCancel, {
+  const handleCancelKeybinding = useCallback(
+    () => {
+      const causalEventId = traceInterruptionEvent('input.cancel_keybinding', {
+        source: 'cancel_keybinding',
+        subsystem: 'cancel_request',
+      })
+      handleCancel('cancel_keybinding', causalEventId)
+    },
+    [handleCancel],
+  )
+
+  useKeybinding('chat:cancel', handleCancelKeybinding, {
     context: 'Chat',
     isActive: isEscapeActive,
   })
@@ -169,13 +201,14 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
   // Shared kill path: stop all agents, suppress per-agent notifications,
   // emit SDK events, enqueue a single aggregate model-facing notification.
   // Returns true if anything was killed.
-  const killAllAgentsAndNotify = useCallback((): boolean => {
+  const killAllAgentsAndNotify = useCallback(
+    (source: string, causalEventId?: string): boolean => {
     const tasks = store.getState().tasks
     const running = Object.entries(tasks).filter(
       ([, t]) => t.type === 'local_agent' && t.status === 'running',
     )
     if (running.length === 0) return false
-    killAllRunningAgentTasks(tasks, setAppState)
+    killAllRunningAgentTasks(tasks, setAppState, { source, causalEventId })
     const descriptions: string[] = []
     for (const [taskId, task] of running) {
       markAgentsNotified(taskId, setAppState)
@@ -191,19 +224,26 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
         : `${descriptions.length} background agents were stopped by the user: ${descriptions.map(d => `"${d}"`).join(', ')}.`
     enqueuePendingNotification({ value: summary, mode: 'task-notification' })
     onAgentsKilled()
-    return true
-  }, [store, setAppState, onAgentsKilled])
+      return true
+    },
+    [store, setAppState, onAgentsKilled],
+  )
 
   // Ctrl+C (app:interrupt). Scoped to teammate-view: killing agents from the
   // main prompt stays a deliberate gesture (chat:killAgents), not a
   // side-effect of cancelling a turn.
   const handleInterrupt = useCallback(() => {
+    const causalEventId = traceInterruptionEvent('input.ctrl_c', {
+      source: 'ctrl_c',
+      subsystem: 'cancel_request',
+      phase: isViewingTeammate ? 'teammate_view' : 'main_view',
+    })
     if (isViewingTeammate) {
-      killAllAgentsAndNotify()
+      killAllAgentsAndNotify('ctrl_c', causalEventId)
       exitTeammateView(setAppState)
     }
     if (canCancelRunningTask || hasQueuedCommands) {
-      handleCancel()
+      handleCancel('ctrl_c', causalEventId)
     }
   }, [
     isViewingTeammate,
@@ -247,7 +287,11 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
           'kill_agents' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
       clearCommandQueue()
-      killAllAgentsAndNotify()
+      const causalEventId = traceInterruptionEvent('input.kill_agents', {
+        source: 'kill_agents',
+        subsystem: 'cancel_request',
+      })
+      killAllAgentsAndNotify('kill_agents', causalEventId)
       return
     }
     // First press -- show confirmation hint in status bar

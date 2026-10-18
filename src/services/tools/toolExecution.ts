@@ -67,6 +67,7 @@ import {
   shouldCreateUserInterruptionMessage,
 } from '../../utils/abortReasons.js'
 import { logForDebugging } from '../../utils/debug.js'
+import { checkDoomLoop } from '../../utils/doomLoop.js'
 import {
   AbortError,
   errorMessage,
@@ -474,6 +475,38 @@ export async function* runToolUse(
           },
         ],
         toolUseResult: `Error: No such tool available: ${toolName}`,
+        sourceToolAssistantUUID: assistantMessage.uuid,
+      }),
+    }
+    return
+  }
+
+  // Doom loop detection: block after N consecutive identical tool calls.
+  // Keyed by agent so concurrent subagents don't pollute each other's counters.
+  const doomLoop = checkDoomLoop(toolName, toolUse.input, {
+    agentKey: toolUseContext.agentId,
+  })
+  if (doomLoop.blocked) {
+    logForDebugging(`Doom loop detected for ${toolName} (${doomLoop.count} consecutive identical calls)`)
+    // Observability for tuning: a burst of these against varied tools would
+    // indicate false positives (e.g. legitimate polling), not stuck agents.
+    logEvent('tengu_doom_loop_blocked', {
+      toolName: sanitizeToolNameForAnalytics(
+        toolName,
+      ) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+      count: doomLoop.count,
+    })
+    yield {
+      message: createUserMessage({
+        content: [
+          {
+            type: 'tool_result',
+            content: `<tool_use_error>Blocked: ${doomLoop.count} consecutive calls to this tool with identical input — you are likely in a loop. Change the input, try a different tool, or ask the user for help. A deliberate repeat is fine once something observable has changed (new output to check, a modified file, an updated instruction).</tool_use_error>`,
+            is_error: true,
+            tool_use_id: toolUse.id,
+          },
+        ],
+        toolUseResult: `Blocked: doom loop detected for ${toolName} after ${doomLoop.count} identical calls`,
         sourceToolAssistantUUID: assistantMessage.uuid,
       }),
     }
@@ -1299,6 +1332,7 @@ export async function checkPermissionsAndCallTool(
         content: messageContent,
         imagePasteIds: rejectImageIds,
         toolUseResult: `Error: ${errorMessage}`,
+        imagePermissionToolUseIds: rejectImageIds?.map(() => toolUseID),
         sourceToolAssistantUUID: assistantMessage.uuid,
       }),
     })
@@ -1637,6 +1671,7 @@ export async function checkPermissionsAndCallTool(
             toolUseContext.agentId && !toolUseContext.preserveToolUseResults
               ? undefined
               : toolUseResult,
+          imagePermissionToolUseIds: allowImageIds?.map(() => toolUseID),
           mcpMeta: toolUseContext.agentId ? undefined : mcpMeta,
           sourceToolAssistantUUID: assistantMessage.uuid,
         }),

@@ -63,6 +63,7 @@ const originalEnv: Record<string, string | undefined> = {}
 const originalMacro = (globalThis as Record<string, unknown>).MACRO
 const originalIsTTY = process.stdout.isTTY
 const originalWrite = process.stdout.write
+const originalColumns = process.stdout.columns
 // `model` is a legacy loose key not declared on GlobalConfig.
 const originalModel = (getGlobalConfig() as GlobalConfig & Record<string, unknown>).model
 
@@ -88,6 +89,10 @@ afterEach(() => {
   Object.defineProperty(process.stdout, 'isTTY', {
     configurable: true,
     value: originalIsTTY,
+  })
+  Object.defineProperty(process.stdout, 'columns', {
+    configurable: true,
+    value: originalColumns,
   })
   process.stdout.write = originalWrite
   for (const key of ENV_KEYS) {
@@ -123,10 +128,103 @@ describe('printStartupScreen logo', () => {
     printStartupScreen()
 
     const plainOutput = stripAnsi(output)
-    expect(plainOutput).toContain('███████╗ ████████╗')
-    expect(plainOutput).toContain('██╔═══██╗ ██╔═════╝')
-    expect(plainOutput).toContain('███████╔╝ ████████╗')
-    expect(plainOutput).not.toContain('████████║ ████████╗')
+    expect(plainOutput).toContain('██████╗  ███████╗')
+    expect(plainOutput).toContain('██║  ██║ █████╗')
+    expect(plainOutput).toContain('██████╔╝ ███████╗')
+    expect(plainOutput).not.toContain('██║   ██║ █████╗')
+  })
+})
+
+// --- Logo layout: one centered row on wide terminals, stacked fallback ---
+
+function renderStartupScreen(columns: number): string {
+  ;(globalThis as Record<string, unknown>).MACRO = { VERSION: 'test-version' }
+  Object.defineProperty(process.stdout, 'isTTY', {
+    configurable: true,
+    value: true,
+  })
+  Object.defineProperty(process.stdout, 'columns', {
+    configurable: true,
+    value: columns,
+  })
+
+  let output = ''
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    output += chunk.toString()
+    return true
+  }) as typeof process.stdout.write
+
+  printStartupScreen()
+
+  process.stdout.write = originalWrite
+  return stripAnsi(output)
+}
+
+function logoLines(plainOutput: string): string[] {
+  // Letter rows contain █; the bottom shadow row only ╚═╝ glyphs. Neither
+  // pattern occurs in the tagline, info box, or version line.
+  return plainOutput.split('\n').filter(line => line.includes('█') || line.includes('╚═╝'))
+}
+
+// Visible widths of the current art: OPEN 38 + gap 2 + CLAUDE 54.
+const ONE_ROW_WIDTH = 94
+const BOX_WIDTH = 62
+
+describe('printStartupScreen layout', () => {
+  test('wide terminal renders OPEN and CLAUDE side by side as one 6-line block', () => {
+    const out = renderStartupScreen(120)
+    const logo = logoLines(out)
+    expect(logo).toHaveLength(6)
+    // End of N (OPEN) and start of C (CLAUDE) share a line
+    expect(logo[0]).toContain('███╗   ██╗   ██████╗ ██╗')
+  })
+
+  test('one-row logo is centered and rows are aligned as a block', () => {
+    const out = renderStartupScreen(120)
+    const logo = logoLines(out)
+    const pad = ' '.repeat(Math.floor((120 - ONE_ROW_WIDTH) / 2))
+    expect(logo[1]!.startsWith(`${pad}██╔═══██╗`)).toBe(true)
+    expect(logo[4]!.startsWith(`${pad}╚██████╔╝`)).toBe(true)
+    for (const line of out.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(120)
+    }
+  })
+
+  test('narrow terminal falls back to two stacked centered blocks', () => {
+    const out = renderStartupScreen(80)
+    expect(logoLines(out)).toHaveLength(12)
+    expect(out).not.toContain('███╗   ██╗   ██████╗')
+    for (const line of out.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(80)
+    }
+  })
+
+  test('layout switches exactly at the one-row width', () => {
+    expect(logoLines(renderStartupScreen(ONE_ROW_WIDTH))).toHaveLength(6)
+    expect(logoLines(renderStartupScreen(ONE_ROW_WIDTH - 1))).toHaveLength(12)
+  })
+
+  test('provider box, tagline, and version line are centered', () => {
+    const out = renderStartupScreen(120)
+    const lines = out.split('\n')
+
+    // The logo letterforms also contain ╔ — the box's top border is the line
+    // that starts with it.
+    const boxTop = lines.find(line => line.trimStart().startsWith('╔'))
+    expect(boxTop).toBeDefined()
+    expect(boxTop!.indexOf('╔')).toBe(Math.floor((120 - BOX_WIDTH) / 2))
+
+    const tagline = lines.find(line => line.includes('✦'))
+    expect(tagline).toBeDefined()
+    expect(tagline!.indexOf('✦')).toBe(
+      Math.floor((120 - tagline!.trim().length) / 2),
+    )
+
+    const version = lines.find(line => line.includes('openclaude v'))
+    expect(version).toBeDefined()
+    expect(version!.indexOf('openclaude')).toBe(
+      Math.floor((120 - version!.trim().length) / 2),
+    )
   })
 })
 

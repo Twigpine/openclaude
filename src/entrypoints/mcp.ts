@@ -202,20 +202,19 @@ export async function startMCPServer(
         if (typeof data === 'string') {
           content = [{ type: 'text', text: data }]
         } else if (Array.isArray(data)) {
-          content = data.map((block: any) => {
-            if (block.type === 'text') {
-              return { type: 'text', text: block.text || '' }
-            } else if (block.type === 'image' && block.source) {
-              return {
-                type: 'image',
-                data: block.source.data,
-                mimeType: block.source.media_type,
-              }
-            } else {
-              // eslint-disable-next-line custom-rules/no-top-level-side-effects, no-console
-              console.warn(`Unmapped content block type from tool ${name}: ${block.type || 'unknown'}`)
-              return { type: 'text', text: jsonStringify(block) }
+          content = data.flatMap((block: unknown) => {
+            // Boundary data — defensively skip primitives/null instead of crashing.
+            if (!block || typeof block !== 'object') return []
+            const b = block as { type?: unknown; text?: unknown; source?: { type?: unknown; media_type?: unknown; data?: unknown } }
+            if (b.type === 'text') {
+              return [{ type: 'text', text: String(b.text ?? '') } as CallToolResult['content'][number]]
             }
+            if (b.type === 'image' && b.source && typeof b.source.data === 'string' && typeof b.source.media_type === 'string') {
+              return [{ type: 'image', data: b.source.data, mimeType: b.source.media_type } as CallToolResult['content'][number]]
+            }
+            // eslint-disable-next-line custom-rules/no-top-level-side-effects, no-console
+            console.warn(`Unmapped content block type from tool ${name}: ${String(b.type ?? 'unknown')}`)
+            return [{ type: 'text', text: jsonStringify(block) } as CallToolResult['content'][number]]
           }) as CallToolResult['content']
         } else {
           content = [{ type: 'text', text: jsonStringify(data) }]
@@ -223,7 +222,7 @@ export async function startMCPServer(
 
         return {
           content,
-          isError: !!(finalResult as any).isError,
+          isError: !!(finalResult as { isError?: unknown }).isError,
         }
       } catch (error) {
         logError(error)

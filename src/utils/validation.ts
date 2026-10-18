@@ -47,7 +47,7 @@ export function assertObject(value: unknown, field: string): asserts value is Re
 /**
  * Assert that a value is a function.
  */
-export function assertFunction(value: unknown, field: string): asserts value is (...args: any[]) => any {
+export function assertFunction(value: unknown, field: string): asserts value is (...args: unknown[]) => unknown {
   if (typeof value !== 'function') {
     throw new TypeError(`missing or invalid '${field}' (expected function)`)
   }

@@ -12,6 +12,7 @@ export type OpenAICompatibilityFailureCategory =
   | 'context_overflow'
   | 'tool_call_incompatible'
   | 'tool_stream_unsupported'
+  | 'stream_options_unsupported'
   | 'malformed_provider_response'
   | 'provider_unavailable'
   | 'unknown'
@@ -25,6 +26,28 @@ export type OpenAICompatibilityFailure = {
   code?: string
   status?: number
   requestUrl?: string
+}
+
+const NON_REPLAYABLE_OPENAI_REQUEST = Symbol.for(
+  'openclaude.openai.nonReplayableRequest',
+)
+
+export function markOpenAIRequestNonReplayable<T extends object>(error: T): T {
+  Object.defineProperty(error, NON_REPLAYABLE_OPENAI_REQUEST, {
+    value: true,
+    configurable: false,
+    enumerable: false,
+    writable: false,
+  })
+  return error
+}
+
+export function isOpenAIRequestNonReplayable(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    Reflect.get(error, NON_REPLAYABLE_OPENAI_REQUEST) === true
+  )
 }
 
 const OPENAI_CATEGORY_MARKER_PREFIX = '[openai_category='
@@ -46,6 +69,7 @@ const OPENAI_COMPATIBILITY_FAILURE_CATEGORIES: ReadonlySet<OpenAICompatibilityFa
     'context_overflow',
     'tool_call_incompatible',
     'tool_stream_unsupported',
+    'stream_options_unsupported',
     'malformed_provider_response',
     'provider_unavailable',
     'unknown',
@@ -227,6 +251,92 @@ function isToolStreamUnsupportedMessage(body: string): boolean {
     /\bparam(?:eter)?\s*[:=]\s*tool_stream\b.*?(?:unsupported|unknown|unrecognized|invalid|not\s+supported)/.test(normalized) ||
     /(?:extra[_\s-]?forbidden|extra inputs are not permitted|additional properties? (?:are )?not allowed|unexpected (?:field|property|parameter)).*?tool_stream\b/.test(normalized) ||
     /tool_stream\b.*?(?:extra[_\s-]?forbidden|extra inputs are not permitted|unexpected (?:field|property|parameter))/.test(normalized)
+  )
+}
+
+function getStructuredStreamOptionsValidationError(
+  body: string,
+): boolean | undefined {
+  try {
+    const parsed = JSON.parse(body) as {
+      detail?: unknown
+      error?: unknown
+    }
+    if (Array.isArray(parsed.detail)) {
+      let referencesRootStreamOptions = false
+      let referencesNestedStreamOptions = false
+      for (const entry of parsed.detail) {
+        if (!entry || typeof entry !== 'object') continue
+        const detail = entry as { loc?: unknown; type?: unknown; msg?: unknown }
+        if (!Array.isArray(detail.loc) || !detail.loc.includes('stream_options')) {
+          continue
+        }
+        const isRootField =
+          (detail.loc.length === 1 && detail.loc[0] === 'stream_options') ||
+          (detail.loc.length === 2 &&
+            detail.loc[0] === 'body' &&
+            detail.loc[1] === 'stream_options')
+        if (!isRootField) {
+          referencesNestedStreamOptions = true
+          continue
+        }
+        referencesRootStreamOptions = true
+        const message = typeof detail.msg === 'string' ? detail.msg : ''
+        if (
+          detail.type === 'extra_forbidden' ||
+          detail.type === 'value_error.extra' ||
+          /(?:unsupported|not supported|unknown|unrecognized|unexpected|not permitted|extra (?:inputs|fields))/i.test(message)
+        ) {
+          return true
+        }
+      }
+      if (referencesNestedStreamOptions) return false
+      if (referencesRootStreamOptions) return undefined
+    }
+
+    if (parsed.error && typeof parsed.error === 'object') {
+      const error = parsed.error as {
+        param?: unknown
+        message?: unknown
+        type?: unknown
+        code?: unknown
+      }
+      const parameter = typeof error.param === 'string'
+        ? error.param.toLowerCase().replace(/['"`]/g, '')
+        : undefined
+      if (parameter === 'stream_options') {
+        const signal = [error.message, error.code]
+          .filter((value): value is string => typeof value === 'string')
+          .join(' ')
+        if (
+          /(?:unsupported|not supported|unknown|unrecognized|unexpected|not permitted|extra[_ -]?forbidden|invalid (?:request )?(?:argument|parameter|field|property))/i.test(signal)
+        ) {
+          return true
+        }
+        return undefined
+      }
+      if (parameter && /^stream_options(?:\.|\[|\/)/.test(parameter)) {
+        return false
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+function isStreamOptionsUnsupportedMessage(body: string): boolean {
+  const structuredValidation = getStructuredStreamOptionsValidationError(body)
+  if (structuredValidation !== undefined) return structuredValidation
+
+  const normalized = body.toLowerCase().replace(/['"`]/g, '')
+  return (
+    /(?:^|[\s:{,(])stream_options\b(?![.\[/])\s+(?:is\s+)?(?:an?\s+)?(?:unsupported|not\s+supported|unknown|unrecognized|not\s+permitted)\b/.test(normalized) ||
+    /(?:unsupported|unknown|unrecognized|invalid)\s+(?:request\s+argument(?:\s+supplied)?|parameter(?:s|\(s\))?|field|property)(?:\s*[:=])?\s*(?:[\[(<]\s*)?stream_options\b(?![.\[/])/.test(normalized) ||
+    /(?:request\s+argument(?:\s+supplied)?|parameter(?:s|\(s\))?|field|property)\s+(?:[\[(<]\s*)?stream_options\b(?![.\[/])(?:\s*[\])>])?\s+(?:is\s+)?(?:unsupported|not\s+supported|unknown|unrecognized|invalid|not\s+permitted)\b/.test(normalized) ||
+    /\bstream_options\b(?![.\[/])\s+(?:is\s+)?(?:an?\s+)?(?:unsupported|not\s+supported|unknown|unrecognized|invalid)\s+(?:request\s+argument|parameter|field|property)\b/.test(normalized) ||
+    /(?:additional properties? (?:are )?not allowed|extra inputs are not permitted|extra fields? (?:are )?not permitted|unexpected (?:field|property|parameter)).{0,80}\bstream_options\b(?![.\[/])/.test(normalized) ||
+    /\bstream_options\b(?![.\[/]).{0,80}(?:additional properties? (?:are )?not allowed|extra inputs are not permitted|extra fields? (?:are )?not permitted|was unexpected)\b/.test(normalized)
   )
 }
 
@@ -538,6 +648,22 @@ export function classifyOpenAIHttpFailure(options: {
       status: options.status,
       message: body,
       hint: 'Prompt context exceeded model/server limits. Reduce context or increase provider context length.',
+    }
+  }
+
+  // Keep this classification narrower than a generic invalid-request match.
+  // The executor uses it to authorize one replay without `stream_options`.
+  if (
+    (options.status === 400 || options.status === 422) &&
+    isStreamOptionsUnsupportedMessage(body)
+  ) {
+    return {
+      source: 'http',
+      category: 'stream_options_unsupported',
+      retryable: false,
+      status: options.status,
+      message: body,
+      hint: 'Provider rejected the `stream_options` parameter; streaming usage is unavailable on this route.',
     }
   }
 

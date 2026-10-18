@@ -5,7 +5,10 @@ import type { QuerySource } from '../../constants/querySource.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
 import { getGlobalConfig } from '../../utils/config.js'
-import { getContextWindowForModel } from '../../utils/context.js'
+import {
+  getContextWindowForModel,
+  getSessionContextWindowOverride,
+} from '../../utils/context.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { hasExactErrorMessage } from '../../utils/errors.js'
@@ -13,7 +16,10 @@ import type { CacheSafeParams } from '../../utils/forkedAgent.js'
 import { logError } from '../../utils/log.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
 import { partitionContext } from '../../utils/contextPartitioning.js'
-import { pruneByRelevance } from '../../utils/relevancePruning.js'
+import {
+  normalizeCompactTailTurns,
+  pruneByRelevance,
+} from '../../utils/relevancePruning.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
 import { getMaxOutputTokensForModel } from '../api/claude.js'
 import { notifyCompaction } from '../api/promptCacheBreakDetection.js'
@@ -32,15 +38,35 @@ import { trySessionMemoryCompaction } from './sessionMemoryCompact.js'
 const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
 
 // Returns the context window size minus the max output tokens for the model
-export function getEffectiveContextWindowSize(model: string): number {
+export function getEffectiveContextWindowSize(
+  model: string,
+  runtimeLimits?: { contextWindow?: number; maxOutputTokens?: number },
+): number {
   const reservedTokensForSummary = Math.min(
-    getMaxOutputTokensForModel(model),
+    runtimeLimits?.maxOutputTokens ?? getMaxOutputTokensForModel(model),
     MAX_OUTPUT_TOKENS_FOR_SUMMARY,
   )
-  let contextWindow = getContextWindowForModel(model, getSdkBetas())
+  let contextWindow = getContextWindowForModel(
+    model,
+    getSdkBetas(),
+    runtimeLimits,
+  )
 
+  // An explicit per-model session setting is more specific than the legacy
+  // auto-compact cap. Otherwise that cap can silently keep a newly configured
+  // large context window stuck at (for example) 100k for compaction decisions.
+  const internalContextWindowOverride =
+    process.env.USER_TYPE === 'ant'
+      ? parseInt(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? '', 10)
+      : NaN
+  const internalOverrideTakesPrecedence =
+    Number.isFinite(internalContextWindowOverride) &&
+    internalContextWindowOverride > 0
+  const hasSessionOverride =
+    getSessionContextWindowOverride(model) !== undefined &&
+    !internalOverrideTakesPrecedence
   const autoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
-  if (autoCompactWindow) {
+  if (autoCompactWindow && !hasSessionOverride) {
     const parsed = parseInt(autoCompactWindow, 10)
     if (!isNaN(parsed) && parsed > 0) {
       contextWindow = Math.min(contextWindow, parsed)
@@ -72,10 +98,10 @@ export type AutoCompactTrackingState = {
   // threaded through query() callers rather than serialized into transcripts.
   nextRetryAtMs?: number
   lastFailureAtMs?: number
-  // When set, bypasses shouldAutoCompact() token threshold and user-disable checks.
-  // Used by memory pressure and message count guards to force compaction
-  // even when token usage is below the normal autocompact threshold.
-  forceReason?: 'memory-pressure' | 'message-count'
+  // When set, bypasses the normal token threshold. Message-count and
+  // provider-overflow recovery also bypass user-disable; process-memory
+  // pressure respects that setting.
+  forceReason?: 'memory-pressure' | 'message-count' | 'context-overflow'
 }
 
 // Threshold buffer: auto-compact fires when token usage reaches this far below
@@ -296,8 +322,9 @@ export async function shouldAutoCompact(
   // pre-snip context, so tokenCountWithEstimation can't see the savings.
   // Subtract the rough-delta that snip already computed.
   snipTokensFreed = 0,
-  // When set, skip user-disable and token-threshold checks but still run
-  // recursion/context-collapse guards. Used by runtime safety signals.
+  // When set, skip the token threshold but still run recursion and
+  // context-collapse guards. Only message-count and provider-overflow also
+  // bypass a user-disabled auto-compact setting.
   forceReason?: AutoCompactTrackingState['forceReason'],
 ): Promise<boolean> {
   // Recursion guards. session_memory and compact are forked agents that
@@ -316,7 +343,15 @@ export async function shouldAutoCompact(
     }
   }
 
-  if (!forceReason && !isAutoCompactEnabled()) {
+  // Process memory pressure is not evidence that this conversation exhausted
+  // its context. Keep cache pruning available, but honor the user's disabled
+  // auto-compact choice rather than unexpectedly summarizing a short
+  // conversation (#1985). Explicit message-count and provider-overflow
+  // recovery remain forced compaction paths.
+  if (
+    !isAutoCompactEnabled() &&
+    (!forceReason || forceReason === 'memory-pressure')
+  ) {
     return false
   }
 
@@ -408,8 +443,8 @@ export async function autoCompactIfNeeded(
   // Force compaction if a pressure/count signal set forceReason.
   // Intentionally consume the caller-owned flag in place so the same tracking
   // object cannot force multiple compaction cycles in one query loop pass.
-  // Forced safety compaction bypasses user-disable gates while preserving
-  // recursion/context-collapse guards.
+  // Message-count and provider-overflow bypass user-disable gates; memory
+  // pressure does not. All forced paths preserve recursion/collapse guards.
   const forcedBy = tracking?.forceReason
   if (tracking?.forceReason) {
     tracking.forceReason = undefined
@@ -479,9 +514,12 @@ export async function autoCompactIfNeeded(
     const systemMessages = messages.filter(m => m.message?.role === 'system')
     const nonSystemMessages = messages.filter(m => m.message?.role !== 'system')
     
+    // Config may be hand-edited; normalizeCompactTailTurns is the single
+    // rule (shared with the /config UI) — a stray `0.5` must not floor to a
+    // zero-message tail, and invalid values fall back to the default.
     const pruned = pruneByRelevance(nonSystemMessages, {
       targetTokens: availableSpace,
-      preserveRecent: 3,
+      preserveRecent: normalizeCompactTailTurns(getGlobalConfig().compactTailTurns),
       preserveTools: true,
       preserveErrors: true,
     })

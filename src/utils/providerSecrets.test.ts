@@ -162,10 +162,14 @@ describe('getKnownProviderSecretEnvKeys', () => {
 })
 
 describe('sanitizeApiKey', () => {
-  test('drops empty and the Portuguese placeholder', () => {
+  test('drops empty and credential placeholders', () => {
     expect(sanitizeApiKey(undefined)).toBeUndefined()
     expect(sanitizeApiKey('')).toBeUndefined()
     expect(sanitizeApiKey('SUA_CHAVE')).toBeUndefined()
+    expect(sanitizeApiKey('sua_chave')).toBeUndefined()
+    expect(sanitizeApiKey('null')).toBeUndefined()
+    expect(sanitizeApiKey('undefined')).toBeUndefined()
+    expect(sanitizeApiKey(' NULL ')).toBeUndefined()
   })
 
   test('returns real keys unchanged', () => {

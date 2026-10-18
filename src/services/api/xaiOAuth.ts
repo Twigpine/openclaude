@@ -287,6 +287,7 @@ export class XaiOAuthService {
    * The loopback callback server stays open until tokens are obtained, the
    * caller submits a manual code, or `cancel()` is invoked. CORS preflight
    * from `auth.x.ai` is echoed so xAI's browser-side fetch can reach us.
+   * Callbacks with missing or mismatched state leave the login pending.
    */
   async beginOAuthFlow(): Promise<XaiOAuthFlowHandle> {
     // Reset cross-flow state so a reused service instance starts clean.
@@ -310,6 +311,7 @@ export class XaiOAuthService {
         port: callbackPort,
         host: callbackHost,
         callbackPath: XAI_OAUTH_CALLBACK_PATH,
+        expectedState: state,
         successTitle: 'xAI OAuth complete',
       })
     } catch (error) {

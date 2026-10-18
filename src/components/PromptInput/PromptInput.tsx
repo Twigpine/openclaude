@@ -52,7 +52,7 @@ import { AGENT_COLOR_TO_THEME_COLOR, AGENT_COLORS, type AgentColorName } from '.
 import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js';
 import type { Message } from '../../types/message.js';
 import type { PermissionMode } from '../../types/permissions.js';
-import type { BaseTextInputProps, PromptInputMode, VimMode } from '../../types/textInputTypes.js';
+import type { BaseTextInputProps, PromptInputMode, TextInputChangeContext, VimMode } from '../../types/textInputTypes.js';
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js';
 import { count } from '../../utils/array.js';
 import type { AutoUpdaterResult } from '../../utils/autoUpdater.js';
@@ -68,7 +68,7 @@ import { getFastModeUnavailableReason, isFastModeAvailable, isFastModeCooldown, 
 import { isFullscreenEnvEnabled } from '../../utils/fullscreen.js';
 import type { PromptInputHelpers } from '../../utils/handlePromptSubmit.js';
 import { extractDraggedFilePaths } from '../../utils/dragDropPaths.js';
-import { getImageFromClipboard, PASTE_THRESHOLD } from '../../utils/imagePaste.js';
+import { CLIPBOARD_IMAGE_PASTE_FAILURE_KEY, formatClipboardImagePasteError, getImageFromClipboard, PASTE_THRESHOLD } from '../../utils/imagePaste.js';
 import type { ImageDimensions } from '../../utils/imageResizer.js';
 import { cacheImagePath, storeImage } from '../../utils/imageStore.js';
 import { isMacosOptionChar, MACOS_OPTION_SPECIAL_CHARS } from '../../utils/keyboardShortcuts.js';
@@ -87,7 +87,7 @@ import { findSlackChannelPositions, getKnownChannelsVersion, hasSlackMcpServer, 
 import { isInProcessEnabled } from '../../utils/swarm/backends/registry.js';
 import { syncTeammateMode } from '../../utils/swarm/teamHelpers.js';
 import type { TeamSummary } from '../../utils/teamDiscovery.js';
-import { getTeammateColor } from '../../utils/teammate.js';
+import { getTeammateColor, getTeamName } from '../../utils/teammate.js';
 import { isInProcessTeammate } from '../../utils/teammateContext.js';
 import { writeToMailbox } from '../../utils/teammateMailbox.js';
 import type { TextHighlight } from '../../utils/textHighlighting.js';
@@ -123,7 +123,7 @@ import { useMaybeTruncateInput } from './useMaybeTruncateInput.js';
 import { usePromptInputPlaceholder } from './usePromptInputPlaceholder.js';
 import { useShowFastIconHint } from './useShowFastIconHint.js';
 import { useSwarmBanner } from './useSwarmBanner.js';
-import { isNonSpacePrintable, isVimModeEnabled } from './utils.js';
+import { canAcceptPromptSuggestion, isVimModeEnabled, normalizePromptInputChunk, resolveCoalescedModeSubmission, resolveHelpToggleChange, resolvePromptBorderColor } from './utils.js';
 type Props = {
   debug: boolean;
   ideSelection: IDESelection | undefined;
@@ -133,6 +133,9 @@ type Props = {
   commands: Command[];
   agents: AgentDefinition[];
   isLoading: boolean;
+  /** True when ultracode is the active effort. Tints the prompt border
+   *  cyan-blue as a persistent ambient indicator of the mode. */
+  ultracodeActive?: boolean;
   verbose: boolean;
   messages: Message[];
   onAutoUpdaterResult: (result: AutoUpdaterResult) => void;
@@ -171,6 +174,7 @@ type Props = {
   }, options?: {
     fromKeybinding?: boolean;
     slashCommandOverride?: Command;
+    inputModeOverride?: PromptInputMode;
   }) => Promise<void>;
   onAgentSubmit?: (input: string, task: InProcessTeammateTaskState | LocalAgentTaskState, helpers: PromptInputHelpers) => Promise<void>;
   isSearchingHistory: boolean;
@@ -194,6 +198,7 @@ type Props = {
 // Bottom slot has maxHeight="50%"; reserve lines for footer, border, status.
 const PROMPT_FOOTER_LINES = 5;
 const MIN_INPUT_VIEWPORT_LINES = 3;
+/** Renders the prompt editor, agent banner, and mode-aware input controls. */
 function PromptInput({
   debug,
   ideSelection,
@@ -203,6 +208,7 @@ function PromptInput({
   commands,
   agents,
   isLoading,
+  ultracodeActive,
   verbose,
   messages,
   onAutoUpdaterResult,
@@ -309,6 +315,7 @@ function PromptInput({
   // WebBrowser pill — visible when a browser is open
   const bagelFooterVisible = useAppState(s => false);
   const teamContext = useAppState(s => s.teamContext);
+  const standaloneAgentContext = useAppState(s => s.standaloneAgentContext);
   const queuedCommands = useCommandQueue();
   const promptSuggestionState = useAppState(s => s.promptSuggestion);
   const speculation = useAppState(s => s.speculation);
@@ -865,10 +872,19 @@ function PromptInput({
     submitCount,
     viewingAgentName
   });
-  const onChange = useCallback((value: string) => {
-    if (value === '?') {
+  const pendingCoalescedModeSubmitRef = React.useRef<ReturnType<typeof detectModeEntry>>(null);
+  const suppressNextCoalescedSubmitRef = React.useRef(false);
+  const onChange = useCallback((value: string, changeContext?: TextInputChangeContext) => {
+    const helpToggleChange = resolveHelpToggleChange(value, changeContext);
+    if (helpToggleChange) {
       logEvent('tengu_help_toggled', {});
       setHelpOpen(v => !v);
+      pendingCoalescedModeSubmitRef.current = null;
+      suppressNextCoalescedSubmitRef.current = helpToggleChange.suppressSubmit;
+      if (helpToggleChange.restore) {
+        trackAndSetInput(helpToggleChange.restore.value);
+        setCursorOffset(helpToggleChange.restore.cursorOffset);
+      }
       return;
     }
     setHelpOpen(false);
@@ -884,19 +900,26 @@ function PromptInput({
     // mode itself is shown via the prompt prefix in the UI. Without this,
     // typing `!` into empty input would enter bash mode but leave the literal
     // `!` in the buffer (issue #662).
+    const modeDetectionValue = changeContext?.previousValue ?? input;
+    const modeDetectionCursorOffset = changeContext?.cursorOffset ?? cursorOffset;
     const modeEntry = detectModeEntry({
       value,
-      prevInputLength: input.length,
-      cursorOffset,
+      prevInputLength: modeDetectionValue.length,
+      cursorOffset: modeDetectionCursorOffset,
     });
     if (modeEntry) {
-      onModeChange(modeEntry.mode);
       const cleaned = modeEntry.strippedValue.replaceAll('\t', '    ');
+      pendingCoalescedModeSubmitRef.current = changeContext?.willSubmit ? {
+        ...modeEntry,
+        strippedValue: cleaned
+      } : null;
+      onModeChange(modeEntry.mode);
       pushToBuffer(input, cursorOffset, pastedContents);
       trackAndSetInput(cleaned);
       setCursorOffset(cleaned.length);
       return;
     }
+    pendingCoalescedModeSubmitRef.current = null;
     const processedValue = value.replaceAll('\t', '    ');
 
     // Push current state to buffer before making changes
@@ -994,6 +1017,15 @@ function PromptInput({
     setSuggestionsStateRaw(prev => typeof updater === 'function' ? updater(prev) : updater);
   }, []);
   const onSubmit = useCallback(async (inputParam: string, isSubmittingSlashCommand = false, slashCommandOverride?: Command) => {
+    if (suppressNextCoalescedSubmitRef.current) {
+      suppressNextCoalescedSubmitRef.current = false;
+      return;
+    }
+    const pendingModeEntry = pendingCoalescedModeSubmitRef.current;
+    pendingCoalescedModeSubmitRef.current = null;
+    const modeSubmission = resolveCoalescedModeSubmission(inputParam, mode, pendingModeEntry);
+    inputParam = modeSubmission.input;
+    const effectiveSubmissionMode = modeSubmission.mode;
     inputParam = inputParam.trimEnd();
 
     // Don't submit if a footer indicator is being opened. Read fresh from
@@ -1022,7 +1054,7 @@ function PromptInput({
     // Only in leader view — promptSuggestion is leader-context, not teammate.
     const suggestionText = promptSuggestionState.text;
     const inputMatchesSuggestion = inputParam.trim() === '' || inputParam === suggestionText;
-    if (inputMatchesSuggestion && suggestionText && !hasImages && !state.viewingAgentTaskId) {
+    if (canAcceptPromptSuggestion(effectiveSubmissionMode) && inputMatchesSuggestion && suggestionText && !hasImages && !state.viewingAgentTaskId) {
       // If speculation is active, inject messages immediately as they stream
       if (speculation.status === 'active') {
         markAccepted();
@@ -1038,7 +1070,9 @@ function PromptInput({
           state: speculation,
           speculationSessionTimeSavedMs: speculationSessionTimeSavedMs,
           setAppState
-        });
+        }, modeSubmission.inputModeOverride ? {
+          inputModeOverride: modeSubmission.inputModeOverride
+        } : undefined);
         return; // Skip normal query - speculation handled it
       }
 
@@ -1083,7 +1117,7 @@ function PromptInput({
     // PromptInput UX: Check if suggestions dropdown is showing
     // For directory suggestions, allow submission (Tab is used for completion)
     const hasDirectorySuggestions = suggestionsState.suggestions.length > 0 && suggestionsState.suggestions.every(s => s.description === 'directory');
-    if (suggestionsState.suggestions.length > 0 && !isSubmittingSlashCommand && !hasDirectorySuggestions) {
+    if (canAcceptPromptSuggestion(effectiveSubmissionMode) && suggestionsState.suggestions.length > 0 && !isSubmittingSlashCommand && !hasDirectorySuggestions) {
       logForDebugging(`[onSubmit] early return: suggestions showing (count=${suggestionsState.suggestions.length})`);
       return; // Don't submit, user needs to clear suggestions first
     }
@@ -1109,14 +1143,16 @@ function PromptInput({
     }
 
     // Normal leader submission
+    const submitOptions = slashCommandOverride || modeSubmission.inputModeOverride ? {
+      slashCommandOverride,
+      inputModeOverride: modeSubmission.inputModeOverride
+    } : undefined;
     await onSubmitProp(inputParam, {
       setCursorOffset,
       clearBuffer,
       resetHistory
-    }, undefined, slashCommandOverride ? {
-      slashCommandOverride
-    } : undefined);
-  }, [promptSuggestionState, speculation, speculationSessionTimeSavedMs, teamContext, store, footerItems, suggestionsState.suggestions, onSubmitProp, onAgentSubmit, clearBuffer, resetHistory, logOutcomeAtSubmission, setAppState, markAccepted, pastedContents, removeNotification]);
+    }, undefined, submitOptions);
+  }, [promptSuggestionState, speculation, speculationSessionTimeSavedMs, teamContext, store, footerItems, suggestionsState.suggestions, onSubmitProp, onAgentSubmit, clearBuffer, resetHistory, logOutcomeAtSubmission, setAppState, markAccepted, pastedContents, removeNotification, mode]);
   const {
     suggestions,
     selectedSuggestion,
@@ -1269,10 +1305,9 @@ function PromptInput({
     }
   }
   const lazySpaceInputFilter = useCallback((input: string, key: Key): string => {
-    if (!pendingSpaceAfterPillRef.current) return input;
+    const prependLazySpace = pendingSpaceAfterPillRef.current;
     pendingSpaceAfterPillRef.current = false;
-    if (isNonSpacePrintable(input, key)) return ' ' + input;
-    return input;
+    return normalizePromptInputChunk(input, key, prependLazySpace);
   }, []);
   // Ref mirrors cursorOffset for use in synchronous loops (e.g. multi-image
   // paste) where React batches state updates and the closure value is stale.
@@ -1705,6 +1740,13 @@ function PromptInput({
           timeoutMs: 1000
         });
       }
+    }).catch(error => {
+      addNotification({
+        key: CLIPBOARD_IMAGE_PASTE_FAILURE_KEY,
+        text: formatClipboardImagePasteError(error),
+        priority: 'immediate',
+        timeoutMs: 5000
+      });
     });
   }, [addNotification, onImagePaste]);
 
@@ -2248,28 +2290,16 @@ function PromptInput({
     inlineGhostText,
     inputFilter: lazySpaceInputFilter
   };
-  const getBorderColor = (): keyof Theme => {
-    const modeColors: Record<string, keyof Theme> = {
-      bash: 'bashBorder'
-    };
-
-    // Mode colors take priority, then teammate color, then default
-    if (modeColors[mode]) {
-      return modeColors[mode];
-    }
-
-    // In-process teammates run headless - don't apply teammate colors to leader UI
-    if (isInProcessTeammate()) {
-      return 'promptBorder';
-    }
-
-    // Check for teammate color from environment
-    const teammateColorName = getTeammateColor();
-    if (teammateColorName && AGENT_COLORS.includes(teammateColorName as AgentColorName)) {
-      return AGENT_COLOR_TO_THEME_COLOR[teammateColorName as AgentColorName];
-    }
-    return 'promptBorder';
-  };
+  /** Resolves the current mode and team/standalone identity for the input border. */
+  const getBorderColor = (): keyof Theme => resolvePromptBorderColor({
+    mode,
+    inProcessTeammate: isInProcessTeammate(),
+    teammateColor: getTeammateColor(),
+    teamContext,
+    teamName: getTeamName(teamContext),
+    standaloneColor: standaloneAgentContext?.color,
+    ultracodeActive,
+  });
   if (isExternalEditorActive) {
     return <Box flexDirection="row" alignItems="center" justifyContent="center" borderColor={getBorderColor()} borderStyle="round" borderLeft={false} borderRight={false} borderBottom width="100%">
         <Text dimColor italic>

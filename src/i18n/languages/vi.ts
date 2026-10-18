@@ -68,6 +68,8 @@ export const vi = {
   'commands.request-size.description':
     'Hiện tải ngữ cảnh ước tính và các thành phần chính',
   'commands.resume.description': 'Tiếp tục cuộc hội thoại trước',
+  'commands.sessions.description':
+    'Liệt kê các cuộc hội thoại đã lưu để tiếp tục hoặc xóa',
   'commands.review.description': 'Đánh giá pull request',
   'commands.rewind.description':
     'Khôi phục mã và/hoặc cuộc hội thoại về điểm trước',

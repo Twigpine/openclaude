@@ -15,20 +15,95 @@ const registerProtocolModule = feature('LODESTONE')
 
 import { getIsInteractive, getLastInteractionTime } from '../bootstrap/state.js'
 import {
+  cleanupBackgroundSessionRetentionInBackground,
+  cleanupBackgroundSessionsInBackground,
   cleanupNpmCacheForAnthropicPackages,
   cleanupOldMessageFilesInBackground,
   cleanupOldVersionsThrottled,
 } from './cleanup.js'
+import { logError } from './log.js'
 import { cleanupOldVersions } from './nativeInstaller/index.js'
 import { autoUpdateMarketplacesAndPluginsInBackground } from './plugins/pluginAutoupdate.js'
 
 // 24 hours in milliseconds
 const RECURRING_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000
+// Terminal facts are a durable handoff from background children. The cleanup
+// coordinator globally throttles this minute trigger and streams only a bounded
+// fact/metadata sample, without rerunning the age-based retention sweep.
+const BACKGROUND_SESSION_RECONCILIATION_INTERVAL_MS = 60 * 1000
 
 // 10 minutes after start.
 const DELAY_VERY_SLOW_OPERATIONS_THAT_HAPPEN_EVERY_SESSION = 10 * 60 * 1000
 
-export function startBackgroundHousekeeping(): void {
+type BackgroundSessionScheduleOptions = {
+  cleanup?: () => Promise<unknown>
+  setInterval?: (
+    callback: () => void,
+    intervalMs: number,
+  ) => { unref(): unknown }
+  _onPassFinishedForTesting?: () => void
+}
+
+type BackgroundHousekeepingOptions = {
+  backgroundSessionReconciliation?: BackgroundSessionScheduleOptions
+  backgroundSessionRetention?: BackgroundSessionScheduleOptions
+  _reconciliationOnlyForTesting?: boolean
+  _backgroundSessionTimersOnlyForTesting?: boolean
+}
+
+function scheduleNonOverlappingBackgroundCleanup(
+  cleanup: () => Promise<unknown>,
+  intervalMs: number,
+  options: BackgroundSessionScheduleOptions,
+): void {
+  const scheduleInterval =
+    options.setInterval ??
+    ((callback, intervalMs) => setInterval(callback, intervalMs))
+  let running = false
+  const interval = scheduleInterval(() => {
+    if (running) return
+    running = true
+    void Promise.resolve()
+      .then(() => cleanup())
+      .catch(error => logError(error as Error))
+      .finally(() => {
+        running = false
+        options._onPassFinishedForTesting?.()
+      })
+  }, intervalMs)
+  interval.unref()
+}
+
+function startBackgroundSessionRetention(
+  options: BackgroundSessionScheduleOptions = {},
+): void {
+  scheduleNonOverlappingBackgroundCleanup(
+    options.cleanup ?? cleanupBackgroundSessionRetentionInBackground,
+    RECURRING_CLEANUP_INTERVAL_MS,
+    options,
+  )
+}
+
+export function startBackgroundSessionReconciliation(
+  options: BackgroundSessionScheduleOptions = {},
+): void {
+  scheduleNonOverlappingBackgroundCleanup(
+    options.cleanup ?? cleanupBackgroundSessionsInBackground,
+    BACKGROUND_SESSION_RECONCILIATION_INTERVAL_MS,
+    options,
+  )
+}
+
+export function startBackgroundHousekeeping(
+  options: BackgroundHousekeepingOptions = {},
+): void {
+  startBackgroundSessionReconciliation(
+    options.backgroundSessionReconciliation,
+  )
+  if (options._reconciliationOnlyForTesting) return
+  startBackgroundSessionRetention(options.backgroundSessionRetention)
+  if (options._backgroundSessionTimersOnlyForTesting) return
+
   void initMagicDocs()
   void initSkillImprovement()
   if (feature('EXTRACT_MEMORIES')) {
@@ -39,7 +114,6 @@ export function startBackgroundHousekeeping(): void {
   if (feature('LODESTONE') && getIsInteractive()) {
     void registerProtocolModule!.ensureDeepLinkProtocolRegistered()
   }
-
   let needsCleanup = true
   async function runVerySlowOps(): Promise<void> {
     // If the user did something in the last minute, don't make them wait for these slow operations to run.

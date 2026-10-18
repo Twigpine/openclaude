@@ -18,8 +18,19 @@ npm --version
 ## 2. Install OpenClaude
 
 ```bash
-npm install -g @gitlawb/openclaude@latest
+npm install -g @twigpine/openclaude@latest
 ```
+
+Upgrading from `@gitlawb/openclaude`? The package moved to the `@twigpine`
+scope and the old one is no longer updated. npm will not install one over the
+other because both provide the `openclaude` command, so remove the old package
+first:
+
+```bash
+npm uninstall -g @gitlawb/openclaude
+npm install -g @twigpine/openclaude@latest
+```
+
 On Arch Linux, you can alternatively install OpenClaude via the community-maintained [AUR package](https://aur.archlinux.org/packages/openclaude):
 
 ```bash
@@ -160,7 +171,7 @@ Check the basics:
 
 **Via npm:**
 ```bash
-npm install -g @gitlawb/openclaude@latest
+npm install -g @twigpine/openclaude@latest
 ```
 
 **Via AUR:**
@@ -173,7 +184,7 @@ paru
 
 **Via npm:**
 ```bash
-npm uninstall -g @gitlawb/openclaude
+npm uninstall -g @twigpine/openclaude
 ```
 
 **Via AUR (Arch Linux):**

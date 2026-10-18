@@ -15,6 +15,10 @@
 export const COMMON_EXTERNALS: string[] = [
   // Native image processing
   'sharp',
+  // Optional Sentry error reporting — dynamically required in utils/sentry.ts
+  // only when SENTRY_DSN is set. Not shipped by default; kept external so
+  // esbuild doesn't try to inline it.
+  '@sentry/node',
   // Cloud provider SDKs
   '@aws-sdk/client-bedrock',
   '@aws-sdk/client-bedrock-runtime',
@@ -52,7 +56,7 @@ export const SDK_ONLY_EXTERNALS: string[] = [
 
 // Optional runtime packages: dynamically imported only when a provider/feature
 // needs them, and NOT listed in package.json `dependencies`, so a default
-// `npm install -g @gitlawb/openclaude` stays small and warning-free.
+// `npm install -g @twigpine/openclaude` stays small and warning-free.
 //
 // Two shapes (see RUNTIME_INDIRECTION_ONLY_EXTERNALS below):
 //   - Most stay external in both bundles (in COMMON_EXTERNALS) so esbuild never
@@ -88,6 +92,9 @@ export const OPTIONAL_RUNTIME_EXTERNALS: string[] = [
   // Optional: only image reads need it, and it carries a native install
   // script. Kept opt-in so default installs run no install scripts.
   'sharp',
+  // Sentry error reporting — loaded via require() in utils/sentry.ts only
+  // when SENTRY_DSN is set. Optional: most users never enable this.
+  '@sentry/node',
 ]
 
 // OPTIONAL_RUNTIME_EXTERNALS that are loaded ONLY through the runtime importer

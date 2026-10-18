@@ -15,14 +15,21 @@ import { jsonParse } from './slowOperations.js'
 import {
   getTodayDateString,
   getYesterdayDateString,
+  comparePersistedDates,
   isDateBefore,
   loadStatsCache,
   mergeCacheWithNewStats,
   type PersistedStatsCache,
   saveStatsCache,
+  parsePersistedDateMs,
   toDateString,
   withStatsCacheLock,
 } from './statsCache.js'
+
+// Re-exported so the persisted-date helpers stay reachable from the stats
+// surface; they live in statsCache.js because the cache writer needs them too
+// and this module already depends on that one.
+export { comparePersistedDates }
 
 export type DailyActivity = {
   date: string // YYYY-MM-DD format
@@ -547,14 +554,25 @@ function cacheToStats(
   }
 
   // Find first/last session dates
+  // Seeded from the persisted cache, which can hold a corrupt firstSessionDate.
+  // An unparseable seed that sorts lexically before real timestamps would never
+  // be displaced by comparePersistedDates, locking in a wrong totalDays. Treat
+  // it as absent so a valid session date takes over.
   let firstSessionDate = cache.firstSessionDate
   let lastSessionDate: string | null = null
   if (todayStats) {
     for (const session of todayStats.sessionStats) {
-      if (!firstSessionDate || session.timestamp < firstSessionDate) {
+      if (
+        !firstSessionDate ||
+        Number.isNaN(parsePersistedDateMs(firstSessionDate)) ||
+        comparePersistedDates(session.timestamp, firstSessionDate) < 0
+      ) {
         firstSessionDate = session.timestamp
       }
-      if (!lastSessionDate || session.timestamp > lastSessionDate) {
+      if (
+        !lastSessionDate ||
+        comparePersistedDates(session.timestamp, lastSessionDate) > 0
+      ) {
         lastSessionDate = session.timestamp
       }
     }
@@ -580,11 +598,7 @@ function cacheToStats(
 
   const totalDays =
     firstSessionDate && lastSessionDate
-      ? Math.ceil(
-          (new Date(lastSessionDate).getTime() -
-            new Date(firstSessionDate).getTime()) /
-            (1000 * 60 * 60 * 24),
-        ) + 1
+      ? inclusiveCalendarDaySpan(firstSessionDate, lastSessionDate)
       : 0
 
   const totalSpeculationTimeSavedMs =
@@ -772,10 +786,16 @@ function processedStatsToClaudeCodeStats(
   let firstSessionDate: string | null = null
   let lastSessionDate: string | null = null
   for (const session of stats.sessionStats) {
-    if (!firstSessionDate || session.timestamp < firstSessionDate) {
+    if (
+      !firstSessionDate ||
+      comparePersistedDates(session.timestamp, firstSessionDate) < 0
+    ) {
       firstSessionDate = session.timestamp
     }
-    if (!lastSessionDate || session.timestamp > lastSessionDate) {
+    if (
+      !lastSessionDate ||
+      comparePersistedDates(session.timestamp, lastSessionDate) > 0
+    ) {
       lastSessionDate = session.timestamp
     }
   }
@@ -803,11 +823,7 @@ function processedStatsToClaudeCodeStats(
   // Total days in range
   const totalDays =
     firstSessionDate && lastSessionDate
-      ? Math.ceil(
-          (new Date(lastSessionDate).getTime() -
-            new Date(firstSessionDate).getTime()) /
-            (1000 * 60 * 60 * 24),
-        ) + 1
+      ? inclusiveCalendarDaySpan(firstSessionDate, lastSessionDate)
       : 0
 
   const result: ClaudeCodeStats = {
@@ -849,6 +865,32 @@ function getNextDay(dateStr: string): string {
   const date = new Date(dateStr)
   date.setDate(date.getDate() + 1)
   return toDateString(date)
+}
+
+/**
+ * Inclusive count of calendar days spanned by two ISO timestamps, on the same
+ * UTC-date basis as activeDays/dailyActivity (via toDateString). The endpoints
+ * are full timestamps, so diffing them raw and Math.ceil-ing rounds any partial
+ * day up to a whole one; adding 1 for inclusivity then double-counts it (a
+ * single active day would report 2). Snap both ends to their date first so the
+ * gap is an exact multiple of 24h before adding the inclusive +1.
+ */
+export function inclusiveCalendarDaySpan(
+  firstIso: string,
+  lastIso: string,
+): number {
+  const firstMs = parsePersistedDateMs(firstIso)
+  const lastMs = parsePersistedDateMs(lastIso)
+  // A persisted cache can carry a corrupt date. Passing that to
+  // `new Date(...).toISOString()` throws RangeError, which would abort the whole
+  // `/stats` render, so bail out to the same 0 the callers already use when an
+  // endpoint is missing.
+  if (Number.isNaN(firstMs) || Number.isNaN(lastMs)) {
+    return 0
+  }
+  const firstDay = new Date(toDateString(new Date(firstMs))).getTime()
+  const lastDay = new Date(toDateString(new Date(lastMs))).getTime()
+  return Math.round((lastDay - firstDay) / (1000 * 60 * 60 * 24)) + 1
 }
 
 function calculateStreaks(dailyActivity: DailyActivity[]): StreakInfo {

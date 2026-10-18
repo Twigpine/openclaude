@@ -213,6 +213,30 @@ describe('generateSessionTitle', () => {
     })
   })
 
+  test('falls back when the title query returns an API error message', async () => {
+    queryHaikuImpl = async () => ({
+      isApiErrorMessage: true,
+      message: {
+        content: [{ type: 'text', text: 'API Error: 400 provider error' }],
+      },
+    })
+
+    const { generateSessionTitle } = await importSubject()
+    const title = await generateSessionTitle(
+      'Name a session with a failed title request',
+      new AbortController().signal,
+    )
+
+    expect(title).toBe('OpenClaude')
+    expect(debugMessages.at(-1)?.message).toContain(
+      'parse_failure=query_error',
+    )
+    expect(analyticsEvents).toContainEqual({
+      name: 'tengu_session_title_generated',
+      metadata: { success: false },
+    })
+  })
+
   test('propagates caller aborts to the internal title signal', async () => {
     queryHaikuImpl = async ({ signal }) => rejectWhenAborted(signal)
 

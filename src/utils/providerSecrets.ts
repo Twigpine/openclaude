@@ -87,7 +87,19 @@ export type SecretValueSource = Partial<Record<string, string | undefined>>
 export function sanitizeApiKey(
   key: string | null | undefined,
 ): string | undefined {
-  if (!key || key === 'SUA_CHAVE') return undefined
+  if (!key) return undefined
+  const trimmed = key.trim()
+  if (!trimmed) return undefined
+  const normalized = trimmed.toLowerCase()
+  // Keep profile/env sanitization aligned with credentialPool placeholders so
+  // template values like SUA_CHAVE / null / undefined never persist as keys.
+  if (
+    normalized === 'sua_chave' ||
+    normalized === 'null' ||
+    normalized === 'undefined'
+  ) {
+    return undefined
+  }
   return key
 }
 
@@ -104,14 +116,19 @@ const SECRET_PREFIX_PATTERNS = [
   /^ghs_/,
   /^ghr_/,
   /^github_pat_/,
+  /^npm_/,
+  /^glpat-/,
+  /^AKIA/,
+  /^ASIA/,
+  /^xox[baprs]-/,
 ]
 
 const SECRET_PREFIX_SUBSTRING_PATTERN =
-  /(?:sk-ant-|sk-|AIza|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9._-]{8,}/g
+  /(?:sk-ant-|sk-|AIza|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|npm_|glpat-|AKIA|ASIA|xox[baprs]-)[A-Za-z0-9._-]{8,}/g
 const JWT_SUBSTRING_PATTERN =
   /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g
 
-function looksLikeSecretValue(value: string): boolean {
+export function looksLikeSecretValue(value: string): boolean {
   const trimmed = value.trim()
   if (!trimmed) return false
 
@@ -123,9 +140,9 @@ function looksLikeSecretValue(value: string): boolean {
 }
 
 // Opaque provider tokens are typically long, mixed-case alphanumeric payloads,
-// sometimes with short prefix segments separated by dashes/underscores.
+// sometimes with short prefix segments separated by dashes/underscores/dots.
 function looksLikeOpaqueToken(value: string): boolean {
-  if (value.length < 24) return false
+  if (value.length < 11) return false
   if (value.includes('://')) return false
   if (value.includes(' ')) return false
   if (value.includes('/')) return false
@@ -140,27 +157,56 @@ function looksLikeOpaqueToken(value: string): boolean {
       (ch >= 'A' && ch <= 'Z') ||
       (ch >= '0' && ch <= '9') ||
       ch === '-' ||
-      ch === '_'
+      ch === '_' ||
+      ch === '.'
     if (!isAllowed) return false
   }
 
-  return value
-    .split(/[-_]+/)
-    .some(segment => segment.length >= 16 && hasLowerUpperDigit(segment))
-}
+  const hasLower = /[a-z]/.test(value)
+  const hasUpper = /[A-Z]/.test(value)
+  const hasDigit = /[0-9]/.test(value)
+  const hasSep = /[-_.]/.test(value)
+  const len = value.length
+  const segments = value.split(/[-_.]+/)
 
-function hasLowerUpperDigit(value: string): boolean {
-  let hasLower = false
-  let hasUpper = false
-  let hasDigit = false
+  // Check for common credential keywords using word boundaries on separator-normalized value
+  const containsSecretKeyword = /\b(?:token|secret|pass|password|passphrase|pwd|key|credential|secure|private)\b|\bauth\b/i.test(value.replace(/[-_.]/g, ' '))
 
-  for (const ch of value) {
-    if (ch >= 'a' && ch <= 'z') hasLower = true
-    else if (ch >= 'A' && ch <= 'Z') hasUpper = true
-    else if (ch >= '0' && ch <= '9') hasDigit = true
+  // 1. If it contains a secret keyword and is of moderate length, it's a secret.
+  //    When the value has separators, require at least one segment to be long
+  //    so that compound model names (e.g. "prefix-sk-or-SECRET-VALUE-123-suffix")
+  //    are not falsely flagged.
+  if (containsSecretKeyword && len >= 12) {
+    if (!hasSep) return true
+    if (segments.some(seg => seg.length >= 12)) return true
   }
 
-  return hasLower && hasUpper && hasDigit
+  // 2. pure hex blobs
+  if (len >= 16 && /^[a-f0-9]+$/i.test(value) && hasDigit) return true
+
+  if (!hasSep) {
+    // Single segment (no hyphens/underscores/dots)
+    // Mixed-case with digit >= 11 (e.g. Tr0ub4dour1)
+    if (hasLower && hasUpper && hasDigit && len >= 11) return true
+    // All-caps + digit >= 11 (e.g. TOKENABC123)
+    if (hasUpper && hasDigit && !hasLower && len >= 11) return true
+    // Lowercase + digit >= 16
+    if (hasLower && hasDigit && !hasUpper && len >= 16) return true
+    // Mixed-case without digit >= 24
+    if (hasLower && hasUpper && !hasDigit && len >= 24) return true
+  } else {
+    // Has separators
+    // Mixed-case with digit: require at least one segment with digit to be >= 12
+    if (hasLower && hasUpper && hasDigit) {
+      if (segments.some(seg => seg.length >= 12 && /[0-9]/.test(seg))) return true
+    }
+    // Lowercase with separator: require at least one segment to be >= 16
+    if (!hasUpper && segments.some(seg => seg.length >= 16)) return true
+    // Mixed-case without digit: require at least one segment to be >= 16
+    if (hasLower && hasUpper && !hasDigit && segments.some(seg => seg.length >= 16)) return true
+  }
+
+  return false
 }
 
 // Redaction sources may be full process env objects, so also collect values
@@ -262,6 +308,64 @@ export function redactSecretSubstringsForDisplay(
     JWT_SUBSTRING_PATTERN,
     match => maskSecretForDisplay(match) ?? 'configured',
   )
+
+  return redacted
+}
+
+const MAX_SECRET_ENCODING_LAYERS = 4
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function encodedVariantPattern(value: string): string {
+  return Array.from(value, char => {
+    const lower = char.toLowerCase()
+    return lower >= 'a' && lower <= 'f'
+      ? `[${lower}${lower.toUpperCase()}]`
+      : escapeRegex(char)
+  }).join('')
+}
+
+function percentEncodeUtf8(value: string): string {
+  return Array.from(
+    new TextEncoder().encode(value),
+    byte => `%${byte.toString(16).padStart(2, '0').toUpperCase()}`,
+  ).join('')
+}
+
+function encodedSecretPattern(value: string): RegExp {
+  const characterPatterns = Array.from(value, char => {
+    const variants = [escapeRegex(char)]
+    let encoded = percentEncodeUtf8(char)
+    for (let layer = 0; layer < MAX_SECRET_ENCODING_LAYERS; layer++) {
+      variants.push(encodedVariantPattern(encoded))
+      encoded = encodeURIComponent(encoded)
+    }
+    return `(?:${variants.join('|')})`
+  })
+  return new RegExp(characterPatterns.join(''), 'g')
+}
+
+/**
+ * Redacts configured secrets when each character is literal or percent-encoded
+ * without decoding unrelated message text. Encoding depth is explicitly
+ * bounded to keep matching predictable on untrusted diagnostics.
+ */
+export function redactEncodedSecretSubstringsForDisplay(
+  value: string | null | undefined,
+  ...sources: Array<SecretValueSource | null | undefined>
+): string | undefined {
+  if (!value) return undefined
+
+  let redacted = value
+  const secretValues = collectSecretValues(sources).sort(
+    (a, b) => b.length - a.length,
+  )
+  for (const secretValue of secretValues) {
+    const mask = maskSecretForDisplay(secretValue) ?? 'configured'
+    redacted = redacted.replace(encodedSecretPattern(secretValue), mask)
+  }
 
   return redacted
 }

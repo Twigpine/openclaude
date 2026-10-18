@@ -234,12 +234,19 @@ function compareProviderPresetEntries(
     return 0
   }
 
-  // Pin Gitlawb Opengateway first so the startup-default provider is also
-  // the first guided setup option when users need to add an API key.
+  // Keep the primary guided providers at the top of setup: Twigpine
+  // Opengateway first, aimlapi.com second, then the native Anthropic option.
   if (leftPreset === 'gitlawb-opengateway') {
     return -1
   }
   if (rightPreset === 'gitlawb-opengateway') {
+    return 1
+  }
+
+  if (leftPreset === 'aimlapi') {
+    return -1
+  }
+  if (rightPreset === 'aimlapi') {
     return 1
   }
 

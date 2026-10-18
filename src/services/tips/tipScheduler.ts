@@ -55,7 +55,7 @@ export async function getTipToShowOnSpinner(
     return undefined
   }
 
-  // Opt-in earning users (`/ads on <code>`) see Gitlawb sponsored tips on a
+  // Opt-in earning users (`/ads on <code>`) see Twigpine sponsored tips on a
   // per-turn cadence, bypassing the per-startup sponsored gate — they opted in
   // to earn, so we surface (and credit) ads frequently rather than once a session.
   if (shouldShowEarningTip()) {

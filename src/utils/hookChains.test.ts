@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,11 +7,14 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 
+import * as policyLimits from '../services/policyLimits/index.js'
+
 type HookChainsModule = typeof import('./hookChains.js')
 
 const tempDirs: string[] = []
 const originalHookChainsEnabled = process.env.CLAUDE_CODE_ENABLE_HOOK_CHAINS
 
+/** Write a hook-chain fixture configuration in a temporary directory owned by the test. */
 async function makeConfigFile(config: unknown): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'openclaude-hook-chains-'))
   tempDirs.push(dir)
@@ -20,6 +23,7 @@ async function makeConfigFile(config: unknown): Promise<string> {
   return filePath
 }
 
+/** Load a fresh hook-chain module with deterministic policy and telemetry behavior. */
 async function importHookChainsModule(options?: {
   allowRemoteSessions?: boolean
 }): Promise<HookChainsModule> {
@@ -35,9 +39,7 @@ async function importHookChainsModule(options?: {
     logOTelEvent: async () => {},
   }))
 
-  mock.module('../services/policyLimits/index.js', () => ({
-    isPolicyAllowed: () => allowRemoteSessions,
-  }))
+  spyOn(policyLimits, 'isPolicyAllowed').mockImplementation(() => allowRemoteSessions)
 
   return import(`./hookChains.js?test=${Date.now()}-${Math.random()}`)
 }

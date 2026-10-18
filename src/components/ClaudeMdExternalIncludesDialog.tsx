@@ -5,6 +5,7 @@ import { logEvent } from 'src/services/analytics/index.js';
 import { Box, Link, Text } from '../ink.js';
 import type { ExternalClaudeMdInclude } from '../utils/claudemd.js';
 import { saveCurrentProjectConfig } from '../utils/config.js';
+import type { ProjectConfig } from '../utils/config.js';
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js';
 import { getDisplayPath } from '../utils/file.js';
 import { Select } from './CustomSelect/index.js';
@@ -15,16 +16,16 @@ type Props = {
   externalIncludes?: ExternalClaudeMdInclude[];
   scope?: 'User' | 'Project';
 };
-function acceptProject(current: any) {
+function acceptProject(current: ProjectConfig) {
   return { ...current, hasClaudeMdExternalIncludesApproved: true, hasClaudeMdExternalIncludesWarningShown: true };
 }
-function acceptUser(current: any) {
+function acceptUser(current: ProjectConfig) {
   return { ...current, hasClaudeMdExternalIncludesApprovedForUser: true, hasClaudeMdExternalIncludesWarningShownForUser: true };
 }
-function declineProject(current: any) {
+function declineProject(current: ProjectConfig) {
   return { ...current, hasClaudeMdExternalIncludesApproved: false, hasClaudeMdExternalIncludesWarningShown: true };
 }
-function declineUser(current: any) {
+function declineUser(current: ProjectConfig) {
   return { ...current, hasClaudeMdExternalIncludesApprovedForUser: false, hasClaudeMdExternalIncludesWarningShownForUser: true };
 }
 function getUserClaudeMdDisplayPath(): string {

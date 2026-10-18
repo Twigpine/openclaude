@@ -24,6 +24,7 @@ import {
   isTeammate,
 } from '../../utils/teammate.js'
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
+import { shouldShowStandaloneAgentBanner } from './utils.js'
 import type { Theme } from '../../utils/theme.js'
 
 type SwarmBannerInfo = {
@@ -34,8 +35,8 @@ type SwarmBannerInfo = {
 /**
  * Hook that returns banner information for swarm, standalone agent, or --agent CLI context.
  * - Leader (not in tmux): Returns "tmux -L ... attach" command with cyan background
- * - Leader (in tmux / in-process): Falls through to standalone-agent check — shows
- *   /rename name + /color background if set, else null
+ * - Leader (in tmux / in-process): Shows the viewed teammate, otherwise suppresses
+ *   saved standalone identity while the team remains active
  * - Teammate: Returns "teammate@team" format with their assigned color background
  * - Viewing a background agent (CoordinatorTaskPanel): Returns agent name with its color
  * - Standalone agent: Returns agent name with their color background (no @team)
@@ -99,7 +100,7 @@ export function useSwarmBanner(): SwarmBannerInfo {
       }
     }
     // insideTmux === null: still loading — fall through.
-    // Not viewing a teammate: fall through so /rename and /color are honored.
+    // Not viewing a teammate: fall through to background-agent and CLI checks.
   }
 
   // Viewing a background agent (CoordinatorTaskPanel): local_agent tasks aren't
@@ -121,10 +122,13 @@ export function useSwarmBanner(): SwarmBannerInfo {
     }
   }
 
-  // Standalone agent (/rename, /color): name and/or custom color, no @team.
+  // Standalone agent (/rename, /color): a usable name outside any active team.
   const standaloneName = getStandaloneAgentName(state)
   const standaloneColor = standaloneAgentContext?.color
-  if (standaloneName || standaloneColor) {
+  if (
+    !getTeamName(teamContext) &&
+    shouldShowStandaloneAgentBanner(standaloneName)
+  ) {
     return {
       text: standaloneName ?? '',
       bgColor: toThemeColor(standaloneColor),
@@ -145,6 +149,7 @@ export function useSwarmBanner(): SwarmBannerInfo {
   return null
 }
 
+/** Maps a recognized agent color to its theme token, otherwise uses the fallback. */
 function toThemeColor(
   colorName: string | undefined,
   fallback: keyof Theme = 'cyan_FOR_SUBAGENTS_ONLY',

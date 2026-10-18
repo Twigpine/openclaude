@@ -33,9 +33,8 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from '../../utils/model/providers.js'
-import { markInternalWrite } from '../../utils/settings/internalWrites.js'
 import { getSettingsFilePathForSource } from '../../utils/settings/settings.js'
-import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
+import { replaceSettingsFileSync } from '../../utils/settings/settingsFileTransaction.js'
 import { sleep } from '../../utils/sleep.js'
 import { getClaudeCodeUserAgent } from '../../utils/userAgent.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
@@ -113,9 +112,24 @@ export async function uploadUserSettingsInBackground(): Promise<void> {
 // Cached so the fire-and-forget at runHeadless entry and the await in
 // installPluginsAndApplyMcpInBackground share one fetch.
 let downloadPromise: Promise<boolean> | null = null
+let downloadedEntriesForTesting: {
+  entries: Record<string, string>
+  projectId: string | null
+} | null = null
 
 /** Test-only: clear the cached download promise between tests. */
 export function _resetDownloadPromiseForTesting(): void {
+  downloadPromise = null
+}
+
+/** Test-only: bypass eligibility and HTTP while retaining public download flow. */
+export function _setDownloadedEntriesForTesting(
+  value: {
+    entries: Record<string, string>
+    projectId: string | null
+  } | null,
+): void {
+  downloadedEntriesForTesting = value
   downloadPromise = null
 }
 
@@ -157,6 +171,12 @@ export function redownloadUserSettings(): Promise<boolean> {
 async function doDownloadUserSettings(
   maxRetries = DEFAULT_MAX_RETRIES,
 ): Promise<boolean> {
+  if (downloadedEntriesForTesting) {
+    return applyDownloadedEntries(
+      downloadedEntriesForTesting.entries,
+      downloadedEntriesForTesting.projectId,
+    )
+  }
   if (feature('DOWNLOAD_USER_SETTINGS')) {
     try {
       if (
@@ -184,13 +204,7 @@ async function doDownloadUserSettings(
 
       const entries = result.data!.content.entries
       const projectId = await getRepoRemoteHash()
-      const entryCount = Object.keys(entries).length
-      logForDiagnosticsNoPII('info', 'settings_sync_download_applying', {
-        entryCount,
-      })
-      await applyRemoteEntriesToLocal(entries, projectId)
-      logEvent('tengu_settings_sync_download_success', { entryCount })
-      return true
+      return applyDownloadedEntries(entries, projectId)
     } catch {
       // Fail-open: log error but don't block CCR startup
       logForDiagnosticsNoPII('error', 'settings_sync_download_error')
@@ -477,6 +491,20 @@ async function writeFileForSync(
   }
 }
 
+function writeSettingsFileForSync(
+  filePath: string,
+  content: string,
+): boolean {
+  try {
+    replaceSettingsFileSync(filePath, content)
+    logForDiagnosticsNoPII('info', 'settings_sync_file_written')
+    return true
+  } catch {
+    logForDiagnosticsNoPII('warn', 'settings_sync_file_write_failed')
+    return false
+  }
+}
+
 /**
  * Apply remote entries to local files (CCR pull pattern).
  * Only writes files that match expected keys.
@@ -488,10 +516,18 @@ async function writeFileForSync(
 async function applyRemoteEntriesToLocal(
   entries: Record<string, string>,
   projectId: string | null,
-): Promise<void> {
+): Promise<{
+  appliedCount: number
+  settingsFilesWritten: number
+  settingsFilesFailed: number
+  settingsFilesRejected: number
+  memoryFilesWritten: number
+}> {
   let appliedCount = 0
-  let settingsWritten = false
-  let memoryWritten = false
+  let settingsFilesWritten = 0
+  let settingsFilesFailed = 0
+  let settingsFilesRejected = 0
+  let memoryFilesWritten = 0
 
   // Helper to check size limit (defense-in-depth, matches backend limit)
   const exceedsSizeLimit = (content: string, _path: string): boolean => {
@@ -514,12 +550,14 @@ async function applyRemoteEntriesToLocal(
       userSettingsPath &&
       !exceedsSizeLimit(userSettingsContent, userSettingsPath)
     ) {
-      // Mark as internal write to prevent spurious change detection
-      markInternalWrite(userSettingsPath)
-      if (await writeFileForSync(userSettingsPath, userSettingsContent)) {
+      if (writeSettingsFileForSync(userSettingsPath, userSettingsContent)) {
         appliedCount++
-        settingsWritten = true
+        settingsFilesWritten++
+      } else {
+        settingsFilesFailed++
       }
+    } else {
+      settingsFilesRejected++
     }
   }
 
@@ -530,7 +568,7 @@ async function applyRemoteEntriesToLocal(
     if (!exceedsSizeLimit(userMemoryContent, userMemoryPath)) {
       if (await writeFileForSync(userMemoryPath, userMemoryContent)) {
         appliedCount++
-        memoryWritten = true
+        memoryFilesWritten++
       }
     }
   }
@@ -545,12 +583,16 @@ async function applyRemoteEntriesToLocal(
         localSettingsPath &&
         !exceedsSizeLimit(projectSettingsContent, localSettingsPath)
       ) {
-        // Mark as internal write to prevent spurious change detection
-        markInternalWrite(localSettingsPath)
-        if (await writeFileForSync(localSettingsPath, projectSettingsContent)) {
+        if (
+          writeSettingsFileForSync(localSettingsPath, projectSettingsContent)
+        ) {
           appliedCount++
-          settingsWritten = true
+          settingsFilesWritten++
+        } else {
+          settingsFilesFailed++
         }
+      } else {
+        settingsFilesRejected++
       }
     }
 
@@ -561,21 +603,68 @@ async function applyRemoteEntriesToLocal(
       if (!exceedsSizeLimit(projectMemoryContent, localMemoryPath)) {
         if (await writeFileForSync(localMemoryPath, projectMemoryContent)) {
           appliedCount++
-          memoryWritten = true
+          memoryFilesWritten++
         }
       }
     }
   }
 
   // Invalidate caches so subsequent reads pick up new content
-  if (settingsWritten) {
-    resetSettingsCache()
-  }
-  if (memoryWritten) {
+  if (memoryFilesWritten > 0) {
     clearMemoryFileCaches()
   }
 
   logForDiagnosticsNoPII('info', 'settings_sync_applied', {
     appliedCount,
+    settingsFilesWritten,
+    settingsFilesFailed,
+    settingsFilesRejected,
+    memoryFilesWritten,
   })
+  return {
+    appliedCount,
+    settingsFilesWritten,
+    settingsFilesFailed,
+    settingsFilesRejected,
+    memoryFilesWritten,
+  }
+}
+
+async function applyDownloadedEntries(
+  entries: Record<string, string>,
+  projectId: string | null,
+): Promise<boolean> {
+  const entryCount = Object.keys(entries).length
+  logForDiagnosticsNoPII('info', 'settings_sync_download_applying', {
+    entryCount,
+  })
+  const result = await applyRemoteEntriesToLocal(entries, projectId)
+  if (result.settingsFilesFailed > 0) {
+    logForDiagnosticsNoPII('warn', 'settings_sync_download_apply_failed', {
+      entryCount,
+      settingsFilesFailed: result.settingsFilesFailed,
+    })
+    logEvent('tengu_settings_sync_download_apply_failed', {
+      entryCount,
+      settingsFilesFailed: result.settingsFilesFailed,
+    })
+    return false
+  }
+
+  logEvent('tengu_settings_sync_download_success', { entryCount })
+  return true
+}
+
+/** @internal Direct apply seam for focused settings-file transaction tests. */
+export function _applyRemoteEntriesToLocalForTesting(
+  entries: Record<string, string>,
+  projectId: string | null,
+): Promise<{
+  appliedCount: number
+  settingsFilesWritten: number
+  settingsFilesFailed: number
+  settingsFilesRejected: number
+  memoryFilesWritten: number
+}> {
+  return applyRemoteEntriesToLocal(entries, projectId)
 }

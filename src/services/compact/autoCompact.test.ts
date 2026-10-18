@@ -23,10 +23,18 @@ const realErrors = await import(
 const realTokens = await import(
   `../../utils/tokens.js?real=${Date.now()}-${Math.random()}`
 )
+const realCompact = await import(
+  `./compact.js?real=${Date.now()}-${Math.random()}`
+)
+const realSessionMemoryCompact = await import(
+  `./sessionMemoryCompact.js?real=${Date.now()}-${Math.random()}`
+)
 
 const USER_ABORT_MESSAGE = 'API Error: Request was aborted.'
+let hasSharedMutationLock = false
 
 type ImportAutoCompactOptions = {
+  autoCompactEnabled?: boolean
   compactConversation?: ReturnType<typeof mock>
   trySessionMemoryCompaction?: ReturnType<typeof mock>
 }
@@ -39,7 +47,9 @@ async function importAutoCompact(options: ImportAutoCompactOptions = {}) {
   mock.module('../../utils/tokens.js', () => ({ ...realTokens }))
   mock.module('../../utils/config.js', () => ({
     ...realConfig,
-    getGlobalConfig: () => ({ autoCompactEnabled: true }),
+    getGlobalConfig: () => ({
+      autoCompactEnabled: options.autoCompactEnabled ?? true,
+    }),
   }))
   if (options.compactConversation) {
     mock.module('./compact.js', () => ({
@@ -105,19 +115,39 @@ function restoreEnv(): void {
 
 beforeEach(async () => {
   await acquireSharedMutationLock('services/compact/autoCompact.test.ts')
-  delete process.env.DISABLE_COMPACT
-  delete process.env.DISABLE_AUTO_COMPACT
-  delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
-  delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
-  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+  hasSharedMutationLock = true
+  try {
+    delete process.env.DISABLE_COMPACT
+    delete process.env.DISABLE_AUTO_COMPACT
+    delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+    delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    delete process.env.USER_TYPE
+  } catch (error) {
+    releaseSharedMutationLock()
+    hasSharedMutationLock = false
+    throw error
+  }
 })
 
-afterEach(() => {
+afterEach(async () => {
+  if (!hasSharedMutationLock) {
+    return
+  }
   try {
     mock.restore()
     restoreEnv()
+    mock.module('../../utils/context.js', () => ({ ...realContext }))
+    mock.module('../../utils/errors.js', () => ({ ...realErrors }))
+    mock.module('../../utils/tokens.js', () => ({ ...realTokens }))
+    mock.module('../../utils/config.js', () => ({ ...realConfig }))
+    mock.module('./compact.js', () => ({ ...realCompact }))
+    mock.module('./sessionMemoryCompact.js', () => ({
+      ...realSessionMemoryCompact,
+    }))
   } finally {
     releaseSharedMutationLock()
+    hasSharedMutationLock = false
   }
 })
 
@@ -239,6 +269,43 @@ describe('getEffectiveContextWindowSize', () => {
       restoreEnv()
     }
   })
+
+  test('uses explicit route runtime limits instead of ambient provider state', async () => {
+    const { getEffectiveContextWindowSize } = await importAutoCompact()
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+    process.env.OPENAI_MODEL = 'gpt-4o'
+
+    expect(getEffectiveContextWindowSize('k3-256k', {
+      contextWindow: 262_144,
+      maxOutputTokens: 32_768,
+    })).toBe(242_144)
+  })
+
+  test('keeps internal context caps above explicit route runtime limits', async () => {
+    const { getEffectiveContextWindowSize } = await importAutoCompact()
+    process.env.USER_TYPE = 'ant'
+    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '100000'
+
+    expect(getEffectiveContextWindowSize('k3-256k', {
+      contextWindow: 262_144,
+      maxOutputTokens: 32_768,
+    })).toBe(80_000)
+  })
+
+  test('keeps session context caps above explicit route runtime limits', async () => {
+    const { getEffectiveContextWindowSize } = await importAutoCompact()
+    realContext.setSessionContextWindowOverride('k3-256k', 150_000)
+
+    try {
+      expect(getEffectiveContextWindowSize('k3-256k', {
+        contextWindow: 262_144,
+        maxOutputTokens: 32_768,
+      })).toBe(130_000)
+    } finally {
+      realContext.clearSessionContextWindowOverride('k3-256k')
+    }
+  })
 })
 
 describe('getAutoCompactThreshold', () => {
@@ -267,6 +334,41 @@ describe('getAutoCompactThreshold', () => {
     // The effective window is floor-raised to 33k in this configuration.
     // Selecting the 30k buffer here would compact after only 3k tokens.
     expect(getAutoCompactThreshold('claude-sonnet-4')).toBe(20_000)
+  })
+
+  test('internal context cap keeps precedence over session override and auto-compact cap', async () => {
+    process.env.USER_TYPE = 'ant'
+    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '200000'
+    process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '100000'
+    realContext.setSessionContextWindowOverride('claude-sonnet-4', 1_000_000)
+    const { getEffectiveContextWindowSize, getAutoCompactThreshold } =
+      await importAutoCompact()
+
+    try {
+      expect(getEffectiveContextWindowSize('claude-sonnet-4')).toBe(80_000)
+      expect(getAutoCompactThreshold('claude-sonnet-4')).toBe(50_000)
+    } finally {
+      realContext.clearSessionContextWindowOverride('claude-sonnet-4')
+      delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+    }
+  })
+
+  test('session context-window override immediately updates auto-compact threshold', async () => {
+    process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '100000'
+    process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '20000'
+    delete process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+    const { getAutoCompactThreshold, getEffectiveContextWindowSize } =
+      await importAutoCompact()
+
+    expect(getAutoCompactThreshold('claude-sonnet-4')).toBe(50_000)
+    realContext.setSessionContextWindowOverride('claude-sonnet-4', 1_000_000)
+
+    try {
+      expect(getEffectiveContextWindowSize('claude-sonnet-4')).toBe(980_000)
+      expect(getAutoCompactThreshold('claude-sonnet-4')).toBe(950_000)
+    } finally {
+      realContext.clearSessionContextWindowOverride('claude-sonnet-4')
+    }
   })
 
   test('keeps compaction and warning thresholds usable across mid-sized windows', async () => {
@@ -651,6 +753,61 @@ describe('autoCompactIfNeeded circuit breaker', () => {
     expect(compactConversation).toHaveBeenCalledTimes(1)
     expect(result.wasCompacted).toBe(true)
     expect(result.consecutiveFailures).toBe(0)
+  })
+
+  test('memory-pressure signals honor disabled auto-compact', async () => {
+    const compactConversation = mock(async () => compactResult())
+    const trySessionMemoryCompaction = mock(async () => null)
+    const { autoCompactIfNeeded } = await importAutoCompact({
+      autoCompactEnabled: false,
+      compactConversation,
+      trySessionMemoryCompaction,
+    })
+
+    const messages = underThresholdMessages()
+    const result = await autoCompactIfNeeded(
+      messages,
+      toolUseContext(),
+      cacheSafeParams(messages),
+      'repl_main_thread',
+      {
+        compacted: false,
+        turnCounter: 0,
+        turnId: 'turn',
+        forceReason: 'memory-pressure',
+      },
+    )
+
+    expect(compactConversation).not.toHaveBeenCalled()
+    expect(result.wasCompacted).toBe(false)
+  })
+
+  test('provider context-overflow recovery bypasses disabled auto-compact', async () => {
+    process.env.DISABLE_COMPACT = '1'
+    process.env.DISABLE_AUTO_COMPACT = '1'
+    const compactConversation = mock(async () => compactResult())
+    const trySessionMemoryCompaction = mock(async () => null)
+    const { autoCompactIfNeeded } = await importAutoCompact({
+      compactConversation,
+      trySessionMemoryCompaction,
+    })
+
+    const messages = underThresholdMessages()
+    const result = await autoCompactIfNeeded(
+      messages,
+      toolUseContext(),
+      cacheSafeParams(messages),
+      'repl_main_thread',
+      {
+        compacted: false,
+        turnCounter: 0,
+        turnId: 'turn',
+        forceReason: 'context-overflow',
+      },
+    )
+
+    expect(compactConversation).toHaveBeenCalledTimes(1)
+    expect(result.wasCompacted).toBe(true)
   })
 
   test('expired cooldown allows a half-open compaction attempt', async () => {

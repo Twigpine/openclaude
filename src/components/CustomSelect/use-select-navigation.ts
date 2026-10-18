@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -525,6 +526,7 @@ const createDefaultState = <T>({
   }
 }
 
+/** Manage visible options and keyboard focus, publishing the committed selection during layout. */
 export function useSelectNavigation<T>({
   visibleOptionCount = 5,
   options,
@@ -542,7 +544,7 @@ export function useSelectNavigation<T>({
     createDefaultState<T>,
   )
 
-  // Store onFocus in a ref to avoid re-running useEffect when callback changes
+  // Store onFocus in a ref to avoid re-running the effect when callback changes
   const onFocusRef = useRef(onFocus)
   onFocusRef.current = onFocus
 
@@ -633,8 +635,9 @@ export function useSelectNavigation<T>({
 
   // Call onFocus with the validated value (what's actually displayed),
   // not the internal state value which may be stale if options changed.
+  // Publish during commit so the next input acts on the displayed selection.
   // Use ref to avoid re-running when callback reference changes.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (validatedFocusedValue !== undefined) {
       onFocusRef.current?.(validatedFocusedValue)
     }

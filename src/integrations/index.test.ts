@@ -88,6 +88,7 @@ describe('loaded registry validation', () => {
   test('gateway defaultModel values are present unless provided outside curated catalog metadata', () => {
     const routesWithExternalDefaultModelSources = new Set([
       'atomic-chat',
+      'concentrate',
       'custom',
       'lmstudio',
       'ollama',
@@ -99,6 +100,7 @@ describe('loaded registry validation', () => {
         const defaultModel = gateway.defaultModel?.trim()
         return !(gateway.catalog?.models ?? []).some(
           entry =>
+            entry.id === defaultModel ||
             entry.apiName === defaultModel ||
             entry.modelDescriptorId === defaultModel,
         )

@@ -167,6 +167,7 @@ export CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS='{"long-context-model":1000000}'
 | Auth Failed | Missing or wrong `master_key` | Set the correct key in `OPENAI_API_KEY` |
 | `/context` shows 128K for a larger model | LiteLLM is not exposing context metadata for the alias, or startup discovery has not refreshed | Add `model_info.context_length` or `model_info.max_input_tokens` to the LiteLLM config, restart the proxy, then restart OpenClaude; use `CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS` as an explicit override if needed |
 | Upstream provider error | The backend provider key is missing or invalid | Ensure the upstream API key (e.g., `OPENAI_API_KEY`) is set in your LiteLLM proxy process environment |
+| `anthropic does not support parameters: ['store']` | The alias points at an Anthropic backend but its name does not look like a Claude model, so OpenClaude still sends the OpenAI-only `store` field | Name the alias after the Claude model (`claude-*`, `anthropic/...`, or a versioned family name such as `sonnet-4-6`); OpenClaude omits `store` for those names. For other alias names, set `drop_params: true` under `litellm_settings` (or per model in `litellm_params`) so LiteLLM drops unsupported fields |
 | Tools fail but chat works | The selected model has weak function/tool calling support | Switch to a model with strong tool support (e.g., GPT-4o, Claude Sonnet) |
 
 ## 6. Resources

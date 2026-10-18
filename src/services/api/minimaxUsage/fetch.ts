@@ -1,3 +1,4 @@
+import { getMiniMaxBaseUrlValidationError } from '../../../integrations/routeMetadata.js'
 import { createCombinedAbortSignal } from '../../../utils/combinedAbortSignal.js'
 import { logForDebugging } from '../../../utils/debug.js'
 import { getClaudeCodeUserAgent } from '../../../utils/userAgent.js'
@@ -82,6 +83,10 @@ export async function fetchMiniMaxUsage(): Promise<MiniMaxUsageData> {
   }
 
   const usageUrls = getMiniMaxUsageUrls()
+  for (const usageUrl of usageUrls) {
+    const validationError = getMiniMaxBaseUrlValidationError(usageUrl)
+    if (validationError) throw new Error(validationError)
+  }
   const nonFatalFailures: Array<{ status: number; body: string }> = []
   let lastFatalError: Error | null = null
 

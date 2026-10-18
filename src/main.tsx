@@ -27,6 +27,8 @@ import pickBy from 'lodash-es/pickBy.js';
 import uniqBy from 'lodash-es/uniqBy.js';
 import React from 'react';
 import { getOauthConfig } from './constants/oauth.js';
+import { parseSshFlags, sshArgvImpliesHeadless } from './utils/sshPreParse.js';
+import { hasPrintFlag } from './utils/printFlag.js';
 import { getRemoteSessionUrl } from './constants/product.js';
 import { getSystemContext, getUserContext } from './context.js';
 import { init, initializeTelemetryAfterTrust } from './entrypoints/init.js';
@@ -36,7 +38,6 @@ import { launchRepl } from './replLauncher.js';
 import { refreshGrowthBookAfterAuthChange } from './services/analytics/growthbook.js';
 import { fetchBootstrapData } from './services/api/bootstrap.js';
 import { refreshStartupDiscoveryForActiveRoute } from './integrations/discoveryService.js';
-import { MAX_AMOUNT_USD_MINOR, MIN_AMOUNT_USD_MINOR } from './integrations/aimlapi/config.js';
 import { prefetchOllamaModels } from './utils/model/ollamaModels.js';
 import { type DownloadResult, downloadSessionFiles, type FilesApiConfig, parseFileSpecs } from './services/api/filesApi.js';
 import { prefetchPassesEligibility } from './services/api/referral.js';
@@ -47,6 +48,8 @@ import { loadRemoteManagedSettings, refreshRemoteManagedSettings } from './servi
 import type { ToolInputJSONSchema } from './Tool.js';
 import { createSyntheticOutputTool, isSyntheticOutputToolEnabled } from './tools/SyntheticOutputTool/SyntheticOutputTool.js';
 import { registerTaskReportCommand } from './cli/commands/taskReport.js';
+import { registerAimlapiCommand } from './cli/aimlapiCommand.js';
+import { BACKGROUND_PROCESS_MARKER_FLAG, isValidBackgroundProcessMarker } from './cli/bgRouting.js';
 import { getTools } from './tools.js';
 import { canUserConfigureAdvisor, getInitialAdvisorSetting, isAdvisorEnabled, isValidAdvisorModel, modelSupportsAdvisor } from './utils/advisor.js';
 import { isAgentSwarmsEnabled } from './utils/agentSwarmsEnabled.js';
@@ -55,6 +58,10 @@ import { getSubscriptionType, isClaudeAISubscriber, prefetchAwsCredentialsAndBed
 import { checkHasTrustDialogAccepted, getGlobalConfig, getRemoteControlAtStartup, isAutoUpdaterDisabled, saveGlobalConfig } from './utils/config.js';
 import { seedEarlyInput, stopCapturingEarlyInput } from './utils/earlyInput.js';
 import { clampUltracodeEffort, getInitialEffortSetting, parseEffortValue } from './utils/effort.js';
+import {
+  MAX_TURNS_CLI_DESCRIPTION,
+  parseMaxTurnsCommanderArgument,
+} from './utils/replMaxTurns.js';
 import { getInitialFastModeSetting, isFastModeEnabled, prefetchFastModeStatus, resolveFastModeStatusFromCache } from './utils/fastMode.js';
 import { applyConfigEnvironmentVariables } from './utils/managedEnv.js';
 import { createSystemMessage, createUserMessage } from './utils/messages.js';
@@ -105,7 +112,7 @@ import { getActiveAgentsFromList, getAgentDefinitionsWithOverrides, isBuiltInAge
 import type { LogOption } from './types/logs.js';
 import type { Message as MessageType } from './types/message.js';
 import { assertMinVersion } from './utils/autoUpdater.js';
-import { setupClaudeInChrome, shouldAutoEnableClaudeInChrome, shouldEnableClaudeInChrome } from './utils/claudeInChrome/setup.js';
+import { setupClaudeInChrome, shouldAutoEnableClaudeInChrome, shouldEnableClaudeInChrome, waitForClaudeInChromeSetup } from './utils/claudeInChrome/setup.js';
 import { mergeClaudeInChromeStartupConfig, resolveClaudeInChromeStartupMode } from './utils/claudeInChrome/startup.js';
 import { getContextWindowForModel } from './utils/context.js';
 import { loadConversationForResume } from './utils/conversationRecovery.js';
@@ -147,6 +154,8 @@ import { registerMcpXaaIdpCommand } from 'src/commands/mcp/xaaIdpCommand.js';
 import { fetchClaudeAIMcpConfigsIfEligible } from 'src/services/mcp/claudeai.js';
 import { clearServerCache } from 'src/services/mcp/client.js';
 import { areMcpConfigsAllowedWithEnterpriseMcpConfig, dedupClaudeAiMcpServers, doesEnterpriseMcpConfigExist, filterMcpServersByPolicy, getClaudeCodeMcpConfigs, getMcpServerSignature, parseMcpConfig, parseMcpConfigFromFilePath } from 'src/services/mcp/config.js';
+import { getHeadlessMcpConfigWarnings } from 'src/services/mcp/headlessErrors.js';
+import type { PluginError } from 'src/types/plugin.js';
 import { excludeCommandsByServer, excludeResourcesByServer } from 'src/services/mcp/utils.js';
 import { isXaaEnabled } from 'src/services/mcp/xaaIdpLogin.js';
 import { getRelevantTips } from 'src/services/tips/tipRegistry.js';
@@ -254,8 +263,7 @@ function isBeingDebugged() {
   // Check if inspector is available and active (indicates debugging)
   try {
     // Dynamic import would be better but is async - use global object instead
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const inspector = (global as any).require('inspector');
+    const inspector = (global as unknown as { require: (s: string) => { url: () => string } }).require('inspector');
     const hasInspectorUrl = !!inspector.url();
     return hasInspectorUrl || hasInspectArg || hasInspectEnv;
   } catch {
@@ -512,12 +520,10 @@ function initializeEntrypoint(isNonInteractive: boolean): void {
 type PendingConnect = {
   url: string | undefined;
   authToken: string | undefined;
-  dangerouslySkipPermissions: boolean;
 };
 const _pendingConnect: PendingConnect | undefined = feature('DIRECT_CONNECT') ? {
   url: undefined,
-  authToken: undefined,
-  dangerouslySkipPermissions: false
+  authToken: undefined
 } : undefined;
 
 // Set by early argv processing when `claude assistant [sessionId]` is detected
@@ -569,7 +575,7 @@ export async function main() {
     // In print mode, print.ts registers its own SIGINT handler that aborts
     // the in-flight query and calls gracefulShutdown; skip here to avoid
     // preempting it with a synchronous process.exit().
-    if (process.argv.includes('-p') || process.argv.includes('--print')) {
+    if (hasPrintFlag(process.argv)) {
       return;
     }
     process.exit(0);
@@ -588,25 +594,21 @@ export async function main() {
         parseConnectUrl
       } = await import('./server/parseConnectUrl.js');
       const parsed = parseConnectUrl(ccUrl);
-      _pendingConnect.dangerouslySkipPermissions = rawCliArgs.includes('--dangerously-skip-permissions');
-      if (rawCliArgs.includes('-p') || rawCliArgs.includes('--print')) {
+      // Only the cc:// URL is stripped here. The --dangerously-skip-permissions
+      // / --yolo flag is deliberately NOT detected or stripped: it flows to the
+      // main command (interactive) or the `open` subcommand (headless), both of
+      // which register it, so commander is the single authority — respecting
+      // option arity and the `--` end-of-options marker. The action then reads
+      // the parsed opts().dangerouslySkipPermissions (see below).
+      const withoutCcUrl = rawCliArgs.filter((_, i) => i !== ccIdx);
+      if (hasPrintFlag(rawCliArgs)) {
         // Headless: rewrite to internal `open` subcommand
-        const stripped = rawCliArgs.filter((_, i) => i !== ccIdx);
-        const dspIdx = stripped.indexOf('--dangerously-skip-permissions');
-        if (dspIdx !== -1) {
-          stripped.splice(dspIdx, 1);
-        }
-        process.argv = [process.argv[0]!, process.argv[1]!, 'open', ccUrl, ...stripped];
+        process.argv = [process.argv[0]!, process.argv[1]!, 'open', ccUrl, ...withoutCcUrl];
       } else {
-        // Interactive: strip cc:// URL and flags, run main command
+        // Interactive: strip cc:// URL, run main command
         _pendingConnect.url = parsed.serverUrl;
         _pendingConnect.authToken = parsed.authToken;
-        const stripped = rawCliArgs.filter((_, i) => i !== ccIdx);
-        const dspIdx = stripped.indexOf('--dangerously-skip-permissions');
-        if (dspIdx !== -1) {
-          stripped.splice(dspIdx, 1);
-        }
-        process.argv = [process.argv[0]!, process.argv[1]!, ...stripped];
+        process.argv = [process.argv[0]!, process.argv[1]!, ...withoutCcUrl];
       }
     }
   }
@@ -681,65 +683,29 @@ export async function main() {
     // given, so `claude ssh --permission-mode auto host` and `claude ssh host
     // --permission-mode auto` are equivalent. The host check below only needs
     // to guard against `-h`/`--help` (which commander should handle).
+    let parsed: ReturnType<typeof parseSshFlags> | undefined;
     if (rawCliArgs[0] === 'ssh') {
-      const localIdx = rawCliArgs.indexOf('--local');
-      if (localIdx !== -1) {
-        _pendingSSH.local = true;
-        rawCliArgs.splice(localIdx, 1);
+      // Flag pre-parse (arity-aware; see parseSshFlags) lives in a pure helper
+      // so the security-sensitive handling is unit-tested.
+      parsed = parseSshFlags(rawCliArgs);
+      _pendingSSH.local = parsed.local;
+      if (parsed.permissionMode !== undefined) {
+        _pendingSSH.permissionMode = parsed.permissionMode;
       }
-      const dspIdx = rawCliArgs.indexOf('--dangerously-skip-permissions');
-      if (dspIdx !== -1) {
-        _pendingSSH.dangerouslySkipPermissions = true;
-        rawCliArgs.splice(dspIdx, 1);
+      _pendingSSH.dangerouslySkipPermissions = parsed.dangerouslySkipPermissions;
+      _pendingSSH.extraCliArgs.push(...parsed.extraCliArgs);
+
+      // Headless (-p) mode is not supported with SSH in v1 — reject early
+      // before host/cwd extraction so print flags before the host are caught.
+      // The check covers both the remaining argv and flags forwarded to the
+      // remote spawn.
+      if (sshArgvImpliesHeadless(parsed, parsed.remaining.slice(1))) {
+        process.stderr.write('Error: headless (-p/--print) mode is not supported with openclaude ssh\n');
+        gracefulShutdownSync(1);
+        return;
       }
-      const pmIdx = rawCliArgs.indexOf('--permission-mode');
-      if (pmIdx !== -1 && rawCliArgs[pmIdx + 1] && !rawCliArgs[pmIdx + 1]!.startsWith('-')) {
-        _pendingSSH.permissionMode = rawCliArgs[pmIdx + 1];
-        rawCliArgs.splice(pmIdx, 2);
-      }
-      const pmEqIdx = rawCliArgs.findIndex(a => a.startsWith('--permission-mode='));
-      if (pmEqIdx !== -1) {
-        _pendingSSH.permissionMode = rawCliArgs[pmEqIdx]!.split('=')[1];
-        rawCliArgs.splice(pmEqIdx, 1);
-      }
-      // Forward session-resume + model flags to the remote CLI's initial spawn.
-      // --continue/-c and --resume <uuid> operate on the REMOTE session history
-      // (which persists under the remote's ~/.claude/projects/<cwd>/).
-      // --model controls which model the remote uses.
-      const extractFlag = (flag: string, opts: {
-        hasValue?: boolean;
-        as?: string;
-      } = {}) => {
-        const i = rawCliArgs.indexOf(flag);
-        if (i !== -1) {
-          _pendingSSH.extraCliArgs.push(opts.as ?? flag);
-          const val = rawCliArgs[i + 1];
-          if (opts.hasValue && val && !val.startsWith('-')) {
-            _pendingSSH.extraCliArgs.push(val);
-            rawCliArgs.splice(i, 2);
-          } else {
-            rawCliArgs.splice(i, 1);
-          }
-        }
-        const eqI = rawCliArgs.findIndex(a => a.startsWith(`${flag}=`));
-        if (eqI !== -1) {
-          _pendingSSH.extraCliArgs.push(opts.as ?? flag, rawCliArgs[eqI]!.slice(flag.length + 1));
-          rawCliArgs.splice(eqI, 1);
-        }
-      };
-      extractFlag('-c', {
-        as: '--continue'
-      });
-      extractFlag('--continue');
-      extractFlag('--resume', {
-        hasValue: true
-      });
-      extractFlag('--model', {
-        hasValue: true
-      });
-      extractFlag('--fallback-model', {
-        hasValue: true
-      });
+
+      rawCliArgs.splice(0, rawCliArgs.length, ...parsed.remaining);
     }
     // After pre-extraction, any remaining dash-arg at [1] is either -h/--help
     // (commander handles) or an unknown-to-ssh flag (fall through to commander
@@ -753,14 +719,6 @@ export async function main() {
         consumed = 3;
       }
       const rest = rawCliArgs.slice(consumed);
-
-      // Headless (-p) mode is not supported with SSH in v1 — reject early
-      // so the flag doesn't silently cause local execution.
-      if (rest.includes('-p') || rest.includes('--print')) {
-        process.stderr.write('Error: headless (-p/--print) mode is not supported with openclaude ssh\n');
-        gracefulShutdownSync(1);
-        return;
-      }
 
       // Rewrite argv so the main command sees remaining flags but not `ssh`.
       process.argv = [process.argv[0]!, process.argv[1]!, ...rest];
@@ -945,7 +903,9 @@ async function run(): Promise<CommanderCommand> {
     } catch (error) {
       throw new InvalidArgumentError(errorMessage(error));
     }
-  })).option('--bare', 'Minimal mode: skip hooks, LSP, plugin sync, attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery. Sets CLAUDE_CODE_SIMPLE=1. Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper via --settings (OAuth and keychain are never read). 3P providers (Bedrock/Vertex/Foundry) use their own credentials. Skills still resolve via /skill-name. Explicitly provide context via: --system-prompt[-file], --append-system-prompt[-file], --add-dir (CLAUDE.md dirs), --mcp-config, --settings, --agents, --plugin-dir.', () => true).addOption(new Option('--init', 'Run Setup hooks with init trigger, then continue').hideHelp()).addOption(new Option('--init-only', 'Run Setup and SessionStart:startup hooks, then exit').hideHelp()).addOption(new Option('--maintenance', 'Run Setup hooks with maintenance trigger, then continue').hideHelp()).addOption(new Option('--output-format <format>', 'Output format (only works with --print): "text" (default), "json" (single result), or "stream-json" (realtime streaming)').choices(['text', 'json', 'stream-json'])).addOption(new Option('--json-schema <schema>', 'JSON Schema for structured output validation. ' + 'Example: {"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}').argParser(String)).option('--include-hook-events', 'Include all hook lifecycle events in the output stream (only works with --output-format=stream-json)', () => true).option('--include-partial-messages', 'Include partial message chunks as they arrive (only works with --print and --output-format=stream-json)', () => true).addOption(new Option('--input-format <format>', 'Input format (only works with --print): "text" (default), or "stream-json" (realtime streaming input)').choices(['text', 'stream-json'])).option('--mcp-debug', '[DEPRECATED. Use --debug instead] Enable MCP debug mode (shows MCP server errors)', () => true).option('--dangerously-skip-permissions', 'Bypass all permission checks. Recommended only for sandboxes with no internet access.', () => true).option('--allow-dangerously-skip-permissions', 'Enable bypassing all permission checks as an option, without it being enabled by default. Recommended only for sandboxes with no internet access.', () => true).addOption(new Option('--thinking <mode>', 'Thinking mode: enabled (equivalent to adaptive), disabled').choices(['enabled', 'adaptive', 'disabled']).hideHelp()).addOption(new Option('--max-thinking-tokens <tokens>', '[DEPRECATED. Use --thinking instead for newer models] Maximum number of thinking tokens (only works with --print)').argParser(Number).hideHelp()).addOption(new Option('--max-turns <turns>', 'Maximum number of agentic turns in non-interactive mode. This will early exit the conversation after the specified number of turns. (only works with --print)').argParser(Number).hideHelp()).addOption(new Option('--max-budget-usd <amount>', 'Maximum dollar amount to spend on API calls (only works with --print)').argParser(value => {
+  })).option('--bare', 'Minimal mode: skip hooks, LSP, plugin sync, attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery. Sets CLAUDE_CODE_SIMPLE=1. Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper via --settings (OAuth and keychain are never read). 3P providers (Bedrock/Vertex/Foundry) use their own credentials. Skills still resolve via /skill-name. Explicitly provide context via: --system-prompt[-file], --append-system-prompt[-file], --add-dir (CLAUDE.md dirs), --mcp-config, --settings, --agents, --plugin-dir.', () => true).addOption(new Option('--init', 'Run Setup hooks with init trigger, then continue').hideHelp()).addOption(new Option('--init-only', 'Run Setup and SessionStart:startup hooks, then exit').hideHelp()).addOption(new Option('--maintenance', 'Run Setup hooks with maintenance trigger, then continue').hideHelp()).addOption(new Option('--output-format <format>', 'Output format (only works with --print): "text" (default), "json" (single result), or "stream-json" (realtime streaming)').choices(['text', 'json', 'stream-json'])).addOption(new Option('--json-schema <schema>', 'JSON Schema for structured output validation. ' + 'Example: {"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}').argParser(String)).option('--include-hook-events', 'Include all hook lifecycle events in the output stream (only works with --output-format=stream-json)', () => true).option('--include-partial-messages', 'Include partial message chunks as they arrive (only works with --print and --output-format=stream-json)', () => true).addOption(new Option('--input-format <format>', 'Input format (only works with --print): "text" (default), or "stream-json" (realtime streaming input)').choices(['text', 'stream-json'])).option('--mcp-debug', '[DEPRECATED. Use --debug instead] Enable MCP debug mode (shows MCP server errors)', () => true).option('--yolo, --dangerously-skip-permissions', 'Bypass all permission checks (alias: --yolo). Recommended only for sandboxes with no internet access.', () => true).option('--allow-dangerously-skip-permissions', 'Enable bypassing all permission checks as an option, without it being enabled by default. Recommended only for sandboxes with no internet access.', () => true).addOption(new Option('--thinking <mode>', 'Thinking mode: enabled (equivalent to adaptive), disabled').choices(['enabled', 'adaptive', 'disabled']).hideHelp()).addOption(new Option('--max-thinking-tokens <tokens>', '[DEPRECATED. Use --thinking instead for newer models] Maximum number of thinking tokens (only works with --print)').argParser(Number).hideHelp()).addOption(new Option('--max-turns <turns>', MAX_TURNS_CLI_DESCRIPTION).argParser(value => {
+    return parseMaxTurnsCommanderArgument(value);
+  })).addOption(new Option('--max-budget-usd <amount>', 'Maximum dollar amount to spend on API calls (only works with --print)').argParser(value => {
     const amount = Number(value);
     if (isNaN(amount) || amount <= 0) {
       throw new Error('--max-budget-usd must be a positive number greater than 0');
@@ -1778,7 +1738,8 @@ async function run(): Promise<CommanderCommand> {
     // only explicit --mcp-config works. dynamicMcpConfig is spread onto
     // allMcpConfigs downstream so it survives this skip.
     const mcpConfigPromise = (strictMcpConfig || isBareMode() ? Promise.resolve({
-      servers: {} as Record<string, ScopedMcpServerConfig>
+      servers: {} as Record<string, ScopedMcpServerConfig>,
+      errors: [] as PluginError[]
     }) : getClaudeCodeMcpConfigs(dynamicMcpConfig)).then(result => {
       mcpConfigResolvedMs = Date.now() - mcpConfigStart;
       return result;
@@ -2334,8 +2295,16 @@ async function run(): Promise<CommanderCommand> {
     }
 
     const {
-      servers: existingMcpConfigs
+      servers: existingMcpConfigs,
+      errors: mcpConfigErrors = []
     } = await mcpConfigPromise;
+    // Headless (-p) has no MCP-error UI, so a fatal managed-mcp.json fail-closes
+    // every file-based source with no diagnostic — indistinguishable from an
+    // intentionally empty config. Surface those errors on stderr so scripted
+    // users see why nothing loaded. Interactive surfaces them via the MCP UI.
+    for (const line of getHeadlessMcpConfigWarnings(isNonInteractiveSession, mcpConfigErrors)) {
+      process.stderr.write(`${line}\n`);
+    }
     // CLI flag (--mcp-config) should override file-based configs, matching settings precedence
     const allMcpConfigs = {
       ...existingMcpConfigs,
@@ -2530,6 +2499,7 @@ async function run(): Promise<CommanderCommand> {
       await processSessionStartHooks('startup', {
         forceSyncExecution: true
       });
+      await waitForClaudeInChromeSetup();
       gracefulShutdownSync(0);
       return;
     }
@@ -3049,6 +3019,8 @@ async function run(): Promise<CommanderCommand> {
       systemPrompt,
       appendSystemPrompt,
       thinkingConfig,
+      // Interactive REPL default is 50 via resolveReplMaxTurns; CLI wins over env.
+      maxTurns: options.maxTurns,
     };
 
     // Shared context for processResumedConversation calls
@@ -3123,7 +3095,8 @@ async function run(): Promise<CommanderCommand> {
           serverUrl: _pendingConnect.url,
           authToken: _pendingConnect.authToken,
           cwd: getOriginalCwd(),
-          dangerouslySkipPermissions: _pendingConnect.dangerouslySkipPermissions
+          // Commander-authoritative: the flag flowed to the main command parse.
+          dangerouslySkipPermissions
         });
         if (session.workDir) {
           setOriginalCwd(session.workDir);
@@ -3149,7 +3122,8 @@ async function run(): Promise<CommanderCommand> {
         mainThreadAgentDefinition,
         disableSlashCommands,
         directConnectConfig,
-        thinkingConfig
+        thinkingConfig,
+        maxTurns: options.maxTurns,
       }, renderAndRun);
       return;
     } else if (feature('SSH_REMOTE') && _pendingSSH?.host) {
@@ -3215,7 +3189,8 @@ async function run(): Promise<CommanderCommand> {
         mainThreadAgentDefinition,
         disableSlashCommands,
         sshSession,
-        thinkingConfig
+        thinkingConfig,
+        maxTurns: options.maxTurns,
       }, renderAndRun);
       return;
     } else if (feature('KAIROS') && _pendingAssistantChat && (_pendingAssistantChat.sessionId || _pendingAssistantChat.discover)) {
@@ -3311,7 +3286,8 @@ async function run(): Promise<CommanderCommand> {
         mainThreadAgentDefinition,
         disableSlashCommands,
         remoteSessionConfig,
-        thinkingConfig
+        thinkingConfig,
+        maxTurns: options.maxTurns,
       }, renderAndRun);
       return;
     } else if (options.resume || options.fromPr || teleport || remote !== null) {
@@ -3460,7 +3436,8 @@ async function run(): Promise<CommanderCommand> {
           mainThreadAgentDefinition,
           disableSlashCommands,
           remoteSessionConfig,
-          thinkingConfig
+          thinkingConfig,
+          maxTurns: options.maxTurns,
         }, renderAndRun);
         return;
       } else if (teleport) {
@@ -3679,6 +3656,13 @@ async function run(): Promise<CommanderCommand> {
     }
   }).version(`${MACRO.DISPLAY_VERSION ?? MACRO.VERSION} (OpenClaude)`, '-v, --version', 'Output the version number');
 
+  program.addOption(new Option(`${BACKGROUND_PROCESS_MARKER_FLAG} <marker>`, 'Internal background process identity marker').argParser(value => {
+    if (!isValidBackgroundProcessMarker(value)) {
+      throw new InvalidArgumentError('Invalid background process marker');
+    }
+    return value;
+  }).hideHelp());
+
   // Worktree flags
   program.option('-w, --worktree [name]', 'Create a new git worktree for this session (optionally specify a name)');
   program.option('--tmux', 'Create a tmux session for the worktree (requires --worktree). Uses iTerm2 native panes when available; use --tmux=classic for traditional tmux.');
@@ -3739,7 +3723,7 @@ async function run(): Promise<CommanderCommand> {
   // + 40ms sync keychain subprocess), both hidden by the try/catch that
   // always returns false before enableConfigs(). cc:// URLs are rewritten to
   // `open` at main() line ~851 BEFORE this runs, so argv check is safe here.
-  const isPrintMode = process.argv.includes('-p') || process.argv.includes('--print');
+  const isPrintMode = hasPrintFlag(process.argv);
   const isCcUrl = process.argv.some(a => a.startsWith('cc://') || a.startsWith('cc+unix://'));
   if (isPrintMode && !isCcUrl) {
     profileCheckpoint('run_before_parse');
@@ -3903,7 +3887,7 @@ async function run(): Promise<CommanderCommand> {
   // this action it means the argv rewrite didn't fire (e.g. user ran
   // `claude ssh` with no host) — just print usage.
   if (feature('SSH_REMOTE')) {
-    program.command('ssh <host> [dir]').description('Run OpenClaude on a remote host over SSH. Deploys the binary and ' + 'tunnels API auth back through your local machine — no remote setup needed.').option('--permission-mode <mode>', 'Permission mode for the remote session').option('--dangerously-skip-permissions', 'Skip all permission prompts on the remote (dangerous)').option('--local', 'e2e test mode — spawn the child CLI locally (skip ssh/deploy). ' + 'Exercises the auth proxy and unix-socket plumbing without a remote host.').action(async () => {
+    program.command('ssh <host> [dir]').description('Run OpenClaude on a remote host over SSH. Deploys the binary and ' + 'tunnels API auth back through your local machine — no remote setup needed.').option('--permission-mode <mode>', 'Permission mode for the remote session').option('--yolo, --dangerously-skip-permissions', 'Skip all permission prompts on the remote (alias: --yolo; dangerous)').option('--local', 'e2e test mode — spawn the child CLI locally (skip ssh/deploy). ' + 'Exercises the auth proxy and unix-socket plumbing without a remote host.').action(async () => {
       // Argv rewriting in main() should have consumed `ssh <host>` before
       // commander runs. Reaching here means host was missing or the
       // rewrite predicate didn't match.
@@ -3916,9 +3900,10 @@ async function run(): Promise<CommanderCommand> {
   // Interactive mode (without -p) is handled by early argv rewriting in main()
   // which redirects to the main command with full TUI support.
   if (feature('DIRECT_CONNECT')) {
-    program.command('open <cc-url>').description('Connect to an OpenClaude server (internal — use cc:// URLs)').option('-p, --print [prompt]', 'Print mode (headless)').option('--output-format <format>', 'Output format: text, json, stream-json', 'text').action(async (ccUrl: string, opts: {
+    program.command('open <cc-url>').description('Connect to an OpenClaude server (internal — use cc:// URLs)').option('-p, --print [prompt]', 'Print mode (headless)').option('--output-format <format>', 'Output format: text, json, stream-json', 'text').option('--yolo, --dangerously-skip-permissions', 'Bypass all permission checks (alias: --yolo)', () => true).action(async (ccUrl: string, opts: {
       print?: string | boolean;
       outputFormat: string;
+      dangerouslySkipPermissions?: boolean;
     }) => {
       const {
         parseConnectUrl
@@ -3933,7 +3918,7 @@ async function run(): Promise<CommanderCommand> {
           serverUrl,
           authToken,
           cwd: getOriginalCwd(),
-          dangerouslySkipPermissions: _pendingConnect?.dangerouslySkipPermissions
+          dangerouslySkipPermissions: opts.dangerouslySkipPermissions ?? false
         });
         if (session.workDir) {
           setOriginalCwd(session.workDir);
@@ -4013,35 +3998,9 @@ async function run(): Promise<CommanderCommand> {
     await xaiStatus();
   });
 
-  // AI/ML API (aimlapi.com) — log in, open the co-branded top-up page, and
-  // auto-configure the provider with the issued key.
-  const aimlapi = program.command('aimlapi').description('AI/ML API (aimlapi.com) — top up balance and configure the provider').configureHelp(createSortedHelpConfig());
-  aimlapi.command('topup')
-    .description("Log in, open AI/ML API top-up, then set the issued key as OpenClaude's provider")
-    .option('--email <email>', 'AI/ML API account email (or AIMLAPI_EMAIL env)')
-    .option('--amount <usd>', `Top-up amount in USD (min ${MIN_AMOUNT_USD_MINOR / 100}, max ${MAX_AMOUNT_USD_MINOR / 100})`)
-    .addOption(new Option('--method <method>', 'Payment method: card (Stripe) or crypto (NOWPayments)').choices(['card', 'crypto']).default('card'))
-    .option('--model <model>', 'Default model id written into the provider profile', 'gpt-4o')
-    .option('--partner-id <id>', 'Partner id for rebate attribution (part_...)')
-    .option('--no-open', 'Do not auto-open the browser; print the payment URL instead')
-    .action(async (opts: {
-      email?: string;
-      amount?: string;
-      method?: string;
-      model?: string;
-      partnerId?: string;
-      open?: boolean;
-    }) => {
-      const { aimlapiTopup } = await import('./cli/handlers/aimlapi.js');
-      await aimlapiTopup({
-        email: opts.email,
-        amountUsd: opts.amount,
-        method: opts.method === 'crypto' ? 'crypto' : 'card',
-        model: opts.model,
-        partnerId: opts.partnerId,
-        noOpen: opts.open === false,
-      });
-    });
+  // AI/ML API (aimlapi.com) — passwordless sign-in, open the co-branded top-up
+  // page, and auto-configure the provider with the issued key.
+  registerAimlapiCommand(program).configureHelp(createSortedHelpConfig());
 
   /**
    * Helper function to handle marketplace command errors consistently.
@@ -4220,6 +4179,13 @@ async function run(): Promise<CommanderCommand> {
     global?: boolean;
   }) => {
     await runSkillsCommanderAction(({ skillsRemoveHandler }) => skillsRemoveHandler(name, options));
+  });
+  skillsCmd.command('verify').description('Check installed skills against the registry revocation list and, when eyebrow is installed, the lockfile').option('--registry <urlOrPath>', 'Registry JSON URL/path whose revocations.json to read').option('--lockfile <path>', 'eyebrow lockfile path (default: eyebrowlock.json)').option('--policy <path>', 'eyebrow policy file; adds --ci to the eyebrow run').action(async (options: {
+    registry?: string;
+    lockfile?: string;
+    policy?: string;
+  }) => {
+    await runSkillsCommanderAction(({ skillsVerifyHandler }) => skillsVerifyHandler(options));
   });
   if (feature('TRANSCRIPT_CLASSIFIER')) {
     // Skip when tengu_auto_mode_config.enabled === 'disabled' (circuit breaker).

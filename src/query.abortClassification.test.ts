@@ -11,6 +11,16 @@ import {
   INTERRUPT_MESSAGE,
 } from './utils/messages.js'
 import { asSystemPrompt } from './utils/systemPromptType.js'
+import {
+  __getInterruptionTraceSnapshotForTests,
+  __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
+  requestAbort,
+} from './utils/interruptionTrace.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from './test/sharedMutationLock.js'
 
 const DEFAULT_ABORT = Symbol('default abort')
 
@@ -55,11 +65,10 @@ function makeToolUseContext(tools: Tools = []): QueryParams['toolUseContext'] {
 }
 
 function abort(controller: AbortController, reason: AbortInput): void {
-  if (reason === DEFAULT_ABORT) {
-    controller.abort()
-    return
-  }
-  controller.abort(reason)
+  requestAbort(controller, reason === DEFAULT_ABORT ? undefined : reason, {
+    source: 'query_abort_test',
+    controllerRole: 'query-root',
+  })
 }
 
 function makeBaseParams(
@@ -170,6 +179,33 @@ function interruptionMessages(yielded: any[]) {
 }
 
 describe('query abort classification', () => {
+  test.serial('links abort classification to the winning root abort', async () => {
+    await acquireSharedMutationLock('query abort classification trace')
+    const originalTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
+    process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
+    __resetInterruptionTraceForTests()
+    try {
+      await drainWithReturn(makeParams('query-timeout'))
+
+      const trace = __getInterruptionTraceSnapshotForTests()
+      const rootAbort = trace.find(entry => entry.event === 'abort.requested')
+      const classified = trace.find(
+        entry => entry.event === 'query.abort_classified',
+      )
+      expect(rootAbort).toBeDefined()
+      expect(classified).toBeDefined()
+      expect(typeof rootAbort!.eventId).toBe('string')
+      expect(typeof classified!.causalEventId).toBe('string')
+      expect(classified!.causalEventId).toBe(rootAbort!.eventId)
+    } finally {
+      await __waitForInterruptionTraceFlushForTests()
+      __resetInterruptionTraceForTests()
+      if (originalTrace === undefined) delete process.env.OPENCLAUDE_INTERRUPT_TRACE
+      else process.env.OPENCLAUDE_INTERRUPT_TRACE = originalTrace
+      releaseSharedMutationLock()
+    }
+  })
+
   test('query timeout aborts produce timeout transcript text without user interruption', async () => {
     const { yielded, returned } = await drainWithReturn(
       makeParams('query-timeout'),

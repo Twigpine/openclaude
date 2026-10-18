@@ -16,14 +16,18 @@ import {
   applyStartupEnvFromProfile,
   buildStartupEnvFromProfile,
   buildAtomicChatProfileEnv,
+  buildApismartProfileEnv,
   buildCompatibilityProcessEnv,
+  buildConcentrateProfileEnv,
   buildCodexProfileEnv,
   buildGeminiProfileEnv,
+  buildGmiCloudProfileEnv,
   buildLaunchEnv,
   buildOllamaProfileEnv,
   buildOpenAIProfileEnv,
   clearPersistedCodexOAuthProfile,
   createProfileFile,
+  DEFAULT_STARTUP_PROVIDER_ENV_VAR,
   deleteProfileFile,
   getDefaultProfileFilePath,
   isDefaultStartupProviderEnv,
@@ -84,6 +88,7 @@ test('matching persisted ollama env is reused for ollama launch', async () => {
 
   assert.equal(env.OPENAI_BASE_URL, 'http://127.0.0.1:11435/v1')
   assert.equal(env.OPENAI_MODEL, 'mistral:7b-instruct')
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'ollama')
 })
 
 test('ollama launch ignores mismatched persisted openai env and shell model fallback', async () => {
@@ -108,6 +113,7 @@ test('ollama launch ignores mismatched persisted openai env and shell model fall
 
   assert.equal(env.OPENAI_BASE_URL, 'http://localhost:11434/v1')
   assert.equal(env.OPENAI_MODEL, 'qwen2.5-coder:7b')
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'ollama')
   assert.equal(env.OPENAI_API_KEY, undefined)
   assert.equal(env.CODEX_API_KEY, undefined)
   assert.equal(env.CHATGPT_ACCOUNT_ID, undefined)
@@ -256,6 +262,269 @@ test('openai launch preserves persisted dedicated vendor credentials across rest
   assert.equal(env.ATLAS_CLOUD_API_KEY, 'atlas-secret-key')
 })
 
+test('openai launch preserves a persisted GMI Cloud key and prefers a live one', async () => {
+  const persisted = profile('openai', {
+    OPENAI_BASE_URL: 'https://api.gmi-serving.com/v1',
+    OPENAI_MODEL: 'deepseek-ai/DeepSeek-V4-Pro',
+    OPENAI_API_KEY: 'gmi-old-key',
+    GMI_API_KEY: 'gmi-old-key',
+  })
+
+  const restarted = await buildLaunchEnv({
+    profile: 'openai',
+    persisted,
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(restarted.OPENAI_BASE_URL, 'https://api.gmi-serving.com/v1')
+  assert.equal(restarted.OPENAI_MODEL, 'deepseek-ai/DeepSeek-V4-Pro')
+  assert.equal(restarted.GMI_API_KEY, 'gmi-old-key')
+
+  const rotated = await buildLaunchEnv({
+    profile: 'openai',
+    persisted,
+    goal: 'coding',
+    processEnv: {
+      GMI_API_KEY: 'gmi-rotated-key',
+    },
+  })
+
+  assert.equal(rotated.GMI_API_KEY, 'gmi-rotated-key')
+})
+
+test('openai launch preserves persisted ApiSmart dedicated credentials across restart', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://gw.apismart.ai/v1',
+      OPENAI_MODEL: 'DEEPSEEK_V4_FLASH',
+      OPENAI_API_KEY: 'apismart-secret-key',
+      APISMART_API_KEY: 'apismart-secret-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(env.OPENAI_BASE_URL, 'https://gw.apismart.ai/v1')
+  assert.equal(env.OPENAI_MODEL, 'DEEPSEEK_V4_FLASH')
+  assert.equal(env.OPENAI_API_KEY, 'apismart-secret-key')
+  assert.equal(env.APISMART_API_KEY, 'apismart-secret-key')
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'apismart')
+})
+
+test('openai launch prefers dedicated ApiSmart credentials over a legacy generic mirror', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://gw.apismart.ai/v1',
+      OPENAI_MODEL: 'DEEPSEEK_V4_FLASH',
+      OPENAI_API_KEY: 'legacy-generic-key',
+      APISMART_API_KEY: 'dedicated-key',
+    }),
+    goal: 'balanced',
+    processEnv: {},
+  })
+
+  assert.equal(env.APISMART_API_KEY, 'dedicated-key')
+})
+
+test('openai launch backfills APISMART_API_KEY from a legacy OpenAI-shaped ApiSmart profile', async () => {
+  // Pre-dedicated-key persisted envs only stored OPENAI_API_KEY. ApiSmart is
+  // dedicatedCredentialsOnly, so relaunch must recover APISMART_API_KEY from
+  // that mirrored value or the shim authenticates with nothing.
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://gw.apismart.ai/v1',
+      OPENAI_MODEL: 'DEEPSEEK_V4_FLASH',
+      OPENAI_API_KEY: 'apismart-secret-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'apismart')
+  assert.equal(env.OPENAI_API_KEY, 'apismart-secret-key')
+  assert.equal(env.APISMART_API_KEY, 'apismart-secret-key')
+  assert.equal(
+    resolveRouteCredentialValue({
+      routeId: 'apismart',
+      processEnv: env,
+      baseUrl: env.OPENAI_BASE_URL,
+    }),
+    'apismart-secret-key',
+  )
+})
+
+test('openai launch never promotes an ambient generic key to an ApiSmart credential', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://gw.apismart.ai/v1',
+      OPENAI_MODEL: 'DEEPSEEK_V4_FLASH',
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'apismart',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_API_KEY: 'generic-openai-key',
+    },
+  })
+
+  assert.equal(env.APISMART_API_KEY, undefined)
+  assert.equal(
+    resolveRouteCredentialValue({
+      routeId: 'apismart',
+      processEnv: env,
+      baseUrl: env.OPENAI_BASE_URL,
+    }),
+    undefined,
+  )
+})
+
+test('buildGmiCloudProfileEnv never sends the GMI key to an ambient or non-GMI base URL', () => {
+  const ambient = buildGmiCloudProfileEnv({
+    apiKey: 'gmi-secret-key',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_API_KEY: 'sk-openai-other',
+    },
+  })
+  assert.equal(ambient?.OPENAI_BASE_URL, 'https://api.gmi-serving.com/v1')
+  assert.equal(ambient?.OPENAI_API_KEY, 'gmi-secret-key')
+  assert.equal(ambient?.GMI_API_KEY, 'gmi-secret-key')
+
+  const custom = buildGmiCloudProfileEnv({
+    apiKey: 'gmi-secret-key',
+    baseUrl: 'https://proxy.example/v1',
+    processEnv: {},
+  })
+  assert.equal(custom?.OPENAI_BASE_URL, 'https://api.gmi-serving.com/v1')
+
+  const plainHttp = buildGmiCloudProfileEnv({
+    apiKey: 'gmi-secret-key',
+    baseUrl: 'http://api.gmi-serving.com/v1',
+    processEnv: {},
+  })
+  assert.equal(plainHttp?.OPENAI_BASE_URL, 'https://api.gmi-serving.com/v1')
+
+  const explicit = buildGmiCloudProfileEnv({
+    apiKey: 'gmi-secret-key',
+    baseUrl: 'https://api.gmi-serving.com/v1/',
+    processEnv: {},
+  })
+  assert.equal(explicit?.OPENAI_BASE_URL, 'https://api.gmi-serving.com/v1/')
+})
+
+test('buildApismartProfileEnv prefers APISMART_MODEL over OPENAI_MODEL', () => {
+  const env = buildApismartProfileEnv({
+    apiKey: 'apismart-secret-key',
+    processEnv: {
+      APISMART_MODEL: 'KIMI_K3',
+      OPENAI_MODEL: 'GLM_5.2',
+    },
+  })
+
+  assert.ok(env)
+  assert.equal(env?.OPENAI_MODEL, 'KIMI_K3')
+  assert.equal(env?.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'apismart')
+})
+
+test('buildApismartProfileEnv refuses to copy the dedicated credential to a custom endpoint', () => {
+  const env = buildApismartProfileEnv({
+    apiKey: 'apismart-secret-key',
+    baseUrl: 'https://proxy.example/v1',
+  })
+
+  assert.equal(env, null)
+})
+
+test('buildApismartProfileEnv refuses non-canonical ApiSmart paths', () => {
+  assert.equal(
+    buildApismartProfileEnv({
+      apiKey: 'apismart-secret-key',
+      baseUrl: 'https://gw.apismart.ai/staging/v1',
+    }),
+    null,
+  )
+  assert.equal(
+    buildApismartProfileEnv({
+      apiKey: 'apismart-secret-key',
+      baseUrl: 'https://gw.apismart.ai',
+    }),
+    null,
+  )
+})
+
+test('openai launch withholds ambient ApiSmart credentials from a keyless proxy profile on restart', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'apismart',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'DEEPSEEK_V4_FLASH',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_API_KEY: 'ambient-apismart-key',
+      APISMART_API_KEY: 'ambient-apismart-key',
+    },
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'apismart')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.APISMART_API_KEY, undefined)
+
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'apismart',
+      OPENAI_BASE_URL: 'https://gw.apismart.ai/v1',
+      OPENAI_MODEL: 'DEEPSEEK_V4_FLASH',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://gw.apismart.ai/v1',
+      OPENAI_API_KEY: 'ambient-apismart-key',
+      APISMART_API_KEY: 'ambient-apismart-key',
+    },
+  })
+  assert.equal(canonical.OPENAI_API_KEY, 'ambient-apismart-key')
+  assert.equal(canonical.APISMART_API_KEY, 'ambient-apismart-key')
+})
+
+test('openai launch carries APISMART_API_KEY only when the route resolves to apismart', async () => {
+  const offRoute = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_API_KEY: 'sk-openai',
+      APISMART_API_KEY: 'apismart-persisted',
+    }),
+    goal: 'coding',
+    processEnv: {
+      APISMART_API_KEY: 'apismart-ambient',
+    },
+  })
+
+  assert.equal(offRoute.APISMART_API_KEY, undefined)
+
+  const onRoute = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://gw.apismart.ai/v1',
+      OPENAI_MODEL: 'DEEPSEEK_V4_FLASH',
+      OPENAI_API_KEY: 'apismart-key',
+      APISMART_API_KEY: 'apismart-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(onRoute.APISMART_API_KEY, 'apismart-key')
+})
+
 test('openai launch prefers a live dedicated vendor key over the persisted one', async () => {
   const env = await buildLaunchEnv({
     profile: 'openai',
@@ -308,6 +577,34 @@ test('openai launch carries AIMLAPI_API_KEY only when the route resolves to aiml
   assert.equal(onRoute.AIMLAPI_API_KEY, 'aimlapi-key')
 })
 
+test('openai launch carries LONGCAT_API_KEY only when the route resolves to LongCat', async () => {
+  const offRoute = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_API_KEY: 'sk-openai',
+      LONGCAT_API_KEY: 'longcat-persisted',
+    }),
+    goal: 'coding',
+    processEnv: { LONGCAT_API_KEY: 'longcat-ambient' },
+  })
+
+  assert.equal(offRoute.LONGCAT_API_KEY, undefined)
+
+  const onRoute = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.longcat.chat/openai/v1',
+      OPENAI_API_KEY: 'longcat-key',
+      LONGCAT_API_KEY: 'longcat-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(onRoute.LONGCAT_API_KEY, 'longcat-key')
+})
+
 test('openai launch mirrors rotated OPENAI_API_KEY into AIMLAPI_API_KEY on aimlapi route', async () => {
   const env = await buildLaunchEnv({
     profile: 'openai',
@@ -353,6 +650,329 @@ test('openai launch lets live base URL override persisted AIMLAPI route marker',
   assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, undefined)
 })
 
+test('openai launch withholds the ambient AIMLAPI key from a keyless proxy profile on restart', async () => {
+  // A keyless saved aimlapi profile that points at a user-controlled proxy keeps
+  // its route id after relaunch, but the canonical AIMLAPI credential must never
+  // be copied into that proxy session.
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      AIMLAPI_API_KEY: 'ambient-aimlapi-key',
+    },
+  })
+
+  // Still recognized as the aimlapi route...
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'aimlapi')
+  // ...but the ambient canonical credential is withheld from the proxy host.
+  assert.equal(env.AIMLAPI_API_KEY, undefined)
+
+  // The same profile on the canonical host DOES receive the ambient key.
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      AIMLAPI_API_KEY: 'ambient-aimlapi-key',
+    },
+  })
+  assert.equal(canonical.AIMLAPI_API_KEY, 'ambient-aimlapi-key')
+})
+
+test('openai launch withholds the ambient generic OpenAI credential from a keyless proxy aimlapi profile', async () => {
+  // The generic OPENAI_API_KEY / OPENAI_API_KEYS alias is the same exfiltration
+  // path: a keyless retained aimlapi profile on a proxy must not receive the
+  // ambient canonical credential in either form.
+  for (const ambient of [
+    { OPENAI_API_KEY: 'ambient-openai-key' },
+    { OPENAI_API_KEYS: 'ambient-key-a,ambient-key-b' },
+  ]) {
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted: profile('openai', {
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+        OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+        OPENAI_MODEL: 'gpt-4o',
+      }),
+      goal: 'coding',
+      processEnv: {
+        OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+        ...ambient,
+      },
+    })
+    assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'aimlapi')
+    assert.equal(env.OPENAI_API_KEY, undefined)
+    assert.equal(env.OPENAI_API_KEYS, undefined)
+  }
+
+  // The same ambient credential IS applied on the canonical host.
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      OPENAI_API_KEY: 'ambient-openai-key',
+    },
+  })
+  assert.equal(canonical.OPENAI_API_KEY, 'ambient-openai-key')
+})
+
+test('openai launch keeps a keyed proxy aimlapi profile own OpenAI credential', async () => {
+  // A proxy profile that carries its own key still authenticates with it; only
+  // the ambient credential is dropped, not the user-configured one.
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'profile-own-key',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_API_KEY: 'ambient-openai-key',
+    },
+  })
+  assert.equal(env.OPENAI_API_KEY, 'profile-own-key')
+})
+
+test('openai launch keeps the proxy aimlapi guard across equivalent base URL spellings', async () => {
+  // The saved route identity is retained on a normalized comparison, so a shell
+  // base URL that differs only by a trailing slash (or host casing) still names
+  // the same proxy. A literal comparison would drop the route id here and let
+  // the ambient canonical credential through.
+  for (const shellBaseUrl of [
+    'https://proxy.example.com/v1/',
+    'https://PROXY.example.com/v1',
+  ]) {
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted: profile('openai', {
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+        OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+        OPENAI_MODEL: 'gpt-4o',
+      }),
+      goal: 'coding',
+      processEnv: {
+        OPENAI_BASE_URL: shellBaseUrl,
+        OPENAI_API_KEY: 'ambient-openai-key',
+        AIMLAPI_API_KEY: 'ambient-aimlapi-key',
+      },
+    })
+
+    assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'aimlapi')
+    assert.equal(env.OPENAI_API_KEY, undefined)
+    assert.equal(env.AIMLAPI_API_KEY, undefined)
+  }
+})
+
+test('openai launch does not let a distinct proxy target inherit the saved aimlapi identity', async () => {
+  // Path case and query parameters name a distinct target on the same host. The
+  // saved identity must NOT carry over to it, because that identity is what
+  // mirrors the profile's dedicated AIMLAPI_API_KEY — a key configured for the
+  // original tenant, not this one.
+  for (const [persistedBaseUrl, shellBaseUrl] of [
+    ['https://proxy.example.com/tenantA/v1', 'https://proxy.example.com/tenanta/v1'],
+    ['https://proxy.example.com/v1', 'https://proxy.example.com/v1?tenant=other'],
+  ]) {
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted: profile('openai', {
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+        OPENAI_BASE_URL: persistedBaseUrl,
+        OPENAI_MODEL: 'gpt-4o',
+        OPENAI_API_KEY: 'profile-own-tenant-key',
+        AIMLAPI_API_KEY: 'profile-own-tenant-key',
+        OPENAI_AUTH_HEADER: 'X-Profile-Auth',
+        OPENAI_AUTH_HEADER_VALUE: 'profile-own-tenant-secret',
+      }),
+      goal: 'coding',
+      processEnv: {
+        OPENAI_BASE_URL: shellBaseUrl,
+        OPENAI_API_KEY: 'user-supplied-key',
+        OPENAI_AUTH_HEADER_VALUE: 'user-supplied-secret',
+      },
+    })
+
+    assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, undefined)
+    // The dedicated aimlapi credential rides on the route identity, so a target
+    // that cannot inherit the identity never receives it.
+    assert.equal(env.AIMLAPI_API_KEY, undefined)
+    // Without that identity the launch falls back to the route-agnostic
+    // precedence: the credential the user supplied for THIS endpoint wins. The
+    // profile's own key must not be forced in over it — that would both hand a
+    // key to an endpoint it was never configured for and discard the user's.
+    assert.equal(env.OPENAI_API_KEY, 'user-supplied-key')
+    assert.equal(env.OPENAI_AUTH_HEADER_VALUE, 'user-supplied-secret')
+  }
+})
+
+test('openai launch withholds ambient custom headers from a keyless proxy aimlapi profile', async () => {
+  // ANTHROPIC_CUSTOM_HEADERS reaches the proxy: client.ts merges it into the
+  // defaultHeaders passed to the OpenAI shim client, and its filter only drops
+  // the three standard auth header names — a custom-named secret rides through.
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      ANTHROPIC_CUSTOM_HEADERS: 'X-Proxy-Auth: ambient-canonical-secret',
+    },
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'aimlapi')
+  assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, undefined)
+
+  // Headers the profile itself persisted are the user's own configuration for
+  // that proxy, so they survive — and an ambient value cannot override them.
+  const owned = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      ANTHROPIC_CUSTOM_HEADERS: 'X-Proxy-Auth: profile-own-proxy-secret',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      ANTHROPIC_CUSTOM_HEADERS: 'X-Proxy-Auth: ambient-canonical-secret',
+    },
+  })
+  assert.equal(
+    owned.ANTHROPIC_CUSTOM_HEADERS,
+    'X-Proxy-Auth: profile-own-proxy-secret',
+  )
+
+  // On the canonical endpoint the ambient value keeps its existing behaviour.
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      ANTHROPIC_CUSTOM_HEADERS: 'X-Trace: ambient-value',
+    },
+  })
+  assert.equal(canonical.ANTHROPIC_CUSTOM_HEADERS, 'X-Trace: ambient-value')
+})
+
+test('openai launch withholds ambient credentials from a look-alike canonical path', async () => {
+  // `/V1` resolves to the aimlapi route by host, so the launch carries the
+  // identity — but the strict canonical predicate rejects the path, so it is
+  // treated as a proxy and the ambient canonical credential is withheld.
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/V1',
+      OPENAI_API_KEY: 'ambient-openai-key',
+      AIMLAPI_API_KEY: 'ambient-aimlapi-key',
+    },
+  })
+
+  assert.equal(env.OPENAI_BASE_URL, 'https://api.aimlapi.com/V1')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.AIMLAPI_API_KEY, undefined)
+})
+
+test('openai launch withholds ambient custom auth from a keyless proxy aimlapi profile', async () => {
+  // Custom authentication is a second credential channel: the shim sends
+  // OPENAI_AUTH_HEADER_VALUE as the request credential whenever
+  // OPENAI_AUTH_HEADER names a header. An ambient pair must not ride along into
+  // a proxy session that the profile never configured for it.
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_AUTH_HEADER: 'X-Ambient-Auth',
+      OPENAI_AUTH_SCHEME: 'raw',
+      OPENAI_AUTH_HEADER_VALUE: 'ambient-canonical-secret',
+    },
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'aimlapi')
+  assert.equal(env.OPENAI_AUTH_HEADER, undefined)
+  assert.equal(env.OPENAI_AUTH_SCHEME, undefined)
+  assert.equal(env.OPENAI_AUTH_HEADER_VALUE, undefined)
+
+  // The profile's OWN custom auth is still applied — the user configured it for
+  // that proxy — and an ambient value must not override it.
+  const owned = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_AUTH_HEADER: 'X-Proxy-Auth',
+      OPENAI_AUTH_SCHEME: 'raw',
+      OPENAI_AUTH_HEADER_VALUE: 'profile-own-proxy-secret',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_AUTH_HEADER: 'X-Ambient-Auth',
+      OPENAI_AUTH_HEADER_VALUE: 'ambient-canonical-secret',
+    },
+  })
+  assert.equal(owned.OPENAI_AUTH_HEADER, 'X-Proxy-Auth')
+  assert.equal(owned.OPENAI_AUTH_HEADER_VALUE, 'profile-own-proxy-secret')
+
+  // On the canonical endpoint ambient custom auth keeps its existing behaviour.
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.aimlapi.com/v1',
+      OPENAI_AUTH_HEADER: 'X-Ambient-Auth',
+      OPENAI_AUTH_HEADER_VALUE: 'ambient-canonical-secret',
+    },
+  })
+  assert.equal(canonical.OPENAI_AUTH_HEADER_VALUE, 'ambient-canonical-secret')
+})
+
 test('xai launch uses descriptor defaults and persisted xAI key', async () => {
   const env = await buildLaunchEnv({
     profile: 'xai',
@@ -365,7 +985,7 @@ test('xai launch uses descriptor defaults and persisted xAI key', async () => {
 
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, '1')
   assert.equal(env.OPENAI_BASE_URL, 'https://api.x.ai/v1')
-  assert.equal(env.OPENAI_MODEL, 'grok-4.3')
+  assert.equal(env.OPENAI_MODEL, 'grok-4.6')
   assert.equal(env.OPENAI_API_KEY, 'xai-persisted-key')
   assert.equal(env.XAI_API_KEY, 'xai-persisted-key')
 })
@@ -426,7 +1046,7 @@ test('openai launch ignores codex persisted transport hints', async () => {
   assert.equal(env.OPENAI_API_KEY, 'sk-live')
 })
 
-test('buildStartupEnvFromProfile defaults fresh installs to Gitlawb Opengateway', async () => {
+test('buildStartupEnvFromProfile defaults fresh installs to Twigpine Opengateway', async () => {
   const env = await buildStartupEnvFromProfile({
     persisted: null,
     processEnv: {},
@@ -450,7 +1070,7 @@ test('buildStartupEnvFromProfile fresh-install OpenGateway env is invalid withou
   assert.ok(error!.includes('OPENGATEWAY_API_KEY'))
 })
 
-test('applyStartupEnvFromProfile ignores invalid startup env and warns (issue #1651)', async () => {
+test('applyStartupEnvFromProfile ignores the invalid fresh-install default SILENTLY (issue #1651 + zero-warning install)', async () => {
   const processEnv: NodeJS.ProcessEnv = {}
   const warnings: string[] = []
 
@@ -460,12 +1080,64 @@ test('applyStartupEnvFromProfile ignores invalid startup env and warns (issue #1
     onValidationError: message => warnings.push(message),
   })
 
+  // Still ignored (not applied), but a brand-new machine must not see a
+  // "saved provider profile" warning on every command — nothing was saved.
   assert.notEqual(error, null)
   assert.ok(error!.includes('OPENGATEWAY_API_KEY'))
+  assert.deepEqual(warnings, [])
+  assert.deepEqual(processEnv, {})
+})
+
+test('applyStartupEnvFromProfile still warns when a genuinely saved profile fails validation', async () => {
+  const processEnv: NodeJS.ProcessEnv = {}
+  const warnings: string[] = []
+
+  const error = await applyStartupEnvFromProfile({
+    persisted: {
+      profile: 'openai',
+      env: { OPENAI_BASE_URL: 'https://api.openai.com/v1' },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    processEnv,
+    onValidationError: message => warnings.push(message),
+  })
+
+  assert.notEqual(error, null)
   assert.deepEqual(warnings, [
     `Warning: ignoring saved provider profile. ${error}`,
   ])
   assert.deepEqual(processEnv, {})
+})
+
+test('applyStartupEnvFromProfile warns for a saved Opengateway-shaped profile even when the default-startup marker leaks in from a parent process', async () => {
+  // Collision guard: a persisted profile's launch env spreads processEnv, so
+  // a CLAUDE_CODE_DEFAULT_STARTUP_PROVIDER marker inherited from a parent CLI
+  // process can make the saved profile's env indistinguishable from the
+  // injected fresh-install default by marker-sniffing alone. Provenance
+  // (persisted !== null) must win: this saved-but-invalid profile warns.
+  const processEnv: NodeJS.ProcessEnv = {
+    [DEFAULT_STARTUP_PROVIDER_ENV_VAR]: 'gitlawb-opengateway',
+  }
+  const warnings: string[] = []
+
+  const error = await applyStartupEnvFromProfile({
+    persisted: {
+      profile: 'openai',
+      env: { OPENAI_BASE_URL: 'https://opengateway.gitlawb.com/v1' },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    processEnv,
+    onValidationError: message => warnings.push(message),
+  })
+
+  assert.notEqual(error, null)
+  assert.deepEqual(warnings, [
+    `Warning: ignoring saved provider profile. ${error}`,
+  ])
+  // The invalid env is ignored: only the pre-existing marker remains.
+  assert.deepEqual(processEnv, {
+    [DEFAULT_STARTUP_PROVIDER_ENV_VAR]: 'gitlawb-opengateway',
+  })
 })
 
 test('applyStartupEnvFromProfile applies valid startup env (issue #1651)', async () => {
@@ -486,6 +1158,52 @@ test('applyStartupEnvFromProfile applies valid startup env (issue #1651)', async
   assert.equal(processEnv.OPENAI_BASE_URL, 'https://opengateway.gitlawb.com/v1')
   assert.equal(processEnv.OPENAI_MODEL, 'mimo-v2.5-pro')
   assert.equal(processEnv.OPENGATEWAY_API_KEY, 'test-key')
+})
+
+test('applyStartupEnvFromProfile overlays a root model before validating a saved Command Code profile', async () => {
+  const processEnv: NodeJS.ProcessEnv = {}
+
+  const error = await applyStartupEnvFromProfile({
+    persisted: {
+      profile: 'openai',
+      env: {
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'commandcode',
+        OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+        OPENAI_MODEL: 'anthropic/claude-sonnet-4-6',
+        CMD_API_KEY: 'cmd-key',
+      },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    processEnv,
+    modelOverride: 'deepseek/deepseek-v4-flash',
+  })
+
+  assert.equal(error, null)
+  assert.equal(processEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'commandcode')
+  assert.equal(processEnv.OPENAI_MODEL, 'deepseek/deepseek-v4-flash')
+  assert.equal(processEnv.CMD_API_KEY, 'cmd-key')
+})
+
+test('applyStartupEnvFromProfile resolves the reserved default model for Command Code', async () => {
+  const processEnv: NodeJS.ProcessEnv = {}
+
+  const error = await applyStartupEnvFromProfile({
+    persisted: {
+      profile: 'openai',
+      env: {
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'commandcode',
+        OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+        OPENAI_MODEL: 'anthropic/claude-sonnet-4-6',
+        CMD_API_KEY: 'cmd-key',
+      },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    processEnv,
+    modelOverride: 'default',
+  })
+
+  assert.equal(error, null)
+  assert.equal(processEnv.OPENAI_MODEL, 'deepseek/deepseek-v4-flash')
 })
 
 test('buildStartupEnvFromProfile preserves explicit OpenAI-compatible env without a saved profile', async () => {
@@ -533,6 +1251,25 @@ test('buildStartupEnvFromProfile preserves concrete env-only NIM setup over stal
   assert.equal(env.NVIDIA_API_KEY, 'nvapi-live')
   assert.equal(env.NVIDIA_NIM, '1')
   assert.equal(resolveActiveRouteIdFromEnv(env), 'nvidia-nim')
+})
+
+test('buildStartupEnvFromProfile preserves ApiSmart env-only setup over a saved profile', async () => {
+  const processEnv: NodeJS.ProcessEnv = {
+    APISMART_API_KEY: 'apismart-live',
+  }
+
+  const env = await buildStartupEnvFromProfile({
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'stale-openai-key',
+    }),
+    processEnv,
+  })
+
+  assert.equal(env.APISMART_API_KEY, 'apismart-live')
+  assert.equal(resolveActiveRouteIdFromEnv(env), 'apismart')
+  assert.equal(env.OPENAI_BASE_URL, undefined)
 })
 
 test('buildStartupEnvFromProfile does not activate non-NIM env-only OpenAI-compatible setup', async () => {
@@ -650,13 +1387,13 @@ test('buildStartupEnvFromProfile preserves env-only Fireworks setup without a sa
     },
   })
 
-  // Must NOT fall through to Gitlawb Opengateway default
+  // Must NOT fall through to Twigpine Opengateway default
   assert.equal(env.FIREWORKS_API_KEY, 'fw-key')
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, undefined)
   assert.equal(
     env.OPENAI_BASE_URL,
     undefined,
-    'should not inject Gitlawb Opengateway base URL',
+    'should not inject Twigpine Opengateway base URL',
   )
   assert.equal(isDefaultStartupProviderEnv(env), false)
 })
@@ -673,18 +1410,36 @@ test('buildStartupEnvFromProfile preserves env-only NEAR AI setup without a save
   assert.equal(
     env.OPENAI_BASE_URL,
     undefined,
-    'should not inject Gitlawb Opengateway base URL',
+    'should not inject Twigpine Opengateway base URL',
   )
   assert.equal(isDefaultStartupProviderEnv(env), false)
 })
 
-test('openai launch preserves shell responses format and custom auth overrides', async () => {
+test('buildStartupEnvFromProfile preserves env-only LongCat setup without a saved profile', async () => {
+  const env = await buildStartupEnvFromProfile({
+    persisted: null,
+    processEnv: {
+      LONGCAT_API_KEY: 'longcat-key',
+    },
+  })
+
+  assert.equal(env.LONGCAT_API_KEY, 'longcat-key')
+  assert.equal(
+    env.OPENAI_BASE_URL,
+    undefined,
+    'should not inject Twigpine Opengateway base URL',
+  )
+  assert.equal(isDefaultStartupProviderEnv(env), false)
+})
+
+test('openai launch does not apply persisted Azure mode to a shell-selected base', async () => {
   const env = await buildLaunchEnv({
     profile: 'openai',
     persisted: profile('openai', {
       OPENAI_BASE_URL: 'https://persisted.example/v1',
       OPENAI_MODEL: 'persisted-model',
       OPENAI_API_FORMAT: 'chat_completions',
+      OPENAI_AZURE_STYLE: '1',
       OPENAI_AUTH_HEADER: 'X-Persisted-Key',
       OPENAI_AUTH_SCHEME: 'raw',
       OPENAI_AUTH_HEADER_VALUE: 'persisted-secret',
@@ -705,6 +1460,7 @@ test('openai launch preserves shell responses format and custom auth overrides',
   assert.equal(env.OPENAI_BASE_URL, 'https://shell.example/v1')
   assert.equal(env.OPENAI_MODEL, 'shell-model')
   assert.equal(env.OPENAI_API_FORMAT, 'responses')
+  assert.equal(env.OPENAI_AZURE_STYLE, undefined)
   assert.equal(env.OPENAI_AUTH_HEADER, 'api-key')
   assert.equal(env.OPENAI_AUTH_SCHEME, 'raw')
   assert.equal(env.OPENAI_AUTH_HEADER_VALUE, 'shell-secret')
@@ -888,6 +1644,7 @@ test('ollama profiles never persist openai api keys', () => {
   assert.deepEqual(env, {
     OPENAI_BASE_URL: 'http://localhost:11434/v1',
     OPENAI_MODEL: 'llama3.1:8b',
+    CLAUDE_CODE_PROVIDER_ROUTE_ID: 'ollama',
   })
   assert.equal('OPENAI_API_KEY' in env, false)
 })
@@ -1138,11 +1895,11 @@ test('saveProfileFile defaults to user config instead of the working directory',
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-workspace-profile-'))
   const configRoot = mkdtempSync(join(tmpdir(), 'openclaude-config-profile-'))
   const configDir = join(configRoot, 'config')
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const persisted = createProfileFile('openai', {
@@ -1164,9 +1921,9 @@ test('saveProfileFile defaults to user config instead of the working directory',
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configRoot, { recursive: true, force: true })
@@ -1176,11 +1933,11 @@ test('saveProfileFile defaults to user config instead of the working directory',
 test('loadProfileFile keeps project-local files as a legacy fallback', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-legacy-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-empty-config-profile-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const legacyProfile = createProfileFile('gemini', {
@@ -1197,9 +1954,9 @@ test('loadProfileFile keeps project-local files as a legacy fallback', async () 
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -1209,11 +1966,11 @@ test('loadProfileFile keeps project-local files as a legacy fallback', async () 
 test('loadProfileFile does not fall back when user config profile is invalid', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-invalid-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-invalid-config-profile-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const legacyProfile = createProfileFile('gemini', {
@@ -1231,9 +1988,9 @@ test('loadProfileFile does not fall back when user config profile is invalid', a
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -1243,11 +2000,11 @@ test('loadProfileFile does not fall back when user config profile is invalid', a
 test('deleteProfileFile clears the default profile and legacy workspace fallback', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-delete-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-delete-config-profile-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const configProfile = createProfileFile('openai', {
@@ -1259,6 +2016,7 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
     })
 
     saveProfileFile(configProfile)
+    assert.equal(existsSync(join(configDir, PROFILE_FILE_NAME)), true)
     writeFileSync(
       join(cwd, PROFILE_FILE_NAME),
       JSON.stringify(legacyProfile, null, 2),
@@ -1273,9 +2031,9 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -1285,11 +2043,11 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
 test('deleteProfileFile with configDir and cwd clears both user config and legacy fallback', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-delete-mixed-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-delete-mixed-config-profile-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const configProfile = createProfileFile('openai', {
@@ -1315,9 +2073,9 @@ test('deleteProfileFile with configDir and cwd clears both user config and legac
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -1397,11 +2155,11 @@ test('clearPersistedCodexOAuthProfile removes only persisted Codex OAuth profile
 test('clearPersistedCodexOAuthProfile clears both default and legacy OAuth profiles', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-clear-oauth-profile-'))
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-clear-oauth-config-'))
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
 
   try {
-    process.env.CLAUDE_CONFIG_DIR = configDir
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
     const {
@@ -1437,9 +2195,9 @@ test('clearPersistedCodexOAuthProfile clears both default and legacy OAuth profi
   } finally {
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR
+      delete process.env.OPENCLAUDE_CONFIG_DIR
     } else {
-      process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
     }
     rmSync(cwd, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
@@ -2086,6 +2844,19 @@ test('openai profiles keep shell base and model when shell format is responses',
   assert.equal(env?.OPENAI_API_KEY, 'sk-live')
 })
 
+test('openai profiles persist Azure-style routing from the shell environment', () => {
+  const env = buildOpenAIProfileEnv({
+    goal: 'balanced',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://azure.example/openai/v1',
+      OPENAI_API_KEY: 'azure-key',
+      OPENAI_AZURE_STYLE: '1',
+    },
+  })
+
+  assert.equal(env?.OPENAI_AZURE_STYLE, '1')
+})
+
 test('openai profiles use the first model from a semicolon-separated list', () => {
   const env = buildOpenAIProfileEnv({
     goal: 'balanced',
@@ -2357,4 +3128,554 @@ test('atomic-chat launch ignores mismatched persisted openai env', async () => {
   assert.equal(env.OPENAI_API_KEY, undefined)
   assert.equal(env.CODEX_API_KEY, undefined)
   assert.equal(env.CHATGPT_ACCOUNT_ID, undefined)
+})
+
+test('openai launch preserves persisted Concentrate dedicated credentials across restart', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/v1',
+      OPENAI_MODEL: 'deepseek-v4-flash-0731',
+      OPENAI_API_KEY: 'concentrate-secret-key',
+      CONCENTRATE_API_KEY: 'concentrate-secret-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(env.OPENAI_BASE_URL, 'https://api.concentrate.ai/v1')
+  assert.equal(env.OPENAI_MODEL, 'deepseek-v4-flash-0731')
+  assert.equal(env.OPENAI_API_KEY, 'concentrate-secret-key')
+  assert.equal(env.CONCENTRATE_API_KEY, 'concentrate-secret-key')
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'concentrate')
+})
+
+test('legacy generic OpenAI Concentrate profiles keep their credential generic', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/v1',
+      OPENAI_MODEL: 'deepseek-v4-flash-0731',
+      OPENAI_API_KEY: 'concentrate-secret-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'concentrate')
+  assert.equal(env.OPENAI_API_KEY, 'concentrate-secret-key')
+  assert.equal(env.CONCENTRATE_API_KEY, undefined)
+  assert.equal(
+    resolveRouteCredentialValue({
+      routeId: 'concentrate',
+      processEnv: env,
+      baseUrl: env.OPENAI_BASE_URL,
+    }),
+    'concentrate-secret-key',
+  )
+})
+
+test('openai launch keeps a generic Concentrate credential generic', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/v1',
+      OPENAI_MODEL: 'deepseek-v4-flash-0731',
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'concentrate',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_API_KEY: 'generic-openai-key',
+    },
+  })
+
+  assert.equal(env.CONCENTRATE_API_KEY, undefined)
+  assert.equal(
+    resolveRouteCredentialValue({
+      routeId: 'concentrate',
+      processEnv: env,
+      baseUrl: env.OPENAI_BASE_URL,
+    }),
+    'generic-openai-key',
+  )
+})
+
+test('generic Concentrate profile lets a rotated OpenAI key override its saved key', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/v1',
+      OPENAI_MODEL: 'deepseek-v4-flash-0731',
+      OPENAI_API_KEY: 'saved-generic-key',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_API_KEY: 'rotated-generic-key',
+    },
+  })
+
+  assert.equal(env.OPENAI_API_KEY, 'rotated-generic-key')
+  assert.equal(env.CONCENTRATE_API_KEY, undefined)
+  assert.equal(
+    resolveRouteCredentialValue({
+      routeId: 'concentrate',
+      processEnv: env,
+      baseUrl: env.OPENAI_BASE_URL,
+    }),
+    'rotated-generic-key',
+  )
+})
+
+test('openai launch withholds ambient Concentrate credentials from a keyless proxy profile on restart', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'concentrate',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'deepseek-v4-flash-0731',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_API_KEY: 'ambient-concentrate-key',
+      CONCENTRATE_API_KEY: 'ambient-concentrate-key',
+    },
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'concentrate')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.CONCENTRATE_API_KEY, undefined)
+
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'concentrate',
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/v1',
+      OPENAI_MODEL: 'deepseek-v4-flash-0731',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/v1',
+      OPENAI_API_KEY: 'ambient-concentrate-key',
+      CONCENTRATE_API_KEY: 'ambient-concentrate-key',
+    },
+  })
+  assert.equal(canonical.OPENAI_API_KEY, 'ambient-concentrate-key')
+  assert.equal(canonical.CONCENTRATE_API_KEY, 'ambient-concentrate-key')
+})
+
+test('openai launch withholds ambient LLMTR credentials from a keyless proxy profile on restart', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'llmtr',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'proxy-model',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_API_KEY: 'ambient-llmtr-key',
+      LLMTR_API_KEY: 'ambient-llmtr-key',
+    },
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'llmtr')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.LLMTR_API_KEY, undefined)
+
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'llmtr',
+      OPENAI_BASE_URL: 'https://llmtr.com/v1',
+      OPENAI_MODEL: 'deepseek/deepseek-v4-flash',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://llmtr.com/v1',
+      LLMTR_API_KEY: 'ambient-llmtr-key',
+    },
+  })
+
+  assert.equal(canonical.OPENAI_API_KEY, undefined)
+  assert.equal(canonical.LLMTR_API_KEY, 'ambient-llmtr-key')
+})
+
+test('openai launch withholds ambient Command Code credentials from a keyless proxy profile on restart', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'commandcode',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'proxy-model',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_API_KEY: 'ambient-cmd-key',
+      CMD_API_KEY: 'ambient-cmd-key',
+    },
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'commandcode')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.CMD_API_KEY, undefined)
+
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'commandcode',
+      OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+      OPENAI_MODEL: 'deepseek/deepseek-v4-flash',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+      CMD_API_KEY: 'ambient-cmd-key',
+    },
+  })
+
+  assert.equal(canonical.OPENAI_API_KEY, undefined)
+  assert.equal(canonical.CMD_API_KEY, 'ambient-cmd-key')
+})
+
+test('openai launch preserves a canonical Command Code route supplied through OPENAI_API_BASE', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: null,
+    goal: 'coding',
+    processEnv: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_API_BASE: 'https://api.commandcode.ai/provider/v1',
+      OPENAI_MODEL: 'deepseek/deepseek-v4-flash',
+      CMD_API_KEY: 'live-commandcode-key',
+    },
+  })
+
+  assert.equal(
+    env.OPENAI_BASE_URL,
+    'https://api.commandcode.ai/provider/v1',
+  )
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'commandcode')
+  assert.equal(env.CMD_API_KEY, 'live-commandcode-key')
+})
+
+test('openai launch preserves distinct persisted Command Code credentials', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'commandcode',
+      OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+      OPENAI_MODEL: 'deepseek/deepseek-v4-flash',
+      CMD_API_KEY: 'primary-commandcode-key',
+      COMMANDCODE_API_KEY: 'fallback-commandcode-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(env.CMD_API_KEY, 'primary-commandcode-key')
+  assert.equal(env.COMMANDCODE_API_KEY, 'fallback-commandcode-key')
+})
+
+test('openai launch accepts the official Command Code credential variable', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: null,
+    goal: 'coding',
+    processEnv: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+      OPENAI_MODEL: 'deepseek/deepseek-v4-flash',
+      COMMAND_CODE_API_KEY: 'official-command-code-key',
+    },
+  })
+
+  assert.equal(env.COMMAND_CODE_API_KEY, 'official-command-code-key')
+})
+
+test('openai launch does not migrate an unrelated persisted OpenAI key into Command Code', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'persisted-openai-key',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+      OPENAI_MODEL: 'deepseek/deepseek-v4-flash',
+      CMD_API_KEY: 'live-commandcode-key',
+    },
+  })
+
+  assert.equal(env.CMD_API_KEY, 'live-commandcode-key')
+})
+
+test('openai launch still migrates a legacy canonical Command Code profile key', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+      OPENAI_MODEL: 'deepseek/deepseek-v4-flash',
+      OPENAI_API_KEY: 'legacy-commandcode-key',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.commandcode.ai/provider/v1',
+    },
+  })
+
+  assert.equal(env.CMD_API_KEY, 'legacy-commandcode-key')
+})
+
+test('openai launch removes a legacy persisted Concentrate key from a noncanonical URL', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'concentrate',
+      OPENAI_BASE_URL: 'https://api.concentrate.ai/staging/v1',
+      OPENAI_MODEL: 'deepseek-v4-flash-0731',
+      CONCENTRATE_API_KEY: 'legacy-concentrate-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'concentrate')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.CONCENTRATE_API_KEY, undefined)
+})
+
+test('openai launch removes legacy generic credentials from a noncanonical Concentrate URL', async () => {
+  for (const [credentialEnvVar, credential] of [
+    ['OPENAI_API_KEY', 'legacy-concentrate-key'],
+    ['OPENAI_API_KEYS', 'legacy-concentrate-key-1,legacy-concentrate-key-2'],
+  ] as const) {
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted: profile('openai', {
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'concentrate',
+        OPENAI_BASE_URL: 'https://api.concentrate.ai/staging/v1',
+        OPENAI_MODEL: 'deepseek-v4-flash-0731',
+        [credentialEnvVar]: credential,
+      }),
+      goal: 'coding',
+      processEnv: {},
+    })
+
+    assert.equal(env.OPENAI_API_KEY, undefined)
+    assert.equal(env.OPENAI_API_KEYS, undefined)
+    assert.equal(env.CONCENTRATE_API_KEY, undefined)
+  }
+})
+
+test('API Route saved profile relaunch uses persisted generic key/model over ambient dedicated state', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'api-route',
+      OPENAI_BASE_URL: 'https://global.api-route.com/v1',
+      OPENAI_MODEL: 'saved-api-route-model',
+      OPENAI_API_KEY: 'saved-api-route-key',
+    }),
+    goal: 'balanced',
+    processEnv: {
+      API_ROUTE_API_KEY: 'ambient-api-route-key',
+      API_ROUTE_MODEL: 'ambient-api-route-model',
+    },
+  })
+
+  assert.equal(env.API_ROUTE_API_KEY, undefined)
+  assert.equal(env.API_ROUTE_MODEL, undefined)
+  assert.equal(env.OPENAI_BASE_URL, 'https://global.api-route.com/v1')
+  assert.equal(env.OPENAI_MODEL, 'saved-api-route-model')
+  assert.equal(env.OPENAI_API_KEY, 'saved-api-route-key')
+  assert.equal(
+    resolveRouteCredentialValue({
+      routeId: 'api-route',
+      baseUrl: env.OPENAI_BASE_URL,
+      processEnv: env,
+    }),
+    'saved-api-route-key',
+  )
+})
+
+test('buildStartupEnvFromProfile preserves Concentrate env-only setup over a saved profile', async () => {
+  const env = await buildStartupEnvFromProfile({
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'sk-persisted',
+    }),
+    goal: 'balanced',
+    processEnv: {
+      CONCENTRATE_API_KEY: 'concentrate-env-only-key',
+      CONCENTRATE_BASE_URL: 'https://api.concentrate.ai/v1',
+      CONCENTRATE_MODEL: 'claude-sonnet-5',
+    },
+  })
+
+  assert.equal(env.CONCENTRATE_API_KEY, 'concentrate-env-only-key')
+  assert.equal(env.CONCENTRATE_BASE_URL, 'https://api.concentrate.ai/v1')
+  assert.equal(env.CONCENTRATE_MODEL, 'claude-sonnet-5')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(resolveActiveRouteIdFromEnv(env), 'concentrate')
+})
+
+test('applyStartupEnvFromProfile preserves API Route env-only setup over a saved profile', async () => {
+  const processEnv: NodeJS.ProcessEnv = {
+    API_ROUTE_API_KEY: 'api-route-env-only-key',
+    API_ROUTE_MODEL: 'api-route-env-only-model',
+  }
+
+  const error = await applyStartupEnvFromProfile({
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'sk-persisted',
+    }),
+    processEnv,
+  })
+
+  assert.equal(error, null)
+  assert.equal(processEnv.API_ROUTE_API_KEY, 'api-route-env-only-key')
+  assert.equal(processEnv.API_ROUTE_MODEL, 'api-route-env-only-model')
+  assert.equal(processEnv.OPENAI_BASE_URL, undefined)
+  assert.equal(processEnv.OPENAI_API_KEY, undefined)
+  assert.equal(resolveActiveRouteIdFromEnv(processEnv), 'api-route')
+})
+
+test('applyStartupEnvFromProfile preserves API Route key-only descriptor-default intent', async () => {
+  const processEnv: NodeJS.ProcessEnv = {
+    API_ROUTE_API_KEY: 'api-route-env-only-key',
+  }
+
+  const error = await applyStartupEnvFromProfile({
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'sk-persisted',
+    }),
+    processEnv,
+  })
+
+  assert.equal(error, null)
+  assert.equal(processEnv.API_ROUTE_API_KEY, 'api-route-env-only-key')
+  assert.equal(processEnv.OPENAI_MODEL, undefined)
+  assert.equal(resolveActiveRouteIdFromEnv(processEnv), 'api-route')
+  assert.equal(await getProviderValidationError(processEnv), null)
+})
+
+test('buildConcentrateProfileEnv prefers CONCENTRATE_MODEL over OPENAI_MODEL', () => {
+  const env = buildConcentrateProfileEnv({
+    apiKey: 'concentrate-secret-key',
+    processEnv: {
+      CONCENTRATE_MODEL: 'claude-sonnet-5',
+      OPENAI_MODEL: 'gpt-4o',
+    },
+  })
+
+  assert.ok(env)
+  assert.equal(env?.OPENAI_MODEL, 'claude-sonnet-5')
+  assert.equal(env?.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'concentrate')
+})
+
+test('buildConcentrateProfileEnv reads CONCENTRATE_BASE_URL override', () => {
+  const env = buildConcentrateProfileEnv({
+    apiKey: 'concentrate-secret-key',
+    processEnv: {
+      CONCENTRATE_BASE_URL: 'https://api.concentrate.ai/v1',
+    },
+  })
+
+  assert.ok(env)
+  assert.equal(env?.OPENAI_BASE_URL, 'https://api.concentrate.ai/v1')
+})
+
+test('buildConcentrateProfileEnv refuses to serialize its credential for a noncanonical URL', () => {
+  const env = buildConcentrateProfileEnv({
+    apiKey: 'concentrate-secret-key',
+    processEnv: {
+      CONCENTRATE_BASE_URL: 'https://api.concentrate.ai/staging/v1',
+    },
+  })
+
+  assert.equal(env, null)
+})
+
+test('buildOpenAIProfileEnv does not stamp a generic key as Concentrate credentials on a noncanonical URL', () => {
+  const env = buildOpenAIProfileEnv({
+    goal: 'coding',
+    baseUrl: 'https://api.concentrate.ai/staging/v1',
+    apiKey: 'generic-proxy-key',
+    processEnv: {},
+  })
+
+  assert.ok(env)
+  assert.equal(env?.OPENAI_API_KEY, 'generic-proxy-key')
+  assert.equal(env?.CONCENTRATE_API_KEY, undefined)
+})
+
+test('openai launch withholds ambient API Route credentials from a keyless proxy profile on restart', async () => {
+  for (const ambient of [
+    { OPENAI_API_KEY: 'ambient-api-route-key' },
+    { OPENAI_API_KEYS: 'ambient-key-a,ambient-key-b' },
+  ]) {
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted: profile('openai', {
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'api-route',
+        OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+        OPENAI_MODEL: 'claude-sonnet-4-6',
+      }),
+      goal: 'coding',
+      processEnv: {
+        OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+        ...ambient,
+      },
+    })
+
+    assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'api-route')
+    assert.equal(env.OPENAI_API_KEY, undefined)
+    assert.equal(env.OPENAI_API_KEYS, undefined)
+  }
+
+  const canonical = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'api-route',
+      OPENAI_BASE_URL: 'https://global.api-route.com/v1',
+      OPENAI_MODEL: 'claude-sonnet-4-6',
+    }),
+    goal: 'coding',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://global.api-route.com/v1',
+      OPENAI_API_KEY: 'ambient-api-route-key',
+    },
+  })
+  assert.equal(canonical.OPENAI_API_KEY, 'ambient-api-route-key')
+})
+
+test('buildStartupEnvFromProfile applies saved API Route proxy profile even when ambient credentials are present', async () => {
+  const processEnv: NodeJS.ProcessEnv = {
+    OPENAI_API_KEY: 'ambient-key',
+    OPENAI_API_KEYS: 'ambient-key-1,ambient-key-2',
+  }
+
+  const env = await buildStartupEnvFromProfile({
+    persisted: profile('openai', {
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'api-route',
+      OPENAI_BASE_URL: 'https://proxy.example.com/v1',
+      OPENAI_MODEL: 'claude-sonnet-4-6',
+    }),
+    processEnv,
+  })
+
+  assert.equal(env.OPENAI_BASE_URL, 'https://proxy.example.com/v1')
+  assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'api-route')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.OPENAI_API_KEYS, undefined)
 })

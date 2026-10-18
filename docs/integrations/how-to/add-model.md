@@ -31,7 +31,10 @@ still the source of truth for where a model is offered.
    capabilities.
 4. Add optional shared metadata.
    Include `brandId`, `contextWindow`, `maxOutputTokens`, and `cacheConfig`
-   when the data is stable enough to be reused.
+   when the data is stable enough to be reused. Set
+   `runtimeMetadataScope: 'catalog'` when verified limits and capabilities
+   should apply only on route catalogs that explicitly reference the
+   descriptor.
 5. Add `providerModelMap` only when the same model needs route-specific API
    names across multiple catalogs.
 6. Update route-owned catalogs only if the model should be offered by those
@@ -46,6 +49,11 @@ Model descriptor files should:
 - act as glossary/index metadata and optional route enrichment;
 - avoid encoding gateway availability as if every route automatically exposes
   the shared model.
+
+Shared runtime metadata uses the legacy global model-name fallback by default.
+Use `runtimeMetadataScope: 'catalog'` for a model whose verified limits and
+capabilities belong to specific routes; that metadata then applies only when a
+route catalog entry names the descriptor through `modelDescriptorId`.
 
 Normal contributor-facing examples should not call `registerModel(...)`
 directly.
@@ -189,6 +197,11 @@ Model lookup should prefer:
 (env vars and the `settings.json` `modelLimits` map). It should not grow a
 second built-in model table. Built-in model limits belong in model descriptor
 files.
+
+A descriptor with `runtimeMetadataScope: 'catalog'` is intentionally excluded
+from global name-only lookups. Its limits and capabilities are available only
+through an explicit route catalog entry, preventing one vendor's verified
+contract from leaking onto an uncataloged gateway model with the same API name.
 
 ## What not to do
 
