@@ -1,5 +1,9 @@
 import { REAL_PROVIDER_TEST_CHILD_ENV, REAL_PROVIDER_TEST_TIMEOUT_MS, runTestFileWithRealProviders } from '../../test/providerModuleIsolation.js'
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { spawn } from 'node:child_process'
+import type { ShellCommand } from '../../utils/ShellCommand.js'
+import { TaskOutput } from '../../utils/task/TaskOutput.js'
+import { registerForeground } from '../../tasks/LocalShellTask/LocalShellTask.js'
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -63,32 +67,57 @@ afterEach(async () => {
   } finally { releaseSharedMutationLock() }
 })
 
-for (const cancel of [false, true]) {
-  test(`agent ${cancel ? 'stops during' : 'completes after'} its real transcript append while unrelated persistence is blocked`, async () => {
+for (const phase of ['success', 'initial', 'incremental'] as const) {
+  const cancel = phase !== 'success'
+  test(`agent ${cancel ? `stops during its ${phase}` : 'completes after its'} real transcript append while unrelated persistence is blocked`, async () => {
     const remoteEntered = deferred()
     const remoteRelease = deferred()
     setInternalEventWriter(async () => { remoteEntered.resolve(); await remoteRelease.promise })
     const foreground = recordTranscript([createUserMessage({ content: 'unrelated foreground' })])
     await remoteEntered.promise
-    const agentId = asAgentId(`output-${cancel}`)
+    const agentId = asAgentId(`output-${phase}`)
     const transcript = getAgentTranscriptPath(agentId)
     await mkdir(dirname(transcript), { recursive: true })
     const locked = deferred()
     const release = deferred()
-    const holder = withTranscriptFileLock(transcript, async () => { locked.resolve(); await release.promise })
-    await locked.promise
+    const holdTranscript = () => withTranscriptFileLock(transcript, async () => { locked.resolve(); await release.promise })
+    let holder: Promise<void> | undefined
+    if (phase !== 'incremental') {
+      holder = holdTranscript()
+      await locked.promise
+    }
+    let shell: ShellCommand | undefined
+    let childExit: Promise<void> | undefined
+    const shellId = `shell-${phase}`
     let queried = false
     mock.module('../../query.js', () => ({
       ...actualQuery,
       query: async function* () {
         queried = true
+        if (phase === 'incremental') {
+          const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+          childExit = new Promise<void>((resolve, reject) => { child.once('exit', () => resolve()); child.once('error', reject) })
+          // A minimal shell adapter isolates this regression from ShellCommand's
+          // existing cleanup/exit race; the child and agent cleanup are real.
+          shell = {
+            status: 'backgrounded',
+            taskOutput: new TaskOutput(shellId, null),
+            background: () => true,
+            kill: () => { child.kill(); shell!.status = 'killed' },
+            cleanup: () => {},
+            result: childExit.then(() => ({ stdout: '', stderr: '', code: 0, interrupted: true })),
+          }
+          registerForeground({ command: 'test child', description: 'test child', shellCommand: shell, agentId }, setAppState)
+          holder = holdTranscript()
+          await locked.promise
+        }
         yield createAssistantMessage({ content: 'finished output' })
         return { reason: 'completed' }
       },
     }))
     const selectedAgent = { agentType: 'general-purpose', source: 'built-in', baseDir: 'built-in', whenToUse: 'test', getSystemPrompt: () => 'test' } as AgentDefinition
     let appState = {
-      tasks: {}, todos: {}, speculation: { status: 'idle' }, mainLoopModel: 'test-model', mainLoopModelForSession: 'test-model',
+      tasks: {}, todos: { [agentId]: [] }, speculation: { status: 'idle' }, mainLoopModel: 'test-model', mainLoopModelForSession: 'test-model',
       toolPermissionContext: { mode: 'default', additionalWorkingDirectories: new Map(), alwaysAllowRules: {}, alwaysDenyRules: {}, alwaysAskRules: {} },
       mcp: { clients: [], tools: [] },
     } as unknown as AppState
@@ -104,7 +133,7 @@ for (const cancel of [false, true]) {
     const lifecycle = runAsyncAgentLifecycle({
       taskId: agentId, abortController: task.abortController!,
       makeStream: () => runAgent({
-        agentDefinition: selectedAgent, promptMessages: [createUserMessage({ content: 'initial prompt' })],
+        agentDefinition: selectedAgent, promptMessages: [createUserMessage({ content: 'initial prompt' }), createUserMessage({ content: 'remaining initial history' })],
         toolUseContext: context, canUseTool: async () => ({ behavior: 'allow' }),
         isAsync: true, querySource: 'agent:builtin:general-purpose', availableTools: [],
         override: { agentId, abortController: task.abortController, userContext: {}, systemContext: {}, systemPrompt: ['test'] as never },
@@ -113,16 +142,32 @@ for (const cancel of [false, true]) {
       description: 'test output', toolUseContext: context, rootSetAppState: setAppState,
       agentIdForCleanup: agentId, enableSummarization: false, getWorktreeResult: async () => ({}),
     })
+    let cancellationDeadline: ReturnType<typeof setTimeout> | undefined
     try {
+      await locked.promise
       await new Promise(resolve => setTimeout(resolve, 150))
       expect(appState.tasks[agentId]?.status).toBe('running')
-      expect(queried).toBe(false)
+      expect(queried).toBe(phase === 'incremental')
       if (cancel) {
         killAsyncAgent(agentId, setAppState)
         expect(appState.tasks[agentId]?.status).toBe('killed')
+        // Keep storage locked until stopped handling and runner cleanup finish.
+        await Promise.race([
+          lifecycle,
+          new Promise<never>((_, reject) => {
+            cancellationDeadline = setTimeout(() => reject(new Error('cancellation is still waiting for transcript storage')), 2_000)
+          }),
+        ])
+        expect(appState.todos).not.toHaveProperty(agentId)
+        if (phase === 'incremental') {
+          expect(appState.tasks[shellId]?.status).toBe('killed')
+          expect(shell?.status).toBe('killed')
+          await childExit
+        }
+      } else {
+        release.resolve()
+        await lifecycle
       }
-      release.resolve()
-      await lifecycle
       expect(appState.tasks[agentId]?.status).toBe(cancel ? 'killed' : 'completed')
       const notifications = getPendingNotificationsSnapshot().map(item => item.value).join('\n')
       expect(notifications).toContain(`<status>${cancel ? 'killed' : 'completed'}</status>`)
@@ -134,12 +179,24 @@ for (const cancel of [false, true]) {
         expect(output.indexOf('initial prompt')).toBeLessThan(output.indexOf('finished output'))
       }
     } finally {
+      clearTimeout(cancellationDeadline)
       release.resolve()
       remoteRelease.resolve()
+      if (shell?.status === 'running' || shell?.status === 'backgrounded') {
+        shell.kill()
+        shell.cleanup()
+      }
+      await childExit
       await holder
       await foreground
       await lifecycle
     }
+    // Cancellation releases the runner, not the tracked producer or its messages.
+    await flushSessionStorage()
+    const persisted = await readFile(transcript, 'utf8')
+    expect(persisted).toContain('initial prompt')
+    expect(persisted).toContain('remaining initial history')
+    if (phase === 'incremental') expect(persisted).toContain('finished output')
   })
 }
 
