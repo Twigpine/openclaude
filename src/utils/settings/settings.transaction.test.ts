@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import * as fs from 'node:fs'
 import {
   existsSync,
   lstatSync,
@@ -280,6 +281,40 @@ test(
   },
   TEST_TIMEOUT_MS,
 )
+
+test('releasing a lock cannot remove a successor published during cleanup', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'openclaude-settings-release-race-'))
+  const settingsPath = join(root, 'settings.json')
+  const originalRemove = fs.rmSync
+  const { withSettingsFileTransactionSync } = await import(
+    './settingsFileTransaction.js'
+  )
+  let successorCompleted = false
+  let intercepted = false
+  const remove = spyOn(fs, 'rmSync').mockImplementation((path, options) => {
+    if (intercepted) return originalRemove(path, options)
+    intercepted = true
+    // Pause recursive cleanup after unlinking owner.json but before rmdir.
+    // Publishing a new non-empty directory can replace an empty directory.
+    originalRemove(join(String(path), 'owner.json'))
+    withSettingsFileTransactionSync(settingsPath, () => {
+      // Finish the old owner's cleanup while the successor holds its lock.
+      originalRemove(path, options)
+    })
+    successorCompleted = true
+  })
+  try {
+    expect(() =>
+      withSettingsFileTransactionSync(settingsPath, () => undefined),
+    ).not.toThrow()
+    expect(intercepted).toBe(true)
+    expect(successorCompleted).toBe(true)
+    expect(readdirSync(root)).toEqual([])
+  } finally {
+    remove.mockRestore()
+    originalRemove(root, { recursive: true, force: true })
+  }
+})
 
 test('reads the merge base from disk after ownership, not from warm caches', async () => {
   await withIsolatedUserSettings((_root, settingsPath) => {

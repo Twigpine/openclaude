@@ -362,12 +362,16 @@ describe('skillChangeDetector reload batching', () => {
     writeFileSync(siblingFile, 'sibling')
     const detector = await importFreshModule()
     let realWatcher: FSWatcher | undefined
+    const hookPaths: string[] = []
     detector._setDependenciesForTesting({
       getSkillsPath: () => own,
       getAdditionalDirectoriesForClaudeMd: () => [],
       getSiblingSkillsHomePaths: () => siblingSkillsHomePaths,
       getFsImplementation: () => ({ stat: async (path: string) => statSync(path) }),
-      executeConfigChangeHooks,
+      executeConfigChangeHooks: async (_source: string, path: string) => {
+        hookPaths.push(path)
+        return hookResults
+      },
       clearCommandsCache,
       resetSentSkillNames,
       watch: (paths: string[], options: Parameters<typeof chokidar.watch>[1]) => {
@@ -379,7 +383,7 @@ describe('skillChangeDetector reload batching', () => {
       stabilityThreshold: 10, pollInterval: 10, chokidarInterval: 10,
       reloadDebounce: 10, reloadCooldown: 10,
     })
-    const hookCalls = () => executeConfigChangeHooks.mock.calls.length
+    const hookCalls = () => hookPaths.length
     // Settle until no hook has fired for a full window, so a late hook from an
     // earlier phase cannot be attributed to the next one.
     const waitForQuietHooks = async () => {
@@ -399,14 +403,15 @@ describe('skillChangeDetector reload batching', () => {
       // initializing its polling baseline. Retry edits until one is observed.
       // A retry already in flight when the first hook lands can still produce
       // one more, so assert that the edit was seen rather than an exact count.
-      const before = hookCalls()
+      const start = hookPaths.length
       const deadline = Date.now() + 2000
       let edit = 0
-      while (hookCalls() === before && Date.now() < deadline) {
+      while (!hookPaths.slice(start).includes(path) && Date.now() < deadline) {
         writeFileSync(path, `${content} ${edit++}`)
         await sleep(50)
       }
-      expect(hookCalls()).toBeGreaterThan(before)
+      // This test checks source eligibility; batching has dedicated tests below.
+      expect(hookPaths.slice(start)).toContain(path)
       await waitForQuietHooks()
     }
     try {

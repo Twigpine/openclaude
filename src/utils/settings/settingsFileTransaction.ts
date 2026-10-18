@@ -405,7 +405,13 @@ function releaseOwnedLock(
       { code: 'ECOMPROMISED' },
     )
   }
-  removeLockSync(lockPath, { recursive: true })
+  // Recursive removal briefly leaves an empty directory that a contender can
+  // replace with its own claim. Retire our non-empty lock atomically first so
+  // cleanup cannot remove that successor's lock. Our pending path was consumed
+  // by publication and is private to this ownership token.
+  const retiredPath = pendingLockPath(lockPath, owner)
+  renameLockSync(lockPath, retiredPath)
+  removeLockSync(retiredPath, { recursive: true })
 }
 
 function describeCurrentOwner(lockPath: string): string {
