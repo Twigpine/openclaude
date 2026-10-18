@@ -328,9 +328,11 @@ test('configured and inherited Merge teammates authenticate in a fresh process',
     Object.assign(process.env, { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: 'https://api-gateway.merge.dev/v1/openai', OPENAI_MODEL: 'openai/gpt-5.5', OPENAI_API_KEY: 'parent-key', MERGE_GATEWAY_API_KEY: 'parent-key' });
     const forwarded = buildInheritedEnvVars();
     // A pane's shell may not have inherited any of the leader's credentials.
-    await run(['/bin/sh', '-c', 'env ' + forwarded + ' ' + quote([process.execPath, '--eval', request])], {
-      PATH: process.env.PATH, EXPECTED_KEY: 'parent-key',
-    });
+    if (process.platform !== 'win32') {
+      await run(['/bin/sh', '-c', 'env ' + forwarded + ' ' + quote([process.execPath, '--eval', request])], {
+        PATH: process.env.PATH, EXPECTED_KEY: 'parent-key',
+      });
+    }
   `
   try {
     const child = Bun.spawn([process.execPath, '--eval', source], {
