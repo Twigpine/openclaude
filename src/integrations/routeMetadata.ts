@@ -284,6 +284,14 @@ export function isMiniMaxBaseUrl(value: string | undefined): boolean {
   }
 }
 
+export function getMiniMaxBaseUrlValidationError(
+  baseUrl: string | undefined,
+): string | null {
+  return isMiniMaxBaseUrl(baseUrl) && new URL(baseUrl!).protocol !== 'https:'
+    ? 'MiniMax base URL must use HTTPS'
+    : null
+}
+
 export function isXaiBaseUrl(value: string | undefined): boolean {
   const trimmed = value?.trim()
   if (!trimmed) {
@@ -971,7 +979,9 @@ export function hasMiniMaxEnvOnlyProviderIntent(
 
   return (
     hasMiniMaxCredential &&
-    !hasConflictingOpenAIBaseUrlForRoute(processEnv, isMiniMaxBaseUrl) &&
+    ((isMiniMaxBaseUrl(processEnv.ANTHROPIC_BASE_URL) &&
+      hasNoExplicitNonOpenAICompatibleProvider(processEnv)) ||
+      !hasConflictingOpenAIBaseUrlForRoute(processEnv, isMiniMaxBaseUrl)) &&
     (hasExplicitMiniMaxIntent ||
       (!hasAnyUsableOpenAICredential(processEnv) &&
         !hasNonEmptyEnvValue(processEnv.XAI_API_KEY) &&
@@ -1268,11 +1278,9 @@ export function resolveRouteCredentialValue(
   // Check transport before releasing a dedicated MiniMax credential to the shim.
   if (
     routeId === 'minimax' &&
-    options?.baseUrl &&
-    isMiniMaxBaseUrl(options.baseUrl) &&
-    new URL(options.baseUrl).protocol !== 'https:'
+    getMiniMaxBaseUrlValidationError(options?.baseUrl)
   ) {
-    throw new Error('MiniMax base URL must use HTTPS')
+    return undefined
   }
 
   // ApiSmart's host is intentionally sufficient for route identity, but its

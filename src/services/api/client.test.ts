@@ -262,6 +262,7 @@ afterEach(() => {
     restoreEnv('GEMINI_AUTH_MODE', originalEnv.GEMINI_AUTH_MODE)
     restoreEnv('GOOGLE_API_KEY', originalEnv.GOOGLE_API_KEY)
     restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
+    restoreEnv('OPENAI_API_KEYS', originalEnv.OPENAI_API_KEYS)
     restoreEnv('OPENAI_BASE_URL', originalEnv.OPENAI_BASE_URL)
     restoreEnv('OPENAI_API_BASE', originalEnv.OPENAI_API_BASE)
     restoreEnv('OPENAI_API_FORMAT', originalEnv.OPENAI_API_FORMAT)
@@ -753,30 +754,38 @@ test('routes env-only MiniMax requests through the Anthropic-compatible API', as
 })
 
 for (const credentialEnv of ['ANTHROPIC_API_KEY', 'MINIMAX_API_KEY']) {
-  test(`MiniMax China preserves native endpoint with ${credentialEnv}`, async () => {
-    clearEnvForMiniMaxOnlyTest()
-    process.env.ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
-    process.env.ANTHROPIC_MODEL = 'MiniMax-M3'
-    process.env[credentialEnv] = 'china-test-key'
-    let capturedUrl: string | undefined
-    let capturedHeaders: Headers | undefined
-    globalThis.fetch = (async (input, init) => {
-      capturedUrl = String(input)
-      capturedHeaders = new Headers(init?.headers)
-      return new Response(JSON.stringify({
-        id: 'msg-china', type: 'message', role: 'assistant', model: 'MiniMax-M3',
-        content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
-        usage: { input_tokens: 1, output_tokens: 1 },
-      }), { headers: { 'Content-Type': 'application/json' } })
-    }) as FetchType
-    const client = await getAnthropicClient({ maxRetries: 0, model: 'MiniMax-M3' })
-    await client.beta.messages.create({
-      model: 'MiniMax-M3', max_tokens: 16,
-      messages: [{ role: 'user', content: 'hello' }],
-    })
-    expect(capturedUrl).toBe('https://api.minimaxi.com/anthropic/v1/messages?beta=true')
-    expect(capturedHeaders?.get('x-api-key')).toBe('china-test-key')
-  })
+  for (const dormantBaseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
+    for (const host of ['api.minimax.io', 'api.minimaxi.com', 'api.minimax.chat']) {
+      test(`MiniMax native ${host} preserves ${credentialEnv} despite dormant ${dormantBaseEnv}`, async () => {
+        clearEnvForMiniMaxOnlyTest()
+        process.env[dormantBaseEnv] = 'https://unrelated.example/v1'
+        process.env.ANTHROPIC_BASE_URL = `https://${host}/anthropic`
+        process.env.ANTHROPIC_MODEL = 'MiniMax-M3'
+        process.env.OPENAI_MODEL = 'stale-model'
+        const { getMainLoopModel } = await import('../../utils/model/model.js')
+        expect(getMainLoopModel()).toBe('MiniMax-M3')
+        process.env[credentialEnv] = 'china-test-key'
+        let capturedUrl: string | undefined
+        let capturedHeaders: Headers | undefined
+        globalThis.fetch = (async (input, init) => {
+          capturedUrl = String(input)
+          capturedHeaders = new Headers(init?.headers)
+          return new Response(JSON.stringify({
+            id: 'msg-china', type: 'message', role: 'assistant', model: 'MiniMax-M3',
+            content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }), { headers: { 'Content-Type': 'application/json' } })
+        }) as FetchType
+        const client = await getAnthropicClient({ maxRetries: 0, model: 'MiniMax-M3' })
+        await client.beta.messages.create({
+          model: 'MiniMax-M3', max_tokens: 16,
+          messages: [{ role: 'user', content: 'hello' }],
+        })
+        expect(capturedUrl).toBe(`https://${host}/anthropic/v1/messages?beta=true`)
+        expect(capturedHeaders?.get('x-api-key')).toBe('china-test-key')
+      })
+    }
+  }
 }
 
 for (const baseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
@@ -786,27 +795,54 @@ for (const baseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
       process.env[baseEnv] = 'https://api.minimaxi.com/v1'
       process.env[credentialEnv] = 'china-test-key'
+      process.env.OPENAI_MODEL = 'MiniMax-M3'
+      process.env.ANTHROPIC_MODEL = 'claude-sonnet-4-6'
+      const models = await import('../../utils/model/model.js')
+      const selectedModel = models.getMainLoopModel()
+      expect([selectedModel, models.getDefaultMainLoopModel(), models.getSmallFastModel(),
+        models.getDefaultOpusModel(), models.getDefaultSonnetModel(), models.getDefaultHaikuModel(),
+      ]).toEqual(Array(6).fill('MiniMax-M3'))
       let capturedUrl: string | undefined
       let capturedHeaders: Headers | undefined
+      let capturedBody: Record<string, unknown> | undefined
       globalThis.fetch = (async (input, init) => {
         capturedUrl = String(input)
         capturedHeaders = new Headers(init?.headers)
+        capturedBody = JSON.parse(String(init?.body))
         return new Response(JSON.stringify({
           id: 'chat-china', object: 'chat.completion', model: 'MiniMax-M3',
           choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
         }), { headers: { 'Content-Type': 'application/json' } })
       }) as FetchType
-      const client = await getAnthropicClient({ maxRetries: 0, model: 'MiniMax-M3' })
+      const client = await getAnthropicClient({ maxRetries: 0, model: selectedModel })
       await client.beta.messages.create({
-        model: 'MiniMax-M3', max_tokens: 16,
+        model: selectedModel, max_tokens: 16,
         messages: [{ role: 'user', content: 'hello' }],
       })
       expect(capturedUrl).toBe('https://api.minimaxi.com/v1/chat/completions')
+      expect(capturedBody?.model).toBe('MiniMax-M3')
       expect(capturedHeaders?.get('authorization')).toBe('Bearer china-test-key')
+      const { getModelOptions } = await import('../../utils/model/modelOptions.js')
+      const { validateModel } = await import('../../utils/model/validateModel.js')
+      expect(getModelOptions().some(option => option.value === 'MiniMax-M3')).toBe(true)
+      expect(await validateModel('MiniMax-M3')).toEqual({ valid: true })
     })
   }
 }
+
+test('selected Gemini ignores dormant native MiniMax transport settings', async () => {
+  clearEnvForMiniMaxOnlyTest()
+  process.env.CLAUDE_CODE_USE_GEMINI = '1'
+  process.env.GEMINI_API_KEY = 'gemini-test-key'
+  process.env.GEMINI_MODEL = 'gemini-2.5-pro'
+  process.env.ANTHROPIC_BASE_URL = 'http://api.minimaxi.com/anthropic'
+  process.env.MINIMAX_API_KEY = 'dormant-mini-key'
+  process.env.OPENAI_BASE_URL = 'https://unrelated.example/v1'
+  await expect(getAnthropicClient({ maxRetries: 0, model: 'gemini-2.5-pro' })).resolves.toBeDefined()
+  expect(process.env.CLAUDE_CODE_USE_GEMINI).toBe('1')
+  expect(process.env.ANTHROPIC_API_KEY).toBe('must-not-forward')
+})
 
 test('dormant MiniMax China configuration cannot replace an explicit OpenAI route', async () => {
   clearEnvForMiniMaxOnlyTest()
@@ -835,6 +871,10 @@ test('dormant MiniMax China configuration cannot replace an explicit OpenAI rout
   expect(capturedHeaders?.get('authorization')).toBe('Bearer selected-openai-key')
   expect(capturedHeaders?.get('x-api-key')).toBeNull()
   expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+  const { getModelOptions } = await import('../../utils/model/modelOptions.js')
+  const { validateModel } = await import('../../utils/model/validateModel.js')
+  expect(getModelOptions().some(option => option.value === 'MiniMax-M3')).toBe(false)
+  expect(await validateModel('sonnet')).toEqual({ valid: true })
 })
 
 for (const baseEnv of ['ANTHROPIC_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
@@ -859,6 +899,31 @@ for (const baseEnv of ['ANTHROPIC_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_BASE
     expect(process.env.OPENAI_API_KEY).toBeUndefined()
     expect(process.env.ANTHROPIC_API_KEY).toBe('must-not-forward')
   })
+}
+
+for (const dormantBaseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
+  for (const credentialEnv of ['MINIMAX_API_KEY', 'ANTHROPIC_API_KEY']) {
+    for (const host of ['api.minimax.io', 'api.minimaxi.com', 'api.minimax.chat']) {
+      test(`MiniMax native HTTP ${host} rejects ${credentialEnv} despite dormant ${dormantBaseEnv}`, async () => {
+        clearEnvForMiniMaxOnlyTest()
+        process.env[dormantBaseEnv] = 'https://unrelated.example/v1'
+        process.env.ANTHROPIC_BASE_URL = `http://${host}/anthropic`
+        process.env[credentialEnv] = 'native-test-key'
+        let calls = 0
+        globalThis.fetch = (async () => {
+          calls++
+          return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+        }) as unknown as FetchType
+        await expect((async () => {
+          const client = await getAnthropicClient({ maxRetries: 0, model: 'MiniMax-M3' })
+          await client.beta.messages.create({
+            model: 'MiniMax-M3', max_tokens: 16, messages: [{ role: 'user', content: 'hello' }],
+          })
+        })()).rejects.toThrow('MiniMax base URL must use HTTPS')
+        expect(calls).toBe(0)
+      })
+    }
+  }
 }
 
 test('env-only MiniMax fallback preserves legacy OPENAI_MODEL as Anthropic model', async () => {

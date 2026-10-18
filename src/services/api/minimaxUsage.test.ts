@@ -332,3 +332,57 @@ describe('MiniMax usage helpers', () => {
     }
   })
 })
+
+for (const baseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
+  for (const protocol of ['http', 'https']) {
+    test(`China quota ${protocol} via applied profile and ${baseEnv}`, async () => {
+      const { applyProviderProfileToProcessEnv, clearProviderProfileEnvFromProcessEnv } = await import('../../utils/providerProfiles.js')
+      const { buildStartupEnvFromProfile } = await import('../../utils/providerProfile.js')
+      const { getProviderValidationError } = await import('../../utils/providerValidation.js')
+      const { resolveActiveUsageId } = await import('../../commands/usage/index.js')
+      const { fetchMiniMaxUsage } = await import('./minimaxUsage.js')
+      const savedEnv = { ...process.env }
+      const clearedEnv = { ...process.env }
+      clearProviderProfileEnvFromProcessEnv(clearedEnv)
+      const managedKeys = Object.keys(savedEnv).filter(key => !(key in clearedEnv))
+      const savedFetch = globalThis.fetch
+      const globals = globalThis as Record<string, unknown>
+      const savedMacro = globals.MACRO
+      globals.MACRO = { VERSION: '0.0.0-test' }
+      const calls: { url: string; auth: string | null }[] = []
+      try {
+        applyProviderProfileToProcessEnv({
+          id: 'china-quota-test', name: 'China quota test', provider: 'custom',
+          model: 'MiniMax-M3', baseUrl: `${protocol}://api.minimaxi.com/v1`, apiKey: 'quota-test-key',
+        })
+        if (baseEnv === 'OPENAI_API_BASE') {
+          process.env.OPENAI_API_BASE = process.env.OPENAI_BASE_URL
+          delete process.env.OPENAI_BASE_URL
+        }
+        const startup = await buildStartupEnvFromProfile({ processEnv: process.env, persisted: null })
+        expect(resolveActiveUsageId(startup)).toBe('minimax')
+        globalThis.fetch = (async (input, init) => {
+          calls.push({ url: String(input), auth: new Headers(init?.headers).get('authorization') })
+          return new Response('{}', { status: 404 })
+        }) as typeof fetch
+        if (protocol === 'http') {
+          await expect(fetchMiniMaxUsage()).rejects.toThrow('MiniMax base URL must use HTTPS')
+          expect(calls).toEqual([])
+          await expect(getProviderValidationError(startup)).resolves.toBe('MiniMax base URL must use HTTPS')
+        } else {
+          await expect(getProviderValidationError(startup)).resolves.toBeNull()
+          await expect(fetchMiniMaxUsage()).resolves.toMatchObject({ availability: 'unknown' })
+          expect(calls).toEqual([
+            { url: 'https://api.minimaxi.com/v1/token_plan/remains', auth: 'Bearer quota-test-key' },
+            { url: 'https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains', auth: 'Bearer quota-test-key' },
+          ])
+        }
+      } finally {
+        globalThis.fetch = savedFetch
+        globals.MACRO = savedMacro
+        clearProviderProfileEnvFromProcessEnv()
+        for (const key of managedKeys) process.env[key] = savedEnv[key]
+      }
+    })
+  }
+}

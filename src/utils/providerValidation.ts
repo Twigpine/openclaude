@@ -12,6 +12,8 @@ import type {
   VendorDescriptor,
 } from '../integrations/descriptors.js'
 import {
+  getMiniMaxBaseUrlOverride,
+  getMiniMaxBaseUrlValidationError,
   getRouteCredentialEnvVars,
   getRouteCredentialValue,
   getRouteDescriptor,
@@ -593,6 +595,14 @@ export async function getProviderValidationError(
   const secretSource = env as SecretValueSource
   const useOpenAI = isEnvTruthy(env.CLAUDE_CODE_USE_OPENAI)
   const validationTarget = getRuntimeValidationTarget(env)
+
+  if (resolveActiveRouteIdFromEnv(env) === 'minimax') {
+    const baseUrl = useOpenAI
+      ? env.OPENAI_BASE_URL?.trim() || env.OPENAI_API_BASE?.trim()
+      : getMiniMaxBaseUrlOverride(env)
+    const validationError = getMiniMaxBaseUrlValidationError(baseUrl)
+    if (validationError) return validationError
+  }
 
   if (!useOpenAI && !validationTarget) {
     return null

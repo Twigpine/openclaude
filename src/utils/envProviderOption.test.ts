@@ -132,3 +132,23 @@ describe('getEnvProviderOption — availability and var naming', () => {
     expect(option.apiKey).toBe('generic-openai-secret')
   })
 })
+
+for (const baseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
+  test(`inactive insecure MiniMax ${baseEnv} is safe for startup and onboarding inspection`, async () => {
+    const { buildStartupEnvFromProfile } = await import('./providerProfile.js')
+    const { refreshStartupDiscoveryForActiveRoute } = await import('../integrations/discoveryService.js')
+    const env = {
+      CLAUDE_CODE_USE_GEMINI: '1', GEMINI_API_KEY: 'gemini-test-key',
+      GEMINI_MODEL: 'gemini-2.5-pro', [baseEnv]: 'http://api.minimax.io/v1',
+    }
+    const startup = await buildStartupEnvFromProfile({ processEnv: env, persisted: null })
+    expect(startup.CLAUDE_CODE_USE_GEMINI).toBe('1')
+    expect(() => getEnvProviderOption(env)).not.toThrow()
+    const miniEnv = {
+      CLAUDE_CODE_USE_OPENAI: '1', [baseEnv]: 'http://api.minimaxi.com/v1',
+      OPENAI_MODEL: 'MiniMax-M3', MINIMAX_API_KEY: 'mini-test-key',
+    }
+    expect(getEnvProviderOption(miniEnv).apiKey).toBeUndefined()
+    await expect(refreshStartupDiscoveryForActiveRoute({ processEnv: miniEnv })).resolves.toBeNull()
+  })
+}

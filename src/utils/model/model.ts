@@ -42,7 +42,9 @@ export type ModelName = string
 export type ModelSetting = ModelName | ModelAlias | null
 
 function getMiniMaxModelEnv(): string | undefined {
-  return process.env.ANTHROPIC_MODEL || process.env.OPENAI_MODEL
+  return isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
+    ? process.env.OPENAI_MODEL
+    : process.env.ANTHROPIC_MODEL || process.env.OPENAI_MODEL
 }
 
 function normalizeModelSetting(value: unknown): ModelName | ModelAlias | undefined {

@@ -1020,3 +1020,15 @@ test('startup provider validation stays strict for non-interactive launches', ()
     }),
   ).toBe(true)
 })
+
+for (const baseEnv of ['ANTHROPIC_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
+  test(`MiniMax HTTP ${baseEnv} reports a structured transport error`, async () => {
+    const env = {
+      ...(baseEnv === 'ANTHROPIC_BASE_URL' ? {} : { CLAUDE_CODE_USE_OPENAI: '1' }),
+      [baseEnv]: 'http://api.minimaxi.com/anthropic', MINIMAX_API_KEY: 'mini-test-key',
+    }
+    await expect(getProviderValidationError(env)).resolves.toBe('MiniMax base URL must use HTTPS')
+    expect(shouldExitForStartupProviderValidationError({ args: [], stdoutIsTTY: true })).toBe(false)
+    expect(shouldExitForStartupProviderValidationError({ args: ['-p', 'hello'], stdoutIsTTY: false })).toBe(true)
+  })
+}

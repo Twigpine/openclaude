@@ -51,6 +51,7 @@ import {
 } from '../../utils/githubModelsCredentials.js'
 import { resolveXaiAccessToken } from '../../utils/xaiCredentials.js'
 import {
+  getMiniMaxBaseUrlValidationError,
   getRouteDescriptor,
   isLongcatBaseUrl,
   isXaiBaseUrl,
@@ -449,6 +450,9 @@ class OpenAIShimMessages {
     options?: { signal?: AbortSignal; headers?: Record<string, string> },
     requestProcessEnv: NodeJS.ProcessEnv = process.env,
   ): Promise<Response> {
+    const validationError = getMiniMaxBaseUrlValidationError(request.baseUrl)
+    if (validationError) throw new Error(validationError)
+
     const codexResponse = await dispatchCodexRequest({
       request,
       params,

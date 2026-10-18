@@ -42,6 +42,7 @@ import {
   getFireworksBaseUrlOverride,
   getLongcatBaseUrlOverride,
   getMiniMaxBaseUrlOverride,
+  getMiniMaxBaseUrlValidationError,
   isMiniMaxBaseUrl,
   getNearaiBaseUrlOverride,
   isCanonicalApiRouteInferenceBaseUrl,
@@ -197,9 +198,8 @@ function isXaiModelName(value: string | undefined): boolean {
 
 function applyMiniMaxEnvOnlyDefaults(model: string | undefined): void {
   const baseUrlOverride = getMiniMaxBaseUrlOverride()
-  if (baseUrlOverride && new URL(baseUrlOverride).protocol !== 'https:') {
-    throw new Error('MiniMax base URL must use HTTPS')
-  }
+  const validationError = getMiniMaxBaseUrlValidationError(baseUrlOverride)
+  if (validationError) throw new Error(validationError)
   // ANTHROPIC_BASE_URL already describes the native endpoint. Legacy OpenAI
   // URL hints select the region, but still need the native /anthropic path.
   const baseUrl = isMiniMaxBaseUrl(process.env.ANTHROPIC_BASE_URL)
