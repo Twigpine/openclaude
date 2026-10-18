@@ -66,6 +66,7 @@ import { resolveAgentRunModelRouting, shouldEnforceModelAllowlist } from '../../
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import {
   clearAgentTranscriptSubdir,
+  getAgentTranscriptPath,
   recordSidechainTranscript,
   setAgentTranscriptSubdir,
   writeAgentMetadata,
@@ -851,6 +852,19 @@ export async function* runAgent({
     logForDebugging(`Failed to write agent metadata: ${_err}`)
   }
 
+  function recordAgentTranscript(messages: Message[], parentUuid?: UUID | null) {
+    const outputDestination = getAgentTranscriptPath(agentId)
+    // Storage captures this same path synchronously. Publish submission order,
+    // so an older delayed write cannot replace a newer session's destination.
+    const write = recordSidechainTranscript(messages, agentId, parentUuid)
+    rootSetAppState(prev => {
+      const task = prev.tasks?.[agentId]
+      if (task?.type !== 'local_agent' || task.outputDestination === outputDestination) return prev
+      return { ...prev, tasks: { ...prev.tasks, [agentId]: { ...task, outputDestination } } }
+    })
+    return write
+  }
+
   // Track the last recorded message UUID for parent chain continuity.
   let lastRecordedUuid: UUID | null = initialMessages.at(-1)?.uuid ?? null
 
@@ -862,7 +876,7 @@ export async function* runAgent({
       // Storage owns a cleaned message array and tracks this producer even
       // when cancellation releases the runner before its append finishes.
       await raceAbort(
-        recordSidechainTranscript(initialMessages, agentId),
+        recordAgentTranscript(initialMessages),
         agentAbortController.signal,
       ).catch(err => {
         if (agentAbortController.signal.aborted) throw new AbortError()
@@ -937,7 +951,7 @@ export async function* runAgent({
           // Only write if identity metadata was successfully persisted.
           if (metadataWritten) {
             await raceAbort(
-              recordSidechainTranscript([message], agentId, lastRecordedUuid),
+              recordAgentTranscript([message], lastRecordedUuid),
               agentAbortController.signal,
             ).catch(err => {
               if (agentAbortController.signal.aborted) throw new AbortError()

@@ -11,7 +11,7 @@ import type { ShellCommand } from '../../utils/ShellCommand.js'
 import { TaskOutput } from '../../utils/task/TaskOutput.js'
 import { registerForeground } from '../../tasks/LocalShellTask/LocalShellTask.js'
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { AppState } from '../../state/AppState.js'
 import type { ToolUseContext } from '../../Tool.js'
@@ -67,7 +67,7 @@ beforeEach(async () => {
   resetProjectForTesting()
   getProjectDir.cache.clear?.()
   clearPendingNotifications()
-  expect(getAgentTranscriptPath(asAgentId('fixture-check')).startsWith(configDir + '/')).toBe(true)
+  expect(getAgentTranscriptPath(asAgentId('fixture-check')).startsWith(configDir + sep)).toBe(true)
 })
 afterEach(async () => {
   try {
@@ -110,6 +110,14 @@ for (const phase of ['success', 'initial', 'incremental'] as const) {
       holder = holdTranscript()
       await locked.promise
     }
+    const submitted = deferred()
+    let branchCalls = 0
+    mock.module('../../utils/git.js', () => ({ ...actualGit, getBranch: async () => {
+      // This checkpoint is inside the submitted storage chain, after metadata
+      // persistence. The held file lock still prevents its physical append.
+      if (++branchCalls === (phase === 'incremental' ? 2 : 1)) submitted.resolve()
+      return 'test'
+    } }))
     let shell: ShellCommand | undefined
     let childExit: Promise<void> | undefined
     const shellId = `shell-${phase}`
@@ -169,7 +177,7 @@ for (const phase of ['success', 'initial', 'incremental'] as const) {
     let cancellationDeadline: ReturnType<typeof setTimeout> | undefined
     try {
       await locked.promise
-      await new Promise(resolve => setTimeout(resolve, 150))
+      await submitted.promise
       expect(appState.tasks[agentId]?.status).toBe('running')
       expect(queried).toBe(phase === 'incremental')
       if (cancel) {
@@ -344,10 +352,11 @@ for (const foreground of [false, true]) {
     const links: Promise<string>[] = []
     const liveLinks: Promise<string>[] = []
     const releaseRetarget = deferred()
+    const releaseInitial = deferred()
     mock.module('../../utils/task/diskOutput.js', () => ({
       ...actualDiskOutput,
       initTaskOutputAsSymlink: (id: string, path: string) => {
-        const ready = id === agentId ? (links[0] ?? release.promise) : liveLinks.length ? releaseRetarget.promise : Promise.resolve()
+        const ready = id === agentId ? (links[0] ?? release.promise) : liveLinks.length ? releaseRetarget.promise : foreground ? releaseInitial.promise : Promise.resolve()
         const link = ready.then(() => actualDiskOutput.initTaskOutputAsSymlink(id, path))
         if (id === agentId) links.push(link)
         else liveLinks.push(link)
@@ -359,7 +368,7 @@ for (const foreground of [false, true]) {
     register({ agentId, description: 'finished', prompt: 'test', selectedAgent, setAppState })
     if (foreground) backgroundAgentTask(agentId, () => state, setAppState)
     const active = registerAsyncAgent({ agentId: activeId, description: 'active', prompt: 'test', selectedAgent, setAppState })
-    await active.outputReady
+    if (!foreground) await active.outputReady
     await recordSidechainTranscript([createUserMessage({ content: 'finished readable output' })], agentId)
     const finish = () => completeAgentTask({ agentId, content: [] } as never, setAppState)
     let completion = foreground ? undefined : finish()
@@ -375,24 +384,95 @@ for (const foreground of [false, true]) {
       expect(links).toHaveLength(1)
       // A genuine live producer must still migrate and expose new-session output.
       await recordSidechainTranscript([createUserMessage({ content: 'new active output' })], activeId)
-      expect(liveLinks).toHaveLength(2)
       activeCompletion = completeAgentTask({ agentId: activeId, content: [] } as never, setAppState)
       await new Promise(resolve => setTimeout(resolve, 20))
       expect(state.tasks[activeId]?.status).toBe('running')
       releaseRetarget.resolve()
+      if (foreground) {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        expect(state.tasks[activeId]?.status).toBe('running')
+      }
+      releaseInitial.resolve()
       await activeCompletion
       expect(state.tasks[activeId]?.status).toBe('completed')
+      expect(liveLinks).toHaveLength(2)
       expect(await readFile(getTaskOutputPath(activeId), 'utf8')).toContain('new active output')
     } finally {
       release.resolve()
       await completion
       await Promise.all(links)
       releaseRetarget.resolve()
+      releaseInitial.resolve()
       await activeCompletion
       await Promise.all(liveLinks)
       killAsyncAgent(activeId, setAppState)
     }
   })
+}
+
+for (const foreground of [false, true]) {
+  for (const continuesInB of [false, true]) {
+    test(`final ${foreground ? 'foreground' : 'async'} write spanning clear stays readable, continued=${continuesInB}`, async () => {
+      const agentId = asAgentId(`final-clear-${foreground}-${continuesInB}`)
+      let state = getDefaultAppState()
+      const setAppState = (update: (prev: AppState) => AppState) => { state = update(state) }
+      const entered = deferred()
+      const release = deferred()
+      let holdNextBranch = false
+      mock.module('../../utils/git.js', () => ({ ...actualGit, getBranch: async () => {
+        if (holdNextBranch) { holdNextBranch = false; entered.resolve(); await release.promise }
+        return 'test'
+      } }))
+      mock.module('../../query.js', () => ({ ...actualQuery, query: async function* () {
+        holdNextBranch = true
+        yield createAssistantMessage({ content: 'final A answer' })
+        if (continuesInB) yield createAssistantMessage({ content: 'continued B answer' })
+        return { reason: 'completed' }
+      } }))
+      const selectedAgent = { agentType: 'general-purpose', source: 'built-in', baseDir: 'built-in', whenToUse: 'test', getSystemPrompt: () => 'test' } as AgentDefinition
+      const register = foreground ? registerAgentForeground : registerAsyncAgent
+      register({ agentId, description: 'clear output', prompt: 'initial prompt', selectedAgent, setAppState })
+      const task = state.tasks[agentId]
+      if (task?.type !== 'local_agent') throw new Error('expected registered local agent')
+      if (foreground) backgroundAgentTask(agentId, () => state, setAppState)
+      const pathA = getAgentTranscriptPath(agentId)
+      const context = {
+        options: { commands: [], tools: [], mainLoopModel: 'test-model', thinkingConfig: { type: 'disabled' }, mcpClients: [], mcpResources: {}, agentDefinitions: { activeAgents: [], allAgents: [] } },
+        abortController: task.abortController, readFileState: createFileStateCacheWithSizeLimit(READ_FILE_STATE_CACHE_SIZE),
+        messages: [], getAppState: () => state, setAppState,
+        setInProgressToolUseIDs: () => {}, setResponseLength: () => {}, updateFileHistoryState: () => {}, updateAttributionState: () => {},
+      } as unknown as ToolUseContext
+      const lifecycle = runAsyncAgentLifecycle({
+        taskId: agentId, abortController: task.abortController!,
+        makeStream: () => runAgent({
+          agentDefinition: selectedAgent, promptMessages: [createUserMessage({ content: 'initial prompt' })],
+          toolUseContext: context, canUseTool: async () => ({ behavior: 'allow' }), isAsync: true,
+          querySource: 'agent:builtin:general-purpose', availableTools: [],
+          override: { agentId, abortController: task.abortController, userContext: {}, systemContext: {}, systemPrompt: ['test'] as never },
+        }),
+        metadata: { prompt: 'initial prompt', resolvedAgentModel: 'test-model', isBuiltInAgent: true, startTime: Date.now(), agentType: 'general-purpose', isAsync: true },
+        description: 'clear output', toolUseContext: context, rootSetAppState: setAppState,
+        agentIdForCleanup: agentId, enableSummarization: false, getWorktreeResult: async () => ({}),
+      })
+      try {
+        await entered.promise
+        await clearConversation({ setMessages: () => {}, readFileState: context.readFileState, getAppState: () => state, setAppState })
+        await recordTranscript([createUserMessage({ content: 'new main B conversation' })])
+        const pathB = getAgentTranscriptPath(agentId)
+        expect(pathB).not.toBe(pathA)
+        release.resolve()
+        await lifecycle
+        expect(state.tasks[agentId]?.status).toBe('completed')
+        expect(await readFile(pathA, 'utf8')).toContain('final A answer')
+        const output = await readFile(getTaskOutputPath(agentId), 'utf8')
+        expect(output).toContain(continuesInB ? 'continued B answer' : 'final A answer')
+        expect(getPendingNotificationsSnapshot().map(item => item.value).join('\n')).toContain('<status>completed</status>')
+      } finally {
+        release.resolve()
+        await lifecycle
+      }
+    })
+  }
 }
 
 for (const phase of ['initial', 'incremental'] as const) {
