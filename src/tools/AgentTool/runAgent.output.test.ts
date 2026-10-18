@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process'
 import type { ShellCommand } from '../../utils/ShellCommand.js'
 import { TaskOutput } from '../../utils/task/TaskOutput.js'
 import { registerForeground } from '../../tasks/LocalShellTask/LocalShellTask.js'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { AppState } from '../../state/AppState.js'
@@ -21,13 +21,15 @@ import { createAssistantMessage, createUserMessage } from '../../utils/messages.
 import { FileStateCache, createFileStateCacheWithSizeLimit, READ_FILE_STATE_CACHE_SIZE } from '../../utils/fileStateCache.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
-import { getAgentTranscriptPath, getProjectDir, resetSessionFilePointer, recordSidechainTranscript, recordTranscript, setInternalEventWriter, resetProjectForTesting, flushSessionStorage } from '../../utils/sessionStorage.js'
+import { getAgentTranscript, readAgentMetadata, writeAgentMetadata, setAgentTranscriptSubdir, getAgentTranscriptPath, getProjectDir, resetSessionFilePointer, recordSidechainTranscript, recordTranscript, setInternalEventWriter, resetProjectForTesting, flushSessionStorage } from '../../utils/sessionStorage.js'
 import { withTranscriptFileLock } from '../../utils/transcriptFileLock.js'
 import { registerAsyncAgent, registerAgentForeground, backgroundAgentTask, completeAgentTask, killAsyncAgent } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { getTaskOutputPath, _clearOutputsForTest } from '../../utils/task/diskOutput.js'
 import { clearPendingNotifications, getPendingNotificationsSnapshot } from '../../utils/messageQueueManager.js'
 import { runAsyncAgentLifecycle } from './agentToolUtils.js'
 import { runAgent } from './runAgent.js'
+import { resumeAgentBackground } from './resumeAgent.js'
+import { startBackgroundSession } from '../../tasks/LocalMainSessionTask.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 
 const actualDiskOutput = { ...await import('../../utils/task/diskOutput.js') }
@@ -429,7 +431,12 @@ for (const foreground of [false, true]) {
         if (continuesInB) yield createAssistantMessage({ content: 'continued B answer' })
         return { reason: 'completed' }
       } }))
-      const selectedAgent = { agentType: 'general-purpose', source: 'built-in', baseDir: 'built-in', whenToUse: 'test', getSystemPrompt: () => 'test' } as AgentDefinition
+      const selectedAgent = { agentType: continuesInB ? 'general-purpose' : 'retained-agent', source: continuesInB ? 'built-in' : 'userSettings', baseDir: 'built-in', whenToUse: 'test', getSystemPrompt: () => 'test' } as AgentDefinition
+      const transcriptSubdir = foreground && !continuesInB ? join('workflows', 'retained') : undefined
+      if (transcriptSubdir) {
+        switchSession(getSessionId(), getProjectDir(join(configDir, 'resumed-project')))
+        setAgentTranscriptSubdir(agentId, transcriptSubdir)
+      }
       const register = foreground ? registerAgentForeground : registerAsyncAgent
       register({ agentId, description: 'clear output', prompt: 'initial prompt', selectedAgent, setAppState })
       const task = state.tasks[agentId]
@@ -447,7 +454,7 @@ for (const foreground of [false, true]) {
         makeStream: () => runAgent({
           agentDefinition: selectedAgent, promptMessages: [createUserMessage({ content: 'initial prompt' })],
           toolUseContext: context, canUseTool: async () => ({ behavior: 'allow' }), isAsync: true,
-          querySource: 'agent:builtin:general-purpose', availableTools: [],
+          querySource: 'agent:builtin:general-purpose', availableTools: [], transcriptSubdir,
           override: { agentId, abortController: task.abortController, userContext: {}, systemContext: {}, systemPrompt: ['test'] as never },
         }),
         metadata: { prompt: 'initial prompt', resolvedAgentModel: 'test-model', isBuiltInAgent: true, startTime: Date.now(), agentType: 'general-purpose', isAsync: true },
@@ -467,12 +474,110 @@ for (const foreground of [false, true]) {
         const output = await readFile(getTaskOutputPath(agentId), 'utf8')
         expect(output).toContain(continuesInB ? 'continued B answer' : 'final A answer')
         expect(getPendingNotificationsSnapshot().map(item => item.value).join('\n')).toContain('<status>completed</status>')
+        const transcript = await getAgentTranscript(agentId)
+        expect(JSON.stringify(transcript?.messages)).toContain(continuesInB ? 'continued B answer' : 'final A answer')
+        if (!continuesInB) {
+          expect(await readAgentMetadata(agentId)).toMatchObject({ agentType: selectedAgent.agentType, source: selectedAgent.source })
+          context.options.agentDefinitions.activeAgents = []
+          const resume = () => resumeAgentBackground({ agentId, prompt: 'continue after clear', toolUseContext: context, canUseTool: async () => ({ behavior: 'allow' }) })
+          await expect(resume()).rejects.toThrow('unavailable or disabled')
+          context.options.agentDefinitions.activeAgents = [{ ...selectedAgent, source: 'projectSettings' } as AgentDefinition]
+          await expect(resume()).rejects.toThrow('identity mismatch')
+        }
+        context.options.agentDefinitions.activeAgents = [selectedAgent]
+        const resumed = deferred()
+        let resumedMessages: unknown
+        mock.module('../../query.js', () => ({ ...actualQuery, query: async function* ({ messages }: { messages: unknown }) {
+          resumedMessages = structuredClone(messages)
+          yield createAssistantMessage({ content: 'resumed answer' })
+        } }))
+        // Observe actual lifecycle completion, not only resume's admission result.
+        context.setAppState = update => {
+          setAppState(update)
+          if (state.tasks[agentId]?.status !== 'running') resumed.resolve()
+        }
+        const result = await resumeAgentBackground({ agentId, prompt: 'continue after clear', toolUseContext: context, canUseTool: async () => ({ behavior: 'allow' }) })
+        await resumed.promise
+        expect(state.tasks[agentId]?.status).toBe('completed')
+        expect(JSON.stringify(resumedMessages)).toContain(continuesInB ? 'continued B answer' : 'final A answer')
+        expect(JSON.stringify(resumedMessages)).toContain('continue after clear')
+        expect(await readFile(result.outputFile, 'utf8')).toContain('resumed answer')
       } finally {
         release.resolve()
         await lifecycle
       }
     })
   }
+}
+
+test('retained transcript lookup rejects output links outside generated agent storage', async () => {
+  const agentId = asAgentId('retained-path-guard')
+  const pathA = getAgentTranscriptPath(agentId)
+  await writeAgentMetadata(agentId, { agentType: 'retained-agent', source: 'userSettings' })
+  await recordSidechainTranscript([createUserMessage({ content: 'retained history' })], agentId)
+  const transcript = await readFile(pathA, 'utf8')
+  switchSession(asSessionId(randomUUID()))
+  for (const target of [
+    join(configDir, `agent-${agentId}.jsonl`),
+    join(dirname(pathA), 'agent-other.jsonl'),
+    join(getProjectDir(configDir), 'invalid-session', 'subagents', `agent-${agentId}.jsonl`),
+  ]) {
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, transcript)
+    await writeFile(target.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ agentType: 'retained-agent', source: 'userSettings' }))
+    await actualDiskOutput.initTaskOutputAsSymlink(agentId, target)
+    expect(await getAgentTranscript(agentId)).toBeNull()
+    expect(await readAgentMetadata(agentId)).toBeNull()
+  }
+})
+
+for (const continuesInB of [false, true]) {
+  test(`Ctrl+B final write spanning clear stays advertised, continued=${continuesInB}`, async () => {
+    let state = getDefaultAppState()
+    const setAppState = (update: (prev: AppState) => AppState) => { state = update(state) }
+    const entered = deferred()
+    const release = deferred()
+    const finish = deferred()
+    const settled = deferred()
+    let holdNextBranch = false
+    mock.module('../../utils/git.js', () => ({ ...actualGit, getBranch: async () => {
+      if (holdNextBranch) { holdNextBranch = false; entered.resolve(); await release.promise }
+      return 'test'
+    } }))
+    const handle = startBackgroundSession({
+      description: 'main session clear output', setAppState,
+      prepare: async () => ({ messages: [createUserMessage({ content: 'main session initial' })], queryParams: {} as never }),
+      queryImpl: async function* () {
+        await flushSessionStorage()
+        holdNextBranch = true
+        yield createAssistantMessage({ content: 'main session final A answer' })
+        await finish.promise
+        if (continuesInB) {
+          yield createAssistantMessage({ content: 'main session continued B answer' })
+          await flushSessionStorage()
+        }
+        return { reason: 'completed' }
+      },
+      onSettled: () => settled.resolve(),
+    })
+    try {
+      await entered.promise
+      await clearConversation({ setMessages: () => {}, readFileState: createFileStateCacheWithSizeLimit(READ_FILE_STATE_CACHE_SIZE), getAppState: () => state, setAppState })
+      await recordTranscript([createUserMessage({ content: 'new foreground B' })])
+      release.resolve()
+      await flushSessionStorage()
+      finish.resolve()
+      await settled.promise
+      await actualDiskOutput._clearOutputsForTest()
+      expect(state.tasks[handle.taskId]?.status).toBe('completed')
+      expect(getPendingNotificationsSnapshot().map(item => item.value).join('\n')).toContain(getTaskOutputPath(handle.taskId))
+      expect(await readFile(getTaskOutputPath(handle.taskId), 'utf8')).toContain(continuesInB ? 'main session continued B answer' : 'main session final A answer')
+    } finally {
+      release.resolve()
+      finish.resolve()
+      await settled.promise
+    }
+  })
 }
 
 for (const phase of ['initial', 'incremental'] as const) {

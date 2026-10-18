@@ -11,12 +11,13 @@ import {
   mkdir,
   readdir,
   readFile,
+  readlink,
   stat,
   unlink,
   writeFile,
 } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
-import { basename, dirname, join, resolve as resolvePath } from 'path'
+import { basename, dirname, join, relative, sep, isAbsolute, resolve as resolvePath } from 'path'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -79,7 +80,8 @@ import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { getClaudeConfigHomeDir, getProjectsDir, isEnvTruthy } from './envUtils.js'
-import { isFsInaccessible } from './errors.js'
+import { getErrnoCode, isFsInaccessible } from './errors.js'
+import { getTaskOutputPath } from './task/diskOutput.js'
 import type { FileHistorySnapshot } from './fileHistory.js'
 import { formatFileSize } from './format.js'
 import { getFsImplementation } from './fsOperations.js'
@@ -621,6 +623,34 @@ export function getAgentTranscriptPath(agentId: AgentId): string {
   return join(base, `agent-${agentId}.jsonl`)
 }
 
+// Completion can retain a transcript submitted before /clear. Reuse that
+// task's exact output link when no current-session transcript exists; do not
+// search historical sessions. Metadata must follow the same selected file.
+async function getAgentTranscriptReadPath(agentId: AgentId): Promise<string> {
+  const currentPath = getAgentTranscriptPath(agentId)
+  try {
+    await stat(currentPath)
+    return currentPath
+  } catch (error) {
+    if (getErrnoCode(error) !== 'ENOENT') throw error
+  }
+  const outputPath = getTaskOutputPath(agentId)
+  try {
+    const target = resolvePath(dirname(outputPath), await readlink(outputPath))
+    const relativePath = relative(getProjectsDir(), target)
+    const parts = relativePath.split(sep)
+    // Accept only generated project/session/subagents paths for this agent.
+    // Grouping directories and the resumed project override can be released
+    // before this read, so validate against trusted project storage instead.
+    if (!isAbsolute(relativePath) && parts[0] !== '..' && parts.length >= 4 &&
+      validateUuid(parts[1]) && parts[2] === 'subagents' &&
+      parts.at(-1) === `agent-${agentId}.jsonl`) return target
+  } catch (error) {
+    if (!isFsInaccessible(error) && getErrnoCode(error) !== 'EINVAL') throw error
+  }
+  return currentPath
+}
+
 function getAgentMetadataPath(agentId: AgentId): string {
   return getAgentTranscriptPath(agentId).replace(/\.jsonl$/, '.meta.json')
 }
@@ -663,8 +693,8 @@ export async function writeAgentMetadata(
 export async function readAgentMetadata(
   agentId: AgentId,
 ): Promise<AgentMetadata | null> {
-  const path = getAgentMetadataPath(agentId)
   try {
+    const path = (await getAgentTranscriptReadPath(agentId)).replace(/\.jsonl$/, '.meta.json')
     const raw = await readFile(path, 'utf-8')
     return JSON.parse(raw) as AgentMetadata
   } catch (e) {
@@ -1639,10 +1669,11 @@ class Project {
     messages: Transcript,
     agentId?: string,
     startingParentUuid?: UUID | null,
+    captureDestination = true,
   ): Promise<void> {
     // Track the predecessor wait too: shutdown flushes must see queued chains.
     return this.trackWrite(async () => {
-      if (!agentId) {
+      if (!agentId || !captureDestination) {
         return this.insertMessageChain(messages, true, agentId, startingParentUuid)
       }
       // Handoff can restart the same agent before its old iterator has closed.
@@ -2256,9 +2287,10 @@ export async function recordSidechainTranscript(
   messages: Message[],
   agentId?: string,
   startingParentUuid?: UUID | null,
+  { captureDestination = true }: { captureDestination?: boolean } = {},
 ) {
   await getProject().insertSidechainTranscript(
-    cleanMessagesForLogging(messages), agentId, startingParentUuid,
+    cleanMessagesForLogging(messages), agentId, startingParentUuid, captureDestination,
   )
 }
 
@@ -5359,9 +5391,8 @@ export async function getAgentTranscript(agentId: AgentId): Promise<{
   messages: Message[]
   contentReplacements: ContentReplacementRecord[]
 } | null> {
-  const agentFile = getAgentTranscriptPath(agentId)
-
   try {
+    const agentFile = await getAgentTranscriptReadPath(agentId)
     const { messages, agentContentReplacements } =
       await loadTranscriptFile(agentFile)
 
