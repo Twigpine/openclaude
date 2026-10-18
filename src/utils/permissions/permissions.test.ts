@@ -320,6 +320,8 @@ describe('plan mode mechanical read-only policy', () => {
     },
   )
 
+  // Both the tool check and plan-mode guard can exhaust two 5s parse attempts.
+  // Allow the real parser's full retry budget before asserting the denial.
   test('denies mutating PowerShell', async () => {
     const result = await hasPermissionsToUseTool(
       PowerShellTool,
@@ -329,7 +331,7 @@ describe('plan mode mechanical read-only policy', () => {
       'tool-use-id',
     )
     expect(result.behavior).toBe('deny')
-  })
+  }, 25_000)
 
   test.each(['git diff', 'git status', 'ls', 'cat package.json'])(
     'lets read-only Bash continue through normal permissions for %j',
