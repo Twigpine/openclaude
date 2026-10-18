@@ -1,5 +1,6 @@
 import { mock } from 'bun:test'
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +20,7 @@ function compactBoundaryMessage(): Message {
     content: 'Conversation compacted',
     isMeta: false,
     timestamp: new Date().toISOString(),
-    uuid: `test-${Math.random()}` as Message['uuid'],
+    uuid: randomUUID(),
     level: 'info',
     compactMetadata: {
       trigger: 'manual',

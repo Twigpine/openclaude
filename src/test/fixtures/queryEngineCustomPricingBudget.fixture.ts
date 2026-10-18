@@ -1,5 +1,6 @@
 import { mock } from 'bun:test'
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -45,7 +46,7 @@ mock.module('../../utils/processUserInput/processUserInput.js', () => ({
         type: 'user',
         message: { role: 'user', content: 'run' },
         isMeta: false,
-        uuid: `user-${Math.random()}`,
+        uuid: randomUUID(),
         timestamp: new Date().toISOString(),
       } as Message,
     ],
@@ -112,7 +113,7 @@ async function* pricedQuery({
       stop_sequence: null,
       usage,
     },
-    uuid: `assistant-${Math.random()}`,
+    uuid: randomUUID(),
     timestamp: new Date().toISOString(),
   } as Message
 }
