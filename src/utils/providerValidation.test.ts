@@ -35,6 +35,7 @@ const ENV_KEYS = [
   'MINIMAX_API_KEY',
   'LONGCAT_API_KEY',
   'LLMTR_API_KEY',
+  'MERGE_GATEWAY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -1032,3 +1033,44 @@ for (const baseEnv of ['ANTHROPIC_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_BASE
     expect(shouldExitForStartupProviderValidationError({ args: ['-p', 'hello'], stdoutIsTTY: false })).toBe(true)
   })
 }
+
+test.each(['OPENAI_BASE_URL', 'OPENAI_API_BASE'])('Merge validation follows the runtime endpoint boundary through %s', async urlEnv => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_MODEL = 'openai/gpt-5.5'
+  process.env.OPENAI_API_KEY = 'custom-endpoint-key'
+  for (const baseUrl of [
+    'https://api-gateway.merge.dev/v1/custom',
+    'http://api-gateway.merge.dev/v1/openai',
+    'https://api-gateway.merge.dev:8443/v1/openai',
+    'https://user@api-gateway.merge.dev/v1/openai',
+    'https://api-gateway.merge.dev/v1/openai?tenant=proxy',
+    'https://api-gateway.merge.dev/v1/openai#proxy',
+    'https://api-gateway.merge.dev/v1/OpenAI',
+    'https://proxy.example/v1',
+  ]) {
+    process.env[urlEnv] = baseUrl
+    expect(await getProviderValidationError(process.env)).toBeNull()
+  }
+  for (const suffix of ['', '/']) {
+    process.env[urlEnv] = 'https://api-gateway.merge.dev/v1/openai' + suffix
+    delete process.env.MERGE_GATEWAY_API_KEY
+    expect(await getProviderValidationError(process.env)).toContain('MERGE_GATEWAY_API_KEY')
+    process.env.MERGE_GATEWAY_API_KEY = 'merge-key'
+    expect(await getProviderValidationError(process.env)).toBeNull()
+  }
+})
+
+test.each([undefined, '', 'undefined', 'null', 'SUA_CHAVE', 'merge-key'])('Merge validation, picker and runtime agree on usable credentials: %s', async key => {
+  const { getProviderPresetUiMetadata } = await import('../integrations/providerUiMetadata.js')
+  const { resolveRouteCredentialValue } = await import('../integrations/routeMetadata.js')
+  const env = {
+    CLAUDE_CODE_USE_OPENAI: '1', OPENAI_MODEL: 'openai/gpt-5.5',
+    OPENAI_BASE_URL: 'https://api-gateway.merge.dev/v1/openai',
+    MERGE_GATEWAY_API_KEY: key, OPENAI_API_KEY: 'unrelated-openai-key',
+  }
+  const usable = key === 'merge-key'
+  const validation = await getProviderValidationError(env)
+  expect(validation === null).toBe(usable)
+  expect(getProviderPresetUiMetadata('merge-gateway', env).apiKey).toBe(usable ? key : '')
+  expect(resolveRouteCredentialValue({routeId: 'merge-gateway', baseUrl: env.OPENAI_BASE_URL, processEnv: env})).toBe(usable ? key : undefined)
+})

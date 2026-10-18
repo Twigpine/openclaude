@@ -22,6 +22,7 @@ import {
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalConcentrateInferenceBaseUrl,
   isCanonicalCommandcodeInferenceBaseUrl,
+  isCanonicalMergeGatewayInferenceBaseUrl,
   isCloudflareBaseUrl,
   isLongcatBaseUrl,
   matchHostnameAgainstRouteHosts,
@@ -150,6 +151,7 @@ function hasUsableCredentialEnvValue(
     envVar === 'API_ROUTE_API_KEY' ||
     envVar === 'CONCENTRATE_API_KEY' ||
     envVar === 'LLMTR_API_KEY' ||
+    envVar === 'MERGE_GATEWAY_API_KEY' ||
     envVar === 'CMD_API_KEY' ||
     envVar === 'COMMANDCODE_API_KEY' ||
     envVar === 'COMMAND_CODE_API_KEY'
@@ -313,6 +315,8 @@ function getRuntimeValidationTarget(
           !isCanonicalConcentrateInferenceBaseUrl(request.baseUrl)) ||
         (target.descriptor.id === 'api-route' &&
           !isCanonicalApiRouteInferenceBaseUrl(request.baseUrl)) ||
+        (target.descriptor.id === 'merge-gateway' &&
+          !isCanonicalMergeGatewayInferenceBaseUrl(request.baseUrl)) ||
         (target.descriptor.id === 'commandcode' &&
           !isCanonicalCommandcodeInferenceBaseUrl(request.baseUrl)))
     ) {

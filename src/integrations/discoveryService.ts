@@ -27,6 +27,7 @@ import type {
 } from '../utils/providerDiscovery.js'
 import {
   fetchOpenAICompatibleModelsRaw,
+  fetchMergeGatewayModelsRaw,
   listOpenAICompatibleModels,
   probeOllamaModelCatalog,
   probeAtomicChatReadiness,
@@ -430,7 +431,10 @@ async function runDiscovery(
 
     case 'openai-compatible': {
       if (discovery.mapModel) {
-        const rawModels = await fetchOpenAICompatibleModelsRaw({
+        const fetchModels = routeId === 'merge-gateway'
+          ? fetchMergeGatewayModelsRaw
+          : fetchOpenAICompatibleModelsRaw
+        const rawModels = await fetchModels({
           baseUrl: getRouteBaseUrl(routeId, options),
           apiKey: getRouteDiscoveryApiKey(routeId, options),
           headers: getRouteDiscoveryHeaders(routeId, options),

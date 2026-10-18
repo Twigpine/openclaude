@@ -2,6 +2,7 @@ import type { OllamaModelDescriptor } from './providerRecommendation.ts'
 import { DEFAULT_OPENAI_BASE_URL } from '../services/api/providerConfig.js'
 import {
   getRouteLabel,
+  isCanonicalMergeGatewayInferenceBaseUrl,
   resolveRouteIdFromBaseUrl,
 } from '../integrations/routeMetadata.js'
 
@@ -324,6 +325,47 @@ export async function listOpenAICompatibleModels(options?: {
           .map(model => model.id!),
       ),
     )
+  } catch {
+    return null
+  } finally {
+    clear()
+  }
+}
+
+// Merge's native catalog is paginated. Only a complete result may enter the
+// shared discovery cache; an incomplete refresh retains its existing fallback.
+export async function fetchMergeGatewayModelsRaw(options: {
+  baseUrl?: string
+  apiKey?: string
+}): Promise<Record<string, unknown>[] | null> {
+  if (!isCanonicalMergeGatewayInferenceBaseUrl(options.baseUrl)) return null
+  const { signal, clear } = withTimeoutSignal(5000)
+  try {
+    const url = new URL('/v1/models', options.baseUrl)
+    const models: Record<string, unknown>[] = []
+    const cursors = new Set<string>()
+    for (let page = 0; page < 100; page++) {
+      const response = await fetch(url.toString(), {
+        method: 'GET',
+        headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : undefined,
+        signal,
+        redirect: 'error',
+      })
+      if (!response.ok) return null
+      const payload = await response.json() as {
+        data?: Record<string, unknown>[]
+        has_more?: boolean
+        next_cursor?: string | null
+      }
+      if (!Array.isArray(payload.data)) return null
+      models.push(...payload.data)
+      if (!payload.has_more) return models
+      const cursor = payload.next_cursor
+      if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) return null
+      cursors.add(cursor)
+      url.searchParams.set('cursor', cursor)
+    }
+    return null
   } catch {
     return null
   } finally {
