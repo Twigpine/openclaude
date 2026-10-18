@@ -917,6 +917,8 @@ export function setRemoteIngressUrlForTesting(url: string): void {
 
 const REMOTE_FLUSH_INTERVAL_MS = 10
 
+type SidechainDestination = { path: string; sessionId: UUID }
+
 class Project {
   // Minimal cache for current session only (not all sessions)
   currentSessionTag: string | undefined
@@ -1645,10 +1647,14 @@ class Project {
       }
       // Handoff can restart the same agent before its old iterator has closed.
       // Join whole chains; the file lock alone only serializes single appends.
-      const path = getAgentTranscriptPath(asAgentId(agentId))
+      const destination: SidechainDestination = {
+        path: getAgentTranscriptPath(asAgentId(agentId)),
+        sessionId: getSessionId() as UUID,
+      }
+      const { path } = destination
       const previous = this.sidechainWrites.get(path)
       const write = (previous?.catch(() => {}) ?? Promise.resolve()).then(() =>
-        this.insertMessageChain(messages, true, agentId, startingParentUuid),
+        this.insertMessageChain(messages, true, agentId, startingParentUuid, undefined, destination),
       )
       this.sidechainWrites.set(path, write)
       try {
@@ -1665,6 +1671,7 @@ class Project {
     agentId?: string,
     startingParentUuid?: UUID | null,
     teamInfo?: { teamName?: string; agentName?: string },
+    sidechainDestination?: SidechainDestination,
   ) {
     return this.trackWrite(async () => {
       let parentUuid: UUID | null = startingParentUuid ?? null
@@ -1672,7 +1679,10 @@ class Project {
       // First conversation message materializes the session file.
       // Hook progress/attachment messages and local-command bookkeeping
       // alone stay buffered.
-      if (this.sessionFile === null && messages.some(startsConversation)) {
+      if (
+        this.sessionFile === null && messages.some(startsConversation) &&
+        (!sidechainDestination || sidechainDestination.sessionId === getSessionId())
+      ) {
         await this.materializeSessionFile()
       }
 
@@ -1686,7 +1696,7 @@ class Project {
       }
 
       // Get slug if one exists for this session (used for plan files, etc.)
-      const sessionId = getSessionId()
+      const sessionId = sidechainDestination?.sessionId ?? getSessionId()
       const slug = getPlanSlugCache().get(sessionId)
 
       for (const message of messages) {
@@ -1729,7 +1739,7 @@ class Project {
           gitBranch,
           slug,
         }
-        await this.appendEntry(transcriptMessage)
+        await this.appendEntry(transcriptMessage, sidechainDestination?.sessionId, sidechainDestination)
         const shouldTrackReplay = !this.shouldSkipPersistence()
         if (shouldTrackReplay && !isSidechain && message.type === 'user') {
           const content = getFirstMeaningfulUserMessageTextContent([message])
@@ -1847,8 +1857,19 @@ class Project {
     })
   }
 
-  async appendEntry(entry: Entry, sessionId: UUID = getSessionId() as UUID) {
+  async appendEntry(
+    entry: Entry,
+    sessionId: UUID = getSessionId() as UUID,
+    sidechainDestination?: SidechainDestination,
+  ) {
     if (this.shouldSkipPersistence()) {
+      return
+    }
+
+    if (sidechainDestination && isTranscriptMessage(entry) && entry.isSidechain && entry.agentId !== undefined) {
+      // The queue key, session stamp and every append belong to the submission,
+      // even if /clear changes the active session while this chain is waiting.
+      await this.appendToFile(sidechainDestination.path, jsonStringify(entry) + '\n')
       return
     }
 

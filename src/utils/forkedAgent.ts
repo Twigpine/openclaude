@@ -25,6 +25,8 @@ import type { AgentDefinition } from '../tools/AgentTool/loadAgentsDir.js'
 import type { AgentId } from '../types/ids.js'
 import type { Message } from '../types/message.js'
 import { createChildAbortController } from './abortController.js'
+import { raceAbort } from './boundedAsync.js'
+import { AbortError } from './errors.js'
 import { logForDebugging } from './debug.js'
 import { cloneFileStateCache } from './fileStateCache.js'
 import type { REPLHookContext } from './hooks/postSamplingHooks.js'
@@ -559,21 +561,18 @@ export async function runForkedAgent({
   // When skipTranscript is set, skip agent ID creation and all transcript I/O
   const agentId = skipTranscript ? undefined : createAgentId(forkLabel)
   let lastRecordedUuid: UUID | null = null
-  if (agentId) {
-    await recordSidechainTranscript(initialMessages, agentId).catch(err =>
-      logForDebugging(
-        `Forked agent [${forkLabel}] failed to record initial transcript: ${err}`,
-      ),
-    )
-    // Track the last recorded message UUID for parent chain continuity
-    lastRecordedUuid =
-      initialMessages.length > 0
-        ? initialMessages[initialMessages.length - 1]!.uuid
-        : null
-  }
-
-  // Run the query loop with isolated context (cache-safe params preserved)
+  const signal = isolatedToolUseContext.abortController.signal
+  // Initial persistence can now be interrupted too, so it belongs to cleanup.
   try {
+    if (agentId) {
+      await raceAbort(recordSidechainTranscript(initialMessages, agentId), signal).catch(err => {
+        if (signal.aborted) throw new AbortError()
+        logForDebugging(`Forked agent [${forkLabel}] failed to record initial transcript: ${err}`)
+      })
+      lastRecordedUuid = initialMessages.at(-1)?.uuid ?? null
+    }
+
+    // Run the query loop with isolated context (cache-safe params preserved)
     for await (const message of query({
       messages: initialMessages,
       systemPrompt,
@@ -626,12 +625,10 @@ export async function runForkedAgent({
           msg.type === 'user' ||
           msg.type === 'progress')
       ) {
-        await recordSidechainTranscript([msg], agentId, lastRecordedUuid).catch(
-          err =>
-            logForDebugging(
-              `Forked agent [${forkLabel}] failed to record transcript: ${err}`,
-            ),
-        )
+        await raceAbort(recordSidechainTranscript([msg], agentId, lastRecordedUuid), signal).catch(err => {
+          if (signal.aborted) throw new AbortError()
+          logForDebugging(`Forked agent [${forkLabel}] failed to record transcript: ${err}`)
+        })
         if (msg.type !== 'progress') {
           lastRecordedUuid = msg.uuid
         }
