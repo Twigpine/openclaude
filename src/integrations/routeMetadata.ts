@@ -244,6 +244,7 @@ function hasUsableEnvCredentialValue(
     envVar === 'APISMART_API_KEY' ||
     envVar === 'CONCENTRATE_API_KEY' ||
     envVar === 'LLMTR_API_KEY' ||
+    envVar === 'MERGE_GATEWAY_API_KEY' ||
     envVar === 'CMD_API_KEY' ||
     envVar === 'COMMANDCODE_API_KEY' ||
     envVar === 'COMMAND_CODE_API_KEY' ||
@@ -548,6 +549,36 @@ export function isCanonicalLlmtrInferenceBaseUrl(
     return (
       candidate.protocol === 'https:' &&
       !candidate.port &&
+      !candidate.search &&
+      !candidate.hash &&
+      candidate.hostname.toLowerCase() === canonical.hostname.toLowerCase() &&
+      normalizePath(candidate.pathname) === normalizePath(canonical.pathname)
+    )
+  } catch {
+    return false
+  }
+}
+
+const MERGE_GATEWAY_CANONICAL_INFERENCE_BASE_URL = 'https://api-gateway.merge.dev/v1/openai'
+
+export function isCanonicalMergeGatewayInferenceBaseUrl(
+  value: string | undefined,
+): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const canonical = new URL(MERGE_GATEWAY_CANONICAL_INFERENCE_BASE_URL)
+    const candidate = new URL(trimmed)
+    const normalizePath = (pathname: string): string =>
+      pathname.replace(/\/+$/, '') || '/'
+    return (
+      candidate.protocol === 'https:' &&
+      !candidate.port &&
+      !candidate.username &&
+      !candidate.password &&
       !candidate.search &&
       !candidate.hash &&
       candidate.hostname.toLowerCase() === canonical.hostname.toLowerCase() &&
@@ -1320,6 +1351,13 @@ export function resolveRouteCredentialValue(
     return undefined
   }
   if (
+    routeId === 'merge-gateway' &&
+    options?.baseUrl !== undefined &&
+    !isCanonicalMergeGatewayInferenceBaseUrl(options.baseUrl)
+  ) {
+    return undefined
+  }
+  if (
     routeId === 'commandcode' &&
     options?.baseUrl !== undefined &&
     !isCanonicalCommandcodeInferenceBaseUrl(options.baseUrl)
@@ -1452,6 +1490,12 @@ export function resolveRouteIdFromBaseUrl(
         continue
       }
       if (
+        route.id === 'merge-gateway' &&
+        !isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)
+      ) {
+        continue
+      }
+      if (
         route.id === 'commandcode' &&
         !isCanonicalCommandcodeInferenceBaseUrl(baseUrl)
       ) {
@@ -1482,6 +1526,8 @@ export function resolveRouteIdFromBaseUrl(
             !isCanonicalConcentrateInferenceBaseUrl(baseUrl)) ||
           (route.id === 'llmtr' &&
             !isCanonicalLlmtrInferenceBaseUrl(baseUrl)) ||
+          (route.id === 'merge-gateway' &&
+            !isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)) ||
           (route.id === 'commandcode' &&
             !isCanonicalCommandcodeInferenceBaseUrl(baseUrl)) ||
           (route.id === 'api-route' &&
@@ -1527,6 +1573,9 @@ function profileRouteHonorsBaseUrlBoundary(
   }
   if (routeId === 'llmtr') {
     return isCanonicalLlmtrInferenceBaseUrl(baseUrl)
+  }
+  if (routeId === 'merge-gateway') {
+    return isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)
   }
   if (routeId === 'commandcode') {
     return isCanonicalCommandcodeInferenceBaseUrl(baseUrl)

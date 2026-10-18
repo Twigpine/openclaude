@@ -16,6 +16,7 @@ import { filterAvailableCatalogEntries } from './registry.js'
 import {
   getRouteDescriptor,
   isCanonicalApismartInferenceBaseUrl,
+  isCanonicalMergeGatewayInferenceBaseUrl,
   isCanonicalXaiInferenceBaseUrl,
   resolveActiveRouteIdFromEnv,
   resolveRouteCredentialValue,
@@ -217,8 +218,10 @@ function getRouteDiscoveryApiKey(
   // URL. Apply the same exact inference-endpoint boundary used by requests and
   // profiles before considering either a caller-provided or ambient key.
   if (
-    routeId === 'apismart' &&
-    !isCanonicalApismartInferenceBaseUrl(baseUrl)
+    (routeId === 'apismart' &&
+      !isCanonicalApismartInferenceBaseUrl(baseUrl)) ||
+    (routeId === 'merge-gateway' &&
+      !isCanonicalMergeGatewayInferenceBaseUrl(baseUrl))
   ) {
     return undefined
   }

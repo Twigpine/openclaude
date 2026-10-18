@@ -29,6 +29,7 @@ import {
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalConcentrateInferenceBaseUrl,
   isCanonicalLlmtrInferenceBaseUrl,
+  isCanonicalMergeGatewayInferenceBaseUrl,
   isGmiCloudBaseUrl,
   isCanonicalCommandcodeInferenceBaseUrl,
   isLongcatBaseUrl,
@@ -127,6 +128,7 @@ const PROFILE_ENV_KEYS = [
   'FIREWORKS_API_KEY',
   'LONGCAT_API_KEY',
   'LLMTR_API_KEY',
+  'MERGE_GATEWAY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -231,6 +233,7 @@ export type ProfileEnv = {
   FIREWORKS_API_KEY?: string
   LONGCAT_API_KEY?: string
   LLMTR_API_KEY?: string
+  MERGE_GATEWAY_API_KEY?: string
   CMD_API_KEY?: string
   COMMANDCODE_API_KEY?: string
   COMMAND_CODE_API_KEY?: string
@@ -2167,9 +2170,15 @@ export async function buildLaunchEnv(options: {
   } else {
     delete env.OPENAI_AUTH_HEADER_VALUE
   }
+  // A shell URL override must not carry a saved Merge key through its generic
+  // alias after route resolution drops the original provider identity.
+  const retargetedMergeProfile =
+    (persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'merge-gateway' ||
+      isCanonicalMergeGatewayInferenceBaseUrl(persistedOpenAIBaseUrl)) &&
+    !isCanonicalMergeGatewayInferenceBaseUrl(env.OPENAI_BASE_URL)
   const openAICredential = resolveOpenAICredentialEnvOverride(
     processEnv,
-    persistedEnv,
+    retargetedMergeProfile ? {} : persistedEnv,
   )
   if (openAICredential) {
     env[openAICredential.envVar] = openAICredential.value
@@ -2230,6 +2239,10 @@ export async function buildLaunchEnv(options: {
     effectiveOpenAIRouteId === 'llmtr' &&
     !!env.OPENAI_BASE_URL?.trim() &&
     !isCanonicalLlmtrInferenceBaseUrl(env.OPENAI_BASE_URL)
+  const isNoncanonicalMergeGatewayLaunch =
+    effectiveOpenAIRouteId === 'merge-gateway' &&
+    !!env.OPENAI_BASE_URL?.trim() &&
+    !isCanonicalMergeGatewayInferenceBaseUrl(env.OPENAI_BASE_URL)
   const isNoncanonicalCommandcodeLaunch =
     effectiveOpenAIRouteId === 'commandcode' &&
     !!env.OPENAI_BASE_URL?.trim() &&
@@ -2243,6 +2256,7 @@ export async function buildLaunchEnv(options: {
     isNoncanonicalApismartLaunch ||
     isNoncanonicalConcentrateLaunch ||
     isNoncanonicalLlmtrLaunch ||
+    isNoncanonicalMergeGatewayLaunch ||
     isNoncanonicalCommandcodeLaunch ||
     isNoncanonicalApiRouteLaunch
   if (isNoncanonicalDedicatedOpenAILaunch) {
@@ -2256,6 +2270,7 @@ export async function buildLaunchEnv(options: {
     if (
       !isNoncanonicalConcentrateLaunch &&
       !isNoncanonicalLlmtrLaunch &&
+      !isNoncanonicalMergeGatewayLaunch &&
       !isNoncanonicalCommandcodeLaunch
     ) {
       const persistedCredential = resolveOpenAICredentialEnvSelection(persistedEnv)
@@ -2292,6 +2307,7 @@ export async function buildLaunchEnv(options: {
     'APISMART_API_KEY',
     'CONCENTRATE_API_KEY',
     'LLMTR_API_KEY',
+    'MERGE_GATEWAY_API_KEY',
     'CMD_API_KEY',
     'COMMANDCODE_API_KEY',
     'COMMAND_CODE_API_KEY',
@@ -2317,6 +2333,9 @@ export async function buildLaunchEnv(options: {
       continue
     }
     if (dedicatedKey === 'LLMTR_API_KEY' && effectiveOpenAIRouteId !== 'llmtr') {
+      continue
+    }
+    if (dedicatedKey === 'MERGE_GATEWAY_API_KEY' && effectiveOpenAIRouteId !== 'merge-gateway') {
       continue
     }
     if (
@@ -2356,6 +2375,10 @@ export async function buildLaunchEnv(options: {
       dedicatedKey === 'LLMTR_API_KEY' &&
       !!dedicatedBaseUrl &&
       !isCanonicalLlmtrInferenceBaseUrl(dedicatedBaseUrl)
+    const withholdAmbientMergeGatewayKey =
+      dedicatedKey === 'MERGE_GATEWAY_API_KEY' &&
+      !!dedicatedBaseUrl &&
+      !isCanonicalMergeGatewayInferenceBaseUrl(dedicatedBaseUrl)
     const withholdAmbientCommandcodeKey =
       isCommandcodeCredentialEnvVar(dedicatedKey) &&
       !!dedicatedBaseUrl &&
@@ -2365,6 +2388,7 @@ export async function buildLaunchEnv(options: {
       withholdAmbientApismartKey ||
       withholdAmbientConcentrateKey ||
       withholdAmbientLlmtrKey ||
+      withholdAmbientMergeGatewayKey ||
       withholdAmbientCommandcodeKey
     // Unlike the generic proxy-compatible routes above, Concentrate's
     // dedicated key is never valid outside its canonical inference endpoint.
@@ -2374,6 +2398,7 @@ export async function buildLaunchEnv(options: {
     if (
       withholdAmbientConcentrateKey ||
       withholdAmbientLlmtrKey ||
+      withholdAmbientMergeGatewayKey ||
       withholdAmbientCommandcodeKey
     ) {
       continue
@@ -2421,6 +2446,17 @@ export async function buildLaunchEnv(options: {
             ? sanitizeApiKey(persistedOpenAICredential.value)
             : undefined)
         : undefined
+    const persistedMergeGatewayProfileKey =
+      dedicatedKey === 'MERGE_GATEWAY_API_KEY' &&
+      effectiveOpenAIRouteId === 'merge-gateway' &&
+      isCanonicalMergeGatewayInferenceBaseUrl(persistedOpenAIBaseUrl) &&
+      !!dedicatedBaseUrl &&
+      isCanonicalMergeGatewayInferenceBaseUrl(dedicatedBaseUrl)
+        ? sanitizeApiKey(persistedEnv.MERGE_GATEWAY_API_KEY) ||
+          (persistedOpenAICredential?.kind === 'usable'
+            ? sanitizeApiKey(persistedOpenAICredential.value)
+            : undefined)
+        : undefined
     // A selected canonical Command Code profile owns its saved credential.
     // Prefer persisted dedicated keys, then migrate startup files that only
     // mirrored the secret into OPENAI_API_KEY (LLMTR parity). Do not treat a
@@ -2449,6 +2485,7 @@ export async function buildLaunchEnv(options: {
       ? sanitizeApiKey(persistedEnv[dedicatedKey])
       : backfillDedicatedFromOpenAI ||
         persistedLlmtrProfileKey ||
+        persistedMergeGatewayProfileKey ||
         persistedCommandcodeProfileKey ||
         sanitizeApiKey(processEnv[dedicatedKey]) ||
         sanitizeApiKey(persistedEnv[dedicatedKey]) ||
@@ -2564,6 +2601,11 @@ export async function buildStartupEnvFromProfile(options?: {
     persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'llmtr' &&
     !!persisted.env.OPENAI_BASE_URL?.trim() &&
     !isCanonicalLlmtrInferenceBaseUrl(persisted.env.OPENAI_BASE_URL)
+  const persistedMergeGatewayProxy =
+    persisted?.profile === 'openai' &&
+    persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'merge-gateway' &&
+    !!persisted.env.OPENAI_BASE_URL?.trim() &&
+    !isCanonicalMergeGatewayInferenceBaseUrl(persisted.env.OPENAI_BASE_URL)
   const persistedCommandcodeProxy =
     persisted?.profile === 'openai' &&
     persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'commandcode' &&
@@ -2579,6 +2621,7 @@ export async function buildStartupEnvFromProfile(options?: {
     !persistedApismartProxy &&
     !persistedConcentrateProxy &&
     !persistedLlmtrProxy &&
+    !persistedMergeGatewayProxy &&
     !persistedCommandcodeProxy &&
     !persistedApiRouteProxy
   ) {
