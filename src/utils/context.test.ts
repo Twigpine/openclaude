@@ -504,6 +504,21 @@ test('MiniMax-M2.7 uses the shared gateway-safe context cap by default', () => {
   expect(getMaxOutputTokensForModel('MiniMax-M2.7')).toBe(131_072)
 })
 
+test('MiniMax China uses the M3 context limit before client setup', () => {
+  const savedBaseUrl = process.env.ANTHROPIC_BASE_URL
+  const savedApiKey = process.env.ANTHROPIC_API_KEY
+  try {
+    process.env.ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
+    process.env.ANTHROPIC_API_KEY = 'china-test-key'
+    expect(getContextWindowForModel('MiniMax-M3')).toBe(1_048_576)
+  } finally {
+    if (savedBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL
+    else process.env.ANTHROPIC_BASE_URL = savedBaseUrl
+    if (savedApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+    else process.env.ANTHROPIC_API_KEY = savedApiKey
+  }
+})
+
 test('env-only MiniMax key uses provider-specific context and output caps before client setup', () => {
   process.env.MINIMAX_API_KEY = 'minimax-test-key'
   delete process.env.CLAUDE_CODE_USE_OPENAI

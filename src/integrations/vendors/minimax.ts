@@ -27,11 +27,12 @@ export default defineVendor({
     kind: 'credential-env',
     routing: {
       matchDefaultBaseUrl: true,
-    matchBaseUrlHosts: ['api.minimax.io', 'api.minimaxi.com', 'api.minimax.chat'],
+      matchBaseUrlHosts: ['api.minimax.io', 'api.minimaxi.com', 'api.minimax.chat'],
     },
-    credentialEnvVars: ['MINIMAX_API_KEY'],
+    // Explicit OpenAI-compatible endpoints also accept the shim's credentials.
+    credentialEnvVars: ['MINIMAX_API_KEY', 'OPENAI_API_KEYS', 'OPENAI_API_KEY'],
     missingCredentialMessage:
-      'MiniMax auth is required. Set MINIMAX_API_KEY.',
+      'MiniMax auth is required. Set MINIMAX_API_KEY or OPENAI_API_KEY / OPENAI_API_KEYS.',
   },
   catalog: {
     source: 'static',

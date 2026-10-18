@@ -274,7 +274,11 @@ export function isMiniMaxBaseUrl(value: string | undefined): boolean {
 
   try {
     const hostname = new URL(trimmed).hostname.toLowerCase()
-    return hostname === 'api.minimax.io' || hostname === 'api.minimax.chat'
+    const descriptor = getRouteDescriptor('minimax')
+    return descriptor !== null && matchHostnameAgainstRouteHosts(
+      hostname,
+      getValidationRoutingHosts(descriptor),
+    )
   } catch {
     return false
   }
@@ -1259,6 +1263,16 @@ export function resolveRouteCredentialValue(
 
   if (!routeId || routeId === 'anthropic') {
     return undefined
+  }
+
+  // Check transport before releasing a dedicated MiniMax credential to the shim.
+  if (
+    routeId === 'minimax' &&
+    options?.baseUrl &&
+    isMiniMaxBaseUrl(options.baseUrl) &&
+    new URL(options.baseUrl).protocol !== 'https:'
+  ) {
+    throw new Error('MiniMax base URL must use HTTPS')
   }
 
   // ApiSmart's host is intentionally sufficient for route identity, but its

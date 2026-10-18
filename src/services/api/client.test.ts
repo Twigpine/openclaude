@@ -55,6 +55,7 @@ type ShimClient = {
 const originalFetch = globalThis.fetch
 const originalMacro = (globalThis as Record<string, unknown>).MACRO
 const originalEnv = {
+  OPENAI_API_KEYS: process.env.OPENAI_API_KEYS,
   CLAUDE_CODE_ALWAYS_ENABLE_EFFORT:
     process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT,
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
@@ -130,6 +131,7 @@ function restoreEnv(key: string, value: string | undefined): void {
 }
 
 function clearEnvForMiniMaxOnlyTest(): void {
+  delete process.env.OPENAI_API_KEYS
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_BEDROCK
   delete process.env.CLAUDE_CODE_SKIP_BEDROCK_AUTH
@@ -749,6 +751,115 @@ test('routes env-only MiniMax requests through the Anthropic-compatible API', as
     model: 'MiniMax-M2.5',
   })
 })
+
+for (const credentialEnv of ['ANTHROPIC_API_KEY', 'MINIMAX_API_KEY']) {
+  test(`MiniMax China preserves native endpoint with ${credentialEnv}`, async () => {
+    clearEnvForMiniMaxOnlyTest()
+    process.env.ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
+    process.env.ANTHROPIC_MODEL = 'MiniMax-M3'
+    process.env[credentialEnv] = 'china-test-key'
+    let capturedUrl: string | undefined
+    let capturedHeaders: Headers | undefined
+    globalThis.fetch = (async (input, init) => {
+      capturedUrl = String(input)
+      capturedHeaders = new Headers(init?.headers)
+      return new Response(JSON.stringify({
+        id: 'msg-china', type: 'message', role: 'assistant', model: 'MiniMax-M3',
+        content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }), { headers: { 'Content-Type': 'application/json' } })
+    }) as FetchType
+    const client = await getAnthropicClient({ maxRetries: 0, model: 'MiniMax-M3' })
+    await client.beta.messages.create({
+      model: 'MiniMax-M3', max_tokens: 16,
+      messages: [{ role: 'user', content: 'hello' }],
+    })
+    expect(capturedUrl).toBe('https://api.minimaxi.com/anthropic/v1/messages?beta=true')
+    expect(capturedHeaders?.get('x-api-key')).toBe('china-test-key')
+  })
+}
+
+for (const baseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
+  for (const credentialEnv of ['MINIMAX_API_KEY', 'OPENAI_API_KEY', 'OPENAI_API_KEYS']) {
+    test(`MiniMax China preserves OpenAI requests via ${baseEnv} and ${credentialEnv}`, async () => {
+      clearEnvForMiniMaxOnlyTest()
+      process.env.CLAUDE_CODE_USE_OPENAI = '1'
+      process.env[baseEnv] = 'https://api.minimaxi.com/v1'
+      process.env[credentialEnv] = 'china-test-key'
+      let capturedUrl: string | undefined
+      let capturedHeaders: Headers | undefined
+      globalThis.fetch = (async (input, init) => {
+        capturedUrl = String(input)
+        capturedHeaders = new Headers(init?.headers)
+        return new Response(JSON.stringify({
+          id: 'chat-china', object: 'chat.completion', model: 'MiniMax-M3',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }), { headers: { 'Content-Type': 'application/json' } })
+      }) as FetchType
+      const client = await getAnthropicClient({ maxRetries: 0, model: 'MiniMax-M3' })
+      await client.beta.messages.create({
+        model: 'MiniMax-M3', max_tokens: 16,
+        messages: [{ role: 'user', content: 'hello' }],
+      })
+      expect(capturedUrl).toBe('https://api.minimaxi.com/v1/chat/completions')
+      expect(capturedHeaders?.get('authorization')).toBe('Bearer china-test-key')
+    })
+  }
+}
+
+test('dormant MiniMax China configuration cannot replace an explicit OpenAI route', async () => {
+  clearEnvForMiniMaxOnlyTest()
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://openai.example/v1'
+  process.env.OPENAI_API_KEY = 'selected-openai-key'
+  process.env.ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
+  process.env.ANTHROPIC_API_KEY = 'dormant-china-key'
+  let capturedUrl: string | undefined
+  let capturedHeaders: Headers | undefined
+  globalThis.fetch = (async (input, init) => {
+    capturedUrl = String(input)
+    capturedHeaders = new Headers(init?.headers)
+    return new Response(JSON.stringify({
+      id: 'chat-custom', object: 'chat.completion', model: 'custom-model',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }), { headers: { 'Content-Type': 'application/json' } })
+  }) as FetchType
+  const client = await getAnthropicClient({ maxRetries: 0, model: 'custom-model' })
+  await client.beta.messages.create({
+    model: 'custom-model', max_tokens: 16,
+    messages: [{ role: 'user', content: 'hello' }],
+  })
+  expect(capturedUrl).toBe('https://openai.example/v1/chat/completions')
+  expect(capturedHeaders?.get('authorization')).toBe('Bearer selected-openai-key')
+  expect(capturedHeaders?.get('x-api-key')).toBeNull()
+  expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+})
+
+for (const baseEnv of ['ANTHROPIC_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
+  test(`MiniMax China rejects HTTP before sending credentials via ${baseEnv}`, async () => {
+    clearEnvForMiniMaxOnlyTest()
+    if (baseEnv !== 'ANTHROPIC_BASE_URL') process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env[baseEnv] = 'http://api.minimaxi.com/anthropic'
+    process.env.MINIMAX_API_KEY = 'china-test-key'
+    let fetchCount = 0
+    globalThis.fetch = (async (_input, _init) => {
+      fetchCount++
+      throw new Error('Unexpected insecure request')
+    }) as unknown as FetchType
+    await expect((async () => {
+      const client = await getAnthropicClient({ maxRetries: 0, model: 'MiniMax-M3' })
+      await client.beta.messages.create({
+        model: 'MiniMax-M3', max_tokens: 16,
+        messages: [{ role: 'user', content: 'hello' }],
+      })
+    })()).rejects.toThrow('MiniMax base URL must use HTTPS')
+    expect(fetchCount).toBe(0)
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    expect(process.env.ANTHROPIC_API_KEY).toBe('must-not-forward')
+  })
+}
 
 test('env-only MiniMax fallback preserves legacy OPENAI_MODEL as Anthropic model', async () => {
   let capturedUrl: string | undefined
