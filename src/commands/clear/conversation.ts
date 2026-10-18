@@ -18,6 +18,7 @@ import type { AppState } from '../../state/AppState.js'
 import { isInProcessTeammateTask } from '../../tasks/InProcessTeammateTask/types.js'
 import {
   isLocalAgentTask,
+  initAgentTaskOutput,
   type LocalAgentTaskState,
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { isLocalShellTask } from '../../tasks/LocalShellTask/guards.js'
@@ -43,7 +44,6 @@ import {
 } from '../../utils/sessionStorage.js'
 import {
   evictTaskOutput,
-  initTaskOutputAsSymlink,
 } from '../../utils/task/diskOutput.js'
 import { getCurrentWorktreeSession } from '../../utils/worktree.js'
 import { clearSessionCaches } from './caches.js'
@@ -233,9 +233,7 @@ export async function clearConversation({
     const currentTask = getAppState?.().tasks[task.id]
     if (!isLocalAgentTask(currentTask) || currentTask.status !== 'running' || currentTask.producerFinished) continue
     const destination = getAgentTranscriptPath(asAgentId(task.agentId))
-    const outputReady = (currentTask.outputReady ?? Promise.resolve()).then(() =>
-      initTaskOutputAsSymlink(task.id, destination),
-    )
+    const outputReady = initAgentTaskOutput(task.id, destination)
     void outputReady.catch(() => {})
     // Publish before yielding so completion joins this replacement. Once
     // completion starts, producerFinished prevents any further retargeting.

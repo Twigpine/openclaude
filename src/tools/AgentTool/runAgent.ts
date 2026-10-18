@@ -852,8 +852,12 @@ export async function* runAgent({
     logForDebugging(`Failed to write agent metadata: ${_err}`)
   }
 
+  let transcriptDestination: string | undefined
+  agentToolUseContext.getAgentTranscriptPath = id => id === agentId ? transcriptDestination : undefined
+
   function recordAgentTranscript(messages: Message[], parentUuid?: UUID | null) {
     const outputDestination = getAgentTranscriptPath(agentId)
+    transcriptDestination = outputDestination
     // Storage captures this same path synchronously. Publish submission order,
     // so an older delayed write cannot replace a newer session's destination.
     const write = recordSidechainTranscript(messages, agentId, parentUuid)

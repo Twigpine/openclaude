@@ -124,6 +124,8 @@ export type LocalAgentTaskState = TaskStateBase & {
   agentType: string;
   model?: string;
   abortController?: AbortController;
+  // Stable across progress/terminal updates, fresh for each registration.
+  registration?: object;
   outputReady?: Promise<string>;
   // Destination captured when the producer submitted its latest transcript.
   outputDestination?: string;
@@ -433,6 +435,21 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
   }
 }
 
+// Only pending link mutations are retained here. Task records may be killed or
+// evicted while an uncancellable filesystem operation is still running.
+const pendingOutputLinks = new Map<string, Promise<string>>();
+export function initAgentTaskOutput(taskId: string, destination: string): Promise<string> {
+  const previous = pendingOutputLinks.get(taskId);
+  const ready = previous
+    ? previous.catch(() => {}).then(() => initTaskOutputAsSymlink(taskId, destination))
+    : initTaskOutputAsSymlink(taskId, destination);
+  pendingOutputLinks.set(taskId, ready);
+  void ready.finally(() => {
+    if (pendingOutputLinks.get(taskId) === ready) pendingOutputLinks.delete(taskId);
+  }).catch(() => {});
+  return ready;
+}
+
 /**
  * Complete an agent task with result.
  */
@@ -441,7 +458,7 @@ export async function completeAgentTask(result: AgentToolResult, setAppState: Se
   let runningTask: LocalAgentTaskState | undefined;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     runningTask = task.status === 'running' && !task.abortController?.signal.aborted
-      ? { ...task, producerFinished: true }
+      ? { ...task, registration: task.registration ?? {}, producerFinished: true }
       : task;
     return runningTask;
   });
@@ -449,25 +466,40 @@ export async function completeAgentTask(result: AgentToolResult, setAppState: Se
   if (signal?.aborted || runningTask?.status === 'killed') throw new AbortError();
   if (runningTask?.status !== 'running') return false;
 
-  // runAgent has awaited this agent's transcript writes. Join output-path
-  // creation and any disk writer before exposing completion (ORC-1337).
-  // Notification classification/worktree cleanup still follows status (gh-20236).
+  const registration = runningTask.registration;
+  const ownsRegistration = () => {
+    let owns = false;
+    updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
+      owns = task.registration === registration;
+      return task;
+    });
+    return owns;
+  };
+  // Enqueue reconciliation before yielding: a successor must join it even if
+  // cancellation releases this waiter or terminal eviction removes the task.
   try {
-    if (runningTask.outputReady) await raceAbort(runningTask.outputReady, signal);
-    // /clear can migrate the link while the final old-session write is pending.
-    // Restore the producer's actual destination, not the live session's path.
+    let outputReady = runningTask.outputReady;
     if (runningTask.outputDestination) {
-      await raceAbort(initTaskOutputAsSymlink(taskId, runningTask.outputDestination), signal);
+      outputReady = initAgentTaskOutput(taskId, runningTask.outputDestination);
+      const ready = outputReady;
+      updateTaskState<LocalAgentTaskState>(taskId, setAppState, task =>
+        task.registration === registration ? { ...task, outputReady: ready } : task);
     }
+    if (outputReady) await raceAbort(outputReady, signal);
+    if (!ownsRegistration()) return false;
     await raceAbort(evictTaskOutput(taskId), signal);
   } catch (error) {
+    // Lifecycle error handlers act by ID. An obsolete waiter must not kill or
+    // fail a replacement, including one that has already reached terminal state.
+    if (!ownsRegistration()) return false;
     if (signal?.aborted) throw new AbortError();
     throw error;
   }
+  if (!ownsRegistration()) return false;
   if (signal?.aborted) throw new AbortError();
   let completed = false;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
-    if (task.status !== 'running') {
+    if (task.status !== 'running' || task.registration !== registration) {
       return task;
     }
     completed = true;
@@ -541,7 +573,7 @@ export function registerAsyncAgent({
   parentAbortController?: AbortController;
   toolUseId?: string;
 }): LocalAgentTaskState {
-  const outputReady = initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
+  const outputReady = initAgentTaskOutput(agentId, getAgentTranscriptPath(asAgentId(agentId)));
   void outputReady.catch(() => {}); // Completion observes initialization failure.
 
   // Create abort controller - if parent provided, create child that auto-aborts with parent
@@ -561,6 +593,7 @@ export function registerAsyncAgent({
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
     abortController,
+    registration: {},
     outputReady,
     retrieved: false,
     lastReportedToolCount: 0,
@@ -613,7 +646,7 @@ export function registerAgentForeground({
   backgroundSignal: Promise<void>;
   cancelAutoBackground?: () => void;
 } {
-  const outputReady = initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
+  const outputReady = initAgentTaskOutput(agentId, getAgentTranscriptPath(asAgentId(agentId)));
   void outputReady.catch(() => {}); // Completion observes initialization failure.
   const abortController = createAbortController();
   const unregisterCleanup = registerCleanup(async () => {
@@ -628,6 +661,7 @@ export function registerAgentForeground({
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
     abortController,
+    registration: {},
     outputReady,
     unregisterCleanup,
     retrieved: false,
