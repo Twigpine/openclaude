@@ -21,6 +21,7 @@ import {
   type ProviderOutput,
   type SearchInput,
 } from '../../tools/WebSearchTool/providers/index.js'
+import { AIMLAPI_SEARCH_MAX_COST_USD } from '../../tools/WebSearchTool/providers/aimlapi.js'
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 import {
   isSettingSourceEnabled,
@@ -39,6 +40,13 @@ export interface SearchBackendOption {
   keyEnv?: string
   /** True when the backend also works without its key. */
   keyOptional?: boolean
+  /**
+   * Env var holding a key this backend reuses from a model-provider setup.
+   * /search reads it but never saves or removes it: an ambient
+   * AIMLAPI_API_KEY also selects AI/ML API as the model provider, so storing
+   * it here would change the model route on the next launch.
+   */
+  providerKeyEnv?: string
 }
 
 export const SEARCH_BACKENDS: readonly SearchBackendOption[] = [
@@ -82,6 +90,12 @@ export const SEARCH_BACKENDS: readonly SearchBackendOption[] = [
   { mode: 'mojeek', label: 'Mojeek', keyEnv: 'MOJEEK_API_KEY', description: 'Mojeek only' },
   { mode: 'bing', label: 'Bing', keyEnv: 'BING_API_KEY', description: 'Bing only' },
   {
+    mode: 'aimlapi',
+    label: 'AI/ML API',
+    providerKeyEnv: 'AIMLAPI_API_KEY',
+    description: 'AI/ML API Toolbox web/search, billed per search to your AI/ML API balance',
+  },
+  {
     mode: 'ollama',
     label: 'Ollama',
     keyEnv: 'OLLAMA_API_KEY',
@@ -111,6 +125,7 @@ const BACKEND_DISPLAY_NAMES: Record<string, string> = {
   'exa-free': 'Exa free tier',
   anysearch: 'AnySearch',
   keenable: 'Keenable',
+  aimlapi: 'AI/ML API',
   ollama: 'Ollama',
   firecrawl: 'Firecrawl',
   tavily: 'Tavily',
@@ -164,6 +179,17 @@ function usesBuiltInSearch(nativeSearchAvailable: boolean): boolean {
   return mode === 'native' || (mode === 'auto' && nativeSearchAvailable)
 }
 
+/**
+ * Where a backend that reuses a model-provider key gets it. Never names the
+ * key's value, only its variable.
+ */
+function providerKeyMessage(option: SearchBackendOption): string {
+  return (
+    `${option.label} uses ${option.providerKeyEnv} from your ${option.label} provider setup; ` +
+    '/search does not store it. Set it up with /provider (see docs/aimlapi-setup.md).'
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
@@ -209,6 +235,9 @@ export function parseSearchArgs(args: string): SearchCommandAction {
 
   if (sub === 'key' || sub === 'remove-key') {
     const named = parts[1] ? findSearchBackend(parts[1]) : findSearchBackend('exa')
+    if (named?.providerKeyEnv) {
+      return { kind: 'error', message: providerKeyMessage(named) }
+    }
     if (named && !named.keyEnv) {
       return {
         kind: 'error',
@@ -273,7 +302,9 @@ export function describeSearchStatus(nativeSearchAvailable: boolean): string {
     const option = findSearchBackend(mode)
     const keyHint = option?.keyEnv
       ? ` — add ${option.keyEnv} with /search key ${mode}`
-      : ''
+      : option?.providerKeyEnv
+        ? ` — it needs ${option.providerKeyEnv} from the ${option.label} provider setup (/provider)`
+        : ''
     lines.push(`${displayBackendName(first.name)} is not configured${keyHint}.`)
     return lines.join('\n')
   }
@@ -281,6 +312,9 @@ export function describeSearchStatus(nativeSearchAvailable: boolean): string {
   lines.push(`Searches go to: ${displayBackendName(first.name)}`)
   if (fallbacks.length > 0) {
     lines.push(`Fallbacks: ${fallbacks.map(p => displayBackendName(p.name)).join(' → ')}`)
+  }
+  if (first.name === 'aimlapi') {
+    lines.push('Each search is billed to your AI/ML API balance.')
   }
   if (first.name === 'exa-free') {
     lines.push(
@@ -387,6 +421,9 @@ export function applySearchSelection(
   nativeSearchAvailable: boolean,
   store: SearchEnvStore = globalConfigSearchEnvStore,
 ): string {
+  if (option.providerKeyEnv && !isBackendReady(option)) {
+    return `Web search settings unchanged. ${providerKeyMessage(option)}`
+  }
   const set: Record<string, string> = { WEB_SEARCH_PROVIDER: option.mode }
   const key = apiKey?.trim()
   if (key && option.keyEnv) set[option.keyEnv] = key
@@ -406,6 +443,11 @@ export function applySearchSelection(
   if (warnings.length > 0) return lines.join('\n')
   if (option.mode === 'exa' && !hasApiKey(option)) {
     lines.push('Using the Exa free tier — add a key for higher limits with /search key exa.')
+  }
+  if (option.mode === 'aimlapi') {
+    lines.push(
+      `Each search runs the AI/ML API Toolbox tool web/search and is billed to your AI/ML API balance (at most $${AIMLAPI_SEARCH_MAX_COST_USD} per search).`,
+    )
   }
   if (option.mode === 'auto' && nativeSearchAvailable) {
     lines.push('This model provider has built-in web search, which auto mode uses first.')

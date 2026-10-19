@@ -67,6 +67,19 @@ export OPENAI_MODEL="gpt-4o"
 
 `OPENAI_API_KEY` also works as a fallback credential for the route.
 
+## Web search (optional, billed)
+
+AI/ML API can also back OpenClaude's web search through the Toolbox tool `web/search`.
+Turn it on with `/search aimlapi` (or `WEB_SEARCH_PROVIDER=aimlapi`). It reuses the
+`AIMLAPI_API_KEY` this setup provides, so there is no second key to paste.
+
+Each search is billed to your AI/ML API balance — about $0.01 for the 10 results
+OpenClaude requests, and every run is capped at `max_cost_usd: 0.025`. Because it costs
+money, it is never chosen automatically: having an `AIMLAPI_API_KEY` does not put it in
+the `auto` search order. Switch back with `/search auto`. See
+[Web Search Providers](../src/tools/WebSearchTool/README_SEARCH_PROVIDERS.md#aiml-api-toolbox-websearch)
+for the request and response format.
+
 ## Verify
 
 - `/status` shows **AI/ML API** as the active provider with the `https://api.aimlapi.com/v1` base URL.
@@ -76,7 +89,7 @@ export OPENAI_MODEL="gpt-4o"
 ## Notes
 
 - Model discovery uses the public, unauthenticated `GET /models` endpoint and surfaces only chat-completions models; image, audio, embeddings, and other modalities are intentionally not routed through the coding workflow.
-- Every request to AI/ML API (inference, catalog, sign-in/account, and checkout) carries the two mandatory attribution headers `X-AIMLAPI-Source: agent/openclaude` and `X-AIMLAPI-Partner-ID`. On the canonical `api.aimlapi.com` endpoint the inference/catalog requests additionally send `X-AIMLAPI-Integration-*` (owner/repo/version) plus `HTTP-Referer: OpenClaude` and `X-Title: OpenClaude`; all attribution headers are stripped when a non-canonical (proxy) base URL is configured, so a third-party host never receives OpenClaude's partner identity.
+- Every request to AI/ML API (inference, catalog, sign-in/account, checkout, and Toolbox web search) carries the two mandatory attribution headers `X-AIMLAPI-Source: agent/openclaude` and `X-AIMLAPI-Partner-ID`. On the canonical `api.aimlapi.com` endpoint the inference/catalog requests additionally send `X-AIMLAPI-Integration-*` (owner/repo/version) plus `HTTP-Referer: OpenClaude` and `X-Title: OpenClaude`; all attribution headers are stripped when a non-canonical (proxy) base URL is configured, so a third-party host never receives OpenClaude's partner identity.
 - `AIMLAPI_AUTH_URL`, `AIMLAPI_APP_URL`, `AIMLAPI_PAY_URL`, and `AIMLAPI_VERIFICATION_BASE_URL` can point the complete flow at another environment. Guided **new-account** onboarding and key provisioning require the canonical `api.aimlapi.com` inference endpoint, so `AIMLAPI_INFERENCE_URL` must be unset (or left at its default) to create a new account and mint its key — a non-canonical value is rejected there. The existing-key top-up path (paste an aimlapi.com key) instead runs against whatever `AIMLAPI_INFERENCE_URL` is configured. `AIMLAPI_RETURN_URL` overrides only the browser landing page.
 - Checkout success is detected by polling. The browser return target is an HTTPS page; OpenClaude does not install a custom URL-scheme handler.
 - Usage (`/usage`) reporting is not supported for this provider.

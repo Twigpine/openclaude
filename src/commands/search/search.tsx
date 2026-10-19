@@ -90,7 +90,12 @@ function ApiKeyDialog({
 }
 
 /** Picker description for a backend, noting whether its key is set or missing. */
-function backendDescription(option: SearchBackendOption): string {
+export function backendDescription(option: SearchBackendOption): string {
+  if (option.providerKeyEnv) {
+    return isBackendReady(option)
+      ? `${option.description} · uses your ${option.label} key`
+      : `${option.description} · needs ${option.providerKeyEnv} (set up with /provider)`
+  }
   if (!option.keyEnv) return option.description
   if (hasApiKey(option)) return `${option.description} · key set`
   if (isBackendReady(option)) return option.description

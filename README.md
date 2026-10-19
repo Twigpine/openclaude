@@ -473,6 +473,8 @@ See [Agent Routing and Step Limits](docs/agent-routing.md) for the full guide.
 
 Other backends in the auto chain that you configure with a key (Tavily, Brave, Firecrawl, …) run before the Exa free tier, and DuckDuckGo is the last-resort fallback. When the active provider is Ollama, OpenClaude uses the signed-in local Ollama Web Search endpoint ahead of the free tier. Set `OLLAMA_API_KEY` to enable the hosted Ollama endpoint as a fallback. Set `EXA_FREE_TIER=0` if searches should never go to Exa without a key. See [Web Search Providers](src/tools/WebSearchTool/README_SEARCH_PROVIDERS.md) for every backend and option.
 
+If you use AI/ML API as your model provider, `/search aimlapi` (or `WEB_SEARCH_PROVIDER=aimlapi`) runs searches through the AI/ML API Toolbox `web/search` tool with the same `AIMLAPI_API_KEY` — nothing else to paste. Each search is billed to your AI/ML API balance (about $0.01, capped at $0.025 per search), so it is only used when you select it and never joins the `auto` order.
+
 AnySearch is available as an explicit backend with `/search anysearch` or `WEB_SEARCH_PROVIDER=anysearch`. `ANYSEARCH_API_KEY` is optional; anonymous access has lower service limits. Set `ANYSEARCH_MAX_RESULTS` to an integer from 1 to 10 (default 10) to control the requested result count. AnySearch does not change the `auto` search order.
 
 Keenable is available as an explicit backend with `/search keenable` or `WEB_SEARCH_PROVIDER=keenable`. `KEENABLE_API_KEY` is optional; keyless access is rate-limited per IP. Keenable does not change the `auto` search order.
