@@ -414,6 +414,12 @@ export type SDKSessionOptions = {
    * process-wide env mutex `query()` uses. Turns belonging to sessions with
    * different environments therefore serialise rather than overlap.
    *
+   * A turn that sets no environment takes no mutex, so it may run alongside
+   * one that does — and, since `process.env` is one object per process, it
+   * can read that turn's variables while they are in place. Nothing survives
+   * the turn either way. Give a session its own `env` if its turns must not
+   * see another's.
+   *
    * A value of `undefined` removes the variable for the turn.
    */
   env?: Record<string, string | undefined>

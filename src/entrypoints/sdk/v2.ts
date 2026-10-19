@@ -320,17 +320,25 @@ class SDKSessionImpl implements SDKSession {
    */
   private async applySessionEnv(): Promise<Record<string, string | undefined> | null> {
     const overrides = this.options.env
-    if (!overrides || Object.keys(overrides).length === 0) return null
+    if (!overrides) return null
+    // ENUMERATED ONCE, AND BEFORE THE MUTEX. Raised in review: the snapshot
+    // loop read `Object.keys` and the apply loop `Object.entries`, which a
+    // Proxy may answer differently — a key seen only by the apply loop would
+    // be set and never restored. Reading the host's object before the lock
+    // also means a throwing getter cannot leave the mutex held: nothing has
+    // been taken yet.
+    const entries = Object.entries(overrides)
+    if (entries.length === 0) return null
     await acquireEnvMutex()
     // Null-prototype: `__proto__` is a variable name like any other here, and
     // on a plain object it would be swallowed by the prototype setter instead
     // of being remembered — leaving the one key we must restore unrestorable.
     const snapshot: Record<string, string | undefined> = Object.create(null)
     try {
-      for (const key of Object.keys(overrides)) {
+      for (const [key] of entries) {
         snapshot[key] = process.env[key]
       }
-      for (const [key, value] of Object.entries(overrides)) {
+      for (const [key, value] of entries) {
         if (value === undefined) {
           delete process.env[key]
         } else {
