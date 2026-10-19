@@ -815,6 +815,17 @@ let cleanupRegistered = false
 let unsubscribeSessionSwitch: (() => void) | null = null
 /** The session the cached file pointer belongs to. */
 let pointerSessionId: string | null = null
+/**
+ * And the project directory it was resolved under.
+ *
+ * Raised in review. `switchSession(id, projectDir)` sets BOTH, and emits only
+ * the id — so a switch that keeps the id and changes the directory would slip
+ * past an id-only guard and leave the pointer aimed at the old directory's
+ * file. The SDK does exactly that: `v2.ts` switches before every turn with
+ * the session's own `_sessionProjectDir`, and `query.ts` with the resolved
+ * transcript dir.
+ */
+let pointerProjectDir: string | null = null
 
 /**
  * Follow switchSession with the file pointer.
@@ -840,14 +851,20 @@ let pointerSessionId: string | null = null
  *
  * Only on a real change: v2 calls switchSession before EVERY turn with the id
  * it already has, and resetting the pointer each time would drop buffered
- * entries and re-resolve the same path for nothing.
+ * entries and re-resolve the same path for nothing. "The same" means both the
+ * id and the project directory, because both decide the path.
  */
 function followSessionSwitches(): void {
   if (unsubscribeSessionSwitch) return
   pointerSessionId = getSessionId()
+  pointerProjectDir = getSessionProjectDir()
   unsubscribeSessionSwitch = onSessionSwitch(sessionId => {
-    if (sessionId === pointerSessionId) return
+    // Read rather than received: the signal carries the id alone, and
+    // switchSession has already set the directory by the time it emits.
+    const projectDir = getSessionProjectDir()
+    if (sessionId === pointerSessionId && projectDir === pointerProjectDir) return
     pointerSessionId = sessionId
+    pointerProjectDir = projectDir
     // Lazily re-resolved from the new session id on the next write. An
     // existing file is appended to, not replaced — a resume lands back in the
     // conversation it came from.
@@ -929,6 +946,7 @@ export function resetProjectForTesting(): void {
   unsubscribeSessionSwitch?.()
   unsubscribeSessionSwitch = null
   pointerSessionId = null
+  pointerProjectDir = null
 }
 
 export function setSessionFileForTesting(path: string): void {
