@@ -14,6 +14,7 @@ const savedWebSearchEnv = {
   FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL,
   TAVILY_API_KEY: process.env.TAVILY_API_KEY,
   ANYSEARCH_API_KEY: process.env.ANYSEARCH_API_KEY,
+  AIMLAPI_API_KEY: process.env.AIMLAPI_API_KEY,
   EXA_API_KEY: process.env.EXA_API_KEY,
   EXA_FREE_TIER: process.env.EXA_FREE_TIER,
   YOU_API_KEY: process.env.YOU_API_KEY,
@@ -175,6 +176,22 @@ describe('getProviderChain', () => {
     expect(chain[0].isConfigured()).toBe(true)
   })
 
+  test('auto mode never selects AI/ML API, even with an AIMLAPI_API_KEY set', () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-key'
+    expect(getProviderChain('auto').some(p => p.name === 'aimlapi')).toBe(false)
+    expect(getAvailableProviders().some(p => p.name === 'aimlapi')).toBe(false)
+  })
+
+  test('aimlapi mode selects the AI/ML API provider when the key is set', () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-key'
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    expect(getProviderMode()).toBe('aimlapi')
+    const chain = getProviderChain('aimlapi' as ProviderMode)
+    expect(chain).toHaveLength(1)
+    expect(chain[0].name).toBe('aimlapi')
+    expect(chain[0].isConfigured()).toBe(true)
+  })
+
   test('custom mode explicitly returns custom provider', () => {
     const chain = getProviderChain('custom' as ProviderMode)
     expect(chain).toHaveLength(1)
@@ -224,6 +241,42 @@ describe('runSearch', () => {
     const { runSearch } = await import('./index.js')
     await expect(runSearch({ query: 'quota' })).rejects.toThrow(/AnySearch search error HTTP 429/)
     expect(requestCount).toBe(1)
+  })
+
+  test('auto mode with an AIMLAPI_API_KEY never calls the AI/ML API Toolbox', async () => {
+    configureAutoModeWithOnlyBrave()
+    process.env.AIMLAPI_API_KEY = 'aiml-key'
+    console.error = () => {}
+    const hosts: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      hosts.push(new URL(String(input)).hostname)
+      return new Response('unavailable', { status: 503 })
+    }) as typeof fetch
+    mockDuckDuckGoSearch(async () => ({
+      results: [{ title: 'Fallback result', url: 'https://example.com/fallback' }],
+    }))
+
+    const { runSearch } = await import('./index.js')
+    const output = await runSearch({ query: 'q' })
+
+    expect(output.providerName).toBe('duckduckgo')
+    expect(hosts).toEqual(['api.search.brave.com'])
+  })
+
+  test('explicit aimlapi mode without a key fails before any request', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    delete process.env.AIMLAPI_API_KEY
+    let requestCount = 0
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      requestCount += 1
+      return new Response('{}', { status: 200 })
+    }) as typeof fetch
+
+    const { runSearch } = await import('./index.js')
+    await expect(runSearch({ query: 'q' })).rejects.toThrow(
+      /Search provider "aimlapi" is not configured.*AIMLAPI_API_KEY/,
+    )
+    expect(requestCount).toBe(0)
   })
 
   test('AbortError stops the chain immediately in auto mode', async () => {

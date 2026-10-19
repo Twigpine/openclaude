@@ -597,7 +597,7 @@ search (`/search test`). `/search` saves its choices to the `env` block of
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `WEB_SEARCH_PROVIDER` | No | `auto` (default): keyed Exa first, then other configured backends in the auto chain, then the Exa free tier, then DuckDuckGo. Anthropic first-party, Vertex, Foundry, and Codex keep their built-in search in `auto`. Set one backend (`exa`, `anysearch`, `tavily`, `brave`, `firecrawl`, `you`, `jina`, `bing`, `mojeek`, `linkup`, `ollama`, `ddg`, `custom`, or `native`) to use only that backend and fail instead of falling back. AnySearch is explicit-only and does not join `auto`. |
+| `WEB_SEARCH_PROVIDER` | No | `auto` (default): keyed Exa first, then other configured backends in the auto chain, then the Exa free tier, then DuckDuckGo. Anthropic first-party, Vertex, Foundry, and Codex keep their built-in search in `auto`. Set one backend (`exa`, `anysearch`, `aimlapi`, `tavily`, `brave`, `firecrawl`, `you`, `jina`, `bing`, `mojeek`, `linkup`, `ollama`, `ddg`, `custom`, or `native`) to use only that backend and fail instead of falling back. AnySearch and AI/ML API (`aimlapi`, billed per search, uses `AIMLAPI_API_KEY`) are explicit-only and do not join `auto`. |
 | `ANYSEARCH_API_KEY` | No | Optional AnySearch API key. Without one, `/search anysearch` sends anonymous requests without an Authorization header. Add or remove a saved key with `/search key anysearch` or `/search remove-key anysearch`. |
 | `ANYSEARCH_MAX_RESULTS` | No | Requested AnySearch results, integer 1–10 (default `10`; invalid values use the default). |
 | `EXA_API_KEY` | No | Exa API key for higher limits than the free tier. Free keys: https://dashboard.exa.ai/api-keys |

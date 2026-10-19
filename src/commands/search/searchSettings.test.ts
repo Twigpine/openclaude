@@ -35,6 +35,8 @@ const SEARCH_ENV_KEYS = [
   'TAVILY_API_KEY',
   'ANYSEARCH_API_KEY',
   'ANYSEARCH_MAX_RESULTS',
+  'AIMLAPI_API_KEY',
+  'WEB_SEARCH_TIMEOUT_SEC',
   'FIRECRAWL_API_KEY',
   'FIRECRAWL_API_URL',
   'YOU_API_KEY',
@@ -189,6 +191,73 @@ describe('parseSearchArgs', () => {
     const action = parseSearchArgs('remove-key secret-token')
     expect(action).toMatchObject({ kind: 'error' })
     expect(action.kind === 'error' && action.message).not.toContain('secret-token')
+  })
+})
+
+describe('AI/ML API backend', () => {
+  test('/search key and remove-key point at the provider setup instead of storing the key', () => {
+    for (const args of ['key aimlapi', 'remove-key aimlapi']) {
+      const action = parseSearchArgs(args)
+      expect(action.kind).toBe('error')
+      expect(action.kind === 'error' && action.message).toBe(
+        'AI/ML API uses AIMLAPI_API_KEY from your AI/ML API provider setup; /search does not store it. ' +
+          'Set it up with /provider (see docs/aimlapi-setup.md).',
+      )
+    }
+  })
+
+  test('selecting it without AIMLAPI_API_KEY changes nothing', () => {
+    const store = recordingStore()
+    const message = applySearchSelection(backend('aimlapi'), undefined, false, store)
+
+    expect(store.saves).toEqual([])
+    expect(process.env.WEB_SEARCH_PROVIDER).toBeUndefined()
+    expect(message).toStartWith('Web search settings unchanged. AI/ML API uses AIMLAPI_API_KEY')
+  })
+
+  test('selecting it reuses the provider key, saves only the mode, and states the billing', () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-provider-key'
+    const store = recordingStore()
+    const message = applySearchSelection(backend('aimlapi'), 'stray', false, store)
+
+    expect(store.saves).toEqual([{ set: { WEB_SEARCH_PROVIDER: 'aimlapi' }, unset: [] }])
+    expect(message).toBe(
+      'Web search set to AI/ML API.\n' +
+        'Each search runs the AI/ML API Toolbox tool web/search and is billed to your AI/ML API balance (at most $0.025 per search).',
+    )
+  })
+
+  test('status names the missing provider key, or the billed backend once it is set', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    expect(describeSearchStatus(false)).toContain(
+      'AI/ML API is not configured — it needs AIMLAPI_API_KEY from the AI/ML API provider setup (/provider).',
+    )
+
+    process.env.AIMLAPI_API_KEY = 'aiml-provider-key'
+    const status = describeSearchStatus(false)
+    expect(status).toContain('Searches go to: AI/ML API')
+    expect(status).toContain('Each search is billed to your AI/ML API balance.')
+    expect(status).not.toContain('Fallbacks')
+  })
+
+  test('/search test runs through the Toolbox when AI/ML API is selected', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    process.env.AIMLAPI_API_KEY = 'aiml-provider-key'
+    let requestedUrl = ''
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      requestedUrl = String(input)
+      return new Response(JSON.stringify({
+        id: 'run_1',
+        status: 'completed',
+        is_error: false,
+        output: { results: [{ url: 'https://nodejs.org/', title: 'Node.js', snippet: 's' }] },
+      }), { status: 200 })
+    }) as typeof fetch
+
+    const message = await runSearchTest('node', false)
+
+    expect(requestedUrl).toBe('https://tools.aimlapi.com/v1/tools/run')
+    expect(message).toContain('Search OK via AI/ML API: 1 results')
   })
 })
 

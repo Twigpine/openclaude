@@ -47,6 +47,7 @@ instead.
 | Exa (default) | `EXA_API_KEY` | `x-api-key` | POST |
 | Exa free tier | *(none — zero-config default)* | — | POST |
 | AnySearch (explicit only) | `ANYSEARCH_API_KEY` (optional) | `Authorization: Bearer` when set | POST |
+| AI/ML API (explicit only, billed) | `AIMLAPI_API_KEY` (from the AI/ML API provider setup) | `Authorization: Bearer` | POST |
 | You.com | `YOU_API_KEY` | `X-API-Key` | GET |
 | Jina | `JINA_API_KEY` | `Authorization: Bearer` | GET |
 | Bing | `BING_API_KEY` | `Ocp-Apim-Subscription-Key` | GET |
@@ -85,6 +86,7 @@ export WEB_SEARCH_API=https://search.example.com/search
 | `tavily` | Tavily only — throws on failure |
 | `exa` | Exa only — keyed API when `EXA_API_KEY` is set, otherwise the free tier; throws on failure |
 | `anysearch` | AnySearch only — anonymous without a key, Bearer authentication with one; throws on failure |
+| `aimlapi` | AI/ML API Toolbox `web/search` only — billed to your AI/ML API balance; throws on failure. **Not in the auto chain** |
 | `brave` | Brave only — throws on failure |
 | `custom` | Custom API only — throws on failure. **Not in the auto chain** — must be explicitly selected |
 | `firecrawl` | Firecrawl only — throws on failure |
@@ -104,6 +106,10 @@ there too.
 > **Note:** The `custom` provider is excluded from the `auto` chain. It is only used when `WEB_SEARCH_PROVIDER=custom` is explicitly set. This prevents the generic outbound provider from silently becoming the default backend.
 
 AnySearch is also explicit-only: selecting it does not change the existing `auto` chain.
+
+AI/ML API is explicit-only as well. Every search it runs is billed to your AI/ML API
+balance, so an `AIMLAPI_API_KEY` set up for the model provider never makes `auto`
+mode search through it; only `/search aimlapi` (or `WEB_SEARCH_PROVIDER=aimlapi`) does.
 
 ```bash
 # Fail loudly if Tavily is down (don't silently switch backends)
@@ -134,6 +140,72 @@ Run `/search anysearch` to use its general web search without a key, or `/search
 ```json
 {"query":"search terms","max_results":10}
 ```
+
+### AI/ML API (Toolbox `web/search`)
+
+Run `/search aimlapi`. It uses the `AIMLAPI_API_KEY` your AI/ML API provider setup
+already provides (`/provider`, `openclaude aimlapi topup`, or the environment variable —
+see [AI/ML API Setup](../../../docs/aimlapi-setup.md)); there is nothing to paste. The
+route's `OPENAI_API_KEY` fallback is used too, but only while `OPENAI_BASE_URL` is the
+canonical `https://api.aimlapi.com/v1`.
+`/search` does not store or remove that key: an ambient `AIMLAPI_API_KEY` also selects
+AI/ML API as the model provider, so it is managed by the provider setup only. Without the
+key, `/search aimlapi` leaves your settings unchanged and says how to set it up.
+
+Each search runs the Toolbox tool `web/search` and is billed to your AI/ML API balance.
+The tool publishes a $0.0091–$0.0221 price range per run (as of 2026-10); a 10-result
+search was charged $0.0091. Every run carries `max_cost_usd: 0.025`; a run that would
+cost more is refused by the service before it is charged.
+
+**Request:**
+```
+POST https://tools.aimlapi.com/v1/tools/run
+Authorization: Bearer $AIMLAPI_API_KEY
+X-AIMLAPI-Source: agent/openclaude
+X-AIMLAPI-Partner-ID: <OpenClaude partner id>
+Content-Type: application/json
+
+{"tool": "web/search",
+ "input": {"query": "search terms", "max_results": 10, "include_domains": ["example.com"]},
+ "max_cost_usd": 0.025, "wait_ms": 13000}
+```
+
+`allowed_domains` are sent as `include_domains`; the tool has no exclude field, so
+`blocked_domains` are applied to the results. Both lists are also enforced on the
+results like every other backend. `wait_ms` is the search timeout minus two seconds
+(`WEB_SEARCH_TIMEOUT_SEC`, default 15s).
+
+**Response:** `200` with the finished run, or `202` while it is still queued — OpenClaude
+then polls `GET https://tools.aimlapi.com/v1/tools/runs/{id}` (free) after
+`next_poll_hint_ms` until the run is `completed`, `failed`, `stopped` or `timed_out`, all
+within the search timeout. A run with `"is_error": true` is reported with its
+`error.message`.
+
+```json
+{
+  "id": "KsFgaANj50jSrzgHgNCLq",
+  "status": "completed",
+  "is_error": false,
+  "untrusted": true,
+  "output": {
+    "results": [
+      {
+        "url": "https://nodejs.org/en/blog/release",
+        "title": "Node.js",
+        "snippet": "Node.js 24.22.0 (LTS) ...",
+        "published_at": "2026-10-14T15:26:48.000Z"
+      }
+    ]
+  },
+  "cost": {"quoted_usd": 0.0091, "actual_usd": 0.0091, "credits": 18200, "over_max": false}
+}
+```
+
+Each result becomes a search hit: `title`, `url`, and the `snippet` as the description,
+prefixed with the publication date when `published_at` is present. Results are web
+content (`"untrusted": true`) and are passed to the model as search results, the same as
+every other backend's — never as instructions. The key and the attribution headers are
+sent only to `tools.aimlapi.com`, which is not configurable.
 
 ### Ollama
 
