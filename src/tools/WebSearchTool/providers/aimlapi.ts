@@ -46,14 +46,21 @@ const MAX_ERROR_MESSAGE_LENGTH = 300
  * The key the AI/ML API model provider uses: AIMLAPI_API_KEY, or the
  * OPENAI_API_KEY fallback that route accepts — but only while OPENAI_BASE_URL
  * is the canonical AI/ML API endpoint, so another provider's key is never sent.
+ *
+ * An aimlapi provider profile pointed at the user's own proxy exports the
+ * proxy's credential as AIMLAPI_API_KEY. That credential belongs to the
+ * proxy, so no key is resolved at all in that case: the backend reports
+ * itself as not configured and nothing is sent to the Toolbox.
  */
 function apiKey(): string | undefined {
+  const baseUrl = process.env.OPENAI_BASE_URL?.trim()
+  const canonicalBaseUrl = Boolean(baseUrl && isCanonicalAimlapiInferenceBaseUrl(baseUrl))
+  if (process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'aimlapi' && baseUrl && !canonicalBaseUrl) {
+    return undefined
+  }
   const dedicated = sanitizeApiKey(process.env.AIMLAPI_API_KEY)
   if (dedicated) return dedicated
-  const baseUrl = process.env.OPENAI_BASE_URL?.trim()
-  return baseUrl && isCanonicalAimlapiInferenceBaseUrl(baseUrl)
-    ? sanitizeApiKey(process.env.OPENAI_API_KEY)
-    : undefined
+  return canonicalBaseUrl ? sanitizeApiKey(process.env.OPENAI_API_KEY) : undefined
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
