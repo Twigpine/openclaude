@@ -12,7 +12,7 @@
  * configures proxies, mTLS and remote settings process-wide.
  */
 
-import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test'
 
 import { resetEnvMutexForTesting } from './shared'
 import type { SDKMessage } from './coreTypes'
@@ -44,10 +44,20 @@ function engineSeeingEnv(messages = 2) {
 }
 
 let createSession: typeof import('./v2').unstable_v2_createSession
+let realInit: typeof import('../init.js')
 
 beforeAll(async () => {
+  // Held so the registration can be put back. Raised in review: a
+  // `mock.module` registration is process-global and `mock.restore()` does
+  // not remove it, so a stubbed `init` would go on standing in for the real
+  // one in every test file that runs after this one in the same bun process.
+  realInit = await import('../init.js')
   mock.module('../init.js', () => ({ init: async () => {} }))
   createSession = (await import('./v2')).unstable_v2_createSession
+})
+
+afterAll(() => {
+  mock.module('../init.js', () => realInit)
 })
 
 afterEach(() => {
@@ -132,5 +142,45 @@ describe('SDKSessionOptions.env through a turn', () => {
 
     first.close()
     second.close()
+  })
+
+  /**
+   * THE LIMIT, WRITTEN DOWN AS A TEST.
+   *
+   * A turn that asked for no environment takes no mutex — nothing to take and
+   * nothing to put back — so it is free to run beside an env-scoped turn. And
+   * `process.env` is one object for the whole process: while the scoped turn
+   * holds its variables, the other turn is looking at the same object and
+   * sees them.
+   *
+   * This is the price of the design and not a defect in it. The alternative —
+   * making every turn take the mutex — would serialise an embedder's whole
+   * process the moment one session used `env`, which is a far worse trade for
+   * the host this exists for. What IS guaranteed, and asserted below, is that
+   * nothing survives the turn.
+   *
+   * The suggestion to cover a concurrent env-less turn came from review; it
+   * was written expecting isolation, and this is what it actually found.
+   */
+  test('AN ENV-LESS TURN RUNNING ALONGSIDE ONE CAN SEE ITS VARIABLES, BUT NOT OUTLIVE THEM', async () => {
+    const scoped = session({ [KEY]: 'scoped' }, 3)
+    const plain = session(undefined, 3)
+
+    const drain = async (one: ReturnType<typeof session>) => {
+      for await (const _ of one.sendMessage('hi')) {
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+    }
+
+    await Promise.all([drain(scoped), drain(plain)])
+
+    expect(seen.length).toBe(6)
+    // Both turns were looking at the same `process.env` while it was set.
+    expect(seen.every(one => one === 'scoped')).toBe(true)
+    // And the guarantee that does hold: the turn took its variables with it.
+    expect(KEY in process.env).toBe(false)
+
+    scoped.close()
+    plain.close()
   })
 })
