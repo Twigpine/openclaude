@@ -22,6 +22,7 @@ import {
   MAX_MARKDOWN_LENGTH,
 } from './utils.js'
 import { firecrawlScrape } from '../firecrawl/client.js'
+import { isAimlapiWebFetchSelected, scrapeWithAimlapi } from './aimlapiScrape.js'
 
 function isFirecrawlEnabled(): boolean {
   return Boolean(process.env.FIRECRAWL_API_KEY) || Boolean(process.env.FIRECRAWL_API_URL)
@@ -39,6 +40,23 @@ async function scrapeWithFirecrawl(
   })
   const markdown = result.markdown ?? ''
   return { markdown, bytes: Buffer.byteLength(markdown) }
+}
+
+type PageScraper = (
+  url: string,
+  signal?: AbortSignal,
+) => Promise<{ markdown: string; bytes: number }>
+
+/**
+ * The scraping backend that replaces raw HTTP, if any. AI/ML API runs are
+ * billed per page, so that backend needs the explicit WEB_FETCH_PROVIDER=aimlapi
+ * choice and then wins over a configured Firecrawl key.
+ */
+function getPageScraper(): PageScraper | null {
+  if (isAimlapiWebFetchSelected()) {
+    return (url, signal) => scrapeWithAimlapi(url, { signal })
+  }
+  return isFirecrawlEnabled() ? scrapeWithFirecrawl : null
 }
 
 const inputSchema = lazySchema(() =>
@@ -231,8 +249,9 @@ ${DESCRIPTION}`
   ) {
     const start = Date.now()
 
-    if (isFirecrawlEnabled()) {
-      const { markdown, bytes } = await scrapeWithFirecrawl(url, abortController.signal)
+    const scrapePage = getPageScraper()
+    if (scrapePage) {
+      const { markdown, bytes } = await scrapePage(url, abortController.signal)
       const result = await applyPromptToMarkdown(
         prompt,
         markdown,

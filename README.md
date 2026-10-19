@@ -500,6 +500,15 @@ With Firecrawl enabled:
 
 Free tier at [firecrawl.dev](https://firecrawl.dev) includes 500 credits. The key is optional.
 
+`WebFetch` can also scrape pages through the [AI/ML API](https://aimlapi.com) Toolbox with your AI/ML API key. Each fetched page is one paid Toolbox run (about $0.0013, capped at $0.005), so it is used only when you choose it:
+
+```bash
+export AIMLAPI_API_KEY=your-aimlapi-key
+export WEB_FETCH_PROVIDER=aimlapi
+```
+
+`WEB_FETCH_PROVIDER=aimlapi` takes precedence over a Firecrawl key for `WebFetch`. Having `AIMLAPI_API_KEY` set without it does not change how pages are fetched. See [AI/ML API Setup](docs/aimlapi-setup.md#webfetch-through-the-aiml-api-toolbox).
+
 ## Headless gRPC Server
 
 OpenClaude can run as a headless gRPC service with bidirectional streaming —
