@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path'
 import {
   getOriginalCwd,
   getSessionId,
+  getSessionProjectDir,
   isSessionPersistenceDisabled,
   setOriginalCwd,
   setSessionPersistenceDisabled,
@@ -22,6 +23,7 @@ import {
 import {
   flushSessionStorage,
   getTranscriptPathForSession,
+  recordAttributionSnapshot,
   recordTranscript,
   resetProjectForTesting,
 } from './sessionStorage.js'
@@ -44,6 +46,7 @@ const TIMESTAMP = '2026-09-30T00:00:00.000Z'
 let testRoot = ''
 let originalCwd = ''
 let originalSessionId = ''
+let originalSessionProjectDir: string | null = null
 let originalConfigOverride: string | undefined
 let originalPersistenceDisabled = false
 let originalNodeEnv: string | undefined
@@ -82,6 +85,9 @@ beforeEach(async () => {
   testRoot = await mkdtemp(join(tmpdir(), 'openclaude-session-switch-'))
   originalCwd = getOriginalCwd()
   originalSessionId = getSessionId()
+  // Restored with the id below: switchSession sets both, and handing back
+  // `null` would move the active session's transcript for every later test.
+  originalSessionProjectDir = getSessionProjectDir()
   originalConfigOverride = getClaudeConfigHomeDirOverrideForTesting()
   originalPersistenceDisabled = isSessionPersistenceDisabled()
   originalNodeEnv = process.env.NODE_ENV
@@ -107,7 +113,7 @@ afterEach(async () => {
     // Nothing queued; the restore below is what matters.
   }
   resetProjectForTesting()
-  switchSession(originalSessionId as never, null)
+  switchSession(originalSessionId as never, originalSessionProjectDir)
   setOriginalCwd(originalCwd)
   setClaudeConfigHomeDirForTesting(originalConfigOverride)
   setSessionPersistenceDisabled(originalPersistenceDisabled)
@@ -159,6 +165,73 @@ test('switching to the same session id keeps the file it already has', async () 
 
   const ids = await sessionIds(FIRST)
   expect(ids.filter(id => id === FIRST).length).toBeGreaterThanOrEqual(2)
+})
+
+/**
+ * AND IT KEEPS WHAT IS STILL IN THE BUFFER.
+ *
+ * Raised in review, and the test above cannot see it: it flushes before the
+ * second switch, so there is nothing buffered left to lose. Entries recorded
+ * before the first user or assistant message wait in memory until the file is
+ * materialized, and `resetSessionFile()` throws that buffer away. A listener
+ * that reset on EVERY switch — including the same-id one v2 makes before each
+ * turn — would silently drop them.
+ */
+test('a same-id switch does not throw away entries still waiting to be written', async () => {
+  switchSession(FIRST as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(FIRST)), { recursive: true, mode: 0o700 })
+
+  // Nothing has materialized the file yet, so this waits in the buffer.
+  await recordAttributionSnapshot({
+    type: 'attribution-snapshot',
+    messageId: '40000000-0000-4000-8000-000000000007' as UUID,
+    surface: 'sdk',
+    fileStates: {},
+  })
+  expect(existsSync(getTranscriptPathForSession(FIRST))).toBe(false)
+
+  switchSession(FIRST as never, null)
+
+  // The first user message materializes the file; the buffered entry has to
+  // come out with it.
+  await recordTranscript([message('40000000-0000-4000-8000-000000000008', 'after the switch')])
+  await flushSessionStorage()
+
+  const text = await readFile(getTranscriptPathForSession(FIRST), 'utf8')
+  expect(text).toContain('attribution-snapshot')
+  expect(text).toContain('40000000-0000-4000-8000-000000000008')
+})
+
+/**
+ * THE SAME ID IS NOT THE SAME FILE.
+ *
+ * Raised in review. `switchSession(id, projectDir)` sets both and emits only
+ * the id, so an id-only guard lets a directory change past and leaves the
+ * pointer aimed at the old directory's transcript. Both SDK paths do exactly
+ * this: v2 switches with the session's own project dir before every turn, and
+ * query() with the resolved transcript dir.
+ */
+test('a same-id switch to another project directory moves the pointer', async () => {
+  const here = join(testRoot, 'here')
+  const there = join(testRoot, 'there')
+  await mkdir(here, { recursive: true })
+  await mkdir(there, { recursive: true })
+
+  switchSession(FIRST as never, here)
+  await recordTranscript([message('40000000-0000-4000-8000-000000000009', 'written here')])
+  await flushSessionStorage()
+  const first = getTranscriptPathForSession(FIRST)
+
+  // Same session, somewhere else. Nothing about the id changed.
+  switchSession(FIRST as never, there)
+  await recordTranscript([message('40000000-0000-4000-8000-00000000000a', 'written there')])
+  await flushSessionStorage()
+  const second = getTranscriptPathForSession(FIRST)
+
+  expect(second).not.toBe(first)
+  expect(await readFile(second, 'utf8')).toContain('written there')
+  // The point: the second record did NOT land in the first directory's file.
+  expect(await readFile(first, 'utf8')).not.toContain('written there')
 })
 
 /**
