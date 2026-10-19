@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import { asMockFetch, callArgs } from '../../test/typedMocks.js'
 import {
@@ -12,6 +12,9 @@ const originalFetch = globalThis.fetch
 const originalEnv = {
   AIMLAPI_API_KEY: process.env.AIMLAPI_API_KEY,
   WEB_FETCH_PROVIDER: process.env.WEB_FETCH_PROVIDER,
+  CLAUDE_CODE_PROVIDER_ROUTE_ID: process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID,
+  OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
+  OPENAI_API_BASE: process.env.OPENAI_API_BASE,
 }
 
 function restoreEnv(key: string, value: string | undefined): void {
@@ -22,10 +25,16 @@ function restoreEnv(key: string, value: string | undefined): void {
   }
 }
 
+beforeEach(() => {
+  // An ambient aimlapi proxy profile would withhold the key from every test.
+  delete process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_API_BASE
+})
+
 afterEach(() => {
   globalThis.fetch = originalFetch
-  restoreEnv('AIMLAPI_API_KEY', originalEnv.AIMLAPI_API_KEY)
-  restoreEnv('WEB_FETCH_PROVIDER', originalEnv.WEB_FETCH_PROVIDER)
+  for (const [key, value] of Object.entries(originalEnv)) restoreEnv(key, value)
 })
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -110,6 +119,35 @@ describe('scrapeWithAimlapi', () => {
       'WEB_FETCH_PROVIDER=aimlapi needs an AI/ML API key',
     )
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test('does not send a key exported by an aimlapi profile that points at a proxy', async () => {
+    process.env.AIMLAPI_API_KEY = 'proxy-credential'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+    process.env.OPENAI_BASE_URL = 'https://my-proxy.example.com/v1'
+    const fetchMock = mock(async () => json(completedRun('unused')))
+    globalThis.fetch = asMockFetch(fetchMock)
+
+    await expect(scrapeWithAimlapi('https://example.com')).rejects.toThrow(
+      'WEB_FETCH_PROVIDER=aimlapi needs an AI/ML API key',
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test('uses the key of an aimlapi profile on the canonical endpoint', async () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-profile-key'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+    process.env.OPENAI_BASE_URL = 'https://api.aimlapi.com/v1'
+    const fetchMock = mock(async (_input: unknown, init?: RequestInit) => {
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer aiml-profile-key')
+      return json(completedRun('# Canonical'))
+    })
+    globalThis.fetch = asMockFetch(fetchMock)
+
+    await expect(scrapeWithAimlapi('https://example.com')).resolves.toMatchObject({
+      markdown: '# Canonical',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   test('polls a queued (202) run until it completes', async () => {
