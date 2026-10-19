@@ -36,6 +36,7 @@ const SEARCH_ENV_KEYS = [
   'ANYSEARCH_API_KEY',
   'ANYSEARCH_MAX_RESULTS',
   'AIMLAPI_API_KEY',
+  'OPENAI_API_KEY',
   'WEB_SEARCH_TIMEOUT_SEC',
   'FIRECRAWL_API_KEY',
   'FIRECRAWL_API_URL',
@@ -213,6 +214,18 @@ describe('AI/ML API backend', () => {
     expect(store.saves).toEqual([])
     expect(process.env.WEB_SEARCH_PROVIDER).toBeUndefined()
     expect(message).toStartWith('Web search settings unchanged. AI/ML API uses AIMLAPI_API_KEY')
+  })
+
+  test('selecting it is refused when the key belongs to a proxy aimlapi profile', () => {
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+    process.env.OPENAI_BASE_URL = 'https://proxy.example.com/v1'
+    process.env.AIMLAPI_API_KEY = 'proxy-credential'
+    const store = recordingStore()
+    const message = applySearchSelection(backend('aimlapi'), undefined, false, store)
+
+    expect(store.saves).toEqual([])
+    expect(message).toStartWith('Web search settings unchanged.')
+    expect(message).not.toContain('proxy-credential')
   })
 
   test('selecting it reuses the provider key, saves only the mode, and states the billing', () => {

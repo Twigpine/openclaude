@@ -15,6 +15,7 @@ const savedWebSearchEnv = {
   TAVILY_API_KEY: process.env.TAVILY_API_KEY,
   ANYSEARCH_API_KEY: process.env.ANYSEARCH_API_KEY,
   AIMLAPI_API_KEY: process.env.AIMLAPI_API_KEY,
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   EXA_API_KEY: process.env.EXA_API_KEY,
   EXA_FREE_TIER: process.env.EXA_FREE_TIER,
   YOU_API_KEY: process.env.YOU_API_KEY,
@@ -277,6 +278,26 @@ describe('runSearch', () => {
       /Search provider "aimlapi" is not configured.*AIMLAPI_API_KEY/,
     )
     expect(requestCount).toBe(0)
+  })
+
+  test('aimlapi mode on a proxy aimlapi profile is not configured and sends nothing', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+    process.env.OPENAI_BASE_URL = 'https://proxy.example.com/v1'
+    process.env.AIMLAPI_API_KEY = 'proxy-credential'
+    process.env.OPENAI_API_KEY = 'proxy-credential'
+    const hosts: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      hosts.push(new URL(String(input)).hostname)
+      return new Response('{}', { status: 200 })
+    }) as typeof fetch
+
+    const { runSearch } = await import('./index.js')
+    await expect(runSearch({ query: 'q' })).rejects.toThrow(
+      /Search provider "aimlapi" is not configured/,
+    )
+    expect(hosts).not.toContain('tools.aimlapi.com')
+    expect(hosts).toEqual([])
   })
 
   test('AbortError stops the chain immediately in auto mode', async () => {

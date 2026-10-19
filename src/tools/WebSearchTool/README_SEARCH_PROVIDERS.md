@@ -147,7 +147,9 @@ Run `/search aimlapi`. It uses the `AIMLAPI_API_KEY` your AI/ML API provider set
 already provides (`/provider`, `openclaude aimlapi topup`, or the environment variable —
 see [AI/ML API Setup](../../../docs/aimlapi-setup.md)); there is nothing to paste. The
 route's `OPENAI_API_KEY` fallback is used too, but only while `OPENAI_BASE_URL` is the
-canonical `https://api.aimlapi.com/v1`.
+canonical `https://api.aimlapi.com/v1`. When the active AI/ML API provider profile points at your own
+proxy instead, its key belongs to that proxy and is never sent to the Toolbox: AI/ML API
+search then reports itself as not configured.
 `/search` does not store or remove that key: an ambient `AIMLAPI_API_KEY` also selects
 AI/ML API as the model provider, so it is managed by the provider setup only. Without the
 key, `/search aimlapi` leaves your settings unchanged and says how to set it up.
