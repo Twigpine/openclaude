@@ -73,6 +73,33 @@ export OPENAI_MODEL="gpt-4o"
 - `/model` lists chat-capable models discovered from the catalog.
 - Send any prompt to confirm responses come back from the selected model.
 
+## WebFetch through the AI/ML API Toolbox
+
+`WebFetch` normally fetches pages over plain HTTP and converts the HTML to
+Markdown, which can miss JavaScript-rendered content. With an AI/ML API key you
+can have it scrape pages through the
+[AI/ML API Toolbox](https://docs.aimlapi.com/quickstart/toolbox) instead:
+
+```bash
+export AIMLAPI_API_KEY="your-aimlapi-key"
+export WEB_FETCH_PROVIDER=aimlapi
+```
+
+- **Opt-in.** Each fetched page is one Toolbox run of `search1api/crawl`, billed
+  to your AI/ML API balance (about $0.0013 per page on 2026-10-19). Every run is
+  sent with `max_cost_usd` set to $0.005, so a price above that is refused
+  instead of charged. An AI/ML API key on its own never turns this on.
+- `WEB_FETCH_PROVIDER=aimlapi` takes precedence over `FIRECRAWL_API_KEY` /
+  `FIRECRAWL_API_URL` for `WebFetch`. `WebSearch` is not affected.
+- Like the Firecrawl backend, a failed scrape (a page that does not exist, a
+  refused or failed run) is reported as a `WebFetch` error instead of being
+  retried over plain HTTP. Rate-limited requests are retried with the same
+  idempotency key, so a retry is never charged twice.
+- The key and the attribution headers below are sent only to
+  `https://tools.aimlapi.com`, which is fixed and cannot be overridden. A
+  scraped page is untrusted web content and goes through the same `WebFetch`
+  processing as a page fetched over plain HTTP.
+
 ## Notes
 
 - Model discovery uses the public, unauthenticated `GET /models` endpoint and surfaces only chat-completions models; image, audio, embeddings, and other modalities are intentionally not routed through the coding workflow.
