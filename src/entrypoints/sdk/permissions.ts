@@ -19,6 +19,7 @@ import {
   type ToolPermissionContext,
   type Tool,
 } from '../../Tool.js'
+import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
 import { connectToServer, fetchToolsForClient } from '../../services/mcp/client.js'
@@ -588,6 +589,16 @@ export async function connectSdkMcpServers(
         if (client.type === 'connected') {
           const serverTools = await fetchToolsForClient(client)
           return { client, tools: serverTools }
+        }
+
+        // A server that answered 401 is not broken — it is waiting to be
+        // signed into, and the model is the only one here who can ask. The
+        // CLI path already surfaces the pseudo-tool for exactly this case
+        // (client.ts, getMcpToolsCommandsAndResources); without it an
+        // embedder is told the server needs auth and handed no way to act on
+        // that, since `system:init` reports the status and nothing else can.
+        if (client.type === 'needs-auth') {
+          return { client, tools: [createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig)] }
         }
 
         // Return failed/pending client with no tools
