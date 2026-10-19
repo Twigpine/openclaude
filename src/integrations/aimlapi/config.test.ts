@@ -2,12 +2,15 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 
 import {
   AIMLAPI_MANAGED_ATTRIBUTION_HEADER_NAMES,
+  AIMLAPI_MCP_URL,
   DEFAULT_PARTNER_ID,
   buildPartnerCheckoutReturnUrls,
   buildPartnerReturnUrl,
+  isAimlapiMcpUrl,
   isCanonicalAimlapiInferenceBaseUrl,
   isTrustedAimlapiRequestUrl,
   resolveAimlapiAttributionHeaders,
+  resolveAimlapiMcpHeaders,
   resolvePartnerId,
   resolveEndpoints,
   withResolvedPartnerHeader,
@@ -263,4 +266,59 @@ test('proxy attribution strips every managed name spelling and keeps X-Tenant', 
   }
   expect(headers.get('x-tenant')).toBe('acme')
   expect(Object.keys(resolved)).toEqual(['X-Tenant'])
+})
+
+test('MCP host gate is an exact https hostname match, never a suffix', () => {
+  expect(isAimlapiMcpUrl(AIMLAPI_MCP_URL)).toBe(true)
+  expect(isAimlapiMcpUrl('https://MCP.aimlapi.com/mcp')).toBe(true)
+  expect(isAimlapiMcpUrl('https://mcp.aimlapi.com:443/other')).toBe(true)
+  // Sibling aimlapi hosts are not the MCP server.
+  expect(isAimlapiMcpUrl('https://api.aimlapi.com/v1')).toBe(false)
+  expect(isAimlapiMcpUrl('https://staging.mcp.aimlapi.com/mcp')).toBe(false)
+  // Look-alikes, cleartext and garbage are rejected.
+  expect(isAimlapiMcpUrl('https://mcp.aimlapi.com.attacker.test/mcp')).toBe(false)
+  expect(isAimlapiMcpUrl('https://evilmcp.aimlapi.com/mcp')).toBe(false)
+  expect(isAimlapiMcpUrl('https://attacker.test/mcp.aimlapi.com/mcp')).toBe(false)
+  expect(isAimlapiMcpUrl('http://mcp.aimlapi.com/mcp')).toBe(false)
+  expect(isAimlapiMcpUrl('not-a-url')).toBe(false)
+})
+
+test('MCP headers gain both mandatory attribution headers on the MCP host only', () => {
+  const resolved = resolveAimlapiMcpHeaders(
+    { Authorization: 'Bearer test-key' },
+    AIMLAPI_MCP_URL,
+  )
+  expectSingleManagedAttribution(resolved, {
+    'X-AIMLAPI-Source': 'agent/openclaude',
+    'X-AIMLAPI-Partner-ID': DEFAULT_PARTNER_ID,
+  })
+  expect(resolved.Authorization).toBe('Bearer test-key')
+
+  // Any other MCP server keeps exactly the headers it was configured with.
+  for (const url of [
+    'https://mcp.example.test/mcp',
+    'https://mcp.aimlapi.com.attacker.test/mcp',
+    'http://mcp.aimlapi.com/mcp',
+  ]) {
+    expect(resolveAimlapiMcpHeaders({ 'X-Tenant': 'acme' }, url)).toEqual({
+      'X-Tenant': 'acme',
+    })
+  }
+})
+
+test('MCP attribution restamps a configured partner id instead of combining it', () => {
+  const resolved = resolveAimlapiMcpHeaders(
+    {
+      'x-aimlapi-partner-id': 'part_attacker',
+      'X-AIMLAPI-SOURCE': 'agent/attacker',
+      'X-Tenant': 'acme',
+    },
+    AIMLAPI_MCP_URL,
+  )
+  expectSingleManagedAttribution(resolved, {
+    'X-AIMLAPI-Source': 'agent/openclaude',
+    'X-AIMLAPI-Partner-ID': DEFAULT_PARTNER_ID,
+  })
+  expect(new Headers(resolved).get('x-aimlapi-partner-id')).not.toContain(',')
+  expect(resolved['X-Tenant']).toBe('acme')
 })

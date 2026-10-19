@@ -252,6 +252,48 @@ export function resolveAimlapiAttributionHeaders(
 }
 
 /**
+ * AI/ML API MCP server (streamable HTTP). It accepts the same
+ * `Authorization: Bearer <AIMLAPI key>` as the inference API and falls back to
+ * OAuth when no Authorization header is sent.
+ */
+export const AIMLAPI_MCP_URL = 'https://mcp.aimlapi.com/mcp'
+const AIMLAPI_MCP_HOSTNAME = new URL(AIMLAPI_MCP_URL).hostname
+
+/**
+ * True only for an https URL whose hostname is exactly the AI/ML API MCP host.
+ * Deliberately not a suffix match: attribution must never reach a look-alike
+ * (`mcp.aimlapi.com.evil.test`) or a sibling host the user pointed elsewhere.
+ */
+export function isAimlapiMcpUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.toLowerCase() === AIMLAPI_MCP_HOSTNAME
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Stamp the mandatory attribution headers onto an MCP server's request headers
+ * when (and only when) the server is the AI/ML API MCP host. This covers both
+ * the built-in `aimlapi` plugin server and a server the user added by hand
+ * with `openclaude mcp add`. Any other MCP server's headers are returned
+ * untouched. Managed names are restamped through the same helper the
+ * inference path uses, so a configured header cannot replace the partner id.
+ */
+export function resolveAimlapiMcpHeaders(
+  headers: Readonly<Record<string, string>>,
+  url: string,
+): Record<string, string> {
+  if (!isAimlapiMcpUrl(url)) return { ...headers }
+  // An undefined base URL selects the canonical (attributed) branch.
+  return resolveAimlapiAttributionHeaders(headers, undefined)
+}
+
+/**
  * Build the co-branded checkout return URLs the hosted payment page redirects
  * to after the user pays or cancels. Carrying `sessionToken` + `partnerCheckout=1`
  * makes the AI/ML API `/checkout` page resolve the partner (name + logo + amount)

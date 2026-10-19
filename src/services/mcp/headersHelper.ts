@@ -1,4 +1,5 @@
 import { getIsNonInteractiveSession } from '../../bootstrap/state.js'
+import { resolveAimlapiMcpHeaders } from '../../integrations/aimlapi/config.js'
 import { checkHasTrustDialogAccepted } from '../../utils/config.js'
 import { logAntError } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
@@ -131,9 +132,13 @@ export async function getMcpServerHeaders(
   const dynamicHeaders =
     (await getMcpHeadersFromHelper(serverName, config)) || {}
 
-  // Dynamic headers override static headers if both are present
-  return {
-    ...staticHeaders,
-    ...dynamicHeaders,
-  }
+  // Dynamic headers override static headers if both are present. Requests to
+  // the AI/ML API MCP host (exact hostname) also carry its attribution headers.
+  return resolveAimlapiMcpHeaders(
+    {
+      ...staticHeaders,
+      ...dynamicHeaders,
+    },
+    config.url,
+  )
 }
