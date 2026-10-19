@@ -109,7 +109,10 @@ export WEB_FETCH_PROVIDER=aimlapi
   retried over plain HTTP. Rate-limited requests are retried with the same
   idempotency key, so a retry is never charged twice.
 - The key and the attribution headers below are sent only to
-  `https://tools.aimlapi.com`, which is fixed and cannot be overridden. A
+  `https://tools.aimlapi.com`, which is fixed and cannot be overridden. When
+  the active aimlapi profile points at your own proxy (a non-canonical
+  `OPENAI_BASE_URL`), its key is treated as the proxy's and is not sent; set
+  up a canonical AI/ML API key to use this backend. A
   scraped page is untrusted web content and goes through the same `WebFetch`
   processing as a page fetched over plain HTTP.
 

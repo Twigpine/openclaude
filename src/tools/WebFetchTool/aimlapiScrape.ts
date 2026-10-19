@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 
 import {
   AIMLAPI_SOURCE,
+  isCanonicalAimlapiInferenceBaseUrl,
   PARTNER_HEADER_NAME,
   resolvePartnerId,
   SOURCE_HEADER_NAME,
@@ -92,8 +93,23 @@ export function isAimlapiWebFetchSelected(): boolean {
   return process.env.WEB_FETCH_PROVIDER?.trim().toLowerCase() === 'aimlapi'
 }
 
+/**
+ * An aimlapi provider profile pointed at the user's own proxy exports the
+ * proxy's credential as AIMLAPI_API_KEY. That key belongs to the proxy, so it
+ * must never be sent to tools.aimlapi.com: treat it as no key at all.
+ */
+function isProxiedAimlapiProfileKey(): boolean {
+  const baseUrl = (process.env.OPENAI_BASE_URL ?? process.env.OPENAI_API_BASE)?.trim()
+  return (
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'aimlapi' &&
+    Boolean(baseUrl) &&
+    !isCanonicalAimlapiInferenceBaseUrl(baseUrl!)
+  )
+}
+
 function resolveApiKey(options: AimlapiScrapeOptions): string {
-  const apiKey = (options.apiKey ?? process.env.AIMLAPI_API_KEY ?? '').trim()
+  const ambientKey = isProxiedAimlapiProfileKey() ? undefined : process.env.AIMLAPI_API_KEY
+  const apiKey = (options.apiKey ?? ambientKey ?? '').trim()
   if (!apiKey) {
     throw new Error(
       'WEB_FETCH_PROVIDER=aimlapi needs an AI/ML API key. Set AIMLAPI_API_KEY, or unset WEB_FETCH_PROVIDER to fetch pages directly.',
