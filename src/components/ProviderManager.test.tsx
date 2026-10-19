@@ -389,6 +389,8 @@ function mockProviderManagerDependencies(
     completeAimlapiCodeSignIn?: (...args: any[]) => Promise<unknown>
     validateAimlapiApiKey?: (...args: any[]) => Promise<unknown>
     claimAimlapiTopupStateAsync?: (...args: any[]) => unknown
+    // Observes the default (stateful) claim's arguments without replacing it.
+    onAimlapiTopupClaim?: (intent: Record<string, unknown>, claimOptions: unknown) => void
     clearAimlapiTopupStateAsync?: (...args: any[]) => unknown
     recordAimlapiCheckoutSessionAsync?: (...args: any[]) => unknown
     resetAimlapiCheckoutSessionAsync?: (...args: any[]) => unknown
@@ -547,7 +549,8 @@ function mockProviderManagerDependencies(
       (async () => ({ balance: 25, lowBalance: false, lowBalanceThreshold: 20 })),
     claimAimlapiTopupStateAsync:
       options?.claimAimlapiTopupStateAsync ??
-      (async (intent: Record<string, unknown>) => {
+      (async (intent: Record<string, unknown>, claimOptions?: unknown) => {
+        options?.onAimlapiTopupClaim?.(intent, claimOptions)
         if (matchesAimlapiIntent(persistedAimlapiTopup, intent)) {
           return {
             paymentSessionId: persistedAimlapiTopup?.paymentSessionId,
@@ -1574,11 +1577,15 @@ test('ProviderManager tops up a low-balance saved key by API key, not a new chec
       model: 'gpt-4o',
     }
   })
+  const onAimlapiTopupClaim = mock(
+    (_intent: Record<string, unknown>, _claimOptions: unknown) => {},
+  )
 
   mockProviderManagerDependencies(() => undefined, async () => undefined, {
     addProviderProfile,
     validateAimlapiApiKey,
     topUpAimlapiByApiKey,
+    onAimlapiTopupClaim,
   })
 
   const nonce = `${Date.now()}-${Math.random()}`
@@ -1618,6 +1625,11 @@ test('ProviderManager tops up a low-balance saved key by API key, not a new chec
     expect(topUpOptions.paymentSessionId).toEqual(expect.any(String))
     expect(topUpOptions.paymentSessionId).not.toBe('')
     expect(topUpOptions.resumeSessionToken).toBe('')
+    // The claim carries the credential so it can adopt a receipt an earlier
+    // version wrote for it under the legacy identity.
+    const [claimIntent, claimOptions] = onAimlapiTopupClaim.mock.calls[0] ?? []
+    expect(claimIntent?.email).toBe(aimlapiByKeyIdentity('aimlapi-test-key'))
+    expect(claimOptions).toEqual(expect.objectContaining({ byKeyApiKey: 'aimlapi-test-key' }))
 
     await waitForCondition(() => addProviderProfile.mock.calls.length > 0)
     expect(addProviderProfile).toHaveBeenCalledWith(

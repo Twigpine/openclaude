@@ -3392,6 +3392,9 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
       checkoutState = await claimAimlapiTopupStateAsync(intent, {
         abandonExisting:
           abandoningOpenedCheckout || abandoningPersistedIntent || forceAbandonExisting,
+        // Lets the claim adopt a receipt an earlier version wrote for this
+        // same credential under the legacy identity (see aimlapiByKeyIdentity).
+        ...(aimlapiTopupByKey ? { byKeyApiKey: aimlapiIssuedKey } : {}),
       })
     } catch (error) {
       if (controller.signal.aborted) return

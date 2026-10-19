@@ -1164,6 +1164,156 @@ test('reconcileSettledAimlapiTopupStateAsync leaves an unsettled (still in-progr
   expect(loadAimlapiTopupState(keyAIntent)?.apiKey).toBe('key-a')
 })
 
+test('aimlapiByKeyIdentity is pinned: persisted receipts key on this exact value', () => {
+  // Known answer, not a recomputation: changing the derivation silently
+  // orphans every by-key receipt already on disk, so it must fail here first.
+  expect(aimlapiByKeyIdentity('  key-a\n')).toBe(
+    'key:v2:64f9586e11869548ac185049673d8e13f98f7baf364d6a174ac7de4a41039e8e',
+  )
+  expect(aimlapiByKeyIdentity('key-b')).not.toBe(aimlapiByKeyIdentity('key-a'))
+})
+
+// What versions before the HMAC identity wrote into a by-key intent's `email`
+// field (a plain SHA-256 of the trimmed key), as literals: those receipts are
+// already on disk, so the values to handle are fixed.
+const LEGACY_BY_KEY_IDENTITIES = {
+  'key-a': 'key:f10f781241e2246678b6b45c857069208152a53863e47fac33f607ab405006f4',
+  'env-key-a': 'key:cd2374cd39e15cbed7e8a5c93f1c15ffb00b1a295b26fb00a181e91e9c6e2f03',
+} as const
+
+function legacyByKeyIntent(apiKey: keyof typeof LEGACY_BY_KEY_IDENTITIES): AimlapiTopupIntent {
+  return { ...intent, email: LEGACY_BY_KEY_IDENTITIES[apiKey] }
+}
+
+function persistedEmail(directory: string): string {
+  return JSON.parse(readFileSync(join(directory, 'aimlapi-topup.json'), 'utf8')).email
+}
+
+// A settled saved-key top-up still waiting on its profile write: the one legacy
+// receipt claimTopupStateOperation refuses to replace even with abandonExisting.
+function seedLegacySettledKeyReceipt(): string {
+  const legacyIntent = legacyByKeyIntent('key-a')
+  const claimed = claimAimlapiTopupState(legacyIntent)
+  saveAimlapiTopupState({
+    ...legacyIntent,
+    paymentSessionId: claimed.paymentSessionId,
+    resumeSessionToken: 'paid-session',
+    apiKey: 'key-a',
+    settled: true,
+  })
+  return claimed.paymentSessionId
+}
+
+test('re-running a by-key top-up adopts its settled legacy receipt by the stored key and upgrades it', async () => {
+  const directory = useTemporaryConfig()
+  const paymentSessionId = seedLegacySettledKeyReceipt()
+  const currentIntent = byKeyIntent('key-a')
+
+  const resumed = await claimAimlapiTopupStateAsync(currentIntent, { byKeyApiKey: 'key-a' })
+
+  expect(resumed.paymentSessionId).toBe(paymentSessionId)
+  expect(resumed.settled).toBe(true)
+  expect(persistedEmail(directory)).toBe(currentIntent.email)
+  // The CAS operations after the claim key on the current identity and land.
+  clearAimlapiTopupState({ ...currentIntent, paymentSessionId })
+  expect(existsSync(join(directory, 'aimlapi-topup.json'))).toBe(false)
+})
+
+test('reconcileSettledAimlapiTopupStateAsync clears a settled legacy receipt that stores the same credential', async () => {
+  const directory = useTemporaryConfig()
+  seedLegacySettledKeyReceipt()
+
+  await reconcileSettledAimlapiTopupStateAsync('key-b')
+  expect(existsSync(join(directory, 'aimlapi-topup.json'))).toBe(true)
+
+  await reconcileSettledAimlapiTopupStateAsync('key-a')
+  expect(existsSync(join(directory, 'aimlapi-topup.json'))).toBe(false)
+})
+
+test('a settled legacy receipt storing a DIFFERENT credential is neither adopted nor replaced', async () => {
+  const directory = useTemporaryConfig()
+  seedLegacySettledKeyReceipt()
+
+  await expect(
+    claimAimlapiTopupStateAsync(byKeyIntent('key-b'), { byKeyApiKey: 'key-b' }),
+  ).rejects.toThrow(/already succeeded and is waiting to be saved/)
+  expect(persistedEmail(directory)).toBe(LEGACY_BY_KEY_IDENTITIES['key-a'])
+})
+
+test('a legacy by-key checkout with no stored key is released to the next claim', async () => {
+  // Nothing ties it to a credential without re-hashing one, and a by-key
+  // payment is credited to its key server-side, so refusing would only block
+  // a re-run that can never match it.
+  const directory = useTemporaryConfig()
+  const legacyIntent = legacyByKeyIntent('key-a')
+  const claimed = claimAimlapiTopupState(legacyIntent)
+  saveAimlapiTopupState({
+    ...legacyIntent,
+    paymentSessionId: claimed.paymentSessionId,
+    resumeSessionToken: 'open-session',
+  })
+  const currentIntent = byKeyIntent('key-a')
+
+  const fresh = await claimAimlapiTopupStateAsync(currentIntent, { byKeyApiKey: 'key-a' })
+
+  expect(fresh.paymentSessionId).not.toBe(claimed.paymentSessionId)
+  expect(fresh.resumeSessionToken).toBe('')
+  expect(persistedEmail(directory)).toBe(currentIntent.email)
+})
+
+test('a settled legacy env-credential receipt (never stores its key) is released to the next claim', async () => {
+  const directory = useTemporaryConfig()
+  const legacyIntent = legacyByKeyIntent('env-key-a')
+  const claimed = claimAimlapiTopupState(legacyIntent)
+  saveAimlapiTopupState({
+    ...legacyIntent,
+    paymentSessionId: claimed.paymentSessionId,
+    resumeSessionToken: 'paid-session',
+    settled: true,
+  })
+
+  const fresh = await claimAimlapiTopupStateAsync(byKeyIntent('env-key-b'), {
+    byKeyApiKey: 'env-key-b',
+  })
+
+  expect(fresh.paymentSessionId).not.toBe(claimed.paymentSessionId)
+  expect(persistedEmail(directory)).toBe(byKeyIntent('env-key-b').email)
+})
+
+test('a current-identity keyless receipt for another credential is still refused, not released', async () => {
+  // The release is only for legacy receipts that cannot be attributed; a
+  // current one can be, so its owner's re-run must still be able to resume it.
+  useTemporaryConfig()
+  const envKeyAIntent = byKeyIntent('env-key-a')
+  const claimed = claimAimlapiTopupState(envKeyAIntent)
+  saveAimlapiTopupState({
+    ...envKeyAIntent,
+    paymentSessionId: claimed.paymentSessionId,
+    resumeSessionToken: 'paid-session',
+    settled: true,
+  })
+
+  await expect(
+    claimAimlapiTopupStateAsync(byKeyIntent('env-key-b'), { byKeyApiKey: 'env-key-b' }),
+  ).rejects.toThrow(/hasn't finished and may already be paid/)
+  expect(loadAimlapiTopupState(envKeyAIntent)?.resumeSessionToken).toBe('paid-session')
+})
+
+test('a legacy receipt is neither adopted nor released while a key-mint lease on it is live', async () => {
+  const directory = useTemporaryConfig()
+  const legacyIntent = legacyByKeyIntent('key-a')
+  const claimed = claimAimlapiTopupState(legacyIntent)
+  const expected = { ...legacyIntent, paymentSessionId: claimed.paymentSessionId }
+  // A holder that claimed under the legacy identity has a mint in flight; its
+  // eventual CAS save must still find the record it claimed.
+  expect((await acquireAimlapiKeyMintLeaseAsync(expected, 'legacy-owner')).status).toBe('acquired')
+
+  await expect(
+    claimAimlapiTopupStateAsync(byKeyIntent('key-a'), { byKeyApiKey: 'key-a' }),
+  ).rejects.toThrow(/minting or exchanging a key right now/)
+  expect(persistedEmail(directory)).toBe(legacyIntent.email)
+})
+
 test('recordAimlapiSettledKeyAsync persists the key and clears the lease under the CAS', async () => {
   useTemporaryConfig()
   const claimed = claimAimlapiTopupState(intent)

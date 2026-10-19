@@ -379,37 +379,59 @@ describe('skillChangeDetector reload batching', () => {
       stabilityThreshold: 10, pollInterval: 10, chokidarInterval: 10,
       reloadDebounce: 10, reloadCooldown: 10,
     })
-    const editUntilHook = async (path: string, content: string, count: number) => {
+    const hookCalls = () => executeConfigChangeHooks.mock.calls.length
+    // Settle until no hook has fired for a full window, so a late hook from an
+    // earlier phase cannot be attributed to the next one.
+    const waitForQuietHooks = async () => {
+      const deadline = Date.now() + 2000
+      let seen = hookCalls()
+      let quietSince = Date.now()
+      while (Date.now() - quietSince < 200 && Date.now() < deadline) {
+        await sleep(25)
+        if (hookCalls() !== seen) {
+          seen = hookCalls()
+          quietSince = Date.now()
+        }
+      }
+    }
+    const editUntilHook = async (path: string, content: string) => {
       // Chokidar's ready marks traversal completion, but Bun may still be
       // initializing its polling baseline. Retry edits until one is observed.
+      // A retry already in flight when the first hook lands can still produce
+      // one more, so assert that the edit was seen rather than an exact count.
+      const before = hookCalls()
       const deadline = Date.now() + 2000
       let edit = 0
-      while (executeConfigChangeHooks.mock.calls.length < count && Date.now() < deadline) {
+      while (hookCalls() === before && Date.now() < deadline) {
         writeFileSync(path, `${content} ${edit++}`)
         await sleep(50)
       }
-      expect(executeConfigChangeHooks).toHaveBeenCalledTimes(count)
+      expect(hookCalls()).toBeGreaterThan(before)
+      await waitForQuietHooks()
     }
     try {
       siblingSkillsHomePaths = [sibling]
       await detector.initialize()
       await new Promise<void>(resolve => realWatcher!.once('ready', resolve))
-      await editUntilHook(siblingFile, 'enabled edit', 1)
+      await editUntilHook(siblingFile, 'enabled edit')
       siblingSkillsHomePaths = []
       await detector.reloadAfterSkillSourceSettingsChange()
+      // Drain anything the sibling watcher emitted before it was closed.
+      await waitForQuietHooks()
+      const settled = hookCalls()
       writeFileSync(siblingFile, 'disabled edit')
       await sleep(150)
-      expect(executeConfigChangeHooks).toHaveBeenCalledTimes(1)
-      await editUntilHook(ownFile, 'owned edit', 2)
+      expect(hookCalls()).toBe(settled)
+      await editUntilHook(ownFile, 'owned edit')
       siblingSkillsHomePaths = [sibling]
       await detector.reloadAfterSkillSourceSettingsChange()
       await new Promise<void>(resolve => realWatcher!.once('ready', resolve))
-      await editUntilHook(siblingFile, 're-enabled edit', 3)
+      await editUntilHook(siblingFile, 're-enabled edit')
     } finally {
       await detector.dispose()
       rmSync(root, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   test('batches rapid reload requests into one hook/cache clear/notification', async () => {
     const detector = await importFreshModule()
