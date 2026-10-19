@@ -248,6 +248,13 @@ export async function mcpRemoveHandler(name: string, options: {
 // mcp list (lines 4641–4688)
 export async function mcpListHandler(): Promise<void> {
   logEvent('tengu_mcp_list', {});
+  // The mcp subcommands skip the session startup that registers built-in
+  // plugins; register them so an enabled built-in plugin's MCP server (e.g.
+  // aimlapi@builtin) is listed and health-checked the way a session sees it.
+  const {
+    initBuiltinPlugins
+  } = await import('../../plugins/bundled/index.js');
+  initBuiltinPlugins();
   const {
     servers: configs
   } = await getAllMcpConfigs();

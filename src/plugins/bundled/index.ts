@@ -14,6 +14,7 @@
  * 2. Call that helper from initBuiltinPlugins()
  */
 
+import { registerAimlapiMcpPlugin } from './aimlapiMcp.js'
 import { registerKarpathyGuidelinesPlugin } from './karpathyGuidelines.js'
 
 /**
@@ -21,4 +22,5 @@ import { registerKarpathyGuidelinesPlugin } from './karpathyGuidelines.js'
  */
 export function initBuiltinPlugins(): void {
   registerKarpathyGuidelinesPlugin()
+  registerAimlapiMcpPlugin()
 }

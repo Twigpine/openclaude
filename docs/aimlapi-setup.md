@@ -73,10 +73,52 @@ export OPENAI_MODEL="gpt-4o"
 - `/model` lists chat-capable models discovered from the catalog.
 - Send any prompt to confirm responses come back from the selected model.
 
+## AI/ML API MCP server (Toolbox and media generation)
+
+AI/ML API also runs a remote MCP server at `https://mcp.aimlapi.com/mcp`. It adds 19 tools to a session: the Toolbox (`tools_search`, `tools_inspect`, `tools_run`, `tools_run_status`), `image_generate`, `video_generate`, `audio_generate`, `llm_chat`, `embeddings_create`, `job_status`, `job_result`, model lookup (`models_list`, `models_search`, `models_find_best`, `models_compare`, `model_get`), `account_balance`, `account_usage`, and `ping`.
+
+> **Billing:** Toolbox runs (`tools_run`), generations, `llm_chat` and embeddings are charged to your AI/ML API balance. `ping`, `tools_search` and `tools_inspect` are free. The server is never connected unless you turn it on.
+
+### One step: the built-in `aimlapi` plugin
+
+If AI/ML API is already your provider, turn the server on with:
+
+```bash
+openclaude plugin enable aimlapi@builtin
+```
+
+You can also open `/plugin` in a session, find the built-in **aimlapi** plugin and enable it there. To turn it off again:
+
+```bash
+openclaude plugin disable aimlapi@builtin
+```
+
+- The plugin signs in with the AI/ML API key you already configured. It reads the key from `AIMLAPI_API_KEY`, which an active aimlapi.com provider profile sets for the session. You can also export the variable yourself. The settings file only stores `"aimlapi@builtin": true`. The key is never written there.
+- The plugin is off by default, so having a key does not connect the server. It is also hidden when no `AIMLAPI_API_KEY` is set. It stays hidden when your aimlapi profile points at a proxy base URL, so a proxy credential is never sent to aimlapi.com.
+- The server appears as `plugin:aimlapi:aimlapi`, and its tools appear as `mcp__plugin_aimlapi_aimlapi__<tool>`, for example `mcp__plugin_aimlapi_aimlapi__tools_search`.
+- To check it, run `openclaude mcp list`. You should see `plugin:aimlapi:aimlapi: https://mcp.aimlapi.com/mcp (HTTP) - ✓ Connected`. In a session, `/mcp` shows the same server.
+
+### Without the plugin: `openclaude mcp add`
+
+The standard MCP commands work too. To use your API key, keep the single quotes so that your shell does not expand the variable. OpenClaude expands `${AIMLAPI_API_KEY}` when it connects, so the config file stores the reference and not the key:
+
+```bash
+openclaude mcp add --transport http -s user aimlapi https://mcp.aimlapi.com/mcp \
+  --header 'Authorization: Bearer ${AIMLAPI_API_KEY}'
+```
+
+To sign in with your aimlapi.com account (OAuth) instead, leave out the header. `openclaude mcp list` reports **Needs authentication**. In a session, open `/mcp`, select the server and authenticate in the browser:
+
+```bash
+openclaude mcp add --transport http -s user aimlapi https://mcp.aimlapi.com/mcp
+```
+
+If you configure the server both ways, the hand-added entry wins and the plugin copy is skipped as a duplicate. Note that `openclaude mcp get aimlapi` prints header values after expansion, which includes your key.
+
 ## Notes
 
 - Model discovery uses the public, unauthenticated `GET /models` endpoint and surfaces only chat-completions models; image, audio, embeddings, and other modalities are intentionally not routed through the coding workflow.
-- Every request to AI/ML API (inference, catalog, sign-in/account, and checkout) carries the two mandatory attribution headers `X-AIMLAPI-Source: agent/openclaude` and `X-AIMLAPI-Partner-ID`. On the canonical `api.aimlapi.com` endpoint the inference/catalog requests additionally send `X-AIMLAPI-Integration-*` (owner/repo/version) plus `HTTP-Referer: OpenClaude` and `X-Title: OpenClaude`; all attribution headers are stripped when a non-canonical (proxy) base URL is configured, so a third-party host never receives OpenClaude's partner identity.
+- Every request to AI/ML API (inference, catalog, sign-in/account, and checkout) carries the two mandatory attribution headers `X-AIMLAPI-Source: agent/openclaude` and `X-AIMLAPI-Partner-ID`. On the canonical `api.aimlapi.com` endpoint the inference/catalog requests additionally send `X-AIMLAPI-Integration-*` (owner/repo/version) plus `HTTP-Referer: OpenClaude` and `X-Title: OpenClaude`; all attribution headers are stripped when a non-canonical (proxy) base URL is configured, so a third-party host never receives OpenClaude's partner identity. MCP requests to `mcp.aimlapi.com` (matched by exact hostname, from the plugin or a hand-added server) carry `X-AIMLAPI-Source` and `X-AIMLAPI-Partner-ID`. Other MCP servers never receive them.
 - `AIMLAPI_AUTH_URL`, `AIMLAPI_APP_URL`, `AIMLAPI_PAY_URL`, and `AIMLAPI_VERIFICATION_BASE_URL` can point the complete flow at another environment. Guided **new-account** onboarding and key provisioning require the canonical `api.aimlapi.com` inference endpoint, so `AIMLAPI_INFERENCE_URL` must be unset (or left at its default) to create a new account and mint its key — a non-canonical value is rejected there. The existing-key top-up path (paste an aimlapi.com key) instead runs against whatever `AIMLAPI_INFERENCE_URL` is configured. `AIMLAPI_RETURN_URL` overrides only the browser landing page.
 - Checkout success is detected by polling. The browser return target is an HTTPS page; OpenClaude does not install a custom URL-scheme handler.
 - Usage (`/usage`) reporting is not supported for this provider.
