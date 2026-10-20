@@ -1006,7 +1006,7 @@ describe('applyProviderFlag - minimax', () => {
     expect(result.error).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
     expect(process.env.ANTHROPIC_BASE_URL).toBe('https://api.minimax.io/anthropic')
-    expect(process.env.ANTHROPIC_MODEL).toBe('MiniMax-M3')
+    expect(process.env.ANTHROPIC_MODEL).toBe('MiniMax-M3.1-Flash')
     expect(process.env.OPENAI_BASE_URL).toBeUndefined()
     expect(process.env.OPENAI_MODEL).toBeUndefined()
   })

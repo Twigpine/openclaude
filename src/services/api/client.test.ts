@@ -761,6 +761,66 @@ test('routes env-only MiniMax requests through the Anthropic-compatible API', as
   })
 })
 
+for (const host of ['api.minimax.io', 'api.minimaxi.com']) {
+  for (const protocol of ['anthropic', 'openai'] as const) {
+    for (const savedModel of [undefined, 'MiniMax-M3', 'MiniMax-M2.7', 'custom-minimax-deployment']) {
+      test(`MiniMax ${host} ${protocol} serializes ${savedModel ?? 'Flash default'} unchanged`, async () => {
+        clearEnvForMiniMaxOnlyTest()
+        process.env.MINIMAX_API_KEY = 'minimax-test-key'
+        if (protocol === 'anthropic') {
+          process.env.ANTHROPIC_BASE_URL = `https://${host}/anthropic`
+          if (savedModel) process.env.ANTHROPIC_MODEL = savedModel
+        } else {
+          process.env.CLAUDE_CODE_USE_OPENAI = '1'
+          process.env.OPENAI_BASE_URL = `https://${host}/v1`
+          if (savedModel) process.env.OPENAI_MODEL = savedModel
+        }
+        const { getDefaultMainLoopModel } = await import('../../utils/model/model.js')
+        const model = getDefaultMainLoopModel()
+        expect(model).toBe(savedModel ?? 'MiniMax-M3.1-Flash')
+        let requestURL = ''
+        let requestHeaders = new Headers()
+        let requestBody: Record<string, unknown> = {}
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = new Request(input, init)
+          requestURL = request.url
+          requestHeaders = request.headers
+          requestBody = await request.json() as Record<string, unknown>
+          const response = protocol === 'anthropic'
+            ? { id: 'msg-minimax', type: 'message', role: 'assistant', model, content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }
+            : { id: 'chat-minimax', object: 'chat.completion', model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+          return new Response(JSON.stringify(response), { headers: { 'content-type': 'application/json' } })
+        }) as FetchType
+        const client = await getAnthropicClient({ maxRetries: 0, model })
+        await client.beta.messages.create({
+          model, max_tokens: 16,
+          messages: [{ role: 'user', content: savedModel ? 'hello' : [
+            { type: 'text', text: 'describe this image' },
+            { type: 'image', source: { type: 'url', url: 'https://example.com/fixture.png' } },
+          ] }],
+        })
+        if (!savedModel) {
+          expect(requestBody.messages).toEqual([{
+            role: 'user', content: [
+              { type: 'text', text: 'describe this image' },
+              protocol === 'anthropic'
+                ? { type: 'image', source: { type: 'url', url: 'https://example.com/fixture.png' } }
+                : { type: 'image_url', image_url: { url: 'https://example.com/fixture.png' } },
+            ],
+          }])
+        }
+        expect(requestURL).toContain(`https://${host}/${protocol === 'anthropic' ? 'anthropic/v1/messages' : 'v1/chat/completions'}`)
+        expect(requestHeaders.get(protocol === 'anthropic' ? 'x-api-key' : 'authorization')).toBe(protocol === 'anthropic' ? 'minimax-test-key' : 'Bearer minimax-test-key')
+        expect(requestBody.model).toBe(model)
+        expect(requestBody.service_tier).toBeUndefined()
+        expect(requestBody.thinking).not.toEqual({ type: 'disabled' })
+        expect(requestBody.reasoning_effort).not.toBe('none')
+        expect(requestBody.reasoning_split).not.toBe(false)
+      })
+    }
+  }
+}
+
 for (const credentialEnv of ['ANTHROPIC_API_KEY', 'MINIMAX_API_KEY']) {
   for (const dormantBaseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
     for (const host of ['api.minimax.io', 'api.minimaxi.com', 'api.minimax.chat']) {

@@ -744,6 +744,7 @@ test('getModelOptionsBase: MiniMax catalog branch appends inactive profile optio
   const { active, inactive } = activeAndInactivePair()
   activeMiniMaxOverride = {
     cachedModels: [
+      { value: 'MiniMax-M3.1-Flash', label: 'MiniMax-M3.1-Flash', description: 'MiniMax' },
       { value: 'MiniMax-M2.7', label: 'MiniMax-M2.7', description: 'MiniMax' },
     ],
   }
@@ -756,12 +757,36 @@ test('getModelOptionsBase: MiniMax catalog branch appends inactive profile optio
       ],
     })
     const options = getModelOptions(false)
-    expect(options.some(o => o.value === 'MiniMax-M2.7')).toBe(true)
+    expect(options.some(o => o.value === 'MiniMax-M3.1-Flash')).toBe(true)
+    expect(options.some(o => o.value === 'MiniMax-M2.7')).toBe(false)
     expect(
       options
         .filter(o => o.switchToProfileId !== undefined)
         .map(o => o.switchToProfileId),
     ).toContain('profile_remote')
+  })
+})
+
+test('MiniMax picker keeps a saved legacy model without restoring other retired suggestions', async () => {
+  const { active, inactive } = activeAndInactivePair()
+  active.model = 'MiniMax-M2.7'
+  activeMiniMaxOverride = {
+    cachedModels: ['MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-M2.5'].map(value => ({ value, label: value, description: 'MiniMax' })),
+  }
+  await withProfileEnvApplied(async () => {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [active, inactive],
+      getActiveProviderProfile: () => active,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expect(values).toContain('MiniMax-M3.1-Flash')
+    expect(values).toContain('MiniMax-M3')
+    expect(values).toContain('MiniMax-M2.7')
+    expect(values).not.toContain('MiniMax-M2.5')
+    expect(active.model).toBe('MiniMax-M2.7')
   })
 })
 

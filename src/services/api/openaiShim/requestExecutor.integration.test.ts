@@ -2049,6 +2049,30 @@ test('xiaomi mimo token plan uses raw api-key and OpenAI-compatible reasoning_ef
 })
 
 test.each([
+  ['https://opencode.ai/zen/v1', 'minimax-m3.1-flash-free'],
+  ['https://opencode.ai/zen/v1', 'minimax-m3'],
+  ['https://openrouter.ai/api/v1', 'minimax/minimax-m3.1-flash:free'],
+])('MiniMax gateway %s preserves the verified model ID %s at HTTP boundary', async (baseURL, model) => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = baseURL
+  process.env.OPENAI_MODEL = model
+  process.env.OPENAI_API_KEY = 'gateway-fixture-key'
+  let capturedURL = ''
+  let body: Record<string, unknown> = {}
+  globalThis.fetch = (async (input, init) => {
+    capturedURL = String(input)
+    body = JSON.parse(String(init?.body))
+    return makeChatCompletionResponse(model)
+  }) as unknown as FetchType
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  await client.beta.messages.create({ model, messages: [{ role: 'user', content: 'hello' }], max_tokens: 32, stream: false })
+  expect(capturedURL).toBe(`${baseURL}/chat/completions`)
+  expect(body.model).toBe(model)
+  expect(body.thinking).not.toEqual({ type: 'disabled' })
+  expect(body.reasoning_effort).not.toBe('none')
+})
+
+test.each([
   'minimax-m3',
   'minimax-m2.7',
   'qwen3.7-max',

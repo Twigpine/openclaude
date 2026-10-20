@@ -3941,7 +3941,7 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.requiresApiKey).toBe(true)
   })
 
-  test('minimax preset defaults to MiniMax M3', async () => {
+  test('minimax preset defaults to MiniMax M3.1 Flash', async () => {
     const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
 
     const defaults = getProviderPresetDefaults('minimax')
@@ -3949,7 +3949,7 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.provider).toBe('minimax')
     expect(defaults.name).toBe('MiniMax')
     expect(defaults.baseUrl).toBe('https://api.minimax.io/anthropic')
-    expect(defaults.model).toBe('MiniMax-M3')
+    expect(defaults.model).toBe('MiniMax-M3.1-Flash')
     expect(defaults.requiresApiKey).toBe(true)
   })
 
@@ -6122,6 +6122,22 @@ describe('getProfileModelOptions', () => {
       { value: 'glm-4.7-flash', label: 'glm-4.7-flash', description: 'Provider: Test Provider' },
       { value: 'glm-4.7-plus', label: 'glm-4.7-plus', description: 'Discovered from API' },
     ])
+  })
+
+  test('keeps saved MiniMax IDs while filtering retired discovered text choices', async () => {
+    const { getProfileModelOptions } = await importFreshProviderProfileModules()
+    mockConfigState = {
+      ...createMockConfigState(),
+      openaiAdditionalModelOptionsCacheByProfile: {
+        provider_test: ['MiniMax-M2.5', 'MiniMax-M2.7', 'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o'].map(value => ({ value, label: value, description: 'Discovered from API' })),
+      },
+    }
+    const profile = buildProfile({ id: 'provider_test', model: 'MiniMax-M2.7, custom-minimax' })
+    expect(getProfileModelOptions(profile).map(option => option.value)).toEqual([
+      'MiniMax-M2.7', 'custom-minimax', 'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o',
+    ])
+    expect(profile.model).toBe('MiniMax-M2.7, custom-minimax')
+    expect(mockConfigState.openaiAdditionalModelOptionsCacheByProfile?.provider_test?.[0]).toMatchObject({ value: 'MiniMax-M2.5' })
   })
 
   test('returns empty array for empty model field', async () => {
