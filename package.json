@@ -62,6 +62,7 @@
     "test:coverage:ui": "bun run scripts/render-coverage-heatmap.ts",
     "security:pr-scan": "bun run scripts/pr-intent-scan.ts",
     "test:provider-recommendation": "bun test src/utils/providerRecommendation.test.ts src/utils/providerProfile.test.ts",
+    "test:node-options-parity": "bun run scripts/check-node-options-parity.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:fast": "bun run scripts/typecheck-fast.ts",
     "typecheck:type-tests": "bun run scripts/typecheck-type-tests.ts",

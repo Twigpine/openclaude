@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { createRequire } from 'module'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { clearCACertsCache, getCACertificates } from './caCerts.js'
 import { hasNodeOption } from './envUtils.js'
 
@@ -118,6 +122,9 @@ describe('hasNodeOption', () => {
     { name: '--no-use-openssl-ca then --use-openssl-ca re-enables (exact)', nodeOptions: '--no-use-openssl-ca --use-openssl-ca', flag: '--use-openssl-ca', expected: true },
     { name: 'negation alone does not enable positive', nodeOptions: '--no-use-system-ca', flag: '--use-system-ca', expected: false },
     { name: 'negation with =value disables equals-positive', nodeOptions: '--use-system-ca=1 --no-use-system-ca=0', flag: '--use-system-ca', expected: false },
+    { name: 'negated spelling is queryable', nodeOptions: '--no-use-system-ca', flag: '--no-use-system-ca', expected: true },
+    { name: 'negated spelling is not active after a later positive', nodeOptions: '--no-use-system-ca --use-system-ca', flag: '--no-use-system-ca', expected: false },
+    { name: 'negated spelling is active after a later negation', nodeOptions: '--use-system-ca --no-use-system-ca', flag: '--no-use-system-ca', expected: true },
 
     // Required-value failures invalidate the whole stream even when the CA
     // target appears before the error (Node exits, so nothing is active).
@@ -155,6 +162,61 @@ describe('hasNodeOption', () => {
     { name: 'boolean import-meta-resolve then CA stays visible', nodeOptions: '--experimental-import-meta-resolve --use-system-ca', flag: '--use-system-ca', expected: true },
     { name: 'boolean import-meta-resolve then openssl CA stays visible', nodeOptions: '--experimental-import-meta-resolve --use-openssl-ca', flag: '--use-openssl-ca', expected: true },
     { name: 'boolean import-meta-resolve then equals CA stays visible', nodeOptions: '--experimental-import-meta-resolve --use-system-ca=1', flag: '--use-system-ca', expected: true },
+
+    // V8-owned heap flags have their own value grammar: the value must be
+    // attached with `=`, an empty inline value is tolerated by V8 (Node starts
+    // and only warns), and a separate value leaves the bare flag in front of
+    // V8, which rejects it.
+    { name: 'empty inline max-old-space-size keeps CA enabled', nodeOptions: '--use-system-ca --max-old-space-size=', flag: '--use-system-ca', expected: true },
+    { name: 'empty inline max-semi-space-size keeps CA enabled', nodeOptions: '--use-system-ca --max-semi-space-size=', flag: '--use-system-ca', expected: true },
+    { name: 'empty inline max-old-space-size keeps openssl CA enabled', nodeOptions: '--use-openssl-ca --max-old-space-size=', flag: '--use-openssl-ca', expected: true },
+    { name: 'empty inline max-semi-space-size keeps openssl CA enabled', nodeOptions: '--use-openssl-ca --max-semi-space-size=', flag: '--use-openssl-ca', expected: true },
+    { name: 'separated max-old-space-size value fails closed', nodeOptions: '--use-system-ca=1 --max-old-space-size 4096', flag: '--use-system-ca', expected: false },
+    { name: 'separated max-semi-space-size value fails closed', nodeOptions: '--use-system-ca=1 --max-semi-space-size 16', flag: '--use-system-ca', expected: false },
+    { name: 'separated max-old-space-size value fails closed (openssl)', nodeOptions: '--use-openssl-ca=1 --max-old-space-size 4096', flag: '--use-openssl-ca', expected: false },
+    { name: 'separated stack-trace-limit value fails closed', nodeOptions: '--use-system-ca=1 --stack-trace-limit 10', flag: '--use-system-ca', expected: false },
+    { name: 'empty inline stack-trace-limit fails closed', nodeOptions: '--use-system-ca=1 --stack-trace-limit=', flag: '--use-system-ca', expected: false },
+    { name: 'inline stack-trace-limit value keeps CA enabled', nodeOptions: '--use-system-ca=1 --stack-trace-limit=10', flag: '--use-system-ca', expected: true },
+    { name: 'inline stack-trace-limit value keeps openssl CA enabled', nodeOptions: '--use-openssl-ca=1 --stack-trace-limit=10', flag: '--use-openssl-ca', expected: true },
+    { name: 'empty inline max-old-space-size-percentage fails closed', nodeOptions: '--use-system-ca=1 --max-old-space-size-percentage=', flag: '--use-system-ca', expected: false },
+    { name: 'separated max-old-space-size-percentage value keeps CA enabled', nodeOptions: '--use-system-ca=1 --max-old-space-size-percentage 50', flag: '--use-system-ca', expected: true },
+    { name: 'inline max-old-space-size-percentage value keeps CA enabled', nodeOptions: '--use-system-ca=1 --max-old-space-size-percentage=50', flag: '--use-system-ca', expected: true },
+
+    // The inspector family: `--inspect-port` (and its `--debug-port` alias)
+    // require a value, while the bare `--inspect`/`--inspect-brk`/
+    // `--inspect-wait` forms are booleans. The `=`-forms expand through
+    // `--inspect-port`, so an empty inline value is rejected by Node.
+    { name: '--inspect-port without value fails closed', nodeOptions: '--use-system-ca=1 --inspect-port', flag: '--use-system-ca', expected: false },
+    { name: '--debug-port without value fails closed', nodeOptions: '--use-system-ca=1 --debug-port', flag: '--use-system-ca', expected: false },
+    { name: '--inspect= without value fails closed', nodeOptions: '--use-system-ca=1 --inspect=', flag: '--use-system-ca', expected: false },
+    { name: '--inspect-brk= without value fails closed', nodeOptions: '--use-system-ca=1 --inspect-brk=', flag: '--use-system-ca', expected: false },
+    { name: '--inspect-wait= without value fails closed', nodeOptions: '--use-system-ca=1 --inspect-wait=', flag: '--use-system-ca', expected: false },
+    { name: '--inspect-brk-node= without value fails closed', nodeOptions: '--use-system-ca=1 --inspect-brk-node=', flag: '--use-system-ca', expected: false },
+    { name: '--inspect-publish-uid without value fails closed', nodeOptions: '--use-system-ca=1 --inspect-publish-uid', flag: '--use-system-ca', expected: false },
+    { name: 'bare --inspect keeps CA enabled', nodeOptions: '--use-system-ca=1 --inspect', flag: '--use-system-ca', expected: true },
+    { name: 'bare --inspect-brk keeps CA enabled', nodeOptions: '--use-system-ca=1 --inspect-brk', flag: '--use-system-ca', expected: true },
+    { name: 'bare --inspect-wait keeps CA enabled', nodeOptions: '--use-system-ca=1 --inspect-wait', flag: '--use-system-ca', expected: true },
+    { name: '--inspect= with value keeps CA enabled', nodeOptions: '--use-system-ca=1 --inspect=9229', flag: '--use-system-ca', expected: true },
+    { name: '--inspect-brk= with value keeps CA enabled', nodeOptions: '--use-system-ca=1 --inspect-brk=9229', flag: '--use-system-ca', expected: true },
+    { name: '--inspect-wait= with value keeps CA enabled', nodeOptions: '--use-system-ca=1 --inspect-wait=9229', flag: '--use-system-ca', expected: true },
+    { name: '--inspect-port= with value keeps CA enabled', nodeOptions: '--use-system-ca=1 --inspect-port=9229', flag: '--use-system-ca', expected: true },
+    { name: '--debug-port= with value keeps CA enabled', nodeOptions: '--use-system-ca=1 --debug-port=9229', flag: '--use-system-ca', expected: true },
+    { name: '--debug-port without value fails closed (openssl)', nodeOptions: '--use-openssl-ca=1 --debug-port', flag: '--use-openssl-ca', expected: false },
+    { name: '--inspect= without value fails closed (openssl)', nodeOptions: '--use-openssl-ca=1 --inspect=', flag: '--use-openssl-ca', expected: false },
+
+    // Node stops parsing options at the first argument that is not an option,
+    // so the ignored suffix neither enables a CA flag nor creates a
+    // required-value error, while the preceding CA state is preserved.
+    { name: 'ignored suffix keeps preceding CA state', nodeOptions: '--use-system-ca foo --title', flag: '--use-system-ca', expected: true },
+    { name: 'ignored suffix keeps preceding openssl CA state', nodeOptions: '--use-openssl-ca foo --title', flag: '--use-openssl-ca', expected: true },
+    { name: 'ignored suffix keeps preceding CA state (equals)', nodeOptions: '--use-system-ca=1 foo', flag: '--use-system-ca', expected: true },
+    { name: 'consumed value is not an ignored suffix', nodeOptions: '--title foo --use-system-ca', flag: '--use-system-ca', expected: true },
+    { name: 'CA token inside the ignored suffix is not enabled', nodeOptions: 'foo --use-system-ca=1', flag: '--use-system-ca', expected: false },
+    { name: 'CA token inside the ignored suffix is not enabled (openssl)', nodeOptions: 'foo --use-openssl-ca=1', flag: '--use-openssl-ca', expected: false },
+    { name: 'lone hyphen stops option parsing', nodeOptions: '--use-system-ca -', flag: '--use-system-ca', expected: true },
+    { name: 'lone hyphen stops option parsing before the CA flag', nodeOptions: '- --use-system-ca', flag: '--use-system-ca', expected: false },
+    { name: '-- is not allowed in NODE_OPTIONS', nodeOptions: '--use-system-ca --', flag: '--use-system-ca', expected: false },
+    { name: '-- before the CA flag is not allowed in NODE_OPTIONS', nodeOptions: '-- --use-system-ca', flag: '--use-system-ca', expected: false },
   ]
 
   for (const { name, nodeOptions, flag, expected } of cases) {
@@ -274,5 +336,114 @@ describe('hasNodeOption CA selection via cache rebuild', () => {
         '--experimental-import-meta-resolve --use-openssl-ca',
       ),
     ).toBeDefined()
+  })
+})
+
+describe('hasNodeOption CA source selection', () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS
+  const originalExtraCerts = process.env.NODE_EXTRA_CA_CERTS
+  const nodeRequire = createRequire(import.meta.url)
+  const tls = nodeRequire('tls') as typeof import('tls')
+  const originalGetCACertificates = tls.getCACertificates
+
+  // The bundled and system stores can hold the same certificates, so
+  // "defined" alone cannot prove which root source the selector picked.
+  // Stubbing the system store makes the choice observable.
+  const SYSTEM_SENTINEL = 'SYSTEM-CA-SENTINEL'
+  const EXTRA_CA_SENTINEL = 'EXTRA-CA-SENTINEL'
+  let extraCertsDir: string | undefined
+
+  beforeEach(() => {
+    delete process.env.NODE_OPTIONS
+    delete process.env.NODE_EXTRA_CA_CERTS
+    tls.getCACertificates = (type) =>
+      type === 'system' ? [SYSTEM_SENTINEL] : []
+    extraCertsDir = mkdtempSync(join(tmpdir(), 'openclaude-ca-'))
+    writeFileSync(join(extraCertsDir, 'extra.pem'), EXTRA_CA_SENTINEL)
+    clearCACertsCache()
+  })
+
+  afterEach(() => {
+    tls.getCACertificates = originalGetCACertificates
+    if (originalNodeOptions === undefined) {
+      delete process.env.NODE_OPTIONS
+    } else {
+      process.env.NODE_OPTIONS = originalNodeOptions
+    }
+    if (originalExtraCerts === undefined) {
+      delete process.env.NODE_EXTRA_CA_CERTS
+    } else {
+      process.env.NODE_EXTRA_CA_CERTS = originalExtraCerts
+    }
+    if (extraCertsDir) {
+      rmSync(extraCertsDir, { recursive: true, force: true })
+      extraCertsDir = undefined
+    }
+    clearCACertsCache()
+  })
+
+  function getEffectiveCACerts(nodeOptions: string): string[] | undefined {
+    // Simulates the settings-reload path: applyConfigEnvironmentVariables()
+    // replaces process.env.NODE_OPTIONS, then clears CA/proxy/mTLS caches and
+    // rebuilds global agents.
+    process.env.NODE_OPTIONS = nodeOptions
+    clearCACertsCache()
+    return getCACertificates()
+  }
+
+  test('active CA flag selects the system root store', () => {
+    expect(getEffectiveCACerts('--use-system-ca')).toEqual([SYSTEM_SENTINEL])
+    expect(getEffectiveCACerts('--use-openssl-ca')).toEqual([SYSTEM_SENTINEL])
+    expect(getEffectiveCACerts('--use-system-ca=1')).toEqual([SYSTEM_SENTINEL])
+  })
+
+  test('inactive CA flag keeps the runtime default (undefined)', () => {
+    expect(getEffectiveCACerts('--no-use-system-ca')).toBeUndefined()
+    expect(
+      getEffectiveCACerts('--use-system-ca=1 --no-use-system-ca'),
+    ).toBeUndefined()
+  })
+
+  test('invalid streams keep the runtime default (undefined)', () => {
+    // Missing required value, flag-like value, malformed quoting, an invalid
+    // V8 value form and `--` all make Node reject the whole value.
+    expect(getEffectiveCACerts('--use-system-ca=1 --title')).toBeUndefined()
+    expect(getEffectiveCACerts('--title --use-system-ca')).toBeUndefined()
+    expect(getEffectiveCACerts('"--use-system-ca')).toBeUndefined()
+    expect(
+      getEffectiveCACerts('--use-system-ca=1 --max-old-space-size 4096'),
+    ).toBeUndefined()
+    expect(getEffectiveCACerts('--use-system-ca=1 --inspect=')).toBeUndefined()
+    expect(getEffectiveCACerts('--use-system-ca --')).toBeUndefined()
+  })
+
+  test('active CA flag selects the system store plus the extra certificate', () => {
+    process.env.NODE_EXTRA_CA_CERTS = join(extraCertsDir!, 'extra.pem')
+    expect(getEffectiveCACerts('--use-system-ca')).toEqual([
+      SYSTEM_SENTINEL,
+      EXTRA_CA_SENTINEL,
+    ])
+    expect(getEffectiveCACerts('--use-openssl-ca')).toEqual([
+      SYSTEM_SENTINEL,
+      EXTRA_CA_SENTINEL,
+    ])
+  })
+
+  test('inactive CA flag selects the bundled roots plus the extra certificate', () => {
+    process.env.NODE_EXTRA_CA_CERTS = join(extraCertsDir!, 'extra.pem')
+    const bundled = tls.rootCertificates
+    const certs = getEffectiveCACerts('--use-system-ca --no-use-system-ca')
+    expect(certs).toBeDefined()
+    expect(certs![0]).toBe(bundled[0])
+    expect(certs!.length).toBe(bundled.length + 1)
+    expect(certs![certs!.length - 1]).toBe(EXTRA_CA_SENTINEL)
+  })
+
+  test('ignored suffix preserves the preceding CA state', () => {
+    // Node stops parsing options at `foo`, so the trailing `--title` never
+    // becomes a required-value error and the CA flag stays enabled.
+    expect(getEffectiveCACerts('--use-system-ca foo --title')).toEqual([
+      SYSTEM_SENTINEL,
+    ])
   })
 })
