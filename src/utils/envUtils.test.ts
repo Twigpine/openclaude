@@ -417,6 +417,31 @@ describe('hasNodeOption CA source selection', () => {
     expect(getEffectiveCACerts('--use-system-ca --')).toBeUndefined()
   })
 
+  test('accepted empty inline heap value keeps the system store', () => {
+    // V8 tolerates an empty inline value for its own heap flags, so Node
+    // starts with the CA flag enabled.
+    expect(
+      getEffectiveCACerts('--use-system-ca --max-old-space-size='),
+    ).toEqual([SYSTEM_SENTINEL])
+    expect(
+      getEffectiveCACerts('--use-system-ca --max-semi-space-size='),
+    ).toEqual([SYSTEM_SENTINEL])
+  })
+
+  test('valid inspector forms keep the system store', () => {
+    // Bare inspector booleans and populated inline endpoints are accepted by
+    // Node, so the CA flag stays enabled.
+    expect(getEffectiveCACerts('--use-system-ca=1 --inspect')).toEqual([
+      SYSTEM_SENTINEL,
+    ])
+    expect(getEffectiveCACerts('--use-system-ca=1 --inspect=9229')).toEqual([
+      SYSTEM_SENTINEL,
+    ])
+    expect(getEffectiveCACerts('--use-system-ca=1 --inspect-port=9229')).toEqual([
+      SYSTEM_SENTINEL,
+    ])
+  })
+
   test('active CA flag selects the system store plus the extra certificate', () => {
     process.env.NODE_EXTRA_CA_CERTS = join(extraCertsDir!, 'extra.pem')
     expect(getEffectiveCACerts('--use-system-ca')).toEqual([
