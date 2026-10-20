@@ -9,12 +9,16 @@
  * CA-store selection with the helper's result.
  *
  * Usage:
- *   bun run scripts/check-node-options-parity.ts [--node <path>] [--flag <flag>]
+ *   bun run scripts/check-node-options-parity.ts [--node <path>]
  *
  * The CA store is observed through `tls.getCACertificates('default')`: with
  * `--use-openssl-ca` the default store is empty, without it the bundled roots
  * are returned. A stream Node rejects leaves no option active, so the helper
  * must fail closed and report the flag as disabled.
+ *
+ * `tls.getCACertificates()` and `--use-system-ca` both landed in Node
+ * v22.15.0, so that is the minimum runtime this script can measure against;
+ * it exits with an error on anything older.
  *
  * Known divergence: Node rejects options it does not know ("--bogus is not
  * allowed in NODE_OPTIONS"). This helper models a curated set of options and
@@ -27,13 +31,30 @@ import { hasNodeOption } from '../src/utils/envUtils.js'
 
 const args = process.argv.slice(2)
 
+/**
+ * Read an operand for an option. An absent option returns undefined; a
+ * present option without a usable operand is a usage error, so it must not
+ * silently fall back to a default.
+ */
 function argValue(name: string): string | undefined {
   const index = args.indexOf(name)
-  return index === -1 ? undefined : args[index + 1]
+  if (index === -1) return undefined
+  const value = args[index + 1]
+  if (value === undefined || value.startsWith('-')) {
+    console.error(`${name} requires a value`)
+    process.exit(2)
+  }
+  return value
 }
 
+// The Node probe and the matrix both observe `--use-openssl-ca`, so the flag
+// is fixed: making it configurable would compare the runtime's answer for one
+// flag against the helper's answer for another.
+const flag = '--use-openssl-ca'
+
+// The binary is passed as argv[0] with an argument array, never through a
+// shell, so the path cannot be interpreted as a command.
 const nodePath = argValue('--node') ?? process.env.NODE_BIN ?? 'node'
-const flag = argValue('--flag') ?? '--use-openssl-ca'
 
 const nodeVersion = spawnSync(nodePath, ['--version'], { encoding: 'utf8' })
 if (nodeVersion.status !== 0) {
@@ -45,6 +66,21 @@ if (!version.startsWith('v22.')) {
   console.warn(
     `Warning: ${nodePath} is ${version}; the helper models the Node 22 grammar.`,
   )
+}
+
+// The observation method needs `tls.getCACertificates()`, which landed in
+// Node v22.15.0 together with `--use-system-ca`. Without it every probe
+// throws and the run would check nothing while still exiting successfully.
+const probeSupport = spawnSync(
+  nodePath,
+  ['-p', "typeof require('tls').getCACertificates"],
+  { encoding: 'utf8' },
+)
+if ((probeSupport.stdout ?? '').trim() !== 'function') {
+  console.error(
+    `${nodePath} (${version}) has no tls.getCACertificates(); the parity check needs Node >= 22.15.`,
+  )
+  process.exit(2)
 }
 
 type NodeOutcome =
@@ -71,6 +107,12 @@ const PARSE_ERROR_PATTERNS = [
 
 /** Ask Node what the CA flag would be for a given NODE_OPTIONS value. */
 function nodeOutcome(nodeOptions: string): NodeOutcome {
+  // NODE_EXTRA_CA_CERTS and NODE_USE_SYSTEM_CA add certificates to the
+  // 'default' store, which would make the "empty store" signal unusable.
+  const env = { ...process.env, NODE_OPTIONS: nodeOptions }
+  delete env.NODE_EXTRA_CA_CERTS
+  delete env.NODE_USE_SYSTEM_CA
+
   const result = spawnSync(
     nodePath,
     [
@@ -78,7 +120,7 @@ function nodeOutcome(nodeOptions: string): NodeOutcome {
       "require('tls').getCACertificates('default').length === 0 ? 'enabled' : 'disabled'",
     ],
     {
-      env: { ...process.env, NODE_OPTIONS: nodeOptions },
+      env,
       timeout: 10_000,
       encoding: 'utf8',
     },
@@ -208,10 +250,18 @@ for (const construct of CONSTRUCTS) {
 let failures = 0
 let checked = 0
 let runtimeErrors = 0
+let timeouts = 0
 for (const nodeOptions of matrix) {
   const expected = nodeOutcome(nodeOptions)
-  if (expected === 'timeout' || expected === 'runtime-error') {
-    if (expected === 'runtime-error') runtimeErrors++
+  if (expected === 'timeout') {
+    // Node started and is waiting for a debugger (`--inspect-brk`,
+    // `--inspect-wait`), so the option stream was accepted but the CA state
+    // cannot be observed.
+    timeouts++
+    continue
+  }
+  if (expected === 'runtime-error') {
+    runtimeErrors++
     continue
   }
   checked++
@@ -228,16 +278,24 @@ for (const nodeOptions of matrix) {
 
   // The sibling CA flag shares the parser, so a rejected stream must make it
   // fail closed as well.
-  const sibling = flag === '--use-system-ca' ? '--use-openssl-ca' : '--use-system-ca'
-  if (helperOutcome(nodeOptions, sibling) !== 'disabled') {
-    failures++
-    console.log(
-      `MISMATCH sibling ${sibling} did not fail closed for ${JSON.stringify(nodeOptions)}`,
-    )
+  if (expected === 'rejected') {
+    const sibling = '--use-system-ca'
+    if (helperOutcome(nodeOptions, sibling) !== 'disabled') {
+      failures++
+      console.log(
+        `MISMATCH sibling ${sibling} did not fail closed for ${JSON.stringify(nodeOptions)}`,
+      )
+    }
   }
 }
 
 console.log(
-  `\nchecked=${checked} mismatches=${failures} runtime-errors=${runtimeErrors} (node=${version}, flag=${flag})`,
+  `\nchecked=${checked} mismatches=${failures} runtime-errors=${runtimeErrors} timeouts=${timeouts} (node=${version}, flag=${flag})`,
 )
+
+// A run that checked nothing must not report success.
+if (checked === 0) {
+  console.error('No case was checked; the parity result is meaningless.')
+  process.exit(1)
+}
 process.exit(failures === 0 ? 0 : 1)

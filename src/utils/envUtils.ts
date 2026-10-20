@@ -466,16 +466,18 @@ export function hasNodeOption(flag: string): boolean {
 
   // Node applies boolean options in order, so the last occurrence wins.
   // A query for the negated spelling (`--no-<flag>`) asks whether the
-  // negation is the effective state.
+  // negation is the effective state, which requires the option to be present.
   const negatedQuery = flag.startsWith('--no-')
   const optionName = negatedQuery ? `--${flag.slice('--no-'.length)}` : flag
   let enabled = false
+  let seen = false
   for (const option of parsed.options) {
     if (option.name === optionName) {
       enabled = !option.negated
+      seen = true
     }
   }
-  return negatedQuery ? !enabled : enabled
+  return negatedQuery ? seen && !enabled : enabled
 }
 
 export function isEnvTruthy(envVar: string | boolean | undefined): boolean {

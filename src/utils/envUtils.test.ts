@@ -125,6 +125,8 @@ describe('hasNodeOption', () => {
     { name: 'negated spelling is queryable', nodeOptions: '--no-use-system-ca', flag: '--no-use-system-ca', expected: true },
     { name: 'negated spelling is not active after a later positive', nodeOptions: '--no-use-system-ca --use-system-ca', flag: '--no-use-system-ca', expected: false },
     { name: 'negated spelling is active after a later negation', nodeOptions: '--use-system-ca --no-use-system-ca', flag: '--no-use-system-ca', expected: true },
+    { name: 'negated spelling is absent when the option is not present', nodeOptions: '--max-old-space-size=4096', flag: '--no-use-system-ca', expected: false },
+    { name: 'negated spelling is absent for an unrelated stream', nodeOptions: '--title foo', flag: '--no-use-system-ca', expected: false },
 
     // Required-value failures invalidate the whole stream even when the CA
     // target appears before the error (Node exits, so nothing is active).
