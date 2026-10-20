@@ -12,6 +12,7 @@ import {
   type ProviderProfile,
 } from './config.js'
 import type { ModelOption } from './model/modelOptions.js'
+import { isCurrentMiniMaxModelOption } from './model/minimaxCatalog.js'
 import { getPrimaryModel, parseModelList } from './providerModels.js'
 import {
   buildCompatibilityProcessEnv,
@@ -1640,7 +1641,9 @@ export function getProfileModelOptions(
   const configuredOptions = getConfiguredProfileModelOptions(profile)
   return mergeModelOptionsByValue(
     configuredOptions,
-    getModelCacheByProfile(profile.id, config),
+    getModelCacheByProfile(profile.id, config).filter(option =>
+      isCurrentMiniMaxModelOption(option.value),
+    ),
   )
 }
 

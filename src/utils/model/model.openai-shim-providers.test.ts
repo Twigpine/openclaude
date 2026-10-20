@@ -342,15 +342,23 @@ test('getDefaultOpusModel returns OPENAI_MODEL for MiniMax', async () => {
   expect(getDefaultOpusModel()).toBe('MiniMax-M2.7')
 })
 
-test('getDefaultMainLoopModelSetting defaults MiniMax to M3', async () => {
+test('MiniMax default tiers share the Flash route default', async () => {
   process.env.MINIMAX_API_KEY = 'minimax-test'
 
   const {
     getDefaultMainLoopModel,
     getDefaultMainLoopModelSetting,
+    getDefaultOpusModel,
+    getDefaultSonnetModel,
+    getDefaultHaikuModel,
+    getSmallFastModel,
   } = await importFreshModelModule()
-  expect(getDefaultMainLoopModelSetting()).toBe('MiniMax-M3')
-  expect(getDefaultMainLoopModel()).toBe('MiniMax-M3')
+  expect(getDefaultSonnetModel()).toBe('MiniMax-M3.1-Flash')
+  expect(getDefaultHaikuModel()).toBe('MiniMax-M3.1-Flash')
+  expect(getSmallFastModel()).toBe('MiniMax-M3.1-Flash')
+  expect(getDefaultMainLoopModelSetting()).toBe('MiniMax-M3.1-Flash')
+  expect(getDefaultMainLoopModel()).toBe('MiniMax-M3.1-Flash')
+  expect(getDefaultOpusModel()).toBe('MiniMax-M3.1-Flash')
 })
 
 test('Concentrate selects its dedicated model before client normalization', async () => {
