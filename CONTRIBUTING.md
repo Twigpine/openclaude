@@ -266,8 +266,6 @@ bun run check
 bun run typecheck
 bun run typecheck:type-tests
 node bin/openclaude --version
-bun run test:provider
-npm run test:provider-recommendation
 git fetch https://github.com/Twigpine/openclaude.git main
 bun run security:pr-scan -- --base FETCH_HEAD --head HEAD
 ```
