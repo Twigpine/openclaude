@@ -112,10 +112,9 @@ export function getSmallFastModel(): ModelName {
   if (getAPIProvider() === 'nvidia-nim') {
     return process.env.OPENAI_MODEL || 'meta/llama-3.1-8b-instruct'
   }
-  // MiniMax — OPENAI_MODEL carries the active MiniMax model; fall back to
-  // the fastest tier (M2.5-highspeed) when missing.
+  // MiniMax uses the configured model or the shared Flash route default.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M2.5-highspeed'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo — OPENAI_MODEL carries the active MiMo model; fall back to
   // the fast tier when missing.
@@ -260,7 +259,7 @@ export function getDefaultOpusModel(): ModelName {
   }
   // MiniMax — flagship tier for "opus"-equivalent.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M2.7'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo — flagship tier for "opus"-equivalent.
   if (getAPIProvider() === 'xiaomi-mimo') {
@@ -310,7 +309,7 @@ export function getDefaultSonnetModel(): ModelName {
   }
   // MiniMax — mid tier for "sonnet"-equivalent.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M2.5'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo — flagship model for "sonnet"-equivalent.
   if (getAPIProvider() === 'xiaomi-mimo') {
@@ -358,7 +357,7 @@ export function getDefaultHaikuModel(): ModelName {
   }
   // MiniMax — fastest tier for "haiku"-equivalent.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M2.5-highspeed'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo — fast tier for "haiku"-equivalent.
   if (getAPIProvider() === 'xiaomi-mimo') {
@@ -470,11 +469,9 @@ export function getDefaultMainLoopModelSetting(): ModelName | ModelAlias {
     return process.env.OPENAI_MODEL || getRouteDefaultModel('xai') || 'grok-4.6'
   }
   // MiniMax provider: always use the configured MiniMax model.
-  // Keep the env-only fallback aligned with the MiniMax descriptor default
-  // (MiniMax-M3) so a session with only MINIMAX_API_KEY / a MiniMax base URL
-  // defaults to the same model as --provider minimax and saved profiles.
+  // Share the route default across env-only sessions, --provider, and profiles.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M3'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo provider: always use the configured MiMo model
   if (getAPIProvider() === 'xiaomi-mimo') {

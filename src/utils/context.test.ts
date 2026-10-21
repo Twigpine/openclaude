@@ -510,7 +510,9 @@ test('MiniMax China uses the M3 context limit before client setup', () => {
   try {
     process.env.ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
     process.env.ANTHROPIC_API_KEY = 'china-test-key'
-    expect(getContextWindowForModel('MiniMax-M3')).toBe(1_048_576)
+    expect(getContextWindowForModel('MiniMax-M3')).toBe(1_000_000)
+    expect(getContextWindowForModel('MiniMax-M3.1-Flash')).toBe(1_000_000)
+    expect(getMaxOutputTokensForModel('MiniMax-M3.1-Flash')).toBe(524_288)
   } finally {
     if (savedBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL
     else process.env.ANTHROPIC_BASE_URL = savedBaseUrl
