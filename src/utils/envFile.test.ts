@@ -19,6 +19,7 @@ const TEST_ENV_KEYS = [
   'CODEX_AUTH_JSON_PATH',
   'CODEX_HOME',
   'LLMTR_API_KEY',
+  'MERGE_GATEWAY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -341,6 +342,31 @@ describe('loadEnvFile', () => {
       'Unsupported variable UNSAFE_API_ROUTE_SETTING in --provider-env-file',
     )
     expect(process.env.API_ROUTE_API_KEY).toBeUndefined()
+  })
+
+  it('loads a usable Merge credential with shell precedence and remembered replay', async () => {
+    const { getProviderValidationError } = await import('./providerValidation.js')
+    const filePath = writeTempEnvFile('MERGE_GATEWAY_API_KEY=file-merge-key')
+    const loaded = loadEnvFile(filePath)
+    expect(loaded).toEqual({ MERGE_GATEWAY_API_KEY: 'file-merge-key' })
+    const validateMerge = () => getProviderValidationError({
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://api-gateway.merge.dev/v1/openai',
+      OPENAI_MODEL: 'openai/gpt-5.5',
+      MERGE_GATEWAY_API_KEY: process.env.MERGE_GATEWAY_API_KEY,
+    })
+    expect(await validateMerge()).toBeNull()
+
+    rememberLoadedEnvFileValues(loaded)
+    delete process.env.MERGE_GATEWAY_API_KEY
+    expect(await validateMerge()).toContain('MERGE_GATEWAY_API_KEY')
+    reapplyRememberedEnvFileValues()
+    expect<string | undefined>(process.env.MERGE_GATEWAY_API_KEY).toBe('file-merge-key')
+    expect(await validateMerge()).toBeNull()
+
+    process.env.MERGE_GATEWAY_API_KEY = 'shell-merge-key'
+    expect(loadEnvFile(filePath)).toEqual({})
+    expect(process.env.MERGE_GATEWAY_API_KEY).toBe('shell-merge-key')
   })
 
   it('loads the dedicated LLMTR credential without selecting a route', () => {

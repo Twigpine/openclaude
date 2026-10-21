@@ -176,6 +176,47 @@ describe('discoverModelsForRoute', () => {
     })
   })
 
+  test('publishes only conversational Merge models to the catalog and cache', async () => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    process.env.MERGE_GATEWAY_API_KEY = 'merge-key'
+    const nativeModel = (model: string, input: string[], output: string[]) => ({
+      model, vendors: { native: { capabilities: { input, output } } },
+    })
+    const models = [
+      nativeModel('anthropic/claude-sonnet-5', ['text', 'image', 'document'], ['text', 'tool_use']),
+      nativeModel('provider/audio-chat', ['text', 'audio'], ['text', 'audio']),
+      {
+        model: 'provider/multi-vendor-chat', vendors: {
+          speech: { capabilities: { input: ['text'], output: ['audio'] } },
+          chat: { capabilities: { input: ['text'], output: ['text'] } },
+        },
+      },
+      // Modalities, rather than names, also exclude unknown media/model families.
+      nativeModel('provider/vector-v1', ['text'], ['embedding']),
+      nativeModel('provider/narrator-v1', ['text'], ['audio']),
+      nativeModel('provider/movie-v1', ['text', 'image'], ['video']),
+      nativeModel('provider/painter-v1', ['text'], ['image']),
+      nativeModel('provider/transcription-v1', ['audio'], ['text']),
+      nativeModel('provider/ranker-v1', ['text'], ['score']),
+      // Sparse native/compatible payloads still exclude known non-chat families.
+      { model: 'google/gemini-embedding-001' },
+      { model: 'minimax/speech-2.6-turbo' },
+      { id: 'google/veo-3.1-generate-001' },
+    ]
+    const fetchMock = mock(() => Promise.resolve(new Response(JSON.stringify({ data: models, has_more: false }))))
+    setMockFetch(fetchMock as unknown as typeof globalThis.fetch)
+    const result = await discoverModelsForRoute('merge-gateway', { forceRefresh: true })
+    expect(result).toMatchObject({ source: 'network', discoveredModelCount: 3, error: null })
+    expect(result?.models.map(model => model.apiName)).toEqual([
+      'default_routing', 'openai/gpt-5.5',
+      'anthropic/claude-sonnet-5', 'provider/audio-chat', 'provider/multi-vendor-chat',
+    ])
+    const cached = await discoverModelsForRoute('merge-gateway')
+    expect(cached?.source).toBe('cache')
+    expect(cached?.models).toEqual(result?.models)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   test('withholds explicit and ambient Merge keys from retargeted discovery', async () => {
     const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
     process.env.MERGE_GATEWAY_API_KEY = 'merge-secret'

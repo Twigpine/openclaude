@@ -1,4 +1,5 @@
 import { defineGateway } from '../define.js'
+import { isKnownNonCodingModelId, isRecord } from '../modelMapping.js'
 
 /** Convert Merge's native catalog object into an OpenClaude route entry. */
 function mapMergeGatewayModel(raw: unknown) {
@@ -14,6 +15,29 @@ function mapMergeGatewayModel(raw: unknown) {
         ? model.model.trim()
         : ''
   if (!apiName) {
+    return null
+  }
+
+  // Native entries describe modalities per vendor. Keep multimodal chat if
+  // any vendor supports text in and out; media/embedding endpoints cannot serve
+  // this conversation route. Sparse compatible entries use the existing ID filter.
+  const modalities = isRecord(model.vendors)
+    ? Object.values(model.vendors).flatMap(vendor => {
+        const capabilities = isRecord(vendor) ? vendor.capabilities : undefined
+        return isRecord(capabilities) &&
+          Array.isArray(capabilities.input) &&
+          Array.isArray(capabilities.output)
+          ? [{ input: capabilities.input, output: capabilities.output }]
+          : []
+      })
+    : []
+  if (
+    modalities.length > 0
+      ? !modalities.some(
+          ({ input, output }) => input.includes('text') && output.includes('text'),
+        )
+      : isKnownNonCodingModelId(apiName) || /(?:^|\/)veo[-_.]/i.test(apiName)
+  ) {
     return null
   }
 
