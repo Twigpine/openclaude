@@ -633,8 +633,8 @@ describe('background session finalizer', () => {
     return { id, child, readyPath }
   }
 
-  async function waitForFile(path: string): Promise<void> {
-    for (let attempt = 0; attempt < 500; attempt += 1) {
+  async function waitForFile(path: string, attempts: number = 500): Promise<void> {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       if (await Bun.file(path).exists()) return
       await new Promise(resolve => setTimeout(resolve, 10))
     }
@@ -967,6 +967,7 @@ describe('background session finalizer', () => {
   async function runWaitingDetachedLaunch(
     name: string,
     fixtureEnv: NodeJS.ProcessEnv = {},
+    readinessAttempts?: number,
   ): Promise<{ id: string; childPid: number; readyPath: string }> {
     const readyPath = join(configDir, `${name}.ready`)
     const launcher = spawn(
@@ -1017,7 +1018,7 @@ describe('background session finalizer', () => {
       if (!id || childPid === undefined) {
         throw new Error('detached wait launch omitted its session identity')
       }
-      await waitForFile(readyPath)
+      await waitForFile(readyPath, readinessAttempts)
       ownershipTransferred = true
       return { id, childPid, readyPath }
     } finally {
@@ -1044,6 +1045,9 @@ describe('background session finalizer', () => {
       env: {
         OPENCLAUDE_BG_FINALIZER_FIXTURE_SKIP_READY: '1',
       },
+      // Readiness is deliberately suppressed; only exercise the failure path.
+      readinessAttempts: 25,
+      expectedError: 'fixture readiness file was not created',
     },
   ]) {
     it(
@@ -1051,8 +1055,8 @@ describe('background session finalizer', () => {
       async () => {
         const name = `failed-handoff-${scenario.label.replaceAll(' ', '-')}`
         await expect(
-          runWaitingDetachedLaunch(name, scenario.env),
-        ).rejects.toThrow()
+          runWaitingDetachedLaunch(name, scenario.env, scenario.readinessAttempts),
+        ).rejects.toThrow(scenario.expectedError)
         const session = (await listBackgroundSessions()).find(
           candidate => candidate.name === name,
         )

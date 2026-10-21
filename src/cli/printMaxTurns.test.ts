@@ -135,18 +135,6 @@ function createHeadlessRunOptions(maxTurns: number | undefined) {
   }
 }
 
-async function waitForAskCall(
-  askSpy: ReturnType<typeof spyOn<typeof queryEngineModule, 'ask'>>,
-): Promise<void> {
-  const deadline = Date.now() + 15_000
-  while (askSpy.mock.calls.length === 0) {
-    if (Date.now() >= deadline) {
-      throw new Error('Timed out waiting for runHeadless to call ask()')
-    }
-    await new Promise(resolve => setTimeout(resolve, 25))
-  }
-}
-
 describe('headless --print max-turns', () => {
   const savedSimple = process.env.CLAUDE_CODE_SIMPLE
 
@@ -213,9 +201,8 @@ describe('headless --print max-turns', () => {
         createHeadlessRunOptions(0),
       )
 
-      await waitForAskCall(askSpy)
-      expect(askSpy.mock.calls[0]?.[0]?.maxTurns).toBe(0)
       await runPromise
+      expect(askSpy.mock.calls[0]?.[0]?.maxTurns).toBe(0)
       expect(shutdownSpy).toHaveBeenCalledWith(0)
     } finally {
       await runPromise?.catch(() => {})

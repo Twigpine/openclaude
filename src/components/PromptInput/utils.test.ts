@@ -119,7 +119,7 @@ test.each([
   /** Observes the real hook after mounting its AppState provider. */
   function HookProbe() {
     observedBanner = useSwarmBanner()
-    React.useEffect(() => { notifyRendered() }, [])
+    React.useLayoutEffect(() => { notifyRendered() }, [])
     return null
   }
 

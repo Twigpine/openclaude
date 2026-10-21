@@ -72,6 +72,7 @@ describe('openclaude launcher heap guard', () => {
     expect(source).not.toMatch(/import\s*\{[^}]*enableCompileCache[^}]*\}\s*from\s*['"]node:module['"]/s)
   })
 
+  // Real CLI startup has an 8s child deadline; allow time to assert its result.
   test('strips launcher-only percentage before Commander when native heap and expose-gc are present', () => {
     const env = {
       ...process.env,
@@ -98,8 +99,9 @@ describe('openclaude launcher heap guard', () => {
     expect(output).not.toContain(
       "unknown option '--max-old-space-size-percentage=50'",
     )
-  })
+  }, 10_000)
 
+  // Real CLI startup has an 8s child deadline; allow time to assert its result.
   test('strips launcher-only percentage before Commander when heap relaunch is disabled', () => {
     const env = {
       ...process.env,
@@ -120,8 +122,9 @@ describe('openclaude launcher heap guard', () => {
     expect(output).not.toContain(
       "unknown option '--max-old-space-size-percentage=50'",
     )
-  })
+  }, 10_000)
 
+  // Real CLI startup has an 8s child deadline; allow time to assert its result.
   test('strips launcher-only percentage when OPENCLAUDE_HEAP_RELAUNCHED is already set', () => {
     const env = {
       ...process.env,
@@ -142,7 +145,7 @@ describe('openclaude launcher heap guard', () => {
     expect(output).not.toContain(
       "unknown option '--max-old-space-size-percentage=50'",
     )
-  })
+  }, 10_000)
 })
 
 describe('heap-limit percentage resolution', () => {
