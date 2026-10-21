@@ -1015,12 +1015,12 @@ class Project {
   currentSessionBranch: SessionBranchEntry | undefined
 
   sessionFile: string | null = null
-  // Entries buffered while sessionFile is null. Flushed by materializeSessionFile
-  // on the first user/assistant message — prevents metadata-only session files.
-  private pendingEntries: Entry[] = []
-  // Session the buffered entries belong to; a switch drops them so they are
-  // not written into the next session's transcript.
-  private pendingEntriesSessionId: UUID | null = null
+  // Entries buffered while sessionFile is null, keyed by the session they
+  // belong to. Flushed by materializeSessionFile on that session's first
+  // user/assistant message — prevents metadata-only session files without
+  // letting one session's buffer leak into another's transcript. Keyed rather
+  // than a single slot: a switch away and back must not lose them.
+  private pendingEntries = new Map<UUID, Entry[]>()
   private remoteIngressUrl: string | null = null
   private internalEventWriter: InternalEventWriter | null = null
   private internalEventReader: InternalEventReader | null = null
@@ -1351,19 +1351,33 @@ class Project {
 
   resetSessionFile(): void {
     this.sessionFile = null
-    this.pendingEntries = []
-    this.pendingEntriesSessionId = null
+    // The "current session only" metadata caches must not survive the move to
+    // another session: reAppendSessionMetadata would otherwise write them into
+    // the next session's transcript. The CLI already paired
+    // resetSessionFilePointer with clearSessionMetadata() by hand (see
+    // REPL.tsx); doing it here makes the SDK path follow the same rule, since
+    // it has no restoreSessionMetadata call to put them back.
+    this.clearSessionMetadata()
+    // Buffered entries are deliberately NOT dropped: they belong to the
+    // session that recorded them and are flushed when THAT session
+    // materializes. A switch away and back must keep them.
   }
 
-  /** Drops buffered entries that belong to a session other than `sessionId`. */
-  private dropForeignPendingEntries(sessionId: UUID): void {
-    if (
-      this.pendingEntriesSessionId !== null &&
-      this.pendingEntriesSessionId !== sessionId
-    ) {
-      this.pendingEntries = []
-      this.pendingEntriesSessionId = null
-    }
+  /** Drops the "current session only" metadata caches. */
+  clearSessionMetadata(): void {
+    this.currentSessionTitle = undefined
+    this.currentSessionTag = undefined
+    this.currentSessionAgentName = undefined
+    this.currentSessionAgentColor = undefined
+    this.currentSessionLastPrompt = undefined
+    this.currentSessionAgentSetting = undefined
+    this.currentSessionMode = undefined
+    this.currentSessionWorktree = undefined
+    this.currentSessionPrNumber = undefined
+    this.currentSessionPrUrl = undefined
+    this.currentSessionPrRepository = undefined
+    this.currentSessionGoal = undefined
+    this.currentSessionBranch = undefined
   }
 
   /**
@@ -1695,14 +1709,13 @@ class Project {
     // (not appendEntry) so it would bypass the per-entry persistence check
     // and create a metadata-only file despite --no-session-persistence.
     if (this.shouldSkipPersistence()) return
-    this.dropForeignPendingEntries(getSessionId() as UUID)
+    const sessionId = getSessionId() as UUID
     this.ensureCurrentSessionFile()
     // mode/agentSetting are cache-only pre-materialization; write them now.
     this.reAppendSessionMetadata()
-    if (this.pendingEntries.length > 0) {
-      const buffered = this.pendingEntries
-      this.pendingEntries = []
-      this.pendingEntriesSessionId = null
+    const buffered = this.pendingEntries.get(sessionId)
+    if (buffered && buffered.length > 0) {
+      this.pendingEntries.delete(sessionId)
       for (const entry of buffered) {
         await this.appendEntry(entry)
       }
@@ -1909,9 +1922,12 @@ class Project {
     if (isCurrentSession) {
       // Buffer until materializeSessionFile runs (first user/assistant message).
       if (this.sessionFile === null) {
-        this.dropForeignPendingEntries(currentSessionId)
-        this.pendingEntriesSessionId = currentSessionId
-        this.pendingEntries.push(entry)
+        let buffered = this.pendingEntries.get(currentSessionId)
+        if (!buffered) {
+          buffered = []
+          this.pendingEntries.set(currentSessionId, buffered)
+        }
+        buffered.push(entry)
         return
       }
       sessionFile = this.sessionFile
@@ -2090,6 +2106,8 @@ class Project {
   ): Promise<void> {
     this.deletedSessionFiles.add(resolvePath(transcriptPath))
     this.existingSessionFiles.delete(sessionId)
+    // The session is gone; its buffered entries have nowhere to go.
+    this.pendingEntries.delete(sessionId)
     if (this.sessionFile && this.isDeletedSessionFile(this.sessionFile)) {
       this.resetSessionFile()
     }
@@ -3950,20 +3968,7 @@ export function restoreSessionMetadata(meta: {
  * from the previous session does not leak into the new one.
  */
 export function clearSessionMetadata(): void {
-  const project = getProject()
-  project.currentSessionTitle = undefined
-  project.currentSessionTag = undefined
-  project.currentSessionAgentName = undefined
-  project.currentSessionAgentColor = undefined
-  project.currentSessionLastPrompt = undefined
-  project.currentSessionAgentSetting = undefined
-  project.currentSessionMode = undefined
-  project.currentSessionWorktree = undefined
-  project.currentSessionPrNumber = undefined
-  project.currentSessionPrUrl = undefined
-  project.currentSessionPrRepository = undefined
-  project.currentSessionGoal = undefined
-  project.currentSessionBranch = undefined
+  getProject().clearSessionMetadata()
 }
 
 /**

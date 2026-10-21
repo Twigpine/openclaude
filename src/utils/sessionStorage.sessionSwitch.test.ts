@@ -203,6 +203,71 @@ test('a same-id switch does not throw away entries still waiting to be written',
 })
 
 /**
+ * A SECOND SESSION DOES NOT INHERIT THE FIRST SESSION'S LAST PROMPT.
+ *
+ * Raised in review. The `currentSession*` caches are documented as "current
+ * session only", but switching did not clear them: when the second session
+ * materialized its file, reAppendSessionMetadata() wrote the FIRST session's
+ * lastPrompt into it. The CLI worked around this by hand (clearSessionMetadata
+ * before restoreSessionMetadata); the SDK has no restore to put anything back,
+ * so resetSessionFile() clears the caches itself.
+ */
+test('a second session does not inherit the first session previous prompt', async () => {
+  switchSession(FIRST as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(FIRST)), { recursive: true, mode: 0o700 })
+  await recordTranscript([
+    message('40000000-0000-4000-8000-00000000000b', 'the first session prompt'),
+  ])
+  await flushSessionStorage()
+
+  switchSession(SECOND as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(SECOND)), { recursive: true, mode: 0o700 })
+  await recordTranscript([
+    message('40000000-0000-4000-8000-00000000000c', 'the second session prompt'),
+  ])
+  await flushSessionStorage()
+
+  const secondText = await readFile(getTranscriptPathForSession(SECOND), 'utf8')
+  expect(secondText).toContain('the second session prompt')
+  // A stale cache would land here as a last-prompt entry.
+  expect(secondText).not.toContain('the first session prompt')
+})
+
+/**
+ * A DIFFERENT-ID SWITCH KEEPS BUFFERED ENTRIES FOR THEIR OWN SESSION.
+ *
+ * Raised in review. resetSessionFile() dropped the buffer, so a session that
+ * had recorded an attribution snapshot but not yet materialized lost it when
+ * another session's turn switched away — and found it empty if it returned.
+ * Buffers are keyed by session now, and only the materializing session's is
+ * flushed.
+ */
+test('a different-id switch keeps entries buffered for their own session', async () => {
+  switchSession(FIRST as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(FIRST)), { recursive: true, mode: 0o700 })
+  await recordAttributionSnapshot({
+    type: 'attribution-snapshot',
+    messageId: '40000000-0000-4000-8000-00000000000d' as UUID,
+    surface: 'sdk',
+    fileStates: {},
+  })
+  expect(existsSync(getTranscriptPathForSession(FIRST))).toBe(false)
+
+  // Another session runs and returns before FIRST ever materializes.
+  switchSession(SECOND as never, null)
+  switchSession(FIRST as never, null)
+
+  await recordTranscript([
+    message('40000000-0000-4000-8000-00000000000e', 'after the round trip'),
+  ])
+  await flushSessionStorage()
+
+  const text = await readFile(getTranscriptPathForSession(FIRST), 'utf8')
+  expect(text).toContain('attribution-snapshot')
+  expect(text).toContain('after the round trip')
+})
+
+/**
  * THE SAME ID IS NOT THE SAME FILE.
  *
  * Raised in review. `switchSession(id, projectDir)` sets both and emits only
