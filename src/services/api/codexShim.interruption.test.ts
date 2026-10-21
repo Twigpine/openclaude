@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, jest, test } from 'bun:test'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -707,6 +707,10 @@ describe('issue #1830 Codex interruption ownership', () => {
     const originalTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
     process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
     __resetInterruptionTraceForTests()
+    const realSetImmediate = setImmediate
+    const nextTurn = () => new Promise<void>(resolve => realSetImmediate(resolve))
+    let consumption: ReturnType<typeof driveWithGuard> | undefined
+    jest.useFakeTimers()
     const timed = makeTimedStream(
       index => {
         if (index % 4 === 0) return ': keepalive\n\n'
@@ -721,15 +725,35 @@ describe('issue #1830 Codex interruption ownership', () => {
       25,
     )
     try {
-      const outcome = await driveWithGuard(timed.response, {
+      let settled = false
+      consumption = driveWithGuard(timed.response, {
         idleTimeoutMs: 250,
         hardMaxQueryMs: 1_500,
         readerIdleTimeoutMs: 500,
       })
+      void consumption.then(
+        () => { settled = true },
+        () => { settled = true },
+      )
+      // Finish message_start and drain each frame before advancing the clock.
+      // Real interval callbacks can fall behind the guard deadline under load.
+      await nextTurn()
+      for (let elapsed = 25; elapsed < 250; elapsed += 25) {
+        jest.advanceTimersByTime(25)
+        await nextTurn()
+      }
+      jest.advanceTimersByTime(24)
+      await nextTurn()
+      expect(settled).toBe(false)
+      jest.advanceTimersByTime(1)
+      await nextTurn()
+      expect(settled).toBe(true)
+      const outcome = await consumption
 
       expect(outcome.timeout.reason satisfies QueryGuardTimeoutReason).toBe(
         'idle',
       )
+      expect(outcome.timeout.elapsedMs).toBe(250)
       expect(outcome.signalReason).toBe('query-timeout')
       expect(outcome.result.status).toBe('rejected')
       expect(outcome.events.map(event => event.type)).toEqual([
@@ -766,6 +790,8 @@ describe('issue #1830 Codex interruption ownership', () => {
       expect(timed.cancelReasons).toHaveLength(1)
     } finally {
       timed.stop()
+      jest.useRealTimers()
+      if (consumption) await bounded(consumption).catch(() => {})
       await __waitForInterruptionTraceFlushForTests()
       __resetInterruptionTraceForTests()
       if (originalTrace === undefined) {
