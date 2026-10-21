@@ -641,10 +641,11 @@ async function getAgentTranscriptReadPath(agentId: AgentId): Promise<string> {
     const parts = relativePath.split(sep)
     // Accept only generated project/session/subagents paths for this agent.
     // Grouping directories and the resumed project override can be released
-    // before this read, so validate against trusted project storage instead.
+    // before this read. Require a destination recorded by this agent's producer.
     if (!isAbsolute(relativePath) && parts[0] !== '..' && parts.length >= 4 &&
       validateUuid(parts[1]) && parts[2] === 'subagents' &&
-      parts.at(-1) === `agent-${agentId}.jsonl`) return target
+      parts.at(-1) === `agent-${agentId}.jsonl` &&
+      getProject().sidechainProducerPaths.get(agentId)?.has(target)) return target
   } catch (error) {
     if (!isFsInaccessible(error) && getErrnoCode(error) !== 'EINVAL') throw error
   }
@@ -1664,6 +1665,18 @@ class Project {
   }
 
   private sidechainWrites = new Map<string, Promise<void>>()
+  // Producer destinations outlive /clear and project/subdirectory overrides.
+  readonly sidechainProducerPaths = new Map<string, Set<string>>()
+
+  private async appendSidechainEntry(agentId: string, path: string, data: string): Promise<void> {
+    await this.appendToFile(path, data)
+    let paths = this.sidechainProducerPaths.get(agentId)
+    if (!paths) {
+      paths = new Set()
+      this.sidechainProducerPaths.set(agentId, paths)
+    }
+    paths.add(resolvePath(path))
+  }
 
   insertSidechainTranscript(
     messages: Transcript,
@@ -1901,7 +1914,7 @@ class Project {
     if (sidechainDestination && isTranscriptMessage(entry) && entry.isSidechain && entry.agentId !== undefined) {
       // The queue key, session stamp and every append belong to the submission,
       // even if /clear changes the active session while this chain is waiting.
-      await this.appendToFile(sidechainDestination.path, jsonStringify(entry) + '\n')
+      await this.appendSidechainEntry(entry.agentId, sidechainDestination.path, jsonStringify(entry) + '\n')
       return
     }
 
@@ -2025,7 +2038,7 @@ class Project {
           if (isAgentSidechain) {
             // Agent completion awaits this producer. Use the existing per-file
             // append/lock path so unrelated session queues cannot gate output.
-            await this.appendToFile(targetFile, jsonStringify(entry) + '\n')
+            await this.appendSidechainEntry(entry.agentId!, targetFile, jsonStringify(entry) + '\n')
           } else {
             void this.enqueueWrite(targetFile, entry)
           }

@@ -685,6 +685,39 @@ for (const foreground of [false, true]) {
   })
 }
 
+for (const captureDestination of [true, false]) {
+  for (const swappedTarget of ['agent', 'project']) {
+    test(`retained transcript lookup rejects another ${swappedTarget}'s output link, captured=${captureDestination}`, async () => {
+      const agentId = asAgentId('retained-producer')
+      const pathA = getAgentTranscriptPath(agentId)
+      const metadata = { agentType: 'retained-agent', source: 'userSettings' }
+      await writeAgentMetadata(agentId, metadata)
+      await recordSidechainTranscript([createUserMessage({ content: 'recorded producer history' })], agentId, undefined, { captureDestination })
+      let target: string
+      if (swappedTarget === 'agent') {
+        const otherId = asAgentId('other-producer')
+        target = getAgentTranscriptPath(otherId)
+        await writeAgentMetadata(otherId, metadata)
+        await recordSidechainTranscript([createUserMessage({ content: 'other producer history' })], otherId, undefined, { captureDestination })
+      } else {
+        target = join(getProjectDir(join(configDir, 'other-project')), getSessionId(), 'subagents', `agent-${agentId}.jsonl`)
+        await mkdir(dirname(target), { recursive: true })
+        // Matching agent content and filename cannot establish producer ownership.
+        await writeFile(target, await readFile(pathA, 'utf8'))
+        await writeFile(target.replace(/\.jsonl$/, '.meta.json'), JSON.stringify(metadata))
+      }
+      switchSession(asSessionId(randomUUID()))
+      await resetSessionFilePointer()
+      await actualDiskOutput.initTaskOutputAsSymlink(agentId, pathA)
+      expect(JSON.stringify((await getAgentTranscript(agentId))?.messages)).toContain('recorded producer history')
+      expect(await readAgentMetadata(agentId)).toEqual(metadata)
+      await actualDiskOutput.initTaskOutputAsSymlink(agentId, target)
+      expect(await getAgentTranscript(agentId)).toBeNull()
+      expect(await readAgentMetadata(agentId)).toBeNull()
+    })
+  }
+}
+
 test('retained transcript lookup rejects output links outside generated agent storage', async () => {
   const agentId = asAgentId('retained-path-guard')
   const pathA = getAgentTranscriptPath(agentId)
