@@ -244,7 +244,7 @@ bun run dev:profile
 
 ## Validation
 
-PR Checks skips the static check, unit shard, dedicated test, launcher, and typecheck jobs when a PR changes only Markdown files or files under `docs/`, unless any change is under `.github/`. The web job is selected independently by website paths; every job runs on pushes to `main` (see `.github/workflows/pr-checks.yml`). This section is the **authoritative local pre-push validation contract** — `AGENTS.md` defers to it. **Run every locally applicable check before every push to an open PR, including follow-up pushes during review.** Do not wait for GitHub CI to discover failures you could have caught locally — wasted Actions minutes are a real cost on this repo.
+PR Checks skips the static check, unit shard, dedicated test, launcher, and typecheck jobs when a PR changes only Markdown files or files under `docs/`, unless any change is under `.github/`. CI runs the PR intent scan on every PR, including documentation-only PRs. The web job is selected independently by website paths; every job runs on pushes to `main` (see `.github/workflows/pr-checks.yml`). This section is the **authoritative local pre-push validation contract** — `AGENTS.md` defers to it. **Run every locally applicable check before every push to an open PR, including follow-up pushes during review.** Do not wait for GitHub CI to discover failures you could have caught locally — wasted Actions minutes are a real cost on this repo.
 
 The security scan requires the commit ancestry needed to find the PR's merge base. Check whether your clone is shallow:
 
