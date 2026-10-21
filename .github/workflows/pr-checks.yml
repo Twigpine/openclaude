@@ -10,7 +10,34 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      web: ${{ steps.filter.outputs.web }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          filters: |
+            code:
+              - '.github/**'
+              - '!{*.md,**/*.md,docs/**}'
+            web:
+              - 'web/**'
+              - 'package.json'
+              - 'bun.lock'
+              - '.bun-version'
+              - '.github/workflows/pr-checks.yml'
+
   smoke-and-tests:
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -51,6 +78,8 @@ jobs:
         run: bun run security:pr-scan -- --base "$PR_SCAN_BASE" --head "$PR_SCAN_HEAD"
 
   unit-tests:
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -90,6 +119,8 @@ jobs:
         run: bun run scripts/run-tests.ts --shards=8 --shard-index=${{ matrix.shard }} --feature=UNATTENDED_RETRY --max-concurrency=1
 
   dedicated-tests:
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -125,6 +156,8 @@ jobs:
         run: bun run test:context-efficiency
 
   launcher-compatibility:
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:
@@ -167,6 +200,8 @@ jobs:
           NODE_DISABLE_COMPILE_CACHE=1 node bin/openclaude --version
 
   launcher-node-floor:
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -204,6 +239,8 @@ jobs:
         run: node bin/openclaude --version
 
   typecheck:
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -236,6 +273,8 @@ jobs:
         run: bun run typecheck:type-tests
 
   web:
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.web == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
