@@ -1289,6 +1289,7 @@ async function* queryLoop(
           turnNumber: deriveUserTurnNumber(messagesForQuery),
         },
         sessionId: getSessionId(),
+        agentId: toolUseContext.agentId,
       })
       if (pinnedTurnRoute.routed === false && pinnedTurnRoute.justDisabledForSession) {
         yield createSystemMessage(
