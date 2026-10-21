@@ -158,6 +158,27 @@ export function getOpenAICompatibleModelsBaseUrl(baseUrl?: string): string {
   ).replace(/\/+$/, '')
 }
 
+export function getOpenAICompatibleModelsUrl(
+  baseUrl?: string,
+  discoveryPath?: string,
+): string {
+  const resolvedBaseUrl = getOpenAICompatibleModelsBaseUrl(baseUrl)
+  if (!discoveryPath?.trim()) {
+    return `${resolvedBaseUrl}/models`
+  }
+
+  const parsedBaseUrl = new URL(resolvedBaseUrl)
+  const resolvedUrl = new URL(
+    discoveryPath.trim(),
+    `${resolvedBaseUrl}/`,
+  )
+  if (resolvedUrl.origin !== parsedBaseUrl.origin) {
+    throw new Error('Model discovery path must stay on the provider origin')
+  }
+
+  return resolvedUrl.toString()
+}
+
 export function getLocalOpenAICompatibleProviderLabel(baseUrl?: string): string {
   try {
     const parsed = new URL(getOpenAICompatibleModelsBaseUrl(baseUrl))
@@ -263,11 +284,15 @@ export async function listOpenAICompatibleModels(options?: {
   baseUrl?: string
   apiKey?: string
   headers?: Record<string, string>
+  path?: string
 }): Promise<string[] | null> {
   const { signal, clear } = withTimeoutSignal(5000)
   try {
-    const baseUrl = getOpenAICompatibleModelsBaseUrl(options?.baseUrl)
-    const isBankr = baseUrl.toLowerCase().includes('bankr')
+    const modelsUrl = getOpenAICompatibleModelsUrl(
+      options?.baseUrl,
+      options?.path,
+    )
+    const isBankr = modelsUrl.toLowerCase().includes('bankr')
     const headers = {
       ...(options?.headers ?? {}),
       ...(options?.apiKey
@@ -277,7 +302,7 @@ export async function listOpenAICompatibleModels(options?: {
         : {}),
     }
     const response = await fetch(
-      `${baseUrl}/models`,
+      modelsUrl,
       {
         method: 'GET',
         headers: Object.keys(headers).length > 0 ? headers : undefined,
@@ -310,11 +335,15 @@ export async function fetchOpenAICompatibleModelsRaw(options?: {
   baseUrl?: string
   apiKey?: string
   headers?: Record<string, string>
+  path?: string
 }): Promise<Record<string, unknown>[] | null> {
   const { signal, clear } = withTimeoutSignal(5000)
   try {
-    const baseUrl = getOpenAICompatibleModelsBaseUrl(options?.baseUrl)
-    const isBankr = baseUrl.toLowerCase().includes('bankr')
+    const modelsUrl = getOpenAICompatibleModelsUrl(
+      options?.baseUrl,
+      options?.path,
+    )
+    const isBankr = modelsUrl.toLowerCase().includes('bankr')
     const headers = {
       ...(options?.headers ?? {}),
       ...(options?.apiKey
@@ -323,7 +352,7 @@ export async function fetchOpenAICompatibleModelsRaw(options?: {
           : { Authorization: `Bearer ${options.apiKey}` }
         : {}),
     }
-    const response = await fetch(`${baseUrl}/models`, {
+    const response = await fetch(modelsUrl, {
       method: 'GET',
       headers: Object.keys(headers).length > 0 ? headers : undefined,
       signal,

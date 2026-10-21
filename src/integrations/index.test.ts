@@ -67,6 +67,7 @@ describe('loaded registry validation', () => {
       // Virtual model — the gateway's smart router resolves it server-side,
       // so there is no concrete model descriptor to reference.
       'gitlawb-opengateway:opengateway-auto',
+      'merge-gateway:merge-gateway-default-routing',
       // Cloudflare Workers AI serves provider-specific quantized builds
       // (`@cf/...`) with no shared cross-provider model descriptor, the same
       // situation as azure-deployment above. See gateways/cloudflare.ts (#1100).
