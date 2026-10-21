@@ -189,7 +189,56 @@ describe('discoverModelsForRoute', () => {
         baseUrl: 'https://proxy.example/v1', apiKey, forceRefresh: true,
       })
     }
-    expect(authorizations).toEqual([null, null])
+    expect(authorizations).toEqual([])
+  })
+
+  test('caches the complete native Merge catalog after cursor continuation', async () => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    process.env.MERGE_GATEWAY_API_KEY = 'merge-key'
+    const urls: string[] = []
+    setMockFetch(mock((input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input))
+      urls.push(url.toString())
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer merge-key')
+      expect(url.origin).toBe('https://api-gateway.merge.dev')
+      const second = url.searchParams.get('cursor') === 'page/2?opaque=1'
+      return Promise.resolve(new Response(JSON.stringify({
+        data: second ? [{ model: 'provider/later' }, { model: 'provider/first' }] : [{ model: 'provider/first' }],
+        has_more: !second, next_cursor: second ? null : 'page/2?opaque=1',
+      })))
+    }) as unknown as typeof globalThis.fetch)
+    const result = await discoverModelsForRoute('merge-gateway', { forceRefresh: true })
+    expect(result).toMatchObject({ source: 'network', discoveredModelCount: 2, error: null })
+    expect(result?.models.map(model => model.apiName)).toContain('provider/later')
+    expect(urls).toHaveLength(2)
+    expect((await discoverModelsForRoute('merge-gateway'))?.source).toBe('cache')
+    expect(urls).toHaveLength(2)
+  })
+
+  test.each(['http-error', 'repeated-cursor', 'missing-cursor', 'page-bound'])('incomplete Merge discovery preserves fallback: %s', async failure => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    process.env.MERGE_GATEWAY_API_KEY = 'merge-key'
+    for (const withCache of [false, true]) {
+      if (withCache) {
+        setMockFetch(mock(() => Promise.resolve(new Response(JSON.stringify({data: [{model: 'provider/complete'}], has_more: false})))) as unknown as typeof globalThis.fetch)
+        await discoverModelsForRoute('merge-gateway', {forceRefresh: true})
+      }
+      let calls = 0
+      setMockFetch(mock(() => {
+        calls++
+        if (failure === 'http-error' && calls > 1) return Promise.resolve(new Response('unavailable', { status: 503 }))
+        return Promise.resolve(new Response(JSON.stringify({
+          data: [{ model: 'provider/partial' }], has_more: true,
+          next_cursor: failure === 'missing-cursor' ? null : failure === 'page-bound' ? 'page-' + calls : 'page-2',
+        })))
+      }) as unknown as typeof globalThis.fetch)
+      const result = await discoverModelsForRoute('merge-gateway', {forceRefresh: true})
+      expect(result?.error).not.toBeNull()
+      expect(result?.models.map(model => model.apiName)).not.toContain('provider/partial')
+      expect(result?.models.map(model => model.apiName)).toContain(withCache ? 'provider/complete' : 'default_routing')
+      expect(result?.source).toBe('stale-cache')
+      expect(calls).toBeLessThanOrEqual(100)
+    }
   })
 
   test('does not send an ApiSmart key to an overridden discovery URL', async () => {

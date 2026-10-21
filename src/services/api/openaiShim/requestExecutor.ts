@@ -257,7 +257,8 @@ export async function executeOpenAIRequest(
   // behavior for unrelated providers or generic custom endpoints.
   const supportsConfiguredAuthHeaders =
     (runtimeShimContext.routeId !== 'llmtr' &&
-      runtimeShimContext.routeId !== 'commandcode') ||
+      runtimeShimContext.routeId !== 'commandcode' &&
+      runtimeShimContext.routeId !== 'merge-gateway') ||
     runtimeShimContext.openaiShimConfig.supportsAuthHeaders === true
   const unsupportedCustomHeaderNames = supportsConfiguredAuthHeaders
     ? null

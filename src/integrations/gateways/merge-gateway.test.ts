@@ -65,6 +65,10 @@ describe('Merge Gateway', () => {
       process.env.MERGE_GATEWAY_API_KEY = 'merge-key'
       process.env.OPENAI_API_KEY = 'unrelated-openai-key'
       delete process.env.OPENAI_BASE_URL
+      process.env.OPENAI_AUTH_HEADER = 'X-Stale-Key'
+      process.env.OPENAI_AUTH_SCHEME = 'Token'
+      process.env.OPENAI_AUTH_HEADER_VALUE = 'stale-secret'
+      process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Stale-Secret: old-secret'
 
       expect(
         applyProviderFlag('merge-gateway', [
@@ -80,9 +84,20 @@ describe('Merge Gateway', () => {
       expect(String(process.env.OPENAI_MODEL)).toBe('default_routing')
       expect(resolveActiveRouteIdFromEnv(process.env)).toBe('merge-gateway')
 
+      for (const name of ['OPENAI_AUTH_HEADER', 'OPENAI_AUTH_SCHEME', 'OPENAI_AUTH_HEADER_VALUE', 'ANTHROPIC_CUSTOM_HEADERS']) {
+        expect(process.env[name]).toBeUndefined()
+      }
+      // A direct canonical selection must also ignore stale settings at request time.
+      process.env.OPENAI_AUTH_HEADER = 'X-Stale-Key'
+      process.env.OPENAI_AUTH_SCHEME = 'Token'
+      process.env.OPENAI_AUTH_HEADER_VALUE = 'stale-secret'
+      process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Stale-Secret: old-secret'
       let authorization: string | null = null
       globalThis.fetch = asMockFetch(mock((_input, init) => {
-        authorization = new Headers(init?.headers).get('authorization')
+        const headers = new Headers(init?.headers)
+        expect(headers.get('x-stale-key')).toBeNull()
+        expect(headers.get('x-stale-secret')).toBeNull()
+        authorization = headers.get('authorization')
         return Promise.resolve(
           new Response(
             JSON.stringify({
@@ -100,7 +115,7 @@ describe('Merge Gateway', () => {
         )
       }))
 
-      const client = createOpenAIShimClient({}) as OpenAIShimClient
+      const client = createOpenAIShimClient({ defaultHeaders: { 'X-Stale-Secret': 'old-secret' } }) as OpenAIShimClient
       await client.beta.messages.create({
         model: 'default_routing',
         messages: [{ role: 'user', content: 'hello' }],
@@ -144,14 +159,15 @@ describe('Merge Gateway', () => {
 })
 
 // Use separate processes so profile creation cannot mask a missing startup key.
-test('Merge saved profiles authorize inference and discovery after a fresh startup', async () => {
+test.each(['merge-gateway', 'openai', 'custom'])('%s saved profiles authorize Merge inference and discovery after a fresh startup', async provider => {
   const configDir = mkdtempSync(join(tmpdir(), 'merge-profile-'))
   const env = { ...process.env }
   clearManagedProfileEnv(env)
   env.CLAUDE_CONFIG_DIR = configDir
   env.OPENCLAUDE_CONFIG_DIR = configDir
+  env.NODE_ENV = 'production'
   const run = async (source: string) => {
-    const child = Bun.spawn([process.execPath, '--eval', source], {
+    const child = Bun.spawn([process.execPath, '--eval', "import { enableConfigs } from './src/utils/config.ts'; enableConfigs();\n" + source], {
       cwd: join(import.meta.dir, '../../..'),
       env,
       stdout: 'pipe',
@@ -167,11 +183,12 @@ test('Merge saved profiles authorize inference and discovery after a fresh start
   try {
     await run(`
       import assert from 'node:assert/strict';
-      import { addProviderProfile } from './src/utils/providerProfiles.ts';
+      import { addProviderProfile, applyProviderProfileToProcessEnv } from './src/utils/providerProfiles.ts';
+      import { clearManagedProfileEnv } from './src/utils/providerProfile.ts';
       import { applyProviderFlag } from './src/utils/providerFlag.ts';
       globalThis.fetch = async () => new Response(JSON.stringify({ data: [] }));
       const profile = addProviderProfile({
-        provider: 'merge-gateway', name: 'Merge',
+        provider: '${provider}', name: 'Merge',
         baseUrl: 'https://api-gateway.merge.dev/v1/openai',
         model: 'openai/gpt-5.5', apiKey: 'saved-merge-key', apiFormat: 'chat',
       });
@@ -179,14 +196,24 @@ test('Merge saved profiles authorize inference and discovery after a fresh start
       assert.equal(process.env.MERGE_GATEWAY_API_KEY, 'saved-merge-key');
       applyProviderFlag('openai', ['--provider', 'openai']);
       assert.equal(process.env.OPENAI_API_KEY, undefined);
+      for (const key of [undefined, 'undefined', 'null', 'SUA_CHAVE']) {
+        clearManagedProfileEnv(process.env);
+        applyProviderProfileToProcessEnv({ ...profile, apiKey: key });
+        assert.equal(Object.hasOwn(process.env, 'MERGE_GATEWAY_API_KEY'), false);
+      }
+      process.env.MERGE_GATEWAY_API_KEY = 'ambient-merge-key';
+      applyProviderProfileToProcessEnv({ ...profile, apiKey: undefined });
+      assert.equal(process.env.MERGE_GATEWAY_API_KEY, 'ambient-merge-key');
     `)
-    await run(`
+    for (const startup of ['legacy', 'plural']) await run(`
       import assert from 'node:assert/strict';
+      import { applyActiveProviderProfileFromConfig } from './src/utils/providerProfiles.ts';
       import { applyStartupEnvFromProfile } from './src/utils/providerProfile.ts';
       import { createOpenAIShimClient } from './src/services/api/openaiShim.ts';
       import { discoverModelsForRoute } from './src/integrations/discoveryService.ts';
       assert.equal(process.env.MERGE_GATEWAY_API_KEY, undefined);
-      assert.equal(await applyStartupEnvFromProfile(), null);
+      if ('${startup}' === 'legacy') assert.equal(await applyStartupEnvFromProfile(), null);
+      else assert.ok(applyActiveProviderProfileFromConfig());
       const calls = [];
       globalThis.fetch = async (url, init) => {
         calls.push({ url: String(url), auth: new Headers(init?.headers).get('authorization') });
@@ -207,7 +234,7 @@ test('Merge saved profiles authorize inference and discovery after a fresh start
   } finally {
     rmSync(configDir, { recursive: true, force: true })
   }
-})
+}, 30_000)
 
 test('Merge credentials are withheld from retargeted inference and startup', async () => {
   const { resolveRouteCredentialValue } = await import('../routeMetadata.js')
@@ -255,3 +282,62 @@ test('a startup URL override cannot inherit a saved Merge credential', async () 
     expect(env.OPENAI_API_KEY).toBe(customKey)
   }
 })
+
+
+test('configured and inherited Merge teammates authenticate in a fresh process', async () => {
+  const configDir = mkdtempSync(join(tmpdir(), 'merge-teammate-'))
+  const env = { ...process.env }
+  clearManagedProfileEnv(env)
+  env.CLAUDE_CONFIG_DIR = configDir
+  env.OPENCLAUDE_CONFIG_DIR = configDir
+  const source = `
+    import assert from 'node:assert/strict';
+    import { quote } from 'shell-quote';
+    import { resolveOutOfProcessTeammateProvider, applyAgentProviderOverrideToEnv } from './src/services/api/agentRouting.ts';
+    import { buildInheritedEnvVars } from './src/utils/swarm/spawnUtils.ts';
+    const request = \`      import assert from 'node:assert/strict';
+      import { createOpenAIShimClient } from './src/services/api/openaiShim.ts';
+      import { enableConfigs } from './src/utils/config.ts';
+      enableConfigs();
+      let auth;
+      globalThis.fetch = async (url, init) => {
+        auth = new Headers(init?.headers).get('authorization');
+        return new Response(JSON.stringify({ id: 'chatcmpl-child', choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] }), { headers: { 'Content-Type': 'application/json' } });
+      };
+      await createOpenAIShimClient({}).beta.messages.create({ model: 'openai/gpt-5.5', messages: [{role: 'user', content: 'hello'}], stream: false, max_tokens: 32 });
+      assert.equal(auth, 'Bearer ' + process.env.EXPECTED_KEY);
+    \`;
+    const run = async (command, childEnv) => {
+      const child = Bun.spawn(command, { env: childEnv, stdout: 'pipe', stderr: 'pipe' });
+      assert.deepEqual(await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()]), [0, '', '']);
+    };
+    for (const parentKey of [undefined, 'parent-key']) {
+      const childEnv = { ...process.env, EXPECTED_KEY: 'configured-agent-key' };
+      if (parentKey) childEnv.MERGE_GATEWAY_API_KEY = parentKey;
+      const override = resolveOutOfProcessTeammateProvider({
+        cliModel: 'openai/gpt-5.5', agentName: 'worker', settings: {
+          agentModels: { 'openai/gpt-5.5': { base_url: 'https://api-gateway.merge.dev/v1/openai', api_key: 'configured-agent-key' } },
+        },
+      });
+      assert.ok(override);
+      applyAgentProviderOverrideToEnv(override, childEnv);
+      await run([process.execPath, '--eval', request], childEnv);
+      applyAgentProviderOverrideToEnv({ ...override, baseURL: 'https://proxy.example/v1', apiKey: 'custom-key' }, childEnv);
+      assert.equal(childEnv.MERGE_GATEWAY_API_KEY, undefined);
+    }
+    Object.assign(process.env, { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: 'https://api-gateway.merge.dev/v1/openai', OPENAI_MODEL: 'openai/gpt-5.5', OPENAI_API_KEY: 'parent-key', MERGE_GATEWAY_API_KEY: 'parent-key' });
+    const forwarded = buildInheritedEnvVars();
+    // A pane's shell may not have inherited any of the leader's credentials.
+    await run(['/bin/sh', '-c', 'env ' + forwarded + ' ' + quote([process.execPath, '--eval', request])], {
+      PATH: process.env.PATH, EXPECTED_KEY: 'parent-key',
+    });
+  `
+  try {
+    const child = Bun.spawn([process.execPath, '--eval', source], {
+      cwd: join(import.meta.dir, '../../..'), env, stdout: 'pipe', stderr: 'pipe',
+    })
+    expect(await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()])).toEqual([0, '', ''])
+  } finally {
+    rmSync(configDir, { recursive: true, force: true })
+  }
+}, 30_000)

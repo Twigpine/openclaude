@@ -5,6 +5,7 @@ import { isModelAlias } from '../../utils/model/aliases.js'
 import { parseModelFlagValue } from '../../utils/cliArgs.js'
 import { argsBeforeModelOwningSubcommand } from '../../utils/printFlag.js'
 import { resolveRouteIdFromBaseUrl } from '../../integrations/routeMetadata.js'
+import { sanitizeApiKey } from '../../utils/providerSecrets.js'
 
 /**
  * Provider override resolved from agent routing config.
@@ -60,6 +61,7 @@ const PROVIDER_ENV_VARS_TO_CLEAR_FOR_OVERRIDE = [
   'OPENAI_AUTH_HEADER',
   'OPENAI_AUTH_SCHEME',
   'OPENAI_AUTH_HEADER_VALUE',
+  'MERGE_GATEWAY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -368,6 +370,10 @@ export function applyAgentProviderOverrideToEnv(
   env.OPENAI_MODEL = providerOverride.model
   env.OPENAI_BASE_URL = providerOverride.baseURL
   env.OPENAI_API_KEY = providerOverride.apiKey
+  if (resolveRouteIdFromBaseUrl(providerOverride.baseURL) === 'merge-gateway') {
+    const key = sanitizeApiKey(providerOverride.apiKey)
+    if (key) env.MERGE_GATEWAY_API_KEY = key
+  }
   if (resolveRouteIdFromBaseUrl(providerOverride.baseURL) === 'commandcode') {
     env.CMD_API_KEY = providerOverride.apiKey
   }

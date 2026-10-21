@@ -8,7 +8,7 @@ OpenClaude connects to [Merge Gateway](https://gateway.merge.dev) through its Op
 2. Start OpenClaude and run `/provider`.
 3. Choose **Add provider**, then **Merge Gateway**.
 4. Paste the API key when prompted.
-5. Choose a discovered model, or select **Default routing policy** to let the policy attached to the key choose the provider and model.
+5. Choose a discovered model, or select **Default routing policy** to let the applicable Merge routing policy choose the provider and model.
 6. Choose **Chat Completions** or **Responses** for the API format supported by the selected model and route.
 
 The model picker keeps a cached catalog for one day and can be refreshed manually. If discovery is temporarily unavailable, the routing-policy and GPT-5.5 fallback entries remain selectable.

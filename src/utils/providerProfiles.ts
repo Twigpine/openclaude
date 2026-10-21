@@ -207,12 +207,13 @@ function isLlmtrProfile(profile: ProviderProfile): boolean {
 }
 
 function isMergeGatewayProfile(profile: ProviderProfile): boolean {
-  const { route } = resolveProfileCompatibility(profile.provider)
-  if (route.routeId !== 'merge-gateway') {
-    return false
-  }
+  const { route, compatibilityMode } = resolveProfileCompatibility(profile.provider)
+  if (compatibilityMode !== 'openai') return false
   const baseUrl = profile.baseUrl?.trim()
-  return !baseUrl || isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)
+  if (route.routeId === 'merge-gateway') {
+    return !baseUrl || isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)
+  }
+  return Boolean(baseUrl && isCanonicalMergeGatewayInferenceBaseUrl(baseUrl))
 }
 
 function isCommandcodeProfile(profile: ProviderProfile): boolean {
@@ -1351,19 +1352,20 @@ export function applyProviderProfileToProcessEnv(
         }
       }
     }
+    if (route.routeId === 'merge-gateway' || isMergeGatewayProfile(profile)) {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'merge-gateway'
+      if (isMergeGatewayProfile(profile)) {
+        const mergeKey =
+          sanitizeApiKey(profile.apiKey) ||
+          sanitizeApiKey(process.env.MERGE_GATEWAY_API_KEY)
+        if (mergeKey) openAIProfileEnv.MERGE_GATEWAY_API_KEY = mergeKey
+      }
+    }
     // A keyless canonical LLMTR profile may use the dedicated credential from
     // the ambient environment. Profile application clears all managed provider
     // variables before installing this object, so adopt it here while the
     // canonical endpoint boundary is still known. Never carry it to a
     // retargeted profile.
-    if (route.routeId === 'merge-gateway') {
-      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'merge-gateway'
-      if (isMergeGatewayProfile(profile)) {
-        openAIProfileEnv.MERGE_GATEWAY_API_KEY =
-          sanitizeApiKey(profile.apiKey) ||
-          sanitizeApiKey(process.env.MERGE_GATEWAY_API_KEY)
-      }
-    }
     if (route.routeId === 'llmtr') {
       openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'llmtr'
       if (isLlmtrProfile(profile) && !profile.apiKey) {

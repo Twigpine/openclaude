@@ -90,7 +90,7 @@ export default defineGateway({
         id: 'merge-gateway-default-routing',
         apiName: 'default_routing',
         label: 'Default routing policy',
-        notes: 'Uses the routing policy configured for the Merge Gateway API key.',
+        notes: 'Uses the applicable Merge routing policy.',
       },
       {
         id: 'merge-gateway-gpt-5.5',
