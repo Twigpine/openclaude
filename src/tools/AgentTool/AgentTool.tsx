@@ -1151,13 +1151,9 @@ export const AgentTool = buildTool({
                     }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
 
-                    // completeAgentTask flushes session storage + task output
-                    // BEFORE flipping status, so readers released by the
-                    // terminal state never see a partially written file
-                    // (ORC-1337). classifyHandoffIfNeeded and
-                    // cleanupWorktreeIfNeeded run AFTER status transition so
-                    // they cannot block TaskOutput unblock (gh-20236).
-                    await completeAsyncAgent(agentResult, rootSetAppState);
+                    // Transcript writes are awaited by runAgent; completion joins the output link.
+                    // Keep notification embellishments after the terminal state (gh-20236).
+                    if (!await completeAsyncAgent(agentResult, rootSetAppState)) return;
 
                     // Extract text from agent result content for the notification
                     let finalMessage = extractTextContent(agentResult.content, '\n');

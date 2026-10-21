@@ -1631,6 +1631,34 @@ class Project {
     }
   }
 
+  private sidechainWrites = new Map<string, Promise<void>>()
+
+  insertSidechainTranscript(
+    messages: Transcript,
+    agentId?: string,
+    startingParentUuid?: UUID | null,
+  ): Promise<void> {
+    // Track the predecessor wait too: shutdown flushes must see queued chains.
+    return this.trackWrite(async () => {
+      if (!agentId) {
+        return this.insertMessageChain(messages, true, agentId, startingParentUuid)
+      }
+      // Handoff can restart the same agent before its old iterator has closed.
+      // Join whole chains; the file lock alone only serializes single appends.
+      const path = getAgentTranscriptPath(asAgentId(agentId))
+      const previous = this.sidechainWrites.get(path)
+      const write = (previous?.catch(() => {}) ?? Promise.resolve()).then(() =>
+        this.insertMessageChain(messages, true, agentId, startingParentUuid),
+      )
+      this.sidechainWrites.set(path, write)
+      try {
+        await write
+      } finally {
+        if (this.sidechainWrites.get(path) === write) this.sidechainWrites.delete(path)
+      }
+    })
+  }
+
   async insertMessageChain(
     messages: Transcript,
     isSidechain: boolean = false,
@@ -1941,8 +1969,13 @@ class Project {
         // exhausts retries → gracefulShutdownSync(1). See inc-4718.
         const isNewUuid = !messageSet.has(entry.uuid)
         if (isAgentSidechain || isNewUuid) {
-          // Enqueue write — appendToFile handles ENOENT by creating directories
-          void this.enqueueWrite(targetFile, entry)
+          if (isAgentSidechain) {
+            // Agent completion awaits this producer. Use the existing per-file
+            // append/lock path so unrelated session queues cannot gate output.
+            await this.appendToFile(targetFile, jsonStringify(entry) + '\n')
+          } else {
+            void this.enqueueWrite(targetFile, entry)
+          }
 
           if (!isAgentSidechain) {
             // messageSet is main-file-authoritative. Sidechain entries go to a
@@ -2203,11 +2236,8 @@ export async function recordSidechainTranscript(
   agentId?: string,
   startingParentUuid?: UUID | null,
 ) {
-  await getProject().insertMessageChain(
-    cleanMessagesForLogging(messages),
-    true,
-    agentId,
-    startingParentUuid,
+  await getProject().insertSidechainTranscript(
+    cleanMessagesForLogging(messages), agentId, startingParentUuid,
   )
 }
 

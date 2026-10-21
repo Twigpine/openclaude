@@ -1,116 +1,99 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { REAL_PROVIDER_TEST_CHILD_ENV, REAL_PROVIDER_TEST_TIMEOUT_MS, runTestFileWithRealProviders } from '../../test/providerModuleIsolation.js'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import type { AppState } from '../../state/AppState.js'
 import type { AgentToolResult } from '../../tools/AgentTool/agentToolUtils.js'
+import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js'
+import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
+import { AbortError } from '../../utils/errors.js'
 import type { LocalAgentTaskState } from './LocalAgentTask.js'
 
-// Pin ORC-1337 — the durable-output barrier must precede the observable
-// terminal state. TaskOutput(block=true) releases readers the moment it sees
-// a terminal status, so if completeAgentTask flips status to 'completed'
-// before the session-storage queue (sidechain transcript) and DiskTaskOutput
-// are flushed, readers can observe an empty or partial output file. These
-// tests gate both flushes behind controllable deferreds and assert the
-// status transition cannot be observed until BOTH barriers have settled.
-
-function deferred(): { promise: Promise<void>; resolve: () => void } {
+function deferred() {
   let resolve!: () => void
-  const promise = new Promise<void>(res => {
-    resolve = res
-  })
+  const promise = new Promise<void>(res => { resolve = res })
   return { promise, resolve }
 }
 
-// Let queued microtasks (the awaits inside completeAgentTask) run.
-const settleMicrotasks = () => new Promise<void>(res => setTimeout(res, 0))
+const actualDiskOutput = { ...await import('../../utils/task/diskOutput.js') }
+const settle = () => new Promise<void>(res => setTimeout(res, 0))
 
-const actualSessionStorage = await import('../../utils/sessionStorage.js')
-const actualDiskOutput = await import('../../utils/task/diskOutput.js')
-
+// Use the existing clean-child harness: other agent tests replace these
+// production modules globally, and this test needs real registration/storage.
+if (process.env[REAL_PROVIDER_TEST_CHILD_ENV] !== '1') {
+  test('agent output regression cases in a clean process', () =>
+    runTestFileWithRealProviders(import.meta.path), REAL_PROVIDER_TEST_TIMEOUT_MS + 5_000)
+} else {
+beforeEach(() => acquireSharedMutationLock('tasks/LocalAgentTask/completionBarrier.test.ts'))
 afterEach(() => {
-  // Restore real modules so gated barriers don't leak into other files
-  // on the same shard.
-  mock.module('../../utils/sessionStorage.js', () => actualSessionStorage)
   mock.module('../../utils/task/diskOutput.js', () => actualDiskOutput)
+  releaseSharedMutationLock()
 })
 
-function makeRunningTask(taskId: string): {
-  getTask: () => LocalAgentTaskState
-  setAppState: (updater: (prev: AppState) => AppState) => void
-} {
-  // Minimal fixture — only the fields completeAgentTask touches. Cast
-  // type-side only, same pattern as progressTracker.test.ts.
-  let appState = {
-    tasks: {
-      [taskId]: {
-        id: taskId,
-        type: 'local_agent',
-        agentId: taskId,
-        status: 'running',
-        retain: false,
-      } as unknown as LocalAgentTaskState,
-    },
-  } as unknown as AppState
+function state() {
+  let appState = { tasks: {} } as AppState
   return {
-    getTask: () => appState.tasks[taskId] as LocalAgentTaskState,
-    setAppState: updater => {
-      appState = updater(appState)
-    },
+    getTask: (id: string) => appState.tasks[id] as LocalAgentTaskState,
+    setAppState: (updater: (prev: AppState) => AppState) => { appState = updater(appState) },
   }
 }
 
-describe('completeAgentTask output barrier (ORC-1337)', () => {
-  test('status stays running until session-storage flush AND eviction settle', async () => {
-    const flushGate = deferred()
-    const evictGate = deferred()
-    mock.module('../../utils/sessionStorage.js', () => ({
-      ...actualSessionStorage,
-      flushSessionStorage: () => flushGate.promise,
-    }))
+describe('local-agent completion output barrier', () => {
+  for (const foreground of [false, true]) {
+    test(`waits for ${foreground ? 'foreground' : 'async'} output initialization and eviction`, async () => {
+      const link = deferred()
+      const eviction = deferred()
+      mock.module('../../utils/task/diskOutput.js', () => ({
+        ...actualDiskOutput,
+        initTaskOutputAsSymlink: () => link.promise.then(() => '/output'),
+        evictTaskOutput: () => eviction.promise,
+      }))
+      const { registerAsyncAgent, registerAgentForeground, completeAgentTask } = await import('./LocalAgentTask.js')
+      const { getTask, setAppState } = state()
+      const agentId = `barrier-${foreground}`
+      const register = foreground ? registerAgentForeground : registerAsyncAgent
+      register({ agentId, description: 'test', prompt: 'test', selectedAgent: { agentType: 'test' } as AgentDefinition, setAppState })
+      const result = { agentId, content: [] } as unknown as AgentToolResult
+      const completion = completeAgentTask(result, setAppState)
+      try {
+        eviction.resolve()
+        await settle()
+        expect(getTask(agentId).status).toBe('running')
+        link.resolve()
+        await completion
+        expect(getTask(agentId).status).toBe('completed')
+        expect(getTask(agentId).result).toBe(result)
+        expect(getTask(agentId).evictAfter).toBeGreaterThan(Date.now())
+      } finally {
+        link.resolve()
+        eviction.resolve()
+        await completion
+      }
+    })
+  }
+
+  test('cancellation interrupts pending output readiness instead of reporting success', async () => {
+    const link = deferred()
     mock.module('../../utils/task/diskOutput.js', () => ({
       ...actualDiskOutput,
-      evictTaskOutput: () => evictGate.promise,
+      initTaskOutputAsSymlink: () => link.promise.then(() => '/output'),
+      evictTaskOutput: async () => {},
     }))
-    const { completeAgentTask } = await import('./LocalAgentTask.js')
-
-    const taskId = 'orc-1337-barrier'
-    const { getTask, setAppState } = makeRunningTask(taskId)
-    const result = { agentId: taskId, content: [] } as unknown as AgentToolResult
-
-    const completion = completeAgentTask(result, setAppState)
-
-    // Neither barrier has settled — the terminal state must not be visible.
-    await settleMicrotasks()
-    expect(getTask().status).toBe('running')
-
-    // Session storage flushed, but DiskTaskOutput eviction still pending.
-    flushGate.resolve()
-    await settleMicrotasks()
-    expect(getTask().status).toBe('running')
-
-    // Both barriers settled — now, and only now, the task may complete.
-    evictGate.resolve()
-    await completion
-    expect(getTask().status).toBe('completed')
-    expect(getTask().result).toBe(result)
-  })
-
-  test('completion resolves and flips status once barriers are already settled', async () => {
-    mock.module('../../utils/sessionStorage.js', () => ({
-      ...actualSessionStorage,
-      flushSessionStorage: () => Promise.resolve(),
-    }))
-    mock.module('../../utils/task/diskOutput.js', () => ({
-      ...actualDiskOutput,
-      evictTaskOutput: () => Promise.resolve(),
-    }))
-    const { completeAgentTask } = await import('./LocalAgentTask.js')
-
-    const taskId = 'orc-1337-settled'
-    const { getTask, setAppState } = makeRunningTask(taskId)
-    const result = { agentId: taskId, content: [] } as unknown as AgentToolResult
-
-    await completeAgentTask(result, setAppState)
-    expect(getTask().status).toBe('completed')
-    expect(getTask().evictAfter).toBeGreaterThan(Date.now())
+    const { registerAsyncAgent, completeAgentTask, killAsyncAgent } = await import('./LocalAgentTask.js')
+    const { getTask, setAppState } = state()
+    const agentId = 'barrier-cancel'
+    registerAsyncAgent({ agentId, description: 'test', prompt: 'test', selectedAgent: { agentType: 'test' } as AgentDefinition, setAppState })
+    const completion = completeAgentTask({ agentId, content: [] } as unknown as AgentToolResult, setAppState)
+    const outcome = completion.then(() => undefined, error => error)
+    try {
+      killAsyncAgent(agentId, setAppState)
+      await settle()
+      expect(getTask(agentId).status).toBe('killed')
+      expect(await Promise.race([outcome, Promise.resolve('still waiting')])).toBeInstanceOf(AbortError)
+    } finally {
+      link.resolve()
+      await outcome
+    }
   })
 })
+
+}

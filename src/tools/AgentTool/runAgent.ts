@@ -850,21 +850,21 @@ export async function* runAgent({
     logForDebugging(`Failed to write agent metadata: ${_err}`)
   }
 
-  // Record initial messages before the query loop starts.
-  // Fire-and-forget — persistence failure shouldn't block the agent.
-  // Only write the transcript if identity metadata was successfully persisted,
-  // ensuring we never leave a transcript that would resume without its restricted identity.
-  if (metadataWritten) {
-    void recordSidechainTranscript(initialMessages, agentId).catch(_err =>
-      logForDebugging(`Failed to record sidechain transcript: ${_err}`),
-    )
-  } else {
-    logForDebugging('Skipping initial transcript write because identity metadata persistence failed')
-  }
-  // Track the last recorded message UUID for parent chain continuity
+  // Track the last recorded message UUID for parent chain continuity.
   let lastRecordedUuid: UUID | null = initialMessages.at(-1)?.uuid ?? null
 
   try {
+    // Serialize the initial transcript with subsequent writes. The producer
+    // resolves after the local append, without flushing unrelated sessions.
+    // Preserve the identity-metadata gate and best-effort persistence policy.
+    if (metadataWritten) {
+      await recordSidechainTranscript(initialMessages, agentId).catch(err =>
+        logForDebugging(`Failed to record sidechain transcript: ${err}`),
+      )
+    } else {
+      logForDebugging('Skipping initial transcript write because identity metadata persistence failed')
+    }
+    if (agentAbortController.signal.aborted) throw new AbortError()
     let queryTerminal: Terminal | undefined
     const configuredMaxSteps =
       Number.isSafeInteger(maxSteps) && maxSteps! > 0

@@ -12,10 +12,12 @@ import { SYNTHETIC_OUTPUT_TOOL_NAME } from '../../tools/SyntheticOutputTool/Synt
 import { asAgentId } from '../../types/ids.js';
 import type { Message } from '../../types/message.js';
 import { createAbortController, createChildAbortController } from '../../utils/abortController.js';
+import { raceAbort } from '../../utils/boundedAsync.js';
+import { AbortError } from '../../utils/errors.js';
 import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { getToolSearchOrReadInfo } from '../../utils/collapseReadSearch.js';
 import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
-import { flushSessionStorage, getAgentTranscriptPath } from '../../utils/sessionStorage.js';
+import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { requestAbort } from '../../utils/interruptionTrace.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
@@ -122,6 +124,7 @@ export type LocalAgentTaskState = TaskStateBase & {
   agentType: string;
   model?: string;
   abortController?: AbortController;
+  outputReady?: Promise<string>;
   unregisterCleanup?: () => void;
   error?: string;
   result?: AgentToolResult;
@@ -307,6 +310,7 @@ export function killAsyncAgent(taskId: string, setAppState: SetAppState, trace: 
       endTime: Date.now(),
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
+      outputReady: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined
     };
@@ -423,29 +427,34 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
 /**
  * Complete an agent task with result.
  */
-export async function completeAgentTask(result: AgentToolResult, setAppState: SetAppState): Promise<void> {
+export async function completeAgentTask(result: AgentToolResult, setAppState: SetAppState): Promise<boolean> {
   const taskId = result.agentId;
-  // ORC-1337: the durable-output barrier must precede the observable terminal
-  // state. TaskOutput(block=true) releases readers the moment it sees a
-  // terminal status — a caller-side await cannot re-block them — so the
-  // output file must be fully on disk before status flips to 'completed'.
-  //
-  // Two write paths feed that file:
-  // - Local agents: the output path is a symlink to the session transcript
-  //   (initTaskOutputAsSymlink → getAgentTranscriptPath), written by the
-  //   session-storage queue via recordSidechainTranscript. No DiskTaskOutput
-  //   entry exists for it, so evictTaskOutput alone resolves without waiting.
-  //   flushSessionStorage() drains that queue, including in-flight chains.
-  // - DiskTaskOutput writers (appendTaskOutput): flushed and evicted below.
-  //
-  // gh-20236 is unaffected: notification embellishments
-  // (classifyHandoffIfNeeded, worktree cleanup) stay outside this barrier.
-  await flushSessionStorage();
-  await evictTaskOutput(taskId);
+  let runningTask: LocalAgentTaskState | undefined;
+  updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
+    runningTask = task;
+    return task;
+  });
+  const signal = runningTask?.abortController?.signal;
+  if (signal?.aborted || runningTask?.status === 'killed') throw new AbortError();
+  if (runningTask?.status !== 'running') return false;
+
+  // runAgent has awaited this agent's transcript writes. Join output-path
+  // creation and any disk writer before exposing completion (ORC-1337).
+  // Notification classification/worktree cleanup still follows status (gh-20236).
+  try {
+    if (runningTask.outputReady) await raceAbort(runningTask.outputReady, signal);
+    await raceAbort(evictTaskOutput(taskId), signal);
+  } catch (error) {
+    if (signal?.aborted) throw new AbortError();
+    throw error;
+  }
+  if (signal?.aborted) throw new AbortError();
+  let completed = false;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.status !== 'running') {
       return task;
     }
+    completed = true;
     task.unregisterCleanup?.();
     return {
       ...task,
@@ -454,11 +463,12 @@ export async function completeAgentTask(result: AgentToolResult, setAppState: Se
       endTime: Date.now(),
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
+      outputReady: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined
     };
   });
-  // Note: Notification is sent by AgentTool via enqueueAgentNotification
+  return completed;
 }
 
 /**
@@ -477,6 +487,7 @@ export function failAgentTask(taskId: string, error: string, setAppState: SetApp
       endTime: Date.now(),
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
+      outputReady: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined
     };
@@ -510,7 +521,8 @@ export function registerAsyncAgent({
   parentAbortController?: AbortController;
   toolUseId?: string;
 }): LocalAgentTaskState {
-  void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
+  const outputReady = initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
+  void outputReady.catch(() => {}); // Completion observes initialization failure.
 
   // Create abort controller - if parent provided, create child that auto-aborts with parent
   const abortController = parentAbortController
@@ -529,6 +541,7 @@ export function registerAsyncAgent({
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
     abortController,
+    outputReady,
     retrieved: false,
     lastReportedToolCount: 0,
     lastReportedTokenCount: 0,
@@ -580,7 +593,8 @@ export function registerAgentForeground({
   backgroundSignal: Promise<void>;
   cancelAutoBackground?: () => void;
 } {
-  void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
+  const outputReady = initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
+  void outputReady.catch(() => {}); // Completion observes initialization failure.
   const abortController = createAbortController();
   const unregisterCleanup = registerCleanup(async () => {
     killAsyncAgent(agentId, setAppState);
@@ -594,6 +608,7 @@ export function registerAgentForeground({
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
     abortController,
+    outputReady,
     unregisterCleanup,
     retrieved: false,
     lastReportedToolCount: 0,
