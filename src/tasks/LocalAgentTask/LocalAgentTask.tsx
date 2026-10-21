@@ -125,6 +125,8 @@ export type LocalAgentTaskState = TaskStateBase & {
   model?: string;
   abortController?: AbortController;
   outputReady?: Promise<string>;
+  // No more transcript writes; completion may still be waiting for output setup.
+  producerFinished?: boolean;
   unregisterCleanup?: () => void;
   error?: string;
   result?: AgentToolResult;
@@ -311,6 +313,7 @@ export function killAsyncAgent(taskId: string, setAppState: SetAppState, trace: 
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
       outputReady: undefined,
+      producerFinished: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined
     };
@@ -431,8 +434,10 @@ export async function completeAgentTask(result: AgentToolResult, setAppState: Se
   const taskId = result.agentId;
   let runningTask: LocalAgentTaskState | undefined;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
-    runningTask = task;
-    return task;
+    runningTask = task.status === 'running' && !task.abortController?.signal.aborted
+      ? { ...task, producerFinished: true }
+      : task;
+    return runningTask;
   });
   const signal = runningTask?.abortController?.signal;
   if (signal?.aborted || runningTask?.status === 'killed') throw new AbortError();
@@ -464,6 +469,7 @@ export async function completeAgentTask(result: AgentToolResult, setAppState: Se
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
       outputReady: undefined,
+      producerFinished: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined
     };
@@ -488,6 +494,7 @@ export function failAgentTask(taskId: string, error: string, setAppState: SetApp
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
       outputReady: undefined,
+      producerFinished: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined
     };

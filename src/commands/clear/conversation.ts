@@ -221,14 +221,17 @@ export async function clearConversation({
 
   // Preserved local_agent tasks had their TaskOutput symlink baked against the
   // old session ID at spawn time, but post-clear transcript writes land under
-  // the new session directory (appendEntry re-reads getSessionId()). Re-point
+  // the new session directory (new chains capture the current session). Re-point
   // the symlinks so TaskOutput reads the live file instead of a frozen pre-clear
   // snapshot. Only re-point running tasks — finished tasks will never write
   // again, so re-pointing would replace a valid symlink with a dangling one.
   // Main-session tasks use the same per-agent path (they write via
   // recordSidechainTranscript to getAgentTranscriptPath), so no special case.
   for (const task of preservedLocalAgents) {
-    if (task.status !== 'running') continue
+    // Re-read after clear's awaits: completion may have finished the producer
+    // since preservedLocalAgents was captured, without publishing success yet.
+    const currentTask = getAppState?.().tasks[task.id]
+    if (!isLocalAgentTask(currentTask) || currentTask.status !== 'running' || currentTask.producerFinished) continue
     void initTaskOutputAsSymlink(
       task.id,
       getAgentTranscriptPath(asAgentId(task.agentId)),
