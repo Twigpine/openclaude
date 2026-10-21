@@ -112,6 +112,102 @@ for (const shards of [1, 2]) {
   }
 }
 
+test('selected shards partition the same files as the serial run exactly once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openclaude-runner-selection-'))
+  try {
+    const marker = join(dir, 'completed')
+    const fixtures = Array.from({ length: 8 }, (_, index) => join(dir, `fixture-${index + 1}.test.ts`))
+    for (const [index, fixture] of fixtures.entries()) {
+      await writeFile(fixture, `
+        import { test } from 'bun:test'
+        import { appendFileSync } from 'node:fs'
+        test('fixture ${index + 1}', () => appendFileSync(${JSON.stringify(marker)}, '${index + 1}\\n'))
+      `)
+    }
+    const run = async (shardIndex?: number) => {
+      await writeFile(marker, '')
+      const child = Bun.spawn([
+        process.execPath, runner, '--shards=8',
+        ...(shardIndex === undefined ? [] : [`--shard-index=${shardIndex}`]),
+        ...fixtures,
+      ], { stdout: 'pipe', stderr: 'pipe' })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+      ])
+      expect(exitCode, stdout + stderr).toBe(0)
+      expect(stderr).toContain(`Completed ${shardIndex === undefined ? '8/8' : '1/1'} test shards.`)
+      const executed = (await readFile(marker, 'utf8')).trim().split('\n').sort()
+      return { executed, stderr }
+    }
+    const serial = await run()
+    expect(serial.executed).toEqual(['1', '2', '3', '4', '5', '6', '7', '8'])
+    const selected: string[] = []
+    for (let shardIndex = 1; shardIndex <= 8; shardIndex++) {
+      const result = await run(shardIndex)
+      expect(result.stderr.match(/Starting test shard \d+\/8/g)).toEqual([`Starting test shard ${shardIndex}/8`])
+      const serialShard = serial.stderr.split(`Starting test shard ${shardIndex}/8`)[1]!.split('Finished test shard')[0]!
+      const assigned = [...serialShard.matchAll(/fixture-(\d+)\.test\.ts:/g)].map(match => match[1]!).sort()
+      expect(result.executed).toEqual(assigned)
+      selected.push(...result.executed)
+    }
+    expect(selected.sort()).toEqual(serial.executed)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 15_000)
+
+for (const options of [
+  ['--shard-index=0'],
+  ['--shard-index=-1'],
+  ['--shard-index=3'],
+  ['--shard-index=1.5'],
+  ['--shard-index=invalid'],
+  ['--shard-index=9007199254740992'],
+  ['--shard-index='],
+  ['--shard-index'],
+  ['--shard-index', '1'],
+  ['--shard-index=1', '--shard-index=2'],
+]) {
+  test(`test runner rejects invalid selection ${options.join(' ')}`, async () => {
+    const child = Bun.spawn([process.execPath, runner, '--shards=2', ...options], {
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ])
+    expect(exitCode, stdout + stderr).not.toBe(0)
+    expect(stderr).toContain('Use one --shard-index=')
+    expect(stderr).not.toContain('Starting test shard')
+  })
+}
+
+for (const scenario of ['assertion', 'exit'] as const) {
+  test(`selected shard detects ${scenario} failure`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openclaude-runner-selected-failure-'))
+    try {
+      const fixtures = [join(dir, 'first.test.ts'), join(dir, 'later.test.ts')]
+      for (const fixture of fixtures) {
+        await writeFile(fixture, `
+          import { test, expect } from 'bun:test'
+          test('failure', () => { ${scenario === 'exit' ? 'process.exit(0)' : 'expect(1).toBe(2)'} })
+        `)
+      }
+      const child = Bun.spawn([process.execPath, runner, '--shards=2', '--shard-index=2', ...fixtures], {
+        stdout: 'pipe', stderr: 'pipe',
+      })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+      ])
+      expect(exitCode, stdout + stderr).toBe(1)
+      expect(stderr.match(/Starting test shard \d+\/2/g)).toEqual(['Starting test shard 2/2'])
+      expect(stderr).toContain(`Completed ${scenario === 'exit' ? 0 : 1}/1 test shards.`)
+      if (scenario === 'exit') expect(stderr).toContain('without a complete JUnit report')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+}
+
 for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
   test.skipIf(process.platform === 'win32')(`test runner kills a stuck shard and its child (${signal ?? 'deadline'})`, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openclaude-runner-hang-'))
@@ -135,7 +231,8 @@ for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
         }, 200)
       `)
       const shardTimeout = signal ? 4000 : 1500
-      child = Bun.spawn([process.execPath, runner, `--shard-timeout-ms=${shardTimeout}`, fixture], {
+      child = Bun.spawn([process.execPath, runner, `--shard-timeout-ms=${shardTimeout}`,
+        ...(signal ? [] : ['--shards=2', '--shard-index=1']), fixture], {
         stdout: 'pipe', stderr: 'pipe', timeout: 6000, killSignal: 'SIGKILL',
       })
       const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
@@ -152,7 +249,7 @@ for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
       const [, stderr] = await output
       expect(stderr).toContain('last diagnostic before hang')
       expect(exitCode, stderr).toBe(signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 124)
-      if (!signal) expect(stderr).toContain('Test shard 1/1 timed out after 1500ms.')
+      if (!signal) expect(stderr).toContain('Test shard 1/2 timed out after 1500ms.')
       // An orphaned compiler must not survive a timeout or cancellation.
       for (let attempt = 0; attempt < 100; attempt++) {
         try { process.kill(descendant!, 0) } catch { break }

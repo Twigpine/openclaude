@@ -6,23 +6,29 @@ import { join } from 'node:path'
 const args = process.argv.slice(2)
 const shardOptions = args.filter(arg => arg.startsWith('--shards='))
 const shards = shardOptions.length ? Number(shardOptions[0]!.slice('--shards='.length)) : 1
+const shardIndexOptions = args.filter(arg => arg === '--shard-index' || arg.startsWith('--shard-index='))
+const shardIndex = shardIndexOptions.length ? Number(shardIndexOptions[0]!.slice('--shard-index='.length)) : undefined
 const timeoutOptions = args.filter(arg => arg.startsWith('--shard-timeout-ms='))
 const timeoutMs = timeoutOptions.length ? Number(timeoutOptions[0]!.split('=')[1]) : 600_000
 if (shardOptions.length > 1 || !Number.isSafeInteger(shards) || shards < 1 ||
     args.some(arg => arg === '--shard' || arg.startsWith('--shard='))) {
   throw new Error('Use one --shards=<positive integer> option; native --shard is not supported.')
 }
+if (shardIndexOptions.length > 1 || (shardIndex !== undefined &&
+    (!Number.isSafeInteger(shardIndex) || shardIndex < 1 || shardIndex > shards))) {
+  throw new Error('Use one --shard-index=<integer from 1 to the shard count> option.')
+}
 if (timeoutOptions.length > 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647) {
   throw new Error('Use one --shard-timeout-ms=<positive integer up to 2147483647> option.')
 }
-const testArgs = args.filter(arg => !arg.startsWith('--shards=') && !arg.startsWith('--shard-timeout-ms='))
+const testArgs = args.filter(arg => !arg.startsWith('--shards=') && !arg.startsWith('--shard-index=') && !arg.startsWith('--shard-timeout-ms='))
 // Bun can exit zero without finishing its suite if a test calls process.exit(0).
 // Its JUnit report is written only when the runner finishes; require a fresh one.
 const reportDir = await mkdtemp(join(tmpdir(), 'openclaude-test-report-'))
 let exitCode = 0
 let completed = 0
 try {
-  for (let shard = 1; shard <= shards; shard++) {
+  for (let shard = shardIndex ?? 1; shard <= (shardIndex ?? shards); shard++) {
     const started = performance.now()
     console.error(`Starting test shard ${shard}/${shards} (deadline ${timeoutMs}ms).`)
     const reportPath = join(reportDir, `results-${shard}.xml`)
@@ -138,7 +144,7 @@ try {
       }
     }
   }
-  if (shards > 1) console.error(`Completed ${completed}/${shards} test shards.`)
+  if (shards > 1) console.error(`Completed ${completed}/${shardIndex === undefined ? shards : 1} test shards.`)
 } finally {
   await rm(reportDir, { recursive: true, force: true })
 }
