@@ -4219,11 +4219,15 @@ export function REPL({
   // Callback for when user submits input while viewing a teammate's transcript
   const onAgentSubmit = useCallback(async (input: string, task: InProcessTeammateTaskState | LocalAgentTaskState, helpers: PromptInputHelpers) => {
     if (isLocalAgentTask(task)) {
-      appendMessageToLocalAgent(task.id, createUserMessage({
-        content: input
-      }), setAppState);
       if (task.status === 'running') {
-        queuePendingMessage(task.id, input, setAppState);
+        if (!queuePendingMessage(task.id, input, setAppState)) {
+          addNotification({
+            key: `agent-finishing-${task.id}`,
+            jsx: <Text color="warning">Agent is finishing its output. Please retry after it completes.</Text>,
+            priority: 'low'
+          });
+          return; // Keep the typed input for retry; it has not been delivered.
+        }
       } else {
         void resumeAgentBackground({
           agentId: task.id,
@@ -4241,6 +4245,9 @@ export function REPL({
           });
         });
       }
+      appendMessageToLocalAgent(task.id, createUserMessage({
+        content: input
+      }), setAppState);
     } else {
       injectUserMessageToTeammate(task.id, input, setAppState);
     }

@@ -125,6 +125,8 @@ export type LocalAgentTaskState = TaskStateBase & {
   model?: string;
   abortController?: AbortController;
   outputReady?: Promise<string>;
+  // Destination captured when the producer submitted its latest transcript.
+  outputDestination?: string;
   // No more transcript writes; completion may still be waiting for output setup.
   producerFinished?: boolean;
   unregisterCleanup?: () => void;
@@ -165,11 +167,14 @@ export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
 export function isPanelAgentTask(t: unknown): t is LocalAgentTaskState {
   return isLocalAgentTask(t) && t.agentType !== 'main-session';
 }
-export function queuePendingMessage(taskId: string, msg: string, setAppState: (f: (prev: AppState) => AppState) => void): void {
-  updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => ({
-    ...task,
-    pendingMessages: [...task.pendingMessages, msg]
-  }));
+export function queuePendingMessage(taskId: string, msg: string, setAppState: (f: (prev: AppState) => AppState) => void): boolean {
+  let accepted = false;
+  updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
+    if (task.status !== 'running' || task.producerFinished) return task;
+    accepted = true;
+    return { ...task, pendingMessages: [...task.pendingMessages, msg] };
+  });
+  return accepted;
 }
 
 /**
@@ -313,6 +318,7 @@ export function killAsyncAgent(taskId: string, setAppState: SetAppState, trace: 
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
       outputReady: undefined,
+      outputDestination: undefined,
       producerFinished: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined
@@ -448,6 +454,11 @@ export async function completeAgentTask(result: AgentToolResult, setAppState: Se
   // Notification classification/worktree cleanup still follows status (gh-20236).
   try {
     if (runningTask.outputReady) await raceAbort(runningTask.outputReady, signal);
+    // /clear can migrate the link while the final old-session write is pending.
+    // Restore the producer's actual destination, not the live session's path.
+    if (runningTask.outputDestination) {
+      await raceAbort(initTaskOutputAsSymlink(taskId, runningTask.outputDestination), signal);
+    }
     await raceAbort(evictTaskOutput(taskId), signal);
   } catch (error) {
     if (signal?.aborted) throw new AbortError();
@@ -469,6 +480,7 @@ export async function completeAgentTask(result: AgentToolResult, setAppState: Se
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
       outputReady: undefined,
+      outputDestination: undefined,
       producerFinished: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined
@@ -494,6 +506,7 @@ export function failAgentTask(taskId: string, error: string, setAppState: SetApp
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
       outputReady: undefined,
+      outputDestination: undefined,
       producerFinished: undefined,
       unregisterCleanup: undefined,
       selectedAgent: undefined

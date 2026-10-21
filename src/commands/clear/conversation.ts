@@ -232,9 +232,9 @@ export async function clearConversation({
     // since preservedLocalAgents was captured, without publishing success yet.
     const currentTask = getAppState?.().tasks[task.id]
     if (!isLocalAgentTask(currentTask) || currentTask.status !== 'running' || currentTask.producerFinished) continue
-    const outputReady = initTaskOutputAsSymlink(
-      task.id,
-      getAgentTranscriptPath(asAgentId(task.agentId)),
+    const destination = getAgentTranscriptPath(asAgentId(task.agentId))
+    const outputReady = (currentTask.outputReady ?? Promise.resolve()).then(() =>
+      initTaskOutputAsSymlink(task.id, destination),
     )
     void outputReady.catch(() => {})
     // Publish before yielding so completion joins this replacement. Once

@@ -812,11 +812,18 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
           const task = appState.tasks[agentId]
           if (isLocalAgentTask(task) && !isMainSessionTask(task)) {
             if (task.status === 'running') {
-              queuePendingMessage(
+              if (!queuePendingMessage(
                 agentId,
                 input.message,
                 context.setAppStateForTasks ?? context.setAppState,
-              )
+              )) {
+                return {
+                  data: {
+                    success: false,
+                    message: `${input.to} is finishing its output. Please retry after it completes.`,
+                  },
+                }
+              }
               return {
                 data: {
                   success: true,
@@ -831,11 +838,18 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
             // the task reference (the first resume changes status to 'running').
             const freshTask = context.getAppState().tasks[agentId]
             if (isLocalAgentTask(freshTask) && freshTask.status === 'running') {
-              queuePendingMessage(
+              if (!queuePendingMessage(
                 agentId,
                 input.message,
                 context.setAppStateForTasks ?? context.setAppState,
-              )
+              )) {
+                return {
+                  data: {
+                    success: false,
+                    message: `${input.to} is finishing its output. Please retry after it completes.`,
+                  },
+                }
+              }
               return {
                 data: {
                   success: true,
