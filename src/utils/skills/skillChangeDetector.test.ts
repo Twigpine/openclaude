@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, jest, mock, test } from 'bun:test'
 import * as platformPath from 'path'
 import chokidar, { type FSWatcher } from 'chokidar'
 import { type Stats, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'fs'
@@ -33,6 +33,9 @@ let chokidarWatch = mock(() => ({
   close: mock(async () => {}),
 }))
 let activeDetector: SkillChangeDetectorModule | null = null
+let testHome: string
+let originalCwd: string
+let originalEnv: Record<string, string | undefined>
 
 function installMocks(): void {
   clearCommandsCache = mock(() => {})
@@ -91,8 +94,29 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+async function advanceTime(ms: number): Promise<void> {
+  await new Promise<void>(resolve => setImmediate(resolve))
+  jest.advanceTimersByTime(ms)
+  // Timer callbacks await hooks; let their promise continuations finish before
+  // assertions or the next advance (which may depend on the new cooldown).
+  await new Promise<void>(resolve => setImmediate(resolve))
+}
+
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/skills/skillChangeDetector.test.ts')
+  originalCwd = process.cwd()
+  originalEnv = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    OPENCLAUDE_CONFIG_DIR: process.env.OPENCLAUDE_CONFIG_DIR,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  }
+  testHome = mkdtempSync(platformPath.join(tmpdir(), 'skill-detector-home-'))
+  process.env.HOME = testHome
+  process.env.USERPROFILE = testHome
+  process.env.OPENCLAUDE_CONFIG_DIR = platformPath.join(testHome, '.openclaude')
+  delete process.env.CLAUDE_CONFIG_DIR
+  process.chdir(testHome)
   installMocks()
 })
 
@@ -103,6 +127,13 @@ afterEach(async () => {
     activeDetector = null
     mock.restore()
   } finally {
+    jest.useRealTimers()
+    process.chdir(originalCwd)
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    rmSync(testHome, { recursive: true, force: true })
     releaseSharedMutationLock()
   }
 })
@@ -363,6 +394,7 @@ describe('skillChangeDetector reload batching', () => {
     const detector = await importFreshModule()
     let realWatcher: FSWatcher | undefined
     const hookPaths: string[] = []
+    const changedPaths = new Set<string>()
     detector._setDependenciesForTesting({
       getSkillsPath: () => own,
       getAdditionalDirectoriesForClaudeMd: () => [],
@@ -376,6 +408,7 @@ describe('skillChangeDetector reload batching', () => {
       resetSentSkillNames,
       watch: (paths: string[], options: Parameters<typeof chokidar.watch>[1]) => {
         realWatcher = chokidar.watch(paths, options)
+        realWatcher.on('change', path => changedPaths.add(path))
         return realWatcher
       },
     })
@@ -400,15 +433,19 @@ describe('skillChangeDetector reload batching', () => {
     }
     const editUntilHook = async (path: string, content: string) => {
       // Chokidar's ready marks traversal completion, but Bun may still be
-      // initializing its polling baseline. Retry edits until one is observed.
-      // A retry already in flight when the first hook lands can still produce
-      // one more, so assert that the edit was seen rather than an exact count.
+      // initializing its polling baseline. Stop retrying when the file event
+      // arrives, then wait for its hook without resetting the reload debounce.
       const start = hookPaths.length
       const deadline = Date.now() + 2000
       let edit = 0
-      while (!hookPaths.slice(start).includes(path) && Date.now() < deadline) {
+      changedPaths.delete(path)
+      while (!changedPaths.has(path) && Date.now() < deadline) {
         writeFileSync(path, `${content} ${edit++}`)
         await sleep(50)
+      }
+      expect(changedPaths.has(path)).toBe(true)
+      while (!hookPaths.slice(start).includes(path) && Date.now() < deadline) {
+        await sleep(10)
       }
       // This test checks source eligibility; batching has dedicated tests below.
       expect(hookPaths.slice(start)).toContain(path)
@@ -440,6 +477,7 @@ describe('skillChangeDetector reload batching', () => {
 
   test('batches rapid reload requests into one hook/cache clear/notification', async () => {
     const detector = await importFreshModule()
+    jest.useFakeTimers()
     await detector.resetForTesting({ reloadDebounce: 5, reloadCooldown: 20 })
 
     let notifications = 0
@@ -451,7 +489,7 @@ describe('skillChangeDetector reload batching', () => {
     detector._scheduleReloadForTesting('/tmp/skills/b/SKILL.md')
     detector._scheduleReloadForTesting('/tmp/skills/c/SKILL.md')
 
-    await sleep(30)
+    await advanceTime(30)
 
     expect(executeConfigChangeHooks).toHaveBeenCalledTimes(1)
     expect(clearCommandsCache).toHaveBeenCalledTimes(1)
@@ -465,6 +503,7 @@ describe('skillChangeDetector reload batching', () => {
 
   test('delays a second burst until the reload cooldown has elapsed', async () => {
     const detector = await importFreshModule()
+    jest.useFakeTimers()
     await detector.resetForTesting({ reloadDebounce: 5, reloadCooldown: 60 })
 
     let notifications = 0
@@ -473,14 +512,14 @@ describe('skillChangeDetector reload batching', () => {
     })
 
     detector._scheduleReloadForTesting('/tmp/skills/first/SKILL.md')
-    await sleep(20)
+    await advanceTime(20)
     expect(notifications).toBe(1)
 
     detector._scheduleReloadForTesting('/tmp/skills/second/SKILL.md')
-    await sleep(20)
+    await advanceTime(20)
     expect(notifications).toBe(1)
 
-    await sleep(60)
+    await advanceTime(60)
     expect(notifications).toBe(2)
     expect(executeConfigChangeHooks).toHaveBeenCalledTimes(2)
 
@@ -490,6 +529,7 @@ describe('skillChangeDetector reload batching', () => {
 
   test('does not start cooldown when a ConfigChange hook blocks reload', async () => {
     const detector = await importFreshModule()
+    jest.useFakeTimers()
     await detector.resetForTesting({ reloadDebounce: 5, reloadCooldown: 500 })
 
     let notifications = 0
@@ -499,13 +539,13 @@ describe('skillChangeDetector reload batching', () => {
 
     hookResults = [{ blocked: true }]
     detector._scheduleReloadForTesting('/tmp/skills/blocked/SKILL.md')
-    await sleep(20)
+    await advanceTime(20)
     expect(notifications).toBe(0)
     expect(clearCommandsCache).not.toHaveBeenCalled()
 
     hookResults = []
     detector._scheduleReloadForTesting('/tmp/skills/allowed/SKILL.md')
-    await sleep(20)
+    await advanceTime(20)
 
     expect(notifications).toBe(1)
     expect(clearCommandsCache).toHaveBeenCalledTimes(1)
@@ -516,6 +556,7 @@ describe('skillChangeDetector reload batching', () => {
 
   test('queues events during an in-flight reload before cache clear and notification', async () => {
     const detector = await importFreshModule()
+    jest.useFakeTimers()
     await detector.resetForTesting({ reloadDebounce: 5, reloadCooldown: 60 })
 
     let releaseFirstHook: (() => void) | undefined
@@ -541,21 +582,21 @@ describe('skillChangeDetector reload batching', () => {
     })
 
     detector._scheduleReloadForTesting('/tmp/skills/first/SKILL.md')
-    await sleep(20)
+    await advanceTime(20)
     expect(executeConfigChangeHooks).toHaveBeenCalledTimes(1)
 
     detector._scheduleReloadForTesting('/tmp/skills/second/SKILL.md')
-    await sleep(30)
+    await advanceTime(30)
     expect(executeConfigChangeHooks).toHaveBeenCalledTimes(1)
 
     releaseFirstHook?.()
-    await sleep(20)
+    await advanceTime(20)
     expect(notifications).toBe(0)
     expect(clearCommandsCache).not.toHaveBeenCalled()
     expect(executeConfigChangeHooks).toHaveBeenCalledTimes(2)
 
     releaseSecondHook?.()
-    await sleep(30)
+    await advanceTime(30)
     expect(notifications).toBe(1)
     expect(executeConfigChangeHooks).toHaveBeenCalledTimes(2)
 
@@ -565,6 +606,7 @@ describe('skillChangeDetector reload batching', () => {
 
   test('dispose prevents an in-flight reload from clearing caches after hook resolution', async () => {
     const detector = await importFreshModule()
+    jest.useFakeTimers()
     await detector.resetForTesting({ reloadDebounce: 5, reloadCooldown: 20 })
 
     let releaseHook: (() => void) | undefined
@@ -581,12 +623,12 @@ describe('skillChangeDetector reload batching', () => {
     })
 
     detector._scheduleReloadForTesting('/tmp/skills/in-flight/SKILL.md')
-    await sleep(20)
+    await advanceTime(20)
     expect(executeConfigChangeHooks).toHaveBeenCalledTimes(1)
 
     await detector.dispose()
     releaseHook?.()
-    await sleep(20)
+    await advanceTime(20)
 
     expect(clearCommandsCache).not.toHaveBeenCalled()
     expect(resetSentSkillNames).not.toHaveBeenCalled()
@@ -595,6 +637,7 @@ describe('skillChangeDetector reload batching', () => {
 
   test('dispose prevents later reload scheduling from running hooks', async () => {
     const detector = await importFreshModule()
+    jest.useFakeTimers()
     await detector.resetForTesting({ reloadDebounce: 5, reloadCooldown: 20 })
 
     let notifications = 0
@@ -604,7 +647,7 @@ describe('skillChangeDetector reload batching', () => {
 
     await detector.dispose()
     detector._scheduleReloadForTesting('/tmp/skills/after-dispose/SKILL.md')
-    await sleep(20)
+    await advanceTime(20)
 
     expect(executeConfigChangeHooks).not.toHaveBeenCalled()
     expect(clearCommandsCache).not.toHaveBeenCalled()
@@ -613,11 +656,12 @@ describe('skillChangeDetector reload batching', () => {
 
   test('resetForTesting clears pending reload timers', async () => {
     const detector = await importFreshModule()
+    jest.useFakeTimers()
     await detector.resetForTesting({ reloadDebounce: 20, reloadCooldown: 20 })
 
     detector._scheduleReloadForTesting('/tmp/skills/pending/SKILL.md')
     await detector.resetForTesting({ reloadDebounce: 5, reloadCooldown: 5 })
-    await sleep(30)
+    await advanceTime(30)
 
     expect(executeConfigChangeHooks).not.toHaveBeenCalled()
     expect(clearCommandsCache).not.toHaveBeenCalled()

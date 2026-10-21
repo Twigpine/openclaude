@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -131,17 +132,32 @@ function setRealFilesystemForTest(): ReturnType<typeof getFsImplementation> {
   return originalFs
 }
 
-function setConfigDirEnv(configDir: string): void {
+function setConfigDirEnv(configDir: string, homeDir = join(configDir, 'home')): void {
+  mkdirSync(homeDir, { recursive: true })
+  process.env.HOME = homeDir
+  process.env.USERPROFILE = homeDir
+  // Bun caches os.homedir(), so changing HOME alone does not isolate siblings.
+  setSiblingSkillsHomeDirForTesting(homeDir)
   setClaudeConfigHomeDirForTesting(undefined)
   process.env.OPENCLAUDE_CONFIG_DIR = configDir
   delete process.env.CLAUDE_CONFIG_DIR
 }
 
 function restoreConfigDirEnv(original: {
+  home: string | undefined
+  userProfile: string | undefined
   openClaudeConfigDir: string | undefined
   claudeConfigDir: string | undefined
   configHomeOverride: string | undefined
 }): void {
+  for (const [key, value] of Object.entries({
+    HOME: original.home,
+    USERPROFILE: original.userProfile,
+  })) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  setSiblingSkillsHomeDirForTesting(undefined)
   setClaudeConfigHomeDirForTesting(original.configHomeOverride)
 
   if (original.openClaudeConfigDir === undefined) {
@@ -162,6 +178,8 @@ test.serial('loads flat and nested skills with colon namespaces', async () => {
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-skills-'))
   const cwd = join(configDir, 'workspace')
   const originalConfigDir = {
+    home: process.env.HOME,
+    userProfile: process.env.USERPROFILE,
     openClaudeConfigDir: process.env.OPENCLAUDE_CONFIG_DIR,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
     configHomeOverride: getClaudeConfigHomeDirOverrideForTesting(),
@@ -179,6 +197,10 @@ test.serial('loads flat and nested skills with colon namespaces', async () => {
     clearSkillAndConfigCaches()
 
     const skills = await getSkillDirCommands(cwd)
+    assert.equal(
+      skills.some(skill => skill.type === 'prompt' && skill.siblingSkillsHome),
+      false,
+    )
     const fixtureSkillsRoot = join(configDir, '.openclaude', 'skills')
     const promptSkills = skills.filter(
       (
@@ -227,6 +249,8 @@ test.serial('ignores legacy .claude project skills when .openclaude skills exist
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-skills-'))
   const cwd = join(configDir, 'workspace')
   const originalConfigDir = {
+    home: process.env.HOME,
+    userProfile: process.env.USERPROFILE,
     openClaudeConfigDir: process.env.OPENCLAUDE_CONFIG_DIR,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
     configHomeOverride: getClaudeConfigHomeDirOverrideForTesting(),
@@ -275,6 +299,8 @@ test.serial('loads persisted registry trust metadata from skill.json', async () 
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-skills-'))
   const cwd = join(configDir, 'workspace')
   const originalConfigDir = {
+    home: process.env.HOME,
+    userProfile: process.env.USERPROFILE,
     openClaudeConfigDir: process.env.OPENCLAUDE_CONFIG_DIR,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
     configHomeOverride: getClaudeConfigHomeDirOverrideForTesting(),
@@ -323,6 +349,8 @@ test.serial('project skills are ordered before user skills with the same name', 
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-skills-'))
   const cwd = join(configDir, 'workspace')
   const originalConfigDir = {
+    home: process.env.HOME,
+    userProfile: process.env.USERPROFILE,
     openClaudeConfigDir: process.env.OPENCLAUDE_CONFIG_DIR,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
     configHomeOverride: getClaudeConfigHomeDirOverrideForTesting(),
@@ -459,28 +487,31 @@ async function withSiblingHomeFixture(
   const rootDir = mkdtempSync(join(tmpdir(), 'openclaude-sibling-skills-'))
   const homeDir = join(rootDir, 'home')
   const configDir = join(homeDir, '.openclaude')
-  // Inside the fake home so project-dir traversal stops at it.
+  // Keep project and user skills in the same disposable fixture.
   const cwd = join(homeDir, 'workspace')
   const originalConfigDir = {
+    home: process.env.HOME,
+    userProfile: process.env.USERPROFILE,
     openClaudeConfigDir: process.env.OPENCLAUDE_CONFIG_DIR,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
     configHomeOverride: getClaudeConfigHomeDirOverrideForTesting(),
   }
   const originalOriginalCwd = getOriginalCwd()
+  const originalCwd = process.cwd()
   const originalSettingsState = enableUserAndProjectSettingSources()
   const originalFs = setRealFilesystemForTest()
 
   try {
     mkdirSync(cwd, { recursive: true })
     mkdirSync(configDir, { recursive: true })
-    setSiblingSkillsHomeDirForTesting(homeDir)
-    setConfigDirEnv(configDir)
+    setConfigDirEnv(configDir, homeDir)
+    process.chdir(cwd)
     setOriginalCwd(cwd)
     clearSkillAndConfigCaches()
     await run({ homeDir, configDir, cwd })
   } finally {
     try {
-      setSiblingSkillsHomeDirForTesting(undefined)
+      process.chdir(originalCwd)
       restoreConfigDirEnv(originalConfigDir)
       setOriginalCwd(originalOriginalCwd)
       setFsImplementation(originalFs)
@@ -1103,6 +1134,7 @@ for (const home of ['.agents', '.claude'] as const) {
       const plainFile = join(writeSiblingSkill(homeDir, home, 'plain'), 'SKILL.md')
       symlinkSync(target, join(homeDir, home, 'skills', 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
       const ready: Promise<void>[] = []
+      const changedPaths = new Set<string>()
       await detector.resetForTesting({
         stabilityThreshold: 10, pollInterval: 10, chokidarInterval: 10,
         reloadDebounce: 10, reloadCooldown: 10,
@@ -1111,6 +1143,7 @@ for (const home of ['.agents', '.claude'] as const) {
         executeConfigChangeHooks: async () => [],
         watch: (paths, options) => {
           const watcher = chokidar.watch(paths, options)
+          watcher.on('change', path => changedPaths.add(realpathSync(path)))
           ready.push(new Promise(resolve => watcher.once('ready', resolve)))
           return watcher
         },
@@ -1127,12 +1160,20 @@ for (const home of ['.agents', '.claude'] as const) {
         const before = notifications
         const deadline = Date.now() + 2500
         let edit = 0
-        while (Date.now() < deadline) {
+        const watchedFile = realpathSync(file)
+        changedPaths.delete(watchedFile)
+        // Retry only until Chokidar observes the write. Retrying until reload
+        // can enqueue another edit or continually restart the reload debounce.
+        while (!changedPaths.has(watchedFile) && Date.now() < deadline) {
           writeFileSync(file, `---\ndescription: ${marker}\n---\nInstructions ${marker} ${edit++}\n`)
           await Bun.sleep(50)
-          if (notifications > before && (await invokedText(name)).includes(marker)) return
         }
-        assert.fail(`No refreshed invocation for ${name}: ${marker}`)
+        assert.ok(changedPaths.has(watchedFile), `No file event for ${name}: ${marker}`)
+        while (notifications === before && Date.now() < deadline) {
+          await Bun.sleep(10)
+        }
+        assert.ok(notifications > before, `No reload for ${name}: ${marker}`)
+        assert.ok((await invokedText(name)).includes(marker))
       }
       try {
         await detector.initialize()
