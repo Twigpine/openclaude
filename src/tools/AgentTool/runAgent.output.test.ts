@@ -343,10 +343,11 @@ for (const foreground of [false, true]) {
     const release = deferred()
     const links: Promise<string>[] = []
     const liveLinks: Promise<string>[] = []
+    const releaseRetarget = deferred()
     mock.module('../../utils/task/diskOutput.js', () => ({
       ...actualDiskOutput,
       initTaskOutputAsSymlink: (id: string, path: string) => {
-        const ready = id === agentId ? (links[0] ?? release.promise) : Promise.resolve()
+        const ready = id === agentId ? (links[0] ?? release.promise) : liveLinks.length ? releaseRetarget.promise : Promise.resolve()
         const link = ready.then(() => actualDiskOutput.initTaskOutputAsSymlink(id, path))
         if (id === agentId) links.push(link)
         else liveLinks.push(link)
@@ -362,6 +363,7 @@ for (const foreground of [false, true]) {
     await recordSidechainTranscript([createUserMessage({ content: 'finished readable output' })], agentId)
     const finish = () => completeAgentTask({ agentId, content: [] } as never, setAppState)
     let completion = foreground ? undefined : finish()
+    let activeCompletion: Promise<boolean> | undefined
     try {
       expect(state.tasks[agentId]?.status).toBe('running')
       await clearConversation({ setMessages: () => { completion ??= finish() }, readFileState: createFileStateCacheWithSizeLimit(READ_FILE_STATE_CACHE_SIZE), getAppState: () => state, setAppState })
@@ -373,12 +375,21 @@ for (const foreground of [false, true]) {
       expect(links).toHaveLength(1)
       // A genuine live producer must still migrate and expose new-session output.
       await recordSidechainTranscript([createUserMessage({ content: 'new active output' })], activeId)
-      await Promise.all(liveLinks)
+      expect(liveLinks).toHaveLength(2)
+      activeCompletion = completeAgentTask({ agentId: activeId, content: [] } as never, setAppState)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(state.tasks[activeId]?.status).toBe('running')
+      releaseRetarget.resolve()
+      await activeCompletion
+      expect(state.tasks[activeId]?.status).toBe('completed')
       expect(await readFile(getTaskOutputPath(activeId), 'utf8')).toContain('new active output')
     } finally {
       release.resolve()
       await completion
       await Promise.all(links)
+      releaseRetarget.resolve()
+      await activeCompletion
+      await Promise.all(liveLinks)
       killAsyncAgent(activeId, setAppState)
     }
   })

@@ -232,10 +232,18 @@ export async function clearConversation({
     // since preservedLocalAgents was captured, without publishing success yet.
     const currentTask = getAppState?.().tasks[task.id]
     if (!isLocalAgentTask(currentTask) || currentTask.status !== 'running' || currentTask.producerFinished) continue
-    void initTaskOutputAsSymlink(
+    const outputReady = initTaskOutputAsSymlink(
       task.id,
       getAgentTranscriptPath(asAgentId(task.agentId)),
     )
+    void outputReady.catch(() => {})
+    // Publish before yielding so completion joins this replacement. Once
+    // completion starts, producerFinished prevents any further retargeting.
+    setAppState?.(prev => {
+      const current = prev.tasks[task.id]
+      if (!isLocalAgentTask(current) || current.status !== 'running' || current.producerFinished) return prev
+      return { ...prev, tasks: { ...prev.tasks, [task.id]: { ...current, outputReady } } }
+    })
   }
 
   // Re-persist mode and worktree state after the clear so future --resume
