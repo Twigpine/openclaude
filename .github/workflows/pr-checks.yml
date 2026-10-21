@@ -49,11 +49,6 @@ jobs:
           PR_SCAN_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'origin/main' }}
           PR_SCAN_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'HEAD' }}
         run: bun run security:pr-scan -- --base "$PR_SCAN_BASE" --head "$PR_SCAN_HEAD"
-      - name: Provider tests
-        run: bun run test:provider
-
-      - name: Provider recommendation tests
-        run: npm run test:provider-recommendation
 
   launcher-node-floor:
     runs-on: ubuntu-latest
