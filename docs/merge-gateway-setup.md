@@ -26,7 +26,7 @@ To delegate model selection to a Merge Gateway routing policy:
 openclaude --provider merge-gateway --model default_routing
 ```
 
-The dedicated Merge credential is not replaced by `OPENAI_API_KEY`.
+The dedicated Merge credential is not replaced by `OPENAI_API_KEY`. Saved profiles retain it across restarts. It is used only with the canonical inference base above and the native catalog endpoint below; changing a Merge profile to a proxy or another path withholds the credential. Configure a custom OpenAI-compatible profile with its own credentials for a proxy.
 
 ## Verify
 

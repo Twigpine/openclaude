@@ -176,6 +176,22 @@ describe('discoverModelsForRoute', () => {
     })
   })
 
+  test('withholds explicit and ambient Merge keys from retargeted discovery', async () => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    process.env.MERGE_GATEWAY_API_KEY = 'merge-secret'
+    const authorizations: Array<string | null> = []
+    setMockFetch(mock((_input: string | URL | Request, init?: RequestInit) => {
+      authorizations.push(new Headers(init?.headers).get('authorization'))
+      return Promise.resolve(new Response(JSON.stringify({ data: [] })))
+    }) as unknown as typeof globalThis.fetch)
+    for (const apiKey of [undefined, 'merge-secret']) {
+      await discoverModelsForRoute('merge-gateway', {
+        baseUrl: 'https://proxy.example/v1', apiKey, forceRefresh: true,
+      })
+    }
+    expect(authorizations).toEqual([null, null])
+  })
+
   test('does not send an ApiSmart key to an overridden discovery URL', async () => {
     const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
     process.env.APISMART_API_KEY = 'apismart-secret'

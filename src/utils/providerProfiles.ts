@@ -60,6 +60,7 @@ import {
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalConcentrateInferenceBaseUrl,
   isCanonicalLlmtrInferenceBaseUrl,
+  isCanonicalMergeGatewayInferenceBaseUrl,
   isCanonicalCommandcodeInferenceBaseUrl,
   isFireworksBaseUrl,
   isGmiCloudBaseUrl,
@@ -205,6 +206,15 @@ function isLlmtrProfile(profile: ProviderProfile): boolean {
   return !baseUrl || isCanonicalLlmtrInferenceBaseUrl(baseUrl)
 }
 
+function isMergeGatewayProfile(profile: ProviderProfile): boolean {
+  const { route } = resolveProfileCompatibility(profile.provider)
+  if (route.routeId !== 'merge-gateway') {
+    return false
+  }
+  const baseUrl = profile.baseUrl?.trim()
+  return !baseUrl || isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)
+}
+
 function isCommandcodeProfile(profile: ProviderProfile): boolean {
   const { route, compatibilityMode } = resolveProfileCompatibility(
     profile.provider,
@@ -311,6 +321,7 @@ export function resolveProfileCapabilityRouteId(
       providerRouteId === 'concentrate' ||
       providerRouteId === 'api-route' ||
       providerRouteId === 'llmtr' ||
+      providerRouteId === 'merge-gateway' ||
       providerRouteId === 'commandcode') &&
     baseUrl &&
     !(providerRouteId === 'cloudflare'
@@ -323,7 +334,9 @@ export function resolveProfileCapabilityRouteId(
             ? isCanonicalApiRouteInferenceBaseUrl(baseUrl)
           : providerRouteId === 'commandcode'
             ? isCanonicalCommandcodeInferenceBaseUrl(baseUrl)
-            : isCanonicalLlmtrInferenceBaseUrl(baseUrl))
+            : providerRouteId === 'merge-gateway'
+              ? isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)
+              : isCanonicalLlmtrInferenceBaseUrl(baseUrl))
   ) {
     return 'custom'
   }
@@ -1174,6 +1187,8 @@ export function applyProviderProfileToProcessEnv(
       route.routeId === 'api-route' && !isApiRouteProfile(profile)
     const withholdRetargetedLlmtrCredential =
       route.routeId === 'llmtr' && !isLlmtrProfile(profile)
+    const withholdRetargetedMergeGatewayCredential =
+      route.routeId === 'merge-gateway' && !isMergeGatewayProfile(profile)
     const withholdRetargetedCommandcodeCredential =
       route.routeId === 'commandcode' && !isCommandcodeProfile(profile)
     // A gmi-cloud profile's key belongs to GMI: never install it for another URL.
@@ -1185,6 +1200,7 @@ export function applyProviderProfileToProcessEnv(
       !withholdRetargetedConcentrateCredential &&
       !withholdRetargetedApiRouteCredential &&
       !withholdRetargetedLlmtrCredential &&
+      !withholdRetargetedMergeGatewayCredential &&
       !withholdRetargetedCommandcodeCredential &&
       !withholdRetargetedGmiCloudCredential
     ) {
@@ -1340,6 +1356,14 @@ export function applyProviderProfileToProcessEnv(
     // variables before installing this object, so adopt it here while the
     // canonical endpoint boundary is still known. Never carry it to a
     // retargeted profile.
+    if (route.routeId === 'merge-gateway') {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'merge-gateway'
+      if (isMergeGatewayProfile(profile)) {
+        openAIProfileEnv.MERGE_GATEWAY_API_KEY =
+          sanitizeApiKey(profile.apiKey) ||
+          sanitizeApiKey(process.env.MERGE_GATEWAY_API_KEY)
+      }
+    }
     if (route.routeId === 'llmtr') {
       openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'llmtr'
       if (isLlmtrProfile(profile) && !profile.apiKey) {
@@ -1665,6 +1689,8 @@ function buildOpenAICompatibleStartupEnv(
     activeProfileRouteId === 'api-route' && !isApiRouteProfile(activeProfile)
   const withholdRetargetedLlmtrCredential =
     activeProfileRouteId === 'llmtr' && !isLlmtrProfile(activeProfile)
+  const withholdRetargetedMergeGatewayCredential =
+    activeProfileRouteId === 'merge-gateway' && !isMergeGatewayProfile(activeProfile)
   const withholdRetargetedCommandcodeCredential =
     activeProfileRouteId === 'commandcode' &&
     !isCommandcodeProfile(activeProfile)
@@ -1674,6 +1700,7 @@ function buildOpenAICompatibleStartupEnv(
   const isConcentrateProfileFlag = isConcentrateProfile(activeProfile)
   const isApiRouteProfileFlag = isApiRouteProfile(activeProfile)
   const isLlmtrProfileFlag = isLlmtrProfile(activeProfile)
+  const isMergeGatewayProfileFlag = isMergeGatewayProfile(activeProfile)
   const isCommandcodeProfileFlag = isCommandcodeProfile(activeProfile)
 
   if (
@@ -1682,6 +1709,7 @@ function buildOpenAICompatibleStartupEnv(
     !withholdRetargetedConcentrateCredential &&
     !withholdRetargetedApiRouteCredential &&
     !withholdRetargetedLlmtrCredential &&
+    !withholdRetargetedMergeGatewayCredential &&
     !withholdRetargetedCommandcodeCredential
   ) {
     const strictEnv = buildOpenAIProfileEnv({
@@ -1734,6 +1762,9 @@ function buildOpenAICompatibleStartupEnv(
       }
       if (isLlmtrProfileFlag) {
         strictEnv.LLMTR_API_KEY = activeProfile.apiKey
+      }
+      if (isMergeGatewayProfileFlag) {
+        strictEnv.MERGE_GATEWAY_API_KEY = activeProfile.apiKey
       }
       if (isCommandcodeProfileFlag) {
         strictEnv.CMD_API_KEY = activeProfile.apiKey
@@ -1805,6 +1836,9 @@ function buildOpenAICompatibleStartupEnv(
   if (activeProfileRouteId === 'llmtr') {
     env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'llmtr'
   }
+  if (activeProfileRouteId === 'merge-gateway') {
+    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'merge-gateway'
+  }
   if (activeProfileRouteId === 'commandcode') {
     env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'commandcode'
   }
@@ -1814,6 +1848,7 @@ function buildOpenAICompatibleStartupEnv(
     !withholdRetargetedConcentrateCredential &&
     !withholdRetargetedApiRouteCredential &&
     !withholdRetargetedLlmtrCredential &&
+    !withholdRetargetedMergeGatewayCredential &&
     !withholdRetargetedCommandcodeCredential
   ) {
     env.OPENAI_API_KEY = activeProfile.apiKey
@@ -1852,6 +1887,9 @@ function buildOpenAICompatibleStartupEnv(
     }
     if (isLlmtrProfileFlag) {
       env.LLMTR_API_KEY = activeProfile.apiKey
+    }
+    if (isMergeGatewayProfileFlag) {
+      env.MERGE_GATEWAY_API_KEY = activeProfile.apiKey
     }
     if (isCommandcodeProfileFlag) {
       env.CMD_API_KEY = activeProfile.apiKey
@@ -2133,6 +2171,9 @@ function triggerStartupDiscoveryRefreshForProfile(
     return
   }
   if (route.routeId === 'llmtr' && !isLlmtrProfile(profile)) {
+    return
+  }
+  if (route.routeId === 'merge-gateway' && !isMergeGatewayProfile(profile)) {
     return
   }
   if (route.routeId === 'commandcode' && !isCommandcodeProfile(profile)) {

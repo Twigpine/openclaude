@@ -417,6 +417,9 @@ export function applyProviderFlag(
                           process.env.OPENAI_API_KEY === process.env.LLMTR_API_KEY
                         ? 'llmtr'
                         : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.MERGE_GATEWAY_API_KEY
+                        ? 'merge-gateway'
+                        : process.env.OPENAI_API_KEY !== undefined &&
                           (process.env.OPENAI_API_KEY === process.env.CMD_API_KEY ||
                             process.env.OPENAI_API_KEY ===
                               process.env.COMMANDCODE_API_KEY ||
