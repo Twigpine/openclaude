@@ -91,6 +91,8 @@ export interface DecideTurnModelInput {
   permissionMode?: PermissionMode
   input: RoutingInput
   sessionId?: string
+  /** Set when the query loop belongs to a sub-agent rather than the main thread. */
+  agentId?: string
 }
 
 /**
@@ -100,6 +102,11 @@ export interface DecideTurnModelInput {
  * short-circuits when the routed model equals the session model). A disallowed
  * routed model is coerced to strong; if strong is also disallowed, routing is
  * disabled for the session and the caller falls back to today's resolution.
+ *
+ * Sub-agents are never routed. Their prompt is not a user turn: the parent
+ * turn's decision already holds for its Agent tool call, and the sub-agent's
+ * model comes from agentRouting or its definition. Pinning here would
+ * overwrite that model with the classifier's pick.
  */
 export function decideTurnModel({
   settings,
@@ -107,7 +114,9 @@ export function decideTurnModel({
   permissionMode,
   input,
   sessionId,
+  agentId,
 }: DecideTurnModelInput): TurnRoutingDecision {
+  if (agentId) return { routed: false }
   if (isSmartRoutingDisabledForSession(sessionId)) return { routed: false }
 
   const config = resolveSmartRoutingConfig({ settings, parentModel, permissionMode })
