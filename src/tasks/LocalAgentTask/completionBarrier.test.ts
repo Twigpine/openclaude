@@ -149,6 +149,51 @@ describe('local-agent completion output barrier', () => {
       await outcome
     }
   })
+  for (const foreground of [false, true]) {
+    for (const outcome of ['resolve', 'reject', 'abort'] as const) {
+      test(`obsolete ${foreground ? 'foreground' : 'async'} completion cannot own a replacement after ${outcome}`, async () => {
+        const link = deferred()
+        const failure = new Error('old initialization failed')
+        let count = 0
+        mock.module('../../utils/task/diskOutput.js', () => ({
+          ...actualDiskOutput,
+          initTaskOutputAsSymlink: () => ++count === 1 ? link.promise.then(() => {
+            if (outcome === 'reject') throw failure
+            return '/old'
+          }) : Promise.resolve('/new'),
+          evictTaskOutput: async () => {},
+        }))
+        const { registerAsyncAgent, registerAgentForeground, completeAgentTask, killAsyncAgent } = await import('./LocalAgentTask.js')
+        const { getTask, setAppState } = state()
+        const agentId = `replace-${foreground}-${outcome}`
+        const register = foreground ? registerAgentForeground : registerAsyncAgent
+        const params = { agentId, description: 'old', prompt: 'old', selectedAgent: { agentType: 'test' } as AgentDefinition, setAppState }
+        register(params)
+        const old = getTask(agentId)
+        const completion = completeAgentTask({ agentId, content: [] } as unknown as AgentToolResult, setAppState).catch(error => error)
+        register({ ...params, description: 'replacement' })
+        const replacement = getTask(agentId)
+        try {
+          if (outcome === 'abort') old.abortController!.abort()
+          link.resolve()
+          expect(await completion).toBe(false)
+          expect(getTask(agentId).status).toBe('running')
+          expect(getTask(agentId).result).toBeUndefined()
+          expect(getTask(agentId).abortController).toBe(replacement.abortController)
+          expect(getTask(agentId).unregisterCleanup).toBe(replacement.unregisterCleanup)
+          killAsyncAgent(agentId, setAppState)
+          expect(replacement.abortController!.signal.aborted).toBe(true)
+        } finally {
+          link.resolve()
+          await completion
+          await replacement.outputReady
+          old.unregisterCleanup?.()
+          killAsyncAgent(agentId, setAppState)
+        }
+      })
+    }
+  }
+
 })
 
 }

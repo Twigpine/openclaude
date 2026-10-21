@@ -1673,16 +1673,17 @@ class Project {
   ): Promise<void> {
     // Track the predecessor wait too: shutdown flushes must see queued chains.
     return this.trackWrite(async () => {
-      if (!agentId || !captureDestination) {
+      if (!agentId) {
         return this.insertMessageChain(messages, true, agentId, startingParentUuid)
       }
       // Handoff can restart the same agent before its old iterator has closed.
       // Join whole chains; the file lock alone only serializes single appends.
-      const destination: SidechainDestination = {
+      const destination: SidechainDestination | undefined = captureDestination ? {
         path: getAgentTranscriptPath(asAgentId(agentId)),
         sessionId: getSessionId() as UUID,
-      }
-      const { path } = destination
+      } : undefined
+      // Live-path producers still serialize chains, without freezing a session.
+      const path = destination?.path ?? `live:${agentId}`
       const previous = this.sidechainWrites.get(path)
       const write = (previous?.catch(() => {}) ?? Promise.resolve()).then(() =>
         this.insertMessageChain(messages, true, agentId, startingParentUuid, undefined, destination),

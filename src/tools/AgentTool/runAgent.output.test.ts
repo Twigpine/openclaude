@@ -28,10 +28,13 @@ import { getTaskOutputPath, _clearOutputsForTest } from '../../utils/task/diskOu
 import { clearPendingNotifications, getPendingNotificationsSnapshot } from '../../utils/messageQueueManager.js'
 import { runAsyncAgentLifecycle } from './agentToolUtils.js'
 import { runAgent } from './runAgent.js'
+import { executeStopHooks } from '../../utils/hooks.js'
+import { addSessionHook } from '../../utils/hooks/sessionHooks.js'
 import { resumeAgentBackground } from './resumeAgent.js'
 import { startBackgroundSession } from '../../tasks/LocalMainSessionTask.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 
+const actualStorage = { ...await import('../../utils/sessionStorage.js') }
 const actualDiskOutput = { ...await import('../../utils/task/diskOutput.js') }
 const actualUuid = { ...await import('../../utils/uuid.js') }
 let originalSession: ReturnType<typeof getSessionId>
@@ -46,6 +49,14 @@ function deferred() {
   let resolve!: () => void
   const promise = new Promise<void>(res => { resolve = res })
   return { promise, resolve }
+}
+
+async function waitFor(condition: () => boolean) {
+  const deadline = Date.now() + 2000
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('Timed out waiting for agent lifecycle checkpoint')
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
 }
 
 // Use the existing clean-child harness: other agent tests replace these
@@ -73,6 +84,7 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   try {
+    mock.module('../../utils/sessionStorage.js', () => actualStorage)
     mock.module('../../query.js', () => actualQuery)
     mock.module('../../utils/git.js', () => actualGit)
     mock.module('../../utils/uuid.js', () => actualUuid)
@@ -304,6 +316,31 @@ test('sidechain write resolves only after its file is readable, without a sessio
   }
 })
 
+test('live-destination sidechain chains preserve submission order', async () => {
+  const agentId = asAgentId('live-chain-order')
+  const entered = deferred()
+  const release = deferred()
+  let calls = 0
+  mock.module('../../utils/git.js', () => ({ ...actualGit, getBranch: async () => {
+    if (++calls === 1) { entered.resolve(); await release.promise }
+    return 'test'
+  } }))
+  const first = createUserMessage({ content: 'first live chain' })
+  const second = createAssistantMessage({ content: 'second live chain' })
+  const writing = recordSidechainTranscript([first], agentId, null, { captureDestination: false })
+  await entered.promise
+  const queued = recordSidechainTranscript([second], agentId, first.uuid, { captureDestination: false })
+  try {
+    release.resolve()
+    await Promise.all([writing, queued])
+    const entries = (await readFile(getAgentTranscriptPath(agentId), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    expect(entries.map(entry => entry.uuid)).toEqual([first.uuid, second.uuid])
+  } finally {
+    release.resolve()
+    await Promise.all([writing, queued])
+  }
+})
+
 test('queued sidechain chains keep their destination and session across clear pointer reset', async () => {
   const agentId = asAgentId('session-boundary')
   const sessionA = getSessionId()
@@ -425,10 +462,29 @@ for (const foreground of [false, true]) {
         if (holdNextBranch) { holdNextBranch = false; entered.resolve(); await release.promise }
         return 'test'
       } }))
-      mock.module('../../query.js', () => ({ ...actualQuery, query: async function* () {
+      let hookPath: string | undefined
+      let verifierPath: string | undefined
+      let verifierRules: readonly string[] | undefined
+      mock.module('../../query.js', () => ({ ...actualQuery, query: async function* (params: Parameters<typeof actualQuery.query>[0]) {
+        if (params.querySource === 'hook_agent') {
+          const text = JSON.stringify(params.messages)
+          const inputText = params.messages[0]
+          if (inputText?.type !== 'user' || typeof inputText.message.content !== 'string') throw new Error(`unexpected hook input ${text}`)
+          hookPath = JSON.parse(inputText.message.content).agent_transcript_path
+          verifierPath = params.systemPrompt.join('\n').match(/available at: ([^\n]+)/)?.[1]
+          verifierRules = params.toolUseContext.getAppState().toolPermissionContext.alwaysAllowRules.session
+          yield { type: 'attachment', attachment: { type: 'structured_output', data: { ok: true } }, uuid: randomUUID(), timestamp: new Date().toISOString() } as never
+          return { reason: 'completed' }
+        }
         holdNextBranch = true
         yield createAssistantMessage({ content: 'final A answer' })
         if (continuesInB) yield createAssistantMessage({ content: 'continued B answer' })
+        addSessionHook(setAppState, agentId, 'SubagentStop', '', { type: 'agent', prompt: '$ARGUMENTS', model: 'test-model' })
+        const simple = process.env.CLAUDE_CODE_SIMPLE
+        delete process.env.CLAUDE_CODE_SIMPLE
+        try {
+          for await (const _result of executeStopHooks(undefined, params.toolUseContext.abortController.signal, 1000, false, agentId, params.toolUseContext, params.messages)) { /* consume actual hook dispatch */ }
+        } finally { process.env.CLAUDE_CODE_SIMPLE = simple }
         return { reason: 'completed' }
       } }))
       const selectedAgent = { agentType: continuesInB ? 'general-purpose' : 'retained-agent', source: continuesInB ? 'built-in' : 'userSettings', baseDir: 'built-in', whenToUse: 'test', getSystemPrompt: () => 'test' } as AgentDefinition
@@ -473,6 +529,10 @@ for (const foreground of [false, true]) {
         expect(await readFile(pathA, 'utf8')).toContain('final A answer')
         const output = await readFile(getTaskOutputPath(agentId), 'utf8')
         expect(output).toContain(continuesInB ? 'continued B answer' : 'final A answer')
+        expect(hookPath).toBe(continuesInB ? pathB : pathA)
+        expect(verifierPath).toBe(hookPath)
+        expect(verifierRules).toContain(`Read(/${hookPath})`)
+        expect(await readFile(verifierPath!, 'utf8')).toContain(continuesInB ? 'continued B answer' : 'final A answer')
         expect(getPendingNotificationsSnapshot().map(item => item.value).join('\n')).toContain('<status>completed</status>')
         const transcript = await getAgentTranscript(agentId)
         expect(JSON.stringify(transcript?.messages)).toContain(continuesInB ? 'continued B answer' : 'final A answer')
@@ -502,12 +562,127 @@ for (const foreground of [false, true]) {
         expect(JSON.stringify(resumedMessages)).toContain(continuesInB ? 'continued B answer' : 'final A answer')
         expect(JSON.stringify(resumedMessages)).toContain('continue after clear')
         expect(await readFile(result.outputFile, 'utf8')).toContain('resumed answer')
+        if (!foreground && !continuesInB) {
+          // Two real SendMessage resumes may both pass stopped-task admission
+          // before their disk reads finish. The older completion cannot own B.
+          const { SendMessageTool } = await import('../SendMessageTool/SendMessageTool.js')
+          const { TaskStopTool } = await import('../TaskStopTool/TaskStopTool.js')
+          const firstRead = deferred()
+          const secondRead = deferred()
+          const oldLink = deferred()
+          const secondQueryDone = deferred()
+          let reads = 0
+          let links = 0
+          let queries = 0
+          mock.module('../../utils/sessionStorage.js', () => ({ ...actualStorage, readAgentMetadata: async (id: typeof agentId) => {
+            const read = ++reads
+            const meta = await actualStorage.readAgentMetadata(id)
+            await (read === 1 ? firstRead : secondRead).promise
+            return meta
+          } }))
+          mock.module('../../utils/task/diskOutput.js', () => ({ ...actualDiskOutput, initTaskOutputAsSymlink: (id: string, path: string) =>
+            (++links === 1 ? oldLink.promise : Promise.resolve()).then(() => actualDiskOutput.initTaskOutputAsSymlink(id, path)),
+          }))
+          mock.module('../../query.js', () => ({ ...actualQuery, query: async function* (params: Parameters<typeof actualQuery.query>[0]) {
+            if (++queries === 1) { yield createAssistantMessage({ content: 'older resume answer' }); return { reason: 'completed' } }
+            try {
+              await new Promise<void>(resolve => params.toolUseContext.abortController.signal.addEventListener('abort', () => resolve(), { once: true }))
+            } finally { secondQueryDone.resolve() }
+            return { reason: 'completed' }
+          } }))
+          state.agentNameRegistry.set('overlap-target', agentId)
+          const send = () => SendMessageTool.call({ to: 'overlap-target', message: 'resume overlap' }, context, async () => ({ behavior: 'allow' }), {} as never)
+          const firstResume = send()
+          await waitFor(() => reads === 1)
+          const secondResume = send()
+          try {
+            await waitFor(() => reads === 2)
+            firstRead.resolve()
+            expect((await firstResume).data.success).toBe(true)
+            await waitFor(() => state.tasks[agentId]?.type === 'local_agent' && state.tasks[agentId].producerFinished === true)
+            const first = state.tasks[agentId]
+            if (first?.type !== 'local_agent') throw new Error('missing first resume')
+            secondRead.resolve()
+            expect((await secondResume).data.success).toBe(true)
+            await waitFor(() => queries === 2)
+            const successor = state.tasks[agentId]
+            if (successor?.type !== 'local_agent') throw new Error('missing successor')
+            oldLink.resolve()
+            await first.outputReady
+            await actualDiskOutput._clearOutputsForTest()
+            await new Promise(resolve => setTimeout(resolve, 0))
+            expect(state.tasks[agentId]?.status).toBe('running')
+            expect(await TaskStopTool.validateInput({ task_id: agentId }, context)).toEqual({ result: true })
+            await TaskStopTool.call({ task_id: agentId }, context)
+            expect(successor.abortController!.signal.aborted).toBe(true)
+            await secondQueryDone.promise
+            await waitFor(() => getPendingNotificationsSnapshot().some(item => typeof item.value === 'string' && item.value.includes('<status>killed</status>')))
+          } finally {
+            firstRead.resolve()
+            secondRead.resolve()
+            oldLink.resolve()
+            await Promise.all([firstResume, secondResume])
+            killAsyncAgent(agentId, setAppState)
+            if (queries === 2) await secondQueryDone.promise
+          }
+        }
       } finally {
         release.resolve()
         await lifecycle
       }
     })
   }
+}
+
+for (const foreground of [false, true]) {
+  test(`cancelled reconciliation stays before ${foreground ? 'foreground' : 'async'} successor links after eviction`, async () => {
+    const agentId = asAgentId(`cancelled-link-${foreground}`)
+    let state = getDefaultAppState()
+    const setAppState = (update: (prev: AppState) => AppState) => { state = update(state) }
+    const params = { agentId, description: 'old', prompt: 'old', selectedAgent: { agentType: 'test' } as AgentDefinition, setAppState }
+    const old = registerAsyncAgent(params)
+    await old.outputReady
+    const pathA = getAgentTranscriptPath(agentId)
+    await recordSidechainTranscript([createUserMessage({ content: 'old A output' })], agentId)
+    state.tasks[agentId] = { ...old, outputDestination: pathA }
+    const entered = deferred()
+    const release = deferred()
+    const links: Promise<string>[] = []
+    mock.module('../../utils/task/diskOutput.js', () => ({ ...actualDiskOutput, initTaskOutputAsSymlink: (id: string, path: string) => {
+      const wait = path === pathA ? release.promise : Promise.resolve()
+      if (path === pathA) entered.resolve()
+      const link = wait.then(() => actualDiskOutput.initTaskOutputAsSymlink(id, path))
+      links.push(link)
+      return link
+    } }))
+    const completionA = completeAgentTask({ agentId, content: [] } as never, setAppState).catch(error => error)
+    let completionB: Promise<boolean> | undefined
+    try {
+      await entered.promise
+      killAsyncAgent(agentId, setAppState)
+      expect(await completionA).toBeInstanceOf(AbortError)
+      // Terminal records can be evicted before abandoned filesystem work settles.
+      setAppState(prev => { const { [agentId]: removed, ...tasks } = prev.tasks; return { ...prev, tasks } })
+      await clearConversation({ setMessages: () => {}, readFileState: createFileStateCacheWithSizeLimit(READ_FILE_STATE_CACHE_SIZE), getAppState: () => state, setAppState })
+      const register = foreground ? registerAgentForeground : registerAsyncAgent
+      register({ ...params, description: 'successor' })
+      await recordSidechainTranscript([createUserMessage({ content: 'new B output' })], agentId)
+      completionB = completeAgentTask({ agentId, content: [] } as never, setAppState)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      const statusWhileAWasPending = state.tasks[agentId]?.status
+      release.resolve()
+      await completionB
+      await Promise.all(links)
+      expect(await readFile(getTaskOutputPath(agentId), 'utf8')).toContain('new B output')
+      expect(statusWhileAWasPending).toBe('running')
+    } finally {
+      release.resolve()
+      await completionA
+      await completionB
+      await Promise.all(links)
+      killAsyncAgent(agentId, setAppState)
+    }
+  })
 }
 
 test('retained transcript lookup rejects output links outside generated agent storage', async () => {

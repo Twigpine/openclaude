@@ -52,7 +52,7 @@ export async function execAgentHook(
 
   // Get transcript path from context
   const transcriptPath = toolUseContext.agentId
-    ? getAgentTranscriptPath(toolUseContext.agentId)
+    ? toolUseContext.getAgentTranscriptPath?.(toolUseContext.agentId) ?? getAgentTranscriptPath(toolUseContext.agentId)
     : getTranscriptPath()
   const hookStartTime = Date.now()
   try {

@@ -3897,7 +3897,7 @@ export async function* executeStopHooks(
         hook_event_name: 'SubagentStop',
         stop_hook_active: stopHookActive,
         agent_id: subagentId,
-        agent_transcript_path: getAgentTranscriptPath(subagentId),
+        agent_transcript_path: toolUseContext?.getAgentTranscriptPath?.(subagentId) ?? getAgentTranscriptPath(subagentId),
         agent_type: agentType ?? '',
         last_assistant_message: lastAssistantText,
       }
