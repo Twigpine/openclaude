@@ -158,6 +158,7 @@ const PRESET_ORDER = [
   'Atomic Chat',
   'Ollama',
   'LongCat',
+  'Merge Gateway',
   'MiniMax',
   'Mistral AI',
   'Moonshot AI - API',

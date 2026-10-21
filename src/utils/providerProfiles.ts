@@ -1355,8 +1355,10 @@ export function applyProviderProfileToProcessEnv(
     if (route.routeId === 'merge-gateway' || isMergeGatewayProfile(profile)) {
       openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'merge-gateway'
       if (isMergeGatewayProfile(profile)) {
+        // Reuse the source-profile guards above: retargeting a protected
+        // provider to Merge does not transfer ownership of its saved key.
         const mergeKey =
-          sanitizeApiKey(profile.apiKey) ||
+          sanitizeApiKey(openAIProfileEnv.OPENAI_API_KEY) ||
           sanitizeApiKey(process.env.MERGE_GATEWAY_API_KEY)
         if (mergeKey) openAIProfileEnv.MERGE_GATEWAY_API_KEY = mergeKey
       }
