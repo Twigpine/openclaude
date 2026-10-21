@@ -475,8 +475,10 @@ export function startBackgroundSession({
 
       // Persist the pre-backgrounding conversation to the task's isolated
       // transcript so TaskOutput shows context immediately. Subsequent
-      // messages are written incrementally below.
-      void recordSidechainTranscript(messages, taskId).catch(err =>
+      // messages are written incrementally below. Unlike regular agents, this
+      // lifecycle follows clear's live output link and does not reconcile a
+      // submission-time destination on completion. Keep its late path selection.
+      void recordSidechainTranscript(messages, taskId, undefined, { captureDestination: false }).catch(err =>
         logForDebugging(`bg-session initial transcript write failed: ${err}`),
       )
 
@@ -516,7 +518,7 @@ export function startBackgroundSession({
         // Per-message write (matches runAgent.ts pattern) — gives live
         // TaskOutput progress and keeps the transcript file current even if
         // /clear re-links the symlink mid-run.
-        void recordSidechainTranscript([event], taskId, lastRecordedUuid).catch(
+        void recordSidechainTranscript([event], taskId, lastRecordedUuid, { captureDestination: false }).catch(
           err => logForDebugging(`bg-session transcript write failed: ${err}`),
         )
         lastRecordedUuid = event.uuid
