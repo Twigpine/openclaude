@@ -42,10 +42,11 @@ describe('local-agent completion output barrier', () => {
     test(`waits for ${foreground ? 'foreground' : 'async'} output initialization and eviction`, async () => {
       const link = deferred()
       const eviction = deferred()
+      const evict = mock(() => eviction.promise)
       mock.module('../../utils/task/diskOutput.js', () => ({
         ...actualDiskOutput,
         initTaskOutputAsSymlink: () => link.promise.then(() => '/output'),
-        evictTaskOutput: () => eviction.promise,
+        evictTaskOutput: evict,
       }))
       const { registerAsyncAgent, registerAgentForeground, completeAgentTask } = await import('./LocalAgentTask.js')
       const { getTask, setAppState } = state()
@@ -55,10 +56,14 @@ describe('local-agent completion output barrier', () => {
       const result = { agentId, content: [] } as unknown as AgentToolResult
       const completion = completeAgentTask(result, setAppState)
       try {
-        eviction.resolve()
         await settle()
         expect(getTask(agentId).status).toBe('running')
+        expect(evict).not.toHaveBeenCalled()
         link.resolve()
+        await settle()
+        expect(evict).toHaveBeenCalledTimes(1)
+        expect(getTask(agentId).status).toBe('running')
+        eviction.resolve()
         await completion
         expect(getTask(agentId).status).toBe('completed')
         expect(getTask(agentId).result).toBe(result)

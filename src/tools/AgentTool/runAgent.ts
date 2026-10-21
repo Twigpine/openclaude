@@ -45,6 +45,7 @@ import type {
 } from '../../types/message.js'
 import { createAttachmentMessage } from '../../utils/attachments.js'
 import { AbortError } from '../../utils/errors.js'
+import { raceAbort } from '../../utils/boundedAsync.js'
 import { getDisplayPath } from '../../utils/file.js'
 import {
   cloneFileStateCache,
@@ -858,9 +859,15 @@ export async function* runAgent({
     // resolves after the local append, without flushing unrelated sessions.
     // Preserve the identity-metadata gate and best-effort persistence policy.
     if (metadataWritten) {
-      await recordSidechainTranscript(initialMessages, agentId).catch(err =>
-        logForDebugging(`Failed to record sidechain transcript: ${err}`),
-      )
+      // Storage owns a cleaned message array and tracks this producer even
+      // when cancellation releases the runner before its append finishes.
+      await raceAbort(
+        recordSidechainTranscript(initialMessages, agentId),
+        agentAbortController.signal,
+      ).catch(err => {
+        if (agentAbortController.signal.aborted) throw new AbortError()
+        logForDebugging(`Failed to record sidechain transcript: ${err}`)
+      })
     } else {
       logForDebugging('Skipping initial transcript write because identity metadata persistence failed')
     }
@@ -929,13 +936,13 @@ export async function* runAgent({
           // Record only the new message with correct parent (O(1) per message)
           // Only write if identity metadata was successfully persisted.
           if (metadataWritten) {
-            await recordSidechainTranscript(
-              [message],
-              agentId,
-              lastRecordedUuid,
-            ).catch(err =>
-              logForDebugging(`Failed to record sidechain transcript: ${err}`),
-            )
+            await raceAbort(
+              recordSidechainTranscript([message], agentId, lastRecordedUuid),
+              agentAbortController.signal,
+            ).catch(err => {
+              if (agentAbortController.signal.aborted) throw new AbortError()
+              logForDebugging(`Failed to record sidechain transcript: ${err}`)
+            })
           }
           if (message.type !== 'progress') {
             lastRecordedUuid = message.uuid
