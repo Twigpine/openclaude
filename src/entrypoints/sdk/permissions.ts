@@ -598,7 +598,19 @@ export async function connectSdkMcpServers(
         // embedder is told the server needs auth and handed no way to act on
         // that, since `system:init` reports the status and nothing else can.
         if (client.type === 'needs-auth') {
-          return { client, tools: [createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig)] }
+          // The embedder's session connects its MCP servers once and does not
+          // re-read the tool pool after a reconnect (v2.ts, self.mcpConnected),
+          // so tell the model a new session is needed rather than promising
+          // tools this one will not offer. Reconnecting in place is proposal 2
+          // in #2294.
+          return {
+            client,
+            tools: [
+              createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig, {
+                realToolsInCurrentContext: false,
+              }),
+            ],
+          }
         }
 
         // Return failed/pending client with no tools
