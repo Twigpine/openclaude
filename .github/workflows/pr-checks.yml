@@ -106,7 +106,6 @@ jobs:
         run: bun run test:conversation-arc
 
       - name: Context efficiency tests
-        if: ${{ !cancelled() }}
         run: bun run test:context-efficiency
 
   launcher-compatibility:

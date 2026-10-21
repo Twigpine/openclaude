@@ -121,7 +121,7 @@ test('selected shards partition the same files as the serial run exactly once', 
       await writeFile(fixture, `
         import { test } from 'bun:test'
         import { appendFileSync } from 'node:fs'
-        test('fixture ${index + 1}', () => appendFileSync(${JSON.stringify(marker)}, '${index + 1}\\n'))
+        test('fixture ${index + 1}', () => appendFileSync(process.env.OC_TEST_MARKER!, '${index + 1}\\n'))
       `)
     }
     const run = async (shardIndex?: number) => {
@@ -130,7 +130,7 @@ test('selected shards partition the same files as the serial run exactly once', 
         process.execPath, runner, '--shards=8',
         ...(shardIndex === undefined ? [] : [`--shard-index=${shardIndex}`]),
         ...fixtures,
-      ], { stdout: 'pipe', stderr: 'pipe' })
+      ], { stdout: 'pipe', stderr: 'pipe', env: { ...process.env, OC_TEST_MARKER: marker } })
       const [exitCode, stdout, stderr] = await Promise.all([
         child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
       ])
