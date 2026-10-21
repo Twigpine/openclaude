@@ -15,7 +15,7 @@ import { createAbortController, createChildAbortController } from '../../utils/a
 import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { getToolSearchOrReadInfo } from '../../utils/collapseReadSearch.js';
 import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
-import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
+import { flushSessionStorage, getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { requestAbort } from '../../utils/interruptionTrace.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
@@ -425,6 +425,23 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
  */
 export async function completeAgentTask(result: AgentToolResult, setAppState: SetAppState): Promise<void> {
   const taskId = result.agentId;
+  // ORC-1337: the durable-output barrier must precede the observable terminal
+  // state. TaskOutput(block=true) releases readers the moment it sees a
+  // terminal status — a caller-side await cannot re-block them — so the
+  // output file must be fully on disk before status flips to 'completed'.
+  //
+  // Two write paths feed that file:
+  // - Local agents: the output path is a symlink to the session transcript
+  //   (initTaskOutputAsSymlink → getAgentTranscriptPath), written by the
+  //   session-storage queue via recordSidechainTranscript. No DiskTaskOutput
+  //   entry exists for it, so evictTaskOutput alone resolves without waiting.
+  //   flushSessionStorage() drains that queue, including in-flight chains.
+  // - DiskTaskOutput writers (appendTaskOutput): flushed and evicted below.
+  //
+  // gh-20236 is unaffected: notification embellishments
+  // (classifyHandoffIfNeeded, worktree cleanup) stay outside this barrier.
+  await flushSessionStorage();
+  await evictTaskOutput(taskId);
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.status !== 'running') {
       return task;
@@ -441,7 +458,6 @@ export async function completeAgentTask(result: AgentToolResult, setAppState: Se
       selectedAgent: undefined
     };
   });
-  await evictTaskOutput(taskId);
   // Note: Notification is sent by AgentTool via enqueueAgentNotification
 }
 

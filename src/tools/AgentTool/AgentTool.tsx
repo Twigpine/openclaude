@@ -1151,10 +1151,12 @@ export const AgentTool = buildTool({
                     }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
 
-                    // Await eviction to ensure disk writes complete before task
-                    // marked complete (ORC-1337). classifyHandoffIfNeeded and
-                    // cleanupWorktreeIfNeeded run AFTER status transition so they
-                    // cannot block TaskOutput unblock (gh-20236).
+                    // completeAgentTask flushes session storage + task output
+                    // BEFORE flipping status, so readers released by the
+                    // terminal state never see a partially written file
+                    // (ORC-1337). classifyHandoffIfNeeded and
+                    // cleanupWorktreeIfNeeded run AFTER status transition so
+                    // they cannot block TaskOutput unblock (gh-20236).
                     await completeAsyncAgent(agentResult, rootSetAppState);
 
                     // Extract text from agent result content for the notification

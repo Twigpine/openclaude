@@ -615,11 +615,12 @@ export async function runAsyncAgentLifecycle({
 
     const agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
 
-    // Mark task completed FIRST so TaskOutput(block=true) unblocks
-    // immediately. classifyHandoffIfNeeded (API call) and getWorktreeResult
-    // (git exec) are notification embellishments that can hang — they must
-    // not gate the status transition (gh-20236).
-    // Awaiting eviction ensures disk writes complete before task marked complete (ORC-1337).
+    // completeAgentTask flushes session storage + task output BEFORE flipping
+    // status, so TaskOutput(block=true) readers released by the terminal
+    // state never see a partially written file (ORC-1337).
+    // classifyHandoffIfNeeded (API call) and getWorktreeResult (git exec) are
+    // notification embellishments that can hang — they run after the status
+    // transition and must not gate it (gh-20236).
     await completeAsyncAgent(agentResult, rootSetAppState)
 
     let finalMessage = extractTextContent(agentResult.content, '\n')
