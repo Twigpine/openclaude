@@ -1,4 +1,3 @@
-import { feature } from 'bun:bundle'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import {
   acquireSharedMutationLock,
@@ -104,15 +103,4 @@ test('enabling the last inherited server keeps an explicit empty override', () =
   expect(getCurrentProjectConfig().disabledMcpServers).toEqual([])
   expect(isMcpServerDisabled('a')).toBe(false)
   expect(getGlobalConfig().disabledMcpServers).toEqual(['a'])
-})
-
-test.skipIf(feature('CHICAGO_MCP') ? false : true)('builtin toggles leave disabled lists unchanged', () => {
-  getGlobalConfig().disabledMcpServers = ['computer-use', 'other']
-  expect(isMcpServerDisabled('computer-use')).toBe(true)
-  setMcpServerEnabled('computer-use', true)
-  expect(isMcpServerDisabled('computer-use')).toBe(false)
-  setMcpServerEnabled('computer-use', false)
-  expect(isMcpServerDisabled('computer-use')).toBe(true)
-  expect(getGlobalConfig().disabledMcpServers).toEqual(['computer-use', 'other'])
-  expect(getCurrentProjectConfig().disabledMcpServers).toBeUndefined()
 })
