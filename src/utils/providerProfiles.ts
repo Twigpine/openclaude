@@ -1359,7 +1359,9 @@ export function applyProviderProfileToProcessEnv(
         // provider to Merge does not transfer ownership of its saved key.
         const mergeKey =
           sanitizeApiKey(openAIProfileEnv.OPENAI_API_KEY) ||
-          sanitizeApiKey(process.env.MERGE_GATEWAY_API_KEY)
+          (route.routeId === 'merge-gateway'
+            ? sanitizeApiKey(process.env.MERGE_GATEWAY_API_KEY)
+            : undefined)
         if (mergeKey) openAIProfileEnv.MERGE_GATEWAY_API_KEY = mergeKey
       }
     }

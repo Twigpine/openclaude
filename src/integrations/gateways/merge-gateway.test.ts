@@ -203,7 +203,7 @@ test.each(['merge-gateway', 'openai', 'custom'])('%s saved profiles authorize Me
       }
       process.env.MERGE_GATEWAY_API_KEY = 'ambient-merge-key';
       applyProviderProfileToProcessEnv({ ...profile, apiKey: undefined });
-      assert.equal(process.env.MERGE_GATEWAY_API_KEY, 'ambient-merge-key');
+      assert.equal(process.env.MERGE_GATEWAY_API_KEY, '${provider}' === 'merge-gateway' ? 'ambient-merge-key' : undefined);
     `)
     for (const startup of ['legacy', 'plural']) await run(`
       import assert from 'node:assert/strict';
@@ -271,7 +271,7 @@ test.each(['commandcode', 'apismart', 'concentrate', 'api-route', 'llmtr', 'gmi-
         model: 'openai/gpt-5.5', messages: [{ role: 'user', content: 'hello' }], max_tokens: 32, stream: false,
       });
       await discoverModelsForRoute('merge-gateway', { forceRefresh: true });
-      const auth = ambientKey ? 'Bearer ' + ambientKey : null;
+      const auth = null;
       assert.deepEqual(calls, [
         { url: 'https://api-gateway.merge.dev/v1/openai/chat/completions', auth },
         { url: 'https://api-gateway.merge.dev/v1/models', auth },
@@ -287,6 +287,35 @@ test.each(['commandcode', 'apismart', 'concentrate', 'api-route', 'llmtr', 'gmi-
     rmSync(configDir, { recursive: true, force: true })
   }
 }, 30_000)
+
+test('a retargeted profile cannot inherit the previous Merge session credential', async () => {
+  await acquireSharedMutationLock('merge-gateway.test.ts')
+  const previousEnv = { ...process.env }
+  try {
+    const { applyProviderProfileToProcessEnv } = await import('../../utils/providerProfiles.js')
+    if (!mergeGateway.defaultBaseUrl) throw new Error('defaultBaseUrl missing')
+    const profile = {
+      id: 'merge-session', name: 'Merge', provider: 'merge-gateway',
+      baseUrl: mergeGateway.defaultBaseUrl, model: 'default_routing',
+      apiKey: 'saved-merge-key',
+    }
+    applyProviderProfileToProcessEnv(profile)
+    expect(process.env.MERGE_GATEWAY_API_KEY).toBe('saved-merge-key')
+
+    applyProviderProfileToProcessEnv({
+      ...profile, id: 'retargeted', name: 'Retargeted', provider: 'apismart',
+      apiKey: 'source-provider-secret',
+    })
+    expect(process.env.MERGE_GATEWAY_API_KEY).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  } finally {
+    for (const name of Object.keys(process.env)) {
+      if (!(name in previousEnv)) delete process.env[name]
+    }
+    Object.assign(process.env, previousEnv)
+    releaseSharedMutationLock()
+  }
+})
 
 test('Merge credentials are withheld from retargeted inference and startup', async () => {
   const { resolveRouteCredentialValue } = await import('../routeMetadata.js')

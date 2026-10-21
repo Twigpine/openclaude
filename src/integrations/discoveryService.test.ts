@@ -256,6 +256,44 @@ describe('discoverModelsForRoute', () => {
     expect(urls).toHaveLength(2)
   })
 
+  test('allows each Merge discovery page its own timeout', async () => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    process.env.MERGE_GATEWAY_API_KEY = 'merge-key'
+    let calls = 0
+    const fetchMock = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+      const page = ++calls
+      const signal = init?.signal
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', onAbort)
+          reject(signal?.reason)
+        }
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve()
+        }, 2000)
+        signal?.addEventListener('abort', onAbort, { once: true })
+        if (signal?.aborted) onAbort()
+      })
+      return new Response(JSON.stringify({
+        data: [{ model: `provider/page-${page}` }],
+        has_more: page < 3, next_cursor: page < 3 ? `page-${page + 1}` : null,
+      }))
+    })
+    setMockFetch(fetchMock as unknown as typeof globalThis.fetch)
+
+    const result = await discoverModelsForRoute('merge-gateway', { forceRefresh: true })
+    expect(result).toMatchObject({ source: 'network', discoveredModelCount: 3, error: null })
+    expect(result?.models.map(model => model.apiName).filter(name => name.startsWith('provider/page-'))).toEqual([
+      'provider/page-1', 'provider/page-2', 'provider/page-3',
+    ])
+    const cached = await discoverModelsForRoute('merge-gateway')
+    expect(cached?.source).toBe('cache')
+    expect(cached?.models).toEqual(result?.models)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  }, 15_000)
+
   test.each(['http-error', 'repeated-cursor', 'missing-cursor', 'page-bound'])('incomplete Merge discovery preserves fallback: %s', async failure => {
     const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
     process.env.MERGE_GATEWAY_API_KEY = 'merge-key'

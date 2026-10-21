@@ -339,37 +339,39 @@ export async function fetchMergeGatewayModelsRaw(options: {
   apiKey?: string
 }): Promise<Record<string, unknown>[] | null> {
   if (!isCanonicalMergeGatewayInferenceBaseUrl(options.baseUrl)) return null
-  const { signal, clear } = withTimeoutSignal(5000)
   try {
     const url = new URL('/v1/models', options.baseUrl)
     const models: Record<string, unknown>[] = []
     const cursors = new Set<string>()
     for (let page = 0; page < 100; page++) {
-      const response = await fetch(url.toString(), {
-        method: 'GET',
-        headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : undefined,
-        signal,
-        redirect: 'error',
-      })
-      if (!response.ok) return null
-      const payload = await response.json() as {
-        data?: Record<string, unknown>[]
-        has_more?: boolean
-        next_cursor?: string | null
+      const { signal, clear } = withTimeoutSignal(5000)
+      try {
+        const response = await fetch(url.toString(), {
+          method: 'GET',
+          headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : undefined,
+          signal,
+          redirect: 'error',
+        })
+        if (!response.ok) return null
+        const payload = await response.json() as {
+          data?: Record<string, unknown>[]
+          has_more?: boolean
+          next_cursor?: string | null
+        }
+        if (!Array.isArray(payload.data)) return null
+        models.push(...payload.data)
+        if (!payload.has_more) return models
+        const cursor = payload.next_cursor
+        if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) return null
+        cursors.add(cursor)
+        url.searchParams.set('cursor', cursor)
+      } finally {
+        clear()
       }
-      if (!Array.isArray(payload.data)) return null
-      models.push(...payload.data)
-      if (!payload.has_more) return models
-      const cursor = payload.next_cursor
-      if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) return null
-      cursors.add(cursor)
-      url.searchParams.set('cursor', cursor)
     }
     return null
   } catch {
     return null
-  } finally {
-    clear()
   }
 }
 
