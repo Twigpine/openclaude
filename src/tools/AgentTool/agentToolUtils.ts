@@ -619,7 +619,8 @@ export async function runAsyncAgentLifecycle({
     // immediately. classifyHandoffIfNeeded (API call) and getWorktreeResult
     // (git exec) are notification embellishments that can hang — they must
     // not gate the status transition (gh-20236).
-    completeAsyncAgent(agentResult, rootSetAppState)
+    // Awaiting eviction ensures disk writes complete before task marked complete (ORC-1337).
+    await completeAsyncAgent(agentResult, rootSetAppState)
 
     let finalMessage = extractTextContent(agentResult.content, '\n')
 

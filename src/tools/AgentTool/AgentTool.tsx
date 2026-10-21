@@ -1151,11 +1151,11 @@ export const AgentTool = buildTool({
                     }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
 
-                    // Mark task completed FIRST so TaskOutput(block=true)
-                    // unblocks immediately. classifyHandoffIfNeeded and
-                    // cleanupWorktreeIfNeeded can hang — they must not gate
-                    // the status transition (gh-20236).
-                    completeAsyncAgent(agentResult, rootSetAppState);
+                    // Await eviction to ensure disk writes complete before task
+                    // marked complete (ORC-1337). classifyHandoffIfNeeded and
+                    // cleanupWorktreeIfNeeded run AFTER status transition so they
+                    // cannot block TaskOutput unblock (gh-20236).
+                    await completeAsyncAgent(agentResult, rootSetAppState);
 
                     // Extract text from agent result content for the notification
                     let finalMessage = extractTextContent(agentResult.content, '\n');

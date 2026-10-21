@@ -423,7 +423,7 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
 /**
  * Complete an agent task with result.
  */
-export function completeAgentTask(result: AgentToolResult, setAppState: SetAppState): void {
+export async function completeAgentTask(result: AgentToolResult, setAppState: SetAppState): Promise<void> {
   const taskId = result.agentId;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.status !== 'running') {
@@ -441,7 +441,7 @@ export function completeAgentTask(result: AgentToolResult, setAppState: SetAppSt
       selectedAgent: undefined
     };
   });
-  void evictTaskOutput(taskId);
+  await evictTaskOutput(taskId);
   // Note: Notification is sent by AgentTool via enqueueAgentNotification
 }
 
