@@ -143,6 +143,10 @@ test('A SERVER THAT NEEDS SIGNING INTO ARRIVES WITH THE AUTHENTICATE TOOL', asyn
   const said = await tools[0]!.description({} as never, {} as never)
   expect(said).toContain('gated')
   expect(said).toContain('authentication')
+  // The embedder's session connects its MCP servers once and does not pick
+  // the real tools up after auth (v2.ts, self.mcpConnected), so the SDK path
+  // must not promise that it will. Raised in review on the PR.
+  expect(said).toContain('new session')
 }, 30_000)
 
 /**
