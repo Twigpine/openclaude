@@ -18,6 +18,10 @@ import type {
   LocalJSXCommandOnDone,
 } from '../../types/command.js'
 
+const realSessionStorage = {
+  ...await import(`../../utils/sessionStorage.js?real=${Date.now()}-${Math.random()}`),
+}
+
 type OnDoneArgs = Parameters<LocalJSXCommandOnDone>
 
 let saveGoalStateMock: ReturnType<typeof mock>
@@ -196,6 +200,7 @@ describe('/resume and /continue unified command', () => {
 
   afterEach(() => {
     mock.restore()
+    mock.module('../../utils/sessionStorage.js', () => realSessionStorage)
   })
 
   test('/continue continues an active goal', async () => {
