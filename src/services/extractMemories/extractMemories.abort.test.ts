@@ -42,6 +42,64 @@ function createContext(messageUuids: string | string[]): any {
   }
 }
 
+function registerExtractMemoriesStubs({
+  runForkedAgent,
+  debugLog,
+  events,
+}: {
+  runForkedAgent: ReturnType<typeof mock>
+  debugLog: ReturnType<typeof mock<(message: string) => void>>
+  events: string[]
+}) {
+  mock.module('../../bootstrap/state.js', () => ({
+    ...realBootstrapState,
+    getIsRemoteMode: () => false,
+  }))
+  mock.module('../../memdir/memoryScan.js', () => ({
+    ...realMemoryScan,
+    formatMemoryManifest: () => 'No memories yet.',
+    scanMemoryFiles: async () => [],
+  }))
+  mock.module('../../memdir/paths.js', () => ({
+    ...realPaths,
+    getAutoMemPath: () => '/tmp/memory-extraction-test',
+    isAutoMemoryEnabled: () => true,
+    isAutoMemPath: () => false,
+  }))
+  mock.module('../../utils/governancePolicy.js', () => ({
+    ...realGovernance,
+    isMemoryWriteApprovalRequired: () => false,
+  }))
+  mock.module('../../utils/debug.js', () => ({
+    ...realDebug,
+    logForDebugging: debugLog,
+  }))
+  mock.module('../../utils/forkedAgent.js', () => ({
+    ...realForkedAgent,
+    createCacheSafeParams: (context: any) => ({
+      systemPrompt: context.systemPrompt,
+      userContext: context.userContext,
+      systemContext: context.systemContext,
+      toolUseContext: context.toolUseContext,
+      forkContextMessages: context.messages,
+    }),
+    runForkedAgent,
+  }))
+  mock.module('../analytics/growthbook.js', () => ({
+    ...realGrowthbook,
+    getFeatureValue_CACHED_MAY_BE_STALE: (
+      key: string,
+      defaultValue: unknown,
+    ) => (key === 'tengu_passport_quail' ? true : defaultValue),
+  }))
+  mock.module('../analytics/index.js', () => ({
+    ...realAnalytics,
+    logEvent: (name: string) => {
+      events.push(name)
+    },
+  }))
+}
+
 describe('extractMemories cancellation', () => {
   beforeEach(async () => {
     await acquireSharedMutationLock('extractMemories.abort.test.ts')
@@ -94,53 +152,7 @@ describe('extractMemories cancellation', () => {
       })
     })
 
-    mock.module('../../bootstrap/state.js', () => ({
-      ...realBootstrapState,
-      getIsRemoteMode: () => false,
-    }))
-    mock.module('../../memdir/memoryScan.js', () => ({
-      ...realMemoryScan,
-      formatMemoryManifest: () => 'No memories yet.',
-      scanMemoryFiles: async () => [],
-    }))
-    mock.module('../../memdir/paths.js', () => ({
-      ...realPaths,
-      getAutoMemPath: () => '/tmp/memory-extraction-test',
-      isAutoMemoryEnabled: () => true,
-      isAutoMemPath: () => false,
-    }))
-    mock.module('../../utils/governancePolicy.js', () => ({
-      ...realGovernance,
-      isMemoryWriteApprovalRequired: () => false,
-    }))
-    mock.module('../../utils/debug.js', () => ({
-      ...realDebug,
-      logForDebugging: debugLog,
-    }))
-    mock.module('../../utils/forkedAgent.js', () => ({
-      ...realForkedAgent,
-      createCacheSafeParams: (context: any) => ({
-        systemPrompt: context.systemPrompt,
-        userContext: context.userContext,
-        systemContext: context.systemContext,
-        toolUseContext: context.toolUseContext,
-        forkContextMessages: context.messages,
-      }),
-      runForkedAgent,
-    }))
-    mock.module('../analytics/growthbook.js', () => ({
-      ...realGrowthbook,
-      getFeatureValue_CACHED_MAY_BE_STALE: (
-        key: string,
-        defaultValue: unknown,
-      ) => (key === 'tengu_passport_quail' ? true : defaultValue),
-    }))
-    mock.module('../analytics/index.js', () => ({
-      ...realAnalytics,
-      logEvent: (name: string) => {
-        events.push(name)
-      },
-    }))
+    registerExtractMemoriesStubs({ runForkedAgent, debugLog, events })
 
     const { executeExtractMemories, initExtractMemories } = await import(
       `./extractMemories.js?ts=${Date.now()}-${Math.random()}`
@@ -202,53 +214,7 @@ describe('extractMemories cancellation', () => {
       })
     })
 
-    mock.module('../../bootstrap/state.js', () => ({
-      ...realBootstrapState,
-      getIsRemoteMode: () => false,
-    }))
-    mock.module('../../memdir/memoryScan.js', () => ({
-      ...realMemoryScan,
-      formatMemoryManifest: () => 'No memories yet.',
-      scanMemoryFiles: async () => [],
-    }))
-    mock.module('../../memdir/paths.js', () => ({
-      ...realPaths,
-      getAutoMemPath: () => '/tmp/memory-extraction-test',
-      isAutoMemoryEnabled: () => true,
-      isAutoMemPath: () => false,
-    }))
-    mock.module('../../utils/governancePolicy.js', () => ({
-      ...realGovernance,
-      isMemoryWriteApprovalRequired: () => false,
-    }))
-    mock.module('../../utils/debug.js', () => ({
-      ...realDebug,
-      logForDebugging: debugLog,
-    }))
-    mock.module('../../utils/forkedAgent.js', () => ({
-      ...realForkedAgent,
-      createCacheSafeParams: (context: any) => ({
-        systemPrompt: context.systemPrompt,
-        userContext: context.userContext,
-        systemContext: context.systemContext,
-        toolUseContext: context.toolUseContext,
-        forkContextMessages: context.messages,
-      }),
-      runForkedAgent,
-    }))
-    mock.module('../analytics/growthbook.js', () => ({
-      ...realGrowthbook,
-      getFeatureValue_CACHED_MAY_BE_STALE: (
-        key: string,
-        defaultValue: unknown,
-      ) => (key === 'tengu_passport_quail' ? true : defaultValue),
-    }))
-    mock.module('../analytics/index.js', () => ({
-      ...realAnalytics,
-      logEvent: (name: string) => {
-        events.push(name)
-      },
-    }))
+    registerExtractMemoriesStubs({ runForkedAgent, debugLog, events })
 
     const { executeExtractMemories, initExtractMemories } = await import(
       `./extractMemories.js?ts=${Date.now()}-${Math.random()}`
@@ -307,53 +273,7 @@ describe('extractMemories cancellation', () => {
       })
     })
 
-    mock.module('../../bootstrap/state.js', () => ({
-      ...realBootstrapState,
-      getIsRemoteMode: () => false,
-    }))
-    mock.module('../../memdir/memoryScan.js', () => ({
-      ...realMemoryScan,
-      formatMemoryManifest: () => 'No memories yet.',
-      scanMemoryFiles: async () => [],
-    }))
-    mock.module('../../memdir/paths.js', () => ({
-      ...realPaths,
-      getAutoMemPath: () => '/tmp/memory-extraction-test',
-      isAutoMemoryEnabled: () => true,
-      isAutoMemPath: () => false,
-    }))
-    mock.module('../../utils/governancePolicy.js', () => ({
-      ...realGovernance,
-      isMemoryWriteApprovalRequired: () => false,
-    }))
-    mock.module('../../utils/debug.js', () => ({
-      ...realDebug,
-      logForDebugging: debugLog,
-    }))
-    mock.module('../../utils/forkedAgent.js', () => ({
-      ...realForkedAgent,
-      createCacheSafeParams: (context: any) => ({
-        systemPrompt: context.systemPrompt,
-        userContext: context.userContext,
-        systemContext: context.systemContext,
-        toolUseContext: context.toolUseContext,
-        forkContextMessages: context.messages,
-      }),
-      runForkedAgent,
-    }))
-    mock.module('../analytics/growthbook.js', () => ({
-      ...realGrowthbook,
-      getFeatureValue_CACHED_MAY_BE_STALE: (
-        key: string,
-        defaultValue: unknown,
-      ) => (key === 'tengu_passport_quail' ? true : defaultValue),
-    }))
-    mock.module('../analytics/index.js', () => ({
-      ...realAnalytics,
-      logEvent: (name: string) => {
-        events.push(name)
-      },
-    }))
+    registerExtractMemoriesStubs({ runForkedAgent, debugLog, events })
 
     const { executeExtractMemories, initExtractMemories } = await import(
       `./extractMemories.js?ts=${Date.now()}-${Math.random()}`

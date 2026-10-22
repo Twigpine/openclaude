@@ -6,6 +6,7 @@ import {
   describe,
   expect,
   mock,
+  spyOn,
   test,
   vi,
 } from 'bun:test'
@@ -363,8 +364,22 @@ export type CompactMockOptions = {
  * mocks that the provider gate test specifically depends on; all others are
  * DEFENSIVE (prevent transitive import / side-effect / I/O failures).
  */
-function registerCommonCompactStubs(options: CompactMockOptions = {}) {
+async function registerCommonCompactStubs(options: CompactMockOptions = {}) {
   mock.restore()
+
+  const [config, path, settings, model] = await Promise.all([
+    import('../../utils/config.js'),
+    import('../../utils/path.js'),
+    import('../../utils/settings/settings.js'),
+    import('../../utils/model/model.js'),
+  ])
+  spyOn(config, 'getMemoryPath').mockReturnValue('/tmp/memory')
+  if (options.getGlobalConfig) {
+    spyOn(config, 'getGlobalConfig').mockImplementation(options.getGlobalConfig)
+  }
+  spyOn(path, 'expandPath').mockImplementation((p: string) => p)
+  spyOn(settings, 'getInitialSettings').mockReturnValue({})
+  spyOn(model, 'getCanonicalName').mockImplementation((m: string) => m)
 
   // --- Provider gate control ---
   // The isAnthropicProvider() gate is exercised via environment variables
@@ -510,15 +525,6 @@ function registerCommonCompactStubs(options: CompactMockOptions = {}) {
     groupMessagesByApiRound: mock((msgs: Message[]) => [msgs]),
   }))
 
-  // --- Config (DEFENSIVE) ---
-  mock.module('../../utils/config.js', () => ({
-    ..._realConfigModule,
-    getMemoryPath: mock(() => '/tmp/memory'),
-    ...(options.getGlobalConfig
-      ? { getGlobalConfig: options.getGlobalConfig }
-      : {}),
-  }))
-
   // --- File state cache (DEFENSIVE) ---
   mock.module('../../utils/fileStateCache.js', () => ({
     cacheToObject: mock(() => ({})),
@@ -553,12 +559,6 @@ function registerCommonCompactStubs(options: CompactMockOptions = {}) {
   mock.module('../../utils/plans.js', () => ({
     getPlan: mock(() => null),
     getPlanFilePath: mock(() => '/tmp/plan'),
-  }))
-
-  // --- Path (DEFENSIVE) ---
-  mock.module('../../utils/path.js', () => ({
-    ..._realPathModule,
-    expandPath: mock((p: string) => p),
   }))
 
   // --- Sleep (DEFENSIVE) ---
@@ -646,18 +646,6 @@ function registerCommonCompactStubs(options: CompactMockOptions = {}) {
     get3PModelCapabilityOverride: mock(() => undefined),
   }))
 
-  // --- Settings (DEFENSIVE) ---
-  mock.module('../../utils/settings/settings.js', () => ({
-    ..._realSettingsModule,
-    getInitialSettings: mock(() => ({})),
-  }))
-
-  // --- Model (DEFENSIVE) ---
-  mock.module('../../utils/model/model.js', () => ({
-    ..._realModelModule,
-    getCanonicalName: mock((m: string) => m),
-  }))
-
   return { runForkedAgent }
 }
 
@@ -682,7 +670,7 @@ function registerCommonCompactStubs(options: CompactMockOptions = {}) {
  *   trigger hundreds of failed transitive resolution steps.
  */
 async function importCompact(options: CompactMockOptions = {}) {
-  const { runForkedAgent } = registerCommonCompactStubs(options)
+  const { runForkedAgent } = await registerCommonCompactStubs(options)
 
   // Dynamic import with cache-busting so each test gets fresh module state
   const nonce = `${Date.now()}-${Math.random()}`
@@ -818,6 +806,143 @@ afterAll(async () => {
   } finally {
     releaseSharedMutationLock()
   }
+})
+
+describe('compact media stripping', () => {
+  test('strips top-level images and documents without mutating user messages', async () => {
+    const { stripImagesFromMessages } = await import(
+      `./compact.ts?test=${Date.now()}-${Math.random()}`
+    )
+    const message = {
+      type: 'user',
+      uuid: randomUUID(),
+      timestamp: '2026-10-21T00:00:00.000Z',
+      origin: { kind: 'human' },
+      isMeta: true,
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Summarize these attachments.' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+          },
+          {
+            type: 'document',
+            source: { type: 'text', media_type: 'text/plain', data: 'document' },
+          },
+        ],
+      },
+    } satisfies Message
+    const original = structuredClone(message)
+
+    expect(stripImagesFromMessages([message])).toEqual([
+      {
+        ...original,
+        message: {
+          ...original.message,
+          content: [
+            { type: 'text', text: 'Summarize these attachments.' },
+            { type: 'text', text: '[image]' },
+            { type: 'text', text: '[document]' },
+          ],
+        },
+      },
+    ])
+    expect(message).toEqual(original)
+    expect(stripImagesFromMessages([])).toEqual([])
+
+    const stringMessage = userMessage('plain text')
+    const textOnlyMessage = {
+      ...message,
+      message: { role: 'user', content: [{ type: 'text', text: 'only text' }] },
+    } satisfies Message
+    const assistant = assistantMessage('assistant text')
+    const unaffected = [stringMessage, textOnlyMessage, assistant]
+    const stripped = stripImagesFromMessages(unaffected)
+    expect(stripped).toEqual(unaffected)
+    for (const [index, unchanged] of unaffected.entries()) {
+      expect(stripped[index]).toBe(unchanged)
+    }
+  })
+
+  test('strips media inside tool results while preserving tool metadata and text', async () => {
+    const { stripImagesFromMessages } = await import(
+      `./compact.ts?test=${Date.now()}-${Math.random()}`
+    )
+    const message = {
+      type: 'user',
+      uuid: randomUUID(),
+      timestamp: '2026-10-21T00:00:00.000Z',
+      sourceToolUseID: 'toolu_media',
+      toolUseResult: { status: 'failed' },
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'before the tool result' },
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_media',
+            is_error: true,
+            content: [
+              { type: 'text', text: 'tool text' },
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+              },
+              {
+                type: 'document',
+                source: { type: 'text', media_type: 'text/plain', data: 'document' },
+              },
+              { type: 'text', text: 'trailing tool text' },
+            ],
+          },
+          { type: 'tool_result', tool_use_id: 'toolu_string', content: 'string result' },
+          { type: 'tool_result', tool_use_id: 'toolu_empty', content: [] },
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_text',
+            content: [{ type: 'text', text: 'text-only result' }],
+          },
+          { type: 'text', text: 'after the tool result' },
+        ],
+      },
+    } satisfies Message
+    const original = structuredClone(message)
+    const stripped = stripImagesFromMessages([message])[0] as typeof message
+
+    expect(stripped).toEqual({
+      ...original,
+      message: {
+        ...original.message,
+        content: [
+          original.message.content[0],
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_media',
+            is_error: true,
+            content: [
+              { type: 'text', text: 'tool text' },
+              { type: 'text', text: '[image]' },
+              { type: 'text', text: '[document]' },
+              { type: 'text', text: 'trailing tool text' },
+            ],
+          },
+          ...original.message.content.slice(2),
+        ],
+      },
+    })
+    expect(message).toEqual(original)
+    for (const index of [0, 2, 3, 4, 5]) {
+      expect(stripped.message.content[index]).toBe(message.message.content[index])
+    }
+
+    const unchanged = {
+      ...message,
+      message: { ...message.message, content: message.message.content.slice(2) },
+    }
+    expect(stripImagesFromMessages([unchanged])[0]).toBe(unchanged)
+  })
 })
 
 describe('compactConversation provider gate', () => {
