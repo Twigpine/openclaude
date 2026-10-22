@@ -1,13 +1,27 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
-import * as realGrowthbook from '../../services/analytics/growthbook.js'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { getEmptyToolPermissionContext } from '../../Tool.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import * as realShell from '../../utils/Shell.js'
 import type { ExecResult, ShellCommand } from '../../utils/ShellCommand.js'
 import { SandboxManager } from '../../utils/sandbox/sandbox-adapter.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const REAL_SHELL = {
+  ...await import(`../../utils/Shell.js?real=${nonce}`),
+}
+const REAL_GROWTHBOOK = {
+  ...await import(`../../services/analytics/growthbook.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module('../../utils/Shell.js', () => REAL_SHELL)
+  mock.module('src/utils/Shell.js', () => REAL_SHELL)
+  mock.module('../../services/analytics/growthbook.js', () => REAL_GROWTHBOOK)
+  mock.module('src/services/analytics/growthbook.js', () => REAL_GROWTHBOOK)
+})
 
 const originalSandboxMethods = {
   isSandboxingEnabled: SandboxManager.isSandboxingEnabled,
@@ -107,19 +121,19 @@ async function importBashToolWithExecutionMocks() {
   )
 
   mock.module('../../utils/Shell.js', () => ({
-    ...realShell,
+    ...REAL_SHELL,
     exec: execMock,
   }))
   mock.module('src/utils/Shell.js', () => ({
-    ...realShell,
+    ...REAL_SHELL,
     exec: execMock,
   }))
   mock.module('../../services/analytics/growthbook.js', () => ({
-    ...realGrowthbook,
+    ...REAL_GROWTHBOOK,
     getFeatureValue_CACHED_MAY_BE_STALE,
   }))
   mock.module('src/services/analytics/growthbook.js', () => ({
-    ...realGrowthbook,
+    ...REAL_GROWTHBOOK,
     getFeatureValue_CACHED_MAY_BE_STALE,
   }))
 
@@ -137,11 +151,11 @@ async function importSandboxPresentationWithMocks() {
   )
 
   mock.module('../../services/analytics/growthbook.js', () => ({
-    ...realGrowthbook,
+    ...REAL_GROWTHBOOK,
     getFeatureValue_CACHED_MAY_BE_STALE,
   }))
   mock.module('src/services/analytics/growthbook.js', () => ({
-    ...realGrowthbook,
+    ...REAL_GROWTHBOOK,
     getFeatureValue_CACHED_MAY_BE_STALE,
   }))
 
