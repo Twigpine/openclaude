@@ -176,60 +176,60 @@ describe('headless --print max-turns', () => {
 
   test('forwards maxTurns 0 through runHeadless into ask()', async () => {
     await acquireSharedMutationLock('cli/printMaxTurns.test.ts')
-    const unsubscribes: Array<() => void> = []
-    const realSubscribe = settingsChangeDetector.subscribe
-    const subscribeSpy = spyOn(settingsChangeDetector, 'subscribe').mockImplementation(
-      listener => {
-        const unsubscribe = realSubscribe(listener)
-        unsubscribes.push(unsubscribe)
-        return unsubscribe
-      },
-    )
-    process.env.CLAUDE_CODE_SIMPLE = '1'
-
-    const shutdownSpy = spyOn(shutdownModule, 'gracefulShutdownSync').mockImplementation(() => {})
-    const stdoutSpy = spyOn(processModule, 'writeToStdout').mockImplementation(
-      () => {},
-    )
-    const askSpy = spyOn(queryEngineModule, 'ask').mockImplementation(
-      async function* () {
-        yield createHeadlessSuccessResult()
-      },
-    )
-
-    let state = getDefaultAppState()
-    const getAppState = () => state
-    const setAppState = (update: (previous: AppState) => AppState) => {
-      state = update(state)
-    }
-
-    let runPromise: Promise<void> | undefined
     try {
-      runPromise = runHeadless(
-        'headless prompt',
-        getAppState,
-        setAppState,
-        [] as Command[],
-        [] as Tools,
-        {},
-        [],
-        createHeadlessRunOptions(0),
+      const unsubscribes: Array<() => void> = []
+      const realSubscribe = settingsChangeDetector.subscribe
+      const subscribeSpy = spyOn(settingsChangeDetector, 'subscribe').mockImplementation(
+        listener => {
+          const unsubscribe = realSubscribe(listener)
+          unsubscribes.push(unsubscribe)
+          return unsubscribe
+        },
+      )
+      process.env.CLAUDE_CODE_SIMPLE = '1'
+
+      const shutdownSpy = spyOn(shutdownModule, 'gracefulShutdownSync').mockImplementation(() => {})
+      const stdoutSpy = spyOn(processModule, 'writeToStdout').mockImplementation(
+        () => {},
+      )
+      const askSpy = spyOn(queryEngineModule, 'ask').mockImplementation(
+        async function* () {
+          yield createHeadlessSuccessResult()
+        },
       )
 
-      await runPromise
-      expect(askSpy.mock.calls[0]?.[0]?.maxTurns).toBe(0)
-      expect(shutdownSpy).toHaveBeenCalledWith(0)
-    } finally {
+      let state = getDefaultAppState()
+      const getAppState = () => state
+      const setAppState = (update: (previous: AppState) => AppState) => {
+        state = update(state)
+      }
+
+      let runPromise: Promise<void> | undefined
       try {
+        runPromise = runHeadless(
+          'headless prompt',
+          getAppState,
+          setAppState,
+          [] as Command[],
+          [] as Tools,
+          {},
+          [],
+          createHeadlessRunOptions(0),
+        )
+
+        await runPromise
+        expect(askSpy.mock.calls[0]?.[0]?.maxTurns).toBe(0)
+        expect(shutdownSpy).toHaveBeenCalledWith(0)
+      } finally {
         await runPromise?.catch(() => {})
         for (const unsubscribe of unsubscribes) unsubscribe()
         subscribeSpy.mockRestore()
         askSpy.mockRestore()
         stdoutSpy.mockRestore()
         shutdownSpy.mockRestore()
-      } finally {
-        releaseSharedMutationLock()
       }
+    } finally {
+      releaseSharedMutationLock()
     }
   })
 })
