@@ -5,9 +5,13 @@ import {
 } from '../../test/sharedMutationLock.js'
 import * as actualAnalytics from '../analytics/index.js'
 import * as actualConfig from '../../utils/config.js'
-import * as actualSettings from '../../utils/settings/settings.js'
 import type { Tip } from './types.js'
 import * as actualTipRegistry from './tipRegistry.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const actualSettings = {
+  ...await import(`../../utils/settings/settings.js?real=${nonce}`),
+}
 
 const settingsRef: {
   value: {

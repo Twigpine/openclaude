@@ -77,9 +77,11 @@ async function importActualModelAllowlist(): Promise<ModelAllowlistModule> {
 }
 
 async function importActualSettings(): Promise<SettingsModule> {
-  return import(
-    `../../utils/settings/settings.ts?agentToolActual=${Date.now()}-${Math.random()}`
-  )
+  return {
+    ...await import(
+      `../../utils/settings/settings.ts?agentToolActual=${Date.now()}-${Math.random()}`
+    ),
+  }
 }
 
 async function importActualSpawnMultiAgent(): Promise<SpawnMultiAgentModule> {

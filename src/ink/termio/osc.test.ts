@@ -5,6 +5,11 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const actualExecFileNoThrow = {
+  ...await import(`../../utils/execFileNoThrow.js?real=${nonce}`),
+}
+
 const originalEnv = { ...process.env }
 const originalPlatform = process.platform
 const mockedClipboardPath = join(process.cwd(), 'openclaude-clipboard.txt')
@@ -70,6 +75,7 @@ describe('Windows clipboard fallback', () => {
   afterEach(() => {
     try {
       mock.restore()
+      mock.module('../../utils/execFileNoThrow.js', () => actualExecFileNoThrow)
       process.env = { ...originalEnv }
       Object.defineProperty(process, 'platform', { value: originalPlatform })
     } finally {
@@ -125,6 +131,7 @@ describe('clipboard path behavior remains stable', () => {
   afterEach(() => {
     try {
       mock.restore()
+      mock.module('../../utils/execFileNoThrow.js', () => actualExecFileNoThrow)
       process.env = { ...originalEnv }
       Object.defineProperty(process, 'platform', { value: originalPlatform })
     } finally {

@@ -44,9 +44,11 @@ describe('runAgent provider routing', () => {
   beforeEach(async () => {
     await acquireSharedMutationLock('tools/AgentTool/runAgent.routing.test.ts')
     resetSettingsCache()
-    actualSettingsModule ??= await import(
-      `../../utils/settings/settings.ts?runAgentRoutingSettingsActual=${Date.now()}-${Math.random()}`
-    )
+    actualSettingsModule ??= {
+      ...await import(
+        `../../utils/settings/settings.ts?runAgentRoutingSettingsActual=${Date.now()}-${Math.random()}`
+      ),
+    }
     settingsForTest = {}
     mock.module('../../utils/settings/settings.js', () => ({
       ...actualSettingsModule!,
