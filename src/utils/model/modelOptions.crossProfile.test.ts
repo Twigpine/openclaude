@@ -14,44 +14,45 @@ import {
 // loaded in the same `bun test` invocation. See `src/utils/user.test.ts` for
 // the canonical pattern; this is the same lesson as the 2026-04-30 mock-leak
 // note in lessons_learned.md.
-import * as actualProviderProfiles from '../providerProfiles.js'
-import * as actualAuth from '../auth.js'
-import * as actualProviderConfig from '../../services/api/providerConfig.js'
-import * as actualSettings from '../settings/settings.js'
-import * as actualModelAllowlist from './modelAllowlist.js'
-import * as actualOllamaModels from './ollamaModels.js'
-import * as actualNvidiaModels from './nvidiaNimModels.js'
-import * as actualMiniMaxModels from './minimaxModels.js'
-import * as actualXiaomiModels from './xiaomi-mimoModels.js'
 import type { ModelOption } from './modelOptions.js'
 import type { ProviderProfile } from '../config.js'
 import type { SettingsJson } from '../settings/types.js'
 
 const providerSpecifier = './providers.js'
+const realNonce = `${Date.now()}-${Math.random()}`
 const realProvidersForCleanup = {
   ...await import(
-    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+    `${providerSpecifier}?real=${realNonce}`
   ),
 }
+
+// Snapshot the real modules with cache-busted imports before any mock.module
+// runs. bun live-repoints bare-import namespaces to the active mock, so these
+// plain-object copies bypass earlier mocks and keep the genuine implementations.
+const realProviderProfiles = { ...await import(`../providerProfiles.js?real=${realNonce}`) }
+const realProviders = realProvidersForCleanup
+const realAuth = { ...await import(`../auth.js?real=${realNonce}`) }
+const realProviderConfig = { ...await import(`../../services/api/providerConfig.js?real=${realNonce}`) }
+const realSettings = { ...await import(`../settings/settings.js?real=${realNonce}`) }
+const realModelAllowlist = { ...await import(`./modelAllowlist.js?real=${realNonce}`) }
+const realOllamaModels = { ...await import(`./ollamaModels.js?real=${realNonce}`) }
+const realNvidiaModels = { ...await import(`./nvidiaNimModels.js?real=${realNonce}`) }
+const realMiniMaxModels = { ...await import(`./minimaxModels.js?real=${realNonce}`) }
+const realXiaomiModels = { ...await import(`./xiaomi-mimoModels.js?real=${realNonce}`) }
 
 afterAll(() => {
   mock.restore()
   mock.module(providerSpecifier, () => realProvidersForCleanup)
+  mock.module('../providerProfiles.js', () => realProviderProfiles)
+  mock.module('../auth.js', () => realAuth)
+  mock.module('../../services/api/providerConfig.js', () => realProviderConfig)
+  mock.module('../settings/settings.js', () => realSettings)
+  mock.module('./modelAllowlist.js', () => realModelAllowlist)
+  mock.module('./ollamaModels.js', () => realOllamaModels)
+  mock.module('./nvidiaNimModels.js', () => realNvidiaModels)
+  mock.module('./minimaxModels.js', () => realMiniMaxModels)
+  mock.module('./xiaomi-mimoModels.js', () => realXiaomiModels)
 })
-
-// Snapshot the real modules before any mock.module runs. bun live-repoints the
-// `actual*` namespaces to the active mock, so these plain-object copies are the
-// stable handle on the genuine implementations.
-const realProviderProfiles = { ...actualProviderProfiles }
-const realProviders = realProvidersForCleanup
-const realAuth = { ...actualAuth }
-const realProviderConfig = { ...actualProviderConfig }
-const realSettings = { ...actualSettings }
-const realModelAllowlist = { ...actualModelAllowlist }
-const realOllamaModels = { ...actualOllamaModels }
-const realNvidiaModels = { ...actualNvidiaModels }
-const realMiniMaxModels = { ...actualMiniMaxModels }
-const realXiaomiModels = { ...actualXiaomiModels }
 
 // bun's mock.module is process-wide and mock.restore() does NOT undo it, so
 // per-test mocks installed in a harness would persist and leak into later
@@ -61,7 +62,7 @@ const realXiaomiModels = { ...actualXiaomiModels }
 // actively running. afterEach clears the flag, so the persisted mock becomes a
 // transparent passthrough for every other file. Same pattern as the
 // cross-spawn/file-suggestions leak fix (#1667).
-let activeProfilesOverride: Partial<typeof actualProviderProfiles> | null = null
+let activeProfilesOverride: Partial<typeof import('../providerProfiles.js')> | null = null
 // Overrides getAdditionalModelOptionsCacheScope (used by getModelOptions to pick
 // the openai-scope branch) only while a test sets it. Keeps the full
 // providerConfig surface so the persisted mock doesn't strip resolveProviderRequest
@@ -225,7 +226,7 @@ function buildProviderProfileFixture(
 }
 
 async function importFreshModelOptionsModule(
-  providerProfilesMock: Partial<typeof actualProviderProfiles>,
+  providerProfilesMock: Partial<typeof import('../providerProfiles.js')>,
 ) {
   activeProfilesOverride = providerProfilesMock
   const nonce = `${Date.now()}-${Math.random()}`

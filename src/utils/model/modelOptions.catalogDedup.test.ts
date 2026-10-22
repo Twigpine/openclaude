@@ -8,33 +8,34 @@ import {
   resetSettingsCache,
   setSessionSettingsCache,
 } from '../settings/settingsCache.js'
-import * as actualIndex from '../../integrations/index.js'
-import * as actualProviderConfig from '../../services/api/providerConfig.js'
-import * as actualProviderProfiles from '../providerProfiles.js'
-import * as actualModel from './model.js'
 import type { ModelOption } from './modelOptions.js'
 
 const providerSpecifier = './providers.js'
+const realNonce = `${Date.now()}-${Math.random()}`
 const realProvidersForCleanup = {
   ...await import(
-    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+    `${providerSpecifier}?real=${realNonce}`
   ),
 }
+
+// Snapshot the real modules with cache-busted imports before any mock.module
+// runs (same lesson as the 2026-04-30 mock-leak note in lessons_learned.md — bun
+// live-repoints bare-import namespaces to the active mock, so these copies
+// bypass earlier mocks and keep the genuine implementations).
+const realIndex = { ...await import(`../../integrations/index.js?real=${realNonce}`) }
+const realProviderConfig = { ...await import(`../../services/api/providerConfig.js?real=${realNonce}`) }
+const realProviderProfiles = { ...await import(`../providerProfiles.js?real=${realNonce}`) }
+const realProviders = realProvidersForCleanup
+const realModel = { ...await import(`./model.js?real=${realNonce}`) }
 
 afterAll(() => {
   mock.restore()
   mock.module(providerSpecifier, () => realProvidersForCleanup)
+  mock.module('../../integrations/index.js', () => realIndex)
+  mock.module('../../services/api/providerConfig.js', () => realProviderConfig)
+  mock.module('../providerProfiles.js', () => realProviderProfiles)
+  mock.module('./model.js', () => realModel)
 })
-
-// Snapshot the real modules before any mock.module runs (same lesson as the
-// 2026-04-30 mock-leak note in lessons_learned.md — bun live-repoints the
-// `actual*` namespaces to the active mock, so these copies are the stable
-// handle on the genuine implementations).
-const realIndex = { ...actualIndex }
-const realProviderConfig = { ...actualProviderConfig }
-const realProviderProfiles = { ...actualProviderProfiles }
-const realProviders = realProvidersForCleanup
-const realModel = { ...actualModel }
 
 // bun's mock.module is process-wide and mock.restore() does NOT undo it, so
 // each mock installed here is gated and falls through to the real
@@ -42,7 +43,7 @@ const realModel = { ...actualModel }
 // every other suite in the same `bun test` run.
 let activeCatalogEntries: ModelCatalogEntry[] | null = null
 let activeCacheScopeOverride: string | null = null
-let activeProfileOverride: Partial<typeof actualProviderProfiles> | null = null
+let activeProfileOverride: Partial<typeof import('../providerProfiles.js')> | null = null
 let activeOpenAIProvider = false
 let activeModelOverride: typeof realModel | null = null
 let modelMockRegistered = false
