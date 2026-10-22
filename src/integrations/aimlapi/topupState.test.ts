@@ -953,8 +953,18 @@ test('a receipt that fails schema validation fails closed instead of being claim
   )
 })
 
-for (const leasePairField of ['exchangeLease', 'keyMintLease'] as const) {
-  test(`a receipt with a malformed ${leasePairField}Owner fails closed instead of being claimed over as empty`, () => {
+test.each([
+  ['exchangeLease / malformed owner', 'exchangeLease', 12345, 'now'],
+  ['exchangeLease / malformed timestamp', 'exchangeLease', 'some-owner', 'not-a-number'],
+  ['exchangeLease / missing timestamp', 'exchangeLease', 'some-owner', undefined],
+  ['exchangeLease / missing owner', 'exchangeLease', undefined, 'now'],
+  ['keyMintLease / malformed owner', 'keyMintLease', 12345, 'now'],
+  ['keyMintLease / malformed timestamp', 'keyMintLease', 'some-owner', 'not-a-number'],
+  ['keyMintLease / missing timestamp', 'keyMintLease', 'some-owner', undefined],
+  ['keyMintLease / missing owner', 'keyMintLease', undefined, 'now'],
+] as const)(
+  'malformed lease pairs fail closed: %s',
+  (_label, leasePairField, owner, timestamp) => {
     const directory = useTemporaryConfig()
     const claimed = claimAimlapiTopupState(intent)
     saveAimlapiTopupState({
@@ -964,77 +974,24 @@ for (const leasePairField of ['exchangeLease', 'keyMintLease'] as const) {
     })
     const statePath = join(directory, 'aimlapi-topup.json')
     const seeded = JSON.parse(readFileSync(statePath, 'utf8'))
-    // A non-string owner: isLeaseLive would read this as merely "not
-    // currently live" on its own, but the whole receipt must still be
-    // rejected as untrustworthy rather than silently claimed over.
-    seeded[`${leasePairField}Owner`] = 12345
-    seeded[`${leasePairField}At`] = Date.now()
+    const now = Date.now()
+    if (owner === undefined) {
+      delete seeded[`${leasePairField}Owner`]
+    } else {
+      seeded[`${leasePairField}Owner`] = owner
+    }
+    if (timestamp === undefined) {
+      delete seeded[`${leasePairField}At`]
+    } else {
+      seeded[`${leasePairField}At`] = timestamp === 'now' ? now : timestamp
+    }
     writeFileSync(statePath, JSON.stringify(seeded))
 
     expect(() => claimAimlapiTopupState({ ...intent, amountUsdMinor: 5000 })).toThrow(
       /does not match the expected format/,
     )
-  })
-
-  test(`a receipt with a malformed ${leasePairField}At fails closed instead of being claimed over as empty`, () => {
-    const directory = useTemporaryConfig()
-    const claimed = claimAimlapiTopupState(intent)
-    saveAimlapiTopupState({
-      ...intent,
-      paymentSessionId: claimed.paymentSessionId,
-      resumeSessionToken: 'live-resume-token',
-    })
-    const statePath = join(directory, 'aimlapi-topup.json')
-    const seeded = JSON.parse(readFileSync(statePath, 'utf8'))
-    seeded[`${leasePairField}Owner`] = 'some-owner'
-    seeded[`${leasePairField}At`] = 'not-a-number'
-    writeFileSync(statePath, JSON.stringify(seeded))
-
-    expect(() => claimAimlapiTopupState({ ...intent, amountUsdMinor: 5000 })).toThrow(
-      /does not match the expected format/,
-    )
-  })
-
-  test(`a receipt with a one-sided ${leasePairField} pair (owner with no timestamp) fails closed`, () => {
-    const directory = useTemporaryConfig()
-    const claimed = claimAimlapiTopupState(intent)
-    saveAimlapiTopupState({
-      ...intent,
-      paymentSessionId: claimed.paymentSessionId,
-      resumeSessionToken: 'live-resume-token',
-    })
-    const statePath = join(directory, 'aimlapi-topup.json')
-    const seeded = JSON.parse(readFileSync(statePath, 'utf8'))
-    seeded[`${leasePairField}Owner`] = 'some-owner'
-    // No matching *At field — the old, independent-field validation would
-    // have accepted this (each field was only checked in isolation).
-    delete seeded[`${leasePairField}At`]
-    writeFileSync(statePath, JSON.stringify(seeded))
-
-    expect(() => claimAimlapiTopupState({ ...intent, amountUsdMinor: 5000 })).toThrow(
-      /does not match the expected format/,
-    )
-  })
-
-  test(`a receipt with a one-sided ${leasePairField} pair (timestamp with no owner) fails closed`, () => {
-    const directory = useTemporaryConfig()
-    const claimed = claimAimlapiTopupState(intent)
-    saveAimlapiTopupState({
-      ...intent,
-      paymentSessionId: claimed.paymentSessionId,
-      resumeSessionToken: 'live-resume-token',
-    })
-    const statePath = join(directory, 'aimlapi-topup.json')
-    const seeded = JSON.parse(readFileSync(statePath, 'utf8'))
-    delete seeded[`${leasePairField}Owner`]
-    seeded[`${leasePairField}At`] = Date.now()
-    writeFileSync(statePath, JSON.stringify(seeded))
-
-    expect(() => claimAimlapiTopupState({ ...intent, amountUsdMinor: 5000 })).toThrow(
-      /does not match the expected format/,
-    )
-  })
-}
+  },
+)
 
 // By-key checkouts (a saved profile or an env-sourced credential) have no
 // passwordless account email to key the intent on, so the intent's `email`
