@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { test } from 'bun:test'
+import { isolateProcessExitCode } from '../../test/processExitCode.js'
 
 import {
   acquireSharedMutationLock,
@@ -40,6 +41,7 @@ async function withVerifyFixture(
   }) => Promise<void>,
 ): Promise<void> {
   await acquireSharedMutationLock('skillsVerifyHandler')
+  const restoreProcess = isolateProcessExitCode(0)
   const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-skill-verify-test-'))
   const projectDir = join(tempDir, 'project')
   const projectSkills = join(projectDir, '.openclaude', 'skills')
@@ -77,17 +79,23 @@ async function withVerifyFixture(
   try {
     await fn({ tempDir, projectDir, userSkills, projectSkills, registryDir, captured })
   } finally {
-    console.log = saved.log
-    console.error = saved.error
-    setClaudeConfigHomeDirForTesting(undefined)
-    setEyebrowRunnerForTesting(undefined)
-    process.exitCode = 0
-    restoreEnv('PATH', saved.path)
-    restoreEnv('OPENCLAUDE_EYEBROW_BIN', saved.bin)
-    restoreEnv('OPENCLAUDE_SKILLS_REVOCATIONS_URL', saved.revocationsUrl)
-    restoreEnv('OPENCLAUDE_SKILLS_REGISTRY_URL', saved.registryUrl)
-    rmSync(tempDir, { recursive: true, force: true })
-    releaseSharedMutationLock()
+    try {
+      console.log = saved.log
+      console.error = saved.error
+      setClaudeConfigHomeDirForTesting(undefined)
+      setEyebrowRunnerForTesting(undefined)
+      restoreEnv('PATH', saved.path)
+      restoreEnv('OPENCLAUDE_EYEBROW_BIN', saved.bin)
+      restoreEnv('OPENCLAUDE_SKILLS_REVOCATIONS_URL', saved.revocationsUrl)
+      restoreEnv('OPENCLAUDE_SKILLS_REGISTRY_URL', saved.registryUrl)
+      rmSync(tempDir, { recursive: true, force: true })
+    } finally {
+      try {
+        restoreProcess()
+      } finally {
+        releaseSharedMutationLock()
+      }
+    }
   }
 }
 

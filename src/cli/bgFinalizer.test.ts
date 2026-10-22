@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { isProcessRunning } from '../utils/genericProcessUtils.js'
+import { isolateProcessExitCode } from '../test/processExitCode.js'
 import {
   BACKGROUND_SESSION_ID_ENV,
   BACKGROUND_SESSION_LAUNCHER_PID_ENV,
@@ -37,16 +38,22 @@ const FIXTURE_OUTPUT_LIMIT_BYTES = 64 * 1024
 describe('background session finalizer', () => {
   let configDir: string
   let sessionsRoot: string
+  let restoreProcess: () => void
 
   beforeEach(async () => {
+    restoreProcess = isolateProcessExitCode()
     configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-finalizer-'))
     sessionsRoot = join(configDir, 'bg-sessions')
     _setBackgroundSessionsRootForTesting(sessionsRoot)
   })
 
   afterEach(async () => {
-    _setBackgroundSessionsRootForTesting(undefined)
-    await rm(configDir, { recursive: true, force: true })
+    try {
+      _setBackgroundSessionsRootForTesting(undefined)
+      await rm(configDir, { recursive: true, force: true })
+    } finally {
+      restoreProcess()
+    }
   })
 
   function ownedSession(id: string, pid: number): BackgroundSession {

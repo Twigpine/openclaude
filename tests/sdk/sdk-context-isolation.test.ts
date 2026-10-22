@@ -1,5 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../src/test/sharedMutationLock.js'
+import type { SessionId } from '../../src/entrypoints/agentSdkTypes.js'
+
+const {
   bindSdkContextToAsyncGenerator,
   runWithSdkContext,
   runOutsideSdkContext,
@@ -12,12 +18,10 @@ import {
   getOriginalCwd,
   setOriginalCwd,
   getParentSessionId,
-} from '../../src/bootstrap/state.js'
-import {
-  acquireSharedMutationLock,
-  releaseSharedMutationLock,
-} from '../../src/test/sharedMutationLock.js'
-import type { SessionId } from '../../src/entrypoints/agentSdkTypes.js'
+  resetStateForTests,
+} = await import(
+  `../../src/bootstrap/state.js?sdk-context-isolation=${Date.now()}-${Math.random()}`
+) as typeof import('../../src/bootstrap/state.js')
 
 // Snapshot global state before each test so we can restore it
 let originalSessionId: SessionId
@@ -28,6 +32,7 @@ let originalSessionProjectDir: string | null
 describe('SDK context isolation', () => {
   beforeEach(async () => {
     await acquireSharedMutationLock('sdk-context-isolation')
+    resetStateForTests()
     originalSessionId = getSessionId()
     originalCwd = getCwdState()
     originalOriginalCwd = getOriginalCwd()
@@ -41,7 +46,11 @@ describe('SDK context isolation', () => {
       setCwdState(originalCwd)
       setOriginalCwd(originalOriginalCwd)
     } finally {
-      releaseSharedMutationLock()
+      try {
+        resetStateForTests()
+      } finally {
+        releaseSharedMutationLock()
+      }
     }
   })
 

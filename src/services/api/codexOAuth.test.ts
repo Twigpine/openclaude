@@ -156,6 +156,8 @@ function createFakeAuthCodeListener(callbackPath: string): FakeAuthCodeListenerI
 async function acquireCodexOAuthTestIsolation(): Promise<CodexOAuthTestSnapshot> {
   const result = await acquireEnvMutex()
   expect(result.acquired).toBe(true)
+  nextFakePort = 41000
+  fakeListenerInstance = null
 
   activeSnapshot = {
     fetch: globalThis.fetch,

@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'bun:test'
+import { isolateProcessExitCode } from '../../test/processExitCode.js'
 
 import {
   acquireSharedMutationLock,
@@ -227,16 +228,20 @@ async function withTempDir<T>(fn: (tempDir: string) => Promise<T>): Promise<T> {
   // process so each fixture reads its own list, and hand it back afterwards.
   const inheritedRevocationsUrl = process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL
   delete process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL
+  const restoreProcess = isolateProcessExitCode(0)
   try {
     return await fn(tempDir)
   } finally {
-    process.exitCode = 0
-    if (inheritedRevocationsUrl === undefined) {
-      delete process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL
-    } else {
-      process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL = inheritedRevocationsUrl
+    try {
+      if (inheritedRevocationsUrl === undefined) {
+        delete process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL
+      } else {
+        process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL = inheritedRevocationsUrl
+      }
+      rmSync(tempDir, { recursive: true, force: true })
+    } finally {
+      restoreProcess()
     }
-    rmSync(tempDir, { recursive: true, force: true })
   }
 }
 

@@ -130,7 +130,7 @@ afterAll(() => {
 })
 
 test('updates the preview when keyboard focus moves to another theme', async () => {
-  const { ThemePicker } = await import('./ThemePicker.js')
+  const { ThemePicker } = await import(`./ThemePicker.js?theme-picker=${Date.now()}-${Math.random()}`)
   const { stdout, stdin, getOutput } = createTestStreams()
   const root = await createRoot({
     stdout: stdout as unknown as NodeJS.WriteStream,
