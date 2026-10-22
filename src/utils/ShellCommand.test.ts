@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import { spawn } from 'child_process'
 import { expect, test } from 'bun:test'
 import { wrapSpawn } from './ShellCommand.js'
 import { TaskOutput } from './task/TaskOutput.js'
@@ -122,4 +123,41 @@ test('interrupt does not kill keep-alive commands used by asyncRewake hooks', as
   const result = await command.result
   expect(result.code).toBe(2)
   expect(result.interrupted).toBe(false)
+})
+
+test('already-aborted user-cancel kills a real child promptly', async () => {
+  const controller = new AbortController()
+  controller.abort('user-cancel')
+
+  const startedAt = performance.now()
+  const child = spawn('sleep', ['5'], { stdio: 'ignore' })
+  const childClosed = new Promise<void>(resolve => {
+    child.once('close', () => resolve())
+  })
+  const command = wrapSpawn(
+    child,
+    controller.signal,
+    1_000,
+    new TaskOutput('shellcommand-test-already-aborted', null),
+  )
+
+  try {
+    expect(child.pid).toBeDefined()
+
+    const result = await command.result
+    const elapsedMs = performance.now() - startedAt
+    await childClosed
+
+    expect(elapsedMs).toBeLessThan(2_000)
+    expect(result.isAbort).toBe(true)
+    expect(result.abortReason).toBe('user-abort')
+    expect(result.interrupted).toBe(true)
+    expect(result.signalAborted).toBe(true)
+    expect(command.status).toBe('killed')
+  } finally {
+    child.kill('SIGKILL')
+    await command.result
+    await childClosed
+    command.cleanup()
+  }
 })

@@ -303,6 +303,9 @@ class ShellCommandImpl implements ShellCommand {
     this.#abortSignal.addEventListener('abort', this.#boundAbortHandler, {
       once: true,
     })
+    if (this.#abortSignal.aborted) {
+      this.#boundAbortHandler()
+    }
 
     // Use 'exit' not 'close': 'close' waits for stdio to close, which includes
     // grandchild processes that inherit file descriptors (e.g. `sleep 30 &`).
