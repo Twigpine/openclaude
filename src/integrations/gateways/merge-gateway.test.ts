@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { describe, expect, mock, test } from 'bun:test'
 
-import '../index.js'
+import { getCatalogForGateway } from '../index.js'
 import {
   getRouteCredentialEnvVars,
   resolveActiveRouteIdFromEnv,
@@ -18,6 +18,10 @@ import {
 } from '../../test/sharedMutationLock.js'
 import { asMockFetch } from '../../test/typedMocks.js'
 import mergeGateway from './merge-gateway.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
 const mapModel = mergeGateway.catalog?.discovery?.mapModel
 type OpenAIShimClient = {
@@ -29,28 +33,30 @@ type OpenAIShimClient = {
 }
 
 describe('Merge Gateway', () => {
-  test('uses a dedicated OpenAI-compatible gateway route', () => {
-    expect(mergeGateway.id).toBe('merge-gateway')
-    expect(mergeGateway.defaultBaseUrl).toBe(
-      'https://api-gateway.merge.dev/v1/openai',
-    )
-    expect(mergeGateway.setup.credentialEnvVars).toEqual([
-      'MERGE_GATEWAY_API_KEY',
-    ])
-    expect(mergeGateway.setup.dedicatedCredentialsOnly).toBe(true)
-    expect(mergeGateway.transportConfig.kind).toBe('openai-compatible')
-    expect(
-      mergeGateway.transportConfig.openaiShim?.supportsApiFormatSelection,
-    ).toBe(true)
-  })
-
-  test('keeps routing policy and concrete model fallbacks in the catalog', () => {
-    expect(mergeGateway.catalog?.source).toBe('hybrid')
-    expect(mergeGateway.catalog?.discovery?.requiresAuth).toBe(true)
-    expect(mergeGateway.catalog?.models?.map(model => model.apiName)).toEqual([
-      'default_routing',
-      'openai/gpt-5.5',
-    ])
+  describe.each([
+    {
+      routeId: 'merge-gateway',
+      expected: {
+        baseUrl: 'https://api-gateway.merge.dev/v1/openai',
+        defaultModel: 'openai/gpt-5.5',
+        setup: {
+          credentialEnvVars: ['MERGE_GATEWAY_API_KEY'],
+          dedicatedCredentialsOnly: true,
+        },
+        openaiShim: { supportsApiFormatSelection: true },
+        catalogSource: 'hybrid',
+        discovery: { requiresAuth: true },
+      } satisfies GatewayCatalogExpectations,
+    },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+      expect(
+        getCatalogForGateway(routeId)?.models?.some(
+          model => model.apiName === 'default_routing',
+        ),
+      ).toBe(true)
+    })
   })
 
   test('--provider selects the route and uses only its dedicated credential', async () => {

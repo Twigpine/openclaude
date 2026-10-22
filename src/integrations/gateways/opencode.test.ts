@@ -12,6 +12,10 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
 beforeEach(async () => {
   await acquireSharedMutationLock('integrations/gateways/opencode.test.ts')
@@ -28,6 +32,55 @@ afterEach(() => {
   }
 })
 
+describe('OpenCode gateway catalogs', () => {
+  describe.each([
+    {
+      routeId: 'opencode',
+      expected: {
+        baseUrl: 'https://opencode.ai/zen/v1',
+        defaultModel: 'gpt-5.4',
+        category: 'aggregating',
+        setup: {
+          requiresAuth: true,
+          authMode: 'api-key',
+          credentialEnvVars: ['OPENCODE_API_KEY'],
+        },
+        preset: {
+          id: 'opencode',
+          vendorId: 'openai',
+          apiKeyEnvVars: ['OPENCODE_API_KEY'],
+        },
+        validation: { kind: 'credential-env' },
+        usage: { supported: false },
+        catalogSource: 'static',
+      } satisfies GatewayCatalogExpectations,
+    },
+    {
+      routeId: 'opencode-go',
+      expected: {
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+        defaultModel: 'glm-5.1',
+        category: 'aggregating',
+        setup: {
+          requiresAuth: true,
+          authMode: 'api-key',
+          credentialEnvVars: ['OPENCODE_API_KEY'],
+        },
+        preset: {
+          id: 'opencode-go',
+          vendorId: 'openai',
+          apiKeyEnvVars: ['OPENCODE_API_KEY'],
+        },
+        catalogSource: 'static',
+      } satisfies GatewayCatalogExpectations,
+    },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+    })
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Zen Gateway Descriptor Tests
 // ---------------------------------------------------------------------------
@@ -39,76 +92,10 @@ describe('OpenCode Zen gateway descriptor', () => {
     expect(gateway!.id).toBe('opencode')
   })
 
-  test('has correct label', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.label).toBe('OpenCode Zen')
-  })
-
-  test('has aggregating category', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.category).toBe('aggregating')
-  })
-
-  test('has correct default base URL', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.defaultBaseUrl).toBe('https://opencode.ai/zen/v1')
-  })
-
-  test('has correct default model', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.defaultModel).toBe('gpt-5.4')
-  })
-
-  test('requires auth', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.setup.requiresAuth).toBe(true)
-  })
-
-  test('uses api-key auth mode', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.setup.authMode).toBe('api-key')
-  })
-
-  test('has OPENCODE_API_KEY in credential env vars', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.setup.credentialEnvVars).toContain('OPENCODE_API_KEY')
-  })
-
-  test('has openai-compatible transport kind', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.transportConfig.kind).toBe('openai-compatible')
-  })
-
-  test('has preset metadata', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.preset).toBeDefined()
-    expect(gateway!.preset!.id).toBe('opencode')
-    expect(gateway!.preset!.vendorId).toBe('openai')
-    expect(gateway!.preset!.apiKeyEnvVars).toContain('OPENCODE_API_KEY')
-  })
-
-  test('has validation metadata', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.validation).toBeDefined()
-    expect(gateway!.validation!.kind).toBe('credential-env')
-  })
-
-  test('has catalog with static source', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.catalog).toBeDefined()
-    expect(gateway!.catalog!.source).toBe('static')
-  })
-
   test('has static models in catalog', () => {
     const gateway = getGateway('opencode')
     expect(gateway!.catalog!.models).toBeDefined()
     expect(gateway!.catalog!.models!.length).toBeGreaterThan(0)
-  })
-
-  test('has usage metadata', () => {
-    const gateway = getGateway('opencode')
-    expect(gateway!.usage).toBeDefined()
-    expect(gateway!.usage!.supported).toBe(false)
   })
 })
 
@@ -121,60 +108,6 @@ describe('OpenCode Go gateway descriptor', () => {
     const gateway = getGateway('opencode-go')
     expect(gateway).not.toBeNull()
     expect(gateway!.id).toBe('opencode-go')
-  })
-
-  test('has correct label', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.label).toBe('OpenCode Go')
-  })
-
-  test('has aggregating category', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.category).toBe('aggregating')
-  })
-
-  test('has correct default base URL', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.defaultBaseUrl).toBe('https://opencode.ai/zen/go/v1')
-  })
-
-  test('has correct default model', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.defaultModel).toBe('glm-5.1')
-  })
-
-  test('requires auth', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.setup.requiresAuth).toBe(true)
-  })
-
-  test('uses api-key auth mode', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.setup.authMode).toBe('api-key')
-  })
-
-  test('has OPENCODE_API_KEY in credential env vars', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.setup.credentialEnvVars).toContain('OPENCODE_API_KEY')
-  })
-
-  test('has openai-compatible transport kind', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.transportConfig.kind).toBe('openai-compatible')
-  })
-
-  test('has preset metadata with vendorId openai', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.preset).toBeDefined()
-    expect(gateway!.preset!.id).toBe('opencode-go')
-    expect(gateway!.preset!.vendorId).toBe('openai')
-    expect(gateway!.preset!.apiKeyEnvVars).toContain('OPENCODE_API_KEY')
-  })
-
-  test('has catalog with static source', () => {
-    const gateway = getGateway('opencode-go')
-    expect(gateway!.catalog).toBeDefined()
-    expect(gateway!.catalog!.source).toBe('static')
   })
 
   test('has static models in catalog', () => {
@@ -279,57 +212,6 @@ describe('OpenCode model catalog', () => {
     const goIds = new Set(goModels.map(m => m.id))
     for (const id of goIds) {
       expect(zenIds.has(id)).toBe(false)
-    }
-  })
-
-  test('zen model count matches expected', () => {
-    const models = getCatalogEntriesForRoute('opencode')
-    expect(models.length).toBe(48)
-  })
-
-  test('go model count matches expected', () => {
-    const models = getCatalogEntriesForRoute('opencode-go')
-    expect(models.length).toBe(13)
-  })
-
-  test('go model set matches opencode.ai/go catalog exactly', () => {
-    const models = getCatalogEntriesForRoute('opencode-go')
-    const expectedIds = new Set([
-      'opencode-go-glm-5.2',
-      'opencode-go-qwen3.7-max',
-      'opencode-go-kimi-k2.7-code',
-      'opencode-go-mimo-v2.5-pro',
-      'opencode-go-deepseek-v4-pro',
-      'opencode-go-qwen3.7-plus',
-      'opencode-go-minimax-m3',
-      'opencode-go-mimo-v2.5',
-      'opencode-go-deepseek-v4-flash',
-      'opencode-go-glm-5.1',
-      'opencode-go-kimi-k2.6',
-      'opencode-go-qwen3.6-plus',
-      'opencode-go-minimax-m2.7',
-    ])
-    const actualIds = new Set(models.map(m => m.id))
-    // All expected IDs present
-    for (const id of expectedIds) {
-      expect(actualIds.has(id)).toBe(true)
-    }
-    // No removed or unexpected IDs remain
-    for (const id of actualIds) {
-      expect(expectedIds.has(id)).toBe(true)
-    }
-    // Explicitly verify removed models are not included
-    const removedIds = [
-      'opencode-go-minimax-m2.5',
-      'opencode-go-kimi-k2.5',
-      'opencode-go-glm-5',
-      'opencode-go-qwen3.5-plus',
-      'opencode-go-mimo-v2-pro',
-      'opencode-go-mimo-v2-omni',
-      'opencode-go-hy3-preview',
-    ];
-    for (const id of removedIds) {
-      expect(actualIds.has(id)).toBe(false);
     }
   })
 

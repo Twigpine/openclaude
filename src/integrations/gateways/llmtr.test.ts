@@ -1,5 +1,6 @@
-import { expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 
+import { getCatalogForGateway } from '../index.js'
 import { routeForPreset } from '../compatibility.js'
 import { getProviderPresetUiMetadata } from '../providerUiMetadata.js'
 import {
@@ -9,39 +10,45 @@ import {
 } from '../routeMetadata.js'
 import catalog, { mapLlmtrModel } from './llmtr.models.js'
 import gateway from './llmtr.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
-test('LLMTR uses the standard OpenAI-compatible gateway contract', () => {
-  expect(gateway.defaultBaseUrl).toBe('https://llmtr.com/v1')
-  expect(gateway.defaultModel).toBe('deepseek/deepseek-v4-flash')
-  expect(gateway.setup.credentialEnvVars).toEqual([
-    'LLMTR_API_KEY',
-    'OPENAI_API_KEY',
-  ])
-  expect(gateway.setup.dedicatedCredentialsOnly).not.toBe(true)
-  expect(gateway.preset?.apiKeyEnvVars).toEqual([
-    'LLMTR_API_KEY',
-    'OPENAI_API_KEY',
-  ])
-  expect(gateway.validation).toMatchObject({
-    kind: 'credential-env',
-    routing: { matchDefaultBaseUrl: true },
-    credentialEnvVars: [
-      'LLMTR_API_KEY',
-      'OPENAI_API_KEYS',
-      'OPENAI_API_KEY',
-    ],
-  })
-  expect(gateway.validation?.routing?.matchBaseUrlHosts).toBeUndefined()
-  expect(gateway.transportConfig).toEqual({
-    kind: 'openai-compatible',
-    openaiShim: {
-      requiredApiFormat: 'chat_completions',
-      supportsAuthHeaders: false,
-      maxTokensField: 'max_tokens',
+describe('llmtr gateway', () => {
+  describe.each([
+    {
+      routeId: 'llmtr',
+      expected: {
+        baseUrl: 'https://llmtr.com/v1',
+        defaultModel: 'deepseek/deepseek-v4-flash',
+        setup: { credentialEnvVars: ['LLMTR_API_KEY', 'OPENAI_API_KEY'] },
+        preset: { apiKeyEnvVars: ['LLMTR_API_KEY', 'OPENAI_API_KEY'] },
+        validation: {
+          kind: 'credential-env',
+          routing: { matchDefaultBaseUrl: true, matchBaseUrlHosts: undefined },
+          credentialEnvVars: [
+            'LLMTR_API_KEY',
+            'OPENAI_API_KEYS',
+            'OPENAI_API_KEY',
+          ],
+        },
+        openaiShim: {
+          requiredApiFormat: 'chat_completions',
+          supportsAuthHeaders: false,
+          maxTokensField: 'max_tokens',
+        },
+        catalogSource: 'hybrid',
+        discovery: { requiresAuth: false },
+      } satisfies GatewayCatalogExpectations,
     },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+      expect(gateway.setup.dedicatedCredentialsOnly).not.toBe(true)
+      expect(getCatalogForGateway(routeId)).toBe(catalog)
+    })
   })
-  expect(catalog.source).toBe('hybrid')
-  expect(catalog.discovery?.requiresAuth).toBe(false)
 })
 
 test('LLMTR preset uses the existing generic profile path', () => {
@@ -173,15 +180,4 @@ test.each([
       supported_parameters: parameters,
     }),
   ).toBeNull()
-})
-
-test('LLMTR curated models are a small tool-capable fallback catalog', () => {
-  expect(catalog.models?.map(model => model.apiName)).toEqual([
-    'deepseek/deepseek-v4-flash',
-    'anthropic/claude-sonnet-4.6',
-    'openai/gpt-5.4',
-    'google/gemini-3.1-pro-preview',
-    'deepseek/deepseek-v4-pro',
-    'zai/glm-5.2',
-  ])
 })

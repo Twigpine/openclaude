@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 
 import { routeForPreset } from '../compatibility.js'
 import { getProviderPresetUiMetadata } from '../providerUiMetadata.js'
@@ -9,35 +9,43 @@ import {
   resolveRouteIdFromBaseUrl,
 } from '../routeMetadata.js'
 import { resolveModelRuntimeLimits } from '../runtimeMetadata.js'
-import gateway, { mapGmiCloudModel } from './gmi-cloud.js'
+import { mapGmiCloudModel } from './gmi-cloud.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
-test('GMI Cloud uses a dedicated-key hybrid OpenAI-compatible gateway contract', () => {
-  expect(gateway.defaultBaseUrl).toBe('https://api.gmi-serving.com/v1')
-  expect(gateway.defaultModel).toBe('Qwen/Qwen3.8-Max')
-  expect(gateway.setup.credentialEnvVars).toEqual(['GMI_API_KEY'])
-  expect(gateway.setup.dedicatedCredentialsOnly).toBe(true)
-  expect(gateway.preset?.apiKeyEnvVars).toEqual(['GMI_API_KEY'])
-  expect(gateway.validation).toMatchObject({
-    kind: 'credential-env',
-    routing: { matchDefaultBaseUrl: true },
-    credentialEnvVars: ['GMI_API_KEY'],
-  })
-  expect(gateway.transportConfig).toEqual({
-    kind: 'openai-compatible',
-    openaiShim: {
-      supportsApiFormatSelection: false,
-      supportsAuthHeaders: false,
-      maxTokensField: 'max_tokens',
+describe('gmi-cloud gateway', () => {
+  describe.each([
+    {
+      routeId: 'gmi-cloud',
+      expected: {
+        baseUrl: 'https://api.gmi-serving.com/v1',
+        defaultModel: 'Qwen/Qwen3.8-Max',
+        setup: {
+          credentialEnvVars: ['GMI_API_KEY'],
+          dedicatedCredentialsOnly: true,
+        },
+        preset: { apiKeyEnvVars: ['GMI_API_KEY'] },
+        validation: {
+          kind: 'credential-env',
+          routing: { matchDefaultBaseUrl: true },
+          credentialEnvVars: ['GMI_API_KEY'],
+        },
+        openaiShim: {
+          supportsApiFormatSelection: false,
+          supportsAuthHeaders: false,
+          maxTokensField: 'max_tokens',
+        },
+        catalogSource: 'hybrid',
+        discovery: { requiresAuth: true },
+      } satisfies GatewayCatalogExpectations,
     },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+    })
   })
-  expect(gateway.catalog?.source).toBe('hybrid')
-  expect(gateway.catalog?.discovery?.requiresAuth).toBe(true)
-  expect(gateway.catalog?.models?.map(model => model.apiName)).toEqual([
-    'Qwen/Qwen3.8-Max',
-    'Qwen/Qwen3.8-Flash',
-    'deepseek-ai/DeepSeek-V4-Pro',
-    'deepseek-ai/DeepSeek-V4-Flash',
-  ])
 })
 
 test('GMI Cloud preset resolves to its gateway route and reads GMI env vars', () => {

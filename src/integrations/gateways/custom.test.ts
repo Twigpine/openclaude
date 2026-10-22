@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { _clearRegistryForTesting, ensureIntegrationsLoaded, getCatalogForGateway } from '../index.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
 describe('custom gateway', () => {
   beforeEach(() => {
@@ -9,6 +13,31 @@ describe('custom gateway', () => {
 
   afterEach(() => {
     _clearRegistryForTesting()
+  })
+
+  describe.each([
+    {
+      routeId: 'custom',
+      expected: {
+        baseUrl: undefined,
+        defaultModel: 'llama3.1:8b',
+        setup: { requiresAuth: false, credentialEnvVars: undefined },
+        preset: {
+          fallbackBaseUrl: 'http://localhost:11434/v1',
+          apiKeyEnvVars: ['OPENAI_API_KEYS', 'OPENAI_API_KEY'],
+        },
+        openaiShim: {
+          supportsApiFormatSelection: true,
+          supportsAuthHeaders: true,
+        },
+        catalogSource: 'hybrid',
+        allowEmptyCatalog: true,
+      } satisfies GatewayCatalogExpectations,
+    },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+    })
   })
 
   test('discovers /v1/models and maps context_length to contextWindow', async () => {

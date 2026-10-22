@@ -1,17 +1,24 @@
 import { describe, expect, test } from 'bun:test'
 import opengateway, { mapOpenGatewayModel } from './gitlawb-opengateway.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
 describe('gitlawb-opengateway live model mapping', () => {
-  test('uses hybrid discovery against the public models list', () => {
-    expect(opengateway.catalog?.source).toBe('hybrid')
-    expect(opengateway.catalog?.discovery).toEqual(
-      expect.objectContaining({
-        kind: 'openai-compatible',
-        requiresAuth: false,
-      }),
-    )
-    expect(opengateway.catalog?.discovery?.mapModel).toBe(mapOpenGatewayModel)
-    expect(opengateway.startup?.probeReadiness).toBeUndefined()
+  describe.each([
+    {
+      routeId: 'gitlawb-opengateway',
+      expected: {
+        catalogSource: 'hybrid',
+        discovery: { requiresAuth: false, mapModel: mapOpenGatewayModel },
+      } satisfies GatewayCatalogExpectations,
+    },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+      expect(opengateway.startup?.probeReadiness).toBeUndefined()
+    })
   })
 
   test('maps gateway routes including auto and free models', () => {

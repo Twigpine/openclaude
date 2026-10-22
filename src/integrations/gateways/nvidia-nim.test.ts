@@ -8,6 +8,10 @@
 
 import { describe, expect, test } from 'bun:test'
 import nvidiaNim from './nvidia-nim.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
 const mapModel = nvidiaNim.catalog?.discovery?.mapModel
 
@@ -16,13 +20,20 @@ function shape(id: string, extras: Record<string, unknown> = {}) {
 }
 
 describe('nvidia-nim gateway mapModel filter', () => {
-  test('mapModel is wired and gateway uses hybrid catalog', () => {
-    expect(mapModel).toBeDefined()
-    expect(nvidiaNim.catalog?.source).toBe('hybrid')
-    expect(nvidiaNim.catalog?.discovery?.kind).toBe('openai-compatible')
-    expect(nvidiaNim.catalog?.discoveryCacheTtl).toBe('1d')
-    expect(nvidiaNim.catalog?.discoveryRefreshMode).toBe('background-if-stale')
-    expect(nvidiaNim.catalog?.allowManualRefresh).toBe(true)
+  describe.each([
+    {
+      routeId: 'nvidia-nim',
+      expected: {
+        catalogSource: 'hybrid',
+        discoveryRefreshMode: 'background-if-stale',
+        allowManualRefresh: true,
+      } satisfies GatewayCatalogExpectations,
+    },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+      expect(nvidiaNim.catalog?.discoveryCacheTtl).toBeDefined()
+    })
   })
 
   test('keeps chat / instruct / reasoning / code models', () => {

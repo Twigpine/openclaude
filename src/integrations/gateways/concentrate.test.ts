@@ -1,37 +1,45 @@
 import { describe, expect, test } from 'bun:test'
 
 import concentrate from './concentrate.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
 const mapModel = concentrate.catalog?.discovery?.mapModel
 
 describe('concentrate gateway', () => {
-  test('uses dynamic discovery and supports fallback auth', () => {
-    expect(concentrate.id).toBe('concentrate')
-    expect(concentrate.label).toBe('Concentrate')
-    expect(concentrate.category).toBe('aggregating')
-    expect(concentrate.defaultBaseUrl).toBe('https://api.concentrate.ai/v1')
-    expect(concentrate.defaultModel).toBe('deepseek-v4-flash')
-    expect(concentrate.supportsModelRouting).toBe(true)
-
-    expect(concentrate.setup.requiresAuth).toBe(true)
-    expect(concentrate.setup.authMode).toBe('api-key')
-    expect(concentrate.setup.credentialEnvVars).toEqual(['CONCENTRATE_API_KEY'])
-    expect(concentrate.setup.dedicatedCredentialsOnly).toBeUndefined()
-
-    expect(concentrate.catalog?.source).toBe('dynamic')
-    expect(concentrate.catalog?.discovery?.kind).toBe('openai-compatible')
-    expect(concentrate.catalog?.discovery?.requiresAuth).toBe(false)
-
-    expect(concentrate.validation?.kind).toBe('credential-env')
-    expect(
-      (concentrate.validation as { credentialEnvVars: string[] }).credentialEnvVars,
-    ).toEqual([
-      'CONCENTRATE_API_KEY',
-      'OPENAI_API_KEYS',
-      'OPENAI_API_KEY',
-    ])
-
-    expect(mapModel).toBeDefined()
+  describe.each([
+    {
+      routeId: 'concentrate',
+      expected: {
+        baseUrl: 'https://api.concentrate.ai/v1',
+        defaultModel: 'deepseek-v4-flash',
+        category: 'aggregating',
+        supportsModelRouting: true,
+        setup: {
+          requiresAuth: true,
+          authMode: 'api-key',
+          credentialEnvVars: ['CONCENTRATE_API_KEY'],
+          dedicatedCredentialsOnly: undefined,
+        },
+        validation: {
+          kind: 'credential-env',
+          credentialEnvVars: [
+            'CONCENTRATE_API_KEY',
+            'OPENAI_API_KEYS',
+            'OPENAI_API_KEY',
+          ],
+        },
+        catalogSource: 'dynamic',
+        discovery: { requiresAuth: false },
+        allowEmptyCatalog: true,
+      } satisfies GatewayCatalogExpectations,
+    },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+    })
   })
 
   test('mapModel keeps chat models and drops non-chat ids', () => {

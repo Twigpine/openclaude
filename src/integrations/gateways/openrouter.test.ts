@@ -1,16 +1,23 @@
 import { describe, expect, test } from 'bun:test'
-import openrouter, { mapOpenRouterModel } from './openrouter.js'
+import { mapOpenRouterModel } from './openrouter.js'
+import {
+  expectGatewayCatalog,
+  type GatewayCatalogExpectations,
+} from '../../test/gatewayCatalogTestHelpers.js'
 
 describe('openrouter gateway live model mapping', () => {
-  test('uses hybrid discovery against the public models list', () => {
-    expect(openrouter.catalog?.source).toBe('hybrid')
-    expect(openrouter.catalog?.discovery).toEqual(
-      expect.objectContaining({
-        kind: 'openai-compatible',
-        requiresAuth: false,
-      }),
-    )
-    expect(openrouter.catalog?.discovery?.mapModel).toBe(mapOpenRouterModel)
+  describe.each([
+    {
+      routeId: 'openrouter',
+      expected: {
+        catalogSource: 'hybrid',
+        discovery: { requiresAuth: false, mapModel: mapOpenRouterModel },
+      } satisfies GatewayCatalogExpectations,
+    },
+  ])('$routeId catalog', ({ routeId, expected }) => {
+    test('satisfies the registered gateway catalog contract', () => {
+      expectGatewayCatalog(routeId, expected)
+    })
   })
 
   test('maps coding models with context length and free labels', () => {
