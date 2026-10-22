@@ -480,6 +480,28 @@ function promptSkillsNamed(
   )
 }
 
+async function waitForReadiness<T>(
+  readiness: Promise<T>,
+  description: string,
+  timeoutMs = 1000,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      readiness,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(
+            `Timed out after ${timeoutMs}ms waiting for ${description}`,
+          ))
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 async function withSiblingHomeFixture(
   run: (fixture: SiblingHomeFixture) => Promise<void>,
 ): Promise<void> {
@@ -524,6 +546,27 @@ async function withSiblingHomeFixture(
     }
   }
 }
+
+test.serial('releases the sibling home fixture lock when readiness times out', async () => {
+  await assert.rejects(
+    withSiblingHomeFixture(async () => {
+      await waitForReadiness(
+        new Promise<void>(() => {}),
+        'missing sibling skill readiness',
+        50,
+      )
+    }),
+    { message: 'Timed out after 50ms waiting for missing sibling skill readiness' },
+  )
+
+  let lockAcquired = false
+  try {
+    await acquireSharedMutationLock('loadSkillsDir.test.ts readiness cleanup', 250)
+    lockAcquired = true
+  } finally {
+    if (lockAcquired) releaseSharedMutationLock()
+  }
+})
 
 test.serial('loads ~/.agents/skills by default and keeps ~/.claude/skills opt-in', async () => {
   await withSiblingHomeFixture(async ({ homeDir }) => {
@@ -730,7 +773,10 @@ for (const home of ['.agents', '.claude'] as const) {
         } })
         const oldScan = getSkillDirCommands(cwd)
         try {
-          await reading
+          await waitForReadiness(
+            reading,
+            `both SKILL.md reads for ${home} before ${invalidation}`,
+          )
           if (invalidation === 'disable') {
             writeFileSync(join(configDir, 'settings.json'), JSON.stringify({
               agentsSkillsEnabled: false, claudeCodeSkillsEnabled: false,
@@ -1177,7 +1223,11 @@ for (const home of ['.agents', '.claude'] as const) {
       }
       try {
         await detector.initialize()
-        await Promise.all(ready)
+        await waitForReadiness(
+          Promise.all(ready),
+          `initial watcher readiness for ${home}`,
+          3_000,
+        )
         assert.ok((await invokedText('linked')).includes('Instructions initial linked'))
         await editUntilRefreshed(plainFile, 'plain', 'plain control')
         await editUntilRefreshed(targetFile, 'linked', 'revised linked')
@@ -1194,7 +1244,11 @@ for (const home of ['.agents', '.claude'] as const) {
         writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ [settingKey]: true }))
         resetSettingsCache()
         await detector.reloadAfterSkillSourceSettingsChange()
-        await Promise.all(ready)
+        await waitForReadiness(
+          Promise.all(ready),
+          `watcher readiness for ${home} after re-enabling`,
+          3_000,
+        )
         await editUntilRefreshed(targetFile, 'linked', 're-enabled linked')
         await detector.dispose()
         const disposedCount = notifications

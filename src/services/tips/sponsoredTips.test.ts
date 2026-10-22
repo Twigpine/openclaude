@@ -20,6 +20,10 @@ const configRef: {
 // mock.module is process-global — install once, then mutate the refs per test.
 await acquireSharedMutationLock('services/tips/sponsoredTips.test.ts')
 
+// Bun repoints module namespaces when mocked; preserve the original exports.
+const realSettings = { ...actualSettings }
+const realConfig = { ...actualConfig }
+
 mock.module('../../utils/settings/settings.js', () => ({
   getSettings_DEPRECATED: () => settingsRef.value,
   getInitialSettings: () => settingsRef.value,
@@ -36,8 +40,15 @@ mock.module('../../utils/config.js', () => ({
 afterAll(() => {
   try {
     mock.restore()
-    mock.module('../../utils/settings/settings.js', () => actualSettings)
-    mock.module('../../utils/config.js', () => actualConfig)
+    mock.module('../../utils/settings/settings.js', () => realSettings)
+    mock.module('../../utils/config.js', () => realConfig)
+    expect(actualSettings.getSettings_DEPRECATED).toBe(
+      realSettings.getSettings_DEPRECATED,
+    )
+    expect(actualSettings.getInitialSettings).toBe(realSettings.getInitialSettings)
+    expect(actualSettings.getSettingsForSource).toBe(realSettings.getSettingsForSource)
+    expect(actualConfig.getGlobalConfig).toBe(realConfig.getGlobalConfig)
+    expect(actualConfig.saveGlobalConfig).toBe(realConfig.saveGlobalConfig)
   } finally {
     releaseSharedMutationLock()
   }

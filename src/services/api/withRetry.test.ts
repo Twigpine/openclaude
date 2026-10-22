@@ -3,8 +3,10 @@ import type Anthropic from '@anthropic-ai/sdk'
 import { APIError, APIUserAbortError } from '@anthropic-ai/sdk'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import * as debugNs from '../../utils/debug.js'
+import * as sleepNs from '../../utils/sleep.js'
 import { markOpenAIRequestNonReplayable } from './openaiErrorClassification.js'
 type ProvidersModule = typeof import('../../utils/model/providers.js')
+type FastModeModule = typeof import('../../utils/fastMode.js')
 
 // Helper to build a mock APIError with specific headers
 function makeError(headers: Record<string, string>): APIError {
@@ -20,7 +22,9 @@ function makeError(headers: Record<string, string>): APIError {
 // Save/restore env vars between tests
 const originalEnv = { ...process.env }
 const originalDebugModule = { ...debugNs }
+const originalSleepModule = { ...sleepNs }
 let originalProvidersModule: ProvidersModule | undefined
+let originalFastModeModule: FastModeModule | undefined
 
 const envKeys = [
   'CLAUDE_CODE_USE_OPENAI',
@@ -56,6 +60,10 @@ afterEach(() => {
       mock.module('src/utils/model/providers.js', () => originalProvidersModule!)
     }
     mock.module('src/utils/debug.js', () => originalDebugModule)
+    mock.module('src/utils/sleep.js', () => originalSleepModule)
+    if (originalFastModeModule) {
+      mock.module('src/utils/fastMode.js', () => originalFastModeModule!)
+    }
   } finally {
     releaseSharedMutationLock()
   }
@@ -102,9 +110,11 @@ async function importFreshWithRetryModule(
     usesAnthropicAccountFlow: () => false,
   }))
   if (options.forceFastMode) {
-    const realFastMode = await import('../../utils/fastMode.js')
+    originalFastModeModule ??= {
+      ...(await import('../../utils/fastMode.js')),
+    }
     mock.module('src/utils/fastMode.js', () => ({
-      ...realFastMode,
+      ...originalFastModeModule!,
       isFastModeEnabled: () => true,
     }))
   }
