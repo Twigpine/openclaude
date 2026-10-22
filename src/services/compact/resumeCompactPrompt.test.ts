@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
+const realTokens = {
+  ...await import(`../../utils/tokens.js?real=${Date.now()}-${Math.random()}`),
+}
+const realAutoCompact = {
+  ...await import(`./autoCompact.js?real=${Date.now()}-${Math.random()}`),
+}
+
 async function importResumeCompactPrompt() {
   mock.restore()
   const nonce = `${Date.now()}-${Math.random()}`
@@ -15,6 +22,8 @@ describe('shouldPromptCompactOnResume', () => {
 
   afterEach(() => {
     mock.restore()
+    mock.module('../../utils/tokens.js', () => realTokens)
+    mock.module('./autoCompact.js', () => realAutoCompact)
   })
 
   test('returns false for empty messages', async () => {

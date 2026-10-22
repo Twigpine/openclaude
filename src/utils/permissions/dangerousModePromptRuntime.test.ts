@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 
+const realSettings = {
+  ...await import(`../settings/settings.js?real=${Date.now()}-${Math.random()}`),
+}
+
 afterEach(() => {
   mock.restore()
+  mock.module('../settings/settings.js', () => realSettings)
 })
 
 describe('dangerousModePromptRuntime', () => {

@@ -3,7 +3,10 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as actualGrowthbook from '../services/analytics/growthbook.js'
+
+const actualGrowthbook = {
+  ...await import(`../services/analytics/growthbook.js?real=${Date.now()}-${Math.random()}`),
+}
 
 async function importFileModuleWithKillswitchEnabled(
   killswitchEnabled: boolean,

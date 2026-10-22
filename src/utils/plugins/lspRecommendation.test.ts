@@ -4,6 +4,19 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 
+const realMarketplaceManager = {
+  ...await import(`./marketplaceManager.js?real=${Date.now()}-${Math.random()}`),
+}
+const realBinaryCheck = {
+  ...await import(`../binaryCheck.js?real=${Date.now()}-${Math.random()}`),
+}
+const realInstalledPluginsManager = {
+  ...await import(`./installedPluginsManager.js?real=${Date.now()}-${Math.random()}`),
+}
+const realConfig = {
+  ...await import(`../config.js?real=${Date.now()}-${Math.random()}`),
+}
+
 type MarketplaceEntry = {
   name: string
   description?: string
@@ -89,9 +102,6 @@ mock.module('./installedPluginsManager.js', () => ({
 // any downstream test that re-imports the mocked path in the same Bun
 // process. The `?real=...` cache-bust ensures the import bypasses this
 // file's own mock.module() registration for the same path.
-const realConfig = await import(
-  `../config.js?real=${Date.now()}-${Math.random()}`
-)
 mock.module('../config.js', () => ({
   ...realConfig,
   checkHasTrustDialogAccepted: () => true,
@@ -154,6 +164,10 @@ listLspPluginCandidates = mod.listLspPluginCandidates
 afterAll(() => {
   try {
     mock.restore()
+    mock.module('./marketplaceManager.js', () => realMarketplaceManager)
+    mock.module('../binaryCheck.js', () => realBinaryCheck)
+    mock.module('./installedPluginsManager.js', () => realInstalledPluginsManager)
+    mock.module('../config.js', () => realConfig)
   } finally {
     releaseSharedMutationLock()
   }

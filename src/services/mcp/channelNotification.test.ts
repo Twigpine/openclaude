@@ -26,14 +26,14 @@ import { parsePluginIdentifier } from '../../utils/plugins/pluginIdentifier.js'
 // module-level mock.module() overrides in bun (the registry is process-global),
 // so without this, neighboring test files that import the real module would
 // fail with "Export named 'getChannelAllowlist' not found".
-const _realChannelAllowlist = await import(
-  `./channelAllowlist.js?real=${Date.now()}-${Math.random()}`
-)
+const _realChannelAllowlist = {
+  ...await import(`./channelAllowlist.js?real=${Date.now()}-${Math.random()}`),
+}
 
 // Real auth module — captured before mocking so afterAll can restore it.
-const _realAuth = await import(
-  `../../utils/auth.js?real=${Date.now()}-${Math.random()}`
-)
+const _realAuth = {
+  ...await import(`../../utils/auth.js?real=${Date.now()}-${Math.random()}`),
+}
 
 // Module-level mocks for the GrowthBook-backed helpers. The gate
 // reads these on every call; resetting between tests keeps the

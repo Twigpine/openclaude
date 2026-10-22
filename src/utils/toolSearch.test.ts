@@ -7,8 +7,13 @@ import {
 import { TaskCreateTool } from '../tools/TaskCreateTool/TaskCreateTool.js'
 import { ToolSearchTool } from '../tools/ToolSearchTool/ToolSearchTool.js'
 
+const realGrowthbook = {
+  ...await import(`../services/analytics/growthbook.js?real=${Date.now()}-${Math.random()}`),
+}
+
 afterEach(() => {
   mock.restore()
+  mock.module('../services/analytics/growthbook.js', () => realGrowthbook)
 })
 
 describe('resolveToolSearchMode', () => {
