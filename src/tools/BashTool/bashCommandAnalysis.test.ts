@@ -5,8 +5,12 @@ import {
 } from '../../test/sharedMutationLock.js'
 import { parseForSecurityFromAst } from '../../utils/bash/ast.js'
 import { PARSE_ABORTED } from '../../utils/bash/parser.js'
-import * as realDebug from '../../utils/debug.js'
 import { analyzeBashCommand } from './bashCommandAnalysis.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realDebug = {
+  ...await import(`../../utils/debug.js?real=${nonce}`),
+}
 
 let importCounter = 0
 

@@ -6,6 +6,7 @@ import {
 } from '../../test/sharedMutationLock.js'
 
 type BrowserModule = typeof import('../../utils/browser.js')
+type ConfigModule = typeof import('../../utils/config.js')
 type ExecFileNoThrowModule = typeof import('../../utils/execFileNoThrow.js')
 
 type ExecCall = {
@@ -15,6 +16,7 @@ type ExecCall = {
 
 type RealModules = {
   browser: BrowserModule
+  config: ConfigModule
   execFileNoThrow: ExecFileNoThrowModule
 }
 
@@ -44,6 +46,9 @@ async function importRealModules(): Promise<RealModules> {
     browser: (await import(
       `../../utils/browser.ts?setup-actions-real-${cacheKey}`
     )) as BrowserModule,
+    config: {
+      ...await import(`../../utils/config.js?real=${cacheKey}`),
+    } as ConfigModule,
     execFileNoThrow: (await import(
       `../../utils/execFileNoThrow.ts?setup-actions-real-${cacheKey}`
     )) as ExecFileNoThrowModule,
@@ -212,6 +217,8 @@ afterEach(() => {
   try {
     mock.restore()
     if (realModules) {
+      mock.module('src/utils/config.js', () => realModules!.config)
+      mock.module('../../utils/config.js', () => realModules!.config)
       mock.module(
         '../../utils/execFileNoThrow.js',
         () => realModules!.execFileNoThrow,

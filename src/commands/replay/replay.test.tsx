@@ -10,13 +10,29 @@ import { AppStateProvider } from '../../state/AppState.js'
 import type { LogOption, ReplayIndex } from '../../types/logs.js'
 import { renderToString } from '../../utils/staticRender.js'
 import * as realBootstrapState from '../../bootstrap/state.js'
-import * as realGetWorktreePaths from '../../utils/getWorktreePaths.js'
-import * as realSessionStorage from '../../utils/sessionStorage.js'
-import * as realReplayIndex from '../../utils/replayIndex.js'
-import * as realUseTerminalSize from '../../hooks/useTerminalSize.js'
-import * as realModalContext from '../../context/modalContext.js'
-import * as realLogSelector from '../../components/LogSelector.js'
-import * as realReplayTimeline from './ReplayTimeline.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realGetWorktreePaths = {
+  ...await import(`../../utils/getWorktreePaths.js?real=${nonce}`),
+}
+const realSessionStorage = {
+  ...await import(`../../utils/sessionStorage.js?real=${nonce}`),
+}
+const realReplayIndex = {
+  ...await import(`../../utils/replayIndex.js?real=${nonce}`),
+}
+const realUseTerminalSize = {
+  ...await import(`../../hooks/useTerminalSize.js?real=${nonce}`),
+}
+const realModalContext = {
+  ...await import(`../../context/modalContext.js?real=${nonce}`),
+}
+const realLogSelector = {
+  ...await import(`../../components/LogSelector.js?real=${nonce}`),
+}
+const realReplayTimeline = {
+  ...await import(`./ReplayTimeline.js?real=${nonce}`),
+}
 
 type LogSelectorProps = {
   logs: LogOption[]

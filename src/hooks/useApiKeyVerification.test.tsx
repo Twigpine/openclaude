@@ -3,8 +3,6 @@ import { PassThrough } from 'node:stream'
 import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import React from 'react'
 import { createRoot, Text } from '../ink.js'
-import * as realState from '../bootstrap/state.js'
-import * as realClaudeApi from '../services/api/claude.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -13,6 +11,12 @@ import {
 const nonce = `${Date.now()}-${Math.random()}`
 const realAuth = {
   ...await import(`../utils/auth.js?real=${nonce}`),
+}
+const realState = {
+  ...await import(`../bootstrap/state.js?real=${nonce}`),
+}
+const realClaudeApi = {
+  ...await import(`../services/api/claude.js?real=${nonce}`),
 }
 
 type AuthState = {

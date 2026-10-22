@@ -2,8 +2,13 @@ import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import type { ToolUseContext } from '../../Tool.js'
 
-const actualSessionStorage = { ...await import('../../utils/sessionStorage.js') }
-const actualQuery = { ...await import('../../query.js') }
+const nonce = `${Date.now()}-${Math.random()}`
+const actualSessionStorage = {
+  ...await import(`../../utils/sessionStorage.js?real=${nonce}`),
+}
+const actualQuery = {
+  ...await import(`../../query.js?real=${nonce}`),
+}
 
 // Track how many times each storage function is called
 let metadataWriteCount = 0
@@ -16,6 +21,8 @@ beforeEach(() => {
 
 afterEach(() => {
   mock.restore()
+  mock.module('../../utils/sessionStorage.js', () => actualSessionStorage)
+  mock.module('../../query.js', () => actualQuery)
 })
 
 /** Load runAgent with a failing metadata writer while retaining unrelated module exports. */
