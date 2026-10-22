@@ -5,6 +5,11 @@ import {
 } from '../test/sharedMutationLock.js'
 import { resetSettingsCache } from './settings/settingsCache.js'
 
+const realProvidersModule = await import(
+  `./model/providers.js?real=${Date.now()}-${Math.random()}`
+)
+const realProviders = { ...realProvidersModule }
+
 const ENV_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
@@ -43,6 +48,8 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    // mock.restore() does not unregister Bun's process-global module mocks.
+    mock.module('./model/providers.js', () => realProviders)
     for (const key of ENV_KEYS) {
       if (originalEnv[key] === undefined) {
         delete process.env[key]
@@ -58,10 +65,9 @@ afterEach(() => {
 
 async function importFreshThinkingModule() {
   mock.restore()
-  const originalProviders = await import('./model/providers.js')
   mock.module('./model/providers.js', () => {
     return {
-      ...originalProviders,
+      ...realProviders,
       getAPIProvider: () => 'openai',
     }
   })
