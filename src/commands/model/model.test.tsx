@@ -24,6 +24,22 @@ import {
 import { mergeRouteCatalogEntries } from '../../utils/model/routeCatalogOptions.js'
 
 const nonce = `${Date.now()}-${Math.random()}`
+const realSettings = {
+  ...await import(`../../utils/settings/settings.js?real=${nonce}`),
+} as typeof import('../../utils/settings/settings.js')
+const realModelAllowlist = {
+  ...await import(`../../utils/model/modelAllowlist.js?real=${nonce}`),
+} as typeof import('../../utils/model/modelAllowlist.js')
+const realConfig = {
+  ...await import(`../../utils/config.js?real=${nonce}`),
+} as typeof import('../../utils/config.js')
+const realModelPicker = {
+  ...await import(`../../components/ModelPicker.js?real=${nonce}`),
+} as typeof import('../../components/ModelPicker.js')
+const realOpenAIModelDiscovery = {
+  ...await import(`../../utils/model/openaiModelDiscovery.js?real=${nonce}`),
+} as typeof import('../../utils/model/openaiModelDiscovery.js')
+
 const REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST = {
   ...await import(`../../integrations/discoveryService.js?real=${nonce}`),
 }
@@ -253,6 +269,11 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('../../utils/settings/settings.js', () => realSettings)
+    mock.module('../../utils/model/modelAllowlist.js', () => realModelAllowlist)
+    mock.module('../../utils/config.js', () => realConfig)
+    mock.module('../../components/ModelPicker.js', () => realModelPicker)
+    mock.module('../../utils/model/openaiModelDiscovery.js', () => realOpenAIModelDiscovery)
     resetSettingsCache()
     settingsForTest = {}
     restoreEnv('CLAUDE_CODE_USE_OPENAI', originalEnv.CLAUDE_CODE_USE_OPENAI)

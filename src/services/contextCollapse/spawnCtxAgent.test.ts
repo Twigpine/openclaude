@@ -14,21 +14,29 @@ import type { Message } from '../../types/message.js'
 // which imports that function and uses it to size truncation. Restoring by
 // specifier is safe: autoCompact.test.ts re-imports autoCompact fresh via a
 // cache-busting nonce (a different specifier), so it is unaffected.
-import * as spanSelectionNs from './spanSelection.js'
-import * as forkedAgentNs from '../../utils/forkedAgent.js'
-import * as tokensNs from '../../utils/tokens.js'
-import * as autoCompactNs from '../compact/autoCompact.js'
-import * as analyticsNs from '../../services/analytics/index.js'
-import * as logNs from '../../utils/log.js'
-import * as messagesNs from '../../utils/messages.js'
 
-const realSpanSelection = { ...spanSelectionNs }
-const realForkedAgent = { ...forkedAgentNs }
-const realTokens = { ...tokensNs }
-const realAutoCompact = { ...autoCompactNs }
-const realAnalytics = { ...analyticsNs }
-const realLog = { ...logNs }
-const realMessages = { ...messagesNs }
+const nonce = `${Date.now()}-${Math.random()}`
+const realSpanSelection = {
+  ...await import(`./spanSelection.js?real=${nonce}`),
+} as typeof import('./spanSelection.js')
+const realForkedAgent = {
+  ...await import(`../../utils/forkedAgent.js?real=${nonce}`),
+} as typeof import('../../utils/forkedAgent.js')
+const realTokens = {
+  ...await import(`../../utils/tokens.js?real=${nonce}`),
+} as typeof import('../../utils/tokens.js')
+const realAutoCompact = {
+  ...await import(`../compact/autoCompact.js?real=${nonce}`),
+} as typeof import('../compact/autoCompact.js')
+const realAnalytics = {
+  ...await import(`../../services/analytics/index.js?real=${nonce}`),
+} as typeof import('../../services/analytics/index.js')
+const realLog = {
+  ...await import(`../../utils/log.js?real=${nonce}`),
+} as typeof import('../../utils/log.js')
+const realMessages = {
+  ...await import(`../../utils/messages.js?real=${nonce}`),
+} as typeof import('../../utils/messages.js')
 
 // Build a transcript big enough to yield a collapsible span.
 function bigTranscript(): Message[] {

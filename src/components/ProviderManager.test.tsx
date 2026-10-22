@@ -14,6 +14,32 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realProviderProfiles = {
+  ...await import(`../utils/providerProfiles.js?real=${nonce}`),
+} as typeof import('../utils/providerProfiles.js')
+const realProviderDiscovery = {
+  ...await import(`../utils/providerDiscovery.js?real=${nonce}`),
+} as typeof import('../utils/providerDiscovery.js')
+const realDiscoveryService = {
+  ...await import(`../integrations/discoveryService.js?real=${nonce}`),
+} as typeof import('../integrations/discoveryService.js')
+const realGithubModelsCredentials = {
+  ...await import(`../utils/githubModelsCredentials.js?real=${nonce}`),
+} as typeof import('../utils/githubModelsCredentials.js')
+const realCodexCredentials = {
+  ...await import(`../utils/codexCredentials.js?real=${nonce}`),
+} as typeof import('../utils/codexCredentials.js')
+const realProviderProfile = {
+  ...await import(`../utils/providerProfile.js?real=${nonce}`),
+} as typeof import('../utils/providerProfile.js')
+const realProviderManagerAimlapi = {
+  ...await import(`./providerManagerAimlapi.js?real=${nonce}`),
+} as typeof import('./providerManagerAimlapi.js')
+const realUseCodexOAuthFlow = {
+  ...await import(`./useCodexOAuthFlow.js?real=${nonce}`),
+} as typeof import('./useCodexOAuthFlow.js')
+
 type SettingsModule = typeof import('../utils/settings/settings.js')
 type ProviderStartupOverridesModule = typeof import('../utils/providerStartupOverrides.js')
 
@@ -829,6 +855,14 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('../utils/providerProfiles.js', () => realProviderProfiles)
+    mock.module('../utils/providerDiscovery.js', () => realProviderDiscovery)
+    mock.module('../integrations/discoveryService.js', () => realDiscoveryService)
+    mock.module('../utils/githubModelsCredentials.js', () => realGithubModelsCredentials)
+    mock.module('../utils/codexCredentials.js', () => realCodexCredentials)
+    mock.module('../utils/providerProfile.js', () => realProviderProfile)
+    mock.module('./providerManagerAimlapi.js', () => realProviderManagerAimlapi)
+    mock.module('./useCodexOAuthFlow.js', () => realUseCodexOAuthFlow)
     mock.module('../utils/settings/settings.js', () => actualSettingsModule)
     mock.module('../utils/providerStartupOverrides.js', () => actualProviderStartupOverridesModule)
 

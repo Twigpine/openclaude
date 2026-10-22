@@ -9,11 +9,26 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import * as actualAuth from '../../utils/auth.js'
-import * as actualModelSupportOverrides from '../../utils/model/modelSupportOverrides.js'
-import * as actualSettings from '../../utils/settings/settings.js'
-import * as actualThinking from '../../utils/thinking.js'
-import * as actualGrowthbook from '../../services/analytics/growthbook.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const actualAuth = {
+  ...await import(`../../utils/auth.js?real=${nonce}`),
+} as typeof import('../../utils/auth.js')
+const actualModelSupportOverrides = {
+  ...await import(`../../utils/model/modelSupportOverrides.js?real=${nonce}`),
+} as typeof import('../../utils/model/modelSupportOverrides.js')
+const actualSettings = {
+  ...await import(`../../utils/settings/settings.js?real=${nonce}`),
+} as typeof import('../../utils/settings/settings.js')
+const actualThinking = {
+  ...await import(`../../utils/thinking.js?real=${nonce}`),
+} as typeof import('../../utils/thinking.js')
+const actualGrowthbook = {
+  ...await import(`../../services/analytics/growthbook.js?real=${nonce}`),
+} as typeof import('../../services/analytics/growthbook.js')
+const realEffortPicker = {
+  ...await import(`../../components/EffortPicker.js?real=${nonce}`),
+} as typeof import('../../components/EffortPicker.js')
 
 const providerSpecifier = '../../utils/model/providers.js'
 const realProvidersForCleanup = {
@@ -39,6 +54,13 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('../../utils/auth.js', () => actualAuth)
+    mock.module('../../utils/model/modelSupportOverrides.js', () => actualModelSupportOverrides)
+    mock.module('../../utils/settings/settings.js', () => actualSettings)
+    mock.module('../../utils/thinking.js', () => actualThinking)
+    mock.module('../../services/analytics/growthbook.js', () => actualGrowthbook)
+    mock.module('../../utils/model/providers.js', () => realProvidersForCleanup)
+    mock.module('../../components/EffortPicker.js', () => realEffortPicker)
     if (originalEffortEnv === undefined) {
       delete process.env.CLAUDE_CODE_EFFORT_LEVEL
     } else {

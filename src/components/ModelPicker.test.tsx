@@ -17,9 +17,17 @@ import {
 } from '../utils/settings/settingsCache.js'
 import type { SettingsJson } from '../utils/settings/types.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realSettings = {
+  ...await import(`../utils/settings/settings.js?real=${nonce}`),
+} as typeof import('../utils/settings/settings.js')
+const realModelAllowlist = {
+  ...await import(`../utils/model/modelAllowlist.js?real=${nonce}`),
+} as typeof import('../utils/model/modelAllowlist.js')
+
 type SettingsModule = typeof import('../utils/settings/settings.js')
 
-let actualSettingsModule: SettingsModule | undefined
+let actualSettingsModule: SettingsModule | undefined = realSettings
 let settingsForTest: SettingsJson = {}
 
 function useSettings(settings: SettingsJson): void {
@@ -83,6 +91,8 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('../utils/settings/settings.js', () => realSettings)
+    mock.module('../utils/model/modelAllowlist.js', () => realModelAllowlist)
     resetSettingsCache()
     settingsForTest = {}
   } finally {

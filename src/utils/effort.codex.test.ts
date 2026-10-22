@@ -9,11 +9,21 @@ import {
 // any module we mock here needs to keep the full original export shape — or
 // downstream tests that load it via openaiShim/client/codexShim crash with
 // "Export named 'X' not found in module".
-import * as actualAuth from './auth.js'
-import * as actualThinking from './thinking.js'
-import * as actualGrowthbook from 'src/services/analytics/growthbook.js'
-import * as actualModelSupportOverrides from './model/modelSupportOverrides.js'
 import type { APIProvider } from './model/providers.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const actualAuth = {
+  ...await import(`./auth.js?real=${nonce}`),
+} as typeof import('./auth.js')
+const actualThinking = {
+  ...await import(`./thinking.js?real=${nonce}`),
+} as typeof import('./thinking.js')
+const actualGrowthbook = {
+  ...await import(`../services/analytics/growthbook.js?real=${nonce}`),
+} as typeof import('src/services/analytics/growthbook.js')
+const actualModelSupportOverrides = {
+  ...await import(`./model/modelSupportOverrides.js?real=${nonce}`),
+} as typeof import('./model/modelSupportOverrides.js')
 
 type MockedThirdPartyCapability = 'effort' | 'max_effort' | 'xhigh_effort'
 

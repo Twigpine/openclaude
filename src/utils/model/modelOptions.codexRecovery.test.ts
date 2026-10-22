@@ -7,6 +7,11 @@ import {
   setSessionSettingsCache,
 } from '../settings/settingsCache.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realModel = {
+  ...await import(`./model.js?real=${nonce}`),
+} as typeof import('./model.js')
+
 const providerSpecifier = './providers.js'
 const realProvidersForCleanup = {
   ...await import(
@@ -16,6 +21,7 @@ const realProvidersForCleanup = {
 
 afterAll(() => {
   mock.restore()
+  mock.module('./model.js', () => realModel)
   mock.module(providerSpecifier, () => realProvidersForCleanup)
 })
 

@@ -18,9 +18,19 @@ import type {
   LocalJSXCommandOnDone,
 } from '../../types/command.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realGoalPersistence = {
+  ...await import(`../../services/goal/persistence.js?real=${nonce}`),
+} as typeof import('../../services/goal/persistence.js')
+const realGetWorktreePaths = {
+  ...await import(`../../utils/getWorktreePaths.js?real=${nonce}`),
+} as typeof import('../../utils/getWorktreePaths.js')
 const realSessionStorage = {
   ...await import(`../../utils/sessionStorage.js?real=${Date.now()}-${Math.random()}`),
 }
+const realReplayIndex = {
+  ...await import(`../../utils/replayIndex.js?real=${nonce}`),
+} as typeof import('../../utils/replayIndex.js')
 
 type OnDoneArgs = Parameters<LocalJSXCommandOnDone>
 
@@ -200,7 +210,10 @@ describe('/resume and /continue unified command', () => {
 
   afterEach(() => {
     mock.restore()
+    mock.module('../../services/goal/persistence.js', () => realGoalPersistence)
+    mock.module('../../utils/getWorktreePaths.js', () => realGetWorktreePaths)
     mock.module('../../utils/sessionStorage.js', () => realSessionStorage)
+    mock.module('../../utils/replayIndex.js', () => realReplayIndex)
   })
 
   test('/continue continues an active goal', async () => {

@@ -7,8 +7,15 @@ import {
   ensureIntegrationsLoaded,
   getCatalogEntriesForRoute,
 } from '../integrations/index.js'
-import * as realAuth from './auth.js'
-import * as realThinking from './thinking.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realAuth = {
+  ...await import(`./auth.js?real=${nonce}`),
+} as typeof import('./auth.js')
+const realThinking = {
+  ...await import(`./thinking.js?real=${nonce}`),
+} as typeof import('./thinking.js')
+
 const realModelSupportOverridesModule = await import(
   `./model/modelSupportOverrides.js?real=${Date.now()}-${Math.random()}`,
 )

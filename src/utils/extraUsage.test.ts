@@ -3,8 +3,12 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realAuth from './auth.js'
 import { isBilledAsExtraUsage } from './extraUsage.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realAuth = {
+  ...await import(`./auth.js?real=${nonce}`),
+} as typeof import('./auth.js')
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/extraUsage.test.ts')

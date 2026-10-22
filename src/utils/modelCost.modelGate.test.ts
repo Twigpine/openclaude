@@ -13,12 +13,15 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realFastMode from './fastMode.js'
-import * as realModel from './model/model.js'
 import { resetSettingsCache } from './settings/settingsCache.js'
 
-const realFastModeSnapshot = { ...realFastMode }
-const realModelSnapshot = { ...realModel }
+const nonce = `${Date.now()}-${Math.random()}`
+const realFastModeSnapshot = {
+  ...await import(`./fastMode.js?real=${nonce}`),
+} as typeof import('./fastMode.js')
+const realModelSnapshot = {
+  ...await import(`./model/model.js?real=${nonce}`),
+} as typeof import('./model/model.js')
 
 type PricingOverride = {
   inputTokens: number

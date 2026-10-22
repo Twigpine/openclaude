@@ -1,23 +1,35 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import * as realAxios from 'axios'
-import * as realOauthConstants from 'src/constants/oauth.js'
-import * as realGrowthbook from 'src/services/analytics/growthbook.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realModel from './model/model.js'
 type ProvidersModule = typeof import('./model/providers.js')
 type AxiosModule = typeof import('axios')
 
 const nonce = `${Date.now()}-${Math.random()}`
+const realAxios = {
+  ...await import(`${import.meta.resolve('axios')}?real=${nonce}`),
+} as typeof import('axios')
+const realOauthConstants = {
+  ...await import(`../constants/oauth.js?real=${nonce}`),
+} as typeof import('src/constants/oauth.js')
+const realGrowthbook = {
+  ...await import(`../services/analytics/growthbook.js?real=${nonce}`),
+} as typeof import('src/services/analytics/growthbook.js')
+const realModel = {
+  ...await import(`./model/model.js?real=${nonce}`),
+} as typeof import('./model/model.js')
+const realProviders = {
+  ...await import(`./model/providers.js?real=${nonce}`),
+} as typeof import('./model/providers.js')
+
 const realAuth = {
   ...await import(`./auth.js?real=${nonce}`),
 }
 
 const originalEnv = { ...process.env }
-let originalProvidersModule: ProvidersModule | undefined
-let originalAxiosModule: AxiosModule | undefined
+let originalProvidersModule: ProvidersModule | undefined = realProviders
+let originalAxiosModule: AxiosModule | undefined = realAxios
 
 async function importFreshFastModeModule() {
   return import(`./fastMode.ts?ts=${Date.now()}-${Math.random()}`)

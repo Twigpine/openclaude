@@ -12,7 +12,11 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { Message } from '../../types/message.js'
-import * as realConfig from '../../utils/config.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realConfig = {
+  ...await import(`../../utils/config.js?real=${nonce}`),
+} as typeof import('../../utils/config.js')
 
 const realContext = await import(
   `../../utils/context.js?real=${Date.now()}-${Math.random()}`

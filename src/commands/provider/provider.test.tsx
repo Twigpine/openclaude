@@ -23,6 +23,11 @@ import {
 } from '../../test/sharedMutationLock.js'
 import { createProfileFile } from '../../utils/providerProfile.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realProviderConfig = {
+  ...await import(`../../services/api/providerConfig.js?real=${nonce}`),
+} as typeof import('../../services/api/providerConfig.js')
+
 const SYNC_START = '\x1B[?2026h'
 const SYNC_END = '\x1B[?2026l'
 const ORIGINAL_SIMPLE_ENV = process.env.CLAUDE_CODE_SIMPLE
@@ -169,6 +174,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('../../services/api/providerConfig.js', () => realProviderConfig)
 
     if (ORIGINAL_SIMPLE_ENV === undefined) {
       delete process.env.CLAUDE_CODE_SIMPLE

@@ -1,9 +1,19 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { mcpContentNeedsTruncation, truncateMcpContent } from './mcpValidation.js'
-import * as realGrowthbook from '../services/analytics/growthbook.js'
-import * as realTokenEstimation from '../services/tokenEstimation.js'
-import * as realImageResizer from './imageResizer.js'
-import * as realLog from './log.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realGrowthbook = {
+  ...await import(`../services/analytics/growthbook.js?real=${nonce}`),
+} as typeof import('../services/analytics/growthbook.js')
+const realTokenEstimation = {
+  ...await import(`../services/tokenEstimation.js?real=${nonce}`),
+} as typeof import('../services/tokenEstimation.js')
+const realImageResizer = {
+  ...await import(`./imageResizer.js?real=${nonce}`),
+} as typeof import('./imageResizer.js')
+const realLog = {
+  ...await import(`./log.js?real=${nonce}`),
+} as typeof import('./log.js')
 
 // 60_000-char inputs: real roughTokenCountEstimation returns 15_000, which exceeds
 // DEFAULT_MAX_MCP_OUTPUT_TOKENS * MCP_TOKEN_COUNT_THRESHOLD_FACTOR (25_000 * 0.5 = 12_500),

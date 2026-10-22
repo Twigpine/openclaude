@@ -7,10 +7,18 @@ import {
   resetSettingsCache,
   setSessionSettingsCache,
 } from '../utils/settings/settingsCache.js'
-import * as actualAuth from '../utils/auth.js'
-import * as actualModelOptions from '../utils/model/modelOptions.js'
-import * as actualProviderProfiles from '../utils/providerProfiles.js'
 import type { ProviderProfile } from '../utils/config.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realAuth = {
+  ...await import(`../utils/auth.js?real=${nonce}`),
+} as typeof import('../utils/auth.js')
+const realModelOptions = {
+  ...await import(`../utils/model/modelOptions.js?real=${nonce}`),
+} as typeof import('../utils/model/modelOptions.js')
+const realProviderProfiles = {
+  ...await import(`../utils/providerProfiles.js?real=${nonce}`),
+} as typeof import('../utils/providerProfiles.js')
 
 const providerSpecifier = '../utils/model/providers.js'
 const realProvidersForCleanup = {
@@ -22,21 +30,18 @@ const realProvidersForCleanup = {
 afterAll(() => {
   mock.restore()
   mock.module(providerSpecifier, () => realProvidersForCleanup)
+  mock.module('../utils/auth.js', () => realAuth)
+  mock.module('../utils/model/modelOptions.js', () => realModelOptions)
+  mock.module('../utils/providerProfiles.js', () => realProviderProfiles)
 })
 
-// Snapshot the real modules before any mock.module runs. bun live-repoints the
-// `actual*` namespaces to the active mock, so these plain-object copies are the
-// stable handle on the genuine implementations (2026-04-30 mock-leak lesson).
-const realAuth = { ...actualAuth }
-const realModelOptions = { ...actualModelOptions }
-const realProviderProfiles = { ...actualProviderProfiles }
 const realProviders = realProvidersForCleanup
 
 // bun's mock.module is process-wide and mock.restore() does NOT undo it, so
 // each mock is gated and falls through to the real implementation whenever
 // activeProfilesOverride is null — a transparent passthrough for every other
 // suite in the same `bun test` run.
-let activeProfilesOverride: Partial<typeof actualProviderProfiles> | null = null
+let activeProfilesOverride: Partial<typeof import('../utils/providerProfiles.js')> | null = null
 
 mock.module('../utils/model/providers.js', () => ({
   ...realProviders,
@@ -91,7 +96,7 @@ mock.module('../utils/providerProfiles.js', () => ({
 // mock modelOptions for the fresh ModelPicker import so its isGenuineSwitch-
 // ProfileValue is bound to the fresh instance.
 async function importFreshModelPicker(
-  profilesMock: Partial<typeof actualProviderProfiles>,
+  profilesMock: Partial<typeof import('../utils/providerProfiles.js')>,
   options: {
     trackGetModelOptions?: boolean
   } = {},

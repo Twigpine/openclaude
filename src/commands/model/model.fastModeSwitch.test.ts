@@ -1,6 +1,9 @@
 import { afterEach, expect, mock, test } from 'bun:test'
 
-import * as actualFastMode from '../../utils/fastMode.js'
+const nonce = `${Date.now()}-${Math.random()}`
+const actualFastMode = {
+  ...await import(`../../utils/fastMode.js?real=${nonce}`),
+} as typeof import('../../utils/fastMode.js')
 
 // Regression for #1119 / jatmn review on PR #1164 — the cross-profile
 // `/model` branch must run the same fast-mode reconciliation as the regular
@@ -9,6 +12,7 @@ import * as actualFastMode from '../../utils/fastMode.js'
 
 afterEach(() => {
   mock.restore()
+  mock.module('../../utils/fastMode.js', () => actualFastMode)
 })
 
 function mockFastMode(

@@ -8,6 +8,11 @@ import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
 import { resolveRouteCredentialValue } from '../integrations/routeMetadata.js'
 import type { ProviderProfile } from './config.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realConfig = {
+  ...await import(`./config.js?real=${nonce}`),
+} as typeof import('./config.js')
+
 async function importFreshProvidersModule() {
   return import(`./model/providers.ts?ts=${Date.now()}-${Math.random()}`)
 }
@@ -140,6 +145,7 @@ afterEach(() => {
     }
 
     mock.restore()
+    mock.module('./config.js', () => realConfig)
     globalThis.fetch = originalFetch
     mockConfigState = createMockConfigState()
     process.chdir(originalCwd)

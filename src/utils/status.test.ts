@@ -6,6 +6,11 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realMTLS = {
+  ...await import(`./mtls.js?real=${nonce}`),
+} as typeof import('./mtls.js')
+
 const realProvidersModule = await import(
   `./model/providers.js?real=${Date.now()}-${Math.random()}`
 )
@@ -86,6 +91,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('./mtls.js', () => realMTLS)
     // mock.restore() does not unregister Bun's process-global module mocks.
     mock.module('./model/providers.js', () => realProviders)
     restoreEnv()

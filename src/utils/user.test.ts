@@ -1,13 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import * as realExeca from 'execa'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realAuth from './auth.js'
-import * as realConfig from './config.js'
-import * as realEnv from './env.js'
-import * as realEnvUtils from './envUtils.js'
 
 // Snapshot each real module surface into a plain object BEFORE any
 // mock.module call. `import * as` gives a live namespace: mock.module
@@ -15,11 +10,22 @@ import * as realEnvUtils from './envUtils.js'
 // rather than the real module -- permanently, since mock.module lasts for the
 // life of the process. That is how this suite's stderr-less `execa` stub used
 // to escape into every later suite, where `result.stderr.trim()` then threw.
-const realAuthSnapshot = { ...realAuth }
-const realConfigSnapshot = { ...realConfig }
-const realEnvSnapshot = { ...realEnv }
-const realEnvUtilsSnapshot = { ...realEnvUtils }
-const realExecaSnapshot = { ...realExeca }
+const nonce = `${Date.now()}-${Math.random()}`
+const realAuthSnapshot = {
+  ...await import(`./auth.js?real=${nonce}`),
+} as typeof import('./auth.js')
+const realConfigSnapshot = {
+  ...await import(`./config.js?real=${nonce}`),
+} as typeof import('./config.js')
+const realEnvSnapshot = {
+  ...await import(`./env.js?real=${nonce}`),
+} as typeof import('./env.js')
+const realEnvUtilsSnapshot = {
+  ...await import(`./envUtils.js?real=${nonce}`),
+} as typeof import('./envUtils.js')
+const realExecaSnapshot = {
+  ...await import(`${import.meta.resolve('execa')}?real=${nonce}`),
+} as typeof import('execa')
 
 const originalEnv = { ...process.env }
 const originalMacro = (globalThis as Record<string, unknown>).MACRO

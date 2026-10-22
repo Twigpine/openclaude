@@ -9,6 +9,11 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realCodexCredentials = {
+  ...await import(`../../utils/codexCredentials.js?real=${nonce}`),
+} as typeof import('../../utils/codexCredentials.js')
+
 type ProviderConfigModule = typeof import('./providerConfig.js')
 
 function importFreshProviderConfig(
@@ -26,6 +31,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('../../utils/codexCredentials.js', () => realCodexCredentials)
   } finally {
     releaseSharedMutationLock()
   }
