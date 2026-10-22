@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { APIError } from '@anthropic-ai/sdk'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
+import { clearOAuthTokenCache } from '../../utils/auth.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import {
   classifyAPIError,
@@ -27,6 +28,7 @@ let tempDir: string
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'openclaude-opencode-go-error-test-'))
   setClaudeConfigHomeDirForTesting(tempDir)
+  clearOAuthTokenCache()
 })
 
 afterEach(() => {
