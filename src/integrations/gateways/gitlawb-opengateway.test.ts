@@ -10,6 +10,14 @@ describe('gitlawb-opengateway live model mapping', () => {
     {
       routeId: 'gitlawb-opengateway',
       expected: {
+        defaultModel: 'mimo-v2.5-pro',
+        setup: {
+          credentialEnvVars: [
+            'OPENGATEWAY_API_KEY',
+            'OPENAI_API_KEYS',
+            'OPENAI_API_KEY',
+          ],
+        },
         catalogSource: 'hybrid',
         discovery: { requiresAuth: false, mapModel: mapOpenGatewayModel },
       } satisfies GatewayCatalogExpectations,
