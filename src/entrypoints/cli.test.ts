@@ -1128,6 +1128,8 @@ describe('Node 24 premature exit regression (issue #1678)', () => {
         process.stdout.isTTY = true;
         process.stdin.isTTY = true;
         process.stdin.setRawMode = () => {};
+        process.stdin.ref = () => process.stdin;
+        process.stdin.unref = () => process.stdin;
         process.env.OPENCLAUDE_DISABLE_TELEMETRY = '1';
         process.env.OPENGATEWAY_API_KEY = 'dummy';
 
