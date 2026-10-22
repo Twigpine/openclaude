@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type Anthropic from '@anthropic-ai/sdk'
 import { APIError, APIUserAbortError } from '@anthropic-ai/sdk'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
+import * as debugNs from '../../utils/debug.js'
+import * as sleepNs from '../../utils/sleep.js'
 import { markOpenAIRequestNonReplayable } from './openaiErrorClassification.js'
 type ProvidersModule = typeof import('../../utils/model/providers.js')
 type FastModeModule = typeof import('../../utils/fastMode.js')
@@ -19,21 +21,10 @@ function makeError(headers: Record<string, string>): APIError {
 
 // Save/restore env vars between tests
 const originalEnv = { ...process.env }
-const nonce = `${Date.now()}-${Math.random()}`
-const originalDebugModule = {
-  ...await import(`../../utils/debug.js?real=${nonce}`),
-} as typeof import('../../utils/debug.js')
-const originalSleepModule = {
-  ...await import(`../../utils/sleep.js?real=${nonce}`),
-} as typeof import('../../utils/sleep.js')
-const realProviders = {
-  ...await import(`../../utils/model/providers.js?real=${nonce}`),
-} as typeof import('../../utils/model/providers.js')
-const realFastMode = {
-  ...await import(`../../utils/fastMode.js?real=${nonce}`),
-} as typeof import('../../utils/fastMode.js')
-let originalProvidersModule: ProvidersModule | undefined = realProviders
-let originalFastModeModule: FastModeModule | undefined = realFastMode
+const originalDebugModule = { ...debugNs }
+const originalSleepModule = { ...sleepNs }
+let originalProvidersModule: ProvidersModule | undefined
+let originalFastModeModule: FastModeModule | undefined
 
 const envKeys = [
   'CLAUDE_CODE_USE_OPENAI',
