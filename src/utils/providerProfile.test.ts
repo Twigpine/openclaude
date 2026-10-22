@@ -10,6 +10,10 @@ import {
   resolveRouteCredentialValue,
 } from '../integrations/routeMetadata.js'
 import { DEFAULT_CODEX_BASE_URL } from '../services/api/providerConfig.js'
+import {
+  getClaudeConfigHomeDirOverrideForTesting,
+  setClaudeConfigHomeDirForTesting,
+} from './envUtils.js'
 import { getProviderValidationError } from './providerValidation.js'
 import {
   applySavedProfileToCurrentSession,
@@ -2002,8 +2006,10 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
   const configDir = mkdtempSync(join(tmpdir(), 'openclaude-delete-config-profile-'))
   const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
   const previousCwd = process.cwd()
+  const previousConfigOverride = getClaudeConfigHomeDirOverrideForTesting()
 
   try {
+    setClaudeConfigHomeDirForTesting(undefined)
     process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.chdir(cwd)
 
@@ -2015,6 +2021,7 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
       OPENAI_MODEL: 'llama3.1:8b',
     })
 
+    assert.equal(getDefaultProfileFilePath(), join(configDir, PROFILE_FILE_NAME))
     saveProfileFile(configProfile)
     assert.equal(existsSync(join(configDir, PROFILE_FILE_NAME)), true)
     writeFileSync(
@@ -2029,6 +2036,7 @@ test('deleteProfileFile clears the default profile and legacy workspace fallback
     assert.equal(existsSync(join(cwd, PROFILE_FILE_NAME)), false)
     assert.equal(loadProfileFile(), null)
   } finally {
+    setClaudeConfigHomeDirForTesting(previousConfigOverride)
     process.chdir(previousCwd)
     if (previousConfigDir === undefined) {
       delete process.env.OPENCLAUDE_CONFIG_DIR

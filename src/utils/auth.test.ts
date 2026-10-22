@@ -1,5 +1,6 @@
-import { afterEach, expect, mock, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import * as originalSettings from './settings/settings.js'
+import type { SettingsJson } from './settings/types.js'
 
 type MockSource =
   | 'userSettings'
@@ -14,11 +15,10 @@ async function importAuthFresh() {
   return await import(`./auth.js?ts=${Date.now()}-${Math.random()}`)
 }
 
-// Restore Bun's module mocks after each test so leaked settings behavior
-// cannot influence later auth/settings tests in the same process.
-// Addresses jatmn's P3 on #1731: test isolation for mock.module().
+const settingsSpies: Array<{ mockRestore(): void }> = []
+
 afterEach(() => {
-  mock.restore()
+  for (const spy of settingsSpies.splice(0)) spy.mockRestore()
 })
 
 // Helper: mock settings to return the given subscriptionType from a specific
@@ -26,17 +26,18 @@ afterEach(() => {
 // from user settings only — project, local, flag, and policy settings must
 // NOT propagate subscriptionType.
 function mockSettings(
-  subscriptionType: string | undefined,
+  subscriptionType: SettingsJson['subscriptionType'],
   source: MockSource = 'userSettings',
 ) {
-  mock.module('./settings/settings.js', () => ({
-    ...originalSettings,
-    getSettings_DEPRECATED: () => (source === 'none' ? {} : { subscriptionType }),
-    getSettingsForSource: (s: string) => {
+  settingsSpies.push(
+    spyOn(originalSettings, 'getSettings_DEPRECATED').mockImplementation(
+      () => (source === 'none' ? {} : { subscriptionType }),
+    ),
+    spyOn(originalSettings, 'getSettingsForSource').mockImplementation(s => {
       if (source === 'none') return null
       return s === source ? { subscriptionType } : null
-    },
-  }))
+    }),
+  )
 }
 
 async function withControlledAuthEnv<T>(

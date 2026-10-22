@@ -17,6 +17,7 @@ import * as realFastMode from './fastMode.js'
 import * as realModel from './model/model.js'
 import { resetSettingsCache } from './settings/settingsCache.js'
 
+const realFastModeSnapshot = { ...realFastMode }
 const realModelSnapshot = { ...realModel }
 
 type PricingOverride = {
@@ -38,6 +39,7 @@ async function importFreshModelCost() {
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/modelCost.modelGate.test.ts')
+  resetCostState()
   originalSources = [...getAllowedSettingSources()]
   originalFlagPath = getFlagSettingsPath()
   originalFlagInline = getFlagSettingsInline()
@@ -50,8 +52,9 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    resetCostState()
     mock.restore()
-    mock.module('./fastMode.js', () => realFastMode)
+    mock.module('./fastMode.js', () => realFastModeSnapshot)
     mock.module('./model/model.js', () => realModelSnapshot)
     setAllowedSettingSources(originalSources)
     setFlagSettingsPath(originalFlagPath)
@@ -90,7 +93,7 @@ test('unknown models do not inherit the configured default model price', async (
 // billed at the normal rate while the picker advertised the fast-mode price.
 test('fast-mode Opus 4.8 is charged the elevated fast-mode tier, normal otherwise', async () => {
   mock.module('./fastMode.js', () => ({
-    ...realFastMode,
+    ...realFastModeSnapshot,
     isFastModeEnabled: () => true,
   }))
   const { getModelCosts, COST_TIER_30_150, COST_TIER_5_25 } =
@@ -199,7 +202,7 @@ test('all-zero exact override is authoritative for unknown and fast-mode known m
   pricingByModel['nvidia/free-model'] = zero
   pricingByModel['claude-opus-4-8'] = zero
   mock.module('./fastMode.js', () => ({
-    ...realFastMode,
+    ...realFastModeSnapshot,
     isFastModeEnabled: () => true,
   }))
   const { calculateUSDCost, getModelCosts, getModelPricingString } =
@@ -223,7 +226,7 @@ test('all-zero exact override is authoritative for unknown and fast-mode known m
 
 test('custom pricing matches exact resolved ids only, including unusual own keys', async () => {
   mock.restore()
-  mock.module('./fastMode.js', () => realFastMode)
+  mock.module('./fastMode.js', () => realFastModeSnapshot)
   mock.module('./model/model.js', () => realModelSnapshot)
   const configured = {
     inputTokens: 7,

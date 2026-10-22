@@ -17,11 +17,15 @@ import {
   switchSession,
 } from '../bootstrap/state.js'
 import { createGoalState } from '../services/goal/state.js'
-import { setClaudeConfigHomeDirForTesting } from './envUtils.js'
+import {
+  getClaudeConfigHomeDirOverrideForTesting,
+  setClaudeConfigHomeDirForTesting,
+} from './envUtils.js'
 import { deleteSessionFiles } from './sessionDeletion.js'
 import * as sessionStorage from './sessionStorage.js'
 import {
   flushSessionStorage,
+  getProjectDir,
   getTranscriptPathForSession,
   recordGoalState,
   resetProjectForTesting,
@@ -34,16 +38,19 @@ import {
 const DELETED = '00000000-0000-4000-8000-00000000d001' as UUID
 const ACTIVE = '00000000-0000-4000-8000-00000000d002' as UUID
 const tempDirs: string[] = []
-const savedEnv = {
-  NODE_ENV: process.env.NODE_ENV,
-  TEST_ENABLE_SESSION_PERSISTENCE: process.env.TEST_ENABLE_SESSION_PERSISTENCE,
-  ENABLE_SESSION_PERSISTENCE: process.env.ENABLE_SESSION_PERSISTENCE,
-}
+let savedEnv: Record<string, string | undefined>
+let originalConfigOverride: string | undefined
 let originalSessionId: string
 let originalPersistenceDisabled: boolean
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/sessionStorage.deletedSession.test.ts')
+  savedEnv = {
+    NODE_ENV: process.env.NODE_ENV,
+    TEST_ENABLE_SESSION_PERSISTENCE: process.env.TEST_ENABLE_SESSION_PERSISTENCE,
+    ENABLE_SESSION_PERSISTENCE: process.env.ENABLE_SESSION_PERSISTENCE,
+  }
+  originalConfigOverride = getClaudeConfigHomeDirOverrideForTesting()
   originalSessionId = getSessionId()
   originalPersistenceDisabled = isSessionPersistenceDisabled()
   process.env.NODE_ENV = 'development'
@@ -53,24 +60,31 @@ beforeEach(async () => {
   const configDir = await mkdtemp(join(tmpdir(), 'openclaude-deleted-session-'))
   tempDirs.push(configDir)
   setClaudeConfigHomeDirForTesting(configDir)
+  getProjectDir.cache.clear()
   resetProjectForTesting()
 })
 
 afterEach(async () => {
   try {
-    mock.restore()
-    for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
-    setSessionPersistenceDisabled(originalPersistenceDisabled)
-    switchSession(originalSessionId as never)
-    resetProjectForTesting()
-    await Promise.all(
-      tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })),
-    )
+    await flushSessionStorage()
   } finally {
-    releaseSharedMutationLock()
+    try {
+      mock.restore()
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      setSessionPersistenceDisabled(originalPersistenceDisabled)
+      switchSession(originalSessionId as never)
+      resetProjectForTesting()
+      setClaudeConfigHomeDirForTesting(originalConfigOverride)
+      getProjectDir.cache.clear()
+      await Promise.all(
+        tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })),
+      )
+    } finally {
+      releaseSharedMutationLock()
+    }
   }
 })
 

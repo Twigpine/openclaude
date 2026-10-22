@@ -1,9 +1,12 @@
-import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
 import type { PermissionRule } from '../../utils/permissions/PermissionRule.js'
-import { getRelativeSettingsFilePathForSource as REAL_canonicalPath } from '../../utils/settings/settings.js'
+import * as settingsModule from '../../utils/settings/settings.js'
+import * as permissionsLoader from '../../utils/permissions/permissionsLoader.js'
 import type { SettingsJson } from '../../utils/settings/types.js'
+
+const REAL_canonicalPath = settingsModule.getRelativeSettingsFilePathForSource
 
 // TrustDialog/utils.ts emits file-path strings shown to users in the trust
 // dialog. These MUST come from getRelativeSettingsFilePathForSource — the
@@ -52,24 +55,17 @@ const permissionRulesState: {
   localSettings: [],
 }
 
-mock.module('../../utils/settings/settings.js', () => ({
-  // Stateful — needs mocking to control test inputs.
-  getSettingsForSource: (source: 'projectSettings' | 'localSettings') =>
-    settingsState[source],
-  // Pure — pass the REAL function through. The mock exists only because
-  // utils.ts imports both names from the same module; we must provide both.
-  getRelativeSettingsFilePathForSource: REAL_canonicalPath,
-}))
-
-mock.module('../../utils/permissions/permissionsLoader.js', () => ({
-  getPermissionRulesForSource: (
-    source: 'projectSettings' | 'localSettings',
-  ): PermissionRule[] => permissionRulesState[source],
-}))
+const settingsSpy = spyOn(settingsModule, 'getSettingsForSource').mockImplementation(
+  source => settingsState[source as keyof typeof settingsState],
+)
+const permissionRulesSpy = spyOn(permissionsLoader, 'getPermissionRulesForSource').mockImplementation(
+  source => permissionRulesState[source as keyof typeof permissionRulesState],
+)
 
 afterAll(() => {
   try {
-    mock.restore()
+    settingsSpy.mockRestore()
+    permissionRulesSpy.mockRestore()
   } finally {
     releaseSharedMutationLock()
   }

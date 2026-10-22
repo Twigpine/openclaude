@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import {
   existsSync,
   mkdirSync,
@@ -7,12 +7,29 @@ import {
   writeFileSync,
 } from 'fs'
 import * as fsPromises from 'fs/promises'
+import * as os from 'os'
 import { homedir, tmpdir } from 'os'
 import { join } from 'path'
 import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
+import {
+  getClaudeConfigHomeDir,
+  getClaudeConfigHomeDirOverrideForTesting,
+  setClaudeConfigHomeDirForTesting,
+} from './envUtils.js'
 
-const originalEnv = { ...process.env }
-const originalArgv = [...process.argv]
+let originalEnv: NodeJS.ProcessEnv
+let originalArgv: string[]
+let originalConfigOverride: string | undefined
+const pathSpies: Array<{ mockRestore(): void }> = []
+
+beforeEach(async () => {
+  await acquireEnvMutex()
+  originalEnv = { ...process.env }
+  originalArgv = [...process.argv]
+  originalConfigOverride = getClaudeConfigHomeDirOverrideForTesting()
+  setClaudeConfigHomeDirForTesting(undefined)
+  getClaudeConfigHomeDir.cache.clear()
+})
 
 async function importFreshEnvUtils() {
   return import(`./envUtils.ts?ts=${Date.now()}-${Math.random()}`)
@@ -34,7 +51,9 @@ afterEach(() => {
   try {
     process.env = { ...originalEnv }
     process.argv = [...originalArgv]
-    mock.restore()
+    for (const spy of pathSpies.splice(0)) spy.mockRestore()
+    setClaudeConfigHomeDirForTesting(originalConfigOverride)
+    getClaudeConfigHomeDir.cache.clear()
   } finally {
     releaseEnvMutex()
   }
@@ -42,7 +61,6 @@ afterEach(() => {
 
 describe('OpenClaude paths', () => {
   test('defaults user config home to ~/.openclaude', async () => {
-    await acquireEnvMutex()
     delete process.env.OPENCLAUDE_CONFIG_DIR
     delete process.env.CLAUDE_CONFIG_DIR
     const { resolveClaudeConfigHomeDir } = await importFreshEnvUtils()
@@ -55,7 +73,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('hard-cuts user config home to ~/.openclaude by default', async () => {
-    await acquireEnvMutex()
     delete process.env.OPENCLAUDE_CONFIG_DIR
     delete process.env.CLAUDE_CONFIG_DIR
     const { resolveClaudeConfigHomeDir } = await importFreshEnvUtils()
@@ -68,7 +85,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('does not migrate legacy .claude config into .openclaude', async () => {
-    await acquireEnvMutex()
     const tempHome = mkdtempSync(join(tmpdir(), 'openclaude-paths-test-'))
     try {
       mkdirSync(join(tempHome, '.claude', 'skills', 'legacy-skill'), {
@@ -91,15 +107,11 @@ describe('OpenClaude paths', () => {
   })
 
   test('config home does not fall back to legacy .claude', async () => {
-    await acquireEnvMutex()
     const tempHome = mkdtempSync(join(tmpdir(), 'openclaude-paths-test-'))
     try {
       writeFileSync(join(tempHome, '.openclaude'), 'not a directory')
       mkdirSync(join(tempHome, '.claude'), { recursive: true })
-      mock.module('os', () => ({
-        homedir: () => tempHome,
-        tmpdir,
-      }))
+      pathSpies.push(spyOn(os, 'homedir').mockReturnValue(tempHome))
       delete process.env.OPENCLAUDE_CONFIG_DIR
       delete process.env.CLAUDE_CONFIG_DIR
 
@@ -112,7 +124,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('default plans directory uses ~/.openclaude/plans', async () => {
-    await acquireEnvMutex()
     delete process.env.OPENCLAUDE_CONFIG_DIR
     delete process.env.CLAUDE_CONFIG_DIR
     const { getDefaultPlansDirectory } = await importFreshPlans()
@@ -123,7 +134,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('default plans directory respects explicit configDirEnv argument', async () => {
-    await acquireEnvMutex()
     const { getDefaultPlansDirectory } = await importFreshPlans()
 
     expect(
@@ -132,7 +142,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('default plans directory respects OPENCLAUDE_CONFIG_DIR', async () => {
-    await acquireEnvMutex()
     process.env.OPENCLAUDE_CONFIG_DIR = '/tmp/preferred-openclaude'
     delete process.env.CLAUDE_CONFIG_DIR
     const { getDefaultPlansDirectory } = await importFreshPlans()
@@ -143,7 +152,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('OPENCLAUDE_CONFIG_DIR wins for default plans directory', async () => {
-    await acquireEnvMutex()
     process.env.OPENCLAUDE_CONFIG_DIR = '/tmp/preferred-openclaude'
     process.env.CLAUDE_CONFIG_DIR = '/tmp/legacy-openclaude'
     const { getDefaultPlansDirectory } = await importFreshPlans()
@@ -154,7 +162,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('default plans directory normalizes generated path to NFC', async () => {
-    await acquireEnvMutex()
     delete process.env.OPENCLAUDE_CONFIG_DIR
     const { getDefaultPlansDirectory } = await importFreshPlans()
 
@@ -164,7 +171,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('default plans directory normalizes explicit configDirEnv argument to NFC', async () => {
-    await acquireEnvMutex()
     const { getDefaultPlansDirectory } = await importFreshPlans()
 
     expect(
@@ -173,20 +179,15 @@ describe('OpenClaude paths', () => {
   })
 
   test('ignores CLAUDE_CONFIG_DIR override when provided', async () => {
-    await acquireEnvMutex()
     delete process.env.OPENCLAUDE_CONFIG_DIR
     process.env.CLAUDE_CONFIG_DIR = '/tmp/custom-openclaude'
-    mock.module('os', () => ({
-      homedir: () => '/tmp/home',
-      tmpdir,
-    }))
+    pathSpies.push(spyOn(os, 'homedir').mockReturnValue('/tmp/home'))
     const { getClaudeConfigHomeDir } = await importFreshEnvUtils()
 
     expect(getClaudeConfigHomeDir()).toBe('/tmp/home/.openclaude')
   })
 
   test('OPENCLAUDE_CONFIG_DIR overrides the default (issue #454)', async () => {
-    await acquireEnvMutex()
     delete process.env.CLAUDE_CONFIG_DIR
     process.env.OPENCLAUDE_CONFIG_DIR = '/tmp/oc-config-only'
     const { getClaudeConfigHomeDir } = await importFreshEnvUtils()
@@ -195,7 +196,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('OPENCLAUDE_CONFIG_DIR wins when both env vars are set with different values', async () => {
-    await acquireEnvMutex()
     process.env.OPENCLAUDE_CONFIG_DIR = '/tmp/oc-wins'
     process.env.CLAUDE_CONFIG_DIR = '/tmp/legacy-loses'
     const { getClaudeConfigHomeDir } = await importFreshEnvUtils()
@@ -204,7 +204,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('CLAUDE_CONFIG_DIR is ignored when OPENCLAUDE_CONFIG_DIR is unset', async () => {
-    await acquireEnvMutex()
     delete process.env.OPENCLAUDE_CONFIG_DIR
     process.env.CLAUDE_CONFIG_DIR = '/tmp/legacy-only'
     const { getClaudeConfigHomeDir } = await importFreshEnvUtils()
@@ -213,7 +212,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('empty OPENCLAUDE_CONFIG_DIR does not fall through to CLAUDE_CONFIG_DIR', async () => {
-    await acquireEnvMutex()
     process.env.OPENCLAUDE_CONFIG_DIR = ''
     process.env.CLAUDE_CONFIG_DIR = '/tmp/legacy-fallback'
     const { getClaudeConfigHomeDir } = await importFreshEnvUtils()
@@ -222,7 +220,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('resolveConfigDirEnv ignores CLAUDE_CONFIG_DIR without warning', async () => {
-    await acquireEnvMutex()
     const { resolveConfigDirEnv, __resetConfigDirEnvWarningForTesting } =
       await importFreshEnvUtils()
     __resetConfigDirEnvWarningForTesting()
@@ -246,7 +243,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('resolveConfigDirEnv ignores legacy env for silent and warning callers', async () => {
-    await acquireEnvMutex()
     const { resolveConfigDirEnv, __resetConfigDirEnvWarningForTesting } =
       await importFreshEnvUtils()
     __resetConfigDirEnvWarningForTesting()
@@ -270,7 +266,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('resolveConfigDirEnv does not warn when both env vars agree', async () => {
-    await acquireEnvMutex()
     const { resolveConfigDirEnv, __resetConfigDirEnvWarningForTesting } =
       await importFreshEnvUtils()
     __resetConfigDirEnvWarningForTesting()
@@ -287,7 +282,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('resolveConfigDirEnv returns undefined when neither env var is set', async () => {
-    await acquireEnvMutex()
     const { resolveConfigDirEnv } = await importFreshEnvUtils()
 
     expect(
@@ -299,7 +293,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('project and local settings paths use .openclaude', async () => {
-    await acquireEnvMutex()
     const { getRelativeSettingsFilePathForSource } = await importFreshSettings()
 
     expect(getRelativeSettingsFilePathForSource('projectSettings')).toBe(
@@ -311,7 +304,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('local installer uses openclaude wrapper path', async () => {
-    await acquireEnvMutex()
     process.env.OPENCLAUDE_CONFIG_DIR = join(homedir(), '.openclaude')
     delete process.env.CLAUDE_CONFIG_DIR
     const { getLocalClaudePath } = await importFreshLocalInstaller()
@@ -322,7 +314,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('local installation detection matches .openclaude path', async () => {
-    await acquireEnvMutex()
     const { isManagedLocalInstallationPath } =
       await importFreshLocalInstaller()
 
@@ -334,7 +325,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('local installation detection ignores legacy .claude path', async () => {
-    await acquireEnvMutex()
     const { isManagedLocalInstallationPath } =
       await importFreshLocalInstaller()
 
@@ -346,7 +336,6 @@ describe('OpenClaude paths', () => {
   })
 
   test('candidate local install dirs include only openclaude path', async () => {
-    await acquireEnvMutex()
     const { getCandidateLocalInstallDirs } = await importFreshLocalInstaller()
 
     expect(
@@ -359,18 +348,16 @@ describe('OpenClaude paths', () => {
   })
 
   test('legacy local installs are ignored even when they expose the claude binary', async () => {
-    await acquireEnvMutex()
-    mock.module('fs/promises', () => ({
-      ...fsPromises,
-      access: async (path: string) => {
+    pathSpies.push(
+      spyOn(fsPromises, 'access').mockImplementation(async path => {
         if (
           path === join(homedir(), '.claude', 'local', 'node_modules', '.bin', 'claude')
         ) {
           return
         }
         throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
-      },
-    }))
+      }),
+    )
 
     const { getDetectedLocalInstallDir, localInstallationExists } =
       await importFreshLocalInstaller()

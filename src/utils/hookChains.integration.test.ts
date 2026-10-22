@@ -7,6 +7,10 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 
+import * as realTeammate from './teammate.js'
+
+const realTeammateSnapshot = { ...realTeammate }
+
 type HookChainsModule = typeof import('./hookChains.js')
 type ImportHarnessOptions = {
   allowRemoteSessions?: boolean
@@ -45,7 +49,6 @@ async function importRealModules() {
     policyLimits: await import(`../services/policyLimits/index.js?real=${ts}-${rand}`) as typeof import('../services/policyLimits/index.js'),
     teamHelpers: await import(`./swarm/teamHelpers.js?real=${ts}-${rand}`) as typeof import('./swarm/teamHelpers.js'),
     teammateMailbox: await import(`./teammateMailbox.js?real=${ts}-${rand}`) as typeof import('./teammateMailbox.js'),
-    teammate: await import(`./teammate.js?real=${ts}-${rand}`) as typeof import('./teammate.js'),
     replBridge: await import(`../bridge/replBridgeHandle.js?real=${ts}-${rand}`) as typeof import('../bridge/replBridgeHandle.js'),
     agentTool: await import(`../tools/AgentTool/AgentTool.js?real=${ts}-${rand}`) as typeof import('../tools/AgentTool/AgentTool.js'),
   }
@@ -58,7 +61,7 @@ async function restorePersistentModuleMocks(): Promise<void> {
   mock.module('../services/policyLimits/index.js', () => real.policyLimits)
   mock.module('./swarm/teamHelpers.js', () => real.teamHelpers)
   mock.module('./teammateMailbox.js', () => real.teammateMailbox)
-  mock.module('./teammate.js', () => real.teammate)
+  mock.module('./teammate.js', () => realTeammateSnapshot)
   mock.module('../bridge/replBridgeHandle.js', () => real.replBridge)
   mock.module('../tools/AgentTool/AgentTool.js', () => real.agentTool)
 }
@@ -112,7 +115,7 @@ async function importHookChainsHarness(
   }))
 
   mock.module('./teammate.js', () => ({
-    ...real.teammate,
+    ...realTeammateSnapshot,
     getAgentName: () => senderName,
     getTeamName: () => teamName,
     getTeammateColor: () => 'blue',

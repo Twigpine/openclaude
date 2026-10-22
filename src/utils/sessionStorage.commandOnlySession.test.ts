@@ -3,7 +3,7 @@ import { type UUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 import {
   acquireSharedMutationLock,
@@ -16,7 +16,10 @@ import {
   switchSession,
 } from '../bootstrap/state.js'
 import type { Message } from '../types/message.js'
-import { setClaudeConfigHomeDirForTesting } from './envUtils.js'
+import {
+  getClaudeConfigHomeDirOverrideForTesting,
+  setClaudeConfigHomeDirForTesting,
+} from './envUtils.js'
 import {
   createAssistantMessage,
   createUserMessage,
@@ -24,6 +27,7 @@ import {
 } from './messages.js'
 import {
   flushSessionStorage,
+  getProjectDir,
   getTranscriptPathForSession,
   recordTranscript,
   resetProjectForTesting,
@@ -34,16 +38,19 @@ import {
 const SESSION = '00000000-0000-4000-8000-00000000c001' as UUID
 const OTHER = '00000000-0000-4000-8000-00000000c002' as UUID
 const tempDirs: string[] = []
-const savedEnv = {
-  NODE_ENV: process.env.NODE_ENV,
-  TEST_ENABLE_SESSION_PERSISTENCE: process.env.TEST_ENABLE_SESSION_PERSISTENCE,
-  ENABLE_SESSION_PERSISTENCE: process.env.ENABLE_SESSION_PERSISTENCE,
-}
+let savedEnv: Record<string, string | undefined>
+let originalConfigOverride: string | undefined
 let originalSessionId: string
 let originalPersistenceDisabled: boolean
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/sessionStorage.commandOnlySession.test.ts')
+  savedEnv = {
+    NODE_ENV: process.env.NODE_ENV,
+    TEST_ENABLE_SESSION_PERSISTENCE: process.env.TEST_ENABLE_SESSION_PERSISTENCE,
+    ENABLE_SESSION_PERSISTENCE: process.env.ENABLE_SESSION_PERSISTENCE,
+  }
+  originalConfigOverride = getClaudeConfigHomeDirOverrideForTesting()
   originalSessionId = getSessionId()
   originalPersistenceDisabled = isSessionPersistenceDisabled()
   process.env.NODE_ENV = 'development'
@@ -53,25 +60,33 @@ beforeEach(async () => {
   const configDir = await mkdtemp(join(tmpdir(), 'openclaude-command-only-'))
   tempDirs.push(configDir)
   setClaudeConfigHomeDirForTesting(configDir)
+  getProjectDir.cache.clear()
   resetProjectForTesting()
   switchSession(SESSION as never)
   await resetSessionFilePointer()
+  expect(getTranscriptPathForSession(SESSION).startsWith(`${configDir}${sep}`)).toBe(true)
 })
 
 afterEach(async () => {
   try {
-    for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
-    setSessionPersistenceDisabled(originalPersistenceDisabled)
-    switchSession(originalSessionId as never)
-    resetProjectForTesting()
-    await Promise.all(
-      tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })),
-    )
+    await flushSessionStorage()
   } finally {
-    releaseSharedMutationLock()
+    try {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      setSessionPersistenceDisabled(originalPersistenceDisabled)
+      switchSession(originalSessionId as never)
+      resetProjectForTesting()
+      setClaudeConfigHomeDirForTesting(originalConfigOverride)
+      getProjectDir.cache.clear()
+      await Promise.all(
+        tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })),
+      )
+    } finally {
+      releaseSharedMutationLock()
+    }
   }
 })
 

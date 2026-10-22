@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../test/sharedMutationLock.js'
+import { settingsChangeDetector } from '../utils/settings/changeDetector.js'
 import type { Command } from '../commands.js'
 import type { SDKMessage } from '../entrypoints/agentSdkTypes.js'
 import * as queryEngineModule from '../QueryEngine.js'
@@ -170,6 +175,16 @@ describe('headless --print max-turns', () => {
   })
 
   test('forwards maxTurns 0 through runHeadless into ask()', async () => {
+    await acquireSharedMutationLock('cli/printMaxTurns.test.ts')
+    const unsubscribes: Array<() => void> = []
+    const realSubscribe = settingsChangeDetector.subscribe
+    const subscribeSpy = spyOn(settingsChangeDetector, 'subscribe').mockImplementation(
+      listener => {
+        const unsubscribe = realSubscribe(listener)
+        unsubscribes.push(unsubscribe)
+        return unsubscribe
+      },
+    )
     process.env.CLAUDE_CODE_SIMPLE = '1'
 
     const shutdownSpy = spyOn(shutdownModule, 'gracefulShutdownSync').mockImplementation(() => {})
@@ -205,10 +220,16 @@ describe('headless --print max-turns', () => {
       expect(askSpy.mock.calls[0]?.[0]?.maxTurns).toBe(0)
       expect(shutdownSpy).toHaveBeenCalledWith(0)
     } finally {
-      await runPromise?.catch(() => {})
-      askSpy.mockRestore()
-      stdoutSpy.mockRestore()
-      shutdownSpy.mockRestore()
+      try {
+        await runPromise?.catch(() => {})
+        for (const unsubscribe of unsubscribes) unsubscribe()
+        subscribeSpy.mockRestore()
+        askSpy.mockRestore()
+        stdoutSpy.mockRestore()
+        shutdownSpy.mockRestore()
+      } finally {
+        releaseSharedMutationLock()
+      }
     }
   })
 })
