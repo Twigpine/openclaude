@@ -4,6 +4,8 @@ import {
   getCatalogEntriesForRoute,
   getModel,
   getModelsForBrand,
+  getRouteDefaultBaseUrl,
+  resolveRouteIdFromBaseUrl,
 } from './index.js'
 import { resolveModelRuntimeLimits } from './runtimeMetadata.js'
 
@@ -16,46 +18,46 @@ const AT_CUTOFF = new Date('2026-08-13T10:00:00Z')
 const AFTER_WINDOW = new Date('2026-08-13T10:00:01Z')
 
 describe('Ling 3.0 Tiny :free descriptor', () => {
-  test('exposes the Tiny capabilities and limits to gateway catalogs', () => {
-    const model = getModel('inclusionai/ling-3.0-tiny:free')
+  test('links gateway wire models to descriptors and resolves limits by base URL', () => {
+    const routeId = 'gitlawb-opengateway'
+    const baseUrl = 'https://opengateway.gitlawb.com/v1'
+    expect(resolveRouteIdFromBaseUrl(baseUrl)).toBe(routeId)
+    expect(getRouteDefaultBaseUrl(routeId)).toBe(baseUrl)
 
-    expect(model).toBeDefined()
-    expect(model).toMatchObject({
-      id: 'inclusionai/ling-3.0-tiny:free',
-      brandId: 'ling',
-      classification: ['chat', 'reasoning', 'coding'],
-      contextWindow: 262_144,
-      maxOutputTokens: 32_768,
-      capabilities: {
-        supportsVision: false,
-        supportsStreaming: true,
-        supportsFunctionCalling: true,
-        supportsJsonMode: false,
-        supportsReasoning: true,
-        supportsPreciseTokenCount: false,
+    for (const { id, catalogId, limits, classification, capabilities } of [
+      {
+        id: 'inclusionai/ling-3.0-tiny:free',
+        catalogId: 'opengateway-ling-3.0-tiny-free',
+        limits: { contextWindow: 262_144, maxOutputTokens: 32_768 },
+        classification: ['chat', 'reasoning', 'coding'],
+        capabilities: {
+          supportsVision: false,
+          supportsStreaming: true,
+          supportsFunctionCalling: true,
+          supportsJsonMode: false,
+          supportsReasoning: true,
+          supportsPreciseTokenCount: false,
+        },
       },
-    })
-    expect(getModelsForBrand('ling').map(m => m.id)).toContain(
-      'inclusionai/ling-3.0-tiny:free',
-    )
-
-    // The gateway entry must map BOTH the wire id (apiName) and the picker
-    // descriptor to the :free id — a mismatch would send a different model
-    // upstream than the picker advertises.
-    const catalogEntry = getCatalogEntriesForRoute(
-      'gitlawb-opengateway',
-      DURING_WINDOW,
-    ).find(entry => entry.apiName === 'inclusionai/ling-3.0-tiny:free')
-    expect(catalogEntry?.id).toBe('opengateway-ling-3.0-tiny-free')
-    expect(catalogEntry?.modelDescriptorId).toBe(model?.id)
-
-    expect(
-      resolveModelRuntimeLimits({
-        model: 'inclusionai/ling-3.0-tiny:free',
-        baseUrl: 'https://opengateway.gitlawb.com/v1',
-        processEnv: {},
-      }),
-    ).toEqual({ contextWindow: 262_144, maxOutputTokens: 32_768 })
+    ]) {
+      const model = getModel(id)
+      expect(model).toMatchObject({
+        id,
+        brandId: 'ling',
+        defaultModel: id,
+        ...limits,
+        classification,
+        capabilities,
+      })
+      expect(getModelsForBrand('ling').map(m => m.id)).toContain(id)
+      const entry = getCatalogEntriesForRoute(routeId, DURING_WINDOW).find(
+        e => e.id === catalogId,
+      )
+      expect(entry).toMatchObject({ apiName: id, modelDescriptorId: model?.id })
+      expect(
+        resolveModelRuntimeLimits({ model: id, baseUrl, processEnv: {} }),
+      ).toEqual(limits)
+    }
   })
 
   test('availableUntil drops the entry from catalog resolution after the window', () => {

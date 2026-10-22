@@ -159,6 +159,7 @@ Dependency changes need a clear project benefit — fixing a bug, addressing a s
 - Avoid mixing unrelated cleanup into the same change.
 - Preserve existing repo patterns unless the change is intentionally refactoring them.
 - Add or update tests when the change affects behavior.
+- For vendor/integration catalog tests, cover each vendor with one table-driven test of its registry contract (route resolution, default base URL and model, credential env vars, catalog-to-descriptor linkage, and capability/limit values the runtime uses), plus a small number of behavioral tests such as model-discovery keep/drop parsing or availability windows. Do not copy full curated model lists or cache/refresh settings from vendor definitions into tests.
 - In timing-sensitive tests, drive timers with Bun's fake timers (`jest.useFakeTimers()` and `jest.advanceTimersByTime()`) instead of racing real delays, and restore real timers during cleanup, so the tests pass in a single-process whole-suite run as well as in the sharded runner.
 - Await completion promises or explicit readiness signals before asserting asynchronous results. For tests that deliberately suppress readiness, use a short, bounded wait and assert the expected failure.
 - For tests that launch real subprocesses, set an explicit per-test timeout longer than the child-process deadline, leaving time for assertions and cleanup. The launcher heap tests use an 8-second child deadline and a 10-second test timeout. Document the reason for the timeout beside the test.

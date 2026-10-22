@@ -1,110 +1,74 @@
 import { describe, expect, test } from 'bun:test'
+import type { ModelCatalogEntry } from '../descriptors.js'
+import {
+  getCatalogEntriesForRoute,
+  getModel,
+  getRouteDefaultBaseUrl,
+  getRouteDefaultModel,
+  getVendor,
+  resolveRouteIdFromBaseUrl,
+} from '../index.js'
 import xai from './xai.js'
 
 const mapModel = xai.catalog?.discovery?.mapModel
 
-function shape(id: string, extras: Record<string, unknown> = {}) {
-  return { id, ...extras }
-}
-
 describe('xAI vendor hybrid catalog', () => {
-  test('uses hybrid discovery with curated Grok 4.6 as the default', () => {
+  test('registers route defaults, credentials, and descriptor links', () => {
     expect(mapModel).toBeDefined()
     expect(xai.catalog?.source).toBe('hybrid')
     expect(xai.catalog?.discovery?.kind).toBe('openai-compatible')
-    expect(xai.catalog?.discoveryCacheTtl).toBe('1d')
-    expect(xai.catalog?.discoveryRefreshMode).toBe('background-if-stale')
-    expect(xai.catalog?.allowManualRefresh).toBe(true)
-    expect(xai.defaultModel).toBe('grok-4.6')
-    expect(xai.catalog?.models?.map(model => model.apiName)).toEqual([
-      'grok-4.6',
-      'grok-4.5',
-      'grok-4.3',
-      'grok-build-0.1',
-      'grok-4.20-0309-reasoning',
-      'grok-4.20-0309-non-reasoning',
-    ])
-  })
-
-  test('keeps chat Grok IDs including later uncataloged releases', () => {
-    if (!mapModel) throw new Error('mapModel missing')
-    const keep = [
-      'grok-4.6',
-      'grok-4.5',
-      'grok-4.3',
-      'grok-4.7',
-      'grok-build-0.1',
-      'grok-4.20-0309-reasoning',
-    ]
-    for (const id of keep) {
-      expect(mapModel(shape(id))).toEqual({
-        id,
-        apiName: id,
-        label: id,
-      })
+    for (const { routeId, baseUrl, model } of [
+      { routeId: 'xai', baseUrl: 'https://api.x.ai/v1', model: 'grok-4.6' },
+    ]) {
+      expect(resolveRouteIdFromBaseUrl(baseUrl)).toBe(routeId)
+      expect(getRouteDefaultBaseUrl(routeId)).toBe(baseUrl)
+      expect(getRouteDefaultModel(routeId)).toBe(model)
+      expect(getVendor(routeId)?.setup.credentialEnvVars).toEqual(['XAI_API_KEY'])
+      const catalog = getCatalogEntriesForRoute(routeId)
+      expect(catalog.some(entry => entry.apiName === model)).toBe(true)
+      for (const entry of catalog) {
+        const descriptor = getModel(entry.modelDescriptorId ?? '')
+        expect(descriptor).toBeDefined()
+        expect(descriptor?.defaultModel).toBe(entry.apiName)
+      }
     }
   })
 
-  test('drops Imagine, voice, STT/TTS, and embedding models', () => {
+  test('maps chat discovery entries and rejects unsupported or invalid entries', () => {
     if (!mapModel) throw new Error('mapModel missing')
-    const drop = [
-      'grok-imagine-image',
-      'grok-imagine-image-quality',
-      'grok-imagine-video-1.5',
-      'grok-voice-think-fast-1.0',
-      'grok-voice-think-fast-2.0',
-      'grok-stt-1.0',
-      'grok-tts-1.0',
-      // This model requires xAI's Responses API and does not support the
-      // generic OpenAI-compatible chat transport used by live discovery.
-      'grok-4.20-multi-agent-0309',
+    const chat = (id: string): ModelCatalogEntry => ({ id, apiName: id, label: id })
+    const cases: Array<{ raw: unknown, expected: ModelCatalogEntry | null }> = [
+      { raw: { id: 'grok-4.6' }, expected: chat('grok-4.6') },
+      { raw: { id: 'grok-4.7' }, expected: chat('grok-4.7') },
+      { raw: { id: 'grok-build-0.1' }, expected: chat('grok-build-0.1') },
+      { raw: { id: 'grok-4.20-0309-reasoning' }, expected: chat('grok-4.20-0309-reasoning') },
+      { raw: { id: 'grok-imagine-image' }, expected: null },
+      { raw: { id: 'grok-imagine-video-1.5' }, expected: null },
+      { raw: { id: 'grok-voice-think-fast-1.0' }, expected: null },
+      { raw: { id: 'grok-stt-1.0' }, expected: null },
+      { raw: { id: 'grok-tts-1.0' }, expected: null },
+      { raw: { id: 'grok-embed-1.0' }, expected: null },
+      { raw: { id: 'grok-4.20-multi-agent-0309' }, expected: null },
+      { raw: { id: 'latest' }, expected: null },
+      { raw: { id: 'grok-4.6-latest' }, expected: null },
+      { raw: { id: 'grok-build-latest' }, expected: null },
+      { raw: { id: 'grok-code-fast-1' }, expected: null },
+      { raw: { id: 'grok-4.6', active: false }, expected: null },
+      { raw: null, expected: null },
+      { raw: {}, expected: null },
+      { raw: { id: 1 }, expected: null },
+      { raw: { id: '' }, expected: null },
+      { raw: { id: 'other-model' }, expected: null },
+      { raw: { id: 'grok-4.7', context_length: 0 }, expected: chat('grok-4.7') },
+      { raw: { id: 'grok-4.7', context_length: -1 }, expected: chat('grok-4.7') },
+      { raw: { id: 'grok-4.7', context_length: Number.NaN }, expected: chat('grok-4.7') },
+      {
+        raw: { id: 'grok-4.6', context_length: 500_000 },
+        expected: { ...chat('grok-4.6'), contextWindow: 500_000 },
+      },
     ]
-    for (const id of drop) {
-      expect(mapModel(shape(id))).toBeNull()
+    for (const { raw, expected } of cases) {
+      expect(mapModel(raw)).toEqual(expected)
     }
-  })
-
-  test('drops curated aliases so hybrid merge does not duplicate them', () => {
-    if (!mapModel) throw new Error('mapModel missing')
-    const drop = [
-      'latest',
-      'grok-4.6-latest',
-      'grok-4.5-latest',
-      'grok-build-latest',
-      'grok-latest',
-      'grok-code-fast-1',
-    ]
-    for (const id of drop) {
-      expect(mapModel(shape(id))).toBeNull()
-    }
-  })
-
-  test('drops inactive entries, missing ids, and non-positive context limits', () => {
-    if (!mapModel) throw new Error('mapModel missing')
-    expect(mapModel(shape('grok-4.6', { active: false }))).toBeNull()
-    expect(mapModel(null)).toBeNull()
-    expect(mapModel({})).toBeNull()
-    expect(mapModel({ id: 1 })).toBeNull()
-    expect(mapModel({ id: '' })).toBeNull()
-    expect(mapModel(shape('grok-4.7', { context_length: 0 }))).toEqual({
-      id: 'grok-4.7',
-      apiName: 'grok-4.7',
-      label: 'grok-4.7',
-    })
-    expect(mapModel(shape('grok-4.7', { context_length: Number.NaN }))).toEqual({
-      id: 'grok-4.7',
-      apiName: 'grok-4.7',
-      label: 'grok-4.7',
-    })
-  })
-
-  test('forwards the /v1/models context_length when present', () => {
-    if (!mapModel) throw new Error('mapModel missing')
-    expect(mapModel(shape('grok-4.6', { context_length: 500000 }))).toEqual({
-      id: 'grok-4.6',
-      apiName: 'grok-4.6',
-      label: 'grok-4.6',
-      contextWindow: 500000,
-    })
   })
 })

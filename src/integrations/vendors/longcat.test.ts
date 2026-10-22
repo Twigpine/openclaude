@@ -17,10 +17,22 @@ describe('longcat vendor', () => {
   test('registers route defaults, catalog, and preset metadata', () => {
     ensureIntegrationsLoaded()
 
+    for (const baseUrl of [
+      'https://api.longcat.chat/openai',
+      'https://api.longcat.chat/openai/v1',
+    ]) {
+      expect(resolveRouteIdFromBaseUrl(baseUrl)).toBe('longcat')
+    }
+    expect(getRouteDefaultBaseUrl('longcat')).toBe(
+      'https://api.longcat.chat/openai/v1',
+    )
+    expect(getRouteDefaultModel('longcat')).toBe('LongCat-2.0')
+
     const vendor = getVendor('longcat')
-    expect(vendor).toBeDefined()
-    expect(vendor?.defaultBaseUrl).toBe('https://api.longcat.chat/openai/v1')
-    expect(vendor?.defaultModel).toBe('LongCat-2.0')
+    expect(vendor).toMatchObject({
+      defaultBaseUrl: 'https://api.longcat.chat/openai/v1',
+      defaultModel: 'LongCat-2.0',
+    })
     expect(vendor?.setup.credentialEnvVars).toEqual(['LONGCAT_API_KEY'])
     expect(vendor?.transportConfig.openaiShim?.thinkingRequestFormat).toBe(
       'zai-compatible',
@@ -32,27 +44,13 @@ describe('longcat vendor', () => {
       'stream_options',
     )
 
-    expect(getRouteDefaultBaseUrl('longcat')).toBe(
-      'https://api.longcat.chat/openai/v1',
+    const entry = getCatalogEntriesForRoute('longcat').find(
+      entry => entry.id === 'LongCat-2.0',
     )
-    expect(getRouteDefaultModel('longcat')).toBe('LongCat-2.0')
-    expect(resolveRouteIdFromBaseUrl('https://api.longcat.chat/openai')).toBe(
-      'longcat',
-    )
-    expect(
-      resolveRouteIdFromBaseUrl('https://api.longcat.chat/openai/v1'),
-    ).toBe('longcat')
-
-    const catalog = getCatalogEntriesForRoute('longcat')
-    expect(catalog).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'LongCat-2.0',
-          apiName: 'LongCat-2.0',
-          modelDescriptorId: 'LongCat-2.0',
-        }),
-      ]),
-    )
+    expect(entry).toMatchObject({
+      apiName: 'LongCat-2.0',
+      modelDescriptorId: 'LongCat-2.0',
+    })
 
     const model = getModel('LongCat-2.0')
     expect(model).toMatchObject({

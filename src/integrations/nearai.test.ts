@@ -14,7 +14,12 @@ import {
   getCatalogEntriesForRoute,
   getModelsForVendor,
 } from './registry.js'
-import { getRouteDefaultBaseUrl } from './routeMetadata.js'
+import {
+  getRouteDefaultBaseUrl,
+  getRouteDefaultModel,
+  getRouteDescriptor,
+  resolveRouteIdFromBaseUrl,
+} from './routeMetadata.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -33,30 +38,26 @@ afterEach(() => {
 })
 
 describe('NearAI Claude Opus 4.8 route', () => {
-  test('catalog exposes the anthropic/claude-opus-4-8 entry', () => {
-    const entry = getCatalogEntriesForRoute('nearai').find(
-      e => e.id === OPUS_48_ID,
-    )
-    expect(entry).toBeDefined()
-    expect(entry!.apiName).toBe(OPUS_48_ID)
-    // The entry must link to a model descriptor so the route resolves it.
-    expect(entry!.modelDescriptorId).toBe(OPUS_48_ID)
-  })
-
-  test('catalog entry resolves to a registered NearAI model descriptor', () => {
-    const model = getModelsForVendor('nearai').find(m => m.id === OPUS_48_ID)
-    // getModelsForVendor drops entries whose modelDescriptorId has no
-    // matching descriptor, so a defined result proves the route is wired.
-    expect(model).toBeDefined()
-    expect(model!.vendorId).toBe('nearai')
-    expect(model!.brandId).toBe('nearai')
-    expect(model!.defaultModel).toBe(OPUS_48_ID)
-    expect(model!.label).toBe('Claude Opus 4.8')
-  })
-
-  test('NearAI route points at the NearAI cloud gateway base URL', () => {
-    expect(getRouteDefaultBaseUrl('nearai')).toBe(
-      'https://cloud-api.near.ai/v1',
-    )
+  test('resolves route defaults, credentials, and catalog descriptor links', () => {
+    for (const { routeId, baseUrl, id } of [
+      { routeId: 'nearai', baseUrl: 'https://cloud-api.near.ai/v1', id: OPUS_48_ID },
+    ]) {
+      expect(resolveRouteIdFromBaseUrl(baseUrl)).toBe(routeId)
+      expect(getRouteDefaultBaseUrl(routeId)).toBe(baseUrl)
+      expect(getRouteDefaultModel(routeId)).toBe('anthropic/claude-sonnet-4-6')
+      expect(getRouteDescriptor(routeId)?.setup.credentialEnvVars).toEqual([
+        'NEARAI_API_KEY',
+      ])
+      const entry = getCatalogEntriesForRoute(routeId).find(e => e.id === id)
+      expect(entry).toMatchObject({ apiName: id, modelDescriptorId: id })
+      const model = getModelsForVendor(routeId).find(m => m.id === entry?.modelDescriptorId)
+      expect(model).toMatchObject({
+        id,
+        vendorId: routeId,
+        brandId: 'nearai',
+        defaultModel: id,
+        label: 'Claude Opus 4.8',
+      })
+    }
   })
 })
