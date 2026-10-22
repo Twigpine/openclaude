@@ -241,6 +241,23 @@ describe('OpenCode model catalog', () => {
     }
   })
 
+  test('go catalog excludes removed model ids', () => {
+    const models = getCatalogEntriesForRoute('opencode-go')
+    const ids = models.map(m => m.id)
+    const removedModelIds = [
+      'opencode-go-minimax-m2.5',
+      'opencode-go-kimi-k2.5',
+      'opencode-go-glm-5',
+      'opencode-go-qwen3.5-plus',
+      'opencode-go-mimo-v2-pro',
+      'opencode-go-mimo-v2-omni',
+      'opencode-go-hy3-preview',
+    ]
+    for (const id of removedModelIds) {
+      expect(ids).not.toContain(id)
+    }
+  })
+
   test('go Anthropic-format models use the messages endpoint with x-api-key auth', () => {
     const models = getCatalogEntriesForRoute('opencode-go')
     const messagesModelIds = [
