@@ -4,7 +4,7 @@ This guide uses Windows PowerShell.
 
 ## 1. Install Node.js
 
-Install Node.js 22 LTS or newer from:
+Install Node.js 22.23.4 or newer from:
 
 - `https://nodejs.org/`
 

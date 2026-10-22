@@ -142,7 +142,7 @@ OpenClaude is also mirrored to Twigpine:
 
 ### Install
 
-OpenClaude requires Node.js `>=22.0.0` for npm installs and runtime. Bun is
+OpenClaude requires Node.js `>=22.23.4` for npm installs and runtime. Bun is
 only needed for source builds and local development.
 
 ```bash
@@ -489,7 +489,7 @@ and client generation from `src/proto/openclaude.proto`.
 
 ## Development
 
-Use Node.js `>=22.0.0` and Bun `1.3.13` or newer for source builds.
+Use Node.js `>=22.23.4` and Bun `1.3.13` or newer for source builds.
 
 ```bash
 bun install
@@ -516,7 +516,7 @@ bun run benchmark:startup
 ```
 
 The benchmark requires Node `>=22.8.0`, where the compile-cache API was added;
-the built OpenClaude launcher continues to support the declared Node `>=22.0.0`
+the built OpenClaude launcher continues to support the declared Node `>=22.23.4`
 runtime range.
 
 The benchmark defaults to 30 separate-process warm runs and 10 isolated
