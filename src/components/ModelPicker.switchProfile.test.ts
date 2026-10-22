@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 
 import { resetModelStringsForTestingOnly } from '../bootstrap/state.js'
 import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
@@ -10,8 +10,19 @@ import {
 import * as actualAuth from '../utils/auth.js'
 import * as actualModelOptions from '../utils/model/modelOptions.js'
 import * as actualProviderProfiles from '../utils/providerProfiles.js'
-import * as actualProviders from '../utils/model/providers.js'
 import type { ProviderProfile } from '../utils/config.js'
+
+const providerSpecifier = '../utils/model/providers.js'
+const realProvidersForCleanup = {
+  ...await import(
+    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+  ),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module(providerSpecifier, () => realProvidersForCleanup)
+})
 
 // Snapshot the real modules before any mock.module runs. bun live-repoints the
 // `actual*` namespaces to the active mock, so these plain-object copies are the
@@ -19,7 +30,7 @@ import type { ProviderProfile } from '../utils/config.js'
 const realAuth = { ...actualAuth }
 const realModelOptions = { ...actualModelOptions }
 const realProviderProfiles = { ...actualProviderProfiles }
-const realProviders = { ...actualProviders }
+const realProviders = realProvidersForCleanup
 
 // bun's mock.module is process-wide and mock.restore() does NOT undo it, so
 // each mock is gated and falls through to the real implementation whenever

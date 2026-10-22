@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test'
 import { mock } from 'bun:test'
 
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
@@ -15,7 +15,6 @@ import {
 // the canonical pattern; this is the same lesson as the 2026-04-30 mock-leak
 // note in lessons_learned.md.
 import * as actualProviderProfiles from '../providerProfiles.js'
-import * as actualProviders from './providers.js'
 import * as actualAuth from '../auth.js'
 import * as actualProviderConfig from '../../services/api/providerConfig.js'
 import * as actualSettings from '../settings/settings.js'
@@ -28,11 +27,23 @@ import type { ModelOption } from './modelOptions.js'
 import type { ProviderProfile } from '../config.js'
 import type { SettingsJson } from '../settings/types.js'
 
+const providerSpecifier = './providers.js'
+const realProvidersForCleanup = {
+  ...await import(
+    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+  ),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module(providerSpecifier, () => realProvidersForCleanup)
+})
+
 // Snapshot the real modules before any mock.module runs. bun live-repoints the
 // `actual*` namespaces to the active mock, so these plain-object copies are the
 // stable handle on the genuine implementations.
 const realProviderProfiles = { ...actualProviderProfiles }
-const realProviders = { ...actualProviders }
+const realProviders = realProvidersForCleanup
 const realAuth = { ...actualAuth }
 const realProviderConfig = { ...actualProviderConfig }
 const realSettings = { ...actualSettings }

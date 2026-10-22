@@ -1,8 +1,20 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+
+const providerSpecifier = '../model/providers.js'
+const realProvidersForCleanup = {
+  ...await import(
+    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+  ),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module(providerSpecifier, () => realProvidersForCleanup)
+})
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/swarm/teammateModel.test.ts')

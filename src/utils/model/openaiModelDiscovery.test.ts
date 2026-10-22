@@ -1,9 +1,21 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import axios from 'axios'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+
+const providerSpecifier = './providers.js'
+const realProvidersForCleanup = {
+  ...await import(
+    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+  ),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module(providerSpecifier, () => realProvidersForCleanup)
+})
 
 const originalAxiosGet = axios.get
 const originalEnv = {

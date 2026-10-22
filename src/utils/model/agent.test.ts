@@ -1,10 +1,22 @@
-import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test'
+import { afterAll, describe, test, expect, beforeEach, afterEach, mock } from 'bun:test'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 
-const actualProviders = { ...await import('./providers.js') }
+const providerSpecifier = './providers.js'
+const realProvidersForCleanup = {
+  ...await import(
+    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+  ),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module(providerSpecifier, () => realProvidersForCleanup)
+})
+
+const actualProviders = realProvidersForCleanup
 
 const originalSubagentModel = process.env.CLAUDE_CODE_SUBAGENT_MODEL
 const originalOpenAIModel = process.env.OPENAI_MODEL

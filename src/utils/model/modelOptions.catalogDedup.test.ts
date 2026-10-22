@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
 import { acquireEnvMutex, releaseEnvMutex } from '../../entrypoints/sdk/shared.js'
@@ -11,9 +11,20 @@ import {
 import * as actualIndex from '../../integrations/index.js'
 import * as actualProviderConfig from '../../services/api/providerConfig.js'
 import * as actualProviderProfiles from '../providerProfiles.js'
-import * as actualProviders from './providers.js'
 import * as actualModel from './model.js'
 import type { ModelOption } from './modelOptions.js'
+
+const providerSpecifier = './providers.js'
+const realProvidersForCleanup = {
+  ...await import(
+    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+  ),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module(providerSpecifier, () => realProvidersForCleanup)
+})
 
 // Snapshot the real modules before any mock.module runs (same lesson as the
 // 2026-04-30 mock-leak note in lessons_learned.md — bun live-repoints the
@@ -22,7 +33,7 @@ import type { ModelOption } from './modelOptions.js'
 const realIndex = { ...actualIndex }
 const realProviderConfig = { ...actualProviderConfig }
 const realProviderProfiles = { ...actualProviderProfiles }
-const realProviders = { ...actualProviders }
+const realProviders = realProvidersForCleanup
 const realModel = { ...actualModel }
 
 // bun's mock.module is process-wide and mock.restore() does NOT undo it, so

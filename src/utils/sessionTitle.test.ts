@@ -1,4 +1,38 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realAnalytics = {
+  ...await import(`../services/analytics/index.js?real=${nonce}`),
+}
+const realClaude = {
+  ...await import(`../services/api/claude.js?real=${nonce}`),
+}
+const realBetas = {
+  ...await import(`./betas.js?real=${nonce}`),
+}
+const realCombinedAbortSignal = {
+  ...await import(`./combinedAbortSignal.js?real=${nonce}`),
+}
+const realDebug = {
+  ...await import(`./debug.js?real=${nonce}`),
+}
+const realModel = {
+  ...await import(`./model/model.js?real=${nonce}`),
+}
+const realProviders = {
+  ...await import(`./model/providers.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module('../services/analytics/index.js', () => realAnalytics)
+  mock.module('../services/api/claude.js', () => realClaude)
+  mock.module('./betas.js', () => realBetas)
+  mock.module('./combinedAbortSignal.js', () => realCombinedAbortSignal)
+  mock.module('./debug.js', () => realDebug)
+  mock.module('./model/model.js', () => realModel)
+  mock.module('./model/providers.js', () => realProviders)
+})
 
 type QueryHaikuArgs = {
   outputFormat?: unknown
@@ -70,6 +104,7 @@ async function importSubject() {
     },
   }))
   mock.module('../services/api/claude.js', () => ({
+    ...realClaude,
     queryHaiku: async (args: QueryHaikuArgs) => {
       queryHaikuCalls.push(args)
       return queryHaikuImpl(args)

@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream'
 
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import React from 'react'
 
 import { render } from '../../ink.js'
@@ -11,10 +11,23 @@ import {
 } from '../../test/sharedMutationLock.js'
 import * as actualAuth from '../../utils/auth.js'
 import * as actualModelSupportOverrides from '../../utils/model/modelSupportOverrides.js'
-import * as actualProviders from '../../utils/model/providers.js'
 import * as actualSettings from '../../utils/settings/settings.js'
 import * as actualThinking from '../../utils/thinking.js'
 import * as actualGrowthbook from '../../services/analytics/growthbook.js'
+
+const providerSpecifier = '../../utils/model/providers.js'
+const realProvidersForCleanup = {
+  ...await import(
+    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+  ),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module(providerSpecifier, () => realProvidersForCleanup)
+})
+
+const actualProviders = realProvidersForCleanup
 
 const originalEffortEnv = process.env.CLAUDE_CODE_EFFORT_LEVEL
 

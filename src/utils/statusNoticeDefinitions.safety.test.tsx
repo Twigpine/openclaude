@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import figures from 'figures'
 import type { StatusNoticeContext } from './statusNoticeDefinitions.js'
 import {
@@ -6,6 +6,20 @@ import {
   statusNoticeDefinitions,
 } from './statusNoticeDefinitions.js'
 import { renderToString } from './staticRender.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realProviders = {
+  ...await import(`./model/providers.js?real=${nonce}`),
+}
+const realBetas = {
+  ...await import(`./betas.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module('./model/providers.js', () => realProviders)
+  mock.module('./betas.js', () => realBetas)
+})
 
 // Regression coverage for issue #244 — the two safety-related status notices
 // that warn 3P users when they are running without the AI classifier or with
@@ -65,9 +79,11 @@ afterEach(() => {
 describe('third-party permissive mode notice (#244 finding 1)', () => {
   test('fires when 3P + acceptEdits + classifier-off model', async () => {
     mock.module('./model/providers.js', () => ({
+      ...realProviders,
       getAPIProvider: () => 'openai',
     }))
     mock.module('./betas.js', () => ({
+      ...realBetas,
       modelSupportsAutoMode: () => false,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
@@ -80,9 +96,11 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 
   test('fires when 3P + bypassPermissions', async () => {
     mock.module('./model/providers.js', () => ({
+      ...realProviders,
       getAPIProvider: () => 'openai',
     }))
     mock.module('./betas.js', () => ({
+      ...realBetas,
       modelSupportsAutoMode: () => false,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
@@ -95,9 +113,11 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 
   test('suppressed in default mode even on 3P', async () => {
     mock.module('./model/providers.js', () => ({
+      ...realProviders,
       getAPIProvider: () => 'openai',
     }))
     mock.module('./betas.js', () => ({
+      ...realBetas,
       modelSupportsAutoMode: () => false,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
@@ -110,9 +130,11 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 
   test('suppressed on firstParty Anthropic in acceptEdits', async () => {
     mock.module('./model/providers.js', () => ({
+      ...realProviders,
       getAPIProvider: () => 'firstParty',
     }))
     mock.module('./betas.js', () => ({
+      ...realBetas,
       modelSupportsAutoMode: () => true,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
@@ -125,9 +147,11 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 
   test('suppressed when classifier supports the model (defensive)', async () => {
     mock.module('./model/providers.js', () => ({
+      ...realProviders,
       getAPIProvider: () => 'openai',
     }))
     mock.module('./betas.js', () => ({
+      ...realBetas,
       modelSupportsAutoMode: () => true,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
 import { acquireEnvMutex, releaseEnvMutex } from '../../entrypoints/sdk/shared.js'
@@ -6,6 +6,18 @@ import {
   resetSettingsCache,
   setSessionSettingsCache,
 } from '../settings/settingsCache.js'
+
+const providerSpecifier = './providers.js'
+const realProvidersForCleanup = {
+  ...await import(
+    `${providerSpecifier}?real=${Date.now()}-${Math.random()}`
+  ),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module(providerSpecifier, () => realProvidersForCleanup)
+})
 
 // Picker recovery for persisted Codex models while a NON-Codex provider is
 // active (the curated Codex options are only appended for the openai/codex

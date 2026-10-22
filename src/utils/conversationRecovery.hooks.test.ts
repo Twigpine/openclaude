@@ -3,7 +3,7 @@
  * conversationRecovery so Bun's mock.module can replace sessionStart before
  * that module is first loaded.
  */
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,8 +11,20 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realProviders from './model/providers.js'
-import * as realSessionStart from './sessionStart.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realProviders = {
+  ...await import(`./model/providers.js?real=${nonce}`),
+}
+const realSessionStart = {
+  ...await import(`./sessionStart.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module('./model/providers.js', () => realProviders)
+  mock.module('./sessionStart.js', () => realSessionStart)
+})
 
 const tempDirs: string[] = []
 const originalEnv = { ...process.env }

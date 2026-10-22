@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,9 +10,21 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realUdsClient from './udsClient.js'
-import * as realProviders from './model/providers.js'
 import type { NormalizedMessage } from '../types/message.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realProviders = {
+  ...await import(`./model/providers.js?real=${nonce}`),
+}
+const realUdsClient = {
+  ...await import(`./udsClient.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module('./model/providers.js', () => realProviders)
+  mock.module('./udsClient.js', () => realUdsClient)
+})
 
 // Typed fixture for the thinking-strip gate tests. The full NormalizedMessage
 // shape carries fields these tests don't exercise, so the cast is centralized

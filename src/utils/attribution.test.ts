@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import {
   getClientType,
   getMainLoopModelOverride,
@@ -6,16 +6,29 @@ import {
   setClientType,
   setMainLoopModelOverride,
 } from '../bootstrap/state.js'
-import * as actualModel from './model/model.js'
-import * as actualProviders from './model/providers.js'
 import {
   resetSettingsCache,
   setSessionSettingsCache,
 } from './settings/settingsCache.js'
-import * as realSettings from './settings/settings.js'
 import type { SettingsJson } from './settings/types.js'
 
-const actualSettings = { ...realSettings }
+const nonce = `${Date.now()}-${Math.random()}`
+const actualProviders = {
+  ...await import(`./model/providers.js?real=${nonce}`),
+}
+const actualModel = {
+  ...await import(`./model/model.js?real=${nonce}`),
+}
+const actualSettings = {
+  ...await import(`./settings/settings.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module('./model/providers.js', () => actualProviders)
+  mock.module('./model/model.js', () => actualModel)
+  mock.module('./settings/settings.js', () => actualSettings)
+})
 
 let getAttributionTexts: (typeof import('./attribution.js'))['getAttributionTexts']
 let getDefaultCommitCoAuthorEmail: (typeof import('./attribution.js'))[

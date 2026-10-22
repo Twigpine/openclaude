@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream'
 
-import { afterEach, beforeEach, expect, mock, setSystemTime, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, setSystemTime, test } from 'bun:test'
 import React from 'react'
 
 import { getAdditionalModelOptionsCacheScope } from '../../services/api/providerConfig.js'
@@ -22,20 +22,43 @@ import {
   getRouteDescriptor,
 } from '../../integrations/index.js'
 import { mergeRouteCatalogEntries } from '../../utils/model/routeCatalogOptions.js'
-import * as actualFastModeForModelTest from '../../utils/fastMode.js'
-import * as actualExtraUsageForModelTest from '../../utils/extraUsage.js'
-import * as actualDiscoveryServiceForModelTest from '../../integrations/discoveryService.js'
-import * as actualDiscoveryCacheForModelTest from '../../integrations/discoveryCache.js'
 
-const REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST = { ...actualDiscoveryServiceForModelTest }
-const REAL_DISCOVERY_CACHE_FOR_MODEL_TEST = { ...actualDiscoveryCacheForModelTest }
+const nonce = `${Date.now()}-${Math.random()}`
+const REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST = {
+  ...await import(`../../integrations/discoveryService.js?real=${nonce}`),
+}
+const REAL_DISCOVERY_CACHE_FOR_MODEL_TEST = {
+  ...await import(`../../integrations/discoveryCache.js?real=${nonce}`),
+}
 
 // Snapshot the real fast-mode module up front so the cross-profile switch test
 // can mock it with a full surface and restore the real one afterwards.
-const REAL_FAST_MODE_FOR_MODEL_TEST = { ...actualFastModeForModelTest }
+const REAL_FAST_MODE_FOR_MODEL_TEST = {
+  ...await import(`../../utils/fastMode.js?real=${nonce}`),
+}
 // Same for extraUsage, so the cross-profile confirmation test can force the
 // `Billed as extra usage` branch and restore the real surface afterwards.
-const REAL_EXTRA_USAGE_FOR_MODEL_TEST = { ...actualExtraUsageForModelTest }
+const REAL_EXTRA_USAGE_FOR_MODEL_TEST = {
+  ...await import(`../../utils/extraUsage.js?real=${nonce}`),
+}
+
+function restoreDiscoveryModules(): void {
+  mock.module(
+    '../../integrations/discoveryService.js',
+    () => REAL_DISCOVERY_SERVICE_FOR_MODEL_TEST,
+  )
+  mock.module(
+    '../../integrations/discoveryCache.js',
+    () => REAL_DISCOVERY_CACHE_FOR_MODEL_TEST,
+  )
+}
+
+afterAll(() => {
+  mock.restore()
+  restoreDiscoveryModules()
+  mock.module('../../utils/fastMode.js', () => REAL_FAST_MODE_FOR_MODEL_TEST)
+  mock.module('../../utils/extraUsage.js', () => REAL_EXTRA_USAGE_FOR_MODEL_TEST)
+})
 
 type SettingsModule = typeof import('../../utils/settings/settings.js')
 
@@ -3429,18 +3452,22 @@ test('/model does not auto-refresh descriptor models when nonessential traffic i
     discoverModelsForRoute,
   }))
 
-  mockProviderProfiles({
-    getActiveOpenAIModelOptionsCache: () => [],
-    getActiveProviderProfile: () => undefined,
-    getProfileModelOptions: () => [],
-    setActiveOpenAIModelOptionsCache: () => {},
-  })
+  try {
+    mockProviderProfiles({
+      getActiveOpenAIModelOptionsCache: () => [],
+      getActiveProviderProfile: () => undefined,
+      getProfileModelOptions: () => [],
+      setActiveOpenAIModelOptionsCache: () => {},
+    })
 
-  const { call } = await importFreshModelModule('descriptor-privacy-open')
-  const result = await call(() => {}, {} as never, '')
+    const { call } = await importFreshModelModule('descriptor-privacy-open')
+    const result = await call(() => {}, {} as never, '')
 
-  expect(result).toBeTruthy()
-  expect(discoverModelsForRoute).not.toHaveBeenCalled()
+    expect(result).toBeTruthy()
+    expect(discoverModelsForRoute).not.toHaveBeenCalled()
+  } finally {
+    restoreDiscoveryModules()
+  }
 })
 
 test('cross-profile /model switch drops latched fast mode before activating an unsupported target profile (#1119)', async () => {
