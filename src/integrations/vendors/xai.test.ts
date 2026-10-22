@@ -32,6 +32,17 @@ describe('xAI vendor hybrid catalog', () => {
         expect(descriptor?.defaultModel).toBe(entry.apiName)
       }
     }
+    expect(getModel('grok-4.6')).toMatchObject({
+      contextWindow: 500_000,
+      capabilities: {
+        supportsVision: true,
+        supportsStreaming: true,
+        supportsFunctionCalling: true,
+        supportsJsonMode: true,
+        supportsReasoning: true,
+        supportsPreciseTokenCount: false,
+      },
+    })
   })
 
   test('maps chat discovery entries and rejects unsupported or invalid entries', () => {

@@ -58,7 +58,13 @@ describe('longcat vendor', () => {
       vendorId: 'longcat',
       contextWindow: 1_048_576,
       maxOutputTokens: 131_072,
-      capabilities: expect.objectContaining({ supportsFunctionCalling: false }),
+      capabilities: {
+        supportsStreaming: true,
+        supportsFunctionCalling: false,
+        supportsJsonMode: false,
+        supportsReasoning: true,
+        supportsPreciseTokenCount: false,
+      },
     })
 
     const preset = getProviderPresetUiMetadata('longcat')

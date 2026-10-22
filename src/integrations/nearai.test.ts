@@ -57,6 +57,16 @@ describe('NearAI Claude Opus 4.8 route', () => {
         brandId: 'nearai',
         defaultModel: id,
         label: 'Claude Opus 4.8',
+        contextWindow: 1_000_000,
+        maxOutputTokens: 65_536,
+        capabilities: {
+          supportsVision: false,
+          supportsStreaming: true,
+          supportsFunctionCalling: true,
+          supportsJsonMode: true,
+          supportsReasoning: false,
+          supportsPreciseTokenCount: false,
+        },
       })
     }
   })
