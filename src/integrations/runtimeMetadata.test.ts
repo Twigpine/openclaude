@@ -26,93 +26,98 @@ import glmModels from './models/glm.js'
 import zaiVendor from './vendors/zai.js'
 
 describe('Z.AI GLM-5.3 descriptor contract', () => {
-  it('wires the verified GLM-5.3-Flash descriptor and direct catalog contract', () => {
-    const model = glmModels.find(candidate => candidate.id === 'glm-5.3-flash')
-    expect(model).toMatchObject({
-      id: 'glm-5.3-flash',
-      label: 'GLM 5.3 Flash',
-      vendorId: 'zai',
-      brandId: 'glm',
-      classification: ['chat', 'reasoning', 'vision', 'coding'],
-      defaultModel: 'glm-5.3-flash',
-      contextWindow: 1_000_000,
-      maxOutputTokens: 131_072,
-      runtimeMetadataScope: 'catalog',
-      capabilities: {
-        supportsVision: true,
-        supportsStreaming: true,
-        supportsFunctionCalling: true,
-        supportsJsonMode: true,
-        supportsReasoning: true,
-        supportsPreciseTokenCount: false,
-      },
-    })
+  const golden = {
+    zai: {
+      defaultModel: 'glm-5.2',
+      catalogSource: 'static' as const,
+      models: [
+        {
+          id: 'glm-5.3-flash',
+          label: 'GLM 5.3 Flash',
+          catalogLabel: 'GLM-5.3-Flash',
+          vendorId: 'zai',
+          brandId: 'glm',
+          classification: ['chat', 'reasoning', 'vision', 'coding'],
+          defaultModel: 'glm-5.3-flash',
+          contextWindow: 1_000_000,
+          maxOutputTokens: 131_072,
+          runtimeMetadataScope: 'catalog',
+          capabilities: {
+            supportsVision: true,
+            supportsStreaming: true,
+            supportsFunctionCalling: true,
+            supportsJsonMode: true,
+            supportsReasoning: true,
+            supportsPreciseTokenCount: false,
+          },
+        },
+        {
+          id: 'glm-5.3',
+          label: 'GLM 5.3',
+          catalogLabel: 'GLM-5.3',
+          vendorId: 'zai',
+          brandId: 'glm',
+          classification: ['chat', 'reasoning', 'coding'],
+          defaultModel: 'glm-5.3',
+          contextWindow: 1_000_000,
+          maxOutputTokens: 131_072,
+          runtimeMetadataScope: 'catalog',
+          capabilities: {
+            supportsVision: false,
+            supportsStreaming: true,
+            supportsFunctionCalling: true,
+            supportsJsonMode: true,
+            supportsReasoning: true,
+            supportsPreciseTokenCount: false,
+          },
+        },
+      ],
+    },
+  }
 
-    expect(glmBrand.modelIds?.[0]).toBe('glm-5.3-flash')
-    expect(glmBrand.modelIds?.[1]).toBe('glm-5.3')
+  for (const [routeId, route] of Object.entries(golden)) {
+    it(`preserves the golden model descriptor and catalog contracts for ${routeId}`, () => {
+      expect(zaiVendor.id).toBe(routeId)
+      expect(zaiVendor.defaultModel).toBe(route.defaultModel)
+      expect(zaiVendor.catalog?.source).toBe(route.catalogSource)
 
-    const catalogEntries = zaiVendor.catalog?.models ?? []
-    const flashEntries = catalogEntries.filter(entry => entry.id === 'glm-5.3-flash')
-    expect(flashEntries).toHaveLength(1)
-    expect(catalogEntries[0]).toMatchObject({
-      id: 'glm-5.3-flash',
-      apiName: 'glm-5.3-flash',
-      label: 'GLM-5.3-Flash',
-      modelDescriptorId: 'glm-5.3-flash',
-      reasoning: {
-        mode: 'levels',
-        levels: ['low', 'high', 'xhigh'],
-        wireFormat: 'zai_compatible',
-      },
-      transportOverrides: {
-        openaiShim: { enableToolStreaming: true },
-      },
-    })
-    expect(catalogEntries[1]?.id).toBe('glm-5.3')
-    expect(zaiVendor.catalog?.source).toBe('static')
-    expect(zaiVendor.defaultModel).toBe('glm-5.2')
-  })
+      for (const expected of route.models) {
+        const { catalogLabel, ...descriptor } = expected
+        const model = glmModels.find(candidate => candidate.id === expected.id)
+        expect(model).toMatchObject(descriptor)
+        expect(glmBrand.modelIds).toContain(expected.id)
 
-  it('wires the verified shared model, brand, and direct catalog entry without changing the default', () => {
-    const model = glmModels.find(candidate => candidate.id === 'glm-5.3')
-    expect(model).toMatchObject({
-      id: 'glm-5.3',
-      label: 'GLM 5.3',
-      vendorId: 'zai',
-      brandId: 'glm',
-      classification: ['chat', 'reasoning', 'coding'],
-      defaultModel: 'glm-5.3',
-      contextWindow: 1_000_000,
-      maxOutputTokens: 131_072,
-      runtimeMetadataScope: 'catalog',
-      capabilities: {
-        supportsVision: false,
-        supportsStreaming: true,
-        supportsFunctionCalling: true,
-        supportsJsonMode: true,
-        supportsReasoning: true,
-        supportsPreciseTokenCount: false,
-      },
-    })
-    expect(glmBrand.modelIds).toContain('glm-5.3')
+        const catalogEntry = zaiVendor.catalog?.models?.find(
+          entry => entry.id === expected.id,
+        )
+        expect(catalogEntry).toMatchObject({
+          id: expected.id,
+          apiName: expected.id,
+          label: catalogLabel,
+          modelDescriptorId: expected.id,
+          reasoning: {
+            mode: 'levels',
+            levels: ['low', 'high', 'xhigh'],
+            wireFormat: 'zai_compatible',
+          },
+          transportOverrides: {
+            openaiShim: { enableToolStreaming: true },
+          },
+        })
 
-    const catalogEntry = zaiVendor.catalog?.models?.find(entry => entry.id === 'glm-5.3')
-    expect(catalogEntry).toMatchObject({
-      id: 'glm-5.3',
-      apiName: 'glm-5.3',
-      label: 'GLM-5.3',
-      modelDescriptorId: 'glm-5.3',
-      reasoning: {
-        mode: 'levels',
-        levels: ['low', 'high', 'xhigh'],
-        wireFormat: 'zai_compatible',
-      },
-      transportOverrides: {
-        openaiShim: { enableToolStreaming: true },
-      },
+        expect(
+          resolveModelRuntimeLimits({
+            model: expected.id,
+            baseUrl: zaiVendor.defaultBaseUrl,
+            processEnv: { CLAUDE_CODE_USE_OPENAI: '1' },
+          }),
+        ).toEqual({
+          contextWindow: expected.contextWindow,
+          maxOutputTokens: expected.maxOutputTokens,
+        })
+      }
     })
-    expect(zaiVendor.defaultModel).toBe('glm-5.2')
-  })
+  }
 })
 
 // The discovery cache resolves its path through getClaudeConfigHomeDir(), which
