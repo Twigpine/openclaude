@@ -1,12 +1,21 @@
 import { PassThrough } from 'node:stream'
 
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import React, { useEffect } from 'react'
 import stripAnsi from 'strip-ansi'
 
 import { Box, createRoot, Text } from '../../../../ink.js'
 import { WizardProvider, useWizard } from '../../../wizard/index.js'
 import type { AgentWizardData } from '../types.js'
+
+// Copy real exports before mock.module can replace live module bindings.
+const nonce = `${Date.now()}-${Math.random()}`
+const realColorPicker = {
+  ...await import(`../../ColorPicker.js?real=${nonce}`),
+}
+const realSelect = {
+  ...await import(`../../../CustomSelect/select.js?real=${nonce}`),
+}
 
 type ColorPickerProps = {
   onConfirm: (color: string | undefined) => void
@@ -158,6 +167,12 @@ afterEach(() => {
     latestColorPickerProps = undefined
     latestSelectProps = undefined
   }
+})
+
+afterAll(() => {
+  // mock.restore() does not remove Bun module mock registrations.
+  mock.module('../../ColorPicker.js', () => realColorPicker)
+  mock.module('../../../CustomSelect/select.js', () => realSelect)
 })
 
 test('ColorStep does not create a final agent when required wizard data is missing', async () => {
