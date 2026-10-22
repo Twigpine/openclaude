@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream'
 
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import React from 'react'
 import { createRoot, Text } from '../ink.js'
 import * as realState from '../bootstrap/state.js'
@@ -9,7 +9,11 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realAuth from '../utils/auth.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realAuth = {
+  ...await import(`../utils/auth.js?real=${nonce}`),
+}
 
 type AuthState = {
   anthropicAuthEnabled: boolean
@@ -73,6 +77,10 @@ afterEach(() => {
   } finally {
     releaseSharedMutationLock()
   }
+})
+
+afterAll(() => {
+  mock.module('../utils/auth.js', () => realAuth)
 })
 
 test('useApiKeyVerification resets stale missing status when the session switches to a third-party provider', async () => {

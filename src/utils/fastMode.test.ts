@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import * as realAxios from 'axios'
 import * as realOauthConstants from 'src/constants/oauth.js'
 import * as realGrowthbook from 'src/services/analytics/growthbook.js'
@@ -6,10 +6,14 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realAuth from './auth.js'
 import * as realModel from './model/model.js'
 type ProvidersModule = typeof import('./model/providers.js')
 type AxiosModule = typeof import('axios')
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realAuth = {
+  ...await import(`./auth.js?real=${nonce}`),
+}
 
 const originalEnv = { ...process.env }
 let originalProvidersModule: ProvidersModule | undefined
@@ -241,6 +245,10 @@ afterEach(async () => {
   } finally {
     releaseSharedMutationLock()
   }
+})
+
+afterAll(() => {
+  mock.module('./auth.js', () => realAuth)
 })
 
 describe('isFastModeSupportedByModel — Opus model gate (#1769)', () => {

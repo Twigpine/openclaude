@@ -10,8 +10,11 @@
  *   5. P1 context guard — bare JSON in explanatory prose is skipped
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import { createOpenAIShimClient } from './openaiShim.js'
 import { parseTextToolCalls } from './openaiShim/rawToolCallParsing.js'
+
+const ENV_KEYS = ['OLLAMA_BASE_URL', 'OPENAI_API_KEY', 'OPENAI_BASE_URL'] as const
 
 type FetchType = typeof globalThis.fetch
 
@@ -224,17 +227,17 @@ const ollamaToolChunk = (toolCalls: unknown[], finishReason?: string) => ({
 
 describe('Ollama streaming — think-tag filtering on text-tool fallback (P1)', () => {
   let originalFetch: FetchType
+  let restoreEnv: () => void
   beforeEach(() => {
     originalFetch = globalThis.fetch
+    restoreEnv = snapshotEnv(ENV_KEYS)
     process.env.OLLAMA_BASE_URL = 'http://localhost:11434'
     process.env.OPENAI_API_KEY = 'test-key'
     process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
   })
   afterEach(() => {
     globalThis.fetch = originalFetch
-    delete process.env.OLLAMA_BASE_URL
-    delete process.env.OPENAI_API_KEY
-    delete process.env.OPENAI_BASE_URL
+    restoreEnv()
   })
 
   test('<think> content is NOT emitted as assistant text when text-tool fallback fires', async () => {
@@ -278,17 +281,17 @@ describe('Ollama streaming — think-tag filtering on text-tool fallback (P1)', 
 
 describe('Ollama streaming — plain text response with no tool calls', () => {
   let originalFetch: FetchType
+  let restoreEnv: () => void
   beforeEach(() => {
     originalFetch = globalThis.fetch
+    restoreEnv = snapshotEnv(ENV_KEYS)
     process.env.OLLAMA_BASE_URL = 'http://localhost:11434'
     process.env.OPENAI_API_KEY = 'test-key'
     process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
   })
   afterEach(() => {
     globalThis.fetch = originalFetch
-    delete process.env.OLLAMA_BASE_URL
-    delete process.env.OPENAI_API_KEY
-    delete process.env.OPENAI_BASE_URL
+    restoreEnv()
   })
 
   test('plain text in two chunks (content then stop) is emitted as text_delta', async () => {
@@ -385,17 +388,17 @@ describe('Ollama streaming — plain text response with no tool calls', () => {
 
 describe('Ollama streaming — visible text before real structured tool_calls (P2)', () => {
   let originalFetch: FetchType
+  let restoreEnv: () => void
   beforeEach(() => {
     originalFetch = globalThis.fetch
+    restoreEnv = snapshotEnv(ENV_KEYS)
     process.env.OLLAMA_BASE_URL = 'http://localhost:11434'
     process.env.OPENAI_API_KEY = 'test-key'
     process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
   })
   afterEach(() => {
     globalThis.fetch = originalFetch
-    delete process.env.OLLAMA_BASE_URL
-    delete process.env.OPENAI_API_KEY
-    delete process.env.OPENAI_BASE_URL
+    restoreEnv()
   })
 
   test('visible assistant text is preserved when real delta.tool_calls follow it', async () => {
@@ -441,17 +444,17 @@ describe('Ollama streaming — visible text before real structured tool_calls (P
 
 describe('Ollama streaming — visible prose before text-based tool-call fallback (P2 buffered path)', () => {
   let originalFetch: FetchType
+  let restoreEnv: () => void
   beforeEach(() => {
     originalFetch = globalThis.fetch
+    restoreEnv = snapshotEnv(ENV_KEYS)
     process.env.OLLAMA_BASE_URL = 'http://localhost:11434'
     process.env.OPENAI_API_KEY = 'test-key'
     process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
   })
   afterEach(() => {
     globalThis.fetch = originalFetch
-    delete process.env.OLLAMA_BASE_URL
-    delete process.env.OPENAI_API_KEY
-    delete process.env.OPENAI_BASE_URL
+    restoreEnv()
   })
 
   test('visible prose before text-based JSON tool call is preserved in emitted text_delta', async () => {
@@ -513,17 +516,17 @@ describe('parseTextToolCalls — pretty-printed bare JSON detection', () => {
 
 describe('Ollama streaming — non-stop terminal finish reasons flush buffer', () => {
   let originalFetch: FetchType
+  let restoreEnv: () => void
   beforeEach(() => {
     originalFetch = globalThis.fetch
+    restoreEnv = snapshotEnv(ENV_KEYS)
     process.env.OLLAMA_BASE_URL = 'http://localhost:11434'
     process.env.OPENAI_API_KEY = 'test-key'
     process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
   })
   afterEach(() => {
     globalThis.fetch = originalFetch
-    delete process.env.OLLAMA_BASE_URL
-    delete process.env.OPENAI_API_KEY
-    delete process.env.OPENAI_BASE_URL
+    restoreEnv()
   })
 
   test('buffered text is flushed when finish_reason is "length"', async () => {

@@ -14,8 +14,10 @@ import {
   VALID_PROVIDERS,
 } from './providerFlag.js'
 import { resolveActiveRouteIdFromEnv } from '../integrations/routeMetadata.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 
 const ENV_KEYS = [
+  'CLAUDE_CODE_PROVIDER_ROUTE_ID',
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
   'CLAUDE_CODE_USE_GITHUB',
@@ -67,81 +69,21 @@ const ENV_KEYS = [
   'USER_TYPE',
 ]
 
-const originalEnv: Record<string, string | undefined> = {}
+let restoreEnv: () => void
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/providerFlag.test.ts')
-  for (const key of ENV_KEYS) {
-    originalEnv[key] = process.env[key]
-    delete process.env[key]
-  }
+  restoreEnv = snapshotEnv(ENV_KEYS, { clear: true })
 })
-
-const RESET_KEYS = [
-  'CLAUDE_CODE_USE_OPENAI',
-  'CLAUDE_CODE_USE_GEMINI',
-  'CLAUDE_CODE_USE_GITHUB',
-  'CLAUDE_CODE_USE_MISTRAL',
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'OPENAI_BASE_URL',
-  'OPENAI_API_BASE',
-  'OPENAI_API_KEY',
-  'OPENAI_MODEL',
-  'OPENAI_API_FORMAT',
-  'OPENAI_AZURE_STYLE',
-  'OPENAI_AUTH_HEADER',
-  'OPENAI_AUTH_SCHEME',
-  'OPENAI_AUTH_HEADER_VALUE',
-  'GEMINI_MODEL',
-  'NVIDIA_API_KEY',
-  'NVIDIA_NIM',
-  'BNKR_API_KEY',
-  'XAI_API_KEY',
-  'MINIMAX_API_KEY',
-  'VENICE_API_KEY',
-  'MIMO_API_KEY',
-  'ATLAS_CLOUD_API_KEY',
-  'GMI_API_KEY',
-  'GMI_MODEL',
-  'APISMART_API_KEY',
-  'APISMART_MODEL',
-  'API_ROUTE_API_KEY',
-  'API_ROUTE_MODEL',
-  'CONCENTRATE_API_KEY',
-  'CONCENTRATE_BASE_URL',
-  'CONCENTRATE_MODEL',
-  'LONGCAT_API_KEY',
-  'OPENGATEWAY_API_KEY',
-  'OPENGATEWAY_BASE_URL',
-  'CLOUDFLARE_API_TOKEN',
-  'MISTRAL_MODEL',
-  'ANTHROPIC_MODEL',
-  'ANTHROPIC_BASE_URL',
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_CUSTOM_HEADERS',
-  'USER_TYPE',
-] as const
 
 beforeEach(() => {
   clearRememberedProviderFlagForTests()
-  for (const key of RESET_KEYS) {
-    delete process.env[key]
-  }
 })
 
 afterEach(() => {
   try {
     clearRememberedProviderFlagForTests()
-    for (const key of ENV_KEYS) {
-      if (originalEnv[key] === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = originalEnv[key]
-      }
-    }
+    restoreEnv()
   } finally {
     releaseSharedMutationLock()
   }

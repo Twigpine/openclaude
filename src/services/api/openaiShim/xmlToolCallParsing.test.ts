@@ -15,6 +15,7 @@
  *   D. <tool_calls:ID><tool_call:ID>NAME<parameter name="KEY">VALUE</parameter>…</tool_calls:ID>
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { snapshotEnv } from '../../../test/envSnapshot.js'
 import { createOpenAIShimClient } from '../openaiShim.js'
 import {
   parseXmlToolCalls as parseXmlToolCallsModule,
@@ -283,16 +284,17 @@ describe('parseXmlToolCalls', () => {
 
 describe('GLM streaming — XML tool calls', () => {
   let originalFetch: FetchType
+  let restoreEnv: () => void
   beforeEach(() => {
     originalFetch = globalThis.fetch
+    restoreEnv = snapshotEnv(['OPENAI_API_KEY', 'OPENAI_BASE_URL'])
     process.env.OPENAI_API_KEY = 'test-key'
     // Deliberately NOT an Ollama endpoint, so isOllama=false.
     process.env.OPENAI_BASE_URL = 'https://gateway.example.com/v1'
   })
   afterEach(() => {
     globalThis.fetch = originalFetch
-    delete process.env.OPENAI_API_KEY
-    delete process.env.OPENAI_BASE_URL
+    restoreEnv()
   })
 
   async function run(
