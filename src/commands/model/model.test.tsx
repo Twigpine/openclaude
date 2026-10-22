@@ -41,6 +41,9 @@ const REAL_FAST_MODE_FOR_MODEL_TEST = {
 const REAL_EXTRA_USAGE_FOR_MODEL_TEST = {
   ...await import(`../../utils/extraUsage.js?real=${nonce}`),
 }
+const REAL_PROVIDER_PROFILES_FOR_MODEL_TEST = {
+  ...await import(`../../utils/providerProfiles.js?real=${nonce}`),
+}
 
 function restoreDiscoveryModules(): void {
   mock.module(
@@ -55,6 +58,7 @@ function restoreDiscoveryModules(): void {
 
 afterAll(() => {
   mock.restore()
+  mock.module('../../utils/providerProfiles.js', () => REAL_PROVIDER_PROFILES_FOR_MODEL_TEST)
   restoreDiscoveryModules()
   mock.module('../../utils/fastMode.js', () => REAL_FAST_MODE_FOR_MODEL_TEST)
   mock.module('../../utils/extraUsage.js', () => REAL_EXTRA_USAGE_FOR_MODEL_TEST)
