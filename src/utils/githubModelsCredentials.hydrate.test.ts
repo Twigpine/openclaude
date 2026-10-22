@@ -3,11 +3,21 @@
  * githubModelsCredentials so Bun's mock.module can replace secureStorage
  * before that module is first loaded.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realSecureStorage = {
+  ...await import(`./secureStorage/index.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.module('./secureStorage/index.js', () => realSecureStorage)
+})
 
 type GithubModelsCredentialsModule =
   typeof import('./githubModelsCredentials.js')
@@ -25,30 +35,24 @@ function getEnvValue(name: string): string | undefined {
 }
 
 describe('hydrateGithubModelsTokenFromSecureStorage', () => {
-  const orig = {
-    CLAUDE_CODE_USE_GITHUB: process.env.CLAUDE_CODE_USE_GITHUB,
-    GITHUB_COPILOT_KEY: process.env.GITHUB_COPILOT_KEY,
-    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-    GH_TOKEN: process.env.GH_TOKEN,
-    CLAUDE_CODE_GITHUB_TOKEN_HYDRATED:
-      process.env.CLAUDE_CODE_GITHUB_TOKEN_HYDRATED,
-    CLAUDE_CODE_SIMPLE: process.env.CLAUDE_CODE_SIMPLE,
-  }
+  let restoreEnv: () => void = () => {}
 
   beforeEach(async () => {
     await acquireSharedMutationLock('utils/githubModelsCredentials.hydrate.test.ts')
+    restoreEnv = snapshotEnv([
+      'CLAUDE_CODE_USE_GITHUB',
+      'GITHUB_COPILOT_KEY',
+      'GITHUB_TOKEN',
+      'GH_TOKEN',
+      'CLAUDE_CODE_GITHUB_TOKEN_HYDRATED',
+      'CLAUDE_CODE_SIMPLE',
+    ])
   })
 
   afterEach(() => {
     try {
       mock.restore()
-      for (const [k, v] of Object.entries(orig)) {
-        if (v === undefined) {
-          delete process.env[k as keyof typeof orig]
-        } else {
-          process.env[k as keyof typeof orig] = v
-        }
-      }
+      restoreEnv()
     } finally {
       releaseSharedMutationLock()
     }
