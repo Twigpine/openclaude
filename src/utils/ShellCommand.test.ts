@@ -130,7 +130,9 @@ test('already-aborted user-cancel kills a real child promptly', async () => {
   controller.abort('user-cancel')
 
   const startedAt = performance.now()
-  const child = spawn('sleep', ['5'], { stdio: 'ignore' })
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+  })
   const childClosed = new Promise<void>(resolve => {
     child.once('close', () => resolve())
   })
