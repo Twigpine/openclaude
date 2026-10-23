@@ -63,7 +63,7 @@ const PING_INTERVAL_MS = 30_000
  * protobufjs would be the general answer; for a single-field bytes message
  * the hand encoding is 10 lines and avoids a runtime dep in the hot path.
  */
-export function encodeChunk(data: Uint8Array): Uint8Array {
+export function encodeChunk(data: Uint8Array): Uint8Array<ArrayBuffer> {
   const len = data.length
   // varint encoding of length — most chunks fit in 1–3 length bytes
   const varint: number[] = []

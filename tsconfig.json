@@ -16,7 +16,7 @@
     "declaration": false,
     "outDir": "./dist",
     "rootDir": "./src",
-    "baseUrl": ".",
+    "types": ["bun", "node"],
     "paths": {
       "src/*": ["./src/*"]
     }
