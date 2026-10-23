@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
+import * as fs from 'fs'
 import { mkdirSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { getCwdState, setCwdState } from '../bootstrap/state.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import { shouldIncludeGitInstructions } from './gitSettings.js'
 
 const realSettings = (await import(
@@ -10,15 +12,28 @@ const realSettings = (await import(
 )) as typeof import('./settings/settings.js')
 
 let originalCwdState: string
-let originalEnv: string | undefined
+let restoreEnv: () => void
 let tempRoot: string
 let settingsFixture: Record<string, unknown> = {}
 
 beforeEach(() => {
   originalCwdState = getCwdState()
-  originalEnv = process.env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS
-  delete process.env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS
+  restoreEnv = snapshotEnv(['CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS'], { clear: true })
   tempRoot = mkdtempSync(join(tmpdir(), 'gitsettings-test-'))
+  // findGitRoot walks the filesystem itself, ignoring GIT_CEILING_DIRECTORIES.
+  // Hide ancestor repositories when tmpdir() happens to be inside a checkout.
+  const ancestorGitPaths = new Set<string>()
+  for (let ancestor = dirname(tempRoot); ; ancestor = dirname(ancestor)) {
+    ancestorGitPaths.add(join(ancestor, '.git'))
+    if (dirname(ancestor) === ancestor) break
+  }
+  const statSync = fs.statSync
+  spyOn(fs, 'statSync').mockImplementation(((path, options) => {
+    if (ancestorGitPaths.has(String(path))) {
+      throw new Error('Outside the test fixture')
+    }
+    return statSync(path, options)
+  }) as typeof fs.statSync)
   settingsFixture = {}
   mock.module('./settings/settings.js', () => ({
     ...realSettings,
@@ -28,11 +43,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setCwdState(originalCwdState)
-  if (originalEnv === undefined) {
-    delete process.env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS
-  } else {
-    process.env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS = originalEnv
-  }
+  restoreEnv()
   rmSync(tempRoot, { recursive: true, force: true })
   mock.module('./settings/settings.js', () => ({ ...realSettings }))
   mock.restore()
