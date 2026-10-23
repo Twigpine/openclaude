@@ -146,6 +146,7 @@ describe('/replay command', () => {
       loadSameRepoMessageLogs: loadSameRepoMessageLogsMock,
     }))
     mock.module('../../utils/replayIndex.js', () => ({
+      ...realReplayIndex,
       loadReplayIndex: loadReplayIndexMock,
     }))
     mock.module('../../hooks/useTerminalSize.js', () => ({
@@ -155,6 +156,7 @@ describe('/replay command', () => {
       useIsInsideModal: () => false,
     }))
     mock.module('../../components/LogSelector.js', () => ({
+      ...realLogSelector,
       LogSelector: (props: LogSelectorProps) => {
         lastLogSelectorProps = props
         return <Text>{`LogSelector:${props.logs.length}`}</Text>

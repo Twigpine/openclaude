@@ -43,15 +43,15 @@ async function importRealModules(): Promise<RealModules> {
 
   const cacheKey = `${Date.now()}-${Math.random()}`
   realModules = {
-    browser: (await import(
-      `../../utils/browser.ts?setup-actions-real-${cacheKey}`
-    )) as BrowserModule,
+    browser: {
+      ...await import(`../../utils/browser.ts?setup-actions-real-${cacheKey}`),
+    } as BrowserModule,
     config: {
       ...await import(`../../utils/config.js?real=${cacheKey}`),
     } as ConfigModule,
-    execFileNoThrow: (await import(
-      `../../utils/execFileNoThrow.ts?setup-actions-real-${cacheKey}`
-    )) as ExecFileNoThrowModule,
+    execFileNoThrow: {
+      ...await import(`../../utils/execFileNoThrow.ts?setup-actions-real-${cacheKey}`),
+    } as ExecFileNoThrowModule,
   }
   return realModules
 }
