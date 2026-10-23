@@ -13,6 +13,7 @@ describe('custom gateway', () => {
 
   afterEach(() => {
     _clearRegistryForTesting()
+    ensureIntegrationsLoaded()
   })
 
   describe.each([
