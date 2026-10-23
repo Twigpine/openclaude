@@ -15,6 +15,8 @@ const originalTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
 
 beforeEach(async () => {
   await acquireSharedMutationLock('QueryEngine.interruptionTrace.test.ts')
+  // Earlier files can leave trace entries behind in non-isolated runs.
+  __resetInterruptionTraceForTests()
 })
 
 afterEach(async () => {
