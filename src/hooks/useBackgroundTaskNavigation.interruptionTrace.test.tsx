@@ -22,6 +22,8 @@ beforeEach(async () => {
   await acquireSharedMutationLock(
     'hooks/useBackgroundTaskNavigation.interruptionTrace.test.tsx',
   )
+  // Earlier files can leave trace entries behind in non-isolated runs.
+  __resetInterruptionTraceForTests()
 })
 
 afterEach(() => {
