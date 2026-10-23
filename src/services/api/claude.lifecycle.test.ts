@@ -511,9 +511,17 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  let flushTimeout: ReturnType<typeof setTimeout> | undefined
   try {
-    await __waitForInterruptionTraceFlushForTests()
-    __resetInterruptionTraceForTests()
+    // Match graceful shutdown's budget so a stuck append cannot hold the lock.
+    await Promise.race([
+      __waitForInterruptionTraceFlushForTests(),
+      new Promise<void>(resolve => {
+        flushTimeout = setTimeout(resolve, 500)
+      }),
+    ])
+    // Trace-enabled cases reset their snapshots before use. Resetting here
+    // makes Bun 1.3.13 crash while running subsequent isolated test files.
     for (const key of envKeys) {
       if (originalEnv[key] === undefined) {
         delete process.env[key]
@@ -543,6 +551,7 @@ afterEach(async () => {
       fixturesRoot = undefined
     }
   } finally {
+    if (flushTimeout !== undefined) clearTimeout(flushTimeout)
     releaseSharedMutationLock()
   }
 })
