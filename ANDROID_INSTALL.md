@@ -62,10 +62,10 @@ This downloads ~200–400MB. Wait for it to complete.
 proot-distro login ubuntu
 bun_installer="$(mktemp)"
 curl -fsSL https://bun.sh/install -o "$bun_installer"
-bash "$bun_installer" bun-v1.4.3
+bash "$bun_installer" bun-v1.4.4
 rm -f "$bun_installer"
 source ~/.bashrc
-bun --version  # should show 1.4.3
+bun --version  # should show 1.4.4
 ```
 
 ### Step 6 — Build OpenClaude

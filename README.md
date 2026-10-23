@@ -489,7 +489,7 @@ and client generation from `src/proto/openclaude.proto`.
 
 ## Development
 
-Use Node.js `>=22.0.0` and Bun `1.4.3` for source builds.
+Use Node.js `>=22.0.0` and Bun `1.4.4` for source builds.
 
 ```bash
 bun install
