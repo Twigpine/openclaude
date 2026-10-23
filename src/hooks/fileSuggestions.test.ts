@@ -203,7 +203,7 @@ async function loadFileSuggestionsModule(options: LoadModuleOptions = {}) {
   )
   installFileSuggestionsDependencyMocks(options)
   const module = await import(`./fileSuggestions.ts?ts=${nonce}`)
-  restoreFileSuggestionsDependencyMocks()
+  // Restore in afterEach so live imports stay mocked while the test runs.
   return module
 }
 
