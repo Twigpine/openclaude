@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import type { AppState } from './AppState.js'
 import { getDefaultAppState } from './AppStateStore.js'
 import { stopOrDismissAgent } from './teammateViewHelpers.js'
@@ -12,22 +13,20 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 
-const originalTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
+let restoreEnv: () => void
 
 beforeEach(async () => {
   await acquireSharedMutationLock(
     'state/teammateViewHelpers.interruptionTrace.test.ts',
   )
+  restoreEnv = snapshotEnv(['OPENCLAUDE_INTERRUPT_TRACE'])
+  __resetInterruptionTraceForTests()
 })
 
 afterEach(() => {
   try {
     __resetInterruptionTraceForTests()
-    if (originalTrace === undefined) {
-      delete process.env.OPENCLAUDE_INTERRUPT_TRACE
-    } else {
-      process.env.OPENCLAUDE_INTERRUPT_TRACE = originalTrace
-    }
+    restoreEnv()
   } finally {
     releaseSharedMutationLock()
   }
