@@ -57,12 +57,11 @@ bun install
 bun run build
 bun run smoke
 bun run check
-bun run typecheck
 bun run typecheck:fast
 bun run typecheck:type-tests
 ```
 
-`bun run typecheck` (tsc) remains authoritative. `bun run typecheck:fast` adds Bun's builtin type checker locally and in CI; use the wrapper because the repository's `check` script shadows `bun check`.
+`bun run typecheck:fast` runs Bun's builtin type checker locally and is the CI typecheck; use the wrapper because the repository's `check` script shadows `bun check`. `bun run typecheck:type-tests` also runs in CI for focused TypeScript assertions. `bun run typecheck` (tsc) is available as an additional local check. Keep the `typescript` devDependency for ESLint, `@astrojs/check`, and the focused type tests.
 
 Focused checks:
 

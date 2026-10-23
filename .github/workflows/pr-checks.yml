@@ -295,10 +295,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Fast typecheck (Bun builtin)
+      - name: Typecheck (Bun builtin)
         run: bun run typecheck:fast
 
       - name: Type tests
