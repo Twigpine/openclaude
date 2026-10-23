@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import {
   chmod,
   mkdir,
@@ -1621,7 +1622,7 @@ describe('background session registry', () => {
   })
 
   it('converges concurrent natural finalizers on one immutable fact', async () => {
-    await createBackgroundSession({
+    const session = await createBackgroundSession({
       id: 'bg-concurrent-natural',
       pid: 346,
       cwd: '/repo',
@@ -1635,24 +1636,41 @@ describe('background session registry', () => {
       processMarker: TEST_PROCESS_MARKER,
     })
 
-    const results = await Promise.all([
-      recordBackgroundSessionNaturalTermination(
-        'bg-concurrent-natural',
-        { exitCode: 31 },
-        {
-          ownerPid: 346,
-          now: new Date('2026-06-15T08:10:00.000Z'),
+    const factPath = terminalFactPath(
+      session.id,
+      'natural',
+      TEST_PROCESS_MARKER,
+    )
+    let concurrentResult: Promise<BackgroundSession> | undefined
+    let firstFact: string | undefined
+    const result = await recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 31 },
+      {
+        ownerPid: session.pid,
+        get now() {
+          // The async finalizer holds the metadata lock and has read running
+          // state. Force the exit-event finalizer to install its fact before
+          // the async writer, without depending on the lock retry window.
+          recordBackgroundSessionNaturalTerminationSync(
+            session.id,
+            { exitCode: 0 },
+            {
+              ownerPid: session.pid,
+              expectedSession: session,
+              now: new Date('2026-06-15T08:11:00.000Z'),
+            },
+          )
+          firstFact = readFileSync(factPath, 'utf8')
+          concurrentResult = resolveBackgroundSession(session.id)
+          return new Date('2026-06-15T08:10:00.000Z')
         },
-      ),
-      recordBackgroundSessionNaturalTermination(
-        'bg-concurrent-natural',
-        { exitCode: 0 },
-        {
-          ownerPid: 346,
-          now: new Date('2026-06-15T08:11:00.000Z'),
-        },
-      ),
-    ])
+      },
+    )
+    if (!concurrentResult || firstFact === undefined) {
+      throw new Error('concurrent finalizer did not run')
+    }
+    const results = [result, await concurrentResult]
 
     const facts = results.map(result => {
       if (result.finishedAt === undefined || result.exitCode === undefined) {
@@ -1665,6 +1683,11 @@ describe('background session registry', () => {
       }
     })
     expect(new Set(facts.map(fact => JSON.stringify(fact))).size).toBe(1)
+    expect(facts[0]).toEqual({
+      status: 'exited',
+      finishedAt: '2026-06-15T08:11:00.000Z',
+      exitCode: 0,
+    })
     expect([
       {
         status: 'failed',
@@ -1680,6 +1703,7 @@ describe('background session registry', () => {
     expect(await resolveBackgroundSession('bg-concurrent-natural')).toMatchObject(
       facts[0]!,
     )
+    expect(await readFile(factPath, 'utf8')).toBe(firstFact)
   })
 
   it('corrects a stale guess with a later exact-owner natural fact', async () => {
