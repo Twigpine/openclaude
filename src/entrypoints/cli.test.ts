@@ -487,6 +487,8 @@ describe('cli.tsx — background routing behavior', () => {
 
   afterEach(() => {
     process.argv = [...savedArgv]
+    // Later SDK initialization must not replay a test's provider selection.
+    clearRememberedProviderFlagForTests()
   })
 
   it('dispatches background management commands before startup work', async () => {
