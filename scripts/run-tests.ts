@@ -61,7 +61,6 @@ try {
       const child = Bun.spawn([
         process.execPath,
         'test',
-        '--isolate',
         ...testArgs,
         ...(shards > 1 ? [`--shard=${shard}/${shards}`] : []),
         '--reporter=junit',
