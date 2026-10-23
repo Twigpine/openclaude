@@ -1,24 +1,24 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realThinking from './thinking.js'
+
+// Keep a copy: mock.module also repoints an imported module namespace.
+const realThinking = {
+  ...await import(`./thinking.js?real=${Date.now()}-${Math.random()}`),
+}
 
 let getUltrathinkEffortAttachment: typeof import('./attachments.js').getUltrathinkEffortAttachment
-let savedEnv: {
-  disableAttachments: string | undefined
-  simple: string | undefined
-}
+let restoreEnv: () => void
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/attachments.ultrathink.test.ts')
-  savedEnv = {
-    disableAttachments: process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS,
-    simple: process.env.CLAUDE_CODE_SIMPLE,
-  }
-  delete process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS
-  delete process.env.CLAUDE_CODE_SIMPLE
+  restoreEnv = snapshotEnv([
+    'CLAUDE_CODE_DISABLE_ATTACHMENTS',
+    'CLAUDE_CODE_SIMPLE',
+  ], { clear: true })
   mock.module('./thinking.js', () => ({
     ...realThinking,
     isUltrathinkEnabled: () => true,
@@ -30,16 +30,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
-    if (savedEnv.disableAttachments === undefined) {
-      delete process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS
-    } else {
-      process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS = savedEnv.disableAttachments
-    }
-    if (savedEnv.simple === undefined) {
-      delete process.env.CLAUDE_CODE_SIMPLE
-    } else {
-      process.env.CLAUDE_CODE_SIMPLE = savedEnv.simple
-    }
+    restoreEnv()
     mock.restore()
     // Bun's mock.restore() does not unregister module mocks.
     mock.module('./thinking.js', () => realThinking)
