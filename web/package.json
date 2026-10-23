@@ -10,10 +10,10 @@
     "typecheck": "astro check"
   },
   "dependencies": {
-    "@astrojs/check": "0.9.9",
-    "@astrojs/sitemap": "3.7.3",
-    "@fontsource-variable/geist-mono": "^5.2.5",
-    "astro": "6.4.6",
+    "@astrojs/check": "0.9.12",
+    "@astrojs/sitemap": "3.7.4",
+    "@fontsource-variable/geist-mono": "5.2.8",
+    "astro": "6.4.8",
     "typescript": "^6.0.3"
   }
 }
