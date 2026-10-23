@@ -272,6 +272,7 @@ Required local preflight:
 bun install --frozen-lockfile
 bun run check
 bun run typecheck
+bun run typecheck:fast
 bun run typecheck:type-tests
 node bin/openclaude --version
 git fetch https://github.com/Twigpine/openclaude.git main
@@ -314,6 +315,7 @@ bun run web:build
 
 Notes on the local preflight:
 
+- `bun run typecheck` uses TypeScript's `tsc` and remains the authoritative typecheck. `bun run typecheck:fast` runs Bun's builtin type checker against the same `tsconfig.json` as an additional local and CI check. Its wrapper resolves the config relative to the script and runs from outside the repository because the package's `check` script shadows `bun check` inside the project. Use `bun run typecheck:fast` from the root or a subdirectory; from elsewhere, use `bun run --cwd /path/to/openclaude typecheck:fast`.
 - PR Checks caches Bun package downloads using OS-scoped keys derived from `bun.lock` for root installs and `web/bun.lock` for web installs, with separate restore prefixes. Dependency installs still run with `--frozen-lockfile` on cache hits. Keep the relevant lockfile in sync with dependency changes and run the required local preflight regardless of cache status.
 - `bun run check` runs `check:static` (the any-usage budget, smoke build, and deadcode checks), then the full unit pass (`test:full`) — do not run those separately, or you execute work twice.
 - `bun run test` runs test files in a shared process and requires Bun's completed JUnit report as well as a successful exit. `test:full` runs all eight native Bun shards serially to release memory between groups. Use `bun run scripts/run-tests.ts --shards=N --shard-index=K` with the same test flags to run only shard K of N. `test:full` then applies the same completion check to the conversation-arc pass and the context-efficiency pass with `HISTORY_SNIP` enabled. Every shard must produce a complete report; a failed shard does not prevent the remaining shards from running. A test that terminates the runner early fails the command, even if it exits with code zero. Each shard has a ten-minute deadline (override with `--shard-timeout-ms=<milliseconds>`), reports its start/end and elapsed time, and kills its process group on timeout or cancellation. A timeout stops the remaining shards and exits nonzero. On Linux, shard output is relayed from temporary regular files; diagnostics remain visible during execution. Temporary reports and logs are removed after the check. CI runs `check:static` in `smoke-and-tests`, runs the eight unit shards as parallel `unit-tests` jobs, and runs each dedicated feature pass once in `dedicated-tests`. Each unit shard builds the CLI before testing. CI caps these jobs at 15 minutes each and the other jobs at five minutes.

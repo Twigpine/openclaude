@@ -1,16 +1,22 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import type { ToolUseContext, Tools } from '../Tool.js'
 import { BASH_TOOL_NAME } from '../tools/BashTool/toolName.js'
 import type { DiagnosticFile } from '../services/diagnosticTracking.js'
 import type { Attachment } from './attachments.js'
 
 const debugMessages: string[] = []
-const realDebugModule = await import(
-  `./debug.js?real=${Date.now()}-${Math.random()}`,
-)
-const realLSPRegistry = await import(
-  `../services/lsp/LSPDiagnosticRegistry.js?real=${Date.now()}-${Math.random()}`,
-)
+const realDebugModule = {
+  ...await import(`./debug.js?real=${Date.now()}-${Math.random()}`),
+}
+const realLSPRegistry = {
+  ...await import(`../services/lsp/LSPDiagnosticRegistry.js?real=${Date.now()}-${Math.random()}`),
+}
+
+afterAll(() => {
+  mock.module('./debug.js', () => realDebugModule)
+  mock.module('../services/lsp/LSPDiagnosticRegistry.js', () => realLSPRegistry)
+})
 
 let diagnosticSets: Array<{ serverName: string; files: DiagnosticFile[] }> = []
 let nextDeliveryDelay: number | null = null
@@ -48,8 +54,7 @@ const { getAttachmentMessages, __test } = await import(
   `./attachments.ts?test=${Date.now()}-${Math.random()}`
 )
 
-const SAVED_SIMPLE = process.env.CLAUDE_CODE_SIMPLE
-const SAVED_DISABLE_ATTACHMENTS = process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS
+let restoreEnv: () => void
 
 type DiagnosticsAttachment = Extract<Attachment, { type: 'diagnostics' }>
 
@@ -137,8 +142,10 @@ async function collectLSPDiagnosticAttachments(): Promise<
 
 describe('LSP diagnostic attachment filtering', () => {
   beforeEach(() => {
-    delete process.env.CLAUDE_CODE_SIMPLE
-    delete process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS
+    restoreEnv = snapshotEnv(
+      ['CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_DISABLE_ATTACHMENTS'],
+      { clear: true },
+    )
     diagnosticSets = []
     nextDeliveryDelay = null
     checkForLSPDiagnosticsOptions.length = 0
@@ -150,16 +157,7 @@ describe('LSP diagnostic attachment filtering', () => {
   })
 
   afterEach(() => {
-    if (SAVED_SIMPLE === undefined) {
-      delete process.env.CLAUDE_CODE_SIMPLE
-    } else {
-      process.env.CLAUDE_CODE_SIMPLE = SAVED_SIMPLE
-    }
-    if (SAVED_DISABLE_ATTACHMENTS === undefined) {
-      delete process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS
-    } else {
-      process.env.CLAUDE_CODE_DISABLE_ATTACHMENTS = SAVED_DISABLE_ATTACHMENTS
-    }
+    restoreEnv()
   })
 
   test('does not return a diagnostics attachment for an empty final LSP payload', async () => {

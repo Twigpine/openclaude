@@ -58,8 +58,11 @@ bun run build
 bun run smoke
 bun run check
 bun run typecheck
+bun run typecheck:fast
 bun run typecheck:type-tests
 ```
+
+`bun run typecheck` (tsc) remains authoritative. `bun run typecheck:fast` adds Bun's builtin type checker locally and in CI; use the wrapper because the repository's `check` script shadows `bun check`.
 
 Focused checks:
 
