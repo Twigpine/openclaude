@@ -211,6 +211,8 @@ When submitting provider changes:
 
 ## Local Setup
 
+Use Node.js `>=22.0.0` and Bun `1.4.4` (tracked in `.bun-version`).
+
 Install dependencies:
 
 ```bash
