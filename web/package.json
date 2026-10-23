@@ -12,7 +12,7 @@
   "dependencies": {
     "@astrojs/check": "0.9.12",
     "@astrojs/sitemap": "3.7.4",
-    "@fontsource-variable/geist-mono": "5.2.8",
+    "@fontsource-variable/geist-mono": "5.3.0",
     "astro": "6.4.8",
     "typescript": "^6.0.3"
   }

@@ -252,7 +252,7 @@ export function filterControlOperators(
   commandsAndOperators: string[],
 ): string[] {
   return commandsAndOperators.filter(
-    part => !(ALL_SUPPORTED_CONTROL_OPERATORS as Set<string>).has(part),
+    part => !ALL_SUPPORTED_CONTROL_OPERATORS.has(part),
   )
 }
 
@@ -520,7 +520,7 @@ export function clearCommandPrefixCaches(): void {
   getCommandSubcommandPrefix.cache.clear()
 }
 
-const COMMAND_LIST_SEPARATORS = new Set<ControlOperator>([
+const COMMAND_LIST_SEPARATORS: ReadonlySet<string> = new Set<ControlOperator['op']>([
   '&&',
   '||',
   ';',
@@ -528,7 +528,7 @@ const COMMAND_LIST_SEPARATORS = new Set<ControlOperator>([
   '|',
 ])
 
-const ALL_SUPPORTED_CONTROL_OPERATORS = new Set<ControlOperator>([
+const ALL_SUPPORTED_CONTROL_OPERATORS: ReadonlySet<string> = new Set([
   ...COMMAND_LIST_SEPARATORS,
   '>&',
   '>',
