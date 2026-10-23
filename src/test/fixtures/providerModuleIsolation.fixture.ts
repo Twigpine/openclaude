@@ -4,6 +4,7 @@ import {
   attributionModulesNeedIsolation,
   providerModuleIsMocked,
   REAL_PROVIDER_TEST_CHILD_ENV,
+  REAL_PROVIDER_TEST_TIMEOUT_MS,
 } from '../providerModuleIsolation.js'
 
 const scenario = process.env.ISOLATION_FIXTURE_SCENARIO
@@ -99,9 +100,11 @@ if (scenario === 'assertion-failure') {
     })
   }
 
+  // Cold attribution imports can exceed the default test timeout under shard
+  // load. Use the isolation budget, below the outer fixture process deadline.
   test(`attribution isolation detector: ${scenario}`, async () => {
     expect(await attributionModulesNeedIsolation()).toBe(
       scenario !== 'clean' && scenario !== 'child-marker',
     )
-  })
+  }, { timeout: REAL_PROVIDER_TEST_TIMEOUT_MS })
 }
