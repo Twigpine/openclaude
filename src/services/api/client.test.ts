@@ -7,6 +7,7 @@ import {
   registerGateway,
 } from '../../integrations/index.js'
 import { publicBuildVersion } from '../../utils/version.js'
+import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
 
 // bun:test keeps mock.module() registrations process-global across test files.
 // Load and re-register the real module before importing the client so a prior
@@ -328,6 +329,7 @@ afterEach(() => {
       originalEnv.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID,
     )
     globalThis.fetch = originalFetch
+    resetModelStringsForTestingOnly()
   } finally {
     releaseSharedMutationLock()
   }
