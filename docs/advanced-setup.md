@@ -15,7 +15,7 @@ npm install -g @twigpine/openclaude@latest
 
 ### Option B: From source with Bun
 
-Use Bun `1.3.13` or newer for source builds. Older Bun versions can fail during `bun run build`.
+Use Bun `1.4.4` for source builds. Older Bun versions can fail during `bun run build`.
 
 ```bash
 git clone https://github.com/Twigpine/openclaude.git

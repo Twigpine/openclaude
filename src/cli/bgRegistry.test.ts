@@ -2527,14 +2527,20 @@ describe('background session registry', () => {
       sessionId: 'conversation-kill-natural-race',
     })
 
-    await Promise.all([
-      recordBackgroundSessionNaturalTermination(
-        'bg-kill-natural-race',
-        { exitCode: 0 },
-        { ownerPid: 345 },
-      ),
-      markBackgroundSessionKilled('bg-kill-natural-race'),
-    ])
+    // Let kill observe a running session, then finish naturally before its write.
+    // Force this interleaving without depending on lock retry timing.
+    await markBackgroundSessionKilled('bg-kill-natural-race', {
+      _beforeMarkWriteForTesting: async session => {
+        expect(session.status).toBe('running')
+        expect(
+          await recordBackgroundSessionNaturalTermination(
+            session.id,
+            { exitCode: 0 },
+            { ownerPid: session.pid },
+          ),
+        ).toMatchObject({ status: 'exited', exitCode: 0 })
+      },
+    })
 
     expect(await resolveBackgroundSession('bg-kill-natural-race')).toMatchObject(
       {
