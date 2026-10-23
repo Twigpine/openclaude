@@ -18,6 +18,8 @@ beforeEach(async () => {
   await acquireSharedMutationLock(
     'utils/swarm/spawnInProcess.interruptionTrace.test.ts',
   )
+  // Earlier files can leave trace entries behind in non-isolated runs.
+  __resetInterruptionTraceForTests()
 })
 
 afterEach(() => {
