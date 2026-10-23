@@ -237,7 +237,8 @@ function streamOnOpen(this: StreamState, fd: number): void {
   })
 }
 
-function streamOnData(this: StreamState, chunk: string): void {
+function streamOnData(this: StreamState, chunk: string | Buffer): void {
+  chunk = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
   if (this.isFirstChunk) {
     this.isFirstChunk = false
     if (chunk.charCodeAt(0) === 0xfeff) {

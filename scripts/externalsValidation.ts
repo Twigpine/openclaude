@@ -40,7 +40,7 @@ export const RUNTIME_DEPENDENCY_CONTRACT: Readonly<Record<string, string>> = {
 }
 
 /** Node range advertised to installers; changing it changes who gets EBADENGINE. */
-export const ENGINES_NODE_CONTRACT = '>=22.0.0'
+export const ENGINES_NODE_CONTRACT = '>=24.22.1'
 
 const EXACT_VERSION_RE = /^\d+\.\d+\.\d+(?:-[\w.]+)?$/
 

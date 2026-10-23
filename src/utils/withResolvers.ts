@@ -1,6 +1,6 @@
 /**
  * Polyfill for Promise.withResolvers() (ES2024, Node 22+).
- * Native on every supported runtime now that engines.node is >=22.0.0; kept as a
+ * Native on every supported runtime (engines.node >=24.22.1); kept as a
  * thin wrapper so call sites stay stable and downstream embeds running older Node
  * (despite the warning) don't crash.
  */

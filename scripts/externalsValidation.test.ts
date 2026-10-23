@@ -304,7 +304,7 @@ describe('validateRuntimeDependencyContract', () => {
 })
 
 describe('validateInstallHygieneFields', () => {
-  const CLEAN = { engines: { node: '>=22.0.0' } }
+  const CLEAN = { engines: { node: '>=24.22.1' } }
 
   test('passes for a clean manifest', () => {
     expect(validateInstallHygieneFields(CLEAN).ok).toBe(true)

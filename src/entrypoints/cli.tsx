@@ -11,7 +11,7 @@ import {
 } from '../utils/printFlag.js'
 
 // Defensive compatibility guard for environments where globalThis.File is
-// unexpectedly absent. OpenClaude's supported runtime is Node >=22; this is
+// unexpectedly absent. OpenClaude's supported runtime is Node >=24.22.1; this is
 // not a Node 18 support guarantee. The guard is harmless on supported Node
 // versions and prevents undici's module evaluation from throwing in unusual
 // embedded/runtime setups.

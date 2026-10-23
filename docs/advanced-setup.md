@@ -4,7 +4,7 @@ This guide is for users who want source builds, Bun workflows, provider profiles
 
 ## Install Options
 
-OpenClaude requires Node.js `>=22.0.0` for npm installs and runtime. Bun is
+OpenClaude requires Node.js `>=24.22.1` for npm installs and runtime (Node 26 recommended/default). Bun is
 only required when building or running from source.
 
 ### Option A: npm
@@ -424,7 +424,7 @@ the percentage through the OpenClaude launcher. OpenClaude converts
 `--max-old-space-size-percentage` and
 `OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_PERCENTAGE` to an explicit
 `--max-old-space-size` in megabytes so the same command works on every supported
-Node version, including `22.0.0`:
+Node version, including `24.22.1`:
 
 ```bash
 openclaude --max-old-space-size-percentage=50
@@ -441,7 +441,7 @@ Heap size precedence, earlier wins:
 
 Putting the native flag in `NODE_OPTIONS` or
 `node --max-old-space-size-percentage=…` only works on Node versions that accept
-that option; Node 22.0.0 rejects it before OpenClaude starts. When a supporting
+that option. When a supporting
 Node already applied that native flag, OpenClaude leaves it in place and does
 not append `8192`. Launcher-only flags (`--max-old-space-size-percentage`,
 `--max-memory=`) are still stripped so Commander can start. That native-flag
@@ -507,7 +507,7 @@ host. Without this variable the behavior is unchanged.
 | `OLLAMA_BASE_URL` | Ollama only | Optional Ollama server base URL used for model discovery and the signed-in local Web Search proxy. The Ollama provider profile normally supplies the equivalent `OPENAI_BASE_URL`. |
 | `OLLAMA_API_KEY` | Ollama Web Search only | Enables hosted Ollama search at `https://ollama.com/api/web_search` and acts as a fallback when the configured local Ollama search endpoint is unavailable. |
 | `OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_MB` | No | Explicit V8 old-space heap cap in megabytes for the Node launcher. Used only when `--max-memory`, `--max-old-space-size-percentage`, and `OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_PERCENTAGE` are all unset. Default `8192`. |
-| `OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_PERCENTAGE` | No | Size the V8 old-space heap as a percentage (greater than 0, up to 100) of constrained/container memory when Node reports it, otherwise total system RAM. Converted to `--max-old-space-size` so Node 22.0.0 can start. Precedence, earlier wins: `--max-memory` → `--max-old-space-size-percentage` → this variable → `OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_MB` → default `8192`. |
+| `OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_PERCENTAGE` | No | Size the V8 old-space heap as a percentage (greater than 0, up to 100) of constrained/container memory when Node reports it, otherwise total system RAM. Converted to `--max-old-space-size` for compatibility across supported Node versions. Precedence, earlier wins: `--max-memory` → `--max-old-space-size-percentage` → this variable → `OPENCLAUDE_NODE_MAX_OLD_SPACE_SIZE_MB` → default `8192`. |
 | `CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS` | No | JSON map of OpenAI-compatible model names to context windows, such as `{"custom-model":1000000}`. Use this when a custom provider does not expose context metadata from `/v1/models`. |
 | `CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS` | No | JSON map of OpenAI-compatible model names to max output tokens, such as `{"custom-model":32768}`. Use this when a custom provider does not expose output-limit metadata from `/v1/models`. |
 | `OPENCODE_API_KEY` | OpenCode Zen / Go | Shared API key for OpenCode Zen (pay-as-you-go) and OpenCode Go (subscription); get yours from https://opencode.ai |

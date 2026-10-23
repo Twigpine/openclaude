@@ -1,9 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, posix, win32 } from 'node:path'
-import {
-  monitorEventLoopDelay,
-  type IntervalHistogram,
-} from 'node:perf_hooks'
+import { monitorEventLoopDelay } from 'node:perf_hooks'
 import { normalizeAbortReason } from './abortReasons.js'
 import { appendDiagnosticsNoPII } from './diagLogs.js'
 import { redactHomePath, redactLikelySecrets } from './redaction.js'
@@ -117,7 +114,7 @@ let signalAbortEventIds = new WeakMap<AbortSignal, string>()
 let signalAbortSources = new WeakMap<AbortSignal, string>()
 let signalStates = new WeakMap<AbortSignal, SignalTraceState>()
 let errorCausalEventIds = new WeakMap<object, string>()
-let eventLoopDelay: IntervalHistogram | undefined
+let eventLoopDelay: ReturnType<typeof monitorEventLoopDelay> | undefined
 let flushQueue: Promise<void> = Promise.resolve()
 let retryBatch:
   | {

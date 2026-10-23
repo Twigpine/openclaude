@@ -22,7 +22,7 @@ For most first-time users, OpenAI is the easiest option.
 
 You need:
 
-1. Node.js 22 LTS or newer installed
+1. Node.js 24.22.1 or newer (Node 26 recommended/default) installed
 2. A terminal window
 3. An API key from your provider, unless you are using a local model like Ollama
 

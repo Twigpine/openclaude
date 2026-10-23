@@ -30,8 +30,8 @@ jobs:
           release-type: node
 
   # Zero-warning install gate: pack the release tag and install it globally in
-  # a sandbox (cold + upgrade scenarios) on the supported Node floor (22 →
-  # npm 10) and current (24 → npm 11), whose warning output differs. Publish
+  # a sandbox (cold + upgrade scenarios) on the supported Node floor (24.22.1)
+  # and current (26), both shipping npm 11. Publish
   # is blocked unless the real `npm install -g` experience is clean.
   install-verify:
     name: Verify clean npm install (Node ${{ matrix.node-version }})
@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [22, 24]
+        node-version: ["24.22.1", "26"]
     steps:
       - name: Checkout release tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -89,7 +89,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           registry-url: https://registry.npmjs.org
 
       - name: Set up Bun
@@ -110,7 +110,7 @@ jobs:
         run: bun run smoke
 
       # Final install-hygiene gate on the publishing machine itself (the
-      # install-verify job covered Node 22/24 already); packs with
+      # install-verify job covered Node 24.22.1/26 already); packs with
       # --ignore-scripts to reuse the dist/ built above. Supersedes the old
       # `npm pack --dry-run` (contents are asserted inside the verify).
       - name: Verify zero-warning global install

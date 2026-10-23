@@ -1048,14 +1048,14 @@ describe('checkNodeVersion', () => {
   test('reads the Node.js version from the node executable output', () => {
     const probe = readNodeExecutableVersion(() => ({
       status: 0,
-      stdout: 'v22.0.0\n',
+      stdout: 'v24.22.1\n',
       stderr: '',
       error: undefined,
     }))
 
     expect(probe).toEqual({
       ok: true,
-      version: 'v22.0.0',
+      version: 'v24.22.1',
     })
   })
 
@@ -1064,7 +1064,7 @@ describe('checkNodeVersion', () => {
       ok: false,
       label: 'Node.js version',
       detail:
-        'Detected 20.11.1. OpenClaude requires Node.js >=22.0.0. Install Node 22 LTS or newer, then reinstall/re-run OpenClaude.',
+        'Detected 20.11.1. OpenClaude requires Node.js >=24.22.1. Install Node 24.22.1 or newer, then reinstall/re-run OpenClaude.',
     })
   })
 
@@ -1080,7 +1080,7 @@ describe('checkNodeVersion', () => {
       ok: false,
       label: 'Node.js version',
       detail:
-        'Unable to run `node --version`: spawn node ENOENT. OpenClaude requires Node.js >=22.0.0 on PATH.',
+        'Unable to run `node --version`: spawn node ENOENT. OpenClaude requires Node.js >=24.22.1 on PATH.',
     })
   })
 
@@ -1089,17 +1089,36 @@ describe('checkNodeVersion', () => {
       ok: false,
       label: 'Node.js version',
       detail:
-        'Detected 20.11.1. OpenClaude requires Node.js >=22.0.0. Install Node 22 LTS or newer, then reinstall/re-run OpenClaude.',
+        'Detected 20.11.1. OpenClaude requires Node.js >=24.22.1. Install Node 24.22.1 or newer, then reinstall/re-run OpenClaude.',
     })
   })
 
   test('passes supported Node.js versions', () => {
-    expect(checkNodeVersion('22.0.0')).toEqual({
+    expect(checkNodeVersion('24.22.1')).toEqual({
       ok: true,
       label: 'Node.js version',
-      detail: '22.0.0',
+      detail: '24.22.1',
     })
   })
+
+  test('rejects the patch immediately below the Node.js minimum', () => {
+    expect(checkNodeVersion({ ok: true, version: 'v24.22.0' })).toEqual({
+      ok: false,
+      label: 'Node.js version',
+      detail:
+        'Detected 24.22.0. OpenClaude requires Node.js >=24.22.1. Install Node 24.22.1 or newer, then reinstall/re-run OpenClaude.',
+    })
+  })
+
+  test.each(['v24.22.1', 'v26.12.1'])(
+    'passes the supported probed version %s', version => {
+      expect(checkNodeVersion({ ok: true, version })).toEqual({
+        ok: true,
+        label: 'Node.js version',
+        detail: version.slice(1),
+      })
+    },
+  )
 })
 
 describe('sandbox runtime diagnostics', () => {

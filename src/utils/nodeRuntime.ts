@@ -1,5 +1,7 @@
-export const MIN_NODE_MAJOR = 22
-export const MIN_NODE_VERSION = '22.0.0'
+import { satisfies } from './semver.js'
+
+export const MIN_NODE_MAJOR = 24
+export const MIN_NODE_VERSION = '24.22.1'
 export const MIN_NODE_ENGINE_RANGE = `>=${MIN_NODE_VERSION}`
 
 export type NodeVersionCheckResult =
@@ -39,12 +41,12 @@ export function checkSupportedNodeVersion(
     }
   }
 
-  if (major < MIN_NODE_MAJOR) {
+  if (!satisfies(version, MIN_NODE_ENGINE_RANGE)) {
     return {
       ok: false,
       version,
       major,
-      message: `Detected ${version}. OpenClaude requires Node.js ${MIN_NODE_ENGINE_RANGE}. Install Node ${MIN_NODE_MAJOR} LTS or newer, then reinstall/re-run OpenClaude.`,
+      message: `Detected ${version}. OpenClaude requires Node.js ${MIN_NODE_ENGINE_RANGE}. Install Node ${MIN_NODE_VERSION} or newer, then reinstall/re-run OpenClaude.`,
     }
   }
 

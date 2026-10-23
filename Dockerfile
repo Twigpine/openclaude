@@ -1,5 +1,5 @@
 # ---- build stage ----
-FROM node:22-slim AS build
+FROM node:26-slim AS build
 
 WORKDIR /app
 
@@ -28,7 +28,7 @@ RUN bun run build
 RUN rm -rf node_modules && bun install --frozen-lockfile --production
 
 # ---- runtime stage ----
-FROM node:22-slim
+FROM node:26-slim
 
 WORKDIR /app
 

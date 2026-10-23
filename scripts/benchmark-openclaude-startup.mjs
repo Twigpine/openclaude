@@ -34,7 +34,7 @@ if (warmRuns < MIN_WARM_RUNS) {
   throw new Error(`--warm-runs must be at least ${MIN_WARM_RUNS}`)
 }
 if (typeof nodeModule.enableCompileCache !== 'function') {
-  throw new Error(`Node ${process.version} does not expose module.enableCompileCache; the benchmark requires Node >=22.8.0`)
+  throw new Error(`Node ${process.version} does not expose module.enableCompileCache; the benchmark requires Node >=24.22.1`)
 }
 if (!existsSync(BUNDLE_PATH) || !statSync(BUNDLE_PATH).isFile()) {
   throw new Error('dist/cli.mjs is missing; run `bun run build` first')

@@ -4,7 +4,7 @@ This guide uses a standard shell such as Terminal, iTerm, bash, or zsh.
 
 ## 1. Install Node.js
 
-Install Node.js 22 LTS or newer from:
+Install Node.js 24.22.1 or newer (Node 26 recommended/default) from:
 
 - `https://nodejs.org/`
 

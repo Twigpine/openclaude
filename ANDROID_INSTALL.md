@@ -36,7 +36,7 @@ pkg install nodejs-lts git proot-distro
 
 Verify Node.js:
 ```bash
-node --version  # should be v20+
+node --version  # requires v24.22.1 or newer; Node 26 recommended/default
 ```
 
 ### Step 3 — Clone OpenClaude

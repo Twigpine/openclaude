@@ -107,7 +107,7 @@
     "@smithy/core": "3.24.3",
     "@smithy/node-http-handler": "4.7.3",
     "@types/bun": "1.4.4",
-    "@types/node": "25.5.0",
+    "@types/node": "^24.19.2",
     "@types/react": "19.2.14",
     "@typescript-eslint/eslint-plugin": "^8.69.0",
     "@typescript-eslint/parser": "^8.69.0",
@@ -191,7 +191,7 @@
     }
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=24.22.1"
   },
   "repository": {
     "type": "git",

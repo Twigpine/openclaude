@@ -211,7 +211,7 @@ When submitting provider changes:
 
 ## Local Setup
 
-Use Node.js `>=22.0.0` and Bun `1.4.4` (tracked in `.bun-version`).
+Use Node.js `>=24.22.1` (Node 26 recommended/default) and Bun `1.4.4` (tracked in `.bun-version`).
 
 Install dependencies:
 
@@ -320,7 +320,7 @@ Notes on the local preflight:
 - `bun run test` runs test files in a shared process and requires Bun's completed JUnit report as well as a successful exit. `test:full` runs all eight native Bun shards serially to release memory between groups. Use `bun run scripts/run-tests.ts --shards=N --shard-index=K` with the same test flags to run only shard K of N. `test:full` then applies the same completion check to the conversation-arc pass and the context-efficiency pass with `HISTORY_SNIP` enabled. Every shard must produce a complete report; a failed shard does not prevent the remaining shards from running. A test that terminates the runner early fails the command, even if it exits with code zero. Each shard has a ten-minute deadline (override with `--shard-timeout-ms=<milliseconds>`), reports its start/end and elapsed time, and kills its process group on timeout or cancellation. A timeout stops the remaining shards and exits nonzero. On Linux, shard output is relayed from temporary regular files; diagnostics remain visible during execution. Temporary reports and logs are removed after the check. CI runs `check:static` in `smoke-and-tests`, runs the eight unit shards as parallel `unit-tests` jobs, and runs each dedicated feature pass once in `dedicated-tests`. Each unit shard builds the CLI before testing. CI caps these jobs at 15 minutes each and the other jobs at five minutes.
 - Fetching upstream `main` by URL avoids assuming that a fork checkout's `origin` points at Twigpine/openclaude. `FETCH_HEAD` is the fetched upstream tip. The scan deliberately uses local `HEAD` so it includes commits that have not been pushed yet; CI uses the pushed PR head SHA after the push.
 - The web CI job runs on PRs that change `web/**`, root `package.json` or `bun.lock`, `.bun-version`, or `.github/workflows/pr-checks.yml`, and on every push to `main`. Contributors do not need to run the web suite locally for changes that cannot affect the site.
-- This preflight covers the same command families as CI, but it does not reproduce CI exactly in one shell. When selected, CI runs static checks with Node 22 available for smoke checks, runs the unit shards and dedicated feature passes under Node 22, separately builds and checks launcher compatibility under Node 22 and 24.11.x, separately builds and launches under exact Node 22.0.0, and executes every job on a clean runner.
+- This preflight covers the same command families as CI, but it does not reproduce CI exactly in one shell. When selected, CI runs static checks with Node 26 available for smoke checks, runs the unit shards and dedicated feature passes under Node 26, separately builds and checks launcher compatibility under Node 24.22.1 and 26, separately builds and launches under exact Node 24.22.1, and executes every job on a clean runner.
 
 If a local or GitHub CI check fails, first determine whether the PR owns the failure. Treat a failure as pre-existing only when you can reproduce it on the PR's current base (or link to the same failure on a current `main` CI run) and the PR neither changes the causal surface nor claims to fix that problem.
 
