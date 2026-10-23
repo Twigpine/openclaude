@@ -11,9 +11,9 @@
  * with (the channel's MCP tool, SendUserMessage, or both).
  *
  * feature('KAIROS') || feature('KAIROS_CHANNELS'). Runtime gate tengu_harbor.
- * Requires claude.ai OAuth auth — API key users are blocked until
- * console gets a channelsEnabled admin surface. Teams/Enterprise orgs
- * must explicitly opt in via channelsEnabled: true in managed settings.
+ * Explicitly configured MCP servers work with any supported model provider.
+ * Teams/Enterprise orgs must explicitly opt in via channelsEnabled: true in
+ * managed settings.
  */
 
 import type { ServerCapabilities } from '@modelcontextprotocol/sdk/types.js'
@@ -21,7 +21,6 @@ import { z } from 'zod/v4'
 import { type ChannelEntry, getAllowedChannels } from '../../bootstrap/state.js'
 import { CHANNEL_TAG } from '../../constants/xml.js'
 import {
-  getClaudeAIOAuthTokens,
   getSubscriptionType,
 } from '../../utils/auth.js'
 import { lazySchema } from '../../utils/lazySchema.js'
@@ -251,17 +250,6 @@ export function gateChannelServer(
     }
   }
 
-  // OAuth-only. API key users (console) are blocked — there's no
-  // channelsEnabled admin surface in console yet, so the policy opt-in
-  // flow doesn't exist for them. Drop this when console parity lands.
-  if (!getClaudeAIOAuthTokens()?.accessToken) {
-    return {
-      action: 'skip',
-      kind: 'auth',
-      reason: 'channels requires claude.ai authentication (run /login)',
-    }
-  }
-
   // Teams/Enterprise opt-in. Managed orgs must explicitly enable channels.
   // Default OFF — absent or false blocks. Keyed off subscription tier, not
   // "policy settings exist" — a team org with zero configured policy keys
@@ -336,15 +324,9 @@ export function gateChannelServer(
     }
   } else {
     // server-kind: allowlist schema is {marketplace, plugin} — a server entry
-    // can never match. Without this, --channels server:plugin:foo:bar would
-    // match a plugin's runtime name and register with no allowlist check.
-    if (!entry.dev) {
-      return {
-        action: 'skip',
-        kind: 'allowlist',
-        reason: `server ${entry.name} is not on the approved channels allowlist (use --dangerously-load-development-channels for local dev)`,
-      }
-    }
+    // Manually configured MCP servers are trusted by their explicit
+    // server:<name> session entry. Plugin entries use the marketplace
+    // allowlist above because their implementation is third-party code.
   }
 
   return { action: 'register' }

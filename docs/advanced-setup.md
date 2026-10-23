@@ -38,6 +38,32 @@ bun run dev
 
 ## Provider Examples
 
+## Telegram and Other Chat Channels
+
+OpenClaude accepts inbound messages from an MCP channel server. The channel
+server owns the Telegram bot token and chat polling; OpenClaude owns the model
+conversation and sends each notification into the active session.
+
+Configure the Telegram MCP server in the normal MCP configuration, making sure
+it declares the `claude/channel` capability and emits
+`notifications/claude/channel`. Then explicitly enable that server for the
+session:
+
+```powershell
+openclaude --channels server:telegram
+```
+
+Use the exact MCP server name from your configuration. Messages are still
+subject to the channel server's own chat/user filtering, and the explicit
+`--channels` opt-in is required because inbound messages can contain prompt
+injection. Plugin-provided channels use
+`--channels plugin:<name>@<marketplace>` and remain subject to the approved
+plugin allowlist.
+
+The channel path works with OpenAI-compatible providers such as DeepSeek; it
+does not require `claude.ai` OAuth. The model remains configured normally, for
+example with `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
+
 ### OpenAI
 
 ```bash
