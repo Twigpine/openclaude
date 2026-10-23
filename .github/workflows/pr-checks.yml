@@ -298,6 +298,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Fast typecheck (Bun builtin)
+        run: bun run typecheck:fast
+
       - name: Type tests
         run: bun run typecheck:type-tests
 

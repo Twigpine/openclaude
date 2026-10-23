@@ -1,11 +1,19 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type { Diagnostic, DiagnosticFile } from '../diagnosticTracking.js'
 
 const debugMessages: string[] = []
 
-const realDebugModule = await import(
-  `../../utils/debug.js?real=${Date.now()}-${Math.random()}`,
-)
+const realDebugModule = {
+  ...await import(`../../utils/debug.js?real=${Date.now()}-${Math.random()}`),
+}
+const realSlowOperations = {
+  ...await import(`../../utils/slowOperations.js?real=${Date.now()}-${Math.random()}`),
+}
+
+afterAll(() => {
+  mock.module('../../utils/debug.js', () => realDebugModule)
+  mock.module('../../utils/slowOperations.js', () => realSlowOperations)
+})
 
 mock.module('../../utils/debug.js', () => ({
   ...realDebugModule,
@@ -16,6 +24,7 @@ mock.module('../../utils/debug.js', () => ({
 // Other tests mock slowOperations process-wide; restore the real serializer so
 // diagnostic keys keep message/range/code entropy under full-suite ordering.
 mock.module('../../utils/slowOperations.js', () => ({
+  ...realSlowOperations,
   jsonStringify: JSON.stringify,
 }))
 
