@@ -35,8 +35,11 @@ beforeAll(async () => {
     'tools/ExitPlanModeTool/ExitPlanModeV2Tool.test.ts',
   )
 
-  actualPlans = await import('../../utils/plans.ts')
-  actualTeammateMailbox = await import('../../utils/teammateMailbox.ts')
+  const nonce = `${Date.now()}-${Math.random()}`
+  actualPlans = { ...await import(`../../utils/plans.js?real=${nonce}`) }
+  actualTeammateMailbox = {
+    ...await import(`../../utils/teammateMailbox.js?real=${nonce}`),
+  }
 
   mock.module('../../utils/plans.js', () => ({
     ...actualPlans,

@@ -22,6 +22,20 @@ import type { Notification } from '../../../context/notifications.js'
 import { getDefaultAppState } from '../../../state/AppStateStore.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../../../tools/ExitPlanModeTool/constants.js'
 
+const nonce = `${Date.now()}-${Math.random()}`
+const realPlans = {
+  ...await import(`../../../utils/plans.js?real=${nonce}`),
+}
+const realPermissionRuleExplanation = {
+  ...await import(`../PermissionRuleExplanation.js?real=${nonce}`),
+}
+const realMarkdown = {
+  ...await import(`../../Markdown.js?real=${nonce}`),
+}
+const realNotifications = {
+  ...await import(`../../../context/notifications.js?real=${nonce}`),
+}
+
 // A real path whose parent directory does not exist, so writeFile rejects with
 // a genuine ENOENT — no fs/promises mock needed.
 const unwritablePlanPath = join(
@@ -142,7 +156,6 @@ beforeEach(async () => {
     useNotifications: () => ({ addNotification, removeNotification: () => {} }),
   }))
   // V2 plan-file path points at a missing parent dir → real ENOENT on write.
-  const realPlans = await import('../../../utils/plans.ts')
   mock.module('../../../utils/plans.js', () => ({
     ...realPlans,
     getPlanFilePath: () => unwritablePlanPath,
@@ -154,6 +167,10 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('../../../utils/plans.js', () => realPlans)
+    mock.module('../PermissionRuleExplanation.js', () => realPermissionRuleExplanation)
+    mock.module('../../Markdown.js', () => realMarkdown)
+    mock.module('src/context/notifications.js', () => realNotifications)
   } finally {
     releaseSharedMutationLock()
   }

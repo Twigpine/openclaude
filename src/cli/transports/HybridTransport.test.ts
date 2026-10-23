@@ -1,5 +1,13 @@
-import { afterEach, beforeEach, describe, expect, jest, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, test } from 'bun:test'
 import type { StdoutMessage } from 'src/entrypoints/sdk/controlTypes.js'
+
+const realAxios = {
+  ...await import(`${import.meta.resolve('axios')}?real=${Date.now()}-${Math.random()}`),
+} as typeof import('axios')
+
+afterAll(() => {
+  mock.module('axios', () => realAxios)
+})
 
 type AxiosPost = (
   url: string,

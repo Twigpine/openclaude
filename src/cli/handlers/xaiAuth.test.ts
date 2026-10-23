@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { getCwdState, setCwdState } from '../../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -19,10 +20,13 @@ const SAVED_ENV = {
 
 let tempConfigDir = ''
 let tempCwd = ''
+let originalSessionCwd: string
 const originalCwd = process.cwd()
 
 beforeEach(async () => {
   await acquireSharedMutationLock('cli/handlers/xaiAuth.test.ts')
+  // Initialize session state before lazy handler imports see the temporary cwd.
+  originalSessionCwd = getCwdState()
   tempConfigDir = mkdtempSync(join(tmpdir(), 'openclaude-xai-cli-config-'))
   tempCwd = mkdtempSync(join(tmpdir(), 'openclaude-xai-cli-cwd-'))
   process.chdir(tempCwd)
@@ -39,6 +43,7 @@ afterEach(() => {
   try {
     setClaudeConfigHomeDirForTesting(undefined)
     process.chdir(originalCwd)
+    setCwdState(originalSessionCwd)
     rmSync(tempConfigDir, { recursive: true, force: true })
     rmSync(tempCwd, { recursive: true, force: true })
     if (SAVED_ENV.CLAUDE_CONFIG_DIR === undefined) {

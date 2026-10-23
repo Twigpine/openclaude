@@ -3,12 +3,18 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import * as actualAnalytics from '../analytics/index.js'
-import * as actualConfig from '../../utils/config.js'
 import type { Tip } from './types.js'
-import * as actualTipRegistry from './tipRegistry.js'
 
 const nonce = `${Date.now()}-${Math.random()}`
+const actualAnalytics = {
+  ...await import(`../analytics/index.js?real=${nonce}`),
+}
+const actualConfig = {
+  ...await import(`../../utils/config.js?real=${nonce}`),
+}
+const actualTipRegistry = {
+  ...await import(`./tipRegistry.js?real=${nonce}`),
+}
 const actualSettings = {
   ...await import(`../../utils/settings/settings.js?real=${nonce}`),
 }

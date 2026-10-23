@@ -22,6 +22,7 @@ import { QueryLifecycleOperationTracker } from '../../utils/queryLifecycle.js'
 import {
   __getInterruptionTraceSnapshotForTests,
   __resetInterruptionTraceForTests,
+  __waitForInterruptionTraceFlushForTests,
 } from '../../utils/interruptionTrace.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
 import { getClaudeAIOAuthTokens } from '../../utils/auth.js'
@@ -509,8 +510,10 @@ beforeEach(async () => {
   getClaudeAIOAuthTokens.cache?.clear?.()
 })
 
-afterEach(() => {
+afterEach(async () => {
   try {
+    await __waitForInterruptionTraceFlushForTests()
+    __resetInterruptionTraceForTests()
     for (const key of envKeys) {
       if (originalEnv[key] === undefined) {
         delete process.env[key]

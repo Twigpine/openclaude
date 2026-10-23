@@ -34,9 +34,11 @@ afterEach(() => {
 })
 
 async function importActualProviders(): Promise<ProvidersModule> {
-  return import(
-    `../../utils/model/providers.ts?officialRegistryActual=${Date.now()}-${Math.random()}`
-  )
+  return {
+    ...await import(
+      `../../utils/model/providers.ts?officialRegistryActual=${Date.now()}-${Math.random()}`
+    ),
+  }
 }
 
 async function mockApiProvider(provider: string): Promise<void> {

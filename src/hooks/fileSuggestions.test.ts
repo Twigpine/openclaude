@@ -188,14 +188,20 @@ function installFileSuggestionsDependencyMocks(options: LoadModuleOptions = {}):
 
 async function loadFileSuggestionsModule(options: LoadModuleOptions = {}) {
   activeSpawnScenario = options.spawnScenario
-  actualCrossSpawnModule ??= await import('cross-spawn')
-  actualRipgrepModule ??= await import('../utils/ripgrep.js')
-  actualFileIndexModule ??= await import('../native-ts/file-index/index.js')
+  const nonce = `${Date.now()}-${Math.random()}`
+  actualCrossSpawnModule ??= {
+    ...await import(`${import.meta.resolve('cross-spawn')}?real=${nonce}`),
+  }
+  actualRipgrepModule ??= {
+    ...await import(`../utils/ripgrep.js?real=${nonce}`),
+  }
+  actualFileIndexModule ??= {
+    ...await import(`../native-ts/file-index/index.js?real=${nonce}`),
+  }
   actualMarkdownConfigLoaderModule ??= await import(
     '../utils/markdownConfigLoader.js'
   )
   installFileSuggestionsDependencyMocks(options)
-  const nonce = `${Date.now()}-${Math.random()}`
   const module = await import(`./fileSuggestions.ts?ts=${nonce}`)
   restoreFileSuggestionsDependencyMocks()
   return module

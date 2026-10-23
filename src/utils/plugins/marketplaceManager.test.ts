@@ -9,11 +9,9 @@ import {
   type Mock,
   test,
 } from 'bun:test'
-import * as realAxios from 'axios'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import * as realExecFileNoThrow from '../execFileNoThrow.js'
 import {
   getFsImplementation,
   NodeFsOperations,
@@ -22,6 +20,14 @@ import {
 } from '../fsOperations.js'
 
 import type { MarketplaceSource } from './schemas.js'
+
+const nonce = `${Date.now()}-${Math.random()}`
+const realAxios = {
+  ...await import(`${import.meta.resolve('axios')}?real=${nonce}`),
+} as typeof import('axios')
+const realExecFileNoThrow = {
+  ...await import(`../execFileNoThrow.js?real=${nonce}`),
+} as typeof import('../execFileNoThrow.js')
 
 // @ts-expect-error -- query-string cache-buster: the import specifier ends with `?bust=...`
 // so TypeScript cannot resolve the bare path. The runtime import works under Bun (treats the

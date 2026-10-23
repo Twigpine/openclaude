@@ -1,5 +1,4 @@
 import { expect, test, mock, describe, beforeEach, afterEach, afterAll, beforeAll } from "bun:test";
-import * as realExeca from "execa";
 import { homedir } from "os";
 import { join } from "path";
 import {
@@ -10,6 +9,10 @@ import type * as EnvUtils from "../envUtils.js";
 import type * as MacOsKeychainHelpers from "./macOsKeychainHelpers.js";
 import type { linuxSecretStorage as LinuxSecretStorage } from "./linuxSecretStorage.js";
 import type { windowsCredentialStorage as WindowsCredentialStorage } from "./windowsCredentialStorage.js";
+
+const realExeca = {
+  ...await import(`${import.meta.resolve("execa")}?real=${Date.now()}-${Math.random()}`),
+} as typeof import("execa");
 
 type MockExecaOptions = {
   input?: string;
