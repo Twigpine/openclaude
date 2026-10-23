@@ -70,9 +70,12 @@ afterEach(() => {
 })
 
 async function importActualProviders(): Promise<ProvidersModule> {
-  return import(
-    `../../utils/model/providers.ts?withRetryActual=${Date.now()}-${Math.random()}`
-  )
+  // Bun repoints module namespaces when mocked; keep the original exports.
+  return {
+    ...await import(
+      `../../utils/model/providers.ts?withRetryActual=${Date.now()}-${Math.random()}`
+    ),
+  }
 }
 
 async function importFreshWithRetryModule(

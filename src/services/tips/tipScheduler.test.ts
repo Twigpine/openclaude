@@ -53,6 +53,7 @@ mock.module('../../utils/config.js', () => ({
 }))
 
 mock.module('./tipRegistry.js', () => ({
+  ...actualTipRegistry,
   getRelevantTips: async () => relevantTipsRef.value,
 }))
 

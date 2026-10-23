@@ -71,9 +71,12 @@ function restoreEnv(key: keyof typeof originalEnv): void {
 }
 
 async function importActualModelAllowlist(): Promise<ModelAllowlistModule> {
-  return import(
-    `../../utils/model/modelAllowlist.ts?agentToolActual=${Date.now()}-${Math.random()}`
-  )
+  // Bun repoints module namespaces when mocked; keep the original exports.
+  return {
+    ...await import(
+      `../../utils/model/modelAllowlist.ts?agentToolActual=${Date.now()}-${Math.random()}`
+    ),
+  }
 }
 
 async function importActualSettings(): Promise<SettingsModule> {

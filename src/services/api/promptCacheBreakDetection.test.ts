@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type { BetaToolUnion } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { TextBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { QuerySource } from '../../constants/querySource.js'
@@ -30,9 +30,23 @@ const logForDebuggingMock = mock(
     debugCalls.push({ message, options })
   },
 )
-const actualDebugModule = await import('../../utils/debug.js')
+const nonce = `${Date.now()}-${Math.random()}`
+const actualDebugModule = {
+  ...await import(`../../utils/debug.js?real=${nonce}`),
+}
+const actualAnalyticsModule = {
+  ...await import(`../analytics/index.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.restore()
+  mock.module('../analytics/index.js', () => actualAnalyticsModule)
+  mock.module('src/utils/debug.js', () => actualDebugModule)
+  mock.module('../../utils/debug.js', () => actualDebugModule)
+})
 
 mock.module('../analytics/index.js', () => ({
+  ...actualAnalyticsModule,
   logEvent: logEventMock,
 }))
 
