@@ -44,6 +44,8 @@ export async function initializeSentry(): Promise<void> {
       // v11 attaches synthetic stacks to messages and collects more data by
       // default. Keep this reporter limited to the vetted message.
       attachStacktrace: false,
+      // The SDK otherwise adds os.hostname() as server_name to every event.
+      includeServerName: false,
       dataCollection: {
         userInfo: false,
         cookies: false,
