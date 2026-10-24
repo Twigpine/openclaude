@@ -37,6 +37,27 @@ export async function initializeSentry(): Promise<void> {
       dsn: process.env.SENTRY_DSN,
       environment: process.env.NODE_ENV ?? 'production',
       tracesSampleRate: 0,
+      // Keep v11's span streaming and runtime instrumentation out of this path.
+      traceLifecycle: 'static',
+      enableOpenTelemetrySetup: false,
+      enableRuntimeChannelInjection: false,
+      // v11 attaches synthetic stacks to messages and collects more data by
+      // default. Keep this reporter limited to the vetted message.
+      attachStacktrace: false,
+      dataCollection: {
+        userInfo: false,
+        cookies: false,
+        httpHeaders: false,
+        httpBodies: [],
+        urlQueryParams: false,
+        graphQL: { document: false, variables: false },
+        genAI: { inputs: false, outputs: false },
+        mcp: { inputs: false, outputs: false },
+        databaseQueryData: false,
+        queues: false,
+        stackFrameVariables: false,
+        frameContextLines: 0,
+      },
       // Disable Sentry's automatic uncaughtException/unhandledRejection
       // integrations. Those hooks report raw error content, bypassing the
       // TelemetrySafeError sanitization in reportErrorToSentry(). Only
