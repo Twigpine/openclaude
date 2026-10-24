@@ -14,6 +14,7 @@ const savedWebSearchEnv = {
   FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL,
   TAVILY_API_KEY: process.env.TAVILY_API_KEY,
   ANYSEARCH_API_KEY: process.env.ANYSEARCH_API_KEY,
+  KEENABLE_API_KEY: process.env.KEENABLE_API_KEY,
   EXA_API_KEY: process.env.EXA_API_KEY,
   EXA_FREE_TIER: process.env.EXA_FREE_TIER,
   YOU_API_KEY: process.env.YOU_API_KEY,
@@ -134,6 +135,11 @@ describe('getProviderMode', () => {
     expect(getProviderMode()).toBe('anysearch')
   })
 
+  test('returns keenable mode', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'keenable'
+    expect(getProviderMode()).toBe('keenable')
+  })
+
   test('returns native mode', () => {
     process.env.WEB_SEARCH_PROVIDER = 'native'
     expect(getProviderMode()).toBe('native')
@@ -172,6 +178,20 @@ describe('getProviderChain', () => {
     const chain = getProviderChain('anysearch' as ProviderMode)
     expect(chain).toHaveLength(1)
     expect(chain[0].name).toBe('anysearch')
+    expect(chain[0].isConfigured()).toBe(true)
+  })
+
+  test('auto mode does not select Keenable, even with a key', () => {
+    process.env.KEENABLE_API_KEY = 'kn-test-key'
+    const chain = getProviderChain('auto')
+    expect(chain.some(p => p.name === 'keenable')).toBe(false)
+  })
+
+  test('keenable mode selects the built-in provider without a key', () => {
+    delete process.env.KEENABLE_API_KEY
+    const chain = getProviderChain('keenable' as ProviderMode)
+    expect(chain).toHaveLength(1)
+    expect(chain[0].name).toBe('keenable')
     expect(chain[0].isConfigured()).toBe(true)
   })
 
@@ -223,6 +243,20 @@ describe('runSearch', () => {
 
     const { runSearch } = await import('./index.js')
     await expect(runSearch({ query: 'quota' })).rejects.toThrow(/AnySearch search error HTTP 429/)
+    expect(requestCount).toBe(1)
+  })
+
+  test('explicit Keenable failure does not fall back to another provider', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'keenable'
+    delete process.env.KEENABLE_API_KEY
+    let requestCount = 0
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      requestCount += 1
+      return new Response(JSON.stringify({ error: 'Too Many Requests' }), { status: 429 })
+    }) as typeof fetch
+
+    const { runSearch } = await import('./index.js')
+    await expect(runSearch({ query: 'quota' })).rejects.toThrow(/Keenable search error HTTP 429/)
     expect(requestCount).toBe(1)
   })
 

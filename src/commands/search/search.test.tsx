@@ -31,7 +31,7 @@ const memoryStore: SearchEnvStore = {
 const SYNC_START = '\x1B[?2026h'
 const SYNC_END = '\x1B[?2026l'
 
-const ENV_KEYS = ['WEB_SEARCH_PROVIDER', 'EXA_API_KEY', 'TAVILY_API_KEY', 'ANYSEARCH_API_KEY'] as const
+const ENV_KEYS = ['WEB_SEARCH_PROVIDER', 'EXA_API_KEY', 'TAVILY_API_KEY', 'ANYSEARCH_API_KEY', 'KEENABLE_API_KEY'] as const
 const savedEnv = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]))
 const originalFetch = globalThis.fetch
 
@@ -187,6 +187,7 @@ describe('/search command', () => {
     expect(frame).toContain('Auto (recommended)')
     expect(frame).toContain('Exa')
     expect(frame).toContain('AnySearch')
+    expect(frame).toContain('Keenable')
     expect(frame).toContain('needs TAVILY_API_KEY')
   })
 
@@ -196,6 +197,14 @@ describe('/search command', () => {
     expect(mounted).toBeUndefined()
     expect(text).toBe('Web search set to AnySearch.')
     expect(savedEnvBlock).toEqual({ WEB_SEARCH_PROVIDER: 'anysearch' })
+  })
+
+  test('direct selection enables Keenable without opening a key dialog', async () => {
+    const { text, mounted } = await runSearch('keenable')
+
+    expect(mounted).toBeUndefined()
+    expect(text).toBe('Web search set to Keenable.')
+    expect(savedEnvBlock).toEqual({ WEB_SEARCH_PROVIDER: 'keenable' })
   })
 
   test('typing a key saves the backend and key without ever showing the key', async () => {
@@ -247,6 +256,41 @@ describe('/search command', () => {
     const anonymousTest = await runSearch('test anonymous after removing key')
     expect(anonymousTest.text).toContain('Search OK via AnySearch: 0 results')
     expect(authorizationPresent).toBe(false)
+  })
+
+  test('a Keenable key can be saved through hidden input and removed', async () => {
+    await runSearch('keenable')
+    const { mounted } = await runSearch('key keenable')
+    await mounted!.waitFor(f => f.includes('Keenable API key'))
+
+    mounted!.stdin.write('private-kn-key')
+    const masked = await mounted!.waitFor(f => f.includes('**************'))
+    mounted!.stdin.write('\r')
+    const message = await waitUntil(mounted!.done, text => text !== undefined)
+    mounted!.unmount()
+
+    expect(masked).not.toContain('private-kn-key')
+    expect(message).toBe('Saved KEENABLE_API_KEY. Keenable now uses your key.')
+    expect(savedEnvBlock).toEqual({
+      WEB_SEARCH_PROVIDER: 'keenable',
+      KEENABLE_API_KEY: 'private-kn-key',
+    })
+
+    const removed = await runSearch('remove-key keenable')
+    expect(removed.text).toBe('Removed the saved KEENABLE_API_KEY.')
+    expect(process.env.KEENABLE_API_KEY).toBeUndefined()
+
+    let requestedUrl = ''
+    let keyHeaderPresent = true
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrl = String(input)
+      keyHeaderPresent = Object.hasOwn(init?.headers ?? {}, 'X-API-Key')
+      return new Response(JSON.stringify({ results: [] }), { status: 200 })
+    }) as typeof fetch
+    const keylessTest = await runSearch('test keyless after removing key')
+    expect(keylessTest.text).toContain('Search OK via Keenable: 0 results')
+    expect(requestedUrl).toBe('https://api.keenable.ai/v1/search/public')
+    expect(keyHeaderPresent).toBe(false)
   })
 
   test('Esc in the key dialog cancels without saving', async () => {

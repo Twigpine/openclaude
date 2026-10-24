@@ -35,6 +35,7 @@ const SEARCH_ENV_KEYS = [
   'TAVILY_API_KEY',
   'ANYSEARCH_API_KEY',
   'ANYSEARCH_MAX_RESULTS',
+  'KEENABLE_API_KEY',
   'FIRECRAWL_API_KEY',
   'FIRECRAWL_API_URL',
   'YOU_API_KEY',
@@ -133,6 +134,11 @@ describe('parseSearchArgs', () => {
       option: { mode: 'anysearch' },
       typedInline: false,
     })
+    expect(parseSearchArgs('keenable')).toMatchObject({
+      kind: 'set',
+      option: { mode: 'keenable' },
+      typedInline: false,
+    })
   })
 
   test('extra tokens after a backend are flagged as an inline key', () => {
@@ -204,6 +210,7 @@ describe('needsApiKey', () => {
     expect(needsApiKey(backend('ddg'))).toBe(false)
     expect(needsApiKey(backend('auto'))).toBe(false)
     expect(needsApiKey(backend('anysearch'))).toBe(false)
+    expect(needsApiKey(backend('keenable'))).toBe(false)
   })
 
   test('Exa needs a key when the free tier is turned off', () => {
@@ -250,6 +257,11 @@ describe('describeSearchStatus', () => {
     expect(describeSearchStatus(false)).toContain('Searches go to: AnySearch')
   })
 
+  test('an explicit Keenable selection reports the active backend without a key', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'keenable'
+    expect(describeSearchStatus(false)).toContain('Searches go to: Keenable')
+  })
+
   test('native mode without built-in search reports searches as unavailable', () => {
     process.env.WEB_SEARCH_PROVIDER = 'native'
     expect(describeSearchStatus(false)).toContain('searches are unavailable')
@@ -265,6 +277,16 @@ describe('applySearchSelection', () => {
       { set: { WEB_SEARCH_PROVIDER: 'anysearch' }, unset: [] },
     ])
     expect(message).toBe('Web search set to AnySearch.')
+  })
+
+  test('saves Keenable selection without requiring an API key', () => {
+    const store = recordingStore()
+    const message = applySearchSelection(backend('keenable'), undefined, false, store)
+
+    expect(store.saves).toEqual([
+      { set: { WEB_SEARCH_PROVIDER: 'keenable' }, unset: [] },
+    ])
+    expect(message).toBe('Web search set to Keenable.')
   })
 
   test('saves the backend and its key, and applies them to this session', () => {
@@ -497,6 +519,23 @@ describe('runSearchTest', () => {
     expect(requestedUrl).toBe('https://api.anysearch.com/v1/search')
     expect(message).toContain('Search OK via AnySearch: 1 results')
     expect(message).toContain('Top result: Any result — https://example.com/result')
+  })
+
+  test('uses the selected Keenable backend through the normal test entry', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'keenable'
+    let requestedUrl = ''
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      requestedUrl = String(input)
+      return new Response(JSON.stringify({
+        results: [{ title: 'Keenable result', url: 'https://example.com/result', snippet: 'text' }],
+      }), { status: 200 })
+    }) as typeof fetch
+
+    const message = await runSearchTest('keenable query', false)
+
+    expect(requestedUrl).toBe('https://api.keenable.ai/v1/search/public')
+    expect(message).toContain('Search OK via Keenable: 1 results')
+    expect(message).toContain('Top result: Keenable result — https://example.com/result')
   })
 
   test('reports the backend, count, timing, and top result', async () => {

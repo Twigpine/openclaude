@@ -47,6 +47,7 @@ instead.
 | Exa (default) | `EXA_API_KEY` | `x-api-key` | POST |
 | Exa free tier | *(none — zero-config default)* | — | POST |
 | AnySearch (explicit only) | `ANYSEARCH_API_KEY` (optional) | `Authorization: Bearer` when set | POST |
+| Keenable (explicit only) | `KEENABLE_API_KEY` (optional) | `X-API-Key` when set | POST |
 | You.com | `YOU_API_KEY` | `X-API-Key` | GET |
 | Jina | `JINA_API_KEY` | `Authorization: Bearer` | GET |
 | Bing | `BING_API_KEY` | `Ocp-Apim-Subscription-Key` | GET |
@@ -85,6 +86,7 @@ export WEB_SEARCH_API=https://search.example.com/search
 | `tavily` | Tavily only — throws on failure |
 | `exa` | Exa only — keyed API when `EXA_API_KEY` is set, otherwise the free tier; throws on failure |
 | `anysearch` | AnySearch only — anonymous without a key, Bearer authentication with one; throws on failure |
+| `keenable` | Keenable only — keyless endpoint without a key, keyed endpoint with one; throws on failure |
 | `brave` | Brave only — throws on failure |
 | `custom` | Custom API only — throws on failure. **Not in the auto chain** — must be explicitly selected |
 | `firecrawl` | Firecrawl only — throws on failure |
@@ -103,7 +105,7 @@ there too.
 
 > **Note:** The `custom` provider is excluded from the `auto` chain. It is only used when `WEB_SEARCH_PROVIDER=custom` is explicitly set. This prevents the generic outbound provider from silently becoming the default backend.
 
-AnySearch is also explicit-only: selecting it does not change the existing `auto` chain.
+AnySearch and Keenable are also explicit-only: selecting them does not change the existing `auto` chain.
 
 ```bash
 # Fail loudly if Tavily is down (don't silently switch backends)
@@ -130,6 +132,16 @@ Invalid, fractional, zero, negative, or very large values fall back to 15s. Cust
 Run `/search anysearch` to use its general web search without a key, or `/search key anysearch` to add an optional key through hidden input. Anonymous access has lower service limits. `/search remove-key anysearch` removes a key saved by `/search`; keys from the shell or `settings.json` remain controlled by those sources.
 
 `ANYSEARCH_MAX_RESULTS` accepts an integer from 1 to 10 (default 10). Invalid values use 10. General search sends `query` and `max_results` to `POST https://api.anysearch.com/v1/search`. Results come from `data.results`; OpenClaude reports HTTP and business-code failures separately from an empty result list. A key, when present, is sent only as `Authorization: Bearer <key>` to that endpoint.
+
+```json
+{"query":"search terms","max_results":10}
+```
+
+### Keenable
+
+Run `/search keenable` to use it without a key, or `/search key keenable` to add an optional key through hidden input. Keyless access is rate-limited per IP; a key lifts those limits. `/search remove-key keenable` removes a key saved by `/search`; keys from the shell or `settings.json` remain controlled by those sources.
+
+Without a key, OpenClaude sends `query` and `max_results` (10) to `POST https://api.keenable.ai/v1/search/public` with an `X-Keenable-Title: OpenClaude` header. With `KEENABLE_API_KEY` set, the same body goes to `POST https://api.keenable.ai/v1/search` with the key in `X-API-Key`. Result text comes from each result's `snippet`, flattened to one line and capped at 800 characters. Domain filters are applied to the returned hits.
 
 ```json
 {"query":"search terms","max_results":10}

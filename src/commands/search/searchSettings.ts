@@ -61,6 +61,13 @@ export const SEARCH_BACKENDS: readonly SearchBackendOption[] = [
     keyOptional: true,
     description: 'AnySearch only — anonymous access without a key, higher limits with one',
   },
+  {
+    mode: 'keenable',
+    label: 'Keenable',
+    keyEnv: 'KEENABLE_API_KEY',
+    keyOptional: true,
+    description: 'Keenable only — keyless access without a key, higher limits with one',
+  },
   { mode: 'tavily', label: 'Tavily', keyEnv: 'TAVILY_API_KEY', description: 'Tavily only' },
   {
     mode: 'brave',
@@ -103,6 +110,7 @@ const BACKEND_DISPLAY_NAMES: Record<string, string> = {
   exa: 'Exa (API key)',
   'exa-free': 'Exa free tier',
   anysearch: 'AnySearch',
+  keenable: 'Keenable',
   ollama: 'Ollama',
   firecrawl: 'Firecrawl',
   tavily: 'Tavily',

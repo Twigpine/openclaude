@@ -9,6 +9,7 @@
  *   "firecrawl" — use Firecrawl only (fail loudly)
  *   "tavily"    — use Tavily only (fail loudly)
  *   "anysearch" — use AnySearch only, with an optional API key (fail loudly)
+ *   "keenable"  — use Keenable only, with an optional API key (fail loudly)
  *   "exa"       — use Exa only (fail loudly): the keyed API when EXA_API_KEY
  *                 is set, otherwise the keyless free tier
  *   "you"       — use You.com only (fail loudly)
@@ -35,6 +36,7 @@ import { duckduckgoProvider } from './duckduckgo.js'
 import { firecrawlProvider } from './firecrawl.js'
 import { tavilyProvider } from './tavily.js'
 import { anysearchProvider } from './anysearch.js'
+import { keenableProvider } from './keenable.js'
 import { exaProvider } from './exa.js'
 import { exaFreeProvider } from './exaFree.js'
 import { youProvider } from './you.js'
@@ -96,6 +98,7 @@ export type ProviderMode =
   | 'ddg'
   | 'tavily'
   | 'anysearch'
+  | 'keenable'
   | 'exa'
   | 'you'
   | 'jina'
@@ -112,6 +115,7 @@ const PROVIDER_BY_NAME: Record<string, SearchProvider> = {
   ddg: duckduckgoProvider,
   tavily: tavilyProvider,
   anysearch: anysearchProvider,
+  keenable: keenableProvider,
   exa: exaProvider,
   you: youProvider,
   jina: jinaProvider,
