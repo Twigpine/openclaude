@@ -105,7 +105,7 @@ test('reportErrorToSentry only reports sanitized messages without stacks using t
   expect(exitCode).toBe(0)
   const result = JSON.parse(stdout)
   expect(result.integrations).toEqual([])
-  expect(result.tracesSampleRate).toBe(0)
+  expect(result.tracesSampleRate).toBeUndefined()
   expect(result.events).toHaveLength(1)
   expect(result.events[0].message).toBe('sanitized message')
   expect(result.events[0].level).toBe('error')
