@@ -213,9 +213,7 @@ const McpbPath = lazySchema(() =>
         message: 'MCPB file path must end with .mcpb or .dxt',
       })
       .describe('Path to MCPB file relative to plugin root'),
-    z
-      .string()
-      .url()
+    z.url()
       .refine(url => url.endsWith('.mcpb') || url.endsWith('.dxt'), {
         message: 'MCPB URL must end with .mcpb or .dxt',
       })
@@ -332,9 +330,7 @@ const PluginManifestMetadataSchema = lazySchema(() =>
     author: PluginAuthorSchema()
       .optional()
       .describe('Information about the plugin creator or maintainer'),
-    homepage: z
-      .string()
-      .url()
+    homepage: z.url()
       .optional()
       .describe('Plugin homepage or documentation URL'),
     repository: z.string().optional().describe('Source code repository URL'),
@@ -622,7 +618,7 @@ const PluginManifestMcpServerSchema = lazySchema(() =>
  */
 const PluginUserConfigOptionSchema = lazySchema(() =>
   z
-    .object({
+    .strictObject({
       type: z
         .enum(['string', 'number', 'boolean', 'directory', 'file'])
         .describe('Type of the configuration value'),
@@ -652,8 +648,7 @@ const PluginUserConfigOptionSchema = lazySchema(() =>
         ),
       min: z.number().optional().describe('Minimum value (number type only)'),
       max: z.number().optional().describe('Maximum value (number type only)'),
-    })
-    .strict(),
+    }),
 )
 
 /**
@@ -708,7 +703,7 @@ const PluginManifestChannelsSchema = lazySchema(() =>
     channels: z
       .array(
         z
-          .object({
+          .strictObject({
             server: z
               .string()
               .min(1)
@@ -728,8 +723,7 @@ const PluginManifestChannelsSchema = lazySchema(() =>
                 'Fields to prompt the user for when enabling this plugin in assistant mode. ' +
                   'Saved values are substituted into ${user_config.KEY} references in the mcpServers env.',
               ),
-          })
-          .strict(),
+          }),
       )
       .describe(
         'Channels this plugin provides. Each entry declares an MCP server as a message channel ' +
@@ -943,7 +937,7 @@ export const MarketplaceSourceSchema = lazySchema(() =>
   z.discriminatedUnion('source', [
     z.object({
       source: z.literal('url'),
-      url: z.string().url().describe('Direct URL to marketplace.json file'),
+      url: z.url().describe('Direct URL to marketplace.json file'),
       headers: z
         .record(z.string(), z.string())
         .optional()
@@ -1116,9 +1110,7 @@ export const PluginSourceSchema = lazySchema(() =>
           .string()
           .optional()
           .describe('Specific version or version range (e.g., ^1.0.0, ~2.1.0)'),
-        registry: z
-          .string()
-          .url()
+        registry: z.url()
           .optional()
           .describe(
             'Custom NPM registry URL (defaults to using system default, likely npmjs.org)',
@@ -1135,9 +1127,7 @@ export const PluginSourceSchema = lazySchema(() =>
           .string()
           .optional()
           .describe('Version specifier (e.g., ==1.0.0, >=2.0.0, <3.0.0)'),
-        registry: z
-          .string()
-          .url()
+        registry: z.url()
           .optional()
           .describe(
             'Custom PyPI registry URL (defaults to using system default, likely pypi.org)',

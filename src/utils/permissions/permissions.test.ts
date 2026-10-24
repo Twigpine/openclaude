@@ -259,7 +259,7 @@ const fileEditTool = createToolFixture(fileInputSchema, {
 })
 
 function mcpTool(name: string, readOnlyHint?: boolean) {
-  return createToolFixture(z.object({}).passthrough(), {
+  return createToolFixture(z.looseObject({}), {
     name,
     isMcp: true,
     mcpInfo: { serverName: 'test', toolName: name.split('__').at(-1) ?? name },

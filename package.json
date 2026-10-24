@@ -168,7 +168,7 @@
     "ws": "8.22.0",
     "xss": "1.0.16",
     "yaml": "2.9.1",
-    "zod": "3.25.76"
+    "zod": "4.6.7"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": "^0.137.0",
@@ -215,7 +215,8 @@
     "ip-address": "10.7.4",
     "google-auth-library": "11.3.1",
     "lodash-es": "4.18.1",
-    "node-domexception": "file:vendor/node-domexception-shim"
+    "node-domexception": "file:vendor/node-domexception-shim",
+    "zod": "4.6.7"
   },
   "allowScripts": {
     "protobufjs@7.6.4": true

@@ -42,7 +42,7 @@ const ModelTokenRateSchema = z
   .max(MAX_MODEL_TOKEN_RATE_USD_PER_MILLION)
 
 export const ModelPricingEntrySchema = z
-  .object({
+  .strictObject({
     inputTokens: ModelTokenRateSchema.describe(
       'Input-token price in USD per 1,000,000 tokens.',
     ),
@@ -65,7 +65,6 @@ export const ModelPricingEntrySchema = z
         'Web-search price in USD per request. Defaults to $0.01 when omitted.',
       ),
   })
-  .strict()
 
 const MODEL_PRICING_KEY_PREFIX = '\0'
 
@@ -139,7 +138,7 @@ export const EnvironmentVariablesSchema = lazySchema(() =>
  */
 export const PermissionsSchema = lazySchema(() =>
   z
-    .object({
+    .looseObject({
       allow: z
         .array(PermissionRuleSchema())
         .optional()
@@ -184,8 +183,7 @@ export const PermissionsSchema = lazySchema(() =>
         .array(z.string())
         .optional()
         .describe('Additional directories to include in the permission scope'),
-    })
-    .passthrough(),
+    }),
 )
 
 /**
@@ -353,7 +351,7 @@ export const DeniedMcpServerEntrySchema = lazySchema(() =>
  * The settings system handles backward compatibility automatically:
  * - When updating settings, invalid fields are preserved in the file (see settings.ts lines 233-249)
  * - Type coercion via z.coerce (e.g., env vars convert numbers to strings)
- * - .passthrough() preserves unknown fields in permissions object
+ * - z.looseObject() preserves unknown fields in permissions object
  * - Invalid settings are simply not used, but remain in the file to be fixed by the user
  */
 
@@ -371,7 +369,7 @@ export const CUSTOMIZATION_SURFACES = [
 
 export const SettingsSchema = lazySchema(() =>
   z
-    .object({
+    .looseObject({
       $schema: z
         .literal(CLAUDE_CODE_SETTINGS_SCHEMA_URL)
         .optional()
@@ -402,15 +400,13 @@ export const SettingsSchema = lazySchema(() =>
         ),
       // Gated so the SDK generator (which runs without CLAUDE_CODE_ENABLE_XAA)
       // doesn't surface this in GlobalClaudeSettings. Read via getXaaIdpSettings().
-      // .passthrough() on the outer object keeps an existing settings.json key
+      // z.looseObject() on the outer object keeps an existing settings.json key
       // alive across env-var-off sessions — it's just not schema-validated then.
       ...(isEnvTruthy(process.env.CLAUDE_CODE_ENABLE_XAA)
         ? {
             xaaIdp: z
               .object({
-                issuer: z
-                  .string()
-                  .url()
+                issuer: z.url()
                   .describe('IdP issuer URL for OIDC discovery'),
                 clientId: z
                   .string()
@@ -902,9 +898,7 @@ export const SettingsSchema = lazySchema(() =>
               .string()
               .optional()
               .describe('Actual model name to send to the API. Defaults to the surrounding agentModels key.'),
-            base_url: z
-              .string()
-              .url()
+            base_url: z.url()
               .optional()
               .describe('OpenAI-compatible API endpoint (must be https:// or http://). Omit together with api_key to reuse the current provider (model-only route).'),
             api_key: z
@@ -1178,7 +1172,7 @@ export const SettingsSchema = lazySchema(() =>
       // works when explicitly enabled. Which servers can connect at all is
       // still governed by allowedMcpServers/deniedMcpServers. Not
       // feature-spread: KAIROS_CHANNELS is external:true, and the spread
-      // wrecks type inference for allowedChannelPlugins (the .passthrough()
+      // wrecks type inference for allowedChannelPlugins (the z.looseObject()
       // catch-all gives {} instead of the array type).
       channelsEnabled: z
         .boolean()
@@ -1405,8 +1399,7 @@ export const SettingsSchema = lazySchema(() =>
             'Useful for enterprise administrators to add organization-specific context ' +
             '(e.g., "All plugins from our internal marketplace are vetted and approved.").',
         ),
-    })
-    .passthrough(),
+    }),
 )
 
 /**

@@ -15,7 +15,7 @@ import {
 } from './UI.js'
 
 // Allow any input object since MCP tools define their own schemas
-export const inputSchema = lazySchema(() => z.object({}).passthrough())
+export const inputSchema = lazySchema(() => z.looseObject({}))
 type InputSchema = ReturnType<typeof inputSchema>
 
 // MCP tools can return either a plain string or an array of content blocks

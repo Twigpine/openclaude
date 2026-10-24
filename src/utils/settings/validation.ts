@@ -193,7 +193,7 @@ export function validateSettingsFileContent(content: string):
     const jsonData = jsonParse(content)
 
     // Validate against SettingsSchema in strict mode
-    const result = SettingsSchema().strict().safeParse(jsonData)
+    const result = z.strictObject(SettingsSchema().shape).safeParse(jsonData)
 
     if (result.success) {
       return { isValid: true }

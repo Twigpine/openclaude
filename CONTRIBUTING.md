@@ -256,6 +256,15 @@ Keep all direct dependencies and devDependencies pinned to exact versions in the
 root and web manifests. Regenerate the relevant Bun lockfile
 when changing a pin.
 
+Schema validation uses Zod `4.6.7`, pinned exactly in the root development
+dependencies and in the root and website resolution overrides. Import
+`zod/v4` for application schemas, use native conversion through the shared
+`zodToJsonSchema` helper, and preserve validation messages and generated schema
+contracts. Follow [Schema validation](docs/schema-validation.md) for object
+strictness, defaults, error customization, dependency compatibility and SDK
+peer handling. Regenerate both lockfiles with `bun install` after changing
+the shared pin.
+
 The static website in `web/` uses Astro `7.4.2`, `@astrojs/check` `0.9.12`,
 and `@astrojs/sitemap` `3.7.4`, all pinned exactly. Install its dependencies
 with `bun install --cwd web`, then run `bun run web:typecheck` and

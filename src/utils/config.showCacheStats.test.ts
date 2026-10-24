@@ -1,5 +1,5 @@
 import { expect, test, describe } from 'bun:test'
-import { z } from 'zod'
+import { z } from 'zod/v4'
 import {
   DEFAULT_GLOBAL_CONFIG,
   GLOBAL_CONFIG_KEYS,

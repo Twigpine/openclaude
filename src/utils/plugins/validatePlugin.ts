@@ -216,7 +216,7 @@ export async function validatePluginManifest(
   // them. `claude plugin validate` is a developer tool — authors running it
   // want to know these fields don't belong here. But it's a warning, not an
   // error: the plugin loads fine at runtime (the base schema strips unknown
-  // keys). We strip them here so the .strict() call below doesn't double-
+  // keys). We strip them here so the z.strictObject() call below doesn't double-
   // report them as unrecognized-key errors on top of the targeted warnings.
   let toValidate = parsed
   if (typeof parsed === 'object' && parsed !== null) {
@@ -241,10 +241,10 @@ export async function validatePluginManifest(
   }
 
   // Validate against schema (post-strip, so marketplace fields don't fail it).
-  // We call .strict() locally here even though the base schema is lenient —
+  // We call z.strictObject() locally here even though the base schema is lenient —
   // the runtime load path silently strips unknown keys for resilience, but
   // this is a developer tool and authors running it want typo feedback.
-  const result = PluginManifestSchema().strict().safeParse(toValidate)
+  const result = z.strictObject(PluginManifestSchema().shape).safeParse(toValidate)
 
   if (!result.success) {
     errors.push(...formatZodErrors(result.error))
@@ -397,14 +397,13 @@ export async function validateMarketplaceManifest(
   // Validate against schema.
   // The base schemas are lenient (strip unknown keys) for runtime resilience,
   // but this is a developer tool — authors want typo feedback. We rebuild the
-  // schema with .strict() here. Note .strict() on the outer object does NOT
+  // schema with z.strictObject() here. Note z.strictObject() on the outer object does NOT
   // propagate into z.array() elements, so we also override the plugins array
   // with strict entries to catch typos inside individual plugin entries too.
-  const strictMarketplaceSchema = PluginMarketplaceSchema()
-    .extend({
-      plugins: z.array(PluginMarketplaceEntrySchema().strict()),
-    })
-    .strict()
+  const strictMarketplaceSchema = z.strictObject({
+    ...PluginMarketplaceSchema().shape,
+    plugins: z.array(z.strictObject(PluginMarketplaceEntrySchema().shape)),
+  })
   const result = strictMarketplaceSchema.safeParse(parsed)
 
   if (!result.success) {

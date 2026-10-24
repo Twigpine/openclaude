@@ -18,7 +18,7 @@ import {
 import { createServer, type Server, type Socket } from 'net'
 import { homedir, platform } from 'os'
 import { join } from 'path'
-import { z } from 'zod'
+import { z } from 'zod/v4'
 import { lazySchema } from '../lazySchema.js'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
 import { getSecureSocketPath, getSocketDir } from './common.js'
@@ -83,10 +83,9 @@ export async function runChromeNativeHost(): Promise<void> {
 
 const messageSchema = lazySchema(() =>
   z
-    .object({
+    .looseObject({
       type: z.string(),
-    })
-    .passthrough(),
+    }),
 )
 
 type ToolRequest = {

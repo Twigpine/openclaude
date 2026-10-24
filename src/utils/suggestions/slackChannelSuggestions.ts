@@ -1,4 +1,4 @@
-import { z } from 'zod'
+import { z } from 'zod/v4'
 import type { SuggestionItem } from '../../components/PromptInput/PromptInputFooterSuggestions.js'
 import type { MCPServerConnection } from '../../services/mcp/types.js'
 import { logForDebugging } from '../debug.js'

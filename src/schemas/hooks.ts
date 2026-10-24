@@ -96,7 +96,7 @@ function buildHookSchemas() {
 
   const HttpHookSchema = z.object({
     type: z.literal('http').describe('HTTP hook type'),
-    url: z.string().url().describe('URL to POST the hook input JSON to'),
+    url: z.url().describe('URL to POST the hook input JSON to'),
     if: IfConditionSchema(),
     timeout: z
       .number()

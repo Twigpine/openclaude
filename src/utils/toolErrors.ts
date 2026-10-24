@@ -136,3 +136,7 @@ export function formatZodValidationError(
 
   return errorContent
 }
+
+export function formatMcpValidationError(name: string, error: ZodError): string {
+  return `Tool ${name} input is invalid:\n${error.issues.map(issue => `- ${issue.path.join('.')}: ${issue.message}`).join('\n')}`
+}
