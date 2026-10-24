@@ -26,6 +26,12 @@ on:
 permissions:
   contents: read
 
+# Supersede stale runs for the same pull request. Scheduled and manual runs
+# get a per-run group and are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify-published-install:
     name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
