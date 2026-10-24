@@ -140,12 +140,12 @@ function MarkdownBody(t0) {
         nonTableContent = "";
       }
     };
-    for (const token of tokens) {
+    for (const [index, token] of tokens.entries()) {
       if (token.type === "table") {
         flushNonTableContent();
         elements.push(<MarkdownTable key={elements.length} token={token as Tokens.Table} highlight={highlight} />);
       } else {
-        nonTableContent = nonTableContent + formatToken(token, theme, 0, null, null, highlight);
+        nonTableContent = nonTableContent + formatToken(token, theme, 0, null, null, highlight, tokens[index - 1]);
         nonTableContent;
       }
     }

@@ -312,14 +312,20 @@ function stripHtmlCommentsFromTokens(tokens: ReturnType<Lexer['lex']>): {
   let result = ''
   let stripped = false
 
-  for (const token of tokens) {
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]!
     if (token.type === 'html') {
       const trimmed = token.raw.trimStart()
       if (trimmed.startsWith('<!--') && trimmed.includes('-->')) {
         // Per CommonMark, a type-2 HTML block ends at the *line* containing
         // `-->`, so text after `-->` on that line is part of this token.
         // Strip only the comment spans and keep any residual content.
-        const residue = stripHtmlCommentSpans(token.raw)
+        // marked emits trailing blank lines as a separate token. Remove them
+        // with a comment-only block, or retain them with its visible residue.
+        const next = tokens[index + 1]
+        const trailingSpace = next?.type === 'space' ? next.raw : ''
+        if (trailingSpace) index++
+        const residue = stripHtmlCommentSpans(token.raw + trailingSpace)
         stripped = true
         if (residue.trim().length > 0) {
           // Residual content exists (e.g. `<!-- note --> Use bun`): keep it.

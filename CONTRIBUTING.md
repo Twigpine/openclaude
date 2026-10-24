@@ -180,6 +180,29 @@ Before submitting, run multiple rounds of review on generated code:
 
 Self-review up front saves everyone time and reduces back-and-forth during maintainer review.
 
+### Markdown parsing and rendering
+
+Use the exact `marked` version in `package.json` and its bundled TypeScript types;
+import `marked`, `Lexer`, `Token`, or `Tokens` from the package's ESM entry point.
+Do not add `@types/marked` or a separate rendering extension. Use
+`configureMarked()` before terminal lexing and `formatToken()` / `applyMarkdown()`
+for terminal output; strikethrough parsing is deliberately disabled.
+
+List items can contain `paragraph` children and `checkbox` tokens. Preserve list
+markers for paragraph children and omit checkbox glyphs in terminal output. Pass
+the previous sibling to `formatToken()` when rendering block sequences so separate
+`space` tokens do not duplicate spacing after headings, tables, or indented code.
+Indented code has trailing newlines removed for terminal display and `/copy`;
+fenced code retains its content. Keep streaming boundary calculations on the
+complete lexer token stream, including whitespace and each token's `raw` length.
+
+CLAUDE.md parsing uses its own `new Lexer({ gfm: false })` to preserve include
+paths. When removing a comment-only HTML block, consume its following whitespace
+token too; preserve whitespace with visible comment residue and leave code blocks
+untouched. When updating `marked`, compare representative terminal, table, list,
+code, link, streaming, and memory-file output and run the markdown regression tests.
+Regenerate the exact dependency pin and lockfile with `bun add --exact marked@<version>`.
+
 ## AI Agent Guidelines
 
 If you are an AI agent (Copilot, Cursor, Claude, etc.) working on this codebase, refer to [AGENTS.md](AGENTS.md) for project-specific coding guidelines, conventions, and validation commands. Following these guidelines will help your contributions align with the project's patterns and reduce review friction.

@@ -1,0 +1,88 @@
+{
+  "inline": {
+    "input": "Plain **bold**, *italic*, `code`, ~~approximate~~ and \\*literal\\*.",
+    "terminal": "Plain bold, italic, code, ~~approximate~~ and *literal*.",
+    "codes": []
+  },
+  "headings": {
+    "input": "# Heading\n\nBody\n\n## Subheading\n\nNext",
+    "terminal": "Heading\n\nBody\n\nSubheading\n\nNext",
+    "codes": []
+  },
+  "blocks": {
+    "input": "> A quote\n> with **bold**\n\n---\n\nAfter",
+    "terminal": "▎ A quote\n▎ with bold\n\n---\nAfter",
+    "codes": []
+  },
+  "code": {
+    "input": "Before\n\n```ts\nconst n = 1\nconsole.log(n)\n```\n\nAfter\n\n    indented()\n",
+    "terminal": "Before\n\nconst n = 1\nconsole.log(n)\n\nAfter\n\nindented()",
+    "codes": [
+      {
+        "code": "const n = 1\nconsole.log(n)",
+        "lang": "ts"
+      },
+      {
+        "code": "indented()"
+      }
+    ]
+  },
+  "links": {
+    "input": "[Guide](https://example.com/guide) and <dev@example.com> and ![alt](image.png)",
+    "terminal": "https://example.com/guide and dev@example.com and image.png",
+    "codes": []
+  },
+  "tight": {
+    "input": "- First **bold**\n- Second\n  continued\n  1. Nested one\n  2. Nested two\n- Last",
+    "terminal": "- First bold\n- Second\ncontinued\n  a. Nested one\n  b. Nested two\n- Last",
+    "codes": []
+  },
+  "loose": {
+    "input": "3. First **bold**\n\n4. Second\n\n   Another paragraph\n\n5. Last",
+    "terminal": "3. First bold\n4. Second\n\n4. Another paragraph\n5. Last",
+    "codes": []
+  },
+  "tasks": {
+    "input": "- [ ] Pending\n- [x] Done\n\n- [ ] Loose task\n\n  More text",
+    "terminal": "- Pending\n- Done\n- Loose task\n\n- More text",
+    "codes": []
+  },
+  "table": {
+    "input": "| Name | Value |\n| :--- | ---: |\n| **one** | `two` |\n| 三 | 42 |\n\nAfter",
+    "terminal": "| Name | Value |\n|------|-------|\n| one  |   two |\n| 三   |    42 |\n\nAfter",
+    "codes": []
+  },
+  "spacing": {
+    "input": "# Title\n\n\nBody\n\n```\ncode\n```\n\n\nAfter\n",
+    "terminal": "Title\n\nBody\n\ncode\n\nAfter",
+    "codes": [
+      {
+        "code": "code",
+        "lang": ""
+      }
+    ]
+  },
+  "listBlocks": {
+    "input": "- Intro\n\n  ```\n  code\n  ```\n\n  > quote\n\n- End",
+    "terminal": "- Intro\n\ncode\n\n▎ quote\n- End",
+    "codes": []
+  },
+  "tableComponent": "┌──────┬───────┐\n│ Name │ Value │\n├──────┼───────┤\n│ one  │   two │\n├──────┼───────┤\n│ 三   │    42 │\n└──────┴───────┘",
+  "Markdown": "Heading\n\nBody\n\nSubheading\n\nNext\n\n- First bold\n- Second\ncontinued\n  a. Nested one\n  b. Nested two\n- Last\n\n┌──────┬───────┐\n│ Name │ Value │\n├──────┼───────┤\n│ one  │   two │\n├──────┼───────┤\n│ 三   │    42 │\n└──────┴───────┘\n\nAfter",
+  "StreamingMarkdown": "Heading\n\nBody\n\nSubheading\n\nNext\n\n- First bold\n- Second\ncontinued\n  a. Nested one\n  b. Nested two\n- Last\n\n┌──────┬───────┐\n│ Name │ Value │\n├──────┼───────┤\n│ one  │   two │\n├──────┼───────┤\n│ 三   │    42 │\n└──────┴───────┘\n\nAfter",
+  "memory": {
+    "input": "# Rules\n\n<!-- hidden -->\n\nUse **Bun**.\n\n```md\n<!-- keep -->\n@./ignored.md\n```\n\n@./included.md\n",
+    "content": "# Rules\n\nUse **Bun**.\n\n```md\n<!-- keep -->\n@./ignored.md\n```\n\n@./included.md\n",
+    "stripped": true
+  },
+  "memoryFiles": [
+    {
+      "name": "CLAUDE.md",
+      "content": "# Rules\n\nUse **Bun**.\n\n```md\n<!-- keep -->\n@./ignored.md\n```\n\n@./included.md\n"
+    },
+    {
+      "name": "included.md",
+      "content": "Included rule\n"
+    }
+  ]
+}

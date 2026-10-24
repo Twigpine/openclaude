@@ -142,7 +142,7 @@
     "knip": "6.42.1",
     "lodash-es": "4.18.1",
     "lru-cache": "11.5.3",
-    "marked": "15.0.12",
+    "marked": "18.1.1",
     "p-map": "7.1.1",
     "picomatch": "4.0.7",
     "proper-lockfile": "4.1.2",
