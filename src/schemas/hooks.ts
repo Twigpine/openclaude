@@ -32,6 +32,28 @@ function buildHookSchemas() {
   const BashCommandHookSchema = z.object({
     type: z.literal('command').describe('Shell command hook type'),
     command: z.string().describe('Shell command to execute'),
+    // Command hooks have no separate `args` field: the executor spawns the
+    // `command` string through a shell with an empty argument array. zod's
+    // default key stripping would silently drop a supplied `args`, turning
+    // e.g. { command: "sh", args: ["-c", handler] } into a bare `sh` that
+    // executes its JSON stdin as shell input (gh-2304). Reject the field
+    // with an actionable error instead, while all other unknown keys keep
+    // being tolerated for forward compatibility. JSON cannot express
+    // undefined, so `.optional()` only admits a programmatically-constructed
+    // explicit `undefined`, which means "not supplied" — every JSON-parsed
+    // value (null, array, string, …) is rejected.
+    args: z
+      .never({
+        error:
+          'Command hooks do not support an "args" field. Put the complete ' +
+          'invocation in "command" (e.g. "command": "sh -c \'printf HANDLER_RAN; cat\'"); ' +
+          'a supplied "args" would otherwise be silently discarded and a ' +
+          'different command would run.',
+      })
+      .optional()
+      .describe(
+        'Not supported: put the complete invocation in "command" instead',
+      ),
     if: IfConditionSchema(),
     shell: z
       .enum(SHELL_TYPES)
