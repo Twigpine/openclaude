@@ -45,19 +45,42 @@ function getConfigUrl(config: ScopedMcpServerConfig): string | undefined {
  * are swapped into appState.mcp.tools via the existing prefix-based
  * replacement (useManageMCPConnections.updateServer wipes anything matching
  * mcp__<server>__*, so this pseudo-tool is removed automatically).
+ *
+ * That last step only happens where appState feeds the tool pool — the CLI.
+ * A v2 SDK session connects its MCP servers once and does not re-read the
+ * pool after a reconnect, so `realToolsInCurrentContext` lets that caller
+ * tell the model the truth instead of promising tools the session cannot
+ * offer. See issue #2294.
  */
+export type McpAuthToolOptions = {
+  /**
+   * Whether the host exposes the server's real tools in the current context
+   * once authorization completes. Defaults to `true` (the CLI behavior).
+   * Pass `false` from an embedder whose session will not pick them up, so the
+   * model is told to start a new session rather than promised automatic
+   * availability.
+   */
+  realToolsInCurrentContext?: boolean
+}
+
 export function createMcpAuthTool(
   serverName: string,
   config: ScopedMcpServerConfig,
+  options: McpAuthToolOptions = {},
 ): Tool<InputSchema, McpAuthOutput> {
   const url = getConfigUrl(config)
   const transport = config.type ?? 'stdio'
   const location = url ? `${transport} at ${url}` : transport
+  const realToolsInCurrentContext = options.realToolsInCurrentContext ?? true
+
+  const afterAuth = realToolsInCurrentContext
+    ? `Once the user completes authorization in their browser, the server's real tools will become available automatically.`
+    : `Once the user completes authorization in their browser, start a new session to use the server's real tools — this one connects its MCP servers once and will not pick them up.`
 
   const description =
     `The \`${serverName}\` MCP server (${location}) is installed but requires authentication. ` +
     `Call this tool to start the OAuth flow — you'll receive an authorization URL to share with the user. ` +
-    `Once the user completes authorization in their browser, the server's real tools will become available automatically.`
+    afterAuth
 
   return {
     name: buildMcpToolName(serverName, 'authenticate'),
@@ -184,7 +207,11 @@ export function createMcpAuthTool(
             data: {
               status: 'auth_url' as const,
               authUrl,
-              message: `Ask the user to open this URL in their browser to authorize the ${serverName} MCP server:\n\n${authUrl}\n\nOnce they complete the flow, the server's tools will become available automatically.`,
+              message:
+                `Ask the user to open this URL in their browser to authorize the ${serverName} MCP server:\n\n${authUrl}\n\n` +
+                (realToolsInCurrentContext
+                  ? `Once they complete the flow, the server's tools will become available automatically.`
+                  : `Once they complete the flow, start a new session to use the server's tools.`),
             },
           }
         }
@@ -192,7 +219,9 @@ export function createMcpAuthTool(
         return {
           data: {
             status: 'auth_url' as const,
-            message: `Authentication completed silently for ${serverName}. The server's tools should now be available.`,
+            message: realToolsInCurrentContext
+              ? `Authentication completed silently for ${serverName}. The server's tools should now be available.`
+              : `Authentication completed silently for ${serverName}. Start a new session to use the server's tools.`,
           },
         }
       } catch (err) {
