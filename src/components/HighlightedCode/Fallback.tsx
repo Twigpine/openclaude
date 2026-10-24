@@ -1,4 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
+import chalk from 'chalk';
 import { extname } from 'path';
 import React, { Suspense, use, useMemo } from 'react';
 import { Ansi, Text } from '../../ink.js';
@@ -15,11 +16,11 @@ type Props = {
 
 // Module-level highlight cache — hl.highlight() is the hot cost on virtual-
 // scroll remounts. useMemo doesn't survive unmount→remount. Keyed by hash
-// of code+language to avoid retaining full source strings (#24180 RSS fix).
+// of code+language and Chalk level to avoid retaining full source strings (#24180 RSS fix).
 const HL_CACHE_MAX = 500;
 const hlCache = new Map<string, string>();
 function cachedHighlight(hl: NonNullable<Awaited<ReturnType<typeof getCliHighlightPromise>>>, code: string, language: string): string {
-  const key = hashPair(language, code);
+  const key = `${chalk.level}:${hashPair(language, code)}`;
   const hit = hlCache.get(key);
   if (hit !== undefined) {
     hlCache.delete(key);
