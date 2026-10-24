@@ -401,6 +401,11 @@ describe('cleanupOldMessageFilesInBackground', () => {
       expect(await Bun.file(targetPath).exists()).toBe(true)
       await rm(join(root, '.recovery-pass'), { force: true })
 
+      const freshPath = await createCompletedBackgroundSession(
+        configDir,
+        'bg-progress-fresh',
+        new Date(Date.now() - 60_000),
+      )
       expect(
         await runCleanupFixture(
           configDir,
@@ -408,6 +413,7 @@ describe('cleanupOldMessageFilesInBackground', () => {
           { OPENCLAUDE_CLEANUP_RECOVERY_LIMIT: '2' },
         ),
       ).toEqual({ result: 'ran' })
+      expect(await Bun.file(freshPath).exists()).toBe(false)
       expect(await Bun.file(targetPath).exists()).toBe(false)
     },
     30_000,
@@ -472,6 +478,7 @@ describe('cleanupOldMessageFilesInBackground', () => {
           throttled: 'skipped',
           rerun: {
             result: 'ran',
+            metadataPresent: false,
             markerPresent: true,
           },
         })

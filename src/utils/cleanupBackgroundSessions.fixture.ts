@@ -130,9 +130,28 @@ try {
         phases.push('threshold')
         const throttled = await freshPass()
         await rm(marker)
+        const rerunSession = await createBackgroundSession({
+          id: 'bg-policy-rerun',
+          pid: process.pid,
+          cwd: process.cwd(),
+          command: ['openclaude', '--print', 'fixture'],
+          sessionId: 'bg-policy-rerun-conversation',
+        })
+        recordBackgroundSessionNaturalTerminationSync(
+          rerunSession.id,
+          { exitCode: 0 },
+          {
+            ownerPid: process.pid,
+            expectedSession: rerunSession,
+            now: new Date(markerNow - 1_000),
+          },
+        )
         const rerunState = await snapshot(await freshPass())
         const rerun = {
           result: rerunState.result,
+          metadataPresent: await Bun.file(
+            join(root, 'sessions', `${rerunSession.id}.json`),
+          ).exists(),
           markerPresent: rerunState.markerPresent,
         }
         process.stdout.write(
