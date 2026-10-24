@@ -35,6 +35,13 @@ test('isSentryEnabled is false when SENTRY_DSN is set but DISABLE_TELEMETRY is s
   expect(isSentryEnabled()).toBe(false)
 })
 
+test('isSentryEnabled is false when SENTRY_DSN is set but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set', async () => {
+  process.env.SENTRY_DSN = 'https://example@o0.ingest.sentry.io/0'
+  process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+  const { isSentryEnabled } = await import('./sentry.js')
+  expect(isSentryEnabled()).toBe(false)
+})
+
 test('reportErrorToSentry does not throw when Sentry is disabled', async () => {
   const { reportErrorToSentry } = await import('./sentry.js')
   const { TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS: TelemetrySafeError } =
