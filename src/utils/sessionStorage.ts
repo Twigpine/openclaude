@@ -29,6 +29,7 @@ import {
   getReplayIndexBuilder,
   getSessionId,
   getSessionProjectDir,
+  onSessionSwitch,
   switchSession,
 } from '../bootstrap/state.js'
 import {
@@ -841,10 +842,71 @@ export const getProjectDir = memoize((projectDir: string): string => {
 
 let project: Project | null = null
 let cleanupRegistered = false
+/** Held so the subscription can be given up again — see resetProjectForTesting. */
+let unsubscribeSessionSwitch: (() => void) | null = null
+/** The session the cached file pointer belongs to. */
+let pointerSessionId: string | null = null
+/**
+ * And the project directory it was resolved under.
+ *
+ * Raised in review. `switchSession(id, projectDir)` sets BOTH, and emits only
+ * the id — so a switch that keeps the id and changes the directory would slip
+ * past an id-only guard and leave the pointer aimed at the old directory's
+ * file. The SDK does exactly that: `v2.ts` switches before every turn with
+ * the session's own `_sessionProjectDir`, and `query.ts` with the resolved
+ * transcript dir.
+ */
+let pointerProjectDir: string | null = null
+
+/**
+ * Follow switchSession with the file pointer.
+ *
+ * `Project.sessionFile` is resolved once and cached for the life of the
+ * process. Every CLI path that changes the active session resets it by hand
+ * immediately afterwards — sessionRestore.ts, /clear, print.ts all call
+ * resetSessionFilePointer right after switchSession, and its own docstring
+ * says that is when to call it.
+ *
+ * The v2 SDK does not, because it cannot: `unstable_v2_createSession` hands
+ * back a session object and the switch happens inside sendMessage, with no
+ * moment the embedder could hook. So a second session created in one process
+ * went on writing into the FIRST session's file. Its records carried its own
+ * sessionId, so nothing looked wrong until something tried to resume it:
+ * `resolveSessionFilePath` found no file, the resume came back with zero
+ * prior messages, and the conversation was gone.
+ *
+ * Measured in an embedder (2026-09-30): one project directory, one .jsonl,
+ * and inside it three sessions' records — 3979, 917 and 348 — while two of
+ * the three had no file of their own. An interrupt resumed the newest and
+ * silently started from nothing.
+ *
+ * Only on a real change: v2 calls switchSession before EVERY turn with the id
+ * it already has, and resetting the pointer each time would drop buffered
+ * entries and re-resolve the same path for nothing. "The same" means both the
+ * id and the project directory, because both decide the path.
+ */
+function followSessionSwitches(): void {
+  if (unsubscribeSessionSwitch) return
+  pointerSessionId = getSessionId()
+  pointerProjectDir = getSessionProjectDir()
+  unsubscribeSessionSwitch = onSessionSwitch(sessionId => {
+    // Read rather than received: the signal carries the id alone, and
+    // switchSession has already set the directory by the time it emits.
+    const projectDir = getSessionProjectDir()
+    if (sessionId === pointerSessionId && projectDir === pointerProjectDir) return
+    pointerSessionId = sessionId
+    pointerProjectDir = projectDir
+    // Lazily re-resolved from the new session id on the next write. An
+    // existing file is appended to, not replaced — a resume lands back in the
+    // conversation it came from.
+    project?.resetSessionFile()
+  })
+}
 
 function getProject(): Project {
   if (!project) {
     project = new Project()
+    followSessionSwitches()
 
     // Register flush as a cleanup handler (only once)
     if (!cleanupRegistered) {
@@ -900,6 +962,22 @@ export function resetProjectFlushStateForTesting(): void {
  */
 export function resetProjectForTesting(): void {
   project = null
+  // Give up the switch subscription with the singleton it resets.
+  //
+  // Raised in review. `resetStateForTests()` calls `sessionSwitched.clear()`,
+  // which drops every listener at once. A module that merely remembered "I am
+  // subscribed" would then believe it was still following switches while its
+  // listener was gone, and since test files share one bun process that
+  // silently stops pointer-following for every test that runs afterwards —
+  // failing the switch tests in a full-suite run and nowhere else.
+  //
+  // Unsubscribing and forgetting lets the next getProject() register afresh. A
+  // stale unsubscribe against an already-cleared signal is a no-op, so this
+  // heals the resetStateForTests() case as well as its own.
+  unsubscribeSessionSwitch?.()
+  unsubscribeSessionSwitch = null
+  pointerSessionId = null
+  pointerProjectDir = null
 }
 
 export function setSessionFileForTesting(path: string): void {
@@ -970,12 +1048,12 @@ class Project {
   currentSessionBranch: SessionBranchEntry | undefined
 
   sessionFile: string | null = null
-  // Entries buffered while sessionFile is null. Flushed by materializeSessionFile
-  // on the first user/assistant message — prevents metadata-only session files.
-  private pendingEntries: Entry[] = []
-  // Session the buffered entries belong to; a switch drops them so they are
-  // not written into the next session's transcript.
-  private pendingEntriesSessionId: UUID | null = null
+  // Entries buffered while sessionFile is null, keyed by the session they
+  // belong to. Flushed by materializeSessionFile on that session's first
+  // user/assistant message — prevents metadata-only session files without
+  // letting one session's buffer leak into another's transcript. Keyed rather
+  // than a single slot: a switch away and back must not lose them.
+  private pendingEntries = new Map<UUID, Entry[]>()
   private remoteIngressUrl: string | null = null
   private internalEventWriter: InternalEventWriter | null = null
   private internalEventReader: InternalEventReader | null = null
@@ -1306,19 +1384,33 @@ class Project {
 
   resetSessionFile(): void {
     this.sessionFile = null
-    this.pendingEntries = []
-    this.pendingEntriesSessionId = null
+    // The "current session only" metadata caches must not survive the move to
+    // another session: reAppendSessionMetadata would otherwise write them into
+    // the next session's transcript. The CLI already paired
+    // resetSessionFilePointer with clearSessionMetadata() by hand (see
+    // REPL.tsx); doing it here makes the SDK path follow the same rule, since
+    // it has no restoreSessionMetadata call to put them back.
+    this.clearSessionMetadata()
+    // Buffered entries are deliberately NOT dropped: they belong to the
+    // session that recorded them and are flushed when THAT session
+    // materializes. A switch away and back must keep them.
   }
 
-  /** Drops buffered entries that belong to a session other than `sessionId`. */
-  private dropForeignPendingEntries(sessionId: UUID): void {
-    if (
-      this.pendingEntriesSessionId !== null &&
-      this.pendingEntriesSessionId !== sessionId
-    ) {
-      this.pendingEntries = []
-      this.pendingEntriesSessionId = null
-    }
+  /** Drops the "current session only" metadata caches. */
+  clearSessionMetadata(): void {
+    this.currentSessionTitle = undefined
+    this.currentSessionTag = undefined
+    this.currentSessionAgentName = undefined
+    this.currentSessionAgentColor = undefined
+    this.currentSessionLastPrompt = undefined
+    this.currentSessionAgentSetting = undefined
+    this.currentSessionMode = undefined
+    this.currentSessionWorktree = undefined
+    this.currentSessionPrNumber = undefined
+    this.currentSessionPrUrl = undefined
+    this.currentSessionPrRepository = undefined
+    this.currentSessionGoal = undefined
+    this.currentSessionBranch = undefined
   }
 
   /**
@@ -1650,14 +1742,13 @@ class Project {
     // (not appendEntry) so it would bypass the per-entry persistence check
     // and create a metadata-only file despite --no-session-persistence.
     if (this.shouldSkipPersistence()) return
-    this.dropForeignPendingEntries(getSessionId() as UUID)
+    const sessionId = getSessionId() as UUID
     this.ensureCurrentSessionFile()
     // mode/agentSetting are cache-only pre-materialization; write them now.
     this.reAppendSessionMetadata()
-    if (this.pendingEntries.length > 0) {
-      const buffered = this.pendingEntries
-      this.pendingEntries = []
-      this.pendingEntriesSessionId = null
+    const buffered = this.pendingEntries.get(sessionId)
+    if (buffered && buffered.length > 0) {
+      this.pendingEntries.delete(sessionId)
       for (const entry of buffered) {
         await this.appendEntry(entry)
       }
@@ -1925,9 +2016,12 @@ class Project {
     if (isCurrentSession) {
       // Buffer until materializeSessionFile runs (first user/assistant message).
       if (this.sessionFile === null) {
-        this.dropForeignPendingEntries(currentSessionId)
-        this.pendingEntriesSessionId = currentSessionId
-        this.pendingEntries.push(entry)
+        let buffered = this.pendingEntries.get(currentSessionId)
+        if (!buffered) {
+          buffered = []
+          this.pendingEntries.set(currentSessionId, buffered)
+        }
+        buffered.push(entry)
         return
       }
       sessionFile = this.sessionFile
@@ -2111,6 +2205,8 @@ class Project {
   ): Promise<void> {
     this.deletedSessionFiles.add(resolvePath(transcriptPath))
     this.existingSessionFiles.delete(sessionId)
+    // The session is gone; its buffered entries have nowhere to go.
+    this.pendingEntries.delete(sessionId)
     if (this.sessionFile && this.isDeletedSessionFile(this.sessionFile)) {
       this.resetSessionFile()
     }
@@ -3969,20 +4065,7 @@ export function restoreSessionMetadata(meta: {
  * from the previous session does not leak into the new one.
  */
 export function clearSessionMetadata(): void {
-  const project = getProject()
-  project.currentSessionTitle = undefined
-  project.currentSessionTag = undefined
-  project.currentSessionAgentName = undefined
-  project.currentSessionAgentColor = undefined
-  project.currentSessionLastPrompt = undefined
-  project.currentSessionAgentSetting = undefined
-  project.currentSessionMode = undefined
-  project.currentSessionWorktree = undefined
-  project.currentSessionPrNumber = undefined
-  project.currentSessionPrUrl = undefined
-  project.currentSessionPrRepository = undefined
-  project.currentSessionGoal = undefined
-  project.currentSessionBranch = undefined
+  getProject().clearSessionMetadata()
 }
 
 /**
