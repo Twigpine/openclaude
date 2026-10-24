@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { hostname } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { snapshotEnv } from '../test/envSnapshot.js'
 
@@ -105,5 +106,8 @@ test('reportErrorToSentry only reports sanitized messages without stacks using t
   expect(result.events[0].stacktrace).toBeUndefined()
   expect(result.events[0].user).toBeUndefined()
   expect(result.events[0].request).toBeUndefined()
+  expect(result.events[0].server_name).toBeUndefined()
+  expect(result.events[0].hostname).toBeUndefined()
+  expect(stdout).not.toContain(hostname())
   expect(stdout).not.toContain('/some/file/path')
 }, 15_000)
