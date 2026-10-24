@@ -311,8 +311,8 @@ Undici 8 enables HTTP/2 by default; the bridge keeps legacy requests on HTTP/1.1
 Set `proxyTunnel: true` to retain CONNECT for plain HTTP targets. Normalize
 leading `*.` bypass entries to `.` before constructing the environment proxy
 dispatcher so apex and subdomain bypasses continue to match the shared helpers.
-Keep custom TLS options on `Agent.connect` for direct requests and
-`ProxyAgent.requestTls` for CONNECT targets, including `NO_PROXY` bypasses.
+Keep custom TLS options on `Agent.connect` for direct requests, including
+`NO_PROXY` bypasses, and on `ProxyAgent.requestTls` for CONNECT targets.
 
 Use the shared helpers in `src/utils/proxy.ts`: `createAxiosInstance()` for
 Axios, `getWebSocketProxyAgent(url)` for Node WebSockets, and `getProxyFetchOptions()`
