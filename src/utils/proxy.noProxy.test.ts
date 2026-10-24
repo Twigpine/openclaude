@@ -27,7 +27,7 @@ beforeAll(async () => {
   proxyModulePath = join(directory, 'proxy.mjs')
   const entrypoint = join(directory, 'entry.ts')
   await writeFile(entrypoint, `
-    export { getProxyAgent, getNoProxy, shouldBypassProxy, configureGlobalAgents, clearProxyCache } from ${JSON.stringify(join(import.meta.dir, 'proxy.ts'))};
+    export { getProxyAgent, getProxyFetchOptions, getNoProxy, shouldBypassProxy, configureGlobalAgents, clearProxyCache } from ${JSON.stringify(join(import.meta.dir, 'proxy.ts'))};
     export { StructuredIO } from ${JSON.stringify(join(import.meta.dir, '../cli/structuredIO.ts'))};
     export { clearCACertsCache, getCACertificates } from ${JSON.stringify(join(import.meta.dir, 'caCerts.ts'))};
     export { clearMTLSCache, getMTLSConfig, getMTLSAgent } from ${JSON.stringify(join(import.meta.dir, 'mtls.ts'))};
@@ -295,7 +295,7 @@ for (const mode of [
   'lowercase-bypass', 'lowercase-proxy', 'empty-lowercase',
   'refresh-uppercase', 'refresh-lowercase', 'cache-wildcard',
   'update-uppercase', 'update-lowercase', 'clear-cache',
-  'clear-proxy', 'clear-unset',
+  'clear-proxy', 'clear-unset', 'retained-proxy',
 ] as const) {
   // The Node child has a 6s deadline; allow extra time for cleanup.
   test(`Node NO_PROXY routing: ${mode}`, async () => {
@@ -307,14 +307,17 @@ for (const mode of [
       response.end('direct')
     })
     const proxy = createServer()
-    proxy.on('connect', (_request, client) => {
+    const replacementProxy = mode === 'retained-proxy' ? createServer() : undefined
+    const proxies = [proxy, ...(replacementProxy ? [replacementProxy] : [])]
+    for (const server of proxies) server.on('connect', (_request, client) => {
       connects++
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
       client.once('data', () => {
         client.end('HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nproxy')
       })
     })
-    for (const server of [target, proxy]) {
+    const servers = [target, ...proxies]
+    for (const server of servers) {
       server.on('connection', socket => {
         sockets.add(socket)
         socket.on('close', () => sockets.delete(socket))
@@ -326,6 +329,10 @@ for (const mode of [
       await once(target, 'listening')
       proxy.listen(0, '127.0.0.1')
       await once(proxy, 'listening')
+      if (replacementProxy) {
+        replacementProxy.listen(0, '127.0.0.1')
+        await once(replacementProxy, 'listening')
+      }
       const env = { ...process.env }
       for (const key of [
         'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy',
@@ -335,6 +342,9 @@ for (const mode of [
       const config = {
         mode,
         proxy: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`,
+        replacementProxy: replacementProxy
+          ? `http://127.0.0.1:${(replacementProxy.address() as AddressInfo).port}`
+          : undefined,
         url: `http://127.0.0.1:${(target.address() as AddressInfo).port}/`,
       }
       const { stdout } = await run('node', ['--input-type=module', '-e', `
@@ -342,7 +352,7 @@ for (const mode of [
         import { pathToFileURL } from 'node:url';
         const network = await import(pathToFileURL(process.argv[1]));
         const { getGlobalDispatcher, setGlobalDispatcher } = await import(pathToFileURL(${JSON.stringify(Bun.resolveSync('undici/index.js', import.meta.dir))}));
-        const { mode, proxy, url } = JSON.parse(process.argv[2]);
+        const { mode, proxy, replacementProxy, url } = JSON.parse(process.argv[2]);
         const previousGlobalDispatcher = getGlobalDispatcher();
         if (mode !== 'clear-unset') process.env.HTTPS_PROXY = proxy;
         const agents = new Set();
@@ -365,7 +375,22 @@ for (const mode of [
           }
         };
         try {
-          if (mode === 'clear-proxy' || mode === 'clear-unset') {
+          if (mode === 'retained-proxy') {
+            const retained = network.getProxyFetchOptions().dispatcher;
+            agents.add(retained);
+            network.configureGlobalAgents();
+            assert.equal(getGlobalDispatcher(), retained);
+            await request('proxy');
+            await update({ HTTPS_PROXY: replacementProxy });
+            agents.add(getGlobalDispatcher());
+            assert.notEqual(getGlobalDispatcher(), retained);
+            await request('proxy');
+            await request('proxy', retained);
+            await update({ HTTPS_PROXY: '' });
+            agents.add(getGlobalDispatcher());
+            await request('direct');
+            await request('proxy', retained);
+          } else if (mode === 'clear-proxy' || mode === 'clear-unset') {
             if (mode === 'clear-proxy') {
               network.configureGlobalAgents();
               const installed = agent();
@@ -378,8 +403,8 @@ for (const mode of [
               await update({ HTTPS_PROXY: '' });
               agents.add(getGlobalDispatcher());
               await request('direct');
-              assert.equal(closed, 1, 'the removed proxy dispatcher must be closed');
-              // Reusing the same proxy must not retrieve a closed cached dispatcher.
+              assert.equal(closed, 0, 'retained proxy dispatchers must stay open');
+              // Reusing the same proxy must use the refreshed cache.
               process.env.HTTPS_PROXY = proxy;
               network.configureGlobalAgents();
               agents.add(getGlobalDispatcher());
@@ -448,16 +473,16 @@ for (const mode of [
         }
       `, modulePath, JSON.stringify(config)], { env, timeout: 6000 })
       expect(stdout.trim()).toBe('verified')
-      const expectedConnects = mode === 'clear-proxy' ? 2 : mode === 'clear-unset' ? 0 : mode === 'lowercase-bypass' ? 0 :
+      const expectedConnects = mode === 'retained-proxy' ? 4 : mode === 'clear-proxy' ? 2 : mode === 'clear-unset' ? 0 : mode === 'lowercase-bypass' ? 0 :
         mode.startsWith('refresh') ? 3 : mode.startsWith('update') || mode === 'clear-cache' ? 2 : 1
-      const expectedDirect = mode === 'clear-proxy' ? 3 : mode === 'clear-unset' ? 2 : mode === 'lowercase-bypass' ? 1 :
+      const expectedDirect = mode === 'retained-proxy' ? 1 : mode === 'clear-proxy' ? 3 : mode === 'clear-unset' ? 2 : mode === 'lowercase-bypass' ? 1 :
         mode.startsWith('lowercase') || mode === 'empty-lowercase' ? 0 :
           mode.startsWith('update') || mode === 'clear-cache' ? 4 : mode === 'cache-wildcard' ? 3 : 2
       expect(connects).toBe(expectedConnects)
       expect(requests).toBe(expectedDirect)
     } finally {
       for (const socket of sockets) socket.destroy()
-      await Promise.all([target, proxy].map(server => new Promise<void>(resolve => {
+      await Promise.all(servers.map(server => new Promise<void>(resolve => {
         server.close(() => resolve())
       })))
     }
@@ -585,7 +610,7 @@ test.each(['shared TLS', 'TLS clear', 'TLS refresh', 'proxy replacement', 'exter
             process.env.HTTPS_PROXY = 'http://127.0.0.1:2';
             network.configureGlobalAgents();
             const second = undici.getGlobalDispatcher();
-            assert.equal(firstCloses(), 1, 'replaced owned proxy must be closed');
+            assert.equal(firstCloses(), 0, 'replaced shared proxy must stay open');
             assert.notEqual(second, first);
             assert.equal(network.getProxyAgent(process.env.HTTPS_PROXY), second);
             const recreated = network.getProxyAgent('http://127.0.0.1:1');

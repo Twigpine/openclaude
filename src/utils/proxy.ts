@@ -466,26 +466,29 @@ export function configureGlobalAgents(): void {
     cachedTLSDispatcher ?? tlsOptions?.dispatcher ?? new undiciMod.Agent({ connect: tlsOptions?.tls })
   undiciMod.setGlobalDispatcher(dispatcher)
 
-  if (installedDispatcher && installedDispatcher !== dispatcher &&
-      (ownsInstalledDispatcher || (installedTLSDispatcher && installedTLSAgent !== mtlsAgent))) {
+  if (installedDispatcher && installedDispatcher !== dispatcher) {
     // Evict only the retired proxy, leaving the active dispatcher cached.
     if (installedProxyCacheKey !== undefined &&
         getProxyAgent.cache.get(installedProxyCacheKey) === installedDispatcher) {
       getProxyAgent.cache.delete(installedProxyCacheKey)
     }
-    try {
-      // Graceful close lets in-flight requests finish without blocking updates.
-      void installedDispatcher.close().catch(() => {})
-    } catch {
-      // Dispatcher cleanup is best effort.
+    // Proxy dispatchers are shared with callers that can retain fetch options.
+    // Eviction does not prove those references are gone, so leave them open.
+    if (ownsInstalledDispatcher || (installedTLSDispatcher && installedTLSAgent !== mtlsAgent)) {
+      try {
+        // Graceful close lets in-flight requests finish without blocking updates.
+        void installedDispatcher.close().catch(() => {})
+      } catch {
+        // Dispatcher cleanup is best effort.
+      }
     }
   }
   installedDispatcher = dispatcher
   installedProxyCacheKey = proxyUrl ? getProxyAgentCacheKey(proxyUrl) : undefined
   installedTLSDispatcher = !proxyUrl && !!mtlsAgent
   installedTLSAgent = mtlsAgent
-  // Cached TLS configuration may still be in use by per-request callers.
-  ownsInstalledDispatcher = !!proxyUrl || !mtlsAgent
+  // Only the plain direct dispatcher is private; proxy options are handed out.
+  ownsInstalledDispatcher = !proxyUrl && !mtlsAgent
 }
 
 /**
