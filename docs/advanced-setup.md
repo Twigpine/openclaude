@@ -407,7 +407,7 @@ missing. Install only what you need:
 | Azure Foundry | `CLAUDE_CODE_USE_FOUNDRY=1` | `npm i -g @anthropic-ai/foundry-sdk @azure/identity` |
 | Claude on Vertex AI / Gemini ADC | `CLAUDE_CODE_USE_VERTEX=1` / Gemini ADC auth | `npm i -g google-auth-library` |
 | Reading/processing images (clipboard paste, drag-and-drop paths, FileReadTool local decode) | local image decode — **not** pre-encoded URL/base64 passthrough | `npm i -g sharp` (intentionally opt-in; prebuilt releases load it externally only when processing requires it) |
-| Optional error reporting | `SENTRY_DSN` is set | `npm i -g @sentry/node`. Without this package installed, setting `SENTRY_DSN` has no effect and reporting is silently disabled. |
+| Optional error reporting | `SENTRY_DSN` is set | `npm i -g @sentry/node@11.9.0`. Without this package installed, setting `SENTRY_DSN` has no effect and reporting is silently disabled. |
 
 When installing OpenClaude from source (`bun install`), all of these are
 already present as dev dependencies, so source/dev builds need no extra steps.
@@ -693,6 +693,8 @@ Notes:
 - Reporting is skipped even when `SENTRY_DSN` is set if `DISABLE_TELEMETRY` or
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, matching the same privacy
   levels used for existing telemetry (see [Runtime Hardening](#runtime-hardening)).
+- Automatic integrations, tracing, message stack traces, and SDK data collection
+  are disabled. Self-hosted Sentry requires version 26.4.2 or later.
 - Only sanitized, telemetry-safe error messages are sent — never raw error
   messages, which may contain file paths or other identifying information.
 - `@sentry/node` is an optional dev dependency and is **not included** in the
@@ -702,7 +704,7 @@ Notes:
   disabled (no error, no crash). Install it explicitly with:
 
 ```bash
-  npm i -g @sentry/node
+  npm i -g @sentry/node@11.9.0
 ```
 
   Source builds (`bun install`) already include it as a dev dependency, so no
