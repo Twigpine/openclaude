@@ -148,7 +148,9 @@ export function getTLSFetchOptions(): {
     pipelining: 1,
   })
 
-  return { dispatcher: agent }
+  // Per-request dispatchers need the bridge too: setGlobalDispatcher only
+  // bridges the global dispatcher used by Node 24's native fetch.
+  return { dispatcher: new undiciMod.Dispatcher1Wrapper(agent) }
 }
 
 /**

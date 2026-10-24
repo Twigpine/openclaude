@@ -310,12 +310,27 @@ paths.
 
 ### Proxy agents
 
+Use the exact `undici` 8.12.3 pin and its public exports and bundled types.
+Regenerate `bun.lock` with `bun install` after changing the manifest pin.
+Its Node.js minimum is covered by the supported `>=24.22.1` runtime.
+Wrap per-request fetch dispatchers with the public `Dispatcher1Wrapper` so
+Node 24's native fetch can use its legacy callbacks; the wrapper also accepts
+the current handler API. `setGlobalDispatcher()` handles the global bridge.
+Undici 8 enables HTTP/2 by default; the bridge keeps legacy requests on HTTP/1.1.
+Set `proxyTunnel: true` to retain CONNECT for plain HTTP targets. Normalize
+leading `*.` bypass entries to `.` before constructing the environment proxy
+dispatcher so apex and subdomain bypasses continue to match the shared helpers.
+Keep custom TLS options on `Agent.connect` for direct requests, including
+`NO_PROXY` bypasses, and on `ProxyAgent.requestTls` for CONNECT targets.
+
 Use the shared helpers in `src/utils/proxy.ts`: `createAxiosInstance()` for
 Axios, `getWebSocketProxyAgent(url)` for Node WebSockets, and `getProxyFetchOptions()`
 for fetch. The Axios and WebSocket helpers apply `NO_PROXY` bypasses before
 selecting an agent. `getWebSocketProxyUrl(url)` supplies Bun's native WebSocket proxy
 option. Lowercase proxy environment variables take precedence over uppercase
-variants on the Axios and WebSocket paths.
+variants on the Axios, WebSocket, and fetch/undici paths. The shared helpers read
+`no_proxy` before `NO_PROXY` using `??`, so an empty lowercase `no_proxy` is kept
+and does not fall back to `NO_PROXY`.
 
 `https-proxy-agent` is pinned exactly to `9.1.0` and remains an external runtime
 module in `scripts/externals.ts`. Use its public named ESM exports, such as
@@ -328,7 +343,9 @@ packages requiring Node.js 20 or later; use OpenClaude's supported Node.js
 Keep TLS verification enabled. Configure `NODE_EXTRA_CA_CERTS` before starting
 the CLI when a custom CA is needed. For runtime certificate configuration, the
 shared CA loader reads that file and the TLS helpers supply explicit options;
-clear the CA and mTLS caches after configuration changes. Proxy-agent
+clear the CA and mTLS caches after configuration changes. Structured I/O
+environment updates to TLS or proxy settings refresh CA, mTLS, and proxy caches
+and global agents; effective bypass-list changes do the same. Proxy-agent
 constructor options configure the connection to the proxy. Supply target TLS
 options on the HTTPS request, using `getWebSocketTLSOptions()` where applicable;
 do not assume constructor `ca` options also trust the target inside a CONNECT

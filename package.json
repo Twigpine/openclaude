@@ -160,7 +160,7 @@
     "turndown": "7.2.4",
     "type-fest": "5.10.0",
     "typescript": "6.0.3",
-    "undici": "7.30.1",
+    "undici": "8.12.3",
     "usehooks-ts": "3.1.1",
     "vscode-languageserver-protocol": "3.18.5",
     "web-tree-sitter": "0.25.10",

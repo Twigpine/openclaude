@@ -20,6 +20,21 @@ import {
 } from './mtls.js'
 import { importOptionalRuntimeModule } from './optionalRuntimeModule.js'
 
+// Environment settings captured by cached TLS/proxy agents. Check NO_PROXY
+// separately via getNoProxy() so shadowed bypass values do not rebuild agents.
+export const AGENT_CONFIG_ENV_VARS: ReadonlySet<string> = new Set([
+  'NODE_EXTRA_CA_CERTS',
+  'NODE_OPTIONS',
+  'CLAUDE_CODE_CLIENT_CERT',
+  'CLAUDE_CODE_CLIENT_KEY',
+  'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'CLAUDE_CODE_PROXY_RESOLVES_HOSTS',
+])
+
 // Disable fetch keep-alive after a stale-pool ECONNRESET so retries open a
 // fresh TCP connection instead of reusing the dead pooled socket. Sticky for
 // the process lifetime — once the pool is known-bad, don't trust it again.
@@ -73,7 +88,7 @@ export function getProxyUrl(env: EnvLike = process.env): string | undefined {
  * @param env Environment variables to check (defaults to process.env for production use)
  */
 export function getNoProxy(env: EnvLike = process.env): string | undefined {
-  return env.no_proxy || env.NO_PROXY
+  return env.no_proxy ?? env.NO_PROXY
 }
 
 /**
@@ -244,8 +259,8 @@ export function createAxiosInstance(
 }
 
 /**
- * Get or create a memoized proxy agent for the given URI
- * Now respects NO_PROXY environment variable
+ * Get or create a proxy agent cached by URI and effective NO_PROXY value.
+ * Include the bypass list because wildcard normalization pins it on the agent.
  */
 export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -254,19 +269,19 @@ export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
   const caCerts = getCACertificates()
 
   // Use EnvHttpProxyAgent to respect NO_PROXY
-  // This agent automatically checks NO_PROXY for each request
-  const proxyOptions: undici.EnvHttpProxyAgent.Options & {
-    requestTls?: {
-      cert?: string | Buffer
-      key?: string | Buffer
-      passphrase?: string
-      ca?: string | string[] | Buffer
-    }
-  } = {
+  const noProxy = getNoProxy()
+  const normalizedNoProxy = noProxy?.replace(/(^|[,\s])\*\./g, '$1.')
+  const proxyOptions: undici.EnvHttpProxyAgent.Options = {
     // Override both HTTP and HTTPS proxy with the provided URI
     httpProxy: uri,
     httpsProxy: uri,
-    noProxy: process.env.NO_PROXY || process.env.no_proxy,
+    // Keep the v7 CONNECT default for HTTP targets as well as HTTPS targets.
+    proxyTunnel: true,
+    // v8 excludes the apex for *.domain entries. Preserve our existing
+    // apex-and-subdomain contract, shared with the Axios/WebSocket helpers.
+    // Leave ordinary values unset so undici rereads the environment. Explicit
+    // normalized values are refreshed via the cache key and env reconfiguration.
+    ...(normalizedNoProxy !== noProxy && { noProxy: normalizedNoProxy }),
   }
 
   // Set both connect and requestTls so TLS options apply to both paths:
@@ -285,8 +300,13 @@ export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
     proxyOptions.requestTls = tlsOpts
   }
 
-  return new undiciMod.EnvHttpProxyAgent(proxyOptions)
-})
+  // Node 24's native fetch still uses dispatcher v1 callbacks. The public
+  // bridge also accepts v2 handlers and preserves HTTP/1.1 for legacy callers.
+  const agent = new undiciMod.EnvHttpProxyAgent(proxyOptions)
+  return typeof Bun === 'undefined'
+    ? new undiciMod.Dispatcher1Wrapper(agent)
+    : agent
+}, (uri: string) => JSON.stringify([uri, getNoProxy()]))
 
 /**
  * Get an HTTP agent configured for WebSocket proxy support
