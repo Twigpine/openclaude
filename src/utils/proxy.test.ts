@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'bun:test'
-import axios from 'axios'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createServer as createHttpServer } from 'node:http'
@@ -11,12 +10,37 @@ import { getGlobalDispatcher, setGlobalDispatcher } from 'undici'
 import { snapshotEnv } from '../test/envSnapshot.js'
 import { clearCACertsCache } from './caCerts.js'
 import { clearMTLSCache } from './mtls.js'
-import {
-  clearProxyCache,
-  configureGlobalAgents,
-  createAxiosInstance,
-  shouldBypassProxy,
-} from './proxy.js'
+import { shouldBypassProxy } from './proxy.js'
+
+// Other suites can leave a process-wide axios mock behind. Give this copy of
+// proxy.ts and the global-client test the same real axios, without registering
+// a global mock. Keep other imports external so CA/mTLS caches stay shared.
+const axiosPath = `${require.resolve('axios')}?connect=${Date.now()}-${Math.random()}`
+const { default: axios } = await import(axiosPath) as typeof import('axios')
+const proxyBuild = await Bun.build({
+  entrypoints: [join(import.meta.dir, 'proxy.ts')],
+  target: 'bun',
+  plugins: [{
+    name: 'connect-test-real-axios',
+    setup(build) {
+      build.onResolve({ filter: /.*/ }, args => {
+        if (!args.importer) return
+        return {
+          path: args.path === 'axios'
+            ? axiosPath
+            : Bun.resolveSync(args.path, args.resolveDir),
+          external: true,
+        }
+      })
+    },
+  }],
+})
+if (!proxyBuild.success) {
+  throw new AggregateError(proxyBuild.logs, 'Could not build proxy.ts for CONNECT tests')
+}
+const { clearProxyCache, configureGlobalAgents, createAxiosInstance } = await import(
+  `data:text/javascript;base64,${Buffer.from(await proxyBuild.outputs[0].text()).toString('base64')}`
+) as typeof import('./proxy.js')
 
 describe('runtime CA certificates through CONNECT', () => {
   test.each(['instance', 'global'] as const)('%s axios trusts a runtime CA', async path => {
