@@ -107,7 +107,7 @@
     "@smithy/core": "3.36.2",
     "@smithy/node-http-handler": "4.12.1",
     "@types/bun": "1.4.4",
-    "@types/node": "^24.19.2",
+    "@types/node": "24.19.2",
     "@types/react": "19.2.14",
     "@typescript-eslint/eslint-plugin": "8.72.0",
     "@typescript-eslint/parser": "8.72.0",

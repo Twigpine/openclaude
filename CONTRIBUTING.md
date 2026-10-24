@@ -213,6 +213,8 @@ When submitting provider changes:
 
 Use Node.js `>=24.22.1` (Node 26 recommended/default) and Bun `1.4.4` (tracked in `.bun-version`).
 
+Keep `@types/node` on the Node 24 major to match the minimum supported runtime, even when developing on Node 26. Pin it to an exact published 24.x version; the type package version does not need to match the Node.js runtime patch version.
+
 Install dependencies:
 
 ```bash
