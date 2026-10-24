@@ -13,6 +13,12 @@
 name: Install hygiene
 
 on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'bun.lock'
+      - 'src/utils/imageResizer.native.test.ts'
+      - '.github/workflows/install-hygiene.yml'
   schedule:
     - cron: '17 6 * * *' # daily, off the top-of-hour rush
   workflow_dispatch:
@@ -47,6 +53,9 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify native image processing
+        run: bun test src/utils/imageResizer.native.test.ts
 
       - name: Verify published package installs clean
         run: bun run scripts/verify-clean-install.ts --published
