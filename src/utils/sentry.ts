@@ -37,7 +37,7 @@ export async function initializeSentry(): Promise<void> {
     sentryModule.init({
       dsn: process.env.SENTRY_DSN,
       environment: process.env.NODE_ENV ?? 'production',
-      tracesSampleRate: 0,
+      // Leave tracing sample options unset; even a zero rate enables span recording.
       // Keep v11's span streaming and runtime instrumentation out of this path.
       traceLifecycle: 'static',
       enableOpenTelemetrySetup: false,
