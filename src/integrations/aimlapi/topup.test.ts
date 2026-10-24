@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, expect, jest, mock, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -78,6 +78,7 @@ afterAll(() => {
 })
 
 afterEach(() => {
+  jest.useRealTimers()
   globalThis.fetch = originalFetch
   lastSavedProfileEnv = undefined
   setClaudeConfigHomeDirForTesting(undefined)
@@ -1950,6 +1951,7 @@ test('a terminal poll error awaits onSession before rejecting, not racing ahead 
 })
 
 test('polling retries a transient transport failure', async () => {
+  jest.useFakeTimers()
   process.env.AIMLAPI_APP_URL = 'https://app.example.test'
   let attempts = 0
   globalThis.fetch = mock(async () => {
@@ -1965,13 +1967,22 @@ test('polling retries a transient transport failure', async () => {
     verificationBaseUrl: 'https://front.example.test',
   })
 
-  await expect(pollUntilPaid(client, 'session')).resolves.toEqual(
+  const polling = pollUntilPaid(client, 'session')
+  // Let the failed request schedule its retry before advancing the poll timer.
+  await new Promise<void>(resolve => setImmediate(resolve))
+  jest.advanceTimersByTime(2999)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(attempts).toBe(1)
+  jest.advanceTimersByTime(1)
+
+  await expect(polling).resolves.toEqual(
     expect.objectContaining({ status: 'paid' }),
   )
   expect(attempts).toBe(2)
 })
 
 test('polling retains and retries the same session after a rate limit', async () => {
+  jest.useFakeTimers()
   process.env.AIMLAPI_APP_URL = 'https://app.example.test'
   let attempts = 0
   globalThis.fetch = mock(async () => {
@@ -1988,9 +1999,15 @@ test('polling retains and retries the same session after a rate limit', async ()
   })
   const sessions: string[] = []
 
-  await expect(
-    pollUntilPaid(client, 'session', undefined, value => { sessions.push(value) }),
-  ).resolves.toEqual(expect.objectContaining({ status: 'paid' }))
+  const polling = pollUntilPaid(client, 'session', undefined, value => { sessions.push(value) })
+  // Let the failed request schedule its retry before advancing the poll timer.
+  await new Promise<void>(resolve => setImmediate(resolve))
+  jest.advanceTimersByTime(2999)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(attempts).toBe(1)
+  jest.advanceTimersByTime(1)
+
+  await expect(polling).resolves.toEqual(expect.objectContaining({ status: 'paid' }))
   expect(attempts).toBe(2)
   expect(sessions).toEqual([])
 })
