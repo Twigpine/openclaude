@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type {
   BetaMessage,
   BetaMessageStreamParams,
@@ -523,8 +523,7 @@ afterEach(async () => {
         flushTimeout = setTimeout(resolve, 500)
       }),
     ])
-    // Trace-enabled cases reset their snapshots before use. Resetting here
-    // makes Bun 1.3.13 crash while running subsequent isolated test files.
+    __resetInterruptionTraceForTests()
     for (const key of envKeys) {
       if (originalEnv[key] === undefined) {
         delete process.env[key]
@@ -558,6 +557,10 @@ afterEach(async () => {
     if (flushTimeout !== undefined) clearTimeout(flushTimeout)
     releaseSharedMutationLock()
   }
+})
+
+afterAll(() => {
+  expect(__getInterruptionTraceSnapshotForTests()).toEqual([])
 })
 
 if (runInProviderIsolatedChild) {
