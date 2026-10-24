@@ -454,6 +454,8 @@ describe('cleanupOldMessageFilesInBackground', () => {
             timing === 'after' ? '1' : '0',
         })
         expect(outcomes).toEqual({
+          phases: timing === 'after' ? ['policy-hook', 'threshold'] : ['threshold'],
+          policyHookLockHeld: timing === 'after' ? true : null,
           rejected: {
             result: 'invalid-policy',
             metadataPresent: true,

@@ -35,8 +35,18 @@ try {
         : 'periodic-recovery'
     let rejectAfterLock =
       process.env.OPENCLAUDE_CLEANUP_REJECT_AFTER_LOCK === '1'
+    const phases: string[] = []
+    let policyHookLockHeld: boolean | null = null
     const afterLock = async () => {
       if (rejectAfterLock) {
+        phases.push('policy-hook')
+        policyHookLockHeld = await stat(join(
+          process.env.OPENCLAUDE_CONFIG_DIR!,
+          'bg-sessions',
+          trigger === 'periodic-recovery'
+            ? '.recovery-pass.lock'
+            : '.retention-pass.lock',
+        )).then(lock => lock.isDirectory(), () => false)
         await Bun.write(
           settingsPath,
           JSON.stringify({ cleanupPeriodDays: 'invalid' }),
@@ -117,6 +127,7 @@ try {
         // Anchor the throttle check to the published marker's time.
         const markerNow = Math.max(now, Math.ceil((await stat(marker)).mtimeMs))
         Date.now = () => markerNow
+        phases.push('threshold')
         const throttled = await freshPass()
         await rm(marker)
         const rerunState = await snapshot(await freshPass())
@@ -125,7 +136,7 @@ try {
           markerPresent: rerunState.markerPresent,
         }
         process.stdout.write(
-          `${JSON.stringify({ rejected, retried, throttled, rerun })}\n`,
+          `${JSON.stringify({ rejected, retried, throttled, rerun, phases, policyHookLockHeld })}\n`,
         )
       } finally {
         Date.now = originalDateNow
