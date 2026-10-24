@@ -401,6 +401,8 @@ export function getProxyFetchOptions(opts?: { forAnthropicAPI?: boolean }): {
 let proxyInterceptorId: number | undefined
 let installedDispatcher: undici.Dispatcher | undefined
 let installedProxyCacheKey: string | undefined
+let installedTLSDispatcher = false
+let installedTLSAgent: ReturnType<typeof getMTLSAgent>
 let ownsInstalledDispatcher = false
 
 export function configureGlobalAgents(): void {
@@ -449,19 +451,23 @@ export function configureGlobalAgents(): void {
     axios.defaults.httpsAgent = mtlsAgent
   }
 
-  // Keep the ordinary direct path lazy. Without TLS, only clear our own proxy
+  // Keep the ordinary direct path lazy. Only clear our proxy/TLS installation
   // while it is still global; another caller may have installed a replacement.
-  if (!proxyUrl && !mtlsAgent && installedProxyCacheKey === undefined) return
+  if (!proxyUrl && !mtlsAgent && installedProxyCacheKey === undefined && !installedTLSDispatcher) return
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const undiciMod = require('undici') as typeof undici
   if (!proxyUrl && !mtlsAgent && undiciMod.getGlobalDispatcher() !== installedDispatcher) return
 
-  const tlsOptions = proxyUrl ? undefined : getTLSFetchOptions()
+  // Reuse our TLS installation while its source configuration remains cached.
+  const cachedTLSDispatcher = !proxyUrl && mtlsAgent && installedTLSDispatcher &&
+    installedTLSAgent === mtlsAgent ? installedDispatcher : undefined
+  const tlsOptions = proxyUrl || cachedTLSDispatcher ? undefined : getTLSFetchOptions()
   const dispatcher = proxyUrl ? getProxyAgent(proxyUrl) :
-    tlsOptions?.dispatcher ?? new undiciMod.Agent({ connect: tlsOptions?.tls })
+    cachedTLSDispatcher ?? tlsOptions?.dispatcher ?? new undiciMod.Agent({ connect: tlsOptions?.tls })
   undiciMod.setGlobalDispatcher(dispatcher)
 
-  if (installedDispatcher && installedDispatcher !== dispatcher && ownsInstalledDispatcher) {
+  if (installedDispatcher && installedDispatcher !== dispatcher &&
+      (ownsInstalledDispatcher || (installedTLSDispatcher && installedTLSAgent !== mtlsAgent))) {
     // Evict only the retired proxy, leaving the active dispatcher cached.
     if (installedProxyCacheKey !== undefined &&
         getProxyAgent.cache.get(installedProxyCacheKey) === installedDispatcher) {
@@ -476,8 +482,10 @@ export function configureGlobalAgents(): void {
   }
   installedDispatcher = dispatcher
   installedProxyCacheKey = proxyUrl ? getProxyAgentCacheKey(proxyUrl) : undefined
-  // TLS-helper dispatchers can be shared with per-request callers.
-  ownsInstalledDispatcher = !!proxyUrl || !tlsOptions?.dispatcher
+  installedTLSDispatcher = !proxyUrl && !!mtlsAgent
+  installedTLSAgent = mtlsAgent
+  // Cached TLS configuration may still be in use by per-request callers.
+  ownsInstalledDispatcher = !!proxyUrl || !mtlsAgent
 }
 
 /**

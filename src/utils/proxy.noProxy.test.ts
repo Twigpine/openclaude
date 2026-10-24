@@ -29,8 +29,8 @@ beforeAll(async () => {
   await writeFile(entrypoint, `
     export { getProxyAgent, getNoProxy, shouldBypassProxy, configureGlobalAgents, clearProxyCache } from ${JSON.stringify(join(import.meta.dir, 'proxy.ts'))};
     export { StructuredIO } from ${JSON.stringify(join(import.meta.dir, '../cli/structuredIO.ts'))};
-    export { getCACertificates } from ${JSON.stringify(join(import.meta.dir, 'caCerts.ts'))};
-    export { getMTLSConfig, getMTLSAgent } from ${JSON.stringify(join(import.meta.dir, 'mtls.ts'))};
+    export { clearCACertsCache, getCACertificates } from ${JSON.stringify(join(import.meta.dir, 'caCerts.ts'))};
+    export { clearMTLSCache, getMTLSConfig, getMTLSAgent } from ${JSON.stringify(join(import.meta.dir, 'mtls.ts'))};
   `)
   const result = await Bun.build({
     entrypoints: [entrypoint, join(import.meta.dir, 'proxy.ts')],
@@ -508,7 +508,7 @@ test('empty configuration does not load or install a global dispatcher', async (
   expect(stdout.trim()).toBe('verified')
 }, 10000)
 
-test.each(['shared TLS', 'proxy replacement', 'external replacement'] as const)(
+test.each(['shared TLS', 'TLS clear', 'TLS refresh', 'proxy replacement', 'external replacement'] as const)(
   'global dispatcher ownership: %s', async mode => {
     const env = { ...process.env }
     for (const name of [
@@ -539,18 +539,36 @@ test.each(['shared TLS', 'proxy replacement', 'external replacement'] as const)(
       try {
         network.configureGlobalAgents();
         assert.equal(undici.getGlobalDispatcher(), original);
-        if (mode === 'shared TLS') {
+        if (mode === 'shared TLS' || mode.startsWith('TLS')) {
           process.env.NODE_EXTRA_CA_CERTS = directory + '/ca.pem';
+          network.clearCACertsCache();
+          network.clearMTLSCache();
           network.configureGlobalAgents();
           const shared = undici.getGlobalDispatcher();
+          assert.notEqual(shared, original, 'CA configuration must install a TLS dispatcher');
           const sharedCloses = countCloses(shared);
           network.configureGlobalAgents();
-          process.env.HTTPS_PROXY = 'http://127.0.0.1:1';
-          network.configureGlobalAgents();
-          delete process.env.HTTPS_PROXY;
-          network.clearProxyCache();
-          network.configureGlobalAgents();
-          assert.equal(sharedCloses(), 0, 'retained TLS-helper dispatchers must stay open');
+          assert.equal(undici.getGlobalDispatcher(), shared, 'cached TLS dispatcher must be reused');
+          assert.equal(sharedCloses(), 0, 'cached TLS dispatcher must stay open');
+          if (mode.startsWith('TLS')) {
+            if (mode === 'TLS clear') delete process.env.NODE_EXTRA_CA_CERTS;
+            network.clearCACertsCache();
+            network.clearMTLSCache();
+            network.configureGlobalAgents();
+            const replacement = undici.getGlobalDispatcher();
+            assert.notEqual(replacement, shared, 'invalidated TLS configuration must be replaced');
+            if (mode === 'TLS clear') assert.ok(replacement instanceof undici.Agent);
+            assert.equal(sharedCloses(), 1, 'retired TLS dispatcher must be closed after cache invalidation');
+            network.configureGlobalAgents();
+            if (mode === 'TLS clear') assert.equal(undici.getGlobalDispatcher(), replacement);
+          } else {
+            process.env.HTTPS_PROXY = 'http://127.0.0.1:1';
+            network.configureGlobalAgents();
+            delete process.env.HTTPS_PROXY;
+            network.clearProxyCache();
+            network.configureGlobalAgents();
+            assert.equal(sharedCloses(), 0, 'retained cached TLS dispatcher must stay open');
+          }
         } else {
           process.env.HTTPS_PROXY = 'http://127.0.0.1:1';
           network.configureGlobalAgents();
