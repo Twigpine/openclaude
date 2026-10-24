@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'bun:test'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import { isolateProcessExitCode } from '../../test/processExitCode.js'
 
 import {
@@ -222,27 +223,94 @@ async function withMockedFetch<T>(
 
 async function withTempDir<T>(fn: (tempDir: string) => Promise<T>): Promise<T> {
   const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-skill-install-test-'))
+  const tmpKeys = ['TMPDIR', 'TMP', 'TEMP'] as const
+  const restoreEnv = snapshotEnv([
+    ...tmpKeys, 'OPENCLAUDE_SKILLS_REVOCATIONS_URL',
+  ])
+  const nativeTmpEnv = tmpKeys.map(key => [key, Bun.env[key]] as const)
+  // Both the installer and the leak assertions must use this fixture's own
+  // directory, so other runs cannot change the staged-root snapshots.
+  // Bun's tmpdir reads its native environment even when another suite has
+  // replaced process.env, so update and restore both environment objects.
+  for (const key of tmpKeys) {
+    process.env[key] = tempDir
+    Bun.env[key] = tempDir
+  }
   // The revocation override is process-global input that the fixtures below
   // resolve against, and production gives it precedence over the sibling
   // revocations.json. Own it here: clear any value inherited from the host
   // process so each fixture reads its own list, and hand it back afterwards.
-  const inheritedRevocationsUrl = process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL
   delete process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL
   const restoreProcess = isolateProcessExitCode(0)
   try {
     return await fn(tempDir)
   } finally {
     try {
-      if (inheritedRevocationsUrl === undefined) {
-        delete process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL
-      } else {
-        process.env.OPENCLAUDE_SKILLS_REVOCATIONS_URL = inheritedRevocationsUrl
+      restoreEnv()
+      for (const [key, value] of nativeTmpEnv) {
+        if (value === undefined) delete Bun.env[key]
+        else Bun.env[key] = value
       }
       rmSync(tempDir, { recursive: true, force: true })
     } finally {
       restoreProcess()
     }
   }
+}
+
+test.serial('restores fixture environment and removes its temp root when a callback throws', async () => {
+  const keys = ['TMPDIR', 'TMP', 'TEMP', 'OPENCLAUDE_SKILLS_REVOCATIONS_URL']
+  const inherited = keys.map(key => process.env[key])
+  const inheritedNativeTmp = keys.slice(0, 3).map(key => Bun.env[key])
+  const failure = new Error('fixture callback failed')
+  let fixtureRoot: string | undefined
+  await assert.rejects(withTempDir(async tempDir => {
+    fixtureRoot = tempDir
+    assert.equal(tmpdir(), tempDir)
+    throw failure
+  }), error => error === failure)
+
+  assert.deepEqual(keys.map(key => process.env[key]), inherited)
+  assert.deepEqual(keys.slice(0, 3).map(key => Bun.env[key]), inheritedNativeTmp)
+  assert.ok(fixtureRoot)
+  assert.equal(existsSync(fixtureRoot), false)
+})
+
+for (const change of ['appears', 'disappears'] as const) {
+  test.serial(`ignores a foreign staged temp root that ${change} during install`, async () => {
+    const sharedTmpdir = tmpdir()
+    let foreignRoot: string | undefined
+    try {
+      if (change === 'disappears') {
+        foreignRoot = mkdtempSync(join(sharedTmpdir, 'openclaude-skill-install-test-'))
+      }
+      await withTempDir(async tempDir => {
+        const cwd = join(tempDir, 'project')
+        const source = writeSkillDir(join(tempDir, 'source'))
+        mkdirSync(cwd, { recursive: true })
+
+        const stagedBefore = stagedInstallTempDirs()
+        // Model another run creating a fixture, or finishing its cleanup,
+        // between this install's snapshots without relying on timing.
+        if (change === 'appears') {
+          foreignRoot = mkdtempSync(join(sharedTmpdir, 'openclaude-skill-install-test-'))
+        } else {
+          assert.ok(foreignRoot)
+          rmSync(foreignRoot, { recursive: true, force: true })
+        }
+        await skillsInstallHandler(join(source, 'SKILL.md'), { projectDir: cwd })
+
+        assert.equal(process.exitCode, 0)
+        assert.equal(
+          readFileSync(join(cwd, '.openclaude', 'skills', 'sample-skill', 'SKILL.md'), 'utf8'),
+          VALID_SKILL,
+        )
+        assertNoNewStagedInstallDirs(stagedBefore)
+      })
+    } finally {
+      if (foreignRoot) rmSync(foreignRoot, { recursive: true, force: true })
+    }
+  })
 }
 
 test('formats skills list as an aligned human table', () => {
@@ -1218,7 +1286,7 @@ test.serial('rejects direct HTTP URL installs without a sha256 pin', async () =>
   })
 })
 
-test.serial('cleans staged temp roots when markdown staging fails', async () => {
+test.serial('rejects oversized skill names before staging', async () => {
   await withTempDir(async tempDir => {
     const cwd = join(tempDir, 'project')
     const source = join(tempDir, 'source', 'SKILL.md')
@@ -1237,6 +1305,42 @@ test.serial('cleans staged temp roots when markdown staging fails', async () => 
     assert.equal(process.exitCode, 1)
     assertNoNewStagedInstallDirs(stagedBefore)
   })
+})
+
+test.serial('cleans staged temp roots when markdown staging fails', async () => {
+  await acquireSharedMutationLock('skillsInstallHandler staging failure')
+  const originalFs = getFsImplementation()
+  try {
+    await withTempDir(async tempDir => {
+      const cwd = join(tempDir, 'project')
+      const source = writeSkillDir(join(tempDir, 'source'))
+      mkdirSync(cwd, { recursive: true })
+      const stagedBefore = stagedInstallTempDirs()
+      let stagingWriteAttempted = false
+      setFsImplementation({
+        ...originalFs,
+        writeFile: async () => {
+          // A valid skill must reach staging, then fail after mkdtemp. An
+          // invalid name is rejected before allocation and cannot test cleanup.
+          assert.equal(stagedInstallTempDirs().length, stagedBefore.length + 1)
+          stagingWriteAttempted = true
+          throw new Error('staging write failed')
+        },
+      })
+      try {
+        await skillsInstallHandler(join(source, 'SKILL.md'), { projectDir: cwd })
+
+        assert.ok(stagingWriteAttempted)
+        assert.equal(process.exitCode, 1)
+        assert.equal(existsSync(join(cwd, '.openclaude', 'skills')), false)
+        assertNoNewStagedInstallDirs(stagedBefore)
+      } finally {
+        setFsImplementation(originalFs)
+      }
+    })
+  } finally {
+    releaseSharedMutationLock()
+  }
 })
 
 test.serial('removes only the targeted project skill directory', async () => {
