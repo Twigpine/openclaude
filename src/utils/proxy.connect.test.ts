@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { X509Certificate } from 'node:crypto'
 import { once } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http'
@@ -13,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import { snapshotEnv } from '../test/envSnapshot.js'
+import { createTestTlsFixture } from '../test/tlsFixture.js'
 import { clearCACertsCache } from './caCerts.js'
 import { clearMTLSCache, getMTLSAgent, getWebSocketTLSOptions } from './mtls.js'
 
@@ -46,23 +48,19 @@ const { createAxiosInstance, getWebSocketProxyAgent } = await import(
   `data:text/javascript;base64,${Buffer.from(await proxyBuild.outputs[0].text()).toString('base64')}`
 ) as typeof import('./proxy.js')
 
-// Self-signed test certificate and key, valid only for the loopback target.
-const cert = `-----BEGIN CERTIFICATE-----
-MIIBmzCCAUGgAwIBAgIUAtOYg4xV7C9catkY/bwZc7XywMgwCgYIKoZIzj0EAwIw
-FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAyNDA4NTUxNloYDzIxMjYwOTMw
-MDg1NTE2WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
-PQMBBwNCAAS5HiqEES/b1Oe+NOKT+Cg3Gh89Rk0O7bSu0aDJpwdMzOxgOT2jTBmK
-2H5TUBnDWHjLktPtbmQQ4nMAb1kD4oKWo28wbTAdBgNVHQ4EFgQUu+xqnGfB/gu8
-DbNNHlVonV69Y64wHwYDVR0jBBgwFoAUu+xqnGfB/gu8DbNNHlVonV69Y64wDwYD
-VR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCgYIKoZI
-zj0EAwIDSAAwRQIgPy5jbT1ECH7LFy5r5JrV7xfsOkhwtbuwqVeidDBynFACIQCp
-sTyTz0llkGsTStOnpDBTzTUQzcDT8z6ZgqqxbY29nw==
------END CERTIFICATE-----`
-const key = `-----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXc/iw7bBMrZkWHsr
-tDvMDJ6qPLsspu6IH8lHZ3ccGvihRANCAAS5HiqEES/b1Oe+NOKT+Cg3Gh89Rk0O
-7bSu0aDJpwdMzOxgOT2jTBmK2H5TUBnDWHjLktPtbmQQ4nMAb1kD4oKW
------END PRIVATE KEY-----`
+const { key, cert, publicKey } = createTestTlsFixture()
+
+test('runtime TLS fixture parses, verifies and covers the loopback target', () => {
+  const certificate = new X509Certificate(cert)
+  expect(certificate.verify(publicKey)).toBe(true)
+  expect(certificate.ca).toBe(true)
+  expect(certificate.subject).toBe('CN=localhost')
+  expect(certificate.subjectAltName).toBe('DNS:localhost, IP Address:127.0.0.1')
+  expect(certificate.checkHost('localhost')).toBe('localhost')
+  expect(certificate.checkIP('127.0.0.1')).toBe('127.0.0.1')
+  expect(Date.parse(certificate.validFrom)).toBeLessThan(Date.now())
+  expect(Date.parse(certificate.validTo)).toBeGreaterThan(Date.now())
+})
 
 describe('HTTPS_PROXY CONNECT transport', () => {
   let restoreEnv: () => void
