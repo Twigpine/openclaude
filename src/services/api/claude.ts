@@ -3510,6 +3510,7 @@ export function updateUsage(
     output_tokens: partUsage.output_tokens ?? usage.output_tokens,
     output_tokens_details:
       partUsage.output_tokens_details ?? usage.output_tokens_details,
+    fallback_credit: partUsage.fallback_credit ?? usage.fallback_credit,
     server_tool_use: {
       web_search_requests:
         partUsage.server_tool_use?.web_search_requests ??
@@ -3582,6 +3583,7 @@ export function accumulateUsage(
         messageUsage.server_tool_use.web_fetch_requests,
     },
     service_tier: messageUsage.service_tier, // Use the most recent service tier
+    fallback_credit: messageUsage.fallback_credit, // Use the most recent outcome
     cache_creation: {
       ephemeral_1h_input_tokens:
         totalUsage.cache_creation.ephemeral_1h_input_tokens +

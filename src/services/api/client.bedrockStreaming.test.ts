@@ -11,6 +11,8 @@ const envKeys = [
   'CLAUDE_CODE_USE_GITHUB', 'CLAUDE_CODE_USE_MISTRAL',
   'AWS_BEARER_TOKEN_BEDROCK', 'ANTHROPIC_BASE_URL',
   'ANTHROPIC_BEDROCK_BASE_URL', 'AWS_REGION',
+  'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+  'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION', 'ANTHROPIC_CUSTOM_HEADERS',
 ] as const
 let restoreEnv: () => void
 let originalMacro: PropertyDescriptor | undefined
@@ -62,29 +64,57 @@ function bedrockFrame(event: object): Buffer {
   return frame
 }
 
-test('the real Bedrock client decodes AWS streaming frames with the installed Anthropic SDK', async () => {
-  const events = [
-    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hello' } },
-    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 7, output_tokens_details: { thinking_tokens: 5 } } },
-    { type: 'message_stop' },
-  ]
-  const fetch = mock(async () => new Response(Buffer.concat(events.map(bedrockFrame)), {
-    headers: { 'content-type': 'application/vnd.amazon.eventstream' },
-  }))
-  const { getAnthropicClient } = await import(
-    `./client.js?bedrock-stream=${Date.now()}-${Math.random()}`
-  ) as typeof import('./client.js')
-  const client = await getAnthropicClient({
-    maxRetries: 0,
-    model: 'anthropic.claude-sonnet-4-6',
-    fetchOverride: asMockFetch(fetch),
+for (const auth of ['skip', 'bearer', 'sigv4'] as const) {
+  test(`the real Bedrock client decodes AWS streaming frames with ${auth} auth`, async () => {
+    if (auth === 'bearer') process.env.AWS_BEARER_TOKEN_BEDROCK = 'bedrock-test-token'
+    if (auth === 'sigv4') {
+      delete process.env.CLAUDE_CODE_SKIP_BEDROCK_AUTH
+      process.env.AWS_ACCESS_KEY_ID = 'test-access-key'
+      process.env.AWS_SECRET_ACCESS_KEY = 'test-secret-key'
+      process.env.AWS_SESSION_TOKEN = 'test-session-token'
+    }
+    const events = [
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hello' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 7, output_tokens_details: { thinking_tokens: 5 } } },
+      { type: 'message_stop' },
+    ]
+    let requestUrl = ''
+    let requestHeaders = new Headers()
+    let requestBody: unknown
+    const fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestUrl = String(input)
+      requestHeaders = new Headers(init?.headers)
+      requestBody = JSON.parse(String(init?.body))
+      return new Response(Buffer.concat(events.map(bedrockFrame)), {
+        headers: { 'content-type': 'application/vnd.amazon.eventstream' },
+      })
+    })
+    const { getAnthropicClient } = await import(
+      `./client.js?bedrock-stream=${Date.now()}-${Math.random()}`
+    ) as typeof import('./client.js')
+    const client = await getAnthropicClient({
+      maxRetries: 0,
+      model: 'anthropic.claude-sonnet-4-6',
+      fetchOverride: asMockFetch(fetch),
+    })
+    expect(client.constructor.name).toBe('AnthropicBedrock')
+    const received: unknown[] = []
+    for await (const event of await client.beta.messages.create({
+      model: 'anthropic.claude-sonnet-4-6', max_tokens: 16,
+      messages: [{ role: 'user', content: 'hello' }], stream: true,
+    })) received.push(event)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(received).toEqual(events)
+    expect(requestUrl).toBe('https://bedrock.example.test/model/anthropic.claude-sonnet-4-6/invoke-with-response-stream')
+    expect(requestBody).toMatchObject({
+      anthropic_version: 'bedrock-2023-05-31', max_tokens: 16,
+      messages: [{ role: 'user', content: 'hello' }],
+    })
+    if (auth === 'bearer') expect(requestHeaders.get('authorization')).toBe('Bearer bedrock-test-token')
+    else if (auth === 'sigv4') {
+      expect(requestHeaders.get('authorization')).toContain('AWS4-HMAC-SHA256 Credential=test-access-key/')
+      expect(requestHeaders.get('authorization')).toContain('/us-east-1/bedrock/aws4_request')
+      expect(requestHeaders.get('x-amz-security-token')).toBe('test-session-token')
+    } else expect(requestHeaders.get('authorization')).toBeNull()
   })
-  expect(client.constructor.name).toBe('AnthropicBedrock')
-  const received: unknown[] = []
-  for await (const event of await client.beta.messages.create({
-    model: 'anthropic.claude-sonnet-4-6', max_tokens: 16,
-    messages: [{ role: 'user', content: 'hello' }], stream: true,
-  })) received.push(event)
-  expect(fetch).toHaveBeenCalledTimes(1)
-  expect(received).toEqual(events)
-})
+}

@@ -141,6 +141,7 @@ function makeCompleteStreamEvents(): BetaRawMessageStreamEvent[] {
         iterations: null,
         output_tokens: 1,
         output_tokens_details: null,
+        fallback_credit: null,
         server_tool_use: null,
       },
     },

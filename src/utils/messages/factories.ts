@@ -99,6 +99,7 @@ function baseCreateAssistantMessage({
     input_tokens: 0,
     output_tokens: 0,
     output_tokens_details: null,
+    fallback_credit: null,
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
     server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
