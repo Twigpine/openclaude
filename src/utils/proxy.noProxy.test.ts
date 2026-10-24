@@ -14,6 +14,7 @@ const run = promisify(execFile)
 const { key, cert } = createTestTlsFixture()
 let directory: string
 let modulePath: string
+let proxyModulePath: string
 
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), 'proxy-no-proxy-'))
@@ -23,6 +24,7 @@ beforeAll(async () => {
     writeFile(join(directory, 'client.key'), key),
   ])
   modulePath = join(directory, 'network.mjs')
+  proxyModulePath = join(directory, 'proxy.mjs')
   const entrypoint = join(directory, 'entry.ts')
   await writeFile(entrypoint, `
     export { getProxyAgent, getNoProxy, shouldBypassProxy, configureGlobalAgents, clearProxyCache } from ${JSON.stringify(join(import.meta.dir, 'proxy.ts'))};
@@ -31,7 +33,7 @@ beforeAll(async () => {
     export { getMTLSConfig, getMTLSAgent } from ${JSON.stringify(join(import.meta.dir, 'mtls.ts'))};
   `)
   const result = await Bun.build({
-    entrypoints: [entrypoint],
+    entrypoints: [entrypoint, join(import.meta.dir, 'proxy.ts')],
     target: 'node',
     plugins: [{
       name: 'node-proxy-environment-fixture',
@@ -71,6 +73,7 @@ beforeAll(async () => {
   })
   if (!result.success) throw new AggregateError(result.logs, 'Could not build proxy environment fixture')
   await writeFile(modulePath, await result.outputs[0].text())
+  await writeFile(proxyModulePath, await result.outputs[1].text())
 })
 
 afterAll(async () => {
@@ -280,7 +283,7 @@ test.each(['TLS/proxy settings', 'unrelated session token'] as const)(
         console.log('verified');
       } finally {
         setGlobalDispatcher(previousGlobalDispatcher);
-        await Promise.all([...dispatchers].map(dispatcher => dispatcher.close()));
+        await Promise.all([...dispatchers].map(dispatcher => dispatcher.destroy()));
         for (const agent of tlsAgents) agent.destroy();
       }
     `, modulePath, JSON.stringify({ mode, directory })], { env, timeout: 6000 })
@@ -460,3 +463,127 @@ for (const mode of [
     }
   }, 10000)
 }
+
+test('empty configuration does not load or install a global dispatcher', async () => {
+  const env = { ...process.env }
+  for (const name of [
+    'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy',
+    'NODE_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'CLAUDE_CODE_CLIENT_CERT',
+    'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
+  ]) delete env[name]
+  const { stdout } = await run('node', ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import Module from 'node:module';
+    import { pathToFileURL } from 'node:url';
+    const load = Module._load;
+    Module._load = function(specifier, ...args) {
+      assert.ok(!specifier.includes('undici'), 'empty configuration must stay lazy');
+      return load.call(this, specifier, ...args);
+    };
+    const symbols = ['undici.globalDispatcher.1', 'undici.globalDispatcher.2'].map(Symbol.for);
+    try {
+      const network = await import(pathToFileURL(process.argv[1]));
+      // Importing HTTP clients may initialize Node's built-in fetch dispatcher.
+      const before = symbols.map(symbol => globalThis[symbol]);
+      network.configureGlobalAgents();
+      network.configureGlobalAgents();
+      assert.deepEqual(symbols.map(symbol => globalThis[symbol]), before);
+      // The full fixture imports unrelated services which can eagerly load
+      // dispatchers. Only the environment-update operation must stay lazy.
+      Module._load = load;
+      const structured = await import(pathToFileURL(process.argv[2]));
+      const structuredBefore = symbols.map(symbol => globalThis[symbol]);
+      Module._load = function(specifier, ...args) {
+        assert.ok(!specifier.includes('undici'), 'empty update must stay lazy');
+        return load.call(this, specifier, ...args);
+      };
+      const io = new structured.StructuredIO((async function* () {
+        yield JSON.stringify({ type: 'update_environment_variables', variables: { HTTPS_PROXY: '' } }) + '\\n';
+      })());
+      for await (const message of io.structuredInput) assert.fail(message.type);
+      assert.deepEqual(symbols.map(symbol => globalThis[symbol]), structuredBefore);
+      console.log('verified');
+    } finally { Module._load = load; }
+  `, proxyModulePath, modulePath], { env, timeout: 6000 })
+  expect(stdout.trim()).toBe('verified')
+}, 10000)
+
+test.each(['shared TLS', 'proxy replacement', 'external replacement'] as const)(
+  'global dispatcher ownership: %s', async mode => {
+    const env = { ...process.env }
+    for (const name of [
+      'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy',
+      'NODE_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'CLAUDE_CODE_CLIENT_CERT',
+      'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
+    ]) delete env[name]
+    const { stdout } = await run('node', ['--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { pathToFileURL } from 'node:url';
+      const undici = (await import(pathToFileURL(${JSON.stringify(Bun.resolveSync('undici/index.js', import.meta.dir))}))).default;
+      const network = await import(pathToFileURL(process.argv[1]));
+      const { mode, directory } = JSON.parse(process.argv[2]);
+      const original = undici.getGlobalDispatcher();
+      const setGlobalDispatcher = undici.setGlobalDispatcher;
+      const dispatchers = new Set();
+      undici.setGlobalDispatcher = dispatcher => {
+        dispatchers.add(dispatcher);
+        setGlobalDispatcher(dispatcher);
+      };
+      const countCloses = dispatcher => {
+        const close = dispatcher.close;
+        let count = 0;
+        dispatcher.close = function(...args) { count++; return close.apply(this, args); };
+        return () => count;
+      };
+      const defaultCloses = countCloses(original);
+      try {
+        network.configureGlobalAgents();
+        assert.equal(undici.getGlobalDispatcher(), original);
+        if (mode === 'shared TLS') {
+          process.env.NODE_EXTRA_CA_CERTS = directory + '/ca.pem';
+          network.configureGlobalAgents();
+          const shared = undici.getGlobalDispatcher();
+          const sharedCloses = countCloses(shared);
+          network.configureGlobalAgents();
+          process.env.HTTPS_PROXY = 'http://127.0.0.1:1';
+          network.configureGlobalAgents();
+          delete process.env.HTTPS_PROXY;
+          network.clearProxyCache();
+          network.configureGlobalAgents();
+          assert.equal(sharedCloses(), 0, 'retained TLS-helper dispatchers must stay open');
+        } else {
+          process.env.HTTPS_PROXY = 'http://127.0.0.1:1';
+          network.configureGlobalAgents();
+          const first = undici.getGlobalDispatcher();
+          const firstCloses = countCloses(first);
+          if (mode === 'external replacement') {
+            const external = new undici.Agent();
+            undici.setGlobalDispatcher(external);
+            delete process.env.HTTPS_PROXY;
+            network.configureGlobalAgents();
+            assert.equal(undici.getGlobalDispatcher(), external);
+            assert.equal(firstCloses(), 0, 'a cached proxy must stay open');
+          } else {
+            process.env.HTTPS_PROXY = 'http://127.0.0.1:2';
+            network.configureGlobalAgents();
+            const second = undici.getGlobalDispatcher();
+            assert.equal(firstCloses(), 1, 'replaced owned proxy must be closed');
+            assert.notEqual(second, first);
+            assert.equal(network.getProxyAgent(process.env.HTTPS_PROXY), second);
+            const recreated = network.getProxyAgent('http://127.0.0.1:1');
+            dispatchers.add(recreated);
+            assert.notEqual(recreated, first, 'retired proxy must leave the cache');
+          }
+        }
+        assert.equal(defaultCloses(), 0, 'the default dispatcher must stay open');
+        console.log('verified');
+      } finally {
+        undici.setGlobalDispatcher = setGlobalDispatcher;
+        setGlobalDispatcher(original);
+        await Promise.all([...dispatchers].map(dispatcher => dispatcher.destroy()));
+        network.getMTLSAgent()?.destroy();
+      }
+    `, modulePath, JSON.stringify({ mode, directory })], { env, timeout: 6000 })
+    expect(stdout.trim()).toBe('verified')
+  }, 10000,
+)

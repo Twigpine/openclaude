@@ -1,7 +1,7 @@
 // @aws-sdk/credential-provider-node and @smithy/node-http-handler are imported
 // dynamically in getAWSClientProxyConfig() to defer ~929KB of AWS SDK.
-// undici is lazy-required inside getProxyAgent/configureGlobalAgents so importing
-// the shared helpers does not load its networking implementation.
+// undici is lazy-required inside getProxyAgent/configureGlobalAgents to defer
+// ~1.5MB when no HTTPS_PROXY/mTLS env vars are set (the common case).
 import axios, { type AxiosInstance } from 'axios'
 import type { LookupOptions } from 'dns'
 import type { Agent } from 'http'
@@ -258,6 +258,10 @@ export function createAxiosInstance(
   return instance
 }
 
+function getProxyAgentCacheKey(uri: string): string {
+  return JSON.stringify([uri, getNoProxy()])
+}
+
 /**
  * Get or create a proxy agent cached by URI and effective NO_PROXY value.
  * Include the bypass list because wildcard normalization pins it on the agent.
@@ -306,7 +310,7 @@ export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
   return typeof Bun === 'undefined'
     ? new undiciMod.Dispatcher1Wrapper(agent)
     : agent
-}, (uri: string) => JSON.stringify([uri, getNoProxy()]))
+}, getProxyAgentCacheKey)
 
 /**
  * Get an HTTP agent configured for WebSocket proxy support
@@ -395,6 +399,9 @@ export function getProxyFetchOptions(opts?: { forAnthropicAPI?: boolean }): {
  * This ensures all HTTP requests use the proxy and/or mTLS if configured
  */
 let proxyInterceptorId: number | undefined
+let installedDispatcher: undici.Dispatcher | undefined
+let installedProxyCacheKey: string | undefined
+let ownsInstalledDispatcher = false
 
 export function configureGlobalAgents(): void {
   const proxyUrl = getProxyUrl()
@@ -438,36 +445,39 @@ export function configureGlobalAgents(): void {
       }
       return config
     })
-
-    // Set global dispatcher that now respects NO_PROXY via EnvHttpProxyAgent
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    ;(require('undici') as typeof undici).setGlobalDispatcher(
-      getProxyAgent(proxyUrl),
-    )
   } else {
     axios.defaults.httpsAgent = mtlsAgent
+  }
 
-    // Clearing the last proxy must also restore direct native fetch routing.
-    // Reuse the TLS dispatcher, or the native TLS options returned under Bun.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const undiciMod = require('undici') as typeof undici
-    const tlsOptions = getTLSFetchOptions()
-    const dispatcher = tlsOptions.dispatcher ?? new undiciMod.Agent({
-      connect: tlsOptions.tls,
-    })
-    const previous = undiciMod.getGlobalDispatcher()
-    undiciMod.setGlobalDispatcher(dispatcher)
-    if (previous !== dispatcher) {
-      // A later proxy configuration must not reuse the retired dispatcher.
-      clearProxyCache()
-      try {
-        // Graceful close lets in-flight requests finish without blocking updates.
-        void previous.close().catch(() => {})
-      } catch {
-        // Dispatcher cleanup is best effort.
-      }
+  // Keep the ordinary direct path lazy. Without TLS, only clear our own proxy
+  // while it is still global; another caller may have installed a replacement.
+  if (!proxyUrl && !mtlsAgent && installedProxyCacheKey === undefined) return
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const undiciMod = require('undici') as typeof undici
+  if (!proxyUrl && !mtlsAgent && undiciMod.getGlobalDispatcher() !== installedDispatcher) return
+
+  const tlsOptions = proxyUrl ? undefined : getTLSFetchOptions()
+  const dispatcher = proxyUrl ? getProxyAgent(proxyUrl) :
+    tlsOptions?.dispatcher ?? new undiciMod.Agent({ connect: tlsOptions?.tls })
+  undiciMod.setGlobalDispatcher(dispatcher)
+
+  if (installedDispatcher && installedDispatcher !== dispatcher && ownsInstalledDispatcher) {
+    // Evict only the retired proxy, leaving the active dispatcher cached.
+    if (installedProxyCacheKey !== undefined &&
+        getProxyAgent.cache.get(installedProxyCacheKey) === installedDispatcher) {
+      getProxyAgent.cache.delete(installedProxyCacheKey)
+    }
+    try {
+      // Graceful close lets in-flight requests finish without blocking updates.
+      void installedDispatcher.close().catch(() => {})
+    } catch {
+      // Dispatcher cleanup is best effort.
     }
   }
+  installedDispatcher = dispatcher
+  installedProxyCacheKey = proxyUrl ? getProxyAgentCacheKey(proxyUrl) : undefined
+  // TLS-helper dispatchers can be shared with per-request callers.
+  ownsInstalledDispatcher = !!proxyUrl || !tlsOptions?.dispatcher
 }
 
 /**
