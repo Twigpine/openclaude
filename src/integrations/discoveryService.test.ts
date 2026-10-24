@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, jest, mock, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -97,6 +97,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    jest.useRealTimers()
     mock.restore()
     globalThis.fetch = originalFetch
     rmSync(tempDir, { recursive: true, force: true })
@@ -259,6 +260,7 @@ describe('discoverModelsForRoute', () => {
   test('allows each Merge discovery page its own timeout', async () => {
     const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
     process.env.MERGE_GATEWAY_API_KEY = 'merge-key'
+    const pages = Array.from({ length: 3 }, () => Promise.withResolvers<void>())
     let calls = 0
     const fetchMock = mock(async (_input: string | URL | Request, init?: RequestInit) => {
       const page = ++calls
@@ -275,6 +277,7 @@ describe('discoverModelsForRoute', () => {
         }, 2000)
         signal?.addEventListener('abort', onAbort, { once: true })
         if (signal?.aborted) onAbort()
+        pages[page - 1]!.resolve()
       })
       return new Response(JSON.stringify({
         data: [{ model: `provider/page-${page}` }],
@@ -283,16 +286,34 @@ describe('discoverModelsForRoute', () => {
     })
     setMockFetch(fetchMock as unknown as typeof globalThis.fetch)
 
-    const result = await discoverModelsForRoute('merge-gateway', { forceRefresh: true })
-    expect(result).toMatchObject({ source: 'network', discoveredModelCount: 3, error: null })
-    expect(result?.models.map(model => model.apiName).filter(name => name.startsWith('provider/page-'))).toEqual([
-      'provider/page-1', 'provider/page-2', 'provider/page-3',
-    ])
-    const cached = await discoverModelsForRoute('merge-gateway')
-    expect(cached?.source).toBe('cache')
-    expect(cached?.models).toEqual(result?.models)
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-  }, 15_000)
+    jest.useFakeTimers()
+    try {
+      const discovery = discoverModelsForRoute('merge-gateway', { forceRefresh: true })
+      const completed = discovery.then(() => 'completed' as const)
+      // Each page completes within its own five-second deadline, but the
+      // complete request exceeds one shared deadline. Wait for the next fetch
+      // to install both timers before advancing the clock again.
+      for (const page of pages) {
+        const next = await Promise.race([
+          page.promise.then(() => 'page' as const),
+          completed,
+        ])
+        expect(next).toBe('page')
+        jest.advanceTimersByTime(2000)
+      }
+      const result = await discovery
+      expect(result).toMatchObject({ source: 'network', discoveredModelCount: 3, error: null })
+      expect(result?.models.map(model => model.apiName).filter(name => name.startsWith('provider/page-'))).toEqual([
+        'provider/page-1', 'provider/page-2', 'provider/page-3',
+      ])
+      const cached = await discoverModelsForRoute('merge-gateway')
+      expect(cached?.source).toBe('cache')
+      expect(cached?.models).toEqual(result?.models)
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
 
   test.each(['http-error', 'repeated-cursor', 'missing-cursor', 'page-bound'])('incomplete Merge discovery preserves fallback: %s', async failure => {
     const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
