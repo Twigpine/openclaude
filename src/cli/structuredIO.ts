@@ -52,6 +52,7 @@ import {
   persistPermissionUpdates,
 } from '../utils/permissions/PermissionUpdate.js'
 import { applyPermissionUpdatesToLiveContext } from '../utils/permissions/permissionSetup.js'
+import { clearProxyCache, configureGlobalAgents, getNoProxy } from '../utils/proxy.js'
 import {
   notifySessionStateChanged,
   type RequiresActionDetails,
@@ -357,11 +358,18 @@ export class StructuredIO {
         // Used by bridge session runner for auth token refresh
         // (CLAUDE_CODE_SESSION_ACCESS_TOKEN) which must be readable
         // by the REPL process itself, not just child Bash commands.
+        const previousNoProxy = getNoProxy()
         const keys = Object.keys(message.variables)
         for (const [key, value] of Object.entries(message.variables)) {
           if (typeof value === 'string') {
             process.env[key] = value
           }
+        }
+        // Wildcard normalization pins undici's noProxy option. Rebuild cached
+        // and global agents when the effective bypass list changes.
+        if (getNoProxy() !== previousNoProxy) {
+          clearProxyCache()
+          configureGlobalAgents()
         }
         logForDebugging(
           `[structuredIO] applied update_environment_variables: ${keys.join(', ')}`,

@@ -73,7 +73,7 @@ export function getProxyUrl(env: EnvLike = process.env): string | undefined {
  * @param env Environment variables to check (defaults to process.env for production use)
  */
 export function getNoProxy(env: EnvLike = process.env): string | undefined {
-  return env.no_proxy || env.NO_PROXY
+  return env.no_proxy ?? env.NO_PROXY
 }
 
 /**
@@ -244,8 +244,8 @@ export function createAxiosInstance(
 }
 
 /**
- * Get or create a memoized proxy agent for the given URI
- * Now respects NO_PROXY environment variable
+ * Get or create a proxy agent cached by URI and effective NO_PROXY value.
+ * Include the bypass list because wildcard normalization pins it on the agent.
  */
 export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -254,7 +254,8 @@ export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
   const caCerts = getCACertificates()
 
   // Use EnvHttpProxyAgent to respect NO_PROXY
-  // This agent automatically checks NO_PROXY for each request
+  const noProxy = getNoProxy()
+  const normalizedNoProxy = noProxy?.replace(/(^|[,\s])\*\./g, '$1.')
   const proxyOptions: undici.EnvHttpProxyAgent.Options = {
     // Override both HTTP and HTTPS proxy with the provided URI
     httpProxy: uri,
@@ -263,10 +264,9 @@ export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
     proxyTunnel: true,
     // v8 excludes the apex for *.domain entries. Preserve our existing
     // apex-and-subdomain contract, shared with the Axios/WebSocket helpers.
-    noProxy: (process.env.NO_PROXY || process.env.no_proxy)?.replace(
-      /(^|[,\s])\*\./g,
-      '$1.',
-    ),
+    // Leave ordinary values unset so undici rereads the environment. Explicit
+    // normalized values are refreshed via the cache key and env reconfiguration.
+    ...(normalizedNoProxy !== noProxy && { noProxy: normalizedNoProxy }),
   }
 
   // Set both connect and requestTls so TLS options apply to both paths:
@@ -291,7 +291,7 @@ export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
   return typeof Bun === 'undefined'
     ? new undiciMod.Dispatcher1Wrapper(agent)
     : agent
-})
+}, (uri: string) => JSON.stringify([uri, getNoProxy()]))
 
 /**
  * Get an HTTP agent configured for WebSocket proxy support
