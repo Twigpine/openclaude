@@ -16,15 +16,34 @@ import { snapshotEnv } from '../test/envSnapshot.js'
 import { clearCACertsCache } from './caCerts.js'
 import { clearMTLSCache, getMTLSAgent, getWebSocketTLSOptions } from './mtls.js'
 
-// Other files can leave partial Axios mocks registered in Bun's shared process.
-// Resolve the CommonJS entry because the ESM entry can still return a prior mock.
-// Keep real Axios local so those files' module registrations remain untouched.
+// Cache-busting proxy.ts alone still imports any leaked global Axios mock.
+// Build a fresh copy of the production module with only its Axios import
+// redirected to the real CommonJS entry. Keep the other imports external so
+// CA/mTLS caches stay shared, without changing any global mock registration.
 const nonce = `${Date.now()}-${Math.random()}`
-const { default: realAxios } = await import(
-  `${require.resolve('axios')}?real=${nonce}`
-) as typeof import('axios')
-const { getWebSocketProxyAgent } = await import(
-  `./proxy.ts?connect=${nonce}`
+const proxyBuild = await Bun.build({
+  entrypoints: [join(import.meta.dir, 'proxy.ts')],
+  target: 'bun',
+  plugins: [{
+    name: 'connect-test-real-axios',
+    setup(build) {
+      build.onResolve({ filter: /.*/ }, args => {
+        if (!args.importer) return
+        return {
+          path: args.path === 'axios'
+            ? `${require.resolve('axios')}?real=${nonce}`
+            : Bun.resolveSync(args.path, args.resolveDir),
+          external: true,
+        }
+      })
+    },
+  }],
+})
+if (!proxyBuild.success) {
+  throw new AggregateError(proxyBuild.logs, 'Could not build proxy.ts for CONNECT tests')
+}
+const { createAxiosInstance, getWebSocketProxyAgent } = await import(
+  `data:text/javascript;base64,${Buffer.from(await proxyBuild.outputs[0].text()).toString('base64')}`
 ) as typeof import('./proxy.js')
 
 // Self-signed test certificate and key, valid only for the loopback target.
@@ -125,15 +144,7 @@ describe('HTTPS_PROXY CONNECT transport', () => {
   })
 
   test('Axios tunnels HTTPS through HTTPS_PROXY and bypasses it for NO_PROXY', async () => {
-    // createAxiosInstance binds to the global Axios registration. Use real Axios
-    // locally with the production agent helper's proxy and NO_PROXY selection.
-    const client = realAxios.create({ proxy: false })
-    client.interceptors.request.use(config => {
-      const agent = getWebSocketProxyAgent(config.url!)
-      config.httpsAgent = agent
-      config.httpAgent = agent
-      return config
-    })
+    const client = createAxiosInstance()
     // Native TLS reads NODE_EXTRA_CA_CERTS only at startup. Pass the runtime
     // CA loader's result to the target request; agent options configure the proxy.
     client.defaults.transport = {
