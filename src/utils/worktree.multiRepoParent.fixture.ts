@@ -8,6 +8,7 @@ import {
   setClaudeConfigHomeDirForTesting,
 } from './envUtils.js'
 import { createAgentWorktree } from './worktree.js'
+import { findGitRoot } from './git.js'
 
 const [cfgDir, targetCwd, name] = process.argv.slice(2)
 
@@ -33,6 +34,7 @@ try {
   process.stdout.write(
     JSON.stringify({
       ok: false,
+      gitRoot: findGitRoot(targetCwd),
       error: error instanceof Error ? error.message : String(error),
     }),
   )

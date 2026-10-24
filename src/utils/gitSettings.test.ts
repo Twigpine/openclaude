@@ -20,7 +20,7 @@ beforeEach(() => {
   originalCwdState = getCwdState()
   restoreEnv = snapshotEnv(['CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS'], { clear: true })
   tempRoot = mkdtempSync(join(tmpdir(), 'gitsettings-test-'))
-  // findGitRoot walks the filesystem itself, ignoring GIT_CEILING_DIRECTORIES.
+  // Isolate filesystem lookups without changing the shared process's Git environment.
   // Hide ancestor repositories when tmpdir() happens to be inside a checkout.
   const ancestorGitPaths = new Set<string>()
   for (let ancestor = dirname(tempRoot); ; ancestor = dirname(ancestor)) {
