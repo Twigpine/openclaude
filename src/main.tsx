@@ -897,7 +897,7 @@ async function run(): Promise<CommanderCommand> {
     // If not provided but flag is present, value will be true
     // The actual filtering is handled in debug.ts by parsing process.argv
     return true;
-  }).addOption(new Option('-d2e, --debug-to-stderr', 'Enable debug mode (to stderr)').argParser(Boolean).hideHelp()).option('--debug-file <path>', 'Write debug logs to a specific file path (implicitly enables debug mode)', () => true).option('--verbose', 'Override verbose mode setting from config', () => true).option('-p, --print', 'Print response and exit (useful for pipes). Note: The workspace trust dialog is skipped when Claude is run with the -p mode. Only use this flag in directories you trust.', () => true).addOption(new Option('--heartbeat <duration>', 'Emit a headless liveness heartbeat while output is quiet (only works with --print, e.g. 30s, 2m; pre-stream startup heartbeats use stderr)').argParser(value => {
+  }).addOption(new Option('--debug-to-stderr', 'Enable debug mode (to stderr)').argParser(Boolean).hideHelp()).option('--debug-file <path>', 'Write debug logs to a specific file path (implicitly enables debug mode)', () => true).option('--verbose', 'Override verbose mode setting from config', () => true).option('-p, --print', 'Print response and exit (useful for pipes). Note: The workspace trust dialog is skipped when Claude is run with the -p mode. Only use this flag in directories you trust.', () => true).addOption(new Option('--heartbeat <duration>', 'Emit a headless liveness heartbeat while output is quiet (only works with --print, e.g. 30s, 2m; pre-stream startup heartbeats use stderr)').argParser(value => {
     try {
       return parseHeadlessHeartbeatDuration(value);
     } catch (error) {

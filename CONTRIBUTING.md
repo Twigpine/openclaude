@@ -228,6 +228,21 @@ only when a separate capability level is intentional, as for Apple Terminal
 charts. Tests that change `chalk.level` must restore it, and environment-driven
 color detection tests must import in a fresh process.
 
+### CLI argument parsing
+
+Keep `commander` and `@commander-js/extra-typings` pinned together at exactly
+`15.0.0`; the typings peer requires `commander ~15.0.0`. Regenerate `bun.lock`
+with `bun install` after changing both pins. Use their public ESM exports.
+
+Declare positional arguments explicitly, including variadic arguments for commands
+that forward subprocess arguments. Excess arguments are rejected by default.
+Short flags must be a single character; use `--debug-to-stderr` in place of the
+unsupported `-d2e` spelling. Dual long flags, such as `--yolo` and
+`--dangerously-skip-permissions`, are supported. When registering both positive
+and negative boolean flags, set an explicit default only if the command needs one;
+otherwise the omitted option remains undefined. Keep help and parse-error checks
+on the built CLI so command registration is exercised under Node.
+
 ### Dependency pins and overrides
 
 Terminal syntax highlighting uses the exact `highlight.js` pin directly, with
