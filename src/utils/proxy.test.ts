@@ -6,7 +6,7 @@ import { createServer as createHttpsServer } from 'node:https'
 import { connect, type AddressInfo, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { getGlobalDispatcher, setGlobalDispatcher } from 'undici'
+import { Agent, getGlobalDispatcher, setGlobalDispatcher } from 'undici'
 import { snapshotEnv } from '../test/envSnapshot.js'
 import { clearCACertsCache } from './caCerts.js'
 import { clearMTLSCache } from './mtls.js'
@@ -57,6 +57,8 @@ describe('runtime CA certificates through CONNECT', () => {
       httpsAgent: axios.defaults.httpsAgent,
     }
     const dispatcher = getGlobalDispatcher()
+    // Reconfiguration retires the previous dispatcher; preserve the suite's one.
+    setGlobalDispatcher(new Agent())
     const directory = mkdtempSync(join(tmpdir(), 'proxy-ca-'))
     const sockets = new Set<Socket>()
     const proxy = createHttpServer()
@@ -132,9 +134,11 @@ describe('runtime CA certificates through CONNECT', () => {
       clearMTLSCache()
       clearProxyCache()
       configureGlobalAgents() // Eject the test's global axios interceptor.
+      const directDispatcher = getGlobalDispatcher()
       Object.assign(axios.defaults, defaults)
       setGlobalDispatcher(dispatcher)
       if (testDispatcher !== dispatcher) await testDispatcher.close?.()
+      await directDispatcher.close?.()
       restoreEnv()
       clearCACertsCache()
       clearMTLSCache()

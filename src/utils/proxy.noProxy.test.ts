@@ -80,6 +80,8 @@ afterAll(async () => {
 test.each([
   'combined certificate and no_proxy',
   'certificate-only',
+  'proxy-clear-ca',
+  'proxy-clear-mtls',
 ] as const)('structured I/O refreshes certificate caches with a %s update', async mode => {
   const caPath = join(directory, 'ca.pem')
   const certPath = join(directory, 'client.pem')
@@ -89,7 +91,7 @@ test.each([
   let requests = 0
   let authorizedRequests = 0
   const target = createHttpsServer({
-    key, cert, ca: cert, requestCert: true, rejectUnauthorized: true,
+    key, cert, ca: cert, requestCert: mode !== 'proxy-clear-ca', rejectUnauthorized: true,
   }, (request, response) => {
     requests++
     if ('authorized' in request.socket && request.socket.authorized) authorizedRequests++
@@ -150,6 +152,7 @@ test.each([
       const previousGlobalDispatcher = getGlobalDispatcher();
       network.configureGlobalAgents();
       const agents = new Set([cached]);
+      const tlsAgents = new Set();
       const update = async variables => {
         const io = new network.StructuredIO((async function* () {
           yield JSON.stringify({ type: 'update_environment_variables', variables }) + '\\n';
@@ -161,38 +164,53 @@ test.each([
       try {
         await update({
           NODE_EXTRA_CA_CERTS: config.caPath,
-          CLAUDE_CODE_CLIENT_CERT: config.certPath,
-          CLAUDE_CODE_CLIENT_KEY: config.keyPath,
+          ...(config.mode !== 'proxy-clear-ca' && {
+            CLAUDE_CODE_CLIENT_CERT: config.certPath,
+            CLAUDE_CODE_CLIENT_KEY: config.keyPath,
+          }),
           ...(config.mode !== 'certificate-only' && { no_proxy: 'unused.invalid' }),
         });
         agents.add(getGlobalDispatcher());
-        const expectedCert = readFileSync(config.certPath, 'utf8');
-        const expectedKey = readFileSync(config.keyPath, 'utf8');
-        assert.deepEqual(network.getMTLSConfig(), { cert: expectedCert, key: expectedKey });
-        assert.ok(network.getCACertificates().includes(readFileSync(config.caPath, 'utf8')));
-        assert.equal(network.getMTLSAgent().options.cert, expectedCert);
-        assert.equal(network.getMTLSAgent().options.key, expectedKey);
-        for (const noProxy of ['unused.invalid', '*.127.0.0.1']) {
-          if (network.getNoProxy() !== noProxy) await update({ no_proxy: noProxy });
-          const dispatcher = network.getProxyAgent(config.proxy);
-          agents.add(dispatcher);
-          assert.notEqual(dispatcher, cached);
-          for (const options of [{ dispatcher }, {}]) {
-            const response = await fetch(config.url, options);
-            assert.equal(response.status, 200);
-            assert.equal(await response.text(), 'authenticated response');
+        tlsAgents.add(network.getMTLSAgent());
+        if (config.mode.startsWith('proxy-clear')) {
+          const proxied = await fetch(config.url);
+          assert.equal(await proxied.text(), 'authenticated response');
+          await update({ HTTPS_PROXY: '' });
+          agents.add(getGlobalDispatcher());
+          tlsAgents.add(network.getMTLSAgent());
+          const direct = await fetch(config.url);
+          assert.equal(direct.status, 200);
+          assert.equal(await direct.text(), 'authenticated response');
+        } else {
+          const expectedCert = readFileSync(config.certPath, 'utf8');
+          const expectedKey = readFileSync(config.keyPath, 'utf8');
+          assert.deepEqual(network.getMTLSConfig(), { cert: expectedCert, key: expectedKey });
+          assert.ok(network.getCACertificates().includes(readFileSync(config.caPath, 'utf8')));
+          assert.equal(network.getMTLSAgent().options.cert, expectedCert);
+          assert.equal(network.getMTLSAgent().options.key, expectedKey);
+          for (const noProxy of ['unused.invalid', '*.127.0.0.1']) {
+            if (network.getNoProxy() !== noProxy) await update({ no_proxy: noProxy });
+            const dispatcher = network.getProxyAgent(config.proxy);
+            agents.add(dispatcher);
+            assert.notEqual(dispatcher, cached);
+            for (const options of [{ dispatcher }, {}]) {
+              const response = await fetch(config.url, options);
+              assert.equal(response.status, 200);
+              assert.equal(await response.text(), 'authenticated response');
+            }
           }
         }
         console.log('verified');
       } finally {
         setGlobalDispatcher(previousGlobalDispatcher);
-        await Promise.all([...agents].map(dispatcher => dispatcher.close()));
+        await Promise.all([...agents].map(dispatcher => dispatcher.destroy()));
+        for (const agent of tlsAgents) agent.destroy();
       }
     `, modulePath, JSON.stringify(config)], { env, timeout: 6000 })
     expect(stdout.trim()).toBe('verified')
-    expect(connects).toBe(2)
-    expect(requests).toBe(4)
-    expect(authorizedRequests).toBe(4)
+    expect(connects).toBe(mode.startsWith('proxy-clear') ? 1 : 2)
+    expect(requests).toBe(mode.startsWith('proxy-clear') ? 2 : 4)
+    expect(authorizedRequests).toBe(mode === 'proxy-clear-ca' ? 0 : mode === 'proxy-clear-mtls' ? 2 : 4)
   } finally {
     for (const socket of sockets) socket.destroy()
     await Promise.all([target, proxy].map(server => new Promise<void>(resolve => {
@@ -274,6 +292,7 @@ for (const mode of [
   'lowercase-bypass', 'lowercase-proxy', 'empty-lowercase',
   'refresh-uppercase', 'refresh-lowercase', 'cache-wildcard',
   'update-uppercase', 'update-lowercase', 'clear-cache',
+  'clear-proxy', 'clear-unset',
 ] as const) {
   // The Node child has a 6s deadline; allow extra time for cleanup.
   test(`Node NO_PROXY routing: ${mode}`, async () => {
@@ -319,8 +338,10 @@ for (const mode of [
         import assert from 'node:assert/strict';
         import { pathToFileURL } from 'node:url';
         const network = await import(pathToFileURL(process.argv[1]));
+        const { getGlobalDispatcher, setGlobalDispatcher } = await import(pathToFileURL(${JSON.stringify(Bun.resolveSync('undici/index.js', import.meta.dir))}));
         const { mode, proxy, url } = JSON.parse(process.argv[2]);
-        process.env.HTTPS_PROXY = proxy;
+        const previousGlobalDispatcher = getGlobalDispatcher();
+        if (mode !== 'clear-unset') process.env.HTTPS_PROXY = proxy;
         const agents = new Set();
         const agent = () => {
           const result = network.getProxyAgent(proxy);
@@ -341,7 +362,35 @@ for (const mode of [
           }
         };
         try {
-          if (mode.startsWith('lowercase') || mode === 'empty-lowercase') {
+          if (mode === 'clear-proxy' || mode === 'clear-unset') {
+            if (mode === 'clear-proxy') {
+              network.configureGlobalAgents();
+              const installed = agent();
+              let closed = 0;
+              const close = installed.close.bind(installed);
+              installed.close = () => { closed++; return close(); };
+              network.configureGlobalAgents();
+              assert.equal(closed, 0, 'the active cached dispatcher must stay open');
+              await request('proxy');
+              await update({ HTTPS_PROXY: '' });
+              agents.add(getGlobalDispatcher());
+              await request('direct');
+              assert.equal(closed, 1, 'the removed proxy dispatcher must be closed');
+              // Reusing the same proxy must not retrieve a closed cached dispatcher.
+              process.env.HTTPS_PROXY = proxy;
+              network.configureGlobalAgents();
+              agents.add(getGlobalDispatcher());
+              await request('proxy');
+              await update({ HTTPS_PROXY: '' });
+            } else {
+              await update({ HTTPS_PROXY: '' });
+            }
+            agents.add(getGlobalDispatcher());
+            await request('direct');
+            await update({ HTTPS_PROXY: '' });
+            agents.add(getGlobalDispatcher());
+            await request('direct');
+          } else if (mode.startsWith('lowercase') || mode === 'empty-lowercase') {
             process.env.NO_PROXY = mode === 'lowercase-bypass' ? 'unused.invalid' : '127.0.0.1';
             process.env.no_proxy = mode === 'lowercase-bypass' ? '127.0.0.1' :
               mode === 'empty-lowercase' ? '' : 'unused.invalid';
@@ -391,13 +440,14 @@ for (const mode of [
           }
           console.log('verified');
         } finally {
-          for (const dispatcher of agents) await dispatcher.close();
+          setGlobalDispatcher(previousGlobalDispatcher);
+          for (const dispatcher of agents) await dispatcher.destroy();
         }
       `, modulePath, JSON.stringify(config)], { env, timeout: 6000 })
       expect(stdout.trim()).toBe('verified')
-      const expectedConnects = mode === 'lowercase-bypass' ? 0 :
+      const expectedConnects = mode === 'clear-proxy' ? 2 : mode === 'clear-unset' ? 0 : mode === 'lowercase-bypass' ? 0 :
         mode.startsWith('refresh') ? 3 : mode.startsWith('update') || mode === 'clear-cache' ? 2 : 1
-      const expectedDirect = mode === 'lowercase-bypass' ? 1 :
+      const expectedDirect = mode === 'clear-proxy' ? 3 : mode === 'clear-unset' ? 2 : mode === 'lowercase-bypass' ? 1 :
         mode.startsWith('lowercase') || mode === 'empty-lowercase' ? 0 :
           mode.startsWith('update') || mode === 'clear-cache' ? 4 : mode === 'cache-wildcard' ? 3 : 2
       expect(connects).toBe(expectedConnects)

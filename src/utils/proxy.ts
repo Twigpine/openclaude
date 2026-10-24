@@ -1,7 +1,7 @@
 // @aws-sdk/credential-provider-node and @smithy/node-http-handler are imported
 // dynamically in getAWSClientProxyConfig() to defer ~929KB of AWS SDK.
-// undici is lazy-required inside getProxyAgent/configureGlobalAgents to defer
-// ~1.5MB when no HTTPS_PROXY/mTLS env vars are set (the common case).
+// undici is lazy-required inside getProxyAgent/configureGlobalAgents so importing
+// the shared helpers does not load its networking implementation.
 import axios, { type AxiosInstance } from 'axios'
 import type { LookupOptions } from 'dns'
 import type { Agent } from 'http'
@@ -444,17 +444,28 @@ export function configureGlobalAgents(): void {
     ;(require('undici') as typeof undici).setGlobalDispatcher(
       getProxyAgent(proxyUrl),
     )
-  } else if (mtlsAgent) {
-    // No proxy but mTLS is configured
+  } else {
     axios.defaults.httpsAgent = mtlsAgent
 
-    // Set undici global dispatcher with mTLS
-    const mtlsOptions = getTLSFetchOptions()
-    if (mtlsOptions.dispatcher) {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      ;(require('undici') as typeof undici).setGlobalDispatcher(
-        mtlsOptions.dispatcher,
-      )
+    // Clearing the last proxy must also restore direct native fetch routing.
+    // Reuse the TLS dispatcher, or the native TLS options returned under Bun.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const undiciMod = require('undici') as typeof undici
+    const tlsOptions = getTLSFetchOptions()
+    const dispatcher = tlsOptions.dispatcher ?? new undiciMod.Agent({
+      connect: tlsOptions.tls,
+    })
+    const previous = undiciMod.getGlobalDispatcher()
+    undiciMod.setGlobalDispatcher(dispatcher)
+    if (previous !== dispatcher) {
+      // A later proxy configuration must not reuse the retired dispatcher.
+      clearProxyCache()
+      try {
+        // Graceful close lets in-flight requests finish without blocking updates.
+        void previous.close().catch(() => {})
+      } catch {
+        // Dispatcher cleanup is best effort.
+      }
     }
   }
 }
