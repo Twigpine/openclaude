@@ -3,6 +3,9 @@ import { fileURLToPath } from 'node:url'
 
 test.each([
   ['enabled', 1, true],
+  ['default-budget', 1, true],
+  ['failsafe', 1, true],
+  ['sync-rejection', 1, true],
   ['dsn-unset', 0, false],
   ['telemetry-disabled', 0, false],
   ['nonessential-disabled', 0, false],

@@ -30,7 +30,11 @@ import {
   wrapForMultiplexer,
 } from '../ink/termio/osc.js'
 import { shutdownDatadog } from '../services/analytics/datadog.js'
-import { flushSentry, reportErrorToSentry } from './sentry.js'
+import {
+  flushSentry,
+  reportErrorToSentry,
+  SENTRY_FLUSH_TIMEOUT_MS,
+} from './sentry.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -442,8 +446,8 @@ export async function gracefulShutdown(
 
   // Failsafe: guarantee process exits even if cleanup hangs (e.g., MCP connections).
   // Runs cleanupTerminalModes first so a hung cleanup doesn't leave the terminal dirty.
-  // Budget = max(5s, hook budget + 3.5s headroom for cleanup + analytics flush).
-  // Sentry gets at most another 2s to drain before the forced exit.
+  // Budget = max(5s, hook budget + 3.5s cleanup/analytics headroom + Sentry drain).
+  // If cleanup hangs, the failsafe gives Sentry one bounded drain before exit.
   failsafeTimer = setTimeout(
     async code => {
       cleanupTerminalModes(true)
@@ -451,7 +455,7 @@ export async function gracefulShutdown(
       await flushSentry()
       forceExit(code)
     },
-    Math.max(5000, sessionEndTimeoutMs + 3500),
+    Math.max(5000, sessionEndTimeoutMs + 3500 + SENTRY_FLUSH_TIMEOUT_MS),
     exitCode,
   )
   failsafeTimer.unref()

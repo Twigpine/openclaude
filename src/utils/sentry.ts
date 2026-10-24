@@ -11,6 +11,8 @@ import { isTelemetryDisabled } from './privacyLevel.js'
 import { TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS as TelemetrySafeError } from './errors.js'
 import { sleep } from './sleep.js'
 
+export const SENTRY_FLUSH_TIMEOUT_MS = 2000
+
 let sentryInitialized = false
 let sentryModule: typeof import('@sentry/node') | null = null
 
@@ -105,8 +107,8 @@ export async function flushSentry(): Promise<void> {
   try {
     // The SDK timeout does not bound every stage of its flush pipeline.
     await Promise.race([
-      sentryModule.flush(2000),
-      sleep(2000, deadline.signal),
+      sentryModule.flush(SENTRY_FLUSH_TIMEOUT_MS),
+      sleep(SENTRY_FLUSH_TIMEOUT_MS, deadline.signal),
     ])
   } catch {
     // Reporting failures must never prevent process exit.
