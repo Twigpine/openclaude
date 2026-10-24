@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { once } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http'
@@ -15,7 +15,22 @@ import type { Duplex } from 'node:stream'
 import { snapshotEnv } from '../test/envSnapshot.js'
 import { clearCACertsCache } from './caCerts.js'
 import { clearMTLSCache, getMTLSAgent, getWebSocketTLSOptions } from './mtls.js'
-import { createAxiosInstance, getWebSocketProxyAgent } from './proxy.js'
+
+// Other files can leave partial Axios mocks registered in Bun's shared process.
+// Resolve the CommonJS entry because the ESM entry can still return a prior mock.
+// Bypass those registrations, then load fresh proxy helpers against real Axios.
+const nonce = `${Date.now()}-${Math.random()}`
+const realAxiosModule = {
+  ...await import(`${require.resolve('axios')}?real=${nonce}`),
+} as typeof import('axios')
+mock.module('axios', () => realAxiosModule)
+const { createAxiosInstance, getWebSocketProxyAgent } = await import(
+  `./proxy.ts?connect=${nonce}`
+) as typeof import('./proxy.js')
+
+afterAll(() => {
+  mock.module('axios', () => realAxiosModule)
+})
 
 // Self-signed test certificate and key, valid only for the loopback target.
 const cert = `-----BEGIN CERTIFICATE-----
