@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { fileURLToPath } from 'node:url'
 import {
   AgentTool,
   assertAgentToolCwdAllowed,
@@ -29,6 +30,54 @@ afterAll(() => {
     rmSync(existingCwd, { recursive: true, force: true })
   } catch {
     // best-effort cleanup
+  }
+})
+
+describe('AgentTool input schema background gates', () => {
+  for (const { name, disableBackground, fork, interactive, backgroundField } of [
+    { name: 'default', disableBackground: false, fork: false, interactive: true, backgroundField: true },
+    { name: 'background tasks disabled', disableBackground: true, fork: false, interactive: true, backgroundField: false },
+    { name: 'interactive fork', disableBackground: false, fork: true, interactive: true, backgroundField: false },
+    { name: 'noninteractive fork', disableBackground: false, fork: true, interactive: false, backgroundField: true },
+  ]) {
+    test(`${name} loads the module and preserves cwd validation`, () => {
+      // Set session state before importing: buildTool reads the gated schema
+      // during module initialization, and lazySchema memoizes that choice.
+      const child = Bun.spawnSync([
+        process.execPath,
+        ...(fork ? ['--feature=FORK_SUBAGENT'] : []),
+        '--eval',
+        `
+          import assert from 'node:assert/strict'
+          import { setIsInteractive } from ${JSON.stringify(new URL('../../bootstrap/state.ts', import.meta.url).href)}
+          setIsInteractive(${interactive})
+          const { inputSchema, fullInputSchema } = await import(${JSON.stringify(new URL('./AgentTool.tsx', import.meta.url).href)})
+          assert.equal('run_in_background' in inputSchema().shape, ${backgroundField})
+          assert.equal('run_in_background' in fullInputSchema().shape, true)
+          const baseInput = ${JSON.stringify(baseInput)}
+          for (const schema of [inputSchema(), fullInputSchema()]) {
+            assert.equal(schema.safeParse(baseInput).success, true)
+            assert.equal(schema.safeParse({ ...baseInput, cwd: ${JSON.stringify(existingCwd)} }).success, true)
+            const invalid = schema.safeParse({ ...baseInput, cwd: 'relative/path' })
+            assert.equal(invalid.success, false)
+            assert.deepEqual(invalid.error.issues, [{
+              code: 'custom', path: ['cwd'], message: 'cwd must be an absolute path.'
+            }])
+          }
+          console.log('ok')
+        `,
+      ], {
+        cwd: fileURLToPath(new URL('../../../', import.meta.url)),
+        env: {
+          ...process.env,
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: String(disableBackground),
+        },
+        timeout: 20_000,
+      })
+      expect(child.stderr.toString()).toBe('')
+      expect(child.exitCode).toBe(0)
+      expect(child.stdout.toString().trim()).toBe('ok')
+    }, 25_000)
   }
 })
 
