@@ -148,6 +148,7 @@ import { useMailboxBridge } from '../hooks/useMailboxBridge.js';
 import { queryCheckpoint, logQueryProfileReport, clearQueryProfile } from '../utils/queryProfiler.js';
 import type { Message as MessageType, UserMessage, ProgressMessage, HookResultMessage, PartialCompactDirection } from '../types/message.js';
 import { query, type QueryTurnBudget } from '../query.js';
+import { closeNeedleClient, runNeedleWorkerTurn } from '../services/needle/runNeedleWorkerTurn.js';
 import type { Terminal as QueryTerminal } from '../query/transitions.js';
 import type { AutoCompactTrackingState } from '../services/compact/autoCompact.js';
 import { mergeClients, useMergedClients } from '../hooks/useMergedClients.js';
@@ -681,6 +682,7 @@ export function REPL({
   // without requiring a REPL remount. CLI prop still wins over env/config.
   const isRemoteSession = !!remoteSessionConfig;
   const foregroundTurnBudgetRef = useRef<ForegroundTurnBudgetHandoff | null>(null);
+  const needleClientOwnerRef = useRef({});
   const backgroundHandoffStartedRef = useRef(false);
   const [backgroundHandoffPreparing, setBackgroundHandoffPreparing] = useState(false);
 
@@ -1017,6 +1019,10 @@ export function REPL({
   // REPL bridge to abort the active query when a remote interrupt arrives.
   const abortControllerRef = useRef<AbortController | null>(null);
   abortControllerRef.current = abortController;
+  useEffect(() => () => {
+    abortControllerRef.current?.abort();
+    closeNeedleClient(needleClientOwnerRef.current);
+  }, []);
 
   // Ref for the bridge result callback — set after useReplBridge initializes,
   // read in the onQuery finally block to notify mobile clients that a turn ended.
@@ -3292,7 +3298,8 @@ export function REPL({
     resetTurnToolDuration();
     resetTurnClassifierDuration();
     let expectedAutoCompactTracking = queryAutoCompactTracking;
-    const queryGenerator = query({
+    const needleConfig = getGlobalConfig();
+    const queryParams = {
       messages: messagesIncludingNewMessages,
       requestOnlyMessages,
       onModelRequestStart: interruptionCorrectionQueryId
@@ -3301,8 +3308,8 @@ export function REPL({
               shouldQuery,
               isInterruptionCorrectionEligible: true,
               queryId: interruptionCorrectionQueryId,
-            })
-            onModelRequestStart?.()
+            });
+            onModelRequestStart?.();
           }
         : undefined,
       systemPrompt,
@@ -3318,13 +3325,34 @@ export function REPL({
         if (setAutoCompactTrackingForSessionIfUnchanged(querySessionId, expectedAutoCompactTracking, tracking)) {
           expectedAutoCompactTracking = tracking;
         }
-      }
-    });
+      },
+    };
+    const currentUserMessage = newMessages.findLast(selectableUserMessagesFilter);
+    const currentUserContent = currentUserMessage?.message.content;
+    const needlePrompt = currentUserContent ? getContentText(currentUserContent) ?? '' : '';
+    const hasImageContent =
+      Array.isArray(currentUserContent) && currentUserContent.some(block => block.type === 'image');
+    const queryGenerator =
+      needleConfig.needleEnabled === true &&
+      needleConfig.needleMode === 'main' &&
+      needlePrompt &&
+      !hasImageContent
+        ? runNeedleWorkerTurn({
+            prompt: needlePrompt,
+            queryParams,
+            tools: freshTools,
+            toolUseContext,
+            clientOwner: needleClientOwnerRef.current,
+            canUseTool,
+            signal: abortController.signal,
+          })
+        : query(queryParams);
     const queryTerminal = await driveQueryEvents(
       queryGenerator,
       reason => queryGuard.registerActivity(reason, queryGeneration),
       onQueryEvent,
     );
+
     if (isBuddyEnabled()) {
       void fireCompanionObserver(messagesRef.current, reaction => setAppState(prev => prev.companionReaction === reaction ? prev : {
         ...prev,

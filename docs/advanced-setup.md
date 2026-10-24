@@ -938,3 +938,29 @@ project's `disabledMcpServers` key to restore inheritance. Builtin servers that
 are disabled by default keep their separate project-level `enabledMcpServers`
 allowlist. Existing running sessions are not forcibly disconnected by a toggle
 in another project.
+
+## Needle local planner
+
+Needle is an optional local pre-query planner and is disabled by default. Install Python 3 and Git first, then install the upstream package from source.
+
+Linux and macOS:
+
+```bash
+git clone https://github.com/cactus-compute/needle.git
+cd needle
+python3 -m pip install --user -e '.[jax]'
+```
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/cactus-compute/needle.git
+Set-Location needle
+py -3 -m pip install --user -e ".[jax]"
+```
+
+OpenClaude uses `python3` by default on Linux/macOS and `py -3` on Windows. Set `OPENCLAUDE_NEEDLE_PYTHON` to an interpreter path when your setup differs.
+
+Enable it in an OpenClaude session with `/needle enable`. OpenClaude verifies that the selected interpreter can import `needle`; if not, enablement is refused with an installation message. Use `/needle mode worker` for AgentTool workers or `/needle mode main` for the main conversation; `/needle status` reports the current settings, and `/needle disable` turns it off. In either mode, Needle proposes at most one tool call. OpenClaude executes it using normal permissions and tool handling, then continues the same conversation with the configured provider. The provider remains responsible for the final response, summaries, interpreting WebFetch results, redirects, and any subsequent tool calls. Needle does not summarize the conversation or execute tools itself.
+
+The `needle-worker` model route selects Needle for AgentTool workers when enabled; main-conversation use is controlled by the `main` mode. The TypeScript bridge exchanges JSONL requests with Python. If Needle fails after enablement, OpenClaude skips the local prelude and continues with the configured provider. Set `OPENCLAUDE_NEEDLE_TIMEOUT_MS` to change the bounded planner timeout.

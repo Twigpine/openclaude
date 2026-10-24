@@ -689,6 +689,10 @@ export type GlobalConfig = {
   // Knowledge Graph configuration
   knowledgeGraphEnabled: boolean
 
+  // Needle local planner configuration.
+  needleEnabled?: boolean
+  needleMode?: 'worker' | 'main'
+
   // Startup splash logo color scheme — set via /logo. See
   // src/components/StartupScreen.palettes.ts for valid values. Stored as a
   // plain string (validated on read) to avoid pulling a UI module into the
@@ -760,6 +764,8 @@ function createDefaultGlobalConfig(): GlobalConfig {
     providerProfiles: [],
     openaiAdditionalModelOptionsCacheByProfile: {},
     knowledgeGraphEnabled: true,
+    needleEnabled: false,
+    needleMode: 'worker',
     // Omitted by default so callers can distinguish "unset" from an explicit
     // persisted "off"; normalizeMaxMessagesCompactionThreshold resolves an
     // unset value to the effective default of '200' (message-count compaction
@@ -819,6 +825,8 @@ export const GLOBAL_CONFIG_KEYS = [
   'remoteControlAtStartup',
   'remoteDialogSeen',
   'knowledgeGraphEnabled',
+  'needleEnabled',
+  'needleMode',
   'logoColor',
   'maxMessagesCompactionThreshold',
   'compactModel',
@@ -932,6 +940,8 @@ function getTestGlobalConfigForTesting(): GlobalConfig {
       ...DEFAULT_GLOBAL_CONFIG,
       autoUpdates: false,
       knowledgeGraphEnabled: true,
+      needleEnabled: false,
+      needleMode: 'worker',
     }
   }
   return testGlobalConfigForTesting
