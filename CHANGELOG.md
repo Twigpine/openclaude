@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.34.0](https://github.com/Twigpine/openclaude/compare/v0.33.0...v0.34.0) (2026-10-24)
+
+
+### Features
+
+* **gateway:** add Merge Gateway provider ([#2317](https://github.com/Twigpine/openclaude/issues/2317)) ([a13ed45](https://github.com/Twigpine/openclaude/commit/a13ed45b14a25f0afde43932ab1d53bf0c06909c))
+* **skills:** load skills from ~/.agents/skills and opt-in ~/.claude/skills ([#2258](https://github.com/Twigpine/openclaude/issues/2258)) ([#2283](https://github.com/Twigpine/openclaude/issues/2283)) ([8ee936c](https://github.com/Twigpine/openclaude/commit/8ee936cfa1cb0f73b84ab45636e9a7b2fe7e14c8))
+
+
+### Bug Fixes
+
+* **agent:** await per-agent output before completion (ORC-1337) ([#2318](https://github.com/Twigpine/openclaude/issues/2318)) ([a4ed687](https://github.com/Twigpine/openclaude/commit/a4ed687b84d8276b2e868a9c9fe6c3cb8430013d))
+* **aimlapi:** derive the by-key identity without hashing the API key ([#2293](https://github.com/Twigpine/openclaude/issues/2293)) ([8c46032](https://github.com/Twigpine/openclaude/commit/8c46032db2e192c1bee0c70d21f5baca01b310bb))
+* complete full checks and repair baseline test failures ([#2286](https://github.com/Twigpine/openclaude/issues/2286)) ([0e9170f](https://github.com/Twigpine/openclaude/commit/0e9170fd37ae7d78e30f30831397bc096fe35d85))
+* fall back to global disabledMcpServers when project has none configured ([#1935](https://github.com/Twigpine/openclaude/issues/1935)) ([66cb795](https://github.com/Twigpine/openclaude/commit/66cb795034a3170ffb6b12f9ae0d0004e671335f))
+* **model:** enable discovery for remote custom providers ([#1895](https://github.com/Twigpine/openclaude/issues/1895)) ([6e16948](https://github.com/Twigpine/openclaude/commit/6e1694892dc2f9d83b09f3700619241a77fd634d))
+* **proxy:** pass runtime CA and mTLS options to the target TLS connection behind CONNECT proxies ([#2386](https://github.com/Twigpine/openclaude/issues/2386)) ([df184fb](https://github.com/Twigpine/openclaude/commit/df184fbafcad18d1feada4a4da38fecb9ce25c49))
+* **shell:** honor an abort that lands before the listener is attached ([#2321](https://github.com/Twigpine/openclaude/issues/2321)) ([1c42a10](https://github.com/Twigpine/openclaude/commit/1c42a10628df59cdaaf3a75a89978737f592721a))
+* stabilize settings writes and enable fork PR scans ([#2290](https://github.com/Twigpine/openclaude/issues/2290)) ([a0c5c7d](https://github.com/Twigpine/openclaude/commit/a0c5c7d0232b8c71545d5cb3d9d745a9c756e69f))
+* **tests:** isolate skills homes and stabilize reload assertions ([#2307](https://github.com/Twigpine/openclaude/issues/2307)) ([5a1fbe0](https://github.com/Twigpine/openclaude/commit/5a1fbe03e62f354a972871336cbf541f27cf4dd9))
+
 ## [0.33.0](https://github.com/Twigpine/openclaude/compare/v0.32.0...v0.33.0) (2026-10-14)
 
 
