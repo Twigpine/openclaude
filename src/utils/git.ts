@@ -37,7 +37,7 @@ const findGitRootImpl = memoizeWithLRU(
         resolveSymlinks = false
       } else if (isAbsolute(entry)) {
         try {
-          ceilings.add(resolveSymlinks ? realpathSync(entry) : resolve(entry))
+          ceilings.add(resolveSymlinks ? realpathSync(entry) : entry)
         } catch {
           // Git ignores ceiling entries that cannot be resolved.
         }

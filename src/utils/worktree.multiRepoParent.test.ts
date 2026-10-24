@@ -10,6 +10,8 @@ import {
 } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { snapshotEnv } from '../test/envSnapshot.js'
+import { gitFixtureEnv } from '../test/gitEnv.js'
 
 // Regression for #2052 — sessions started in a non-git parent of multiple
 // child repos must still be able to create agent worktrees when cwd points
@@ -20,7 +22,7 @@ function git(cwd: string, ceiling: string, ...args: string[]): string {
     cwd,
     encoding: 'utf8',
     env: {
-      ...process.env,
+      ...gitFixtureEnv(),
       GIT_CEILING_DIRECTORIES: ceiling,
       GIT_AUTHOR_NAME: 'Test',
       GIT_AUTHOR_EMAIL: 'test@example.com',
@@ -46,7 +48,7 @@ function runCreateAgentWorktree(
     {
       encoding: 'utf8',
       timeout: 30_000,
-      env: { ...process.env, GIT_CEILING_DIRECTORIES: ceiling },
+      env: { ...gitFixtureEnv(), GIT_CEILING_DIRECTORIES: ceiling },
     },
   )
   return JSON.parse(stdout) as
@@ -54,16 +56,29 @@ function runCreateAgentWorktree(
     | { ok: false; error: string; gitRoot: string | null }
 }
 
-test.each(['none', 'writable', 'read-only'] as const)(
-  'createAgentWorktree fails for a non-git multi-repo parent, succeeds for a child repo cwd (enclosing repo: %s)',
-  enclosing => {
+test.each([
+  ['none', false],
+  ['writable', false],
+  ['read-only', false],
+  ['read-only', true],
+] as const)(
+  'createAgentWorktree fails for a non-git multi-repo parent, succeeds for a child repo cwd (enclosing repo: %s, inherited repository variables: %s)',
+  (enclosing, inheritedRepository) => {
     const root = mkdtempSync(join(tmpdir(), 'openclaude-2052-'))
     const cfgDir = join(root, 'config')
     const parent = join(root, 'parent')
     const repoA = join(parent, 'repo-a')
     const repoB = join(parent, 'repo-b')
+    const inheritedEnv = {
+      GIT_DIR: join(root, 'unexpected.git'),
+      GIT_WORK_TREE: join(root, 'unexpected-worktree'),
+      GIT_INDEX_FILE: join(root, 'unexpected-index'),
+      GIT_COMMON_DIR: join(root, 'unexpected-common'),
+    }
+    const restoreEnv = snapshotEnv(Object.keys(inheritedEnv))
 
     try {
+      if (inheritedRepository) Object.assign(process.env, inheritedEnv)
       mkdirSync(repoA, { recursive: true })
       mkdirSync(repoB, { recursive: true })
       mkdirSync(cfgDir)
@@ -113,6 +128,7 @@ test.each(['none', 'writable', 'read-only'] as const)(
         git(repoA, root, 'worktree', 'remove', '--force', childResult.worktreePath)
       }
     } finally {
+      restoreEnv()
       if (enclosing === 'read-only' && existsSync(join(root, '.git'))) {
         chmodSync(join(root, '.git'), 0o755)
       }
