@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  resetModelStringsForTestingOnly,
   setAllowedSettingSources,
   setFlagSettingsInline,
   setFlagSettingsPath,
@@ -503,6 +504,7 @@ function setIgnoredApiKeyHelper(): void {
 
 beforeEach(async () => {
   await acquireSharedMutationLock('claude.lifecycle.test.ts')
+  resetModelStringsForTestingOnly()
   setFlagSettingsPath(undefined)
   setFlagSettingsInline(null)
   setAllowedSettingSources([...SETTING_SOURCES])
@@ -543,6 +545,7 @@ afterEach(async () => {
     setFlagSettingsPath(undefined)
     setFlagSettingsInline(null)
     setAllowedSettingSources([...SETTING_SOURCES])
+    resetModelStringsForTestingOnly()
     resetSettingsCache()
     getClaudeAIOAuthTokens.cache?.clear?.()
     resetGrowthBook()
