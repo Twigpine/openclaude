@@ -134,7 +134,8 @@ function buildRequiresActionDetails(
 type PendingRequest<T> = {
   resolve: (result: T) => void
   reject: (error: unknown) => void
-  schema?: z.Schema
+  // Response consumers only parse; avoid comparing Zod's fluent builder types.
+  schema?: Pick<z.Schema, 'parse'>
   request: SDKControlRequest
 }
 
@@ -496,7 +497,7 @@ export class StructuredIO {
 
   private async sendRequest<Response>(
     request: SDKControlRequest['request'],
-    schema: z.Schema,
+    schema: Pick<z.Schema, 'parse'>,
     signal?: AbortSignal,
     requestId: string = randomUUID(),
   ): Promise<Response> {
@@ -798,7 +799,7 @@ export class StructuredIO {
         message,
       },
       z.object({
-        mcp_response: z.any() as z.Schema<JSONRPCMessage>,
+        mcp_response: z.any() as z.core.$ZodType<JSONRPCMessage>,
       }),
     )
     return response.mcp_response
