@@ -288,6 +288,15 @@ new watcher for subsequent subscriptions because closing is terminal. Its
 Node.js 22.22 minimum is covered by the supported Node.js `>=24.22.1` runtime.
 Regenerate `bun.lock` with `bun install` after updating the exact pin.
 
+Keep `@sentry/node` pinned exactly to `11.9.0` and regenerate `bun.lock` with
+`bun install` after updating it. The optional reporter uses a lazy ESM import
+after trust is established. Keep default integrations and tracing disabled,
+set `attachStacktrace: false`, and explicitly disable `dataCollection` categories
+so only vetted messages are reported. Do not add automatic instrumentation or
+an OpenTelemetry provider to this path. Run `bun test src/utils/sentry.test.ts`
+when updating the SDK or initialization. Its Node.js minimum is covered by the
+supported runtime; self-hosted Sentry requires 26.4.2 or later.
+
 The root `overrides` block also controls transitive resolutions:
 
 - `ip-address`: `10.7.4` sets the security floor for the MCP SDK's
