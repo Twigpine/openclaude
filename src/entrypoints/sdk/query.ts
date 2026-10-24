@@ -35,7 +35,10 @@ import {
   getSessionId,
   bindSdkContextToAsyncGenerator,
   runOutsideSdkContext,
+  registerHookCallbacks,
 } from '../../bootstrap/state.js'
+import type { HookCallbackMatcher, HookEvent } from '../../types/hooks.js'
+import { isHookEvent } from '../../types/hooks.js'
 import type { SessionId } from '../../types/ids.js'
 import {
   getAgentDefinitionsWithOverrides,
@@ -1047,6 +1050,50 @@ export function query(params: {
 
   if (!cwd) {
     throw new Error('query() requires options.cwd')
+  }
+
+  // Register SDK-provided hook callbacks with the in-process hook executor.
+  //
+  // The CLI path wires options.hooks through the control protocol
+  // (print.ts → structuredIO.createHookCallback → registerHookCallbacks);
+  // the in-process query() path historically dropped options.hooks on the
+  // floor — the field was declared but never consumed, so PreToolUse /
+  // PostToolUse / Stop callbacks silently never fired for SDK consumers.
+  //
+  // The kernel hook executor (utils/hooks.ts) reads STATE.registeredHooks on
+  // every hook event, so registering here makes in-process callbacks work
+  // exactly like their CLI counterparts. Each user callback receives the
+  // same HookInput the shell-hook and CLI-callback paths get; its return
+  // value (HookJSONOutput) drives allow/ask/deny decisions natively.
+  if (options.hooks) {
+    const registered: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {}
+    for (const [event, matchers] of Object.entries(options.hooks)) {
+      if (!isHookEvent(event) || !Array.isArray(matchers)) continue
+      const callbackMatchers: HookCallbackMatcher[] = []
+      for (const matcher of matchers) {
+        const m = matcher as {
+          matcher?: string
+          hooks?: unknown
+        }
+        if (!m || !Array.isArray(m.hooks)) continue
+        callbackMatchers.push({
+          matcher: m.matcher ?? '',
+          hooks: m.hooks
+            .filter((h): h is (input: unknown) => unknown => typeof h === 'function')
+            .map((h) => ({
+              type: 'callback' as const,
+              callback: async (input: unknown) =>
+                (await h(input)) as never,
+            })) as never,
+        })
+      }
+      if (callbackMatchers.length > 0) {
+        registered[event as HookEvent] = callbackMatchers
+      }
+    }
+    if (Object.keys(registered).length > 0) {
+      registerHookCallbacks(registered)
+    }
   }
 
   // Note: We pass settings?.env to QueryImpl for application AFTER init() runs.
