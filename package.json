@@ -121,7 +121,7 @@
     "cli-highlight": "2.1.11",
     "commander": "12.1.0",
     "cross-spawn": "7.0.6",
-    "diff": "8.0.4",
+    "diff": "9.0.0",
     "duck-duck-scrape": "^2.2.7",
     "emoji-regex": "11.0.0",
     "env-paths": "4.0.0",

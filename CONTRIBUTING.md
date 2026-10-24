@@ -193,6 +193,14 @@ In particular: link release-notes navigation to GitHub Releases rather than addi
 - Do not reformat unrelated files just because they are nearby.
 - Keep comments useful and concise.
 
+When working on diff generation or rendering, import public APIs and types from
+`diff`; the package supplies its own TypeScript declarations, so do not add
+`@types/diff` or import internal library paths. Use `diffWordsWithSpace` when
+rendering must preserve whitespace. Keep patch filenames separate from hunk
+content: serialized headers may quote or escape filenames, and parsed patches
+can omit filenames. Check the diff and edit-snippet tests when changing these
+paths.
+
 ## Provider Changes
 
 OpenClaude supports multiple provider paths. Before contributing provider changes, review the relevant documentation to ensure your implementation follows the expected patterns:
