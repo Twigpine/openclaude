@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { once } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http'
@@ -18,19 +18,14 @@ import { clearMTLSCache, getMTLSAgent, getWebSocketTLSOptions } from './mtls.js'
 
 // Other files can leave partial Axios mocks registered in Bun's shared process.
 // Resolve the CommonJS entry because the ESM entry can still return a prior mock.
-// Bypass those registrations, then load fresh proxy helpers against real Axios.
+// Keep real Axios local so those files' module registrations remain untouched.
 const nonce = `${Date.now()}-${Math.random()}`
-const realAxiosModule = {
-  ...await import(`${require.resolve('axios')}?real=${nonce}`),
-} as typeof import('axios')
-mock.module('axios', () => realAxiosModule)
-const { createAxiosInstance, getWebSocketProxyAgent } = await import(
+const { default: realAxios } = await import(
+  `${require.resolve('axios')}?real=${nonce}`
+) as typeof import('axios')
+const { getWebSocketProxyAgent } = await import(
   `./proxy.ts?connect=${nonce}`
 ) as typeof import('./proxy.js')
-
-afterAll(() => {
-  mock.module('axios', () => realAxiosModule)
-})
 
 // Self-signed test certificate and key, valid only for the loopback target.
 const cert = `-----BEGIN CERTIFICATE-----
@@ -130,7 +125,15 @@ describe('HTTPS_PROXY CONNECT transport', () => {
   })
 
   test('Axios tunnels HTTPS through HTTPS_PROXY and bypasses it for NO_PROXY', async () => {
-    const client = createAxiosInstance()
+    // createAxiosInstance binds to the global Axios registration. Use real Axios
+    // locally with the production agent helper's proxy and NO_PROXY selection.
+    const client = realAxios.create({ proxy: false })
+    client.interceptors.request.use(config => {
+      const agent = getWebSocketProxyAgent(config.url!)
+      config.httpsAgent = agent
+      config.httpAgent = agent
+      return config
+    })
     // Native TLS reads NODE_EXTRA_CA_CERTS only at startup. Pass the runtime
     // CA loader's result to the target request; agent options configure the proxy.
     client.defaults.transport = {
