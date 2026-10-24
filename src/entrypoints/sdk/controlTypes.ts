@@ -15,7 +15,7 @@ import type { SDKPartialAssistantMessageSchema } from './coreSchemas.js'
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-type InferSchema<T extends () => z.ZodType> = z.infer<ReturnType<T>>
+type InferSchema<T extends () => z.core.$ZodType> = z.infer<ReturnType<T>>
 
 export type SDKControlInitializeRequest = InferSchema<
   typeof SDKControlInitializeRequestSchema

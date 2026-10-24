@@ -132,7 +132,9 @@ export function getEnumLabel(schema: EnumSchema, value: string): string {
   return index >= 0 ? (getEnumLabels(schema)[index] ?? value) : value
 }
 
-function getZodSchema(schema: PrimitiveSchemaDefinition): z.ZodTypeAny {
+function getZodSchema(
+  schema: PrimitiveSchemaDefinition,
+): Pick<z.ZodType<string | number | boolean>, 'safeParse'> {
   if (isEnumSchema(schema)) {
     const [first, ...rest] = getEnumValues(schema)
     if (!first) {

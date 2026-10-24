@@ -42,7 +42,7 @@ function getSyncedJsonPath(agentType: string, scope: AgentMemoryScope): string {
 
 async function readJsonFile<T>(
   path: string,
-  schema: z.ZodType<T>,
+  schema: Pick<z.ZodType<T>, 'safeParse'>,
 ): Promise<T | null> {
   try {
     const content = await readFile(path, { encoding: 'utf-8' })

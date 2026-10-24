@@ -383,8 +383,15 @@ export type ToolCallProgress<P extends ToolProgressData = ToolProgressData> = (
   progress: ToolProgress<P>,
 ) => void
 
-// Type for any schema that outputs an object with string keys
-export type AnyObject = z.ZodType<{ [key: string]: unknown }>
+// Consumers only parse/convert schemas. Comparing the full fluent ZodType
+// interface recursively instantiates builders for every concrete tool schema.
+type ToolSchema<Output> = Pick<
+  z.ZodType<Output>,
+  '_zod' | '~standard' | 'parse' | 'safeParse'
+>
+
+// Type for any schema that outputs an object with string keys.
+export type AnyObject = ToolSchema<{ [key: string]: unknown }>
 
 /**
  * Checks if a tool matches the given name (primary name or alias).
@@ -441,7 +448,7 @@ export type Tool<
   readonly inputJSONSchema?: ToolInputJSONSchema
   // Optional because TungstenTool doesn't define this. TODO: Make it required.
   // When we do that, we can also go through and make this a bit more type-safe.
-  outputSchema?: z.ZodType<unknown>
+  outputSchema?: ToolSchema<unknown>
   inputsEquivalent?(a: z.infer<Input>, b: z.infer<Input>): boolean
   isConcurrencySafe(input: z.infer<Input>): boolean
   isEnabled(): boolean
