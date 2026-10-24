@@ -25,3 +25,8 @@ plan/
 .tmp
 .tmp-*
 temp_reference/
+
+# Free-Code Step-1 cli-dev (generated)
+cli
+cli-dev
+cli-dev.stamp.json
