@@ -9,6 +9,7 @@
  */
 import { isTelemetryDisabled } from './privacyLevel.js'
 import { TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS as TelemetrySafeError } from './errors.js'
+import { sleep } from './sleep.js'
 
 let sentryInitialized = false
 let sentryModule: typeof import('@sentry/node') | null = null
@@ -91,5 +92,25 @@ export function reportErrorToSentry(error: unknown): void {
     // message has not been vetted as safe to send.
   } catch {
     // Reporting must never throw.
+  }
+}
+
+/** Drain opted-in reports before exit, without allowing the SDK to delay shutdown indefinitely. */
+export async function flushSentry(): Promise<void> {
+  if (!sentryModule || !isSentryEnabled()) {
+    return
+  }
+
+  const deadline = new AbortController()
+  try {
+    // The SDK timeout does not bound every stage of its flush pipeline.
+    await Promise.race([
+      sentryModule.flush(2000),
+      sleep(2000, deadline.signal),
+    ])
+  } catch {
+    // Reporting failures must never prevent process exit.
+  } finally {
+    deadline.abort()
   }
 }

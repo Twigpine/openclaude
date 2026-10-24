@@ -67,7 +67,7 @@ test('reportErrorToSentry only reports sanitized messages without stacks using t
   // Leave time for the child deadline and reading its output during cleanup.
   const child = Bun.spawn([process.execPath, '--eval', `
     import * as Sentry from '@sentry/node'
-    import { initializeSentry, reportErrorToSentry } from '${new URL('./sentry.ts', import.meta.url).href}'
+    import { flushSentry, initializeSentry, reportErrorToSentry } from '${new URL('./sentry.ts', import.meta.url).href}'
     import { TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS as TelemetrySafeError } from '${new URL('./errors.ts', import.meta.url).href}'
 
     await initializeSentry()
@@ -85,7 +85,7 @@ test('reportErrorToSentry only reports sanitized messages without stacks using t
     }
     reportErrorToSentry(new Error('raw error with /some/file/path'))
     reportErrorToSentry(new TelemetrySafeError('full message with /some/file/path', 'sanitized message'))
-    await Sentry.flush(1000)
+    await flushSentry()
     const options = client.getOptions()
     console.log(JSON.stringify({ events, integrations: options.integrations.map(i => i.name), tracesSampleRate: options.tracesSampleRate }))
     await Sentry.close(1000)
