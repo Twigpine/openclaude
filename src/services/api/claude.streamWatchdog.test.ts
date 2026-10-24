@@ -92,6 +92,7 @@ function makeBetaMessage(
     content,
     container: null,
     context_management: null,
+    diagnostics: null,
     stop_details: null,
     stop_reason: 'end_turn',
     stop_sequence: null,
@@ -139,6 +140,7 @@ function makeCompleteStreamEvents(): BetaRawMessageStreamEvent[] {
         input_tokens: null,
         iterations: null,
         output_tokens: 1,
+        output_tokens_details: null,
         server_tool_use: null,
       },
     },
@@ -202,9 +204,8 @@ function makeWedgedStream(): {
   }
 }
 
-function makeCompleteStream(): Stream<BetaRawMessageStreamEvent> {
+function makeCompleteStream(events = makeCompleteStreamEvents()): Stream<BetaRawMessageStreamEvent> {
   const controller = new AbortController()
-  const events = makeCompleteStreamEvents()
   const iterator: AsyncIterator<BetaRawMessageStreamEvent> = {
     next() {
       const value = events.shift()
@@ -360,6 +361,32 @@ afterEach(async () => {
 })
 
 describe('Claude stream watchdog', () => {
+  test('streamed assistant usage retains cumulative thinking token details', async () => {
+    const events = makeCompleteStreamEvents()
+    for (const event of events) {
+      if (event.type === 'message_start') {
+        event.message.usage.output_tokens_details = { thinking_tokens: 2 }
+      } else if (event.type === 'message_delta') {
+        event.usage.output_tokens = 7
+        event.usage.output_tokens_details = { thinking_tokens: 5 }
+      }
+    }
+    createHandler = () => makeWithResponse(makeCompleteStream(events))
+    const messages = await collectStreamingMessages(
+      new AbortController().signal,
+      makeOptions(),
+    )
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: 'assistant',
+      message: expect.objectContaining({
+        usage: expect.objectContaining({
+          output_tokens: 7,
+          output_tokens_details: { thinking_tokens: 5 },
+        }),
+      }),
+    }))
+  })
+
   test('falls back when the top-level stream iterator never settles', async () => {
     const traceFile = join(fixturesRoot!, 'interruption-trace.jsonl')
     process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'

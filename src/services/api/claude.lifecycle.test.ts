@@ -145,6 +145,7 @@ function makeBetaMessage(): BetaMessage {
     content: [],
     container: null,
     context_management: null,
+    diagnostics: null,
     stop_details: null,
     stop_reason: 'end_turn',
     stop_sequence: null,

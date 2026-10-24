@@ -91,10 +91,10 @@
   },
   "devDependencies": {
     "@alcalzone/ansi-tokenize": "0.3.1",
-    "@anthropic-ai/bedrock-sdk": "0.29.2",
+    "@anthropic-ai/bedrock-sdk": "0.30.2",
     "@anthropic-ai/foundry-sdk": "0.2.4",
     "@anthropic-ai/sandbox-runtime": "0.0.55",
-    "@anthropic-ai/sdk": "0.94.0",
+    "@anthropic-ai/sdk": "0.110.0",
     "@aws-sdk/client-bedrock": "3.1156.0",
     "@aws-sdk/client-sts": "3.1156.0",
     "@aws-sdk/credential-provider-node": "3.972.88",
@@ -171,7 +171,7 @@
     "zod": "3.25.76"
   },
   "peerDependencies": {
-    "@anthropic-ai/sdk": "^0.94.0",
+    "@anthropic-ai/sdk": "^0.110.0",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "react": "^19.0.0",
     "react-reconciler": "^0.33.0"

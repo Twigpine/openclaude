@@ -3508,6 +3508,8 @@ export function updateUsage(
         ? partUsage.cache_read_input_tokens
         : usage.cache_read_input_tokens,
     output_tokens: partUsage.output_tokens ?? usage.output_tokens,
+    output_tokens_details:
+      partUsage.output_tokens_details ?? usage.output_tokens_details,
     server_tool_use: {
       web_search_requests:
         partUsage.server_tool_use?.web_search_requests ??
@@ -3566,6 +3568,11 @@ export function accumulateUsage(
     cache_read_input_tokens:
       totalUsage.cache_read_input_tokens + messageUsage.cache_read_input_tokens,
     output_tokens: totalUsage.output_tokens + messageUsage.output_tokens,
+    output_tokens_details: {
+      thinking_tokens:
+        totalUsage.output_tokens_details.thinking_tokens +
+        messageUsage.output_tokens_details.thinking_tokens,
+    },
     server_tool_use: {
       web_search_requests:
         totalUsage.server_tool_use.web_search_requests +

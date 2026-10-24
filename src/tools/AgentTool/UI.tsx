@@ -280,6 +280,7 @@ export function renderToolResultMessage(data: Output, progressMessagesForMessage
     content: completionMessage,
     usage: {
       ...usage,
+      output_tokens_details: null,
       inference_geo: null,
       iterations: null,
       speed: null
