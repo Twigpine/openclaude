@@ -1999,9 +1999,17 @@ test('polling retains and retries the same session after a rate limit', async ()
   })
   const sessions: string[] = []
 
+  const setTimeoutSpy = jest.spyOn(globalThis, 'setTimeout')
   const polling = pollUntilPaid(client, 'session', undefined, value => { sessions.push(value) })
-  // Let the failed request schedule its retry before advancing the poll timer.
-  await new Promise<void>(resolve => setImmediate(resolve))
+  try {
+    // Reading the 429 body may take multiple turns before the retry is scheduled.
+    for (let tick = 0; tick < 100 && !setTimeoutSpy.mock.calls.some(call => call[1] === 3000); tick++) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 3000)
+  } finally {
+    setTimeoutSpy.mockRestore()
+  }
   jest.advanceTimersByTime(2999)
   await new Promise<void>(resolve => setImmediate(resolve))
   expect(attempts).toBe(1)
