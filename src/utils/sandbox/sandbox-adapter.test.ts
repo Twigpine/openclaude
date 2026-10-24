@@ -23,8 +23,58 @@ import { SettingsSchema, type SettingsJson } from '../settings/types.js'
 import {
   convertToSandboxRuntimeConfig,
   SandboxManager,
+  type SandboxRuntimeConfig,
   SandboxRuntimeConfigSchema,
 } from './sandbox-adapter.js'
+
+const policyGetters = [
+  'getFsReadConfig',
+  'getFsWriteConfig',
+  'getNetworkRestrictionConfig',
+  'getAllowUnixSockets',
+  'getAllowLocalBinding',
+  'getIgnoreViolations',
+  'getEnableWeakerNestedSandbox',
+] as const
+
+type RuntimePolicy = {
+  [K in (typeof policyGetters)[number]]: ReturnType<(typeof SandboxManager)[K]>
+}
+
+// reset() retains config and the public API cannot clear it. Inspect policies
+// in a child so an initially unconfigured shared manager stays unconfigured.
+async function inspectRuntimePolicy(config: SandboxRuntimeConfig): Promise<RuntimePolicy> {
+  const previousConfig = BaseSandboxManager.getConfig()
+  const adapterUrl = new URL('./sandbox-adapter.ts', import.meta.url).href
+  const child = Bun.spawn([process.execPath, '--eval', `
+    import { SandboxManager as BaseSandboxManager } from '@anthropic-ai/sandbox-runtime'
+    import { SandboxManager } from ${JSON.stringify(adapterUrl)}
+    const initiallyUnconfigured = BaseSandboxManager.getConfig() === undefined
+    BaseSandboxManager.updateConfig(await Bun.stdin.json())
+    const policy = Object.fromEntries(${JSON.stringify(policyGetters)}.map(
+      getter => [getter, SandboxManager[getter]()],
+    ))
+    console.log(JSON.stringify({ initiallyUnconfigured, policy }))
+  `], {
+    stdin: new Blob([JSON.stringify(config)]),
+    stdout: 'pipe',
+    stderr: 'pipe',
+    timeout: 8_000,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  expect(exitCode, stderr).toBe(0)
+  const result = JSON.parse(stdout) as {
+    initiallyUnconfigured: boolean
+    policy: RuntimePolicy
+  }
+  expect(result.initiallyUnconfigured).toBe(true)
+  expect(BaseSandboxManager.getConfig()).toBe(previousConfig)
+  return result.policy
+}
 
 describe('convertToSandboxRuntimeConfig', () => {
   let restoreEnv: () => void
@@ -32,10 +82,12 @@ describe('convertToSandboxRuntimeConfig', () => {
   let previousCwd: string
   let tempRoot: string
   let activeCwd: string
+  let previousRuntimeConfig: ReturnType<typeof BaseSandboxManager.getConfig>
 
   beforeEach(async () => {
     await acquireSharedMutationLock('utils/sandbox/sandbox-adapter.test.ts')
 
+    previousRuntimeConfig = BaseSandboxManager.getConfig()
     restoreEnv = snapshotEnv(['CLAUDE_CONFIG_DIR', 'OPENCLAUDE_CONFIG_DIR'])
     previousOriginalCwd = getOriginalCwd()
     previousCwd = getCwdState()
@@ -54,13 +106,20 @@ describe('convertToSandboxRuntimeConfig', () => {
   afterEach(async () => {
     try {
       await SandboxManager.reset()
-      restoreEnv()
-      setOriginalCwd(previousOriginalCwd)
-      setCwdState(previousCwd)
-      resetSettingsCache()
-      await rm(tempRoot, { recursive: true, force: true })
+      if (previousRuntimeConfig !== undefined) {
+        BaseSandboxManager.updateConfig(previousRuntimeConfig)
+      }
+      expect(BaseSandboxManager.getConfig()).toEqual(previousRuntimeConfig)
     } finally {
-      releaseSharedMutationLock()
+      try {
+        restoreEnv()
+        setOriginalCwd(previousOriginalCwd)
+        setCwdState(previousCwd)
+        resetSettingsCache()
+        await rm(tempRoot, { recursive: true, force: true })
+      } finally {
+        releaseSharedMutationLock()
+      }
     }
   })
 
@@ -113,7 +172,8 @@ describe('convertToSandboxRuntimeConfig', () => {
     }
   })
 
-  test('maps validated settings to the runtime network and process policy', () => {
+  // Each child has an 8s deadline; allow 2s more for assertions and teardown.
+  test('maps validated settings to the runtime network and process policy', async () => {
     const settings = SettingsSchema().parse({
       permissions: {
         allow: ['WebFetch(domain:api.example.com:443)'],
@@ -156,16 +216,16 @@ describe('convertToSandboxRuntimeConfig', () => {
     expect(config.credentials).toBeUndefined()
     expect(config.windows).toBeUndefined()
 
-    BaseSandboxManager.updateConfig(config)
-    expect(SandboxManager.getNetworkRestrictionConfig()).toEqual({
+    const policy = await inspectRuntimePolicy(config)
+    expect(policy.getNetworkRestrictionConfig).toEqual({
       allowedHosts: ['*.example.org', 'api.example.com:443'],
       deniedHosts: ['blocked.example.com', '*:22'],
     })
-    expect(SandboxManager.getAllowUnixSockets()).toEqual(['/var/run/example.sock'])
-    expect(SandboxManager.getAllowLocalBinding()).toBe(false)
-    expect(SandboxManager.getIgnoreViolations()).toEqual({ '*': ['/dev/example'] })
-    expect(SandboxManager.getEnableWeakerNestedSandbox()).toBe(false)
-  })
+    expect(policy.getAllowUnixSockets).toEqual(['/var/run/example.sock'])
+    expect(policy.getAllowLocalBinding).toBe(false)
+    expect(policy.getIgnoreViolations).toEqual({ '*': ['/dev/example'] })
+    expect(policy.getEnableWeakerNestedSandbox).toBe(false)
+  }, 10_000)
 
   test('loads filesystem rules from disk with their source path semantics', async () => {
     const configDir = process.env.OPENCLAUDE_CONFIG_DIR!
@@ -190,10 +250,9 @@ describe('convertToSandboxRuntimeConfig', () => {
     const config = SandboxRuntimeConfigSchema.parse(
       convertToSandboxRuntimeConfig(settings),
     )
-    BaseSandboxManager.updateConfig(config)
-
-    const read = SandboxManager.getFsReadConfig()
-    const write = SandboxManager.getFsWriteConfig()
+    const policy = await inspectRuntimePolicy(config)
+    const read = policy.getFsReadConfig
+    const write = policy.getFsWriteConfig
     expect(read.denyOnly).toContain('/private')
     expect(read.denyOnly).toContain(join(configDir, 'secrets'))
     expect(read.allowWithinDeny).toContain(join(configDir, 'secrets/public'))
@@ -204,7 +263,7 @@ describe('convertToSandboxRuntimeConfig', () => {
     expect(write.denyWithinAllow).toContain(
       join(activeCwd, '.openclaude', 'settings.json'),
     )
-  })
+  }, 10_000)
 
   test('keeps managed domain and read exceptions exclusive without dropping denies', () => {
     setCachedSettingsForSource('policySettings', SettingsSchema().parse({
@@ -246,18 +305,18 @@ describe('convertToSandboxRuntimeConfig', () => {
     expect(config.filesystem.denyRead).toContain(join(tempRoot, 'secrets'))
   })
 
-  test('preserves an empty network allowlist through the runtime adapter', () => {
+  test('preserves an empty network allowlist through the runtime adapter', async () => {
     const config = SandboxRuntimeConfigSchema.parse(
       convertToSandboxRuntimeConfig(SettingsSchema().parse({})),
     )
-    BaseSandboxManager.updateConfig(config)
+    const policy = await inspectRuntimePolicy(config)
 
-    expect(SandboxManager.getNetworkRestrictionConfig()).toEqual({
+    expect(policy.getNetworkRestrictionConfig).toEqual({
       allowedHosts: [],
     })
-    expect(SandboxManager.getAllowLocalBinding()).toBeUndefined()
-    expect(SandboxManager.getAllowUnixSockets()).toBeUndefined()
-  })
+    expect(policy.getAllowLocalBinding).toBeUndefined()
+    expect(policy.getAllowUnixSockets).toBeUndefined()
+  }, 10_000)
 
   test('exposes sanitized violation events and subscriptions through the adapter', () => {
     const store = SandboxManager.getSandboxViolationStore()
