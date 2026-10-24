@@ -230,9 +230,21 @@ color detection tests must import in a fresh process.
 
 ### Dependency pins and overrides
 
+Terminal syntax highlighting uses the exact `highlight.js` pin directly, with
+the shared Chalk instance for ANSI colors. Keep the lazy loader and terminal
+palette in `src/utils/cliHighlight.ts`; code and Markdown renderers share it.
+The diff renderer also uses this language registry. Run the highlighting and
+Markdown regression tests when changing this dependency or its ANSI renderer.
+
+Keep `qrcode` for terminal QR output in the bridge, session and mobile commands.
+These use UTF-8 blocks and error correction level L. There is no other QR encoder
+in the dependency tree; replacing it would require maintaining QR segmentation,
+Reed–Solomon error correction and mask selection. A small terminal renderer alone
+cannot replace the encoder. Keep the exact pin and test short and long payloads
+when changing it.
+
 Keep all direct dependencies and devDependencies pinned to exact versions in the
-root and web manifests. The existing `sharp` range is the temporary exception
-while its separate upgrade is in progress. Regenerate the relevant Bun lockfile
+root and web manifests. Regenerate the relevant Bun lockfile
 when changing a pin.
 
 The root `overrides` block also controls transitive resolutions:

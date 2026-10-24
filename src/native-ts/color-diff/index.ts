@@ -2,8 +2,8 @@
  * Pure TypeScript port of vendor/color-diff-src.
  *
  * The Rust version uses syntect+bat for syntax highlighting and the similar
- * crate for word diffing. This port uses highlight.js (already a dep via
- * cli-highlight) and the diff npm package's diffArrays.
+ * crate for word diffing. This port uses highlight.js and the diff npm
+ * package's diffArrays.
  *
  * API matches vendor/color-diff-src/index.d.ts exactly so callers don't change.
  *

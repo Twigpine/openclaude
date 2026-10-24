@@ -1,34 +1,64 @@
-// highlight.js's type defs carry `/// <reference lib="dom" />`. SSETransport,
-// mcp/client, ssh, dumpPrompts use DOM types (TextDecodeOptions, RequestInfo)
-// that only typecheck because this file's `typeof import('highlight.js')` pulls
-// lib.dom in. tsconfig has lib: ["ESNext"] only — fixing the actual DOM-type
-// deps is a separate sweep; this ref preserves the status quo.
-/// <reference lib="dom" />
-
+import chalk from 'chalk'
 import { extname } from 'path'
 
 export type CliHighlight = {
-  highlight: typeof import('cli-highlight').highlight
-  supportsLanguage: typeof import('cli-highlight').supportsLanguage
+  highlight: (code: string, options: { language: string }) => string
+  supportsLanguage: (name: string) => boolean
 }
 
-// One promise shared by Fallback.tsx, markdown.ts, events.ts, getLanguageName.
-// The highlight.js import piggybacks: cli-highlight has already pulled it into
-// the module cache, so the second import() is a cache hit — no extra bytes
-// faulted in.
+// Preserve the terminal palette used by the code and Markdown renderers.
+// Unlisted tokens, including titles, parameters and substitutions, are plain.
+const tokenStyles = new Map<string, (text: string) => string>([
+  ['keyword', chalk.blue], ['literal', chalk.blue], ['class', chalk.blue],
+  ['built_in', chalk.cyan], ['type', chalk.cyan.dim], ['attr', chalk.cyan],
+  ['number', chalk.green], ['comment', chalk.green], ['doctag', chalk.green],
+  ['addition', chalk.green], ['regexp', chalk.red], ['string', chalk.red],
+  ['deletion', chalk.red], ['function', chalk.yellow], ['meta', chalk.gray],
+  ['tag', chalk.gray], ['name', chalk.blue], ['emphasis', chalk.italic],
+  ['strong', chalk.bold], ['link', chalk.underline],
+])
+
+const entities: Record<string, string> = {
+  '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#x27;': "'",
+}
+
+// Only consume highlight.js's generated spans and its five escaped entities.
+// Source markup is escaped by highlight.js, so it cannot become a span here.
+// A stack preserves nested styles and unprefixed sublanguage spans without a
+// general HTML parser. Keep the previous renderer's CR/LF and NUL handling.
+function terminalHighlight(html: string): string {
+  const stack: { token?: string; text: string }[] = [{ text: '' }]
+  for (const part of html.replace(/\r\n?/g, '\n').replace(/\0/g, '')
+    .split(/(<span class="[^"]*">|<\/span>)/g)) {
+    if (part.startsWith('<span class="')) {
+      stack.push({ token: /hljs-(\w+)/.exec(part)?.[1], text: '' })
+    } else if (part === '</span>') {
+      const frame = stack.pop()!
+      const style = frame.token ? tokenStyles.get(frame.token) : undefined
+      stack[stack.length - 1]!.text += style ? style(frame.text) : frame.text
+    } else {
+      stack[stack.length - 1]!.text += part.replace(
+        /&(?:amp|lt|gt|quot|#x27);/g, entity => entities[entity]!,
+      )
+    }
+  }
+  return stack[0]!.text
+}
+
+// Share one lazy registry load across code, Markdown and telemetry consumers.
 let cliHighlightPromise: Promise<CliHighlight | null> | undefined
 
 let loadedGetLanguage: typeof import('highlight.js').getLanguage | undefined
 
 async function loadCliHighlight(): Promise<CliHighlight | null> {
   try {
-    const cliHighlight = await import('cli-highlight')
-    // cache hit — cli-highlight already loaded highlight.js
     const highlightJs = await import('highlight.js')
     loadedGetLanguage = highlightJs.getLanguage
     return {
-      highlight: cliHighlight.highlight,
-      supportsLanguage: cliHighlight.supportsLanguage,
+      highlight: (code, options) => terminalHighlight(
+        highlightJs.highlight(code, options).value,
+      ),
+      supportsLanguage: name => Boolean(highlightJs.getLanguage(name)),
     }
   } catch {
     return null
@@ -41,7 +71,7 @@ export function getCliHighlightPromise(): Promise<CliHighlight | null> {
 }
 
 /**
- * eg. "foo/bar.ts" → "TypeScript". Awaits the shared cli-highlight load,
+ * Resolves a filename's extension to a language name after the shared load,
  * then reads highlight.js's language registry. All callers are telemetry
  * (OTel counter attributes, permission-dialog unary events) — none block
  * on this, they fire-and-forget or the consumer already handles Promise<string>.

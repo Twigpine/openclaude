@@ -141,7 +141,7 @@ export const INTENTIONALLY_BUNDLED: string[] = [
   'bidi-js',
   'chalk',
   'cli-boxes',
-  'cli-highlight',
+  'highlight.js',
   'commander',
   'emoji-regex',
   'env-paths',
