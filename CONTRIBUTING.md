@@ -241,6 +241,16 @@ Keep all direct dependencies and devDependencies pinned to exact versions in the
 root and web manifests. Regenerate the relevant Bun lockfile
 when changing a pin.
 
+Keep `chokidar` pinned exactly to `6.0.0` and use its public ESM exports and
+bundled types. Pass literal paths rather than globs. Use `backend` to select
+watching behavior and `pollingInterval` / `pollingBinaryInterval` for polling;
+`awaitWriteFinish.pollInterval` is a separate, unchanged option. Skill watching
+uses the polling backend under Bun with explicit `atomic: true` to preserve
+atomic-save handling. Await `close()` when teardown must finish, and create a
+new watcher for subsequent subscriptions because closing is terminal. Its
+Node.js 22.22 minimum is covered by the supported Node.js `>=24.22.1` runtime.
+Regenerate `bun.lock` with `bun install` after updating the exact pin.
+
 The root `overrides` block also controls transitive resolutions:
 
 - `ip-address`: `10.7.4` sets the security floor for the MCP SDK's

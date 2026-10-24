@@ -116,7 +116,7 @@
     "axios": "1.20.0",
     "bidi-js": "1.1.0",
     "chalk": "6.0.1",
-    "chokidar": "4.0.3",
+    "chokidar": "6.0.0",
     "cli-boxes": "4.0.1",
     "commander": "12.1.0",
     "cross-spawn": "7.0.6",

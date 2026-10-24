@@ -160,7 +160,7 @@ export async function initialize(): Promise<void> {
     },
     // Additional options for stability
     ignorePermissionErrors: true,
-    usePolling: false, // Use native file system events
+    backend: 'auto', // Use native file system events
     atomic: true, // Handle atomic writes better
   })
 
