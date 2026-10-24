@@ -31,7 +31,7 @@ test('filesystem discovery matches Git ceilings, including changes to cached bou
         cwd, env, encoding: 'utf8', timeout: 5_000,
       })
       expect(result.error).toBeUndefined()
-      expect([0, 128]).toContain(result.status)
+      expect(result.status === 0 || result.status === 128).toBe(true)
       return result.status === 0 ? realpathSync(result.stdout.trim()) : null
     })
     expect(expected).toEqual([root, null, root, null, null, null, null, null, root])
