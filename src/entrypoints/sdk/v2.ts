@@ -53,8 +53,10 @@ import type {
   SDKPermissionRequestMessage,
 } from './shared.js'
 import {
+  acquireEnvMutex,
   assertValidSessionId,
   mapMessageToSDK,
+  releaseEnvMutex,
 } from './shared.js'
 import {
   buildPermissionContext,
@@ -97,6 +99,49 @@ export type SDKSessionOptions = {
   allowDangerouslySkipPermissions?: boolean
   /** AbortController to cancel the session. */
   abortController?: AbortController
+  /**
+   * Environment variables to apply while this session's turns run.
+   *
+   * `QueryOptions` already accepts this; a session could not, so a host that
+   * keeps several sessions in one process had to share one environment
+   * between them. That is a problem when the variable in question selects the
+   * provider: `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and the matching keys
+   * are read per request, so two sessions pointed at different endpoints
+   * silently used whichever was set last.
+   *
+   * Applied around each turn and restored afterwards, under the same
+   * process-wide env mutex `query()` uses, so a session's variables cannot
+   * leak into another session's turn. That mutex also means turns with
+   * different environments SERIALISE rather than overlap: with one process
+   * environment there is no honest alternative, and serialising is the
+   * behaviour that is correct rather than merely concurrent.
+   *
+   * A value of `undefined` removes the variable for the turn.
+   *
+   * What it does NOT do, exactly as in `query()`: a turn belonging to a
+   * session without `env` takes no mutex, so it can run while another
+   * session's variables are in place. In one process there is one
+   * environment; isolating readers as well as writers would mean serialising
+   * every turn in the process. So set `env` on every session that cares which
+   * provider it reaches, not only on the odd one out.
+   *
+   * TWO WAYS TO DEADLOCK YOURSELF, because the lock is held for the whole
+   * turn and not just while the variables are written:
+   *
+   * 1. A PAUSED ITERATOR STILL HOLDS IT. Stopping half way through
+   *    `for await (… of session.sendMessage(…))` to await another
+   *    env-carrying turn waits forever: the first turn cannot finish while
+   *    the second waits for the lock it holds. Finish the turn, or leave the
+   *    loop with `break`/`return` — which calls the generator's `return` and
+   *    frees the lock — before awaiting another one.
+   * 2. A `canUseTool` CALLBACK IS INSIDE THE TURN. Awaiting an env-carrying
+   *    `query()` or session turn from it is the same deadlock, one level
+   *    down. Answer the permission from what the callback already has.
+   *
+   * Neither applies to sessions without `env`: they take no lock.
+   */
+  env?: Record<string, string | undefined>
+
   /**
    * Callback invoked before each tool use. Return `{ behavior: 'allow' }` to
    * permit the call or `{ behavior: 'deny', message?: string }` to reject it.
@@ -260,6 +305,67 @@ class SDKSessionImpl implements SDKSession {
     return this._sessionId
   }
 
+  /**
+   * Apply this session's `env`, remembering what was there.
+   *
+   * Returns the snapshot to restore, or null when the session set no `env` —
+   * in which case the mutex is never taken and a session without `env` costs
+   * nothing.
+   *
+   * If reading or writing a variable throws half way through — an `env` whose
+   * properties are getters, say — what was already applied is put back and the
+   * mutex is released before the error leaves. Otherwise the lock would be
+   * held by a turn that never started, and every later env-setting turn in the
+   * process would wait on it forever.
+   */
+  private async applySessionEnv(): Promise<Record<string, string | undefined> | null> {
+    const overrides = this.options.env
+    if (!overrides) return null
+    // ENUMERATED ONCE, AND BEFORE THE MUTEX. Raised in review: the snapshot
+    // loop read `Object.keys` and the apply loop `Object.entries`, which a
+    // Proxy may answer differently — a key seen only by the apply loop would
+    // be set and never restored. Reading the host's object before the lock
+    // also means a throwing getter cannot leave the mutex held: nothing has
+    // been taken yet.
+    const entries = Object.entries(overrides)
+    if (entries.length === 0) return null
+    await acquireEnvMutex()
+    // Null-prototype: `__proto__` is a variable name like any other here, and
+    // on a plain object it would be swallowed by the prototype setter instead
+    // of being remembered — leaving the one key we must restore unrestorable.
+    const snapshot: Record<string, string | undefined> = Object.create(null)
+    try {
+      for (const [key] of entries) {
+        snapshot[key] = process.env[key]
+      }
+      for (const [key, value] of entries) {
+        if (value === undefined) {
+          delete process.env[key]
+        } else {
+          process.env[key] = value
+        }
+      }
+    } catch (error) {
+      this.restoreSessionEnv(snapshot)
+      throw error
+    }
+    return snapshot
+  }
+
+  /** Put back what `applySessionEnv` found, and let the next turn in. */
+  private restoreSessionEnv(snapshot: Record<string, string | undefined> | null): void {
+    if (!snapshot) return
+    for (const key of Object.keys(snapshot)) {
+      const original = snapshot[key]
+      if (original === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = original
+      }
+    }
+    releaseEnvMutex()
+  }
+
   async *sendMessage(content: string): AsyncIterable<SDKMessage> {
     const sdkContext = {
       sessionId: this._sessionId as SessionId,
@@ -278,107 +384,121 @@ class SDKSessionImpl implements SDKSession {
 
         await runOutsideSdkContext(init)
 
-        // Load agent definitions once (not on every sendMessage call)
-        if (!self.agentsLoaded) {
-          let agentDefs: AgentDefinitionsResult = { activeAgents: [], allAgents: [] }
-          const reportDefinitionFailure = (errorMessage: string) => {
-            self.pushAgentFailure({
-              type: 'agent_load_failure',
-              stage: 'definitions',
-              error_message: errorMessage,
-            })
-          }
-          try {
-            agentDefs = await getAgentDefinitionsWithOverrides(self.options.cwd)
-            for (const failedFile of agentDefs.failedFiles ?? []) {
-              reportDefinitionFailure(
-                `Failed to load agent definition '${failedFile.path}': ${failedFile.error}`,
-              )
-            }
-          } catch (err) {
-            // Agent loading failed — continue without filesystem agents but emit failure event
-            const errorMessage = err instanceof Error ? err.message : String(err)
-            console.warn('SDK: agent loading failed:', errorMessage)
-            reportDefinitionFailure(errorMessage)
-          }
-
-          const userAgents = buildSdkUserAgents(
-            self.options.agents,
-            (name, errorMessage) => {
+        // The session's own environment, for the length of the turn and no
+        // longer. Applied AFTER init() with a full-duration mutex, the way
+        // query() does it (SEC-1): init is memoized and configures proxies,
+        // mTLS and the global agents process-wide, so it must not be
+        // configured out of one session's variables.
+        //
+        // Inside the generator rather than around `yield* inner`, so an
+        // abandoned iterator still restores: breaking out of the loop calls
+        // the generator's return, which runs this finally with it.
+        const envSnapshot = await self.applySessionEnv()
+        try {
+          // Load agent definitions once (not on every sendMessage call)
+          if (!self.agentsLoaded) {
+            let agentDefs: AgentDefinitionsResult = { activeAgents: [], allAgents: [] }
+            const reportDefinitionFailure = (errorMessage: string) => {
               self.pushAgentFailure({
                 type: 'agent_load_failure',
-                stage: 'injection',
-                error_message: `Invalid SDK agent '${name}': ${errorMessage}`,
-              })
-            },
-          )
-          const mergedAgentDefs = mergeSdkUserAgents(agentDefs, userAgents)
-          if (mergedAgentDefs.activeAgents.length > 0) {
-            self.appStateStore.setState(prev => ({
-              ...prev,
-              agentDefinitions: mergedAgentDefs,
-            }))
-            try {
-              self.engine.injectAgents(mergedAgentDefs.activeAgents)
-            } catch (err) {
-              // Agent injection failed — continue without agents but emit failure event
-              const errorMessage = err instanceof Error ? err.message : String(err)
-              console.warn('SDK: agent injection failed:', errorMessage)
-              self.appStateStore.setState(prev => ({
-                ...prev,
-                agentDefinitions: { activeAgents: [], allAgents: [] },
-              }))
-              self.pushAgentFailure({
-                type: 'agent_load_failure',
-                stage: 'injection',
+                stage: 'definitions',
                 error_message: errorMessage,
               })
             }
-          } else {
-            self.appStateStore.setState(prev => ({
-              ...prev,
-              agentDefinitions: mergedAgentDefs,
-            }))
-          }
-          self.agentsLoaded = true
-        }
+            try {
+              agentDefs = await getAgentDefinitionsWithOverrides(self.options.cwd)
+              for (const failedFile of agentDefs.failedFiles ?? []) {
+                reportDefinitionFailure(
+                  `Failed to load agent definition '${failedFile.path}': ${failedFile.error}`,
+                )
+              }
+            } catch (err) {
+              // Agent loading failed — continue without filesystem agents but emit failure event
+              const errorMessage = err instanceof Error ? err.message : String(err)
+              console.warn('SDK: agent loading failed:', errorMessage)
+              reportDefinitionFailure(errorMessage)
+            }
 
-        // Connect MCP servers once (lazy, on first message)
-        if (!self.mcpConnected && self.mcpServers && Object.keys(self.mcpServers).length > 0) {
+            const userAgents = buildSdkUserAgents(
+              self.options.agents,
+              (name, errorMessage) => {
+                self.pushAgentFailure({
+                  type: 'agent_load_failure',
+                  stage: 'injection',
+                  error_message: `Invalid SDK agent '${name}': ${errorMessage}`,
+                })
+              },
+            )
+            const mergedAgentDefs = mergeSdkUserAgents(agentDefs, userAgents)
+            if (mergedAgentDefs.activeAgents.length > 0) {
+              self.appStateStore.setState(prev => ({
+                ...prev,
+                agentDefinitions: mergedAgentDefs,
+              }))
+              try {
+                self.engine.injectAgents(mergedAgentDefs.activeAgents)
+              } catch (err) {
+                // Agent injection failed — continue without agents but emit failure event
+                const errorMessage = err instanceof Error ? err.message : String(err)
+                console.warn('SDK: agent injection failed:', errorMessage)
+                self.appStateStore.setState(prev => ({
+                  ...prev,
+                  agentDefinitions: { activeAgents: [], allAgents: [] },
+                }))
+                self.pushAgentFailure({
+                  type: 'agent_load_failure',
+                  stage: 'injection',
+                  error_message: errorMessage,
+                })
+              }
+            } else {
+              self.appStateStore.setState(prev => ({
+                ...prev,
+                agentDefinitions: mergedAgentDefs,
+              }))
+            }
+            self.agentsLoaded = true
+          }
+
+          // Connect MCP servers once (lazy, on first message)
+          if (!self.mcpConnected && self.mcpServers && Object.keys(self.mcpServers).length > 0) {
+            try {
+              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers)
+              if (mcpClients.length > 0) {
+                self.engine.setMcpClients(mcpClients)
+              }
+              if (mcpTools.length > 0) {
+                const permissionContext = self.appStateStore.getState().toolPermissionContext
+                self.engine.updateTools(assembleToolPool(permissionContext, mcpTools))
+              }
+            } catch (err) {
+              // MCP connection failed — continue without MCP tools
+              console.warn('SDK: MCP server connection failed:', err instanceof Error ? err.message : String(err))
+            }
+            self.mcpConnected = true
+          }
+
+          // Switch session for transcript writes using session's own resolved dir
+          switchSession(self._sessionId as SessionId, self._sessionProjectDir)
+
           try {
-            const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers)
-            if (mcpClients.length > 0) {
-              self.engine.setMcpClients(mcpClients)
+            if (self._abortController?.signal.aborted) return
+            yield* self.drainAgentFailureQueue()
+            for await (const engineMsg of self.engine.submitMessage(content)) {
+              if (self._abortController?.signal.aborted) break
+              yield engineMsg
+              yield* self.drainTimeoutQueue()
+              yield* self.drainAgentFailureQueue()
             }
-            if (mcpTools.length > 0) {
-              const permissionContext = self.appStateStore.getState().toolPermissionContext
-              self.engine.updateTools(assembleToolPool(permissionContext, mcpTools))
-            }
-          } catch (err) {
-            // MCP connection failed — continue without MCP tools
-            console.warn('SDK: MCP server connection failed:', err instanceof Error ? err.message : String(err))
-          }
-          self.mcpConnected = true
-        }
-
-        // Switch session for transcript writes using session's own resolved dir
-        switchSession(self._sessionId as SessionId, self._sessionProjectDir)
-
-        try {
-          if (self._abortController?.signal.aborted) return
-          yield* self.drainAgentFailureQueue()
-          for await (const engineMsg of self.engine.submitMessage(content)) {
-            if (self._abortController?.signal.aborted) break
-            yield engineMsg
+            // Final drain for timeout/failure messages that fired on the last engine yield
             yield* self.drainTimeoutQueue()
             yield* self.drainAgentFailureQueue()
+          } finally {
+            self.timeoutQueue.length = 0
+            self.agentFailureQueue.length = 0
           }
-          // Final drain for timeout/failure messages that fired on the last engine yield
-          yield* self.drainTimeoutQueue()
-          yield* self.drainAgentFailureQueue()
         } finally {
-          self.timeoutQueue.length = 0
-          self.agentFailureQueue.length = 0
+          self.restoreSessionEnv(envSnapshot)
         }
       })(),
     )
