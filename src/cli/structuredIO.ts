@@ -44,9 +44,11 @@ import {
 import { writeToStdout } from 'src/utils/process.js'
 import { jsonStringify } from 'src/utils/slowOperations.js'
 import { z } from 'zod/v4'
+import { clearCACertsCache } from '../utils/caCerts.js'
 import { notifyCommandLifecycle } from '../utils/commandLifecycle.js'
 import { normalizeControlMessageKeys } from '../utils/controlMessageCompat.js'
 import { executePermissionRequestHooks } from '../utils/hooks.js'
+import { clearMTLSCache } from '../utils/mtls.js'
 import {
   filterPermissionRequestHookUpdates,
   persistPermissionUpdates,
@@ -368,6 +370,8 @@ export class StructuredIO {
         // Wildcard normalization pins undici's noProxy option. Rebuild cached
         // and global agents when the effective bypass list changes.
         if (getNoProxy() !== previousNoProxy) {
+          clearCACertsCache()
+          clearMTLSCache()
           clearProxyCache()
           configureGlobalAgents()
         }

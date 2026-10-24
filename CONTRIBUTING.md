@@ -319,7 +319,9 @@ Axios, `getWebSocketProxyAgent(url)` for Node WebSockets, and `getProxyFetchOpti
 for fetch. The Axios and WebSocket helpers apply `NO_PROXY` bypasses before
 selecting an agent. `getWebSocketProxyUrl(url)` supplies Bun's native WebSocket proxy
 option. Lowercase proxy environment variables take precedence over uppercase
-variants on the Axios and WebSocket paths.
+variants on the Axios, WebSocket, and fetch/undici paths. The shared helpers read
+`no_proxy` before `NO_PROXY` using `??`, so an empty lowercase `no_proxy` is kept
+and does not fall back to `NO_PROXY`.
 
 `https-proxy-agent` is pinned exactly to `9.1.0` and remains an external runtime
 module in `scripts/externals.ts`. Use its public named ESM exports, such as

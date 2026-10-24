@@ -117,6 +117,7 @@ for (const mode of ['proxy', 'bypass', 'wildcard-bypass', 'direct', 'global', 'g
       const { stdout } = await run('node', ['--input-type=module', '-e', `
         import assert from 'node:assert/strict';
         import { pathToFileURL } from 'node:url';
+        const { getGlobalDispatcher, setGlobalDispatcher } = await import(pathToFileURL(${JSON.stringify(Bun.resolveSync('undici/index.js', import.meta.dir))}));
         const network = await import(pathToFileURL(process.argv[1]));
         const config = JSON.parse(process.argv[2]);
         // Configure after startup so trust comes from our CA loader.
@@ -140,28 +141,40 @@ for (const mode of ['proxy', 'bypass', 'wildcard-bypass', 'direct', 'global', 'g
         network.clearMTLSCache();
         network.clearProxyCache();
         const options = network.getProxyFetchOptions();
-        if (config.mode.startsWith('global')) network.configureGlobalAgents();
-        const trustedTimeout = network.createCombinedAbortSignal(undefined, { timeoutMs: 2000 });
+        const previousGlobalDispatcher = getGlobalDispatcher();
+        const dispatchers = new Set([options.dispatcher]);
         try {
-          const response = await fetch(config.url, {
-            ...(config.mode.startsWith('global') ? {} : options), signal: trustedTimeout.signal,
+          if (config.mode.startsWith('global')) {
+            network.configureGlobalAgents();
+            const globalDispatcher = getGlobalDispatcher();
+            dispatchers.add(globalDispatcher);
+            assert.notEqual(globalDispatcher, previousGlobalDispatcher);
+            assert.equal(globalDispatcher === options.dispatcher, config.mode === 'global');
+          }
+          const trustedTimeout = network.createCombinedAbortSignal(undefined, { timeoutMs: 2000 });
+          try {
+            const response = await fetch(config.url, {
+              ...(config.mode.startsWith('global') ? {} : options), signal: trustedTimeout.signal,
+            });
+            assert.equal(response.status, 200);
+            assert.equal(await response.text(), 'authenticated response');
+          } finally { trustedTimeout.cleanup(); }
+          // Node 24 uses these v1 callbacks even when Node 26 runs this test.
+          const legacyBody = await new Promise((resolve, reject) => {
+            let body = '';
+            options.dispatcher.dispatch({ origin: config.url, path: '/', method: 'GET' }, {
+              onConnect() {},
+              onHeaders(status) { assert.equal(status, 200); },
+              onData(chunk) { body += chunk.toString(); },
+              onComplete() { resolve(body); },
+              onError: reject,
+            });
           });
-          assert.equal(response.status, 200);
-          assert.equal(await response.text(), 'authenticated response');
-        } finally { trustedTimeout.cleanup(); }
-        // Node 24 uses these v1 callbacks even when Node 26 runs this test.
-        const legacyBody = await new Promise((resolve, reject) => {
-          let body = '';
-          options.dispatcher.dispatch({ origin: config.url, path: '/', method: 'GET' }, {
-            onConnect() {},
-            onHeaders(status) { assert.equal(status, 200); },
-            onData(chunk) { body += chunk.toString(); },
-            onComplete() { resolve(body); },
-            onError: reject,
-          });
-        });
-        assert.equal(legacyBody, 'authenticated response');
-        await options.dispatcher.close();
+          assert.equal(legacyBody, 'authenticated response');
+        } finally {
+          setGlobalDispatcher(previousGlobalDispatcher);
+          await Promise.all([...dispatchers].map(dispatcher => dispatcher.close()));
+        }
         console.log('verified');
       `, modulePath, JSON.stringify(config)], { env, timeout: 6000 })
       expect(stdout.trim()).toBe('verified')
