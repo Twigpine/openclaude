@@ -5,7 +5,9 @@ import { zodToJsonSchema } from '../utils/zodToJsonSchema.js'
 
 // A fresh process avoids shared mocks and registry filters hiding schemas.
 const toolsDir = new URL('../tools/', import.meta.url)
-const files = [...new Bun.Glob('**/*Tool.{ts,tsx}').scanSync(fileURLToPath(toolsDir))].sort()
+const files = [...new Bun.Glob('**/*Tool.{ts,tsx}').scanSync(fileURLToPath(toolsDir))]
+  .map(file => file.replaceAll('\\', '/'))
+  .sort()
 const schemas: { id: string; input: unknown; advertised: unknown; output: unknown }[] = []
 for (const file of files) {
   const exports = await import(new URL(file, toolsDir).href)

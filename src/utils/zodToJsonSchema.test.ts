@@ -20,7 +20,26 @@ describe('schema compatibility', () => {
     const schemas = JSON.parse(child.stdout.toString())
     expect(schemas.length).toBeGreaterThan(40)
     expect(schemas).toMatchSnapshot()
-  }, 25_000)
+
+    // Simulate Windows glob paths and reverse discovery order in a fresh child
+    // so separator normalization, sorting, imports and id hashes are all covered.
+    const windowsChild = Bun.spawnSync([
+      process.execPath,
+      '--eval',
+      `
+        const scanSync = Bun.Glob.prototype.scanSync
+        Bun.Glob.prototype.scanSync = function* (...args) {
+          yield* [...scanSync.apply(this, args)]
+            .map(file => file.replaceAll('/', '\\\\'))
+            .reverse()
+        }
+        await import(${JSON.stringify(new URL('../test/toolSchemas.fixture.ts', import.meta.url).href)})
+      `,
+    ], { cwd: fileURLToPath(new URL('../../', import.meta.url)), timeout: 20_000 })
+    expect(windowsChild.stderr.toString()).toBe('')
+    expect(windowsChild.exitCode).toBe(0)
+    expect(JSON.parse(windowsChild.stdout.toString())).toEqual(schemas)
+  }, 45_000) // Allow both children their 20-second deadlines plus assertion time.
 
   test('preserves defaults, optional and nullable fields, records and unknown-key policy', () => {
     const schema = z.strictObject({
