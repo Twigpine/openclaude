@@ -256,6 +256,19 @@ Keep all direct dependencies and devDependencies pinned to exact versions in the
 root and web manifests. Regenerate the relevant Bun lockfile
 when changing a pin.
 
+The static website in `web/` uses Astro `7.4.2`, `@astrojs/check` `0.9.12`,
+and `@astrojs/sitemap` `3.7.4`, all pinned exactly. Install its dependencies
+with `bun install --cwd web`, then run `bun run web:typecheck` and
+`bun run web:build` from the root. The build includes `scripts/verify-dist.ts`
+to check rendered navigation, release redirects, sprites, and sitemap entries.
+Astro's Node.js `>=22.23.4` requirement is covered by the repository's
+`>=24.22.1` runtime floor. Keep `compressHTML: true` in the site config to
+preserve HTML-aware whitespace compression; Astro 7 defaults to JSX whitespace
+rules. The site uses Astro templates and typed data without remark or rehype
+plugins, so it does not need the optional `@astrojs/markdown-remark` peer.
+If adding those plugins later, install a compatible exact pin and configure
+the Markdown processor according to the Astro 7 upgrade guide.
+
 Linting uses ESLint `10.13.0` with `@typescript-eslint/parser` and
 `@typescript-eslint/eslint-plugin` both pinned to `8.72.0`, which support ESLint 10.
 Keep these pins compatible and regenerate `bun.lock` with `bun install` after
