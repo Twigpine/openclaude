@@ -255,18 +255,18 @@ export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
 
   // Use EnvHttpProxyAgent to respect NO_PROXY
   // This agent automatically checks NO_PROXY for each request
-  const proxyOptions: undici.EnvHttpProxyAgent.Options & {
-    requestTls?: {
-      cert?: string | Buffer
-      key?: string | Buffer
-      passphrase?: string
-      ca?: string | string[] | Buffer
-    }
-  } = {
+  const proxyOptions: undici.EnvHttpProxyAgent.Options = {
     // Override both HTTP and HTTPS proxy with the provided URI
     httpProxy: uri,
     httpsProxy: uri,
-    noProxy: process.env.NO_PROXY || process.env.no_proxy,
+    // Keep the v7 CONNECT default for HTTP targets as well as HTTPS targets.
+    proxyTunnel: true,
+    // v8 excludes the apex for *.domain entries. Preserve our existing
+    // apex-and-subdomain contract, shared with the Axios/WebSocket helpers.
+    noProxy: (process.env.NO_PROXY || process.env.no_proxy)?.replace(
+      /(^|[,\s])\*\./g,
+      '$1.',
+    ),
   }
 
   // Set both connect and requestTls so TLS options apply to both paths:
@@ -285,7 +285,12 @@ export const getProxyAgent = memoize((uri: string): undici.Dispatcher => {
     proxyOptions.requestTls = tlsOpts
   }
 
-  return new undiciMod.EnvHttpProxyAgent(proxyOptions)
+  // Node 24's native fetch still uses dispatcher v1 callbacks. The public
+  // bridge also accepts v2 handlers and preserves HTTP/1.1 for legacy callers.
+  const agent = new undiciMod.EnvHttpProxyAgent(proxyOptions)
+  return typeof Bun === 'undefined'
+    ? new undiciMod.Dispatcher1Wrapper(agent)
+    : agent
 })
 
 /**

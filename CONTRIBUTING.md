@@ -301,6 +301,19 @@ paths.
 
 ### Proxy agents
 
+Use the exact `undici` 8.12.3 pin and its public exports and bundled types.
+Regenerate `bun.lock` with `bun install` after changing the manifest pin.
+Its Node.js minimum is covered by the supported `>=24.22.1` runtime.
+Wrap per-request fetch dispatchers with the public `Dispatcher1Wrapper` so
+Node 24's native fetch can use its legacy callbacks; the wrapper also accepts
+the current handler API. `setGlobalDispatcher()` handles the global bridge.
+Undici 8 enables HTTP/2 by default; the bridge keeps legacy requests on HTTP/1.1.
+Set `proxyTunnel: true` to retain CONNECT for plain HTTP targets. Normalize
+leading `*.` bypass entries to `.` before constructing the environment proxy
+dispatcher so apex and subdomain bypasses continue to match the shared helpers.
+Keep custom TLS options on `Agent.connect` for direct requests and
+`ProxyAgent.requestTls` for CONNECT targets, including `NO_PROXY` bypasses.
+
 Use the shared helpers in `src/utils/proxy.ts`: `createAxiosInstance()` for
 Axios, `getWebSocketProxyAgent(url)` for Node WebSockets, and `getProxyFetchOptions()`
 for fetch. The Axios and WebSocket helpers apply `NO_PROXY` bypasses before
