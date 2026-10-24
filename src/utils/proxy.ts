@@ -7,6 +7,7 @@ import type { LookupOptions } from 'dns'
 import type { Agent } from 'http'
 import { HttpsProxyAgent, type HttpsProxyAgentOptions } from 'https-proxy-agent'
 import memoize from 'lodash-es/memoize.js'
+import type { ConnectionOptions } from 'tls'
 import type * as undici from 'undici'
 import { getCACertificates } from './caCerts.js'
 import { logForDebugging } from './debug.js'
@@ -155,6 +156,31 @@ export function shouldBypassProxy(
 }
 
 /**
+ * Keep target TLS defaults separate from the proxy connection options.
+ * HttpsProxyAgent's constructor options configure only the socket to the proxy;
+ * the target TLS upgrade takes its options from connect().
+ */
+class TargetTLSHttpsProxyAgent extends HttpsProxyAgent<string> {
+  private readonly targetTLSOptions: Pick<
+    ConnectionOptions,
+    'ca' | 'cert' | 'key' | 'passphrase'
+  >
+
+  constructor(
+    proxyUrl: string,
+    options: HttpsProxyAgentOptions<string> & ConnectionOptions,
+  ) {
+    super(proxyUrl, options)
+    const { ca, cert, key, passphrase } = options
+    this.targetTLSOptions = { ca, cert, key, passphrase }
+  }
+
+  override connect(...[req, opts]: Parameters<HttpsProxyAgent<string>['connect']>) {
+    return super.connect(req, { ...this.targetTLSOptions, ...opts })
+  }
+}
+
+/**
  * Create an HttpsProxyAgent with optional mTLS configuration
  * Skips local DNS resolution to let the proxy handle it
  */
@@ -183,7 +209,7 @@ function createHttpsProxyAgent(
     }
   }
 
-  return new HttpsProxyAgent(proxyUrl, { ...agentOptions, ...extra })
+  return new TargetTLSHttpsProxyAgent(proxyUrl, { ...agentOptions, ...extra })
 }
 
 /**
