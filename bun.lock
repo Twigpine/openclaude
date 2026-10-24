@@ -23,7 +23,7 @@
         "@grpc/grpc-js": "1.14.6",
         "@grpc/proto-loader": "0.8.1",
         "@modelcontextprotocol/sdk": "1.32.1",
-        "@sentry/node": "^10.70.0",
+        "@sentry/node": "10.70.0",
         "@smithy/core": "3.36.2",
         "@smithy/node-http-handler": "4.12.1",
         "@types/bun": "1.4.4",
@@ -42,7 +42,7 @@
         "commander": "12.1.0",
         "cross-spawn": "7.0.6",
         "diff": "9.0.0",
-        "duck-duck-scrape": "^2.2.7",
+        "duck-duck-scrape": "2.2.7",
         "emoji-regex": "11.0.0",
         "env-paths": "4.0.0",
         "eslint": "9.39.5",
@@ -106,7 +106,7 @@
   },
   "overrides": {
     "google-auth-library": "11.3.1",
-    "ip-address": "10.2.0",
+    "ip-address": "10.7.4",
     "lodash-es": "4.18.1",
     "node-domexception": "file:vendor/node-domexception-shim",
   },
@@ -895,7 +895,7 @@
 
     "inherits": ["inherits@2.0.4", "", {}, "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="],
 
-    "ip-address": ["ip-address@10.2.0", "", {}, "sha512-/+S6j4E9AHvW9SWMSEY9Xfy66O5PWvVEJ08O0y5JGyEKQpojb0K0GKpz/v5HJ/G0vi3D2sjGK78119oXZeE0qA=="],
+    "ip-address": ["ip-address@10.7.4", "", {}, "sha512-DWBMKyeM25D70nrIiTkgQth59/G+naKOTep6huF9j+GmeK3DMD60Zvxg5d5qQnz+38AHgou6ean2LECX+lrKDg=="],
 
     "ipaddr.js": ["ipaddr.js@1.9.1", "", {}, "sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g=="],
 

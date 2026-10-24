@@ -228,6 +228,25 @@ only when a separate capability level is intentional, as for Apple Terminal
 charts. Tests that change `chalk.level` must restore it, and environment-driven
 color detection tests must import in a fresh process.
 
+### Dependency pins and overrides
+
+Keep all direct dependencies and devDependencies pinned to exact versions in the
+root and web manifests. The existing `sharp` range is the temporary exception
+while its separate upgrade is in progress. Regenerate the relevant Bun lockfile
+when changing a pin.
+
+The root `overrides` block also controls transitive resolutions:
+
+- `ip-address`: `10.7.4` sets the security floor for the MCP SDK's
+  `express-rate-limit` dependency path.
+- `google-auth-library`: `11.3.1` keeps Google authentication on the same version
+  as the direct dependency. The override accompanies the replacement of the
+  legacy Vertex SDK to remove its deprecated UUID dependency path.
+- `lodash-es`: `4.18.1` keeps transitive copies on the security fixes for template
+  code injection and prototype pollution, avoiding the deprecated `4.18.0` release.
+- `node-domexception`: the existing shim re-exports the platform's native
+  `DOMException` for `fetch-blob`, replacing the deprecated polyfill.
+
 ## AI Agent Guidelines
 
 If you are an AI agent (Copilot, Cursor, Claude, etc.) working on this codebase, refer to [AGENTS.md](AGENTS.md) for project-specific coding guidelines, conventions, and validation commands. Following these guidelines will help your contributions align with the project's patterns and reduce review friction.
