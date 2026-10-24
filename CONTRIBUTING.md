@@ -256,6 +256,15 @@ Keep all direct dependencies and devDependencies pinned to exact versions in the
 root and web manifests. Regenerate the relevant Bun lockfile
 when changing a pin.
 
+Linting uses ESLint `10.13.0` with `@typescript-eslint/parser` and
+`@typescript-eslint/eslint-plugin` both pinned to `8.72.0`, which support ESLint 10.
+Keep these pins compatible and regenerate `bun.lock` with `bun install` after
+updating them. Run `bun run lint` from the repository root; ESLint 10 discovers
+`eslint.config.js` from each linted file's directory. The JavaScript flat config
+does not require `jiti` or extend a recommended preset. Keep its explicit rules
+and ignores when upgrading. ESLint's Node.js requirement is covered by the
+supported Node.js `>=24.22.1` runtime.
+
 Keep `chokidar` pinned exactly to `6.0.0` and use its public ESM exports and
 bundled types. Pass literal paths rather than globs. Use `backend` to select
 watching behavior and `pollingInterval` / `pollingBinaryInterval` for polling;

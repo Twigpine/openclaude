@@ -124,7 +124,7 @@
     "duck-duck-scrape": "2.2.7",
     "emoji-regex": "11.0.0",
     "env-paths": "4.0.0",
-    "eslint": "9.39.5",
+    "eslint": "10.13.0",
     "execa": "10.2.1",
     "fflate": "0.8.3",
     "figures": "6.1.0",
