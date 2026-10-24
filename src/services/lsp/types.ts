@@ -22,7 +22,7 @@ export type LspServerConfig = {
   settings?: unknown
   /** Workspace folder path to use for the server */
   workspaceFolder?: string
-  /** Maximum time to wait for server startup (ms) */
+  /** Maximum time to wait for each server startup phase (default: 30000 ms) */
   startupTimeout?: number
   /** Maximum time to wait for graceful shutdown (ms) */
   shutdownTimeout?: number
