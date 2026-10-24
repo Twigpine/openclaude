@@ -203,6 +203,31 @@ untouched. When updating `marked`, compare representative terminal, table, list,
 code, link, streaming, and memory-file output and run the markdown regression tests.
 Regenerate the exact dependency pin and lockfile with `bun add --exact marked@<version>`.
 
+### Subprocesses and terminal colors
+
+Use the exact `execa` and `chalk` pins in `package.json` and their public ESM
+exports and bundled types. Regenerate both pins and the lockfile with
+`bun add --exact execa@<version> chalk@<version>`.
+
+Prefer asynchronous `execa(file, args, options)`; use `shell: true` only for
+commands that need shell syntax. With `reject: false`, check `failed`,
+`timedOut` and `exitCode` before consuming `stdout` or `stderr`. Use
+`SyncOptions` for synchronous options. The subprocess is a promise; access
+Node child-process event and lifecycle APIs through `subprocess.nodeChildProcess`.
+Use template strings or `parseCommandString()` for command splitting, and
+`ipc: true` for IPC. Explicit `input` takes precedence over inherited stdin;
+set stdin deliberately, and bound subprocess output with `maxBuffer` and
+execution time with `timeout`.
+
+Use the shared default `chalk` instance for terminal styles and the existing
+`colorize()` and theme helpers for theme colors. Keep the VS Code color boost
+and tmux clamp in `src/ink/colorize.ts`. Numeric `FORCE_COLOR` selects an exact
+level (0 disables color, 1 selects 16 colors, 2 selects 256, 3 selects truecolor);
+`ansi256()` and `bgAnsi256()` downsample at level 1. Use `new Chalk({ level })`
+only when a separate capability level is intentional, as for Apple Terminal
+charts. Tests that change `chalk.level` must restore it, and environment-driven
+color detection tests must import in a fresh process.
+
 ## AI Agent Guidelines
 
 If you are an AI agent (Copilot, Cursor, Claude, etc.) working on this codebase, refer to [AGENTS.md](AGENTS.md) for project-specific coding guidelines, conventions, and validation commands. Following these guidelines will help your contributions align with the project's patterns and reduce review friction.
