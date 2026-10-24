@@ -41,7 +41,16 @@ describe('openclaude launcher heap guard', () => {
     expect(source).toContain("resolved.source === 'percentage-unavailable'")
     expect(source).toContain('--expose-gc')
     expect(source).toContain('spawnSync(process.execPath')
-    expect(source).toContain("from './heap-limit.mjs'")
+    // The launcher must not statically import its bin/*.mjs siblings: distro
+    // layouts that copy only the launcher file (issue #2255) would otherwise
+    // crash with ERR_MODULE_NOT_FOUND before any code runs. Siblings load
+    // dynamically with inline fallbacks instead.
+    expect(source).not.toContain("from './heap-limit.mjs'")
+    expect(source).not.toContain("from './node-compile-cache.mjs'")
+    expect(source).toContain("'./heap-limit.mjs'")
+    expect(source).toContain("'./node-compile-cache.mjs'")
+    expect(source).toContain('fallbackResolveHeapSizeMb')
+    expect(source).toContain('fallbackEnableNodeCompileCacheIfAvailable')
     const importingBranch = source.slice(source.indexOf('if (existsSync(distPath))'))
     const relaunchIndex = importingBranch.indexOf('relaunchWithLongSessionHeapIfNeeded()')
     const compileCacheIndex = importingBranch.indexOf('enableNodeCompileCacheIfAvailable()')
