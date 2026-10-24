@@ -1,7 +1,23 @@
 import { describe, expect, test } from 'bun:test'
+import { snapshotEnv } from '../src/test/envSnapshot.js'
 import { captureSync } from './subprocess.ts'
 
 describe('development subprocess capture', () => {
+  test('inherits environment variables set after startup when env is omitted', () => {
+    const key = 'OPENCLAUDE_SUBPROCESS_LATE_ENV_TEST'
+    const restoreEnv = snapshotEnv([key])
+    try {
+      process.env[key] = 'set after startup'
+      const result = captureSync(process.execPath, ['-e', `
+        process.stdout.write(process.env.${key} ?? '')
+      `])
+      expect(result.status).toBe(0)
+      expect(result.stdout).toBe('set after startup')
+    } finally {
+      restoreEnv()
+    }
+  })
+
   test('captures both streams and a nonzero status without shell expansion', () => {
     const literal = 'space ; $value & "quoted"'
     const result = captureSync(process.execPath, ['-e', `

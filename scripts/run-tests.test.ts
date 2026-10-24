@@ -226,7 +226,7 @@ for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
         import { writeSync } from 'node:fs'
         test('stuck compiler cleanup', () => {
           writeSync(2, 'last diagnostic before hang\\n')
-          Bun.spawnSync([process.execPath, '-e', ${JSON.stringify(subprocess)}], { timeout: 500, killSignal: 'SIGTERM', stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+          Bun.spawnSync([process.execPath, '-e', ${JSON.stringify(subprocess)}], { env: process.env, timeout: 500, killSignal: 'SIGTERM', stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
         }, 200)
       `)
       const shardTimeout = signal ? 4000 : 1500

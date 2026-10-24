@@ -21,7 +21,7 @@ export function captureSync(
   try {
     const result = Bun.spawnSync([command, ...args], {
       cwd: options.cwd,
-      env: options.env,
+      env: options.env ?? process.env,
       timeout: options.timeout,
       maxBuffer: options.maxBuffer ?? 1024 * 1024,
       stdin: 'pipe',
