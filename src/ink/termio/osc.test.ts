@@ -28,6 +28,7 @@ const execFileNoThrowMock = mock(
 
 function installOscMocks(): void {
   mock.module('../../utils/execFileNoThrow.js', () => ({
+    ...actualExecFileNoThrow,
     execFileNoThrow: execFileNoThrowMock,
     execFileNoThrowWithCwd: execFileNoThrowMock,
   }))
