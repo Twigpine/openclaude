@@ -201,6 +201,34 @@ content: serialized headers may quote or escape filenames, and parsed patches
 can omit filenames. Check the diff and edit-snippet tests when changing these
 paths.
 
+### Proxy agents
+
+Use the shared helpers in `src/utils/proxy.ts`: `createAxiosInstance()` for
+Axios, `getWebSocketProxyAgent(url)` for Node WebSockets, and `getProxyFetchOptions()`
+for fetch. The Axios and WebSocket helpers apply `NO_PROXY` bypasses before
+selecting an agent. `getWebSocketProxyUrl(url)` supplies Bun's native WebSocket proxy
+option. Lowercase proxy environment variables take precedence over uppercase
+variants on the Axios and WebSocket paths.
+
+`https-proxy-agent` is pinned exactly to `9.1.0` and remains an external runtime
+module in `scripts/externals.ts`. Use its public named ESM exports, such as
+`import { HttpsProxyAgent } from 'https-proxy-agent'`, and the constructor
+`new HttpsProxyAgent(proxyUrl, options)`. Both it and `agent-base` are ESM
+packages requiring Node.js 20 or later; use OpenClaude's supported Node.js
+`>=24.22.1` runtime. Keep dependency updates exact and generate `bun.lock` with
+`bun add --exact https-proxy-agent@<version>`.
+
+Keep TLS verification enabled. Configure `NODE_EXTRA_CA_CERTS` before starting
+the CLI when a custom CA is needed. For runtime certificate configuration, the
+shared CA loader reads that file and the TLS helpers supply explicit options;
+clear the CA and mTLS caches after configuration changes. Proxy-agent
+constructor options configure the connection to the proxy. Supply target TLS
+options on the HTTPS request, using `getWebSocketTLSOptions()` where applicable;
+do not assume constructor `ca` options also trust the target inside a CONNECT
+tunnel. Run `bun test src/utils/proxy.connect.test.ts src/utils/proxy.test.ts`
+when changing these paths to verify HTTPS CONNECT routing and `NO_PROXY`
+bypass with certificate validation enabled.
+
 ## Provider Changes
 
 OpenClaude supports multiple provider paths. Before contributing provider changes, review the relevant documentation to ensure your implementation follows the expected patterns:
