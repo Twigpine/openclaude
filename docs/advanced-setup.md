@@ -734,6 +734,8 @@ export OPENCLAUDE_SAFETY_LEVEL=permissive   # relax benign-task false positives
 
 ## Runtime Hardening
 
+Run the development diagnostics under Bun. Their subprocess probes capture output and
+check exit status before reporting results; the installed CLI still runs under Node.
 Use these commands to validate your setup and catch mistakes early:
 
 ```bash

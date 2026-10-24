@@ -205,6 +205,18 @@ Regenerate the exact dependency pin and lockfile with `bun add --exact marked@<v
 
 ### Subprocesses and terminal colors
 
+Development scripts run under Bun and use `Bun.spawn` or `Bun.spawnSync`.
+Use argument arrays and set stdin, stdout, stderr, cwd, environment, and deadlines
+explicitly to preserve the command contract. The capture helper in
+`scripts/subprocess.ts` returns UTF-8 stdout and stderr, a nullable status, and
+launch, timeout, or output-limit errors for synchronous probes. Check errors and
+status before consuming output. Keep the fixed processor probe's platform shell
+invocation when testing command wrappers; never interpolate user input into it.
+The clean-install verifier retains its existing command runner for cross-platform
+package-manager wrappers. The startup benchmark runs under Node to measure its
+startup and compile cache; its process calls and the real Node pipe observer in
+the test runner's backpressure fixture use Node's process API.
+
 Use the exact `execa` and `chalk` pins in `package.json` and their public ESM
 exports and bundled types. Regenerate both pins and the lockfile with
 `bun add --exact execa@<version> chalk@<version>`.

@@ -1,5 +1,4 @@
 // @ts-nocheck
-import { spawn } from 'node:child_process'
 import {
   resolveCodexApiCredentials,
 } from '../src/services/api/providerConfig.js'
@@ -102,17 +101,20 @@ function runCommand(command: string, env: NodeJS.ProcessEnv): Promise<number> {
   return runProcess(command, [], env)
 }
 
-function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
-  return new Promise(resolve => {
-    const child = spawn(command, args, {
+export async function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
+  try {
+    const child = Bun.spawn([command, ...args], {
       cwd: process.cwd(),
       env,
-      stdio: 'inherit',
+      stdin: 'inherit',
+      stdout: 'inherit',
+      stderr: 'inherit',
     })
-
-    child.on('close', code => resolve(code ?? 1))
-    child.on('error', () => resolve(1))
-  })
+    await child.exited
+    return child.signalCode ? 1 : child.exitCode ?? 1
+  } catch {
+    return 1
+  }
 }
 
 function applyFastFlags(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

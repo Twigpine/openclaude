@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { captureSync } from './subprocess.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
@@ -24,7 +24,7 @@ const HEAP_LIMIT_PATH = join(import.meta.dir, '..', 'bin', 'heap-limit.mjs')
 const FOUR_GIB = 4 * 1024 * 1024 * 1024
 
 function expectSuccessfulLauncherSpawn(
-  result: ReturnType<typeof spawnSync>,
+  result: ReturnType<typeof captureSync>,
 ): void {
   expect(result.error).toBeUndefined()
   expect(result.status).toBe(0)
@@ -80,7 +80,7 @@ describe('openclaude launcher heap guard', () => {
     }
     delete env.OPENCLAUDE_HEAP_RELAUNCHED
     delete env.OPENCLAUDE_DISABLE_HEAP_RELAUNCH
-    const result = spawnSync(
+    const result = captureSync(
       process.execPath,
       [
         '--expose-gc',
@@ -89,7 +89,6 @@ describe('openclaude launcher heap guard', () => {
         '--version',
       ],
       {
-        encoding: 'utf8',
         timeout: 8000,
         env,
       },
@@ -108,11 +107,10 @@ describe('openclaude launcher heap guard', () => {
       OPENCLAUDE_DISABLE_HEAP_RELAUNCH: '1',
     }
     delete env.OPENCLAUDE_HEAP_RELAUNCHED
-    const result = spawnSync(
+    const result = captureSync(
       process.execPath,
       [BIN_PATH, '--max-old-space-size-percentage=50', '--version'],
       {
-        encoding: 'utf8',
         timeout: 8000,
         env,
       },
@@ -131,11 +129,10 @@ describe('openclaude launcher heap guard', () => {
       OPENCLAUDE_HEAP_RELAUNCHED: '1',
     }
     delete env.OPENCLAUDE_DISABLE_HEAP_RELAUNCH
-    const result = spawnSync(
+    const result = captureSync(
       process.execPath,
       [BIN_PATH, '--max-old-space-size-percentage=50', '--version'],
       {
-        encoding: 'utf8',
         timeout: 8000,
         env,
       },

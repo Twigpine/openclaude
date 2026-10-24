@@ -34,7 +34,7 @@
  * Note: package.json `overrides` do NOT travel to consumers; this script
  * intentionally reproduces the user's resolution, not the repo's.
  */
-import { execFileSync } from 'node:child_process'
+import { captureSync } from './subprocess.ts'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, posix, win32 } from 'node:path'
@@ -630,7 +630,13 @@ export function getTarballPayloadProblems(
 
 function checkTarballContents(tarballPath: string): void {
   const scenario = 'tarball'
-  const listing = execFileSync('tar', ['-tzf', tarballPath], { encoding: 'utf8' })
+  const result = captureSync('tar', ['-tzf', tarballPath])
+  process.stderr.write(result.stderr)
+  if (result.error) throw result.error
+  if (result.status !== 0) {
+    throw new Error(`Command failed: tar -tzf ${tarballPath}\n${result.stderr}`)
+  }
+  const listing = result.stdout
   const entries = new Set(listing.split(/\r?\n/).map(l => l.trim()))
   const payloadProblems = getTarballPayloadProblems(entries)
   for (const problem of payloadProblems) fail(scenario, problem)
