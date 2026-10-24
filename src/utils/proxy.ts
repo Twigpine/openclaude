@@ -20,6 +20,21 @@ import {
 } from './mtls.js'
 import { importOptionalRuntimeModule } from './optionalRuntimeModule.js'
 
+// Environment settings captured by cached TLS/proxy agents. Check NO_PROXY
+// separately via getNoProxy() so shadowed bypass values do not rebuild agents.
+export const AGENT_CONFIG_ENV_VARS: ReadonlySet<string> = new Set([
+  'NODE_EXTRA_CA_CERTS',
+  'NODE_OPTIONS',
+  'CLAUDE_CODE_CLIENT_CERT',
+  'CLAUDE_CODE_CLIENT_KEY',
+  'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'CLAUDE_CODE_PROXY_RESOLVES_HOSTS',
+])
+
 // Disable fetch keep-alive after a stale-pool ECONNRESET so retries open a
 // fresh TCP connection instead of reusing the dead pooled socket. Sticky for
 // the process lifetime — once the pool is known-bad, don't trust it again.

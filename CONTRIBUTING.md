@@ -334,7 +334,9 @@ packages requiring Node.js 20 or later; use OpenClaude's supported Node.js
 Keep TLS verification enabled. Configure `NODE_EXTRA_CA_CERTS` before starting
 the CLI when a custom CA is needed. For runtime certificate configuration, the
 shared CA loader reads that file and the TLS helpers supply explicit options;
-clear the CA and mTLS caches after configuration changes. Proxy-agent
+clear the CA and mTLS caches after configuration changes. Structured I/O
+environment updates to TLS or proxy settings refresh CA, mTLS, and proxy caches
+and global agents; effective bypass-list changes do the same. Proxy-agent
 constructor options configure the connection to the proxy. Supply target TLS
 options on the HTTPS request, using `getWebSocketTLSOptions()` where applicable;
 do not assume constructor `ca` options also trust the target inside a CONNECT

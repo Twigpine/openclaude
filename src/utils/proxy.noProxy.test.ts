@@ -11,11 +11,17 @@ import { promisify } from 'node:util'
 import { createTestTlsFixture } from '../test/tlsFixture.js'
 
 const run = promisify(execFile)
+const { key, cert } = createTestTlsFixture()
 let directory: string
 let modulePath: string
 
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), 'proxy-no-proxy-'))
+  await Promise.all([
+    writeFile(join(directory, 'ca.pem'), cert),
+    writeFile(join(directory, 'client.pem'), cert),
+    writeFile(join(directory, 'client.key'), key),
+  ])
   modulePath = join(directory, 'network.mjs')
   const entrypoint = join(directory, 'entry.ts')
   await writeFile(entrypoint, `
@@ -71,14 +77,13 @@ afterAll(async () => {
   if (directory) await rm(directory, { recursive: true, force: true })
 })
 
-test('structured I/O refreshes certificate caches with a combined certificate and no_proxy update', async () => {
-  const { key, cert } = createTestTlsFixture()
+test.each([
+  'combined certificate and no_proxy',
+  'certificate-only',
+] as const)('structured I/O refreshes certificate caches with a %s update', async mode => {
   const caPath = join(directory, 'ca.pem')
   const certPath = join(directory, 'client.pem')
   const keyPath = join(directory, 'client.key')
-  await Promise.all([
-    writeFile(caPath, cert), writeFile(certPath, cert), writeFile(keyPath, key),
-  ])
   const sockets = new Set<Socket>()
   let connects = 0
   let requests = 0
@@ -125,7 +130,7 @@ test('structured I/O refreshes certificate caches with a combined certificate an
       'CLAUDE_CODE_CLIENT_CERT', 'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
     ]) delete env[name]
     const config = {
-      caPath, certPath, keyPath,
+      mode, caPath, certPath, keyPath,
       proxy: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`,
       url: `https://127.0.0.1:${targetPort}/`,
     }
@@ -133,14 +138,16 @@ test('structured I/O refreshes certificate caches with a combined certificate an
       import assert from 'node:assert/strict';
       import { readFileSync } from 'node:fs';
       import { pathToFileURL } from 'node:url';
+      const { getGlobalDispatcher, setGlobalDispatcher } = await import(pathToFileURL(${JSON.stringify(Bun.resolveSync('undici/index.js', import.meta.dir))}));
       const network = await import(pathToFileURL(process.argv[1]));
       const config = JSON.parse(process.argv[2]);
       process.env.HTTPS_PROXY = config.proxy;
-      process.env.no_proxy = '*.127.0.0.1';
+      process.env.no_proxy = config.mode === 'certificate-only' ? 'unused.invalid' : '*.127.0.0.1';
       assert.equal(network.getCACertificates(), undefined);
       assert.equal(network.getMTLSConfig(), undefined);
       assert.equal(network.getMTLSAgent(), undefined);
       const cached = network.getProxyAgent(config.proxy);
+      const previousGlobalDispatcher = getGlobalDispatcher();
       network.configureGlobalAgents();
       const agents = new Set([cached]);
       const update = async variables => {
@@ -156,8 +163,9 @@ test('structured I/O refreshes certificate caches with a combined certificate an
           NODE_EXTRA_CA_CERTS: config.caPath,
           CLAUDE_CODE_CLIENT_CERT: config.certPath,
           CLAUDE_CODE_CLIENT_KEY: config.keyPath,
-          no_proxy: 'unused.invalid',
+          ...(config.mode !== 'certificate-only' && { no_proxy: 'unused.invalid' }),
         });
+        agents.add(getGlobalDispatcher());
         const expectedCert = readFileSync(config.certPath, 'utf8');
         const expectedKey = readFileSync(config.keyPath, 'utf8');
         assert.deepEqual(network.getMTLSConfig(), { cert: expectedCert, key: expectedKey });
@@ -177,7 +185,8 @@ test('structured I/O refreshes certificate caches with a combined certificate an
         }
         console.log('verified');
       } finally {
-        for (const dispatcher of agents) await dispatcher.close();
+        setGlobalDispatcher(previousGlobalDispatcher);
+        await Promise.all([...agents].map(dispatcher => dispatcher.close()));
       }
     `, modulePath, JSON.stringify(config)], { env, timeout: 6000 })
     expect(stdout.trim()).toBe('verified')
@@ -191,6 +200,75 @@ test('structured I/O refreshes certificate caches with a combined certificate an
     })))
   }
 }, 10000)
+
+test.each(['TLS/proxy settings', 'unrelated session token'] as const)(
+  'structured I/O cache refresh for %s', async mode => {
+    const env = { ...process.env }
+    for (const name of [
+      'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy',
+      'NODE_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'CLAUDE_CODE_PROXY_RESOLVES_HOSTS',
+      'CLAUDE_CODE_CLIENT_CERT', 'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
+    ]) delete env[name]
+    const { stdout } = await run('node', ['--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { join } from 'node:path';
+      import { pathToFileURL } from 'node:url';
+      const { getGlobalDispatcher, setGlobalDispatcher } = await import(pathToFileURL(${JSON.stringify(Bun.resolveSync('undici/index.js', import.meta.dir))}));
+      const network = await import(pathToFileURL(process.argv[1]));
+      const { mode, directory } = JSON.parse(process.argv[2]);
+      const proxy = 'http://127.0.0.1:1';
+      const settings = {
+        NODE_EXTRA_CA_CERTS: join(directory, 'ca.pem'),
+        CLAUDE_CODE_CLIENT_CERT: join(directory, 'client.pem'),
+        CLAUDE_CODE_CLIENT_KEY: join(directory, 'client.key'),
+        CLAUDE_CODE_CLIENT_KEY_PASSPHRASE: 'test-passphrase',
+      };
+      Object.assign(process.env, settings, { HTTPS_PROXY: proxy, no_proxy: 'unused.invalid' });
+      const updates = mode === 'unrelated session token'
+        ? { CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'refreshed-token' }
+        : { ...settings, NODE_OPTIONS: '--use-system-ca',
+            HTTP_PROXY: proxy, HTTPS_PROXY: proxy, http_proxy: proxy, https_proxy: proxy,
+            CLAUDE_CODE_PROXY_RESOLVES_HOSTS: 'true' };
+      const previousGlobalDispatcher = getGlobalDispatcher();
+      const dispatchers = new Set();
+      const tlsAgents = new Set();
+      const snapshot = () => {
+        const state = [network.getCACertificates(), network.getMTLSConfig(),
+          network.getMTLSAgent(), network.getProxyAgent(proxy), getGlobalDispatcher()];
+        tlsAgents.add(state[2]);
+        dispatchers.add(state[3]);
+        dispatchers.add(state[4]);
+        return state;
+      };
+      try {
+        network.configureGlobalAgents();
+        for (const [name, value] of Object.entries(updates)) {
+          const before = snapshot();
+          const io = new network.StructuredIO((async function* () {
+            yield JSON.stringify({ type: 'update_environment_variables', variables: { [name]: value } }) + '\\n';
+          })());
+          for await (const message of io.structuredInput) {
+            assert.fail('Environment updates must be consumed internally: ' + message.type);
+          }
+          const after = snapshot();
+          assert.equal(process.env[name], value);
+          assert.equal(network.getNoProxy(), 'unused.invalid');
+          for (let index = 0; index < before.length; index++) {
+            if (mode === 'unrelated session token') assert.equal(after[index], before[index], name);
+            else assert.notEqual(after[index], before[index], name);
+          }
+          assert.equal(getGlobalDispatcher(), network.getProxyAgent(proxy));
+        }
+        console.log('verified');
+      } finally {
+        setGlobalDispatcher(previousGlobalDispatcher);
+        await Promise.all([...dispatchers].map(dispatcher => dispatcher.close()));
+        for (const agent of tlsAgents) agent.destroy();
+      }
+    `, modulePath, JSON.stringify({ mode, directory })], { env, timeout: 6000 })
+    expect(stdout.trim()).toBe('verified')
+  }, 10000,
+)
 
 for (const mode of [
   'lowercase-bypass', 'lowercase-proxy', 'empty-lowercase',
