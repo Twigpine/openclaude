@@ -1,7 +1,10 @@
-import { describe, expect, test } from 'bun:test'
-import { resolve } from 'node:path'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { copyFile, mkdtemp, rm, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
-const cliPath = resolve(import.meta.dir, '../../dist/cli.mjs')
+let buildDir: string
+let cliPath: string
 
 function runCli(args: string[]) {
   const env: NodeJS.ProcessEnv = { ...process.env, OPENCLAUDE_DISABLE_TELEMETRY: '1' }
@@ -13,6 +16,38 @@ function runCli(args: string[]) {
 }
 
 describe('built CLI Commander compatibility', () => {
+  beforeAll(async () => {
+    const repoRoot = resolve(import.meta.dir, '../..')
+    buildDir = await mkdtemp(join(tmpdir(), 'openclaude-commander-test-'))
+    // The build script writes to cwd/dist. Give it the current source and
+    // dependencies in an isolated workspace so every run tests a fresh bundle.
+    for (const directory of ['src', 'scripts', 'node_modules']) {
+      await symlink(join(repoRoot, directory), join(buildDir, directory), 'junction')
+    }
+    for (const file of ['package.json', 'tsconfig.json']) {
+      await copyFile(join(repoRoot, file), join(buildDir, file))
+    }
+    const build = Bun.spawn([process.execPath, 'run', 'scripts/build.ts'], {
+      cwd: buildDir,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 120_000,
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      build.exited,
+      new Response(build.stdout).text(),
+      new Response(build.stderr).text(),
+    ])
+    if (exitCode !== 0) {
+      throw new Error(`CLI build failed (${exitCode}):\n${stdout}\n${stderr}`)
+    }
+    cliPath = join(buildDir, 'dist/cli.mjs')
+  }, 130_000) // Leave time beyond the build deadline for output and cleanup.
+
+  afterAll(async () => {
+    if (buildDir) await rm(buildDir, { recursive: true, force: true })
+  })
+
   // Allow time for the eight-second subprocess deadline and assertions.
   test('registers the stderr debug option without breaking help', () => {
     const result = runCli(['--debug-to-stderr', '--help'])
