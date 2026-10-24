@@ -136,13 +136,19 @@ function describeOllamaReadinessIssue(
   return ''
 }
 
-type ProviderChoice = 'auto' | ProviderProfile | 'codex-oauth' | 'clear'
+type ProviderChoice =
+  | 'auto'
+  | ProviderProfile
+  | 'llama-windows'
+  | 'codex-oauth'
+  | 'clear'
 
 type Step =
   | { name: 'choose' }
   | { name: 'auto-goal' }
   | { name: 'auto-detect'; goal: RecommendationGoal }
   | { name: 'ollama-detect' }
+  | { name: 'llama-windows-detect' }
   | { name: 'openai-key'; defaultModel: string }
   | { name: 'openai-base'; apiKey: string; defaultModel: string }
   | {
@@ -671,6 +677,7 @@ function ProviderChooser({
   const summary = buildCurrentProviderSummary()
   const canUseCodexOAuth = !isBareMode()
   const ollamaMetadata = getProviderPresetUiMetadata('ollama')
+  const llamaWindowsMetadata = getProviderPresetUiMetadata('llama-windows')
   const openAIMetadata = getProviderPresetUiMetadata('openai')
   const geminiMetadata = getProviderPresetUiMetadata('gemini')
   const mistralMetadata = getProviderPresetUiMetadata('mistral')
@@ -688,6 +695,11 @@ function ProviderChooser({
       label: ollamaMetadata.label,
       value: 'ollama',
       description: ollamaMetadata.description,
+    },
+    {
+      label: llamaWindowsMetadata.label,
+      value: 'llama-windows',
+      description: `${llamaWindowsMetadata.description} (${llamaWindowsMetadata.baseUrl})`,
     },
     {
       label: openAIMetadata.name,
@@ -1103,6 +1115,126 @@ function OllamaModelStep({
   )
 }
 
+export function LlamaWindowsModelStep({
+  onSave,
+  onBack,
+  onCancel,
+}: {
+  onSave: (profile: ProviderProfile, env: ProfileEnv) => void
+  onBack: () => void
+  onCancel: () => void
+}): React.ReactNode {
+  const metadata = getProviderPresetUiMetadata('llama-windows')
+  const [status, setStatus] = React.useState<
+    | { state: 'loading' }
+    | { state: 'ready'; models: string[] }
+    | { state: 'unavailable'; message: string }
+  >({ state: 'loading' })
+
+  React.useEffect(() => {
+    let cancelled = false
+
+    void (async () => {
+      const readiness = await probeRouteReadiness('llama-windows', {
+        baseUrl: metadata.baseUrl,
+      })
+      if (!readiness || readiness.state === 'unreachable') {
+        if (!cancelled) {
+          setStatus({
+            state: 'unavailable',
+            message: `Could not reach Llama for Windows at ${metadata.baseUrl}. Start its local server, then run /provider again.`,
+          })
+        }
+        return
+      }
+      if (readiness.state === 'no_models') {
+        if (!cancelled) {
+          setStatus({
+            state: 'unavailable',
+            message: `Llama for Windows is reachable at ${metadata.baseUrl}, but it did not report any models.`,
+          })
+        }
+        return
+      }
+      if (readiness.state !== 'ready') {
+        if (!cancelled) {
+          setStatus({
+            state: 'unavailable',
+            message: `Llama for Windows could not return a model list from ${metadata.baseUrl}.`,
+          })
+        }
+        return
+      }
+      const models = readiness.models
+        .map(model => (typeof model === 'string' ? model : model.name))
+        .filter(Boolean)
+      if (models.length === 0) {
+        if (!cancelled) {
+          setStatus({
+            state: 'unavailable',
+            message: `Llama for Windows did not report any selectable models at ${metadata.baseUrl}.`,
+          })
+        }
+        return
+      }
+      if (!cancelled) {
+        setStatus({ state: 'ready', models })
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [metadata.baseUrl])
+
+  if (status.state === 'loading') {
+    return <LoadingState message="Checking Llama for Windows models…" />
+  }
+
+  if (status.state === 'unavailable') {
+    return (
+      <Dialog title="Llama for Windows setup" onCancel={onCancel} color="warning">
+        <Box flexDirection="column" gap={1}>
+          <Text>{status.message}</Text>
+          <Select
+            options={[
+              { label: 'Back', value: 'back' },
+              { label: 'Cancel', value: 'cancel' },
+            ]}
+            onChange={(value: string) =>
+              value === 'back' ? onBack() : onCancel()
+            }
+            onCancel={onCancel}
+          />
+        </Box>
+      </Dialog>
+    )
+  }
+
+  return (
+    <Dialog title="Choose a Llama for Windows model" onCancel={onBack}>
+      <Box flexDirection="column" gap={1}>
+        <Text>
+          Choose a model reported by the local server at {metadata.baseUrl}.
+        </Text>
+        <Select
+          options={status.models.map(model => ({ label: model, value: model }))}
+          inlineDescriptions
+          visibleOptionCount={Math.min(8, status.models.length)}
+          onChange={model =>
+            onSave('openai', {
+              OPENAI_BASE_URL: metadata.baseUrl,
+              OPENAI_MODEL: model,
+              CLAUDE_CODE_PROVIDER_ROUTE_ID: 'llama-windows',
+            })
+          }
+          onCancel={onBack}
+        />
+      </Box>
+    </Dialog>
+  )
+}
+
 function CodexOAuthStep({
   onSave,
   onBack,
@@ -1315,6 +1447,8 @@ export function ProviderWizard({
               setStep({ name: 'auto-goal' })
             } else if (value === 'ollama') {
               setStep({ name: 'ollama-detect' })
+            } else if (value === 'llama-windows') {
+              setStep({ name: 'llama-windows-detect' })
             } else if (value === 'openai') {
               setStep({
                 name: 'openai-key',
@@ -1366,6 +1500,15 @@ export function ProviderWizard({
     case 'ollama-detect':
       return (
         <OllamaModelStep
+          onSave={(profile, env) => finishProfileSave(onDone, profile, env)}
+          onBack={() => setStep({ name: 'choose' })}
+          onCancel={() => onDone()}
+        />
+      )
+
+    case 'llama-windows-detect':
+      return (
+        <LlamaWindowsModelStep
           onSave={(profile, env) => finishProfileSave(onDone, profile, env)}
           onBack={() => setStep({ name: 'choose' })}
           onCancel={() => onDone()}

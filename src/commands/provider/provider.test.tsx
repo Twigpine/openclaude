@@ -813,5 +813,6 @@ test('ProviderWizard hides Codex OAuth while running in bare mode', async () => 
   const output = await renderProviderWizardFrame()
 
   expect(output).toContain('Set up a provider profile')
+  expect(output).toContain('Llama for Windows')
   expect(output).not.toContain('Codex OAuth')
 })

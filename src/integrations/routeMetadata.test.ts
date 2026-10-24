@@ -399,6 +399,20 @@ test('Venice route metadata uses official OpenAI-compatible defaults', () => {
   expect(resolveRouteIdFromBaseUrl('https://api.venice.ai/api/v1/chat/completions')).toBe('venice')
 })
 
+test('Llama for Windows route metadata only recognizes its default port on loopback', () => {
+  expect(resolveRouteIdFromBaseUrl('http://127.0.0.1:9931/v1')).toBe(
+    'llama-windows',
+  )
+  expect(resolveRouteIdFromBaseUrl('http://localhost:9931/v1')).toBe(
+    'llama-windows',
+  )
+  expect(resolveRouteIdFromBaseUrl('http://[::1]:9931/v1')).toBe(
+    'llama-windows',
+  )
+  expect(resolveRouteIdFromBaseUrl('http://192.168.1.20:9931/v1')).toBeNull()
+  expect(resolveRouteIdFromBaseUrl('http://127.0.0.1:9932/v1')).toBeNull()
+})
+
 test('Z.AI route metadata is limited to the canonical Coding Plan endpoint', () => {
   expect(
     resolveRouteIdFromBaseUrl('https://api.z.ai/api/coding/paas/v4'),

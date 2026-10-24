@@ -314,6 +314,20 @@ export const PROVIDER_PRESET_MANIFEST = [
     ]
   },
   {
+    "preset": "llama-windows",
+    "routeKind": "gateway",
+    "routeId": "llama-windows",
+    "vendorId": "openai",
+    "gatewayId": "llama-windows",
+    "description": "Local Llama for Windows endpoint",
+    "baseUrlEnvVars": [
+      "LLAMA_WINDOWS_BASE_URL"
+    ],
+    "modelEnvVars": [
+      "OPENAI_MODEL"
+    ]
+  },
+  {
     "preset": "lmstudio",
     "routeKind": "gateway",
     "routeId": "lmstudio",
@@ -651,6 +665,7 @@ export const ORDERED_PROVIDER_PRESETS = [
   "groq",
   "hicap",
   "llmtr",
+  "llama-windows",
   "lmstudio",
   "atomic-chat",
   "ollama",

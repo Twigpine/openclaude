@@ -127,6 +127,14 @@ function resolveKnownLocalRouteIdFromBaseUrl(baseUrl?: string): string | null {
       return 'ollama'
     }
     if (
+      host.endsWith(':9931') &&
+      (hostname === '127.0.0.1' ||
+        hostname === 'localhost' ||
+        hostname === '[::1]')
+    ) {
+      return 'llama-windows'
+    }
+    if (
       host.endsWith(':1234') ||
       haystack.includes('lmstudio') ||
       haystack.includes('lm-studio')

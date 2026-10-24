@@ -12,14 +12,50 @@ Then open PowerShell and check it:
 
 ```powershell
 node --version
-npm --version
+npm.cmd --version
 ```
 
 ## 2. Install OpenClaude
 
+### Install the Llama for Windows fork build
+
+Choose one installation method below. To use the fork's native Llama for
+Windows integration, paste this into PowerShell. It requires Node.js 22+ and
+Git, clones the fork to
+`%LOCALAPPDATA%\OpenClaude-Fork`, builds it, and adds the `openclaude` command
+to npm's global command path:
+
 ```powershell
-npm install -g @twigpine/openclaude@latest
+irm https://raw.githubusercontent.com/LightningEX19/openclaude/lightningex19-llama-windows-provider/scripts/windows/install-openclaude.ps1 | iex
 ```
+
+After it finishes, start OpenClaude with `openclaude.cmd` (or `openclaude` if
+PowerShell script execution is enabled). To configure Llama for Windows, run
+`/provider` and choose **Llama for Windows**.
+
+To update this fork installation, rerun the same installer; it updates the
+checkout only when it has no local changes. To remove its global command link,
+open PowerShell in `%LOCALAPPDATA%\OpenClaude-Fork` and run:
+
+```powershell
+npm.cmd unlink -g
+```
+
+This removes the command link, not the fork checkout or your local files.
+
+### Install the published OpenClaude release
+
+Use this instead if you want the published release; it is separate from the
+fork build above. Installing both globally can replace the `openclaude`
+command link, so choose one method.
+
+```powershell
+npm.cmd install -g @twigpine/openclaude@latest
+```
+
+Update the published release with `npm.cmd update -g @twigpine/openclaude`.
+Remove it with `npm.cmd uninstall -g @twigpine/openclaude`; these commands do
+not update or remove the fork checkout.
 
 Upgrading from `@gitlawb/openclaude`? The package moved to the `@twigpine`
 scope and the old one is no longer updated. npm will not install one over the
@@ -27,8 +63,8 @@ other because both provide the `openclaude` command, so remove the old package
 first:
 
 ```powershell
-npm uninstall -g @gitlawb/openclaude
-npm install -g @twigpine/openclaude@latest
+npm.cmd uninstall -g @gitlawb/openclaude
+npm.cmd install -g @twigpine/openclaude@latest
 ```
 
 If you set up the optional PowerShell aliases, your `$PROFILE` still loads them
@@ -46,7 +82,7 @@ $env:CLAUDE_CODE_USE_OPENAI="1"
 $env:OPENAI_API_KEY="sk-your-key-here"
 $env:OPENAI_MODEL="gpt-4o"
 
-openclaude
+openclaude.cmd
 ```
 
 ### Option B: DeepSeek
@@ -57,7 +93,7 @@ $env:OPENAI_API_KEY="sk-your-key-here"
 $env:OPENAI_BASE_URL="https://api.deepseek.com/v1"
 $env:OPENAI_MODEL="deepseek-v4-flash"
 
-openclaude
+openclaude.cmd
 ```
 
 Use `deepseek-v4-pro` when you want the stronger model. `deepseek-chat` and `deepseek-reasoner` still work as DeepSeek's legacy API aliases.
@@ -77,7 +113,7 @@ $env:CLAUDE_CODE_USE_OPENAI="1"
 $env:OPENAI_BASE_URL="http://localhost:11434/v1"
 $env:OPENAI_MODEL="llama3.1:8b"
 
-openclaude
+openclaude.cmd
 ```
 
 No API key is needed for Ollama local models.
@@ -116,19 +152,34 @@ $env:OPENAI_BASE_URL="http://localhost:1234/v1"
 $env:OPENAI_MODEL="your-model-name"
 # $env:OPENAI_API_KEY="lmstudio"  # optional: some users need a dummy key
 
-openclaude
+openclaude.cmd
 ```
 
 Replace `your-model-name` with the model name shown in LM Studio.
 
 No API key is needed for LM Studio local models (but uncomment the `OPENAI_API_KEY` line if you hit auth errors).
 
-### Option E: Using a .env file (Optional)
+### Option E: Llama for Windows
+
+Llama for Windows requires Windows 11. If you are on Windows 10, use another
+local backend such as Ollama or LM Studio.
+
+Install [Llama for Windows](https://github.com/ggml-org/Llama-Windows), start
+the tray app, and load a model. Its local OpenAI-compatible server uses
+`127.0.0.1:9931` by default.
+
+Run `/provider`, choose **Llama for Windows**, then select one of the models
+reported by its server. OpenClaude uses `http://127.0.0.1:9931/v1` and does
+not require an API key. If you changed the app's listen address or port, set
+`$env:LLAMA_WINDOWS_BASE_URL="http://127.0.0.1:8080/v1"` before running
+OpenClaude. Include `/v1` in the custom base URL.
+
+### Option F: Using a .env file (Optional)
 
 If you prefer to keep your keys in a `.env` file instead of exporting them individually, note that OpenClaude does not load `.env` files automatically. You must explicitly pass it:
 
 ```powershell
-openclaude --provider-env-file .env
+openclaude.cmd --provider-env-file .env
 ```
 
 Keep `.env` out of git because it contains secrets.
@@ -139,7 +190,7 @@ The explicit loader accepts provider/setup variables. Set runtime/debug variable
 Close PowerShell, open a new one, and try again:
 
 ```powershell
-openclaude
+openclaude.cmd
 ```
 
 If PowerShell still says `openclaude` is not recognized, npm's global bin
@@ -147,7 +198,7 @@ folder may be missing from your user `Path`. Add it, then open a new
 PowerShell window:
 
 ```powershell
-$npmPrefix = npm config get prefix
+$npmPrefix = npm.cmd config get prefix
 $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
 if (($currentUserPath -split ';') -notcontains $npmPrefix) {
@@ -187,13 +238,13 @@ Check the basics:
 ## 6. Updating OpenClaude
 
 ```powershell
-npm install -g @twigpine/openclaude@latest
+npm.cmd install -g @twigpine/openclaude@latest
 ```
 
 ## 7. Uninstalling OpenClaude
 
 ```powershell
-npm uninstall -g @twigpine/openclaude
+npm.cmd uninstall -g @twigpine/openclaude
 ```
 
 
