@@ -47,6 +47,7 @@ import {
   buildVertexProfileEnv,
   clearManagedProfileEnv,
   deleteProfileFile,
+  loadProfileFile,
   type ProfileFileLocation,
   type ProfileEnv,
   type ProviderProfile as ProviderProfileStartup,
@@ -700,6 +701,15 @@ function hasProviderSelectionFlags(
   return PROVIDER_SELECTION_FLAGS.some(flag => processEnv[flag] !== undefined)
 }
 
+function hasCompleteAnthropicSelection(processEnv: NodeJS.ProcessEnv): boolean {
+  return (
+    trimOrUndefined(processEnv.ANTHROPIC_BASE_URL) !== undefined &&
+    trimOrUndefined(processEnv.ANTHROPIC_MODEL) !== undefined &&
+    (trimOrUndefined(processEnv.ANTHROPIC_AUTH_TOKEN) !== undefined ||
+      trimOrUndefined(processEnv.ANTHROPIC_API_KEY) !== undefined)
+  )
+}
+
 /**
  * A "complete" explicit provider selection = a USE flag AND at least one
  * concrete config value that tells us WHERE to route (a base URL) or WHAT
@@ -718,12 +728,7 @@ function hasCompleteProviderSelection(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): boolean {
   if (resolveEnvOnlyProviderRouteId(processEnv) !== null) return true
-  if (
-    trimOrUndefined(processEnv.ANTHROPIC_BASE_URL) !== undefined &&
-    trimOrUndefined(processEnv.ANTHROPIC_MODEL) !== undefined &&
-    (trimOrUndefined(processEnv.ANTHROPIC_AUTH_TOKEN) !== undefined ||
-      trimOrUndefined(processEnv.ANTHROPIC_API_KEY) !== undefined)
-  ) {
+  if (hasCompleteAnthropicSelection(processEnv)) {
     return true
   }
   if (!hasProviderSelectionFlags(processEnv)) return false
@@ -843,6 +848,7 @@ export function shouldRouteToGeminiVertexFromProfile(
   activeProfile: ProviderProfile | undefined,
 ): boolean {
   if (activeProfile?.provider !== 'gemini-vertex') return false
+  if (hasCompleteAnthropicSelection(processEnv)) return false
   return !hasConflictingProviderFlagsForProfile(processEnv, activeProfile)
 }
 
@@ -1313,7 +1319,7 @@ export function clearProviderProfileEnvFromProcessEnv(
 
 export function applyProviderProfileToProcessEnv(
   profile: ProviderProfile,
-  options?: { primaryModel?: string },
+  options?: { primaryModel?: string; startupEnv?: ProfileEnv },
 ): void {
   const { route, compatibilityMode } = resolveProfileCompatibility(profile.provider)
   const primaryModel = options?.primaryModel ?? getPrimaryModel(profile.model)
@@ -1357,7 +1363,14 @@ export function applyProviderProfileToProcessEnv(
       ...(profile.apiKey ? { GEMINI_API_KEY: profile.apiKey } : {}),
     }
   } else if (compatibilityMode === 'gemini-vertex') {
-    const vertexAuthMode = resolveGeminiVertexAuthMode(process.env)
+    const savedEnv = options?.startupEnv
+    const accessToken = sanitizeApiKey(process.env.GEMINI_ACCESS_TOKEN) ??
+      sanitizeApiKey(profile.apiKey) ?? sanitizeApiKey(savedEnv?.GEMINI_ACCESS_TOKEN)
+    const vertexAuthMode = resolveGeminiVertexAuthMode({
+      GEMINI_VERTEX_AUTH_MODE: trimOrUndefined(process.env.GEMINI_VERTEX_AUTH_MODE) ??
+        savedEnv?.GEMINI_VERTEX_AUTH_MODE,
+      GEMINI_ACCESS_TOKEN: accessToken,
+    })
     profileEnv = buildGeminiVertexProfileEnv({
       model: primaryModel,
       project:
@@ -1365,8 +1378,9 @@ export function applyProviderProfileToProcessEnv(
         trimOrUndefined(process.env.GEMINI_VERTEX_PROJECT) ||
         trimOrUndefined(process.env.GOOGLE_CLOUD_PROJECT) ||
         trimOrUndefined(process.env.GCLOUD_PROJECT) ||
-        trimOrUndefined(process.env.GOOGLE_PROJECT_ID),
-      location: process.env.GEMINI_VERTEX_LOCATION,
+        trimOrUndefined(process.env.GOOGLE_PROJECT_ID) ||
+        savedEnv?.GEMINI_VERTEX_PROJECT,
+      location: trimOrUndefined(process.env.GEMINI_VERTEX_LOCATION) ?? savedEnv?.GEMINI_VERTEX_LOCATION,
       authMode: vertexAuthMode,
     })
     // buildCompatibilityProcessEnv clears every managed key (incl.
@@ -1374,10 +1388,10 @@ export function applyProviderProfileToProcessEnv(
     // profileEnv, so carry the active credential forward or selecting a Vertex
     // profile would erase it before the first request.
     if (vertexAuthMode === 'access-token') {
-      const accessToken = trimOrUndefined(process.env.GEMINI_ACCESS_TOKEN)
       if (accessToken) profileEnv.GEMINI_ACCESS_TOKEN = accessToken
     } else {
-      const adcFile = trimOrUndefined(process.env.GOOGLE_APPLICATION_CREDENTIALS)
+      const adcFile = trimOrUndefined(process.env.GOOGLE_APPLICATION_CREDENTIALS) ??
+        savedEnv?.GOOGLE_APPLICATION_CREDENTIALS
       if (adcFile) profileEnv.GOOGLE_APPLICATION_CREDENTIALS = adcFile
     }
   } else if (isGithubCompatibilityMode(compatibilityMode)) {
@@ -1767,8 +1781,22 @@ export function applyActiveProviderProfileFromConfig(
   }
 
   const savedPrimaryModel = getSavedModelOverrideForProfile(activeProfile)
+  // The active mirror carries Vertex settings absent from the plural schema.
+  // Read it before setting the applied marker, which suppresses the legacy
+  // startup loader. A preset endpoint is not an explicit project; in that case
+  // the mirror also owns the saved project. Reject conflicting projects/routes.
+  const startupProfile = activeProfile.provider === 'gemini-vertex'
+    ? loadProfileFile()
+    : null
+  const profileProject = geminiVertexProjectFromProfile(activeProfile.baseUrl)
+  const startupEnv = startupProfile?.profile === 'gemini-vertex' &&
+    (!profileProject || trimOrUndefined(startupProfile.env.GEMINI_VERTEX_PROJECT) === profileProject) &&
+    trimOrUndefined(startupProfile.env.GEMINI_VERTEX_MODEL) === getPrimaryModel(activeProfile.model)
+    ? startupProfile.env
+    : undefined
   applyProviderProfileToProcessEnv(activeProfile, {
     primaryModel: savedPrimaryModel,
+    startupEnv,
   })
   return activeProfile
 }

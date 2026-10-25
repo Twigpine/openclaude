@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import type { DebugLogLevel } from '../../utils/debug.js'
 
 type DebugModule = typeof import('../../utils/debug.js')
@@ -27,6 +28,7 @@ const originalEnv = {
   GOOGLE_PROJECT_ID: process.env.GOOGLE_PROJECT_ID,
 }
 let actualDebugModule: DebugModule | undefined
+let restoreGithubEnv: () => void
 
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) {
@@ -51,10 +53,12 @@ function findDebugCall(
 
 beforeEach(async () => {
   await acquireSharedMutationLock('providerConfig.envDiagnostics.test.ts')
+  restoreGithubEnv = snapshotEnv(['CLAUDE_CODE_USE_GITHUB'])
 })
 
 afterEach(() => {
   try {
+    restoreGithubEnv()
     restoreEnv('CLAUDE_CODE_USE_OPENAI', originalEnv.CLAUDE_CODE_USE_OPENAI)
     restoreEnv('CLAUDE_CODE_USE_GEMINI', originalEnv.CLAUDE_CODE_USE_GEMINI)
     restoreEnv('CLAUDE_CODE_USE_GEMINI_VERTEX', originalEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)

@@ -981,6 +981,63 @@ test('saved-profile-only Vertex lets an explicit model override the profile mode
   }
 })
 
+test.each([undefined, '1'])('native Vertex selects a Gemini default through the client with Foundry=%s', async foundry => {
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  if (foundry) process.env.CLAUDE_CODE_USE_FOUNDRY = foundry
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+  const { getDefaultMainLoopModelSetting } = await import('../../utils/model/model.js')
+  const model = getDefaultMainLoopModelSetting()
+  let url = ''
+  const client = await getAnthropicClient({
+    maxRetries: 0, model,
+    fetchOverride: async input => {
+      url = String(input)
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }))
+    },
+  })
+  await client.beta.messages.create({ model, messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
+  expect(realProviders.getAPIProvider()).toBe('gemini-vertex')
+  expect(url).toContain('/publishers/google/models/gemini-2.5-flash:generateContent')
+})
+
+test.each(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const)(
+  'complete custom Anthropic selection with %s survives saved Vertex routing',
+  async credentialKey => {
+    delete process.env.CLAUDE_CODE_USE_OPENAI
+    delete process.env.CLAUDE_CODE_USE_GEMINI
+    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+    process.env.ANTHROPIC_BASE_URL = 'https://anthropic.example/api'
+    process.env.ANTHROPIC_MODEL = 'claude-sonnet-4-6'
+    delete process.env.ANTHROPIC_API_KEY
+    delete process.env.ANTHROPIC_AUTH_TOKEN
+    process.env[credentialKey] = 'custom-credential'
+    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+    const saved = { id: 'saved-vertex', provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'saved-project', model: 'gemini-2.5-flash' }
+    const spy = spyOn(providerProfilesModule, 'getActiveProviderProfile').mockReturnValue(saved)
+    try {
+      expect(providerProfilesModule.applyActiveProviderProfileFromConfig({
+        ...(await import('../../utils/config.js')).getGlobalConfig(),
+        providerProfiles: [saved], activeProviderProfileId: saved.id,
+      })).toBeUndefined()
+      let url = ''
+      const client = await getAnthropicClient({
+        maxRetries: 0, model: process.env.ANTHROPIC_MODEL,
+        fetchOverride: async input => {
+          url = String(input)
+          return new Response(JSON.stringify({ id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }), { headers: { 'Content-Type': 'application/json' } })
+        },
+      })
+      await client.beta.messages.create({ model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
+      expect(url).toStartWith('https://anthropic.example/api/')
+      expect(realProviders.getAPIProvider()).toBe('firstParty')
+    } finally {
+      spy.mockRestore()
+    }
+  },
+)
+
 test('ADC-only Vertex routing uses the credential-discovered project', async () => {
   let capturedUrl: string | undefined
 

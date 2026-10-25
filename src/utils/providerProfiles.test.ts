@@ -778,6 +778,88 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(getFreshAPIProvider()).toBe('gemini-vertex')
   })
 
+  test.each([
+    ['access-token', 'saved-project'],
+    ['adc', 'saved-project'],
+    ['adc', 'https://aiplatform.googleapis.com'],
+  ] as const)(
+    'restores the saved active Vertex %s configuration for %s before legacy startup is skipped',
+    async (mode, baseUrl) => {
+      const { addProviderProfile, applyActiveProviderProfileFromConfig, clearProviderProfileEnvFromProcessEnv } =
+        await importFreshProviderProfileModules()
+      const { buildStartupEnvFromProfile } = await import('./providerProfile.js')
+      process.env.GEMINI_VERTEX_AUTH_MODE = mode
+      process.env.GEMINI_VERTEX_LOCATION = 'europe-west4'
+      process.env.GEMINI_VERTEX_PROJECT = 'saved-project'
+      if (mode === 'access-token') process.env.GEMINI_ACCESS_TOKEN = 'saved-bearer'
+      else process.env.GOOGLE_APPLICATION_CREDENTIALS = '/saved/adc.json'
+      const saved = addProviderProfile({
+        provider: 'gemini-vertex', name: 'Vertex', baseUrl,
+        model: 'gemini-2.5-flash',
+      })!
+      clearProviderProfileEnvFromProcessEnv()
+      delete process.env.GOOGLE_APPLICATION_CREDENTIALS
+
+      expect(applyActiveProviderProfileFromConfig()?.id).toBe(saved.id)
+      const launched = await buildStartupEnvFromProfile()
+      expect(launched.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED).toBe('1')
+      expect(launched.GEMINI_VERTEX_PROJECT).toBe('saved-project')
+      expect(launched.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
+      expect(launched.GEMINI_VERTEX_LOCATION).toBe('europe-west4')
+      expect(launched.GEMINI_VERTEX_AUTH_MODE).toBe(mode)
+      expect(launched.GEMINI_ACCESS_TOKEN).toBe(mode === 'access-token' ? 'saved-bearer' : undefined)
+      expect(launched.GOOGLE_APPLICATION_CREDENTIALS).toBe(mode === 'adc' ? '/saved/adc.json' : undefined)
+    },
+  )
+
+  test('reselecting a Vertex profile restores its saved bearer after another provider clears it', async () => {
+    const { addProviderProfile, setActiveProviderProfile } = await importFreshProviderProfileModules()
+    const saved = addProviderProfile({
+      provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'saved-project',
+      model: 'gemini-2.5-flash', apiKey: 'saved-bearer',
+    })!
+    addProviderProfile({ provider: 'openai', name: 'Other', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' })
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
+    setActiveProviderProfile(saved.id)
+    expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('access-token')
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('saved-bearer')
+  })
+
+  test('Vertex startup ignores a stale mirror and honors explicit credential settings', async () => {
+    const { applyActiveProviderProfileFromConfig, clearProviderProfileEnvFromProcessEnv } = await importFreshProviderProfileModules()
+    const { createProfileFile, saveProfileFile } = await import('./providerProfile.js')
+    const saved = buildGeminiVertexProfile({ baseUrl: 'saved-project', apiKey: 'profile-token' })
+    const config = { providerProfiles: [saved], activeProviderProfileId: saved.id }
+    for (const [project, model] of [
+      ['other-project', saved.model], ['saved-project', 'other-model'],
+    ]) {
+      saveProfileFile(createProfileFile('gemini-vertex', {
+        GEMINI_VERTEX_PROJECT: project, GEMINI_VERTEX_MODEL: model,
+        GEMINI_VERTEX_LOCATION: 'europe-west4', GEMINI_VERTEX_AUTH_MODE: 'adc',
+        GOOGLE_APPLICATION_CREDENTIALS: '/stale/adc.json',
+      }))
+      clearProviderProfileEnvFromProcessEnv()
+      applyActiveProviderProfileFromConfig(config)
+      expect(process.env.GEMINI_VERTEX_LOCATION).toBe('global')
+      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('profile-token')
+      expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined()
+    }
+    saveProfileFile(createProfileFile('gemini-vertex', {
+      GEMINI_VERTEX_PROJECT: 'saved-project', GEMINI_VERTEX_MODEL: saved.model,
+      GEMINI_VERTEX_LOCATION: 'europe-west4', GEMINI_VERTEX_AUTH_MODE: 'access-token',
+      GEMINI_ACCESS_TOKEN: 'mirror-token',
+    }))
+    clearProviderProfileEnvFromProcessEnv()
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/explicit/adc.json'
+    process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+    applyActiveProviderProfileFromConfig(config)
+    expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
+    expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/explicit/adc.json')
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
+    expect(process.env.GEMINI_VERTEX_LOCATION).toBe('us-central1')
+  })
+
   test('gemini vertex profile never writes the endpoint URL into GEMINI_VERTEX_PROJECT', async () => {
     const { applyProviderProfileToProcessEnv } =
       await importFreshProviderProfileModules()

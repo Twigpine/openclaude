@@ -1959,6 +1959,19 @@ test('hasExplicitProviderSelection treats Gemini Vertex as selected', () => {
   )
 })
 
+test('native Vertex launch keeps canonical precedence over competing provider flags', async () => {
+  for (const flag of ['CLAUDE_CODE_USE_GITHUB', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX']) {
+    const launched = await buildLaunchEnv({
+      profile: 'gemini-vertex', persisted: null, goal: 'balanced',
+      processEnv: { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', [flag]: '1', GEMINI_VERTEX_PROJECT: 'project-test' },
+      readGeminiAccessToken: () => undefined,
+    })
+    assert.equal(launched.CLAUDE_CODE_USE_GEMINI_VERTEX, '1')
+    assert.equal(launched[flag], undefined)
+    assert.equal(launched.GEMINI_VERTEX_PROJECT, 'project-test')
+  }
+})
+
 test('gemini vertex profiles default to global and current flash model', () => {
   const env = buildGeminiVertexProfileEnv({ processEnv: {} })
 

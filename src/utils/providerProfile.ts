@@ -1771,10 +1771,10 @@ export async function buildLaunchEnv(options: {
 
   if (hasExplicitProviderSelection(processEnv)) {
     const explicitProfileOverrides: Array<[string, ProviderProfile]> = [
+      ['CLAUDE_CODE_USE_GEMINI_VERTEX', 'gemini-vertex'],
       ['CLAUDE_CODE_USE_GITHUB', 'github'],
       ['CLAUDE_CODE_USE_BEDROCK', 'bedrock'],
       ['CLAUDE_CODE_USE_VERTEX', 'vertex'],
-      ['CLAUDE_CODE_USE_GEMINI_VERTEX', 'gemini-vertex'],
       ['CLAUDE_CODE_USE_MISTRAL', 'mistral'],
       ['CLAUDE_CODE_USE_GEMINI', 'gemini'],
       ['CLAUDE_CODE_USE_OPENAI', 'openai'],

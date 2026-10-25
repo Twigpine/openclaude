@@ -1290,6 +1290,8 @@ describe('doctor recognises Gemini Vertex', () => {
     expect(summary.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe(true)
     expect(summary.GEMINI_VERTEX_PROJECT).toBe('my-proj')
     expect(summary.GEMINI_VERTEX_CREDENTIAL_SET).toBe(true)
+    process.env.GEMINI_VERTEX_LOCATION = '   '
+    expect(__test.serializeSafeEnvSummary().GEMINI_VERTEX_LOCATION).toBe('global')
   })
 
   test('generation readiness passes when a Vertex credential resolves', async () => {

@@ -1563,7 +1563,7 @@ export function serializeSafeEnvSummary(): Record<string, string | boolean> {
       CLAUDE_CODE_USE_GEMINI_VERTEX: true,
       GEMINI_VERTEX_MODEL: safeDisplayValue(process.env.GEMINI_VERTEX_MODEL, '(unset, default: gemini-2.5-flash)'),
       GEMINI_VERTEX_PROJECT: safeDisplayValue(getGeminiVertexProjectId(process.env), '(unset)'),
-      GEMINI_VERTEX_LOCATION: safeDisplayValue(process.env.GEMINI_VERTEX_LOCATION, 'global'),
+      GEMINI_VERTEX_LOCATION: safeDisplayValue(getGeminiVertexLocation(process.env), 'global'),
       GEMINI_VERTEX_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
       GEMINI_VERTEX_CREDENTIAL_SET: Boolean(
         process.env.GEMINI_ACCESS_TOKEN?.trim() ||

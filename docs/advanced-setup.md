@@ -581,6 +581,12 @@ host. Without this variable the behavior is unchanged.
 | `OPENCLAUDE_DISABLE_CO_AUTHORED_BY` | No | Suppress the default `Co-Authored-By` trailer in generated git commits |
 | `OPENCLAUDE_LOG_TOKEN_USAGE` | No | When truthy (e.g. `verbose`), emits one JSON line on stderr per API request with input/output/cache tokens and the resolved provider. **User-facing debug output** — complements the REPL display controlled by `/config showCacheStats`. Distinct from `CLAUDE_CODE_ENABLE_TOKEN_USAGE_ATTACHMENT`, which is **model-facing** (injects context usage info into the prompt itself). Both can run together. |
 
+For a saved active Gemini Vertex profile, startup restores the matching
+profile file's auth mode, credential and location. Explicit shell settings
+still take precedence. Selecting a saved Vertex profile also reuses its saved
+access token; tokens saved by direct Gemini's setup remain specific to that
+setup and are not an implicit Vertex credential source.
+
 Model env vars are provider-scoped: first-party Anthropic sessions read
 `ANTHROPIC_MODEL`, OpenAI-compatible sessions read `OPENAI_MODEL`, Gemini reads
 `GEMINI_MODEL`, Gemini on Vertex AI reads `GEMINI_VERTEX_MODEL`, and Mistral reads
