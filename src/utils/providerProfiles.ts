@@ -1362,11 +1362,20 @@ export function applyProviderProfileToProcessEnv(
     const selectedToken = options?.preferProfileCredentials
       ? sanitizeApiKey(profile.apiKey)
       : undefined
-    const accessToken = selectedToken ?? sanitizeApiKey(process.env.GEMINI_ACCESS_TOKEN) ??
+    const appliedProfileId = trimOrUndefined(process.env[PROFILE_ENV_APPLIED_ID])
+    const inheritedFromOtherProfile = options?.preferProfileCredentials === true &&
+      process.env[PROFILE_ENV_APPLIED_FLAG] === '1' &&
+      appliedProfileId !== undefined && appliedProfileId !== profile.id
+    // Another managed profile's bearer/mode is not a shell override for this one.
+    const ambientToken = inheritedFromOtherProfile
+      ? undefined : sanitizeApiKey(process.env.GEMINI_ACCESS_TOKEN)
+    const ambientAuthMode = inheritedFromOtherProfile
+      ? undefined : trimOrUndefined(process.env.GEMINI_VERTEX_AUTH_MODE)
+    const accessToken = selectedToken ?? ambientToken ??
       sanitizeApiKey(profile.apiKey) ?? sanitizeApiKey(savedEnv?.GEMINI_ACCESS_TOKEN)
     const vertexAuthMode = resolveGeminiVertexAuthMode({
       GEMINI_VERTEX_AUTH_MODE: selectedToken ? 'access-token' :
-        trimOrUndefined(process.env.GEMINI_VERTEX_AUTH_MODE) ?? savedEnv?.GEMINI_VERTEX_AUTH_MODE,
+        ambientAuthMode ?? savedEnv?.GEMINI_VERTEX_AUTH_MODE,
       GEMINI_ACCESS_TOKEN: accessToken,
     })
     profileEnv = buildGeminiVertexProfileEnv({

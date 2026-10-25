@@ -862,6 +862,27 @@ describe('applyProviderProfileToProcessEnv', () => {
     }
   })
 
+  test('keyless Vertex selection discards another profile bearer through restart', async () => {
+    const { addProviderProfile, setActiveProviderProfile,
+      clearProviderProfileEnvFromProcessEnv, applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    const { loadProfileFile } = await import('./providerProfile.js')
+    const input = { provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'project-a', model: 'gemini-2.5-flash' }
+    addProviderProfile({ ...input, apiKey: 'token-a' })
+    const b = addProviderProfile({ ...input, baseUrl: 'project-b' }, { makeActive: false })!
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('token-a')
+    setActiveProviderProfile(b.id)
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
+    expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
+    expect(loadProfileFile()?.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
+    expect(loadProfileFile()?.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
+    clearProviderProfileEnvFromProcessEnv()
+    applyActiveProviderProfileFromConfig()
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
+    expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
+    expect(process.env.GEMINI_VERTEX_PROJECT).toBe('project-b')
+  })
+
   test('Vertex startup does not consume a workspace mirror when config home has none', async () => {
     const { applyActiveProviderProfileFromConfig } = await importFreshProviderProfileModules()
     const { createProfileFile, saveProfileFile } = await import('./providerProfile.js')
