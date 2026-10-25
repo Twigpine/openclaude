@@ -902,8 +902,15 @@ test.each([
   { body: 'Too many requests', retries: false, noRetry: true, remote: true },
   { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: false, noRetry: true, remote: true },
   { body: 'Too many requests', retries: true, remote: true },
-])('throttle-403 through the shim and retry loop: %j', async ({ body, retries, noRetry, remote }) => {
-  const restoreRetryEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS', 'CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_REMOTE'])
+  { body: 'Too many requests', retries: true, baseUrl: 'https://billing.example.com/v1' },
+  { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: true, baseUrl: 'https://billing.example.com/v1' },
+  { body: 'Too many requests', retries: false, noRetry: true, baseUrl: 'https://billing.example.com/v1' },
+  { body: 'Quota exceeded; too many requests', retries: false, baseUrl: 'https://billing.example.com/v1' },
+  { body: 'Too many requests', retries: true, status: 429, baseUrl: 'https://billing.example.com/v1' },
+  { body: 'Billing required; too many requests', retries: false, status: 429, baseUrl: 'https://billing.example.com/v1' },
+])('throttle responses through the shim and retry loop: %j', async ({ body, retries, noRetry, remote, baseUrl, status = 403 }) => {
+  const restoreRetryEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS', 'CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_REMOTE', 'OPENAI_BASE_URL'])
+  if (baseUrl) process.env.OPENAI_BASE_URL = baseUrl
   if (remote) process.env.CLAUDE_CODE_REMOTE = '1'
   else delete process.env.CLAUDE_CODE_REMOTE
   process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
@@ -913,7 +920,7 @@ test.each([
     attempts++
     return attempts === 1
       ? new Response(body, {
-          status: 403,
+          status,
           headers: noRetry ? { 'x-should-retry': 'false' } : {},
         })
       : makeChatCompletionResponse('gpt-5.5')

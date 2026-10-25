@@ -124,7 +124,11 @@ function isPersistentRetryEnabled(): boolean {
 
 function isQuotaExhausted(error: unknown): boolean {
   const errObj = error as { message?: unknown; status?: unknown } | null | undefined
-  const msg = String(errObj?.message ?? '').toLowerCase()
+  // Routing metadata is not evidence of provider quota exhaustion. Keep the
+  // category and provider text, without changing the original error message.
+  const msg = String(errObj?.message ?? '')
+    .replace(/(\[openai_category=[a-z_]+),host=[A-Za-z0-9.\-:]+]/g, '$1]')
+    .toLowerCase()
   const status = errObj?.status
 
   // OpenRouter (and other gateways) return 402 with instructions to adjust max_tokens.
