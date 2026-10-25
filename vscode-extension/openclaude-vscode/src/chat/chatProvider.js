@@ -200,6 +200,14 @@ class ChatController {
   }
 
   abort() {
+    if (this._pendingStart && !this._process) {
+      // Discovery has no child to signal yet. Invalidate its startup and all
+      // sends waiting on it, just as stopping or replacing the session does.
+      this.stopSession();
+      this._broadcast({ type: 'stream_end', text: '', usage: null, final: true });
+      this._onDidChangeState.fire('idle');
+      return;
+    }
     if (this._process) {
       this._process.abort();
       this._broadcast({ type: 'stream_end', text: this._accumulatedText, usage: null });

@@ -17,9 +17,15 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
     const calls = [];
     const children = [];
     class Emitter {
-      constructor() { this.event = () => ({ dispose() {} }); }
-      fire() {}
-      dispose() {}
+      constructor() {
+        this.emitter = new EventEmitter();
+        this.event = listener => {
+          this.emitter.on('event', listener);
+          return { dispose: () => this.emitter.off('event', listener) };
+        };
+      }
+      fire(value) { this.emitter.emit('event', value); }
+      dispose() { this.emitter.removeAllListeners(); }
     }
     let cwd;
     const originalLoad = Module._load;
@@ -37,7 +43,7 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
         child.stdout = new PassThrough();
         child.stderr = new PassThrough();
         child.stdin = new PassThrough();
-        child.kill = () => { child.killed = true; };
+        child.kill = signal => { child.killed = true; child.killSignal = signal; };
         children.push(child);
         return child;
       } };
@@ -107,6 +113,54 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
         assert.equal(calls.length, stoppedCount);
         assert.deepEqual(sent, ['one', 'two']);
 
+        // Stop/Abort Generation must cancel a reconnect before it has a child.
+        // Hold the real resolver's directory read so the user action arrives
+        // during discovery, without replacing the controller's send method.
+        delete manager.getResumeTarget;
+        const aborting = new ChatController(manager);
+        const updates = [];
+        const states = [];
+        aborting.registerWebview({ postMessage: message => updates.push(message) });
+        aborting.onDidChangeState(state => states.push(state));
+        const realReaddir = fs.readdir;
+        let releaseRead;
+        const lookupStarted = new Promise(resolve => {
+          fs.readdir = async (directory, ...args) => {
+            if (directory === path.join(process.env.OPENCLAUDE_CONFIG_DIR, 'projects') && !releaseRead) {
+              await new Promise(release => { releaseRead = release; resolve(); });
+            }
+            return realReaddir(directory, ...args);
+          };
+        });
+        try {
+          // The saved session has already exited; sending now reconnects.
+          aborting._currentSessionId = id;
+          const cancelledOne = aborting.sendMessage('abort one');
+          const cancelledTwo = aborting.sendMessage('abort two');
+          await lookupStarted;
+          const beforeAbort = calls.length;
+          aborting.abort();
+          releaseRead();
+          await new Promise(setImmediate);
+          // If broken startup launches a child, let its real send path settle
+          // so the no-launch assertion, rather than a timeout, catches it.
+          if (calls.length > beforeAbort) children.at(-1).stdout.write('{"type":"system"}\n');
+          await Promise.all([cancelledOne, cancelledTwo]);
+          assert.equal(calls.length, beforeAbort, 'Abort must not launch the pending reconnect');
+          assert.ok(updates.some(message => message.type === 'stream_end' && message.final));
+          assert.equal(states.at(-1), 'idle');
+        } finally {
+          releaseRead?.();
+          fs.readdir = realReaddir;
+          aborting.stopSession();
+        }
+        // Cancelling discovery must leave ordinary running-process SIGINT intact.
+        await aborting.startSession({ sessionId: id });
+        const activeChild = children.at(-1);
+        aborting.abort();
+        assert.equal(activeChild.killSignal, 'SIGINT');
+        aborting.stopSession();
+
         // The exact Node copy remains the normal UUID route.
         delete manager.getResumeTarget;
         let hash = 0;
@@ -130,7 +184,7 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
         assert.notEqual(win.options.shell, true);
         assert.equal(win.options.windowsVerbatimArguments, true);
         assert.deepEqual(win.args.slice(0, 5), ['/d', '/e:on', '/v:off', '/s', '/c']);
-        assert.ok(win.args[5].includes('--resume "C:'));
+        assert.ok(win.args[5].includes('"--resume" "C:'));
         assert.ok(!win.args[5].includes('OPENCLAUDE_VSCODE_RESUME_PATH'));
         assert.equal(pm.sessionId, id);
         pm.dispose();

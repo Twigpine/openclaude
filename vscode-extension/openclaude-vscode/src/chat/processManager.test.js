@@ -105,13 +105,17 @@ test('real launcher preserves argv and NDJSON through executable and Windows npm
       }
     }
     const values = ['model"&echo INJECTED>injected.txt', '%OPENCLAUDE_TEST_VALUE%', '!OPENCLAUDE_TEST_VALUE!', '', 'trailing\\', 'space & | < > ( ) ^', 'quote\\\"tail'];
-    for (const { command, env } of commands) {
+    const resumePath = path.join(dir, 'saved %OPENCLAUDE_TEST_VALUE% & ! history.jsonl');
+    for (const { command, env, resumeTarget } of commands.flatMap(entry => [
+      entry, { ...entry, resumeTarget: resumePath },
+    ])) {
       const result = run(`
         const { ProcessManager } = require(${JSON.stringify(managerPath)});
         const pm = new ProcessManager({
           command: ${JSON.stringify(command)}, cwd: ${JSON.stringify(dir)},
           env: { ...${JSON.stringify(env)}, OPENCLAUDE_TEST_VALUE: 'EXPANDED' },
           model: ${JSON.stringify(values[0])}, sessionId: ${JSON.stringify(values[1])},
+          resumeTarget: ${JSON.stringify(resumeTarget)},
           extraArgs: ${JSON.stringify(values.slice(2))},
         });
         const messages = [];
@@ -130,7 +134,7 @@ test('real launcher preserves argv and NDJSON through executable and Windows npm
       assert.deepEqual(result.messages[0].argv, [
         '--print', '--verbose', '--input-format=stream-json', '--output-format=stream-json',
         '--include-partial-messages', '--permission-mode', 'acceptEdits',
-        '--resume', values[1], '--model', values[0], ...values.slice(2),
+        '--resume', resumeTarget ?? values[1], '--model', values[0], ...values.slice(2),
       ]);
       assert.equal(result.messages[1].received.message.content, 'literal & message');
       assert.equal(fs.existsSync(path.join(dir, 'injected.txt')), false);
