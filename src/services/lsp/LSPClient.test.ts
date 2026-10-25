@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { describe, expect, jest, mock, test } from 'bun:test'
 import type { ChildProcess } from 'child_process'
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import {
   createLSPClient,
   type LSPClientDependencies,

@@ -117,6 +117,7 @@ const { LSPTool } = await import('./tools/LSPTool/LSPTool.js')
 
 afterAll(() => {
   try {
+    lspManager = undefined
     mock.restore()
   } finally {
     releaseSharedMutationLock()
@@ -173,6 +174,7 @@ test('LSPTool keeps the 10 MB guard ahead of open and request', async () => {
   }
 })
 
+// The test budget leaves cleanup time after the mkfifo subprocess deadline.
 test('LSPTool opens FIFO recovery paths nonblocking before validation', async () => {
   if (process.platform === 'win32') return
 
@@ -181,7 +183,7 @@ test('LSPTool opens FIFO recovery paths nonblocking before validation', async ()
   const openFile = mock(async () => {})
   const { sendRequest, calls: sendRequestCalls } = createSendRequestDouble()
   try {
-    execFileSync('mkfifo', [filePath])
+    execFileSync('mkfifo', [filePath], { timeout: 5_000 })
     lspManager = createLspManagerDouble({
       isFileOpen: () => false,
       openFile,
@@ -199,7 +201,7 @@ test('LSPTool opens FIFO recovery paths nonblocking before validation', async ()
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
-})
+}, 10_000)
 
 test('LSPTool does not redundantly open a current document', async () => {
   const openFile = mock(async () => {})

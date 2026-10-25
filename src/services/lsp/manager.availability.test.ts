@@ -3,6 +3,7 @@ import { expect, test } from 'bun:test'
 
 // Keep a pristine Bun module graph: tools.lsp.test.ts installs a process-wide
 // mock for manager.js, so in-process behavior would depend on test-file order.
+// Allow assertions and cleanup to finish after the child's 30-second deadline.
 test('bounds failed starts before advertising server availability', () => {
   const managerModuleUrl = new URL('./manager.ts', import.meta.url).href
   const instanceModuleUrl = new URL(
@@ -130,4 +131,4 @@ test('bounds failed starts before advertising server availability', () => {
       startCalls: 3,
     },
   })
-})
+}, 35_000)

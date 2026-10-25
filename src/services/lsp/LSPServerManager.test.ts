@@ -6,7 +6,7 @@ import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, jest, mock, test } from 'bun:test'
 import type { ChildProcess } from 'child_process'
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import {
   getLspDocumentIdentity,
   LspDocumentTooLargeError,
@@ -1336,6 +1336,7 @@ describe('LSP document identity and diagnostics activity', () => {
     const { manager, controls } = await createManager({ recordFileActivity })
     const server = controls.get('typescript')!
     const file = '/repo/src/activity.ts'
+    const expectedActivityPath = getLspDocumentIdentity(file).activityPath
 
     await manager.changeFile(file, 'opened through change')
     await manager.changeFile(file, 'changed')
@@ -1345,10 +1346,10 @@ describe('LSP document identity and diagnostics activity', () => {
 
     expect(recordFileActivity).toHaveBeenCalledTimes(4)
     expect(recordFileActivity.mock.calls.map(call => call[0])).toEqual([
-      file,
-      file,
-      file,
-      file,
+      expectedActivityPath,
+      expectedActivityPath,
+      expectedActivityPath,
+      expectedActivityPath,
     ])
   })
 
@@ -1357,12 +1358,13 @@ describe('LSP document identity and diagnostics activity', () => {
     const { manager, controls } = await createManager({ recordFileActivity })
     const server = controls.get('typescript')!
     const file = '/repo/src/unopened-save.ts'
+    const expectedActivityPath = getLspDocumentIdentity(file).activityPath
 
     await manager.ensureServerStarted(file)
     await manager.saveFile(file)
 
     expect(recordFileActivity).toHaveBeenCalledTimes(1)
-    expect(recordFileActivity).toHaveBeenCalledWith(file)
+    expect(recordFileActivity).toHaveBeenCalledWith(expectedActivityPath)
     expect(
       server.events.some(
         event =>
