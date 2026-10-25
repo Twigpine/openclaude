@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { APIConnectionTimeoutError, APIUserAbortError } from '@anthropic-ai/sdk'
+import { expect, jest, test } from 'bun:test'
 import { createGeminiVertexClient, type GeminiVertexStreamEvent } from './geminiVertexClient.js'
 
 function createJsonVertexResponse(text: string) {
@@ -11,6 +12,80 @@ function createJsonVertexResponse(text: string) {
     { headers: { 'Content-Type': 'application/json', 'x-request-id': 'vertex-request-123' } },
   )
 }
+
+test.each([false, true])('Vertex request cancellation reaches fetch and settles (stream=%s)', async stream => {
+  const started = Promise.withResolvers<void>()
+  const response = Promise.withResolvers<Response>()
+  const controller = new AbortController()
+  let fetchSignal: AbortSignal | null | undefined
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => 'token',
+    fetch: async (_input, init) => {
+      fetchSignal = init?.signal
+      fetchSignal?.addEventListener('abort', () => response.reject(fetchSignal?.reason), { once: true })
+      started.resolve()
+      return response.promise
+    },
+  })
+  const request = (stream ? client.beta.messages : client.messages).create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }], stream,
+  }, { signal: controller.signal })
+  const outcome = (stream ? request.withResponse() : request).then(() => undefined, error => error)
+  try {
+    await started.promise
+    controller.abort()
+    response.resolve(createJsonVertexResponse('late'))
+    expect(await outcome).toBeInstanceOf(APIUserAbortError)
+    expect(fetchSignal?.aborted).toBe(true)
+  } finally {
+    controller.abort()
+    response.resolve(createJsonVertexResponse('cleanup'))
+    await outcome
+  }
+})
+
+test('Vertex honors an explicit request timeout and releases its timer', async () => {
+  jest.useFakeTimers()
+  const started = Promise.withResolvers<void>()
+  const response = Promise.withResolvers<Response>()
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => 'token',
+    fetch: async (_input, init) => {
+      init?.signal?.addEventListener('abort', () => response.reject(init.signal?.reason), { once: true })
+      started.resolve()
+      return response.promise
+    },
+  })
+  const outcome = client.messages.create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }],
+  }, { timeout: 5 }).then(() => undefined, error => error)
+  try {
+    await started.promise
+    jest.advanceTimersByTime(5)
+    response.resolve(createJsonVertexResponse('late'))
+    expect(await outcome).toBeInstanceOf(APIConnectionTimeoutError)
+    expect(jest.getTimerCount()).toBe(0)
+  } finally {
+    response.resolve(createJsonVertexResponse('cleanup'))
+    await outcome
+    jest.useRealTimers()
+  }
+})
+
+test('an already-cancelled Vertex request never resolves credentials or sends a request', async () => {
+  let calls = 0
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => { calls++; return 'token' },
+    fetch: async () => { calls++; return createJsonVertexResponse('unexpected') },
+  })
+  await expect(client.messages.create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }],
+  }, { signal: AbortSignal.abort() })).rejects.toBeInstanceOf(APIUserAbortError)
+  expect(calls).toBe(0)
+})
 
 test('Gemini Vertex client uses root aiplatform host for global location', async () => {
   let capturedUrl: string | undefined

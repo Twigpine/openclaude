@@ -559,7 +559,7 @@ host. Without this variable the behavior is unchanged.
 | `CLAUDE_CODE_USE_GEMINI_VERTEX` | Gemini on Vertex AI only | Set to `1` to enable native Gemini on Vertex AI; distinct from direct Gemini and Claude on Vertex |
 | `GEMINI_VERTEX_PROJECT` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `GOOGLE_PROJECT_ID` | Gemini on Vertex AI | Google Cloud project, in the listed precedence order. Required explicitly for access-token auth; ADC may derive it from credentials. |
 | `GEMINI_VERTEX_LOCATION` | No | Vertex location, defaulting to `global`; global-only models require `global` |
-| `GEMINI_VERTEX_MODEL` | No | Vertex Gemini model, defaulting to `gemini-2.5-flash`; an explicit `--model` overrides it |
+| `GEMINI_VERTEX_MODEL` | No | Vertex Gemini model, defaulting to `gemini-2.5-flash`; an explicit `--model` or session `/model` selection overrides it |
 | `GEMINI_VERTEX_AUTH_MODE` | No | `adc` or `access-token`. Defaults to `access-token` when a nonblank `GEMINI_ACCESS_TOKEN` is present, otherwise `adc`. |
 | `GEMINI_ACCESS_TOKEN` | Gemini Vertex access-token auth | Google Cloud OAuth access token; not a Gemini API key |
 | `GOOGLE_APPLICATION_CREDENTIALS` | No | Path to Google ADC credentials; ambient ADC is also supported |

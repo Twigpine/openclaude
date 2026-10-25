@@ -1251,6 +1251,20 @@ describe('sandbox runtime diagnostics', () => {
 })
 
 describe('doctor recognises Gemini Vertex', () => {
+  test.each(['GEMINI_VERTEX_MODEL', 'GEMINI_VERTEX_PROJECT', 'GEMINI_VERTEX_LOCATION'])(
+    'redacts a known credential placed in %s from results and saved reports', field => {
+      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+      process.env.GEMINI_VERTEX_PROJECT = 'project-test'
+      process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+      process.env.GEMINI_VERTEX_LOCATION = 'global'
+      const secret = 'vertex-private-access-token'
+      process.env.GEMINI_ACCESS_TOKEN = secret
+      process.env[field] = secret
+      expect(JSON.stringify(checkOpenAIEnv())).not.toContain(secret)
+      expect(JSON.stringify(serializeSafeEnvSummary())).not.toContain(secret)
+    },
+  )
+
   test('checkOpenAIEnv reports the Vertex provider, not the Anthropic flow', async () => {
     const { __test } = await import('./system-check.ts')
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'

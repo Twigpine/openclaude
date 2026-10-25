@@ -21,6 +21,7 @@ import { readGeminiAccessToken } from './geminiCredentials.js'
 import {
   DEFAULT_GEMINI_VERTEX_MODEL,
   getGeminiVertexLocation,
+  resolveGeminiVertexAuthMode,
 } from './geminiAuth.js'
 import { getOllamaChatBaseUrl } from './providerDiscovery.js'
 import { getPrimaryModel } from './providerModels.js'
@@ -111,13 +112,6 @@ const PROFILE_ENV_KEYS = [
   'GEMINI_VERTEX_PROJECT',
   'GEMINI_VERTEX_LOCATION',
   'GOOGLE_API_KEY',
-  // CLOUD_ML_REGION is read by the @anthropic-ai/vertex-sdk to pick a region
-  // (via getDefaultVertexRegion). Leaving a stale value in process.env after a
-  // profile switch would let a malformed location like "glogal" leak into a
-  // 404 even when the active profile is Gemini Vertex. Clear it with the rest
-  // of the managed vars so each profile activation starts from a clean slate.
-  'CLOUD_ML_REGION',
-  'ANTHROPIC_VERTEX_PROJECT_ID',
   'NVIDIA_NIM',
   'NVIDIA_API_KEY',
   'NVIDIA_MODEL',
@@ -1969,11 +1963,17 @@ export async function buildLaunchEnv(options: {
         ? normalized
         : undefined
     }
-    const env = buildGeminiVertexProfileEnv({
-      authMode:
+    const geminiAccessToken =
+      sanitizeApiKey(processEnv.GEMINI_ACCESS_TOKEN) ??
+      sanitizeApiKey(persistedEnv.GEMINI_ACCESS_TOKEN)
+    const authMode = resolveGeminiVertexAuthMode({
+      GEMINI_VERTEX_AUTH_MODE:
         isVertexAuthMode(processEnv.GEMINI_VERTEX_AUTH_MODE) ??
-        isVertexAuthMode(persistedEnv.GEMINI_VERTEX_AUTH_MODE) ??
-        'adc',
+        isVertexAuthMode(persistedEnv.GEMINI_VERTEX_AUTH_MODE),
+      GEMINI_ACCESS_TOKEN: geminiAccessToken,
+    })
+    const env = buildGeminiVertexProfileEnv({
+      authMode,
       model: firstSanitizedProviderValue(
         processEnv.GEMINI_VERTEX_MODEL,
         persistedEnv.GEMINI_VERTEX_MODEL,
@@ -2020,11 +2020,6 @@ export async function buildLaunchEnv(options: {
     // PROFILE_ENV_KEYS clears GEMINI_ACCESS_TOKEN on relaunch; an access-token
     // Vertex profile must carry its bearer forward or it relaunches unauthed.
     if (env.GEMINI_VERTEX_AUTH_MODE === 'access-token') {
-      // Sanitize each candidate so a whitespace-only shell token doesn't drop
-      // the real persisted bearer.
-      const geminiAccessToken =
-        sanitizeApiKey(processEnv.GEMINI_ACCESS_TOKEN) ??
-        sanitizeApiKey(persistedEnv.GEMINI_ACCESS_TOKEN)
       if (geminiAccessToken) env.GEMINI_ACCESS_TOKEN = geminiAccessToken
     }
 

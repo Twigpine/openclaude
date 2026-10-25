@@ -1966,6 +1966,49 @@ test('gemini vertex profiles default to global and current flash model', () => {
   assert.equal(env.GEMINI_VERTEX_LOCATION, 'global')
 })
 
+test('Claude Vertex launch preserves ambient project and region across provider switches', async () => {
+  const processEnv = {
+    ANTHROPIC_VERTEX_PROJECT_ID: 'claude-project',
+    CLOUD_ML_REGION: 'europe-west4',
+  }
+  for (const previous of [processEnv, buildCompatibilityProcessEnv({
+    processEnv,
+    compatibilityMode: 'openai',
+    profileEnv: { OPENAI_MODEL: 'gpt-4o' },
+  })]) {
+    const launched = await buildLaunchEnv({
+      profile: 'vertex', persisted: null, goal: 'balanced', processEnv: previous,
+    })
+    assert.equal(launched.ANTHROPIC_VERTEX_PROJECT_ID, 'claude-project')
+    assert.equal(launched.CLOUD_ML_REGION, 'europe-west4')
+  }
+})
+
+test('Vertex launch infers token auth from effective shell or saved credentials', async () => {
+  for (const [shellToken, shellMode, savedMode, expectedToken, expectedMode] of [
+    ['shell-token', undefined, undefined, 'shell-token', 'access-token'],
+    ['   ', undefined, undefined, 'saved-token', 'access-token'],
+    [undefined, undefined, undefined, 'saved-token', 'access-token'],
+    ['shell-token', 'adc', 'access-token', undefined, 'adc'],
+    ['shell-token', undefined, 'adc', undefined, 'adc'],
+    ['shell-token', 'access-token', 'adc', 'shell-token', 'access-token'],
+  ] as const) {
+    const launched = await buildLaunchEnv({
+      profile: 'gemini-vertex', goal: 'balanced',
+      persisted: profile('gemini-vertex', {
+        GEMINI_VERTEX_PROJECT: 'saved-project',
+        GEMINI_ACCESS_TOKEN: 'saved-token',
+        GEMINI_VERTEX_AUTH_MODE: savedMode,
+      }),
+      processEnv: { GEMINI_ACCESS_TOKEN: shellToken, GEMINI_VERTEX_AUTH_MODE: shellMode },
+      readGeminiAccessToken: () => undefined,
+    })
+    assert.equal(launched.GEMINI_VERTEX_AUTH_MODE, expectedMode)
+    assert.equal(launched.GEMINI_ACCESS_TOKEN, expectedToken)
+    assert.equal(launched.GEMINI_VERTEX_PROJECT, 'saved-project')
+  }
+})
+
 test('gemini vertex profiles persist dedicated env vars', () => {
   const env = buildGeminiVertexProfileEnv({
     authMode: 'adc',

@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk'
+import Anthropic, { type APIError } from '@anthropic-ai/sdk'
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 import { snapshotEnv } from '../../test/envSnapshot.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
@@ -8,8 +8,7 @@ import {
   registerGateway,
 } from '../../integrations/index.js'
 import { publicBuildVersion } from '../../utils/version.js'
-import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
-import { snapshotEnv } from '../../test/envSnapshot.js'
+import { getMainLoopModelOverride, resetModelStringsForTestingOnly, setMainLoopModelOverride } from '../../bootstrap/state.js'
 import {
   buildLaunchEnv,
   buildStartupEnvFromProfile,
@@ -1069,22 +1068,119 @@ test('Gemini Vertex provider uses GEMINI_VERTEX_MODEL instead of generic OPENAI_
     )
   }) as FetchType
 
-  const client = (await getAnthropicClient({
-    maxRetries: 0,
-    model: process.env.OPENAI_MODEL,
-  })) as unknown as ShimClient
-
-  await client.beta.messages.create({
-    model: process.env.OPENAI_MODEL,
-    messages: [{ role: 'user', content: 'hello' }],
-    max_tokens: 64,
-    stream: false,
-  })
-
-  expect(capturedUrl).toBe(
-    'https://us-central1-aiplatform.googleapis.com/v1/projects/project-test-1234/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
-  )
+  const previousModel = getMainLoopModelOverride()
+  try {
+    setMainLoopModelOverride(undefined)
+    const { getUserSpecifiedModelSetting } = await import('../../utils/model/model.js')
+    const model = getUserSpecifiedModelSetting()
+    expect(model).toBe('gemini-2.5-flash')
+    const client = await getAnthropicClient({ maxRetries: 0, model: model ?? undefined })
+    await client.beta.messages.create({
+      model: model!, messages: [{ role: 'user', content: 'hello' }], max_tokens: 64,
+    })
+    expect(capturedUrl).toBe(
+      'https://us-central1-aiplatform.googleapis.com/v1/projects/project-test-1234/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
+    )
+  } finally {
+    setMainLoopModelOverride(previousModel)
+  }
 })
+
+test.each([
+  [undefined, 'gemini-2.5-pro'],
+  ['gemini-2.5-pro', 'gemini-2.5-pro'],
+  ['gemini-2.5-pro', 'gemini-2.5-flash'],
+] as const)(
+  'applied Vertex honors request model with OPENAI_MODEL=%s and session model=%s', async (ambientModel, sessionModel) => {
+    process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
+    providerProfilesModule.applyProviderProfileToProcessEnv({
+      id: 'vertex-runtime-model', name: 'Vertex', provider: 'gemini-vertex',
+      baseUrl: 'project-test', model: 'gemini-2.5-flash,gemini-2.5-pro',
+    })
+    if (ambientModel) process.env.OPENAI_MODEL = ambientModel
+    const previousModel = getMainLoopModelOverride()
+    try {
+      setMainLoopModelOverride(sessionModel)
+      const { getUserSpecifiedModelSetting } = await import('../../utils/model/model.js')
+      expect(getUserSpecifiedModelSetting()).toBe(sessionModel)
+      // /model validates the requested model before installing the override;
+      // agent and fallback requests may also differ from the session model.
+      const model = 'gemini-2.5-pro'
+      let url = ''
+      const client = await getAnthropicClient({
+        maxRetries: 0, model: model ?? undefined,
+        fetchOverride: async input => {
+          url = String(input)
+          return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }), {
+            headers: { 'content-type': 'application/json' },
+          })
+        },
+      })
+      await client.beta.messages.create({ model: model!, max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] })
+      expect(url).toContain('/models/gemini-2.5-pro:generateContent')
+      expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
+    } finally {
+      setMainLoopModelOverride(previousModel)
+    }
+  },
+)
+
+test.each([503, 429, 400, 'network', 'body', 'invalid-json'] as const)(
+  'native Vertex preserves %s failure identity through the production retry loop', async failure => {
+    const { withRetry } = await import(`./withRetry.js?vertex=${Date.now()}-${Math.random()}`)
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_PROJECT = 'project-test'
+    process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+    const restoreEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS'])
+    process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+    let requests = 0
+    let nativeError: unknown
+    try {
+      const client = await getAnthropicClient({
+        maxRetries: 0, model: 'gemini-2.5-flash',
+        fetchOverride: async () => {
+          requests++
+          if (failure === 'network') throw new TypeError('fetch failed')
+          if (failure === 'body') return new Response(new ReadableStream({
+            start(controller) { controller.error(new TypeError('connection reset while reading body')) },
+          }))
+          if (failure === 'invalid-json') return new Response('{invalid json')
+          return new Response('{"error":{"message":"unavailable"}}', {
+            status: failure, headers: { 'retry-after': '0' },
+          })
+        },
+      })
+      try {
+        for await (const _ of withRetry(async () => client, async current => {
+          try {
+            return await current.beta.messages.create({
+              model: 'gemini-2.5-flash', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }],
+            })
+          } catch (error) {
+            nativeError = error
+            throw error
+          }
+        }, { model: 'gemini-2.5-flash', maxRetries: 1, thinkingConfig: { type: 'disabled' } })) {}
+      } catch {
+        // Exhausted/fatal failures are expected; assert the actual transport and retry boundary below.
+      }
+      expect(requests).toBe(failure === 400 || failure === 'invalid-json' ? 1 : 2)
+      if (failure === 'invalid-json') {
+        expect(nativeError).toBeInstanceOf(SyntaxError)
+        return
+      }
+      expect(nativeError).toBeInstanceOf(Anthropic.APIError)
+      if (failure === 'network' || failure === 'body') expect(nativeError).toBeInstanceOf(Anthropic.APIConnectionError)
+      else {
+        expect((nativeError as APIError).status).toBe(failure)
+        expect((nativeError as APIError).headers?.get('retry-after')).toBe('0')
+      }
+    } finally {
+      restoreEnv()
+    }
+  },
+)
 
 test('routes env-only MiniMax requests through the Anthropic-compatible API', async () => {
   let capturedUrl: string | undefined

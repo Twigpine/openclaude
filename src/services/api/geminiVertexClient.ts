@@ -1,5 +1,7 @@
-import type { ClientOptions } from '@anthropic-ai/sdk'
+import { APIConnectionError, APIConnectionTimeoutError, APIError, APIUserAbortError, type ClientOptions } from '@anthropic-ai/sdk'
 import type { MessageCreateParamsBase } from '@anthropic-ai/sdk/resources/messages/messages'
+import { raceAbort, throwIfAborted } from '../../utils/boundedAsync.js'
+import { createCombinedAbortSignal } from '../../utils/combinedAbortSignal.js'
 
 type AccessTokenProvider = () => Promise<string>
 
@@ -608,11 +610,20 @@ async function* toAnthropicStream(
 export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
   const fetchImpl = options.fetch ?? fetch
 
-  const create = (params: MessageCreateParamsBase & { stream?: boolean }): GeminiVertexPromise => {
+  const create = (
+    params: MessageCreateParamsBase & { stream?: boolean },
+    requestOptions: { signal?: AbortSignal | null; timeout?: number } = {},
+  ): GeminiVertexPromise => {
     let capturedResponse: Response | undefined
-    const promise = (async (): Promise<GeminiVertexMessage> => {
+    const { signal, cleanup } = createCombinedAbortSignal(requestOptions.signal ?? undefined, {
+      timeoutMs: requestOptions.timeout,
+      trace: { subsystem: 'gemini_vertex', controllerRole: 'request' },
+    })
+    const promise = raceAbort((async (): Promise<GeminiVertexMessage> => {
+      throwIfAborted(signal)
       const model = options.model
       const token = await options.getAccessToken()
+      throwIfAborted(signal)
       const host = options.location === 'global'
         ? 'aiplatform.googleapis.com'
         : `${options.location}-aiplatform.googleapis.com`
@@ -647,6 +658,7 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
 
       const response = await fetchImpl(url, {
         method: 'POST',
+        signal,
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
@@ -671,15 +683,25 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
               : {}),
           },
         }),
+      }).catch(error => {
+        // Only transport failures become connection errors. Schema/content
+        // errors below retain their existing fatal classification.
+        throw new APIConnectionError({ cause: error instanceof Error ? error : undefined })
       })
       capturedResponse = response
 
+      const body = await response.text().catch(error => {
+        throw new APIConnectionError({ cause: error instanceof Error ? error : undefined })
+      })
       if (!response.ok) {
-        const body = await response.text()
-        throw new Error(`Gemini Vertex request failed: ${response.status} ${body}`)
+        throw APIError.generate(
+          response.status, undefined,
+          `Gemini Vertex request failed: ${response.status} ${body}`,
+          response.headers,
+        )
       }
 
-      const json = (await response.json()) as GeminiVertexResponse
+      const json = JSON.parse(body) as GeminiVertexResponse
       const contentBlocks = extractContentBlocks(json)
       const text = extractText(json)
       const candidate = json.candidates?.[0]
@@ -778,7 +800,15 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
         },
         content: finalBlocks,
       }
-    })()
+    })(), signal).catch(error => {
+      if (signal.aborted) {
+        if (requestOptions.signal?.aborted && signal.reason === requestOptions.signal.reason) {
+          throw new APIUserAbortError()
+        }
+        throw new APIConnectionTimeoutError()
+      }
+      throw error
+    }).finally(cleanup)
 
     const typed = promise as GeminiVertexPromise
     typed.withResponse = async () => {

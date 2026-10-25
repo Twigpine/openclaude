@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import { resolveRouteCredentialValue } from '../integrations/routeMetadata.js'
 import { snapshotEnv } from '../test/envSnapshot.js'
 import type { ProviderProfile } from './config.js'
@@ -843,6 +844,45 @@ describe('applyProviderProfileToProcessEnv', () => {
     )
 
     expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.token-only')
+  })
+
+  test('Claude Vertex project and region survive apply and switching away and back', async () => {
+    const { applyProviderProfileToProcessEnv } = await importFreshProviderProfileModules()
+    const restoreEnv = snapshotEnv(['ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION'])
+    try {
+      process.env.ANTHROPIC_VERTEX_PROJECT_ID = 'claude-project'
+      process.env.CLOUD_ML_REGION = 'europe-west4'
+      const vertex = buildProfile({ provider: 'vertex', model: 'claude-sonnet-4-6' })
+      for (const selected of [vertex, buildProfile(), vertex]) {
+        applyProviderProfileToProcessEnv(selected)
+        expect(process.env.ANTHROPIC_VERTEX_PROJECT_ID).toBe('claude-project')
+        expect(process.env.CLOUD_ML_REGION).toBe('europe-west4')
+      }
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  test('Vertex reapplication honors the saved model without changing the profile list', async () => {
+    const { applyActiveProviderProfileFromConfig, _setSavedModelOverrideForTesting } =
+      await importFreshProviderProfileModules()
+    const profile = buildGeminiVertexProfile({
+      id: 'vertex-model-reapply', baseUrl: 'project-test',
+      model: 'gemini-2.5-flash,gemini-2.5-pro',
+    })
+    const config = { providerProfiles: [profile], activeProviderProfileId: profile.id }
+    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+    try {
+      _setSavedModelOverrideForTesting(undefined)
+      applyActiveProviderProfileFromConfig(config)
+      expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
+      _setSavedModelOverrideForTesting('gemini-2.5-pro')
+      applyActiveProviderProfileFromConfig(config)
+      expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-pro')
+      expect(profile.model).toBe('gemini-2.5-flash,gemini-2.5-pro')
+    } finally {
+      _setSavedModelOverrideForTesting(undefined)
+    }
   })
 
   test('bedrock profile sets CLAUDE_CODE_USE_BEDROCK and preserves anthropic model routing', async () => {
@@ -3325,7 +3365,8 @@ describe('applyActiveProviderProfileFromConfig', () => {
     ).toBe(false)
   })
 
-  test('does not override explicit Gemini Vertex startup selection with saved profile', async () => {
+  test.each([undefined, '0', 'false', '1'])(
+    'does not override explicit Gemini Vertex startup selection with OPENAI=%s', async openaiFlag => {
     // Maintainer repro: CLAUDE_CODE_USE_GEMINI_VERTEX=1 with concrete
     // project/model vars must win over a saved OpenAI profile, like every
     // other provider. Before the fix the saved profile was applied and the
@@ -3335,6 +3376,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     process.env.GEMINI_VERTEX_PROJECT = 'explicit-project'
     process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+    if (openaiFlag !== undefined) process.env.CLAUDE_CODE_USE_OPENAI = openaiFlag
     try {
       const applied = applyActiveProviderProfileFromConfig({
         providerProfiles: [
@@ -3351,7 +3393,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
       expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
       expect(process.env.GEMINI_VERTEX_PROJECT).toBe('explicit-project')
       expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-3.5-flash')
-      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe(openaiFlag)
       expect(process.env.OPENAI_MODEL).toBeUndefined()
     } finally {
       delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
@@ -3512,13 +3554,14 @@ describe('applyActiveProviderProfileFromConfig', () => {
     }
   })
 
-  test('applies saved profile when the Gemini Vertex flag is bare (stale export)', async () => {
+  test.each(['1', '0', 'false', ''])(
+    'applies saved profile when the Gemini Vertex flag is bare or disabled (%s)', async flag => {
     // A lone CLAUDE_CODE_USE_GEMINI_VERTEX=1 with no project/model/location
     // is a stale shell export, not intent — same semantics as the other
     // providers' bare-flag handling.
     const { applyActiveProviderProfileFromConfig } =
       await importFreshProviderProfileModules()
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = flag
     try {
       const applied = applyActiveProviderProfileFromConfig({
         providerProfiles: [

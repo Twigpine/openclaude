@@ -727,14 +727,8 @@ function hasCompleteProviderSelection(
     return true
   }
   if (!hasProviderSelectionFlags(processEnv)) return false
-  if (processEnv.CLAUDE_CODE_USE_OPENAI !== undefined) {
-    return (
-      trimOrUndefined(processEnv.OPENAI_BASE_URL) !== undefined ||
-      trimOrUndefined(processEnv.OPENAI_API_BASE) !== undefined ||
-      trimOrUndefined(processEnv.OPENAI_MODEL) !== undefined
-    )
-  }
-  if (processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX !== undefined) {
+  // Match native routing precedence even when an OpenAI flag is also defined.
+  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
     // An explicit project alias is enough to route, regardless of auth mode.
     if (
       trimOrUndefined(processEnv.GEMINI_VERTEX_PROJECT) !== undefined ||
@@ -753,6 +747,13 @@ function hasCompleteProviderSelection(
     // them as complete would suppress the saved active profile and strand
     // startup on an unusable Vertex route. Require a project alias here.
     return false
+  }
+  if (processEnv.CLAUDE_CODE_USE_OPENAI !== undefined) {
+    return (
+      trimOrUndefined(processEnv.OPENAI_BASE_URL) !== undefined ||
+      trimOrUndefined(processEnv.OPENAI_API_BASE) !== undefined ||
+      trimOrUndefined(processEnv.OPENAI_MODEL) !== undefined
+    )
   }
   if (processEnv.CLAUDE_CODE_USE_GEMINI !== undefined) {
     return (
@@ -780,7 +781,11 @@ function hasCompleteProviderSelection(
   }
   // Bedrock / Vertex / Foundry signal cloud-provider routing in env; treat
   // the flag alone as complete (these paths rely on ambient AWS/GCP creds).
-  return true
+  return (
+    processEnv.CLAUDE_CODE_USE_BEDROCK !== undefined ||
+    processEnv.CLAUDE_CODE_USE_VERTEX !== undefined ||
+    processEnv.CLAUDE_CODE_USE_FOUNDRY !== undefined
+  )
 }
 
 function hasConflictingProviderFlagsForProfile(
@@ -1101,7 +1106,7 @@ function isProcessEnvAlignedWithProfile(
       processEnv.CLAUDE_CODE_USE_FOUNDRY === undefined &&
       processEnv.OPENAI_BASE_URL === undefined &&
       processEnv.OPENAI_MODEL === undefined &&
-      sameOptionalEnvValue(processEnv.GEMINI_VERTEX_MODEL, getPrimaryModel(profile.model)) &&
+      sameOptionalEnvValue(processEnv.GEMINI_VERTEX_MODEL, primaryModel) &&
       projectAligned
     )
   }

@@ -1066,15 +1066,15 @@ function checkGeminiVertexEnv(): CheckResult[] {
       )
     }
   } else {
-    results.push(pass('GEMINI_VERTEX_PROJECT', project))
+    results.push(pass('GEMINI_VERTEX_PROJECT', safeDisplayValue(project, '(unset)')))
   }
 
   results.push(
     model
-      ? pass('GEMINI_VERTEX_MODEL', model)
+      ? pass('GEMINI_VERTEX_MODEL', safeDisplayValue(model, '(unset)'))
       : pass('GEMINI_VERTEX_MODEL', 'Not set. Default gemini-2.5-flash will be used.'),
   )
-  results.push(pass('GEMINI_VERTEX_LOCATION', location))
+  results.push(pass('GEMINI_VERTEX_LOCATION', safeDisplayValue(location, 'global')))
 
   if (authMode === 'access-token') {
     results.push(
@@ -1561,9 +1561,9 @@ export function serializeSafeEnvSummary(): Record<string, string | boolean> {
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
     return {
       CLAUDE_CODE_USE_GEMINI_VERTEX: true,
-      GEMINI_VERTEX_MODEL: process.env.GEMINI_VERTEX_MODEL ?? '(unset, default: gemini-2.5-flash)',
-      GEMINI_VERTEX_PROJECT: getGeminiVertexProjectId(process.env) ?? '(unset)',
-      GEMINI_VERTEX_LOCATION: process.env.GEMINI_VERTEX_LOCATION ?? 'global',
+      GEMINI_VERTEX_MODEL: safeDisplayValue(process.env.GEMINI_VERTEX_MODEL, '(unset, default: gemini-2.5-flash)'),
+      GEMINI_VERTEX_PROJECT: safeDisplayValue(getGeminiVertexProjectId(process.env), '(unset)'),
+      GEMINI_VERTEX_LOCATION: safeDisplayValue(process.env.GEMINI_VERTEX_LOCATION, 'global'),
       GEMINI_VERTEX_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
       GEMINI_VERTEX_CREDENTIAL_SET: Boolean(
         process.env.GEMINI_ACCESS_TOKEN?.trim() ||
