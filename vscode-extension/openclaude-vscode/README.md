@@ -31,6 +31,14 @@ A practical VS Code companion for OpenClaude with a project-aware **Control Cent
 - VS Code `1.95+`
 - `openclaude` available in your terminal PATH (`npm install -g @twigpine/openclaude@latest`)
 
+## Resuming sessions
+
+**OpenClaude: Resume Session** reads the current workspace's saved conversations
+from `~/.openclaude/projects/`, including long workspace paths. If you use
+`OPENCLAUDE_CONFIG_DIR`, start VS Code with the same environment override as the
+CLI so both read the same history. Claude Code's `CLAUDE_CONFIG_DIR` and
+`~/.claude/` are separate and are not used for OpenClaude session discovery.
+
 ## Commands
 
 - `OpenClaude: Open Control Center`

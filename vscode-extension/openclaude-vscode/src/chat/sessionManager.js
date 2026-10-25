@@ -5,7 +5,7 @@
  * Session files live under:
  *   ~/.openclaude/projects/<sanitized-cwd>/<sessionId>.jsonl
  *
- * Falls back to ~/.claude/projects/ for legacy installs.
+ * OPENCLAUDE_CONFIG_DIR overrides the config root, matching the CLI.
  */
 
 const fs = require('fs');
@@ -14,7 +14,8 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const MAX_SANITIZED_LENGTH = 80;
+// Keep in sync with src/utils/sessionStoragePortable.ts.
+const MAX_SANITIZED_LENGTH = 200;
 
 function sanitizePath(name) {
   const sanitized = name.replace(/[^a-zA-Z0-9]/g, '-');
@@ -32,23 +33,33 @@ function simpleHash(str) {
 }
 
 function resolveConfigDir() {
-  const envDir = process.env.CLAUDE_CONFIG_DIR;
-  if (envDir) return envDir;
-  const home = os.homedir();
-  const openClaudeDir = path.join(home, '.openclaude');
-  const legacyDir = path.join(home, '.claude');
-  if (!fs.existsSync(openClaudeDir) && fs.existsSync(legacyDir)) {
-    return legacyDir;
-  }
-  return openClaudeDir;
+  // Match src/utils/envUtils.ts: OpenClaude and Claude Code are independent.
+  return (process.env.OPENCLAUDE_CONFIG_DIR || path.join(os.homedir(), '.openclaude')).normalize('NFC');
 }
 
 function getProjectsDir() {
   return path.join(resolveConfigDir(), 'projects');
 }
 
-function getProjectDir(cwd) {
-  return path.join(getProjectsDir(), sanitizePath(cwd));
+async function getProjectDir(cwd) {
+  const sanitized = sanitizePath(cwd);
+  const exact = path.join(getProjectsDir(), sanitized);
+  if (sanitized.length <= MAX_SANITIZED_LENGTH) return exact;
+  try {
+    await fsp.readdir(exact);
+    return exact;
+  } catch {
+    // The CLI under Bun uses a different hash than Node. Match the portable
+    // SDK's prefix fallback when the exact long-path directory is absent.
+    try {
+      const prefix = sanitized.slice(0, MAX_SANITIZED_LENGTH) + '-';
+      const entries = await fsp.readdir(getProjectsDir(), { withFileTypes: true });
+      const match = entries.find(e => e.isDirectory() && e.name.startsWith(prefix));
+      return match ? path.join(getProjectsDir(), match.name) : exact;
+    } catch {
+      return exact;
+    }
+  }
 }
 
 class SessionManager {
@@ -62,7 +73,7 @@ class SessionManager {
 
   async listSessions() {
     const projectDir = this._cwd
-      ? getProjectDir(this._cwd)
+      ? await getProjectDir(this._cwd)
       : null;
 
     const dirs = projectDir
@@ -171,7 +182,7 @@ class SessionManager {
   }
 
   async loadSession(sessionId) {
-    const projectDir = this._cwd ? getProjectDir(this._cwd) : null;
+    const projectDir = this._cwd ? await getProjectDir(this._cwd) : null;
     const dirs = projectDir ? [projectDir] : await this._allProjectDirs();
 
     for (const dir of dirs) {
