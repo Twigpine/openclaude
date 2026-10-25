@@ -413,6 +413,18 @@ function isQuotaExhaustedMessage(body: string): boolean {
   )
 }
 
+function isExplicitThrottleMessage(body: string): boolean {
+  // A 403 is normally an authorization failure. Require positive throttling
+  // evidence, with auth/quota signals taking precedence even in mixed bodies.
+  // Empty bodies and generic "try again" / "busy" responses are ambiguous.
+  if (
+    /auth|forbidden|access[ _-]denied|permission|credential|denied|suspended|blocked|banned|insufficient[ _-]funds|invalid.{0,20}(?:key|token)|api[ _-]?key|revoked|expired|not[ _-]allowed|quota|billing|credit|payment|allotment/i.test(body)
+  ) {
+    return false
+  }
+  return /\brate[ _-]limit(?:ed|ing|[ _-](?:exceeded|reached))\b|\btoo[ _-]many[ _-]requests\b|\bthrottl(?:ed|ing)\b/i.test(body)
+}
+
 export function formatOpenAICategoryMarker(
   category: OpenAICompatibilityFailureCategory,
   host?: string,
@@ -542,6 +554,17 @@ export function classifyOpenAIHttpFailure(options: {
       status: options.status,
       message: body,
       hint: 'Provider quota or usage allotment has run out. Enable billing or switch provider.',
+    }
+  }
+
+  if (options.status === 403 && isExplicitThrottleMessage(body)) {
+    return {
+      source: 'http',
+      category: 'rate_limited',
+      retryable: true,
+      status: options.status,
+      message: body,
+      hint: 'Provider rate-limited the request. Retry after backoff.',
     }
   }
 

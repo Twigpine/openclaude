@@ -574,3 +574,51 @@ test('does not classify generic billing 400 errors as quota_exhausted', () => {
   expect(failure.category).toBe('malformed_provider_response')
   expect(failure.retryable).toBe(false)
 })
+
+
+test.each([
+  'Too many requests, try again in 30s',
+  'Rate limit exceeded',
+  'Request rate-limited',
+  'Requests are being throttled',
+  '{"error":{"code":"rate_limit_exceeded","message":"Please retry later"}}',
+])('classifies explicit throttle-403 as retryable: %s', body => {
+  expect(classifyOpenAIHttpFailure({ status: 403, body })).toMatchObject({
+    category: 'rate_limited',
+    retryable: true,
+  })
+  expect(classifyOpenAIHttpFailure({ status: 401, body })).toMatchObject({
+    category: 'auth_invalid',
+    retryable: false,
+  })
+})
+
+test.each([
+  '',
+  '   \n\t',
+  'Try again later',
+  'Server busy; slow down',
+  'Capacity exceeded',
+  'See the rate limit documentation',
+  'Forbidden: too many requests',
+  'Unauthorized: rate limit exceeded',
+  'Invalid API key; too many requests',
+  'Invalid credentials; too many requests',
+  'Account suspended; rate limit exceeded',
+  'Insufficient funds; requests throttled',
+  'Invalid token; requests throttled',
+  'Token expired; too many requests',
+  'Token revoked; rate limit exceeded',
+  'Access denied; too many requests',
+  'Permission denied; request throttled',
+  'Organization not allowed; rate limit exceeded',
+  'Quota exceeded; too many requests',
+  'Billing limit reached; too many requests',
+  'Credit balance depleted; rate limit exceeded',
+  '{"error":{"code":"insufficient_quota","message":"Too many requests"}}',
+  '{"error":{"type":"authentication_error","message":"Rate limit exceeded"}}',
+])('keeps ambiguous or denied throttle-403 terminal: %s', body => {
+  const failure = classifyOpenAIHttpFailure({ status: 403, body })
+  expect(failure.retryable).toBe(false)
+  expect(failure.category).not.toBe('rate_limited')
+})

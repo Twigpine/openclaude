@@ -1,4 +1,7 @@
+import type Anthropic from '@anthropic-ai/sdk'
 import { APIError } from '@anthropic-ai/sdk'
+import { snapshotEnv } from '../../../test/envSnapshot.js'
+import { CannotRetryError, withRetry } from '../withRetry.js'
 import { afterEach, beforeEach, expect, jest, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../../test/sharedMutationLock.js'
 import { asMockFetch } from '../../../test/typedMocks.js'
@@ -874,6 +877,139 @@ test('OPENAI_API_KEYS rotates to the next key on rate-limit failure', async () =
   })
 
   expect(authorizations).toEqual(['Bearer key-a', 'Bearer key-b'])
+})
+
+test.each([
+  { body: 'Too many requests, try again in 30s', retries: true },
+  { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: true },
+  { body: '', retries: false },
+  { body: 'Try again later', retries: false },
+  { body: 'Forbidden: too many requests', retries: false },
+  { body: 'Quota exceeded; too many requests', retries: false },
+  { body: 'Too many requests', retries: false, noRetry: true },
+])('throttle-403 through the shim and retry loop: %j', async ({ body, retries, noRetry }) => {
+  const restoreRetryEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS', 'CLAUDE_CODE_USE_OPENAI'])
+  process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  let attempts = 0
+  globalThis.fetch = asMockFetch(mock(async () => {
+    attempts++
+    return attempts === 1
+      ? new Response(body, {
+          status: 403,
+          headers: noRetry ? { 'x-should-retry': 'false' } : {},
+        })
+      : makeChatCompletionResponse('gpt-5.5')
+  }))
+  const client = createOpenAIShimClient({}) as Anthropic
+  const countdowns: unknown[] = []
+  let caught: unknown
+  let result: unknown
+  try {
+    const generator = withRetry(
+      async () => client,
+      api => api.beta.messages.create({
+        model: 'gpt-5.5',
+        messages: [{ role: 'user', content: 'hello' }],
+        max_tokens: 32,
+        stream: false,
+      }),
+      { maxRetries: 2, model: 'gpt-5.5', thinkingConfig: { type: 'disabled' } },
+    )
+    while (true) {
+      const next = await generator.next()
+      if (next.done) {
+        result = next.value
+        break
+      }
+      countdowns.push(next.value)
+    }
+  } catch (error) {
+    caught = error
+  } finally {
+    restoreRetryEnv()
+  }
+  expect(attempts).toBe(retries ? 2 : 1)
+  if (retries) {
+    expect(caught).toBeUndefined()
+    expect(result).toMatchObject({ content: [{ type: 'text', text: 'ok' }] })
+    expect(countdowns).toEqual([expect.objectContaining({
+      type: 'system', subtype: 'api_error', retryAttempt: 1, maxRetries: 2,
+    })])
+  } else {
+    expect(caught).toBeInstanceOf(CannotRetryError)
+    expect(countdowns).toEqual([])
+  }
+})
+
+test.each([
+  'Too many requests',
+  '{"error":{"code":"rate_limit_exceeded","message":"Too many requests"}}',
+])('throttle-403 exhausts the bounded retry budget with rate-limit guidance: %s', async body => {
+  const restoreRetryEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS', 'CLAUDE_CODE_USE_OPENAI'])
+  process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  let attempts = 0
+  globalThis.fetch = asMockFetch(mock(async () => {
+    attempts++
+    return new Response(body, { status: 403, headers: { 'request-id': 'throttle-request' } })
+  }))
+  const client = createOpenAIShimClient({}) as Anthropic
+  let caught: unknown
+  try {
+    for await (const _ of withRetry(
+      async () => client,
+      api => api.beta.messages.create({
+        model: 'gpt-5.5', messages: [{ role: 'user', content: 'hello' }], max_tokens: 32,
+      }),
+      { maxRetries: 2, model: 'gpt-5.5', thinkingConfig: { type: 'disabled' } },
+    )) { /* drain countdowns */ }
+  } catch (error) {
+    caught = error
+  } finally {
+    restoreRetryEnv()
+  }
+  expect(attempts).toBe(3)
+  expect(caught).toBeInstanceOf(CannotRetryError)
+  const originalError = (caught as CannotRetryError).originalError as APIError
+  expect(originalError.status).toBe(403)
+  expect(originalError.requestID).toBe('throttle-request')
+  if (body.startsWith('{')) expect(originalError.error).toEqual(JSON.parse(body))
+  const message = getAssistantMessageFromError(originalError, 'gpt-5.5')
+  expect(JSON.stringify(message)).toContain('Provider rate limit reached')
+  expect(JSON.stringify(message)).not.toContain('Authentication failed')
+})
+
+test('throttle-403 cools pooled keys and reuses them after cooldown', async () => {
+  const restorePoolEnv = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'OPENAI_API_KEYS', 'OPENAI_API_KEY'])
+  try {
+    jest.useFakeTimers()
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_API_KEYS = 'key-a,key-b'
+    delete process.env.OPENAI_API_KEY
+    const authorizations: Array<string | null> = []
+    globalThis.fetch = asMockFetch(mock(async (_input, init) => {
+      const headers = new Headers(init?.headers)
+      authorizations.push(headers.get('authorization'))
+      return authorizations.length === 1
+        ? new Response('Too many requests', { status: 403 })
+        : makeChatCompletionResponse('gpt-5.5')
+    }))
+    const client = createOpenAIShimClient({}) as Anthropic
+    const request = () => client.beta.messages.create({
+      model: 'gpt-5.5', messages: [{ role: 'user', content: 'hello' }], max_tokens: 32,
+    })
+    await request()
+    await request()
+    expect(authorizations).toEqual(['Bearer key-a', 'Bearer key-b', 'Bearer key-b'])
+    jest.advanceTimersByTime(30_001)
+    await request()
+    expect(authorizations).toEqual([
+      'Bearer key-a', 'Bearer key-b', 'Bearer key-b', 'Bearer key-a',
+    ])
+  } finally {
+    restorePoolEnv()
+  }
 })
 
 test('GitHub 429 cools the active pooled credential before retrying', async () => {

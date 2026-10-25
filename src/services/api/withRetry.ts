@@ -954,6 +954,12 @@ function shouldRetry(error: APIError, persistentRetryEnabled: boolean): boolean 
     return !isClaudeAISubscriber() || isEnterpriseSubscriber()
   }
 
+  // Only the OpenAI shim's explicit throttle classification makes a 403
+  // retryable. Preserve the no-retry header gate above and quota guard.
+  if (error.status === 403 && openAICategory === 'rate_limited') {
+    return !isQuotaExhausted(error)
+  }
+
   // Clear API key cache on 401 and allow retry.
   // OAuth token handling is done in the main retry loop via handleOAuth401Error.
   if (error.status === 401) {
