@@ -11,6 +11,7 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 import type { NormalizedMessage } from '../types/message.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 
 const nonce = `${Date.now()}-${Math.random()}`
 const realProviders = {
@@ -217,6 +218,33 @@ test('loadConversationForResume accepts a small transcript from jsonl path', asy
   expect(result).not.toBeNull()
   expect(result?.sessionId).toBe(sessionId)
   expect(result?.messages.length).toBeGreaterThan(0)
+})
+
+test('jsonl resume retains the selected main conversation, metadata, and write directory', async () => {
+  const restoreEnv = snapshotEnv(['CLAUDE_CODE_SIMPLE'])
+  try {
+    process.env.CLAUDE_CODE_SIMPLE = '1'
+    const childSessionId = id(89)
+    const path = await writeJsonlEntries([
+      user(id(80), 'inherited prompt'),
+      { ...assistant(id(81), 'continued answer', id(80)), sessionId: childSessionId },
+      { ...user(id(82), 'unrelated agent'), isSidechain: true,
+        timestamp: '2026-04-03T00:00:00.000Z' },
+      { type: 'custom-title', sessionId: childSessionId, customTitle: 'Selected history' },
+      { type: 'tag', sessionId: childSessionId, tag: 'keep-tag' },
+      { type: 'agent-setting', sessionId: childSessionId, agentSetting: 'reviewer' },
+    ])
+    const { loadConversationForResume } = await importFreshConversationRecovery()
+    const result = await loadConversationForResume('fixture', path)
+    expect(result?.sessionId).toBe(childSessionId)
+    expect(result?.fullPath).toBe(path)
+    expect(result?.customTitle).toBe('Selected history')
+    expect(result?.tag).toBe('keep-tag')
+    expect(result?.agentSetting).toBe('reviewer')
+    expect(result?.messages.map(message => message.uuid)).toEqual([id(80), id(81)])
+  } finally {
+    restoreEnv()
+  }
 })
 
 test('loadConversationForResume preserves goal metadata from a loaded log option', async () => {

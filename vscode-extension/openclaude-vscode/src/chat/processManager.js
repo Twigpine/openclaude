@@ -26,6 +26,7 @@ class ProcessManager {
    * @param {string} [opts.cwd] - Working directory
    * @param {Record<string,string>} [opts.env] - Extra env vars
    * @param {string} [opts.sessionId] - Session to resume
+   * @param {string} [opts.resumeTarget] - Resolved transcript path or session ID
    * @param {boolean} [opts.continueSession] - Use --continue instead of --resume
    * @param {string} [opts.model] - Model override
    * @param {string[]} [opts.extraArgs] - Additional CLI flags
@@ -35,6 +36,7 @@ class ProcessManager {
     this._cwd = opts.cwd || undefined;
     this._env = opts.env || {};
     this._sessionId = opts.sessionId || null;
+    this._resumeTarget = opts.resumeTarget || this._sessionId;
     this._continueSession = opts.continueSession || false;
     this._model = opts.model || null;
     this._permissionMode = opts.permissionMode || 'acceptEdits';
@@ -73,7 +75,7 @@ class ProcessManager {
     ];
 
     if (this._sessionId) {
-      args.push('--resume', this._sessionId);
+      args.push('--resume', this._resumeTarget);
     } else if (this._continueSession) {
       args.push('--continue');
     }

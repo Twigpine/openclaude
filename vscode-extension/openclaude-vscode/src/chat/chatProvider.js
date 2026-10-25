@@ -41,6 +41,8 @@ class ChatController {
   constructor(sessionManager) {
     this._sessionManager = sessionManager;
     this._process = null;
+    this._startGeneration = 0;
+    this._pendingStart = null;
     this._webviews = new Set();
     this._accumulatedText = '';
     this._toolUses = [];
@@ -77,8 +79,16 @@ class ChatController {
     this.broadcast(msg);
   }
 
-  async startSession(opts = {}) {
+  startSession(opts = {}) {
     this.stopSession();
+    const pending = this._startSession(opts).finally(() => {
+      if (this._pendingStart === pending) this._pendingStart = null;
+    });
+    this._pendingStart = pending;
+    return pending;
+  }
+
+  async _startSession(opts) {
     this._accumulatedText = '';
     this._toolUses = [];
     // Only clear messages if this is a brand new session (not continuing)
@@ -89,11 +99,19 @@ class ChatController {
 
     const { command, cwd, env, permissionMode } = getLaunchConfig();
 
+    const generation = this._startGeneration;
+    const resumeTarget = opts.sessionId
+      ? await this._sessionManager.getResumeTarget(opts.sessionId)
+      : undefined;
+    // A stop or another selection can arrive while resolving the transcript.
+    if (generation !== this._startGeneration) return;
+
     this._process = new ProcessManager({
       command,
       cwd,
       env,
       sessionId: opts.sessionId,
+      resumeTarget,
       continueSession: opts.continueSession || false,
       model: opts.model,
       permissionMode,
@@ -141,6 +159,8 @@ class ChatController {
   }
 
   stopSession() {
+    this._startGeneration++;
+    this._pendingStart = null;
     if (this._process) {
       this._process.dispose();
       this._process = null;
@@ -149,14 +169,14 @@ class ChatController {
   }
 
   async sendMessage(text) {
-    // Keep the process alive for multi-turn — just send directly.
-    // The CLI maintains full session state (tools, history) across turns.
-    // Only start a new process if none exists or it died.
-    if (!this._process || !this._process.running) {
-      await this.startSession({
-        sessionId: this._currentSessionId || undefined,
-      });
-    }
+    // Reuse a pending restart so simultaneous sends retain both messages.
+    // A stop or a new selection cancels sends waiting on the old startup.
+    const pending = this._pendingStart || ((!this._process || !this._process.running)
+      ? this.startSession({ sessionId: this._currentSessionId || undefined })
+      : null);
+    const generation = this._startGeneration;
+    if (pending) await pending;
+    if (generation !== this._startGeneration) return;
     await this._doSend(text);
   }
 

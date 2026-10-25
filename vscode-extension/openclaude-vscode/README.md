@@ -34,7 +34,7 @@ A practical VS Code companion for OpenClaude with a project-aware **Control Cent
 ## Resuming sessions
 
 **OpenClaude: Resume Session** reads the current workspace's saved conversations
-from `~/.openclaude/projects/`, including long workspace paths. If you use
+from `~/.openclaude/projects/`, including long workspace paths. When a session lives in an alternate runtime directory, resume passes its resolved transcript path to the CLI so continued messages stay with that history. If you use
 `OPENCLAUDE_CONFIG_DIR`, start VS Code with the same environment override as the
 CLI so both read the same history. Claude Code's `CLAUDE_CONFIG_DIR` and
 `~/.claude/` are separate and are not used for OpenClaude session discovery.

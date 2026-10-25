@@ -1,6 +1,6 @@
 import { feature } from 'bun:bundle'
 import type { UUID } from 'crypto'
-import { relative } from 'path'
+import { relative, resolve } from 'path'
 import { getCwd } from 'src/utils/cwd.js'
 import { addInvokedSkill } from '../bootstrap/state.js'
 import { asSessionId } from '../types/ids.js'
@@ -42,15 +42,12 @@ import {
 import { copyPlanForResume } from './plans.js'
 import { processSessionStartHooks } from './sessionStart.js'
 import {
-  buildConversationChain,
   checkResumeConsistency,
   getLastSessionLog,
   getSessionIdFromLog,
   isLiteLog,
   loadFullLog,
   loadMessageLogs,
-  loadTranscriptFile,
-  removeExtraFields,
 } from './sessionStorage.js'
 import { jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
@@ -648,50 +645,6 @@ export function restoreSkillStateFromMessages(messages: Message[]): void {
 }
 
 /**
- * Chain-walk a transcript jsonl by path.  Same sequence loadFullLog
- * runs internally — loadTranscriptFile → find newest non-sidechain
- * leaf → buildConversationChain → removeExtraFields — just starting
- * from an arbitrary path instead of the sid-derived one.
- *
- * leafUuids is populated by loadTranscriptFile as "uuids that no
- * other message's parentUuid points at" — the chain tips.  There can
- * be several (sidechains, orphans); newest non-sidechain is the main
- * conversation's end.
- */
-export async function loadMessagesFromJsonlPath(path: string): Promise<{
-  messages: SerializedMessage[]
-  sessionId: UUID | undefined
-  goal: LogOption['goal'] | undefined
-}> {
-  const {
-    messages: byUuid,
-    goalStates,
-    leafUuids,
-  } = await loadTranscriptFile(path)
-  let tip: (typeof byUuid extends Map<UUID, infer T> ? T : never) | null = null
-  let tipTs = 0
-  for (const m of byUuid.values()) {
-    if (m.isSidechain || !leafUuids.has(m.uuid)) continue
-    const ts = new Date(m.timestamp).getTime()
-    if (ts > tipTs) {
-      tipTs = ts
-      tip = m
-    }
-  }
-  if (!tip) return { messages: [], sessionId: undefined, goal: undefined }
-  const chain = buildConversationChain(byUuid, tip)
-  const sessionId = tip.sessionId as UUID | undefined
-  return {
-    messages: removeExtraFields(chain),
-    // Leaf's sessionId — forked sessions copy chain[0] from the source
-    // transcript, so the root retains the source session's ID. Matches
-    // loadFullLog's mostRecentLeaf.sessionId.
-    sessionId,
-    goal: sessionId ? goalStates.get(sessionId) : undefined,
-  }
-}
-
-/**
  * Loads a conversation for resume from various sources.
  * This is the centralized function for loading and deserializing conversations.
  *
@@ -753,13 +706,9 @@ export async function loadConversationForResume(
           return !id || !skip.has(id)
         }) ?? null
     } else if (sourceJsonlFile) {
-      // --resume with a .jsonl path (cli/print.ts routes on suffix).
-      // Same chain walk as the sid branch below — only the starting
-      // path differs.
-      const loaded = await loadMessagesFromJsonlPath(sourceJsonlFile)
-      messages = loaded.messages
-      sessionId = loaded.sessionId
-      goal = loaded.goal
+      // Preserve metadata and the source directory so continuation appends
+      // to the selected transcript even when another runtime hashes cwd differently.
+      log = await loadFullLog(resolve(sourceJsonlFile))
     } else if (typeof source === 'string') {
       // Load specific session by ID
       log = await getLastSessionLog(source as UUID)

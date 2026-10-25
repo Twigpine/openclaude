@@ -199,7 +199,8 @@ class SessionManager {
     };
   }
 
-  async loadSession(sessionId) {
+  /** Resolve the same transcript used by the history view and CLI resume. */
+  async resolveSessionPath(sessionId) {
     const cwd = this._cwd;
     const dirs = cwd ? await getProjectDirs(cwd) : await this._allProjectDirs();
 
@@ -207,10 +208,22 @@ class SessionManager {
       const filePath = path.join(dir, `${sessionId}.jsonl`);
       if (fs.existsSync(filePath)) {
         if (cwd && index > 0 && !await this._matchesWorkspace(filePath, cwd)) continue;
-        return this._parseSessionFile(filePath);
+        return filePath;
       }
     }
     return null;
+  }
+
+  /** Keep ordinary UUID resume; use the selected file for alternate stores. */
+  async getResumeTarget(sessionId) {
+    const filePath = await this.resolveSessionPath(sessionId);
+    const exact = this._cwd && path.join(getProjectsDir(), sanitizePath(this._cwd), `${sessionId}.jsonl`);
+    return filePath && filePath !== exact ? filePath : sessionId;
+  }
+
+  async loadSession(sessionId) {
+    const filePath = await this.resolveSessionPath(sessionId);
+    return filePath ? this._parseSessionFile(filePath) : null;
   }
 
   async _parseSessionFile(filePath) {

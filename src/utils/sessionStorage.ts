@@ -4123,13 +4123,30 @@ export function isLiteLog(log: LogOption): boolean {
 }
 
 /**
- * Loads full messages for a lite log by reading its JSONL file.
+ * Loads messages and resume metadata from a lite log or an explicit JSONL path.
  * Returns a new LogOption with populated messages array.
- * If the log is already full or loading fails, returns the original log.
+ * Explicit paths select the latest non-sidechain leaf and retain its session ID.
+ * If the log is already full or loading fails, returns the original/empty log.
  */
-export async function loadFullLog(log: LogOption): Promise<LogOption> {
+export async function loadFullLog(source: LogOption | string): Promise<LogOption> {
+  // Explicit file resumes use the same metadata restoration as the picker.
+  // The leaf supplies their identity; filenames may have been renamed.
+  const fromPath = typeof source === 'string'
+  const log: LogOption = fromPath
+    ? {
+        fullPath: source,
+        date: '',
+        messages: [],
+        value: 0,
+        created: new Date(0),
+        modified: new Date(0),
+        firstPrompt: '',
+        messageCount: 0,
+        isSidechain: false,
+      }
+    : source
   // If already full, return as-is
-  if (!isLiteLog(log)) {
+  if (!fromPath && !isLiteLog(log)) {
     return log
   }
 
@@ -4167,12 +4184,14 @@ export async function loadFullLog(log: LogOption): Promise<LogOption> {
       return log
     }
 
-    // Find the most recent user/assistant leaf message from the transcript
+    // Keep explicit-path resume on the main chain; preserve picker selection.
     const mostRecentLeaf = findLatestMessage(
       messages.values(),
       msg =>
         leafUuids.has(msg.uuid) &&
-        (msg.type === 'user' || msg.type === 'assistant'),
+        (fromPath
+          ? !msg.isSidechain
+          : msg.type === 'user' || msg.type === 'assistant'),
     )
     if (!mostRecentLeaf) {
       return log
@@ -4185,6 +4204,7 @@ export async function loadFullLog(log: LogOption): Promise<LogOption> {
     const sessionId = mostRecentLeaf.sessionId as UUID | undefined
     return {
       ...log,
+      sessionId: fromPath ? sessionId : log.sessionId,
       messages: removeExtraFields(transcript),
       firstPrompt: extractFirstPrompt(transcript),
       messageCount: countVisibleMessages(transcript),
