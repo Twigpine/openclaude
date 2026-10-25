@@ -252,6 +252,24 @@ test('rejects a global-only Gemini Vertex model on a regional location', async (
   )
 })
 
+test('global-endpoint validation redacts a credential from its supplied environment', async () => {
+  const secret = 'vertex-private-location-token'
+  const env = {
+    ...process.env,
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+    GEMINI_VERTEX_PROJECT: 'project-test-1234',
+    GEMINI_VERTEX_MODEL: 'gemini-3.5-flash',
+    GEMINI_VERTEX_LOCATION: secret,
+    GEMINI_VERTEX_AUTH_MODE: 'access-token',
+    GEMINI_ACCESS_TOKEN: secret,
+  }
+  const error = await getProviderValidationError(env, {
+    resolveGeminiCredential: async () => ({ kind: 'access-token', credential: secret }),
+  })
+  expect(error).toContain('GEMINI_VERTEX_LOCATION=global')
+  expect(error).not.toContain(secret)
+})
+
 test('accepts ADC credentials for Gemini auth', async () => {
   process.env.CLAUDE_CODE_USE_GEMINI = '1'
   process.env.GEMINI_AUTH_MODE = 'adc'

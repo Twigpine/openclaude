@@ -1310,17 +1310,29 @@ describe('doctor recognises Gemini Vertex', () => {
     }
   })
 
-  test.each(['GEMINI_VERTEX_MODEL', 'GEMINI_VERTEX_PROJECT', 'GEMINI_VERTEX_LOCATION'])(
-    'redacts a known credential placed in %s from results and saved reports', field => {
+  test.each([
+    ['GEMINI_VERTEX_MODEL', 'gemini-2.5-flash'],
+    ['GEMINI_VERTEX_PROJECT', 'gemini-2.5-flash'],
+    ['GEMINI_VERTEX_LOCATION', 'gemini-2.5-flash'],
+    ['GEMINI_VERTEX_LOCATION', 'gemini-3.5-flash'],
+  ])(
+    'redacts a known credential placed in %s with %s from results and saved reports', async (field, model) => {
       process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
       process.env.GEMINI_VERTEX_PROJECT = 'project-test'
-      process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+      process.env.GEMINI_VERTEX_MODEL = model
       process.env.GEMINI_VERTEX_LOCATION = 'global'
       const secret = 'vertex-private-access-token'
       process.env.GEMINI_ACCESS_TOKEN = secret
       process.env[field] = secret
       expect(JSON.stringify(checkOpenAIEnv())).not.toContain(secret)
       expect(JSON.stringify(serializeSafeEnvSummary())).not.toContain(secret)
+      if (model === 'gemini-3.5-flash') {
+        const { __test } = await import('./system-check.ts')
+        const readiness = await __test.checkProviderGenerationReadiness()
+        expect(readiness.ok).toBe(false)
+        expect(readiness.detail).toContain('GEMINI_VERTEX_LOCATION=global')
+        expect(readiness.detail).not.toContain(secret)
+      }
     },
   )
 

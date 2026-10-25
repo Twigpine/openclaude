@@ -8,6 +8,7 @@ import { createRoot } from '../ink.js'
 import { KeybindingSetup } from '../keybindings/KeybindingProviderSetup.js'
 import { AppStateProvider } from '../state/AppState.js'
 import { AIMLAPI_MESSAGES } from '../integrations/aimlapi/messages.js'
+import { resetModelStringsForTestingOnly } from '../bootstrap/state.js'
 import { aimlapiByKeyIdentity } from '../integrations/aimlapi/topupState.js'
 import {
   acquireSharedMutationLock,
@@ -6117,8 +6118,8 @@ test('ProviderManager hides Codex OAuth setup in bare mode', async () => {
   expect(output).not.toContain('Codex OAuth')
 })
 
-test('ProviderManager switches back to Anthropic via the manager UI: resets the model and clears managed env', async () => {
-  // GitHub Models is the active provider with no saved profiles. Selecting the
+test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthropic from %s via the manager UI: resets the model and clears managed env', async provider => {
+  // GitHub Models or a saved Vertex profile is active. Selecting the
   // "Use Anthropic (built-in)" recovery option must reset the session model and
   // drop the managed CLAUDE_CODE_USE_* flags. This is the production switch-back
   // path; the existing util tests only cover the sentinel in isolation.
@@ -6128,6 +6129,7 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
   // provider flags or a live mount into later tests.
   const envKeys = [
     'CLAUDE_CODE_USE_GITHUB',
+    'CLAUDE_CODE_USE_GEMINI_VERTEX',
     'GITHUB_TOKEN',
     'GH_TOKEN',
     'CLAUDE_CODE_SIMPLE',
@@ -6136,7 +6138,9 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
   let mounted: Awaited<ReturnType<typeof mountProviderManager>> | undefined
 
   try {
-    process.env.CLAUDE_CODE_USE_GITHUB = '1'
+    delete process.env.CLAUDE_CODE_USE_GITHUB
+    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+    process.env[provider === 'github' ? 'CLAUDE_CODE_USE_GITHUB' : 'CLAUDE_CODE_USE_GEMINI_VERTEX'] = '1'
     delete process.env.GITHUB_TOKEN
     delete process.env.GH_TOKEN
     delete process.env.CLAUDE_CODE_SIMPLE
@@ -6147,9 +6151,16 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
 
     const githubSyncRead = mock(() => undefined)
     const githubAsyncRead = mock(async () => undefined)
+    const vertexProfile = provider === 'gemini-vertex' ? {
+      id: 'vertex-test', name: 'Vertex', provider: 'gemini-vertex' as const,
+      baseUrl: 'test-project', model: 'gemini-2.5-flash',
+      createdAt: 1, updatedAt: 1,
+    } : null
+    const getProviderProfiles = () => vertexProfile ? [vertexProfile] : []
+    const getActiveProviderProfile = () => vertexProfile
     mockProviderManagerDependencies(githubSyncRead, githubAsyncRead, {
-      getProviderProfiles: () => [],
-      getActiveProviderProfile: () => null,
+      getProviderProfiles,
+      getActiveProviderProfile,
     })
 
     const clearActiveProviderProfile = mock(() => {
@@ -6168,8 +6179,8 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
     mock.module('../utils/providerProfiles.js', () => ({
       ...realProviderProfiles,
       applyActiveProviderProfileFromConfig: () => {},
-      getProviderProfiles: () => [],
-      getActiveProviderProfile: () => null,
+      getProviderProfiles,
+      getActiveProviderProfile,
       setActiveProviderProfile: mock(() => null),
       clearActiveProviderProfile,
     }))
@@ -6185,6 +6196,12 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
     mock.module('../utils/providerStartupOverrides.js', () => ({
       clearStartupProviderOverrides,
     }))
+
+    if (provider === 'gemini-vertex') {
+      resetModelStringsForTestingOnly()
+      const { ensureModelStringsInitialized } = await import('../utils/model/modelStrings.js')
+      await ensureModelStringsInitialized()
+    }
 
     const onDoneResults: Array<Record<string, unknown>> = []
     const appStateChanges: Array<{ newState: any; oldState: any }> = []
@@ -6213,8 +6230,8 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
     await Bun.sleep(25)
     mounted.stdin.write('\r')
 
-    // Options here are [GitHub Models (active), Use Anthropic (built-in)]; move
-    // down to the switch-back option and select it.
+    // The optional saved Vertex profile precedes the GitHub virtual provider
+    // and the built-in switch-back option.
     await waitForFrameOutput(
       mounted.getOutput,
       frame => frame.includes('Use Anthropic (built-in)'),
@@ -6222,6 +6239,10 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
 
     mounted.stdin.write('j')
     await Bun.sleep(25)
+    if (vertexProfile) {
+      mounted.stdin.write('j')
+      await Bun.sleep(25)
+    }
     mounted.stdin.write('\r')
 
     await waitForCondition(() => onDoneResults.length > 0)
@@ -6238,6 +6259,9 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
     // assert the AppState update sets mainLoopModel to the Anthropic model from
     // the result and clears mainLoopModelForSession to null.
     const anthropicModel = result.activeProviderModel as string
+    if (provider === 'gemini-vertex') {
+      expect(anthropicModel).toMatch(/^claude-/)
+    }
     await waitForCondition(() =>
       appStateChanges.some(
         ({ newState }) => newState.mainLoopModel === anthropicModel,
@@ -6272,6 +6296,7 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
     // if the Anthropic branch stops calling it.
     expect(clearStartupProviderOverrides).toHaveBeenCalled()
   } finally {
+    if (provider === 'gemini-vertex') resetModelStringsForTestingOnly()
     if (mounted) {
       await mounted.dispose()
     }

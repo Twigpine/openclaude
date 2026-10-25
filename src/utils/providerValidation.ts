@@ -637,6 +637,7 @@ export async function getProviderValidationError(
     const globalEndpointError = getGeminiVertexGlobalEndpointError(
       getGeminiVertexModel(env),
       getGeminiVertexLocation(env),
+      env,
     )
     if (globalEndpointError) {
       return globalEndpointError

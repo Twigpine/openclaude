@@ -790,13 +790,13 @@ test('routes Gemini Vertex provider requests through the native client', async (
   })
 })
 
-test('rejects a global-only Vertex model paired with a regional location', async () => {
+test.each(['us-central1', 'vertex-access-token'])('rejects a global-only Vertex model at %s without exposing credentials', async location => {
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_VERTEX
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
-  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_LOCATION = location
   // gemini-3.5-flash is served only from the global endpoint, so a regional
   // location must fail fast instead of building an unusable regional URL.
   process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
@@ -804,7 +804,7 @@ test('rejects a global-only Vertex model paired with a regional location', async
 
   await expect(
     getAnthropicClient({ maxRetries: 0, model: 'gemini-3.5-flash' }),
-  ).rejects.toThrow(/only available on the global endpoint/)
+  ).rejects.toThrow(`GEMINI_VERTEX_LOCATION=global (currently "${location === 'us-central1' ? location : 'ver...ken'}")`)
 })
 
 test('allows a global-only Vertex model on the global endpoint', async () => {

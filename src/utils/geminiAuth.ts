@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { memoizeWithTTLAsync } from './memoize.js'
+import { redactSecretValueForDisplay } from './providerSecrets.js'
 import {
   importOptionalRuntimeModule,
   isOptionalRuntimeModuleUnavailableError,
@@ -111,13 +112,17 @@ export function isGlobalOnlyVertexModel(model: string | undefined): boolean {
 export function getGeminiVertexGlobalEndpointError(
   model: string | undefined,
   location: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
 ): string | null {
   const resolvedLocation = sanitizeCredential(location) ?? DEFAULT_GEMINI_VERTEX_LOCATION
   const resolvedModel = sanitizeCredential(model)
   if (resolvedLocation === 'global' || !isGlobalOnlyVertexModel(resolvedModel)) {
     return null
   }
-  return `Gemini Vertex model "${resolvedModel}" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "${resolvedLocation}") to use it.`
+  // All consumers publish this message (doctor, startup validation and client
+  // errors). Redact the display value here, after comparing the raw location.
+  const displayLocation = redactSecretValueForDisplay(resolvedLocation, env)
+  return `Gemini Vertex model "${resolvedModel}" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "${displayLocation}") to use it.`
 }
 
 export function getGeminiAuthMode(
