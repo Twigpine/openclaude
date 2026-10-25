@@ -6923,7 +6923,7 @@ describe('isGeminiVertexEffectiveProvider', () => {
 
 describe('getAdditionalModelOptionsCacheScope — saved-profile Gemini Vertex', () => {
   test.each(['vertex_prof', undefined, 'deleted_profile'])('keeps saved Vertex profile %s out of first-party cache scope', async activeProviderProfileId => {
-    await importFreshProviderProfileModules()
+    const { getAPIProvider } = await importFreshProviderProfileModules()
     const { getAdditionalModelOptionsCacheScope } = await import(
       `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
     )
@@ -6938,6 +6938,7 @@ describe('getAdditionalModelOptionsCacheScope — saved-profile Gemini Vertex', 
       activeProviderProfileId,
     }))
 
+    expect(getAPIProvider()).toBe('gemini-vertex')
     expect(getAdditionalModelOptionsCacheScope()).toBeNull()
   })
 

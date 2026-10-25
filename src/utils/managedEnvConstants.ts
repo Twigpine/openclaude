@@ -187,7 +187,6 @@ export const SAFE_ENV_VARS = new Set([
   // traffic to an attacker-controlled project (same policy as the Anthropic
   // Vertex project id, which is managed but not safe).
   'GEMINI_VERTEX_AUTH_MODE',
-  'GEMINI_VERTEX_LOCATION',
   'MAX_MCP_OUTPUT_TOKENS',
   'MAX_THINKING_TOKENS',
   'MCP_TIMEOUT',

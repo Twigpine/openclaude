@@ -35,6 +35,15 @@ export function getAPIProvider(): LegacyAPIProvider {
     return 'foundry'
   }
 
+  // Match the client's saved-profile route before ambient credential inference.
+  // Read lazily: config may not yet be enabled during bootstrap imports.
+  try {
+    const { isGeminiVertexEffectiveProvider } = require('../providerProfiles.js') as typeof import('../providerProfiles.js')
+    if (isGeminiVertexEffectiveProvider()) return 'gemini-vertex'
+  } catch {
+    // Explicit env routing remains available before config initialization.
+  }
+
   const activeRouteId = resolveActiveRouteIdFromEnv(process.env)
 
   switch (activeRouteId) {

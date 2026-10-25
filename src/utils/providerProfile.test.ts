@@ -159,6 +159,10 @@ test('openai profile switch clears stale plural credential pool before applying 
       OPENAI_MODEL: 'gpt-5.4',
     },
     processEnv: {
+      GOOGLE_APPLICATION_CREDENTIALS: 'ambient-GOOGLE_APPLICATION_CREDENTIALS',
+      GOOGLE_CLOUD_PROJECT: 'ambient-GOOGLE_CLOUD_PROJECT',
+      GCLOUD_PROJECT: 'ambient-GCLOUD_PROJECT',
+      GOOGLE_PROJECT_ID: 'ambient-GOOGLE_PROJECT_ID',
       OPENAI_API_KEYS: 'stale-a,stale-b',
       OPENAI_API_KEY: 'shell-key',
       OPENAI_BASE_URL: 'https://api.openai.com/v1',
@@ -166,6 +170,10 @@ test('openai profile switch clears stale plural credential pool before applying 
     },
   })
 
+  assert.equal(env.GOOGLE_APPLICATION_CREDENTIALS, 'ambient-GOOGLE_APPLICATION_CREDENTIALS')
+  assert.equal(env.GOOGLE_CLOUD_PROJECT, 'ambient-GOOGLE_CLOUD_PROJECT')
+  assert.equal(env.GCLOUD_PROJECT, 'ambient-GCLOUD_PROJECT')
+  assert.equal(env.GOOGLE_PROJECT_ID, 'ambient-GOOGLE_PROJECT_ID')
   assert.equal(env.OPENAI_API_KEYS, undefined)
   assert.equal(env.OPENAI_API_KEY, 'profile-key')
   assert.equal(

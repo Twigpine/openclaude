@@ -361,7 +361,7 @@ Advanced and source-build guides:
 | Fireworks AI | `/provider` or env vars | First-class provider with 276 curated models (DeepSeek, Qwen, Llama, Gemma, and more); uses `FIREWORKS_API_KEY` |
 | LongCat | `/provider` or env vars | Meituan LongCat OpenAI-compatible API at `https://api.longcat.chat/openai/v1`; uses `LONGCAT_API_KEY` and defaults to `LongCat-2.0` |
 | ClinePass | `/provider` or env vars | AI model gateway with usage limits (5hr, weekly, monthly); uses `CLINE_API_KEY` at `https://api.cline.bot/api/v1` |
-| Gemini | `/provider` or env vars | Google AI Studio (Gemini API), API key only |
+| Gemini | `/provider` or env vars | Google AI Studio (Gemini API); API key, or access token/ADC via saved profiles |
 | Google Vertex AI (Gemini) | `/provider` or env vars | Native Gemini on Vertex AI (`generateContent`), enabled via `CLAUDE_CODE_USE_GEMINI_VERTEX`. Auth is ambient Google ADC by default, or an access token (`GEMINI_ACCESS_TOKEN` with `GEMINI_VERTEX_AUTH_MODE=access-token`). Project from `GEMINI_VERTEX_PROJECT` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `GOOGLE_PROJECT_ID` (or ADC-derived); model via `GEMINI_VERTEX_MODEL`, region via `GEMINI_VERTEX_LOCATION`. Distinct from API-key Gemini and from Claude-on-Vertex |
 | GitHub Models | `/onboard-github` | Interactive onboarding with saved credentials |
 | Codex OAuth | `/provider` | Opens ChatGPT sign-in in your browser and stores Codex credentials securely |

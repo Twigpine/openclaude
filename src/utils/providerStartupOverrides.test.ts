@@ -26,6 +26,10 @@ describe('clearStartupProviderOverrides', () => {
           VENICE_API_KEY: 'sk-venice',
           LONGCAT_API_KEY: 'sk-longcat',
           ANTHROPIC_AUTH_TOKEN: 'stale-proxy-token',
+          GOOGLE_APPLICATION_CREDENTIALS: 'ambient-GOOGLE_APPLICATION_CREDENTIALS',
+          GOOGLE_CLOUD_PROJECT: 'ambient-GOOGLE_CLOUD_PROJECT',
+          GCLOUD_PROJECT: 'ambient-GCLOUD_PROJECT',
+          GOOGLE_PROJECT_ID: 'ambient-GOOGLE_PROJECT_ID',
           KEEP_ME: '1',
         },
       }),
@@ -57,6 +61,17 @@ describe('clearStartupProviderOverrides', () => {
     )
     expect(
       (saveConfig.mock.results[0]?.value as { env: Record<string, string> }).env,
-    ).toEqual({ KEEP_ME: '1' })
+    ).toEqual({ KEEP_ME: '1',
+      GOOGLE_APPLICATION_CREDENTIALS: 'ambient-GOOGLE_APPLICATION_CREDENTIALS',
+      GOOGLE_CLOUD_PROJECT: 'ambient-GOOGLE_CLOUD_PROJECT',
+      GCLOUD_PROJECT: 'ambient-GCLOUD_PROJECT',
+      GOOGLE_PROJECT_ID: 'ambient-GOOGLE_PROJECT_ID',
+    })
+    const patch = (updateUserSettings.mock.calls as unknown as Array<[string, { env: Record<string, unknown> }]>)[0]![1]
+    expect(patch.env).not.toHaveProperty('GOOGLE_APPLICATION_CREDENTIALS')
+    expect(patch.env).not.toHaveProperty('GOOGLE_CLOUD_PROJECT')
+    expect(patch.env).not.toHaveProperty('GCLOUD_PROJECT')
+    expect(patch.env).not.toHaveProperty('GOOGLE_PROJECT_ID')
+
   })
 })

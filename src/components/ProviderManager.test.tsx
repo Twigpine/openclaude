@@ -21,7 +21,6 @@ import {
 // process — turning unstubbed exports into undefined and making provider
 // detection (StartupScreen.detectProvider, the logError gate, client routing)
 // order-dependent across OSes.
-import * as realProviderProfilesModule from '../utils/providerProfiles.js'
 
 const nonce = `${Date.now()}-${Math.random()}`
 const realProviderProfiles = {

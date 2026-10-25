@@ -110,10 +110,6 @@ const PROFILE_ENV_KEYS = [
   'GEMINI_VERTEX_MODEL',
   'GEMINI_VERTEX_PROJECT',
   'GEMINI_VERTEX_LOCATION',
-  'GOOGLE_CLOUD_PROJECT',
-  'GCLOUD_PROJECT',
-  'GOOGLE_PROJECT_ID',
-  'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_API_KEY',
   // CLOUD_ML_REGION is read by the @anthropic-ai/vertex-sdk to pick a region
   // (via getDefaultVertexRegion). Leaving a stale value in process.env after a

@@ -105,7 +105,7 @@ describe('SAFE_ENV_VARS excludes credentials', () => {
     expect(safeSection).not.toContain('ANTHROPIC_FOUNDRY_API_KEY')
   })
 
-  test('Gemini Vertex routing env vars are managed; project ids stay unsafe', async () => {
+  test('Gemini Vertex routing env vars are managed; project ids and locations require trust', async () => {
     // Assert runtime classification behavior, not source formatting, so the
     // test catches real regressions in env policy instead of breaking on edits.
     const { isProviderManagedEnvVar, SAFE_ENV_VARS } = await import(
@@ -129,15 +129,16 @@ describe('SAFE_ENV_VARS excludes credentials', () => {
       'CLAUDE_CODE_USE_GEMINI_VERTEX',
       'GEMINI_VERTEX_AUTH_MODE',
       'GEMINI_VERTEX_MODEL',
-      'GEMINI_VERTEX_LOCATION',
     ]) {
       expect(SAFE_ENV_VARS.has(envVar)).toBe(true)
     }
 
-    // Project ids from untrusted settings would switch Vertex traffic to an
+    // Locations control the authenticated request origin. Project ids from
+    // untrusted settings would switch Vertex traffic to an
     // attacker-controlled GCP project — same policy as
     // ANTHROPIC_VERTEX_PROJECT_ID, which is managed but not safe.
     for (const envVar of [
+      'GEMINI_VERTEX_LOCATION',
       'GEMINI_VERTEX_PROJECT',
       'GOOGLE_CLOUD_PROJECT',
       'GCLOUD_PROJECT',

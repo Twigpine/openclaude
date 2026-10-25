@@ -738,6 +738,10 @@ describe('applyAgentProviderOverrideToEnv', () => {
       CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED: '1',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID: 'saved-gemini',
+      GOOGLE_APPLICATION_CREDENTIALS: 'ambient-GOOGLE_APPLICATION_CREDENTIALS',
+      GOOGLE_CLOUD_PROJECT: 'ambient-GOOGLE_CLOUD_PROJECT',
+      GCLOUD_PROJECT: 'ambient-GCLOUD_PROJECT',
+      GOOGLE_PROJECT_ID: 'ambient-GOOGLE_PROJECT_ID',
       GEMINI_MODEL: 'gemini-parent',
       GEMINI_API_KEY: 'gemini-key',
       ANTHROPIC_MODEL: 'claude-parent',
@@ -764,6 +768,10 @@ describe('applyAgentProviderOverrideToEnv', () => {
     expect(env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID).toBeUndefined()
+    expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe('ambient-GOOGLE_APPLICATION_CREDENTIALS')
+    expect(env.GOOGLE_CLOUD_PROJECT).toBe('ambient-GOOGLE_CLOUD_PROJECT')
+    expect(env.GCLOUD_PROJECT).toBe('ambient-GCLOUD_PROJECT')
+    expect(env.GOOGLE_PROJECT_ID).toBe('ambient-GOOGLE_PROJECT_ID')
     expect(env.GEMINI_MODEL).toBeUndefined()
     expect(env.ANTHROPIC_MODEL).toBeUndefined()
     expect(env.OPENAI_API_BASE).toBeUndefined()

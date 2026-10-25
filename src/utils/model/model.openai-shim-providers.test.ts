@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 
 import {
   acquireSharedMutationLock,
@@ -14,11 +14,15 @@ import {
   clearPluginSettingsBase,
   resetSettingsCache,
 } from '../settings/settingsCache.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
+let restoreVertexEnv: () => void
 let allowedModels: Set<string> | undefined
 
-async function importFreshModelModule() {
+async function importFreshModelModule(providerOverride?: import('./providers.js').LegacyAPIProvider) {
   mock.restore()
   const getAPIProvider = () => {
+    if (providerOverride) return providerOverride
+    if (process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) return 'gemini-vertex'
     if (process.env.NVIDIA_NIM) return 'nvidia-nim'
     if (process.env.MINIMAX_API_KEY) return 'minimax'
     if (process.env.MIMO_API_KEY) return 'xiaomi-mimo'
@@ -129,6 +133,7 @@ beforeEach(async () => {
   resetStateForTests()
   resetSettingsCache()
   clearPluginSettingsBase()
+  restoreVertexEnv = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_MODEL'], { clear: true })
   allowedModels = undefined
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
@@ -171,6 +176,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   try {
+    restoreVertexEnv()
     mock.restore()
     resetStateForTests()
     resetSettingsCache()
@@ -632,5 +638,33 @@ test('default helpers do not leak claude-* names to Xiaomi MiMo', async () => {
     const model = fn()
     expect(model.toLowerCase()).not.toContain('claude')
     expect(model.toLowerCase()).not.toContain('opus')
+  }
+})
+
+
+test('Vertex without a model override ignores a saved model from another provider', async () => {
+  saveGlobalConfig(current => ({ ...current, model: 'claude-sonnet-4-6' }))
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  const { getUserSpecifiedModelSetting } = await importFreshModelModule()
+  expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-flash')
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
+  expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-pro')
+})
+
+
+test('profile-only Vertex model selection preserves the saved primary model over ambient settings', async () => {
+  const { getUserSpecifiedModelSetting } = await importFreshModelModule('gemini-vertex')
+  const profiles = require('../providerProfiles.js') as typeof import('../providerProfiles.js')
+  const profileSpy = spyOn(profiles, 'getActiveProviderProfile').mockReturnValue({
+    id: 'saved-vertex', name: 'Saved Vertex', provider: 'gemini-vertex',
+    baseUrl: 'my-project', model: 'gemini-2.5-pro,gemini-2.5-flash',
+  })
+  try {
+    process.env.GEMINI_VERTEX_MODEL = 'ambient-model'
+    process.env.CONCENTRATE_API_KEY = 'ambient-key'
+    process.env.CONCENTRATE_MODEL = 'unrelated-model'
+    expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-pro')
+  } finally {
+    profileSpy.mockRestore()
   }
 })

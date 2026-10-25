@@ -1,3 +1,4 @@
+import { snapshotEnv } from '../src/test/envSnapshot.js'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -18,6 +19,15 @@ import { DEFAULT_MAX_ACTIVE_MESSAGES_HARD_CAP } from '../src/utils/maxActiveMess
 import { resetSettingsCache } from '../src/utils/settings/settingsCache.ts'
 
 const ENV_KEYS = [
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_LOCATION',
+  'GEMINI_VERTEX_AUTH_MODE',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'GOOGLE_CLOUD_PROJECT',
+  'GCLOUD_PROJECT',
+  'GOOGLE_PROJECT_ID',
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_GEMINI',
@@ -116,27 +126,18 @@ const ENV_KEYS = [
   'LINKUP_API_KEY',
 ] as const
 
-const originalEnv: Record<string, string | undefined> = {}
+let restoreEnv: () => void
 let tempConfigDir: string | undefined
 
 beforeEach(() => {
-  for (const key of ENV_KEYS) {
-    originalEnv[key] = process.env[key]
-    delete process.env[key]
-  }
+  restoreEnv = snapshotEnv(ENV_KEYS, { clear: true })
   tempConfigDir = mkdtempSync(join(tmpdir(), 'openclaude-system-check-'))
   process.env.OPENCLAUDE_CONFIG_DIR = tempConfigDir
   resetSettingsCache()
 })
 
 afterEach(() => {
-  for (const key of ENV_KEYS) {
-    if (originalEnv[key] === undefined) {
-      delete process.env[key]
-    } else {
-      process.env[key] = originalEnv[key]
-    }
-  }
+  restoreEnv()
   resetSettingsCache()
   if (tempConfigDir) {
     rmSync(tempConfigDir, { recursive: true, force: true })
@@ -1250,30 +1251,8 @@ describe('sandbox runtime diagnostics', () => {
 })
 
 describe('doctor recognises Gemini Vertex', () => {
-  const FLAGS = [
-    'CLAUDE_CODE_USE_GEMINI_VERTEX',
-    'CLAUDE_CODE_USE_OPENAI',
-    'CLAUDE_CODE_USE_GEMINI',
-    'CLAUDE_CODE_USE_GITHUB',
-    'CLAUDE_CODE_USE_MISTRAL',
-    'GEMINI_VERTEX_PROJECT',
-    'GEMINI_VERTEX_MODEL',
-    'GEMINI_VERTEX_LOCATION',
-    'GEMINI_VERTEX_AUTH_MODE',
-    'GEMINI_ACCESS_TOKEN',
-  ] as const
-  const prior = Object.fromEntries(FLAGS.map(k => [k, process.env[k]]))
-
-  afterEach(() => {
-    for (const k of FLAGS) {
-      if (prior[k] === undefined) delete process.env[k]
-      else process.env[k] = prior[k]
-    }
-  })
-
   test('checkOpenAIEnv reports the Vertex provider, not the Anthropic flow', async () => {
     const { __test } = await import('./system-check.ts')
-    for (const k of FLAGS) delete process.env[k]
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
     process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
@@ -1288,7 +1267,6 @@ describe('doctor recognises Gemini Vertex', () => {
 
   test('safe env summary surfaces Vertex config', async () => {
     const { __test } = await import('./system-check.ts')
-    for (const k of FLAGS) delete process.env[k]
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
     process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
@@ -1302,7 +1280,6 @@ describe('doctor recognises Gemini Vertex', () => {
 
   test('generation readiness passes when a Vertex credential resolves', async () => {
     const { __test } = await import('./system-check.ts')
-    for (const k of FLAGS) delete process.env[k]
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
     process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
@@ -1315,7 +1292,6 @@ describe('doctor recognises Gemini Vertex', () => {
 
   test('generation readiness fails when no Vertex credential resolves (preflight matches startup)', async () => {
     const { __test } = await import('./system-check.ts')
-    for (const k of FLAGS) delete process.env[k]
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
     // Same fail branch the runtime resolver takes when ambient ADC cannot be

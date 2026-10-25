@@ -844,10 +844,9 @@ export function shouldRouteToGeminiVertexFromProfile(
 /**
  * Effective "is this session talking to Gemini Vertex?" decision, mirroring the
  * client's routing in getAnthropicClient(): the env flag OR a saved active
- * profile that routes to Vertex. getAPIProvider() only sees env route state, so
- * paths that run before the client is selected (e.g. the tool_use id sanitizer
- * in normalizeMessagesForAPI) must use this to avoid stripping Vertex
- * thought-signature ids on the saved-profile-only route.
+ * profile that routes to Vertex. Model classification and paths that run before the client is selected (e.g.
+ * the tool_use id sanitizer in normalizeMessagesForAPI) use this to preserve
+ * the saved-profile-only route.
  */
 export function isGeminiVertexEffectiveProvider(
   processEnv: NodeJS.ProcessEnv = process.env,

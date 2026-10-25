@@ -1,3 +1,4 @@
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
 import {
@@ -106,21 +107,16 @@ test('buildInheritedEnvVars forwards every Gemini Vertex project alias to teamma
     'GCLOUD_PROJECT',
     'GOOGLE_PROJECT_ID',
   ] as const
-  const prior = Object.fromEntries(aliases.map(k => [k, process.env[k]]))
+  const restoreEnv = snapshotEnv([...aliases, 'CLAUDE_CODE_USE_GEMINI_VERTEX'])
   try {
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     for (const k of aliases) process.env[k] = `value-${k}`
     const envVars = buildInheritedEnvVars()
     for (const k of aliases) {
-      expect(envVars).toContain(`${k}=`)
-      expect(envVars).toContain(`value-${k}`)
+      expect(envVars).toContain(`${k}=value-${k}`)
     }
   } finally {
-    for (const k of aliases) {
-      if (prior[k] === undefined) delete process.env[k]
-      else process.env[k] = prior[k]
-    }
-    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+    restoreEnv()
   }
 })
 
