@@ -421,7 +421,7 @@ function isExplicitThrottleMessage(body: string): boolean {
   // "key, supplied here, is invalid"). Keep that evidence together, without
   // joining a separate subject such as "key, streaming is disabled".
   const credentialFaultBody = body.replace(
-    /,\s*(?:[^,.;!?]*,\s*)?(?=(?:which|that|is|are|was|were|has|have|had|now|still|already|[a-z]+ly|invalid|missing|incorrect|disabled|deactivated|unusable|required|not)\b)/gi,
+    /,\s*(?:[^,.;!?]*,\s*)?(?=(?:(?:which|that)\b[^,.;!?]*|(?:(?:is|are|was|were|has|have|had|been|being|now|still|already|[a-z]+ly)\s+)*)(?:invalid|missing|incorrect|disabled|deactivated|unusable|required|not[ _-](?:valid|found|provided|configured|set))\b)/gi,
     continuation => continuation.replace(/,/g, ' '),
   )
   if (
