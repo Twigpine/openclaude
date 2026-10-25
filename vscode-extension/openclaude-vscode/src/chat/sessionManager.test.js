@@ -6,7 +6,8 @@ const path = require('node:path');
 const { spyOn } = require('bun:test');
 const { acquireEnvMutex, releaseEnvMutex } = require('../../../../src/entrypoints/sdk/shared.js');
 const { resolveClaudeConfigHomeDir } = require('../../../../src/utils/envUtils.js');
-const { sanitizePath } = require('../../../../src/utils/sessionStoragePortable.js');
+const { sanitizePath, MAX_SANITIZED_LENGTH } = require('../../../../src/utils/sessionStoragePortable.js');
+const { djb2Hash } = require('../../../../src/utils/hash.js');
 const { SessionManager } = require('./sessionManager');
 
 let root;
@@ -42,13 +43,13 @@ test.afterEach(async () => {
   }
 });
 
-async function writeSession(configDir, cwd, text) {
+async function writeSession(configDir, cwd, text, { id = sessionId, projectName = sanitizePath(cwd) } = {}) {
   // Use the CLI's production path rules rather than the extension's helper.
-  const directory = path.join(configDir, 'projects', sanitizePath(cwd));
+  const directory = path.join(configDir, 'projects', projectName);
   await fs.mkdir(directory, { recursive: true });
-  const filePath = path.join(directory, `${sessionId}.jsonl`);
+  const filePath = path.join(directory, `${id}.jsonl`);
   await fs.writeFile(filePath, JSON.stringify({
-    type: 'user', message: { role: 'user', content: text },
+    type: 'user', message: { role: 'user', content: text }, cwd,
   }) + '\n');
   return filePath;
 }
@@ -93,4 +94,27 @@ test('list and load match CLI project directories at truncation boundaries', asy
     assert.deepEqual((await manager.listSessions()).map(s => s.filePath), [expectedPath], `path length ${length}`);
     assert.deepEqual(await manager.loadSession(sessionId), [{ role: 'user', text: `Session ${length}` }]);
   }
+});
+
+test('mixed Node/Bun histories remain discoverable without duplicate or unrelated sessions', async () => {
+  const configDir = resolveClaudeConfigHomeDir({ homeDir: home });
+  const cwd = '/' + 'p'.repeat(MAX_SANITIZED_LENGTH) + '/project';
+  const prefix = cwd.replace(/[^a-zA-Z0-9]/g, '-').slice(0, MAX_SANITIZED_LENGTH);
+  const nodeProject = prefix + '-' + Math.abs(djb2Hash(cwd)).toString(36);
+  const bunId = 'fe3477aa-67af-47a0-a355-2f15c348d884';
+  const unrelatedId = 'cc0d9b97-04c0-402f-ad89-92e9993b53f9';
+  const nodePath = await writeSession(configDir, cwd, 'Node session', { projectName: nodeProject });
+  await writeSession(configDir, cwd, 'Older copy of Node session');
+  // cwd follows the message in real CLI transcripts, so it can lie beyond
+  // the metadata reader's 64 KiB head buffer.
+  const longPrompt = 'Bun session ' + 'x'.repeat(70000);
+  const bunPath = await writeSession(configDir, cwd, longPrompt, { id: bunId });
+  await writeSession(configDir, cwd + '-unrelated', 'Other workspace', { id: unrelatedId });
+
+  const manager = new SessionManager();
+  manager.setCwd(cwd);
+  assert.deepEqual((await manager.listSessions()).map(s => s.filePath).sort(), [nodePath, bunPath].sort());
+  assert.deepEqual(await manager.loadSession(sessionId), [{ role: 'user', text: 'Node session' }]);
+  assert.deepEqual(await manager.loadSession(bunId), [{ role: 'user', text: longPrompt }]);
+  assert.equal(await manager.loadSession(unrelatedId), null);
 });
