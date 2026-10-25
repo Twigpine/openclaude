@@ -118,3 +118,22 @@ test('mixed Node/Bun histories remain discoverable without duplicate or unrelate
   assert.deepEqual(await manager.loadSession(bunId), [{ role: 'user', text: longPrompt }]);
   assert.equal(await manager.loadSession(unrelatedId), null);
 });
+
+test('a zero-byte exact transcript does not hide a populated alternate history', async () => {
+  const configDir = resolveClaudeConfigHomeDir({ homeDir: home });
+  const cwd = '/' + 'p'.repeat(MAX_SANITIZED_LENGTH) + '/project';
+  const prefix = cwd.replace(/[^a-zA-Z0-9]/g, '-').slice(0, MAX_SANITIZED_LENGTH);
+  const exactProject = prefix + '-' + Math.abs(djb2Hash(cwd)).toString(36);
+  const exactPath = path.join(configDir, 'projects', exactProject, `${sessionId}.jsonl`);
+  await fs.mkdir(path.dirname(exactPath), { recursive: true });
+  await fs.writeFile(exactPath, '');
+  const alternatePath = await writeSession(configDir, cwd, 'Recovered history', {
+    projectName: prefix + '-alternate',
+  });
+
+  const manager = new SessionManager();
+  manager.setCwd(cwd);
+  assert.deepEqual((await manager.listSessions()).map(session => session.filePath), [alternatePath]);
+  assert.deepEqual(await manager.loadSession(sessionId), [{ role: 'user', text: 'Recovered history' }]);
+  assert.equal(await manager.getResumeTarget(sessionId), alternatePath);
+});

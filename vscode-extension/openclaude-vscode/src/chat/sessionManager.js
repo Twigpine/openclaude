@@ -42,6 +42,16 @@ function getProjectsDir() {
   return path.join(resolveConfigDir(), 'projects');
 }
 
+/** Same rule as resolveSessionFilePath: a zero-byte file is not a session. */
+async function hasTranscriptBytes(filePath) {
+  try {
+    const stat = await fsp.stat(filePath);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Return the Node directory first, followed by alternate long-path hashes. */
 async function getProjectDirs(cwd) {
   const sanitized = sanitizePath(cwd);
@@ -109,6 +119,7 @@ class SessionManager {
       for (const file of jsonlFiles) {
         const filePath = path.join(dir, file);
         try {
+          if (!await hasTranscriptBytes(filePath)) continue;
           if (expectedCwd && !await this._matchesWorkspace(filePath, expectedCwd)) continue;
           const meta = await this._extractSessionMeta(filePath);
           if (meta) results.push(meta);
@@ -206,7 +217,7 @@ class SessionManager {
 
     for (const [index, dir] of dirs.entries()) {
       const filePath = path.join(dir, `${sessionId}.jsonl`);
-      if (fs.existsSync(filePath)) {
+      if (await hasTranscriptBytes(filePath)) {
         if (cwd && index > 0 && !await this._matchesWorkspace(filePath, cwd)) continue;
         return filePath;
       }
