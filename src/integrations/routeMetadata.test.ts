@@ -640,13 +640,22 @@ test('resolveActiveRouteIdFromEnv ignores a saved gemini-vertex profile when ano
   ).toBe('gemini')
 })
 
-test('resolveActiveRouteIdFromEnv keeps a saved gemini-vertex profile over ambient credential-only env', () => {
-  // The client routes a saved gemini-vertex profile unless a conflicting
-  // provider *flag* is set; an ambient API key (e.g. XAI_API_KEY) is not a
-  // conflict, so route resolution must agree and not fall to env-only inference.
+test.each([
+  [{ ANTHROPIC_BASE_URL: 'https://anthropic.example/api', ANTHROPIC_MODEL: 'claude-sonnet-4-6', ANTHROPIC_AUTH_TOKEN: 'token' }, 'custom-anthropic'],
+  [{ ANTHROPIC_BASE_URL: 'https://anthropic.example/api', ANTHROPIC_MODEL: 'claude-sonnet-4-6', ANTHROPIC_API_KEY: 'key' }, 'custom-anthropic'],
+  [{ NEARAI_API_KEY: 'key' }, 'nearai'],
+  [{ FIREWORKS_API_KEY: 'key' }, 'fireworks'],
+  [{ XAI_API_KEY: 'key' }, 'xai'],
+] as const)('saved Vertex metadata yields to explicit environment selection %j', (env, route) => {
+  expect(resolveActiveRouteIdFromEnv(env, { activeProfileProvider: 'gemini-vertex' })).toBe(route)
+})
+
+test('resolveActiveRouteIdFromEnv keeps a saved gemini-vertex profile over an unselected ambient OpenAI key', () => {
+  // A generic key alone does not select a route. Dedicated env-only provider
+  // selections above do, matching the startup profile gate.
   expect(
     resolveActiveRouteIdFromEnv(
-      { XAI_API_KEY: 'xai-key' },
+      { OPENAI_API_KEY: 'openai-key' },
       { activeProfileProvider: 'gemini-vertex' },
     ),
   ).toBe('gemini-vertex')

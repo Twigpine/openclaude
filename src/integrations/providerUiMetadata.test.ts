@@ -24,12 +24,11 @@ describe('getProviderPresetUiMetadata — API-key prompt gating', () => {
 })
 
 describe('getProviderPresetUiMetadata — Gemini Vertex credential metadata', () => {
-  test('credentialEnvVars are real credentials, not routing/config vars', () => {
+  test('scalar preset credentials contain only the bearer source', () => {
     const metadata = getProviderPresetUiMetadata('gemini-vertex', EMPTY_ENV)
 
     expect(metadata.credentialEnvVars).toEqual([
       'GEMINI_ACCESS_TOKEN',
-      'GOOGLE_APPLICATION_CREDENTIALS',
     ])
   })
 

@@ -848,7 +848,7 @@ export async function getAnthropicClient({
         GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
         GEMINI_API_KEY: undefined,
         GOOGLE_API_KEY: undefined,
-      } as NodeJS.ProcessEnv)
+      } as NodeJS.ProcessEnv, { allowAmbientAdc: true })
     const credential = await resolveVertexCredential()
     if (credential.kind === 'none') {
       throw new Error('Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN or Google ADC credentials')

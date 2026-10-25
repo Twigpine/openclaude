@@ -602,7 +602,9 @@ export async function getProviderValidationError(
     // both the access token and the project id (credential.projectId), so a
     // missing project env var is only fatal once we know ADC didn't provide one.
     const vertexCredential = await (
-      options?.resolveGeminiCredential ?? resolveGeminiCredential
+      options?.resolveGeminiCredential ??
+      ((credentialEnv: NodeJS.ProcessEnv) =>
+        resolveGeminiCredential(credentialEnv, { allowAmbientAdc: true }))
     )({
       ...env,
       GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(env),

@@ -254,6 +254,9 @@ export const PROVIDER_PRESET_MANIFEST = [
     "routeId": "gemini-vertex",
     "vendorId": "gemini-vertex",
     "description": "Gemini on Google Vertex AI",
+    "apiKeyEnvVars": [
+      "GEMINI_ACCESS_TOKEN"
+    ],
     "modelEnvVars": [
       "GEMINI_VERTEX_MODEL"
     ],

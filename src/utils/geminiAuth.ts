@@ -45,6 +45,9 @@ export type GeminiResolvedCredential =
     }
 
 type ResolveGeminiCredentialDeps = {
+  // Native Vertex promises the full ADC chain; direct Gemini keeps its
+  // existing file-presence policy to avoid ambient discovery during inference.
+  allowAmbientAdc?: boolean
   createGoogleAuth?: () => Promise<GoogleAuthLike>
   importOptionalRuntimeModule?: typeof importOptionalRuntimeModule
 }
@@ -204,7 +207,7 @@ async function resolveGeminiAdcCredentialUncached(
   env: NodeJS.ProcessEnv,
   deps: ResolveGeminiCredentialDeps,
 ): Promise<Exclude<GeminiResolvedCredential, { kind: 'none' | 'api-key' | 'access-token' }> | { kind: 'none' }> {
-  if (!mayHaveGeminiAdcCredentials(env)) {
+  if (!deps.allowAmbientAdc && !mayHaveGeminiAdcCredentials(env)) {
     return { kind: 'none' }
   }
 
@@ -245,6 +248,7 @@ const resolveDefaultGeminiAdcCredential = memoizeWithTTLAsync(
     appData: string | undefined,
     home: string,
     projectIdHint: string | undefined,
+    allowAmbientAdc: boolean,
   ) =>
     resolveGeminiAdcCredentialUncached(
       {
@@ -255,7 +259,7 @@ const resolveDefaultGeminiAdcCredential = memoizeWithTTLAsync(
         GOOGLE_PROJECT_ID: projectIdHint,
         HOME: home,
       } as NodeJS.ProcessEnv,
-      {},
+      { allowAmbientAdc },
     ),
   GEMINI_ADC_CACHE_TTL_MS,
 )
@@ -303,5 +307,6 @@ export async function resolveGeminiCredential(
     sanitizeCredential(env.APPDATA),
     homedir(),
     getGeminiProjectIdHint(env),
+    deps.allowAmbientAdc ?? false,
   )
 }

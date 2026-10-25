@@ -20,6 +20,7 @@ import {
 import { readGeminiAccessToken } from './geminiCredentials.js'
 import {
   DEFAULT_GEMINI_VERTEX_MODEL,
+  geminiVertexAdcWillResolveProject,
   getGeminiVertexLocation,
   resolveGeminiVertexAuthMode,
 } from './geminiAuth.js'
@@ -1551,13 +1552,7 @@ function hasConcreteProviderSelection(
       sanitizeProviderConfigValue(processEnv.GOOGLE_CLOUD_PROJECT) !== undefined ||
       sanitizeProviderConfigValue(processEnv.GCLOUD_PROJECT) !== undefined ||
       sanitizeProviderConfigValue(processEnv.GOOGLE_PROJECT_ID) !== undefined ||
-      sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_LOCATION) !== undefined ||
-      normalizeProfileModel(
-        sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_MODEL),
-      ) !== undefined ||
-      sanitizeApiKey(processEnv.GEMINI_ACCESS_TOKEN) !== undefined ||
-      sanitizeProviderConfigValue(processEnv.GOOGLE_APPLICATION_CREDENTIALS) !== undefined ||
-      sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_AUTH_MODE) !== undefined
+      geminiVertexAdcWillResolveProject(processEnv)
     )
   }
 

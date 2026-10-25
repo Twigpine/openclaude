@@ -812,6 +812,79 @@ describe('applyProviderProfileToProcessEnv', () => {
     },
   )
 
+  test('Vertex preset keeps an ADC file out of the saved bearer and startup mirror', async () => {
+    const { addProviderProfile, getProviderPresetDefaults } = await importFreshProviderProfileModules()
+    const { loadProfileFile } = await import('./providerProfile.js')
+    const restore = snapshotEnv(['GOOGLE_APPLICATION_CREDENTIALS'])
+    try {
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = '/saved/adc.json'
+      const defaults = getProviderPresetDefaults('gemini-vertex')
+      const saved = addProviderProfile({
+        ...defaults, provider: 'gemini-vertex', name: 'ADC', baseUrl: 'saved-project',
+      })!
+      expect(saved.apiKey).toBeUndefined()
+      expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
+      expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
+      expect(loadProfileFile()?.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/saved/adc.json')
+      expect(loadProfileFile()?.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
+    } finally {
+      restore()
+    }
+  })
+
+  test('Vertex selection and active edits replace the bearer and restore the same identity', async () => {
+    const { addProviderProfile, setActiveProviderProfile, updateProviderProfile,
+      clearProviderProfileEnvFromProcessEnv, applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    const { loadProfileFile } = await import('./providerProfile.js')
+    const input = { provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'project-a', model: 'gemini-2.5-flash' }
+    addProviderProfile({ ...input, apiKey: 'token-a' })
+    const b = addProviderProfile({ ...input, baseUrl: 'project-b', apiKey: 'token-b' }, { makeActive: false })!
+    setActiveProviderProfile(b.id)
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('token-b')
+    expect(loadProfileFile()?.env.GEMINI_ACCESS_TOKEN).toBe('token-b')
+    updateProviderProfile(b.id, { ...b, apiKey: 'token-c' })
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('token-c')
+    expect(loadProfileFile()?.env.GEMINI_ACCESS_TOKEN).toBe('token-c')
+    clearProviderProfileEnvFromProcessEnv()
+    applyActiveProviderProfileFromConfig()
+    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('token-c')
+    expect(process.env.GEMINI_VERTEX_PROJECT).toBe('project-b')
+    const restore = snapshotEnv(['GEMINI_VERTEX_AUTH_MODE', 'GEMINI_ACCESS_TOKEN'])
+    try {
+      process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+      delete process.env.GEMINI_ACCESS_TOKEN
+      setActiveProviderProfile(b.id)
+      expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('access-token')
+      expect(process.env.GEMINI_ACCESS_TOKEN as string | undefined).toBe('token-c')
+    } finally {
+      restore()
+    }
+  })
+
+  test('Vertex startup does not consume a workspace mirror when config home has none', async () => {
+    const { applyActiveProviderProfileFromConfig } = await importFreshProviderProfileModules()
+    const { createProfileFile, saveProfileFile } = await import('./providerProfile.js')
+    const workspace = mkdtempSync(join(tmpdir(), 'vertex-untrusted-workspace-'))
+    const restore = snapshotEnv(['GEMINI_ACCESS_TOKEN'])
+    try {
+      const saved = buildGeminiVertexProfile({ baseUrl: 'saved-project' })
+      saveProfileFile(createProfileFile('gemini-vertex', {
+        GEMINI_VERTEX_PROJECT: 'saved-project', GEMINI_VERTEX_MODEL: saved.model,
+        GEMINI_VERTEX_LOCATION: 'attacker.example/', GEMINI_VERTEX_AUTH_MODE: 'access-token',
+      }), { filePath: join(workspace, '.openclaude-profile.json') })
+      process.chdir(workspace)
+      process.env.GEMINI_ACCESS_TOKEN = 'shell-token'
+      applyActiveProviderProfileFromConfig({ providerProfiles: [saved], activeProviderProfileId: saved.id })
+      expect(process.env.GEMINI_VERTEX_LOCATION).toBe('global')
+      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('shell-token')
+    } finally {
+      process.chdir(originalCwd)
+      restore()
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
   test('reselecting a Vertex profile restores its saved bearer after another provider clears it', async () => {
     const { addProviderProfile, setActiveProviderProfile } = await importFreshProviderProfileModules()
     const saved = addProviderProfile({

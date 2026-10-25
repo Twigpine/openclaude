@@ -1586,6 +1586,25 @@ function profileRouteHonorsBaseUrlBoundary(
   return true
 }
 
+export function hasCompleteAnthropicSelection(processEnv: NodeJS.ProcessEnv): boolean {
+  return (
+    Boolean(processEnv.ANTHROPIC_BASE_URL?.trim()) &&
+    Boolean(processEnv.ANTHROPIC_MODEL?.trim()) &&
+    (Boolean(processEnv.ANTHROPIC_AUTH_TOKEN?.trim()) ||
+      Boolean(processEnv.ANTHROPIC_API_KEY?.trim()))
+  )
+}
+
+// The client and metadata must yield the saved Vertex fallback to the same
+// explicit startup selections, including routes selected by dedicated env vars.
+export function canUseGeminiVertexProfile(processEnv: NodeJS.ProcessEnv): boolean {
+  return (
+    !hasCompleteAnthropicSelection(processEnv) &&
+    resolveEnvOnlyProviderRouteId(processEnv) === null &&
+    !hasConflictingProviderFlag(processEnv, 'CLAUDE_CODE_USE_GEMINI_VERTEX')
+  )
+}
+
 export function resolveActiveRouteIdFromEnv(
   processEnv: NodeJS.ProcessEnv = process.env,
   options?: {
@@ -1612,15 +1631,10 @@ export function resolveActiveRouteIdFromEnv(
     return 'vertex'
   }
 
-  // Saved-profile-only Gemini Vertex must win over ambient credential-only
-  // inference (e.g. a stray XAI_API_KEY), matching getAnthropicClient: it routes
-  // a saved gemini-vertex profile unless a conflicting provider flag is set.
-  // Mirror shouldRouteToGeminiVertexFromProfile exactly — any *defined* (not
-  // just truthy) provider flag other than the Vertex one is explicit intent, so
-  // CLAUDE_CODE_USE_OPENAI=0 must block the saved-profile route here too.
+  // Share the client's fallback rule, including defined-but-falsey conflicts.
   if (
     options?.activeProfileProvider === 'gemini-vertex' &&
-    !hasConflictingProviderFlag(processEnv, 'CLAUDE_CODE_USE_GEMINI_VERTEX')
+    canUseGeminiVertexProfile(processEnv)
   ) {
     return 'gemini-vertex'
   }

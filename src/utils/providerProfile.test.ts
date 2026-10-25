@@ -2040,6 +2040,36 @@ test('gemini vertex profiles persist dedicated env vars', () => {
   })
 })
 
+test('legacy Vertex startup restores the project for an incomplete shell selection', async () => {
+  const persisted = createProfileFile('gemini-vertex', {
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+    GEMINI_VERTEX_PROJECT: 'saved-project',
+    GEMINI_VERTEX_AUTH_MODE: 'access-token',
+    GEMINI_ACCESS_TOKEN: 'saved-token',
+  })
+  for (const partial of [
+    { GEMINI_ACCESS_TOKEN: 'shell-token' },
+    { GEMINI_VERTEX_AUTH_MODE: 'access-token' },
+    { GEMINI_VERTEX_LOCATION: 'europe-west4' },
+    { GEMINI_VERTEX_MODEL: 'gemini-2.5-pro' },
+    { GEMINI_ACCESS_TOKEN: 'shell-token', GOOGLE_APPLICATION_CREDENTIALS: '/adc.json' },
+  ]) {
+    const env = await buildStartupEnvFromProfile({
+      persisted, processEnv: { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', ...partial },
+    })
+    assert.equal(env.GEMINI_VERTEX_PROJECT, 'saved-project')
+    assert.equal(env.GEMINI_ACCESS_TOKEN, partial.GEMINI_ACCESS_TOKEN ?? 'saved-token')
+  }
+  for (const complete of [
+    { GEMINI_VERTEX_PROJECT: 'shell-project' },
+    { GEMINI_VERTEX_AUTH_MODE: 'adc' },
+    { GOOGLE_APPLICATION_CREDENTIALS: '/adc.json' },
+  ]) {
+    const processEnv = { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', ...complete }
+    assert.equal(await buildStartupEnvFromProfile({ persisted, processEnv }), processEnv)
+  }
+})
+
 test('buildStartupEnvFromProfile applies Gemini Vertex profiles', async () => {
   const persisted = createProfileFile('gemini-vertex', {
     CLAUDE_CODE_USE_GEMINI_VERTEX: '1',

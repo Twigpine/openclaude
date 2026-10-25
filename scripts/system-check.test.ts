@@ -1,5 +1,5 @@
 import { snapshotEnv } from '../src/test/envSnapshot.js'
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -1251,6 +1251,65 @@ describe('sandbox runtime diagnostics', () => {
 })
 
 describe('doctor recognises Gemini Vertex', () => {
+  test('generation readiness discovers ambient ADC without a credentials file', async () => {
+    const fs = await import('node:fs')
+    const auth = await import('../src/utils/geminiAuth.js')
+    const { __test } = await import('./system-check.ts')
+    const files = spyOn(fs, 'existsSync').mockReturnValue(false)
+    const resolveCredential = auth.resolveGeminiCredential
+    const resolver = spyOn(auth, 'resolveGeminiCredential').mockImplementation(
+      (env, options) => resolveCredential(env, {
+        ...options,
+        createGoogleAuth: async () => ({
+          getClient: async () => ({ getAccessToken: async () => 'metadata-token' }),
+          getProjectId: async () => 'metadata-project',
+        }),
+      }),
+    )
+    const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE'])
+    try {
+      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+      process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+      expect((await __test.checkProviderGenerationReadiness()).ok).toBe(true)
+    } finally {
+      resolver.mockRestore()
+      files.mockRestore()
+      restore()
+    }
+  })
+
+  test('disabled Vertex uses the actual Anthropic diagnostics and readiness', async () => {
+    const { __test } = await import('./system-check.ts')
+    const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE'])
+    try {
+      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = 'off'
+      process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+      expect(checkOpenAIEnv().find(r => r.label === 'Provider mode')?.detail).toContain('Anthropic')
+      expect(serializeSafeEnvSummary().CLAUDE_CODE_USE_GEMINI_VERTEX).not.toBe(true)
+      expect((await __test.checkProviderGenerationReadiness()).detail).not.toContain('Gemini Vertex')
+    } finally {
+      restore()
+    }
+  })
+
+  test.each([
+    ['access-token', '', '/adc.json', false],
+    ['adc', 'ignored-token', '', false],
+    ['access-token', 'token', '', true],
+    ['adc', '', '/adc.json', true],
+  ])('credential summary uses %s source', (mode, token, file, expected) => {
+    const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE', 'GEMINI_ACCESS_TOKEN', 'GOOGLE_APPLICATION_CREDENTIALS'])
+    try {
+      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+      process.env.GEMINI_VERTEX_AUTH_MODE = mode as string
+      process.env.GEMINI_ACCESS_TOKEN = token as string
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = file as string
+      expect(serializeSafeEnvSummary().GEMINI_VERTEX_CREDENTIAL_SET).toBe(expected)
+    } finally {
+      restore()
+    }
+  })
+
   test.each(['GEMINI_VERTEX_MODEL', 'GEMINI_VERTEX_PROJECT', 'GEMINI_VERTEX_LOCATION'])(
     'redacts a known credential placed in %s from results and saved reports', field => {
       process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'

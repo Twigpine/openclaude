@@ -157,6 +157,9 @@ export GEMINI_VERTEX_MODEL=gemini-2.5-flash   # optional, defaults to gemini-2.5
 openclaude --model gemini-2.5-flash
 ```
 
+On Google Cloud, ADC can also use an attached service account through the
+metadata server, without a local credentials file.
+
 Access-token mode instead of ADC:
 
 ```bash
@@ -586,6 +589,10 @@ profile file's auth mode, credential and location. Explicit shell settings
 still take precedence. Selecting a saved Vertex profile also reuses its saved
 access token; tokens saved by direct Gemini's setup remain specific to that
 setup and are not an implicit Vertex credential source.
+
+Startup reads the active Vertex profile's mirror from configuration home.
+Documented environment-only provider selections take precedence over a saved
+Vertex fallback, just like a complete explicit custom Anthropic selection.
 
 Model env vars are provider-scoped: first-party Anthropic sessions read
 `ANTHROPIC_MODEL`, OpenAI-compatible sessions read `OPENAI_MODEL`, Gemini reads

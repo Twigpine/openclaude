@@ -47,6 +47,7 @@ import {
   buildVertexProfileEnv,
   clearManagedProfileEnv,
   deleteProfileFile,
+  getDefaultProfileFilePath,
   loadProfileFile,
   type ProfileFileLocation,
   type ProfileEnv,
@@ -68,6 +69,8 @@ import {
 } from '../integrations/index.js'
 import {
   getRouteDefaultBaseUrl,
+  hasCompleteAnthropicSelection,
+  canUseGeminiVertexProfile,
   isCloudflareBaseUrl,
   isClinePassBaseUrl,
   isCanonicalApiRouteInferenceBaseUrl,
@@ -701,15 +704,6 @@ function hasProviderSelectionFlags(
   return PROVIDER_SELECTION_FLAGS.some(flag => processEnv[flag] !== undefined)
 }
 
-function hasCompleteAnthropicSelection(processEnv: NodeJS.ProcessEnv): boolean {
-  return (
-    trimOrUndefined(processEnv.ANTHROPIC_BASE_URL) !== undefined &&
-    trimOrUndefined(processEnv.ANTHROPIC_MODEL) !== undefined &&
-    (trimOrUndefined(processEnv.ANTHROPIC_AUTH_TOKEN) !== undefined ||
-      trimOrUndefined(processEnv.ANTHROPIC_API_KEY) !== undefined)
-  )
-}
-
 /**
  * A "complete" explicit provider selection = a USE flag AND at least one
  * concrete config value that tells us WHERE to route (a base URL) or WHAT
@@ -848,8 +842,7 @@ export function shouldRouteToGeminiVertexFromProfile(
   activeProfile: ProviderProfile | undefined,
 ): boolean {
   if (activeProfile?.provider !== 'gemini-vertex') return false
-  if (hasCompleteAnthropicSelection(processEnv)) return false
-  return !hasConflictingProviderFlagsForProfile(processEnv, activeProfile)
+  return canUseGeminiVertexProfile(processEnv)
 }
 
 /**
@@ -1319,7 +1312,7 @@ export function clearProviderProfileEnvFromProcessEnv(
 
 export function applyProviderProfileToProcessEnv(
   profile: ProviderProfile,
-  options?: { primaryModel?: string; startupEnv?: ProfileEnv },
+  options?: { primaryModel?: string; startupEnv?: ProfileEnv; preferProfileCredentials?: boolean },
 ): void {
   const { route, compatibilityMode } = resolveProfileCompatibility(profile.provider)
   const primaryModel = options?.primaryModel ?? getPrimaryModel(profile.model)
@@ -1364,11 +1357,16 @@ export function applyProviderProfileToProcessEnv(
     }
   } else if (compatibilityMode === 'gemini-vertex') {
     const savedEnv = options?.startupEnv
-    const accessToken = sanitizeApiKey(process.env.GEMINI_ACCESS_TOKEN) ??
+    // Explicit selection/edit replaces the previous profile's managed bearer.
+    // Startup application retains the documented shell-override precedence.
+    const selectedToken = options?.preferProfileCredentials
+      ? sanitizeApiKey(profile.apiKey)
+      : undefined
+    const accessToken = selectedToken ?? sanitizeApiKey(process.env.GEMINI_ACCESS_TOKEN) ??
       sanitizeApiKey(profile.apiKey) ?? sanitizeApiKey(savedEnv?.GEMINI_ACCESS_TOKEN)
     const vertexAuthMode = resolveGeminiVertexAuthMode({
-      GEMINI_VERTEX_AUTH_MODE: trimOrUndefined(process.env.GEMINI_VERTEX_AUTH_MODE) ??
-        savedEnv?.GEMINI_VERTEX_AUTH_MODE,
+      GEMINI_VERTEX_AUTH_MODE: selectedToken ? 'access-token' :
+        trimOrUndefined(process.env.GEMINI_VERTEX_AUTH_MODE) ?? savedEnv?.GEMINI_VERTEX_AUTH_MODE,
       GEMINI_ACCESS_TOKEN: accessToken,
     })
     profileEnv = buildGeminiVertexProfileEnv({
@@ -1786,7 +1784,7 @@ export function applyActiveProviderProfileFromConfig(
   // startup loader. A preset endpoint is not an explicit project; in that case
   // the mirror also owns the saved project. Reject conflicting projects/routes.
   const startupProfile = activeProfile.provider === 'gemini-vertex'
-    ? loadProfileFile()
+    ? loadProfileFile({ filePath: getDefaultProfileFilePath() })
     : null
   const profileProject = geminiVertexProjectFromProfile(activeProfile.baseUrl)
   const startupEnv = startupProfile?.profile === 'gemini-vertex' &&
@@ -2567,7 +2565,7 @@ export function setActiveProviderProfile(
     },
   }))
 
-  applyProviderProfileToProcessEnv(activeProfile)
+  applyProviderProfileToProcessEnv(activeProfile, { preferProfileCredentials: true })
   triggerStartupDiscoveryRefreshForProfile(activeProfile)
 
   // Keep startup persisted provider profile in sync so initial startup

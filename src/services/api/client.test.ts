@@ -851,15 +851,15 @@ test('allows a global-only Vertex model on the global endpoint', async () => {
   )
 })
 
-test('saved-profile-only Vertex prefers the profile over ambient env and xAI credentials', async () => {
+test('saved-profile-only Vertex prefers the profile over ambient env and an unselected OpenAI key', async () => {
   let capturedUrl: string | undefined
 
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
   // Ambient env that must NOT win over the selected profile in profile-only mode.
-  const restoreAmbientXai = snapshotEnv(['XAI_API_KEY'])
-  process.env.XAI_API_KEY = 'ambient-xai-key'
+  const restoreAmbientKey = snapshotEnv(['OPENAI_API_KEY'])
+  process.env.OPENAI_API_KEY = 'ambient-openai-key'
   process.env.GOOGLE_CLOUD_PROJECT = 'ambient-project'
   process.env.GEMINI_VERTEX_MODEL = 'ambient-model'
   process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
@@ -911,7 +911,7 @@ test('saved-profile-only Vertex prefers the profile over ambient env and xAI cre
     expect(capturedUrl).not.toContain('ambient-model')
   } finally {
     spy.mockRestore()
-    restoreAmbientXai()
+    restoreAmbientKey()
   }
 })
 
@@ -1037,6 +1037,82 @@ test.each(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const)(
     }
   },
 )
+
+test.each([
+  ['NEARAI_API_KEY', 'https://cloud-api.near.ai/', 'nearai'],
+  ['XAI_API_KEY', 'https://api.x.ai/', 'xai'],
+] as const)('env-only %s survives saved Vertex startup, classification and request routing', async (key, origin, route) => {
+  const restore = snapshotEnv([key, 'CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GEMINI_VERTEX', 'OPENAI_API_KEY'], { clear: true })
+  process.env[key] = 'selected-key'
+  const saved = { id: 'saved-vertex', provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'saved-project', model: 'gemini-2.5-flash' }
+  const spy = spyOn(providerProfilesModule, 'getActiveProviderProfile').mockReturnValue(saved)
+  try {
+    expect(providerProfilesModule.applyActiveProviderProfileFromConfig({
+      ...(await import('../../utils/config.js')).getGlobalConfig(),
+      providerProfiles: [saved], activeProviderProfileId: saved.id,
+    })).toBeUndefined()
+    const { resolveActiveRouteIdFromEnv } = await import('../../integrations/routeMetadata.js')
+    expect(resolveActiveRouteIdFromEnv(process.env, { activeProfileProvider: saved.provider })).toBe(route)
+    expect(realProviders.getAPIProvider()).not.toBe('gemini-vertex')
+    let url = ''
+    globalThis.fetch = (async input => {
+      url = String(input)
+      return new Response(JSON.stringify({
+        id: 'chat_test', object: 'chat.completion', model: 'selected-model',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), { headers: { 'Content-Type': 'application/json' } })
+    }) as FetchType
+    const client = await getAnthropicClient({ maxRetries: 0, model: 'selected-model' })
+    await client.beta.messages.create({ model: 'selected-model', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
+    expect(url).toStartWith(origin)
+  } finally {
+    spy.mockRestore()
+    restore()
+  }
+})
+
+test('native Vertex discovers fileless ADC through client refresh and validation', async () => {
+  const fs = await import('node:fs')
+  const files = spyOn(fs, 'existsSync').mockReturnValue(false)
+  const resolveCredential = geminiAuthModule.resolveGeminiCredential
+  let discoveries = 0
+  const createGoogleAuth = async () => ({
+    getClient: async () => ({ getAccessToken: async () => ({ token: `metadata-token-${++discoveries}` }) }),
+    getProjectId: async () => 'metadata-project',
+  })
+  const resolver = spyOn(geminiAuthModule, 'resolveGeminiCredential').mockImplementation(
+    (env, options) => resolveCredential(env, { ...options, createGoogleAuth }),
+  )
+  const restore = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE'], { clear: true })
+  try {
+    // Direct Gemini retains its prior policy; native callers opt into discovery.
+    expect(await resolveCredential({ GEMINI_AUTH_MODE: 'adc' }, { createGoogleAuth })).toEqual({ kind: 'none' })
+    expect(discoveries).toBe(0)
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+    let authorization: string | null = null
+    let url = ''
+    const client = await getAnthropicClient({
+      maxRetries: 0, model: 'gemini-2.5-flash',
+      fetchOverride: async (input, init) => {
+        url = String(input)
+        authorization = new Headers(init?.headers).get('authorization')
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }))
+      },
+    })
+    await client.beta.messages.create({ model: 'gemini-2.5-flash', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
+    expect(url).toContain('/projects/metadata-project/')
+    expect(authorization as string | null).toBe('Bearer metadata-token-2')
+    const { getProviderValidationError } = await import('../../utils/providerValidation.js')
+    expect(await getProviderValidationError()).toBeNull()
+    expect(discoveries).toBe(3)
+  } finally {
+    resolver.mockRestore()
+    files.mockRestore()
+    restore()
+  }
+})
 
 test('ADC-only Vertex routing uses the credential-discovered project', async () => {
   let capturedUrl: string | undefined

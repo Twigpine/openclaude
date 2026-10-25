@@ -60,6 +60,7 @@ import {
 import { getWebSearchTimeoutMs } from '../src/tools/WebSearchTool/providers/timeout.js'
 import { isFirecrawlCloudApiUrl } from '../src/tools/firecrawl/client.js'
 import { getAPIProvider } from '../src/utils/model/providers.js'
+import { isEnvTruthy } from '../src/utils/envUtils.js'
 import { getMainLoopModel } from '../src/utils/model/model.js'
 
 type CheckResult = {
@@ -985,7 +986,7 @@ function hasPlaceholderCredential(value: string | undefined): boolean {
 }
 
 function currentBaseUrl(): string {
-  if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
     const location = getGeminiVertexLocation(process.env)
     const project =
       getGeminiVertexProjectId(process.env) ?? '<set GEMINI_VERTEX_PROJECT>'
@@ -1147,7 +1148,7 @@ function checkGithubEnv(): CheckResult[] {
 
 export function checkOpenAIEnv(): CheckResult[] {
   const results: CheckResult[] = []
-  const useGeminiVertex = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
+  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const useMistral = isTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
@@ -1261,7 +1262,7 @@ export function checkOpenAIEnv(): CheckResult[] {
 }
 
 async function checkBaseUrlReachability(): Promise<CheckResult> {
-  const useGeminiVertex = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
+  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useOpenAI = isTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
@@ -1378,7 +1379,7 @@ async function checkBaseUrlReachability(): Promise<CheckResult> {
 }
 
 async function checkProviderGenerationReadiness(): Promise<CheckResult> {
-  const useGeminiVertex = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
+  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useOpenAI = isTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
@@ -1396,7 +1397,7 @@ async function checkProviderGenerationReadiness(): Promise<CheckResult> {
       GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
       GEMINI_API_KEY: undefined,
       GOOGLE_API_KEY: undefined,
-    })
+    }, { allowAmbientAdc: true })
     if (credential.kind === 'none') {
       return fail(
         'Provider generation readiness',
@@ -1558,17 +1559,17 @@ function checkOllamaProcessorMode(): CheckResult {
 }
 
 export function serializeSafeEnvSummary(): Record<string, string | boolean> {
-  if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
     return {
       CLAUDE_CODE_USE_GEMINI_VERTEX: true,
       GEMINI_VERTEX_MODEL: safeDisplayValue(process.env.GEMINI_VERTEX_MODEL, '(unset, default: gemini-2.5-flash)'),
       GEMINI_VERTEX_PROJECT: safeDisplayValue(getGeminiVertexProjectId(process.env), '(unset)'),
       GEMINI_VERTEX_LOCATION: safeDisplayValue(getGeminiVertexLocation(process.env), 'global'),
       GEMINI_VERTEX_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
-      GEMINI_VERTEX_CREDENTIAL_SET: Boolean(
-        process.env.GEMINI_ACCESS_TOKEN?.trim() ||
-          process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim(),
-      ),
+      GEMINI_VERTEX_CREDENTIAL_SET:
+        resolveGeminiVertexAuthMode(process.env) === 'access-token'
+          ? Boolean(process.env.GEMINI_ACCESS_TOKEN?.trim())
+          : Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()),
     }
   }
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)) {

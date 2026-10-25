@@ -1,10 +1,7 @@
 import { defineVendor } from '../define.js'
 
-// Only real credential sources belong here (like every other vendor):
-// generic consumers (getProviderPresetUiMetadata / getRouteCredentialValue)
-// treat these as "the credential", so routing/config vars such as
-// CLAUDE_CODE_USE_GEMINI_VERTEX or GEMINI_VERTEX_PROJECT must not be included —
-// otherwise the preset flow would prefill apiKey with non-secret config.
+// Credential sources for presence checks and redaction, excluding routing
+// configuration. The preset's scalar bearer field uses only the access token.
 // access-token mode → GEMINI_ACCESS_TOKEN; ADC mode → GOOGLE_APPLICATION_CREDENTIALS
 // (ambient ADC has no env var and is resolved at runtime).
 const geminiVertexCredentialEnvVars = [
@@ -34,6 +31,7 @@ export default defineVendor({
   preset: {
     id: 'gemini-vertex',
     description: 'Gemini on Google Vertex AI',
+    apiKeyEnvVars: ['GEMINI_ACCESS_TOKEN'],
     modelEnvVars: ['GEMINI_VERTEX_MODEL'],
     fallbackModel: 'gemini-2.5-flash',
   },
