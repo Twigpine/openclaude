@@ -812,6 +812,8 @@ test('getModelOptionsBase: Claude subscriber branch appends inactive profile opt
 
 test('getModelOptionsBase: MiniMax catalog branch appends inactive profile options', async () => {
   const { active, inactive } = activeAndInactivePair()
+  active.provider = 'minimax'
+  active.baseUrl = 'https://api.minimax.io/anthropic'
   activeMiniMaxOverride = {
     cachedModels: [
       { value: 'MiniMax-M3.1-Flash', label: 'MiniMax-M3.1-Flash', description: 'MiniMax' },
@@ -839,6 +841,8 @@ test('getModelOptionsBase: MiniMax catalog branch appends inactive profile optio
 
 test.each(['MiniMax-M2.7', 'minimax-m3-free', 'minimax-m3.1-flash-free'])('MiniMax picker keeps saved %s without restoring other retired suggestions', async savedModel => {
   const { active, inactive } = activeAndInactivePair()
+  active.provider = 'minimax'
+  active.baseUrl = 'https://api.minimax.io/anthropic'
   active.model = savedModel
   activeMiniMaxOverride = {
     cachedModels: ['MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-M2.5', 'minimax-m3-free', 'minimax-m3.1-flash-free'].map(value => ({ value, label: value, description: 'MiniMax' })),
@@ -861,6 +865,31 @@ test.each(['MiniMax-M2.7', 'minimax-m3-free', 'minimax-m3.1-flash-free'])('MiniM
     }
     expect(active.model).toBe(savedModel)
   })
+})
+
+test.each([
+  ['https://opencode.ai/zen/v1', 'gpt-5.4'],
+  ['https://opencode.ai/zen/go/v1', 'glm-5.1'],
+])('getModelOptions retains available MiniMax gateway choices on %s', async (baseUrl, model) => {
+  const restoreEnv = snapshotEnv([
+    'CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_API_BASE', 'OPENAI_MODEL',
+    'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED', 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
+  ], { clear: true })
+  try {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = baseUrl
+    process.env.OPENAI_MODEL = model
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => undefined,
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expect(values).toContain('minimax-m2.7')
+    expect(values).not.toContain('minimax-m3-free')
+    expect(values).not.toContain('minimax-m3.1-flash-free')
+  } finally {
+    restoreEnv()
+  }
 })
 
 test('getModelOptionsBase: Xiaomi MiMo catalog branch appends inactive profile options', async () => {

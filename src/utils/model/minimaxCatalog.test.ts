@@ -15,25 +15,33 @@ for (const model of ['MiniMax-M3.1-Flash', 'minimax/minimax-m3.1-flash:free', 'm
   })
 }
 
-test('static and discovered catalogs cannot reintroduce retired text suggestions', () => {
+test('Zen catalogs retain available gateway models but exclude obsolete free suggestions', () => {
   const entries = mergeRouteCatalogEntries(getCatalogEntriesForRoute('opencode'), [
     { id: 'minimax/minimax-m2.7', apiName: 'minimax/minimax-m2.7' },
     { id: 'minimax-m3-free', apiName: 'minimax-m3-free' },
     { id: 'minimax-m3.1-flash-free', apiName: 'minimax-m3.1-flash-free' },
     { id: 'minimax/minimax-m3.1-flash:free', apiName: 'minimax/minimax-m3.1-flash:free' },
   ])
-  const values = buildRouteCatalogModelOptions('Gateway', entries).map(option => option.value)
+  const values = buildRouteCatalogModelOptions('Gateway', entries, undefined, 'opencode').map(option => option.value)
   expect(values).not.toContain('minimax-m3.1-flash-free')
   expect(values).not.toContain('minimax-m3-free')
   expect(values).toContain('minimax-m3')
   expect(values).toContain('minimax/minimax-m3.1-flash:free')
-  expect(values).not.toContain('minimax-m2.7')
-  expect(values).not.toContain('minimax/minimax-m2.7')
+  expect(values).toContain('minimax-m2.5')
+  expect(values).toContain('minimax-m2.7')
+  expect(values).toContain('minimax/minimax-m2.7')
   // Filtering suggestions must not delete metadata used by explicit requests.
   expect(getModel('minimax-m2.7')?.capabilities.supportsVision).toBe(false)
   expect(getCatalogEntriesForRoute('opencode').some(entry => entry.apiName === 'minimax-m2.7')).toBe(true)
   expect(getCatalogEntriesForRoute('opencode').some(entry => entry.apiName === 'minimax-m3.1-flash-free')).toBe(true)
   expect(getModel('opencode-minimax-m3.1-flash-free')?.defaultModel).toBe('minimax-m3.1-flash-free')
+})
+
+test.each(['openrouter', 'opencode-go', 'custom'])('%s discovery owns its MiniMax availability', routeId => {
+  const models = ['minimax-m2.5', 'minimax/minimax-m2.7']
+  expect(buildRouteCatalogModelOptions(
+    'Gateway', models.map(apiName => ({ id: apiName, apiName })), undefined, routeId,
+  ).map(option => option.value)).toEqual(models)
 })
 
 test.each(['ollama', 'lmstudio', 'atomic-chat'])('%s catalog options retain provider-owned MiniMax model identities', routeId => {

@@ -3371,6 +3371,7 @@ test.each([
   ['ollama', 'http://localhost:11434/v1'],
   ['lmstudio', 'http://localhost:1234/v1'],
   ['atomic-chat', 'http://127.0.0.1:1337/v1'],
+  ['openrouter', 'https://openrouter.ai/api/v1'],
 ])('%s picker retains advertised MiniMax models before and after refresh', async (provider, baseUrl) => {
   const restoreEnv = snapshotEnv([
     'CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_API_BASE',
@@ -3391,7 +3392,9 @@ test.each([
     process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
     process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
     mockProviderProfiles({ getActiveProviderProfile: () => activeProfile })
-    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m']
+    const models = provider === 'openrouter'
+      ? ['minimax/minimax-m2.5', 'minimax/minimax-m2.7']
+      : ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m']
     mockDescriptorDiscovery({
       routeId: provider,
       cachedModels: [{ id: models[0]!, apiName: models[0]! }],

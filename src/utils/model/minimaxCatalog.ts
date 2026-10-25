@@ -13,6 +13,11 @@ export function isCurrentMiniMaxModelOption(
   if (!/^(minimax-(?:m\d|text-|\d)|abab\d)/.test(name)) return true
   // Independently hosted servers own their installed/discovered model names.
   if (localEndpoint || (routeId && getTransportKindForRoute(routeId) === 'local')) return true
-  // Retired Zen "-free" IDs remain raw metadata for explicit saved selections.
+  // Direct MiniMax retirement does not retire independently served gateway models.
+  if (routeId === 'opencode') {
+    return name !== 'minimax-m3-free' && name !== 'minimax-m3.1-flash-free'
+  }
+  if (routeId && routeId !== 'minimax') return true
+  // No route is the conservative precheck used before resolving picker context.
   return /^(minimax-m3(?:\.1-flash)?)(?::free)?$/.test(name)
 }

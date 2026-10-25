@@ -6148,7 +6148,11 @@ describe('getProfileModelOptions', () => {
     ])
   })
 
-  test.each(['MiniMax-M2.7', 'minimax-m3-free', 'minimax-m3.1-flash-free'])('keeps saved %s while filtering retired discovered text choices', async savedModel => {
+  test.each([
+    ['minimax', 'https://api.minimax.io/anthropic', 'MiniMax-M2.7'],
+    ['opencode', 'https://opencode.ai/zen/v1', 'minimax-m3-free'],
+    ['opencode', 'https://opencode.ai/zen/v1', 'minimax-m3.1-flash-free'],
+  ])('%s at %s keeps saved %s while filtering its retired suggestions', async (provider, baseUrl, savedModel) => {
     const { getProfileModelOptions } = await importFreshProviderProfileModules()
     mockConfigState = {
       ...createMockConfigState(),
@@ -6156,9 +6160,14 @@ describe('getProfileModelOptions', () => {
         provider_test: ['MiniMax-M2.5', 'MiniMax-M2.7', 'minimax-m3-free', 'minimax-m3.1-flash-free', 'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o'].map(value => ({ value, label: value, description: 'Discovered from API' })),
       },
     }
-    const profile = buildProfile({ id: 'provider_test', model: `${savedModel}, custom-minimax` })
+    const profile = buildProfile({
+      id: 'provider_test', provider, baseUrl,
+      model: `${savedModel}, custom-minimax`,
+    })
     expect(getProfileModelOptions(profile).map(option => option.value)).toEqual([
-      savedModel, 'custom-minimax', 'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o',
+      savedModel, 'custom-minimax',
+      ...(provider === 'opencode' ? ['MiniMax-M2.5', 'MiniMax-M2.7'] : []),
+      'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o',
     ])
     expect(profile.model).toBe(`${savedModel}, custom-minimax`)
     expect(mockConfigState.openaiAdditionalModelOptionsCacheByProfile?.provider_test?.[0]).toMatchObject({ value: 'MiniMax-M2.5' })
@@ -6187,9 +6196,13 @@ describe('setActiveProviderProfile model cache', () => {
     ['lmstudio', 'https://lmstudio-proxy.example/v1'],
     ['atomic-chat', 'http://127.0.0.1:1337/v1'],
     ['custom', 'http://localhost:8080/v1'],
-  ] as const)('activation preserves advertised local models for %s at %s', async (provider, baseUrl) => {
+    ['opencode', 'https://opencode.ai/zen/v1'],
+    ['opencode-go', 'https://opencode.ai/zen/go/v1'],
+    ['openrouter', 'https://openrouter.ai/api/v1'],
+    ['custom', 'https://models.example/v1'],
+  ] as const)('activation preserves advertised models for %s at %s', async (provider, baseUrl) => {
     const { setActiveProviderProfile, getActiveOpenAIModelOptionsCache } = await importFreshProviderProfileModules()
-    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m']
+    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m', 'minimax-m2.5', 'minimax-m2.7']
     const profile = buildProfile({ id: 'local_models', provider, baseUrl, model: 'qwen3:latest' })
     mockConfigState = {
       ...createMockConfigState(),
@@ -6200,6 +6213,7 @@ describe('setActiveProviderProfile model cache', () => {
     }
     expect(setActiveProviderProfile(profile.id, { configDir: testConfigDir ?? undefined })?.id).toBe(profile.id)
     expect(getActiveOpenAIModelOptionsCache().map(option => option.value)).toEqual(['qwen3:latest', ...models])
+    expect(mockConfigState.openaiAdditionalModelOptionsCacheByProfile[profile.id]?.map(option => (option as { value: string }).value)).toEqual(['qwen3:latest', ...models])
     expect(profile.model).toBe('qwen3:latest')
   })
 
