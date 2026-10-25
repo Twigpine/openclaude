@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod'
 import { SandboxRuntimeConfigSchema } from '@anthropic-ai/sandbox-runtime'
+import type { AnySchema } from '@modelcontextprotocol/sdk/server/zod-compat.js'
 import { parseWithCompat, toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js'
 import { z as legacy } from 'zod/v3'
 import { z } from 'zod/v4'
@@ -14,7 +15,12 @@ describe('dependency schema compatibility', () => {
   })
 
   test('the protocol converter and parser support both packaged schema generations', () => {
-    for (const schema of [z.strictObject({ value: z.string() }), legacy.object({ value: legacy.string() }).strict()]) {
+    // Avoid finding a common type by comparing both versions' fluent builders.
+    const schemas: AnySchema[] = [
+      z.strictObject({ value: z.string() }),
+      legacy.object({ value: legacy.string() }).strict(),
+    ]
+    for (const schema of schemas) {
       expect(toJsonSchemaCompat(schema).type).toBe('object')
       expect(parseWithCompat(schema, { value: 'ok' })).toEqual({ value: 'ok' })
       expect(() => parseWithCompat(schema, { value: 1 })).toThrow()
