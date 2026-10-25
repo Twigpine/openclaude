@@ -882,6 +882,7 @@ test('OPENAI_API_KEYS rotates to the next key on rate-limit failure', async () =
 test.each([
   { body: 'Too many requests, try again in 30s', retries: true },
   { body: 'Rate limit exceeded for this API key', retries: true },
+  { body: 'Rate limit exceeded for this API key, streaming is disabled', retries: true },
   { body: 'Rate limit exceeded for this OAuth token', retries: true },
   { body: 'Token is invalid; too many requests', retries: false },
   { body: 'Account disabled; too many requests', retries: false },

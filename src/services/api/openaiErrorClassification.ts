@@ -417,13 +417,20 @@ function isExplicitThrottleMessage(body: string): boolean {
   // A 403 is normally an authorization failure. Require positive throttling
   // evidence, with auth/quota signals taking precedence even in mixed bodies.
   // Empty bodies and generic "try again" / "busy" responses are ambiguous.
+  // A comma may continue the credential's predicate ("key, now disabled" or
+  // "key, supplied here, is invalid"). Keep that evidence together, without
+  // joining a separate subject such as "key, streaming is disabled".
+  const credentialFaultBody = body.replace(
+    /,\s*(?:[^,.;!?]*,\s*)?(?=(?:which|that|is|are|was|were|has|have|had|now|still|already|[a-z]+ly|invalid|missing|incorrect|disabled|deactivated|unusable|required|not)\b)/gi,
+    continuation => continuation.replace(/,/g, ' '),
+  )
   if (
     /unauthori[sz]ed|unauthenticated|not[ _-]auth|forbidden|access[ _-]denied|permission|credential|denied|suspended|blocked|banned|insufficient[ _-]funds|revoked|expired|not[ _-]allowed|quota|billing|credit|payment|allotment/i.test(body) ||
     /auth(?:entication|ori[sz]ation)?[\s\S]{0,20}(?:error|fail|invalid|required|missing)|(?:invalid|failed|missing|required)[\s\S]{0,20}auth/i.test(body) ||
     // Rate limits can name valid accounts, keys or OAuth tokens. Match faults
     // in either word order within a clause, including line wraps and codes;
     // an arbitrary character limit can miss "has been permanently disabled".
-    /(?:\b|_)(?:invalid|missing|incorrect|disabled|deactivated|unusable)[^.;!?]*(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:\b|_)|(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)[^.;!?]*(?:invalid|missing|incorrect|disabled|deactivated|unusable|required|not[ _-](?:valid|found|provided|configured|set))(?:\b|_)/i.test(body)
+    /(?:\b|_)(?:invalid|missing|incorrect|disabled|deactivated|unusable)[^,.;!?]*(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:\b|_)|(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)[^,.;!?]*(?:invalid|missing|incorrect|disabled|deactivated|unusable|required|not[ _-](?:valid|found|provided|configured|set))(?:\b|_)/i.test(credentialFaultBody)
   ) {
     return false
   }
