@@ -429,7 +429,10 @@ function isExplicitThrottleMessage(body: string): boolean {
     /auth(?:entication|ori[sz]ation)?[\s\S]{0,20}(?:error|fail|invalid|required|missing)|(?:invalid|failed|missing|required)[\s\S]{0,20}auth/i.test(body) ||
     // New absence/state forms must describe the credential directly. Do not
     // scan across an unrelated subject such as a bad gateway or empty response.
-    /(?:\b|_)(?:no|bad|empty)[\s_-]+(?:accounts?|(?:api[\s_-]*)?keys?|tokens?)(?:\b|_)(?:[\s_-]+(?:(?:is|are|was|were|has|have|had|been|being)[\s_-]+)*(?:provided|configured|set)(?:\b|_)|(?=\s*(?:$|[,.;!?:'"}\]])))/i.test(body) ||
+    /(?:\b|_)(?:no(?:[\s_-]+valid)?|bad|empty)[\s_-]+(?:accounts?|(?:api[\s_-]*)?keys?|tokens?)(?:\b|_)(?:[\s_-]+(?:(?:is|are|was|were|has|have|had|been|being)[\s_-]+)*(?:provided|configured|set)(?:\b|_)|(?=\s*(?:$|[,.;!?:'"}\]])))/i.test(body) ||
+    // A key/account lookup failure is explicit absence; unqualified tokens
+    // can instead describe a rate-limit bucket, so require credential validity.
+    /(?:\b|_)no[\s_-]+(?:(?:valid[\s_-]+)?(?:accounts?|(?:api[\s_-]*)?keys?)|valid[\s_-]+tokens?)[\s_-]+(?:(?:is|are|was|were|has|have|had|been|being)[\s_-]+)*found(?:\b|_)/i.test(body) ||
     /(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:,\s*[^,.;!?]*,)?(?:[\s_-]+|,\s*)(?:(?:which|that)[\s_-]+)?(?:(?:is|are|was|were|has|have|had|been|being|now|still|already|[a-z]+ly)[\s_-]+)+empty(?:\b|_)/i.test(body) ||
     /(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:,\s*[^,.;!?]*,)?(?:[\s_-]+|,\s*)(?:(?:which|that)[\s_-]+)?(?:(?:is|are|was|were|has|have|had|been|being|now|still|already|[a-z]+ly)[\s_-]+)*(?:no[\s_-]longer[\s_-]valid|does[\s_-]not[\s_-]exist)(?:\b|_)/i.test(body) ||
     // Rate limits can name valid accounts, keys or OAuth tokens. Match faults
