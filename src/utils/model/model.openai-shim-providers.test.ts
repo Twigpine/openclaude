@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 
 import {
   acquireSharedMutationLock,
@@ -18,10 +18,9 @@ import { snapshotEnv } from '../../test/envSnapshot.js'
 let restoreVertexEnv: () => void
 let allowedModels: Set<string> | undefined
 
-async function importFreshModelModule(providerOverride?: import('./providers.js').LegacyAPIProvider) {
+async function importFreshModelModule() {
   mock.restore()
   const getAPIProvider = () => {
-    if (providerOverride) return providerOverride
     if (process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) return 'gemini-vertex'
     if (process.env.NVIDIA_NIM) return 'nvidia-nim'
     if (process.env.MINIMAX_API_KEY) return 'minimax'
@@ -649,22 +648,4 @@ test('Vertex without a model override ignores a saved model from another provide
   expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-flash')
   process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
   expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-pro')
-})
-
-
-test('profile-only Vertex model selection preserves the saved primary model over ambient settings', async () => {
-  const { getUserSpecifiedModelSetting } = await importFreshModelModule('gemini-vertex')
-  const profiles = require('../providerProfiles.js') as typeof import('../providerProfiles.js')
-  const profileSpy = spyOn(profiles, 'getActiveProviderProfile').mockReturnValue({
-    id: 'saved-vertex', name: 'Saved Vertex', provider: 'gemini-vertex',
-    baseUrl: 'my-project', model: 'gemini-2.5-pro,gemini-2.5-flash',
-  })
-  try {
-    process.env.GEMINI_VERTEX_MODEL = 'ambient-model'
-    process.env.CONCENTRATE_API_KEY = 'ambient-key'
-    process.env.CONCENTRATE_MODEL = 'unrelated-model'
-    expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-pro')
-  } finally {
-    profileSpy.mockRestore()
-  }
 })

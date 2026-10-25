@@ -783,8 +783,8 @@ export function buildAPIProviderProperties(): Property[] {
     pushRedactedProperty(properties, 'Model', geminiModel, secretSource);
   } else if (apiProvider === 'gemini-vertex') {
     // Mirror the /provider summary's native Vertex endpoint/model display. By the
-    // time /status runs the saved-profile env (if any) is already applied to
-    // process.env, so reading it directly matches getAnthropicClient's routing.
+    // time /status runs the explicit provider env has been applied to
+    // process.env, matching getAnthropicClient's env-only routing.
     const location = getGeminiVertexLocation(process.env);
     const project = getGeminiVertexProjectId(process.env);
     // An explicit ADC credential lets the native client derive the project at

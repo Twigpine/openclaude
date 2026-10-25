@@ -31,18 +31,7 @@ export type LegacyAPIProvider =
 export type APIProvider = LegacyAPIProvider
 
 export function getAPIProvider(): LegacyAPIProvider {
-  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
-    return 'gemini-vertex'
-  }
-  // Match the client's saved-profile route before ambient credential inference.
-  // Read lazily: config may not yet be enabled during bootstrap imports.
-  try {
-    const { isGeminiVertexEffectiveProvider } = require('../providerProfiles.js') as typeof import('../providerProfiles.js')
-    if (isGeminiVertexEffectiveProvider()) return 'gemini-vertex'
-  } catch {
-    // Explicit env routing remains available before config initialization.
-  }
-
+  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) return 'gemini-vertex'
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)) {
     return 'foundry'
   }

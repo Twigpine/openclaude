@@ -26,15 +26,6 @@ import {
   redactSecretSubstringsForDisplay,
   type SecretValueSource,
 } from '../src/utils/providerSecrets.js'
-import {
-  getGeminiVertexEndpointError,
-  getGeminiVertexGlobalEndpointError,
-  getGeminiVertexLocation,
-  getGeminiVertexModel,
-  getGeminiVertexProjectId,
-  resolveGeminiCredential,
-  resolveGeminiVertexAuthMode,
-} from '../src/utils/geminiAuth.js'
 import { redactUrlForDisplay } from '../src/utils/redaction.js'
 import {
   MIN_NODE_ENGINE_RANGE,
@@ -63,7 +54,6 @@ import {
 import { getWebSearchTimeoutMs } from '../src/tools/WebSearchTool/providers/timeout.js'
 import { isFirecrawlCloudApiUrl } from '../src/tools/firecrawl/client.js'
 import { getAPIProvider } from '../src/utils/model/providers.js'
-import { isEnvTruthy } from '../src/utils/envUtils.js'
 import { getMainLoopModel } from '../src/utils/model/model.js'
 
 type CheckResult = {
@@ -989,12 +979,6 @@ function hasPlaceholderCredential(value: string | undefined): boolean {
 }
 
 function currentBaseUrl(): string {
-  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
-    const location = getGeminiVertexLocation(process.env)
-    const project =
-      getGeminiVertexProjectId(process.env) ?? '<set GEMINI_VERTEX_PROJECT>'
-    return `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
-  }
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)) {
     return process.env.GEMINI_BASE_URL ?? GEMINI_DEFAULT_BASE_URL
   }
@@ -1027,86 +1011,6 @@ function checkGeminiEnv(): CheckResult[] {
     results.push(fail('GEMINI_API_KEY', 'Missing. Set GEMINI_API_KEY or GOOGLE_API_KEY.'))
   } else {
     results.push(pass('GEMINI_API_KEY', 'Configured.'))
-  }
-
-  return results
-}
-
-function checkGeminiVertexEnv(): CheckResult[] {
-  const results: CheckResult[] = []
-  results.push(pass('Provider mode', 'Google Vertex AI Gemini provider enabled.'))
-
-  const nonBlank = (v: string | undefined): string | undefined => {
-    const t = v?.trim()
-    return t ? t : undefined
-  }
-  const model = nonBlank(process.env.GEMINI_VERTEX_MODEL)
-  // Same resolvers as the runtime validator / client so doctor never reports a
-  // different project, model, or location than the provider would actually use.
-  const project = getGeminiVertexProjectId(process.env)
-  const location = getGeminiVertexLocation(process.env)
-  const effectiveModel = getGeminiVertexModel(process.env)
-  const accessToken = nonBlank(process.env.GEMINI_ACCESS_TOKEN)
-  const adcFile = nonBlank(process.env.GOOGLE_APPLICATION_CREDENTIALS)
-  const authMode = resolveGeminiVertexAuthMode(process.env)
-
-  if (!project) {
-    // ADC can supply the project id at runtime (credential.projectId), matching
-    // the provider validator / native client, so only access-token mode hard
-    // fails on a missing project here; the generation-readiness check resolves
-    // the ADC-derived project for ADC mode.
-    if (authMode === 'access-token') {
-      results.push(
-        fail(
-          'GEMINI_VERTEX_PROJECT',
-          'Missing. Set GEMINI_VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GOOGLE_PROJECT_ID).',
-        ),
-      )
-    } else {
-      results.push(
-        pass(
-          'GEMINI_VERTEX_PROJECT',
-          'Not set; will use the ADC-derived project (validated by the generation-readiness check).',
-        ),
-      )
-    }
-  } else {
-    const projectError = getGeminiVertexEndpointError({ project })
-    results.push(projectError
-      ? fail('GEMINI_VERTEX_PROJECT', projectError)
-      : pass('GEMINI_VERTEX_PROJECT', safeDisplayValue(project, '(unset)')))
-  }
-
-  const modelError = getGeminiVertexEndpointError({ model })
-  results.push(
-    modelError
-      ? fail('GEMINI_VERTEX_MODEL', modelError)
-      : model
-      ? pass('GEMINI_VERTEX_MODEL', safeDisplayValue(model, '(unset)'))
-      : pass('GEMINI_VERTEX_MODEL', 'Not set. Default gemini-2.5-flash will be used.'),
-  )
-  const globalEndpointError = getGeminiVertexEndpointError({ location }) ?? getGeminiVertexGlobalEndpointError(
-    effectiveModel,
-    location,
-  )
-  results.push(
-    globalEndpointError
-      ? fail('GEMINI_VERTEX_LOCATION', globalEndpointError)
-      : pass('GEMINI_VERTEX_LOCATION', safeDisplayValue(location, 'global')),
-  )
-
-  if (authMode === 'access-token') {
-    results.push(
-      accessToken
-        ? pass('GEMINI_VERTEX_AUTH', 'access-token configured.')
-        : fail('GEMINI_VERTEX_AUTH', 'access-token mode selected but GEMINI_ACCESS_TOKEN is missing.'),
-    )
-  } else {
-    results.push(
-      adcFile
-        ? pass('GEMINI_VERTEX_AUTH', 'ADC via GOOGLE_APPLICATION_CREDENTIALS.')
-        : pass('GEMINI_VERTEX_AUTH', 'ADC mode — ambient Google ADC is validated by the generation-readiness check below.'),
-    )
   }
 
   return results
@@ -1166,15 +1070,10 @@ function checkGithubEnv(): CheckResult[] {
 
 export function checkOpenAIEnv(): CheckResult[] {
   const results: CheckResult[] = []
-  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const useMistral = isTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
   const useOpenAI = isTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
-
-  if (useGeminiVertex) {
-    return checkGeminiVertexEnv()
-  }
 
   if (useGemini) {
     return checkGeminiEnv()
@@ -1280,18 +1179,10 @@ export function checkOpenAIEnv(): CheckResult[] {
 }
 
 async function checkBaseUrlReachability(): Promise<CheckResult> {
-  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useOpenAI = isTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const useMistral = isTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
-
-  if (useGeminiVertex) {
-    return pass(
-      'Provider reachability',
-      'Skipped for Gemini Vertex (native generateContent endpoint differs from the OpenAI /models probe).',
-    )
-  }
 
   if (!useGemini && !useOpenAI && !useGithub && !useMistral) {
     return pass('Provider reachability', 'Skipped (OpenAI-compatible mode disabled).')
@@ -1397,57 +1288,10 @@ async function checkBaseUrlReachability(): Promise<CheckResult> {
 }
 
 async function checkProviderGenerationReadiness(): Promise<CheckResult> {
-  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useOpenAI = isTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
   const useGithub = isTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const useMistral = isTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
-
-  if (useGeminiVertex) {
-    // Reuse the runtime credential resolver so this preflight matches what
-    // startup/runtime will accept. Otherwise "relying on ambient ADC" is a
-    // false green: a fresh env with a project but no resolvable ADC passes the
-    // doctor, then `node bin/openclaude` fails startup validation. Map the
-    // Vertex auth mode to GEMINI_AUTH_MODE and clear API keys, exactly like the
-    // native client does, then fail when nothing actually resolves.
-    const credential = await resolveGeminiCredential({
-      ...process.env,
-      GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
-      GEMINI_API_KEY: undefined,
-      GOOGLE_API_KEY: undefined,
-    }, { allowAmbientAdc: true })
-    if (credential.kind === 'none') {
-      return fail(
-        'Provider generation readiness',
-        'Gemini Vertex authentication could not be resolved. access-token mode needs GEMINI_ACCESS_TOKEN; ADC mode needs GOOGLE_APPLICATION_CREDENTIALS or ambient Google ADC (e.g. `gcloud auth application-default login`).',
-      )
-    }
-    // A resolved ADC credential may still lack a project if none appears in env
-    // vars and the ADC JSON doesn't embed one. Mirror getProviderValidationError.
-    const project =
-      getGeminiVertexProjectId(process.env) ||
-      (credential.kind === 'adc' && credential.projectId?.trim()) ||
-      null
-    if (!project) {
-      return fail(
-        'Provider generation readiness',
-        'Gemini Vertex: a project id is required. Set GEMINI_VERTEX_PROJECT, GOOGLE_CLOUD_PROJECT, or use an ADC credential that embeds a project.',
-      )
-    }
-    const globalEndpointError = getGeminiVertexEndpointError({
-      project, location: getGeminiVertexLocation(process.env), model: getGeminiVertexModel(process.env),
-    }) ?? getGeminiVertexGlobalEndpointError(
-      getGeminiVertexModel(process.env),
-      getGeminiVertexLocation(process.env),
-    )
-    if (globalEndpointError) {
-      return fail('Provider generation readiness', globalEndpointError)
-    }
-    return pass(
-      'Provider generation readiness',
-      `Gemini Vertex credential resolved (${credential.kind}).`,
-    )
-  }
 
   if (!useGemini && !useOpenAI && !useGithub && !useMistral) {
     return pass('Provider generation readiness', 'Skipped (OpenAI-compatible mode disabled).')
@@ -1586,19 +1430,6 @@ function checkOllamaProcessorMode(): CheckResult {
 }
 
 export function serializeSafeEnvSummary(): Record<string, string | boolean> {
-  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
-    return {
-      CLAUDE_CODE_USE_GEMINI_VERTEX: true,
-      GEMINI_VERTEX_MODEL: safeDisplayValue(process.env.GEMINI_VERTEX_MODEL, '(unset, default: gemini-2.5-flash)'),
-      GEMINI_VERTEX_PROJECT: safeDisplayValue(getGeminiVertexProjectId(process.env), '(unset)'),
-      GEMINI_VERTEX_LOCATION: safeDisplayValue(getGeminiVertexLocation(process.env), 'global'),
-      GEMINI_VERTEX_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
-      GEMINI_VERTEX_CREDENTIAL_SET:
-        resolveGeminiVertexAuthMode(process.env) === 'access-token'
-          ? Boolean(process.env.GEMINI_ACCESS_TOKEN?.trim())
-          : Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()),
-    }
-  }
   if (isTruthy(process.env.CLAUDE_CODE_USE_GEMINI)) {
     return {
       CLAUDE_CODE_USE_GEMINI: true,
@@ -1749,9 +1580,4 @@ if (import.meta.main) {
   await main()
 }
 
-// Test-only surface for the provider dispatch.
-export const __test = {
-  checkOpenAIEnv,
-  serializeSafeEnvSummary,
-  checkProviderGenerationReadiness,
-}
+export {}

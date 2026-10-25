@@ -58,12 +58,12 @@ import { resolveOpenAIShimRuntimeContext } from '../../integrations/runtimeMetad
 import {
   DEFAULT_GEMINI_VERTEX_MODEL,
   getGeminiVertexEndpointError,
+  getGeminiVertexGlobalEndpointError,
+  resolveGeminiVertexAuthMode,
   getGeminiVertexLocation,
   getGeminiVertexModel,
   getGeminiVertexProjectId,
-  getGeminiVertexGlobalEndpointError,
   resolveGeminiCredential,
-  resolveGeminiVertexAuthMode,
 } from '../../utils/geminiAuth.js'
 import {
   shouldUseCustomAnthropicBearerAuth,
@@ -74,12 +74,6 @@ import { hasUsableOpenAICredential } from './credentialPool.js'
 import { getApiTimeoutMs } from './openaiShim/transport.js'
 import { AnthropicVertex } from './vertexClient.js'
 import { importOptionalRuntimeModule } from '../../utils/optionalRuntimeModule.js'
-import { getPrimaryModel } from '../../utils/providerModels.js'
-import {
-  geminiVertexProjectFromProfile,
-  getActiveProviderProfile,
-  shouldRouteToGeminiVertexFromProfile,
-} from '../../utils/providerProfiles.js'
 
 type OptionalRuntimeImporter = typeof importOptionalRuntimeModule
 
@@ -623,36 +617,15 @@ export async function getAnthropicClient({
             ? 'max'
           : standardEffortToOpenAI(appliedEffortLevel))
       : undefined
-  // Intent check: if the user's active provider profile is gemini-vertex,
-  // route to our Gemini Vertex client even when the env flag is missing — a
-  // stale CLAUDE_CODE_USE_VERTEX from the launching shell would otherwise
-  // fall through to the Anthropic Vertex SDK and emit a 404 for
-  // publishers/anthropic/models/gemini-* (a model that doesn't exist there).
-  // Explicit startup selections for another provider keep precedence over
-  // the saved profile (see shouldRouteToGeminiVertexFromProfile).
-  const activeProfile = (() => {
-    try {
-      return getActiveProviderProfile()
-    } catch {
-      return undefined
-    }
-  })()
-  const routedFromProfileOnly =
-    !isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
-    shouldRouteToGeminiVertexFromProfile(process.env, activeProfile)
-  const useGeminiVertexProvider =
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) || routedFromProfileOnly
-
   // Normalize env-only routes before snapshotting custom headers. Dedicated
   // routes such as Concentrate deliberately clear inherited proxy headers;
   // doing that after getCustomHeaders() would leave a copied secret in the
   // request defaults.
-  const envOnlyProviderRouteId = useGeminiVertexProvider
-    ? null
-    : resolveEnvOnlyProviderRouteId(process.env)
-  const useMiniMaxEnvOnlyProvider =
-    !useGeminiVertexProvider &&
-    shouldUseMiniMaxEnvOnlyProvider(model, envOnlyProviderRouteId)
+  const envOnlyProviderRouteId = resolveEnvOnlyProviderRouteId(process.env)
+  const useMiniMaxEnvOnlyProvider = shouldUseMiniMaxEnvOnlyProvider(
+    model,
+    envOnlyProviderRouteId,
+  )
   const useXiaomiMimoEnvOnlyProvider =
     envOnlyProviderRouteId === 'xiaomi-mimo' && !useMiniMaxEnvOnlyProvider
   const useXaiEnvOnlyProvider =
@@ -810,46 +783,17 @@ export async function getAnthropicClient({
     return new Anthropic(nativeArgs)
   }
 
-  if (useGeminiVertexProvider) {
-    // When routing purely from the saved profile (no env flag), the profile's
-    // own project (stored in baseUrl) and model must win over ambient/default
-    // env, otherwise this branch throws "project required" or routes to the
-    // wrong project/model. Env still wins when explicitly set.
-    // The profile stores its project in baseUrl, but the preset can seed it
-    // with the endpoint URL — never treat a URL as a project (it would build
-    // /v1/projects/https://.../locations/...). Shared sanitizer with the
-    // env-apply path.
-    const profileProject = routedFromProfileOnly
-      ? geminiVertexProjectFromProfile(activeProfile?.baseUrl)
-      : undefined
-    const profileModel = routedFromProfileOnly && activeProfile?.model
-      ? getPrimaryModel(activeProfile.model)
-      : undefined
-    // In profile-only routing the selected profile must win over ambient env;
-    // profileProject/profileModel are only set when routedFromProfileOnly, so
-    // leading with them keeps env precedence for an explicit Vertex selection.
-    const project = profileProject ?? getGeminiVertexProjectId(process.env)
+  // This routing layer is env/CLI-only; saved native profiles are deferred.
+  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+    const project = getGeminiVertexProjectId(process.env)
     const location = getGeminiVertexLocation(process.env)
-    // Callers have already resolved the request model. It may differ from the
-    // session default for /model validation, agents or fallback requests.
-    // Provider-specific default selection excludes stale OPENAI_MODEL earlier.
-    const geminiVertexModel =
-      model?.trim() ||
-      profileModel ||
-      process.env.GEMINI_VERTEX_MODEL?.trim() ||
-      getGeminiVertexModel(process.env) ||
-      DEFAULT_GEMINI_VERTEX_MODEL
-    // Re-resolve on every call instead of capturing one token: ADC access
-    // tokens expire (~1h), so a long-lived client must pick up refreshed
-    // tokens. resolveGeminiCredential memoizes the ADC path (5-min TTL) and
-    // GoogleAuth refreshes internally, so this stays cheap.
-    const resolveVertexCredential = () =>
-      resolveGeminiCredential({
-        ...process.env,
-        GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
-        GEMINI_API_KEY: undefined,
-        GOOGLE_API_KEY: undefined,
-      } as NodeJS.ProcessEnv, { allowAmbientAdc: true })
+    const geminiVertexModel = model?.trim() || getGeminiVertexModel(process.env) || DEFAULT_GEMINI_VERTEX_MODEL
+    const resolveVertexCredential = () => resolveGeminiCredential({
+      ...process.env,
+      GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(process.env),
+      GEMINI_API_KEY: undefined,
+      GOOGLE_API_KEY: undefined,
+    }, { allowAmbientAdc: true })
     const credential = await resolveVertexCredential()
     if (credential.kind === 'none') {
       throw new Error('Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN or Google ADC credentials')
@@ -860,17 +804,8 @@ export async function getAnthropicClient({
     }
     const endpointError = getGeminiVertexEndpointError({
       project: vertexProject, location, model: geminiVertexModel,
-    })
+    }) ?? getGeminiVertexGlobalEndpointError(geminiVertexModel, location)
     if (endpointError) throw new Error(endpointError)
-    // Same rule as startup validation and doctor (geminiAuth). Fail before
-    // the request so a regional URL is never built for a global-only model.
-    const globalEndpointError = getGeminiVertexGlobalEndpointError(
-      geminiVertexModel,
-      location,
-    )
-    if (globalEndpointError) {
-      throw new Error(globalEndpointError)
-    }
 
     const { createGeminiVertexClient } = await import('./geminiVertexClient.js')
     return createGeminiVertexClient({
@@ -880,7 +815,7 @@ export async function getAnthropicClient({
       getAccessToken: async () => {
         const fresh = await resolveVertexCredential()
         if (fresh.kind === 'none') {
-          throw new Error('Gemini Vertex authentication is no longer available (token expired or revoked; re-set GEMINI_ACCESS_TOKEN or refresh ADC).')
+          throw new Error('Gemini Vertex authentication is no longer available; refresh the access token or Google ADC credentials.')
         }
         return fresh.credential
       },
@@ -998,8 +933,7 @@ export async function getAnthropicClient({
   }
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)) {
     // Anthropic-on-Vertex (Claude models). The Gemini-on-Vertex case already
-    // returned above (env flag or saved profile without a conflicting
-    // explicit selection), so reaching this branch means the user really
+    // returned above, so reaching this branch means the user really
     // selected Anthropic-on-Vertex.
     // Refresh GCP credentials if gcpAuthRefresh is configured and credentials are expired
     // This is similar to how we handle AWS credential refresh for Bedrock

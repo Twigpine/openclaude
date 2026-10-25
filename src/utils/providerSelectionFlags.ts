@@ -39,19 +39,3 @@ export function hasAnyTruthyProviderSelectionFlag(
 ): boolean {
   return PROVIDER_SELECTION_FLAGS.some(flag => isEnvTruthy(processEnv[flag]))
 }
-
-/**
- * True when any registered provider-selection flag other than `exceptFlag` is
- * present in env. Uses presence (`!== undefined`), not truthiness, because even
- * a bare `CLAUDE_CODE_USE_<provider>=` signals intent for the conflict check. Pass the
- * flag of the active profile to detect a conflicting selection for any other
- * provider.
- */
-export function hasConflictingProviderFlag(
-  processEnv: NodeJS.ProcessEnv = process.env,
-  exceptFlag?: ProviderSelectionFlag,
-): boolean {
-  return PROVIDER_SELECTION_FLAGS.some(
-    flag => flag !== exceptFlag && processEnv[flag] !== undefined,
-  )
-}

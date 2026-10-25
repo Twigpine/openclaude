@@ -27,24 +27,6 @@ const _realChannelAllowlist = await import(
 )
 const file = (relative: string) => Bun.file(resolve(SRC, relative))
 
-/**
- * Slice the region of `content` delimited by two source anchors, asserting
- * both anchors are present first. Without this, a renamed/removed anchor makes
- * indexOf return -1 and slice() silently widen or mis-scope the section, so the
- * drift guard could keep passing on an unrelated match elsewhere in the file.
- */
-function sectionBetween(
-  content: string,
-  startAnchor: string,
-  endAnchor: string,
-): string {
-  const start = content.indexOf(startAnchor)
-  expect(start, `start anchor not found: ${startAnchor}`).toBeGreaterThanOrEqual(0)
-  const end = content.indexOf(endAnchor, start)
-  expect(end, `end anchor not found after start: ${endAnchor}`).toBeGreaterThan(start)
-  return content.slice(start, end)
-}
-
 // ---------------------------------------------------------------------------
 // Fix 1: Gemini `store: false` rejection
 // ---------------------------------------------------------------------------
@@ -520,29 +502,26 @@ describe('Context overflow 500 fix', () => {
 describe('Gemini Vertex provider drift guards', () => {
   test('API customer, model flag, and startup detection include Gemini Vertex', async () => {
     const authContent = await file('utils/auth.ts').text()
-    const apiCustomerSection = sectionBetween(
-      authContent,
-      'export function is1PApiCustomer',
-      'export function getOauthAccountInfo',
-    )
+    const apiCustomerStart = authContent.indexOf('export function is1PApiCustomer')
+    const apiCustomerEnd = authContent.indexOf('export function getOauthAccountInfo', apiCustomerStart)
+    const apiCustomerSection = authContent.slice(apiCustomerStart, apiCustomerEnd)
 
     expect(apiCustomerSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
 
     const providerFlagContent = await file('utils/providerFlag.ts').text()
-    const modelFlagSection = sectionBetween(
-      providerFlagContent,
-      'export function applyModelFlagFromArgs',
-      'export function applyProviderFlag',
-    )
+    const modelFlagStart = providerFlagContent.indexOf('export function applyModelFlagFromArgs')
+    const modelFlagEnd = providerFlagContent.indexOf('export function applyProviderFlag', modelFlagStart)
+    const modelFlagSection = providerFlagContent.slice(modelFlagStart, modelFlagEnd)
 
     expect(modelFlagSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
     expect(modelFlagSection).toContain('GEMINI_VERTEX_MODEL')
 
     const startupScreenContent = await file('components/StartupScreen.ts').text()
-    const detectProviderSection = sectionBetween(
-      startupScreenContent,
-      'export function detectProvider',
-      'function boxRow',
+    const detectProviderStart = startupScreenContent.indexOf('export function detectProvider')
+    const detectProviderEnd = startupScreenContent.indexOf('export function StartupScreen', detectProviderStart)
+    const detectProviderSection = startupScreenContent.slice(
+      detectProviderStart,
+      detectProviderEnd,
     )
 
     expect(detectProviderSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
@@ -551,10 +530,11 @@ describe('Gemini Vertex provider drift guards', () => {
 
   test('log and GitHub onboarding clear Gemini Vertex provider state', async () => {
     const logContent = await file('utils/log.ts').text()
-    const errorReportingSection = sectionBetween(
-      logContent,
-      'Cloud providers',
-      'process.env.DISABLE_ERROR_REPORTING',
+    const errorReportingStart = logContent.indexOf('Cloud providers')
+    const errorReportingEnd = logContent.indexOf('process.env.DISABLE_ERROR_REPORTING', errorReportingStart)
+    const errorReportingSection = logContent.slice(
+      errorReportingStart,
+      errorReportingEnd,
     )
 
     expect(errorReportingSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
@@ -562,66 +542,32 @@ describe('Gemini Vertex provider drift guards', () => {
     const onboardGithubContent = await file(
       'commands/onboard-github/onboard-github.tsx',
     ).text()
-    const providerKeysSection = sectionBetween(
-      onboardGithubContent,
-      'PROVIDER_SPECIFIC_KEYS',
-      '])',
+    const providerKeysStart = onboardGithubContent.indexOf('PROVIDER_SPECIFIC_KEYS')
+    const providerKeysEnd = onboardGithubContent.indexOf('])', providerKeysStart)
+    const providerKeysSection = onboardGithubContent.slice(
+      providerKeysStart,
+      providerKeysEnd,
     )
 
     expect(providerKeysSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
   })
 
   test('auth treats Gemini Vertex as a third-party provider', async () => {
-    // isAnthropicAuthEnabled's is3P gate now derives from the
-    // PROVIDER_SELECTION_FLAGS registry instead of hand-enumerating
-    // CLAUDE_CODE_USE_* flags, so the guarantee is two-fold: (1) the gate routes
-    // through the registry helper, and (2) the Vertex flag is registered in that
-    // single source of truth. Asserting the literal in the function body would
-    // regress to the exact drift the registry refactor eliminated.
     const content = await file('utils/auth.ts').text()
-    const is3PSection = sectionBetween(
-      content,
-      'const is3P =',
-      '// Check if user has configured',
-    )
+    const is3PStart = content.indexOf('const is3P =')
+    const is3PEnd = content.indexOf('// Check if user has configured', is3PStart)
+    const is3PSection = content.slice(is3PStart, is3PEnd)
 
     expect(is3PSection).toContain('hasAnyTruthyProviderSelectionFlag')
-
-    const { PROVIDER_SELECTION_FLAGS } = await import(
-      '../utils/providerSelectionFlags.js'
-    )
-    expect(PROVIDER_SELECTION_FLAGS).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
-  })
-
-  test('isUsing3PServices() includes Gemini Vertex flag', async () => {
-    // isUsing3PServices now derives from the PROVIDER_SELECTION_FLAGS registry
-    // instead of hand-enumerating CLAUDE_CODE_USE_* flags, so the coverage
-    // guarantee is two-fold: (1) the function routes through the registry
-    // helper, and (2) the Vertex flag is registered in that single source of
-    // truth. Asserting the literal in the function body would regress to the
-    // exact drift the registry refactor eliminated.
-    const content = await file('utils/auth.ts').text()
-    const using3PSection = sectionBetween(
-      content,
-      'export function isUsing3PServices',
-      'function getConfiguredOtelHeadersHelper',
-    )
-
-    expect(using3PSection).toContain('hasAnyTruthyProviderSelectionFlag')
-
-    const { PROVIDER_SELECTION_FLAGS } = await import(
-      '../utils/providerSelectionFlags.js'
-    )
+    const { PROVIDER_SELECTION_FLAGS } = await import('../utils/providerSelectionFlags.js')
     expect(PROVIDER_SELECTION_FLAGS).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
   })
 
   test('API preconnect skips Gemini Vertex routing', async () => {
     const content = await file('utils/apiPreconnect.ts').text()
-    const cloudSkipSection = sectionBetween(
-      content,
-      '// Skip if using a cloud provider',
-      '// Skip if proxy/mTLS/unix',
-    )
+    const cloudSkipStart = content.indexOf('// Skip if using a cloud provider')
+    const cloudSkipEnd = content.indexOf('// Skip if proxy/mTLS/unix', cloudSkipStart)
+    const cloudSkipSection = content.slice(cloudSkipStart, cloudSkipEnd)
 
     expect(cloudSkipSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
   })

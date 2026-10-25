@@ -89,13 +89,46 @@ export GEMINI_API_KEY=...
 export GEMINI_MODEL=gemini-3-flash-preview
 ```
 
+### Gemini on Vertex AI (native)
+
+Use the native Gemini endpoint with an explicit CLI or environment selection:
+
+```bash
+# For global npm installs, install the optional ADC package:
+npm i -g google-auth-library
+gcloud auth application-default login
+export GEMINI_VERTEX_PROJECT=my-gcp-project
+export GEMINI_VERTEX_LOCATION=global
+openclaude --provider gemini-vertex --model gemini-2.5-flash
+```
+
+Alternatively set `CLAUDE_CODE_USE_GEMINI_VERTEX=1` and
+`GEMINI_VERTEX_MODEL=gemini-2.5-flash`. Project aliases are checked in order:
+`GEMINI_VERTEX_PROJECT`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`,
+`GOOGLE_PROJECT_ID`. ADC may supply the project when none is set. ADC supports
+`GOOGLE_APPLICATION_CREDENTIALS` and the ambient Google credential chain.
+
+For bearer authentication, set `GEMINI_ACCESS_TOKEN` to a Google OAuth access
+token and supply a project. `GEMINI_VERTEX_AUTH_MODE=adc` or `access-token`
+selects the mode explicitly; otherwise a nonblank token selects access-token
+mode and the default is ADC. An explicit `--model` or session `/model`
+overrides `GEMINI_VERTEX_MODEL`. Location defaults to `global`;
+`gemini-3.5-flash` requires the global endpoint.
+
+This routing stage supports env/CLI selection. Saved native Vertex profiles,
+the `/provider` setup preset, and profile launcher/bootstrap integration are
+deferred to the profile/UI follow-up. Existing saved profiles for other providers
+remain available. Native requests support text, tools, and base64 images/PDFs;
+URL media sources must be supplied as base64. Streaming emits the completed
+response as Anthropic-shaped events.
+
 ### Claude on Vertex AI
 
 The Vertex route uses Anthropic's Claude-on-Vertex API. It is not a general
-Vertex AI Model Garden adapter for Gemini or arbitrary partner models; for
-Gemini on Vertex use the [Gemini on Vertex AI](#gemini-on-vertex-ai) route
-below (or the API-key Gemini provider), and OpenAI-compatible routes for
-compatible third-party gateways.
+Vertex AI Model Garden adapter for Gemini or arbitrary partner models; use the
+native Gemini-on-Vertex route above for Gemini on Vertex, the direct Gemini
+provider for Google AI Studio, and OpenAI-compatible routes for compatible
+third-party gateways.
 
 Authentication uses Google Application Default Credentials through
 `google-auth-library`. There is no `OPENAI_API_KEY`-style API key for this
@@ -131,58 +164,6 @@ openclaude --model claude-sonnet-4-6
 `CLOUD_ML_REGION` is optional and defaults to `us-east5`. Model-specific
 Vertex region override variables are also supported for Claude models; see
 `src/utils/envUtils.ts` for the current override names.
-
-### Gemini on Vertex AI
-
-Native Gemini on Vertex AI (the `generateContent` API), distinct from Claude on
-Vertex (above) and from the API-key Gemini provider. Enable it with
-`CLAUDE_CODE_USE_GEMINI_VERTEX=1` or through `/provider`.
-
-Authentication is either ambient Google Application Default Credentials (the
-default) or an access token — there is no API key for this route:
-
-```bash
-# ADC mode (default): no token needed, uses your gcloud ADC
-gcloud auth application-default login
-```
-
-Minimal setup (ADC):
-
-```bash
-export CLAUDE_CODE_USE_GEMINI_VERTEX=1
-export GEMINI_VERTEX_PROJECT=my-gcp-project   # or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GOOGLE_PROJECT_ID; ADC can also supply it
-export GEMINI_VERTEX_LOCATION=global          # optional, defaults to global
-export GEMINI_VERTEX_MODEL=gemini-2.5-flash   # optional, defaults to gemini-2.5-flash
-
-openclaude --model gemini-2.5-flash
-```
-
-On Google Cloud, ADC can also use an attached service account through the
-metadata server, without a local credentials file.
-
-Access-token mode instead of ADC:
-
-```bash
-export CLAUDE_CODE_USE_GEMINI_VERTEX=1
-export GEMINI_VERTEX_AUTH_MODE=access-token
-export GEMINI_ACCESS_TOKEN="$(gcloud auth print-access-token)"
-export GEMINI_VERTEX_PROJECT=my-gcp-project
-```
-
-A project is required. In access-token mode it must be set explicitly via one
-of the env vars above; in ADC mode it can alternatively be derived from the ADC
-credential at runtime. `GEMINI_VERTEX_AUTH_MODE` defaults to `access-token`
-when `GEMINI_ACCESS_TOKEN` is set, otherwise `adc`.
-
-Native Gemini Vertex accepts base64 image and PDF attachments, including file
-read results. URL-source attachments are rejected before generation; attach
-the file as base64 instead.
-
-Use a region label such as `us-central1` or `global` for
-`GEMINI_VERTEX_LOCATION`, and a bare model ID for `GEMINI_VERTEX_MODEL`.
-Endpoint URLs and URL path/query/fragment syntax are rejected in these routing
-fields. Project IDs, project numbers and legacy domain-scoped IDs such as
-`example.com:my-project` remain supported.
 
 ### Gemini via OpenRouter
 
@@ -458,7 +439,7 @@ missing. Install only what you need:
 | --- | --- | --- |
 | AWS Bedrock | `CLAUDE_CODE_USE_BEDROCK=1` | `npm i -g @anthropic-ai/bedrock-sdk`. Profile-based auth (`~/.aws/credentials`) additionally needs `@aws-sdk/credential-providers` and `@aws-sdk/client-sts`; model listing needs `@aws-sdk/client-bedrock`. Proxy and skip-auth setups may also need `@aws-sdk/credential-provider-node`, `@smithy/node-http-handler`, or `@smithy/core`. The CLI prints the exact missing package if you hit one. |
 | Azure Foundry | `CLAUDE_CODE_USE_FOUNDRY=1` | `npm i -g @anthropic-ai/foundry-sdk @azure/identity` |
-| Claude on Vertex AI / Gemini ADC | `CLAUDE_CODE_USE_VERTEX=1` / Gemini ADC auth | `npm i -g google-auth-library` |
+| Claude on Vertex AI / Gemini ADC / Gemini on Vertex AI | `CLAUDE_CODE_USE_VERTEX=1` / Gemini ADC auth / `CLAUDE_CODE_USE_GEMINI_VERTEX=1` | `npm i -g google-auth-library` |
 | Reading/processing images (clipboard paste, drag-and-drop paths, FileReadTool local decode) | local image decode — **not** pre-encoded URL/base64 passthrough | `npm i -g sharp` (intentionally opt-in; prebuilt releases load it externally only when processing requires it) |
 | Optional error reporting | `SENTRY_DSN` is set | `npm i -g @sentry/node@11.9.0`. Without this package installed, setting `SENTRY_DSN` has no effect and reporting is silently disabled. |
 
@@ -569,13 +550,6 @@ host. Without this variable the behavior is unchanged.
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini API-key auth | Gemini API key for direct Gemini setup |
 | `GEMINI_MODEL` | Gemini only | Model name such as `gemini-3-flash-preview` or `gemini-2.5-pro` |
 | `GEMINI_BASE_URL` | No | Override the Gemini base URL |
-| `CLAUDE_CODE_USE_GEMINI_VERTEX` | Gemini on Vertex AI only | Set to `1` to enable native Gemini on Vertex AI; distinct from direct Gemini and Claude on Vertex |
-| `GEMINI_VERTEX_PROJECT` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `GOOGLE_PROJECT_ID` | Gemini on Vertex AI | Google Cloud project, in the listed precedence order. Required explicitly for access-token auth; ADC may derive it from credentials. |
-| `GEMINI_VERTEX_LOCATION` | No | Vertex location, defaulting to `global`; global-only models require `global` |
-| `GEMINI_VERTEX_MODEL` | No | Vertex Gemini model, defaulting to `gemini-2.5-flash`; an explicit `--model` or session `/model` selection overrides it |
-| `GEMINI_VERTEX_AUTH_MODE` | No | `adc` or `access-token`. Defaults to `access-token` when a nonblank `GEMINI_ACCESS_TOKEN` is present, otherwise `adc`. |
-| `GEMINI_ACCESS_TOKEN` | Gemini Vertex access-token auth | Google Cloud OAuth access token; not a Gemini API key |
-| `GOOGLE_APPLICATION_CREDENTIALS` | No | Path to Google ADC credentials; ambient ADC is also supported |
 | `CLAUDE_CODE_USE_MISTRAL` | Mistral only | Set to `1` to enable the dedicated Mistral provider path |
 | `MISTRAL_API_KEY` | Mistral only | Mistral API key |
 | `MISTRAL_MODEL` | Mistral only | Model name such as `devstral-latest` |
@@ -594,22 +568,9 @@ host. Without this variable the behavior is unchanged.
 | `OPENCLAUDE_DISABLE_CO_AUTHORED_BY` | No | Suppress the default `Co-Authored-By` trailer in generated git commits |
 | `OPENCLAUDE_LOG_TOKEN_USAGE` | No | When truthy (e.g. `verbose`), emits one JSON line on stderr per API request with input/output/cache tokens and the resolved provider. **User-facing debug output** — complements the REPL display controlled by `/config showCacheStats`. Distinct from `CLAUDE_CODE_ENABLE_TOKEN_USAGE_ATTACHMENT`, which is **model-facing** (injects context usage info into the prompt itself). Both can run together. |
 
-For a saved active Gemini Vertex profile, startup restores the matching
-profile file's auth mode, credential and location. Explicit shell settings
-still take precedence. Selecting a saved Vertex profile also reuses its saved
-access token; tokens saved by direct Gemini's setup remain specific to that
-setup and are not an implicit Vertex credential source.
-
-Startup reads the active Vertex profile's mirror from configuration home.
-Automatic legacy startup also requires a newly restored ADC filename to come
-from configuration home or the shell; a workspace-only profile cannot supply
-one before credential validation.
-Documented environment-only provider selections take precedence over a saved
-Vertex fallback, just like a complete explicit custom Anthropic selection.
-
 Model env vars are provider-scoped: first-party Anthropic sessions read
 `ANTHROPIC_MODEL`, OpenAI-compatible sessions read `OPENAI_MODEL`, Gemini reads
-`GEMINI_MODEL`, Gemini on Vertex AI reads `GEMINI_VERTEX_MODEL`, and Mistral reads
+`GEMINI_MODEL`, Gemini on Vertex reads `GEMINI_VERTEX_MODEL`, and Mistral reads
 `MISTRAL_MODEL`. For manual Bedrock, Claude on Vertex,
 or Foundry launches, select the model with `--model`.
 
@@ -847,7 +808,7 @@ bun run hardening:strict
 Notes:
 
 - `doctor:runtime` fails fast if `CLAUDE_CODE_USE_OPENAI=1` with a placeholder key or a missing key for non-local providers.
-- `doctor:runtime` also validates the dedicated Gemini and Mistral env paths when `CLAUDE_CODE_USE_GEMINI=1` or `CLAUDE_CODE_USE_MISTRAL=1`. With `CLAUDE_CODE_USE_GEMINI_VERTEX=1`, it checks the native Vertex path, credential readiness, and an explicit or ADC-derived project before attempting generation.
+- `doctor:runtime` also validates the dedicated Gemini and Mistral env paths when `CLAUDE_CODE_USE_GEMINI=1` or `CLAUDE_CODE_USE_MISTRAL=1`.
 - Local providers such as `http://localhost:11434/v1`, `http://10.0.0.1:11434/v1`, and `http://127.0.0.1:1337/v1` can run without `OPENAI_API_KEY`.
 - Codex profiles validate `CODEX_API_KEY` or the Codex CLI auth file and probe `POST /responses` instead of `GET /models`.
 - `openclaude doctor report` is redacted by default and is intended for GitHub issues. It summarizes provider/runtime/build/settings state without prompts, transcripts, raw settings files, API keys, MCP command details, or full home-directory paths.

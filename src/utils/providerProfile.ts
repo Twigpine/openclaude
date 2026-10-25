@@ -1,3 +1,4 @@
+import { getGeminiVertexProjectId, geminiVertexAdcWillResolveProject } from './geminiAuth.js'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import {
@@ -18,13 +19,6 @@ import {
   type RecommendationGoal,
 } from './providerRecommendation.js'
 import { readGeminiAccessToken } from './geminiCredentials.js'
-import {
-  DEFAULT_GEMINI_VERTEX_MODEL,
-  geminiVertexAdcWillResolveProject,
-  getGeminiVertexLocation,
-  getGeminiVertexProjectId,
-  resolveGeminiVertexAuthMode,
-} from './geminiAuth.js'
 import { getOllamaChatBaseUrl } from './providerDiscovery.js'
 import { getPrimaryModel } from './providerModels.js'
 import { getProviderValidationError } from './providerValidation.js'
@@ -60,7 +54,6 @@ export {
   sanitizeProviderConfigValue,
 } from './providerSecrets.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
-import { hasAnyTruthyProviderSelectionFlag } from './providerSelectionFlags.js'
 
 export const PROFILE_FILE_NAME = '.openclaude-profile.json'
 export const DEFAULT_GEMINI_BASE_URL =
@@ -72,10 +65,10 @@ export const DEFAULT_STARTUP_PROVIDER_ENV_VAR =
   'CLAUDE_CODE_DEFAULT_STARTUP_PROVIDER'
 
 const PROFILE_ENV_KEYS = [
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_GEMINI',
-  'CLAUDE_CODE_USE_GEMINI_VERTEX',
   'CLAUDE_CODE_USE_MISTRAL',
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
@@ -109,10 +102,6 @@ const PROFILE_ENV_KEYS = [
   'GEMINI_ACCESS_TOKEN',
   'GEMINI_MODEL',
   'GEMINI_BASE_URL',
-  'GEMINI_VERTEX_AUTH_MODE',
-  'GEMINI_VERTEX_MODEL',
-  'GEMINI_VERTEX_PROJECT',
-  'GEMINI_VERTEX_LOCATION',
   'GOOGLE_API_KEY',
   'NVIDIA_NIM',
   'NVIDIA_API_KEY',
@@ -167,7 +156,6 @@ export type CompatibilityProfileMode =
   | 'anthropic'
   | 'openai'
   | 'gemini'
-  | 'gemini-vertex'
   | 'mistral'
   | 'github'
   | 'github-enterprise'
@@ -180,7 +168,6 @@ export type ProviderProfile =
   | 'ollama'
   | 'codex'
   | 'gemini'
-  | 'gemini-vertex'
   | 'atomic-chat'
   | 'nvidia-nim'
   | 'minimax'
@@ -222,15 +209,6 @@ export type ProfileEnv = {
   GEMINI_ACCESS_TOKEN?: string
   GEMINI_MODEL?: string
   GEMINI_BASE_URL?: string
-  CLAUDE_CODE_USE_GEMINI_VERTEX?: string
-  GEMINI_VERTEX_AUTH_MODE?: 'access-token' | 'adc'
-  GEMINI_VERTEX_MODEL?: string
-  GEMINI_VERTEX_PROJECT?: string
-  GEMINI_VERTEX_LOCATION?: string
-  GOOGLE_CLOUD_PROJECT?: string
-  GCLOUD_PROJECT?: string
-  GOOGLE_PROJECT_ID?: string
-  GOOGLE_APPLICATION_CREDENTIALS?: string
   GOOGLE_API_KEY?: string
   NVIDIA_NIM?: string
   NVIDIA_API_KEY?: string
@@ -384,7 +362,6 @@ export function isProviderProfile(value: unknown): value is ProviderProfile {
     value === 'ollama' ||
     value === 'codex' ||
     value === 'gemini' ||
-    value === 'gemini-vertex' ||
     value === 'atomic-chat' ||
     value === 'nvidia-nim' ||
     value === 'minimax' ||
@@ -493,36 +470,6 @@ export function buildVertexProfileEnv(options: {
   }
 
   return env
-}
-
-export function buildGeminiVertexProfileEnv(options: {
-  model?: string | null
-  project?: string | null
-  location?: string | null
-  authMode?: 'access-token' | 'adc' | null
-  processEnv?: NodeJS.ProcessEnv
-}): ProfileEnv {
-  const processEnv = options.processEnv ?? process.env
-  // Project IDs are routing identities, not display values: valid IDs can
-  // begin with "sk-" and must not pass through the secret-shape heuristic.
-  const project = (options.project ?? processEnv.GEMINI_VERTEX_PROJECT)?.trim() || undefined
-  const location = sanitizeProviderConfigValue(
-    options.location ?? processEnv.GEMINI_VERTEX_LOCATION,
-  ) || getGeminiVertexLocation(processEnv)
-  const model = normalizeProfileModel(
-    sanitizeProviderConfigValue(options.model ?? processEnv.GEMINI_VERTEX_MODEL),
-  ) || DEFAULT_GEMINI_VERTEX_MODEL
-  const authMode = options.authMode ?? processEnv.GEMINI_VERTEX_AUTH_MODE
-
-  return {
-    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-    ...(authMode === 'access-token' || authMode === 'adc'
-      ? { GEMINI_VERTEX_AUTH_MODE: authMode }
-      : {}),
-    GEMINI_VERTEX_MODEL: model,
-    ...(project ? { GEMINI_VERTEX_PROJECT: project } : {}),
-    GEMINI_VERTEX_LOCATION: location,
-  }
 }
 
 export function buildNvidiaNimProfileEnv(options: {
@@ -1298,7 +1245,6 @@ function getCompatibilityProfileFlag(
   | 'CLAUDE_CODE_USE_OPENAI'
   | 'CLAUDE_CODE_USE_GITHUB'
   | 'CLAUDE_CODE_USE_GEMINI'
-  | 'CLAUDE_CODE_USE_GEMINI_VERTEX'
   | 'CLAUDE_CODE_USE_MISTRAL'
   | 'CLAUDE_CODE_USE_BEDROCK'
   | 'CLAUDE_CODE_USE_VERTEX'
@@ -1311,8 +1257,6 @@ function getCompatibilityProfileFlag(
       return 'CLAUDE_CODE_USE_GITHUB'
     case 'gemini':
       return 'CLAUDE_CODE_USE_GEMINI'
-    case 'gemini-vertex':
-      return 'CLAUDE_CODE_USE_GEMINI_VERTEX'
     case 'mistral':
       return 'CLAUDE_CODE_USE_MISTRAL'
     case 'bedrock':
@@ -1450,23 +1394,15 @@ export function clearPersistedXaiOAuthProfile(
   return removedPath
 }
 
-function loadProfileFileWithSource(options?: ProfileFileLocation): {
-  profile: ProfileFile
-  isLegacyFallback: boolean
-} | null {
-  const primaryPath = resolveProfileFilePath(options)
+export function loadProfileFile(options?: ProfileFileLocation): ProfileFile | null {
   for (const filePath of resolveProfileFileReadPaths(options)) {
     const profile = readProfileFile(filePath)
     if (profile) {
-      return { profile, isLegacyFallback: filePath !== primaryPath }
+      return profile
     }
   }
 
   return null
-}
-
-export function loadProfileFile(options?: ProfileFileLocation): ProfileFile | null {
-  return loadProfileFileWithSource(options)?.profile ?? null
 }
 
 export function saveProfileFile(
@@ -1502,7 +1438,15 @@ export function hasExplicitProviderSelection(
     return true
   }
 
-  return hasAnyTruthyProviderSelectionFlag(processEnv)
+  return (
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI) ||
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB) ||
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI) ||
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_MISTRAL) ||
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_BEDROCK) ||
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_VERTEX) ||
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_FOUNDRY)
+  )
 }
 
 function hasExplicitNonOpenAIProviderSelection(
@@ -1552,13 +1496,6 @@ function hasConcreteProviderSelection(
       ) !== undefined ||
       sanitizeApiKey(processEnv.GEMINI_API_KEY) !== undefined ||
       sanitizeApiKey(processEnv.GOOGLE_API_KEY) !== undefined
-    )
-  }
-
-  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
-    return (
-      getGeminiVertexProjectId(processEnv) !== undefined ||
-      geminiVertexAdcWillResolveProject(processEnv)
     )
   }
 
@@ -1772,7 +1709,6 @@ export async function buildLaunchEnv(options: {
 
   if (hasExplicitProviderSelection(processEnv)) {
     const explicitProfileOverrides: Array<[string, ProviderProfile]> = [
-      ['CLAUDE_CODE_USE_GEMINI_VERTEX', 'gemini-vertex'],
       ['CLAUDE_CODE_USE_GITHUB', 'github'],
       ['CLAUDE_CODE_USE_BEDROCK', 'bedrock'],
       ['CLAUDE_CODE_USE_VERTEX', 'vertex'],
@@ -1940,97 +1876,6 @@ export async function buildLaunchEnv(options: {
     return buildCompatibilityProcessEnv({
       processEnv,
       compatibilityMode: 'gemini',
-      profileEnv: env,
-    })
-  }
-
-  if (selectedProfile === 'gemini-vertex') {
-    // Shell value wins over the persisted one (same precedence as model/project
-    // below) so an explicit GEMINI_VERTEX_AUTH_MODE isn't silently replaced.
-    // Sanitize each candidate first so a whitespace-only shell value (e.g.
-    // GEMINI_VERTEX_PROJECT=' ') doesn't win over a real persisted value.
-    const firstSanitizedProviderValue = (
-      ...values: Array<string | undefined>
-    ): string | undefined => {
-      for (const value of values) {
-        const sanitized = sanitizeProviderConfigValue(value)
-        if (sanitized) return sanitized
-      }
-      return undefined
-    }
-    const isVertexAuthMode = (value: string | undefined) => {
-      const normalized = value?.trim().toLowerCase()
-      return normalized === 'access-token' || normalized === 'adc'
-        ? normalized
-        : undefined
-    }
-    // Preserve typed project IDs and credential-file locators. Display
-    // redaction is separate from selecting the configured runtime identity.
-    const firstTrimmedValue = (...values: Array<string | undefined>) =>
-      values.map(value => value?.trim()).find(value => Boolean(value))
-    const geminiAccessToken =
-      sanitizeApiKey(processEnv.GEMINI_ACCESS_TOKEN) ??
-      sanitizeApiKey(persistedEnv.GEMINI_ACCESS_TOKEN)
-    const authMode = resolveGeminiVertexAuthMode({
-      GEMINI_VERTEX_AUTH_MODE:
-        isVertexAuthMode(processEnv.GEMINI_VERTEX_AUTH_MODE) ??
-        isVertexAuthMode(persistedEnv.GEMINI_VERTEX_AUTH_MODE),
-      GEMINI_ACCESS_TOKEN: geminiAccessToken,
-    })
-    const env = buildGeminiVertexProfileEnv({
-      authMode,
-      model: firstSanitizedProviderValue(
-        processEnv.GEMINI_VERTEX_MODEL,
-        persistedEnv.GEMINI_VERTEX_MODEL,
-      ),
-      project: firstTrimmedValue(
-        processEnv.GEMINI_VERTEX_PROJECT,
-        persistedEnv.GEMINI_VERTEX_PROJECT,
-        processEnv.GOOGLE_CLOUD_PROJECT,
-        persistedEnv.GOOGLE_CLOUD_PROJECT,
-        processEnv.GCLOUD_PROJECT,
-        persistedEnv.GCLOUD_PROJECT,
-        processEnv.GOOGLE_PROJECT_ID,
-        persistedEnv.GOOGLE_PROJECT_ID,
-      ),
-      location: firstSanitizedProviderValue(
-        processEnv.GEMINI_VERTEX_LOCATION,
-        persistedEnv.GEMINI_VERTEX_LOCATION,
-      ),
-      processEnv,
-    })
-
-    const googleCloudProject = firstTrimmedValue(
-      processEnv.GOOGLE_CLOUD_PROJECT,
-      persistedEnv.GOOGLE_CLOUD_PROJECT,
-    )
-    const gcloudProject = firstTrimmedValue(
-      processEnv.GCLOUD_PROJECT,
-      persistedEnv.GCLOUD_PROJECT,
-    )
-    const googleProjectId = firstTrimmedValue(
-      processEnv.GOOGLE_PROJECT_ID,
-      persistedEnv.GOOGLE_PROJECT_ID,
-    )
-    const googleApplicationCredentials = firstTrimmedValue(
-      processEnv.GOOGLE_APPLICATION_CREDENTIALS,
-      persistedEnv.GOOGLE_APPLICATION_CREDENTIALS,
-    )
-    if (googleCloudProject) env.GOOGLE_CLOUD_PROJECT = googleCloudProject
-    if (gcloudProject) env.GCLOUD_PROJECT = gcloudProject
-    if (googleProjectId) env.GOOGLE_PROJECT_ID = googleProjectId
-    if (googleApplicationCredentials) {
-      env.GOOGLE_APPLICATION_CREDENTIALS = googleApplicationCredentials
-    }
-    // PROFILE_ENV_KEYS clears GEMINI_ACCESS_TOKEN on relaunch; an access-token
-    // Vertex profile must carry its bearer forward or it relaunches unauthed.
-    if (env.GEMINI_VERTEX_AUTH_MODE === 'access-token') {
-      if (geminiAccessToken) env.GEMINI_ACCESS_TOKEN = geminiAccessToken
-    }
-
-    return buildCompatibilityProcessEnv({
-      processEnv,
-      compatibilityMode: 'gemini-vertex',
       profileEnv: env,
     })
   }
@@ -2714,6 +2559,11 @@ export async function buildStartupEnvFromProfile(options?: {
   readGeminiAccessToken?: () => string | undefined
 }): Promise<NodeJS.ProcessEnv> {
   const processEnv = options?.processEnv ?? process.env
+  // Explicit native selection must precede saved-profile/default adoption.
+  if (
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
+    (getGeminiVertexProjectId(processEnv) || geminiVertexAdcWillResolveProject(processEnv))
+  ) return processEnv
   const persisted =
     options && 'persisted' in options ? options.persisted : loadProfileFile()
 
@@ -2866,10 +2716,10 @@ export async function applyStartupEnvFromProfile(options?: StartupEnvOptions & {
   // alone is not enough: a persisted profile's launch env spreads processEnv,
   // so a marker inherited from a parent CLI process (pane/teammate children)
   // could make a genuinely saved profile look like the injected default.
-  const loadedProfile = 'persisted' in startupOptions
-    ? null : loadProfileFileWithSource()
-  const persisted = 'persisted' in startupOptions
-    ? startupOptions.persisted : loadedProfile?.profile ?? null
+  const persisted =
+    startupOptions && 'persisted' in startupOptions
+      ? startupOptions.persisted
+      : loadProfileFile()
   const startupEnv = await buildStartupEnvFromProfile({
     ...startupOptions,
     persisted,
@@ -2877,23 +2727,6 @@ export async function applyStartupEnvFromProfile(options?: StartupEnvOptions & {
   })
   if (startupEnv === processEnv) {
     return null
-  }
-
-  const candidateAdcFile = startupEnv.GOOGLE_APPLICATION_CREDENTIALS?.trim()
-  if (
-    loadedProfile?.isLegacyFallback === true &&
-    isEnvTruthy(startupEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
-    resolveGeminiVertexAuthMode(startupEnv) === 'adc' &&
-    candidateAdcFile &&
-    candidateAdcFile !== processEnv.GOOGLE_APPLICATION_CREDENTIALS?.trim()
-  ) {
-    // The loader read this candidate from cwd. An ADC config can read
-    // files and choose token endpoints, so do not discover a new one here,
-    // before the CLI reaches workspace trust. Explicit shell/user config
-    // and caller-supplied profiles keep their existing behavior.
-    const error = 'A workspace-only Gemini Vertex ADC profile cannot supply a startup credential file. Save the profile in configuration home or set GOOGLE_APPLICATION_CREDENTIALS in your shell.'
-    onValidationError?.(`Warning: ignoring saved provider profile. ${error}`)
-    return error
   }
 
   // A root CLI --model is higher precedence than saved profile state. Apply

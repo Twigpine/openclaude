@@ -1,3 +1,4 @@
+import { getGeminiVertexModel } from '../geminiAuth.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 /**
  * Ensure that any model codenames introduced here are also added to
@@ -33,8 +34,6 @@ import { LIGHTNING_BOLT } from '../../constants/figures.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { type ModelAlias, isModelAlias } from './aliases.js'
 import { capitalize } from '../stringUtils.js'
-import { getPrimaryModel } from '../providerModels.js'
-import { getGeminiVertexModel, DEFAULT_GEMINI_VERTEX_MODEL } from '../geminiAuth.js'
 import { DEFAULT_GEMINI_MODEL } from '../providerProfile.js'
 import { getAntModelOverrideConfig, resolveAntModel } from './antModels.js'
 import { getRouteDefaultModel, resolveActiveRouteIdFromEnv } from '../../integrations/routeMetadata.js'
@@ -42,24 +41,6 @@ import { getRouteDefaultModel, resolveActiveRouteIdFromEnv } from '../../integra
 export type ModelShortName = string
 export type ModelName = string
 export type ModelSetting = ModelName | ModelAlias | null
-
-function getConfiguredGeminiVertexModel(): string {
-  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
-    return getGeminiVertexModel() ?? DEFAULT_GEMINI_VERTEX_MODEL
-  }
-  // Profile-only routing ignores ambient Vertex model overrides, just like
-  // getAnthropicClient. Read lazily to avoid bootstrap config import cycles.
-  try {
-    const { getActiveProviderProfile } = require('../providerProfiles.js') as typeof import('../providerProfiles.js')
-    const profile = getActiveProviderProfile()
-    if (profile?.provider === 'gemini-vertex' && profile.model) {
-      return getPrimaryModel(profile.model) || DEFAULT_GEMINI_VERTEX_MODEL
-    }
-  } catch {
-    // Config can be unavailable during early model-default resolution.
-  }
-  return DEFAULT_GEMINI_VERTEX_MODEL
-}
 
 function getMiniMaxModelEnv(): string | undefined {
   return isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
@@ -195,9 +176,7 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
     // settings.model, so switching from (say) Moonshot to Codex kept firing
     // `kimi-k2.6` at the Codex endpoint and getting 400s.
     const provider = getAPIProvider()
-    const activeRouteId = provider === 'gemini-vertex'
-      ? 'gemini-vertex'
-      : resolveActiveRouteIdFromEnv(process.env)
+    const activeRouteId = resolveActiveRouteIdFromEnv(process.env)
     const isOpenAIShimProvider =
       provider === 'openai' ||
       provider === 'codex' ||
@@ -215,7 +194,7 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
       : activeRouteId === 'api-route'
         ? getAllowedApiRouteConfigModel()
         : (provider === 'gemini' ? process.env.GEMINI_MODEL : undefined) ||
-        (provider === 'gemini-vertex' ? getConfiguredGeminiVertexModel() : undefined) ||
+        (provider === 'gemini-vertex' ? getGeminiVertexModel() : undefined) ||
         (provider === 'mistral' ? process.env.MISTRAL_MODEL : undefined) ||
         (provider === 'minimax' ? getMiniMaxModelEnv() : undefined) ||
         (isOpenAIShimProvider ? process.env.OPENAI_MODEL : undefined) ||
@@ -561,14 +540,6 @@ export function getDefaultMainLoopModel(): ModelName {
  * module top-level (see MODEL_COSTS in modelCost.ts).
  */
 export function firstPartyNameToCanonical(name: ModelName): ModelShortName {
-  // Defensive: callers in the model-resolution chain can hand us undefined
-  // (e.g. when a third-party provider like Vertex returns an assistant message
-  // without a `model` field, or when a stale code path consults a fallback
-  // that wasn't seeded yet). Crashing here cascades into the render layer
-  // and takes the whole chat down — return an empty canonical instead.
-  if (typeof name !== 'string') {
-    return ''
-  }
   name = name.toLowerCase()
   // Special cases for Claude 4+ models to differentiate versions
   // Order matters: check more specific versions first (4-8 before 4-7 before 4-6 before 4-5 before 4)

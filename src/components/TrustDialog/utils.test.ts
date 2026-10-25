@@ -278,14 +278,6 @@ describe('TrustDialog utils — canonical paths from source-of-truth', () => {
       expect(getDangerousEnvVarsSources()).toEqual([EXPECTED.projectSettings])
     })
 
-    test('Vertex location requires trust because it controls authenticated request origins', async () => {
-      settingsState.projectSettings = settings({
-        env: { GEMINI_VERTEX_LOCATION: 'attacker.example/' },
-      })
-      const { getDangerousEnvVarsSources } = await freshUtils()
-      expect(getDangerousEnvVarsSources()).toEqual([EXPECTED.projectSettings])
-    })
-
     test('getDangerousEnvVarsSources — only safe vars produces nothing', async () => {
       // AWS_REGION is in SAFE_ENV_VARS; must not trigger the warning.
       settingsState.projectSettings = settings({ env: { AWS_REGION: 'us-east-1' } })

@@ -1,39 +1,18 @@
 import { defineVendor } from '../define.js'
 
-// Credential sources for presence checks and redaction, excluding routing
-// configuration. The preset's scalar bearer field uses only the access token.
-// access-token mode → GEMINI_ACCESS_TOKEN; ADC mode → GOOGLE_APPLICATION_CREDENTIALS
-// (ambient ADC has no env var and is resolved at runtime).
-const geminiVertexCredentialEnvVars = [
-  'GEMINI_ACCESS_TOKEN',
-  'GOOGLE_APPLICATION_CREDENTIALS',
-]
-
 export default defineVendor({
   id: 'gemini-vertex',
   label: 'Google Vertex AI Gemini',
   classification: 'native',
-  // The native client builds its own aiplatform.googleapis.com URL from
-  // project+location, so this field is reused to carry the Google Cloud project
-  // id. Use a placeholder (not the endpoint URL) so the preset routes through
-  // the full setup form to collect the project instead of silently saving the
-  // endpoint URL as the project.
-  defaultBaseUrl: '<your-gcp-project-id>',
+  defaultBaseUrl: 'https://aiplatform.googleapis.com',
   defaultModel: 'gemini-2.5-flash',
   setup: {
     requiresAuth: true,
     authMode: 'adc',
-    credentialEnvVars: geminiVertexCredentialEnvVars,
+    credentialEnvVars: ['GEMINI_ACCESS_TOKEN', 'GOOGLE_APPLICATION_CREDENTIALS'],
   },
   transportConfig: {
     kind: 'gemini-vertex',
-  },
-  preset: {
-    id: 'gemini-vertex',
-    description: 'Gemini on Google Vertex AI',
-    apiKeyEnvVars: ['GEMINI_ACCESS_TOKEN'],
-    modelEnvVars: ['GEMINI_VERTEX_MODEL'],
-    fallbackModel: 'gemini-2.5-flash',
   },
   validation: {
     kind: 'gemini-credential',
@@ -60,10 +39,7 @@ export default defineVendor({
         contextWindow: 1_048_576,
         maxOutputTokens: 65_536,
       },
-      // Thinking model — available on the global endpoint only. The client
-      // enforces this via isGlobalOnlyVertexModel (utils/geminiAuth.ts): a
-      // regional GEMINI_VERTEX_LOCATION with this model is rejected. Keep the
-      // two in sync.
+      // Thinking model — available on global endpoint only
       {
         id: 'gemini-3.5-flash',
         apiName: 'gemini-3.5-flash',

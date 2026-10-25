@@ -124,7 +124,7 @@ export function isGlobalOnlyVertexModel(model: string | undefined): boolean {
 }
 
 /**
- * The native client, startup validator, and doctor share this rule. A
+ * The native client and startup validator share this rule. A
  * global-only model on a regional location builds a URL Vertex will not serve.
  * Returns the same message the client throws, or null when the pair is valid.
  * Location defaults the same way as getGeminiVertexLocation (`global`).
@@ -139,7 +139,7 @@ export function getGeminiVertexGlobalEndpointError(
   if (resolvedLocation === 'global' || !isGlobalOnlyVertexModel(resolvedModel)) {
     return null
   }
-  // All consumers publish this message (doctor, startup validation and client
+  // All consumers publish this message (startup validation and client
   // errors). Redact the display value here, after comparing the raw location.
   const displayLocation = redactSecretValueForDisplay(resolvedLocation, env)
   return `Gemini Vertex model "${resolvedModel}" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "${displayLocation}") to use it.`
@@ -163,7 +163,7 @@ export function getGeminiAuthMode(
  * Single source of truth for the Gemini Vertex auth mode. An explicit
  * (sanitized) GEMINI_VERTEX_AUTH_MODE wins; otherwise a present access token
  * implies access-token mode, falling back to ADC. Every site that shapes Vertex
- * credentials (client, validator, doctor, profile builders) must use this so a
+ * credentials (client and validator) must use this so a
  * token-only or whitespace-only configuration is classified identically.
  */
 export function resolveGeminiVertexAuthMode(
@@ -237,14 +237,12 @@ function normalizeAccessToken(
 async function createDefaultGoogleAuth(
   optionalRuntimeImporter: typeof importOptionalRuntimeModule =
     importOptionalRuntimeModule,
-  credentialFile?: string,
 ): Promise<GoogleAuthLike> {
   const { GoogleAuth } = await optionalRuntimeImporter<
     typeof import('google-auth-library')
   >('google-auth-library', 'Gemini Application Default Credentials')
   return new GoogleAuth({
     scopes: [GEMINI_ADC_SCOPE],
-    ...(credentialFile ? { keyFilename: credentialFile } : {}),
   }) as GoogleAuthLike
 }
 
@@ -259,14 +257,7 @@ async function resolveGeminiAdcCredentialUncached(
   try {
     const createGoogleAuth =
       deps.createGoogleAuth ??
-      (() => createDefaultGoogleAuth(
-        deps.importOptionalRuntimeModule,
-        // Native startup validates a prospective env before applying it.
-        // Direct Gemini retains its existing ambient/file-presence policy.
-        deps.allowAmbientAdc
-          ? sanitizeCredential(env.GOOGLE_APPLICATION_CREDENTIALS)
-          : undefined,
-      ))
+      (() => createDefaultGoogleAuth(deps.importOptionalRuntimeModule))
     const auth = await createGoogleAuth()
     const client = await auth.getClient()
     const accessToken = normalizeAccessToken(await client.getAccessToken())

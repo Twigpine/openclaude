@@ -11,7 +11,6 @@ import {
   buildAtomicChatProfileEnv,
   buildCodexProfileEnv,
   buildGeminiProfileEnv,
-  buildGeminiVertexProfileEnv,
   buildMistralProfileEnv,
   buildOllamaProfileEnv,
   buildOpenAIProfileEnv,
@@ -29,7 +28,6 @@ import {
   listAtomicChatModels,
   listOllamaModels,
 } from './provider-discovery.ts'
-import { getGeminiVertexProjectId, resolveGeminiVertexAuthMode } from '../src/utils/geminiAuth.ts'
 
 function parseArg(name: string): string | null {
   const args = process.argv.slice(2)
@@ -40,7 +38,7 @@ function parseArg(name: string): string | null {
 
 function parseProviderArg(): ProviderProfile | 'auto' {
   const p = parseArg('--provider')?.toLowerCase()
-  if (p === 'openai' || p === 'ollama' || p === 'codex' || p === 'gemini' || p === 'gemini-vertex' || p === 'mistral' || p === 'atomic-chat') return p
+  if (p === 'openai' || p === 'ollama' || p === 'codex' || p === 'gemini' || p === 'mistral' || p === 'atomic-chat') return p
   return 'auto'
 }
 
@@ -94,44 +92,6 @@ async function main(): Promise<void> {
     }
 
     env = builtEnv
-  } else if (selected === 'gemini-vertex') {
-    // Reuse the runtime project resolver (same normalization as the provider
-    // validator) rather than an ad-hoc OR chain.
-    const projectFromArg = argBaseUrl?.trim()
-    if (projectFromArg && /^https?:\/\//i.test(projectFromArg)) {
-      console.error('Gemini Vertex --base-url expects a Google Cloud project id, not an API endpoint URL.')
-      process.exit(1)
-    }
-    const vertexAuthMode = resolveGeminiVertexAuthMode(process.env)
-    const project = projectFromArg || getGeminiVertexProjectId(process.env) || null
-    // ADC can supply the project id at runtime (credential.projectId), matching
-    // the provider validator / launcher — so only access-token profiles need an
-    // explicit project here, otherwise valid ADC-only profiles can't be saved.
-    if (!project && vertexAuthMode === 'access-token') {
-      console.error('Gemini Vertex access-token profiles require a project. Use --base-url <project> or set GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID.')
-      process.exit(1)
-    }
-    env = buildGeminiVertexProfileEnv({
-      model: argModel || null,
-      project,
-      authMode: vertexAuthMode,
-      processEnv: process.env,
-    })
-    // PROFILE_ENV_KEYS clears GEMINI_ACCESS_TOKEN / GOOGLE_APPLICATION_CREDENTIALS
-    // on relaunch, so the saved profile must carry the active credential forward
-    // or it relaunches unauthed — mirrors the compatibility builder in
-    // providerProfile.ts / applyProviderProfileToProcessEnv.
-    if (vertexAuthMode === 'access-token') {
-      const accessToken = process.env.GEMINI_ACCESS_TOKEN?.trim()
-      if (!accessToken) {
-        console.error('Gemini Vertex access-token profiles require GEMINI_ACCESS_TOKEN.')
-        process.exit(1)
-      }
-      env.GEMINI_ACCESS_TOKEN = accessToken
-    } else {
-      const adcFile = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()
-      if (adcFile) env.GOOGLE_APPLICATION_CREDENTIALS = adcFile
-    }
   } else if (selected === 'mistral') {
     const builtEnv = buildMistralProfileEnv({
       model: argModel || null,
@@ -227,7 +187,7 @@ async function main(): Promise<void> {
 
   console.log(`Saved profile: ${selected}`)
   console.log(`Goal: ${goal}`)
-  console.log(`Model: ${profile.env.GEMINI_VERTEX_MODEL || profile.env.GEMINI_MODEL || profile.env.MISTRAL_MODEL || profile.env.OPENAI_MODEL || getGoalDefaultOpenAIModel(goal)}`)
+  console.log(`Model: ${profile.env.GEMINI_MODEL || profile.env.MISTRAL_MODEL || profile.env.OPENAI_MODEL || getGoalDefaultOpenAIModel(goal)}`)
   console.log(`Path: ${outputPath}`)
   console.log('Next: bun run dev:profile')
 }

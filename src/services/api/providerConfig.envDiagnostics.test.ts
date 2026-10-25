@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
-import { snapshotEnv } from '../../test/envSnapshot.js'
 import type { DebugLogLevel } from '../../utils/debug.js'
 
 type DebugModule = typeof import('../../utils/debug.js')
@@ -28,7 +27,6 @@ const originalEnv = {
   GOOGLE_PROJECT_ID: process.env.GOOGLE_PROJECT_ID,
 }
 let actualDebugModule: DebugModule | undefined
-let restoreGithubEnv: () => void
 
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) {
@@ -53,12 +51,10 @@ function findDebugCall(
 
 beforeEach(async () => {
   await acquireSharedMutationLock('providerConfig.envDiagnostics.test.ts')
-  restoreGithubEnv = snapshotEnv(['CLAUDE_CODE_USE_GITHUB'])
 })
 
 afterEach(() => {
   try {
-    restoreGithubEnv()
     restoreEnv('CLAUDE_CODE_USE_OPENAI', originalEnv.CLAUDE_CODE_USE_OPENAI)
     restoreEnv('CLAUDE_CODE_USE_GEMINI', originalEnv.CLAUDE_CODE_USE_GEMINI)
     restoreEnv('CLAUDE_CODE_USE_GEMINI_VERTEX', originalEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)
@@ -112,7 +108,6 @@ test('does not warn for OPENAI_API_BASE when OPENAI_BASE_URL is active', async (
 
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
   process.env.OPENAI_BASE_URL = 'http://127.0.0.1:11434/v1'
   process.env.OPENAI_MODEL = 'qwen2.5-coder:7b'
   process.env.OPENAI_API_BASE = 'undefined'
@@ -155,7 +150,6 @@ test('uses descriptor-backed Gemini default model when GEMINI_MODEL is unset', a
 
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
   process.env.CLAUDE_CODE_USE_GEMINI = '1'
   delete process.env.GEMINI_MODEL
   delete process.env.GEMINI_BASE_URL
@@ -177,7 +171,6 @@ test('uses GEMINI_VERTEX_MODEL instead of OPENAI_MODEL in Gemini Vertex mode', a
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.OPENAI_MODEL = 'gpt-5.5'
   process.env.GEMINI_VERTEX_MODEL = 'gemini-vertex-custom'
@@ -198,7 +191,6 @@ test('uses current Gemini Vertex fallback model instead of OPENAI_MODEL when ver
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.OPENAI_MODEL = 'gpt-5.5'
   delete process.env.GEMINI_VERTEX_MODEL
@@ -219,7 +211,6 @@ test('exposes Gemini Vertex project and location from dedicated env vars', async
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.GEMINI_VERTEX_PROJECT = 'vertex-project'
   process.env.GEMINI_VERTEX_LOCATION = 'europe-west4'
@@ -240,13 +231,10 @@ test('falls back to Google project env vars for Gemini Vertex project', async ()
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.GOOGLE_CLOUD_PROJECT = 'project-test-1234'
   process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
   delete process.env.GEMINI_VERTEX_PROJECT
-  delete process.env.GCLOUD_PROJECT
-  delete process.env.GOOGLE_PROJECT_ID
   delete process.env.OPENAI_API_BASE
 
   const nonce = `${Date.now()}-${Math.random()}`
@@ -264,12 +252,9 @@ test('defaults Gemini Vertex location to global when unset', async () => {
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.GOOGLE_CLOUD_PROJECT = 'project-test-1234'
   delete process.env.GEMINI_VERTEX_PROJECT
-  delete process.env.GCLOUD_PROJECT
-  delete process.env.GOOGLE_PROJECT_ID
   delete process.env.GEMINI_VERTEX_LOCATION
   delete process.env.OPENAI_API_BASE
 

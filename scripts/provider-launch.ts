@@ -14,7 +14,6 @@ import {
   type ProfileFile,
   type ProviderProfile,
 } from '../src/utils/providerProfile.ts'
-import { getGeminiVertexProjectId, resolveGeminiVertexAuthMode } from '../src/utils/geminiAuth.ts'
 import {
   getRouteCredentialValue,
   resolveActiveRouteIdFromEnv,
@@ -55,7 +54,7 @@ function parseLaunchOptions(argv: string[]): LaunchOptions {
       continue
     }
 
-    if ((lower === 'auto' || lower === 'openai' || lower === 'ollama' || lower === 'codex' || lower === 'gemini' || lower === 'gemini-vertex' || lower ==='mistral' || lower === 'atomic-chat') && requestedProfile === 'auto') {
+    if ((lower === 'auto' || lower === 'openai' || lower === 'ollama' || lower === 'codex' || lower === 'gemini' || lower ==='mistral' || lower === 'atomic-chat') && requestedProfile === 'auto') {
       requestedProfile = lower as ProviderProfile | 'auto'
       continue
     }
@@ -132,8 +131,6 @@ function printSummary(profile: ProviderProfile): void {
   console.log(`Launching profile: ${profile}`)
   if (profile === 'gemini') {
     console.log('Using configured Gemini provider settings.')
-  } else if (profile === 'gemini-vertex') {
-    console.log('Using configured Gemini Vertex provider settings.')
   } else if (profile === 'mistral') {
     console.log('Using configured Mistral provider settings.')
   } else if (profile === 'codex') {
@@ -187,7 +184,7 @@ async function main(): Promise<void> {
   const options = parseLaunchOptions(process.argv.slice(2))
   const requestedProfile = options.requestedProfile
   if (!requestedProfile) {
-    console.error('Usage: bun run scripts/provider-launch.ts [openai|ollama|codex|gemini|gemini-vertex|mistral|atomic-chat|auto] [--fast] [--goal <latency|balanced|coding>] [-- <cli args>]')
+    console.error('Usage: bun run scripts/provider-launch.ts [openai|ollama|codex|gemini|mistral|atomic-chat|mistral|auto] [--fast] [--goal <latency|balanced|coding>] [-- <cli args>]')
     process.exit(1)
   }
 
@@ -251,34 +248,6 @@ async function main(): Promise<void> {
   if (profile === 'gemini' && !hasUsableGeminiLaunchAuth(env)) {
     console.error('Gemini credentials are required for gemini profile. Use `bun run profile:init -- --provider gemini --api-key <key>`, save an access-token/ADC Gemini profile with `/provider`, or set GEMINI_API_KEY/GOOGLE_API_KEY/GEMINI_ACCESS_TOKEN.')
     process.exit(1)
-  }
-
-  if (profile === 'gemini-vertex') {
-    // Reuse the runtime project resolver so launch validation matches the
-    // provider validator / client contract instead of drifting.
-    const hasProject = Boolean(getGeminiVertexProjectId(env))
-    const authMode = resolveGeminiVertexAuthMode(env)
-    // Only access-token mode needs an upfront credential. ADC mode (explicit
-    // or default) relies on ambient Google ADC, which only the runtime resolver
-    // (resolveGeminiCredential) can discover from the well-known gcloud
-    // location — so defer that check to runtime instead of hard-failing here,
-    // matching what doctor and the native client already accept.
-    const hasCredential =
-      authMode === 'access-token'
-        ? Boolean(env.GEMINI_ACCESS_TOKEN?.trim())
-        : true
-    // ADC can also supply the project id (credential.projectId), which only the
-    // runtime resolver discovers — so in ADC mode defer the project check to
-    // runtime, matching the provider validator and native client. access-token
-    // mode has no ADC project to fall back on, so it still requires one here.
-    if (!hasProject && authMode === 'access-token') {
-      console.error('Gemini Vertex access-token mode requires a project (GEMINI_VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_PROJECT_ID). Save a gemini-vertex profile with `/provider` or set those env vars.')
-      process.exit(1)
-    }
-    if (!hasCredential) {
-      console.error('Gemini Vertex access-token mode requires GEMINI_ACCESS_TOKEN. Set it, or switch to ADC (GEMINI_VERTEX_AUTH_MODE=adc with ambient Google ADC or GOOGLE_APPLICATION_CREDENTIALS).')
-      process.exit(1)
-    }
   }
 
   if (profile === 'mistral' && !env.MISTRAL_API_KEY) {

@@ -1,4 +1,5 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
+import { snapshotEnv } from '../test/envSnapshot.js'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 const actualSettings = await import('../utils/settings/settings.js')
 import {
@@ -33,7 +34,6 @@ import {
   resetSettingsCache,
   setSessionSettingsCache,
 } from '../utils/settings/settingsCache.js'
-import * as providerProfilesModule from '../utils/providerProfiles.js'
 
 const ENV_KEYS = [
   'CI',
@@ -48,15 +48,6 @@ const ENV_KEYS = [
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'GEMINI_MODEL',
-  'GEMINI_VERTEX_MODEL',
-  'GEMINI_VERTEX_PROJECT',
-  'GEMINI_VERTEX_LOCATION',
-  'GEMINI_VERTEX_AUTH_MODE',
-  'GEMINI_ACCESS_TOKEN',
-  'GOOGLE_CLOUD_PROJECT',
-  'GCLOUD_PROJECT',
-  'GOOGLE_PROJECT_ID',
-  'GOOGLE_APPLICATION_CREDENTIALS',
   'MISTRAL_MODEL',
   'ANTHROPIC_MODEL',
   'CLAUDE_MODEL',
@@ -77,7 +68,6 @@ const originalWrite = process.stdout.write
 const originalColumns = process.stdout.columns
 // `model` is a legacy loose key not declared on GlobalConfig.
 const originalModel = (getGlobalConfig() as GlobalConfig & Record<string, unknown>).model
-let activeProfileSpy: ReturnType<typeof spyOn> | undefined
 
 beforeEach(() => {
   for (const key of ENV_KEYS) {
@@ -89,23 +79,10 @@ beforeEach(() => {
     ...current,
     model: undefined,
   }))
-  // detectProvider() reads getActiveProviderProfile() to decide Gemini Vertex
-  // routing. Pin it to "no active profile" by default so a gemini-vertex profile
-  // leaked into the shared global config by another test file (the beforeEach
-  // above only resets `model`, not providerProfiles) can't make these detection
-  // assertions return "Gemini Vertex". detectProvider imports the function as a
-  // cross-module binding, so the spy intercepts it; the profile-only spec below
-  // overrides this default for its single assertion.
-  activeProfileSpy = spyOn(
-    providerProfilesModule,
-    'getActiveProviderProfile',
-  ).mockReturnValue(undefined)
 })
 
 afterEach(() => {
   resetSettingsCache()
-  activeProfileSpy?.mockRestore()
-  activeProfileSpy = undefined
   saveGlobalConfig(current => ({
     ...current,
     model: originalModel,
@@ -477,105 +454,22 @@ describe('detectProvider — modelOverride from --model flag', () => {
   })
 })
 
-describe('detectProvider — Gemini Vertex endpoint reflects the runtime project contract', () => {
-  test('shows the full /projects/<project>/locations/<location> endpoint when a project resolves', () => {
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_PROJECT = 'my-project'
-    process.env.GEMINI_VERTEX_LOCATION = 'europe-west4'
-
-    const result = detectProvider()
-    expect(result.name).toBe('Gemini Vertex')
-    expect(result.baseUrl).toBe(
-      'https://aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west4',
-    )
-  })
-
-  test('surfaces a project-required state instead of a project-less endpoint', () => {
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    // no project env set — the native client would throw, so the startup
-    // display must not imply a callable project-less endpoint.
-    const result = detectProvider()
-    expect(result.name).toBe('Gemini Vertex')
-    expect(result.baseUrl).toContain('/projects/')
-    expect(result.baseUrl).toContain('GEMINI_VERTEX_PROJECT')
-  })
-
-  test('shows a neutral placeholder for ADC setups that derive the project at runtime', () => {
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    // ADC credential present, no explicit project: getAnthropicClient resolves
-    // the project from credential.projectId at runtime, so the display must not
-    // imperatively demand GEMINI_VERTEX_PROJECT.
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
-
-    const result = detectProvider()
-    expect(result.name).toBe('Gemini Vertex')
-    expect(result.baseUrl).toContain('ADC-resolved project')
-    expect(result.baseUrl).not.toContain('GEMINI_VERTEX_PROJECT')
-  })
-
-  test('keeps the project-required hint when a token coexists with a credentials file', () => {
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    // A GEMINI_ACCESS_TOKEN makes the effective mode access-token even though
-    // GOOGLE_APPLICATION_CREDENTIALS is set, so the runtime needs an explicit
-    // project — keep the actionable hint, not the ADC placeholder.
-    process.env.GEMINI_ACCESS_TOKEN = 'ya29.token'
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
-
-    const result = detectProvider()
-    expect(result.name).toBe('Gemini Vertex')
-    expect(result.baseUrl).toContain('GEMINI_VERTEX_PROJECT')
-    expect(result.baseUrl).not.toContain('ADC-resolved project')
-  })
-
-  test('detects Vertex for isEnvTruthy flag values (yes/on), not just 1/true', () => {
+test.each([
+  ['my-project', undefined, 'my-project'],
+  [undefined, 'adc', '<ADC-resolved project>'],
+] as const)('native startup displays the project or ADC placeholder', (project, mode, displayed) => {
+  const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_PROJECT',
+    'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_PROJECT_ID',
+    'GEMINI_VERTEX_LOCATION', 'GEMINI_VERTEX_MODEL', 'GEMINI_VERTEX_AUTH_MODE'], { clear: true })
+  try {
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = 'yes'
-    process.env.GEMINI_VERTEX_PROJECT = 'my-project'
-
-    const result = detectProvider()
-    expect(result.name).toBe('Gemini Vertex')
-    expect(result.baseUrl).toContain('/projects/my-project/')
-  })
-
-  test('resolves the project from a fallback alias (GOOGLE_CLOUD_PROJECT) when GEMINI_VERTEX_PROJECT is unset', () => {
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    // Only the alias is set; getGeminiVertexProjectId() must resolve it so the
-    // endpoint matches the runtime/provider contract for alias projects.
-    process.env.GOOGLE_CLOUD_PROJECT = 'alias-project'
-
-    const result = detectProvider()
-    expect(result.baseUrl).toBe(
-      'https://aiplatform.googleapis.com/v1/projects/alias-project/locations/global',
-    )
-  })
-
-  test('detects Vertex from a saved active profile with no env flag (profile-only)', () => {
-    // No CLAUDE_CODE_USE_GEMINI_VERTEX: routing comes purely from the saved
-    // active profile, exactly like getAnthropicClient. The profile's project
-    // (stored in baseUrl) and model must drive the startup display instead of
-    // falling through to the default Anthropic/OpenAI branch.
-    //
-    // Override the beforeEach getActiveProviderProfile spy (which defaults to no
-    // active profile) with a saved gemini-vertex profile, mirroring the
-    // client.test.ts Vertex specs, instead of mutating the shared global config:
-    // another test file in the same process can leave a leaked
-    // mock.module('./config.js') installed (bun's mock.restore() does not revert
-    // mock.module()), which silently turns a saveGlobalConfig()-based setup into a
-    // no-op and makes this assertion order-dependent. detectProvider() passes the
-    // resolved profile straight into isGeminiVertexEffectiveProvider(), so the
-    // real routing logic still runs. afterEach restores the spy.
-    activeProfileSpy!.mockReturnValue({
-      id: 'saved_vertex',
-      name: 'Saved Vertex',
-      provider: 'gemini-vertex',
-      baseUrl: 'saved-proj',
-      model: 'gemini-2.5-pro',
-    } as ReturnType<typeof providerProfilesModule.getActiveProviderProfile>)
-
-    const result = detectProvider()
-    expect(result.name).toBe('Gemini Vertex')
-    expect(result.model).toBe('gemini-2.5-pro')
-    expect(result.baseUrl).toBe(
-      'https://aiplatform.googleapis.com/v1/projects/saved-proj/locations/global',
-    )
-  })
+    if (project) process.env.GEMINI_VERTEX_PROJECT = project
+    if (mode) process.env.GEMINI_VERTEX_AUTH_MODE = mode
+    expect(detectProvider()).toMatchObject({
+      name: 'Gemini Vertex', model: 'gemini-2.5-flash',
+      baseUrl: 'https://aiplatform.googleapis.com/v1/projects/' + displayed + '/locations/global',
+    })
+  } finally {
+    restore()
+  }
 })

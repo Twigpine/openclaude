@@ -114,6 +114,7 @@ describe('SAFE_ENV_VARS excludes credentials', () => {
 
     for (const envVar of [
       'CLAUDE_CODE_USE_GEMINI_VERTEX',
+      'GEMINI_ACCESS_TOKEN',
       'GEMINI_VERTEX_AUTH_MODE',
       'GEMINI_VERTEX_MODEL',
       'GEMINI_VERTEX_PROJECT',

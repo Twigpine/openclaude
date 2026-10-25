@@ -18,10 +18,6 @@ import {
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { isFirstPartyAnthropicBaseUrlForEnv } from '../utils/anthropicBaseUrl.js'
-import {
-  hasAnyTruthyProviderSelectionFlag,
-  hasConflictingProviderFlag,
-} from '../utils/providerSelectionFlags.js'
 
 export type RouteDescriptor = GatewayDescriptor | VendorDescriptor | import('./descriptors.js').AnthropicProxyDescriptor
 
@@ -966,7 +962,16 @@ function isAimlapiBaseUrl(baseUrl?: string): boolean {
 function hasNoExplicitNonOpenAICompatibleProvider(
   processEnv: NodeJS.ProcessEnv,
 ): boolean {
-  return !hasAnyTruthyProviderSelectionFlag(processEnv)
+  return (
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI) &&
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB) &&
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI) &&
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_MISTRAL) &&
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_BEDROCK) &&
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_VERTEX) &&
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_FOUNDRY)
+  )
 }
 
 function hasNoExplicitNonOpenAIProvider(
@@ -1586,25 +1591,6 @@ function profileRouteHonorsBaseUrlBoundary(
   return true
 }
 
-export function hasCompleteAnthropicSelection(processEnv: NodeJS.ProcessEnv): boolean {
-  return (
-    Boolean(processEnv.ANTHROPIC_BASE_URL?.trim()) &&
-    Boolean(processEnv.ANTHROPIC_MODEL?.trim()) &&
-    (Boolean(processEnv.ANTHROPIC_AUTH_TOKEN?.trim()) ||
-      Boolean(processEnv.ANTHROPIC_API_KEY?.trim()))
-  )
-}
-
-// The client and metadata must yield the saved Vertex fallback to the same
-// explicit startup selections, including routes selected by dedicated env vars.
-export function canUseGeminiVertexProfile(processEnv: NodeJS.ProcessEnv): boolean {
-  return (
-    !hasCompleteAnthropicSelection(processEnv) &&
-    resolveEnvOnlyProviderRouteId(processEnv) === null &&
-    !hasConflictingProviderFlag(processEnv, 'CLAUDE_CODE_USE_GEMINI_VERTEX')
-  )
-}
-
 export function resolveActiveRouteIdFromEnv(
   processEnv: NodeJS.ProcessEnv = process.env,
   options?: {
@@ -1629,14 +1615,6 @@ export function resolveActiveRouteIdFromEnv(
   }
   if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_VERTEX)) {
     return 'vertex'
-  }
-
-  // Share the client's fallback rule, including defined-but-falsey conflicts.
-  if (
-    options?.activeProfileProvider === 'gemini-vertex' &&
-    canUseGeminiVertexProfile(processEnv)
-  ) {
-    return 'gemini-vertex'
   }
 
   // A Bearer token explicitly selects the custom Anthropic proxy contract,
@@ -1680,13 +1658,9 @@ export function resolveActiveRouteIdFromEnv(
       const route = resolveProfileRoute(options.activeProfileProvider)
       if (
         route.routeId !== 'unknown-fallback' &&
+      route.routeId !== 'gemini-vertex' &&
         route.routeId !== 'openai' &&
         route.routeId !== 'custom' &&
-        // gemini-vertex is a native (non-OpenAI-compatible) route handled only
-        // by its explicit flag or the saved-profile guard above (which already
-        // ran the conflicting-flag check). An explicit OpenAI flag is a
-        // conflict, so the saved Vertex profile must not hijack the route here.
-        route.routeId !== 'gemini-vertex' &&
         profileRouteHonorsBaseUrlBoundary(
           route.routeId,
           options.activeProfileBaseUrl ?? baseUrl,
@@ -1720,13 +1694,9 @@ export function resolveActiveRouteIdFromEnv(
     const route = resolveProfileRoute(options.activeProfileProvider)
     if (
       route.routeId !== 'unknown-fallback' &&
+      route.routeId !== 'gemini-vertex' &&
       route.routeId !== 'openai' &&
       route.routeId !== 'custom' &&
-      // gemini-vertex is routed only by its explicit flag or the saved-profile
-      // guard above (which enforces the conflicting-flag check). A defined-but-
-      // falsey provider flag is an explicit conflict, so it must not reach the
-      // saved Vertex route through this generic profile fallback.
-      route.routeId !== 'gemini-vertex' &&
       profileRouteHonorsBaseUrlBoundary(
         route.routeId,
         options.activeProfileBaseUrl,

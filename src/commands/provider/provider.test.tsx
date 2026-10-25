@@ -655,26 +655,6 @@ test('buildCurrentProviderSummary redacts poisoned model and endpoint values', (
   expect(summary.endpointLabel).toBe('sk-...678')
 })
 
-test('buildCurrentProviderSummary reports Gemini Vertex for a saved profile with no env flag', () => {
-  // Saved-profile-only routing: no CLAUDE_CODE_USE_GEMINI_VERTEX, but the active
-  // profile is gemini-vertex, so the summary must match the client's routing
-  // instead of falling through to the Anthropic branch.
-  const summary = buildCurrentProviderSummary({
-    processEnv: { GEMINI_VERTEX_PROJECT: 'my-proj' } as NodeJS.ProcessEnv,
-    persisted: {
-      profile: 'gemini-vertex',
-      env: { CLAUDE_CODE_USE_GEMINI_VERTEX: '1' },
-    } as unknown as NonNullable<
-      Parameters<typeof buildCurrentProviderSummary>[0]
-    >['persisted'],
-  })
-
-  expect(summary.providerLabel).toBe('Google Vertex AI Gemini')
-  expect(summary.endpointLabel).toBe(
-    'https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global',
-  )
-})
-
 test('buildCurrentProviderSummary labels generic local openai-compatible providers', () => {
   const summary = buildCurrentProviderSummary({
     processEnv: {
@@ -752,38 +732,6 @@ test('buildCurrentProviderSummary recognizes Gemini mode', () => {
   expect(summary.endpointLabel).toBe(
     'https://generativelanguage.googleapis.com/v1beta/openai',
   )
-})
-
-test('buildCurrentProviderSummary recognizes Gemini Vertex mode', () => {
-  const summary = buildCurrentProviderSummary({
-    processEnv: {
-      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-      GEMINI_VERTEX_MODEL: 'gemini-2.5-pro',
-      GEMINI_VERTEX_PROJECT: 'my-project',
-      GEMINI_VERTEX_LOCATION: 'europe-west4',
-    },
-    persisted: null,
-  })
-
-  expect(summary.providerLabel).toBe('Google Vertex AI Gemini')
-  expect(summary.modelLabel).toBe('gemini-2.5-pro')
-  expect(summary.endpointLabel).toBe(
-    'https://aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west4',
-  )
-})
-
-test('buildCurrentProviderSummary shows project-required Vertex endpoint when no project is set', () => {
-  const summary = buildCurrentProviderSummary({
-    processEnv: {
-      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-      GEMINI_VERTEX_MODEL: 'gemini-2.5-flash',
-    },
-    persisted: null,
-  })
-
-  expect(summary.providerLabel).toBe('Google Vertex AI Gemini')
-  expect(summary.endpointLabel).toContain('/projects/')
-  expect(summary.endpointLabel).toContain('GEMINI_VERTEX_PROJECT')
 })
 
 test('buildCurrentProviderSummary recognizes Mistral mode', () => {
@@ -866,4 +814,17 @@ test('ProviderWizard hides Codex OAuth while running in bare mode', async () => 
 
   expect(output).toContain('Set up a provider profile')
   expect(output).not.toContain('Codex OAuth')
+})
+
+test('buildCurrentProviderSummary recognizes the env-only native Vertex route', () => {
+  const summary = buildCurrentProviderSummary({
+    processEnv: {
+      CLAUDE_CODE_USE_GEMINI_VERTEX: '1', GEMINI_VERTEX_PROJECT: 'my-project',
+      GEMINI_VERTEX_LOCATION: 'europe-west4', GEMINI_VERTEX_MODEL: 'gemini-2.5-pro',
+    },
+    persisted: null,
+  })
+  expect(summary.providerLabel).toBe('Google Vertex AI Gemini')
+  expect(summary.modelLabel).toBe('gemini-2.5-pro')
+  expect(summary.endpointLabel).toBe('https://aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west4')
 })

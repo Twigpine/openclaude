@@ -623,65 +623,6 @@ test('resolveActiveRouteIdFromEnv gives gemini-vertex precedence over gemini and
   ).toBe('gemini-vertex')
 })
 
-test('resolveActiveRouteIdFromEnv resolves a saved-profile-only gemini-vertex route with no env flag', () => {
-  // Matches getAnthropicClient's saved-profile routing so /model loads the
-  // Vertex catalog for the same session.
-  expect(
-    resolveActiveRouteIdFromEnv({}, { activeProfileProvider: 'gemini-vertex' }),
-  ).toBe('gemini-vertex')
-})
-
-test('resolveActiveRouteIdFromEnv ignores a saved gemini-vertex profile when another provider flag is set', () => {
-  expect(
-    resolveActiveRouteIdFromEnv(
-      { CLAUDE_CODE_USE_GEMINI: '1' },
-      { activeProfileProvider: 'gemini-vertex' },
-    ),
-  ).toBe('gemini')
-})
-
-test.each([
-  [{ ANTHROPIC_BASE_URL: 'https://anthropic.example/api', ANTHROPIC_MODEL: 'claude-sonnet-4-6', ANTHROPIC_AUTH_TOKEN: 'token' }, 'custom-anthropic'],
-  [{ ANTHROPIC_BASE_URL: 'https://anthropic.example/api', ANTHROPIC_MODEL: 'claude-sonnet-4-6', ANTHROPIC_API_KEY: 'key' }, 'custom-anthropic'],
-  [{ NEARAI_API_KEY: 'key' }, 'nearai'],
-  [{ FIREWORKS_API_KEY: 'key' }, 'fireworks'],
-  [{ XAI_API_KEY: 'key' }, 'xai'],
-] as const)('saved Vertex metadata yields to explicit environment selection %j', (env, route) => {
-  expect(resolveActiveRouteIdFromEnv(env, { activeProfileProvider: 'gemini-vertex' })).toBe(route)
-})
-
-test('resolveActiveRouteIdFromEnv keeps a saved gemini-vertex profile over an unselected ambient OpenAI key', () => {
-  // A generic key alone does not select a route. Dedicated env-only provider
-  // selections above do, matching the startup profile gate.
-  expect(
-    resolveActiveRouteIdFromEnv(
-      { OPENAI_API_KEY: 'openai-key' },
-      { activeProfileProvider: 'gemini-vertex' },
-    ),
-  ).toBe('gemini-vertex')
-})
-
-test('resolveActiveRouteIdFromEnv yields a saved gemini-vertex profile to an explicit OpenAI flag', () => {
-  expect(
-    resolveActiveRouteIdFromEnv(
-      { CLAUDE_CODE_USE_OPENAI: '1' },
-      { activeProfileProvider: 'gemini-vertex' },
-    ),
-  ).toBe('openai')
-})
-
-test('resolveActiveRouteIdFromEnv blocks the saved gemini-vertex route on a defined-but-falsey provider flag', () => {
-  // A defined CLAUDE_CODE_USE_OPENAI (even '0') is explicit intent, matching
-  // shouldRouteToGeminiVertexFromProfile's defined-vs-undefined rule, so the
-  // saved Vertex route must not win here (client would refuse it too).
-  expect(
-    resolveActiveRouteIdFromEnv(
-      { CLAUDE_CODE_USE_OPENAI: '0' },
-      { activeProfileProvider: 'gemini-vertex' },
-    ),
-  ).toBe('anthropic')
-})
-
 test('resolveActiveRouteIdFromEnv treats Xiaomi MiMo credential-only env as Xiaomi MiMo', () => {
   expect(
     resolveActiveRouteIdFromEnv({

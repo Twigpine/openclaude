@@ -1,6 +1,8 @@
-import Anthropic, { type APIError } from '@anthropic-ai/sdk'
-import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
-import { snapshotEnv } from '../../test/envSnapshot.js'
+import { getMainLoopModelOverride, setMainLoopModelOverride } from '../../bootstrap/state.js'
+import { spyOn } from 'bun:test'
+import * as geminiAuthModule from '../../utils/geminiAuth.js'
+import Anthropic from '@anthropic-ai/sdk'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import {
   _clearRegistryForTesting,
@@ -8,7 +10,8 @@ import {
   registerGateway,
 } from '../../integrations/index.js'
 import { publicBuildVersion } from '../../utils/version.js'
-import { getMainLoopModelOverride, resetModelStringsForTestingOnly, setMainLoopModelOverride } from '../../bootstrap/state.js'
+import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import {
   buildLaunchEnv,
   buildStartupEnvFromProfile,
@@ -48,8 +51,6 @@ mock.module(
 const { getAnthropicClient } = await import(
   `./client.js?real=${Date.now()}-${Math.random()}`,
 )
-import * as providerProfilesModule from '../../utils/providerProfiles.js'
-import * as geminiAuthModule from '../../utils/geminiAuth.js'
 
 type FetchType = typeof globalThis.fetch
 
@@ -80,14 +81,12 @@ const originalEnv = {
   GEMINI_MODEL: process.env.GEMINI_MODEL,
   GEMINI_BASE_URL: process.env.GEMINI_BASE_URL,
   GEMINI_AUTH_MODE: process.env.GEMINI_AUTH_MODE,
-  GEMINI_VERTEX_AUTH_MODE: process.env.GEMINI_VERTEX_AUTH_MODE,
   GEMINI_VERTEX_PROJECT: process.env.GEMINI_VERTEX_PROJECT,
   GEMINI_VERTEX_LOCATION: process.env.GEMINI_VERTEX_LOCATION,
   GEMINI_VERTEX_MODEL: process.env.GEMINI_VERTEX_MODEL,
   GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
-  GCLOUD_PROJECT: process.env.GCLOUD_PROJECT,
-  GOOGLE_PROJECT_ID: process.env.GOOGLE_PROJECT_ID,
   GEMINI_ACCESS_TOKEN: process.env.GEMINI_ACCESS_TOKEN,
+  GEMINI_VERTEX_AUTH_MODE: process.env.GEMINI_VERTEX_AUTH_MODE,
   GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
   GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
@@ -165,7 +164,6 @@ function clearEnvForMiniMaxOnlyTest(): void {
   delete process.env.GEMINI_MODEL
   delete process.env.GEMINI_BASE_URL
   delete process.env.GEMINI_AUTH_MODE
-  delete process.env.GEMINI_VERTEX_AUTH_MODE
   delete process.env.GOOGLE_API_KEY
   delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_BASE_URL
@@ -221,9 +219,8 @@ beforeEach(async () => {
   delete process.env.GEMINI_VERTEX_LOCATION
   delete process.env.GEMINI_VERTEX_MODEL
   delete process.env.GOOGLE_CLOUD_PROJECT
-  delete process.env.GCLOUD_PROJECT
-  delete process.env.GOOGLE_PROJECT_ID
   delete process.env.GEMINI_ACCESS_TOKEN
+  delete process.env.GEMINI_VERTEX_AUTH_MODE
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS
   delete process.env.GOOGLE_API_KEY
   delete process.env.OPENAI_API_KEY
@@ -290,14 +287,12 @@ afterEach(() => {
     restoreEnv('GEMINI_MODEL', originalEnv.GEMINI_MODEL)
     restoreEnv('GEMINI_BASE_URL', originalEnv.GEMINI_BASE_URL)
     restoreEnv('GEMINI_AUTH_MODE', originalEnv.GEMINI_AUTH_MODE)
-    restoreEnv('GEMINI_VERTEX_AUTH_MODE', originalEnv.GEMINI_VERTEX_AUTH_MODE)
     restoreEnv('GEMINI_VERTEX_PROJECT', originalEnv.GEMINI_VERTEX_PROJECT)
     restoreEnv('GEMINI_VERTEX_LOCATION', originalEnv.GEMINI_VERTEX_LOCATION)
     restoreEnv('GEMINI_VERTEX_MODEL', originalEnv.GEMINI_VERTEX_MODEL)
     restoreEnv('GOOGLE_CLOUD_PROJECT', originalEnv.GOOGLE_CLOUD_PROJECT)
-    restoreEnv('GCLOUD_PROJECT', originalEnv.GCLOUD_PROJECT)
-    restoreEnv('GOOGLE_PROJECT_ID', originalEnv.GOOGLE_PROJECT_ID)
     restoreEnv('GEMINI_ACCESS_TOKEN', originalEnv.GEMINI_ACCESS_TOKEN)
+    restoreEnv('GEMINI_VERTEX_AUTH_MODE', originalEnv.GEMINI_VERTEX_AUTH_MODE)
     restoreEnv('GOOGLE_APPLICATION_CREDENTIALS', originalEnv.GOOGLE_APPLICATION_CREDENTIALS)
     restoreEnv('GOOGLE_API_KEY', originalEnv.GOOGLE_API_KEY)
     restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
@@ -790,388 +785,6 @@ test('routes Gemini Vertex provider requests through the native client', async (
   })
 })
 
-test.each(['us-central1', 'vertex-access-token'])('rejects a global-only Vertex model at %s without exposing credentials', async location => {
-  delete process.env.CLAUDE_CODE_USE_OPENAI
-  delete process.env.CLAUDE_CODE_USE_GEMINI
-  delete process.env.CLAUDE_CODE_USE_VERTEX
-  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
-  process.env.GEMINI_VERTEX_LOCATION = location
-  // gemini-3.5-flash is served only from the global endpoint, so a regional
-  // location must fail fast instead of building an unusable regional URL.
-  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
-  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
-
-  await expect(
-    getAnthropicClient({ maxRetries: 0, model: 'gemini-3.5-flash' }),
-  ).rejects.toThrow(`GEMINI_VERTEX_LOCATION=global (currently "${location === 'us-central1' ? location : 'ver...ken'}")`)
-})
-
-test('allows a global-only Vertex model on the global endpoint', async () => {
-  let capturedUrl: string | undefined
-
-  delete process.env.CLAUDE_CODE_USE_OPENAI
-  delete process.env.CLAUDE_CODE_USE_GEMINI
-  delete process.env.CLAUDE_CODE_USE_VERTEX
-  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
-  process.env.GEMINI_VERTEX_LOCATION = 'global'
-  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
-  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
-
-  globalThis.fetch = (async (input, init) => {
-    capturedUrl =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url
-    return new Response(
-      JSON.stringify({
-        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
-      }),
-      { headers: { 'Content-Type': 'application/json' } },
-    )
-  }) as FetchType
-
-  const client = (await getAnthropicClient({
-    maxRetries: 0,
-    model: 'gemini-3.5-flash',
-  })) as unknown as ShimClient
-
-  await client.beta.messages.create({
-    model: 'gemini-3.5-flash',
-    messages: [{ role: 'user', content: 'hello' }],
-    max_tokens: 64,
-    stream: false,
-  })
-
-  expect(capturedUrl).toBe(
-    'https://aiplatform.googleapis.com/v1/projects/project-test-1234/locations/global/publishers/google/models/gemini-3.5-flash:generateContent',
-  )
-})
-
-test('saved-profile-only Vertex prefers the profile over ambient env and an unselected OpenAI key', async () => {
-  let capturedUrl: string | undefined
-
-  delete process.env.CLAUDE_CODE_USE_OPENAI
-  delete process.env.CLAUDE_CODE_USE_GEMINI
-  delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-  // Ambient env that must NOT win over the selected profile in profile-only mode.
-  const restoreAmbientKey = snapshotEnv(['OPENAI_API_KEY'])
-  process.env.OPENAI_API_KEY = 'ambient-openai-key'
-  process.env.GOOGLE_CLOUD_PROJECT = 'ambient-project'
-  process.env.GEMINI_VERTEX_MODEL = 'ambient-model'
-  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
-  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
-
-  const spy = spyOn(
-    providerProfilesModule,
-    'getActiveProviderProfile',
-  ).mockReturnValue({
-    id: 'vertex_prof',
-    provider: 'gemini-vertex',
-    name: 'Vertex',
-    baseUrl: 'profile-project',
-    model: 'profile-model',
-  } as ReturnType<typeof providerProfilesModule.getActiveProviderProfile>)
-
-  globalThis.fetch = (async (input, _init) => {
-    capturedUrl =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url
-    return new Response(
-      JSON.stringify({
-        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
-      }),
-      { headers: { 'Content-Type': 'application/json' } },
-    )
-  }) as FetchType
-
-  try {
-    const client = (await getAnthropicClient({
-      maxRetries: 0,
-    })) as unknown as ShimClient
-
-    await client.beta.messages.create({
-      model: 'profile-model',
-      messages: [{ role: 'user', content: 'hello' }],
-      max_tokens: 64,
-      stream: false,
-    })
-
-    // Profile project + model win; the ambient GOOGLE_CLOUD_PROJECT / stale
-    // GEMINI_VERTEX_MODEL must not leak into the request.
-    expect(capturedUrl).toContain('/projects/profile-project/')
-    expect(capturedUrl).toContain('/models/profile-model:generateContent')
-    expect(capturedUrl).not.toContain('ambient-project')
-    expect(capturedUrl).not.toContain('ambient-model')
-  } finally {
-    spy.mockRestore()
-    restoreAmbientKey()
-  }
-})
-
-test('saved-profile-only Vertex lets an explicit model override the profile model', async () => {
-  let capturedUrl: string | undefined
-
-  delete process.env.CLAUDE_CODE_USE_OPENAI
-  delete process.env.CLAUDE_CODE_USE_GEMINI
-  delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-  // Ambient env that must NOT win over the explicit override in profile-only mode.
-  process.env.GEMINI_VERTEX_MODEL = 'ambient-model'
-  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
-  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
-
-  const spy = spyOn(
-    providerProfilesModule,
-    'getActiveProviderProfile',
-  ).mockReturnValue({
-    id: 'vertex_prof',
-    provider: 'gemini-vertex',
-    name: 'Vertex',
-    baseUrl: 'profile-project',
-    model: 'profile-model',
-  } as ReturnType<typeof providerProfilesModule.getActiveProviderProfile>)
-
-  globalThis.fetch = (async (input, _init) => {
-    capturedUrl =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url
-    return new Response(
-      JSON.stringify({
-        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
-      }),
-      { headers: { 'Content-Type': 'application/json' } },
-    )
-  }) as FetchType
-
-  try {
-    // Explicit model override (e.g. --model / runtime override) routed through
-    // the saved profile must win over the profile's saved model.
-    const client = (await getAnthropicClient({
-      maxRetries: 0,
-      model: 'explicit-override-model',
-    })) as unknown as ShimClient
-
-    await client.beta.messages.create({
-      model: 'explicit-override-model',
-      messages: [{ role: 'user', content: 'hello' }],
-      max_tokens: 64,
-      stream: false,
-    })
-
-    // The explicit override wins; neither the profile model nor the stale
-    // ambient GEMINI_VERTEX_MODEL may leak into the request. The profile
-    // project still wins since no explicit project override was provided.
-    expect(capturedUrl).toContain('/projects/profile-project/')
-    expect(capturedUrl).toContain(
-      '/models/explicit-override-model:generateContent',
-    )
-    expect(capturedUrl).not.toContain('profile-model')
-    expect(capturedUrl).not.toContain('ambient-model')
-  } finally {
-    spy.mockRestore()
-  }
-})
-
-test.each([undefined, '1'])('native Vertex selects a Gemini default through the client with Foundry=%s', async foundry => {
-  delete process.env.CLAUDE_CODE_USE_OPENAI
-  if (foundry) process.env.CLAUDE_CODE_USE_FOUNDRY = foundry
-  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-  process.env.GEMINI_VERTEX_PROJECT = 'project-test'
-  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
-  const { getDefaultMainLoopModelSetting } = await import('../../utils/model/model.js')
-  const model = getDefaultMainLoopModelSetting()
-  let url = ''
-  const client = await getAnthropicClient({
-    maxRetries: 0, model,
-    fetchOverride: async input => {
-      url = String(input)
-      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }))
-    },
-  })
-  await client.beta.messages.create({ model, messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
-  expect(realProviders.getAPIProvider()).toBe('gemini-vertex')
-  expect(url).toContain('/publishers/google/models/gemini-2.5-flash:generateContent')
-})
-
-test.each(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const)(
-  'complete custom Anthropic selection with %s survives saved Vertex routing',
-  async credentialKey => {
-    delete process.env.CLAUDE_CODE_USE_OPENAI
-    delete process.env.CLAUDE_CODE_USE_GEMINI
-    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-    process.env.ANTHROPIC_BASE_URL = 'https://anthropic.example/api'
-    process.env.ANTHROPIC_MODEL = 'claude-sonnet-4-6'
-    delete process.env.ANTHROPIC_API_KEY
-    delete process.env.ANTHROPIC_AUTH_TOKEN
-    process.env[credentialKey] = 'custom-credential'
-    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
-    const saved = { id: 'saved-vertex', provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'saved-project', model: 'gemini-2.5-flash' }
-    const spy = spyOn(providerProfilesModule, 'getActiveProviderProfile').mockReturnValue(saved)
-    try {
-      expect(providerProfilesModule.applyActiveProviderProfileFromConfig({
-        ...(await import('../../utils/config.js')).getGlobalConfig(),
-        providerProfiles: [saved], activeProviderProfileId: saved.id,
-      })).toBeUndefined()
-      let url = ''
-      const client = await getAnthropicClient({
-        maxRetries: 0, model: process.env.ANTHROPIC_MODEL,
-        fetchOverride: async input => {
-          url = String(input)
-          return new Response(JSON.stringify({ id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }), { headers: { 'Content-Type': 'application/json' } })
-        },
-      })
-      await client.beta.messages.create({ model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
-      expect(url).toStartWith('https://anthropic.example/api/')
-      expect(realProviders.getAPIProvider()).toBe('firstParty')
-    } finally {
-      spy.mockRestore()
-    }
-  },
-)
-
-test.each([
-  ['NEARAI_API_KEY', 'https://cloud-api.near.ai/', 'nearai'],
-  ['XAI_API_KEY', 'https://api.x.ai/', 'xai'],
-] as const)('env-only %s survives saved Vertex startup, classification and request routing', async (key, origin, route) => {
-  const restore = snapshotEnv([key, 'CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GEMINI_VERTEX', 'OPENAI_API_KEY'], { clear: true })
-  process.env[key] = 'selected-key'
-  const saved = { id: 'saved-vertex', provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'saved-project', model: 'gemini-2.5-flash' }
-  const spy = spyOn(providerProfilesModule, 'getActiveProviderProfile').mockReturnValue(saved)
-  try {
-    expect(providerProfilesModule.applyActiveProviderProfileFromConfig({
-      ...(await import('../../utils/config.js')).getGlobalConfig(),
-      providerProfiles: [saved], activeProviderProfileId: saved.id,
-    })).toBeUndefined()
-    const { resolveActiveRouteIdFromEnv } = await import('../../integrations/routeMetadata.js')
-    expect(resolveActiveRouteIdFromEnv(process.env, { activeProfileProvider: saved.provider })).toBe(route)
-    expect(realProviders.getAPIProvider()).not.toBe('gemini-vertex')
-    let url = ''
-    globalThis.fetch = (async input => {
-      url = String(input)
-      return new Response(JSON.stringify({
-        id: 'chat_test', object: 'chat.completion', model: 'selected-model',
-        choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-      }), { headers: { 'Content-Type': 'application/json' } })
-    }) as FetchType
-    const client = await getAnthropicClient({ maxRetries: 0, model: 'selected-model' })
-    await client.beta.messages.create({ model: 'selected-model', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
-    expect(url).toStartWith(origin)
-  } finally {
-    spy.mockRestore()
-    restore()
-  }
-})
-
-test('native Vertex discovers fileless ADC through client refresh and validation', async () => {
-  const fs = await import('node:fs')
-  const files = spyOn(fs, 'existsSync').mockReturnValue(false)
-  const resolveCredential = geminiAuthModule.resolveGeminiCredential
-  let discoveries = 0
-  const createGoogleAuth = async () => ({
-    getClient: async () => ({ getAccessToken: async () => ({ token: `metadata-token-${++discoveries}` }) }),
-    getProjectId: async () => 'metadata-project',
-  })
-  const resolver = spyOn(geminiAuthModule, 'resolveGeminiCredential').mockImplementation(
-    (env, options) => resolveCredential(env, { ...options, createGoogleAuth }),
-  )
-  const restore = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE'], { clear: true })
-  try {
-    // Direct Gemini retains its prior policy; native callers opt into discovery.
-    expect(await resolveCredential({ GEMINI_AUTH_MODE: 'adc' }, { createGoogleAuth })).toEqual({ kind: 'none' })
-    expect(discoveries).toBe(0)
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
-    let authorization: string | null = null
-    let url = ''
-    const client = await getAnthropicClient({
-      maxRetries: 0, model: 'gemini-2.5-flash',
-      fetchOverride: async (input, init) => {
-        url = String(input)
-        authorization = new Headers(init?.headers).get('authorization')
-        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }))
-      },
-    })
-    await client.beta.messages.create({ model: 'gemini-2.5-flash', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
-    expect(url).toContain('/projects/metadata-project/')
-    expect(authorization as string | null).toBe('Bearer metadata-token-2')
-    const { getProviderValidationError } = await import('../../utils/providerValidation.js')
-    expect(await getProviderValidationError()).toBeNull()
-    expect(discoveries).toBe(3)
-  } finally {
-    resolver.mockRestore()
-    files.mockRestore()
-    restore()
-  }
-})
-
-test('ADC-only Vertex routing uses the credential-discovered project', async () => {
-  let capturedUrl: string | undefined
-
-  delete process.env.CLAUDE_CODE_USE_OPENAI
-  delete process.env.CLAUDE_CODE_USE_GEMINI
-  delete process.env.CLAUDE_CODE_USE_VERTEX
-  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-  process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
-  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
-  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
-  // No GEMINI_VERTEX_PROJECT / alias and no token: the project must come from
-  // the ADC credential (getAnthropicClient falls back to credential.projectId).
-
-  const spy = spyOn(
-    geminiAuthModule,
-    'resolveGeminiCredential',
-  ).mockResolvedValue({
-    kind: 'adc',
-    credential: 'adc-access-token',
-    projectId: 'adc-discovered-project',
-  } as Awaited<ReturnType<typeof geminiAuthModule.resolveGeminiCredential>>)
-
-  globalThis.fetch = (async (input, _init) => {
-    capturedUrl =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url
-    return new Response(
-      JSON.stringify({
-        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
-      }),
-      { headers: { 'Content-Type': 'application/json' } },
-    )
-  }) as FetchType
-
-  try {
-    const client = (await getAnthropicClient({
-      maxRetries: 0,
-      model: 'gemini-2.5-flash',
-    })) as unknown as ShimClient
-
-    await client.beta.messages.create({
-      model: 'gemini-2.5-flash',
-      messages: [{ role: 'user', content: 'hello' }],
-      max_tokens: 64,
-      stream: false,
-    })
-
-    expect(capturedUrl).toBe(
-      'https://us-central1-aiplatform.googleapis.com/v1/projects/adc-discovered-project/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
-    )
-  } finally {
-    spy.mockRestore()
-  }
-})
-
 test('Gemini Vertex provider uses GEMINI_VERTEX_MODEL instead of generic OPENAI_MODEL', async () => {
   let capturedUrl: string | undefined
 
@@ -1218,102 +831,6 @@ test('Gemini Vertex provider uses GEMINI_VERTEX_MODEL instead of generic OPENAI_
     setMainLoopModelOverride(previousModel)
   }
 })
-
-test.each([
-  [undefined, 'gemini-2.5-pro'],
-  ['gemini-2.5-pro', 'gemini-2.5-pro'],
-  ['gemini-2.5-pro', 'gemini-2.5-flash'],
-] as const)(
-  'applied Vertex honors request model with OPENAI_MODEL=%s and session model=%s', async (ambientModel, sessionModel) => {
-    process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
-    providerProfilesModule.applyProviderProfileToProcessEnv({
-      id: 'vertex-runtime-model', name: 'Vertex', provider: 'gemini-vertex',
-      baseUrl: 'project-test', model: 'gemini-2.5-flash,gemini-2.5-pro',
-    })
-    if (ambientModel) process.env.OPENAI_MODEL = ambientModel
-    const previousModel = getMainLoopModelOverride()
-    try {
-      setMainLoopModelOverride(sessionModel)
-      const { getUserSpecifiedModelSetting } = await import('../../utils/model/model.js')
-      expect(getUserSpecifiedModelSetting()).toBe(sessionModel)
-      // /model validates the requested model before installing the override;
-      // agent and fallback requests may also differ from the session model.
-      const model = 'gemini-2.5-pro'
-      let url = ''
-      const client = await getAnthropicClient({
-        maxRetries: 0, model: model ?? undefined,
-        fetchOverride: async input => {
-          url = String(input)
-          return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }), {
-            headers: { 'content-type': 'application/json' },
-          })
-        },
-      })
-      await client.beta.messages.create({ model: model!, max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] })
-      expect(url).toContain('/models/gemini-2.5-pro:generateContent')
-      expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
-    } finally {
-      setMainLoopModelOverride(previousModel)
-    }
-  },
-)
-
-test.each([503, 429, 400, 'network', 'body', 'invalid-json'] as const)(
-  'native Vertex preserves %s failure identity through the production retry loop', async failure => {
-    const { withRetry } = await import(`./withRetry.js?vertex=${Date.now()}-${Math.random()}`)
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_PROJECT = 'project-test'
-    process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
-    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
-    const restoreEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS'])
-    process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
-    let requests = 0
-    let nativeError: unknown
-    try {
-      const client = await getAnthropicClient({
-        maxRetries: 0, model: 'gemini-2.5-flash',
-        fetchOverride: async () => {
-          requests++
-          if (failure === 'network') throw new TypeError('fetch failed')
-          if (failure === 'body') return new Response(new ReadableStream({
-            start(controller) { controller.error(new TypeError('connection reset while reading body')) },
-          }))
-          if (failure === 'invalid-json') return new Response('{invalid json')
-          return new Response('{"error":{"message":"unavailable"}}', {
-            status: failure, headers: { 'retry-after': '0' },
-          })
-        },
-      })
-      try {
-        for await (const _ of withRetry(async () => client, async current => {
-          try {
-            return await current.beta.messages.create({
-              model: 'gemini-2.5-flash', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }],
-            })
-          } catch (error) {
-            nativeError = error
-            throw error
-          }
-        }, { model: 'gemini-2.5-flash', maxRetries: 1, thinkingConfig: { type: 'disabled' } })) {}
-      } catch {
-        // Exhausted/fatal failures are expected; assert the actual transport and retry boundary below.
-      }
-      expect(requests).toBe(failure === 400 || failure === 'invalid-json' ? 1 : 2)
-      if (failure === 'invalid-json') {
-        expect(nativeError).toBeInstanceOf(SyntaxError)
-        return
-      }
-      expect(nativeError).toBeInstanceOf(Anthropic.APIError)
-      if (failure === 'network' || failure === 'body') expect(nativeError).toBeInstanceOf(Anthropic.APIConnectionError)
-      else {
-        expect((nativeError as APIError).status).toBe(failure)
-        expect((nativeError as APIError).headers?.get('retry-after')).toBe('0')
-      }
-    } finally {
-      restoreEnv()
-    }
-  },
-)
 
 test('routes env-only MiniMax requests through the Anthropic-compatible API', async () => {
   let capturedUrl: string | undefined
@@ -4315,52 +3832,85 @@ test('rejects CRLF-injected custom headers before sending OpenAI-compatible shim
   expect(capturedHeaders?.get('authorization')).toBe('Bearer openai-test-key')
 })
 
-test.each([
-  ['GEMINI_VERTEX_LOCATION', 'evil.example/x#'],
-  ['GEMINI_VERTEX_LOCATION', 'user@evil.example/'],
-  ['GEMINI_VERTEX_PROJECT', 'project/../../other'],
-  ['GEMINI_VERTEX_PROJECT', 'project?redirect=x'],
-  ['GEMINI_VERTEX_PROJECT', 'project%2Fother'],
-  ['GEMINI_VERTEX_MODEL', '../../../../../../../projects/other-project/locations/global/publishers/google/models/gemini-2.5-flash'],
-] as const)('native request rejects unsafe %s before sending', async (key, value) => {
-  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
-  process.env.GEMINI_VERTEX_PROJECT = 'sk-openclaude'
-  process.env.GEMINI_VERTEX_LOCATION = 'global'
-  process.env[key] = value
-  const model = key === 'GEMINI_VERTEX_MODEL' ? value : 'gemini-2.5-flash'
-  let requests = 0
-  const request = async () => {
-    const client = await getAnthropicClient({ maxRetries: 0, model,
-      fetchOverride: async () => {
-        requests++
-        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'unexpected' }] } }] }))
-      },
-    })
-    return client.beta.messages.create({ model, max_tokens: 8,
-      messages: [{ role: 'user', content: 'hello' }] })
-  }
-  await expect(request()).rejects.toThrow(key)
-  expect(requests).toBe(0)
-})
-
-test.each(['sk-openclaude', '123456789012', 'example.com:my-project'])(
-  'native request preserves the project path for %s', async project => {
+test('native Vertex discovers fileless ADC through client refresh and validation', async () => {
+  const fs = await import('node:fs')
+  const files = spyOn(fs, 'existsSync').mockReturnValue(false)
+  const resolveCredential = geminiAuthModule.resolveGeminiCredential
+  let discoveries = 0
+  const createGoogleAuth = async () => ({
+    getClient: async () => ({ getAccessToken: async () => ({ token: `metadata-token-${++discoveries}` }) }),
+    getProjectId: async () => 'metadata-project',
+  })
+  const resolver = spyOn(geminiAuthModule, 'resolveGeminiCredential').mockImplementation(
+    (env, options) => resolveCredential(env, { ...options, createGoogleAuth }),
+  )
+  const restore = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE'], { clear: true })
+  try {
+    // Direct Gemini retains its prior policy; native callers opt into discovery.
+    expect(await resolveCredential({ GEMINI_AUTH_MODE: 'adc' }, { createGoogleAuth })).toEqual({ kind: 'none' })
+    expect(discoveries).toBe(0)
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
-    process.env.GEMINI_VERTEX_PROJECT = project
-    process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
-    let sent = ''
-    const client = await getAnthropicClient({ maxRetries: 0, model: 'gemini-2.5-flash',
-      fetchOverride: async input => {
-        sent = String(input)
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+    let authorization: string | null = null
+    let url = ''
+    const client = await getAnthropicClient({
+      maxRetries: 0, model: 'gemini-2.5-flash',
+      fetchOverride: async (input, init) => {
+        url = String(input)
+        authorization = new Headers(init?.headers).get('authorization')
         return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }))
       },
     })
-    await client.beta.messages.create({ model: 'gemini-2.5-flash', max_tokens: 8,
-      messages: [{ role: 'user', content: 'hello' }] })
-    expect(sent).toBe(`https://us-central1-aiplatform.googleapis.com/v1/projects/${project}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent`)
-  },
-)
+    await client.beta.messages.create({ model: 'gemini-2.5-flash', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
+    expect(url).toContain('/projects/metadata-project/')
+    expect(authorization as string | null).toBe('Bearer metadata-token-2')
+    const { getProviderValidationError } = await import('../../utils/providerValidation.js')
+    expect(await getProviderValidationError()).toBeNull()
+    expect(discoveries).toBe(3)
+  } finally {
+    resolver.mockRestore()
+    files.mockRestore()
+    restore()
+  }
+})
+
+
+test.each([false, true])('native factory preserves requested model, refreshed bearer and response metadata (stream=%s)', async stream => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'test-project'
+  process.env.GEMINI_VERTEX_LOCATION = 'global'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+  process.env.GEMINI_ACCESS_TOKEN = 'initial-token'
+  let url = ''
+  let authorization: string | null = null
+  const client = await getAnthropicClient({
+    maxRetries: 0, model: 'gemini-2.5-pro',
+    fetchOverride: async (input, init) => {
+      url = String(input)
+      authorization = new Headers(init?.headers).get('authorization')
+      return Response.json({
+        candidates: [{ content: { parts: [{ text: 'partial answer' }] }, finishReason: 'MAX_TOKENS' }],
+        usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 2, thoughtsTokenCount: 31 },
+      })
+    },
+  })
+  process.env.GEMINI_ACCESS_TOKEN = 'refreshed-token'
+  const params = { model: 'gemini-2.5-pro', max_tokens: 32, messages: [{ role: 'user' as const, content: 'hello' }] }
+  if (stream) {
+    const { data: response } = await client.beta.messages.create({ ...params, stream: true }).withResponse()
+    let observed = false
+    for await (const event of response) {
+      if (event.type !== 'message_delta') continue
+      observed = true
+      expect(event.delta.stop_reason).toBe('max_tokens')
+      expect(event.usage.output_tokens).toBe(33)
+    }
+    expect(observed).toBe(true)
+  } else {
+    const response = await client.beta.messages.create({ ...params, stream: false })
+    expect(response.stop_reason).toBe('max_tokens')
+    expect(response.usage).toMatchObject({ input_tokens: 7, output_tokens: 33 })
+  }
+  expect(url).toContain('/models/gemini-2.5-pro:generateContent')
+  expect(authorization as string | null).toBe('Bearer refreshed-token')
+})

@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import {
   PROVIDER_SELECTION_FLAGS,
   hasAnyTruthyProviderSelectionFlag,
-  hasConflictingProviderFlag,
 } from './providerSelectionFlags.js'
 
 /**
@@ -92,36 +91,5 @@ describe('hasAnyTruthyProviderSelectionFlag', () => {
     expect(
       hasAnyTruthyProviderSelectionFlag({ CLAUDE_CODE_USE_OPENAI: '0' }),
     ).toBe(false)
-  })
-})
-
-describe('hasConflictingProviderFlag', () => {
-  test('returns false for an empty env', () => {
-    expect(hasConflictingProviderFlag({})).toBe(false)
-  })
-
-  test('treats any present flag (even bare) as a conflict', () => {
-    expect(hasConflictingProviderFlag({ CLAUDE_CODE_USE_GEMINI: '' })).toBe(true)
-  })
-
-  test('does not flag the excepted active flag', () => {
-    expect(
-      hasConflictingProviderFlag(
-        { CLAUDE_CODE_USE_GEMINI_VERTEX: '1' },
-        'CLAUDE_CODE_USE_GEMINI_VERTEX',
-      ),
-    ).toBe(false)
-  })
-
-  test('flags a different provider even when the active flag is set', () => {
-    expect(
-      hasConflictingProviderFlag(
-        {
-          CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-          CLAUDE_CODE_USE_OPENAI: '1',
-        },
-        'CLAUDE_CODE_USE_GEMINI_VERTEX',
-      ),
-    ).toBe(true)
   })
 })

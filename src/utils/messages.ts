@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import { isGeminiVertexEffectiveProvider } from './providerProfiles.js'
+import { getAPIProvider } from './model/providers.js'
 import { sanitizeToolUseIdForWire } from './toolUseIds.js'
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type {
@@ -337,35 +337,12 @@ export {
 } from './messages/content.js'
 
 export function isNotEmptyMessage(message: Message): boolean {
-  // Defensive guard: any earlier normalization step that produces a falsy
-  // slot (a missing entry from a sparse array, an unrecognised type that
-  // skipped its switch case, or a streaming bookkeeping bug) would crash
-  // here when we read message.type. Treat such slots as empty so render
-  // pipelines stay alive instead of taking the UI down.
-  if (!message || typeof message !== 'object') {
-    return false
-  }
-
   if (
     message.type === 'progress' ||
     message.type === 'attachment' ||
     message.type === 'system'
   ) {
     return true
-  }
-
-  // Defensive: user/assistant slots can be malformed (e.g. `{ type: 'user' }`,
-  // `{ message: {} }`, or a non-string/non-array `content`) after an error
-  // path; the string/array reads below would then crash. Narrow content to the
-  // only two shapes the rest of this function handles and treat the rest as
-  // empty.
-  const inner = (message as { message?: { content?: unknown } }).message
-  if (!inner || typeof inner !== 'object') {
-    return false
-  }
-  const content = inner.content
-  if (typeof content !== 'string' && !Array.isArray(content)) {
-    return false
   }
 
   if (typeof message.message.content === 'string') {
@@ -381,27 +358,14 @@ export function isNotEmptyMessage(message: Message): boolean {
     return true
   }
 
-  const firstBlock = message.message.content[0]
-  if (!firstBlock || typeof firstBlock !== 'object') {
-    return false
-  }
-  // Reject typeless blocks (e.g. `{ foo: 'bar' }`) before the non-text branch:
-  // without a string `type` we can't prove it's a real content block, so it
-  // must not count as non-empty.
-  if (typeof firstBlock.type !== 'string') {
-    return false
-  }
-  if (firstBlock.type !== 'text') {
+  if (message.message.content[0]!.type !== 'text') {
     return true
-  }
-  if (typeof firstBlock.text !== 'string') {
-    return false
   }
 
   return (
-    firstBlock.text.trim().length > 0 &&
-    firstBlock.text !== NO_CONTENT_MESSAGE &&
-    firstBlock.text !== INTERRUPT_MESSAGE_FOR_TOOL_USE
+    message.message.content[0]!.text.trim().length > 0 &&
+    message.message.content[0]!.text !== NO_CONTENT_MESSAGE &&
+    message.message.content[0]!.text !== INTERRUPT_MESSAGE_FOR_TOOL_USE
   )
 }
 
@@ -1427,11 +1391,10 @@ function sanitizeUserMessageToolUseIds(message: UserMessage): UserMessage {
   if (!Array.isArray(content)) return message
   let changed = false
   const next = content.map(block => {
-    // Mirror the assistant tool_use.id path (which sanitizes any present id via
-    // the unknown-safe helper): a non-string persisted tool_use_id would
-    // otherwise stay un-sanitized while its matching tool_use.id is rewritten,
-    // breaking call/result pairing on the wire.
-    if (block.type === 'tool_result' && block.tool_use_id != null) {
+    if (
+      block.type === 'tool_result' &&
+      typeof block.tool_use_id === 'string'
+    ) {
       const sanitized = sanitizeToolUseIdForWire(block.tool_use_id)
       if (sanitized !== block.tool_use_id) {
         changed = true
@@ -1521,12 +1484,7 @@ export function normalizeMessagesForAPI(
   // client decodes them on its own wire. Every OTHER wire rejects those ids
   // (length/charset), so strip them here when the session history is sent to
   // a different provider — e.g. after a /provider switch or --resume.
-  //
-  // Use the same effective-provider decision as the client (env flag OR saved
-  // active profile): getAPIProvider() only sees env route state, so on the
-  // saved-profile-only Vertex route it would wrongly strip the signatures
-  // before geminiVertexClient can decode and replay thoughtSignature.
-  const sanitizeVertexToolUseIds = !isGeminiVertexEffectiveProvider()
+  const sanitizeVertexToolUseIds = getAPIProvider() !== 'gemini-vertex'
 
   // Whether to inject internal snip ids this pass. Gate must match
   // SnipTool.isEnabled() and skip test mode — markers change message content

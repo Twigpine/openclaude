@@ -1,3 +1,5 @@
+import { isEnvTruthy } from '../utils/envUtils.js'
+import { getGeminiVertexModel, getGeminiVertexLocation, getGeminiVertexProjectId, geminiVertexAdcWillResolveProject } from '../utils/geminiAuth.js'
 /**
  * OpenClaude startup screen — filled-block text logo with sunset gradient.
  * Called once at CLI startup before the Ink UI renders.
@@ -15,22 +17,8 @@ import { getLocalOpenAICompatibleProviderLabel } from '../utils/providerDiscover
 import { getSettings_DEPRECATED } from '../utils/settings/settings.js'
 import { parseUserSpecifiedModel } from '../utils/model/model.js'
 import { DEFAULT_GEMINI_MODEL } from '../utils/providerProfile.js'
-import {
-  DEFAULT_GEMINI_VERTEX_MODEL,
-  geminiVertexAdcWillResolveProject,
-  getGeminiVertexLocation,
-  getGeminiVertexModel,
-  getGeminiVertexProjectId,
-} from '../utils/geminiAuth.js'
 import { BRAND_TAGLINE } from '../constants/brand.js'
 import { getGlobalConfig } from '../utils/config.js'
-import { isEnvTruthy } from '../utils/envUtils.js'
-import { getPrimaryModel } from '../utils/providerModels.js'
-import {
-  geminiVertexProjectFromProfile,
-  getActiveProviderProfile,
-  isGeminiVertexEffectiveProvider,
-} from '../utils/providerProfiles.js'
 import { ANSI_DIM, ANSI_RESET, ansiRgb } from '../utils/terminalAnsi.js'
 import {
   resolveLogoPalette,
@@ -92,55 +80,18 @@ const LOGO_CLAUDE = [
 // ─── Provider detection ───────────────────────────────────────────────────────
 
 export function detectProvider(modelOverride?: string): { name: string; model: string; baseUrl: string; isLocal: boolean } {
-  // Mirror getAnthropicClient: a saved active gemini-vertex profile routes the
-  // session to Vertex even with no CLAUDE_CODE_USE_GEMINI_VERTEX env flag, so
-  // the startup display must reuse the effective-provider check (env flag OR
-  // saved profile) instead of looking at the raw env flag alone.
-  const activeProfile = getActiveProviderProfile()
-  const useGeminiVertex = isGeminiVertexEffectiveProvider(
-    process.env,
-    activeProfile,
-  )
-  const useGemini = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
-  const useGithub = isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
-  const useOpenAI = isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
-  const useMistral = isEnvTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
+  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
+  const useGemini = process.env.CLAUDE_CODE_USE_GEMINI === '1' || process.env.CLAUDE_CODE_USE_GEMINI === 'true'
+  const useGithub = process.env.CLAUDE_CODE_USE_GITHUB === '1' || process.env.CLAUDE_CODE_USE_GITHUB === 'true'
+  const useOpenAI = process.env.CLAUDE_CODE_USE_OPENAI === '1' || process.env.CLAUDE_CODE_USE_OPENAI === 'true'
+  const useMistral = process.env.CLAUDE_CODE_USE_MISTRAL === '1' || process.env.CLAUDE_CODE_USE_MISTRAL === 'true'
 
   if (useGeminiVertex) {
-    // When routing purely from the saved profile (no env flag), the profile's
-    // own project (stored in baseUrl) and model win over ambient/default env —
-    // exactly as getAnthropicClient resolves them. Env still wins when the flag
-    // is explicitly set. Use the shared resolvers so this display matches the
-    // runtime/provider contract (default model, location and project-alias
-    // chain, with sanitization) instead of drifting via manual env reads.
-    const routedFromProfileOnly =
-      !isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
-    const profileProject = routedFromProfileOnly
-      ? geminiVertexProjectFromProfile(activeProfile?.baseUrl)
-      : undefined
-    const profileModel =
-      routedFromProfileOnly && activeProfile?.model
-        ? getPrimaryModel(activeProfile.model)
-        : undefined
-    const model =
-      modelOverride?.trim() ||
-      profileModel ||
-      getGeminiVertexModel(process.env) ||
-      DEFAULT_GEMINI_VERTEX_MODEL
+    const model = modelOverride?.trim() || getGeminiVertexModel(process.env) || 'gemini-2.5-flash'
     const location = getGeminiVertexLocation(process.env)
-    const project = profileProject ?? getGeminiVertexProjectId(process.env)
-    // The native client always targets /projects/<project>/locations/<location>.
-    // With an explicit ADC credential it can derive the project at runtime
-    // (credential.projectId), so a missing project is not necessarily an error
-    // there — show a neutral placeholder. For access-token/ambient setups the
-    // client throws without a project, so keep the actionable "set the project"
-    // hint instead of a project-less endpoint the runtime would never call.
-    const projectSegment =
-      project ??
-      (geminiVertexAdcWillResolveProject(process.env)
-        ? '<ADC-resolved project>'
-        : '<set GEMINI_VERTEX_PROJECT>')
-    const baseUrl = `https://aiplatform.googleapis.com/v1/projects/${projectSegment}/locations/${location}`
+    const project = getGeminiVertexProjectId(process.env) ??
+      (geminiVertexAdcWillResolveProject(process.env) ? '<ADC-resolved project>' : '<set GEMINI_VERTEX_PROJECT>')
+    const baseUrl = `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
     return { name: 'Gemini Vertex', model, baseUrl, isLocal: false }
   }
 

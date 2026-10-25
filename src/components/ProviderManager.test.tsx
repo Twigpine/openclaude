@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream'
 
-import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import React from 'react'
 import { stripVTControlCharacters as stripAnsi } from 'node:util'
 
@@ -8,20 +8,11 @@ import { createRoot } from '../ink.js'
 import { KeybindingSetup } from '../keybindings/KeybindingProviderSetup.js'
 import { AppStateProvider } from '../state/AppState.js'
 import { AIMLAPI_MESSAGES } from '../integrations/aimlapi/messages.js'
-import { resetModelStringsForTestingOnly } from '../bootstrap/state.js'
 import { aimlapiByKeyIdentity } from '../integrations/aimlapi/topupState.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-// Captured before any mock.module() runs so the partial stub below can spread
-// the real exports (keeping ones the tests don't override, e.g.
-// isGeminiVertexEffectiveProvider, intact) and the afterAll can re-install the
-// real module. bun's mock.restore() does NOT revert mock.module(), so without
-// this the providerProfiles.js stub would leak into every later test file in the
-// process — turning unstubbed exports into undefined and making provider
-// detection (StartupScreen.detectProvider, the logError gate, client routing)
-// order-dependent across OSes.
 
 const nonce = `${Date.now()}-${Math.random()}`
 const realProviderProfiles = {
@@ -58,7 +49,6 @@ const actualSettingsModule = (await import(
 const actualProviderStartupOverridesModule = (await import(
   `../utils/providerStartupOverrides.ts?providerManagerStartupOverridesActual=${Date.now()}-${Math.random()}`
 )) as ProviderStartupOverridesModule
-const realProviderProfilesSnapshot = realProviderProfiles
 const SYNC_START = '\x1B[?2026h'
 const SYNC_END = '\x1B[?2026l'
 
@@ -187,7 +177,6 @@ const PRESET_ORDER = [
   'Fireworks AI',
   'GMI Cloud',
   'Google AI / Gemini',
-  'Google Vertex AI Gemini',
   'Groq',
   'Hicap',
   'LLMTR',
@@ -248,7 +237,6 @@ function mockProviderProfilesModule(options?: {
   setActiveProviderProfile?: (...args: unknown[]) => unknown
 }): void {
   mock.module('../utils/providerProfiles.js', () => ({
-    ...realProviderProfilesSnapshot,
     addProviderProfile: options?.addProviderProfile ?? (() => null),
     applyActiveProviderProfileFromConfig: () => {},
     deleteProviderProfile: () => ({ removed: false, activeProfileId: null }),
@@ -932,14 +920,6 @@ test('the mocked saveAimlapiTopupStateAsync/recordAimlapiCheckoutSessionAsync pr
   })) as { keyMintLeaseOwner?: string }
 
   expect(snapshot.keyMintLeaseOwner).toBe('owner-a')
-})
-
-afterAll(() => {
-  // mock.restore() does not revert mock.module(), so explicitly re-install the
-  // real providerProfiles.js module to stop the partial stub installed by
-  // mockProviderProfilesModule() from leaking into later test files.
-  mock.restore()
-  mock.module('../utils/providerProfiles.js', () => realProviderProfilesSnapshot)
 })
 
 test('ProviderManager resolves GitHub virtual provider from async storage without sync reads in render flow', async () => {
@@ -6118,8 +6098,8 @@ test('ProviderManager hides Codex OAuth setup in bare mode', async () => {
   expect(output).not.toContain('Codex OAuth')
 })
 
-test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthropic from %s via the manager UI: resets the model and clears managed env', async provider => {
-  // GitHub Models or a saved Vertex profile is active. Selecting the
+test('ProviderManager switches back to Anthropic via the manager UI: resets the model and clears managed env', async () => {
+  // GitHub Models is the active provider with no saved profiles. Selecting the
   // "Use Anthropic (built-in)" recovery option must reset the session model and
   // drop the managed CLAUDE_CODE_USE_* flags. This is the production switch-back
   // path; the existing util tests only cover the sentinel in isolation.
@@ -6129,7 +6109,6 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
   // provider flags or a live mount into later tests.
   const envKeys = [
     'CLAUDE_CODE_USE_GITHUB',
-    'CLAUDE_CODE_USE_GEMINI_VERTEX',
     'GITHUB_TOKEN',
     'GH_TOKEN',
     'CLAUDE_CODE_SIMPLE',
@@ -6138,9 +6117,7 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
   let mounted: Awaited<ReturnType<typeof mountProviderManager>> | undefined
 
   try {
-    delete process.env.CLAUDE_CODE_USE_GITHUB
-    delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-    process.env[provider === 'github' ? 'CLAUDE_CODE_USE_GITHUB' : 'CLAUDE_CODE_USE_GEMINI_VERTEX'] = '1'
+    process.env.CLAUDE_CODE_USE_GITHUB = '1'
     delete process.env.GITHUB_TOKEN
     delete process.env.GH_TOKEN
     delete process.env.CLAUDE_CODE_SIMPLE
@@ -6151,16 +6128,9 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
 
     const githubSyncRead = mock(() => undefined)
     const githubAsyncRead = mock(async () => undefined)
-    const vertexProfile = provider === 'gemini-vertex' ? {
-      id: 'vertex-test', name: 'Vertex', provider: 'gemini-vertex' as const,
-      baseUrl: 'test-project', model: 'gemini-2.5-flash',
-      createdAt: 1, updatedAt: 1,
-    } : null
-    const getProviderProfiles = () => vertexProfile ? [vertexProfile] : []
-    const getActiveProviderProfile = () => vertexProfile
     mockProviderManagerDependencies(githubSyncRead, githubAsyncRead, {
-      getProviderProfiles,
-      getActiveProviderProfile,
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => null,
     })
 
     const clearActiveProviderProfile = mock(() => {
@@ -6179,8 +6149,8 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
     mock.module('../utils/providerProfiles.js', () => ({
       ...realProviderProfiles,
       applyActiveProviderProfileFromConfig: () => {},
-      getProviderProfiles,
-      getActiveProviderProfile,
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => null,
       setActiveProviderProfile: mock(() => null),
       clearActiveProviderProfile,
     }))
@@ -6196,12 +6166,6 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
     mock.module('../utils/providerStartupOverrides.js', () => ({
       clearStartupProviderOverrides,
     }))
-
-    if (provider === 'gemini-vertex') {
-      resetModelStringsForTestingOnly()
-      const { ensureModelStringsInitialized } = await import('../utils/model/modelStrings.js')
-      await ensureModelStringsInitialized()
-    }
 
     const onDoneResults: Array<Record<string, unknown>> = []
     const appStateChanges: Array<{ newState: any; oldState: any }> = []
@@ -6230,8 +6194,8 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
     await Bun.sleep(25)
     mounted.stdin.write('\r')
 
-    // The optional saved Vertex profile precedes the GitHub virtual provider
-    // and the built-in switch-back option.
+    // Options here are [GitHub Models (active), Use Anthropic (built-in)]; move
+    // down to the switch-back option and select it.
     await waitForFrameOutput(
       mounted.getOutput,
       frame => frame.includes('Use Anthropic (built-in)'),
@@ -6239,10 +6203,6 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
 
     mounted.stdin.write('j')
     await Bun.sleep(25)
-    if (vertexProfile) {
-      mounted.stdin.write('j')
-      await Bun.sleep(25)
-    }
     mounted.stdin.write('\r')
 
     await waitForCondition(() => onDoneResults.length > 0)
@@ -6259,9 +6219,6 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
     // assert the AppState update sets mainLoopModel to the Anthropic model from
     // the result and clears mainLoopModelForSession to null.
     const anthropicModel = result.activeProviderModel as string
-    if (provider === 'gemini-vertex') {
-      expect(anthropicModel).toMatch(/^claude-/)
-    }
     await waitForCondition(() =>
       appStateChanges.some(
         ({ newState }) => newState.mainLoopModel === anthropicModel,
@@ -6296,7 +6253,6 @@ test.each(['github', 'gemini-vertex'])('ProviderManager switches back to Anthrop
     // if the Anthropic branch stops calling it.
     expect(clearStartupProviderOverrides).toHaveBeenCalled()
   } finally {
-    if (provider === 'gemini-vertex') resetModelStringsForTestingOnly()
     if (mounted) {
       await mounted.dispose()
     }

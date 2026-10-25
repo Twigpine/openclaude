@@ -170,7 +170,7 @@ type GeminiVertexToolUseBlock = {
   input: Record<string, unknown>
 }
 type GeminiVertexContentBlock = GeminiVertexTextBlock | GeminiVertexToolUseBlock
-type GeminiVertexStopReason = 'end_turn' | 'tool_use'
+type GeminiVertexStopReason = 'end_turn' | 'tool_use' | 'max_tokens'
 
 type GeminiVertexMessage = {
   id: string
@@ -822,11 +822,12 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
         type: 'message',
         role: 'assistant',
         model,
-        stop_reason: hasToolCall ? 'tool_use' : 'end_turn',
+        stop_reason: hasToolCall ? 'tool_use' : candidate?.finishReason === 'MAX_TOKENS' ? 'max_tokens' : 'end_turn',
         stop_sequence: null,
         usage: {
           input_tokens: json.usageMetadata?.promptTokenCount ?? 0,
-          output_tokens: json.usageMetadata?.candidatesTokenCount ?? 0,
+          output_tokens: (json.usageMetadata?.candidatesTokenCount ?? 0) +
+            (json.usageMetadata?.thoughtsTokenCount ?? 0),
         },
         content: finalBlocks,
       }

@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
 import { resolveRouteCredentialValue } from '../integrations/routeMetadata.js'
@@ -31,6 +31,10 @@ const RESTORED_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
   'CLAUDE_CODE_USE_GEMINI_VERTEX',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_AUTH_MODE',
+  'GOOGLE_APPLICATION_CREDENTIALS',
   'CLAUDE_CODE_USE_MISTRAL',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_BEDROCK',
@@ -65,14 +69,6 @@ const RESTORED_KEYS = [
   'GEMINI_API_KEY',
   'GEMINI_AUTH_MODE',
   'GEMINI_ACCESS_TOKEN',
-  'GEMINI_VERTEX_PROJECT',
-  'GEMINI_VERTEX_MODEL',
-  'GEMINI_VERTEX_LOCATION',
-  'GEMINI_VERTEX_AUTH_MODE',
-  'GOOGLE_CLOUD_PROJECT',
-  'GCLOUD_PROJECT',
-  'GOOGLE_PROJECT_ID',
-  'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_API_KEY',
   'MISTRAL_BASE_URL',
   'MISTRAL_MODEL',
@@ -169,18 +165,6 @@ afterEach(() => {
   }
 })
 
-afterAll(() => {
-  // bun's mock.restore() does NOT revert mock.module(), so the './config.js'
-  // replacement installed by importFreshProviderProfileModules() would otherwise
-  // leak into every later test file in the same process — silently turning their
-  // saveGlobalConfig/getGlobalConfig (and the provider-detection and
-  // error-reporting gates that read the active profile through them) into no-ops
-  // against a dead mock state, which is order-dependent across OSes. Re-install
-  // the real module so the full suite stays isolation-/order-independent.
-  mock.restore()
-  mock.module('./config.js', () => realConfig)
-})
-
 async function importFreshProviderProfileModules() {
   mock.restore()
   const actualConfig = await import(`./config.js?ts=${Date.now()}-${Math.random()}`)
@@ -240,16 +224,6 @@ function buildGeminiProfile(overrides: Partial<ProviderProfile> = {}): ProviderP
     provider: 'gemini',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     model: 'gemini-3-flash-preview',
-    ...overrides,
-  })
-}
-
-function buildGeminiVertexProfile(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
-  return buildProfile({
-    provider: 'gemini-vertex',
-    name: 'Gemini Vertex',
-    baseUrl: 'https://aiplatform.googleapis.com',
-    model: 'gemini-2.5-flash',
     ...overrides,
   })
 }
@@ -756,308 +730,6 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
     expect(process.env.GEMINI_MODEL).toBe('gemini-3-flash-preview')
     expect(getFreshAPIProvider()).toBe('gemini')
-  })
-
-  test('gemini vertex profile uses native Vertex routing instead of OpenAI-compatible base URL', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-    process.env.CLAUDE_CODE_USE_OPENAI = '1'
-    process.env.OPENAI_BASE_URL = 'https://aiplatform.googleapis.com'
-    process.env.OPENAI_MODEL = 'gemini-3.5-flash'
-
-    applyProviderProfileToProcessEnv(buildGeminiVertexProfile())
-    const { getAPIProvider: getFreshAPIProvider } =
-      await importFreshProvidersModule()
-
-    expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
-    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
-    expect(process.env.OPENAI_BASE_URL).toBeUndefined()
-    expect(process.env.OPENAI_MODEL).toBeUndefined()
-    expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
-    expect(getFreshAPIProvider()).toBe('gemini-vertex')
-  })
-
-  test.each([
-    ['access-token', 'saved-project'],
-    ['adc', 'saved-project'],
-    ['adc', 'https://aiplatform.googleapis.com'],
-  ] as const)(
-    'restores the saved active Vertex %s configuration for %s before legacy startup is skipped',
-    async (mode, baseUrl) => {
-      const { addProviderProfile, applyActiveProviderProfileFromConfig, clearProviderProfileEnvFromProcessEnv } =
-        await importFreshProviderProfileModules()
-      const { buildStartupEnvFromProfile } = await import('./providerProfile.js')
-      process.env.GEMINI_VERTEX_AUTH_MODE = mode
-      process.env.GEMINI_VERTEX_LOCATION = 'europe-west4'
-      process.env.GEMINI_VERTEX_PROJECT = 'saved-project'
-      if (mode === 'access-token') process.env.GEMINI_ACCESS_TOKEN = 'saved-bearer'
-      else process.env.GOOGLE_APPLICATION_CREDENTIALS = '/saved/adc.json'
-      const saved = addProviderProfile({
-        provider: 'gemini-vertex', name: 'Vertex', baseUrl,
-        model: 'gemini-2.5-flash',
-      })!
-      clearProviderProfileEnvFromProcessEnv()
-      delete process.env.GOOGLE_APPLICATION_CREDENTIALS
-
-      expect(applyActiveProviderProfileFromConfig()?.id).toBe(saved.id)
-      const launched = await buildStartupEnvFromProfile()
-      expect(launched.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED).toBe('1')
-      expect(launched.GEMINI_VERTEX_PROJECT).toBe('saved-project')
-      expect(launched.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
-      expect(launched.GEMINI_VERTEX_LOCATION).toBe('europe-west4')
-      expect(launched.GEMINI_VERTEX_AUTH_MODE).toBe(mode)
-      expect(launched.GEMINI_ACCESS_TOKEN).toBe(mode === 'access-token' ? 'saved-bearer' : undefined)
-      expect(launched.GOOGLE_APPLICATION_CREDENTIALS).toBe(mode === 'adc' ? '/saved/adc.json' : undefined)
-    },
-  )
-
-  test('Vertex preset keeps an ADC file out of the saved bearer and startup mirror', async () => {
-    const { addProviderProfile, getProviderPresetDefaults } = await importFreshProviderProfileModules()
-    const { loadProfileFile } = await import('./providerProfile.js')
-    const restore = snapshotEnv(['GOOGLE_APPLICATION_CREDENTIALS'])
-    try {
-      process.env.GOOGLE_APPLICATION_CREDENTIALS = '/saved/adc.json'
-      const defaults = getProviderPresetDefaults('gemini-vertex')
-      const saved = addProviderProfile({
-        ...defaults, provider: 'gemini-vertex', name: 'ADC', baseUrl: 'saved-project',
-      })!
-      expect(saved.apiKey).toBeUndefined()
-      expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
-      expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
-      expect(loadProfileFile()?.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/saved/adc.json')
-      expect(loadProfileFile()?.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
-    } finally {
-      restore()
-    }
-  })
-
-  test('Vertex selection and active edits replace the bearer and restore the same identity', async () => {
-    const { addProviderProfile, setActiveProviderProfile, updateProviderProfile,
-      clearProviderProfileEnvFromProcessEnv, applyActiveProviderProfileFromConfig } =
-      await importFreshProviderProfileModules()
-    const { loadProfileFile } = await import('./providerProfile.js')
-    const input = { provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'project-a', model: 'gemini-2.5-flash' }
-    addProviderProfile({ ...input, apiKey: 'token-a' })
-    const b = addProviderProfile({ ...input, baseUrl: 'project-b', apiKey: 'token-b' }, { makeActive: false })!
-    setActiveProviderProfile(b.id)
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('token-b')
-    expect(loadProfileFile()?.env.GEMINI_ACCESS_TOKEN).toBe('token-b')
-    updateProviderProfile(b.id, { ...b, apiKey: 'token-c' })
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('token-c')
-    expect(loadProfileFile()?.env.GEMINI_ACCESS_TOKEN).toBe('token-c')
-    clearProviderProfileEnvFromProcessEnv()
-    applyActiveProviderProfileFromConfig()
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('token-c')
-    expect(process.env.GEMINI_VERTEX_PROJECT).toBe('project-b')
-    const restore = snapshotEnv(['GEMINI_VERTEX_AUTH_MODE', 'GEMINI_ACCESS_TOKEN'])
-    try {
-      process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
-      delete process.env.GEMINI_ACCESS_TOKEN
-      setActiveProviderProfile(b.id)
-      expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('access-token')
-      expect(process.env.GEMINI_ACCESS_TOKEN as string | undefined).toBe('token-c')
-    } finally {
-      restore()
-    }
-  })
-
-  test('keyless Vertex selection discards another profile bearer through restart', async () => {
-    const { addProviderProfile, setActiveProviderProfile,
-      clearProviderProfileEnvFromProcessEnv, applyActiveProviderProfileFromConfig } =
-      await importFreshProviderProfileModules()
-    const { loadProfileFile } = await import('./providerProfile.js')
-    const input = { provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'project-a', model: 'gemini-2.5-flash' }
-    addProviderProfile({ ...input, apiKey: 'token-a' })
-    const b = addProviderProfile({ ...input, baseUrl: 'project-b' }, { makeActive: false })!
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('token-a')
-    setActiveProviderProfile(b.id)
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
-    expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
-    expect(loadProfileFile()?.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
-    expect(loadProfileFile()?.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
-    clearProviderProfileEnvFromProcessEnv()
-    applyActiveProviderProfileFromConfig()
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
-    expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
-    expect(process.env.GEMINI_VERTEX_PROJECT).toBe('project-b')
-  })
-
-  test('Vertex startup does not consume a workspace mirror when config home has none', async () => {
-    const { applyActiveProviderProfileFromConfig } = await importFreshProviderProfileModules()
-    const { createProfileFile, saveProfileFile } = await import('./providerProfile.js')
-    const workspace = mkdtempSync(join(tmpdir(), 'vertex-untrusted-workspace-'))
-    const restore = snapshotEnv(['GEMINI_ACCESS_TOKEN'])
-    try {
-      const saved = buildGeminiVertexProfile({ baseUrl: 'saved-project' })
-      saveProfileFile(createProfileFile('gemini-vertex', {
-        GEMINI_VERTEX_PROJECT: 'saved-project', GEMINI_VERTEX_MODEL: saved.model,
-        GEMINI_VERTEX_LOCATION: 'attacker.example/', GEMINI_VERTEX_AUTH_MODE: 'access-token',
-      }), { filePath: join(workspace, '.openclaude-profile.json') })
-      process.chdir(workspace)
-      process.env.GEMINI_ACCESS_TOKEN = 'shell-token'
-      applyActiveProviderProfileFromConfig({ providerProfiles: [saved], activeProviderProfileId: saved.id })
-      expect(process.env.GEMINI_VERTEX_LOCATION).toBe('global')
-      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('shell-token')
-    } finally {
-      process.chdir(originalCwd)
-      restore()
-      rmSync(workspace, { recursive: true, force: true })
-    }
-  })
-
-  test('reselecting a Vertex profile restores its saved bearer after another provider clears it', async () => {
-    const { addProviderProfile, setActiveProviderProfile } = await importFreshProviderProfileModules()
-    const saved = addProviderProfile({
-      provider: 'gemini-vertex', name: 'Vertex', baseUrl: 'saved-project',
-      model: 'gemini-2.5-flash', apiKey: 'saved-bearer',
-    })!
-    addProviderProfile({ provider: 'openai', name: 'Other', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' })
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
-    setActiveProviderProfile(saved.id)
-    expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('access-token')
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('saved-bearer')
-  })
-
-  test('Vertex startup ignores a stale mirror and honors explicit credential settings', async () => {
-    const { applyActiveProviderProfileFromConfig, clearProviderProfileEnvFromProcessEnv } = await importFreshProviderProfileModules()
-    const { createProfileFile, saveProfileFile } = await import('./providerProfile.js')
-    const saved = buildGeminiVertexProfile({ baseUrl: 'saved-project', apiKey: 'profile-token' })
-    const config = { providerProfiles: [saved], activeProviderProfileId: saved.id }
-    for (const [project, model] of [
-      ['other-project', saved.model], ['saved-project', 'other-model'],
-    ]) {
-      saveProfileFile(createProfileFile('gemini-vertex', {
-        GEMINI_VERTEX_PROJECT: project, GEMINI_VERTEX_MODEL: model,
-        GEMINI_VERTEX_LOCATION: 'europe-west4', GEMINI_VERTEX_AUTH_MODE: 'adc',
-        GOOGLE_APPLICATION_CREDENTIALS: '/stale/adc.json',
-      }))
-      clearProviderProfileEnvFromProcessEnv()
-      applyActiveProviderProfileFromConfig(config)
-      expect(process.env.GEMINI_VERTEX_LOCATION).toBe('global')
-      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('profile-token')
-      expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined()
-    }
-    saveProfileFile(createProfileFile('gemini-vertex', {
-      GEMINI_VERTEX_PROJECT: 'saved-project', GEMINI_VERTEX_MODEL: saved.model,
-      GEMINI_VERTEX_LOCATION: 'europe-west4', GEMINI_VERTEX_AUTH_MODE: 'access-token',
-      GEMINI_ACCESS_TOKEN: 'mirror-token',
-    }))
-    clearProviderProfileEnvFromProcessEnv()
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/explicit/adc.json'
-    process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
-    applyActiveProviderProfileFromConfig(config)
-    expect(process.env.GEMINI_VERTEX_AUTH_MODE).toBe('adc')
-    expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/explicit/adc.json')
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBeUndefined()
-    expect(process.env.GEMINI_VERTEX_LOCATION).toBe('us-central1')
-  })
-
-  test('gemini vertex profile never writes the endpoint URL into GEMINI_VERTEX_PROJECT', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-
-    // The preset seeds baseUrl with the API endpoint default; it must not be
-    // persisted as the Google Cloud project (Vertex would build an invalid
-    // /v1/projects/https://.../locations/... request).
-    applyProviderProfileToProcessEnv(buildGeminiVertexProfile())
-
-    expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
-    expect(process.env.GEMINI_VERTEX_PROJECT).toBeUndefined()
-  })
-
-  test('gemini vertex profile persists a real project id from baseUrl', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-
-    applyProviderProfileToProcessEnv(
-      buildGeminiVertexProfile({ baseUrl: 'my-gcp-project' }),
-    )
-
-    expect(process.env.GEMINI_VERTEX_PROJECT).toBe('my-gcp-project')
-  })
-
-  test('gemini vertex access-token profile preserves GEMINI_ACCESS_TOKEN', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-    // buildCompatibilityProcessEnv clears managed keys; the access token must
-    // survive a profile switch or the first request relaunches unauthed.
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-    process.env.GEMINI_ACCESS_TOKEN = 'ya29.test-bearer'
-
-    applyProviderProfileToProcessEnv(
-      buildGeminiVertexProfile({ baseUrl: 'my-gcp-project' }),
-    )
-
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.test-bearer')
-  })
-
-  test('gemini vertex adc profile preserves GOOGLE_APPLICATION_CREDENTIALS', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
-
-    applyProviderProfileToProcessEnv(
-      buildGeminiVertexProfile({ baseUrl: 'my-gcp-project' }),
-    )
-
-    expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/tmp/adc.json')
-  })
-
-  test('gemini vertex token-only profile (auth mode unset) preserves GEMINI_ACCESS_TOKEN', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-    // A present access token with no explicit GEMINI_VERTEX_AUTH_MODE implies
-    // access-token mode (resolveGeminiVertexAuthMode), so the token must be
-    // carried forward — not dropped by defaulting to adc.
-    delete process.env.GEMINI_VERTEX_AUTH_MODE
-    process.env.GEMINI_ACCESS_TOKEN = 'ya29.token-only'
-
-    applyProviderProfileToProcessEnv(
-      buildGeminiVertexProfile({ baseUrl: 'my-gcp-project' }),
-    )
-
-    expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.token-only')
-  })
-
-  test('Claude Vertex project and region survive apply and switching away and back', async () => {
-    const { applyProviderProfileToProcessEnv } = await importFreshProviderProfileModules()
-    const restoreEnv = snapshotEnv(['ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION'])
-    try {
-      process.env.ANTHROPIC_VERTEX_PROJECT_ID = 'claude-project'
-      process.env.CLOUD_ML_REGION = 'europe-west4'
-      const vertex = buildProfile({ provider: 'vertex', model: 'claude-sonnet-4-6' })
-      for (const selected of [vertex, buildProfile(), vertex]) {
-        applyProviderProfileToProcessEnv(selected)
-        expect(process.env.ANTHROPIC_VERTEX_PROJECT_ID).toBe('claude-project')
-        expect(process.env.CLOUD_ML_REGION).toBe('europe-west4')
-      }
-    } finally {
-      restoreEnv()
-    }
-  })
-
-  test('Vertex reapplication honors the saved model without changing the profile list', async () => {
-    const { applyActiveProviderProfileFromConfig, _setSavedModelOverrideForTesting } =
-      await importFreshProviderProfileModules()
-    const profile = buildGeminiVertexProfile({
-      id: 'vertex-model-reapply', baseUrl: 'project-test',
-      model: 'gemini-2.5-flash,gemini-2.5-pro',
-    })
-    const config = { providerProfiles: [profile], activeProviderProfileId: profile.id }
-    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
-    try {
-      _setSavedModelOverrideForTesting(undefined)
-      applyActiveProviderProfileFromConfig(config)
-      expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-flash')
-      _setSavedModelOverrideForTesting('gemini-2.5-pro')
-      applyActiveProviderProfileFromConfig(config)
-      expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-2.5-pro')
-      expect(profile.model).toBe('gemini-2.5-flash,gemini-2.5-pro')
-    } finally {
-      _setSavedModelOverrideForTesting(undefined)
-    }
   })
 
   test('bedrock profile sets CLAUDE_CODE_USE_BEDROCK and preserves anthropic model routing', async () => {
@@ -3502,46 +3174,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(process.env.OPENAI_MODEL).toBeUndefined()
   })
 
-  test('profile-based Gemini Vertex routing yields to explicit selection of another provider', async () => {
-    // Mirror of the startup precedence: when the saved profile is
-    // gemini-vertex but the shell explicitly selects another provider,
-    // the client must not be hijacked to the Vertex client.
-    const { shouldRouteToGeminiVertexFromProfile } =
-      await importFreshProviderProfileModules()
-    const vertexProfile = buildProfile({
-      id: 'saved_vertex',
-      provider: 'gemini-vertex',
-      model: 'gemini-3.5-flash',
-    })
-
-    expect(
-      shouldRouteToGeminiVertexFromProfile({} as NodeJS.ProcessEnv, vertexProfile),
-    ).toBe(true)
-    expect(
-      shouldRouteToGeminiVertexFromProfile(
-        { CLAUDE_CODE_USE_OPENAI: '1' } as NodeJS.ProcessEnv,
-        vertexProfile,
-      ),
-    ).toBe(false)
-    expect(
-      shouldRouteToGeminiVertexFromProfile(
-        { CLAUDE_CODE_USE_GEMINI_VERTEX: '1' } as NodeJS.ProcessEnv,
-        vertexProfile,
-      ),
-    ).toBe(true)
-    expect(
-      shouldRouteToGeminiVertexFromProfile(
-        {} as NodeJS.ProcessEnv,
-        buildProfile({ id: 'saved_openai' }),
-      ),
-    ).toBe(false)
-    expect(
-      shouldRouteToGeminiVertexFromProfile({} as NodeJS.ProcessEnv, undefined),
-    ).toBe(false)
-  })
-
-  test.each([undefined, '0', 'false', '1'])(
-    'does not override explicit Gemini Vertex startup selection with OPENAI=%s', async openaiFlag => {
+  test('does not override explicit Gemini Vertex startup selection with saved profile', async () => {
     // Maintainer repro: CLAUDE_CODE_USE_GEMINI_VERTEX=1 with concrete
     // project/model vars must win over a saved OpenAI profile, like every
     // other provider. Before the fix the saved profile was applied and the
@@ -3551,9 +3184,9 @@ describe('applyActiveProviderProfileFromConfig', () => {
     process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     process.env.GEMINI_VERTEX_PROJECT = 'explicit-project'
     process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
-    if (openaiFlag !== undefined) process.env.CLAUDE_CODE_USE_OPENAI = openaiFlag
     try {
       const applied = applyActiveProviderProfileFromConfig({
+        ...realConfig.getGlobalConfig(),
         providerProfiles: [
           buildProfile({
             id: 'saved_openai',
@@ -3562,13 +3195,13 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_openai',
-      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
+      })
 
       expect(applied).toBeUndefined()
       expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
       expect(process.env.GEMINI_VERTEX_PROJECT).toBe('explicit-project')
       expect(process.env.GEMINI_VERTEX_MODEL).toBe('gemini-3.5-flash')
-      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe(openaiFlag)
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
       expect(process.env.OPENAI_MODEL).toBeUndefined()
     } finally {
       delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
@@ -3577,168 +3210,16 @@ describe('applyActiveProviderProfileFromConfig', () => {
     }
   })
 
-  test('applies saved profile over Gemini Vertex access-token env with no project', async () => {
-    // Maintainer repro (round 7): CLAUDE_CODE_USE_GEMINI_VERTEX=1 +
-    // GEMINI_ACCESS_TOKEN with no project is an UNUSABLE Vertex selection — the
-    // native client throws "project is required" because access-token mode
-    // cannot derive a project (only ADC can). A stale token-only shell must not
-    // suppress the saved active profile, so the saved profile is applied.
-    const { applyActiveProviderProfileFromConfig } =
-      await importFreshProviderProfileModules()
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_ACCESS_TOKEN = 'ya29.startup-token'
-    try {
-      const applied = applyActiveProviderProfileFromConfig({
-        providerProfiles: [
-          buildProfile({
-            id: 'saved_openai',
-            baseUrl: 'https://api.openai.com/v1',
-            model: 'gpt-4o',
-          }),
-        ],
-        activeProviderProfileId: 'saved_openai',
-      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
-
-      expect(applied?.id).toBe('saved_openai')
-      expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
-    } finally {
-      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-      delete process.env.GEMINI_ACCESS_TOKEN
-    }
-  })
-
-  test('applies saved profile over Gemini Vertex access-token mode with no project', async () => {
-    // Symmetric to the token case: GEMINI_VERTEX_AUTH_MODE=access-token with no
-    // project is equally unusable, so the saved profile wins.
-    const { applyActiveProviderProfileFromConfig } =
-      await importFreshProviderProfileModules()
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-    try {
-      const applied = applyActiveProviderProfileFromConfig({
-        providerProfiles: [
-          buildProfile({
-            id: 'saved_openai',
-            baseUrl: 'https://api.openai.com/v1',
-            model: 'gpt-4o',
-          }),
-        ],
-        activeProviderProfileId: 'saved_openai',
-      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
-
-      expect(applied?.id).toBe('saved_openai')
-      expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
-    } finally {
-      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-      delete process.env.GEMINI_VERTEX_AUTH_MODE
-    }
-  })
-
-  test('applies saved profile when a Vertex token coexists with a credentials file but no project', async () => {
-    // A GEMINI_ACCESS_TOKEN makes the effective auth mode access-token even when
-    // GOOGLE_APPLICATION_CREDENTIALS is also set, so the credentials file must
-    // NOT make this token-only (no-project) selection look complete — the
-    // native client would still throw "project is required".
-    const { applyActiveProviderProfileFromConfig } =
-      await importFreshProviderProfileModules()
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_ACCESS_TOKEN = 'ya29.startup-token'
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
-    try {
-      const applied = applyActiveProviderProfileFromConfig({
-        providerProfiles: [
-          buildProfile({
-            id: 'saved_openai',
-            baseUrl: 'https://api.openai.com/v1',
-            model: 'gpt-4o',
-          }),
-        ],
-        activeProviderProfileId: 'saved_openai',
-      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
-
-      expect(applied?.id).toBe('saved_openai')
-      expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
-    } finally {
-      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-      delete process.env.GEMINI_ACCESS_TOKEN
-      delete process.env.GOOGLE_APPLICATION_CREDENTIALS
-    }
-  })
-
-  test('keeps a Vertex ADC credentials-file startup selection (no project needed)', async () => {
-    // A credentials file with the effective mode still ADC (no token) can derive
-    // the project at runtime, so it is a complete selection and must not be
-    // overridden by the saved profile.
-    const { applyActiveProviderProfileFromConfig } =
-      await importFreshProviderProfileModules()
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
-    try {
-      const applied = applyActiveProviderProfileFromConfig({
-        providerProfiles: [
-          buildProfile({
-            id: 'saved_openai',
-            baseUrl: 'https://api.openai.com/v1',
-            model: 'gpt-4o',
-          }),
-        ],
-        activeProviderProfileId: 'saved_openai',
-      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
-
-      expect(applied).toBeUndefined()
-      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
-      expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/tmp/adc.json')
-      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
-      expect(process.env.OPENAI_MODEL).toBeUndefined()
-    } finally {
-      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-      delete process.env.GOOGLE_APPLICATION_CREDENTIALS
-    }
-  })
-
-  test('keeps Gemini Vertex access-token startup selection when a project is set', async () => {
-    // With a project alias the access-token selection is usable, so it stays
-    // and the saved profile must not hijack it.
-    const { applyActiveProviderProfileFromConfig } =
-      await importFreshProviderProfileModules()
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_ACCESS_TOKEN = 'ya29.startup-token'
-    process.env.GEMINI_VERTEX_PROJECT = 'explicit-project'
-    try {
-      const applied = applyActiveProviderProfileFromConfig({
-        providerProfiles: [
-          buildProfile({
-            id: 'saved_openai',
-            baseUrl: 'https://api.openai.com/v1',
-            model: 'gpt-4o',
-          }),
-        ],
-        activeProviderProfileId: 'saved_openai',
-      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
-
-      expect(applied).toBeUndefined()
-      expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
-      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('ya29.startup-token')
-      expect(process.env.GEMINI_VERTEX_PROJECT).toBe('explicit-project')
-      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
-      expect(process.env.OPENAI_MODEL).toBeUndefined()
-    } finally {
-      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-      delete process.env.GEMINI_ACCESS_TOKEN
-      delete process.env.GEMINI_VERTEX_PROJECT
-    }
-  })
-
-  test.each(['1', '0', 'false', ''])(
-    'applies saved profile when the Gemini Vertex flag is bare or disabled (%s)', async flag => {
+  test('applies saved profile when the Gemini Vertex flag is bare (stale export)', async () => {
     // A lone CLAUDE_CODE_USE_GEMINI_VERTEX=1 with no project/model/location
-    // is a stale shell export, not intent — same semantics as the other
+    // is a stale shell export, not intent - same semantics as the other
     // providers' bare-flag handling.
     const { applyActiveProviderProfileFromConfig } =
       await importFreshProviderProfileModules()
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = flag
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
     try {
       const applied = applyActiveProviderProfileFromConfig({
+        ...realConfig.getGlobalConfig(),
         providerProfiles: [
           buildProfile({
             id: 'saved_moonshot',
@@ -3747,7 +3228,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_moonshot',
-      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
+      })
 
       expect(applied?.id).toBe('saved_moonshot')
       expect(process.env.OPENAI_MODEL!).toBe('kimi-k2.6')
@@ -4460,7 +3941,6 @@ describe('getProviderPresetDefaults', () => {
 
     expect(defaults.apiKey).toBe('openai-single-key')
   })
-
   test('custom preset reads pooled OpenAI credentials', async () => {
     const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
     process.env.OPENAI_API_KEYS = 'key-a,key-b'
@@ -4484,12 +3964,6 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.model).toBe('tenant-model')
     expect(defaults.apiKey).toBe('bearer-token')
   })
-  test('gemini vertex preset default model is a Vertex-supported Gemini model', async () => {
-    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
-    const defaults = getProviderPresetDefaults('gemini-vertex')
-    expect(defaults?.model).toBe('gemini-2.5-flash')
-  })
-
   test('ollama preset defaults to a local Ollama model', async () => {
     const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
     delete process.env.OPENAI_MODEL
@@ -4851,110 +4325,6 @@ describe('setActiveProviderProfile', () => {
       const removed = clearPersistedXaiOAuthProfile({ configDir })
       expect(removed).toBe(profilePath)
       expect(existsSync(profilePath)).toBe(false)
-    } finally {
-      process.chdir(originalCwd)
-      rmSync(tempDir, { recursive: true, force: true })
-      rmSync(configDir, { recursive: true, force: true })
-    }
-  })
-
-  test('persists the access token into a saved Gemini Vertex startup profile', async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
-    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
-    process.chdir(tempDir)
-    process.env.CLAUDE_CONFIG_DIR = configDir
-    // Session-provided credential: on relaunch buildLaunchEnv can only rehydrate
-    // from the persisted profile, so it must carry the token forward.
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-    process.env.GEMINI_ACCESS_TOKEN = 'ya29.session-bearer'
-
-    try {
-      const { setActiveProviderProfile } =
-        await importFreshProviderProfileModules()
-
-      saveMockGlobalConfig(current => ({
-        ...current,
-        providerProfiles: [
-          buildGeminiVertexProfile({ id: 'vertex_prof', baseUrl: 'my-gcp-project' }),
-        ],
-      }))
-
-      const result = setActiveProviderProfile('vertex_prof', { configDir })
-      const persisted = JSON.parse(
-        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
-      )
-
-      expect(result?.id).toBe('vertex_prof')
-      expect(persisted.profile).toBe('gemini-vertex')
-      expect(persisted.env.GEMINI_VERTEX_PROJECT).toBe('my-gcp-project')
-      expect(persisted.env.GEMINI_ACCESS_TOKEN).toBe('ya29.session-bearer')
-    } finally {
-      process.chdir(originalCwd)
-      rmSync(tempDir, { recursive: true, force: true })
-      rmSync(configDir, { recursive: true, force: true })
-    }
-  })
-
-  test('persists the access token into a saved Vertex startup profile when auth mode is unset', async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
-    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
-    process.chdir(tempDir)
-    process.env.CLAUDE_CONFIG_DIR = configDir
-    // No explicit GEMINI_VERTEX_AUTH_MODE: a present token implies access-token
-    // mode, so the persisted startup profile must still carry the bearer.
-    delete process.env.GEMINI_VERTEX_AUTH_MODE
-    process.env.GEMINI_ACCESS_TOKEN = 'ya29.token-only-bearer'
-
-    try {
-      const { setActiveProviderProfile } =
-        await importFreshProviderProfileModules()
-
-      saveMockGlobalConfig(current => ({
-        ...current,
-        providerProfiles: [
-          buildGeminiVertexProfile({ id: 'vertex_prof', baseUrl: 'my-gcp-project' }),
-        ],
-      }))
-
-      setActiveProviderProfile('vertex_prof', { configDir })
-      const persisted = JSON.parse(
-        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
-      )
-
-      expect(persisted.env.GEMINI_VERTEX_AUTH_MODE).toBe('access-token')
-      expect(persisted.env.GEMINI_ACCESS_TOKEN).toBe('ya29.token-only-bearer')
-    } finally {
-      process.chdir(originalCwd)
-      rmSync(tempDir, { recursive: true, force: true })
-      rmSync(configDir, { recursive: true, force: true })
-    }
-  })
-
-  test('persists the ADC credentials file into a saved Gemini Vertex startup profile', async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
-    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
-    process.chdir(tempDir)
-    process.env.CLAUDE_CONFIG_DIR = configDir
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/tmp/adc.json'
-
-    try {
-      const { setActiveProviderProfile } =
-        await importFreshProviderProfileModules()
-
-      saveMockGlobalConfig(current => ({
-        ...current,
-        providerProfiles: [
-          buildGeminiVertexProfile({ id: 'vertex_adc_prof', baseUrl: 'my-gcp-project' }),
-        ],
-      }))
-
-      setActiveProviderProfile('vertex_adc_prof', { configDir })
-      const persisted = JSON.parse(
-        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
-      )
-
-      expect(persisted.env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/tmp/adc.json')
     } finally {
       process.chdir(originalCwd)
       rmSync(tempDir, { recursive: true, force: true })
@@ -6713,7 +6083,7 @@ describe('getProfileModelOptions', () => {
     process.env.OPENAI_MODEL = 'route-model'
 
     const { getAdditionalModelOptionsCacheScope } = await import(
-      `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
+      '../services/api/providerConfig.js'
     )
     const { getActiveOpenAIRouteModelOptionsCache } =
       await importFreshProviderProfileModules()
@@ -7104,94 +6474,4 @@ test('DEFAULT_MISTRAL_MODEL matches the mistral gateway defaultModel', async () 
   const { default: mistralGateway } = await import('../integrations/gateways/mistral.js')
   expect(mistralGateway.defaultModel).toBeDefined()
   expect(DEFAULT_MISTRAL_MODEL).toBe(mistralGateway.defaultModel!)
-})
-
-describe('isGeminiVertexEffectiveProvider', () => {
-  test('true when the env flag is set, regardless of profile', async () => {
-    const { isGeminiVertexEffectiveProvider } =
-      await importFreshProviderProfileModules()
-    expect(
-      isGeminiVertexEffectiveProvider(
-        { CLAUDE_CODE_USE_GEMINI_VERTEX: '1' } as NodeJS.ProcessEnv,
-        buildProfile(),
-      ),
-    ).toBe(true)
-  })
-
-  test('true for a saved gemini-vertex profile even without the env flag', async () => {
-    const { isGeminiVertexEffectiveProvider } =
-      await importFreshProviderProfileModules()
-    // The saved-profile-only route is exactly what getAPIProvider() misses.
-    expect(
-      isGeminiVertexEffectiveProvider(
-        {} as NodeJS.ProcessEnv,
-        buildGeminiVertexProfile(),
-      ),
-    ).toBe(true)
-  })
-
-  test('false for a non-vertex profile with no env flag', async () => {
-    const { isGeminiVertexEffectiveProvider } =
-      await importFreshProviderProfileModules()
-    expect(
-      isGeminiVertexEffectiveProvider({} as NodeJS.ProcessEnv, buildProfile()),
-    ).toBe(false)
-  })
-})
-
-describe('getAdditionalModelOptionsCacheScope — saved-profile Gemini Vertex', () => {
-  test.each(['vertex_prof', undefined, 'deleted_profile'])('keeps saved Vertex profile %s out of first-party cache scope', async activeProviderProfileId => {
-    const { getAPIProvider } = await importFreshProviderProfileModules()
-    const { getAdditionalModelOptionsCacheScope } = await import(
-      `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
-    )
-    // beforeEach clears every CLAUDE_CODE_USE_* flag; the saved profile is what
-    // routes the client to Vertex, so the cache scope must be third-party (null)
-    // rather than first-party Anthropic bootstrap traffic.
-    saveMockGlobalConfig(current => ({
-      ...current,
-      providerProfiles: [
-        buildGeminiVertexProfile({ id: 'vertex_prof', baseUrl: 'my-proj' }),
-      ],
-      activeProviderProfileId,
-    }))
-
-    expect(getAPIProvider()).toBe('gemini-vertex')
-    expect(getAdditionalModelOptionsCacheScope()).toBeNull()
-  })
-
-  test('explicit Anthropic selection keeps first-party scope with saved Vertex profiles', async () => {
-    const { ANTHROPIC_DEFAULT_PROFILE_ID } = await importFreshProviderProfileModules()
-    const { getAdditionalModelOptionsCacheScope } = await import(
-      `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
-    )
-    saveMockGlobalConfig(current => ({
-      ...current,
-      providerProfiles: [buildGeminiVertexProfile({ id: 'vertex_prof' })],
-      activeProviderProfileId: ANTHROPIC_DEFAULT_PROFILE_ID,
-    }))
-    expect(getAdditionalModelOptionsCacheScope()).toBe('firstParty')
-  })
-
-  test('remains first-party with no provider flag and no saved provider profile', async () => {
-    await importFreshProviderProfileModules()
-    const { getAdditionalModelOptionsCacheScope } = await import(
-      `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
-    )
-    saveMockGlobalConfig(current => ({
-      ...current,
-      providerProfiles: [],
-      activeProviderProfileId: undefined,
-    }))
-
-    expect(getAdditionalModelOptionsCacheScope()).toBe('firstParty')
-  })
-})
-
-test('selected Vertex project survives shaping instead of falling back to an ambient project', async () => {
-  const { applyProviderProfileToProcessEnv } = await importFreshProviderProfileModules()
-  process.env.GOOGLE_CLOUD_PROJECT = 'ambient-project'
-  applyProviderProfileToProcessEnv(buildGeminiVertexProfile({ baseUrl: 'sk-openclaude' }))
-  expect(process.env.GEMINI_VERTEX_PROJECT).toBe('sk-openclaude')
-  expect(process.env.GOOGLE_CLOUD_PROJECT).toBe('ambient-project')
 })

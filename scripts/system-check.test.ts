@@ -1,5 +1,4 @@
-import { snapshotEnv } from '../src/test/envSnapshot.js'
-import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -19,15 +18,6 @@ import { DEFAULT_MAX_ACTIVE_MESSAGES_HARD_CAP } from '../src/utils/maxActiveMess
 import { resetSettingsCache } from '../src/utils/settings/settingsCache.ts'
 
 const ENV_KEYS = [
-  'CLAUDE_CODE_USE_GEMINI_VERTEX',
-  'GEMINI_VERTEX_PROJECT',
-  'GEMINI_VERTEX_MODEL',
-  'GEMINI_VERTEX_LOCATION',
-  'GEMINI_VERTEX_AUTH_MODE',
-  'GOOGLE_APPLICATION_CREDENTIALS',
-  'GOOGLE_CLOUD_PROJECT',
-  'GCLOUD_PROJECT',
-  'GOOGLE_PROJECT_ID',
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_GEMINI',
@@ -126,18 +116,27 @@ const ENV_KEYS = [
   'LINKUP_API_KEY',
 ] as const
 
-let restoreEnv: () => void
+const originalEnv: Record<string, string | undefined> = {}
 let tempConfigDir: string | undefined
 
 beforeEach(() => {
-  restoreEnv = snapshotEnv(ENV_KEYS, { clear: true })
+  for (const key of ENV_KEYS) {
+    originalEnv[key] = process.env[key]
+    delete process.env[key]
+  }
   tempConfigDir = mkdtempSync(join(tmpdir(), 'openclaude-system-check-'))
   process.env.OPENCLAUDE_CONFIG_DIR = tempConfigDir
   resetSettingsCache()
 })
 
 afterEach(() => {
-  restoreEnv()
+  for (const key of ENV_KEYS) {
+    if (originalEnv[key] === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = originalEnv[key]
+    }
+  }
   resetSettingsCache()
   if (tempConfigDir) {
     rmSync(tempConfigDir, { recursive: true, force: true })
@@ -1248,187 +1247,4 @@ describe('sandbox runtime diagnostics', () => {
       'CLI bundle: stubbed; sandbox.enabled: false; failIfUnavailable: false; effective behavior: disabled',
     )
   })
-})
-
-describe('doctor recognises Gemini Vertex', () => {
-  test('generation readiness discovers ambient ADC without a credentials file', async () => {
-    const fs = await import('node:fs')
-    const auth = await import('../src/utils/geminiAuth.js')
-    const { __test } = await import('./system-check.ts')
-    const files = spyOn(fs, 'existsSync').mockReturnValue(false)
-    const resolveCredential = auth.resolveGeminiCredential
-    const resolver = spyOn(auth, 'resolveGeminiCredential').mockImplementation(
-      (env, options) => resolveCredential(env, {
-        ...options,
-        createGoogleAuth: async () => ({
-          getClient: async () => ({ getAccessToken: async () => 'metadata-token' }),
-          getProjectId: async () => 'metadata-project',
-        }),
-      }),
-    )
-    const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE'])
-    try {
-      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-      process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
-      expect((await __test.checkProviderGenerationReadiness()).ok).toBe(true)
-    } finally {
-      resolver.mockRestore()
-      files.mockRestore()
-      restore()
-    }
-  })
-
-  test('disabled Vertex uses the actual Anthropic diagnostics and readiness', async () => {
-    const { __test } = await import('./system-check.ts')
-    const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE'])
-    try {
-      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = 'off'
-      process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-      expect(checkOpenAIEnv().find(r => r.label === 'Provider mode')?.detail).toContain('Anthropic')
-      expect(serializeSafeEnvSummary().CLAUDE_CODE_USE_GEMINI_VERTEX).not.toBe(true)
-      expect((await __test.checkProviderGenerationReadiness()).detail).not.toContain('Gemini Vertex')
-    } finally {
-      restore()
-    }
-  })
-
-  test.each([
-    ['access-token', '', '/adc.json', false],
-    ['adc', 'ignored-token', '', false],
-    ['access-token', 'token', '', true],
-    ['adc', '', '/adc.json', true],
-  ])('credential summary uses %s source', (mode, token, file, expected) => {
-    const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE', 'GEMINI_ACCESS_TOKEN', 'GOOGLE_APPLICATION_CREDENTIALS'])
-    try {
-      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-      process.env.GEMINI_VERTEX_AUTH_MODE = mode as string
-      process.env.GEMINI_ACCESS_TOKEN = token as string
-      process.env.GOOGLE_APPLICATION_CREDENTIALS = file as string
-      expect(serializeSafeEnvSummary().GEMINI_VERTEX_CREDENTIAL_SET).toBe(expected)
-    } finally {
-      restore()
-    }
-  })
-
-  test.each([
-    ['GEMINI_VERTEX_MODEL', 'gemini-2.5-flash'],
-    ['GEMINI_VERTEX_PROJECT', 'gemini-2.5-flash'],
-    ['GEMINI_VERTEX_LOCATION', 'gemini-2.5-flash'],
-    ['GEMINI_VERTEX_LOCATION', 'gemini-3.5-flash'],
-  ])(
-    'redacts a known credential placed in %s with %s from results and saved reports', async (field, model) => {
-      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-      process.env.GEMINI_VERTEX_PROJECT = 'project-test'
-      process.env.GEMINI_VERTEX_MODEL = model
-      process.env.GEMINI_VERTEX_LOCATION = 'global'
-      const secret = 'vertex-private-access-token'
-      process.env.GEMINI_ACCESS_TOKEN = secret
-      process.env[field] = secret
-      expect(JSON.stringify(checkOpenAIEnv())).not.toContain(secret)
-      expect(JSON.stringify(serializeSafeEnvSummary())).not.toContain(secret)
-      if (model === 'gemini-3.5-flash') {
-        const { __test } = await import('./system-check.ts')
-        const readiness = await __test.checkProviderGenerationReadiness()
-        expect(readiness.ok).toBe(false)
-        expect(readiness.detail).toContain('GEMINI_VERTEX_LOCATION=global')
-        expect(readiness.detail).not.toContain(secret)
-      }
-    },
-  )
-
-  test('checkOpenAIEnv reports the Vertex provider, not the Anthropic flow', async () => {
-    const { __test } = await import('./system-check.ts')
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
-    process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
-    process.env.GEMINI_ACCESS_TOKEN = 'tok'
-
-    const results = __test.checkOpenAIEnv()
-    const providerMode = results.find(r => r.label === 'Provider mode')
-    expect(providerMode?.detail).toContain('Vertex')
-    expect(providerMode?.detail).not.toContain('Anthropic login flow')
-    expect(results.some(r => r.label === 'GEMINI_VERTEX_PROJECT')).toBe(true)
-  })
-
-  test('safe env summary surfaces Vertex config', async () => {
-    const { __test } = await import('./system-check.ts')
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-    process.env.GEMINI_ACCESS_TOKEN = 'tok'
-
-    const summary = __test.serializeSafeEnvSummary()
-    expect(summary.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe(true)
-    expect(summary.GEMINI_VERTEX_PROJECT).toBe('my-proj')
-    expect(summary.GEMINI_VERTEX_CREDENTIAL_SET).toBe(true)
-    process.env.GEMINI_VERTEX_LOCATION = '   '
-    expect(__test.serializeSafeEnvSummary().GEMINI_VERTEX_LOCATION).toBe('global')
-  })
-
-  test('generation readiness passes when a Vertex credential resolves', async () => {
-    const { __test } = await import('./system-check.ts')
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-    process.env.GEMINI_ACCESS_TOKEN = 'tok'
-
-    const result = await __test.checkProviderGenerationReadiness()
-    expect(result.ok).toBe(true)
-    expect(result.detail).toContain('resolved')
-  })
-
-  test('generation readiness fails when no Vertex credential resolves (preflight matches startup)', async () => {
-    const { __test } = await import('./system-check.ts')
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_PROJECT = 'my-proj'
-    // Same fail branch the runtime resolver takes when ambient ADC cannot be
-    // found: an explicit auth mode with no usable credential must NOT report a
-    // false green, or the launcher preflight would pass and startup would fail.
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-
-    const result = await __test.checkProviderGenerationReadiness()
-    expect(result.ok).toBe(false)
-    expect(result.detail).toContain('could not be resolved')
-  })
-
-  test('env and generation checks reject a global-only model on a regional location', async () => {
-    const { __test } = await import('./system-check.ts')
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_PROJECT = 'project-test'
-    process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
-    process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
-    const message =
-      'Gemini Vertex model "gemini-3.5-flash" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "us-central1") to use it.'
-    const location = __test.checkOpenAIEnv().find(result => result.label === 'GEMINI_VERTEX_LOCATION')
-    expect(location?.ok).toBe(false)
-    expect(location?.detail).toBe(message)
-    const readiness = await __test.checkProviderGenerationReadiness()
-    expect(readiness.ok).toBe(false)
-    expect(readiness.detail).toBe(message)
-  })
-})
-
-test.each([
-  ['GEMINI_VERTEX_LOCATION', 'evil.example/x#'],
-  ['GEMINI_VERTEX_PROJECT', 'project/other'],
-  ['GEMINI_VERTEX_MODEL', '../../projects/other'],
-] as const)('native doctor rejects unsafe %s in env and readiness', async (key, value) => {
-  const { __test } = await import('./system-check.ts')
-  const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE',
-    'GEMINI_ACCESS_TOKEN', 'GEMINI_VERTEX_PROJECT', 'GEMINI_VERTEX_LOCATION', 'GEMINI_VERTEX_MODEL'])
-  try {
-    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
-    process.env.GEMINI_ACCESS_TOKEN = 'fixture-token'
-    process.env.GEMINI_VERTEX_PROJECT = 'sk-openclaude'
-    process.env.GEMINI_VERTEX_LOCATION = 'global'
-    process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
-    process.env[key] = value
-    expect(__test.checkOpenAIEnv().find(result => result.label === key)?.ok).toBe(false)
-    const readiness = await __test.checkProviderGenerationReadiness()
-    expect(readiness.ok).toBe(false)
-    expect(readiness.detail).toContain(key)
-  } finally { restore() }
 })

@@ -27,7 +27,6 @@ import {
   buildCodexProfileEnv,
   buildGeminiProfileEnv,
   buildGmiCloudProfileEnv,
-  buildGeminiVertexProfileEnv,
   buildLaunchEnv,
   buildOllamaProfileEnv,
   buildOpenAIProfileEnv,
@@ -36,7 +35,6 @@ import {
   DEFAULT_STARTUP_PROVIDER_ENV_VAR,
   deleteProfileFile,
   getDefaultProfileFilePath,
-  hasExplicitProviderSelection,
   isDefaultStartupProviderEnv,
   isPersistedCodexOAuthProfile,
   maskSecretForDisplay,
@@ -159,10 +157,6 @@ test('openai profile switch clears stale plural credential pool before applying 
       OPENAI_MODEL: 'gpt-5.4',
     },
     processEnv: {
-      GOOGLE_APPLICATION_CREDENTIALS: 'ambient-GOOGLE_APPLICATION_CREDENTIALS',
-      GOOGLE_CLOUD_PROJECT: 'ambient-GOOGLE_CLOUD_PROJECT',
-      GCLOUD_PROJECT: 'ambient-GCLOUD_PROJECT',
-      GOOGLE_PROJECT_ID: 'ambient-GOOGLE_PROJECT_ID',
       OPENAI_API_KEYS: 'stale-a,stale-b',
       OPENAI_API_KEY: 'shell-key',
       OPENAI_BASE_URL: 'https://api.openai.com/v1',
@@ -170,10 +164,6 @@ test('openai profile switch clears stale plural credential pool before applying 
     },
   })
 
-  assert.equal(env.GOOGLE_APPLICATION_CREDENTIALS, 'ambient-GOOGLE_APPLICATION_CREDENTIALS')
-  assert.equal(env.GOOGLE_CLOUD_PROJECT, 'ambient-GOOGLE_CLOUD_PROJECT')
-  assert.equal(env.GCLOUD_PROJECT, 'ambient-GCLOUD_PROJECT')
-  assert.equal(env.GOOGLE_PROJECT_ID, 'ambient-GOOGLE_PROJECT_ID')
   assert.equal(env.OPENAI_API_KEYS, undefined)
   assert.equal(env.OPENAI_API_KEY, 'profile-key')
   assert.equal(
@@ -1952,172 +1942,6 @@ test('gemini profiles require a key', () => {
   assert.equal(env, null)
 })
 
-test('hasExplicitProviderSelection treats Gemini Vertex as selected', () => {
-  assert.equal(
-    hasExplicitProviderSelection({ CLAUDE_CODE_USE_GEMINI_VERTEX: '1' }),
-    true,
-  )
-})
-
-test('native Vertex launch keeps canonical precedence over competing provider flags', async () => {
-  for (const flag of ['CLAUDE_CODE_USE_GITHUB', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX']) {
-    const launched = await buildLaunchEnv({
-      profile: 'gemini-vertex', persisted: null, goal: 'balanced',
-      processEnv: { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', [flag]: '1', GEMINI_VERTEX_PROJECT: 'project-test' },
-      readGeminiAccessToken: () => undefined,
-    })
-    assert.equal(launched.CLAUDE_CODE_USE_GEMINI_VERTEX, '1')
-    assert.equal(launched[flag], undefined)
-    assert.equal(launched.GEMINI_VERTEX_PROJECT, 'project-test')
-  }
-})
-
-test('gemini vertex profiles default to global and current flash model', () => {
-  const env = buildGeminiVertexProfileEnv({ processEnv: {} })
-
-  assert.equal(env.GEMINI_VERTEX_MODEL, 'gemini-2.5-flash')
-  assert.equal(env.GEMINI_VERTEX_LOCATION, 'global')
-})
-
-test('Claude Vertex launch preserves ambient project and region across provider switches', async () => {
-  const processEnv = {
-    ANTHROPIC_VERTEX_PROJECT_ID: 'claude-project',
-    CLOUD_ML_REGION: 'europe-west4',
-  }
-  for (const previous of [processEnv, buildCompatibilityProcessEnv({
-    processEnv,
-    compatibilityMode: 'openai',
-    profileEnv: { OPENAI_MODEL: 'gpt-4o' },
-  })]) {
-    const launched = await buildLaunchEnv({
-      profile: 'vertex', persisted: null, goal: 'balanced', processEnv: previous,
-    })
-    assert.equal(launched.ANTHROPIC_VERTEX_PROJECT_ID, 'claude-project')
-    assert.equal(launched.CLOUD_ML_REGION, 'europe-west4')
-  }
-})
-
-test('Vertex launch infers token auth from effective shell or saved credentials', async () => {
-  for (const [shellToken, shellMode, savedMode, expectedToken, expectedMode] of [
-    ['shell-token', undefined, undefined, 'shell-token', 'access-token'],
-    ['   ', undefined, undefined, 'saved-token', 'access-token'],
-    [undefined, undefined, undefined, 'saved-token', 'access-token'],
-    ['shell-token', 'adc', 'access-token', undefined, 'adc'],
-    ['shell-token', undefined, 'adc', undefined, 'adc'],
-    ['shell-token', 'access-token', 'adc', 'shell-token', 'access-token'],
-  ] as const) {
-    const launched = await buildLaunchEnv({
-      profile: 'gemini-vertex', goal: 'balanced',
-      persisted: profile('gemini-vertex', {
-        GEMINI_VERTEX_PROJECT: 'saved-project',
-        GEMINI_ACCESS_TOKEN: 'saved-token',
-        GEMINI_VERTEX_AUTH_MODE: savedMode,
-      }),
-      processEnv: { GEMINI_ACCESS_TOKEN: shellToken, GEMINI_VERTEX_AUTH_MODE: shellMode },
-      readGeminiAccessToken: () => undefined,
-    })
-    assert.equal(launched.GEMINI_VERTEX_AUTH_MODE, expectedMode)
-    assert.equal(launched.GEMINI_ACCESS_TOKEN, expectedToken)
-    assert.equal(launched.GEMINI_VERTEX_PROJECT, 'saved-project')
-  }
-})
-
-test('gemini vertex profiles persist dedicated env vars', () => {
-  const env = buildGeminiVertexProfileEnv({
-    authMode: 'adc',
-    model: 'gemini-3.5-flash',
-    project: 'project-test-1234',
-    location: 'us-central1',
-    processEnv: {},
-  })
-
-  assert.deepEqual(env, {
-    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-    GEMINI_VERTEX_AUTH_MODE: 'adc',
-    GEMINI_VERTEX_MODEL: 'gemini-3.5-flash',
-    GEMINI_VERTEX_PROJECT: 'project-test-1234',
-    GEMINI_VERTEX_LOCATION: 'us-central1',
-  })
-})
-
-test('legacy Vertex startup restores the project for an incomplete shell selection', async () => {
-  const persisted = createProfileFile('gemini-vertex', {
-    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-    GEMINI_VERTEX_PROJECT: 'saved-project',
-    GEMINI_VERTEX_AUTH_MODE: 'access-token',
-    GEMINI_ACCESS_TOKEN: 'saved-token',
-  })
-  for (const partial of [
-    { GEMINI_ACCESS_TOKEN: 'shell-token' },
-    { GEMINI_VERTEX_AUTH_MODE: 'access-token' },
-    { GEMINI_VERTEX_LOCATION: 'europe-west4' },
-    { GEMINI_VERTEX_MODEL: 'gemini-2.5-pro' },
-    { GEMINI_ACCESS_TOKEN: 'shell-token', GOOGLE_APPLICATION_CREDENTIALS: '/adc.json' },
-  ]) {
-    const env = await buildStartupEnvFromProfile({
-      persisted, processEnv: { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', ...partial },
-    })
-    assert.equal(env.GEMINI_VERTEX_PROJECT, 'saved-project')
-    assert.equal(env.GEMINI_ACCESS_TOKEN, partial.GEMINI_ACCESS_TOKEN ?? 'saved-token')
-  }
-  for (const complete of [
-    { GEMINI_VERTEX_PROJECT: 'shell-project' },
-    { GEMINI_VERTEX_AUTH_MODE: 'adc' },
-    { GOOGLE_APPLICATION_CREDENTIALS: '/adc.json' },
-  ]) {
-    const processEnv = { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', ...complete }
-    assert.equal(await buildStartupEnvFromProfile({ persisted, processEnv }), processEnv)
-  }
-})
-
-test('buildStartupEnvFromProfile applies Gemini Vertex profiles', async () => {
-  const persisted = createProfileFile('gemini-vertex', {
-    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-    GEMINI_VERTEX_PROJECT: 'project-test-1234',
-    GEMINI_VERTEX_LOCATION: 'europe-west4',
-    GEMINI_VERTEX_MODEL: 'gemini-3.5-flash',
-    GEMINI_VERTEX_AUTH_MODE: 'adc',
-  })
-
-  const env = await buildStartupEnvFromProfile({
-    persisted,
-    processEnv: {
-      OPENAI_API_KEY: 'openai-key',
-    },
-    readGeminiAccessToken: () => undefined,
-  })
-
-  assert.equal(env.CLAUDE_CODE_USE_GEMINI_VERTEX, '1')
-  assert.equal(env.GEMINI_VERTEX_PROJECT, 'project-test-1234')
-  assert.equal(env.GEMINI_VERTEX_LOCATION, 'europe-west4')
-  assert.equal(env.GEMINI_VERTEX_MODEL, 'gemini-3.5-flash')
-  assert.equal(env.GEMINI_VERTEX_AUTH_MODE, 'adc')
-  assert.equal(env.CLAUDE_CODE_USE_OPENAI, undefined)
-})
-
-test('buildStartupEnvFromProfile ignores whitespace-only shell Vertex values over persisted ones', async () => {
-  const persisted = createProfileFile('gemini-vertex', {
-    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-    GEMINI_VERTEX_PROJECT: 'persisted-project',
-    GEMINI_VERTEX_MODEL: 'gemini-3.5-flash',
-    GEMINI_VERTEX_AUTH_MODE: 'access-token',
-  })
-
-  const env = await buildStartupEnvFromProfile({
-    persisted,
-    // Exported-but-blank shell values must not drop the persisted config.
-    processEnv: {
-      GEMINI_VERTEX_PROJECT: '   ',
-      GEMINI_VERTEX_MODEL: '   ',
-      GEMINI_ACCESS_TOKEN: '   ',
-    },
-    readGeminiAccessToken: () => undefined,
-  })
-
-  assert.equal(env.GEMINI_VERTEX_PROJECT, 'persisted-project')
-  assert.equal(env.GEMINI_VERTEX_MODEL, 'gemini-3.5-flash')
-})
-
 test('saveProfileFile writes a profile that loadProfileFile can read back', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'openclaude-profile-file-'))
 
@@ -2833,29 +2657,6 @@ test('applySavedProfileToCurrentSession can switch away from GitHub provider env
   assert.equal(processEnv.OPENAI_BASE_URL, 'http://localhost:11434/v1')
   assert.equal(processEnv.OPENAI_MODEL, 'llama3.1:8b')
   assert.equal(Object.hasOwn(processEnv, 'OPENAI_API_KEY'), false)
-})
-
-test('applying another saved profile replaces an active native Vertex selection', async () => {
-  const { applySavedProfileToCurrentSession } = await importFreshProviderProfileModule()
-  for (const target of ['openai', 'mistral'] as const) {
-    const processEnv: NodeJS.ProcessEnv = {
-      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
-      GEMINI_VERTEX_PROJECT: 'previous-vertex-project',
-      GEMINI_VERTEX_MODEL: 'gemini-2.5-flash',
-      GEMINI_ACCESS_TOKEN: 'previous-vertex-token',
-    }
-    const targetEnv = target === 'openai'
-      ? { OPENAI_BASE_URL: 'http://localhost:11434/v1', OPENAI_MODEL: 'llama3.1:8b' }
-      : { MISTRAL_API_KEY: 'mistral-test-key', MISTRAL_MODEL: 'devstral-latest' }
-    const error = await applySavedProfileToCurrentSession({
-      profileFile: profile(target, targetEnv),
-      processEnv,
-    })
-    assert.equal(error, null)
-    assert.equal(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX, undefined)
-    assert.equal(processEnv[target === 'openai' ? 'CLAUDE_CODE_USE_OPENAI' : 'CLAUDE_CODE_USE_MISTRAL'], '1')
-    assert.equal(processEnv[target === 'openai' ? 'OPENAI_MODEL' : 'MISTRAL_MODEL'], targetEnv[target === 'openai' ? 'OPENAI_MODEL' : 'MISTRAL_MODEL'])
-  }
 })
 
 test('applySavedProfileToCurrentSession replaces empty active OpenAI key for Codex OAuth', async () => {
@@ -3977,108 +3778,4 @@ test('buildStartupEnvFromProfile applies saved API Route proxy profile even when
   assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'api-route')
   assert.equal(env.OPENAI_API_KEY, undefined)
   assert.equal(env.OPENAI_API_KEYS, undefined)
-})
-
-test('native Vertex preserves valid project IDs and ADC paths through profile shaping', async () => {
-  const id = 'sk-openclaude'
-  assert.equal(buildGeminiVertexProfileEnv({ project: id, processEnv: {} }).GEMINI_VERTEX_PROJECT, id)
-  const persisted = profile('gemini-vertex', {
-    GEMINI_VERTEX_PROJECT: id, GOOGLE_APPLICATION_CREDENTIALS: 'sk-adc.json',
-  })
-  const launched = await buildLaunchEnv({ profile: 'gemini-vertex', goal: 'balanced', persisted, processEnv: {} })
-  assert.equal(launched.GEMINI_VERTEX_PROJECT, id)
-  assert.equal(launched.GOOGLE_APPLICATION_CREDENTIALS, 'sk-adc.json')
-  for (const alias of ['GEMINI_VERTEX_PROJECT', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_PROJECT_ID']) {
-    const shell = { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', [alias]: '  ' + id + '  ' }
-    const fromShell = await buildStartupEnvFromProfile({ persisted, processEnv: shell })
-    assert.equal(fromShell, shell, 'a real project makes explicit native selection complete')
-    const fromAlias = await buildLaunchEnv({
-      profile: 'gemini-vertex', goal: 'balanced', persisted: null, processEnv: shell,
-    })
-    assert.equal(fromAlias.GEMINI_VERTEX_PROJECT, id)
-  }
-})
-
-test('saved native ADC file is used before startup applies its candidate environment', { timeout: 40000 }, async () => {
-  // Four isolated children each have an 8s deadline; leave time for cleanup.
-  const temp = mkdtempSync(join(tmpdir(), 'vertex-candidate-adc-'))
-  const source = `
-    const { GoogleAuth, UserRefreshClient } = require(
-      require('node:url').fileURLToPath(process.env.OPENCLAUDE_TEST_GOOGLE_AUTH_ENTRY))
-    const { writeFileSync } = require('node:fs')
-    const { join } = require('node:path')
-    const adcFile = join(process.env.OPENCLAUDE_CONFIG_DIR, 'adc.json')
-    writeFileSync(adcFile, JSON.stringify({
-      type: 'authorized_user', client_id: 'test-client',
-      client_secret: 'test-secret', refresh_token: 'test-refresh',
-    }))
-    // Exercise real file discovery/getClient/token parsing, without reading
-    // host ADC or contacting metadata. Only the token HTTP response is fake.
-    GoogleAuth.prototype._tryGetApplicationCredentialsFromWellKnownFile = async () => null
-    GoogleAuth.prototype._checkIsGCE = async () => false
-    const getClient = GoogleAuth.prototype.getClient
-    let credentialLoads = 0
-    GoogleAuth.prototype.getClient = async function () {
-      credentialLoads++
-      const client = await getClient.call(this)
-      if (!(client instanceof UserRefreshClient)) throw new Error('unexpected ADC source')
-      client.transporter.defaults.fetchImplementation = async () => new Response(JSON.stringify({
-        access_token: 'test-access', token_type: 'Bearer', expires_in: 3600,
-      }), { headers: { 'Content-Type': 'application/json' } })
-      return client
-    }
-    if (process.env.OPENCLAUDE_TEST_SHELL_ADC === '1') process.env.GOOGLE_APPLICATION_CREDENTIALS = adcFile
-    const p = await import(process.env.OPENCLAUDE_TEST_PROFILE_ENTRY)
-    p.saveProfileFile(p.createProfileFile('gemini-vertex', {
-      CLAUDE_CODE_USE_GEMINI_VERTEX: '1', GEMINI_VERTEX_AUTH_MODE: 'adc',
-      GEMINI_VERTEX_PROJECT: 'native-project', GOOGLE_APPLICATION_CREDENTIALS: adcFile,
-    }), process.env.OPENCLAUDE_TEST_WORKSPACE_PROFILE
-      ? { filePath: process.env.OPENCLAUDE_TEST_WORKSPACE_PROFILE } : undefined)
-    const error = await p.applyStartupEnvFromProfile({
-      readGeminiAccessToken: () => {
-        if (process.env.OPENCLAUDE_TEST_CREATE_HOME === '1') {
-          p.saveProfileFile(p.createProfileFile('openai', { OPENAI_MODEL: 'gpt-5.5' }))
-        }
-        return ''
-      },
-    })
-    console.log(JSON.stringify({ error, credentialLoads, flag: process.env.CLAUDE_CODE_USE_GEMINI_VERTEX,
-      file: process.env.GOOGLE_APPLICATION_CREDENTIALS }))
-  `
-  try {
-    const workspace = mkdtempSync(join(temp, 'workspace-'))
-    const results = ['saved', 'shell', 'workspace', 'workspace-race'].map(scenario => {
-      const dir = join(temp, scenario)
-      const env: NodeJS.ProcessEnv = { ...process.env, OPENCLAUDE_CONFIG_DIR: dir,
-        GOOGLE_CLOUD_PROJECT: 'native-project', OPENCLAUDE_TEST_SHELL_ADC: scenario === 'shell' ? '1' : '0',
-        OPENCLAUDE_TEST_GOOGLE_AUTH_ENTRY: import.meta.resolve('google-auth-library'),
-        OPENCLAUDE_TEST_CREATE_HOME: scenario === 'workspace-race' ? '1' : '0',
-        OPENCLAUDE_TEST_PROFILE_ENTRY: new URL('./providerProfile.ts', import.meta.url).href }
-      if (scenario !== 'saved') env.OPENCLAUDE_TEST_WORKSPACE_PROFILE = join(workspace, PROFILE_FILE_NAME)
-      for (const key of Object.keys(env)) {
-        if (key.startsWith('CLAUDE_CODE_USE_') || key.startsWith('CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED') ||
-            key === 'GOOGLE_APPLICATION_CREDENTIALS') delete env[key]
-      }
-      const child = Bun.spawnSync([process.execPath, '--eval',
-        "require('node:fs').mkdirSync(process.env.OPENCLAUDE_CONFIG_DIR, { recursive: true });\n" + source],
-        { cwd: scenario !== 'saved' ? workspace : process.cwd(), env, timeout: 8000 })
-      assert.equal(child.exitCode, 0, child.stderr.toString())
-      return { result: JSON.parse(child.stdout.toString()), expected: join(dir, 'adc.json'), scenario }
-    })
-    for (const { result, expected, scenario } of results) {
-      if (scenario.startsWith('workspace')) {
-        assert.match(result.error ?? '', /workspace.*ADC/i)
-        assert.equal(result.flag, undefined)
-        assert.equal(result.file, undefined)
-        assert.equal(result.credentialLoads, 0)
-        continue
-      }
-      assert.equal(result.error, null)
-      assert.equal(result.flag, '1')
-      assert.equal(result.file, expected)
-      assert.ok(result.credentialLoads > 0)
-    }
-  } finally {
-    rmSync(temp, { recursive: true, force: true })
-  }
 })

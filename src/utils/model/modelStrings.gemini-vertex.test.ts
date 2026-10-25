@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-test.each(['flag', 'profile'] as const)(
+test.each(['flag'] as const)(
   'native Vertex %s initialization preserves defaults and built-in recovery',
   selection => {
     const configDir = mkdtempSync(join(tmpdir(), 'vertex-model-lifecycle-'))
@@ -23,16 +23,7 @@ test.each(['flag', 'profile'] as const)(
         const { getAPIProvider } = await import('./src/utils/model/providers.ts')
         const { getHardcodedTeammateModelFallback } = await import('./src/utils/swarm/teammateModel.ts')
         const { getPrimaryModel } = await import('./src/utils/providerModels.ts')
-        if (process.env.TEST_VERTEX_SELECTION === 'profile') {
-          profiles.addProviderProfile({
-            name: 'Vertex', provider: 'gemini-vertex', model: 'gemini-2.5-flash',
-            apiKey: 'vertex-test-bearer', baseUrl: 'test-project',
-          })
-          // Exercise saved-profile classification rather than the flag shortcut.
-          delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
-        } else {
-          process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
-        }
+        process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
         const provider = getAPIProvider()
         const display = models.renderModelName('gemini-2.5-flash')
         await strings.ensureModelStringsInitialized()
@@ -65,7 +56,7 @@ test.each(['flag', 'profile'] as const)(
         expect(model.length).toBeGreaterThan(0)
       }
       expect(output.native.main).toBe('gemini-2.5-flash')
-      expect(output.native.teammate).toBe(selection === 'profile' ? 'gemini-2.5-flash' : 'gemini-2.5-pro')
+      expect(output.native.teammate).toBe('gemini-2.5-pro')
       expect(output.overriddenTeammate).toBe('gemini-3.5-flash')
       expect(output.restoredProvider).toBe('firstParty')
       expect(output.restoredModel).toBe('claude-sonnet-4-6')

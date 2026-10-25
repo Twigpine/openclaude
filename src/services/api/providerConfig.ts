@@ -12,7 +12,6 @@ import {
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { PROVIDER_SELECTION_FLAGS } from '../../utils/providerSelectionFlags.js'
-import { isGeminiVertexEffectiveProvider } from '../../utils/providerProfiles.js'
 import {
   asTrimmedString,
   parseChatgptAccountId,
@@ -1254,13 +1253,6 @@ export function getAdditionalModelOptionsCacheScope(): string | null {
         flag !== 'CLAUDE_CODE_USE_OPENAI' && isEnvTruthy(process.env[flag]),
     )
     if (!anotherProviderSelected) {
-      // No provider env flag is set, but a saved Gemini Vertex profile still
-      // routes the client to the native Vertex API. Scope it as third-party
-      // (null) so bootstrap/model-option traffic is not treated as first-party
-      // Anthropic — matching getAnthropicClient's saved-profile routing.
-      if (isGeminiVertexEffectiveProvider()) {
-        return null
-      }
       return 'firstParty'
     }
     return null

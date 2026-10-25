@@ -1,37 +1,12 @@
-import { afterEach, describe, expect, spyOn, test } from 'bun:test'
-import * as providerProfilesModule from './providerProfiles.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
+import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   createAssistantMessage,
   createUserMessage,
   normalizeMessagesForAPI,
 } from './messages.js'
 import type { Message } from '../types/message.js'
-
-// normalizeMessagesForAPI sanitizes Vertex tool ids based on the *effective*
-// provider (env flag OR saved active profile) via isGeminiVertexEffectiveProvider.
-// That reads global env/route + config state which other tests in the full suite
-// mutate, so spy on the decision directly to make these assertions hermetic and
-// order-independent. Passing `true` exercises both the env-flag and the
-// saved-profile-only Vertex routes (the helper unifies them).
-//
-// Use spyOn (restored via mockRestore in afterEach), NOT mock.module: restoring
-// a mock.module by re-spreading the `import * as` namespace re-captures the
-// already-mocked live binding, so the "restore" reinstalls the mock and leaks a
-// pinned isGeminiVertexEffectiveProvider into every later test file — which makes
-// detectProvider() mislabel every provider as "Gemini Vertex".
-let vertexEffectiveSpy: ReturnType<typeof spyOn> | undefined
-
-function mockGeminiVertexEffective(isVertex: boolean): void {
-  vertexEffectiveSpy = spyOn(
-    providerProfilesModule,
-    'isGeminiVertexEffectiveProvider',
-  ).mockReturnValue(isVertex)
-}
-
-function restoreGeminiVertexEffective(): void {
-  vertexEffectiveSpy?.mockRestore()
-  vertexEffectiveSpy = undefined
-}
 
 const SIGNED_ID = `toolu_vertex_k9x_3~~sig~~${'S'.repeat(1700)}`
 
@@ -77,10 +52,16 @@ function extractIds(normalized: ReturnType<typeof normalizeMessagesForAPI>): {
 }
 
 describe('normalizeMessagesForAPI Vertex tool_use id sanitation', () => {
-  afterEach(restoreGeminiVertexEffective)
+  let restoreEnv: () => void
+  beforeEach(() => {
+    restoreEnv = snapshotEnv([...PROVIDER_SELECTION_FLAGS, 'OPENAI_MODEL', 'OPENAI_BASE_URL', 'GEMINI_VERTEX_MODEL'], { clear: true })
+  })
+  afterEach(() => restoreEnv())
 
   test('strips smuggled thought signatures when the wire is not Gemini Vertex', () => {
-    mockGeminiVertexEffective(false)
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+    process.env.OPENAI_MODEL = 'gpt-4o'
 
     const { toolUseId, toolResultId } = extractIds(
       normalizeMessagesForAPI(buildHistory()),
@@ -93,10 +74,9 @@ describe('normalizeMessagesForAPI Vertex tool_use id sanitation', () => {
     expect(toolResultId).toBe(toolUseId)
   })
 
-  test('preserves signed ids when Gemini Vertex is the effective provider (env flag or saved profile)', () => {
-    // true covers both routes; isGeminiVertexEffectiveProvider returns true for
-    // the saved-profile-only path even when CLAUDE_CODE_USE_GEMINI_VERTEX is unset.
-    mockGeminiVertexEffective(true)
+  test('preserves signed ids when the wire is Gemini Vertex', () => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
 
     const { toolUseId, toolResultId } = extractIds(
       normalizeMessagesForAPI(buildHistory()),
