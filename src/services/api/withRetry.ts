@@ -899,9 +899,12 @@ function shouldRetry(error: APIError, persistentRetryEnabled: boolean): boolean 
   // transient blip (auth service flap, network hiccup) rather than bad
   // credentials. Bypass x-should-retry:false — the server assumes we'd retry
   // the same bad key, but our key is fine.
+  // A classified provider throttle is not an infrastructure auth failure;
+  // let its normal header and quota checks below decide whether to retry.
   if (
     isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) &&
-    (error.status === 401 || error.status === 403)
+    (error.status === 401 ||
+      (error.status === 403 && openAICategory !== 'rate_limited'))
   ) {
     return true
   }

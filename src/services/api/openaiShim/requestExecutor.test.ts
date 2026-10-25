@@ -884,6 +884,11 @@ test.each([
   { body: 'Rate limit exceeded for this API key', retries: true },
   { body: 'Rate limit exceeded for this OAuth token', retries: true },
   { body: 'Token is invalid; too many requests', retries: false },
+  { body: 'Account disabled; too many requests', retries: false },
+  { body: '{"error":{"code":"account_disabled","message":"Too many requests"}}', retries: false },
+  { body: 'Key is invalid; too many requests', retries: false },
+  { body: 'API key has been permanently disabled; too many requests', retries: false },
+  { body: 'Token has been permanently disabled; too many requests', retries: false },
   { body: 'Rate limit exceeded; API key is invalid', retries: false },
   { body: 'Rate limit exceeded; API key\nis invalid', retries: false },
   { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: true },
@@ -892,8 +897,13 @@ test.each([
   { body: 'Forbidden: too many requests', retries: false },
   { body: 'Quota exceeded; too many requests', retries: false },
   { body: 'Too many requests', retries: false, noRetry: true },
-])('throttle-403 through the shim and retry loop: %j', async ({ body, retries, noRetry }) => {
-  const restoreRetryEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS', 'CLAUDE_CODE_USE_OPENAI'])
+  { body: 'Too many requests', retries: false, noRetry: true, remote: true },
+  { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: false, noRetry: true, remote: true },
+  { body: 'Too many requests', retries: true, remote: true },
+])('throttle-403 through the shim and retry loop: %j', async ({ body, retries, noRetry, remote }) => {
+  const restoreRetryEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS', 'CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_REMOTE'])
+  if (remote) process.env.CLAUDE_CODE_REMOTE = '1'
+  else delete process.env.CLAUDE_CODE_REMOTE
   process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   let attempts = 0
@@ -944,6 +954,11 @@ test.each([
   } else {
     expect(caught).toBeInstanceOf(CannotRetryError)
     expect(countdowns).toEqual([])
+    if (/account|key|token/i.test(body)) {
+      const message = getAssistantMessageFromError((caught as CannotRetryError).originalError, 'gpt-5.5')
+      expect(JSON.stringify(message)).toContain('Authentication failed')
+      expect(JSON.stringify(message)).not.toContain('Provider rate limit reached')
+    }
   }
 })
 
@@ -985,7 +1000,11 @@ test.each([
   expect(JSON.stringify(message)).not.toContain('Authentication failed')
 })
 
-test('throttle-403 cools pooled keys and reuses them after cooldown', async () => {
+test.each([
+  { body: 'Rate limit exceeded for this OAuth token', recoverable: true },
+  { body: 'Account disabled; too many requests', recoverable: false },
+  { body: '{"error":{"code":"account_deactivated","message":"Too many requests"}}', recoverable: false },
+])('throttle-403 credential recovery follows fault precedence: %j', async ({ body, recoverable }) => {
   const restorePoolEnv = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'OPENAI_API_KEYS', 'OPENAI_API_KEY'])
   try {
     jest.useFakeTimers()
@@ -997,7 +1016,7 @@ test('throttle-403 cools pooled keys and reuses them after cooldown', async () =
       const headers = new Headers(init?.headers)
       authorizations.push(headers.get('authorization'))
       return authorizations.length === 1
-        ? new Response('Rate limit exceeded for this OAuth token', { status: 403 })
+        ? new Response(body, { status: 403 })
         : makeChatCompletionResponse('gpt-5.5')
     }))
     const client = createOpenAIShimClient({}) as Anthropic
@@ -1010,7 +1029,7 @@ test('throttle-403 cools pooled keys and reuses them after cooldown', async () =
     jest.advanceTimersByTime(30_001)
     await request()
     expect(authorizations).toEqual([
-      'Bearer key-a', 'Bearer key-b', 'Bearer key-b', 'Bearer key-a',
+      'Bearer key-a', 'Bearer key-b', 'Bearer key-b', recoverable ? 'Bearer key-a' : 'Bearer key-b',
     ])
   } finally {
     restorePoolEnv()

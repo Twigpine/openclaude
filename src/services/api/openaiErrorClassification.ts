@@ -418,10 +418,12 @@ function isExplicitThrottleMessage(body: string): boolean {
   // evidence, with auth/quota signals taking precedence even in mixed bodies.
   // Empty bodies and generic "try again" / "busy" responses are ambiguous.
   if (
-    /unauthori[sz]ed|unauthenticated|not[ _-]auth|forbidden|access[ _-]denied|permission|credential|denied|suspended|blocked|banned|insufficient[ _-]funds|invalid.{0,20}key|revoked|expired|not[ _-]allowed|quota|billing|credit|payment|allotment/i.test(body) ||
+    /unauthori[sz]ed|unauthenticated|not[ _-]auth|forbidden|access[ _-]denied|permission|credential|denied|suspended|blocked|banned|insufficient[ _-]funds|revoked|expired|not[ _-]allowed|quota|billing|credit|payment|allotment/i.test(body) ||
     /auth(?:entication|ori[sz]ation)?[\s\S]{0,20}(?:error|fail|invalid|required|missing)|(?:invalid|failed|missing|required)[\s\S]{0,20}auth/i.test(body) ||
-    // Rate limits can name valid API keys or OAuth tokens. Only faults veto them.
-    /(?:invalid|missing|incorrect|disabled|unusable)[\s\S]{0,20}(?:api[ _-]?key|token)|(?:api[ _-]?key|token)[\s\S]{0,20}(?:invalid|missing|incorrect|disabled|unusable|required|not[ _-](?:valid|found|provided|configured|set))/i.test(body)
+    // Rate limits can name valid accounts, keys or OAuth tokens. Match faults
+    // in either word order within a clause, including line wraps and codes;
+    // an arbitrary character limit can miss "has been permanently disabled".
+    /(?:\b|_)(?:invalid|missing|incorrect|disabled|deactivated|unusable)[^.;!?]*(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:\b|_)|(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)[^.;!?]*(?:invalid|missing|incorrect|disabled|deactivated|unusable|required|not[ _-](?:valid|found|provided|configured|set))(?:\b|_)/i.test(body)
   ) {
     return false
   }
