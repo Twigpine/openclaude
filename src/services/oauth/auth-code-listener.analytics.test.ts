@@ -4,6 +4,10 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 
+const realLog = {
+  ...await import(`../../utils/log.js?oauthAnalyticsReal=${Date.now()}-${Math.random()}`),
+} as typeof import('../../utils/log.js')
+
 beforeEach(async () => {
   await acquireSharedMutationLock('services/oauth/auth-code-listener.analytics.test.ts')
 })
@@ -11,6 +15,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('../../utils/log.js', () => realLog)
   } finally {
     releaseSharedMutationLock()
   }

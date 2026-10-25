@@ -39,7 +39,7 @@ import {
 } from '../services/api/providerConfig.js'
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { getGlobalClaudeFile } from './env.js'
-import { isBareMode } from './envUtils.js'
+import { isBareMode, isEnvTruthy as isRuntimeFlagTruthy } from './envUtils.js'
 import {
   type GeminiResolvedCredential,
   getGeminiVertexEndpointError,
@@ -254,6 +254,8 @@ function getRuntimeValidationTarget(
   const validationTargets = getValidationTargets()
 
   const enabledTarget = validationTargets.find(target => {
+    // Native Vertex is handled by its credential/project branch before this search.
+    if (target.descriptor.id === 'gemini-vertex') return false
     const routing = getValidationRouting(target)
     if (!routing?.enablementEnvVar || !isEnvTruthy(env[routing.enablementEnvVar])) {
       return false
@@ -602,7 +604,7 @@ export async function getProviderValidationError(
     hasStoredXaiOAuthCredentials?: () => Promise<boolean>
   },
 ): Promise<string | null> {
-  if (isEnvTruthy(env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+  if (isRuntimeFlagTruthy(env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
     // Resolve the credential first, mirroring getAnthropicClient: ADC can supply
     // both the access token and the project id (credential.projectId), so a
     // missing project env var is only fatal once we know ADC didn't provide one.

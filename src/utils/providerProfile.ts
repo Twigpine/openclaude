@@ -2985,6 +2985,7 @@ export async function applySavedProfileToCurrentSession(options: {
   delete baseEnv.CLAUDE_CODE_USE_OPENAI
   delete baseEnv.CLAUDE_CODE_USE_GITHUB
   delete baseEnv.CLAUDE_CODE_USE_GEMINI
+  delete baseEnv.CLAUDE_CODE_USE_GEMINI_VERTEX
   delete baseEnv.CLAUDE_CODE_USE_MISTRAL
   delete baseEnv.CLAUDE_CODE_USE_BEDROCK
   delete baseEnv.CLAUDE_CODE_USE_VERTEX

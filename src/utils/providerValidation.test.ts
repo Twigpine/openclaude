@@ -110,6 +110,41 @@ test('accepts GEMINI_ACCESS_TOKEN as valid Gemini auth', async () => {
   await expect(getProviderValidationError(process.env)).resolves.toBeNull()
 })
 
+test('disabled native Vertex flags skip credential discovery while another provider validates', async () => {
+  for (const flag of ['off', 'unexpected', '0', 'false', 'no', '']) {
+    let credentialLoads = 0
+    const error = await getProviderValidationError({
+      CLAUDE_CODE_USE_GEMINI_VERTEX: flag,
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'http://localhost:11434/v1',
+      OPENAI_MODEL: 'llama3.1:8b',
+    }, {
+      resolveGeminiCredential: async () => {
+        credentialLoads++
+        return { kind: 'none' }
+      },
+    })
+    expect(error).toBeNull()
+    expect(credentialLoads).toBe(0)
+  }
+})
+
+test('native Vertex validation accepts the runtime truthy flag spellings', async () => {
+  for (const flag of ['1', 'true', ' YES ', 'on']) {
+    let credentialLoads = 0
+    const error = await getProviderValidationError({
+      CLAUDE_CODE_USE_GEMINI_VERTEX: flag,
+    }, {
+      resolveGeminiCredential: async () => {
+        credentialLoads++
+        return { kind: 'none' }
+      },
+    })
+    expect(error).toContain('Gemini Vertex authentication')
+    expect(credentialLoads).toBe(1)
+  }
+})
+
 test('accepts Gemini Vertex project env aliases without requiring API-key Gemini auth', async () => {
   const projectEnvVars = [
     'GEMINI_VERTEX_PROJECT',

@@ -2835,6 +2835,29 @@ test('applySavedProfileToCurrentSession can switch away from GitHub provider env
   assert.equal(Object.hasOwn(processEnv, 'OPENAI_API_KEY'), false)
 })
 
+test('applying another saved profile replaces an active native Vertex selection', async () => {
+  const { applySavedProfileToCurrentSession } = await importFreshProviderProfileModule()
+  for (const target of ['openai', 'mistral'] as const) {
+    const processEnv: NodeJS.ProcessEnv = {
+      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+      GEMINI_VERTEX_PROJECT: 'previous-vertex-project',
+      GEMINI_VERTEX_MODEL: 'gemini-2.5-flash',
+      GEMINI_ACCESS_TOKEN: 'previous-vertex-token',
+    }
+    const targetEnv = target === 'openai'
+      ? { OPENAI_BASE_URL: 'http://localhost:11434/v1', OPENAI_MODEL: 'llama3.1:8b' }
+      : { MISTRAL_API_KEY: 'mistral-test-key', MISTRAL_MODEL: 'devstral-latest' }
+    const error = await applySavedProfileToCurrentSession({
+      profileFile: profile(target, targetEnv),
+      processEnv,
+    })
+    assert.equal(error, null)
+    assert.equal(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX, undefined)
+    assert.equal(processEnv[target === 'openai' ? 'CLAUDE_CODE_USE_OPENAI' : 'CLAUDE_CODE_USE_MISTRAL'], '1')
+    assert.equal(processEnv[target === 'openai' ? 'OPENAI_MODEL' : 'MISTRAL_MODEL'], targetEnv[target === 'openai' ? 'OPENAI_MODEL' : 'MISTRAL_MODEL'])
+  }
+})
+
 test('applySavedProfileToCurrentSession replaces empty active OpenAI key for Codex OAuth', async () => {
   const { applySavedProfileToCurrentSession } = await importFreshProviderProfileModule()
   const processEnv: NodeJS.ProcessEnv = {
