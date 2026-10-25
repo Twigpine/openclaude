@@ -16,6 +16,7 @@
 
 const { spawn } = require('child_process');
 const vscode = require('vscode');
+const { buildWindowsCommand } = require('./windowsArguments');
 const { parseStdoutLine, serializeStdinMessage, buildUserMessage, buildControlResponse } = require('./protocol');
 
 class ProcessManager {
@@ -87,15 +88,16 @@ class ProcessManager {
     const isWin = process.platform === 'win32';
 
     if (isWin) {
-      // On Windows, npm global installs create .cmd shims that spawn()
-      // cannot find without a shell.  Build one command string so the
-      // deprecation warning about unsanitised args does not fire.
-      const cmdLine = [this._command, ...args].join(' ');
-      this._process = spawn(cmdLine, [], {
+      // npm installs use .cmd shims. Keep argument quotes balanced through
+      // both cmd.exe and the shim's %* forwarding; disable delayed expansion.
+      this._process = spawn(process.env.ComSpec || 'cmd.exe', [
+        '/d', '/e:on', '/v:off', '/s', '/c',
+        buildWindowsCommand(this._command, args),
+      ], {
         cwd: this._cwd,
         env: spawnEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: true,
+        windowsVerbatimArguments: true,
         windowsHide: true,
       });
     } else {

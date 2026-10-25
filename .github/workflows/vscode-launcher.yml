@@ -1,0 +1,29 @@
+name: VS Code Windows launcher
+
+on:
+  pull_request:
+    paths:
+      - 'vscode-extension/openclaude-vscode/**'
+      - '.github/workflows/vscode-launcher.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'vscode-extension/openclaude-vscode/**'
+      - '.github/workflows/vscode-launcher.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-launcher:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Exercise Windows executable and npm batch launcher routes
+        run: node --test vscode-extension/openclaude-vscode/src/chat/processManager.test.js

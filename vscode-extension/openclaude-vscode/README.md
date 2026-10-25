@@ -63,6 +63,14 @@ If you use `.openclaude-profile.json` for the same workspace, leave Azure inject
 
 `openclaude.useOpenAIShim` only injects `CLAUDE_CODE_USE_OPENAI=1` when Azure injection did not already set it. It does not configure endpoints or keys by itself.
 
+On Windows, chat launches through `cmd.exe` to support npm's `.cmd` shims.
+The configured launch command is trusted shell text; quote executable paths that
+contain spaces. Model names, resume targets, and additional CLI arguments are
+passed as literal arguments. CR/LF in those arguments is rejected because
+`cmd.exe` cannot represent it safely. Custom batch wrappers must preserve quoted
+arguments (as npm's `%*` forwarding does); wrappers that re-evaluate arguments
+with `CALL` or delayed expansion are not supported by this quoting contract.
+
 ## Notes on Status Detection
 
 - Provider status prefers the real workspace `.openclaude-profile.json` file when present.
