@@ -9,6 +9,7 @@ import { hasNodeOption } from './envUtils.js'
 // Required-value options accepted by the supported Node 24/26 runtimes.
 const testValueOptions = [
   ['--test-isolation', 'none'],
+  ['--experimental-test-isolation', 'none'],
   ['--test-global-setup', './setup.js'],
   ['--test-rerun-failures', './failures.json'],
 ] as const
@@ -252,7 +253,7 @@ describe('hasNodeOption', () => {
     }
   })
 
-  test('supported test options reject missing, empty and flag-like values', () => {
+  test('supported test options reject missing, empty, flag-like and negated values', () => {
     for (const [option] of testValueOptions) {
       for (const flag of ['--use-system-ca', '--use-openssl-ca']) {
         for (const nodeOptions of [
@@ -260,6 +261,8 @@ describe('hasNodeOption', () => {
           `${flag}=1 ${option}=`,
           `${option}= ${flag}=1`,
           `${option} ${flag}=1`,
+          `${flag}=1 --no-${option.slice(2)}`,
+          `--no-${option.slice(2)}=none ${flag}=1`,
         ]) {
           process.env.NODE_OPTIONS = nodeOptions
           expect(hasNodeOption(flag)).toBe(false)
@@ -496,10 +499,14 @@ describe('hasNodeOption CA source selection', () => {
     process.env.NODE_EXTRA_CA_CERTS = join(extraCertsDir!, 'extra.pem')
     for (const [option, value] of testValueOptions) {
       for (const flag of ['--use-system-ca', '--use-openssl-ca']) {
-        expect(getEffectiveCACerts(`${option} ${value} ${flag}`)).toEqual([
-          SYSTEM_SENTINEL,
-          EXTRA_CA_SENTINEL,
-        ])
+        for (const spelling of [`${option} ${value}`, `${option}=${value}`]) {
+          for (const nodeOptions of [`${spelling} ${flag}`, `${flag} ${spelling}`]) {
+            expect(getEffectiveCACerts(nodeOptions)).toEqual([
+              SYSTEM_SENTINEL,
+              EXTRA_CA_SENTINEL,
+            ])
+          }
+        }
         expect(getEffectiveCACerts(`${flag}=1 ${option}=`)).toEqual([
           ...tls.rootCertificates,
           EXTRA_CA_SENTINEL,

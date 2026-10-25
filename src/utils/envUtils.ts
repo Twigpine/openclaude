@@ -217,6 +217,7 @@ const NODE_OPTION_ALIASES: ReadonlyMap<string, readonly string[]> = new Map([
   ['--debug-port', ['--inspect-port']],
   ['--loader', ['--experimental-loader']],
   ['--report-directory', ['--report-dir']],
+  ['--experimental-test-isolation', ['--test-isolation']],
 ])
 
 /**
