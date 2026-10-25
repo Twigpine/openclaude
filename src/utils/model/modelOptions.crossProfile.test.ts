@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test'
 import { mock } from 'bun:test'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
 import {
@@ -554,17 +555,56 @@ test.each(['llama3.2', 'minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-
   }
 })
 
-test('getModelOptions appends scoped Ollama discoveries when the prefetch cache is empty', async () => {
+test.each([
+  ['ollama', 'http://localhost:11434/v1'],
+  ['lmstudio', 'http://localhost:1234/v1'],
+  ['atomic-chat', 'http://127.0.0.1:1337/v1'],
+  ['custom', 'http://localhost:8080/v1'],
+])('getModelOptions appends scoped %s discoveries when the prefetch cache is empty', async (provider, baseUrl) => {
+  const restoreEnv = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_API_BASE', 'OPENAI_MODEL', 'OLLAMA_BASE_URL'])
   const { getGlobalConfig, saveGlobalConfig } = await import('../config.js')
   const previousOptions = getGlobalConfig().additionalModelOptionsCache
   const previousScope = getGlobalConfig().additionalModelOptionsCacheScope
-  const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud']
-  activeOllamaOverride = { cachedModels: [] }
-  activeCacheScopeOverride = 'openai:http://localhost:11434/v1'
+  const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m']
+  if (provider === 'ollama') activeOllamaOverride = { cachedModels: [] }
+  activeCacheScopeOverride = `openai:${baseUrl}:fixture`
+  try {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = baseUrl
+    process.env.OPENAI_MODEL = 'qwen3:latest'
+    delete process.env.OPENAI_API_BASE
+    delete process.env.OLLAMA_BASE_URL
+    saveGlobalConfig(current => ({
+      ...current,
+      additionalModelOptionsCache: models.map(value => ({ value, label: value, description: `Discovered from ${provider}` })),
+      additionalModelOptionsCacheScope: activeCacheScopeOverride!,
+    }))
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => undefined,
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    for (const model of models) expect(values).toContain(model)
+  } finally {
+    saveGlobalConfig(current => ({
+      ...current,
+      additionalModelOptionsCache: previousOptions,
+      additionalModelOptionsCacheScope: previousScope,
+    }))
+    restoreEnv()
+  }
+})
+
+test.each(['firstParty', 'openai:http://localhost:11434/v1:fixture'])('getModelOptions ignores malformed bootstrap values in %s scope', async scope => {
+  const { getGlobalConfig, saveGlobalConfig } = await import('../config.js')
+  const previousOptions = getGlobalConfig().additionalModelOptionsCache
+  const previousScope = getGlobalConfig().additionalModelOptionsCacheScope
+  activeCacheScopeOverride = scope
+  activeApiProviderOverride = scope === 'firstParty' ? 'firstParty' : 'openai'
   saveGlobalConfig(current => ({
     ...current,
-    additionalModelOptionsCache: models.map(value => ({ value, label: value, description: 'Discovered from Ollama' })),
-    additionalModelOptionsCacheScope: activeCacheScopeOverride!,
+    additionalModelOptionsCacheScope: scope,
+    additionalModelOptionsCache: JSON.parse('[{},{"value":42},{"value":false},{"value":{}},{"value":[]},{"value":null},{"value":"valid-cache-control","label":"control","description":"control"}]'),
   }))
   try {
     const { getModelOptions } = await importFreshModelOptionsModule({
@@ -572,7 +612,9 @@ test('getModelOptions appends scoped Ollama discoveries when the prefetch cache 
       getActiveProviderProfile: () => undefined,
     })
     const values = getModelOptions(false).map(option => option.value)
-    for (const model of models) expect(values).toContain(model)
+    expect(values).toContain(null)
+    expect(values).toContain('valid-cache-control')
+    expect(values.every(value => value === null || typeof value === 'string')).toBe(true)
   } finally {
     saveGlobalConfig(current => ({
       ...current,

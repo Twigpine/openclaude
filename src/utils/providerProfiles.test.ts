@@ -6180,10 +6180,17 @@ describe('getProfileModelOptions', () => {
 })
 
 describe('setActiveProviderProfile model cache', () => {
-  test.each(['http://localhost:11434/v1', 'https://ollama-proxy.example/v1'])('activation preserves advertised Ollama models at %s', async baseUrl => {
+  test.each([
+    ['ollama', 'http://localhost:11434/v1'],
+    ['ollama', 'https://ollama-proxy.example/v1'],
+    ['lmstudio', 'http://localhost:1234/v1'],
+    ['lmstudio', 'https://lmstudio-proxy.example/v1'],
+    ['atomic-chat', 'http://127.0.0.1:1337/v1'],
+    ['custom', 'http://localhost:8080/v1'],
+  ] as const)('activation preserves advertised local models for %s at %s', async (provider, baseUrl) => {
     const { setActiveProviderProfile, getActiveOpenAIModelOptionsCache } = await importFreshProviderProfileModules()
-    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud']
-    const profile = buildProfile({ id: 'ollama_models', provider: 'ollama', baseUrl, model: 'qwen3:latest' })
+    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m']
+    const profile = buildProfile({ id: 'local_models', provider, baseUrl, model: 'qwen3:latest' })
     mockConfigState = {
       ...createMockConfigState(),
       providerProfiles: [profile],

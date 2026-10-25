@@ -170,7 +170,7 @@ export const providers: Provider[] = [
     group: 'gateways',
     setup: '/provider or env vars',
     envVars: ['OPENCODE_API_KEY'],
-    notes: 'Pay-as-you-go gateway (Zen, 48 models) and a $10/mo subscription for open models (Go); one key for both.',
+    notes: 'Pay-as-you-go gateway (Zen) and a $10/mo subscription for open models (Go); one key for both.',
   },
   {
     id: 'clinepass',
@@ -292,7 +292,7 @@ export const providers: Provider[] = [
     group: 'vendors',
     setup: '/provider or env vars',
     envVars: ['MINIMAX_API_KEY'],
-    notes: 'Anthropic-compatible MiniMax endpoint; defaults to MiniMax-M3.',
+    notes: 'Anthropic-compatible MiniMax endpoint; defaults to MiniMax-M3.1-Flash.',
   },
   {
     id: 'longcat',

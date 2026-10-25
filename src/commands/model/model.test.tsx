@@ -3367,7 +3367,11 @@ test('/model refresh treats empty legacy OpenAI-compatible discovery as failed n
   )
 })
 
-test('Ollama picker retains advertised MiniMax models before and after refresh', async () => {
+test.each([
+  ['ollama', 'http://localhost:11434/v1'],
+  ['lmstudio', 'http://localhost:1234/v1'],
+  ['atomic-chat', 'http://127.0.0.1:1337/v1'],
+])('%s picker retains advertised MiniMax models before and after refresh', async (provider, baseUrl) => {
   const restoreEnv = snapshotEnv([
     'CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_API_BASE',
     'OPENAI_API_KEY', 'OPENAI_MODEL', 'CLAUDE_CODE_USE_GEMINI',
@@ -3378,8 +3382,8 @@ test('Ollama picker retains advertised MiniMax models before and after refresh',
   let rendered: Awaited<ReturnType<typeof renderModelCommandWithCapturedPicker>> | undefined
   try {
     const activeProfile = {
-      id: 'ollama-profile', name: 'Ollama', provider: 'ollama',
-      baseUrl: 'http://localhost:11434/v1', model: 'qwen3:latest', apiKey: '',
+      id: 'local-profile', name: provider, provider,
+      baseUrl, model: 'qwen3:latest', apiKey: '',
     }
     process.env.CLAUDE_CODE_USE_OPENAI = '1'
     process.env.OPENAI_BASE_URL = activeProfile.baseUrl
@@ -3387,13 +3391,13 @@ test('Ollama picker retains advertised MiniMax models before and after refresh',
     process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
     process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
     mockProviderProfiles({ getActiveProviderProfile: () => activeProfile })
-    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud']
+    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m']
     mockDescriptorDiscovery({
-      routeId: 'ollama',
+      routeId: provider,
       cachedModels: [{ id: models[0]!, apiName: models[0]! }],
       discoveredModels: models.map(id => ({ id, apiName: id })),
     })
-    rendered = await renderModelCommandWithCapturedPicker('ollama-minimax-discovery')
+    rendered = await renderModelCommandWithCapturedPicker(`${provider}-minimax-discovery`)
     const pickerValues = () => (rendered!.getCapturedProps().optionsOverride as ModelOption[]).map(option => option.value)
     expect(pickerValues()).toContain(models[0])
     expect(pickerValues()).not.toContain(models[1])

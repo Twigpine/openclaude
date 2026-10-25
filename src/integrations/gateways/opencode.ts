@@ -113,7 +113,7 @@ export default defineGateway({
   preset: {
     id: 'opencode',
     vendorId: 'openai',
-    description: 'OpenCode Zen - pay-as-you-go AI gateway (50 models)',
+    description: 'OpenCode Zen - pay-as-you-go AI gateway',
     apiKeyEnvVars: ['OPENCODE_API_KEY'],
     modelEnvVars: ['OPENAI_MODEL'],
   },

@@ -366,7 +366,7 @@ Advanced and source-build guides:
 | Codex OAuth | `/provider` | Opens ChatGPT sign-in in your browser and stores Codex credentials securely |
 | Codex | `/provider` | Uses existing Codex CLI auth, OpenClaude secure storage, or env credentials |
 | Twigpine Opengateway | Startup default, `/provider`, or env vars | Smart gateway at `https://opengateway.gitlawb.com/v1`; requires an API key from https://gitlawb.com/opengateway/keys and routes Xiaomi MiMo and other partner models by `OPENAI_MODEL` |
-| OpenCode Zen | `/provider` or env vars | Pay-as-you-go AI gateway (48 models); uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/v1`; shared key with OpenCode Go |
+| OpenCode Zen | `/provider` or env vars | Pay-as-you-go AI gateway; uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/v1`; shared key with OpenCode Go |
 | OpenCode Go | `/provider` or env vars | $10/mo subscription for open models (13 models); uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/go/v1`; shared key with OpenCode Zen |
 | Xiaomi MiMo | `/provider` or env vars | OpenAI-compatible API at `https://mimo.mi.com`; uses `MIMO_API_KEY` and defaults to `mimo-v2.5-pro` |
 | NEAR AI | `/provider` or env vars | Unified gateway (Claude, GPT, Gemini + TEE open models); uses `NEARAI_API_KEY` at `https://cloud-api.near.ai/v1` |

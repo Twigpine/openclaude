@@ -256,8 +256,8 @@ export OPENAI_MODEL=gpt-5.4
 openclaude
 ```
 
-OpenCode Zen is a pay-as-you-go AI gateway with 48 models (GPT, Claude, Gemini,
-Qwen, MiniMax, GLM, Kimi, Grok, Big Pickle, DeepSeek, Nemotron). Uses the same
+OpenCode Zen is a pay-as-you-go AI gateway with models including GPT, Claude, Gemini,
+Qwen, MiniMax, GLM, Kimi, Grok, Big Pickle, DeepSeek, and Nemotron. Uses the same
 `OPENCODE_API_KEY` as OpenCode Go. Get your key from https://opencode.ai.
 
 ### OpenCode Go (subscription)

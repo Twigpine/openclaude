@@ -8,6 +8,7 @@ import {
 } from '../../integrations/routeMetadata.js'
 import {
   getAdditionalModelOptionsCacheScope,
+  isLocalProviderUrl,
   resolveProviderRequest,
 } from '../../services/api/providerConfig.js'
 import {
@@ -1083,16 +1084,20 @@ export function getModelOptions(fastMode = false): ModelOption[] {
   // Most models need no retirement decision. Resolve the route only for a
   // filtered MiniMax name, and share that metadata lookup across this build.
   let suggestionRouteId: string | null | undefined
+  let suggestionUsesLocalEndpoint = false
   const isSuggestedModel = (model: ModelSetting): boolean => {
     if (isCurrentMiniMaxModelOption(model)) return true
     if (suggestionRouteId === undefined) {
-      suggestionRouteId = getAPIProvider() === 'openai' && isOllamaProvider()
+      const provider = getAPIProvider()
+      suggestionRouteId = provider === 'openai' && isOllamaProvider()
         ? 'ollama'
         : activeProfile
           ? resolveProfileCapabilityRouteId(activeProfile.provider, activeProfile.baseUrl)
           : getActiveOpenAIRouteId()
+      suggestionUsesLocalEndpoint = provider === 'openai' &&
+        isLocalProviderUrl(resolveProviderRequest().baseUrl)
     }
-    return isCurrentMiniMaxModelOption(model, suggestionRouteId)
+    return isCurrentMiniMaxModelOption(model, suggestionRouteId, suggestionUsesLocalEndpoint)
   }
   const options = getModelOptionsBase(fastMode).filter(option =>
     option.switchToProfileId ||

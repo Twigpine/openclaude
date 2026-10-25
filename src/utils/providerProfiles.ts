@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto'
 import {
   getAdditionalModelOptionsCacheScope,
+  isLocalProviderUrl,
   isCodexAlias,
   isCodexBaseUrl,
   isCodexEligibleGpt5Model,
@@ -1788,11 +1789,12 @@ export function getProfileModelOptions(
 ): ModelOption[] {
   const configuredOptions = getConfiguredProfileModelOptions(profile)
   const routeId = resolveProfileCapabilityRouteId(profile.provider, profile.baseUrl)
+  const localEndpoint = isLocalProviderUrl(profile.baseUrl)
   return mergeModelOptionsByValue(
     configuredOptions,
     getModelCacheByProfile(profile.id, config).filter(option =>
       typeof option.value === 'string' &&
-      isCurrentMiniMaxModelOption(option.value, routeId),
+      isCurrentMiniMaxModelOption(option.value, routeId, localEndpoint),
     ),
   )
 }
