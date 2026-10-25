@@ -624,3 +624,55 @@ test('Gemini Vertex client propagates HTTP errors', async () => {
     messages: [{ role: 'user', content: 'Salut' }],
   })).rejects.toThrow('Gemini Vertex request failed: 403 permission denied')
 })
+
+test('native wire preserves direct media and FileRead images without mixing function responses', async () => {
+  const { FileReadTool } = await import('../../tools/FileReadTool/FileReadTool.js')
+  const image = { type: 'image' as const, source: {
+    type: 'base64' as const, media_type: 'image/png' as const, data: 'cG5n',
+  } }
+  const pdf = { type: 'document' as const, source: {
+    type: 'base64' as const, media_type: 'application/pdf' as const, data: 'cGRm',
+  } }
+  const result = FileReadTool.mapToolResultToToolResultBlockParam({
+    type: 'image', file: { base64: image.source.data, type: image.source.media_type, originalSize: 3 },
+  }, 'read-image')
+  let sent: Record<string, unknown> | undefined
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => 'token',
+    fetch: async (_url, init) => {
+      sent = JSON.parse(String(init?.body))
+      return createJsonVertexResponse('seen')
+    },
+  })
+  await client.messages.create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [
+      { role: 'user', content: [image] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'read-image', name: 'Read', input: {} }] },
+      { role: 'user', content: [result] },
+      { role: 'user', content: [pdf] },
+    ],
+  })
+  expect(sent?.contents).toEqual([
+    { role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: 'cG5n' } }] },
+    { role: 'model', parts: [{ functionCall: { name: 'Read', args: {} } }] },
+    { role: 'user', parts: [{ functionResponse: { name: 'Read', response: { result: '' } } }] },
+    { role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: 'cG5n' } }] },
+    { role: 'user', parts: [{ inlineData: { mimeType: 'application/pdf', data: 'cGRm' } }] },
+  ])
+})
+
+test('native wire rejects unsupported URL media before sending instead of losing it', async () => {
+  let requests = 0
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => 'token',
+    fetch: async () => { requests++; return createJsonVertexResponse('unexpected') },
+  })
+  await expect(client.messages.create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [{
+      role: 'user', content: [{ type: 'image', source: { type: 'url', url: 'https://example.invalid/secret' } }],
+    }],
+  })).rejects.toThrow(/base64/)
+  expect(requests).toBe(0)
+})

@@ -7187,3 +7187,11 @@ describe('getAdditionalModelOptionsCacheScope — saved-profile Gemini Vertex', 
     expect(getAdditionalModelOptionsCacheScope()).toBe('firstParty')
   })
 })
+
+test('selected Vertex project survives shaping instead of falling back to an ambient project', async () => {
+  const { applyProviderProfileToProcessEnv } = await importFreshProviderProfileModules()
+  process.env.GOOGLE_CLOUD_PROJECT = 'ambient-project'
+  applyProviderProfileToProcessEnv(buildGeminiVertexProfile({ baseUrl: 'sk-openclaude' }))
+  expect(process.env.GEMINI_VERTEX_PROJECT).toBe('sk-openclaude')
+  expect(process.env.GOOGLE_CLOUD_PROJECT).toBe('ambient-project')
+})

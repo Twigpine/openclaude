@@ -217,12 +217,14 @@ function normalizeAccessToken(
 async function createDefaultGoogleAuth(
   optionalRuntimeImporter: typeof importOptionalRuntimeModule =
     importOptionalRuntimeModule,
+  credentialFile?: string,
 ): Promise<GoogleAuthLike> {
   const { GoogleAuth } = await optionalRuntimeImporter<
     typeof import('google-auth-library')
   >('google-auth-library', 'Gemini Application Default Credentials')
   return new GoogleAuth({
     scopes: [GEMINI_ADC_SCOPE],
+    ...(credentialFile ? { keyFilename: credentialFile } : {}),
   }) as GoogleAuthLike
 }
 
@@ -237,7 +239,14 @@ async function resolveGeminiAdcCredentialUncached(
   try {
     const createGoogleAuth =
       deps.createGoogleAuth ??
-      (() => createDefaultGoogleAuth(deps.importOptionalRuntimeModule))
+      (() => createDefaultGoogleAuth(
+        deps.importOptionalRuntimeModule,
+        // Native startup validates a prospective env before applying it.
+        // Direct Gemini retains its existing ambient/file-presence policy.
+        deps.allowAmbientAdc
+          ? sanitizeCredential(env.GOOGLE_APPLICATION_CREDENTIALS)
+          : undefined,
+      ))
     const auth = await createGoogleAuth()
     const client = await auth.getClient()
     const accessToken = normalizeAccessToken(await client.getAccessToken())

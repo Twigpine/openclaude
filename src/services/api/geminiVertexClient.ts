@@ -25,6 +25,7 @@ type GeminiVertexFunctionResponsePart = {
 }
 type GeminiVertexPart =
   | { text: string }
+  | { inlineData: { mimeType: string; data: string } }
   | GeminiVertexFunctionCallPart
   | GeminiVertexFunctionResponsePart
 type GeminiVertexContent = { role: 'user' | 'model'; parts: GeminiVertexPart[] }
@@ -358,11 +359,34 @@ function safeJsonParse(value: unknown): Record<string, unknown> {
   return {}
 }
 
-function stringifyToolResultContent(content: unknown): string {
+function toGeminiMediaPart(block: unknown): GeminiVertexPart | undefined {
+  if (!block || typeof block !== 'object') return undefined
+  const { type, source } = block as {
+    type?: string
+    source?: { type?: string; media_type?: string; data?: string }
+  }
+  if (type !== 'image' && type !== 'document') return undefined
+  if (
+    source?.type !== 'base64' || !source.data ||
+    !(type === 'image' ? source.media_type?.startsWith('image/') : source.media_type === 'application/pdf')
+  ) {
+    // Never return a successful answer to an attachment the model did not see.
+    // Do not fetch arbitrary URLs or include their potentially secret text.
+    throw new Error('Gemini Vertex requires base64 images or PDF documents; attach the file as base64 instead of an unsupported media source.')
+  }
+  return { inlineData: { mimeType: source.media_type!, data: source.data } }
+}
+
+function stringifyToolResultContent(content: unknown, mediaParts: GeminiVertexPart[]): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
     return content
       .map(block => {
+        const media = toGeminiMediaPart(block)
+        if (media) {
+          mediaParts.push(media)
+          return ''
+        }
         if (block && typeof block === 'object' && 'text' in block) {
           return String((block as { text?: unknown }).text ?? '')
         }
@@ -391,8 +415,8 @@ function stringifyToolResultContent(content: unknown): string {
 //     so the subsequent tool_result can be wired back to the right function)
 //   - user tool_result blocks → user functionResponse parts, looking up the
 //     function name from the most recent tool_use with the same id
-// Drops blocks we can't translate (e.g. images) instead of failing the whole
-// request — Vertex will respond from whatever it received.
+//   - direct and nested tool-result images/PDFs → inlineData parts
+// Unsupported media sources fail before sending, rather than losing content.
 function toGeminiContents(
   messages: MessageCreateParamsBase['messages'],
 ): GeminiVertexContent[] {
@@ -416,6 +440,7 @@ function toGeminiContents(
       if (message.content) otherParts.push({ text: message.content })
     } else {
       for (const block of message.content) {
+        const media = toGeminiMediaPart(block)
         const b = block as {
           type?: string
           text?: string
@@ -425,7 +450,9 @@ function toGeminiContents(
           tool_use_id?: string
           content?: unknown
         }
-        if (b.type === 'text' && typeof b.text === 'string' && b.text) {
+        if (media) {
+          otherParts.push(media)
+        } else if (b.type === 'text' && typeof b.text === 'string' && b.text) {
           otherParts.push({ text: b.text })
         } else if (b.type === 'tool_use' && b.name && b.id) {
           toolUseIdToName.set(b.id, b.name)
@@ -445,7 +472,7 @@ function toGeminiContents(
           responseParts.push({
             functionResponse: {
               name,
-              response: { result: stringifyToolResultContent(b.content) },
+              response: { result: stringifyToolResultContent(b.content, otherParts) },
             },
           })
         }

@@ -22,6 +22,7 @@ import {
   DEFAULT_GEMINI_VERTEX_MODEL,
   geminiVertexAdcWillResolveProject,
   getGeminiVertexLocation,
+  getGeminiVertexProjectId,
   resolveGeminiVertexAuthMode,
 } from './geminiAuth.js'
 import { getOllamaChatBaseUrl } from './providerDiscovery.js'
@@ -502,9 +503,9 @@ export function buildGeminiVertexProfileEnv(options: {
   processEnv?: NodeJS.ProcessEnv
 }): ProfileEnv {
   const processEnv = options.processEnv ?? process.env
-  const project = sanitizeProviderConfigValue(
-    options.project ?? processEnv.GEMINI_VERTEX_PROJECT,
-  )
+  // Project IDs are routing identities, not display values: valid IDs can
+  // begin with "sk-" and must not pass through the secret-shape heuristic.
+  const project = (options.project ?? processEnv.GEMINI_VERTEX_PROJECT)?.trim() || undefined
   const location = sanitizeProviderConfigValue(
     options.location ?? processEnv.GEMINI_VERTEX_LOCATION,
   ) || getGeminiVertexLocation(processEnv)
@@ -1548,10 +1549,7 @@ function hasConcreteProviderSelection(
 
   if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
     return (
-      sanitizeProviderConfigValue(processEnv.GEMINI_VERTEX_PROJECT) !== undefined ||
-      sanitizeProviderConfigValue(processEnv.GOOGLE_CLOUD_PROJECT) !== undefined ||
-      sanitizeProviderConfigValue(processEnv.GCLOUD_PROJECT) !== undefined ||
-      sanitizeProviderConfigValue(processEnv.GOOGLE_PROJECT_ID) !== undefined ||
+      getGeminiVertexProjectId(processEnv) !== undefined ||
       geminiVertexAdcWillResolveProject(processEnv)
     )
   }
@@ -1958,6 +1956,10 @@ export async function buildLaunchEnv(options: {
         ? normalized
         : undefined
     }
+    // Preserve typed project IDs and credential-file locators. Display
+    // redaction is separate from selecting the configured runtime identity.
+    const firstTrimmedValue = (...values: Array<string | undefined>) =>
+      values.map(value => value?.trim()).find(value => Boolean(value))
     const geminiAccessToken =
       sanitizeApiKey(processEnv.GEMINI_ACCESS_TOKEN) ??
       sanitizeApiKey(persistedEnv.GEMINI_ACCESS_TOKEN)
@@ -1973,7 +1975,7 @@ export async function buildLaunchEnv(options: {
         processEnv.GEMINI_VERTEX_MODEL,
         persistedEnv.GEMINI_VERTEX_MODEL,
       ),
-      project: firstSanitizedProviderValue(
+      project: firstTrimmedValue(
         processEnv.GEMINI_VERTEX_PROJECT,
         persistedEnv.GEMINI_VERTEX_PROJECT,
         processEnv.GOOGLE_CLOUD_PROJECT,
@@ -1990,19 +1992,19 @@ export async function buildLaunchEnv(options: {
       processEnv,
     })
 
-    const googleCloudProject = firstSanitizedProviderValue(
+    const googleCloudProject = firstTrimmedValue(
       processEnv.GOOGLE_CLOUD_PROJECT,
       persistedEnv.GOOGLE_CLOUD_PROJECT,
     )
-    const gcloudProject = firstSanitizedProviderValue(
+    const gcloudProject = firstTrimmedValue(
       processEnv.GCLOUD_PROJECT,
       persistedEnv.GCLOUD_PROJECT,
     )
-    const googleProjectId = firstSanitizedProviderValue(
+    const googleProjectId = firstTrimmedValue(
       processEnv.GOOGLE_PROJECT_ID,
       persistedEnv.GOOGLE_PROJECT_ID,
     )
-    const googleApplicationCredentials = firstSanitizedProviderValue(
+    const googleApplicationCredentials = firstTrimmedValue(
       processEnv.GOOGLE_APPLICATION_CREDENTIALS,
       persistedEnv.GOOGLE_APPLICATION_CREDENTIALS,
     )
@@ -2867,6 +2869,24 @@ export async function applyStartupEnvFromProfile(options?: StartupEnvOptions & {
   })
   if (startupEnv === processEnv) {
     return null
+  }
+
+  const candidateAdcFile = startupEnv.GOOGLE_APPLICATION_CREDENTIALS?.trim()
+  if (
+    !('persisted' in startupOptions) &&
+    !existsSync(getDefaultProfileFilePath()) &&
+    isEnvTruthy(startupEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
+    resolveGeminiVertexAuthMode(startupEnv) === 'adc' &&
+    candidateAdcFile &&
+    candidateAdcFile !== processEnv.GOOGLE_APPLICATION_CREDENTIALS?.trim()
+  ) {
+    // The implicit legacy loader fell back to cwd. An ADC config can read
+    // files and choose token endpoints, so do not discover a new one here,
+    // before the CLI reaches workspace trust. Explicit shell/user config
+    // and caller-supplied profiles keep their existing behavior.
+    const error = 'A workspace-only Gemini Vertex ADC profile cannot supply a startup credential file. Save the profile in configuration home or set GOOGLE_APPLICATION_CREDENTIALS in your shell.'
+    onValidationError?.(`Warning: ignoring saved provider profile. ${error}`)
+    return error
   }
 
   // A root CLI --model is higher precedence than saved profile state. Apply

@@ -174,6 +174,10 @@ of the env vars above; in ADC mode it can alternatively be derived from the ADC
 credential at runtime. `GEMINI_VERTEX_AUTH_MODE` defaults to `access-token`
 when `GEMINI_ACCESS_TOKEN` is set, otherwise `adc`.
 
+Native Gemini Vertex accepts base64 image and PDF attachments, including file
+read results. URL-source attachments are rejected before generation; attach
+the file as base64 instead.
+
 ### Gemini via OpenRouter
 
 ```bash
@@ -591,6 +595,9 @@ access token; tokens saved by direct Gemini's setup remain specific to that
 setup and are not an implicit Vertex credential source.
 
 Startup reads the active Vertex profile's mirror from configuration home.
+Automatic legacy startup also requires a newly restored ADC filename to come
+from configuration home or the shell; a workspace-only profile cannot supply
+one before credential validation.
 Documented environment-only provider selections take precedence over a saved
 Vertex fallback, just like a complete explicit custom Anthropic selection.
 

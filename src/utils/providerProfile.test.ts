@@ -3955,3 +3955,99 @@ test('buildStartupEnvFromProfile applies saved API Route proxy profile even when
   assert.equal(env.OPENAI_API_KEY, undefined)
   assert.equal(env.OPENAI_API_KEYS, undefined)
 })
+
+test('native Vertex preserves valid project IDs and ADC paths through profile shaping', async () => {
+  const id = 'sk-openclaude'
+  assert.equal(buildGeminiVertexProfileEnv({ project: id, processEnv: {} }).GEMINI_VERTEX_PROJECT, id)
+  const persisted = profile('gemini-vertex', {
+    GEMINI_VERTEX_PROJECT: id, GOOGLE_APPLICATION_CREDENTIALS: 'sk-adc.json',
+  })
+  const launched = await buildLaunchEnv({ profile: 'gemini-vertex', goal: 'balanced', persisted, processEnv: {} })
+  assert.equal(launched.GEMINI_VERTEX_PROJECT, id)
+  assert.equal(launched.GOOGLE_APPLICATION_CREDENTIALS, 'sk-adc.json')
+  for (const alias of ['GEMINI_VERTEX_PROJECT', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_PROJECT_ID']) {
+    const shell = { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', [alias]: '  ' + id + '  ' }
+    const fromShell = await buildStartupEnvFromProfile({ persisted, processEnv: shell })
+    assert.equal(fromShell, shell, 'a real project makes explicit native selection complete')
+    const fromAlias = await buildLaunchEnv({
+      profile: 'gemini-vertex', goal: 'balanced', persisted: null, processEnv: shell,
+    })
+    assert.equal(fromAlias.GEMINI_VERTEX_PROJECT, id)
+  }
+})
+
+test('saved native ADC file is used before startup applies its candidate environment', { timeout: 30000 }, async () => {
+  // Three isolated children each have an 8s deadline; leave time for cleanup.
+  const temp = mkdtempSync(join(tmpdir(), 'vertex-candidate-adc-'))
+  const source = `
+    const { GoogleAuth, UserRefreshClient } = require(
+      require('node:url').fileURLToPath(process.env.OPENCLAUDE_TEST_GOOGLE_AUTH_ENTRY))
+    const { writeFileSync } = require('node:fs')
+    const { join } = require('node:path')
+    const adcFile = join(process.env.OPENCLAUDE_CONFIG_DIR, 'adc.json')
+    writeFileSync(adcFile, JSON.stringify({
+      type: 'authorized_user', client_id: 'test-client',
+      client_secret: 'test-secret', refresh_token: 'test-refresh',
+    }))
+    // Exercise real file discovery/getClient/token parsing, without reading
+    // host ADC or contacting metadata. Only the token HTTP response is fake.
+    GoogleAuth.prototype._tryGetApplicationCredentialsFromWellKnownFile = async () => null
+    GoogleAuth.prototype._checkIsGCE = async () => false
+    const getClient = GoogleAuth.prototype.getClient
+    let credentialLoads = 0
+    GoogleAuth.prototype.getClient = async function () {
+      credentialLoads++
+      const client = await getClient.call(this)
+      if (!(client instanceof UserRefreshClient)) throw new Error('unexpected ADC source')
+      client.transporter.defaults.fetchImplementation = async () => new Response(JSON.stringify({
+        access_token: 'test-access', token_type: 'Bearer', expires_in: 3600,
+      }), { headers: { 'Content-Type': 'application/json' } })
+      return client
+    }
+    if (process.env.OPENCLAUDE_TEST_SHELL_ADC === '1') process.env.GOOGLE_APPLICATION_CREDENTIALS = adcFile
+    const p = await import(process.env.OPENCLAUDE_TEST_PROFILE_ENTRY)
+    p.saveProfileFile(p.createProfileFile('gemini-vertex', {
+      CLAUDE_CODE_USE_GEMINI_VERTEX: '1', GEMINI_VERTEX_AUTH_MODE: 'adc',
+      GEMINI_VERTEX_PROJECT: 'native-project', GOOGLE_APPLICATION_CREDENTIALS: adcFile,
+    }), process.env.OPENCLAUDE_TEST_WORKSPACE_PROFILE
+      ? { filePath: process.env.OPENCLAUDE_TEST_WORKSPACE_PROFILE } : undefined)
+    const error = await p.applyStartupEnvFromProfile()
+    console.log(JSON.stringify({ error, credentialLoads, flag: process.env.CLAUDE_CODE_USE_GEMINI_VERTEX,
+      file: process.env.GOOGLE_APPLICATION_CREDENTIALS }))
+  `
+  try {
+    const workspace = mkdtempSync(join(temp, 'workspace-'))
+    const results = ['saved', 'shell', 'workspace'].map(scenario => {
+      const dir = join(temp, scenario)
+      const env: NodeJS.ProcessEnv = { ...process.env, OPENCLAUDE_CONFIG_DIR: dir,
+        GOOGLE_CLOUD_PROJECT: 'native-project', OPENCLAUDE_TEST_SHELL_ADC: scenario === 'shell' ? '1' : '0',
+        OPENCLAUDE_TEST_GOOGLE_AUTH_ENTRY: import.meta.resolve('google-auth-library'),
+        OPENCLAUDE_TEST_PROFILE_ENTRY: new URL('./providerProfile.ts', import.meta.url).href }
+      if (scenario !== 'saved') env.OPENCLAUDE_TEST_WORKSPACE_PROFILE = join(workspace, PROFILE_FILE_NAME)
+      for (const key of Object.keys(env)) {
+        if (key.startsWith('CLAUDE_CODE_USE_') || key.startsWith('CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED') ||
+            key === 'GOOGLE_APPLICATION_CREDENTIALS') delete env[key]
+      }
+      const child = Bun.spawnSync([process.execPath, '--eval',
+        "require('node:fs').mkdirSync(process.env.OPENCLAUDE_CONFIG_DIR, { recursive: true });\n" + source],
+        { cwd: scenario !== 'saved' ? workspace : process.cwd(), env, timeout: 8000 })
+      assert.equal(child.exitCode, 0, child.stderr.toString())
+      return { result: JSON.parse(child.stdout.toString()), expected: join(dir, 'adc.json'), scenario }
+    })
+    for (const { result, expected, scenario } of results) {
+      if (scenario === 'workspace') {
+        assert.match(result.error ?? '', /workspace.*ADC/i)
+        assert.equal(result.flag, undefined)
+        assert.equal(result.file, undefined)
+        assert.equal(result.credentialLoads, 0)
+        continue
+      }
+      assert.equal(result.error, null)
+      assert.equal(result.flag, '1')
+      assert.equal(result.file, expected)
+      assert.ok(result.credentialLoads > 0)
+    }
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})

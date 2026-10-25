@@ -346,3 +346,28 @@ describe("diagnostic issue report", () => {
     }
   });
 });
+
+test.each(['GEMINI_VERTEX_PROJECT', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_PROJECT_ID'])(
+  'native report uses its own model and %s instead of stale OpenAI fields',
+  async projectKey => {
+    const report = await buildIssueReport({
+      env: {
+        CLAUDE_CODE_USE_GEMINI_VERTEX: '1', [projectKey]: 'native-project',
+        GEMINI_VERTEX_LOCATION: 'europe-west4', GEMINI_VERTEX_MODEL: 'gemini-2.5-pro',
+        OPENAI_MODEL: 'gpt-5.5', OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      },
+      cwd: process.cwd(), packageInfo: { version: 'test' },
+      checks: { buildArtifactsPresent: true, ripgrep: { available: true, detail: 'fixture' } },
+      settings: { sourcesPresent: [], validationErrors: [] }, mcpServers: {}, errors: [],
+    })
+    expect(report.provider.routeId).toBe('gemini-vertex')
+    expect(report.provider.model).toBe('gemini-2.5-pro')
+    expect(report.provider.baseUrl).toBe('https://europe-west4-aiplatform.googleapis.com/v1/projects/native-project/locations/europe-west4/publishers/google')
+    expect(report.model.contextWindow).toBe(1_048_576)
+    const markdown = formatIssueReportAsMarkdown(report)
+    expect(markdown).toContain('gemini-2.5-pro')
+    expect(markdown).toContain('native-project')
+    expect(markdown).not.toContain('gpt-5.5')
+    expect(markdown).not.toContain('api.openai.com')
+  },
+)
