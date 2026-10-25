@@ -881,6 +881,9 @@ test('OPENAI_API_KEYS rotates to the next key on rate-limit failure', async () =
 
 test.each([
   { body: 'Too many requests, try again in 30s', retries: true },
+  { body: 'Rate limit exceeded for this API key', retries: true },
+  { body: 'Rate limit exceeded; API key is invalid', retries: false },
+  { body: 'Rate limit exceeded; API key\nis invalid', retries: false },
   { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: true },
   { body: '', retries: false },
   { body: 'Try again later', retries: false },
@@ -992,7 +995,7 @@ test('throttle-403 cools pooled keys and reuses them after cooldown', async () =
       const headers = new Headers(init?.headers)
       authorizations.push(headers.get('authorization'))
       return authorizations.length === 1
-        ? new Response('Too many requests', { status: 403 })
+        ? new Response('Rate limit exceeded for this API key', { status: 403 })
         : makeChatCompletionResponse('gpt-5.5')
     }))
     const client = createOpenAIShimClient({}) as Anthropic
