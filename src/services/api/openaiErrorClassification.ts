@@ -418,9 +418,10 @@ function isExplicitThrottleMessage(body: string): boolean {
   // evidence, with auth/quota signals taking precedence even in mixed bodies.
   // Empty bodies and generic "try again" / "busy" responses are ambiguous.
   if (
-    /auth|forbidden|access[ _-]denied|permission|credential|denied|suspended|blocked|banned|insufficient[ _-]funds|invalid.{0,20}(?:key|token)|revoked|expired|not[ _-]allowed|quota|billing|credit|payment|allotment/i.test(body) ||
-    // A per-key rate limit can mention a valid API key. Only key faults veto it.
-    /(?:invalid|missing|incorrect|disabled|unusable)[\s\S]{0,20}api[ _-]?key|api[ _-]?key[\s\S]{0,20}(?:invalid|missing|incorrect|disabled|unusable|required|not[ _-](?:valid|found|provided|configured|set))/i.test(body)
+    /unauthori[sz]ed|unauthenticated|not[ _-]auth|forbidden|access[ _-]denied|permission|credential|denied|suspended|blocked|banned|insufficient[ _-]funds|invalid.{0,20}key|revoked|expired|not[ _-]allowed|quota|billing|credit|payment|allotment/i.test(body) ||
+    /auth(?:entication|ori[sz]ation)?[\s\S]{0,20}(?:error|fail|invalid|required|missing)|(?:invalid|failed|missing|required)[\s\S]{0,20}auth/i.test(body) ||
+    // Rate limits can name valid API keys or OAuth tokens. Only faults veto them.
+    /(?:invalid|missing|incorrect|disabled|unusable)[\s\S]{0,20}(?:api[ _-]?key|token)|(?:api[ _-]?key|token)[\s\S]{0,20}(?:invalid|missing|incorrect|disabled|unusable|required|not[ _-](?:valid|found|provided|configured|set))/i.test(body)
   ) {
     return false
   }
