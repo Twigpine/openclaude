@@ -10,6 +10,9 @@ test.each(['flag', 'profile'] as const)(
     try {
       // A separate process uses real routing, config and model modules without
       // inheriting module mocks or cached model strings from other suites.
+      const childEnv = { ...process.env }
+      // Baseline defaults must not inherit the invoking shell's model override.
+      delete childEnv.GEMINI_VERTEX_MODEL
       const result = Bun.spawnSync([process.execPath, '-e', `
         Object.assign(globalThis, { MACRO: { VERSION: 'test' } })
         const { enableConfigs } = await import('./src/utils/config.ts')
@@ -49,7 +52,7 @@ test.each(['flag', 'profile'] as const)(
       `], {
         cwd: resolve(import.meta.dir, '../../..'),
         env: {
-          ...process.env, OPENCLAUDE_CONFIG_DIR: configDir,
+          ...childEnv, OPENCLAUDE_CONFIG_DIR: configDir,
           CLAUDE_CONFIG_DIR: configDir, TEST_VERTEX_SELECTION: selection,
         },
       })
