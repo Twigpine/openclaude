@@ -1242,3 +1242,23 @@ test.each([undefined, '', 'undefined', 'null', 'SUA_CHAVE', 'merge-key'])('Merge
   expect(getProviderPresetUiMetadata('merge-gateway', env).apiKey).toBe(usable ? key : '')
   expect(resolveRouteCredentialValue({routeId: 'merge-gateway', baseUrl: env.OPENAI_BASE_URL, processEnv: env})).toBe(usable ? key : undefined)
 })
+
+test.each([
+  ['GEMINI_VERTEX_LOCATION', 'evil.example/x#'],
+  ['GEMINI_VERTEX_PROJECT', 'project/other'],
+  ['GEMINI_VERTEX_MODEL', '../../projects/other'],
+] as const)('startup rejects unsafe native %s', async (key, value) => {
+  expect(await getProviderValidationError({
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1', GEMINI_VERTEX_AUTH_MODE: 'access-token',
+    GEMINI_ACCESS_TOKEN: 'fixture-token', GEMINI_VERTEX_PROJECT: 'sk-openclaude',
+    GEMINI_VERTEX_LOCATION: 'global', [key]: value,
+  })).toContain(key)
+})
+
+test('startup rejects unsafe ADC-derived project routing', async () => {
+  expect(await getProviderValidationError({
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1', GEMINI_VERTEX_AUTH_MODE: 'adc',
+  }, { resolveGeminiCredential: async () => ({
+    kind: 'adc', credential: 'fixture-token', projectId: 'project/other',
+  }) })).toContain('GEMINI_VERTEX_PROJECT')
+})

@@ -22,6 +22,7 @@ import {
 } from '../../services/api/providerConfig.js'
 import { getInMemoryErrors } from '../log.js'
 import {
+  getGeminiVertexEndpointError,
   getGeminiVertexLocation,
   getGeminiVertexModel,
   getGeminiVertexProjectId,
@@ -243,6 +244,7 @@ function resolveProviderBaseUrl(
     const project = getGeminiVertexProjectId(env)
     if (!project) return undefined // Ambient ADC may supply it at request time.
     const location = getGeminiVertexLocation(env)
+    if (getGeminiVertexEndpointError({ project, location })) return undefined
     const host = location === 'global'
       ? 'aiplatform.googleapis.com'
       : `${location}-aiplatform.googleapis.com`

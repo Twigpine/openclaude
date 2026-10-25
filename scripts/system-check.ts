@@ -27,6 +27,7 @@ import {
   type SecretValueSource,
 } from '../src/utils/providerSecrets.js'
 import {
+  getGeminiVertexEndpointError,
   getGeminiVertexGlobalEndpointError,
   getGeminiVertexLocation,
   getGeminiVertexModel,
@@ -1070,15 +1071,21 @@ function checkGeminiVertexEnv(): CheckResult[] {
       )
     }
   } else {
-    results.push(pass('GEMINI_VERTEX_PROJECT', safeDisplayValue(project, '(unset)')))
+    const projectError = getGeminiVertexEndpointError({ project })
+    results.push(projectError
+      ? fail('GEMINI_VERTEX_PROJECT', projectError)
+      : pass('GEMINI_VERTEX_PROJECT', safeDisplayValue(project, '(unset)')))
   }
 
+  const modelError = getGeminiVertexEndpointError({ model })
   results.push(
-    model
+    modelError
+      ? fail('GEMINI_VERTEX_MODEL', modelError)
+      : model
       ? pass('GEMINI_VERTEX_MODEL', safeDisplayValue(model, '(unset)'))
       : pass('GEMINI_VERTEX_MODEL', 'Not set. Default gemini-2.5-flash will be used.'),
   )
-  const globalEndpointError = getGeminiVertexGlobalEndpointError(
+  const globalEndpointError = getGeminiVertexEndpointError({ location }) ?? getGeminiVertexGlobalEndpointError(
     effectiveModel,
     location,
   )
@@ -1427,7 +1434,9 @@ async function checkProviderGenerationReadiness(): Promise<CheckResult> {
         'Gemini Vertex: a project id is required. Set GEMINI_VERTEX_PROJECT, GOOGLE_CLOUD_PROJECT, or use an ADC credential that embeds a project.',
       )
     }
-    const globalEndpointError = getGeminiVertexGlobalEndpointError(
+    const globalEndpointError = getGeminiVertexEndpointError({
+      project, location: getGeminiVertexLocation(process.env), model: getGeminiVertexModel(process.env),
+    }) ?? getGeminiVertexGlobalEndpointError(
       getGeminiVertexModel(process.env),
       getGeminiVertexLocation(process.env),
     )

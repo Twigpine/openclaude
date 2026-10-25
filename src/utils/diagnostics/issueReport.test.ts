@@ -371,3 +371,20 @@ test.each(['GEMINI_VERTEX_PROJECT', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'G
     expect(markdown).not.toContain('api.openai.com')
   },
 )
+
+test.each([
+  ['GEMINI_VERTEX_LOCATION', 'evil.example/x#'],
+  ['GEMINI_VERTEX_PROJECT', 'project/other'],
+] as const)('native report with unsafe %s does not publish a false endpoint', async (key, value) => {
+  const report = await buildIssueReport({
+    env: { CLAUDE_CODE_USE_GEMINI_VERTEX: '1', GEMINI_VERTEX_PROJECT: 'native-project',
+      GEMINI_VERTEX_LOCATION: 'global', GEMINI_VERTEX_MODEL: 'gemini-2.5-flash',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1', [key]: value },
+    cwd: process.cwd(), packageInfo: { version: 'test' },
+    checks: { buildArtifactsPresent: true, ripgrep: { available: true, detail: 'fixture' } },
+    settings: { sourcesPresent: [], validationErrors: [] }, mcpServers: {}, errors: [],
+  })
+  expect(report.provider.baseUrl).toBeUndefined()
+  expect(formatIssueReportAsMarkdown(report)).not.toContain('Base URL: https://evil.example')
+  expect(formatIssueReportAsMarkdown(report)).not.toContain('Base URL: https://api.openai.com')
+})

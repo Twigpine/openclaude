@@ -676,3 +676,12 @@ test('native wire rejects unsupported URL media before sending instead of losing
   })).rejects.toThrow(/base64/)
   expect(requests).toBe(0)
 })
+
+test('direct native client rejects a host-changing location before resolving a bearer', () => {
+  let credentials = 0
+  expect(() => createGeminiVertexClient({
+    project: 'project-test', location: 'evil.example/x#', model: 'gemini-2.5-flash',
+    getAccessToken: async () => { credentials++; return 'token' },
+  })).toThrow('GEMINI_VERTEX_LOCATION')
+  expect(credentials).toBe(0)
+})

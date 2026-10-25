@@ -2,6 +2,7 @@ import { APIConnectionError, APIConnectionTimeoutError, APIError, APIUserAbortEr
 import type { MessageCreateParamsBase } from '@anthropic-ai/sdk/resources/messages/messages'
 import { raceAbort, throwIfAborted } from '../../utils/boundedAsync.js'
 import { createCombinedAbortSignal } from '../../utils/combinedAbortSignal.js'
+import { getGeminiVertexEndpointError } from '../../utils/geminiAuth.js'
 
 type AccessTokenProvider = () => Promise<string>
 
@@ -635,6 +636,8 @@ async function* toAnthropicStream(
 }
 
 export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
+  const endpointError = getGeminiVertexEndpointError(options)
+  if (endpointError) throw new Error(endpointError)
   const fetchImpl = options.fetch ?? fetch
 
   const create = (

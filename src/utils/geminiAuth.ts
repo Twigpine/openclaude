@@ -92,6 +92,26 @@ export function getGeminiVertexModel(
   return sanitizeCredential(env.GEMINI_VERTEX_MODEL) ?? DEFAULT_GEMINI_VERTEX_MODEL
 }
 
+// These values are URI components, not endpoint overrides. Keep project
+// numbers and legacy domain:project IDs, and bare/versioned model IDs, while
+// preventing a field from changing the authenticated host or resource path.
+export function getGeminiVertexEndpointError(options: {
+  project?: string
+  location?: string
+  model?: string
+}): string | null {
+  if (options.location !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(options.location)) {
+    return 'Invalid GEMINI_VERTEX_LOCATION: use global or a Google Cloud region name, not an endpoint URL.'
+  }
+  if (options.project !== undefined && !/^[a-z0-9][a-z0-9.:-]*$/i.test(options.project)) {
+    return 'Invalid GEMINI_VERTEX_PROJECT: use a project ID, number or domain-scoped ID without URL delimiters.'
+  }
+  if (options.model !== undefined && !/^[a-z0-9][a-z0-9._:@+-]*$/i.test(options.model)) {
+    return 'Invalid GEMINI_VERTEX_MODEL: use a bare model ID without URL path, query or fragment syntax.'
+  }
+  return null
+}
+
 // Models Vertex only serves from the global endpoint. Pairing one with a
 // regional GEMINI_VERTEX_LOCATION would build a regional URL the model is not
 // available on, so the client validates this before issuing the request. The

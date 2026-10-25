@@ -4314,3 +4314,53 @@ test('rejects CRLF-injected custom headers before sending OpenAI-compatible shim
   expect(capturedHeaders?.get('x-injected')).toBeNull()
   expect(capturedHeaders?.get('authorization')).toBe('Bearer openai-test-key')
 })
+
+test.each([
+  ['GEMINI_VERTEX_LOCATION', 'evil.example/x#'],
+  ['GEMINI_VERTEX_LOCATION', 'user@evil.example/'],
+  ['GEMINI_VERTEX_PROJECT', 'project/../../other'],
+  ['GEMINI_VERTEX_PROJECT', 'project?redirect=x'],
+  ['GEMINI_VERTEX_PROJECT', 'project%2Fother'],
+  ['GEMINI_VERTEX_MODEL', '../../../../../../../projects/other-project/locations/global/publishers/google/models/gemini-2.5-flash'],
+] as const)('native request rejects unsafe %s before sending', async (key, value) => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+  process.env.GEMINI_VERTEX_PROJECT = 'sk-openclaude'
+  process.env.GEMINI_VERTEX_LOCATION = 'global'
+  process.env[key] = value
+  const model = key === 'GEMINI_VERTEX_MODEL' ? value : 'gemini-2.5-flash'
+  let requests = 0
+  const request = async () => {
+    const client = await getAnthropicClient({ maxRetries: 0, model,
+      fetchOverride: async () => {
+        requests++
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'unexpected' }] } }] }))
+      },
+    })
+    return client.beta.messages.create({ model, max_tokens: 8,
+      messages: [{ role: 'user', content: 'hello' }] })
+  }
+  await expect(request()).rejects.toThrow(key)
+  expect(requests).toBe(0)
+})
+
+test.each(['sk-openclaude', '123456789012', 'example.com:my-project'])(
+  'native request preserves the project path for %s', async project => {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+    process.env.GEMINI_VERTEX_PROJECT = project
+    process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+    let sent = ''
+    const client = await getAnthropicClient({ maxRetries: 0, model: 'gemini-2.5-flash',
+      fetchOverride: async input => {
+        sent = String(input)
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }))
+      },
+    })
+    await client.beta.messages.create({ model: 'gemini-2.5-flash', max_tokens: 8,
+      messages: [{ role: 'user', content: 'hello' }] })
+    expect(sent).toBe(`https://us-central1-aiplatform.googleapis.com/v1/projects/${project}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent`)
+  },
+)

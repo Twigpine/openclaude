@@ -1450,15 +1450,23 @@ export function clearPersistedXaiOAuthProfile(
   return removedPath
 }
 
-export function loadProfileFile(options?: ProfileFileLocation): ProfileFile | null {
+function loadProfileFileWithSource(options?: ProfileFileLocation): {
+  profile: ProfileFile
+  isLegacyFallback: boolean
+} | null {
+  const primaryPath = resolveProfileFilePath(options)
   for (const filePath of resolveProfileFileReadPaths(options)) {
     const profile = readProfileFile(filePath)
     if (profile) {
-      return profile
+      return { profile, isLegacyFallback: filePath !== primaryPath }
     }
   }
 
   return null
+}
+
+export function loadProfileFile(options?: ProfileFileLocation): ProfileFile | null {
+  return loadProfileFileWithSource(options)?.profile ?? null
 }
 
 export function saveProfileFile(
@@ -2858,10 +2866,10 @@ export async function applyStartupEnvFromProfile(options?: StartupEnvOptions & {
   // alone is not enough: a persisted profile's launch env spreads processEnv,
   // so a marker inherited from a parent CLI process (pane/teammate children)
   // could make a genuinely saved profile look like the injected default.
-  const persisted =
-    startupOptions && 'persisted' in startupOptions
-      ? startupOptions.persisted
-      : loadProfileFile()
+  const loadedProfile = 'persisted' in startupOptions
+    ? null : loadProfileFileWithSource()
+  const persisted = 'persisted' in startupOptions
+    ? startupOptions.persisted : loadedProfile?.profile ?? null
   const startupEnv = await buildStartupEnvFromProfile({
     ...startupOptions,
     persisted,
@@ -2873,14 +2881,13 @@ export async function applyStartupEnvFromProfile(options?: StartupEnvOptions & {
 
   const candidateAdcFile = startupEnv.GOOGLE_APPLICATION_CREDENTIALS?.trim()
   if (
-    !('persisted' in startupOptions) &&
-    !existsSync(getDefaultProfileFilePath()) &&
+    loadedProfile?.isLegacyFallback === true &&
     isEnvTruthy(startupEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
     resolveGeminiVertexAuthMode(startupEnv) === 'adc' &&
     candidateAdcFile &&
     candidateAdcFile !== processEnv.GOOGLE_APPLICATION_CREDENTIALS?.trim()
   ) {
-    // The implicit legacy loader fell back to cwd. An ADC config can read
+    // The loader read this candidate from cwd. An ADC config can read
     // files and choose token endpoints, so do not discover a new one here,
     // before the CLI reaches workspace trust. Explicit shell/user config
     // and caller-supplied profiles keep their existing behavior.

@@ -1409,3 +1409,26 @@ describe('doctor recognises Gemini Vertex', () => {
     expect(readiness.detail).toBe(message)
   })
 })
+
+test.each([
+  ['GEMINI_VERTEX_LOCATION', 'evil.example/x#'],
+  ['GEMINI_VERTEX_PROJECT', 'project/other'],
+  ['GEMINI_VERTEX_MODEL', '../../projects/other'],
+] as const)('native doctor rejects unsafe %s in env and readiness', async (key, value) => {
+  const { __test } = await import('./system-check.ts')
+  const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE',
+    'GEMINI_ACCESS_TOKEN', 'GEMINI_VERTEX_PROJECT', 'GEMINI_VERTEX_LOCATION', 'GEMINI_VERTEX_MODEL'])
+  try {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+    process.env.GEMINI_ACCESS_TOKEN = 'fixture-token'
+    process.env.GEMINI_VERTEX_PROJECT = 'sk-openclaude'
+    process.env.GEMINI_VERTEX_LOCATION = 'global'
+    process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+    process.env[key] = value
+    expect(__test.checkOpenAIEnv().find(result => result.label === key)?.ok).toBe(false)
+    const readiness = await __test.checkProviderGenerationReadiness()
+    expect(readiness.ok).toBe(false)
+    expect(readiness.detail).toContain(key)
+  } finally { restore() }
+})

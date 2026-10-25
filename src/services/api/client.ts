@@ -57,6 +57,7 @@ import {
 import { resolveOpenAIShimRuntimeContext } from '../../integrations/runtimeMetadata.js'
 import {
   DEFAULT_GEMINI_VERTEX_MODEL,
+  getGeminiVertexEndpointError,
   getGeminiVertexLocation,
   getGeminiVertexModel,
   getGeminiVertexProjectId,
@@ -857,6 +858,10 @@ export async function getAnthropicClient({
     if (!vertexProject) {
       throw new Error('Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT')
     }
+    const endpointError = getGeminiVertexEndpointError({
+      project: vertexProject, location, model: geminiVertexModel,
+    })
+    if (endpointError) throw new Error(endpointError)
     // Same rule as startup validation and doctor (geminiAuth). Fail before
     // the request so a regional URL is never built for a global-only model.
     const globalEndpointError = getGeminiVertexGlobalEndpointError(

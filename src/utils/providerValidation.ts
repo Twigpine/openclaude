@@ -42,9 +42,11 @@ import { getGlobalClaudeFile } from './env.js'
 import { isBareMode } from './envUtils.js'
 import {
   type GeminiResolvedCredential,
+  getGeminiVertexEndpointError,
   getGeminiVertexGlobalEndpointError,
   getGeminiVertexLocation,
   getGeminiVertexModel,
+  getGeminiVertexProjectId,
   resolveGeminiCredential,
   resolveGeminiVertexAuthMode,
 } from './geminiAuth.js'
@@ -632,6 +634,13 @@ export async function getProviderValidationError(
     if (env.GEMINI_VERTEX_MODEL !== undefined && !hasNonEmptyEnvValue(env, 'GEMINI_VERTEX_MODEL')) {
       return 'Gemini Vertex model is required via GEMINI_VERTEX_MODEL.'
     }
+    const endpointError = getGeminiVertexEndpointError({
+      project: getGeminiVertexProjectId(env) ??
+        (vertexCredential.kind === 'adc' ? vertexCredential.projectId?.trim() : undefined),
+      location: getGeminiVertexLocation(env),
+      model: getGeminiVertexModel(env),
+    })
+    if (endpointError) return endpointError
     // Same model/location pair the client refuses. Unset model uses the
     // Vertex default (regional-capable); a set global-only model must be global.
     const globalEndpointError = getGeminiVertexGlobalEndpointError(

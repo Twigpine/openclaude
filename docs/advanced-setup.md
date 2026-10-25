@@ -178,6 +178,12 @@ Native Gemini Vertex accepts base64 image and PDF attachments, including file
 read results. URL-source attachments are rejected before generation; attach
 the file as base64 instead.
 
+Use a region label such as `us-central1` or `global` for
+`GEMINI_VERTEX_LOCATION`, and a bare model ID for `GEMINI_VERTEX_MODEL`.
+Endpoint URLs and URL path/query/fragment syntax are rejected in these routing
+fields. Project IDs, project numbers and legacy domain-scoped IDs such as
+`example.com:my-project` remain supported.
+
 ### Gemini via OpenRouter
 
 ```bash

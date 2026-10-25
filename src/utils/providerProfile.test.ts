@@ -3976,8 +3976,8 @@ test('native Vertex preserves valid project IDs and ADC paths through profile sh
   }
 })
 
-test('saved native ADC file is used before startup applies its candidate environment', { timeout: 30000 }, async () => {
-  // Three isolated children each have an 8s deadline; leave time for cleanup.
+test('saved native ADC file is used before startup applies its candidate environment', { timeout: 40000 }, async () => {
+  // Four isolated children each have an 8s deadline; leave time for cleanup.
   const temp = mkdtempSync(join(tmpdir(), 'vertex-candidate-adc-'))
   const source = `
     const { GoogleAuth, UserRefreshClient } = require(
@@ -4011,17 +4011,25 @@ test('saved native ADC file is used before startup applies its candidate environ
       GEMINI_VERTEX_PROJECT: 'native-project', GOOGLE_APPLICATION_CREDENTIALS: adcFile,
     }), process.env.OPENCLAUDE_TEST_WORKSPACE_PROFILE
       ? { filePath: process.env.OPENCLAUDE_TEST_WORKSPACE_PROFILE } : undefined)
-    const error = await p.applyStartupEnvFromProfile()
+    const error = await p.applyStartupEnvFromProfile({
+      readGeminiAccessToken: () => {
+        if (process.env.OPENCLAUDE_TEST_CREATE_HOME === '1') {
+          p.saveProfileFile(p.createProfileFile('openai', { OPENAI_MODEL: 'gpt-5.5' }))
+        }
+        return ''
+      },
+    })
     console.log(JSON.stringify({ error, credentialLoads, flag: process.env.CLAUDE_CODE_USE_GEMINI_VERTEX,
       file: process.env.GOOGLE_APPLICATION_CREDENTIALS }))
   `
   try {
     const workspace = mkdtempSync(join(temp, 'workspace-'))
-    const results = ['saved', 'shell', 'workspace'].map(scenario => {
+    const results = ['saved', 'shell', 'workspace', 'workspace-race'].map(scenario => {
       const dir = join(temp, scenario)
       const env: NodeJS.ProcessEnv = { ...process.env, OPENCLAUDE_CONFIG_DIR: dir,
         GOOGLE_CLOUD_PROJECT: 'native-project', OPENCLAUDE_TEST_SHELL_ADC: scenario === 'shell' ? '1' : '0',
         OPENCLAUDE_TEST_GOOGLE_AUTH_ENTRY: import.meta.resolve('google-auth-library'),
+        OPENCLAUDE_TEST_CREATE_HOME: scenario === 'workspace-race' ? '1' : '0',
         OPENCLAUDE_TEST_PROFILE_ENTRY: new URL('./providerProfile.ts', import.meta.url).href }
       if (scenario !== 'saved') env.OPENCLAUDE_TEST_WORKSPACE_PROFILE = join(workspace, PROFILE_FILE_NAME)
       for (const key of Object.keys(env)) {
@@ -4035,7 +4043,7 @@ test('saved native ADC file is used before startup applies its candidate environ
       return { result: JSON.parse(child.stdout.toString()), expected: join(dir, 'adc.json'), scenario }
     })
     for (const { result, expected, scenario } of results) {
-      if (scenario === 'workspace') {
+      if (scenario.startsWith('workspace')) {
         assert.match(result.error ?? '', /workspace.*ADC/i)
         assert.equal(result.flag, undefined)
         assert.equal(result.file, undefined)
