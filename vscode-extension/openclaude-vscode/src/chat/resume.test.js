@@ -165,13 +165,19 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
         assert.equal(activeChild.killSignal, 'SIGINT');
         aborting.stopSession();
 
-        // The exact Node copy remains the normal UUID route.
+        // An exact copy under a relative root also needs a stable file target.
         delete manager.getResumeTarget;
         let hash = 0;
         for (const char of cwd) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
-        const exact = path.join(process.env.OPENCLAUDE_CONFIG_DIR, 'projects', prefix + '-' + Math.abs(hash).toString(36), id + '.jsonl');
+        const exact = path.join(root, process.env.OPENCLAUDE_CONFIG_DIR, 'projects', prefix + '-' + Math.abs(hash).toString(36), id + '.jsonl');
         await fs.mkdir(path.dirname(exact), { recursive: true });
         await fs.copyFile(file, exact);
+        await controller.startSession({ sessionId: id });
+        assert.equal(resumeValue(), exact,
+          'relative config roots must preserve exact-copy identity across cwd changes');
+
+        // With an absolute root, the exact Node copy retains UUID resume.
+        process.env.OPENCLAUDE_CONFIG_DIR = path.resolve(process.env.OPENCLAUDE_CONFIG_DIR);
         await controller.startSession({ sessionId: id });
         assert.equal(resumeValue(), id);
         assert.equal(await manager.getResumeTarget('missing'), 'missing');
