@@ -6,6 +6,13 @@ import { join } from 'path'
 import { clearCACertsCache, getCACertificates } from './caCerts.js'
 import { hasNodeOption } from './envUtils.js'
 
+// Required-value options accepted by the supported Node 24/26 runtimes.
+const testValueOptions = [
+  ['--test-isolation', 'none'],
+  ['--test-global-setup', './setup.js'],
+  ['--test-rerun-failures', './failures.json'],
+] as const
+
 describe('hasNodeOption', () => {
   const originalNodeOptions = process.env.NODE_OPTIONS
 
@@ -232,6 +239,35 @@ describe('hasNodeOption', () => {
     })
   }
 
+  test('supported test options consume their values before later CA flags', () => {
+    for (const [option, value] of testValueOptions) {
+      for (const flag of ['--use-system-ca', '--use-openssl-ca']) {
+        for (const spelling of [`${option} ${value}`, `${option}=${value}`]) {
+          process.env.NODE_OPTIONS = `${spelling} ${flag}`
+          expect(hasNodeOption(flag)).toBe(true)
+          process.env.NODE_OPTIONS = `${flag} ${spelling}`
+          expect(hasNodeOption(flag)).toBe(true)
+        }
+      }
+    }
+  })
+
+  test('supported test options reject missing, empty and flag-like values', () => {
+    for (const [option] of testValueOptions) {
+      for (const flag of ['--use-system-ca', '--use-openssl-ca']) {
+        for (const nodeOptions of [
+          `${flag}=1 ${option}`,
+          `${flag}=1 ${option}=`,
+          `${option}= ${flag}=1`,
+          `${option} ${flag}=1`,
+        ]) {
+          process.env.NODE_OPTIONS = nodeOptions
+          expect(hasNodeOption(flag)).toBe(false)
+        }
+      }
+    }
+  })
+
   test('does not leak NODE_OPTIONS between cases (sanity)', () => {
     // This test runs after the table; afterEach should have restored original.
     // Set a distinct value and verify it does not persist to next test via afterEach,
@@ -454,6 +490,22 @@ describe('hasNodeOption CA source selection', () => {
       SYSTEM_SENTINEL,
       EXTRA_CA_SENTINEL,
     ])
+  })
+
+  test('supported test option values preserve the explicit CA source with extra certificates', () => {
+    process.env.NODE_EXTRA_CA_CERTS = join(extraCertsDir!, 'extra.pem')
+    for (const [option, value] of testValueOptions) {
+      for (const flag of ['--use-system-ca', '--use-openssl-ca']) {
+        expect(getEffectiveCACerts(`${option} ${value} ${flag}`)).toEqual([
+          SYSTEM_SENTINEL,
+          EXTRA_CA_SENTINEL,
+        ])
+        expect(getEffectiveCACerts(`${flag}=1 ${option}=`)).toEqual([
+          ...tls.rootCertificates,
+          EXTRA_CA_SENTINEL,
+        ])
+      }
+    }
   })
 
   test('inactive CA flag selects the bundled roots plus the extra certificate', () => {

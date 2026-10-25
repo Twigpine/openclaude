@@ -2,8 +2,8 @@
 /**
  * Parity check for `hasNodeOption()` against the Node runtime.
  *
- * `hasNodeOption()` answers "would Node have enabled this option?" for the
- * NODE_OPTIONS value. This script derives that answer from the Node runtime
+ * `hasNodeOption()` models scoped NODE_OPTIONS syntax and flag state.
+ * This script compares that answer with the Node runtime
  * itself instead of from the implementation's own assumptions: it runs a
  * matrix of NODE_OPTIONS values through `node` and compares the observed
  * CA-store selection with the helper's result.
@@ -62,9 +62,9 @@ if (nodeVersion.status !== 0) {
   process.exit(2)
 }
 const version = (nodeVersion.stdout ?? '').trim()
-if (!version.startsWith('v22.')) {
+if (Number(version.match(/^v(\d+)/)?.[1] ?? 0) < 24) {
   console.warn(
-    `Warning: ${nodePath} is ${version}; the helper models the Node 22 grammar.`,
+    `Warning: ${nodePath} is ${version}; OpenClaude requires Node >= 24.22.1.`,
   )
 }
 
@@ -173,6 +173,15 @@ const CONSTRUCTS = [
   '--conditions=foo',
   '--conditions foo',
   '--conditions -x',
+  '--test-isolation none',
+  '--test-isolation=',
+  '--test-isolation',
+  '--test-global-setup ./setup.js',
+  '--test-global-setup=',
+  '--test-global-setup',
+  '--test-rerun-failures ./failures.json',
+  '--test-rerun-failures=',
+  '--test-rerun-failures',
   '-C foo',
   '-C',
   '--loader',

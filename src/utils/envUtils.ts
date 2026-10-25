@@ -116,10 +116,10 @@ type NodeOptionRole =
   | 'inline-required'
 
 /**
- * NODE_OPTIONS options whose role differs from the default boolean, audited
- * against Node 22.23.2 with `NODE_OPTIONS=<value> node -e ''` probes:
- * every entry below exits with `<flag> requires an argument` when the value
- * is missing, so the helper fails closed for the same inputs.
+ * NODE_OPTIONS options whose role differs from the default boolean.
+ * Originally audited against Node 22.23.2; newer required-value test options
+ * are also modeled for the supported Node 24/26 runtimes. Missing values fail
+ * the scoped parse, including the V8 flags with distinct attachment rules.
  *
  * Options that are not listed here are treated as booleans: they never
  * consume the following argument. Unknown-option and disallowed-option
@@ -185,9 +185,12 @@ const NODE_OPTION_ROLES: ReadonlyMap<string, NodeOptionRole> = new Map<
   ['--test-coverage-functions', 'value'],
   ['--test-coverage-include', 'value'],
   ['--test-coverage-lines', 'value'],
+  ['--test-global-setup', 'value'],
+  ['--test-isolation', 'value'],
   ['--test-name-pattern', 'value'],
   ['--test-reporter', 'value'],
   ['--test-reporter-destination', 'value'],
+  ['--test-rerun-failures', 'value'],
   ['--test-shard', 'value'],
   ['--test-skip-pattern', 'value'],
   ['--title', 'value'],
