@@ -5,7 +5,6 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
-import { snapshotEnv } from '../test/envSnapshot.js'
 import { resolveRouteCredentialValue } from '../integrations/routeMetadata.js'
 import { snapshotEnv } from '../test/envSnapshot.js'
 import type { ProviderProfile } from './config.js'
