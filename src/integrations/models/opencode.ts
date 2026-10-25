@@ -45,7 +45,7 @@ function openCodeModel(spec: OpenCodeModelSpec) {
 }
 
 const zenModels: OpenCodeModelSpec[] = [
-  // Zen's public model list confirms these IDs but publishes no token limits.
+  // Zen publishes no token limits. Historical descriptors do not imply availability.
   { id: 'opencode-minimax-m3.1-flash-free', label: 'MiniMax M3.1 Flash Free', defaultModel: 'minimax-m3.1-flash-free', reasoning: true, coding: true },
   { id: 'opencode-minimax-m3', label: 'MiniMax M3', defaultModel: 'minimax-m3', reasoning: true, coding: true },
   { id: 'opencode-claude-fable-5', label: 'Claude Fable 5', defaultModel: 'claude-fable-5', contextWindow: 1_000_000, maxOutputTokens: 128_000, reasoning: true, vision: true },

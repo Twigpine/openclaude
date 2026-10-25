@@ -75,6 +75,7 @@ const zenModels: OpenCodeCatalogSpec[] = [
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { id: 'glm-5.1', label: 'GLM 5.1', zaiGlm: true },
   { id: 'glm-5', label: 'GLM 5', zaiGlm: true },
+  // Retain historical identity for saved selections; suggestion policy hides it.
   { id: 'minimax-m3.1-flash-free', label: 'MiniMax M3.1 Flash Free' },
   { id: 'minimax-m3', label: 'MiniMax M3' },
   { id: 'minimax-m2.7', label: 'MiniMax M2.7' },

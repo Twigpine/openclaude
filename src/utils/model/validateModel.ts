@@ -16,7 +16,7 @@ import {
   getDiscoveredNvidiaNimModelIds,
   isNvidiaNimProvider,
 } from './nvidiaNimModels.js'
-import { getCachedMiniMaxModelOptions, isMiniMaxProvider } from './minimaxModels.js'
+import { getCachedMiniMaxModelOptions, isKnownMiniMaxModel, isMiniMaxProvider } from './minimaxModels.js'
 
 // Cache valid models to avoid repeated API calls
 const validModelCache = new Map<string, boolean>()
@@ -86,10 +86,10 @@ export async function validateModel(
     }
   }
 
-  // For MiniMax provider, validate against cached model list
+  // Known explicit IDs are independent of the filtered picker suggestions.
   if (isMiniMaxProvider()) {
     const minimaxModels = getCachedMiniMaxModelOptions()
-    const found = minimaxModels.some(m => m.value === normalizedModel)
+    const found = isKnownMiniMaxModel(normalizedModel)
     if (found) {
       validModelCache.set(normalizedModel, true)
       return { valid: true }

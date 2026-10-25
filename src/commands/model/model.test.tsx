@@ -698,6 +698,70 @@ test('/model still applies a Claude alias on a non-Command-Code OpenAI route', a
   expect(messages[0]).not.toContain('requires the Anthropic Messages protocol')
 })
 
+test.each([
+  ['MiniMax-M2.5', true],
+  ['MiniMax-M2.7', true],
+  ['MiniMax-Text-01', true],
+  ['abab6.5s-chat', true],
+  ['abab6.5-chat', true],
+  ['abab6.5g-chat', true],
+  ['abab6-chat', true],
+  ['MiniMax-M3', true],
+  ['MiniMax-M3.1-Flash', true],
+  ['custom-minimax-deployment', false],
+])('/model preserves explicit MiniMax selection validity for %s', async (model, valid) => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.minimax.io/v1'
+  process.env.OPENAI_API_KEY = 'minimax-test-key'
+  process.env.OPENAI_MODEL = 'MiniMax-M3.1-Flash'
+  for (const key of [
+    'OPENAI_API_BASE', 'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GITHUB',
+    'CLAUDE_CODE_USE_MISTRAL', 'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+  ]) delete process.env[key]
+  mockProviderProfiles()
+
+  const { call } = await importFreshModelModule(`minimax-explicit-${model}`)
+  const { AppStateProvider, getDefaultAppState, useAppState } = await import('../../state/AppState.js')
+  const { render } = await import('../../ink.js')
+  const messages: string[] = []
+  let selectedModel: ModelSetting | undefined
+  function CaptureModel() {
+    selectedModel = useAppState(state => state.mainLoopModel)
+    return null
+  }
+  const stdout = new PassThrough()
+  ;(stdout as unknown as { columns: number }).columns = 120
+  const originalFetch = globalThis.fetch
+  const fetch = mock(async () => { throw new Error('Known model validation must not call the API') })
+  globalThis.fetch = fetch as unknown as typeof globalThis.fetch
+  let instance: Awaited<ReturnType<typeof render>> | undefined
+  try {
+    const element = await call(result => { if (result) messages.push(result) }, {} as never, model)
+    instance = await render(
+      <AppStateProvider initialState={{ ...getDefaultAppState(), mainLoopModel: 'MiniMax-M3.1-Flash' }}>
+        {element}
+        <CaptureModel />
+      </AppStateProvider>,
+      stdout as unknown as NodeJS.WriteStream,
+    )
+    await waitForCondition(() => messages.length > 0)
+    if (valid) {
+      expect(messages[0]).toContain('Set model to')
+      await waitForCondition(() => selectedModel === model)
+      expect(selectedModel).toBe(model)
+    } else {
+      expect(messages[0]).toContain(`Model '${model}' not found in MiniMax catalog`)
+      expect(selectedModel).toBe('MiniMax-M3.1-Flash')
+    }
+    expect(fetch).not.toHaveBeenCalled()
+  } finally {
+    instance?.unmount()
+    stdout.end()
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('opens the model picker without awaiting descriptor-backed route refresh', async () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = 'https://openrouter.ai/api/v1'

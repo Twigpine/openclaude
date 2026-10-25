@@ -2052,7 +2052,7 @@ test.each([
   ['https://opencode.ai/zen/v1', 'minimax-m3.1-flash-free'],
   ['https://opencode.ai/zen/v1', 'minimax-m3'],
   ['https://openrouter.ai/api/v1', 'minimax/minimax-m3.1-flash:free'],
-])('MiniMax gateway %s preserves the verified model ID %s at HTTP boundary', async (baseURL, model) => {
+])('MiniMax gateway %s preserves the explicit model ID %s at HTTP boundary', async (baseURL, model) => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = baseURL
   process.env.OPENAI_MODEL = model

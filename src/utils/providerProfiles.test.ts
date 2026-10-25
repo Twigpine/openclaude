@@ -3448,6 +3448,30 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
   })
 
+  test.each(['minimax-m3-free', 'minimax-m3.1-flash-free'])('applies saved retired Zen model %s without rewriting the configured model', async savedModel => {
+    const { _setSavedModelOverrideForTesting, applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    const profile = buildProfile({
+      id: 'saved_zen',
+      provider: 'opencode',
+      baseUrl: 'https://opencode.ai/zen/v1',
+      model: 'gpt-5.4',
+    })
+    _setSavedModelOverrideForTesting(savedModel)
+    try {
+      const applied = applyActiveProviderProfileFromConfig({
+        ...createMockConfigState(),
+        providerProfiles: [profile],
+        activeProviderProfileId: profile.id,
+      })
+      expect(applied?.id).toBe(profile.id)
+      expect(process.env.OPENAI_MODEL).toBe(savedModel)
+      expect(profile.model).toBe('gpt-5.4')
+    } finally {
+      _setSavedModelOverrideForTesting(undefined)
+    }
+  })
+
   test.each(['', '?reasoning=high', '?thinking=disabled&reasoning=high'])(
     'preserves context limits for configured and saved models across profile rehydration (%j)',
     async query => {
@@ -6124,19 +6148,19 @@ describe('getProfileModelOptions', () => {
     ])
   })
 
-  test('keeps saved MiniMax IDs while filtering retired discovered text choices', async () => {
+  test.each(['MiniMax-M2.7', 'minimax-m3-free', 'minimax-m3.1-flash-free'])('keeps saved %s while filtering retired discovered text choices', async savedModel => {
     const { getProfileModelOptions } = await importFreshProviderProfileModules()
     mockConfigState = {
       ...createMockConfigState(),
       openaiAdditionalModelOptionsCacheByProfile: {
-        provider_test: ['MiniMax-M2.5', 'MiniMax-M2.7', 'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o'].map(value => ({ value, label: value, description: 'Discovered from API' })),
+        provider_test: ['MiniMax-M2.5', 'MiniMax-M2.7', 'minimax-m3-free', 'minimax-m3.1-flash-free', 'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o'].map(value => ({ value, label: value, description: 'Discovered from API' })),
       },
     }
-    const profile = buildProfile({ id: 'provider_test', model: 'MiniMax-M2.7, custom-minimax' })
+    const profile = buildProfile({ id: 'provider_test', model: `${savedModel}, custom-minimax` })
     expect(getProfileModelOptions(profile).map(option => option.value)).toEqual([
-      'MiniMax-M2.7', 'custom-minimax', 'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o',
+      savedModel, 'custom-minimax', 'MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-Vision-01', 'gpt-4o',
     ])
-    expect(profile.model).toBe('MiniMax-M2.7, custom-minimax')
+    expect(profile.model).toBe(`${savedModel}, custom-minimax`)
     expect(mockConfigState.openaiAdditionalModelOptionsCacheByProfile?.provider_test?.[0]).toMatchObject({ value: 'MiniMax-M2.5' })
   })
 
