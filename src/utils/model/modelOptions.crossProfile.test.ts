@@ -498,7 +498,7 @@ test('getModelOptionsBase: local OpenAI-compatible scope still appends inactive 
   }
 })
 
-test('getModelOptionsBase: active Ollama profile still surfaces inactive profile options', async () => {
+test.each(['llama3.2', 'minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud'])('getModelOptionsBase: active Ollama profile offers discovered %s and inactive profiles', async discoveredModel => {
   // Regression for #1164: the `isOllamaProvider()` early return ran before the
   // inactive-profile compute, so a user whose active profile is a local Ollama
   // endpoint only saw the Ollama models and lost the cross-profile switcher,
@@ -508,7 +508,7 @@ test('getModelOptionsBase: active Ollama profile still surfaces inactive profile
     id: 'profile_ollama',
     name: 'Local Ollama',
     baseUrl: 'http://localhost:11434/v1',
-    model: 'llama3.2',
+    model: 'qwen3:latest',
   })
   const inactive = buildProviderProfileFixture({
     id: 'profile_remote',
@@ -523,7 +523,7 @@ test('getModelOptionsBase: active Ollama profile still surfaces inactive profile
   // `[default, ...ollamaModels, ...inactiveProfileOptions]` return path.
   activeOllamaOverride = {
     cachedModels: [
-      { value: 'llama3.2', label: 'llama3.2', description: 'Local Ollama' },
+      { value: discoveredModel, label: discoveredModel, description: 'Local Ollama' },
     ],
   }
   try {
@@ -538,7 +538,7 @@ test('getModelOptionsBase: active Ollama profile still surfaces inactive profile
 
     const options = getModelOptions(false)
     // The Ollama model is still present...
-    expect(options.some(o => o.value === 'llama3.2')).toBe(true)
+    expect(options.some(o => o.value === discoveredModel)).toBe(true)
     // ...and the inactive profile now appears as a switch option.
     const switchOptions = options.filter(o => o.switchToProfileId !== undefined)
     expect(switchOptions.length).toBeGreaterThan(0)
@@ -551,6 +551,34 @@ test('getModelOptionsBase: active Ollama profile still surfaces inactive profile
     } else {
       process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = previousFlag
     }
+  }
+})
+
+test('getModelOptions appends scoped Ollama discoveries when the prefetch cache is empty', async () => {
+  const { getGlobalConfig, saveGlobalConfig } = await import('../config.js')
+  const previousOptions = getGlobalConfig().additionalModelOptionsCache
+  const previousScope = getGlobalConfig().additionalModelOptionsCacheScope
+  const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud']
+  activeOllamaOverride = { cachedModels: [] }
+  activeCacheScopeOverride = 'openai:http://localhost:11434/v1'
+  saveGlobalConfig(current => ({
+    ...current,
+    additionalModelOptionsCache: models.map(value => ({ value, label: value, description: 'Discovered from Ollama' })),
+    additionalModelOptionsCacheScope: activeCacheScopeOverride!,
+  }))
+  try {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => undefined,
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    for (const model of models) expect(values).toContain(model)
+  } finally {
+    saveGlobalConfig(current => ({
+      ...current,
+      additionalModelOptionsCache: previousOptions,
+      additionalModelOptionsCacheScope: previousScope,
+    }))
   }
 })
 

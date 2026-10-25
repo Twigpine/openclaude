@@ -35,3 +35,14 @@ test('static and discovered catalogs cannot reintroduce retired text suggestions
   expect(getCatalogEntriesForRoute('opencode').some(entry => entry.apiName === 'minimax-m3.1-flash-free')).toBe(true)
   expect(getModel('opencode-minimax-m3.1-flash-free')?.defaultModel).toBe('minimax-m3.1-flash-free')
 })
+
+test('Ollama catalog options retain provider-owned MiniMax model identities', () => {
+  const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud']
+  const options = buildRouteCatalogModelOptions(
+    'Custom display label',
+    models.map(apiName => ({ id: apiName, apiName })),
+    undefined,
+    'ollama',
+  )
+  expect(options.map(option => option.value)).toEqual(models)
+})

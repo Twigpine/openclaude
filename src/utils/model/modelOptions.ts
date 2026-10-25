@@ -48,6 +48,7 @@ import {
   getConfiguredProfileModelOptions,
   getProfileModelOptions,
   getProviderProfiles,
+  resolveProfileCapabilityRouteId,
 } from '../providerProfiles.js'
 import { getCachedOllamaModelOptions, isOllamaProvider } from './ollamaModels.js'
 import { getCachedNvidiaNimModelOptions, isNvidiaNimProvider } from './nvidiaNimModels.js'
@@ -1079,14 +1080,28 @@ export function getModelOptions(fastMode = false): ModelOption[] {
   const configuredOptions = activeProfile
     ? getConfiguredProfileModelOptions(activeProfile)
     : []
+  // Most models need no retirement decision. Resolve the route only for a
+  // filtered MiniMax name, and share that metadata lookup across this build.
+  let suggestionRouteId: string | null | undefined
+  const isSuggestedModel = (model: ModelSetting): boolean => {
+    if (isCurrentMiniMaxModelOption(model)) return true
+    if (suggestionRouteId === undefined) {
+      suggestionRouteId = getAPIProvider() === 'openai' && isOllamaProvider()
+        ? 'ollama'
+        : activeProfile
+          ? resolveProfileCapabilityRouteId(activeProfile.provider, activeProfile.baseUrl)
+          : getActiveOpenAIRouteId()
+    }
+    return isCurrentMiniMaxModelOption(model, suggestionRouteId)
+  }
   const options = getModelOptionsBase(fastMode).filter(option =>
     option.switchToProfileId ||
-    isCurrentMiniMaxModelOption(option.value) ||
+    isSuggestedModel(option.value) ||
     configuredOptions.some(configured => configured.value === option.value),
   )
 
   for (const configured of configuredOptions) {
-    if (!isCurrentMiniMaxModelOption(configured.value) &&
+    if (!isSuggestedModel(configured.value) &&
       !options.some(option => option.value === configured.value)) {
       options.push(configured)
     }
@@ -1123,7 +1138,7 @@ export function getModelOptions(fastMode = false): ModelOption[] {
 
   // Append additional model options fetched during bootstrap
   for (const opt of getScopedAdditionalModelOptions()) {
-    if (!isCurrentMiniMaxModelOption(opt.value)) continue
+    if (!isSuggestedModel(opt.value)) continue
     const catalogOption = findRouteCatalogOption(
       getSharedRouteCatalogContext(),
       opt.value,

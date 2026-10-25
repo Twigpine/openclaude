@@ -6180,6 +6180,38 @@ describe('getProfileModelOptions', () => {
 })
 
 describe('setActiveProviderProfile model cache', () => {
+  test.each(['http://localhost:11434/v1', 'https://ollama-proxy.example/v1'])('activation preserves advertised Ollama models at %s', async baseUrl => {
+    const { setActiveProviderProfile, getActiveOpenAIModelOptionsCache } = await importFreshProviderProfileModules()
+    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud']
+    const profile = buildProfile({ id: 'ollama_models', provider: 'ollama', baseUrl, model: 'qwen3:latest' })
+    mockConfigState = {
+      ...createMockConfigState(),
+      providerProfiles: [profile],
+      openaiAdditionalModelOptionsCacheByProfile: {
+        [profile.id]: models.map(value => ({ value, label: value, description: 'Discovered from Ollama' })),
+      },
+    }
+    expect(setActiveProviderProfile(profile.id, { configDir: testConfigDir ?? undefined })?.id).toBe(profile.id)
+    expect(getActiveOpenAIModelOptionsCache().map(option => option.value)).toEqual(['qwen3:latest', ...models])
+    expect(profile.model).toBe('qwen3:latest')
+  })
+
+  test('activation ignores malformed persisted option values before filtering', async () => {
+    const { setActiveProviderProfile, getActiveOpenAIModelOptionsCache } = await importFreshProviderProfileModules()
+    const profile = buildProfile({ id: 'malformed_options', model: 'gpt-4o' })
+    mockConfigState = {
+      ...createMockConfigState(),
+      providerProfiles: [profile],
+      // Persisted JSON bypasses the ModelOption type; retain the existing
+      // non-string guard, including records whose value is absent.
+      openaiAdditionalModelOptionsCacheByProfile: {
+        [profile.id]: JSON.parse('[{},{"value":42},{"value":true},{"value":{}},{"value":[]},{"value":null},{"value":" "},{"value":"gpt-4.1","label":"gpt-4.1","description":"Discovered"}]'),
+      },
+    }
+    expect(setActiveProviderProfile(profile.id, { configDir: testConfigDir ?? undefined })?.id).toBe(profile.id)
+    expect(getActiveOpenAIModelOptionsCache().map(option => option.value)).toEqual(['gpt-4o', 'gpt-4.1'])
+  })
+
   test('populates model cache with all models from multi-model profile on activation', async () => {
     const {
       setActiveProviderProfile,

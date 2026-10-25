@@ -1787,10 +1787,12 @@ export function getProfileModelOptions(
   config = getGlobalConfig(),
 ): ModelOption[] {
   const configuredOptions = getConfiguredProfileModelOptions(profile)
+  const routeId = resolveProfileCapabilityRouteId(profile.provider, profile.baseUrl)
   return mergeModelOptionsByValue(
     configuredOptions,
     getModelCacheByProfile(profile.id, config).filter(option =>
-      isCurrentMiniMaxModelOption(option.value),
+      typeof option.value === 'string' &&
+      isCurrentMiniMaxModelOption(option.value, routeId),
     ),
   )
 }

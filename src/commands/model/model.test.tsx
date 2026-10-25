@@ -1,4 +1,5 @@
 import { PassThrough } from 'node:stream'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 
 import { afterAll, afterEach, beforeEach, expect, mock, setSystemTime, test } from 'bun:test'
 import React from 'react'
@@ -3364,6 +3365,47 @@ test('/model refresh treats empty legacy OpenAI-compatible discovery as failed n
   expect(scopedCache.getState().additionalModelOptionsCache).toEqual(
     cachedOptions,
   )
+})
+
+test('Ollama picker retains advertised MiniMax models before and after refresh', async () => {
+  const restoreEnv = snapshotEnv([
+    'CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_API_BASE',
+    'OPENAI_API_KEY', 'OPENAI_MODEL', 'CLAUDE_CODE_USE_GEMINI',
+    'CLAUDE_CODE_USE_GITHUB', 'CLAUDE_CODE_USE_MISTRAL',
+    'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED', 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
+  ], { clear: true })
+  let rendered: Awaited<ReturnType<typeof renderModelCommandWithCapturedPicker>> | undefined
+  try {
+    const activeProfile = {
+      id: 'ollama-profile', name: 'Ollama', provider: 'ollama',
+      baseUrl: 'http://localhost:11434/v1', model: 'qwen3:latest', apiKey: '',
+    }
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = activeProfile.baseUrl
+    process.env.OPENAI_MODEL = activeProfile.model
+    process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
+    process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
+    mockProviderProfiles({ getActiveProviderProfile: () => activeProfile })
+    const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud']
+    mockDescriptorDiscovery({
+      routeId: 'ollama',
+      cachedModels: [{ id: models[0]!, apiName: models[0]! }],
+      discoveredModels: models.map(id => ({ id, apiName: id })),
+    })
+    rendered = await renderModelCommandWithCapturedPicker('ollama-minimax-discovery')
+    const pickerValues = () => (rendered!.getCapturedProps().optionsOverride as ModelOption[]).map(option => option.value)
+    expect(pickerValues()).toContain(models[0])
+    expect(pickerValues()).not.toContain(models[1])
+    expect(rendered.getCapturedProps().onRefresh).toEqual(expect.any(Function))
+    rendered.getCapturedProps().onRefresh!()
+    await waitForCondition(() => pickerValues().includes(models[1]!))
+    for (const model of models) expect(pickerValues()).toContain(model)
+  } finally {
+    rendered?.instance.unmount()
+    rendered?.stdout.end()
+    restoreEnv()
+  }
 })
 
 test('interactive model picker refresh keeps descriptor options allowlist-filtered', async () => {

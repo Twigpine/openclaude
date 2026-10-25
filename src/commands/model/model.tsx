@@ -497,6 +497,7 @@ async function loadDescriptorDiscoveryContext(
       routeLabel,
       staticEntries,
       routeDefaultModel,
+      routeId,
     )
 
     return {
@@ -553,6 +554,7 @@ async function loadDescriptorDiscoveryContext(
     routeLabel,
     mergedEntries,
     routeDefaultModel,
+    routeId,
   )
 
   return {
@@ -933,6 +935,7 @@ function ModelPickerWrapper({
           discoveryContext.routeLabel,
           result?.models ?? [],
           discoveryContext.routeDefaultModel,
+          discoveryContext.routeId,
         ),
         {
           profileModelSurface: discoveryContext.profileModelSurface,
@@ -1285,6 +1288,7 @@ async function refreshModelsAndSummarize(): Promise<string> {
         discoveryContext.routeLabel,
         result?.models ?? [],
         discoveryContext.routeDefaultModel,
+        discoveryContext.routeId,
       ),
       {
         profileModelSurface: discoveryContext.profileModelSurface,

@@ -27,5 +27,6 @@ export function getCachedMiniMaxModelOptions(): ModelOption[] {
     'MiniMax',
     getCatalogEntriesForRoute('minimax'),
     getRouteDefaultModel('minimax'),
+    'minimax',
   )
 }
