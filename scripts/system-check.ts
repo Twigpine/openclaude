@@ -27,7 +27,9 @@ import {
   type SecretValueSource,
 } from '../src/utils/providerSecrets.js'
 import {
+  getGeminiVertexGlobalEndpointError,
   getGeminiVertexLocation,
+  getGeminiVertexModel,
   getGeminiVertexProjectId,
   resolveGeminiCredential,
   resolveGeminiVertexAuthMode,
@@ -1038,10 +1040,11 @@ function checkGeminiVertexEnv(): CheckResult[] {
     return t ? t : undefined
   }
   const model = nonBlank(process.env.GEMINI_VERTEX_MODEL)
-  // Same resolver as the runtime validator / client so doctor never reports a
-  // different project than the one the provider would actually use.
+  // Same resolvers as the runtime validator / client so doctor never reports a
+  // different project, model, or location than the provider would actually use.
   const project = getGeminiVertexProjectId(process.env)
-  const location = nonBlank(process.env.GEMINI_VERTEX_LOCATION) ?? 'global'
+  const location = getGeminiVertexLocation(process.env)
+  const effectiveModel = getGeminiVertexModel(process.env)
   const accessToken = nonBlank(process.env.GEMINI_ACCESS_TOKEN)
   const adcFile = nonBlank(process.env.GOOGLE_APPLICATION_CREDENTIALS)
   const authMode = resolveGeminiVertexAuthMode(process.env)
@@ -1075,7 +1078,15 @@ function checkGeminiVertexEnv(): CheckResult[] {
       ? pass('GEMINI_VERTEX_MODEL', safeDisplayValue(model, '(unset)'))
       : pass('GEMINI_VERTEX_MODEL', 'Not set. Default gemini-2.5-flash will be used.'),
   )
-  results.push(pass('GEMINI_VERTEX_LOCATION', safeDisplayValue(location, 'global')))
+  const globalEndpointError = getGeminiVertexGlobalEndpointError(
+    effectiveModel,
+    location,
+  )
+  results.push(
+    globalEndpointError
+      ? fail('GEMINI_VERTEX_LOCATION', globalEndpointError)
+      : pass('GEMINI_VERTEX_LOCATION', safeDisplayValue(location, 'global')),
+  )
 
   if (authMode === 'access-token') {
     results.push(
@@ -1415,6 +1426,13 @@ async function checkProviderGenerationReadiness(): Promise<CheckResult> {
         'Provider generation readiness',
         'Gemini Vertex: a project id is required. Set GEMINI_VERTEX_PROJECT, GOOGLE_CLOUD_PROJECT, or use an ADC credential that embeds a project.',
       )
+    }
+    const globalEndpointError = getGeminiVertexGlobalEndpointError(
+      getGeminiVertexModel(process.env),
+      getGeminiVertexLocation(process.env),
+    )
+    if (globalEndpointError) {
+      return fail('Provider generation readiness', globalEndpointError)
     }
     return pass(
       'Provider generation readiness',

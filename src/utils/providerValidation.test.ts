@@ -216,7 +216,7 @@ test('accepts Gemini Vertex with project id and access token', async () => {
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
   process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
-  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
   process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
   process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
 
@@ -230,6 +230,26 @@ test('accepts Gemini Vertex with project id and access token', async () => {
       }),
     }),
   ).resolves.toBeNull()
+})
+
+test('rejects a global-only Gemini Vertex model on a regional location', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+
+  await expect(
+    getProviderValidationError(process.env, {
+      resolveGeminiCredential: async () => ({
+        kind: 'access-token',
+        credential: 'vertex-token',
+      }),
+    }),
+  ).resolves.toBe(
+    'Gemini Vertex model "gemini-3.5-flash" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "us-central1") to use it.',
+  )
 })
 
 test('accepts ADC credentials for Gemini auth', async () => {

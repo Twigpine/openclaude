@@ -102,6 +102,24 @@ export function isGlobalOnlyVertexModel(model: string | undefined): boolean {
   return model !== undefined && GLOBAL_ONLY_VERTEX_MODELS.has(model.trim())
 }
 
+/**
+ * The native client, startup validator, and doctor share this rule. A
+ * global-only model on a regional location builds a URL Vertex will not serve.
+ * Returns the same message the client throws, or null when the pair is valid.
+ * Location defaults the same way as getGeminiVertexLocation (`global`).
+ */
+export function getGeminiVertexGlobalEndpointError(
+  model: string | undefined,
+  location: string | undefined,
+): string | null {
+  const resolvedLocation = sanitizeCredential(location) ?? DEFAULT_GEMINI_VERTEX_LOCATION
+  const resolvedModel = sanitizeCredential(model)
+  if (resolvedLocation === 'global' || !isGlobalOnlyVertexModel(resolvedModel)) {
+    return null
+  }
+  return `Gemini Vertex model "${resolvedModel}" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "${resolvedLocation}") to use it.`
+}
+
 export function getGeminiAuthMode(
   env: NodeJS.ProcessEnv = process.env,
 ): GeminiAuthMode | undefined {

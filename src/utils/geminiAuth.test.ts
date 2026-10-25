@@ -7,6 +7,7 @@ import {
 } from '../test/sharedMutationLock.js'
 import {
   getGeminiProjectIdHint,
+  getGeminiVertexGlobalEndpointError,
   getGeminiVertexLocation,
   getGeminiVertexModel,
   getGeminiVertexProjectId,
@@ -256,6 +257,17 @@ describe('Gemini auth helpers', () => {
         GOOGLE_PROJECT_ID: 'legacy-project',
       }),
     ).toBe('legacy-project')
+  })
+
+  test('global-only models require the global location', () => {
+    expect(
+      getGeminiVertexGlobalEndpointError('gemini-3.5-flash', 'us-central1'),
+    ).toBe(
+      'Gemini Vertex model "gemini-3.5-flash" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "us-central1") to use it.',
+    )
+    expect(getGeminiVertexGlobalEndpointError('gemini-3.5-flash', 'global')).toBeNull()
+    expect(getGeminiVertexGlobalEndpointError('gemini-2.5-flash', 'us-central1')).toBeNull()
+    expect(getGeminiVertexGlobalEndpointError(undefined, 'us-central1')).toBeNull()
   })
 
   test('detects explicit project id hints', () => {

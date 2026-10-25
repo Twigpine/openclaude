@@ -1378,4 +1378,22 @@ describe('doctor recognises Gemini Vertex', () => {
     expect(result.ok).toBe(false)
     expect(result.detail).toContain('could not be resolved')
   })
+
+  test('env and generation checks reject a global-only model on a regional location', async () => {
+    const { __test } = await import('./system-check.ts')
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_PROJECT = 'project-test'
+    process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+    process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+    process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+    const message =
+      'Gemini Vertex model "gemini-3.5-flash" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "us-central1") to use it.'
+    const location = __test.checkOpenAIEnv().find(result => result.label === 'GEMINI_VERTEX_LOCATION')
+    expect(location?.ok).toBe(false)
+    expect(location?.detail).toBe(message)
+    const readiness = await __test.checkProviderGenerationReadiness()
+    expect(readiness.ok).toBe(false)
+    expect(readiness.detail).toBe(message)
+  })
 })
