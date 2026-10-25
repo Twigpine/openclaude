@@ -899,16 +899,19 @@ function shouldRetry(error: APIError, persistentRetryEnabled: boolean): boolean 
     return false
   }
 
+  // Decide classified provider throttles before native auth/overload
+  // shortcuts, which can intentionally bypass the normal header gate.
+  if (error.status === 403 && openAICategory === 'rate_limited') {
+    return error.headers?.get('x-should-retry') !== 'false' && !isQuotaExhausted(error)
+  }
+
   // CCR mode: auth is via infrastructure-provided JWTs, so a 401/403 is a
   // transient blip (auth service flap, network hiccup) rather than bad
   // credentials. Bypass x-should-retry:false — the server assumes we'd retry
   // the same bad key, but our key is fine.
-  // A classified provider throttle is not an infrastructure auth failure;
-  // let its normal header and quota checks below decide whether to retry.
   if (
     isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) &&
-    (error.status === 401 ||
-      (error.status === 403 && openAICategory !== 'rate_limited'))
+    (error.status === 401 || error.status === 403)
   ) {
     return true
   }
@@ -959,12 +962,6 @@ function shouldRetry(error: APIError, persistentRetryEnabled: boolean): boolean 
   if (error.status === 429) {
     if (isQuotaExhausted(error)) return false
     return !isClaudeAISubscriber() || isEnterpriseSubscriber()
-  }
-
-  // Only the OpenAI shim's explicit throttle classification makes a 403
-  // retryable. Preserve the no-retry header gate above and quota guard.
-  if (error.status === 403 && openAICategory === 'rate_limited') {
-    return !isQuotaExhausted(error)
   }
 
   // Clear API key cache on 401 and allow retry.

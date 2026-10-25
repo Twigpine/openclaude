@@ -9,6 +9,7 @@ import { _clearRegistryForTesting, ensureIntegrationsLoaded, registerGateway } f
 import { applyProviderFlag } from '../../../utils/providerFlag.ts'
 import { applyProviderProfileToProcessEnv } from '../../../utils/providerProfiles.ts'
 import {
+  categorizeRetryableAPIError,
   getAssistantMessageFromError,
   OPENCODE_GO_FREE_LIMIT_ERROR_MESSAGE,
 } from '../errors.ts'
@@ -885,7 +886,21 @@ test.each([
   { body: 'Rate limit exceeded for this API key, streaming is disabled', retries: true },
   { body: 'Rate limit exceeded for this API key, currently streaming is disabled', retries: true },
   { body: 'Rate limit exceeded for this OAuth token', retries: true },
+  { body: 'Too many requests; no tokens remaining in the rate limit bucket', retries: true },
+  { body: 'Too many requests; empty token bucket', retries: true },
+  { body: 'Rate limit exceeded for this API key: bad gateway', retries: true },
+  { body: 'Rate limit exceeded for this API key: upstream response is empty', retries: true },
+  { body: 'Rate limit exceeded for this API key, bad gateway', retries: true },
+  { body: 'Rate limit exceeded for this API key, empty response received', retries: true },
   { body: 'Token is invalid; too many requests', retries: false },
+  { body: 'No API key was provided; too many requests', retries: false },
+  { body: 'No token provided; rate limit exceeded', retries: false },
+  { body: 'API key is empty; too many requests', retries: false },
+  { body: '{"error":{"code":"bad_api_key","message":"Too many requests"}}', retries: false },
+  { body: 'Too many requests; your API key is no longer valid', retries: false },
+  { body: 'Too many requests; your API key does not exist', retries: false },
+  { body: 'Too many requests; API key, which is no longer valid', retries: false },
+  { body: 'API key, now empty; too many requests', retries: false },
   { body: 'Account disabled; too many requests', retries: false },
   { body: '{"error":{"code":"account_disabled","message":"Too many requests"}}', retries: false },
   { body: 'Key is invalid; too many requests', retries: false },
@@ -899,6 +914,10 @@ test.each([
   { body: 'Forbidden: too many requests', retries: false },
   { body: 'Quota exceeded; too many requests', retries: false },
   { body: 'Too many requests', retries: false, noRetry: true },
+  { body: '{"message":"Too many requests","type":"overloaded_error"}', retries: true },
+  { body: '{"message":"Too many requests","type":"overloaded_error"}', retries: false, noRetry: true },
+  { body: 'Too many requests: {"type":"overloaded_error"}', retries: false, noRetry: true },
+  { body: 'Too many requests: {"type":"overloaded_error"}', retries: false, noRetry: true, remote: true },
   { body: 'Too many requests', retries: false, noRetry: true, remote: true },
   { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: false, noRetry: true, remote: true },
   { body: 'Too many requests', retries: true, remote: true },
@@ -927,6 +946,7 @@ test.each([
   }))
   const client = createOpenAIShimClient({}) as Anthropic
   const countdowns: unknown[] = []
+  const retryCategories: string[] = []
   let caught: unknown
   let result: unknown
   try {
@@ -947,6 +967,8 @@ test.each([
         break
       }
       countdowns.push(next.value)
+      // QueryEngine uses this same projection for public SDK api_retry events.
+      retryCategories.push(categorizeRetryableAPIError(next.value.error))
     }
   } catch (error) {
     caught = error
@@ -954,6 +976,7 @@ test.each([
     restoreRetryEnv()
   }
   expect(attempts).toBe(retries ? 2 : 1)
+  expect(retryCategories).toEqual(retries ? ['rate_limit'] : [])
   if (retries) {
     expect(caught).toBeUndefined()
     expect(result).toMatchObject({ content: [{ type: 'text', text: 'ok' }] })
@@ -1011,7 +1034,11 @@ test.each([
 
 test.each([
   { body: 'Rate limit exceeded for this OAuth token', recoverable: true },
+  { body: 'Rate limit exceeded for this API key, bad gateway', recoverable: true },
   { body: 'Account disabled; too many requests', recoverable: false },
+  { body: 'No API key was provided; too many requests', recoverable: false },
+  { body: 'Too many requests; API key, which is no longer valid', recoverable: false },
+  { body: '{"error":{"code":"bad_api_key","message":"Too many requests"}}', recoverable: false },
   { body: '{"error":{"code":"account_deactivated","message":"Too many requests"}}', recoverable: false },
 ])('throttle-403 credential recovery follows fault precedence: %j', async ({ body, recoverable }) => {
   const restorePoolEnv = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'OPENAI_API_KEYS', 'OPENAI_API_KEY'])

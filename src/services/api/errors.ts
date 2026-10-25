@@ -1616,7 +1616,10 @@ export function categorizeRetryableAPIError(
   ) {
     return 'rate_limit'
   }
-  if (error.status === 429) {
+  if (
+    error.status === 429 ||
+    (error.status === 403 && extractOpenAICategoryMarker(error.message ?? '') === 'rate_limited')
+  ) {
     return 'rate_limit'
   }
   if (error.status === 401 || error.status === 403) {

@@ -427,6 +427,11 @@ function isExplicitThrottleMessage(body: string): boolean {
   if (
     /unauthori[sz]ed|unauthenticated|not[ _-]auth|forbidden|access[ _-]denied|permission|credential|denied|suspended|blocked|banned|insufficient[ _-]funds|revoked|expired|not[ _-]allowed|quota|billing|credit|payment|allotment/i.test(body) ||
     /auth(?:entication|ori[sz]ation)?[\s\S]{0,20}(?:error|fail|invalid|required|missing)|(?:invalid|failed|missing|required)[\s\S]{0,20}auth/i.test(body) ||
+    // New absence/state forms must describe the credential directly. Do not
+    // scan across an unrelated subject such as a bad gateway or empty response.
+    /(?:\b|_)(?:no|bad|empty)[\s_-]+(?:accounts?|(?:api[\s_-]*)?keys?|tokens?)(?:\b|_)(?:[\s_-]+(?:(?:is|are|was|were|has|have|had|been|being)[\s_-]+)*(?:provided|configured|set)(?:\b|_)|(?=\s*(?:$|[,.;!?:'"}\]])))/i.test(body) ||
+    /(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:,\s*[^,.;!?]*,)?(?:[\s_-]+|,\s*)(?:(?:which|that)[\s_-]+)?(?:(?:is|are|was|were|has|have|had|been|being|now|still|already|[a-z]+ly)[\s_-]+)+empty(?:\b|_)/i.test(body) ||
+    /(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:,\s*[^,.;!?]*,)?(?:[\s_-]+|,\s*)(?:(?:which|that)[\s_-]+)?(?:(?:is|are|was|were|has|have|had|been|being|now|still|already|[a-z]+ly)[\s_-]+)*(?:no[\s_-]longer[\s_-]valid|does[\s_-]not[\s_-]exist)(?:\b|_)/i.test(body) ||
     // Rate limits can name valid accounts, keys or OAuth tokens. Match faults
     // in either word order within a clause, including line wraps and codes;
     // an arbitrary character limit can miss "has been permanently disabled".
