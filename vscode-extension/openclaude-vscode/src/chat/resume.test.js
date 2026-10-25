@@ -57,10 +57,12 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
       const controller = new ChatController(new SessionManager());
       try {
         cwd = path.join(root, 'a'.repeat(100), 'b'.repeat(100));
-        process.env.OPENCLAUDE_CONFIG_DIR = path.join(root, 'config with spaces & %PATH% !');
+        // The host resolves this root here; the CLI starts from the workspace.
+        process.chdir(root);
+        process.env.OPENCLAUDE_CONFIG_DIR = 'config with spaces & %PATH% !';
         const id = '38f67e50-946e-4d74-b0b6-c19759b99623';
         const prefix = cwd.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 200);
-        const file = path.join(process.env.OPENCLAUDE_CONFIG_DIR, 'projects', prefix + '-alternate', id + '.jsonl');
+        const file = path.join(root, process.env.OPENCLAUDE_CONFIG_DIR, 'projects', prefix + '-alternate', id + '.jsonl');
         await fs.mkdir(path.dirname(file), { recursive: true });
         await fs.writeFile(file, JSON.stringify({ type: 'user', cwd, message: { content: 'saved prompt' } }) + '\n');
         const manager = controller.sessionManager;
@@ -70,8 +72,10 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
         await controller.startSession({ sessionId: selected.id });
         assert.equal(controller.sessionId, id);
         const resumeValue = () => calls.at(-1).args[calls.at(-1).args.indexOf('--resume') + 1];
-        assert.equal(resumeValue(), file);
         assert.equal(calls.at(-1).options.cwd, cwd);
+        assert.equal(path.resolve(calls.at(-1).options.cwd, resumeValue()), file,
+          'the CLI must resolve the selected transcript from its own cwd');
+        assert.equal(resumeValue(), file);
         children.at(-1).emit('close', 0);
         controller._doSend = async () => {}; // Only inspect the restart launch, no model traffic.
         await controller.sendMessage('continue');

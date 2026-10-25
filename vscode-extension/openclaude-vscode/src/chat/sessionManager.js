@@ -218,7 +218,7 @@ class SessionManager {
   async getResumeTarget(sessionId) {
     const filePath = await this.resolveSessionPath(sessionId);
     const exact = this._cwd && path.join(getProjectsDir(), sanitizePath(this._cwd), `${sessionId}.jsonl`);
-    return filePath && filePath !== exact ? filePath : sessionId;
+    return filePath && filePath !== exact ? path.resolve(filePath) : sessionId;
   }
 
   async loadSession(sessionId) {
