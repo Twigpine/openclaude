@@ -556,6 +556,13 @@ host. Without this variable the behavior is unchanged.
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini API-key auth | Gemini API key for direct Gemini setup |
 | `GEMINI_MODEL` | Gemini only | Model name such as `gemini-3-flash-preview` or `gemini-2.5-pro` |
 | `GEMINI_BASE_URL` | No | Override the Gemini base URL |
+| `CLAUDE_CODE_USE_GEMINI_VERTEX` | Gemini on Vertex AI only | Set to `1` to enable native Gemini on Vertex AI; distinct from direct Gemini and Claude on Vertex |
+| `GEMINI_VERTEX_PROJECT` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `GOOGLE_PROJECT_ID` | Gemini on Vertex AI | Google Cloud project, in the listed precedence order. Required explicitly for access-token auth; ADC may derive it from credentials. |
+| `GEMINI_VERTEX_LOCATION` | No | Vertex location, defaulting to `global`; global-only models require `global` |
+| `GEMINI_VERTEX_MODEL` | No | Vertex Gemini model, defaulting to `gemini-2.5-flash`; an explicit `--model` overrides it |
+| `GEMINI_VERTEX_AUTH_MODE` | No | `adc` or `access-token`. Defaults to `access-token` when a nonblank `GEMINI_ACCESS_TOKEN` is present, otherwise `adc`. |
+| `GEMINI_ACCESS_TOKEN` | Gemini Vertex access-token auth | Google Cloud OAuth access token; not a Gemini API key |
+| `GOOGLE_APPLICATION_CREDENTIALS` | No | Path to Google ADC credentials; ambient ADC is also supported |
 | `CLAUDE_CODE_USE_MISTRAL` | Mistral only | Set to `1` to enable the dedicated Mistral provider path |
 | `MISTRAL_API_KEY` | Mistral only | Mistral API key |
 | `MISTRAL_MODEL` | Mistral only | Model name such as `devstral-latest` |
@@ -576,7 +583,8 @@ host. Without this variable the behavior is unchanged.
 
 Model env vars are provider-scoped: first-party Anthropic sessions read
 `ANTHROPIC_MODEL`, OpenAI-compatible sessions read `OPENAI_MODEL`, Gemini reads
-`GEMINI_MODEL`, and Mistral reads `MISTRAL_MODEL`. For manual Bedrock, Vertex,
+`GEMINI_MODEL`, Gemini on Vertex AI reads `GEMINI_VERTEX_MODEL`, and Mistral reads
+`MISTRAL_MODEL`. For manual Bedrock, Claude on Vertex,
 or Foundry launches, select the model with `--model`.
 
 An OpenAI-compatible provider profile's maximum context length applies to every
@@ -813,7 +821,7 @@ bun run hardening:strict
 Notes:
 
 - `doctor:runtime` fails fast if `CLAUDE_CODE_USE_OPENAI=1` with a placeholder key or a missing key for non-local providers.
-- `doctor:runtime` also validates the dedicated Gemini and Mistral env paths when `CLAUDE_CODE_USE_GEMINI=1` or `CLAUDE_CODE_USE_MISTRAL=1`.
+- `doctor:runtime` also validates the dedicated Gemini and Mistral env paths when `CLAUDE_CODE_USE_GEMINI=1` or `CLAUDE_CODE_USE_MISTRAL=1`. With `CLAUDE_CODE_USE_GEMINI_VERTEX=1`, it checks the native Vertex path, credential readiness, and an explicit or ADC-derived project before attempting generation.
 - Local providers such as `http://localhost:11434/v1`, `http://10.0.0.1:11434/v1`, and `http://127.0.0.1:1337/v1` can run without `OPENAI_API_KEY`.
 - Codex profiles validate `CODEX_API_KEY` or the Codex CLI auth file and probe `POST /responses` instead of `GET /models`.
 - `openclaude doctor report` is redacted by default and is intended for GitHub issues. It summarizes provider/runtime/build/settings state without prompts, transcripts, raw settings files, API keys, MCP command details, or full home-directory paths.

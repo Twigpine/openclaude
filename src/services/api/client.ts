@@ -622,15 +622,36 @@ export async function getAnthropicClient({
             ? 'max'
           : standardEffortToOpenAI(appliedEffortLevel))
       : undefined
+  // Intent check: if the user's active provider profile is gemini-vertex,
+  // route to our Gemini Vertex client even when the env flag is missing — a
+  // stale CLAUDE_CODE_USE_VERTEX from the launching shell would otherwise
+  // fall through to the Anthropic Vertex SDK and emit a 404 for
+  // publishers/anthropic/models/gemini-* (a model that doesn't exist there).
+  // Explicit startup selections for another provider keep precedence over
+  // the saved profile (see shouldRouteToGeminiVertexFromProfile).
+  const activeProfile = (() => {
+    try {
+      return getActiveProviderProfile()
+    } catch {
+      return undefined
+    }
+  })()
+  const routedFromProfileOnly =
+    !isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
+    shouldRouteToGeminiVertexFromProfile(process.env, activeProfile)
+  const useGeminiVertexProvider =
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) || routedFromProfileOnly
+
   // Normalize env-only routes before snapshotting custom headers. Dedicated
   // routes such as Concentrate deliberately clear inherited proxy headers;
   // doing that after getCustomHeaders() would leave a copied secret in the
   // request defaults.
-  const envOnlyProviderRouteId = resolveEnvOnlyProviderRouteId(process.env)
-  const useMiniMaxEnvOnlyProvider = shouldUseMiniMaxEnvOnlyProvider(
-    model,
-    envOnlyProviderRouteId,
-  )
+  const envOnlyProviderRouteId = useGeminiVertexProvider
+    ? null
+    : resolveEnvOnlyProviderRouteId(process.env)
+  const useMiniMaxEnvOnlyProvider =
+    !useGeminiVertexProvider &&
+    shouldUseMiniMaxEnvOnlyProvider(model, envOnlyProviderRouteId)
   const useXiaomiMimoEnvOnlyProvider =
     envOnlyProviderRouteId === 'xiaomi-mimo' && !useMiniMaxEnvOnlyProvider
   const useXaiEnvOnlyProvider =
@@ -788,25 +809,6 @@ export async function getAnthropicClient({
     return new Anthropic(nativeArgs)
   }
 
-  // Intent check: if the user's active provider profile is gemini-vertex,
-  // route to our Gemini Vertex client even when the env flag is missing — a
-  // stale CLAUDE_CODE_USE_VERTEX from the launching shell would otherwise
-  // fall through to the Anthropic Vertex SDK and emit a 404 for
-  // publishers/anthropic/models/gemini-* (a model that doesn't exist there).
-  // Explicit startup selections for another provider keep precedence over
-  // the saved profile (see shouldRouteToGeminiVertexFromProfile).
-  const activeProfile = (() => {
-    try {
-      return getActiveProviderProfile()
-    } catch {
-      return undefined
-    }
-  })()
-  const routedFromProfileOnly =
-    !isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
-    shouldRouteToGeminiVertexFromProfile(process.env, activeProfile)
-  const useGeminiVertexProvider =
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) || routedFromProfileOnly
   if (useGeminiVertexProvider) {
     // When routing purely from the saved profile (no env flag), the profile's
     // own project (stored in baseUrl) and model must win over ambient/default

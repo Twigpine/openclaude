@@ -8,10 +8,6 @@ import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
 import { resolveRouteCredentialValue } from '../integrations/routeMetadata.js'
 import { snapshotEnv } from '../test/envSnapshot.js'
 import type { ProviderProfile } from './config.js'
-// Captured before any mock.module() runs, so this namespace keeps the real
-// config implementation and can be re-installed when this file is done (see the
-// afterAll below). Mirrors the restore pattern in user.test.ts.
-import * as realConfigModule from './config.js'
 
 const nonce = `${Date.now()}-${Math.random()}`
 const realConfig = {
@@ -182,7 +178,7 @@ afterAll(() => {
   // against a dead mock state, which is order-dependent across OSes. Re-install
   // the real module so the full suite stays isolation-/order-independent.
   mock.restore()
-  mock.module('./config.js', () => realConfigModule)
+  mock.module('./config.js', () => realConfig)
 })
 
 async function importFreshProviderProfileModules() {
@@ -3349,7 +3345,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_openai',
-      } as any)
+      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
 
       expect(applied).toBeUndefined()
       expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
@@ -3384,7 +3380,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_openai',
-      } as any)
+      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
 
       expect(applied?.id).toBe('saved_openai')
       expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
@@ -3411,7 +3407,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_openai',
-      } as any)
+      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
 
       expect(applied?.id).toBe('saved_openai')
       expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
@@ -3441,7 +3437,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_openai',
-      } as any)
+      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
 
       expect(applied?.id).toBe('saved_openai')
       expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
@@ -3470,7 +3466,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_openai',
-      } as any)
+      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
 
       expect(applied).toBeUndefined()
       expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
@@ -3501,7 +3497,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_openai',
-      } as any)
+      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
 
       expect(applied).toBeUndefined()
       expect(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBe('1')
@@ -3533,7 +3529,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: 'saved_moonshot',
-      } as any)
+      } as unknown as Parameters<typeof applyActiveProviderProfileFromConfig>[0])
 
       expect(applied?.id).toBe('saved_moonshot')
       expect(process.env.OPENAI_MODEL!).toBe('kimi-k2.6')
@@ -6499,7 +6495,7 @@ describe('getProfileModelOptions', () => {
     process.env.OPENAI_MODEL = 'route-model'
 
     const { getAdditionalModelOptionsCacheScope } = await import(
-      '../services/api/providerConfig.js'
+      `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
     )
     const { getActiveOpenAIRouteModelOptionsCache } =
       await importFreshProviderProfileModules()
@@ -6926,9 +6922,10 @@ describe('isGeminiVertexEffectiveProvider', () => {
 })
 
 describe('getAdditionalModelOptionsCacheScope — saved-profile Gemini Vertex', () => {
-  test('is not scoped as first-party when a saved gemini-vertex profile is active without an env flag', async () => {
+  test.each(['vertex_prof', undefined, 'deleted_profile'])('keeps saved Vertex profile %s out of first-party cache scope', async activeProviderProfileId => {
+    await importFreshProviderProfileModules()
     const { getAdditionalModelOptionsCacheScope } = await import(
-      '../services/api/providerConfig.js'
+      `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
     )
     // beforeEach clears every CLAUDE_CODE_USE_* flag; the saved profile is what
     // routes the client to Vertex, so the cache scope must be third-party (null)
@@ -6938,15 +6935,29 @@ describe('getAdditionalModelOptionsCacheScope — saved-profile Gemini Vertex', 
       providerProfiles: [
         buildGeminiVertexProfile({ id: 'vertex_prof', baseUrl: 'my-proj' }),
       ],
-      activeProviderProfileId: 'vertex_prof',
+      activeProviderProfileId,
     }))
 
     expect(getAdditionalModelOptionsCacheScope()).toBeNull()
   })
 
-  test('remains first-party with no provider flag and no saved provider profile', async () => {
+  test('explicit Anthropic selection keeps first-party scope with saved Vertex profiles', async () => {
+    const { ANTHROPIC_DEFAULT_PROFILE_ID } = await importFreshProviderProfileModules()
     const { getAdditionalModelOptionsCacheScope } = await import(
-      '../services/api/providerConfig.js'
+      `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
+    )
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [buildGeminiVertexProfile({ id: 'vertex_prof' })],
+      activeProviderProfileId: ANTHROPIC_DEFAULT_PROFILE_ID,
+    }))
+    expect(getAdditionalModelOptionsCacheScope()).toBe('firstParty')
+  })
+
+  test('remains first-party with no provider flag and no saved provider profile', async () => {
+    await importFreshProviderProfileModules()
+    const { getAdditionalModelOptionsCacheScope } = await import(
+      `../services/api/providerConfig.js?cacheScope=${Date.now()}-${Math.random()}`
     )
     saveMockGlobalConfig(current => ({
       ...current,

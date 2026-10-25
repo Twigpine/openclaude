@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import {
   _clearRegistryForTesting,
@@ -851,13 +852,15 @@ test('allows a global-only Vertex model on the global endpoint', async () => {
   )
 })
 
-test('saved-profile-only Vertex prefers the profile project/model over ambient env', async () => {
+test('saved-profile-only Vertex prefers the profile over ambient env and xAI credentials', async () => {
   let capturedUrl: string | undefined
 
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
   // Ambient env that must NOT win over the selected profile in profile-only mode.
+  const restoreAmbientXai = snapshotEnv(['XAI_API_KEY'])
+  process.env.XAI_API_KEY = 'ambient-xai-key'
   process.env.GOOGLE_CLOUD_PROJECT = 'ambient-project'
   process.env.GEMINI_VERTEX_MODEL = 'ambient-model'
   process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
@@ -909,6 +912,7 @@ test('saved-profile-only Vertex prefers the profile project/model over ambient e
     expect(capturedUrl).not.toContain('ambient-model')
   } finally {
     spy.mockRestore()
+    restoreAmbientXai()
   }
 })
 

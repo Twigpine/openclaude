@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { getInMemoryErrors, logError } from './log.js'
-import * as providerProfilesModule from './providerProfiles.js'
 
 // Regression for the privacy gate in logError(): a Gemini Vertex session must
 // get no-error-reporting treatment whenever isGeminiVertexEffectiveProvider()
@@ -15,6 +14,8 @@ import * as providerProfilesModule from './providerProfiles.js'
 // setup into a no-op and makes these assertions order-dependent. The
 // profile -> effective-provider derivation itself is covered directly in
 // providerProfiles.test.ts.
+// Spy on the same deferred require export object the logger reads; earlier
+// mock.module replacements can separate it from the ESM namespace in a shard.
 describe('logError error-reporting gate — Gemini Vertex effective provider', () => {
   // Every other env input the logError() gate reads (provider-selection flags
   // plus DISABLE_ERROR_REPORTING and the essential-traffic switches), so the
@@ -60,7 +61,7 @@ describe('logError error-reporting gate — Gemini Vertex effective provider', (
 
   test('records errors when not routing to a cloud provider (control)', () => {
     gateSpy = spyOn(
-      providerProfilesModule,
+      require('./providerProfiles.js') as typeof import('./providerProfiles.js'),
       'isGeminiVertexEffectiveProvider',
     ).mockReturnValue(false)
     const marker = `gate-control-${Date.now()}`
@@ -72,7 +73,7 @@ describe('logError error-reporting gate — Gemini Vertex effective provider', (
     // isGeminiVertexEffectiveProvider() reports Vertex routing derived from the
     // saved active profile (no env flag); logError must then suppress reporting.
     gateSpy = spyOn(
-      providerProfilesModule,
+      require('./providerProfiles.js') as typeof import('./providerProfiles.js'),
       'isGeminiVertexEffectiveProvider',
     ).mockReturnValue(true)
     const marker = `gate-vertex-${Date.now()}`

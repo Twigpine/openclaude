@@ -100,6 +100,16 @@ afterEach(() => {
   }
 })
 
+test('accepts GEMINI_ACCESS_TOKEN as valid Gemini auth', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI = '1'
+  process.env.GEMINI_AUTH_MODE = 'access-token'
+  delete process.env.GEMINI_API_KEY
+  delete process.env.GOOGLE_API_KEY
+  process.env.GEMINI_ACCESS_TOKEN = 'token-123'
+
+  await expect(getProviderValidationError(process.env)).resolves.toBeNull()
+})
+
 test('accepts Gemini Vertex project env aliases without requiring API-key Gemini auth', async () => {
   const projectEnvVars = [
     'GEMINI_VERTEX_PROJECT',

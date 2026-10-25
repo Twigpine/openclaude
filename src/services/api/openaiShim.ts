@@ -282,19 +282,6 @@ function isGeminiMode(): boolean {
   )
 }
 
-/**
- * First candidate whose trimmed value is non-empty, else ''. Used for
- * credential fallback chains where a whitespace-only env value must not
- * suppress a real token further down the chain (`||` alone treats '  ' as
- * truthy and would leave the request unauthenticated).
- */
-function firstNonBlankCredential(...values: (string | undefined)[]): string {
-  for (const value of values) {
-    if (value && value.trim().length > 0) return value
-  }
-  return ''
-}
-
 function hydrateOpenAIShimCompatibilityEnv(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): void {

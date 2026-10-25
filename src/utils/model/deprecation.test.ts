@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import * as providersModule from './providers.js'
 import type { LegacyAPIProvider } from './providers.js'
 import { getModelDeprecationWarning } from './deprecation.js'
@@ -8,15 +8,15 @@ import { getModelDeprecationWarning } from './deprecation.js'
 // full suite mutate (leaked CLAUDE_CODE_USE_* flags, mock.module on providers).
 // Mock the provider directly so these assertions stay hermetic and
 // order-independent instead of racing on process.env.
+let providerSpy: ReturnType<typeof spyOn> | undefined
+
 function mockApiProvider(provider: LegacyAPIProvider): void {
-  mock.module('./providers.js', () => ({
-    ...providersModule,
-    getAPIProvider: () => provider,
-  }))
+  providerSpy = spyOn(providersModule, 'getAPIProvider').mockReturnValue(provider)
 }
 
 function restoreApiProvider(): void {
-  mock.module('./providers.js', () => ({ ...providersModule }))
+  providerSpy?.mockRestore()
+  providerSpy = undefined
 }
 
 // claude-3-opus is deprecated under first-party / Anthropic-wire providers.

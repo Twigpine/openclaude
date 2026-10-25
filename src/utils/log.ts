@@ -21,7 +21,6 @@ import { isEnvTruthy } from './envUtils.js'
 import { toError } from './errors.js'
 import { isEssentialTrafficOnly } from './privacyLevel.js'
 import { jsonRedactor, redactSensitiveInfo } from './redaction.js'
-import { isGeminiVertexEffectiveProvider } from './providerProfiles.js'
 import { jsonParse } from './slowOperations.js'
 
 /**
@@ -167,6 +166,9 @@ export function logError(error: unknown): void {
     process.exit(1)
   }
   try {
+    // Platform initialization imports this logger. Load profile routing only
+    // when needed so its UI dependencies cannot re-enter platform initialization.
+    const { isGeminiVertexEffectiveProvider } = require('./providerProfiles.js') as typeof import('./providerProfiles.js')
     // Check if error reporting should be disabled
     if (
       // Cloud providers (Bedrock/Vertex/Gemini Vertex/Foundry) always disable features.

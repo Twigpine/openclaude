@@ -1936,6 +1936,14 @@ test('gemini profiles support adc auth mode without persisting a key', () => {
   })
 })
 
+test('gemini profiles require a key', () => {
+  const env = buildGeminiProfileEnv({
+    processEnv: {},
+  })
+
+  assert.equal(env, null)
+})
+
 test('hasExplicitProviderSelection treats Gemini Vertex as selected', () => {
   assert.equal(
     hasExplicitProviderSelection({ CLAUDE_CODE_USE_GEMINI_VERTEX: '1' }),
