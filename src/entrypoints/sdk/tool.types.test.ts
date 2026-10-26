@@ -15,6 +15,11 @@ function assertToolTypes(): void {
   const namedShape: NamedShape = { path: z.string() }
   const namedInputShape: NamedInputShape = { _input: z.string(), value: z.string() }
   const jsonArgs: JsonArgs = { path: 'file.txt' }
+  const modeShape = { mode: z.enum(['read', 'write']) }
+  const modeObject = z.object(modeShape)
+  const readOnlyHandler = async (args: { mode: 'read' }) => ({
+    content: [{ type: 'text' as const, text: args.mode }],
+  })
   const readonlyShape = {
     name: z.string(),
     count: z.number().optional(),
@@ -80,9 +85,22 @@ function assertToolTypes(): void {
   tool('wrong-raw', '', { path: z.string() }, async (args: { path: number }) => ({ content: [] }))
   // @ts-expect-error An annotation cannot override a whole schema's input type.
   tool('wrong-object', '', z.object({ path: z.string() }), async (args: { path: number }) => ({ content: [] }))
+  // @ts-expect-error A callback must accept every mode allowed by the raw schema.
+  tool('narrow-raw', '', modeShape, readOnlyHandler)
+  // @ts-expect-error A callback must accept every mode allowed by the whole schema.
+  tool('narrow-object', '', modeObject, readOnlyHandler)
+  const sourceModes = tool('modes', '', modeShape, async args => {
+    type _Mode = Assert<Equal<typeof args.mode, 'read' | 'write'>>
+    return { content: [{ type: 'text', text: args.mode }] }
+  })
+  const sourceWide = tool('wide', '', modeObject, async (args: { mode: string }) => ({
+    content: [{ type: 'text', text: args.mode }],
+  }))
+  void sourceModes.handler({ mode: 'write' }, undefined)
+  void sourceWide.handler({ mode: 'write' }, undefined)
   createSdkMcpServer({
     type: 'sdk', name: 'mixed',
-    tools: [sourceRaw, sourceObject, sourceJson, sourceNamed, sourceNamedInput, sourceReadonly],
+    tools: [sourceRaw, sourceObject, sourceJson, sourceNamed, sourceNamedInput, sourceReadonly, sourceModes, sourceWide],
   })
   const publishedRaw = declaredTool('raw', '', {
     name: z.string(),
@@ -140,9 +158,22 @@ function assertToolTypes(): void {
   declaredTool('wrong-raw', '', { path: z.string() }, async (args: { path: number }) => ({ content: [] }))
   // @ts-expect-error An annotation cannot override a whole schema's input type.
   declaredTool('wrong-object', '', z.object({ path: z.string() }), async (args: { path: number }) => ({ content: [] }))
+  // @ts-expect-error A callback must accept every mode allowed by the raw schema.
+  declaredTool('narrow-raw', '', modeShape, readOnlyHandler)
+  // @ts-expect-error A callback must accept every mode allowed by the whole schema.
+  declaredTool('narrow-object', '', modeObject, readOnlyHandler)
+  const publishedModes = declaredTool('modes', '', modeShape, async args => {
+    type _Mode = Assert<Equal<typeof args.mode, 'read' | 'write'>>
+    return { content: [{ type: 'text', text: args.mode }] }
+  })
+  const publishedWide = declaredTool('wide', '', modeObject, async (args: { mode: string }) => ({
+    content: [{ type: 'text', text: args.mode }],
+  }))
+  void publishedModes.handler({ mode: 'write' }, undefined)
+  void publishedWide.handler({ mode: 'write' }, undefined)
   declaredServer({
     type: 'sdk', name: 'mixed',
-    tools: [publishedRaw, publishedObject, publishedJson, publishedNamed, publishedNamedInput, publishedReadonly],
+    tools: [publishedRaw, publishedObject, publishedJson, publishedNamed, publishedNamedInput, publishedReadonly, publishedModes, publishedWide],
   })
 }
 

@@ -172,7 +172,8 @@ export function tool<Schema = unknown, JsonInput extends object = Record<string,
   name: string,
   description: string,
   inputSchema: Schema,
-  handler: import('./v2.js').SdkMcpToolDefinition<Schema, JsonInput>['handler'],
+  // Check callbacks strictly; the definition method stays bivariant for tool arrays.
+  handler: (...args: Parameters<import('./v2.js').SdkMcpToolDefinition<Schema, JsonInput>['handler']>) => Promise<CallToolResult>,
   extras?: {
     annotations?: ToolAnnotations
     searchHint?: string
