@@ -1,3 +1,4 @@
+import { testReportStatus } from '../src/test/testReport.js'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -125,13 +126,13 @@ try {
       }
       if (result !== 0 && exitCode === 0) exitCode = result
       const report = await readFile(reportPath, 'utf8').catch(() => '')
-      const summary = report.match(/<testsuites\b[^>]*>/)?.[0]
-      if (!summary || !report.trimEnd().endsWith('</testsuites>')) {
+      const status = testReportStatus(report)
+      if (status === 'incomplete') {
         console.error('Test runner exited without a complete JUnit report.')
         if (exitCode === 0) exitCode = 1
       } else {
         completed++
-        if (!/\bfailures="0"/.test(summary) || /<failure\b|<error\b/.test(report)) {
+        if (status === 'failed') {
           if (result === 0) console.error('Test runner reported failures despite exiting successfully.')
           if (exitCode === 0) exitCode = 1
         }

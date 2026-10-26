@@ -1,3 +1,8 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { testReportStatus } from './testReport.js'
+
 export const REAL_PROVIDER_TEST_CHILD_ENV =
   'OPENCLAUDE_REAL_PROVIDER_TEST_CHILD'
 export const REAL_PROVIDER_TEST_TIMEOUT_MS = 30_000
@@ -91,26 +96,37 @@ export async function attributionModulesNeedIsolation(): Promise<boolean> {
 export async function runTestFileWithRealProviders(
   testFile: string,
 ): Promise<void> {
-  const child = Bun.spawn({
-    cmd: [process.execPath, 'test', testFile],
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      [REAL_PROVIDER_TEST_CHILD_ENV]: '1',
-    },
-    stdout: 'pipe',
-    stderr: 'pipe',
-    timeout: REAL_PROVIDER_TEST_TIMEOUT_MS,
-    killSignal: process.platform === 'win32' ? undefined : 'SIGKILL',
-  })
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ])
-  if (exitCode !== 0) {
-    throw new Error(
-      `provider-isolated test process failed for ${testFile} (${exitCode})\n${stdout}\n${stderr}`,
-    )
+  const reportDir = await mkdtemp(join(tmpdir(), 'openclaude-test-report-'))
+  const reportPath = join(reportDir, 'results.xml')
+  try {
+    const child = Bun.spawn({
+      cmd: [process.execPath, 'test', testFile, '--reporter=junit', `--reporter-outfile=${reportPath}`],
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        [REAL_PROVIDER_TEST_CHILD_ENV]: '1',
+      },
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: REAL_PROVIDER_TEST_TIMEOUT_MS,
+      killSignal: process.platform === 'win32' ? undefined : 'SIGKILL',
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    const status = testReportStatus(await readFile(reportPath, 'utf8').catch(() => ''))
+    if (exitCode !== 0 || status !== 'passed') {
+      const reason = status === 'incomplete'
+        ? 'Test runner exited without a complete JUnit report.'
+        : status === 'failed' ? 'Test runner reported failures.' : ''
+      throw new Error(
+        `provider-isolated test process failed for ${testFile} (${exitCode})\n${reason}\n${stdout}\n${stderr}`,
+      )
+    }
+  } finally {
+    await rm(reportDir, { recursive: true, force: true })
   }
 }

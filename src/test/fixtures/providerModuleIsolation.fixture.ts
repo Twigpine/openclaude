@@ -10,7 +10,12 @@ import {
 const scenario = process.env.ISOLATION_FIXTURE_SCENARIO
 const inChild = process.env[REAL_PROVIDER_TEST_CHILD_ENV] === '1'
 
-if (scenario === 'assertion-failure') {
+if (scenario === 'early-exit') {
+  test('premature successful exit', () => process.exit(0))
+  test('unreached assertion', () => expect(true).toBe(false))
+} else if (scenario === 'complete') {
+  test('completed child sentinel', () => expect(inChild).toBe(true))
+} else if (scenario === 'assertion-failure') {
   test('child assertion failure sentinel', () => {
     expect('actual child value').toBe('expected child value')
   })
