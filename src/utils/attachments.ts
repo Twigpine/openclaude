@@ -271,30 +271,19 @@ export function getTodoReminderConfig(): {
   turnsSinceWrite: number
   turnsBetweenReminders: number
 } {
-  // Try to get settings from merged settings (includes all sources)
-  const settings = getSettings_DEPRECATED()
-  const config = settings?.todoReminder
-
-  if (config?.turnsSinceWrite !== undefined && config?.turnsBetweenReminders !== undefined) {
-    return {
-      turnsSinceWrite: config.turnsSinceWrite,
-      turnsBetweenReminders: config.turnsBetweenReminders,
-    }
-  }
-
-  // Fall back to environment variables
-  const envTurnsSinceWrite = getEnvNumber(
-    'OPENCLAUDE_TODO_REMINDER_TURNS_SINCE_WRITE',
-    10,
-  )
-  const envTurnsBetweenReminders = getEnvNumber(
-    'OPENCLAUDE_TODO_REMINDER_TURNS_BETWEEN_REMINDERS',
-    10,
-  )
+  // Per-field precedence: merged-settings value when present, otherwise the
+  // matching environment variable, otherwise the default. Each threshold is
+  // resolved independently so a partial settings object still honors the
+  // field it configures.
+  const config = getSettings_DEPRECATED()?.todoReminder
 
   return {
-    turnsSinceWrite: envTurnsSinceWrite,
-    turnsBetweenReminders: envTurnsBetweenReminders,
+    turnsSinceWrite:
+      config?.turnsSinceWrite ??
+      getEnvNumber('OPENCLAUDE_TODO_REMINDER_TURNS_SINCE_WRITE', 10),
+    turnsBetweenReminders:
+      config?.turnsBetweenReminders ??
+      getEnvNumber('OPENCLAUDE_TODO_REMINDER_TURNS_BETWEEN_REMINDERS', 10),
   }
 }
 

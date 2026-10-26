@@ -589,6 +589,7 @@ export const SettingsSchema = lazySchema(() =>
             .int()
             .positive()
             .optional()
+            .catch(undefined)
             .describe(
               'Assistant turns since last TodoWrite/TaskUpdate before showing reminder (default: 10)',
             ),
@@ -597,11 +598,13 @@ export const SettingsSchema = lazySchema(() =>
             .int()
             .positive()
             .optional()
+            .catch(undefined)
             .describe(
               'Assistant turns between reminders (default: 10)',
             ),
         })
         .optional()
+        .catch(undefined)
         .describe(
           'Configuration for todo/task tool usage reminders',
         ),
