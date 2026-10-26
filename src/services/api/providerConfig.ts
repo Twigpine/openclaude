@@ -391,7 +391,11 @@ export function parseOpenAICompatibleApiFormat(
   return undefined
 }
 
-function parseModelDescriptor(model: string): ModelDescriptor {
+function parseModelIdentity(model: string): {
+  raw: string
+  baseModel: string
+  query: string | undefined
+} {
   // A trailing [1m] suffix is the client-side 1M-context opt-in (see
   // has1mContext) — never part of the wire model id or the ?query syntax.
   // Strip it before parsing so tagged aliases keep their mapping and effort
@@ -400,14 +404,25 @@ function parseModelDescriptor(model: string): ModelDescriptor {
   // on the base id (`gpt-5.5[1m]`); both forms are handled.
   const trimmed = model.trim().replace(/\[1m]$/i, '').trim()
   const queryIndex = trimmed.indexOf('?')
-  if (queryIndex === -1) {
-    const alias = trimmed.toLowerCase() as CodexAlias
+  return {
+    raw: trimmed,
+    baseModel: (queryIndex === -1 ? trimmed : trimmed.slice(0, queryIndex))
+      .trim()
+      .replace(/\[1m]$/i, ''),
+    query: queryIndex === -1 ? undefined : trimmed.slice(queryIndex + 1),
+  }
+}
+
+function parseModelDescriptor(model: string): ModelDescriptor {
+  const { raw, baseModel, query } = parseModelIdentity(model)
+  if (query === undefined) {
+    const alias = baseModel.toLowerCase() as CodexAlias
     const aliasConfig = Object.hasOwn(CODEX_ALIAS_MODELS, alias)
       ? CODEX_ALIAS_MODELS[alias]
       : undefined
     if (aliasConfig) {
       return {
-        raw: trimmed,
+        raw,
         baseModel: aliasConfig.model,
         reasoning: aliasConfig.reasoningEffort
           ? { effort: aliasConfig.reasoningEffort }
@@ -416,16 +431,12 @@ function parseModelDescriptor(model: string): ModelDescriptor {
       }
     }
     return {
-      raw: trimmed,
-      baseModel: trimmed,
+      raw,
+      baseModel,
     }
   }
 
-  const baseModel = trimmed
-    .slice(0, queryIndex)
-    .trim()
-    .replace(/\[1m]$/i, '')
-  const params = new URLSearchParams(trimmed.slice(queryIndex + 1))
+  const params = new URLSearchParams(query)
   const alias = baseModel.toLowerCase() as CodexAlias
   const aliasConfig = Object.hasOwn(CODEX_ALIAS_MODELS, alias)
     ? CODEX_ALIAS_MODELS[alias]
@@ -440,7 +451,7 @@ function parseModelDescriptor(model: string): ModelDescriptor {
   const thinking = parseThinkingType(params.get('thinking') ?? undefined)
 
   return {
-    raw: trimmed,
+    raw,
     baseModel: resolvedBaseModel,
     reasoning: typeof reasoning === 'string' ? { effort: reasoning } : reasoning,
     reasoningFromAlias:
@@ -450,20 +461,13 @@ function parseModelDescriptor(model: string): ModelDescriptor {
 }
 
 export function isCodexAlias(model: string): boolean {
-  // Canonical alias identity: the supported trailing [1m] client-side
-  // context tag is never part of the alias id, so every consumer of this
-  // predicate (endpoint promotion, transport choice) classifies tagged and
-  // untagged aliases identically (#2171).
-  const stripped = model.trim().replace(/\[1m]$/i, '')
-  const normalized = stripped.toLowerCase()
-  const base = normalized.split('?', 1)[0] ?? normalized
-  return Object.hasOwn(CODEX_ALIAS_MODELS, base)
+  const { baseModel } = parseModelIdentity(model)
+  return Object.hasOwn(CODEX_ALIAS_MODELS, baseModel.toLowerCase())
 }
 
 function isOpenAICodexShortcutAlias(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
-  const base = normalized.split('?', 1)[0] ?? normalized
-  return OPENAI_CODEX_SHORTCUT_ALIASES.has(base)
+  const { baseModel } = parseModelIdentity(model)
+  return OPENAI_CODEX_SHORTCUT_ALIASES.has(baseModel.toLowerCase())
 }
 
 export function shouldUseCodexTransport(

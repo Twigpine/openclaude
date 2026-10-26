@@ -484,19 +484,42 @@ test('resolveProviderRequest keeps an explicit default base URL on the direct ro
     },
   })
 
-  expect(request.transport).not.toBe('codex_responses')
+  expect(request.transport).toBe('responses')
   expect(request.baseUrl).toBe('https://api.openai.com/v1')
 })
 
 test('resolveProviderRequest promotes [1m]-tagged Codex aliases identically to untagged ones', () => {
-  // The trailing [1m] client-side context tag is a supported form; alias
-  // classification must consume the canonical (tag-stripped) identity (#2171).
-  for (const model of ['gpt-5.6-sol[1m]', 'gpt-5.5?reasoning=medium[1m]', 'codexplan[1m]']) {
-    const request = resolveProviderRequest({
-      processEnv: { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_MODEL: model },
-    })
-    expect(request.transport).toBe('codex_responses')
-    expect(request.baseUrl).toBe('https://chatgpt.com/backend-api/codex')
+  for (const baseUrl of [undefined, 'https://api.openai.com/v1', 'https://gateway.example/v1']) {
+    for (const model of ['gpt-5.6-sol', 'gpt-5.5', 'codexplan', 'codexspark']) {
+      const processEnv = {
+        CLAUDE_CODE_USE_OPENAI: '1',
+        OPENAI_BASE_URL: baseUrl,
+        OPENAI_MODEL: `${model}?reasoning=medium`,
+      }
+      const untagged = resolveProviderRequest({ processEnv })
+      for (const taggedModel of [`${model}[1m]?reasoning=medium`, `${model}?reasoning=medium[1m]`]) {
+        const request = resolveProviderRequest({
+          processEnv: { ...processEnv, OPENAI_MODEL: taggedModel },
+        })
+        expect(request.requestedModel).toBe(taggedModel)
+        expect(request.baseUrl).toBe(untagged.baseUrl)
+        expect(request.transport).toBe(untagged.transport)
+        expect(request.resolvedModel).toBe(untagged.resolvedModel)
+        expect(request.reasoning).toEqual({ effort: 'medium' })
+      }
+      const tagged = resolveProviderRequest({
+        processEnv: { ...processEnv, OPENAI_MODEL: `${model}[1m]` },
+      })
+      const plain = resolveProviderRequest({
+        processEnv: { ...processEnv, OPENAI_MODEL: model },
+      })
+      expect(tagged).toMatchObject({
+        baseUrl: plain.baseUrl,
+        transport: plain.transport,
+        resolvedModel: plain.resolvedModel,
+        reasoning: plain.reasoning,
+      })
+    }
   }
 })
 

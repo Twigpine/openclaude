@@ -51,6 +51,11 @@ export OPENAI_MODEL=gpt-4o
 `codexplan` maps to GPT-5.6 Sol on the Codex backend with high reasoning.
 `codexspark` maps to GPT-5.3 Codex Spark for faster loops.
 
+Full Codex aliases such as `gpt-5.6-sol` also use the Codex backend when no
+base URL is configured. To use the direct OpenAI API with those model names,
+set `OPENAI_BASE_URL=https://api.openai.com/v1` explicitly. The `[1m]` context
+tag preserves the same route, including when combined with a reasoning query.
+
 If you use the in-app provider wizard, choose `Codex OAuth` to open ChatGPT sign-in in your browser and let OpenClaude store Codex credentials securely.
 
 If you already use the Codex CLI, OpenClaude reads `~/.codex/auth.json` automatically. You can also point it elsewhere with `CODEX_AUTH_JSON_PATH` or override the token directly with `CODEX_API_KEY`.
