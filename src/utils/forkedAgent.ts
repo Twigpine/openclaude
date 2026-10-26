@@ -35,7 +35,8 @@ import {
   extractTextContent,
   getLastAssistantMessage,
 } from './messages.js'
-import { getDefaultMainLoopModelSetting, getProviderRequestModel } from './model/model.js'
+import { getDefaultMainLoopModelSetting, getProviderRequestModel, parseUserSpecifiedModel } from './model/model.js'
+import { getActiveProviderProfile } from './providerProfiles.js'
 import { createDenialTrackingState } from './permissions/denialTracking.js'
 import { parseToolListFromCLI } from './permissions/permissionSetup.js'
 import { recordSidechainTranscript } from './sessionStorage.js'
@@ -326,11 +327,19 @@ export type SubagentContextOverrides = {
 }
 
 /** Return provenance only while its owner and model options are unchanged. */
-export function getQueryModelSelection(context: ToolUseContext) {
+function getOwnedQueryModelSelection(context: ToolUseContext) {
   const selection = context.queryModelSelection?.current
   return context.queryModelSelection?.agentId === context.agentId &&
     selection?.options === context.options &&
     selection.model === context.options.mainLoopModel
+    ? selection
+    : undefined
+}
+
+export function getQueryModelSelection(context: ToolUseContext) {
+  const selection = getOwnedQueryModelSelection(context)
+  return context.options.providerOverride ||
+    selection?.providerId === getActiveProviderProfile()?.id
     ? selection
     : undefined
 }
@@ -378,22 +387,31 @@ export function createSubagentContext(
   parentContext: ToolUseContext,
   overrides?: SubagentContextOverrides,
 ): ToolUseContext {
-  const selection = getQueryModelSelection(parentContext)
+  const ownedSelection = getOwnedQueryModelSelection(parentContext)
+  const providerId = getActiveProviderProfile()?.id
+  const providerChanged = ownedSelection &&
+    !parentContext.options.providerOverride && ownedSelection.providerId !== providerId
+  const selection = providerChanged ? undefined : ownedSelection
+  let runtimeModel = selection?.runtimeModel ?? parentContext.options.mainLoopModel
   let requestModel = selection?.requestModel ?? parentContext.options.mainLoopModel
   // Fresh root contexts (/btw and SDK fallback) have only a resolved model.
   // Restore its configured alias only before an accepted selection exists.
-  // A mismatched saved selection or an explicit child must keep its override.
-  if (!overrides?.options && !parentContext.queryModelSelection?.current && !parentContext.agentId) {
+  // A provider swap also needs a fresh pair; explicit model overrides do not.
+  if (!overrides?.options && (providerChanged ||
+    (!parentContext.queryModelSelection?.current && !parentContext.agentId))) {
     const state = parentContext.getAppState()
+    const selectedModel = state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting()
+    // Do not reuse the old provider's routed runtime model as the fallback.
+    if (providerChanged) runtimeModel = parseUserSpecifiedModel(selectedModel)
     requestModel = getProviderRequestModel(
-      state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting(),
-      parentContext.options.mainLoopModel,
+      selectedModel,
+      runtimeModel,
     )
   }
   // Explicit options (including same-runtime model overrides) take precedence.
   const options = overrides?.options ?? {
     ...parentContext.options,
-    mainLoopModel: selection?.runtimeModel ?? parentContext.options.mainLoopModel,
+    mainLoopModel: runtimeModel,
   }
   const agentId = overrides?.agentId ?? createAgentId()
 
@@ -518,6 +536,7 @@ export function createSubagentContext(
           selectedModel: requestModel,
           runtimeModel: options.mainLoopModel,
           requestModel,
+          providerId,
         },
       }),
     },

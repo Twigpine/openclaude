@@ -214,6 +214,8 @@ export type ToolUseContext = {
       /** Concrete model used for the request, independent of source options. */
       runtimeModel: string
       requestModel: string
+      /** Ambient provider that accepted this pair; fixed provider overrides are independent. */
+      providerId: string | undefined
     }
   }
   abortController: AbortController

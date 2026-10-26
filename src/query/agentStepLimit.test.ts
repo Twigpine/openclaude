@@ -24,6 +24,7 @@ import type { Terminal } from './transitions.js'
 import type { Message } from '../types/message.js'
 import { dequeueAll, enqueue } from '../utils/messageQueueManager.js'
 import * as modelAllowlist from '../utils/model/modelAllowlist.js'
+import * as providerProfiles from '../utils/providerProfiles.js'
 import { getSessionId, getMainLoopModelOverride, setMainLoopModelOverride } from '../bootstrap/state.js'
 import { createSubagentContext, getLastCacheSafeParams, saveCacheSafeParams } from '../utils/forkedAgent.js'
 import { createFileStateCacheWithSizeLimit } from '../utils/fileStateCache.js'
@@ -180,6 +181,83 @@ function gatewayEffort(requestModel: string): string | undefined {
 }
 
 describe('fork request selection at context boundaries', () => {
+  test.each([
+    { route: undefined, fixed: false },
+    { route: 'gpt-5.6-sol?reasoning=low', fixed: false },
+    { route: 'gpt-5.6-sol?reasoning=low', fixed: true },
+  ])('tool refresh then provider switch in nested forks: $route / fixed=$fixed', async ({ route, fixed }) => {
+    let providerId = 'provider-a'
+    const activeProvider = spyOn(providerProfiles, 'getActiveProviderProfile').mockImplementation(
+      () => ({ id: providerId }) as ReturnType<typeof providerProfiles.getActiveProviderProfile>,
+    )
+    const allowlist = spyOn(modelAllowlist, 'isModelAllowed').mockReturnValue(true)
+    const savedBefore = getLastCacheSafeParams()
+    const requests: string[] = []
+    let useTool = false
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      const content = useTool
+        ? [{ type: 'tool_use' as const, id: 'toolu_selection_refresh', name: 'Echo', input: { text: 'refresh' } }]
+        : 'done'
+      useTool = false
+      yield createAssistantMessage({ content })
+    })
+    const state = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({
+      ...state, settings: providerId === 'provider-a' && route
+        ? { smartRouting: { enabled: true, simpleModel: route, strongModel: route } } : {},
+    })
+    params.toolUseContext.options.tools = [echoTool]
+    params.toolUseContext.options.refreshTools = () => [echoTool]
+    if (fixed) params.toolUseContext.options.providerOverride = {
+      model: route!, baseURL: 'https://provider-a.example/v1', apiKey: 'test-key',
+    }
+    let latestContext = params.toolUseContext
+    params.deps = { ...params.deps!, autocompact: async (_messages, context) => {
+      latestContext = context
+      return { wasCompacted: false }
+    } }
+    clearSmartRoutingSessionDisable(getSessionId())
+    resetRoutingTally()
+    try {
+      await drain(params)
+      const inherited = route ?? 'codexplan'
+      const child = createSubagentContext(params.toolUseContext)
+      requests.length = 0
+      useTool = true
+      await drain({ ...params, toolUseContext: child })
+      expect(requests).toEqual([inherited, inherited])
+      expect(requests.map(gatewayEffort)).toEqual(route ? ['low', 'low'] : ['high', 'high'])
+
+      // The next default fork uses the last accepted, internally refreshed context.
+      // Both profiles configure codexplan; only A had a smart-routing selection.
+      providerId = 'provider-b'
+      const nested = createSubagentContext(latestContext)
+      const expected = fixed ? inherited : 'codexplan'
+      expect(nested.options.mainLoopModel).toBe(fixed ? route! : 'gpt-5.6-sol')
+      requests.length = 0
+      useTool = true
+      await drain({ ...params, toolUseContext: nested })
+      expect(requests).toEqual([expected, expected])
+      expect(requests.map(gatewayEffort)).toEqual(fixed ? ['low', 'low'] : ['high', 'high'])
+
+      // An explicit same-concrete-model choice still wins after both transitions.
+      const explicit = createSubagentContext(latestContext, {
+        options: { ...latestContext.options, mainLoopModel: 'gpt-5.6-sol', providerOverride: undefined },
+      })
+      requests.length = 0
+      useTool = true
+      await drain({ ...params, toolUseContext: explicit })
+      expect(requests).toEqual(['gpt-5.6-sol', 'gpt-5.6-sol'])
+    } finally {
+      activeProvider.mockRestore()
+      allowlist.mockRestore()
+      saveCacheSafeParams(savedBefore)
+      resetRoutingTally()
+      clearSmartRoutingSessionDisable(getSessionId())
+    }
+  })
+
   test.each(['accepted', 'fresh', 'nested'] as const)('fork model budgets retain concrete identity: %s', async source => {
     const environment = {
       CLAUDE_CODE_USE_OPENAI: '1',
@@ -346,7 +424,14 @@ describe('fork request selection at context boundaries', () => {
     { selected: 'codexplan', route: 'gpt-4o', current: 'codexplan', request: 'gpt-4o', effort: undefined },
     { selected: 'codexplan', route: undefined, current: 'gpt-5.6-sol', request: 'gpt-5.6-sol', effort: undefined },
     { selected: 'gpt-5.6-sol', route: undefined, current: 'codexplan', request: 'codexplan', effort: 'high' },
-  ])('/btw request selection: $selected / $route -> $current', async ({ selected, route, current, request, effort }) => {
+    { selected: 'codexplan', route: 'provider-a-only', current: 'codexplan', request: 'codexplan', effort: 'high', switchProvider: true },
+    { selected: 'codexplan', route: 'provider-a-only', current: 'codexplan', request: 'codexplan', effort: 'high', switchProvider: true, sdk: true },
+    { selected: 'codexplan', route: 'gpt-5.6-sol?reasoning=low', current: 'codexplan', request: 'gpt-5.6-sol?reasoning=low', effort: 'low', sdk: true },
+  ].map(entry => ({ switchProvider: false, sdk: false, ...entry })))('side question selection: $selected / $route -> $current; switch=$switchProvider SDK=$sdk', async ({ selected, route, current, request, effort, switchProvider, sdk }) => {
+    let providerId = 'provider-a'
+    const activeProvider = spyOn(providerProfiles, 'getActiveProviderProfile').mockImplementation(
+      () => ({ id: providerId }) as ReturnType<typeof providerProfiles.getActiveProviderProfile>,
+    )
     const queryModule = await import('../query.js')
     const sideQuestion = await import('../utils/sideQuestion.js')
     const config = await import('../utils/config.js')
@@ -364,7 +449,7 @@ describe('fork request selection at context boundaries', () => {
     const state = params.toolUseContext.getAppState()
     params.toolUseContext.getAppState = () => ({
       ...state, mainLoopModel: selected,
-      settings: route ? { smartRouting: { enabled: true, simpleModel: route, strongModel: route } } : {},
+      settings: providerId === 'provider-a' && route ? { smartRouting: { enabled: true, simpleModel: route, strongModel: route } } : {},
     })
     const allowlist = spyOn(modelAllowlist, 'isModelAllowed').mockReturnValue(true)
     clearSmartRoutingSessionDisable(getSessionId())
@@ -394,17 +479,26 @@ describe('fork request selection at context boundaries', () => {
       root = await createRoot({ stdout: stdout as unknown as NodeJS.WriteStream, patchConsole: false })
       params.querySource = 'repl_main_thread'
       await drain(params)
+      if (switchProvider) providerId = 'provider-b'
       // Commands get a fresh root context rather than the saved query object.
       const commandContext = makeAliasParent(async function* () {}).toolUseContext
       commandContext.getAppState = () => ({ ...state, mainLoopModel: current })
-      root.render(createElement(AppStateProvider, null, await call(
-        () => {}, commandContext as Parameters<typeof call>[1], 'what happened?',
-      )))
-      await completion.promise
+      if (sdk) {
+        const saved = getLastCacheSafeParams()!
+        await originalSideQuestion({ question: 'what happened?', cacheSafeParams: {
+          ...saved, toolUseContext: { ...saved.toolUseContext, abortController: new AbortController() },
+        } })
+      } else {
+        root.render(createElement(AppStateProvider, null, await call(
+          () => {}, commandContext as Parameters<typeof call>[1], 'what happened?',
+        )))
+        await completion.promise
+      }
       expect(requests).toEqual([route ?? selected, request])
       expect(gatewayEffort(requests[1]!)).toBe(effort)
       expect(runtimeModels).toEqual([request === 'codexplan' ? 'gpt-5.6-sol' : request])
     } finally {
+      activeProvider.mockRestore()
       clearTimeout(deadline)
       root?.unmount()
       stdout.end()

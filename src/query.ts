@@ -1563,6 +1563,7 @@ async function* queryLoop(
               selectedModel,
               runtimeModel: currentModel,
               requestModel,
+              providerId: getActiveProviderProfile()?.id,
             }
             for await (const message of deps.callModel({
             messages: prependUserContext(
@@ -3132,12 +3133,21 @@ async function* queryLoop(
     if (updatedToolUseContext.options.refreshTools) {
       const refreshedTools = updatedToolUseContext.options.refreshTools()
       if (refreshedTools !== updatedToolUseContext.options.tools) {
+        const selection = getQueryModelSelection(updatedToolUseContext)
         updatedToolUseContext = {
           ...updatedToolUseContext,
           options: {
             ...updatedToolUseContext.options,
             tools: refreshedTools,
           },
+        }
+        // This internal clone changes only tools. Keep valid request provenance;
+        // explicit options replacements elsewhere still invalidate inheritance.
+        if (selection && updatedToolUseContext.queryModelSelection) {
+          updatedToolUseContext.queryModelSelection.current = {
+            ...selection,
+            options: updatedToolUseContext.options,
+          }
         }
       }
     }
