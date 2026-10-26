@@ -1,6 +1,15 @@
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { getIsInteractive, setIsInteractive } from '../bootstrap/state.js'
+import { getDefaultAppState } from '../state/AppStateStore.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
-import { getTodoReminderConfig } from './attachments.js'
+import type { ToolUseContext, Tools } from '../Tool.js'
+import { asAgentId } from '../types/ids.js'
+import { createFileStateCacheWithSizeLimit } from './fileStateCache.js'
+import { createAssistantMessage } from './messages.js'
 import { SettingsSchema } from './settings/types.js'
 
 const ENV_KEYS = [
@@ -48,6 +57,7 @@ function mockMergedSettings(settings: Record<string, unknown>): void {
 }
 
 let settingsAwareAttachments: Promise<typeof import('./attachments.js')> | undefined
+let getTodoReminderConfig: typeof import('./attachments.js')['getTodoReminderConfig']
 async function getSettingsAwareAttachments(): Promise<typeof import('./attachments.js')> {
   // Fresh nonced import so the consumer observes this file's settings mock
   // even when earlier serialized tests mocked the same modules.
@@ -60,20 +70,18 @@ async function getSettingsAwareAttachments(): Promise<typeof import('./attachmen
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/attachments.todoReminder.test.ts')
   clearTestEnv()
+  mockMergedSettings({})
+  ;({ getTodoReminderConfig } = await getSettingsAwareAttachments())
 })
 
 afterEach(() => {
   try {
     mock.restore()
+    mock.module('./settings/settings.js', () => realSettings)
     restoreEnv()
   } finally {
     releaseSharedMutationLock()
   }
-})
-
-afterAll(() => {
-  mock.restore()
-  mock.module('./settings/settings.js', () => realSettings)
 })
 
 describe('getTodoReminderConfig', () => {
@@ -186,6 +194,86 @@ describe('getTodoReminderConfig settings precedence', () => {
     expect(config.turnsSinceWrite).toBe(15)
     expect(config.turnsBetweenReminders).toBe(20)
   })
+})
+
+describe('reminder attachment thresholds', () => {
+  let configDir: string
+  let wasInteractive: boolean
+  let restoreConsumerEnv: () => void
+
+  beforeEach(() => {
+    wasInteractive = getIsInteractive()
+    restoreConsumerEnv = snapshotEnv([
+      'OPENCLAUDE_CONFIG_DIR',
+      'CLAUDE_CODE_TASK_LIST_ID',
+      'CLAUDE_CODE_ENABLE_TASKS',
+      'CLAUDE_CODE_DISABLE_ATTACHMENTS',
+      'CLAUDE_CODE_SIMPLE',
+      'USER_TYPE',
+    ], { clear: true })
+    configDir = mkdtempSync(join(tmpdir(), 'todo-reminder-test-'))
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
+    process.env.CLAUDE_CODE_TASK_LIST_ID = 'todo-reminder-test'
+  })
+
+  afterEach(() => {
+    setIsInteractive(wasInteractive)
+    restoreConsumerEnv()
+    rmSync(configDir, { recursive: true, force: true })
+  })
+
+  for (const [type, toolName] of [
+    ['todo_reminder', 'TodoWrite'],
+    ['task_reminder', 'TaskUpdate'],
+  ] as const) {
+    test.each([
+      { field: 'turnsSinceWrite', turnsSinceWrite: 3, turnsBetweenReminders: 1, threshold: 3 },
+      { field: 'turnsBetweenReminders', turnsSinceWrite: 1, turnsBetweenReminders: 4, threshold: 4 },
+    ])(`${type} applies $field at its configured boundary`, async ({
+      turnsSinceWrite, turnsBetweenReminders, threshold,
+    }) => {
+      setIsInteractive(type === 'task_reminder')
+      mockMergedSettings({ todoReminder: { turnsSinceWrite, turnsBetweenReminders } })
+      const { getAttachments } = await getSettingsAwareAttachments()
+      let appState = getDefaultAppState()
+      const messages = Array.from({ length: threshold - 1 }, () =>
+        createAssistantMessage({ content: 'Working on the task' }),
+      )
+      const context: ToolUseContext = {
+        agentId: asAgentId('todo-reminder-test'),
+        abortController: new AbortController(),
+        readFileState: createFileStateCacheWithSizeLimit(1),
+        getAppState: () => appState,
+        setAppState: updater => { appState = updater(appState) },
+        setInProgressToolUseIDs: () => {},
+        setResponseLength: () => {},
+        updateFileHistoryState: () => {},
+        updateAttributionState: () => {},
+        messages,
+        options: {
+          commands: [],
+          debug: false,
+          thinkingConfig: { type: 'disabled' },
+          tools: [{ name: toolName } as Tools[number]],
+          verbose: false,
+          mcpClients: [],
+          mcpResources: {},
+          isNonInteractiveSession: type === 'todo_reminder',
+          agentDefinitions: { activeAgents: [], allAgents: [], allowedAgentTypes: undefined },
+          mainLoopModel: 'gpt-4o',
+        },
+        nestedMemoryAttachmentTriggers: new Set<string>(),
+        dynamicSkillDirTriggers: new Set<string>(),
+      }
+      const collect = async () => (await getAttachments(
+        null, context, null, [], messages, 'compact', { skipSkillDiscovery: true },
+      )).filter(attachment => attachment.type === type)
+
+      expect(await collect()).toEqual([])
+      messages.push(createAssistantMessage({ content: 'Continuing the task' }))
+      expect(await collect()).toEqual([{ type, content: [], itemCount: 0 }])
+    })
+  }
 })
 
 describe('todoReminder settings schema', () => {
