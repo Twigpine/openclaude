@@ -461,16 +461,25 @@ export interface SDKSession {
 // MCP tool types
 // ============================================================================
 
+// Zod 4 distinguishes a missing key from a value that accepts undefined.
+// Keep the Zod 3 input-union rule for validators without Zod 4 metadata.
+type SdkMcpOptionalInput<Field extends { _input: unknown }> = Field extends { _zod: unknown }
+  ? Field extends { _zod: { optin: 'optional' | 'defaulted' } } ? true : false
+  : undefined extends Field['_input'] ? true : false
+
 // A raw shape can have an `_input` field, so recognize shapes before schema metadata.
 type SdkMcpToolInput<Schema, JsonInput extends object> = Schema extends { [Key in keyof Schema]: { _input: unknown } }
-  ? { -readonly [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? never : Key]: Schema[Key]['_input'] }
-    & { -readonly [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? Key : never]?: Schema[Key]['_input'] }
+  ? { -readonly [Key in keyof Schema as SdkMcpOptionalInput<Schema[Key]> extends true ? never : Key]: Schema[Key]['_input'] }
+    & { -readonly [Key in keyof Schema as SdkMcpOptionalInput<Schema[Key]> extends true ? Key : never]?: Schema[Key]['_input'] }
   : Schema extends { _input: infer Input }
     ? Input
     // Materialize named interface keys so typed handlers also fit tool arrays.
     : { [Key in keyof JsonInput]: JsonInput[Key] }
 
-export interface SdkMcpToolDefinition<Schema = unknown, JsonInput extends object = Record<string, unknown>> {
+// Definitions may erase the input type for heterogeneous registration.
+// The factory retains its Record fallback and infers annotated JSON inputs.
+// The erased default preserves both named-interface and contextual handlers.
+export interface SdkMcpToolDefinition<Schema = unknown, JsonInput extends object = Record<string, any>> {
   name: string
   description: string
   inputSchema: Schema
@@ -566,6 +575,22 @@ export function tool<Schema = unknown, JsonInput extends object = Record<string,
     alwaysLoad?: boolean
   },
 ): SdkMcpToolDefinition<Schema, JsonInput>
+
+// Supplying only Schema disables inference of JsonInput. Preserve the original
+// JSON callback compatibility without bypassing schema-derived Zod checks.
+export function tool<Schema = unknown>(
+  name: string,
+  description: string,
+  inputSchema: Schema,
+  handler: Schema extends { [Key in keyof Schema]: { _input: unknown } } | { _input: unknown }
+    ? never
+    : SdkMcpToolDefinition['handler'],
+  extras?: {
+    annotations?: ToolAnnotations
+    searchHint?: string
+    alwaysLoad?: boolean
+  },
+): SdkMcpToolDefinition<Schema>
 
 /**
  * MCP server transport configuration types.

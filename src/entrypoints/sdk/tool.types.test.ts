@@ -1,4 +1,5 @@
 import { z } from 'zod/v4'
+import * as z3 from 'zod/v3'
 import { tool, createSdkMcpServer } from './index.js'
 declare const declaredTool: typeof import('../sdk.js').tool
 declare const declaredServer: typeof import('../sdk.js').createSdkMcpServer
@@ -178,3 +179,127 @@ function assertToolTypes(): void {
 }
 
 void assertToolTypes
+
+function assertInputCompatibility(): void {
+  const requiredShape = {
+    payload: z.unknown(),
+    anyValue: z.any(),
+    custom: z.custom(),
+    preprocessed: z.preprocess(value => value, z.string()),
+    union: z.union([z.string(), z.undefined()]),
+    undefinedValue: z.undefined(),
+    voidValue: z.void(),
+    _input: z.unknown(),
+    optional: z.unknown().optional(),
+    defaulted: z.string().default('value'),
+    prefaulted: z.string().prefault('value'),
+  } as const
+  const requiredObject = z.object(requiredShape)
+  type NativeInput = z.input<typeof requiredObject>
+  const nativeHandler = async (_args: NativeInput) => ({ content: [] })
+  const legacyShape = { payload: z3.unknown(), name: z3.string().optional() }
+  const legacyObject = z3.object(legacyShape)
+  const legacyHandler = async (_args: z3.input<typeof legacyObject>) => ({ content: [] })
+  const jsonSchema = {
+    type: 'object', properties: { path: { type: 'string' } }, required: ['path'],
+  } as const
+  const jsonHandler = async (args: JsonArgs) => ({
+    content: [{ type: 'text' as const, text: args.path }],
+  })
+
+  // Check each entry point separately: their result types are independent.
+  function sourceCompatibility(): void {
+    const raw = tool('required-raw', '', requiredShape, nativeHandler)
+    const whole = tool('required-object', '', requiredObject, nativeHandler)
+    tool('inferred-required', '', requiredShape, async args => {
+      type _NativeInput = Assert<Equal<{ [K in keyof typeof args]: typeof args[K] }, NativeInput>>
+      args.payload = 'mutable input'
+      return { content: [] }
+    })
+    const input: NativeInput = {
+      payload: undefined, anyValue: undefined, custom: undefined,
+      preprocessed: 'value', union: undefined, undefinedValue: undefined,
+      voidValue: undefined, _input: undefined,
+    }
+    void raw.handler(input, undefined)
+    void whole.handler(input, undefined)
+    // @ts-expect-error Required unknown-valued fields cannot be omitted.
+    void raw.handler({}, undefined)
+    const optional = tool('optional', '', { payload: z.unknown().optional() }, async () => ({ content: [] }))
+    void optional.handler({}, undefined)
+    const legacy = tool('legacy', '', legacyShape, legacyHandler)
+    void legacy.handler({}, undefined)
+
+    const explicit = tool<typeof jsonSchema>('explicit', '', jsonSchema, jsonHandler)
+    const specialized = tool<typeof jsonSchema>
+    const instantiated = specialized('specialized', '', jsonSchema, jsonHandler)
+    const fullyTyped = tool<typeof jsonSchema, JsonArgs>('fully-typed', '', jsonSchema, jsonHandler)
+    void explicit.handler({ path: 'file.txt' }, undefined)
+    void instantiated.handler({ path: 'file.txt' }, undefined)
+    void fullyTyped.handler({ path: 'file.txt' }, undefined)
+    // @ts-expect-error Explicit JSON input types still constrain direct calls.
+    void fullyTyped.handler({ path: 1 }, undefined)
+    // @ts-expect-error The compatibility signature must not admit narrow Zod callbacks.
+    tool<typeof requiredShape>('narrow-unknown', '', requiredShape, async (_args: { payload: string }) => ({ content: [] }))
+    createSdkMcpServer({ type: 'sdk', name: 'compatibility', tools: [raw, whole, legacy, explicit, instantiated, fullyTyped] })
+  }
+  function publishedCompatibility(): void {
+    const raw = declaredTool('required-raw', '', requiredShape, nativeHandler)
+    const whole = declaredTool('required-object', '', requiredObject, nativeHandler)
+    declaredTool('inferred-required', '', requiredShape, async args => {
+      type _NativeInput = Assert<Equal<{ [K in keyof typeof args]: typeof args[K] }, NativeInput>>
+      args.payload = 'mutable input'
+      return { content: [] }
+    })
+    const input: NativeInput = {
+      payload: undefined, anyValue: undefined, custom: undefined,
+      preprocessed: 'value', union: undefined, undefinedValue: undefined,
+      voidValue: undefined, _input: undefined,
+    }
+    void raw.handler(input, undefined)
+    void whole.handler(input, undefined)
+    // @ts-expect-error Required unknown-valued fields cannot be omitted.
+    void raw.handler({}, undefined)
+    const optional = declaredTool('optional', '', { payload: z.unknown().optional() }, async () => ({ content: [] }))
+    void optional.handler({}, undefined)
+    const legacy = declaredTool('legacy', '', legacyShape, legacyHandler)
+    void legacy.handler({}, undefined)
+
+    const explicit = declaredTool<typeof jsonSchema>('explicit', '', jsonSchema, jsonHandler)
+    const specialized = declaredTool<typeof jsonSchema>
+    const instantiated = specialized('specialized', '', jsonSchema, jsonHandler)
+    const fullyTyped = declaredTool<typeof jsonSchema, JsonArgs>('fully-typed', '', jsonSchema, jsonHandler)
+    void explicit.handler({ path: 'file.txt' }, undefined)
+    void instantiated.handler({ path: 'file.txt' }, undefined)
+    void fullyTyped.handler({ path: 'file.txt' }, undefined)
+    // @ts-expect-error Explicit JSON input types still constrain direct calls.
+    void fullyTyped.handler({ path: 1 }, undefined)
+    // @ts-expect-error The compatibility signature must not admit narrow Zod callbacks.
+    declaredTool<typeof requiredShape>('narrow-unknown', '', requiredShape, async (_args: { payload: string }) => ({ content: [] }))
+    declaredServer({ type: 'sdk', name: 'compatibility', tools: [raw, whole, legacy, explicit, instantiated, fullyTyped] })
+  }
+
+  void sourceCompatibility
+  void publishedCompatibility
+  const definition = { name: 'json', description: '', inputSchema: jsonSchema, handler: jsonHandler }
+  const sourceDefault: import('./v2.js').SdkMcpToolDefinition = definition
+  const sourceSchema: import('./v2.js').SdkMcpToolDefinition<typeof jsonSchema> = definition
+  const publishedDefault: import('../sdk.js').SdkMcpToolDefinition = definition
+  const publishedSchema: import('../sdk.js').SdkMcpToolDefinition<typeof jsonSchema> = definition
+  const sourceInline: import('./v2.js').SdkMcpToolDefinition = {
+    ...definition, handler: async args => ({ content: [{ type: 'text', text: String(args.path) }] }),
+  }
+  const sourceSchemaInline: import('./v2.js').SdkMcpToolDefinition<typeof jsonSchema> = {
+    ...definition, handler: async args => ({ content: [{ type: 'text', text: String(args.path) }] }),
+  }
+  const publishedInline: import('../sdk.js').SdkMcpToolDefinition = {
+    ...definition, handler: async args => ({ content: [{ type: 'text', text: String(args.path) }] }),
+  }
+  const publishedSchemaInline: import('../sdk.js').SdkMcpToolDefinition<typeof jsonSchema> = {
+    ...definition, handler: async args => ({ content: [{ type: 'text', text: String(args.path) }] }),
+  }
+  createSdkMcpServer({ type: 'sdk', name: 'definitions', tools: [sourceDefault, sourceSchema, sourceInline, sourceSchemaInline] })
+  declaredServer({ type: 'sdk', name: 'definitions', tools: [publishedDefault, publishedSchema, publishedInline, publishedSchemaInline] })
+}
+
+void assertInputCompatibility

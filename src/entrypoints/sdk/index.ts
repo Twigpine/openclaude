@@ -179,7 +179,35 @@ export function tool<Schema = unknown, JsonInput extends object = Record<string,
     searchHint?: string
     alwaysLoad?: boolean
   },
-): import('./v2.js').SdkMcpToolDefinition<Schema, JsonInput> {
+): import('./v2.js').SdkMcpToolDefinition<Schema, JsonInput>
+
+// Supplying only Schema disables inference of JsonInput. Preserve the original
+// JSON callback compatibility without bypassing schema-derived Zod checks.
+export function tool<Schema = unknown>(
+  name: string,
+  description: string,
+  inputSchema: Schema,
+  handler: Schema extends { [Key in keyof Schema]: { _input: unknown } } | { _input: unknown }
+    ? never
+    : import('./v2.js').SdkMcpToolDefinition['handler'],
+  extras?: {
+    annotations?: ToolAnnotations
+    searchHint?: string
+    alwaysLoad?: boolean
+  },
+): import('./v2.js').SdkMcpToolDefinition<Schema>
+
+export function tool(
+  name: string,
+  description: string,
+  inputSchema: unknown,
+  handler: import('./v2.js').SdkMcpToolDefinition['handler'],
+  extras?: {
+    annotations?: ToolAnnotations
+    searchHint?: string
+    alwaysLoad?: boolean
+  },
+): import('./v2.js').SdkMcpToolDefinition {
   return {
     name,
     description,
