@@ -666,7 +666,14 @@ export async function* query(
   const consumedCommandUuids: string[] = []
   // Query clones its context; retained parent references must see the request
   // selection too (for post-turn cache-sharing forks).
-  params.toolUseContext.queryModelSelection ??= {}
+  // Hooks can shallow-copy a context without using createSubagentContext.
+  // Preserve sharing within this agent, never across an agent boundary.
+  if (
+    !params.toolUseContext.queryModelSelection ||
+    params.toolUseContext.queryModelSelection.agentId !== params.toolUseContext.agentId
+  ) {
+    params.toolUseContext.queryModelSelection = { agentId: params.toolUseContext.agentId }
+  }
   const terminal = yield* queryLoop(params, consumedCommandUuids)
   // Only reached if queryLoop returned normally. Skipped on throw (error
   // propagates through yield*) and on .return() (Return completion closes
@@ -1544,10 +1551,13 @@ async function* queryLoop(
             const requestModel = pinnedTurnRoute?.routed
               ? currentModel
               : getProviderRequestModel(selectedModel, currentModel)
-            const queryModelSelection = toolUseContext.queryModelSelection ??= {}
+            const queryModelSelection = toolUseContext.queryModelSelection ??= {
+              agentId: toolUseContext.agentId,
+            }
             const requestSelection = {
               options: toolUseContext.options,
               model: toolUseContext.options.mainLoopModel,
+              selectedModel,
               requestModel,
             }
             for await (const message of deps.callModel({

@@ -35,6 +35,7 @@ import {
   extractTextContent,
   getLastAssistantMessage,
 } from './messages.js'
+import { getDefaultMainLoopModelSetting, getProviderRequestModel } from './model/model.js'
 import { createDenialTrackingState } from './permissions/denialTracking.js'
 import { parseToolListFromCLI } from './permissions/permissionSetup.js'
 import { recordSidechainTranscript } from './sessionStorage.js'
@@ -369,15 +370,26 @@ export function createSubagentContext(
 ): ToolUseContext {
   const selection = parentContext.queryModelSelection?.current
   const inheritsRequestSelection =
+    parentContext.queryModelSelection?.agentId === parentContext.agentId &&
     selection?.options === parentContext.options &&
     selection.model === parentContext.options.mainLoopModel
-  // Preserve the actual request, not a reconstruction from session state.
+  let inheritedModel = inheritsRequestSelection
+    ? selection.requestModel
+    : parentContext.options.mainLoopModel
+  // Fresh root contexts (/btw and SDK fallback) have only a resolved model.
+  // Restore its configured alias only before an accepted selection exists.
+  // A mismatched saved selection or an explicit child must keep its override.
+  if (!overrides?.options && !selection && !parentContext.agentId) {
+    const state = parentContext.getAppState()
+    inheritedModel = getProviderRequestModel(
+      state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting(),
+      inheritedModel,
+    )
+  }
   // Explicit options (including same-runtime model overrides) take precedence.
   const options = overrides?.options ?? {
     ...parentContext.options,
-    mainLoopModel: inheritsRequestSelection
-      ? selection.requestModel
-      : parentContext.options.mainLoopModel,
+    mainLoopModel: inheritedModel,
   }
 
   // Determine abortController: explicit override > share parent's > new child

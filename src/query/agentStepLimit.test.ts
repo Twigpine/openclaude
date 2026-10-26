@@ -1,4 +1,6 @@
 import { describe, expect, spyOn, test } from 'bun:test'
+import { PassThrough } from 'node:stream'
+import { createElement } from 'react'
 import { z } from 'zod/v4'
 
 import {
@@ -22,8 +24,8 @@ import type { Terminal } from './transitions.js'
 import type { Message } from '../types/message.js'
 import { dequeueAll, enqueue } from '../utils/messageQueueManager.js'
 import * as modelAllowlist from '../utils/model/modelAllowlist.js'
-import { getSessionId } from '../bootstrap/state.js'
-import { createSubagentContext } from '../utils/forkedAgent.js'
+import { getSessionId, getMainLoopModelOverride, setMainLoopModelOverride } from '../bootstrap/state.js'
+import { createSubagentContext, getLastCacheSafeParams, saveCacheSafeParams } from '../utils/forkedAgent.js'
 import { createFileStateCacheWithSizeLimit } from '../utils/fileStateCache.js'
 import {
   clearSmartRoutingSessionDisable,
@@ -152,6 +154,192 @@ async function drain(params: QueryParams): Promise<{
     yielded.push(next.value)
   }
 }
+
+function makeAliasParent(callModel: QueryDeps['callModel']): QueryParams {
+  const params = makeParams(callModel)
+  delete params.toolUseContext.agentId
+  const appState = params.toolUseContext.getAppState()
+  params.toolUseContext.getAppState = () => ({ ...appState, mainLoopModel: 'codexplan' })
+  params.toolUseContext.options.mainLoopModel = 'gpt-5.6-sol'
+  params.toolUseContext.readFileState = createFileStateCacheWithSizeLimit(10)
+  params.toolUseContext.setAppState = () => {}
+  return params
+}
+
+function gatewayEffort(requestModel: string): string | undefined {
+  return resolveProviderRequest({
+    model: requestModel,
+    processEnv: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://gateway.example/v1',
+      OPENAI_API_KEY: 'test-key',
+    },
+  }).reasoning?.effort
+}
+
+describe('fork request selection at context boundaries', () => {
+  test('fresh default forks retain the configured alias without overriding explicit children', async () => {
+    const requests: string[] = []
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: 'done' })
+    })
+    // Retain the earlier regression: fork before any parent dispatch, so there
+    // is no saved request. Fresh REPL and SDK contexts have this same shape.
+    await drain({ ...params, toolUseContext: createSubagentContext(params.toolUseContext) })
+    expect(requests).toEqual(['codexplan'])
+    expect(gatewayEffort(requests[0]!)).toBe('high')
+
+    const explicit = createSubagentContext(params.toolUseContext, {
+      options: { ...params.toolUseContext.options },
+    })
+    // An explicit child can itself fork before dispatch. Its choice must not
+    // be reconstructed from the root's codexplan setting.
+    await drain({ ...params, toolUseContext: createSubagentContext(explicit) })
+    await drain({ ...params, toolUseContext: explicit })
+    expect(requests).toEqual(['codexplan', 'gpt-5.6-sol', 'gpt-5.6-sol'])
+    expect(gatewayEffort(requests[1]!)).toBeUndefined()
+  })
+
+  test('agent hook cannot overwrite the saved parent selection', async () => {
+    const queryModule = await import('../query.js')
+    const { execAgentHook } = await import('../utils/hooks/execAgentHook.js')
+    const originalQuery = queryModule.query
+    const savedBefore = getLastCacheSafeParams()
+    const requests: string[] = []
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: options.querySource === 'hook_agent'
+        ? [{ type: 'tool_use', id: 'toolu_hook_selection', name: 'StructuredOutput', input: { ok: true } }]
+        : 'done' })
+    })
+    params.querySource = 'sdk'
+    const hookQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    try {
+      await drain(params)
+      const parent = getLastCacheSafeParams()!.toolUseContext
+      const hookResult = await execAgentHook(
+        { type: 'agent', prompt: 'verify', model: 'gpt-4o', timeout: 2 },
+        'Stop:0', 'Stop', '{}', parent.abortController.signal, parent, undefined, params.messages,
+      )
+      expect(hookResult.message?.type).toBe('attachment')
+      if (hookResult.message?.type === 'attachment') {
+        expect(hookResult.message.attachment.type).toBe('hook_success')
+      }
+      await drain({ ...params, toolUseContext: createSubagentContext(parent), querySource: 'side_question' })
+      expect(requests).toEqual(['codexplan', 'gpt-4o', 'codexplan'])
+      expect(gatewayEffort(requests[2]!)).toBe('high')
+    } finally {
+      hookQuery.mockRestore()
+      saveCacheSafeParams(savedBefore)
+    }
+  })
+
+  test('SDK fallback side question retains the configured request before a snapshot exists', async () => {
+    const queryModule = await import('../query.js')
+    const originalQuery = queryModule.query
+    const { buildSideQuestionFallbackParams } = await import('../utils/queryContext.js')
+    const { runSideQuestion } = await import('../utils/sideQuestion.js')
+    const originalOverride = getMainLoopModelOverride()
+    const allowlist = spyOn(modelAllowlist, 'isModelAllowed').mockReturnValue(true)
+    const requests: string[] = []
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: 'done' })
+    })
+    const sideQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    try {
+      setMainLoopModelOverride('codexplan')
+      const cacheSafeParams = await buildSideQuestionFallbackParams({
+        tools: [], commands: [], mcpClients: [], messages: params.messages,
+        readFileState: params.toolUseContext.readFileState,
+        getAppState: params.toolUseContext.getAppState, setAppState: () => {},
+        customSystemPrompt: 'test system', appendSystemPrompt: undefined,
+        thinkingConfig: { type: 'disabled' }, agents: [],
+      })
+      await runSideQuestion({ question: 'what happened?', cacheSafeParams })
+      expect(requests).toEqual(['codexplan'])
+      expect(gatewayEffort(requests[0]!)).toBe('high')
+    } finally {
+      sideQuery.mockRestore()
+      allowlist.mockRestore()
+      setMainLoopModelOverride(originalOverride)
+    }
+  })
+
+  test.each([
+    { selected: 'codexplan', route: undefined, current: 'codexplan', request: 'codexplan', effort: 'high' },
+    { selected: 'codexplan', route: 'gpt-5.6-sol', current: 'codexplan', request: 'gpt-5.6-sol', effort: undefined },
+    { selected: 'codexplan', route: 'gpt-5.6-sol?reasoning=low', current: 'codexplan', request: 'gpt-5.6-sol?reasoning=low', effort: 'low' },
+    { selected: 'codexplan', route: undefined, current: 'gpt-5.6-sol', request: 'gpt-5.6-sol', effort: undefined },
+    { selected: 'gpt-5.6-sol', route: undefined, current: 'codexplan', request: 'codexplan', effort: 'high' },
+  ])('/btw request selection: $selected / $route -> $current', async ({ selected, route, current, request, effort }) => {
+    const queryModule = await import('../query.js')
+    const sideQuestion = await import('../utils/sideQuestion.js')
+    const config = await import('../utils/config.js')
+    const { call } = await import('../commands/btw/btw.js')
+    const { createRoot } = await import('../ink.js')
+    const { AppStateProvider } = await import('../state/AppState.js')
+    const originalQuery = queryModule.query
+    const originalSideQuestion = sideQuestion.runSideQuestion
+    const savedBefore = getLastCacheSafeParams()
+    const requests: string[] = []
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: 'done' })
+    })
+    const state = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({
+      ...state, mainLoopModel: selected,
+      settings: route ? { smartRouting: { enabled: true, simpleModel: route, strongModel: route } } : {},
+    })
+    const allowlist = spyOn(modelAllowlist, 'isModelAllowed').mockReturnValue(true)
+    clearSmartRoutingSessionDisable(getSessionId())
+    resetRoutingTally()
+    const completion = Promise.withResolvers<void>()
+    const sideQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    const runSideQuestion = spyOn(sideQuestion, 'runSideQuestion').mockImplementation(async input => {
+      try {
+        const result = await originalSideQuestion(input)
+        completion.resolve()
+        return result
+      } catch (error) {
+        completion.reject(error)
+        throw error
+      }
+    })
+    const saveConfig = spyOn(config, 'saveGlobalConfig').mockImplementation(() => {})
+    const stdout = new PassThrough()
+    stdout.resume()
+    let root: Awaited<ReturnType<typeof createRoot>> | undefined
+    const deadline = setTimeout(() => completion.reject(new Error('/btw did not finish')), 2000)
+    try {
+      root = await createRoot({ stdout: stdout as unknown as NodeJS.WriteStream, patchConsole: false })
+      params.querySource = 'repl_main_thread'
+      await drain(params)
+      // Commands get a fresh root context rather than the saved query object.
+      const commandContext = makeAliasParent(async function* () {}).toolUseContext
+      commandContext.getAppState = () => ({ ...state, mainLoopModel: current })
+      root.render(createElement(AppStateProvider, null, await call(
+        () => {}, commandContext as Parameters<typeof call>[1], 'what happened?',
+      )))
+      await completion.promise
+      expect(requests).toEqual([route ?? selected, request])
+      expect(gatewayEffort(requests[1]!)).toBe(effort)
+    } finally {
+      clearTimeout(deadline)
+      root?.unmount()
+      stdout.end()
+      saveConfig.mockRestore()
+      runSideQuestion.mockRestore()
+      sideQuery.mockRestore()
+      saveCacheSafeParams(savedBefore)
+      allowlist.mockRestore()
+      resetRoutingTally()
+      clearSmartRoutingSessionDisable(getSessionId())
+    }
+  })
+})
 
 describe('agent step limits', () => {
   test.each([

@@ -203,10 +203,13 @@ export type ToolUseContext = {
   }
   /** Shared across query's context copies, but not across parent/child queries. */
   queryModelSelection?: {
+    agentId: ToolUseContext['agentId']
     current?: {
       /** Identity and value invalidate provenance after an explicit model override. */
       options: ToolUseContext['options']
       model: string
+      /** Selection before routing/resolution, to detect later configuration changes. */
+      selectedModel: string
       requestModel: string
     }
   }
