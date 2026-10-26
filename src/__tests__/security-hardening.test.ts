@@ -10,7 +10,9 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { resolve } from 'path'
+import { resolve, join } from 'path'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
 const SRC = resolve(import.meta.dir, '..')
 const file = (relative: string) => Bun.file(resolve(SRC, relative))
@@ -91,6 +93,44 @@ describe('Plugin git operations disable hooks', () => {
     expect(subSection).toContain("'core.hooksPath=/dev/null'")
   })
 })
+
+for (const scenario of ['normal', 'sparse', 'pull-default', 'pull-ref']) {
+  // The child has a 30-second deadline; leave time for diagnostics and cleanup.
+  test(`plugin Git operations suppress configured hooks: ${scenario}`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'plugin-git-hooks-'))
+    const config = join(root, 'gitconfig')
+    try {
+      writeFileSync(config, '')
+      const child = Bun.spawn({
+        cmd: [process.execPath, resolve(SRC, 'test/fixtures/pluginGitHooks.fixture.ts'), root, scenario],
+        cwd: root,
+        env: {
+          ...process.env,
+          GIT_DIR: undefined, GIT_WORK_TREE: undefined, GIT_COMMON_DIR: undefined,
+          GIT_INDEX_FILE: undefined, GIT_OBJECT_DIRECTORY: undefined, GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+          GIT_CONFIG: undefined, GIT_CONFIG_PARAMETERS: undefined, GIT_CONFIG_COUNT: '2',
+          GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: join(root, 'hooks'),
+          GIT_CONFIG_KEY_1: 'protocol.file.allow', GIT_CONFIG_VALUE_1: 'always',
+          GIT_CONFIG_GLOBAL: config, GIT_CONFIG_NOSYSTEM: '1', GIT_CEILING_DIRECTORIES: root,
+          GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+          GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+          PLUGIN_HOOK_MARKER: join(root, 'hook-ran'),
+          OPENCLAUDE_CONFIG_DIR: join(root, 'config'), CLAUDE_CONFIG_DIR: join(root, 'config'),
+          CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS: '5000',
+        },
+        stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 30_000,
+        killSignal: process.platform === 'win32' ? undefined : 'SIGKILL',
+      })
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+      ])
+      expect(code, stdout + stderr).toBe(0)
+      expect(stdout).toContain(`verified ${scenario}: content, hooks, and`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 35_000)
+}
 
 // ---------------------------------------------------------------------------
 // Fix 4: ANTHROPIC_FOUNDRY_API_KEY not in SAFE_ENV_VARS

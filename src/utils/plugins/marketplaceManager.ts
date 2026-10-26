@@ -947,7 +947,7 @@ export async function gitClone(
       // in a single step on git >= 2.25.
       const sparseResult = await execFileNoThrowWithCwd(
         gitExe(),
-        ['sparse-checkout', 'set', '--cone', '--', ...sparsePaths],
+        ['-c', 'core.hooksPath=/dev/null', 'sparse-checkout', 'set', '--cone', '--', ...sparsePaths],
         {
           cwd: targetPath,
           timeout: timeoutMs,
@@ -966,7 +966,7 @@ export async function gitClone(
         gitExe(),
         // ref was already passed to clone via --branch, so HEAD points to it;
         // if no ref, HEAD points to the remote's default branch.
-        ['checkout', 'HEAD'],
+        ['-c', 'core.hooksPath=/dev/null', 'checkout', 'HEAD'],
         {
           cwd: targetPath,
           timeout: timeoutMs,
