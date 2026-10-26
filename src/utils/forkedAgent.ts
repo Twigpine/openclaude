@@ -367,6 +367,19 @@ export function createSubagentContext(
   parentContext: ToolUseContext,
   overrides?: SubagentContextOverrides,
 ): ToolUseContext {
+  const selection = parentContext.queryModelSelection?.current
+  const inheritsRequestSelection =
+    selection?.options === parentContext.options &&
+    selection.model === parentContext.options.mainLoopModel
+  // Preserve the actual request, not a reconstruction from session state.
+  // Explicit options (including same-runtime model overrides) take precedence.
+  const options = overrides?.options ?? {
+    ...parentContext.options,
+    mainLoopModel: inheritsRequestSelection
+      ? selection.requestModel
+      : parentContext.options.mainLoopModel,
+  }
+
   // Determine abortController: explicit override > share parent's > new child
   const abortController =
     overrides?.abortController ??
@@ -472,7 +485,7 @@ export function createSubagentContext(
     openMessageSelector: undefined,
 
     // Fields that can be overridden or copied from parent
-    options: overrides?.options ?? parentContext.options,
+    options,
     messages: overrides?.messages ?? parentContext.messages,
     // Generate new agentId for subagents (each subagent should have its own ID)
     agentId: overrides?.agentId ?? createAgentId(),

@@ -201,6 +201,15 @@ export type ToolUseContext = {
     /** Per-agent provider override from agentRouting config */
     providerOverride?: { model: string; baseURL: string; apiKey: string }
   }
+  /** Shared across query's context copies, but not across parent/child queries. */
+  queryModelSelection?: {
+    current?: {
+      /** Identity and value invalidate provenance after an explicit model override. */
+      options: ToolUseContext['options']
+      model: string
+      requestModel: string
+    }
+  }
   abortController: AbortController
   readFileState: FileStateCache
   getAppState(): AppState

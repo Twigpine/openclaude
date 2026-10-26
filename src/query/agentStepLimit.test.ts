@@ -8,6 +8,7 @@ import {
 } from '../query.js'
 import { buildTool, type Tools } from '../Tool.js'
 import type { QueryDeps } from './deps.js'
+import { resolveProviderRequest } from '../services/api/providerConfig.js'
 import { FallbackTriggeredError } from '../services/api/withRetry.js'
 import {
   createAssistantMessage,
@@ -153,23 +154,83 @@ async function drain(params: QueryParams): Promise<{
 }
 
 describe('agent step limits', () => {
-  test('cache-sharing forks preserve the selected provider request alias', async () => {
-    const requests: Array<{ model: string; requestModel?: string }> = []
-    const params = makeParams(async function* ({ options }) {
-      requests.push({ model: options.model, requestModel: options.requestModel })
-      yield createAssistantMessage({ content: 'done' })
-    })
-    const appState = params.toolUseContext.getAppState()
-    params.toolUseContext.getAppState = () => ({
-      ...appState,
-      mainLoopModel: 'codexplan',
-    })
-    params.toolUseContext.options.mainLoopModel = 'gpt-5.6-sol'
-    params.toolUseContext.readFileState = createFileStateCacheWithSizeLimit(10)
+  test.each([
+    { route: 'gpt-5.6-sol', requestModel: 'gpt-5.6-sol', effort: undefined },
+    { route: 'gpt-5.6-sol?reasoning=low', requestModel: 'gpt-5.6-sol?reasoning=low', effort: 'low' },
+    { route: undefined, requestModel: 'codexplan', effort: 'high' },
+  ])('cache-sharing forks preserve parent request selection: $requestModel', async ({ route, requestModel, effort }) => {
+    const allowlist = spyOn(modelAllowlist, 'isModelAllowed').mockReturnValue(true)
+    clearSmartRoutingSessionDisable(getSessionId())
+    resetRoutingTally()
+    try {
+      const requests: Array<{ model: string; requestModel?: string; effort?: string }> = []
+      const params = makeParams(async function* ({ options }) {
+        const resolved = resolveProviderRequest({
+          model: options.requestModel ?? options.model,
+          processEnv: {
+            CLAUDE_CODE_USE_OPENAI: '1',
+            OPENAI_BASE_URL: 'https://gateway.example/v1',
+            OPENAI_API_KEY: 'test-key',
+          },
+        })
+        requests.push({ model: options.model, requestModel: options.requestModel, effort: resolved.reasoning?.effort })
+        yield createAssistantMessage({
+          content: requests.length === 1
+            ? [{ type: 'tool_use', id: 'toolu_selection', name: 'Echo', input: { text: 'inspect' } }]
+            : 'done',
+        })
+      }, [echoTool])
+      delete params.toolUseContext.agentId
+      const appState = params.toolUseContext.getAppState()
+      params.toolUseContext.getAppState = () => ({
+        ...appState,
+        mainLoopModel: 'codexplan',
+        settings: route ? {
+          smartRouting: { enabled: true, simpleModel: route, strongModel: route },
+        } : {},
+      })
+      params.toolUseContext.options.mainLoopModel = 'gpt-5.6-sol'
+      params.toolUseContext.readFileState = createFileStateCacheWithSizeLimit(10)
+      const expected = { model: route ?? 'gpt-5.6-sol', requestModel, effort }
 
-    await drain({ ...params, toolUseContext: createSubagentContext(params.toolUseContext) })
+      // Execute the parent: a resolved model name alone cannot prove which
+      // request selection it used. Retain the original context across query's clones.
+      await drain(params)
+      expect(requests).toEqual([expected, expected])
+      const parentOptions = params.toolUseContext.options
+      let fork = params.toolUseContext
+      for (let depth = 0; depth < 2; depth++) {
+        fork = createSubagentContext(fork)
+        requests.length = 0
+        await drain({ ...params, toolUseContext: fork })
+        expect(requests).toEqual([expected, expected])
+      }
+      expect(parentOptions.mainLoopModel).toBe(route ?? 'gpt-5.6-sol')
+      expect(getRoutingTally().simple + getRoutingTally().strong).toBe(route ? 1 : 0)
 
-    expect(requests).toEqual([{ model: 'gpt-5.6-sol', requestModel: 'codexplan' }])
+      // Explicit agent options and a skill's spread-context override must win,
+      // even when the requested runtime model equals the parent's resolved alias.
+      for (const kind of ['agent', 'skill', 'in-place'] as const) {
+        const options = { ...parentOptions, mainLoopModel: 'gpt-5.6-sol' }
+        const source = kind === 'skill'
+          ? { ...params.toolUseContext, options }
+          : params.toolUseContext
+        if (kind === 'in-place') source.options.mainLoopModel = 'gpt-4o'
+        const overridden = createSubagentContext(source, kind === 'agent' ? { options } : undefined)
+        requests.length = 0
+        await drain({ ...params, toolUseContext: overridden })
+        const model = kind === 'in-place' ? 'gpt-4o' : 'gpt-5.6-sol'
+        expect(requests).toEqual([
+          { model, requestModel: model, effort: undefined },
+          { model, requestModel: model, effort: undefined },
+        ])
+      }
+    } finally {
+      allowlist.mockRestore()
+      resetRoutingTally()
+      clearSmartRoutingSessionDisable(getSessionId())
+      echoCalls.length = 0
+    }
   })
 
   test('smart routing preserves the sub-agent model through query and tool continuations', async () => {

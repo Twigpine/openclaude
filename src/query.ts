@@ -664,6 +664,9 @@ export async function* query(
   Terminal
 > {
   const consumedCommandUuids: string[] = []
+  // Query clones its context; retained parent references must see the request
+  // selection too (for post-turn cache-sharing forks).
+  params.toolUseContext.queryModelSelection ??= {}
   const terminal = yield* queryLoop(params, consumedCommandUuids)
   // Only reached if queryLoop returned normally. Skipped on throw (error
   // propagates through yield*) and on .return() (Return completion closes
@@ -1265,16 +1268,14 @@ async function* queryLoop(
       appState.mainLoopModelForSession ??
       appState.mainLoopModel ??
       getDefaultMainLoopModelSetting()
+    const selectedModel = toolUseContext.agentId
+      ? toolUseContext.options.mainLoopModel
+      : appStateMainLoopModel
     let currentModel = getRuntimeMainLoopModel({
       permissionMode,
-      // Forks inherit the routed parent model in options, while app state may
-      // still hold the session default. Keep the raw app-state selection above
-      // for provider request aliases such as codexplan.
-      mainLoopModel: parseUserSpecifiedModel(
-        toolUseContext.agentId
-          ? toolUseContext.options.mainLoopModel
-          : appStateMainLoopModel,
-      ),
+      // A child owns its selection; session state may still name a different
+      // alias even when both selections resolve to the same runtime model.
+      mainLoopModel: parseUserSpecifiedModel(selectedModel),
       exceeds200kTokens:
         permissionMode === 'plan' &&
         doesMostRecentAssistantMessageExceed200k(messagesForQuery),
@@ -1540,6 +1541,15 @@ async function* queryLoop(
             // callModel performs async provider preparation.
             params.onModelRequestStart?.()
             modelRequestLifecycleStarted = true
+            const requestModel = pinnedTurnRoute?.routed
+              ? currentModel
+              : getProviderRequestModel(selectedModel, currentModel)
+            const queryModelSelection = toolUseContext.queryModelSelection ??= {}
+            const requestSelection = {
+              options: toolUseContext.options,
+              model: toolUseContext.options.mainLoopModel,
+              requestModel,
+            }
             for await (const message of deps.callModel({
             messages: prependUserContext(
               injectRequestOnlyMessages(
@@ -1558,9 +1568,7 @@ async function* queryLoop(
                 return appState.toolPermissionContext
               },
               model: currentModel,
-              requestModel: pinnedTurnRoute?.routed
-                ? currentModel
-                : getProviderRequestModel(appStateMainLoopModel, currentModel),
+              requestModel,
               ...(config.gates.fastModeEnabled && {
                 fastMode: appState.fastMode,
               }),
@@ -1612,6 +1620,7 @@ async function* queryLoop(
                   reservedTurnCount = turnCount
                 }
                 providerDispatchAccepted = true
+                queryModelSelection.current = requestSelection
                 params.onProviderDispatchAccepted?.()
                 return true
               },

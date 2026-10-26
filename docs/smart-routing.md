@@ -51,7 +51,7 @@ These set a startup default. An explicit `smartRouting` block in settings always
 ## Behavior notes
 
 - **One decision per turn.** The model is chosen once when your message arrives and held for the whole turn (including its tool calls), so it does not flap mid-turn.
-- **Sub-agents are not routed.** A sub-agent's prompt is not a user turn, so smart routing leaves its model alone: it uses its [`agentRouting`](agent-routing.md) route or agent-definition model, and otherwise inherits the turn's model. Sub-agent runs are not counted in the `/cost` routing summary.
+- **Sub-agents are not routed.** A sub-agent's prompt is not a user turn, so smart routing leaves its model alone: it uses its [`agentRouting`](agent-routing.md) route or agent-definition model, and otherwise inherits the turn's model. Cache-sharing forks also preserve the parent's provider request selection, including explicit reasoning settings. Sub-agent runs are not counted in the `/cost` routing summary.
 - **Fallback.** If a simple-routed turn's model call errors (transport or server error), it retries once on the strong model. Aborts and auth/permission/bad-request errors are not retried.
 - **Allowlist.** Any model smart routing selects is checked against your org model allowlist (`availableModels`). A disallowed model is coerced to strong; if strong is also disallowed, routing disables itself for the session and the default model is used. Running `/smartroute on` re-enables routing and clears that session disable.
 - **Same-provider only.** Roles must be model-only `agentModels` entries (or bare model ids). If a role resolves to a cross-provider entry (one with `base_url`/`api_key`), routing silently disables — cross-provider routing is not supported yet.
