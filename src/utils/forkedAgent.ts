@@ -325,6 +325,16 @@ export type SubagentContextOverrides = {
   contentReplacementState?: ContentReplacementState
 }
 
+/** Return provenance only while its owner and model options are unchanged. */
+export function getQueryModelSelection(context: ToolUseContext) {
+  const selection = context.queryModelSelection?.current
+  return context.queryModelSelection?.agentId === context.agentId &&
+    selection?.options === context.options &&
+    selection.model === context.options.mainLoopModel
+    ? selection
+    : undefined
+}
+
 /**
  * Creates an isolated ToolUseContext for subagents.
  *
@@ -368,29 +378,24 @@ export function createSubagentContext(
   parentContext: ToolUseContext,
   overrides?: SubagentContextOverrides,
 ): ToolUseContext {
-  const selection = parentContext.queryModelSelection?.current
-  const inheritsRequestSelection =
-    parentContext.queryModelSelection?.agentId === parentContext.agentId &&
-    selection?.options === parentContext.options &&
-    selection.model === parentContext.options.mainLoopModel
-  let inheritedModel = inheritsRequestSelection
-    ? selection.requestModel
-    : parentContext.options.mainLoopModel
+  const selection = getQueryModelSelection(parentContext)
+  let requestModel = selection?.requestModel ?? parentContext.options.mainLoopModel
   // Fresh root contexts (/btw and SDK fallback) have only a resolved model.
   // Restore its configured alias only before an accepted selection exists.
   // A mismatched saved selection or an explicit child must keep its override.
-  if (!overrides?.options && !selection && !parentContext.agentId) {
+  if (!overrides?.options && !parentContext.queryModelSelection?.current && !parentContext.agentId) {
     const state = parentContext.getAppState()
-    inheritedModel = getProviderRequestModel(
+    requestModel = getProviderRequestModel(
       state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting(),
-      inheritedModel,
+      parentContext.options.mainLoopModel,
     )
   }
   // Explicit options (including same-runtime model overrides) take precedence.
   const options = overrides?.options ?? {
     ...parentContext.options,
-    mainLoopModel: inheritedModel,
+    mainLoopModel: selection?.runtimeModel ?? parentContext.options.mainLoopModel,
   }
+  const agentId = overrides?.agentId ?? createAgentId()
 
   // Determine abortController: explicit override > share parent's > new child
   const abortController =
@@ -500,7 +505,22 @@ export function createSubagentContext(
     options,
     messages: overrides?.messages ?? parentContext.messages,
     // Generate new agentId for subagents (each subagent should have its own ID)
-    agentId: overrides?.agentId ?? createAgentId(),
+    agentId,
+    // Runtime options retain the concrete model for budgets and capabilities.
+    // Request aliases/reasoning travel separately, owned by this child. Explicit
+    // options start a new selection even when the concrete model is unchanged.
+    queryModelSelection: {
+      agentId,
+      ...(!overrides?.options && {
+        current: {
+          options,
+          model: options.mainLoopModel,
+          selectedModel: requestModel,
+          runtimeModel: options.mainLoopModel,
+          requestModel,
+        },
+      }),
+    },
     agentType: overrides?.agentType,
     ...(overrides?.queryLifecycle
       ? { queryLifecycle: overrides.queryLifecycle }

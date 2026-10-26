@@ -201,15 +201,18 @@ export type ToolUseContext = {
     /** Per-agent provider override from agentRouting config */
     providerOverride?: { model: string; baseURL: string; apiKey: string }
   }
-  /** Shared across query's context copies, but not across parent/child queries. */
+  /** Shared within a query; forks copy the selection into their own holder. */
   queryModelSelection?: {
     agentId: ToolUseContext['agentId']
+    /** Inherited selection, replaced only after a provider accepts a request. */
     current?: {
       /** Identity and value invalidate provenance after an explicit model override. */
       options: ToolUseContext['options']
       model: string
       /** Selection before routing/resolution, to detect later configuration changes. */
       selectedModel: string
+      /** Concrete model used for the request, independent of source options. */
+      runtimeModel: string
       requestModel: string
     }
   }

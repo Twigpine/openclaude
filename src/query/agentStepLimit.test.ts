@@ -27,6 +27,8 @@ import * as modelAllowlist from '../utils/model/modelAllowlist.js'
 import { getSessionId, getMainLoopModelOverride, setMainLoopModelOverride } from '../bootstrap/state.js'
 import { createSubagentContext, getLastCacheSafeParams, saveCacheSafeParams } from '../utils/forkedAgent.js'
 import { createFileStateCacheWithSizeLimit } from '../utils/fileStateCache.js'
+import { clearSessionContextWindowOverride, getSessionContextWindowOverride, setSessionContextWindowOverride } from '../utils/context.js'
+import { isAutoCompactEnabled, shouldAutoCompact } from '../services/compact/autoCompact.js'
 import {
   clearSmartRoutingSessionDisable,
   getRoutingTally,
@@ -178,6 +180,69 @@ function gatewayEffort(requestModel: string): string | undefined {
 }
 
 describe('fork request selection at context boundaries', () => {
+  test.each(['accepted', 'fresh', 'nested'] as const)('fork model budgets retain concrete identity: %s', async source => {
+    const environment = {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://gateway.example/v1',
+      OPENAI_API_KEY: 'test-key',
+      DISABLE_AUTO_COMPACT: '1',
+      DISABLE_COMPACT: '1',
+    }
+    const previous = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]]))
+    const previousCap = getSessionContextWindowOverride('gpt-5.6-sol')
+    Object.assign(process.env, environment)
+    clearSessionContextWindowOverride('gpt-5.6-sol')
+    try {
+      const requests: string[] = []
+      const params = makeAliasParent(async function* ({ options }) {
+        requests.push(options.requestModel ?? options.model)
+        yield createAssistantMessage({ content: 'done' })
+      })
+      if (source !== 'fresh') await drain(params)
+      let child = createSubagentContext(params.toolUseContext)
+      if (source === 'nested') child = createSubagentContext(child)
+      const prior = createAssistantMessage({ content: 'earlier provider reply' })
+      prior.message.model = 'gpt-5.6-sol'
+      prior.message.usage = { ...prior.message.usage, input_tokens: 150000,
+        output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+      const fork = { ...params, toolUseContext: child, querySource: 'side_question' as const,
+        messages: [createUserMessage({ content: 'earlier question' }), prior,
+          createUserMessage({ content: 'side question' })] }
+      requests.length = 0
+      expect((await drain(fork)).returned.reason).toBe('completed')
+      expect(requests).toEqual(['codexplan'])
+      expect(gatewayEffort(requests[0]!)).toBe('high')
+
+      setSessionContextWindowOverride('gpt-5.6-sol', 60000)
+      prior.message.usage.input_tokens = 90000
+      requests.length = 0
+      expect((await drain(fork)).returned.reason).toBe('blocking_limit')
+      expect(requests).toEqual([])
+
+      clearSessionContextWindowOverride('gpt-5.6-sol')
+      delete process.env.DISABLE_AUTO_COMPACT
+      delete process.env.DISABLE_COMPACT
+      expect(isAutoCompactEnabled()).toBe(true)
+      prior.message.usage.input_tokens = 100000
+      // Run the real compaction eligibility policy at query's production boundary;
+      // no summarizer/provider IO is needed when this history fits the model.
+      let compact: boolean | undefined
+      fork.deps = { ...params.deps!, autocompact: async (messages, context, _cache, querySource) => {
+        compact = await shouldAutoCompact(messages, context.options.mainLoopModel, querySource)
+        return { wasCompacted: false }
+      } }
+      await drain(fork)
+      expect(compact).toBe(false)
+    } finally {
+      clearSessionContextWindowOverride('gpt-5.6-sol')
+      if (previousCap !== undefined) setSessionContextWindowOverride('gpt-5.6-sol', previousCap)
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
   test('fresh default forks retain the configured alias without overriding explicit children', async () => {
     const requests: string[] = []
     const params = makeAliasParent(async function* ({ options }) {
@@ -199,6 +264,13 @@ describe('fork request selection at context boundaries', () => {
     await drain({ ...params, toolUseContext: explicit })
     expect(requests).toEqual(['codexplan', 'gpt-5.6-sol', 'gpt-5.6-sol'])
     expect(gatewayEffort(requests[1]!)).toBeUndefined()
+
+    // A skill can replace options after the fork has inherited a selection.
+    // The query must invalidate that request even for the same concrete model.
+    const skill = createSubagentContext(params.toolUseContext)
+    skill.options = { ...skill.options, mainLoopModel: 'gpt-5.6-sol' }
+    await drain({ ...params, toolUseContext: skill })
+    expect(requests.at(-1)).toBe('gpt-5.6-sol')
   })
 
   test('agent hook cannot overwrite the saved parent selection', async () => {
@@ -271,6 +343,7 @@ describe('fork request selection at context boundaries', () => {
     { selected: 'codexplan', route: undefined, current: 'codexplan', request: 'codexplan', effort: 'high' },
     { selected: 'codexplan', route: 'gpt-5.6-sol', current: 'codexplan', request: 'gpt-5.6-sol', effort: undefined },
     { selected: 'codexplan', route: 'gpt-5.6-sol?reasoning=low', current: 'codexplan', request: 'gpt-5.6-sol?reasoning=low', effort: 'low' },
+    { selected: 'codexplan', route: 'gpt-4o', current: 'codexplan', request: 'gpt-4o', effort: undefined },
     { selected: 'codexplan', route: undefined, current: 'gpt-5.6-sol', request: 'gpt-5.6-sol', effort: undefined },
     { selected: 'gpt-5.6-sol', route: undefined, current: 'codexplan', request: 'codexplan', effort: 'high' },
   ])('/btw request selection: $selected / $route -> $current', async ({ selected, route, current, request, effort }) => {
@@ -297,7 +370,11 @@ describe('fork request selection at context boundaries', () => {
     clearSmartRoutingSessionDisable(getSessionId())
     resetRoutingTally()
     const completion = Promise.withResolvers<void>()
-    const sideQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    const runtimeModels: string[] = []
+    const sideQuery = spyOn(queryModule, 'query').mockImplementation(input => {
+      if (input.querySource === 'side_question') runtimeModels.push(input.toolUseContext.options.mainLoopModel)
+      return originalQuery({ ...input, deps: params.deps })
+    })
     const runSideQuestion = spyOn(sideQuestion, 'runSideQuestion').mockImplementation(async input => {
       try {
         const result = await originalSideQuestion(input)
@@ -326,6 +403,7 @@ describe('fork request selection at context boundaries', () => {
       await completion.promise
       expect(requests).toEqual([route ?? selected, request])
       expect(gatewayEffort(requests[1]!)).toBe(effort)
+      expect(runtimeModels).toEqual([request === 'codexplan' ? 'gpt-5.6-sol' : request])
     } finally {
       clearTimeout(deadline)
       root?.unmount()

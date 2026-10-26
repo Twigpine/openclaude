@@ -102,6 +102,7 @@ import {
 } from './utils/messageQueueManager.js'
 import { notifyCommandLifecycle } from './utils/commandLifecycle.js'
 import { headlessProfilerCheckpoint } from './utils/headlessProfiler.js'
+import { getQueryModelSelection } from './utils/forkedAgent.js'
 import {
   getDefaultMainLoopModelSetting,
   getProviderRequestModel,
@@ -1276,13 +1277,15 @@ async function* queryLoop(
       appState.mainLoopModel ??
       getDefaultMainLoopModelSetting()
     const selectedModel = toolUseContext.agentId
-      ? toolUseContext.options.mainLoopModel
+      ? getQueryModelSelection(toolUseContext)?.requestModel ?? toolUseContext.options.mainLoopModel
       : appStateMainLoopModel
     let currentModel = getRuntimeMainLoopModel({
       permissionMode,
-      // A child owns its selection; session state may still name a different
-      // alias even when both selections resolve to the same runtime model.
-      mainLoopModel: parseUserSpecifiedModel(selectedModel),
+      // A child's concrete runtime model and raw request selection are distinct;
+      // neither should be reconstructed from the root's session setting.
+      mainLoopModel: parseUserSpecifiedModel(
+        toolUseContext.agentId ? toolUseContext.options.mainLoopModel : selectedModel,
+      ),
       exceeds200kTokens:
         permissionMode === 'plan' &&
         doesMostRecentAssistantMessageExceed200k(messagesForQuery),
@@ -1558,6 +1561,7 @@ async function* queryLoop(
               options: toolUseContext.options,
               model: toolUseContext.options.mainLoopModel,
               selectedModel,
+              runtimeModel: currentModel,
               requestModel,
             }
             for await (const message of deps.callModel({
