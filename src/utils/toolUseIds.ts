@@ -11,9 +11,9 @@ export const MAX_WIRE_TOOL_ID_LENGTH = 64
  * ids (`toolu_vertex_x~~sig~~<base64>`, up to ~1.8k chars) so they survive
  * session persistence. Other wires must never see them: OpenAI rejects ids
  * over the length limit and Anthropic rejects ids outside [A-Za-z0-9_-].
- * Cut at the first foreign character (no legitimate id contains one), then
- * cap deterministically with a hash tail so distinct overlong ids stay
- * distinct. Dependency-free so shims and message normalization can share it.
+ * Keep the wire-safe prefix, then add a deterministic hash tail whenever an
+ * id needs rewriting so distinct punctuated or overlong ids do not collapse
+ * to the same prefix. Dependency-free so shims and normalization can share it.
  */
 export function sanitizeToolUseIdForWire(
   value: unknown,
@@ -23,7 +23,7 @@ export function sanitizeToolUseIdForWire(
   // (number/object/undefined) would throw on .replace below. Coerce first.
   const str = typeof value === 'string' ? value : value == null ? '' : String(value)
   const clean = str.replace(/[^A-Za-z0-9_-][\s\S]*$/, '')
-  if (clean.length > 0 && clean.length <= maxLength) {
+  if (clean === str && clean.length > 0 && clean.length <= maxLength) {
     return clean
   }
   // Deterministic non-cryptographic hash of the FULL original value (FNV-1a)

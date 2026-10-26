@@ -500,28 +500,33 @@ describe('Context overflow 500 fix', () => {
 // Fix N: Gemini Vertex provider drift guards
 // ---------------------------------------------------------------------------
 describe('Gemini Vertex provider drift guards', () => {
+  function sectionBetween(content: string, startMarker: string, endMarker: string): string {
+    const start = content.indexOf(startMarker)
+    expect(start, `Missing section start: ${startMarker}`).toBeGreaterThanOrEqual(0)
+    const end = content.indexOf(endMarker, start + startMarker.length)
+    expect(end, `Missing section end: ${endMarker}`).toBeGreaterThan(start)
+    return content.slice(start, end)
+  }
+
   test('API customer, model flag, and startup detection include Gemini Vertex', async () => {
     const authContent = await file('utils/auth.ts').text()
-    const apiCustomerStart = authContent.indexOf('export function is1PApiCustomer')
-    const apiCustomerEnd = authContent.indexOf('export function getOauthAccountInfo', apiCustomerStart)
-    const apiCustomerSection = authContent.slice(apiCustomerStart, apiCustomerEnd)
+    const apiCustomerSection = sectionBetween(
+      authContent, 'export function is1PApiCustomer', 'export function getOauthAccountInfo',
+    )
 
     expect(apiCustomerSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
 
     const providerFlagContent = await file('utils/providerFlag.ts').text()
-    const modelFlagStart = providerFlagContent.indexOf('export function applyModelFlagFromArgs')
-    const modelFlagEnd = providerFlagContent.indexOf('export function applyProviderFlag', modelFlagStart)
-    const modelFlagSection = providerFlagContent.slice(modelFlagStart, modelFlagEnd)
+    const modelFlagSection = sectionBetween(
+      providerFlagContent, 'export function applyModelFlagFromArgs', 'export function applyProviderFlag',
+    )
 
     expect(modelFlagSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
     expect(modelFlagSection).toContain('GEMINI_VERTEX_MODEL')
 
     const startupScreenContent = await file('components/StartupScreen.ts').text()
-    const detectProviderStart = startupScreenContent.indexOf('export function detectProvider')
-    const detectProviderEnd = startupScreenContent.indexOf('export function StartupScreen', detectProviderStart)
-    const detectProviderSection = startupScreenContent.slice(
-      detectProviderStart,
-      detectProviderEnd,
+    const detectProviderSection = sectionBetween(
+      startupScreenContent, 'export function detectProvider', 'export function printStartupScreen',
     )
 
     expect(detectProviderSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
@@ -530,11 +535,8 @@ describe('Gemini Vertex provider drift guards', () => {
 
   test('log and GitHub onboarding clear Gemini Vertex provider state', async () => {
     const logContent = await file('utils/log.ts').text()
-    const errorReportingStart = logContent.indexOf('Cloud providers')
-    const errorReportingEnd = logContent.indexOf('process.env.DISABLE_ERROR_REPORTING', errorReportingStart)
-    const errorReportingSection = logContent.slice(
-      errorReportingStart,
-      errorReportingEnd,
+    const errorReportingSection = sectionBetween(
+      logContent, 'Cloud providers', 'process.env.DISABLE_ERROR_REPORTING',
     )
 
     expect(errorReportingSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
@@ -542,11 +544,8 @@ describe('Gemini Vertex provider drift guards', () => {
     const onboardGithubContent = await file(
       'commands/onboard-github/onboard-github.tsx',
     ).text()
-    const providerKeysStart = onboardGithubContent.indexOf('PROVIDER_SPECIFIC_KEYS')
-    const providerKeysEnd = onboardGithubContent.indexOf('])', providerKeysStart)
-    const providerKeysSection = onboardGithubContent.slice(
-      providerKeysStart,
-      providerKeysEnd,
+    const providerKeysSection = sectionBetween(
+      onboardGithubContent, 'PROVIDER_SPECIFIC_KEYS', '])',
     )
 
     expect(providerKeysSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
@@ -554,9 +553,9 @@ describe('Gemini Vertex provider drift guards', () => {
 
   test('auth treats Gemini Vertex as a third-party provider', async () => {
     const content = await file('utils/auth.ts').text()
-    const is3PStart = content.indexOf('const is3P =')
-    const is3PEnd = content.indexOf('// Check if user has configured', is3PStart)
-    const is3PSection = content.slice(is3PStart, is3PEnd)
+    const is3PSection = sectionBetween(
+      content, 'const is3P =', '// Check if user has configured',
+    )
 
     expect(is3PSection).toContain('hasAnyTruthyProviderSelectionFlag')
     const { PROVIDER_SELECTION_FLAGS } = await import('../utils/providerSelectionFlags.js')
@@ -565,9 +564,9 @@ describe('Gemini Vertex provider drift guards', () => {
 
   test('API preconnect skips Gemini Vertex routing', async () => {
     const content = await file('utils/apiPreconnect.ts').text()
-    const cloudSkipStart = content.indexOf('// Skip if using a cloud provider')
-    const cloudSkipEnd = content.indexOf('// Skip if proxy/mTLS/unix', cloudSkipStart)
-    const cloudSkipSection = content.slice(cloudSkipStart, cloudSkipEnd)
+    const cloudSkipSection = sectionBetween(
+      content, '// Skip if using a cloud provider', '// Skip if proxy/mTLS/unix',
+    )
 
     expect(cloudSkipSection).toContain('CLAUDE_CODE_USE_GEMINI_VERTEX')
   })

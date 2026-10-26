@@ -10,13 +10,13 @@ import type { Message } from '../types/message.js'
 
 const SIGNED_ID = `toolu_vertex_k9x_3~~sig~~${'S'.repeat(1700)}`
 
-function buildHistory(): Message[] {
+function buildHistory(id = SIGNED_ID): Message[] {
   return [
     createAssistantMessage({
       content: [
         {
           type: 'tool_use',
-          id: SIGNED_ID,
+          id,
           name: 'Read',
           input: { file_path: '/tmp/x' },
         } as never,
@@ -26,7 +26,7 @@ function buildHistory(): Message[] {
       content: [
         {
           type: 'tool_result',
-          tool_use_id: SIGNED_ID,
+          tool_use_id: id,
           content: 'done',
         } as never,
       ],
@@ -72,6 +72,20 @@ describe('normalizeMessagesForAPI Vertex tool_use id sanitation', () => {
     expect(toolUseId).toMatch(/^[A-Za-z0-9_-]+$/)
     // call/result pairing must survive the rewrite
     expect(toolResultId).toBe(toolUseId)
+  })
+
+  test('keeps opaque string IDs distinct and paired without rewriting stored history', () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    const ids = ['call.one', 'call.two']
+    const history = ids.flatMap(id => buildHistory(id))
+    const before = JSON.stringify(history)
+    const normalized = normalizeMessagesForAPI(history)
+    const calls = normalized.filter(msg => msg.type === 'assistant').map(msg => extractIds([msg]).toolUseId)
+    const results = normalized.filter(msg => msg.type === 'user').map(msg => extractIds([msg]).toolResultId)
+    expect(calls).toHaveLength(2)
+    expect(new Set(calls).size).toBe(2)
+    expect(results).toEqual(calls)
+    expect(JSON.stringify(history)).toBe(before)
   })
 
   test('preserves signed ids when the wire is Gemini Vertex', () => {

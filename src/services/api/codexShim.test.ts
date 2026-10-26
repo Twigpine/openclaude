@@ -920,11 +920,10 @@ describe('Codex request translation', () => {
     expect(output!.call_id).toBe(call!.call_id)
   })
 
-  test('keeps overlong alphanumeric ids distinct after capping', () => {
-    // Ids that exceed the wire limit without any invalid character must be
-    // capped deterministically while staying distinct.
-    const a = `toolu_${'a'.repeat(90)}1`
-    const b = `toolu_${'a'.repeat(90)}2`
+  test.each([
+    [`toolu_${'a'.repeat(90)}1`, `toolu_${'a'.repeat(90)}2`],
+    ['call.one', 'call.two'],
+  ])('keeps distinct IDs paired after sanitation: %s / %s', (a, b) => {
     const items = convertAnthropicMessagesToResponsesInput([
       {
         role: 'assistant',
@@ -932,6 +931,10 @@ describe('Codex request translation', () => {
           { type: 'tool_use', id: a, name: 'Read', input: {} },
           { type: 'tool_use', id: b, name: 'Grep', input: {} },
         ],
+      },
+      {
+        role: 'user',
+        content: [a, b].map(id => ({ type: 'tool_result', tool_use_id: id, content: 'done' })),
       },
     ])
 
@@ -944,6 +947,8 @@ describe('Codex request translation', () => {
       expect(c.call_id).toMatch(/^[A-Za-z0-9_-]+$/)
     }
     expect(calls[0]!.call_id).not.toBe(calls[1]!.call_id)
+    const outputs = items.filter(i => i.type === 'function_call_output') as Array<{ call_id: string }>
+    expect(outputs.map(output => output.call_id)).toEqual(calls.map(call => call.call_id))
   })
 
   test('converts completed Codex tool response into Anthropic message', () => {

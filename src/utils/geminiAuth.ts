@@ -182,10 +182,10 @@ export function resolveGeminiVertexAuthMode(
  * ADC only), so an explicit project alias is not required. Only the *effective*
  * auth mode counts: a GEMINI_ACCESS_TOKEN makes the runtime resolve
  * access-token even when GOOGLE_APPLICATION_CREDENTIALS is also set, and that
- * path still needs a project. A bare flag with no credential source is ambient
- * and not treated as ADC-resolvable here (it would otherwise mask a stale
- * shell / a project-required setup). Single source of truth so the completeness
- * gate and the startup/summary placeholders cannot drift apart.
+ * path still needs a project. An explicitly configured model also selects ADC
+ * with project discovery from ambient credentials. A bare flag without a model
+ * or credential source remains incomplete. Single source of truth so the
+ * completeness gate and startup/summary placeholders cannot drift apart.
  */
 export function geminiVertexAdcWillResolveProject(
   env: NodeJS.ProcessEnv = process.env,
@@ -195,7 +195,8 @@ export function geminiVertexAdcWillResolveProject(
   }
   return (
     resolveGeminiVertexAuthMode(env) === 'adc' &&
-    sanitizeCredential(env.GOOGLE_APPLICATION_CREDENTIALS) !== undefined
+    (sanitizeCredential(env.GOOGLE_APPLICATION_CREDENTIALS) !== undefined ||
+      sanitizeCredential(env.GEMINI_VERTEX_MODEL) !== undefined)
   )
 }
 
