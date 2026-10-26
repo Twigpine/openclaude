@@ -26,7 +26,8 @@ import { dequeueAll, enqueue } from '../utils/messageQueueManager.js'
 import * as modelAllowlist from '../utils/model/modelAllowlist.js'
 import * as providerProfiles from '../utils/providerProfiles.js'
 import { getSessionId, getMainLoopModelOverride, setMainLoopModelOverride } from '../bootstrap/state.js'
-import { createSubagentContext, getLastCacheSafeParams, saveCacheSafeParams } from '../utils/forkedAgent.js'
+import { createCacheSafeParams, createSubagentContext, getLastCacheSafeParams, runForkedAgent, saveCacheSafeParams } from '../utils/forkedAgent.js'
+import { clearPostSamplingHooks, registerPostSamplingHook } from '../utils/hooks/postSamplingHooks.js'
 import { createFileStateCacheWithSizeLimit } from '../utils/fileStateCache.js'
 import { clearSessionContextWindowOverride, getSessionContextWindowOverride, setSessionContextWindowOverride } from '../utils/context.js'
 import { isAutoCompactEnabled, shouldAutoCompact } from '../services/compact/autoCompact.js'
@@ -181,6 +182,148 @@ function gatewayEffort(requestModel: string): string | undefined {
 }
 
 describe('fork request selection at context boundaries', () => {
+  test.each((['transcript', 'tool'] as const).flatMap(interval =>
+    (['ambient', 'explicit', 'fixed'] as const).map(choice => ({ interval, choice })),
+  ))('existing $choice fork follows a provider switch during $interval', async ({ interval, choice }) => {
+    const queryModule = await import('../query.js')
+    const transcripts = await import('../utils/sessionStorage.js')
+    const originalQuery = queryModule.query
+    const savedBefore = getLastCacheSafeParams()
+    let providerId = 'provider-a'
+    const activeProvider = spyOn(providerProfiles, 'getActiveProviderProfile').mockImplementation(
+      () => ({ id: providerId }) as ReturnType<typeof providerProfiles.getActiveProviderProfile>,
+    )
+    const allowlist = spyOn(modelAllowlist, 'isModelAllowed').mockReturnValue(true)
+    const transcriptEntered = Promise.withResolvers<void>()
+    const releaseTranscript = Promise.withResolvers<void>()
+    let holdTranscript = interval === 'transcript'
+    const transcript = spyOn(transcripts, 'recordSidechainTranscript').mockImplementation(async () => {
+      if (holdTranscript) {
+        holdTranscript = false
+        transcriptEntered.resolve()
+        await releaseTranscript.promise
+      }
+    })
+    const echo = spyOn(echoTool, 'call').mockImplementation(async () => {
+      providerId = 'provider-b'
+      return { data: 'switched' }
+    })
+    const requests: string[] = []
+    const budgets: string[] = []
+    let child = false
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: child && interval === 'tool' && requests.length === 1
+        ? [{ type: 'tool_use', id: 'toolu_provider_switch', name: 'Echo', input: { text: 'switch' } }]
+        : 'done' })
+    })
+    const state = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({
+      ...state, settings: providerId === 'provider-a'
+        ? { smartRouting: { enabled: true, simpleModel: 'gpt-4o', strongModel: 'gpt-4o' } } : {},
+    })
+    params.toolUseContext.options.tools = [echoTool]
+    params.toolUseContext.options.refreshTools = () => [echoTool]
+    params.deps = { ...params.deps!, autocompact: async (_messages, context) => {
+      budgets.push(context.options.mainLoopModel)
+      return { wasCompacted: false }
+    } }
+    const forkQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    clearSmartRoutingSessionDisable(getSessionId())
+    resetRoutingTally()
+    try {
+      await drain(params)
+      child = true
+      // Explicit choices must stay explicit after their first accepted request.
+      providerId = 'provider-a'
+      requests.length = 0
+      budgets.length = 0
+      holdTranscript = interval === 'transcript'
+      const pending = runForkedAgent({
+        promptMessages: [createUserMessage({ content: 'continue' })],
+        cacheSafeParams: { ...params, forkContextMessages: [] },
+        canUseTool: params.canUseTool, querySource: 'session_memory', forkLabel: 'selection-test',
+        ...(choice !== 'ambient' && { overrides: { options: {
+          ...params.toolUseContext.options,
+          ...(choice === 'fixed' && { providerOverride: {
+            model: 'gpt-4o', baseURL: 'https://provider-a.example/v1', apiKey: 'test-key',
+          } }),
+        } } }),
+      })
+      if (interval === 'transcript') {
+        await transcriptEntered.promise
+        providerId = 'provider-b'
+        releaseTranscript.resolve()
+      }
+      await pending
+      const expected = choice === 'ambient' ? 'codexplan' : 'gpt-4o'
+      expect(requests).toEqual(interval === 'tool' ? ['gpt-4o', expected] : [expected])
+      expect(budgets).toEqual(interval === 'tool'
+        ? ['gpt-4o', choice === 'ambient' ? 'gpt-5.6-sol' : 'gpt-4o']
+        : [choice === 'ambient' ? 'gpt-5.6-sol' : 'gpt-4o'])
+      expect(gatewayEffort(requests.at(-1)!)).toBe(choice === 'ambient' ? 'high' : undefined)
+    } finally {
+      releaseTranscript.resolve()
+      transcript.mockRestore()
+      echo.mockRestore()
+      forkQuery.mockRestore()
+      activeProvider.mockRestore()
+      allowlist.mockRestore()
+      saveCacheSafeParams(savedBefore)
+      resetRoutingTally()
+      clearSmartRoutingSessionDisable(getSessionId())
+    }
+  })
+
+  test.each([false, true])('retained parent and delayed sampled contexts survive tool refresh=%s', async refresh => {
+    const queryModule = await import('../query.js')
+    const originalQuery = queryModule.query
+    const savedBefore = getLastCacheSafeParams()
+    const releaseHook = Promise.withResolvers<void>()
+    let hookWork: Promise<unknown> | undefined
+    const requests: string[] = []
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: requests.length === 1
+        ? [{ type: 'tool_use', id: 'toolu_retained', name: 'Echo', input: { text: 'refresh' } }]
+        : 'done' })
+    })
+    params.querySource = 'repl_main_thread'
+    params.toolUseContext.options.tools = [echoTool]
+    params.toolUseContext.options.refreshTools = () => refresh ? [echoTool] : params.toolUseContext.options.tools
+    const forkQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    registerPostSamplingHook(context => {
+      if (context.toolUseContext.agentId || hookWork) return
+      hookWork = (async () => {
+        await releaseHook.promise
+        return runForkedAgent({
+          promptMessages: [createUserMessage({ content: 'summarize' })],
+          cacheSafeParams: createCacheSafeParams(context), canUseTool: params.canUseTool,
+          querySource: 'session_memory', forkLabel: 'retained-sample', skipTranscript: true,
+        })
+      })()
+      return hookWork.then(() => {})
+    })
+    try {
+      await drain(params)
+      expect(hookWork).toBeDefined()
+      releaseHook.resolve()
+      await hookWork
+      await drain({ ...params, toolUseContext: createSubagentContext(params.toolUseContext) })
+      expect(requests).toEqual(['codexplan', 'codexplan', 'codexplan', 'codexplan'])
+      expect(requests.map(gatewayEffort)).toEqual(['high', 'high', 'high', 'high'])
+      params.toolUseContext.options = { ...params.toolUseContext.options }
+      await drain({ ...params, toolUseContext: createSubagentContext(params.toolUseContext) })
+      expect(requests.at(-1)).toBe('gpt-5.6-sol')
+    } finally {
+      releaseHook.resolve()
+      await hookWork
+      clearPostSamplingHooks()
+      forkQuery.mockRestore()
+      saveCacheSafeParams(savedBefore)
+    }
+  })
+
   test.each([
     { route: undefined, fixed: false },
     { route: 'gpt-5.6-sol?reasoning=low', fixed: false },

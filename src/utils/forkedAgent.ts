@@ -338,10 +338,36 @@ function getOwnedQueryModelSelection(context: ToolUseContext) {
 
 export function getQueryModelSelection(context: ToolUseContext) {
   const selection = getOwnedQueryModelSelection(context)
-  return context.options.providerOverride ||
+  return !selection?.followsProvider || context.options.providerOverride ||
     selection?.providerId === getActiveProviderProfile()?.id
     ? selection
     : undefined
+}
+
+/** Re-select an inherited ambient pair before consuming a context under a new provider. */
+export function refreshAmbientQueryModelSelection(context: ToolUseContext): ToolUseContext {
+  const selection = getOwnedQueryModelSelection(context)
+  const providerId = getActiveProviderProfile()?.id
+  if (!selection?.followsProvider || context.options.providerOverride ||
+    selection.providerId === providerId) return context
+
+  const state = context.getAppState()
+  const selectedModel = state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting()
+  const runtimeModel = parseUserSpecifiedModel(selectedModel)
+  const options = { ...context.options, mainLoopModel: runtimeModel }
+  // A retained reader still owns its earlier options/selection snapshot.
+  return {
+    ...context,
+    options,
+    queryModelSelection: {
+      agentId: context.agentId,
+      current: {
+        ...selection, options, model: runtimeModel, selectedModel, runtimeModel,
+        requestModel: getProviderRequestModel(selectedModel, runtimeModel),
+        providerId,
+      },
+    },
+  }
 }
 
 /**
@@ -387,22 +413,17 @@ export function createSubagentContext(
   parentContext: ToolUseContext,
   overrides?: SubagentContextOverrides,
 ): ToolUseContext {
-  const ownedSelection = getOwnedQueryModelSelection(parentContext)
+  if (!overrides?.options) parentContext = refreshAmbientQueryModelSelection(parentContext)
+  const selection = getQueryModelSelection(parentContext)
   const providerId = getActiveProviderProfile()?.id
-  const providerChanged = ownedSelection &&
-    !parentContext.options.providerOverride && ownedSelection.providerId !== providerId
-  const selection = providerChanged ? undefined : ownedSelection
-  let runtimeModel = selection?.runtimeModel ?? parentContext.options.mainLoopModel
+  const runtimeModel = selection?.runtimeModel ?? parentContext.options.mainLoopModel
   let requestModel = selection?.requestModel ?? parentContext.options.mainLoopModel
   // Fresh root contexts (/btw and SDK fallback) have only a resolved model.
   // Restore its configured alias only before an accepted selection exists.
-  // A provider swap also needs a fresh pair; explicit model overrides do not.
-  if (!overrides?.options && (providerChanged ||
-    (!parentContext.queryModelSelection?.current && !parentContext.agentId))) {
+  // A mismatched saved selection or an explicit child must keep its override.
+  if (!overrides?.options && !parentContext.queryModelSelection?.current && !parentContext.agentId) {
     const state = parentContext.getAppState()
     const selectedModel = state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting()
-    // Do not reuse the old provider's routed runtime model as the fallback.
-    if (providerChanged) runtimeModel = parseUserSpecifiedModel(selectedModel)
     requestModel = getProviderRequestModel(
       selectedModel,
       runtimeModel,
@@ -537,6 +558,8 @@ export function createSubagentContext(
           runtimeModel: options.mainLoopModel,
           requestModel,
           providerId,
+          followsProvider: selection?.followsProvider ??
+            (!parentContext.agentId && !parentContext.queryModelSelection?.current),
         },
       }),
     },

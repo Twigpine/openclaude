@@ -102,7 +102,7 @@ import {
 } from './utils/messageQueueManager.js'
 import { notifyCommandLifecycle } from './utils/commandLifecycle.js'
 import { headlessProfilerCheckpoint } from './utils/headlessProfiler.js'
-import { getQueryModelSelection } from './utils/forkedAgent.js'
+import { getQueryModelSelection, refreshAmbientQueryModelSelection } from './utils/forkedAgent.js'
 import {
   getDefaultMainLoopModelSetting,
   getProviderRequestModel,
@@ -853,6 +853,9 @@ async function* queryLoop(
     // is reassigned within an iteration (queryTracking, messages updates);
     // the rest are read-only between continue sites.
     let { toolUseContext } = state
+    // Existing forks can outlive a provider switch. Refresh before compaction,
+    // capability checks, or request selection consume their concrete model.
+    toolUseContext = refreshAmbientQueryModelSelection(toolUseContext)
     const {
       messages,
       autoCompactTracking,
@@ -1564,6 +1567,8 @@ async function* queryLoop(
               runtimeModel: currentModel,
               requestModel,
               providerId: getActiveProviderProfile()?.id,
+              followsProvider: !toolUseContext.agentId ||
+                getQueryModelSelection(toolUseContext)?.followsProvider === true,
             }
             for await (const message of deps.callModel({
             messages: prependUserContext(
@@ -3133,6 +3138,9 @@ async function* queryLoop(
     if (updatedToolUseContext.options.refreshTools) {
       const refreshedTools = updatedToolUseContext.options.refreshTools()
       if (refreshedTools !== updatedToolUseContext.options.tools) {
+        // A provider can also switch during the tool. Preserve that transition
+        // before cloning options, while the old ownership proof is still valid.
+        updatedToolUseContext = refreshAmbientQueryModelSelection(updatedToolUseContext)
         const selection = getQueryModelSelection(updatedToolUseContext)
         updatedToolUseContext = {
           ...updatedToolUseContext,
@@ -3141,13 +3149,11 @@ async function* queryLoop(
             tools: refreshedTools,
           },
         }
-        // This internal clone changes only tools. Keep valid request provenance;
-        // explicit options replacements elsewhere still invalidate inheritance.
-        if (selection && updatedToolUseContext.queryModelSelection) {
-          updatedToolUseContext.queryModelSelection.current = {
-            ...selection,
-            options: updatedToolUseContext.options,
-          }
+        // Keep earlier sampled/retained contexts valid too. Moving a shared
+        // holder's options pointer would invalidate their accepted selections.
+        updatedToolUseContext.queryModelSelection = {
+          agentId: updatedToolUseContext.agentId,
+          ...(selection && { current: { ...selection, options: updatedToolUseContext.options } }),
         }
       }
     }

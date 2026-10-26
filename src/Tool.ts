@@ -201,10 +201,10 @@ export type ToolUseContext = {
     /** Per-agent provider override from agentRouting config */
     providerOverride?: { model: string; baseURL: string; apiKey: string }
   }
-  /** Shared within a query; forks copy the selection into their own holder. */
+  /** Shared by copies with the same options; internal options clones retain separate snapshots. */
   queryModelSelection?: {
     agentId: ToolUseContext['agentId']
-    /** Inherited selection, replaced only after a provider accepts a request. */
+    /** Inherited selection; accepted requests replace it within this options snapshot. */
     current?: {
       /** Identity and value invalidate provenance after an explicit model override. */
       options: ToolUseContext['options']
@@ -216,6 +216,8 @@ export type ToolUseContext = {
       requestModel: string
       /** Ambient provider that accepted this pair; fixed provider overrides are independent. */
       providerId: string | undefined
+      /** Default ambient inheritance may follow a provider switch; explicit model choices may not. */
+      followsProvider: boolean
     }
   }
   abortController: AbortController
