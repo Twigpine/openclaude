@@ -178,11 +178,12 @@ export type SDKResultMessage = GeneratedSDKResultMessage
  * These definitions can be passed to `createSdkMcpServer()` to register
  * custom MCP tools.
  */
-type SdkMcpToolInput<Schema> = Schema extends { _input: infer Input }
-  ? Input
-  : Schema extends Record<string, { _input: unknown }>
-    ? { [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? never : Key]: Schema[Key]['_input'] }
-      & { [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? Key : never]?: Schema[Key]['_input'] }
+// A raw shape can have an `_input` field, so recognize shapes before schema metadata.
+type SdkMcpToolInput<Schema> = Schema extends Record<string, { _input: unknown }>
+  ? { [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? never : Key]: Schema[Key]['_input'] }
+    & { [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? Key : never]?: Schema[Key]['_input'] }
+  : Schema extends { _input: infer Input }
+    ? Input
     : Record<string, unknown>
 
 export interface SdkMcpToolDefinition<Schema = unknown> {

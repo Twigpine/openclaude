@@ -26,6 +26,15 @@ function assertToolTypes(): void {
     type _Enabled = Assert<Equal<typeof args.enabled, boolean>>
     return { content: [{ type: 'text', text: String(args.enabled) }] }
   })
+  // Raw-shape field names must not be mistaken for whole-schema metadata.
+  const sourceInputField = tool('input-field', '', {
+    _input: z.string(), value: z.string(),
+  }, async args => {
+    type _Input = Assert<Equal<typeof args._input, string>>
+    type _Value = Assert<Equal<typeof args.value, string>>
+    return { content: [{ type: 'text', text: args.value }] }
+  })
+  void sourceInputField.handler({ _input: 'input', value: 'value' }, undefined)
   const sourceJson = tool('json', '', {
     type: 'object', properties: { path: { type: 'string' } },
   }, async (args: { path: string }) => ({
@@ -52,6 +61,14 @@ function assertToolTypes(): void {
     type _Enabled = Assert<Equal<typeof args.enabled, boolean>>
     return { content: [{ type: 'text', text: String(args.enabled) }] }
   })
+  const publishedInputField = declaredTool('input-field', '', {
+    _input: z.string(), value: z.string(),
+  }, async args => {
+    type _Input = Assert<Equal<typeof args._input, string>>
+    type _Value = Assert<Equal<typeof args.value, string>>
+    return { content: [{ type: 'text', text: args.value }] }
+  })
+  void publishedInputField.handler({ _input: 'input', value: 'value' }, undefined)
   const publishedJson = declaredTool('json', '', {
     type: 'object', properties: { path: { type: 'string' } },
   }, async (args: { path: string }) => ({
