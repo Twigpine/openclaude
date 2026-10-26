@@ -25,5 +25,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
+      - name: Lint extension JavaScript
+        working-directory: vscode-extension/openclaude-vscode
+        run: npm run lint
       - name: Exercise Windows executable and npm batch launcher routes
         run: node --test vscode-extension/openclaude-vscode/src/chat/processManager.test.js
