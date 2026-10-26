@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import { z } from 'zod/v4'
 
 import {
@@ -20,6 +20,13 @@ import { AGENT_STEP_LIMIT_TOOL_RESULT_PREFIX } from './agentStepLimit.js'
 import type { Terminal } from './transitions.js'
 import type { Message } from '../types/message.js'
 import { dequeueAll, enqueue } from '../utils/messageQueueManager.js'
+import * as modelAllowlist from '../utils/model/modelAllowlist.js'
+import { getSessionId } from '../bootstrap/state.js'
+import {
+  clearSmartRoutingSessionDisable,
+  getRoutingTally,
+  resetRoutingTally,
+} from '../services/api/smartRouting/index.js'
 
 const echoCalls: string[] = []
 
@@ -144,6 +151,50 @@ async function drain(params: QueryParams): Promise<{
 }
 
 describe('agent step limits', () => {
+  test('smart routing preserves the sub-agent model through query and tool continuations', async () => {
+    const allowlist = spyOn(modelAllowlist, 'isModelAllowed').mockReturnValue(true)
+    clearSmartRoutingSessionDisable(getSessionId())
+    resetRoutingTally()
+    try {
+      // The main-thread control proves routing is enabled in this fixture.
+      for (const isSubagent of [false, true]) {
+        const requests: Array<{ model: string; requestModel?: string }> = []
+        const params = makeParams(async function* ({ options }) {
+          requests.push({ model: options.model, requestModel: options.requestModel })
+          yield createAssistantMessage({
+            content: requests.length === 1
+              ? [{ type: 'tool_use', id: 'toolu_routing', name: 'Echo', input: { text: 'inspect' } }]
+              : 'done',
+          })
+        }, [echoTool])
+        if (!isSubagent) delete params.toolUseContext.agentId
+        const appState = params.toolUseContext.getAppState()
+        params.toolUseContext.getAppState = () => ({
+          ...appState,
+          settings: {
+            smartRouting: { enabled: true, simpleModel: 'gpt-5-mini', strongModel: 'gpt-5' },
+          },
+        })
+
+        await drain(params)
+
+        const expectedModel = isSubagent ? 'gpt-4o' : 'gpt-5'
+        expect(requests).toEqual([
+          { model: expectedModel, requestModel: expectedModel },
+          { model: expectedModel, requestModel: expectedModel },
+        ])
+        expect(params.toolUseContext.options.mainLoopModel).toBe(expectedModel)
+      }
+      // Only the main-thread turn contributes a routing decision.
+      expect(getRoutingTally()).toMatchObject({ simple: 0, strong: 1 })
+    } finally {
+      allowlist.mockRestore()
+      resetRoutingTally()
+      clearSmartRoutingSessionDisable(getSessionId())
+      echoCalls.length = 0
+    }
+  })
+
   test('shares one turn budget across query calls for the same prompt', async () => {
     let modelCalls = 0
     const turnBudget = createQueryTurnBudget(1)
