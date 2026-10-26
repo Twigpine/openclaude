@@ -7,7 +7,21 @@ type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
   (<T>() => T extends B ? 1 : 2) ? true : false
 type Assert<T extends true> = T
 
+interface NamedShape { path: z.ZodString }
+interface NamedInputShape { _input: z.ZodString; value: z.ZodString }
+interface JsonArgs { path: string }
+
 function assertToolTypes(): void {
+  const namedShape: NamedShape = { path: z.string() }
+  const namedInputShape: NamedInputShape = { _input: z.string(), value: z.string() }
+  const jsonArgs: JsonArgs = { path: 'file.txt' }
+  const readonlyShape = {
+    name: z.string(),
+    count: z.number().optional(),
+    defaulted: z.string().default('default'),
+    transformed: z.string().transform(Number),
+    _input: z.string(),
+  } as const
   const sourceRaw = tool('raw', '', {
     name: z.string(),
     count: z.number().optional(),
@@ -37,11 +51,38 @@ function assertToolTypes(): void {
   void sourceInputField.handler({ _input: 'input', value: 'value' }, undefined)
   const sourceJson = tool('json', '', {
     type: 'object', properties: { path: { type: 'string' } },
-  }, async (args: { path: string }) => ({
+  }, async (args: JsonArgs) => ({
     content: [{ type: 'text', text: args.path }],
   }))
+  void sourceJson.handler(jsonArgs, undefined)
+  const sourceNamed = tool('named', '', namedShape, async args => ({
+    content: [{ type: 'text', text: args.path.toUpperCase() }],
+  }))
+  const sourceNamedInput = tool('named-input', '', namedInputShape, async args => {
+    type _Input = Assert<Equal<typeof args._input, string>>
+    return { content: [{ type: 'text', text: args.value.toUpperCase() }] }
+  })
+  void sourceNamedInput.handler({ _input: 'input', value: 'value' }, undefined)
+  const sourceReadonly = tool('readonly', '', readonlyShape, async args => {
+    // Const validators do not make the separate raw argument object readonly.
+    args.name = args.name.trim()
+    args.count = 1
+    args.defaulted = 'default'
+    args.transformed = '42'
+    args._input = 'input'
+    return { content: [{ type: 'text', text: args.name }] }
+  })
+  tool('json-fallback', '', { type: 'object' }, async args => {
+    type _Fallback = Assert<Equal<typeof args, Record<string, unknown>>>
+    return { content: [] }
+  })
+  // @ts-expect-error An annotation cannot override a raw schema's input type.
+  tool('wrong-raw', '', { path: z.string() }, async (args: { path: number }) => ({ content: [] }))
+  // @ts-expect-error An annotation cannot override a whole schema's input type.
+  tool('wrong-object', '', z.object({ path: z.string() }), async (args: { path: number }) => ({ content: [] }))
   createSdkMcpServer({
-    type: 'sdk', name: 'mixed', tools: [sourceRaw, sourceObject, sourceJson],
+    type: 'sdk', name: 'mixed',
+    tools: [sourceRaw, sourceObject, sourceJson, sourceNamed, sourceNamedInput, sourceReadonly],
   })
   const publishedRaw = declaredTool('raw', '', {
     name: z.string(),
@@ -71,11 +112,37 @@ function assertToolTypes(): void {
   void publishedInputField.handler({ _input: 'input', value: 'value' }, undefined)
   const publishedJson = declaredTool('json', '', {
     type: 'object', properties: { path: { type: 'string' } },
-  }, async (args: { path: string }) => ({
+  }, async (args: JsonArgs) => ({
     content: [{ type: 'text', text: args.path }],
   }))
+  void publishedJson.handler(jsonArgs, undefined)
+  const publishedNamed = declaredTool('named', '', namedShape, async args => ({
+    content: [{ type: 'text', text: args.path.toUpperCase() }],
+  }))
+  const publishedNamedInput = declaredTool('named-input', '', namedInputShape, async args => {
+    type _Input = Assert<Equal<typeof args._input, string>>
+    return { content: [{ type: 'text', text: args.value.toUpperCase() }] }
+  })
+  void publishedNamedInput.handler({ _input: 'input', value: 'value' }, undefined)
+  const publishedReadonly = declaredTool('readonly', '', readonlyShape, async args => {
+    args.name = args.name.trim()
+    args.count = 1
+    args.defaulted = 'default'
+    args.transformed = '42'
+    args._input = 'input'
+    return { content: [{ type: 'text', text: args.name }] }
+  })
+  declaredTool('json-fallback', '', { type: 'object' }, async args => {
+    type _Fallback = Assert<Equal<typeof args, Record<string, unknown>>>
+    return { content: [] }
+  })
+  // @ts-expect-error An annotation cannot override a raw schema's input type.
+  declaredTool('wrong-raw', '', { path: z.string() }, async (args: { path: number }) => ({ content: [] }))
+  // @ts-expect-error An annotation cannot override a whole schema's input type.
+  declaredTool('wrong-object', '', z.object({ path: z.string() }), async (args: { path: number }) => ({ content: [] }))
   declaredServer({
-    type: 'sdk', name: 'mixed', tools: [publishedRaw, publishedObject, publishedJson],
+    type: 'sdk', name: 'mixed',
+    tools: [publishedRaw, publishedObject, publishedJson, publishedNamed, publishedNamedInput, publishedReadonly],
   })
 }
 

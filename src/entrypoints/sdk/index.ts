@@ -168,17 +168,17 @@ export {
  * )
  * ```
  */
-export function tool<Schema = unknown>(
+export function tool<Schema = unknown, JsonInput extends object = Record<string, unknown>>(
   name: string,
   description: string,
   inputSchema: Schema,
-  handler: import('./v2.js').SdkMcpToolDefinition<Schema>['handler'],
+  handler: import('./v2.js').SdkMcpToolDefinition<Schema, JsonInput>['handler'],
   extras?: {
     annotations?: ToolAnnotations
     searchHint?: string
     alwaysLoad?: boolean
   },
-): import('./v2.js').SdkMcpToolDefinition<Schema> {
+): import('./v2.js').SdkMcpToolDefinition<Schema, JsonInput> {
   return {
     name,
     description,

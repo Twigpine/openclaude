@@ -179,18 +179,19 @@ export type SDKResultMessage = GeneratedSDKResultMessage
  * custom MCP tools.
  */
 // A raw shape can have an `_input` field, so recognize shapes before schema metadata.
-type SdkMcpToolInput<Schema> = Schema extends Record<string, { _input: unknown }>
-  ? { [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? never : Key]: Schema[Key]['_input'] }
-    & { [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? Key : never]?: Schema[Key]['_input'] }
+type SdkMcpToolInput<Schema, JsonInput extends object> = Schema extends { [Key in keyof Schema]: { _input: unknown } }
+  ? { -readonly [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? never : Key]: Schema[Key]['_input'] }
+    & { -readonly [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? Key : never]?: Schema[Key]['_input'] }
   : Schema extends { _input: infer Input }
     ? Input
-    : Record<string, unknown>
+    // Materialize named interface keys so typed handlers also fit tool arrays.
+    : { [Key in keyof JsonInput]: JsonInput[Key] }
 
-export interface SdkMcpToolDefinition<Schema = unknown> {
+export interface SdkMcpToolDefinition<Schema = unknown, JsonInput extends object = Record<string, unknown>> {
   name: string
   description: string
   inputSchema: Schema
-  handler(args: SdkMcpToolInput<Schema>, extra: unknown): Promise<CallToolResult>
+  handler(args: SdkMcpToolInput<Schema, JsonInput>, extra: unknown): Promise<CallToolResult>
   annotations?: ToolAnnotations
   searchHint?: string
   alwaysLoad?: boolean
