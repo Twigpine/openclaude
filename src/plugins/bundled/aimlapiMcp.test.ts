@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 
 import {
   AIMLAPI_MCP_URL,
@@ -6,12 +6,17 @@ import {
 } from '../../integrations/aimlapi/config.js'
 import { getMcpServerHeaders } from '../../services/mcp/headersHelper.js'
 import type { McpHTTPServerConfig } from '../../services/mcp/types.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
 import { getPluginMcpServers } from '../../utils/plugins/mcpPluginIntegration.js'
 import { applyProviderProfileToProcessEnv } from '../../utils/providerProfiles.js'
 import {
   resetSettingsCache,
   setSessionSettingsCache,
 } from '../../utils/settings/settingsCache.js'
+import type { SettingsJson } from '../../utils/settings/types.js'
 import { clearBuiltinPlugins, getBuiltinPlugins } from '../builtinPlugins.js'
 import {
   AIMLAPI_MCP_PLUGIN_NAME,
@@ -30,25 +35,45 @@ const originalEnv = Object.fromEntries(
   envNames.map(name => [name, process.env[name]]),
 )
 
+// Test files share a process, and an earlier file can leave its own
+// settings.js mock registered. Built-in plugins read their enabled state
+// through getSettings_DEPRECATED, so pin it to this file's settings and put
+// the real module back after each test.
+const realSettings = {
+  ...await import(`../../utils/settings/settings.js?real=${Date.now()}-${Math.random()}`),
+} as typeof import('../../utils/settings/settings.js')
+
+let settingsForTest: SettingsJson = {}
+
 function useEnabledPlugins(enabledPlugins?: Record<string, boolean>): void {
-  setSessionSettingsCache({
-    settings: enabledPlugins ? { enabledPlugins } : {},
-    errors: [],
-  })
+  settingsForTest = enabledPlugins ? { enabledPlugins } : {}
+  setSessionSettingsCache({ settings: settingsForTest, errors: [] })
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await acquireSharedMutationLock('plugins/bundled/aimlapiMcp.test.ts')
+  settingsForTest = {}
+  mock.module('../../utils/settings/settings.js', () => ({
+    ...realSettings,
+    getSettings_DEPRECATED: () => settingsForTest,
+  }))
   for (const name of envNames) delete process.env[name]
   registerAimlapiMcpPlugin()
 })
 
 afterEach(() => {
-  clearBuiltinPlugins()
-  resetSettingsCache()
-  for (const name of envNames) {
-    const value = originalEnv[name]
-    if (value === undefined) delete process.env[name]
-    else process.env[name] = value
+  try {
+    clearBuiltinPlugins()
+    mock.module('../../utils/settings/settings.js', () => realSettings)
+    resetSettingsCache()
+    settingsForTest = {}
+    for (const name of envNames) {
+      const value = originalEnv[name]
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  } finally {
+    releaseSharedMutationLock()
   }
 })
 
