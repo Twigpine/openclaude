@@ -464,6 +464,12 @@ This section is the **authoritative local validation contract**; `AGENTS.md` and
 
 CI evaluates the **complete PR diff**, including after a small follow-up push. PR Checks skips code jobs for Markdown/docs-only PRs unless `.github/` is touched; otherwise its code filter selects all unit shards, static checks, type checks, and launcher checks, not individual subsystems. The web job is selected independently. The intent scan runs on every PR, and every PR Checks job runs on pushes to `main`. See `.github/workflows/pr-checks.yml` for exact filters.
 
+### Required merge checks
+
+The stable checks are `PR checks required`, `Install hygiene required`, and `VS Code launcher required`. Each reports on every PR: selected jobs must pass, while jobs for untouched surfaces may skip. Failed change detection, failed or cancelled jobs, and unexpectedly skipped applicable jobs fail the corresponding check. Documentation-only PRs still run the intent scan and existing CodeQL checks; they do not wait for unrelated application, install, or extension jobs.
+
+For repository administrators: after these workflows are merged into `main`, add these three check names to the branch ruleset as required checks from GitHub Actions, preserving the existing CodeQL requirements. Do not require individual matrix jobs or path-filtered workflow names. Enable the requirements only after the workflows are available on the base branch; existing PRs may need an update to pick up the new jobs. Keep the requirement to update branches before merging disabled unless a separate policy change is intended.
+
 ### Select the required local checks
 
 Before the initial PR, apply this table to the complete proposed diff. Combine rows when more than one surface is affected. Before a follow-up push, apply it to the update since the last successfully validated revision, subject to the reuse rules below.
