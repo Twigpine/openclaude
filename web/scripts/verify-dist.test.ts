@@ -140,6 +140,11 @@ describe('verifyDist', () => {
     expect(failures.some(f => f.startsWith('sitemap entry /buddy/'))).toBe(true)
   })
 
+  test('flags an existing zero-byte sitemap', () => {
+    const failures = withFixture(dist => writeFileSync(join(dist, 'sitemap-0.xml'), ''))
+    expect(failures).toEqual([`sitemap entry /buddy/: missing "${SITE.url}/buddy/"`])
+  })
+
   test('flags a missing sitemap', () => {
     const failures = withFixture(dist => rmSync(join(dist, 'sitemap-0.xml')))
     expect(failures).toContain('missing dist/sitemap-0.xml')
