@@ -22,6 +22,8 @@ import type { Message } from '../types/message.js'
 import { dequeueAll, enqueue } from '../utils/messageQueueManager.js'
 import * as modelAllowlist from '../utils/model/modelAllowlist.js'
 import { getSessionId } from '../bootstrap/state.js'
+import { createSubagentContext } from '../utils/forkedAgent.js'
+import { createFileStateCacheWithSizeLimit } from '../utils/fileStateCache.js'
 import {
   clearSmartRoutingSessionDisable,
   getRoutingTally,
@@ -151,6 +153,25 @@ async function drain(params: QueryParams): Promise<{
 }
 
 describe('agent step limits', () => {
+  test('cache-sharing forks preserve the selected provider request alias', async () => {
+    const requests: Array<{ model: string; requestModel?: string }> = []
+    const params = makeParams(async function* ({ options }) {
+      requests.push({ model: options.model, requestModel: options.requestModel })
+      yield createAssistantMessage({ content: 'done' })
+    })
+    const appState = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({
+      ...appState,
+      mainLoopModel: 'codexplan',
+    })
+    params.toolUseContext.options.mainLoopModel = 'gpt-5.6-sol'
+    params.toolUseContext.readFileState = createFileStateCacheWithSizeLimit(10)
+
+    await drain({ ...params, toolUseContext: createSubagentContext(params.toolUseContext) })
+
+    expect(requests).toEqual([{ model: 'gpt-5.6-sol', requestModel: 'codexplan' }])
+  })
+
   test('smart routing preserves the sub-agent model through query and tool continuations', async () => {
     const allowlist = spyOn(modelAllowlist, 'isModelAllowed').mockReturnValue(true)
     clearSmartRoutingSessionDisable(getSessionId())
@@ -184,6 +205,22 @@ describe('agent step limits', () => {
           { model: expectedModel, requestModel: expectedModel },
         ])
         expect(params.toolUseContext.options.mainLoopModel).toBe(expectedModel)
+
+        if (!isSubagent) {
+          // Cache-sharing forks inherit the routed turn model in options,
+          // while the parent's app state still holds the session default.
+          params.toolUseContext.readFileState = createFileStateCacheWithSizeLimit(10)
+          const forkContext = createSubagentContext(params.toolUseContext)
+          expect(forkContext.agentId).toBeTruthy()
+          expect(forkContext.getAppState().mainLoopModel).toBe('gpt-4o')
+          expect(forkContext.options.mainLoopModel).toBe('gpt-5')
+          requests.length = 0
+          await drain({ ...params, toolUseContext: forkContext })
+          expect(requests).toEqual([
+            { model: 'gpt-5', requestModel: 'gpt-5' },
+            { model: 'gpt-5', requestModel: 'gpt-5' },
+          ])
+        }
       }
       // Only the main-thread turn contributes a routing decision.
       expect(getRoutingTally()).toMatchObject({ simple: 0, strong: 1 })

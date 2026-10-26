@@ -1267,7 +1267,14 @@ async function* queryLoop(
       getDefaultMainLoopModelSetting()
     let currentModel = getRuntimeMainLoopModel({
       permissionMode,
-      mainLoopModel: parseUserSpecifiedModel(appStateMainLoopModel),
+      // Forks inherit the routed parent model in options, while app state may
+      // still hold the session default. Keep the raw app-state selection above
+      // for provider request aliases such as codexplan.
+      mainLoopModel: parseUserSpecifiedModel(
+        toolUseContext.agentId
+          ? toolUseContext.options.mainLoopModel
+          : appStateMainLoopModel,
+      ),
       exceeds200kTokens:
         permissionMode === 'plan' &&
         doesMostRecentAssistantMessageExceed200k(messagesForQuery),
