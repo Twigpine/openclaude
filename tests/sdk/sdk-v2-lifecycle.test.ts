@@ -1,3 +1,5 @@
+import { sessionInternals } from './helpers/query-test-doubles.js'
+import type { SDKMessage } from '../../src/entrypoints/sdk/shared.js'
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test'
 import { randomUUID } from 'crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
@@ -23,7 +25,7 @@ import {
   releaseSharedMutationLock,
 } from '../../src/test/sharedMutationLock.js'
 import { clearAgentDefinitionsCache } from '../../src/tools/AgentTool/loadAgentsDir.js'
-import type { SessionId } from '../../src/entrypoints/agentSdkTypes.js'
+type SessionId = ReturnType<typeof getSessionId>
 import {
   drainQuery,
   withTempDir,
@@ -50,8 +52,8 @@ let originalOriginalCwd: string
 // Collect temp dirs for cleanup
 const tempDirs: string[] = []
 
-function attachMockEngine(session: unknown, mockEngine: MockQueryEngine): void {
-  ;(session as { setEngine(engine: MockQueryEngine): void }).setEngine(mockEngine)
+function attachMockEngine(session: Parameters<typeof sessionInternals>[0], mockEngine: MockQueryEngine): void {
+  ;sessionInternals(session).setEngine(mockEngine)
 }
 
 beforeAll(async () => {
@@ -146,9 +148,9 @@ describe('V2: session creation', () => {
         drain(session2.sendMessage('context-b')),
       ])
 
-      expect(engine1.observedSessionId).toBe(session1.sessionId)
-      expect(engine2.observedSessionId).toBe(session2.sessionId)
-      expect(engine1.observedSessionId).not.toBe(engine2.observedSessionId)
+      expect<string | undefined>(engine1.observedSessionId).toBe(session1.sessionId)
+      expect<string | undefined>(engine2.observedSessionId).toBe(session2.sessionId)
+      expect<string | undefined>(engine1.observedSessionId).not.toBe(engine2.observedSessionId)
       expect(getSessionId()).toBe(globalId)
     } finally {
       session1.close()
@@ -175,7 +177,7 @@ describe('V2: session creation', () => {
 
   test('createSession() with no cwd throws', () => {
     expect(() =>
-      unstable_v2_createSession({} as any)
+      unstable_v2_createSession({} as Parameters<typeof unstable_v2_createSession>[0])
     ).toThrow()
   })
 
@@ -216,7 +218,7 @@ describe('V2: session interrupt', () => {
       abortController: ac,
     })
     ac.abort()
-    const messages: unknown[] = []
+    const messages: SDKMessage[] = []
     let caught: unknown = null
     try {
       for await (const msg of session.sendMessage('test')) {
@@ -343,17 +345,17 @@ describe('V2: SDK agents', () => {
       })
       attachMockEngine(session, mockEngine)
 
-      const messages: unknown[] = []
+      const messages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent injection success')) {
         messages.push(msg)
       }
 
       expect(
-        messages.some((message: any) => message?.type === 'assistant'),
+        messages.some((message) => message?.type === 'assistant'),
       ).toBe(true)
       expect(
         mockEngine.config.agents.some(
-          (agent: any) =>
+          (agent) =>
             agent?.agentType === 'helper' &&
             agent?.whenToUse === 'helper' &&
             agent?.maxSteps === 2,
@@ -361,19 +363,19 @@ describe('V2: SDK agents', () => {
       ).toBe(true)
 
       const firstTurnAgents = [...mockEngine.config.agents]
-      const secondTurnMessages: unknown[] = []
+      const secondTurnMessages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent injection second turn')) {
         secondTurnMessages.push(msg)
       }
       expect(
-        secondTurnMessages.some((message: any) => message?.type === 'assistant'),
+        secondTurnMessages.some((message) => message?.type === 'assistant'),
       ).toBe(true)
-      expect(mockEngine.config.agents.map((agent: any) => agent?.agentType)).toEqual(
-        firstTurnAgents.map((agent: any) => agent?.agentType),
+      expect(mockEngine.config.agents.map((agent) => agent?.agentType)).toEqual(
+        firstTurnAgents.map((agent) => agent?.agentType),
       )
       expect(
         mockEngine.config.agents.filter(
-          (agent: any) => agent?.agentType === 'helper',
+          (agent) => agent?.agentType === 'helper',
         ),
       ).toHaveLength(1)
     })
@@ -407,20 +409,19 @@ describe('V2: SDK agents', () => {
         },
       })
       const initialTools =
-        (session as unknown as { _engine: { config: { tools: unknown[] } } })
-          ._engine.config.tools
-      const initialToolNames = initialTools.map((entry: any) => entry?.name)
+        sessionInternals(session)._engine!.config.tools
+      const initialToolNames = initialTools.map((entry) => entry?.name)
       expect(initialToolNames.length).toBeGreaterThan(0)
       expect(initialToolNames).not.toContain('Bash')
       mockEngine.config.tools = [...initialTools]
       attachMockEngine(session, mockEngine)
 
-      const firstTurnMessages: unknown[] = []
+      const firstTurnMessages: SDKMessage[] = []
       for await (const msg of session.sendMessage('mcp deny filtering')) {
         firstTurnMessages.push(msg)
       }
       const firstTurnToolNames = mockEngine.config.tools.map(
-        (entry: any) => entry?.name,
+        (entry) => entry?.name,
       )
       for (const initialToolName of initialToolNames) {
         expect(firstTurnToolNames).toContain(initialToolName)
@@ -428,21 +429,21 @@ describe('V2: SDK agents', () => {
       expect(firstTurnToolNames).toContain('sdkAllowed')
       expect(firstTurnToolNames).not.toContain('Bash')
       expect(
-        firstTurnMessages.some((message: any) => message?.type === 'assistant'),
+        firstTurnMessages.some((message) => message?.type === 'assistant'),
       ).toBe(true)
 
-      const secondTurnMessages: unknown[] = []
+      const secondTurnMessages: SDKMessage[] = []
       for await (const msg of session.sendMessage('mcp deny filtering second turn')) {
         secondTurnMessages.push(msg)
       }
       const secondTurnToolNames = mockEngine.config.tools.map(
-        (entry: any) => entry?.name,
+        (entry) => entry?.name,
       )
       expect(secondTurnToolNames).toEqual(firstTurnToolNames)
       expect(secondTurnToolNames).toContain('sdkAllowed')
       expect(secondTurnToolNames).not.toContain('Bash')
       expect(
-        secondTurnMessages.some((message: any) => message?.type === 'assistant'),
+        secondTurnMessages.some((message) => message?.type === 'assistant'),
       ).toBe(true)
     })
   })
@@ -476,29 +477,29 @@ describe('V2: SDK agents', () => {
       })
       attachMockEngine(session, mockEngine)
 
-      const messages: unknown[] = []
+      const messages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent merge success')) {
         messages.push(msg)
       }
 
-      expect(messages.some((message: any) => message?.type === 'assistant')).toBe(
+      expect(messages.some((message) => message?.type === 'assistant')).toBe(
         true,
       )
       const agentTypes = mockEngine.config.agents.map(
-        (agent: any) => agent?.agentType,
+        (agent) => agent?.agentType,
       )
       expect(agentTypes).toContain('filesystem')
       expect(agentTypes).toContain('helper')
 
-      const secondTurnMessages: unknown[] = []
+      const secondTurnMessages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent merge second turn')) {
         secondTurnMessages.push(msg)
       }
       const secondTurnAgentTypes = mockEngine.config.agents.map(
-        (agent: any) => agent?.agentType,
+        (agent) => agent?.agentType,
       )
       expect(
-        secondTurnMessages.some((message: any) => message?.type === 'assistant'),
+        secondTurnMessages.some((message) => message?.type === 'assistant'),
       ).toBe(true)
       expect(secondTurnAgentTypes).toEqual(agentTypes)
       expect(
@@ -537,38 +538,38 @@ describe('V2: SDK agents', () => {
       })
       attachMockEngine(session, mockEngine)
 
-      const messages: unknown[] = []
+      const messages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent collision success')) {
         messages.push(msg)
       }
 
       const helperAgents = mockEngine.config.agents.filter(
-        (agent: any) => agent?.agentType === 'helper',
+        (agent) => agent?.agentType === 'helper',
       )
-      expect(messages.some((message: any) => message?.type === 'assistant')).toBe(
+      expect(messages.some((message) => message?.type === 'assistant')).toBe(
         true,
       )
       expect(helperAgents).toHaveLength(1)
-      expect((helperAgents[0] as any).getSystemPrompt()).toBe(
+      expect((helperAgents[0]).getSystemPrompt(undefined as unknown as NonNullable<Parameters<typeof helperAgents[0]["getSystemPrompt"]>[0]>)).toBe(
         'SDK helper prompt',
       )
-      expect((helperAgents[0] as any).maxSteps).toBe(2)
+      expect((helperAgents[0]).maxSteps).toBe(2)
 
-      const secondTurnMessages: unknown[] = []
+      const secondTurnMessages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent collision second turn')) {
         secondTurnMessages.push(msg)
       }
       const secondTurnHelpers = mockEngine.config.agents.filter(
-        (agent: any) => agent?.agentType === 'helper',
+        (agent) => agent?.agentType === 'helper',
       )
       expect(
-        secondTurnMessages.some((message: any) => message?.type === 'assistant'),
+        secondTurnMessages.some((message) => message?.type === 'assistant'),
       ).toBe(true)
       expect(secondTurnHelpers).toHaveLength(1)
-      expect((secondTurnHelpers[0] as any).getSystemPrompt()).toBe(
+      expect((secondTurnHelpers[0]).getSystemPrompt(undefined as unknown as NonNullable<Parameters<typeof helperAgents[0]["getSystemPrompt"]>[0]>)).toBe(
         'SDK helper prompt',
       )
-      expect((secondTurnHelpers[0] as any).maxSteps).toBe(2)
+      expect((secondTurnHelpers[0]).maxSteps).toBe(2)
     })
   })
 
@@ -592,7 +593,7 @@ describe('V2: SDK agents', () => {
       })
       attachMockEngine(session, mockEngine)
 
-      const messages: any[] = []
+      const messages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent failure visibility')) {
         messages.push(msg)
       }
@@ -601,7 +602,7 @@ describe('V2: SDK agents', () => {
         type: 'agent_load_failure',
         stage: 'injection',
       })
-      expect(messages[0].error_message).toContain("Invalid SDK agent 'broken'")
+      expect((messages[0] as Extract<SDKMessage, { type: 'agent_load_failure' }>).error_message).toContain("Invalid SDK agent 'broken'")
       const loadFailures = messages.filter(
         message => message?.type === 'agent_load_failure',
       )
@@ -620,16 +621,16 @@ describe('V2: SDK agents', () => {
       expect(messages.some(message => message?.type === 'assistant')).toBe(true)
       expect(
         mockEngine.config.agents.some(
-          (agent: any) => agent?.agentType === 'broken',
+          (agent) => agent?.agentType === 'broken',
         ),
       ).toBe(false)
       expect(
         mockEngine.config.agents.some(
-          (agent: any) => agent?.agentType === 'badLimit',
+          (agent) => agent?.agentType === 'badLimit',
         ),
       ).toBe(false)
 
-      const secondTurnMessages: any[] = []
+      const secondTurnMessages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent failure second turn')) {
         secondTurnMessages.push(msg)
       }
@@ -664,7 +665,7 @@ describe('V2: SDK agents', () => {
       const session = unstable_v2_createSession({ cwd: dir })
       attachMockEngine(session, mockEngine)
 
-      const messages: any[] = []
+      const messages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent parse failure visibility')) {
         messages.push(msg)
       }
@@ -673,13 +674,13 @@ describe('V2: SDK agents', () => {
         type: 'agent_load_failure',
         stage: 'definitions',
       })
-      expect(messages[0].error_message).toContain('broken.md')
-      expect(messages[0].error_message).toContain(
+      expect((messages[0] as Extract<SDKMessage, { type: 'agent_load_failure' }>).error_message).toContain('broken.md')
+      expect((messages[0] as Extract<SDKMessage, { type: 'agent_load_failure' }>).error_message).toContain(
         'Missing required "description" field',
       )
       expect(messages.some(message => message?.type === 'assistant')).toBe(true)
 
-      const secondTurnMessages: any[] = []
+      const secondTurnMessages: SDKMessage[] = []
       for await (const msg of session.sendMessage('agent parse second turn')) {
         secondTurnMessages.push(msg)
       }
@@ -712,7 +713,7 @@ describe('V2: unstable_v2_prompt', () => {
 
   test('throws when cwd is missing', () => {
     expect(() =>
-      unstable_v2_prompt('test', {} as any),
+      unstable_v2_prompt('test', {} as Parameters<typeof unstable_v2_prompt>[1]),
     ).toThrow()
   })
 })

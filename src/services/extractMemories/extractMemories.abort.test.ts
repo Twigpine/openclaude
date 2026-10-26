@@ -26,7 +26,7 @@ type ForkCall = {
   abortController?: AbortController
 }
 
-function createContext(messageUuids: string | string[]): any {
+function createContext(messageUuids: string | string[]) {
   const uuids = Array.isArray(messageUuids) ? messageUuids : [messageUuids]
   return {
     messages: uuids.map(messageUuid => ({
@@ -39,7 +39,7 @@ function createContext(messageUuids: string | string[]): any {
     userContext: {},
     systemContext: {},
     toolUseContext: {},
-  }
+  } as unknown as Parameters<typeof realForkedAgent.createCacheSafeParams>[0]
 }
 
 function registerExtractMemoriesStubs({
@@ -76,7 +76,7 @@ function registerExtractMemoriesStubs({
   }))
   mock.module('../../utils/forkedAgent.js', () => ({
     ...realForkedAgent,
-    createCacheSafeParams: (context: any) => ({
+    createCacheSafeParams: (context: Parameters<typeof realForkedAgent.createCacheSafeParams>[0]) => ({
       systemPrompt: context.systemPrompt,
       userContext: context.userContext,
       systemContext: context.systemContext,
@@ -125,7 +125,7 @@ describe('extractMemories cancellation', () => {
     const debugLog = mock((_message: string) => {})
     const events: string[] = []
     const forkCalls: ForkCall[] = []
-    const runForkedAgent = mock(({ overrides }: any) => {
+    const runForkedAgent = mock(({ overrides }: Parameters<typeof realForkedAgent.runForkedAgent>[0]) => {
       const abortController = overrides?.abortController as
         | AbortController
         | undefined
@@ -187,7 +187,7 @@ describe('extractMemories cancellation', () => {
     const debugLog = mock((_message: string) => {})
     const events: string[] = []
     const forkCalls: ForkCall[] = []
-    const runForkedAgent = mock(({ overrides }: any) => {
+    const runForkedAgent = mock(({ overrides }: Parameters<typeof realForkedAgent.runForkedAgent>[0]) => {
       const abortController = overrides?.abortController as
         | AbortController
         | undefined
@@ -253,7 +253,7 @@ describe('extractMemories cancellation', () => {
         cache_read_input_tokens: 0,
       },
     }
-    const runForkedAgent = mock(({ overrides, promptMessages }: any) => {
+    const runForkedAgent = mock(({ overrides, promptMessages }: Parameters<typeof realForkedAgent.runForkedAgent>[0]) => {
       const abortController = overrides?.abortController as
         | AbortController
         | undefined

@@ -1,3 +1,6 @@
+import type { AppState } from '../../src/state/AppStateStore.js'
+import type { AssistantMessage, ProgressMessage } from '../../src/types/message.js'
+import type { SDKMessage } from '../../src/entrypoints/sdk/shared.js'
 import { describe, test, expect, afterEach, beforeAll, afterAll } from 'bun:test'
 import { query, forkSession, getSessionMessages, unstable_v2_createSession } from '../../src/entrypoints/sdk/index.js'
 import {
@@ -156,7 +159,7 @@ describe('Engine lazy-init guard (COR-1)', () => {
 describe('query() construction validation', () => {
   test('query() with no cwd throws immediately', () => {
     expect(() =>
-      query({ prompt: 'test', options: {} as any })
+      query({ prompt: 'test', options: {} as Parameters<typeof query>[0]['options'] })
     ).toThrow('query() requires options.cwd')
   })
 
@@ -172,7 +175,7 @@ describe('query() construction validation', () => {
 
   test('query() with async iterable prompt creates valid Query', () => {
     async function* prompts() {
-      yield { type: 'user' as const, message: { role: 'user' as const, content: 'hello' } }
+      yield { type: 'user' as const, message: { role: 'user' as const, content: 'hello' } } as import('../../src/entrypoints/sdk/shared.js').SDKUserMessage
     }
     const q = query({
       prompt: prompts(),
@@ -245,10 +248,10 @@ describe('Query interrupt lifecycle', () => {
     ac.abort('interrupt')
     const messages = await drainQuery(q)
     expect(Array.isArray(messages)).toBe(true)
-    const userCancelMsg = messages.find((m: any) => 
+    const userCancelMsg = messages.find((m) =>
       m.type === 'user' && 
       Array.isArray(m.message?.content) && 
-      m.message.content[0]?.text === '[Request interrupted by user]'
+      (m.message.content[0] as { text?: string } | undefined)?.text === '[Request interrupted by user]'
     )
     expect(userCancelMsg).toBeUndefined()
   }, 10_000)
@@ -265,7 +268,7 @@ describe('Query interrupt lifecycle', () => {
       },
     }
 
-    const toolUseContext: any = {
+    const toolUseContext: import("../../src/Tool.js").ToolUseContext = ({
       options: {
         commands: [],
         debug: false,
@@ -280,13 +283,13 @@ describe('Query interrupt lifecycle', () => {
       },
       abortController,
       getAppState: () => appStateRef.current,
-      setAppState: (updater: any) => {
+      setAppState: (updater: (state: AppState) => AppState) => {
         appStateRef.current = updater(appStateRef.current)
       },
-    }
+    } as unknown as import("../../src/Tool.js").ToolUseContext)
 
     const mockExecuteStopHooks = async function* () {
-      yield {
+      yield ({
         message: {
           type: 'progress' as const,
           toolUseID: 'mock-tool-use-id',
@@ -295,9 +298,9 @@ describe('Query interrupt lifecycle', () => {
             promptText: 'mock-prompt',
           },
         },
-      }
+      } as unknown as { message: ProgressMessage })
       abortController.abort('interrupt')
-      yield {
+      yield ({
         message: {
           type: 'progress' as const,
           toolUseID: 'mock-tool-use-id-2',
@@ -306,11 +309,11 @@ describe('Query interrupt lifecycle', () => {
             promptText: 'mock-prompt-2',
           },
         },
-      }
+      } as unknown as { message: ProgressMessage })
     }
 
     const mockCallModel = async function* () {
-      yield {
+      yield ({
         type: 'assistant' as const,
         uuid: 'assistant-1',
         message: {
@@ -327,7 +330,7 @@ describe('Query interrupt lifecycle', () => {
           },
           content: [{ type: 'text' as const, text: 'Hello' }],
         },
-      }
+      } as unknown as AssistantMessage)
     }
 
     const q = queryLoop({
@@ -339,19 +342,19 @@ describe('Query interrupt lifecycle', () => {
       toolUseContext,
       querySource: 'sdk',
       deps: {
-        callModel: mockCallModel as any,
+        callModel: mockCallModel,
         microcompact: async (messages) => ({ messages }),
         autocompact: async () => ({ wasCompacted: false }),
         uuid: () => 'uuid-1',
         stopHookExecutionDeps: {
-          executeStopHooks: mockExecuteStopHooks as any,
+          executeStopHooks: mockExecuteStopHooks,
           isTeammate: () => false,
           getStopHookMessage: () => 'stop hook blocked',
         },
       },
     })
 
-    const messages: any[] = []
+    const messages: Array<ReturnType<typeof import("../../src/query.js").query> extends AsyncGenerator<infer Event> ? Event : never> = []
     try {
       for await (const msg of q) {
         messages.push(msg)
@@ -361,10 +364,10 @@ describe('Query interrupt lifecycle', () => {
     }
 
     const userCancelMsg = messages.find(
-      (m: any) =>
+      (m) =>
         m.type === 'user' &&
         Array.isArray(m.message?.content) &&
-        m.message.content[0]?.text === '[Request interrupted by user]',
+        (m.message.content[0] as { text?: string } | undefined)?.text === '[Request interrupted by user]',
     )
     expect(userCancelMsg).toBeUndefined()
   }, 10_000)
@@ -381,7 +384,7 @@ describe('Query interrupt lifecycle', () => {
       },
     }
 
-    const toolUseContext: any = {
+    const toolUseContext: import("../../src/Tool.js").ToolUseContext = ({
       options: {
         commands: [],
         debug: false,
@@ -396,13 +399,13 @@ describe('Query interrupt lifecycle', () => {
       },
       abortController,
       getAppState: () => appStateRef.current,
-      setAppState: (updater: any) => {
+      setAppState: (updater: (state: AppState) => AppState) => {
         appStateRef.current = updater(appStateRef.current)
       },
-    }
+    } as unknown as import("../../src/Tool.js").ToolUseContext)
 
     const mockExecuteStopHooks = async function* () {
-      yield {
+      yield ({
         message: {
           type: 'progress' as const,
           toolUseID: 'mock-tool-use-id',
@@ -411,9 +414,9 @@ describe('Query interrupt lifecycle', () => {
             promptText: 'mock-prompt',
           },
         },
-      }
+      } as unknown as { message: ProgressMessage })
       abortController.abort()
-      yield {
+      yield ({
         message: {
           type: 'progress' as const,
           toolUseID: 'mock-tool-use-id-2',
@@ -422,11 +425,11 @@ describe('Query interrupt lifecycle', () => {
             promptText: 'mock-prompt-2',
           },
         },
-      }
+      } as unknown as { message: ProgressMessage })
     }
 
     const mockCallModel = async function* () {
-      yield {
+      yield ({
         type: 'assistant' as const,
         uuid: 'assistant-1',
         message: {
@@ -443,7 +446,7 @@ describe('Query interrupt lifecycle', () => {
           },
           content: [{ type: 'text' as const, text: 'Hello' }],
         },
-      }
+      } as unknown as AssistantMessage)
     }
 
     const q = queryLoop({
@@ -455,19 +458,19 @@ describe('Query interrupt lifecycle', () => {
       toolUseContext,
       querySource: 'sdk',
       deps: {
-        callModel: mockCallModel as any,
+        callModel: mockCallModel,
         microcompact: async (messages) => ({ messages }),
         autocompact: async () => ({ wasCompacted: false }),
         uuid: () => 'uuid-1',
         stopHookExecutionDeps: {
-          executeStopHooks: mockExecuteStopHooks as any,
+          executeStopHooks: mockExecuteStopHooks,
           isTeammate: () => false,
           getStopHookMessage: () => 'stop hook blocked',
         },
       },
     })
 
-    const messages: any[] = []
+    const messages: Array<ReturnType<typeof import("../../src/query.js").query> extends AsyncGenerator<infer Event> ? Event : never> = []
     try {
       for await (const msg of q) {
         messages.push(msg)
@@ -477,10 +480,10 @@ describe('Query interrupt lifecycle', () => {
     }
 
     const userCancelMsg = messages.find(
-      (m: any) =>
+      (m) =>
         m.type === 'user' &&
         Array.isArray(m.message?.content) &&
-        m.message.content[0]?.text === '[Request interrupted by user]',
+        (m.message.content[0] as { text?: string } | undefined)?.text === '[Request interrupted by user]',
     )
     expect(userCancelMsg).toBeDefined()
   }, 10_000)
@@ -589,10 +592,10 @@ describe('Query resume lifecycle', () => {
         for await (const _ of q) {
           // drain
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         caught = true
-        expect(err.message).toContain('resumeSessionAt')
-        expect(err.message).toContain('not found')
+        expect((err as Error).message).toContain('resumeSessionAt')
+        expect((err as Error).message).toContain('not found')
       }
       expect(caught).toBe(true)
     })
@@ -607,16 +610,16 @@ describe('Secure-by-default permissions (SEC-2)', () => {
     )
 
     const result = await canUseTool(
-      { name: 'Read' } as any,
+      ({ name: 'Read' } as unknown as Parameters<typeof canUseTool>[0]),
       { file_path: 'test.txt' },
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'tool-use-id',
       undefined,
     )
 
     expect(result.behavior).toBe('deny')
-    expect(result.message).toContain('no canUseTool or onPermissionRequest')
+    expect('message' in result ? result.message : undefined).toContain('no canUseTool or onPermissionRequest')
     expect(result.decisionReason).toEqual({ type: 'mode', mode: 'default' })
   })
 
@@ -706,10 +709,10 @@ describe('Permission timeout eventing (PTO-1)', () => {
     )
 
     const result = await canUseTool(
-      { name: 'Read' } as any,
+      ({ name: 'Read' } as unknown as Parameters<typeof canUseTool>[0]),
       { file_path: 'test.txt' },
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'tool-use-id',
       undefined,
     )

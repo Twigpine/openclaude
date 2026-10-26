@@ -1,3 +1,4 @@
+import type { Message } from '../types/message.js'
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync, mkdirSync } from 'fs'
 import { tmpdir } from 'os'
@@ -27,12 +28,12 @@ import { getOrchestratedMemory } from './knowledgeGraph.js'
 import { getAutoMemPath } from '../memdir/paths.js'
 import { setGovernancePolicySettingsForSourceForTesting } from './governancePolicy.js'
 
-function createMessage(role: string, content: string): any {
+function createMessage(role: string, content: string): Message {
   return {
     type: role,
     message: { role, content, id: 'test', type: 'message', created_at: Date.now() },
     sender: role,
-  }
+  } as unknown as Message
 }
 
 const ARC_FILENAME = '.arc.json'

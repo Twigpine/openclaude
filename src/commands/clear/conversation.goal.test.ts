@@ -1,3 +1,6 @@
+import { createUserMessage } from '../../utils/messages.js'
+import type { Message } from '../../types/message.js'
+import { createFileStateCacheWithSizeLimit } from '../../utils/fileStateCache.js'
 import { describe, expect, test } from 'bun:test'
 
 import {
@@ -19,7 +22,7 @@ describe('/clear goal lifecycle', () => {
       ...getDefaultAppState(),
       goal: createGoalState('finish implementation'),
     }
-    let messages: any[] = [{ type: 'user', uuid: 'user-1' }]
+    let messages: Message[] = [createUserMessage({ content: 'hello' })]
     let sawEmptyMessages = false
 
     try {
@@ -28,7 +31,7 @@ describe('/clear goal lifecycle', () => {
           messages = updater(messages)
           if (messages.length === 0) sawEmptyMessages = true
         },
-        readFileState: new Map() as any,
+        readFileState: createFileStateCacheWithSizeLimit(100),
         getAppState: () => state,
         setAppState: updater => {
           state = updater(state)

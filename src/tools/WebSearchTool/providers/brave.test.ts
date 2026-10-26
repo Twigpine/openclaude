@@ -60,7 +60,7 @@ describe('braveProvider search', () => {
   test('sends bare token in X-Subscription-Token (no Bearer prefix)', async () => {
     let capturedHeaders: Record<string, string> = {}
     let capturedUrl = ''
-    globalThis.fetch = (async (input: any, init: any) => {
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
       capturedUrl = typeof input === 'string' ? input : input.toString()
       capturedHeaders = (init?.headers ?? {}) as Record<string, string>
       return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 })
@@ -74,7 +74,7 @@ describe('braveProvider search', () => {
   })
 
   test('maps web.results into SearchHit shape', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) => new Response(JSON.stringify({
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => new Response(JSON.stringify({
       web: {
         results: [
           { title: 'Example', url: 'https://example.com/a', description: 'snippet a' },
@@ -96,7 +96,7 @@ describe('braveProvider search', () => {
   })
 
   test('applies blocked_domains client-side', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) => new Response(JSON.stringify({
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => new Response(JSON.stringify({
       web: {
         results: [
           { title: 'Keep', url: 'https://keep.com/a', description: 'k' },
@@ -111,14 +111,14 @@ describe('braveProvider search', () => {
   })
 
   test('throws on non-2xx response with status code', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) =>
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) =>
       new Response('rate limited', { status: 429 })) as typeof fetch
     await expect(braveProvider.search({ query: 'q' })).rejects.toThrow(/429/)
   })
 
   test('rejects when the provider-level timeout elapses', async () => {
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
-    globalThis.fetch = ((_: any, init: any) =>
+    globalThis.fetch = ((_: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) =>
       pendingResponseUntilAbort(init?.signal as AbortSignal | undefined)) as typeof fetch
 
     await expect(braveProvider.search({ query: 'q' })).rejects.toThrow(
@@ -129,7 +129,7 @@ describe('braveProvider search', () => {
   test('rejects when the response body stalls after headers arrive', async () => {
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
 
-    globalThis.fetch = (async (_input: any, _init: any) => {
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => {
       return stalledJsonResponse()
     }) as typeof fetch
 
@@ -140,7 +140,7 @@ describe('braveProvider search', () => {
 
   test('rejects when a non-2xx error body stalls after headers arrive', async () => {
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
-    globalThis.fetch = (async (_input: any, _init: any) => stalledJsonResponse(500)) as typeof fetch
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => stalledJsonResponse(500)) as typeof fetch
 
     await expect(braveProvider.search({ query: 'q' })).rejects.toThrow(
       /Brave search timed out/,
@@ -148,7 +148,7 @@ describe('braveProvider search', () => {
   })
 
   test('returns empty hits when web.results is missing', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) =>
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) =>
       new Response(JSON.stringify({}), { status: 200 })) as typeof fetch
     const out = await braveProvider.search({ query: 'q' })
     expect(out.hits).toHaveLength(0)

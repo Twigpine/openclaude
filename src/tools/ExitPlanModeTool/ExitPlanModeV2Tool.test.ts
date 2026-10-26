@@ -27,8 +27,8 @@ type ExitPlanModeModule = typeof import('./ExitPlanModeV2Tool.js')
 type ExitPlanModeTool = ExitPlanModeModule['ExitPlanModeV2Tool']
 
 let ExitPlanModeV2Tool: ExitPlanModeTool | undefined
-let actualPlans: any
-let actualTeammateMailbox: any
+let actualPlans: typeof import("../../utils/plans.js")
+let actualTeammateMailbox: typeof import("../../utils/teammateMailbox.js")
 
 beforeAll(async () => {
   await acquireSharedMutationLock(

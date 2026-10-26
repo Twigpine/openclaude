@@ -1,3 +1,4 @@
+import type { Message } from '../types/message.js'
 import { afterEach, describe, expect, it, beforeEach } from 'bun:test'
 import {
   startNewTurn,
@@ -17,11 +18,11 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 
-function createMessage(role: string, content: string): any {
+function createMessage(role: string, content: string): Message {
   return {
     message: { role, content, id: 'test', type: 'message', created_at: Date.now() },
     sender: role,
-  }
+  } as unknown as Message
 }
 
 describe('multiTurnContext', () => {

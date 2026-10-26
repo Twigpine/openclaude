@@ -19,7 +19,7 @@ import {
 } from '../../test/sharedMutationLock.js'
 
 describe('knowledge command', () => {
-  const mockContext = {} as any
+  const mockContext = {} as Parameters<typeof knowledgeCall>[1]
   const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
   let configDir: string | undefined
 

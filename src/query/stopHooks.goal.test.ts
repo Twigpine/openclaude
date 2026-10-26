@@ -1,3 +1,7 @@
+type QueryEvent = ReturnType<typeof import('../query.js').query> extends AsyncGenerator<infer Event> ? Event : never
+import type { ToolUseContext } from '../Tool.js'
+import type { AssistantMessage } from '../types/message.js'
+import type { Message } from '../types/message.js'
 import { describe, expect, test } from 'bun:test'
 
 import { getDefaultAppState, type AppState } from '../state/AppStateStore.js'
@@ -25,7 +29,7 @@ function assistant(uuid: string, text: string) {
       },
       content: [{ type: 'text', text }],
     },
-  }
+  } as AssistantMessage
 }
 
 function makeToolUseContext(appStateRef: { current: AppState }) {
@@ -38,13 +42,13 @@ function makeToolUseContext(appStateRef: { current: AppState }) {
     setAppState: (updater: (prev: AppState) => AppState) => {
       appStateRef.current = updater(appStateRef.current)
     },
-  } as any
+  } as ToolUseContext
 }
 
-async function drain(
-  generator: AsyncGenerator<any, any>,
-): Promise<{ yielded: any[]; returned: any }> {
-  const yielded: any[] = []
+async function drain<Yield, Return>(
+  generator: AsyncGenerator<Yield, Return>,
+): Promise<{ yielded: Yield[]; returned: Return }> {
+  const yielded: Yield[] = []
   while (true) {
     const next = await generator.next()
     if (next.done) return { yielded, returned: next.value }
@@ -72,7 +76,7 @@ describe('goal continuation stop-hook precedence', () => {
     const { returned } = await drain(
       handleStopHooks(
         [],
-        [assistant('assistant-1', 'Done.') as any],
+        [assistant('assistant-1', 'Done.')],
         asSystemPrompt([]),
         {},
         {},
@@ -82,7 +86,7 @@ describe('goal continuation stop-hook precedence', () => {
         goalEvaluationDeps,
         {
           executeStopHooks: async function* () {
-            yield { blockingError: { blockingError: 'blocked' } } as any
+            yield { blockingError: { blockingError: 'blocked', command: 'test' } }
           },
           getStopHookMessage: () => 'stop hook blocked',
           isTeammate: () => false,
@@ -118,7 +122,7 @@ describe('goal continuation stop-hook precedence', () => {
     const { returned } = await drain(
       handleStopHooks(
         [],
-        [assistant('assistant-1', 'Done.') as any],
+        [assistant('assistant-1', 'Done.')],
         asSystemPrompt([]),
         {},
         {},
@@ -131,7 +135,7 @@ describe('goal continuation stop-hook precedence', () => {
             yield {
               preventContinuation: true,
               stopReason: 'hook stopped continuation',
-            } as any
+            }
           },
           isTeammate: () => false,
         },
@@ -167,7 +171,7 @@ describe('goal continuation stop-hook precedence', () => {
     const { returned } = await drain(
       handleStopHooks(
         [],
-        [assistant('assistant-1', 'Done.') as any],
+        [assistant('assistant-1', 'Done.')],
         asSystemPrompt([]),
         {},
         {},
@@ -208,7 +212,7 @@ describe('goal continuation stop-hook precedence', () => {
     const { yielded, returned } = await drain(
       handleStopHooks(
         [],
-        [assistant('assistant-1', 'Done.') as any],
+        [assistant('assistant-1', 'Done.')],
         asSystemPrompt([]),
         {},
         {},
@@ -228,23 +232,23 @@ describe('goal continuation stop-hook precedence', () => {
     )
     expect(returned.blockingErrors).toHaveLength(1)
     expect(yieldedUserMessages).toHaveLength(1)
-    expect(yieldedUserMessages[0]).toBe(returned.blockingErrors[0])
-    expect(yieldedUserMessages[0].message.content).toContain('Run tests.')
+    expect<Message>(yieldedUserMessages[0]).toBe(returned.blockingErrors[0])
+    expect(yieldedUserMessages[0].message.content as string).toContain('Run tests.')
   })
 })
 
-function interruptionMessages(yielded: any[]) {
+function interruptionMessages(yielded: QueryEvent[]) {
   return yielded.filter(
     message =>
       message.type === 'user' &&
       Array.isArray(message.message.content) &&
       message.message.content.some(
-        (part: any) => part.type === 'text' && part.text === INTERRUPT_MESSAGE,
+        (part) => part.type === 'text' && part.text === INTERRUPT_MESSAGE,
       ),
   )
 }
 
-function systemMessages(yielded: any[]) {
+function systemMessages(yielded: QueryEvent[]) {
   return yielded.filter(message => message.type === 'system')
 }
 
@@ -256,7 +260,7 @@ describe('handleStopHooks abort-reason handling', () => {
     const { yielded, returned } = await drain(
       handleStopHooks(
         [],
-        [assistant('assistant-1', 'Done.') as any],
+        [assistant('assistant-1', 'Done.')],
         asSystemPrompt([]),
         {},
         {},
@@ -269,7 +273,7 @@ describe('handleStopHooks abort-reason handling', () => {
           // abort branch in handleStopHooks runs with reason 'interrupt'.
           executeStopHooks: async function* () {
             toolUseContext.abortController.abort('interrupt')
-            yield {} as any
+            yield {}
           },
           isTeammate: () => false,
         },
@@ -287,7 +291,7 @@ describe('handleStopHooks abort-reason handling', () => {
     const { yielded, returned } = await drain(
       handleStopHooks(
         [],
-        [assistant('assistant-1', 'Done.') as any],
+        [assistant('assistant-1', 'Done.')],
         asSystemPrompt([]),
         {},
         {},
@@ -298,7 +302,7 @@ describe('handleStopHooks abort-reason handling', () => {
         {
           executeStopHooks: async function* () {
             toolUseContext.abortController.abort('query-timeout')
-            yield {} as any
+            yield {}
           },
           isTeammate: () => false,
         },
@@ -322,7 +326,7 @@ describe('handleStopHooks abort-reason handling', () => {
     const { yielded, returned } = await drain(
       handleStopHooks(
         [],
-        [assistant('assistant-1', 'Done.') as any],
+        [assistant('assistant-1', 'Done.')],
         asSystemPrompt([]),
         {},
         {},
@@ -333,7 +337,7 @@ describe('handleStopHooks abort-reason handling', () => {
         {
           executeStopHooks: async function* () {
             toolUseContext.abortController.abort('background')
-            yield {} as any
+            yield {}
           },
           isTeammate: () => false,
         },
@@ -357,7 +361,7 @@ describe('handleStopHooks abort-reason handling', () => {
     const { yielded, returned } = await drain(
       handleStopHooks(
         [],
-        [assistant('assistant-1', 'Done.') as any],
+        [assistant('assistant-1', 'Done.')],
         asSystemPrompt([]),
         {},
         {},
@@ -369,7 +373,7 @@ describe('handleStopHooks abort-reason handling', () => {
           // Default abort (user cancel) must still emit the interruption.
           executeStopHooks: async function* () {
             toolUseContext.abortController.abort()
-            yield {} as any
+            yield {}
           },
           isTeammate: () => false,
         },

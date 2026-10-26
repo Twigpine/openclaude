@@ -41,7 +41,7 @@ async function captureFirstProbeBody(
     }) as unknown as typeof globalThis.fetch
     globalThis.fetch = mockFetch
 
-    await call('', {} as any)
+    await call('', {} as Parameters<typeof call>[1])
     expect(sentBody).toBeDefined()
     return sentBody!
   } finally {
@@ -114,7 +114,7 @@ test('cache-probe omits cache extensions from NVIDIA NIM requests (#2042)', asyn
     }) as unknown as typeof globalThis.fetch
     globalThis.fetch = mockFetch
 
-    const result = await call('', {} as any)
+    const result = await call('', {} as Parameters<typeof call>[1])
 
     expect(result.type).toBe('text')
     expect(sentBody).toBeDefined()
@@ -190,7 +190,7 @@ test('cache-probe no-key guidance mentions pooled OpenAI credentials', async () 
     process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
     process.env.OPENAI_MODEL = 'gpt-5.5'
 
-    const result = await call('', {} as any)
+    const result = await call('', {} as Parameters<typeof call>[1])
 
     expect(result.type).toBe('text')
     if (result.type !== 'text') throw new Error('expected text result')

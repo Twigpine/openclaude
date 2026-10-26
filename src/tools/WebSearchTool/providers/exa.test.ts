@@ -46,11 +46,11 @@ describe('exaProvider search request shape', () => {
   })
 
   test('requests contents.highlights so descriptions are populated', async () => {
-    let capturedBody: any = null
+    let capturedBody: Record<string, unknown> = {}
     let capturedHeaders: Record<string, string> = {}
-    globalThis.fetch = (async (_input: any, init: any) => {
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
       capturedHeaders = (init?.headers ?? {}) as Record<string, string>
-      capturedBody = init?.body ? JSON.parse(init.body as string) : null
+      capturedBody = init?.body ? JSON.parse(init?.body as string) : {}
       return new Response(JSON.stringify({ results: [] }), { status: 200 })
     }) as typeof fetch
 
@@ -66,9 +66,9 @@ describe('exaProvider search request shape', () => {
   })
 
   test('forwards allowed_domains/blocked_domains as includeDomains/excludeDomains', async () => {
-    let capturedBody: any = null
-    globalThis.fetch = (async (_input: any, init: any) => {
-      capturedBody = JSON.parse(init.body as string)
+    let capturedBody: Record<string, unknown> = {}
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      capturedBody = JSON.parse(init?.body as string)
       return new Response(JSON.stringify({ results: [] }), { status: 200 })
     }) as typeof fetch
 
@@ -89,7 +89,7 @@ describe('exaProvider response mapping', () => {
   })
 
   test('maps highlights[] into description (joined with ellipsis)', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) => new Response(JSON.stringify({
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => new Response(JSON.stringify({
       results: [{
         title: 'Nvidia post-Blackwell roadmap',
         url: 'https://example.com/nv',
@@ -114,7 +114,7 @@ describe('exaProvider response mapping', () => {
   })
 
   test('caps the joined description at 3 highlights', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) => new Response(JSON.stringify({
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => new Response(JSON.stringify({
       results: [{
         title: 't', url: 'https://e.com/x',
         highlights: ['a', 'b', 'c', 'd', 'e'],
@@ -126,7 +126,7 @@ describe('exaProvider response mapping', () => {
   })
 
   test('falls back to text when highlights is empty/missing', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) => new Response(JSON.stringify({
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => new Response(JSON.stringify({
       results: [{
         title: 't', url: 'https://e.com/x',
         text: 'Full page body content.',
@@ -138,7 +138,7 @@ describe('exaProvider response mapping', () => {
   })
 
   test('description is undefined when neither highlights nor text is present', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) => new Response(JSON.stringify({
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => new Response(JSON.stringify({
       results: [{ title: 't', url: 'https://e.com/x' }],
     }), { status: 200 })) as typeof fetch
 
@@ -147,7 +147,7 @@ describe('exaProvider response mapping', () => {
   })
 
   test('throws on non-2xx response with status code', async () => {
-    globalThis.fetch = (async (_input: any, _init: any) =>
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) =>
       new Response('quota exceeded', { status: 402 })) as typeof fetch
     await expect(exaProvider.search({ query: 'q' })).rejects.toThrow(/402/)
   })

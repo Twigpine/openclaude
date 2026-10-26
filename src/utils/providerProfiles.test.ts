@@ -853,7 +853,7 @@ describe('applyProviderProfileToProcessEnv', () => {
     const unchanged = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any)
+    })
 
     expect(unchanged?.id).toBe(activeProfile.id)
     expect(process.env.GITHUB_ENTERPRISE_URL).toBe(
@@ -864,7 +864,7 @@ describe('applyProviderProfileToProcessEnv', () => {
     const updated = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any)
+    })
 
     expect(updated?.id).toBe(activeProfile.id)
     expect(String(process.env.GITHUB_ENTERPRISE_URL)).toBe(
@@ -2905,7 +2905,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBe('http://localhost:11434/v1')
@@ -2951,7 +2951,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_moonshot',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_moonshot')
     expect(process.env.OPENAI_BASE_URL!).toBe('https://api.moonshot.ai/v1')
@@ -2984,7 +2984,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [profile],
       activeProviderProfileId: 'minimax_generic',
-    } as any)
+    })
 
     expect(applied?.id).toBe('minimax_generic')
     // Cast past control-flow narrowing: TS pins this to `undefined` after the
@@ -3062,7 +3062,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
       applyActiveProviderProfileFromConfig({
         providerProfiles: [profile],
         activeProviderProfileId: profile.id,
-      } as any)
+      })
 
       expect(process.env.OPENAI_API_KEY).toBe('correct-key')
       expect(process.env.MINIMAX_API_KEY).toBe('correct-key')
@@ -3094,7 +3094,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     applyActiveProviderProfileFromConfig({
       providerProfiles: [profile],
       activeProviderProfileId: 'minimax_lookalike',
-    } as any)
+    })
 
     expect(process.env.MINIMAX_API_KEY).toBeUndefined()
   })
@@ -3118,7 +3118,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_moonshot',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBe('http://192.168.1.1:8080/v1')
@@ -3140,7 +3140,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_moonshot',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o-mini')
@@ -3163,7 +3163,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_GITHUB).toBe('1')
@@ -3255,7 +3255,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.MINIMAX_API_KEY).toBe('minimax-live-key')
@@ -3284,7 +3284,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(String(process.env.CLAUDE_CODE_USE_OPENAI)).toBe('1')
@@ -3315,7 +3315,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_openai')
     expect(process.env.OPENAI_MODEL).toBe('kimi-k2.5:cloud')
@@ -3333,7 +3333,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: 'saved_commandcode',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_commandcode')
     expect(process.env.CMD_API_KEY).toBe('cmd-test-key')
@@ -3365,7 +3365,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_openai')
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
@@ -3398,7 +3398,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_GITHUB).toBe('1')
@@ -3417,7 +3417,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [xaiProfile],
       activeProviderProfileId: 'saved_xai',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_xai')
     expect(String(process.env.XAI_API_KEY)).toBe('xai-test-key')
@@ -3435,7 +3435,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [fwProfile],
       activeProviderProfileId: 'saved_fw',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_fw')
     expect(String(process.env.FIREWORKS_API_KEY)).toBe('fireworks-test-key')
@@ -3460,7 +3460,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [aimlapiProfile],
       activeProviderProfileId: 'saved_aimlapi',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_aimlapi')
     expect(String(process.env.AIMLAPI_API_KEY)).toBe('aimlapi-test-key')
@@ -3479,7 +3479,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [xaiProfile],
       activeProviderProfileId: 'saved_xai',
-    } as any)
+    })
 
     // Returns profile without re-applying since env is aligned
     expect(applied?.id).toBe('saved_xai')
@@ -3510,7 +3510,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_openai')
     expect(String(process.env.CLAUDE_CODE_USE_OPENAI)).toBe('1')
@@ -3567,7 +3567,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
       const config = {
         providerProfiles: [activeProfile],
         activeProviderProfileId: activeProfile.id,
-      } as any
+      }
       const expectedContextWindows = JSON.stringify({
         'glm-5.2': 200_000,
         'gpt-5.2': 200_000,
@@ -3646,7 +3646,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any)
+    })
 
     expect(applied?.id).toBe(activeProfile.id)
     expect(process.env.OPENAI_BASE_URL).toBe(
@@ -3657,7 +3657,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const saved = getProviderProfiles({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any).find((profile: ProviderProfile) => profile.id === activeProfile.id)
+    }).find((profile: ProviderProfile) => profile.id === activeProfile.id)
     expect(saved?.model).toBe('codexplan')
   })
 
@@ -3680,7 +3680,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const config = {
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any
+    }
 
     _setSavedModelOverrideForTesting('gpt-5.1-codex')
     applyActiveProviderProfileFromConfig(config)
@@ -3729,7 +3729,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any)
+    })
     expect(process.env.OPENAI_MODEL).toBe('codexplan[1m]')
   })
 
@@ -3783,7 +3783,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: ANTHROPIC_DEFAULT_PROFILE_ID,
-      } as any)
+      })
 
       // Built-in Anthropic resolves to no profile, but env is now marked handled
       // and carries no third-party provider selection.

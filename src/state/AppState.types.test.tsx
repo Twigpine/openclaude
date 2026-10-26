@@ -15,7 +15,8 @@ type IsEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <
   : false
 
 function assertAppStateHookTypes(): void {
-  const anySelector = ((state: unknown) => state) as any
+  // JSON.parse models an untyped consumer at the public hook boundary.
+  const anySelector = JSON.parse('null')
 
   const verbose = useAppState(state => state.verbose)
   type _VerboseIsBoolean = Assert<IsEqual<typeof verbose, boolean>>

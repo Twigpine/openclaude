@@ -52,7 +52,7 @@ describe('snipCompactIfNeeded', () => {
     const messages = [makeUser(uuid, 'old stuff'), makeUser('keep-uuid', 'keep me')]
     markForSnip([shortId], messages)
     const result = snipCompactIfNeeded(messages)
-    expect(result.messages.map((m: any) => m.uuid)).toEqual(['keep-uuid'])
+    expect(result.messages.map((m) => m.uuid)).toEqual(['keep-uuid'])
     expect(result.tokensFreed).toBeGreaterThan(0)
   })
 
@@ -96,13 +96,13 @@ describe('snipCompactIfNeeded', () => {
     const messages = [assistantMsg, toolResultMsg, makeUser('survivor')]
     markForSnip([shortId], messages)
     const result = snipCompactIfNeeded(messages)
-    expect(result.messages.map((m: any) => m.uuid ?? 'noid')).not.toContain(assistantUuid)
-    const hasToolResult = result.messages.some((m: any) =>
+    expect(result.messages.map((m) => m.uuid ?? 'noid')).not.toContain(assistantUuid)
+    const hasToolResult = result.messages.some((m) =>
       Array.isArray(m.message?.content) &&
-      m.message.content.some((b: any) => b.type === 'tool_result' && b.tool_use_id === toolUseId)
+      m.message.content.some((b) => b.type === 'tool_result' && b.tool_use_id === toolUseId)
     )
     expect(hasToolResult).toBe(false)
-    expect(result.messages.some((m: any) => m.uuid === 'survivor')).toBe(true)
+    expect(result.messages.some((m) => m.uuid === 'survivor')).toBe(true)
   })
 
   test('records paired tool-result UUIDs in removedUuids so replay drops the same set', () => {
@@ -156,10 +156,10 @@ describe('snipCompactIfNeeded', () => {
     markForSnip([shortId], messages)
     const result = snipCompactIfNeeded(messages)
     // Both the tool-result user message and the assistant tool-use are gone from live context.
-    expect(result.messages.map((m: any) => m.uuid)).toEqual(['survivor'])
-    const hasToolUse = result.messages.some((m: any) =>
+    expect(result.messages.map((m) => m.uuid)).toEqual(['survivor'])
+    const hasToolUse = result.messages.some((m) =>
       Array.isArray(m.message?.content) &&
-      m.message.content.some((b: any) => b.type === 'tool_use' && b.id === toolUseId)
+      m.message.content.some((b) => b.type === 'tool_use' && b.id === toolUseId)
     )
     expect(hasToolUse).toBe(false)
     // Both UUIDs are persisted so replay drops the same set.
@@ -196,8 +196,8 @@ describe('snipCompactIfNeeded', () => {
     markForSnip([deriveShortMessageId(toolResultUuid)], messages)
     const result = snipCompactIfNeeded(messages)
     // No-op: the mixed-content assistant (and its text) and the tool-result both survive.
-    expect(result.messages.map((m: any) => m.uuid)).toContain(assistantUuid)
-    expect(result.messages.map((m: any) => m.uuid)).toContain(toolResultUuid)
+    expect(result.messages.map((m) => m.uuid)).toContain(assistantUuid)
+    expect(result.messages.map((m) => m.uuid)).toContain(toolResultUuid)
     expect(result.tokensFreed).toBe(0)
     expect(result.boundaryMessage).toBeUndefined()
   })
@@ -236,9 +236,9 @@ describe('snipCompactIfNeeded', () => {
     markForSnip([deriveShortMessageId(resultAUuid)], messages)
     const result = snipCompactIfNeeded(messages)
     // Nothing is removed: the interaction can't be cleanly snipped.
-    expect(result.messages.map((m: any) => m.uuid)).toContain(assistantUuid)
-    expect(result.messages.map((m: any) => m.uuid)).toContain(resultBUuid)
-    expect(result.messages.map((m: any) => m.uuid)).toContain(resultAUuid)
+    expect(result.messages.map((m) => m.uuid)).toContain(assistantUuid)
+    expect(result.messages.map((m) => m.uuid)).toContain(resultBUuid)
+    expect(result.messages.map((m) => m.uuid)).toContain(resultAUuid)
     expect(result.tokensFreed).toBe(0)
     expect(result.boundaryMessage).toBeUndefined()
   })
@@ -260,7 +260,7 @@ describe('snipCompactIfNeeded', () => {
 
     // A's pending removal survived B's pass and still applies to A's context.
     const aResult = snipCompactIfNeeded(aMessages)
-    expect(aResult.messages.map((m: any) => m.uuid)).toEqual(['a-keep'])
+    expect(aResult.messages.map((m) => m.uuid)).toEqual(['a-keep'])
     expect(aResult.boundaryMessage?.snipMetadata?.removedUuids).toContain(aUuid)
   })
 

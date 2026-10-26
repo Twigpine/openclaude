@@ -206,7 +206,7 @@ test('openai launch omits api key when no key is resolved', async () => {
     }),
     goal: 'balanced',
     processEnv: {
-      OPENAI_API_KEY: undefined as any,
+      OPENAI_API_KEY: undefined,
     },
   })
 

@@ -1,3 +1,4 @@
+type QueryEvent = ReturnType<typeof query> extends AsyncGenerator<infer Event> ? Event : never
 import { describe, expect, spyOn, test } from 'bun:test'
 import { PassThrough } from 'node:stream'
 import { snapshotEnv } from '../test/envSnapshot.js'
@@ -150,10 +151,10 @@ function makeParams(
 }
 
 async function drain(params: QueryParams): Promise<{
-  yielded: any[]
-  returned: any
+  yielded: QueryEvent[]
+  returned: ReturnType<typeof query> extends AsyncGenerator<unknown, infer Result> ? Result : never
 }> {
-  const yielded: any[] = []
+  const yielded: QueryEvent[] = []
   const generator = query(params)
   while (true) {
     const next = await generator.next()
@@ -1771,7 +1772,7 @@ describe('agent step limits', () => {
     let modelCalls = 0
     const requestToolCounts: number[] = []
     const requestMessageNormalizationToolCounts: number[] = []
-    const requestMessages: any[][] = []
+    const requestMessages: Message[][] = []
 
     const { yielded, returned } = await drain(
       makeParams(
@@ -1821,7 +1822,7 @@ describe('agent step limits', () => {
     expect(requestToolCounts).toEqual([1, 0])
     expect(requestMessageNormalizationToolCounts).toEqual([0, 1])
     expect(echoCalls).toEqual(['allowed'])
-    expect(countToolUses(yielded)).toBe(1)
+    expect(countToolUses(yielded.filter(message => message.type === 'assistant' || message.type === 'user'))).toBe(1)
     expect(
       yielded.some(
         message =>
@@ -1840,7 +1841,7 @@ describe('agent step limits', () => {
           message?.type === 'user' &&
           Array.isArray(message.message.content) &&
           message.message.content.some(
-            (part: any) =>
+            (part) =>
               part.type === 'tool_result' &&
               part.tool_use_id === 'toolu_echo_2' &&
               part.is_error === true &&
@@ -1870,7 +1871,7 @@ describe('agent step limits', () => {
     ).toBe(true)
 
     const normalizedSecondRequest = normalizeMessagesForAPI(
-      requestMessages[1] as any,
+      requestMessages[1],
       [echoTool],
     )
     const summaryUser = normalizedSecondRequest.find(
@@ -1963,14 +1964,14 @@ describe('agent step limits', () => {
     expect(requestToolCounts).toEqual([1, 1, 0])
     expect(requestMessageNormalizationToolCounts).toEqual([0, 0, 1])
     expect(echoCalls).toEqual(['first', 'second'])
-    expect(countToolUses(yielded)).toBe(2)
+    expect(countToolUses(yielded.filter(message => message.type === 'assistant' || message.type === 'user'))).toBe(2)
     expect(
       yielded.some(
         message =>
           message?.type === 'user' &&
           Array.isArray(message.message.content) &&
           message.message.content.some(
-            (part: any) =>
+            (part) =>
               part.type === 'tool_result' &&
               part.tool_use_id === 'toolu_turn_2_blocked' &&
               part.is_error === true &&
@@ -2089,14 +2090,14 @@ describe('agent step limits', () => {
     })
     expect(modelCalls).toBe(2)
     expect(echoCalls).toEqual(['allowed'])
-    expect(countToolUses(yielded)).toBe(1)
+    expect(countToolUses(yielded.filter(message => message.type === 'assistant' || message.type === 'user'))).toBe(1)
     expect(
       yielded.some(
         message =>
           message?.type === 'user' &&
           Array.isArray(message.message.content) &&
           message.message.content.some(
-            (part: any) =>
+            (part) =>
               part.type === 'tool_result' &&
               part.tool_use_id === 'toolu_echo_summary' &&
               part.is_error === true &&
@@ -2186,7 +2187,7 @@ describe('agent step limits', () => {
     })
     expect(modelCalls).toBe(2)
     expect(echoCalls).toEqual(['allowed'])
-    expect(countToolUses(yielded)).toBe(1)
+    expect(countToolUses(yielded.filter(message => message.type === 'assistant' || message.type === 'user'))).toBe(1)
 
     const assistantMessages = yielded.filter(
       message => message?.type === 'assistant',

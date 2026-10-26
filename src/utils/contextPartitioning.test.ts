@@ -1,3 +1,4 @@
+import type { Message } from '../types/message.js'
 import { describe, expect, it, beforeEach } from 'bun:test'
 import {
   partitionContext,
@@ -7,11 +8,11 @@ import {
   type PriorityZone,
 } from './contextPartitioning.js'
 
-function createMessage(role: string, content: string, createdAt: number = Date.now()): any {
+function createMessage(role: string, content: string, createdAt: number = Date.now()): Message {
   return {
     message: { role, content, id: 'test', type: 'message', created_at: createdAt },
     sender: role,
-  }
+  } as unknown as Message
 }
 
 describe('contextPartitioning', () => {

@@ -1,3 +1,8 @@
+import type { ToolUseContext } from '../Tool.js'
+import type { AssistantMessage } from '../types/message.js'
+import type { Message } from '../types/message.js'
+import type { QueryDeps } from './deps.js'
+import { createFileStateCacheWithSizeLimit } from '../utils/fileStateCache.js'
 import { describe, expect, test } from 'bun:test'
 
 import { getDefaultAppState, type AppState } from '../state/AppStateStore.js'
@@ -22,10 +27,10 @@ function assistant(uuid: string, text: string) {
       },
       content: [{ type: 'text', text }],
     },
-  }
+  } as AssistantMessage
 }
 
-function makeToolUseContext(appStateRef: { current: AppState }) {
+function makeToolUseContext(appStateRef: { current: AppState }): ToolUseContext {
   return {
     options: {
       commands: [],
@@ -40,7 +45,7 @@ function makeToolUseContext(appStateRef: { current: AppState }) {
       agentDefinitions: { activeAgents: [], allAgents: [] },
     },
     abortController: new AbortController(),
-    readFileState: new Map(),
+    readFileState: createFileStateCacheWithSizeLimit(100),
     getAppState: () => appStateRef.current,
     setAppState: (updater: (prev: AppState) => AppState) => {
       appStateRef.current = updater(appStateRef.current)
@@ -50,7 +55,7 @@ function makeToolUseContext(appStateRef: { current: AppState }) {
     updateFileHistoryState: () => {},
     updateAttributionState: () => {},
     messages: [],
-  } as any
+  }
 }
 
 describe('goal query continuation', () => {
@@ -73,8 +78,8 @@ describe('goal query continuation', () => {
     ]
     const { query } = await import('../query.js')
     let modelCalls = 0
-    const modelRequestMessages: any[][] = []
-    const observedStopHookActive: boolean[] = []
+    const modelRequestMessages: Message[][] = []
+    const observedStopHookActive: (boolean | undefined)[] = []
     const appStateRef = {
       current: {
         ...getDefaultAppState(),
@@ -82,7 +87,7 @@ describe('goal query continuation', () => {
       },
     }
 
-    const yielded: any[] = []
+    const yielded: Array<ReturnType<typeof query> extends AsyncGenerator<infer Event> ? Event : never> = []
     const terminal = await (async () => {
       const generator = query({
         messages: [],
@@ -105,13 +110,13 @@ describe('goal query continuation', () => {
               _permissionMode: string | undefined,
               _signal: AbortSignal | undefined,
               _timeoutMs: number | undefined,
-              stopHookActive: boolean,
+              stopHookActive?: boolean,
             ) {
               observedStopHookActive.push(stopHookActive)
             },
             isTeammate: () => false,
           },
-          callModel: async function* ({ messages }: any) {
+          callModel: async function* ({ messages }: Parameters<QueryDeps['callModel']>[0]) {
             modelCalls++
             modelRequestMessages.push(messages)
             yield assistant(
@@ -119,7 +124,7 @@ describe('goal query continuation', () => {
               modelCalls === 1 ? 'Changed files.' : 'Tests pass.',
             )
           },
-        } as any,
+        },
       })
       while (true) {
         const next = await generator.next()
@@ -180,7 +185,7 @@ describe('goal query continuation', () => {
     const toolUseContext = makeToolUseContext(appStateRef)
     toolUseContext.options.maxBudgetUsd = 0.25
 
-    const yielded: any[] = []
+    const yielded: Array<ReturnType<typeof query> extends AsyncGenerator<infer Event> ? Event : never> = []
     const terminal = await (async () => {
       const generator = query({
         messages: [],
@@ -210,7 +215,7 @@ describe('goal query continuation', () => {
             modelCalls++
             yield assistant('assistant-1', 'Done.')
           },
-        } as any,
+        },
       })
       while (true) {
         const next = await generator.next()

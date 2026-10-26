@@ -1,3 +1,4 @@
+import type { Message } from '../types/message.js'
 import { expect, test } from 'bun:test'
 
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
@@ -1189,7 +1190,7 @@ test('query loop emits a path-safe diagnostic when the guard trips', async () =>
 })
 
 test('query loop forwards an advisory to the next model turn', async () => {
-  const modelRequests: unknown[][] = []
+  const modelRequests: Message[][] = []
   let modelCalls = 0
 
   for await (const _message of query(
@@ -1218,7 +1219,7 @@ test('query loop forwards an advisory to the next model turn', async () => {
   }
 
   const advisory = modelRequests[2]?.find(
-    (message: any) =>
+    (message) =>
       message?.type === 'user' &&
       message.isMeta === true &&
       typeof message.message?.content === 'string' &&
@@ -1230,7 +1231,7 @@ test('query loop forwards an advisory to the next model turn', async () => {
 })
 
 test('query loop does not forward an advisory when maxTurns prevents a next turn', async () => {
-  const modelRequests: unknown[][] = []
+  const modelRequests: Message[][] = []
   let modelCalls = 0
 
   for await (const _message of query(
@@ -1258,7 +1259,7 @@ test('query loop does not forward an advisory when maxTurns prevents a next turn
   expect(modelCalls).toBe(2)
   expect(modelRequests).toHaveLength(2)
   expect(modelRequests[1]?.some(
-    (message: any) =>
+    (message) =>
       message?.type === 'user' &&
       message.isMeta === true &&
       typeof message.message?.content === 'string' &&
@@ -1267,7 +1268,7 @@ test('query loop does not forward an advisory when maxTurns prevents a next turn
 })
 
 test('query loop does not emit an advisory before a no-tools step-limit summary', async () => {
-  const modelRequests: unknown[][] = []
+  const modelRequests: Message[][] = []
   const toolCounts: number[] = []
   let modelCalls = 0
 
@@ -1304,7 +1305,7 @@ test('query loop does not emit an advisory before a no-tools step-limit summary'
   expect(toolCounts).toEqual([1, 1, 0])
   expect(
     modelRequests[2]?.some(
-      (message: any) =>
+      (message) =>
         message?.type === 'user' &&
         typeof message.message?.content === 'string' &&
         message.message.content.includes('Warning: repeated tool failures'),
@@ -1313,7 +1314,7 @@ test('query loop does not emit an advisory before a no-tools step-limit summary'
 })
 
 test('query loop forwards a compacted advisory only once', async () => {
-  const modelRequests: unknown[][] = []
+  const modelRequests: Message[][] = []
   let modelCalls = 0
 
   const params = makeQueryParams(
@@ -1374,7 +1375,7 @@ test('query loop forwards a compacted advisory only once', async () => {
 
   const compactedRequest = modelRequests[2] ?? []
   const advisoryCount = compactedRequest.filter(
-    (message: any) =>
+    (message) =>
       message?.type === 'user' &&
       message.isMeta === true &&
       typeof message.message?.content === 'string' &&

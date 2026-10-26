@@ -36,7 +36,7 @@ describe('tool() factory', () => {
   })
 
   test('handler can return CallToolResult', async () => {
-    const handler = async (args: any) => ({
+    const handler = async (args: { path: string }) => ({
       content: [{ type: 'text' as const, text: `File: ${args.path}` }],
     })
     const def = tool('read', 'Read', { path: 'string' }, handler)
@@ -95,6 +95,6 @@ describe('createSdkMcpServer()', () => {
 
     expect(config.command).toBe('node')
     expect(config.args).toEqual(['server.js'])
-    expect((config as any).env).toEqual({ API_KEY: 'test' })
+    expect('env' in config ? config.env : undefined).toEqual({ API_KEY: 'test' })
   })
 })

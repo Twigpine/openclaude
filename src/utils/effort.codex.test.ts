@@ -1,3 +1,4 @@
+import type { ReasoningControlContext } from './effort.js'
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import {
   acquireSharedMutationLock,
@@ -91,9 +92,9 @@ async function importFreshEffortModule(options: {
   provider: APIProvider
   supportsCodexReasoningEffort: boolean
   routeId?: string
-  catalogEntries?: any[]
-  modelDescriptors?: Record<string, any>
-  openaiShimConfig?: any
+  catalogEntries?: ReasoningControlContext['catalogEntries']
+  modelDescriptors?: ReasoningControlContext['modelDescriptors']
+  openaiShimConfig?: ReasoningControlContext['openaiShimConfig']
   thirdPartyCapabilityOverrides?: {
     apiProvider: APIProvider
     capabilities: Partial<Record<MockedThirdPartyCapability, boolean>>

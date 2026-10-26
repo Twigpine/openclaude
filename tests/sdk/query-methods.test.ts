@@ -1,3 +1,4 @@
+import { queryInternals } from './helpers/query-test-doubles.js'
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { query } from '../../src/entrypoints/sdk/index.js'
 import {
@@ -30,7 +31,7 @@ describe('QueryImpl.setModel', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
     await q.setModel('claude-haiku-4-5')
 
-    const state = (q as any).appStateStore.getState()
+    const state = queryInternals(q).appStateStore.getState()
     expect(state.mainLoopModel).toBe('claude-haiku-4-5')
     expect(state.mainLoopModelForSession).toBe('claude-haiku-4-5')
     q.interrupt()
@@ -42,14 +43,14 @@ describe('QueryImpl.supportedAgents', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
     // Simulate agents loaded into app state
-    ;(q as any).appStateStore.setState(() => ({
-      ...(q as any).appStateStore.getState(),
-      agentDefinitions: {
+    ;queryInternals(q).appStateStore.setState(() => ({
+      ...queryInternals(q).appStateStore.getState(),
+      agentDefinitions: ({
         activeAgents: [
           { agentType: 'code-reviewer' },
           { agentType: 'test-runner' },
         ],
-      },
+      } as unknown as import("../../src/state/AppStateStore.js").AppState["agentDefinitions"]),
     }))
 
     const agents = q.supportedAgents()
@@ -67,15 +68,15 @@ describe('QueryImpl.supportedAgents', () => {
   test('filters out entries with falsy agentType', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    ;(q as any).appStateStore.setState(() => ({
-      ...(q as any).appStateStore.getState(),
-      agentDefinitions: {
+    ;queryInternals(q).appStateStore.setState(() => ({
+      ...queryInternals(q).appStateStore.getState(),
+      agentDefinitions: ({
         activeAgents: [
           { agentType: 'valid-agent' },
           { agentType: null },
           { agentType: '' },
         ],
-      },
+      } as unknown as import("../../src/state/AppStateStore.js").AppState["agentDefinitions"]),
     }))
 
     const agents = q.supportedAgents()
@@ -88,14 +89,14 @@ describe('QueryImpl.supportedCommands', () => {
   test('returns command names from app state', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    ;(q as any).appStateStore.setState(() => ({
-      ...(q as any).appStateStore.getState(),
+    ;queryInternals(q).appStateStore.setState(() => ({
+      ...queryInternals(q).appStateStore.getState(),
       mcp: {
-        ...(q as any).appStateStore.getState().mcp,
-        commands: [
+        ...queryInternals(q).appStateStore.getState().mcp,
+        commands: ([
           { name: '/help' },
           { name: '/clear' },
-        ],
+        ] as unknown as import("../../src/commands.js").Command[]),
       },
     }))
 
@@ -116,8 +117,8 @@ describe('QueryImpl.supportedModels', () => {
   test('returns current model as array', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    ;(q as any).appStateStore.setState(() => ({
-      ...(q as any).appStateStore.getState(),
+    ;queryInternals(q).appStateStore.setState(() => ({
+      ...queryInternals(q).appStateStore.getState(),
       mainLoopModel: 'claude-sonnet-4-6',
     }))
 
@@ -129,9 +130,9 @@ describe('QueryImpl.supportedModels', () => {
   test('returns empty array when no model set', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    ;(q as any).appStateStore.setState(() => ({
-      ...(q as any).appStateStore.getState(),
-      mainLoopModel: undefined,
+    ;queryInternals(q).appStateStore.setState(() => ({
+      ...queryInternals(q).appStateStore.getState(),
+      mainLoopModel: (undefined as unknown as import("../../src/state/AppStateStore.js").AppState["mainLoopModel"]),
     }))
 
     const models = q.supportedModels()
@@ -145,7 +146,7 @@ describe('QueryImpl.setMaxThinkingTokens', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
     q.setMaxThinkingTokens(10000)
 
-    const state = (q as any).appStateStore.getState()
+    const state = queryInternals(q).appStateStore.getState()
     expect(state.thinkingEnabled).toBe(true)
     expect(state.thinkingBudgetTokens).toBe(10000)
     q.interrupt()
@@ -158,7 +159,7 @@ describe('QueryImpl.setMaxThinkingTokens', () => {
     // Then disable
     q.setMaxThinkingTokens(0)
 
-    const state = (q as any).appStateStore.getState()
+    const state = queryInternals(q).appStateStore.getState()
     expect(state.thinkingEnabled).toBe(false)
     expect(state.thinkingBudgetTokens).toBeUndefined()
     q.interrupt()
@@ -169,7 +170,7 @@ describe('QueryImpl.respondToPermission', () => {
   test('resolves pending allow decision', async () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    const promise = (q as any).registerPendingPermission('tool-123')
+    const promise = queryInternals(q).registerPendingPermission('tool-123')
     q.respondToPermission('tool-123', { behavior: 'allow' })
 
     const decision = await promise
@@ -180,7 +181,7 @@ describe('QueryImpl.respondToPermission', () => {
   test('resolves pending deny decision with message', async () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    const promise = (q as any).registerPendingPermission('tool-456')
+    const promise = queryInternals(q).registerPendingPermission('tool-456')
     q.respondToPermission('tool-456', {
       behavior: 'deny',
       message: 'Blocked by policy',
@@ -188,19 +189,19 @@ describe('QueryImpl.respondToPermission', () => {
 
     const decision = await promise
     expect(decision.behavior).toBe('deny')
-    expect(decision.message).toBe('Blocked by policy')
+    expect('message' in decision ? decision.message : undefined).toBe('Blocked by policy')
     q.interrupt()
   })
 
   test('deny with no message uses default', async () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    const promise = (q as any).registerPendingPermission('tool-789')
+    const promise = queryInternals(q).registerPendingPermission('tool-789')
     q.respondToPermission('tool-789', { behavior: 'deny' })
 
     const decision = await promise
     expect(decision.behavior).toBe('deny')
-    expect(decision.message).toBe('Permission denied')
+    expect('message' in decision ? decision.message : undefined).toBe('Permission denied')
     q.interrupt()
   })
 
@@ -216,7 +217,7 @@ describe('QueryImpl.respondToPermission', () => {
   test('allow with updatedInput passes through', async () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    const promise = (q as any).registerPendingPermission('tool-input')
+    const promise = queryInternals(q).registerPendingPermission('tool-input')
     q.respondToPermission('tool-input', {
       behavior: 'allow',
       updatedInput: { path: '/safe/dir' },
@@ -224,7 +225,7 @@ describe('QueryImpl.respondToPermission', () => {
 
     const decision = await promise
     expect(decision.behavior).toBe('allow')
-    expect(decision.updatedInput).toEqual({ path: '/safe/dir' })
+    expect('updatedInput' in decision ? decision.updatedInput : undefined).toEqual({ path: '/safe/dir' })
     q.interrupt()
   })
 })

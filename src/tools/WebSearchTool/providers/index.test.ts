@@ -263,7 +263,7 @@ describe('runSearch', () => {
     configureAutoModeWithOnlyBrave()
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
     console.error = () => {}
-    globalThis.fetch = (async (_input: any, _init: any) =>
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) =>
       new Promise<Response>(() => undefined)) as typeof fetch
     mockDuckDuckGoSearch(async () => ({
       results: [
@@ -287,7 +287,7 @@ describe('runSearch', () => {
     configureAutoModeWithOnlyBrave()
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
     console.error = () => {}
-    globalThis.fetch = (async (_input: any, _init?: any) =>
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
       stalledJsonResponse()) as unknown as typeof fetch
     mockDuckDuckGoSearch(async () => ({
       results: [
@@ -366,7 +366,7 @@ describe('runSearch', () => {
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
 
     let fetchCalls = 0
-    globalThis.fetch = (async (_input: any, _init: any) => {
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => {
       fetchCalls++
       return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 })
     }) as typeof fetch

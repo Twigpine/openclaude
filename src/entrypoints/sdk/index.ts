@@ -172,7 +172,7 @@ export function tool<Schema = unknown>(
   name: string,
   description: string,
   inputSchema: Schema,
-  handler: (args: any, extra: unknown) => Promise<CallToolResult>,
+  handler: import('./v2.js').SdkMcpToolDefinition<Schema>['handler'],
   extras?: {
     annotations?: ToolAnnotations
     searchHint?: string

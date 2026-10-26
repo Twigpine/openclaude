@@ -37,7 +37,7 @@ describe('clearStartupProviderOverrides', () => {
 
     const error = clearStartupProviderOverrides({
       updateUserSettings,
-      saveConfig: saveConfig as any,
+      saveConfig: saveConfig,
     })
 
     expect(error).toBeNull()

@@ -36,7 +36,7 @@ describe('mapMessageToSDK', () => {
 
   test('defaults to unknown when type is missing', () => {
     const result = mapMessageToSDK({ content: 'hello' })
-    expect(result.type).toBe('unknown')
+    expect<string>(result.type).toBe('unknown')
   })
 
   test('spreads all fields through', () => {
@@ -47,9 +47,9 @@ describe('mapMessageToSDK', () => {
       cost_usd: 0.01,
     }
     const result = mapMessageToSDK(msg)
-    expect((result as any).session_id).toBe('test-123')
-    expect((result as any).subtype).toBe('success')
-    expect((result as any).cost_usd).toBe(0.01)
+    expect((result as unknown as typeof msg).session_id).toBe('test-123')
+    expect((result as unknown as typeof msg).subtype).toBe('success')
+    expect((result as unknown as typeof msg).cost_usd).toBe(0.01)
   })
 
   test('preserves nested objects', () => {
@@ -61,17 +61,17 @@ describe('mapMessageToSDK', () => {
       },
     }
     const result = mapMessageToSDK(msg)
-    expect((result as any).message.content[0].text).toBe('Hello world')
+    expect((result as unknown as typeof msg).message.content[0].text).toBe('Hello world')
   })
 
   test('throws TypeError for null input', () => {
-    expect(() => mapMessageToSDK(null as any)).toThrow(TypeError)
-    expect(() => mapMessageToSDK(null as any)).toThrow('expected non-null object')
+    expect(() => mapMessageToSDK(null as unknown as Record<string, unknown>)).toThrow(TypeError)
+    expect(() => mapMessageToSDK(null as unknown as Record<string, unknown>)).toThrow('expected non-null object')
   })
 
   test('throws TypeError for non-object input', () => {
-    expect(() => mapMessageToSDK('string' as any)).toThrow(TypeError)
-    expect(() => mapMessageToSDK(42 as any)).toThrow(TypeError)
+    expect(() => mapMessageToSDK('string' as unknown as Record<string, unknown>)).toThrow(TypeError)
+    expect(() => mapMessageToSDK(42 as unknown as Record<string, unknown>)).toThrow(TypeError)
   })
 
   test('throws TypeError for invalid type field', () => {

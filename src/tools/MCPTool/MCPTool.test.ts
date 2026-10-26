@@ -163,7 +163,7 @@ describe('MCPTool.validateInput', () => {
 
   test('handles invalid schema gracefully', async () => {
     // Schema that will cause ajv.compile to throw
-    const schema = { type: 'invalid_type' } as any
+    const schema = { type: 'invalid_type' }
     const tool = { ...MCPTool, inputJSONSchema: schema }
 
     const result = await withValidator(tool).validateInput({}, {} as never)
@@ -173,7 +173,7 @@ describe('MCPTool.validateInput', () => {
   })
 
   test('error message is readable (not [object Object])', async () => {
-    const schema = { type: 'invalid_type' } as any
+    const schema = { type: 'invalid_type' }
     const tool = { ...MCPTool, inputJSONSchema: schema }
 
     const result = await withValidator(tool).validateInput({}, {} as never)
@@ -202,13 +202,13 @@ describe('MCPTool.mapToolResultToToolResultBlockParam', () => {
   })
 
   test('handles undefined content gracefully', () => {
-    const result = MCPTool.mapToolResultToToolResultBlockParam(undefined as any, 'tool-3')
+    const result = MCPTool.mapToolResultToToolResultBlockParam(undefined as unknown as Output, 'tool-3')
     expect(result.content).toBe('[No content returned from MCP tool]')
     expect(result.tool_use_id).toBe('tool-3')
   })
 
   test('handles null content gracefully', () => {
-    const result = MCPTool.mapToolResultToToolResultBlockParam(null as any, 'tool-4')
+    const result = MCPTool.mapToolResultToToolResultBlockParam(null as unknown as Output, 'tool-4')
     expect(result.content).toBe('[No content returned from MCP tool]')
     expect(result.tool_use_id).toBe('tool-4')
   })
@@ -238,7 +238,7 @@ describe('MCPTool.isResultTruncated', () => {
   test('handles null blocks in array', () => {
     expect(
       withTruncationCheck(MCPTool).isResultTruncated([
-        null as any,
+        null as unknown as Exclude<Output, string>[number],
         { type: 'text', text: 'ok' },
       ]),
     ).toBe(false)
@@ -246,15 +246,15 @@ describe('MCPTool.isResultTruncated', () => {
 
   test('handles undefined blocks in array', () => {
     expect(
-      withTruncationCheck(MCPTool).isResultTruncated([undefined as any]),
+      withTruncationCheck(MCPTool).isResultTruncated([undefined as unknown as Exclude<Output, string>[number]]),
     ).toBe(false)
   })
 
   test('returns false for non-string non-array', () => {
-    expect(withTruncationCheck(MCPTool).isResultTruncated(42 as any)).toBe(
+    expect(withTruncationCheck(MCPTool).isResultTruncated(42 as unknown as Output)).toBe(
       false,
     )
-    expect(withTruncationCheck(MCPTool).isResultTruncated({} as any)).toBe(
+    expect(withTruncationCheck(MCPTool).isResultTruncated({} as Output)).toBe(
       false,
     )
   })

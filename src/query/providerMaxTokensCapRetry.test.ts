@@ -1,3 +1,4 @@
+type QueryEvent = ReturnType<typeof query> extends AsyncGenerator<infer Event> ? Event : never
 import { expect, test } from 'bun:test'
 import { APIError } from '@anthropic-ai/sdk'
 import { z } from 'zod/v4'
@@ -106,12 +107,11 @@ function makeParams(
   }
 }
 
-// `any[]` on purpose: the collected stream mixes Message/StreamEvent/Terminal
-// and the assertions below probe optional properties across all of them.
-async function collect(params: QueryParams): Promise<any[]> {
+// Preserve the yielded event union so assertions narrow each message variant.
+async function collect(params: QueryParams): Promise<QueryEvent[]> {
   const previousSimple = process.env.CLAUDE_CODE_SIMPLE
   process.env.CLAUDE_CODE_SIMPLE = '1'
-  const messages: any[] = []
+  const messages: QueryEvent[] = []
   try {
     for await (const message of query(params)) {
       messages.push(message)
@@ -163,7 +163,7 @@ test('retries once with provider maximum output token cap', async () => {
     messages.some(
       message =>
         message?.type === 'assistant' &&
-        message?.message?.content?.[0]?.text === 'Provider max_tokens limit was lower than requested.',
+        (message?.message?.content?.[0]?.type === 'text' ? message.message.content[0].text : undefined) === 'Provider max_tokens limit was lower than requested.',
     ),
   ).toBe(false)
 })
@@ -219,7 +219,7 @@ test('keeps provider maximum output token cap for follow-up calls after tool use
     messages.some(
       message =>
         message?.type === 'assistant' &&
-        message?.message?.content?.[0]?.text === 'Provider max_tokens limit was lower than requested.',
+        (message?.message?.content?.[0]?.type === 'text' ? message.message.content[0].text : undefined) === 'Provider max_tokens limit was lower than requested.',
     ),
   ).toBe(false)
 })
@@ -244,7 +244,7 @@ test('does not loop if the reduced-cap retry fails', async () => {
     messages.filter(
       message =>
         message?.type === 'assistant' &&
-        message?.message?.content?.[0]?.text === 'Provider max_tokens limit was lower than requested.',
+        (message?.message?.content?.[0]?.type === 'text' ? message.message.content[0].text : undefined) === 'Provider max_tokens limit was lower than requested.',
     ),
   ).toHaveLength(1)
 })
@@ -278,7 +278,7 @@ test('does not retry OpenRouter affordability errors handled by withRetry', asyn
     messages.some(
       message =>
         message?.type === 'assistant' &&
-        message?.message?.content?.[0]?.text?.includes('can only afford 27342'),
+        (message?.message?.content?.[0]?.type === 'text' ? message.message.content[0].text : undefined)?.includes('can only afford 27342'),
     ),
   ).toBe(true)
 })
@@ -381,7 +381,7 @@ test('compacts and retries once for context overflow errors', async () => {
     messages.some(
       message =>
         message?.type === 'assistant' &&
-        message?.message?.content?.[0]?.text === 'ok after compact',
+        (message?.message?.content?.[0]?.type === 'text' ? message.message.content[0].text : undefined) === 'ok after compact',
     ),
   ).toBe(true)
 })
@@ -405,7 +405,7 @@ test('does not retry malformed provider cap errors', async () => {
     messages.filter(
       message =>
         message?.type === 'assistant' &&
-        message?.message?.content?.[0]?.text === 'Provider max_tokens limit was lower than requested.',
+        (message?.message?.content?.[0]?.type === 'text' ? message.message.content[0].text : undefined) === 'Provider max_tokens limit was lower than requested.',
     ),
   ).toHaveLength(1)
 })
@@ -439,7 +439,7 @@ test('does not retry when provider cap is not lower than the current override', 
     messages.filter(
       message =>
         message?.type === 'assistant' &&
-        message?.message?.content?.[0]?.text === 'Provider max_tokens limit was lower than requested.',
+        (message?.message?.content?.[0]?.type === 'text' ? message.message.content[0].text : undefined) === 'Provider max_tokens limit was lower than requested.',
     ),
   ).toHaveLength(1)
 })

@@ -178,7 +178,7 @@ test('microcompact and API error factories preserve branch-specific fields', () 
   })
 
   const cause = new Error('network down')
-  const errorWithCause = { message: 'api failed', cause } as any
+  const errorWithCause = { message: 'api failed', cause } as Parameters<typeof createSystemAPIErrorMessage>[0]
   expect(createSystemAPIErrorMessage(errorWithCause, 100, 2, 5)).toMatchObject({
     type: 'system',
     subtype: 'api_error',
@@ -190,7 +190,7 @@ test('microcompact and API error factories preserve branch-specific fields', () 
     maxRetries: 5,
   })
 
-  const errorWithoutErrorCause = { message: 'api failed', cause: 'string cause' } as any
+  const errorWithoutErrorCause = { message: 'api failed', cause: 'string cause' } as Parameters<typeof createSystemAPIErrorMessage>[0]
   expect(
     createSystemAPIErrorMessage(errorWithoutErrorCause, 200, 1, 3).cause,
   ).toBeUndefined()

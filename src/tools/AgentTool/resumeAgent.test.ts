@@ -3,12 +3,12 @@ import type { ToolUseContext } from '../../Tool.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import { resumeAgentBackground } from './resumeAgent.js'
 
-let mockTranscript: any = {
+let mockTranscript = {
   messages: [],
   contentReplacements: [],
 }
 
-let mockMetadata: any = {
+let mockMetadata: Partial<Awaited<ReturnType<typeof import("../../utils/sessionStorage.js").readAgentMetadata>>> = {
   agentType: 'code-reviewer',
   source: 'built-in',
 }
@@ -72,7 +72,7 @@ test('fails closed when resuming an unavailable agent instead of falling back', 
       agentId: 'test-agent',
       prompt: 'continue',
       toolUseContext: context,
-      canUseTool: async () => ({ behavior: 'allow' } as any),
+      canUseTool: async () => ({ behavior: 'allow' }),
     }),
   ).rejects.toThrow(
     "Cannot resume agent: type 'code-reviewer' is unavailable or disabled in the current session."
@@ -92,7 +92,7 @@ test('successfully resumes when agent is available', async () => {
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' }),
   })
 
   expect(result.agentId).toBe('test-agent')
@@ -118,7 +118,7 @@ test('rejects resume when agent definition source does not match metadata', asyn
       agentId: 'test-agent',
       prompt: 'continue',
       toolUseContext: context,
-      canUseTool: async () => ({ behavior: 'allow' } as any),
+      canUseTool: async () => ({ behavior: 'allow' }),
     }),
   ).rejects.toThrow(
     "Cannot resume agent: identity mismatch. Expected source 'built-in', found 'projectSettings' for type 'code-reviewer'."
@@ -144,7 +144,7 @@ test('rejects resume when legacy metadata lacks a source', async () => {
       agentId: 'test-agent',
       prompt: 'continue',
       toolUseContext: context,
-      canUseTool: async () => ({ behavior: 'allow' } as any),
+      canUseTool: async () => ({ behavior: 'allow' }),
     }),
   ).rejects.toThrow(
     "Cannot resume agent: identity mismatch. Expected source 'undefined', found 'built-in' for type 'code-reviewer'."
@@ -169,7 +169,7 @@ test('successfully resumes when legacy metadata lacks a source and agent is not 
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' }),
   })
 
   expect(result.agentId).toBe('test-agent')

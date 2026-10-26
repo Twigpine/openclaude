@@ -3,7 +3,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
 import { getProjectDir } from '../../../src/utils/sessionStoragePortable.js'
-import type { Query } from '../../../src/entrypoints/sdk/index.js'
+import type { Query, SDKMessage } from '../../../src/entrypoints/sdk/index.js'
 
 let tempDirLockPromise: Promise<void> | null = null
 
@@ -155,8 +155,8 @@ export function createMultiTurnConversation(
  * abort errors.
  * Returns all collected SDKMessages.
  */
-export async function drainQuery(q: Query): Promise<unknown[]> {
-  const messages: unknown[] = []
+export async function drainQuery(q: Query): Promise<SDKMessage[]> {
+  const messages: SDKMessage[] = []
   try {
     for await (const msg of q) {
       messages.push(msg)
@@ -184,8 +184,8 @@ export function isExpectedDrainAbort(err: unknown): boolean {
  * Collects all messages from a query without suppressing errors.
  * Use when you expect the query to complete normally.
  */
-export async function collectMessages(q: Query): Promise<unknown[]> {
-  const messages: unknown[] = []
+export async function collectMessages(q: Query): Promise<SDKMessage[]> {
+  const messages: SDKMessage[] = []
   for await (const msg of q) {
     messages.push(msg)
   }
@@ -196,3 +196,31 @@ export async function collectMessages(q: Query): Promise<unknown[]> {
  * Creates a UUID regex pattern for validation.
  */
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+
+type EngineView = Omit<import('../../../src/QueryEngine.js').QueryEngine, 'config'>
+  & { config: import('../../../src/QueryEngine.js').QueryEngineConfig }
+
+/** Explicit test view for engine injection and private state assertions. */
+export function queryInternals(query: Query) {
+  return query as unknown as {
+    engine: EngineView
+    _engine: EngineView | null
+    appStateStore: import('../../../src/state/store.js').Store<import('../../../src/state/AppStateStore.js').AppState>
+    setEngine(engine: import('./mock-engine.js').MockQueryEngine): void
+    registerPendingPermission(id: string): Promise<import('../../../src/entrypoints/sdk/permissions.js').PermissionResolveDecision>
+  }
+}
+
+export function sessionInternals(session: import('../../../src/entrypoints/sdk/index.js').SDKSession) {
+  return session as unknown as {
+    _engine: EngineView | null
+    setEngine(engine: import('./mock-engine.js').MockQueryEngine): void
+  }
+}
+
+export function isTextBlock(block: unknown): block is { type: 'text'; text: string } {
+  return typeof block === 'object' && block !== null &&
+    'type' in block && block.type === 'text' &&
+    'text' in block && typeof block.text === 'string'
+}

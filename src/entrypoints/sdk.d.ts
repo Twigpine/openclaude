@@ -461,11 +461,18 @@ export interface SDKSession {
 // MCP tool types
 // ============================================================================
 
+type SdkMcpToolInput<Schema> = Schema extends { _input: infer Input }
+  ? Input
+  : Schema extends Record<string, { _input: unknown }>
+    ? { [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? never : Key]: Schema[Key]['_input'] }
+      & { [Key in keyof Schema as undefined extends Schema[Key]['_input'] ? Key : never]?: Schema[Key]['_input'] }
+    : Record<string, unknown>
+
 export interface SdkMcpToolDefinition<Schema = unknown> {
   name: string
   description: string
   inputSchema: Schema
-  handler: (args: any, extra: unknown) => Promise<CallToolResult>
+  handler(args: SdkMcpToolInput<Schema>, extra: unknown): Promise<CallToolResult>
   annotations?: ToolAnnotations
   searchHint?: string
   alwaysLoad?: boolean
@@ -549,7 +556,7 @@ export function tool<Schema = unknown>(
   name: string,
   description: string,
   inputSchema: Schema,
-  handler: (args: any, extra: unknown) => Promise<CallToolResult>,
+  handler: SdkMcpToolDefinition<Schema>['handler'],
   extras?: {
     annotations?: ToolAnnotations
     searchHint?: string

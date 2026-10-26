@@ -1,3 +1,4 @@
+import type { JsonlEntry } from '../../src/entrypoints/sdk/shared.js'
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { writeFileSync, mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -107,18 +108,18 @@ describe('forkSession metadata preservation (COR-2)', () => {
     expect(result.sessionId).not.toBe(sourceId)
 
     const forkedPath = join(sessionDir, `${result.sessionId}.jsonl`)
-    const forkedEntries = await readJSONLFile<any>(forkedPath)
+    const forkedEntries = await readJSONLFile<JsonlEntry>(forkedPath)
 
     const titleEntry = forkedEntries.find(e => e.type === 'custom-title')
     const tagEntry = forkedEntries.find(e => e.type === 'tag')
 
     expect(titleEntry).toBeDefined()
-    expect(titleEntry.customTitle).toBe('My Test Session')
-    expect(titleEntry.sessionId).toBe(result.sessionId)
+    expect(titleEntry!.customTitle).toBe('My Test Session')
+    expect(titleEntry!.sessionId).toBe(result.sessionId)
 
     expect(tagEntry).toBeDefined()
-    expect(tagEntry.tag).toBe('important')
-    expect(tagEntry.sessionId).toBe(result.sessionId)
+    expect(tagEntry!.tag).toBe('important')
+    expect(tagEntry!.sessionId).toBe(result.sessionId)
   })
 })
 
@@ -149,11 +150,11 @@ describe('renameSession', () => {
 
     await renameSession(sid, 'My Renamed Session', { dir: testProjectDir })
 
-    const entries = await readJSONLFile<any>(filePath)
+    const entries = await readJSONLFile<JsonlEntry>(filePath)
     const titleEntry = entries.find(e => e.type === 'custom-title')
     expect(titleEntry).toBeDefined()
-    expect(titleEntry.customTitle).toBe('My Renamed Session')
-    expect(titleEntry.sessionId).toBe(sid)
+    expect(titleEntry!.customTitle).toBe('My Renamed Session')
+    expect(titleEntry!.sessionId).toBe(sid)
   })
 
   test('throws for non-existent session', async () => {
@@ -196,11 +197,11 @@ describe('tagSession', () => {
 
     await tagSession(sid, 'important', { dir: testProjectDir })
 
-    const entries = await readJSONLFile<any>(filePath)
+    const entries = await readJSONLFile<JsonlEntry>(filePath)
     const tagEntry = entries.find(e => e.type === 'tag')
     expect(tagEntry).toBeDefined()
-    expect(tagEntry.tag).toBe('important')
-    expect(tagEntry.sessionId).toBe(sid)
+    expect(tagEntry!.tag).toBe('important')
+    expect(tagEntry!.sessionId).toBe(sid)
   })
 
   test('clears tag when null is passed', async () => {
@@ -217,10 +218,10 @@ describe('tagSession', () => {
 
     await tagSession(sid, null, { dir: testProjectDir })
 
-    const entries = await readJSONLFile<any>(filePath)
+    const entries = await readJSONLFile<JsonlEntry>(filePath)
     const tagEntry = entries.find(e => e.type === 'tag')
     expect(tagEntry).toBeDefined()
-    expect(tagEntry.tag).toBe('')
+    expect(tagEntry!.tag).toBe('')
   })
 
   test('throws for invalid session ID', async () => {
@@ -341,30 +342,30 @@ describe('E2E: session lifecycle — create → read → mutate → fork → del
 
     // Step 3: Rename — should append title entry
     await renameSession(sid, 'E2E Test Session', { dir: testProjectDir })
-    const entriesAfterRename = await readJSONLFile<any>(filePath)
+    const entriesAfterRename = await readJSONLFile<JsonlEntry>(filePath)
     const titleEntry = entriesAfterRename.find(e => e.type === 'custom-title')
-    expect(titleEntry.customTitle).toBe('E2E Test Session')
+    expect(titleEntry!.customTitle).toBe('E2E Test Session')
 
     // Step 4: Tag — should append tag entry
     await tagSession(sid, 'e2e-tag', { dir: testProjectDir })
-    const entriesAfterTag = await readJSONLFile<any>(filePath)
+    const entriesAfterTag = await readJSONLFile<JsonlEntry>(filePath)
     const tagEntry = entriesAfterTag.find(e => e.type === 'tag')
-    expect(tagEntry.tag).toBe('e2e-tag')
+    expect(tagEntry!.tag).toBe('e2e-tag')
 
     // Step 5: Fork — should create new session with remapped UUIDs
     const forked = await forkSession(sid, { dir: testProjectDir, title: 'Forked Copy' })
     expect(forked.sessionId).not.toBe(sid)
     const forkedPath = join(sessionDir, `${forked.sessionId}.jsonl`)
-    const forkedEntries = await readJSONLFile<any>(forkedPath)
+    const forkedEntries = await readJSONLFile<JsonlEntry>(forkedPath)
 
     // Forked session should have remapped UUIDs (different from originals)
     const forkedUser = forkedEntries.find(e => e.type === 'user')
-    expect(forkedUser.uuid).not.toBe(userUuid)
+    expect(forkedUser!.uuid).not.toBe(userUuid)
     // But same content
-    expect(forkedUser.message.content).toBe('hello from e2e')
+    expect(forkedUser!.message!.content).toBe('hello from e2e')
     // Forked from reference should exist
-    expect(forkedUser.forkedFrom).toBeDefined()
-    expect(forkedUser.forkedFrom.sessionId).toBe(sid)
+    expect(forkedUser!.forkedFrom).toBeDefined()
+    expect((forkedUser!.forkedFrom as { sessionId: string; messageUuid: string }).sessionId).toBe(sid)
 
     // Forked title should be set (appended after metadata copy, so last custom-title wins)
     const forkedTitles = forkedEntries.filter(e => e.type === 'custom-title')

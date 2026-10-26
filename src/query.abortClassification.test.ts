@@ -1,3 +1,5 @@
+type QueryEvent = ReturnType<typeof query> extends AsyncGenerator<infer Event> ? Event : never
+import type { Message } from './types/message.js'
 import { describe, expect, test } from 'bun:test'
 import { z } from 'zod/v4'
 
@@ -140,10 +142,10 @@ function makeToolAbortParams(reason: AbortInput): QueryParams {
 }
 
 async function drainWithReturn(params: QueryParams): Promise<{
-  yielded: any[]
-  returned: any
+  yielded: QueryEvent[]
+  returned: ReturnType<typeof query> extends AsyncGenerator<unknown, infer Result> ? Result : never
 }> {
-  const yielded: any[] = []
+  const yielded: QueryEvent[] = []
   const generator = query(params)
   while (true) {
     const next = await generator.next()
@@ -152,28 +154,28 @@ async function drainWithReturn(params: QueryParams): Promise<{
   }
 }
 
-function toolResultContents(yielded: any[]): string[] {
+function toolResultContents(yielded: QueryEvent[]) {
   return yielded.flatMap(message => {
     if (message.type !== 'user' || !Array.isArray(message.message.content)) {
       return []
     }
     return message.message.content
-      .filter((part: any) => part.type === 'tool_result')
-      .map((part: any) => part.content)
+      .filter((part) => part.type === 'tool_result')
+      .map((part) => part.content)
   })
 }
 
-function systemMessages(yielded: any[]) {
+function systemMessages(yielded: QueryEvent[]) {
   return yielded.filter(message => message.type === 'system')
 }
 
-function interruptionMessages(yielded: any[]) {
+function interruptionMessages(yielded: QueryEvent[]) {
   return yielded.filter(
     message =>
       message.type === 'user' &&
       Array.isArray(message.message.content) &&
       message.message.content.some(
-        (part: any) => part.type === 'text' && part.text === INTERRUPT_MESSAGE,
+        (part) => part.type === 'text' && part.text === INTERRUPT_MESSAGE,
       ),
   )
 }

@@ -1,3 +1,4 @@
+import { queryInternals, sessionInternals } from './helpers/query-test-doubles.js'
 import { describe, test, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test'
 import { unstable_v2_createSession } from '../../src/entrypoints/sdk/index.js'
 import { query } from '../../src/entrypoints/sdk/index.js'
@@ -59,7 +60,7 @@ describe('MCP cleanup on session close', () => {
     })
 
     // Inject mock MCP client into the engine using setMcpClients
-    const sessionImpl = session as any
+    const sessionImpl = sessionInternals(session)
     if (sessionImpl._engine?.setMcpClients) {
       sessionImpl._engine.setMcpClients([mockMcpClient])
     }
@@ -88,7 +89,7 @@ describe('MCP cleanup on session close', () => {
     })
 
     // Inject mock MCP client
-    const sessionImpl = session as any
+    const sessionImpl = sessionInternals(session)
     if (sessionImpl._engine?.setMcpClients) {
       sessionImpl._engine.setMcpClients([mockMcpClient])
     }
@@ -105,7 +106,7 @@ describe('MCP cleanup on session close', () => {
       cwd: process.cwd(),
     })
 
-    const sessionImpl = session as any
+    const sessionImpl = sessionInternals(session)
     expect(sessionImpl._engine).not.toBeNull()
 
     session.close()
@@ -120,7 +121,7 @@ describe('MCP cleanup on session close', () => {
     })
 
     // Remove MCP clients to simulate no MCP servers connected
-    const sessionImpl = session as any
+    const sessionImpl = sessionInternals(session)
     if (sessionImpl._engine?.setMcpClients) {
       sessionImpl._engine.setMcpClients([])
     }
@@ -142,7 +143,7 @@ describe('MCP cleanup on session close', () => {
       cwd: process.cwd(),
     })
 
-    const sessionImpl = session as any
+    const sessionImpl = sessionInternals(session)
     if (sessionImpl._engine?.setMcpClients) {
       sessionImpl._engine.setMcpClients([mockMcpClient])
     }
@@ -170,7 +171,7 @@ describe('MCP cleanup on query close', () => {
     })
 
     // Inject mock MCP client
-    const queryImpl = q as any
+    const queryImpl = queryInternals(q)
     if (queryImpl._engine?.setMcpClients) {
       queryImpl._engine.setMcpClients([mockMcpClient])
     }
@@ -197,7 +198,7 @@ describe('MCP cleanup on query close', () => {
       options: { cwd: process.cwd() },
     })
 
-    const queryImpl = q as any
+    const queryImpl = queryInternals(q)
     if (queryImpl._engine?.setMcpClients) {
       queryImpl._engine.setMcpClients([mockMcpClient])
     }
@@ -213,7 +214,7 @@ describe('MCP cleanup on query close', () => {
       options: { cwd: process.cwd() },
     })
 
-    const queryImpl = q as any
+    const queryImpl = queryInternals(q)
     expect(queryImpl._engine).not.toBeNull()
 
     q.close()
@@ -227,7 +228,7 @@ describe('MCP cleanup on query close', () => {
       options: { cwd: process.cwd() },
     })
 
-    const queryImpl = q as any
+    const queryImpl = queryInternals(q)
     if (queryImpl._engine?.setMcpClients) {
       queryImpl._engine.setMcpClients([])
     }

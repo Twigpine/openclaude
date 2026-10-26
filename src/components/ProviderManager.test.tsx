@@ -1,3 +1,6 @@
+import type { AppState } from '../state/AppStateStore.js'
+import type { ProviderProfileInput } from '../utils/providerProfiles.js'
+import type { AimlapiPersistedTopup, AimlapiTopupIntent } from './providerManagerAimlapi.js'
 import { PassThrough } from 'node:stream'
 
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
@@ -231,11 +234,11 @@ function createDeferred<T>(): {
 
 /** Install profile-operation stubs and the preset defaults exercised by provider setup. */
 function mockProviderProfilesModule(options?: {
-  addProviderProfile?: (...args: unknown[]) => unknown
+  addProviderProfile?: (...args: Parameters<typeof realProviderProfiles.addProviderProfile>) => unknown
   getActiveProviderProfile?: () => unknown
   getProviderProfiles?: () => unknown[]
-  updateProviderProfile?: (...args: unknown[]) => unknown
-  setActiveProviderProfile?: (...args: unknown[]) => unknown
+  updateProviderProfile?: (...args: Parameters<typeof realProviderProfiles.updateProviderProfile>) => unknown
+  setActiveProviderProfile?: (...args: Parameters<typeof realProviderProfiles.setActiveProviderProfile>) => unknown
 }): void {
   mock.module('../utils/providerProfiles.js', () => ({
     addProviderProfile: options?.addProviderProfile ?? (() => null),
@@ -383,8 +386,8 @@ function mockProviderManagerDependencies(
   githubSyncRead: () => string | undefined,
   githubAsyncRead: () => Promise<string | undefined>,
   options?: {
-    addProviderProfile?: (...args: any[]) => unknown
-    applySavedProfileToCurrentSession?: (...args: any[]) => Promise<string | null>
+    addProviderProfile?: (...args: Parameters<typeof realProviderProfiles.addProviderProfile>) => unknown
+    applySavedProfileToCurrentSession?: (...args: Parameters<typeof realProviderProfile.applySavedProfileToCurrentSession>) => Promise<string | null>
     clearCodexCredentials?: () => { success: boolean; warning?: string }
     getActiveProviderProfile?: () => unknown
     getProviderProfiles?: () => unknown[]
@@ -409,24 +412,24 @@ function mockProviderManagerDependencies(
     }>
     codexSyncRead?: () => unknown
     codexAsyncRead?: () => Promise<unknown>
-    updateProviderProfile?: (...args: any[]) => unknown
-    setActiveProviderProfile?: (...args: any[]) => unknown
-    provisionAimlapiKey?: (...args: any[]) => Promise<unknown>
-    topUpAimlapiByApiKey?: (...args: any[]) => Promise<unknown>
-    beginAimlapiEmailOnboarding?: (...args: any[]) => Promise<unknown>
-    completeAimlapiCodeSignIn?: (...args: any[]) => Promise<unknown>
-    validateAimlapiApiKey?: (...args: any[]) => Promise<unknown>
-    claimAimlapiTopupStateAsync?: (...args: any[]) => unknown
+    updateProviderProfile?: (...args: Parameters<typeof realProviderProfiles.updateProviderProfile>) => unknown
+    setActiveProviderProfile?: (...args: Parameters<typeof realProviderProfiles.setActiveProviderProfile>) => unknown
+    provisionAimlapiKey?: (...args: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>) => Promise<unknown>
+    topUpAimlapiByApiKey?: (...args: Parameters<typeof realProviderManagerAimlapi.topUpAimlapiByApiKey>) => Promise<unknown>
+    beginAimlapiEmailOnboarding?: (...args: Parameters<typeof realProviderManagerAimlapi.beginAimlapiEmailOnboarding>) => Promise<unknown>
+    completeAimlapiCodeSignIn?: (...args: Parameters<typeof realProviderManagerAimlapi.completeAimlapiCodeSignIn>) => Promise<unknown>
+    validateAimlapiApiKey?: (...args: Parameters<typeof realProviderManagerAimlapi.validateAimlapiApiKey>) => Promise<unknown>
+    claimAimlapiTopupStateAsync?: (...args: Parameters<typeof realProviderManagerAimlapi.claimAimlapiTopupStateAsync>) => unknown
     // Observes the default (stateful) claim's arguments without replacing it.
     onAimlapiTopupClaim?: (intent: Record<string, unknown>, claimOptions: unknown) => void
-    clearAimlapiTopupStateAsync?: (...args: any[]) => unknown
-    recordAimlapiCheckoutSessionAsync?: (...args: any[]) => unknown
-    resetAimlapiCheckoutSessionAsync?: (...args: any[]) => unknown
-    saveAimlapiTopupStateAsync?: (...args: any[]) => unknown
-    reconcileSettledAimlapiTopupStateAsync?: (...args: any[]) => unknown
-    loadAimlapiSignInKey?: (...args: any[]) => unknown
-    saveAimlapiSignInKeyAsync?: (...args: any[]) => unknown
-    clearAimlapiSignInKeyAsync?: (...args: any[]) => unknown
+    clearAimlapiTopupStateAsync?: (...args: Parameters<typeof realProviderManagerAimlapi.clearAimlapiTopupStateAsync>) => unknown
+    recordAimlapiCheckoutSessionAsync?: (...args: Parameters<typeof realProviderManagerAimlapi.recordAimlapiCheckoutSessionAsync>) => unknown
+    resetAimlapiCheckoutSessionAsync?: (...args: Parameters<typeof realProviderManagerAimlapi.resetAimlapiCheckoutSessionAsync>) => unknown
+    saveAimlapiTopupStateAsync?: (...args: Parameters<typeof realProviderManagerAimlapi.saveAimlapiTopupStateAsync>) => unknown
+    reconcileSettledAimlapiTopupStateAsync?: (...args: Parameters<typeof realProviderManagerAimlapi.reconcileSettledAimlapiTopupStateAsync>) => unknown
+    loadAimlapiSignInKey?: (...args: Parameters<typeof realProviderManagerAimlapi.loadAimlapiSignInKey>) => unknown
+    saveAimlapiSignInKeyAsync?: (...args: Parameters<typeof realProviderManagerAimlapi.saveAimlapiSignInKeyAsync>) => unknown
+    clearAimlapiSignInKeyAsync?: (...args: Parameters<typeof realProviderManagerAimlapi.clearAimlapiSignInKeyAsync>) => unknown
     useCodexOAuthFlow?: (options: {
       onAuthenticated: (
         tokens: {
@@ -1126,7 +1129,7 @@ test('ProviderManager keeps full setup flow for presets with placeholder endpoin
 })
 
 test('ProviderManager asks for model and API key when adding OpenAI preset', async () => {
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'openai_profile',
     ...payload,
   }))
@@ -1194,7 +1197,7 @@ test('ProviderManager asks for model and API key when adding OpenAI preset', asy
 })
 
 test('ProviderManager adds LLMTR with only model selection and API key', async () => {
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'llmtr_profile',
     ...payload,
   }))
@@ -1262,7 +1265,7 @@ test('ProviderManager adds LLMTR with only model selection and API key', async (
 })
 
 test('ProviderManager adds Command Code with only model selection and API key', async () => {
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'commandcode_profile',
     ...payload,
   }))
@@ -1332,7 +1335,7 @@ test('ProviderManager adds Command Code with only model selection and API key', 
 test.each([',', ';'])(
   'ProviderManager rejects Anthropic-only models after a %s in a Command Code model list',
   async separator => {
-    const addProviderProfile = mock((payload: any) => ({
+    const addProviderProfile = mock((payload: ProviderProfileInput) => ({
       id: 'commandcode_profile',
       ...payload,
     }))
@@ -1440,7 +1443,7 @@ test('ProviderManager edits query-bearing LLMTR endpoints with generic proxy con
 })
 
 test('ProviderManager saves OpenAI preset GPT-5 models with Responses API', async () => {
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'openai_profile',
     ...payload,
   }))
@@ -1499,7 +1502,7 @@ test('ProviderManager saves OpenAI preset GPT-5 models with Responses API', asyn
 })
 
 test('ProviderManager saves AI/ML API preset with OpenAI-compatible defaults', async () => {
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'aimlapi_profile',
     ...payload,
   }))
@@ -1594,7 +1597,7 @@ test('ProviderManager saves AI/ML API preset with OpenAI-compatible defaults', a
 })
 
 test('ProviderManager tops up a low-balance saved key by API key, not a new checkout', async () => {
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'aimlapi_profile',
     ...payload,
   }))
@@ -1603,7 +1606,7 @@ test('ProviderManager tops up a low-balance saved key by API key, not a new chec
     lowBalance: true,
     lowBalanceThreshold: 20,
   }))
-  const topUpAimlapiByApiKey = mock(async (options: any) => {
+  const topUpAimlapiByApiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.topUpAimlapiByApiKey>[0]) => {
     options.onSession?.('by-key-checkout')
     options.onStatus?.('waiting-payment')
     return {
@@ -1656,7 +1659,7 @@ test('ProviderManager tops up a low-balance saved key by API key, not a new chec
     // opening a new passwordless-account checkout.
     mounted.stdin.write('\r')
     await waitForCondition(() => topUpAimlapiByApiKey.mock.calls.length === 1)
-    const topUpOptions = topUpAimlapiByApiKey.mock.calls[0]?.[0] as any
+    const topUpOptions = topUpAimlapiByApiKey.mock.calls[0]?.[0]
     expect(topUpOptions.apiKey).toBe('aimlapi-test-key')
     expect(topUpOptions.paymentSessionId).toEqual(expect.any(String))
     expect(topUpOptions.paymentSessionId).not.toBe('')
@@ -1707,7 +1710,7 @@ test('ProviderManager tops up and persists a low-balance manually-entered key ag
     apiKey: 'old-key',
     apiFormat: 'chat_completions',
   }
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'aimlapi_profile',
     ...payload,
   }))
@@ -1716,7 +1719,7 @@ test('ProviderManager tops up and persists a low-balance manually-entered key ag
     lowBalance: true,
     lowBalanceThreshold: 20,
   }))
-  const topUpAimlapiByApiKey = mock(async (options: any) => {
+  const topUpAimlapiByApiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.topUpAimlapiByApiKey>[0]) => {
     options.onSession?.('by-key-checkout')
     options.onStatus?.('waiting-payment')
     return {
@@ -1786,7 +1789,7 @@ test('ProviderManager tops up and persists a low-balance manually-entered key ag
 
     mounted.stdin.write('\r')
     await waitForCondition(() => topUpAimlapiByApiKey.mock.calls.length === 1)
-    const topUpOptions = topUpAimlapiByApiKey.mock.calls[0]?.[0] as any
+    const topUpOptions = topUpAimlapiByApiKey.mock.calls[0]?.[0]
     expect(topUpOptions.apiKey).toBe('aimlapi-test-key')
     // The endpoint this key was validated against, not the ambient proxy
     // aimlapiInferenceBaseUrl was reset to by "switch account".
@@ -1817,7 +1820,7 @@ test('ProviderManager offers and reuses an existing AIMLAPI profile', async () =
     apiKey: 'saved-key',
     apiFormat: 'chat_completions',
   }
-  const updateProviderProfile = mock((id: string, payload: any) => ({
+  const updateProviderProfile = mock((id: string, payload: Parameters<typeof realProviderProfiles.updateProviderProfile>[1]) => ({
     id,
     ...payload,
   }))
@@ -1890,7 +1893,7 @@ test('ProviderManager reconciles a stale settled receipt for this credential whe
     apiKey: 'saved-key',
     apiFormat: 'chat_completions',
   }
-  const updateProviderProfile = mock((id: string, payload: any) => ({
+  const updateProviderProfile = mock((id: string, payload: Parameters<typeof realProviderProfiles.updateProviderProfile>[1]) => ({
     id,
     ...payload,
   }))
@@ -2075,7 +2078,7 @@ test('ProviderManager completes (not strands) a settled by-key top-up when Esc i
     apiKey: 'saved-key',
     apiFormat: 'chat_completions',
   }
-  const updateProviderProfile = mock((id: string, payload: any) => ({
+  const updateProviderProfile = mock((id: string, payload: Parameters<typeof realProviderProfiles.updateProviderProfile>[1]) => ({
     id,
     ...payload,
   }))
@@ -2171,7 +2174,7 @@ test('ProviderManager switch-account overrides a stale receipt left by an earlie
   // different account — this mount's refs were never populated for it, so
   // only an explicit "switch account" forces the claim through.
   const claimAimlapiTopupStateAsync = mock(
-    async (intent: any, options?: { abandonExisting?: boolean }) => {
+    async (intent: AimlapiTopupIntent, options?: { abandonExisting?: boolean }) => {
       if (intent.email === 'old@example.com') {
         return { paymentSessionId: 'stale-payment-id', resumeSessionToken: 'stale-session' }
       }
@@ -2240,7 +2243,7 @@ test('ProviderManager switch-account overrides a stale receipt left by an earlie
     // chose to switch accounts.
     await waitForCondition(() => claimAimlapiTopupStateAsync.mock.calls.length > 0)
     const call = claimAimlapiTopupStateAsync.mock.calls.find(
-      (c: any) => c[0]?.email === 'new@example.com',
+      (c) => c[0]?.email === 'new@example.com',
     )
     expect(call?.[1]).toEqual({ abandonExisting: true })
     const output = mounted.getOutput()
@@ -2343,7 +2346,7 @@ test('ProviderManager does not send the OPENAI_API_KEY fallback to a custom AIML
   delete process.env.OPENAI_API_KEYS
   process.env.OPENAI_API_KEY = 'env-runtime-key'
   process.env.AIMLAPI_INFERENCE_URL = 'https://proxy.example.test/v1'
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'aimlapi_env',
     ...payload,
   }))
@@ -2513,13 +2516,13 @@ test('ProviderManager never persists an ambient env API key into the top-up rece
   process.env.AIMLAPI_API_KEY = 'env-runtime-key'
   process.env.AIMLAPI_INFERENCE_URL = 'https://api.aimlapi.com/v1'
 
-  const addProviderProfile = mock((payload: any) => ({ id: 'aimlapi_profile', ...payload }))
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({ id: 'aimlapi_profile', ...payload }))
   const validateAimlapiApiKey = mock(async () => ({
     balance: 5,
     lowBalance: true,
     lowBalanceThreshold: 20,
   }))
-  const topUpAimlapiByApiKey = mock(async (options: any) => {
+  const topUpAimlapiByApiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.topUpAimlapiByApiKey>[0]) => {
     options.onSession?.('by-key-checkout')
     options.onStatus?.('waiting-payment')
     return {
@@ -2529,8 +2532,8 @@ test('ProviderManager never persists an ambient env API key into the top-up rece
       model: 'gpt-4o',
     }
   })
-  const savedStates: any[] = []
-  const saveAimlapiTopupStateAsync = mock(async (state: any) => {
+  const savedStates: AimlapiPersistedTopup[] = []
+  const saveAimlapiTopupStateAsync = mock(async (state: AimlapiPersistedTopup) => {
     savedStates.push(state)
   })
 
@@ -2656,7 +2659,7 @@ test('ProviderManager clears the sign-in cache with the minted key id on a suffi
     lowBalance: false,
   }))
   const clearAimlapiSignInKeyAsync = mock(async () => {})
-  const addProviderProfile = mock((payload: any) => ({ id: 'aimlapi_profile', ...payload }))
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({ id: 'aimlapi_profile', ...payload }))
   mockProviderManagerDependencies(() => undefined, async () => undefined, {
     beginAimlapiEmailOnboarding,
     completeAimlapiCodeSignIn,
@@ -2782,7 +2785,7 @@ test('ProviderManager persists a minted sign-in key into the top-up receipt befo
     balanceStatus: 'confirmed' as const,
     lowBalance: true,
   }))
-  const saveAimlapiTopupStateAsync = mock(async (state: any) => {})
+  const saveAimlapiTopupStateAsync = mock(async (state: AimlapiPersistedTopup) => {})
   const provisionAimlapiKey = mock(async () => await new Promise<never>(() => {}))
   mockProviderManagerDependencies(() => undefined, async () => undefined, {
     beginAimlapiEmailOnboarding,
@@ -2833,7 +2836,7 @@ test('ProviderManager persists a minted sign-in key into the top-up receipt befo
     // must already carry the key minted at sign-in — not just the separate
     // sign-in-key cache — so a restart right here can still recover it.
     await waitForCondition(() => saveAimlapiTopupStateAsync.mock.calls.length > 0)
-    const savedState = saveAimlapiTopupStateAsync.mock.calls[0]?.[0] as any
+    const savedState = saveAimlapiTopupStateAsync.mock.calls[0]?.[0]
     expect(savedState.apiKey).toBe('minted-key')
     expect(savedState.apiKeyId).toBe('minted-id')
   } finally {
@@ -2850,14 +2853,14 @@ test('ProviderManager retains a minted key on a terminal session instead of a fu
     balanceStatus: 'confirmed' as const,
     lowBalance: true,
   }))
-  const resetAimlapiCheckoutSessionAsync = mock(async (expected: any) => ({
+  const resetAimlapiCheckoutSessionAsync = mock(async (expected: Parameters<typeof realProviderManagerAimlapi.resetAimlapiCheckoutSessionAsync>[0]) => ({
     paymentSessionId: 'fresh-payment-id',
     resumeSessionToken: '',
     apiKey: 'minted-key',
     apiKeyId: 'minted-id',
   }))
   const clearAimlapiTopupStateAsync = mock(async () => {})
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     // A session is elected, then goes terminal (cancelled/expired/dead) before
     // ever settling — the scenario reportSession('') must handle by retaining
     // the minted key instead of wiping the whole receipt.
@@ -2910,7 +2913,7 @@ test('ProviderManager retains a minted key on a terminal session instead of a fu
     mounted.stdin.write('\r')
 
     await waitForCondition(() => resetAimlapiCheckoutSessionAsync.mock.calls.length > 0)
-    const resetArg = resetAimlapiCheckoutSessionAsync.mock.calls[0]?.[0] as any
+    const resetArg = resetAimlapiCheckoutSessionAsync.mock.calls[0]?.[0]
     expect(resetArg.email).toBe('stan@aimlapi.com')
     // The key-retaining reset ran; the full-wipe fallback must NOT also run.
     expect(clearAimlapiTopupStateAsync).not.toHaveBeenCalled()
@@ -2944,7 +2947,7 @@ test('ProviderManager awaits terminal-session receipt cleanup before its onSessi
   })
   const clearAimlapiTopupStateAsync = mock(async () => {})
   let cleanupAlreadySettledWhenOnSessionResolved = false
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     options.onSession?.('live-session')
     // Mirrors how the real poll helpers now call this: awaited, so its
     // caller only proceeds once the callback's own work (here, the delayed
@@ -3156,7 +3159,7 @@ test('ProviderManager does not block the completion screen on a contended sign-i
     await Bun.sleep(200)
     clearResolved = true
   })
-  const addProviderProfile = mock((payload: any) => ({ id: 'aimlapi_profile', ...payload }))
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({ id: 'aimlapi_profile', ...payload }))
   mockProviderManagerDependencies(() => undefined, async () => undefined, {
     beginAimlapiEmailOnboarding,
     completeAimlapiCodeSignIn,
@@ -3247,14 +3250,14 @@ test('ProviderManager rejects an empty AIMLAPI top-up amount instead of charging
 
 test('ProviderManager drops a retained checkout when the onboarding email changes', async () => {
   delete process.env.AIMLAPI_EMAIL
-  const addProviderProfile = mock((payload: any) => ({ id: 'aimlapi_profile', ...payload }))
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({ id: 'aimlapi_profile', ...payload }))
   let accountSequence = 0
   const beginAimlapiEmailOnboarding = mock(async () => ({
     action: 'new-account' as const,
     sessionToken: `account-session-${++accountSequence}`,
   }))
   let provisionSequence = 0
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     provisionSequence += 1
     if (provisionSequence === 1) {
       options.onSession?.('checkout-for-first-account')
@@ -3323,8 +3326,8 @@ test('ProviderManager drops a retained checkout when the onboarding email change
     mounted.stdin.write('\r')
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 2)
 
-    const firstOptions = provisionAimlapiKey.mock.calls[0]?.[0] as any
-    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0] as any
+    const firstOptions = provisionAimlapiKey.mock.calls[0]?.[0]
+    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0]
     expect(firstOptions.sessionToken).toBe('account-session-1')
     expect(secondOptions.sessionToken).toBe('account-session-2')
     expect(secondOptions.resumeSessionToken).toBe('')
@@ -3340,7 +3343,7 @@ test('ProviderManager stops before the profile write when the post-exchange rece
     action: 'new-account' as const,
     sessionToken: 'account-session',
   }))
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     options.onSession?.('checkout-session')
     return {
       apiKey: 'exchanged-key',
@@ -3355,7 +3358,7 @@ test('ProviderManager stops before the profile write when the post-exchange rece
   const saveAimlapiTopupStateAsync = mock(async () => {
     throw new Error('EACCES: permission denied')
   })
-  const addProviderProfile = mock((payload: any) => ({ id: 'aimlapi_profile', ...payload }))
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({ id: 'aimlapi_profile', ...payload }))
   mockProviderManagerDependencies(() => undefined, async () => undefined, {
     beginAimlapiEmailOnboarding,
     provisionAimlapiKey,
@@ -3441,7 +3444,7 @@ test('ProviderManager carries a confirmed email-switch abandonment into the atom
   // provisioning after a successful claim.
   const recordAimlapiCheckoutSessionAsync = mock(async (state: Record<string, unknown>) => state)
   let provisionSequence = 0
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     provisionSequence += 1
     if (provisionSequence === 1) {
       options.onSession?.('checkout-for-first-account')
@@ -3513,12 +3516,12 @@ test('ProviderManager carries a confirmed email-switch abandonment into the atom
     mounted.stdin.write('\r')
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 2)
 
-    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0] as any
+    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0]
     expect(secondOptions.sessionToken).toBe('account-session-2')
     // The claim for the new email carried abandonExisting through, rather
     // than relying on the (never-landing) pre-clear.
     const secondClaimCall = claimAimlapiTopupStateAsync.mock.calls[1]
-    expect((secondClaimCall?.[1] as any)?.abandonExisting).toBe(true)
+    expect((secondClaimCall?.[1])?.abandonExisting).toBe(true)
   } finally {
     await mounted.dispose()
   }
@@ -3551,7 +3554,7 @@ test('ProviderManager does not carry a stale force-abandon confirmation into an 
   const clearAimlapiTopupStateAsync = mock(async () => {})
   const recordAimlapiCheckoutSessionAsync = mock(async (state: Record<string, unknown>) => state)
   let provisionSequence = 0
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     provisionSequence += 1
     if (provisionSequence === 1) {
       options.onSession?.('checkout-for-first-account')
@@ -3644,7 +3647,7 @@ test('ProviderManager does not carry a stale force-abandon confirmation into an 
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 2)
 
     const thirdClaimCall = claimAimlapiTopupStateAsync.mock.calls.at(-1)
-    expect((thirdClaimCall?.[1] as any)?.abandonExisting).toBeFalsy()
+    expect((thirdClaimCall?.[1])?.abandonExisting).toBeFalsy()
   } finally {
     await mounted.dispose()
   }
@@ -3682,7 +3685,7 @@ test('ProviderManager carries a confirmed API-key-choice abandonment into the at
   const clearAimlapiTopupStateAsync = mock(() => new Promise<void>(() => {}))
   const recordAimlapiCheckoutSessionAsync = mock(async (state: Record<string, unknown>) => state)
   let provisionSequence = 0
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     provisionSequence += 1
     if (provisionSequence === 1) {
       options.onSession?.('checkout-for-first-account')
@@ -3756,10 +3759,10 @@ test('ProviderManager carries a confirmed API-key-choice abandonment into the at
     mounted.stdin.write('\r')
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 2)
 
-    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0] as any
+    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0]
     expect(secondOptions.sessionToken).toBe('account-session-2')
     const secondClaimCall = claimAimlapiTopupStateAsync.mock.calls[1]
-    expect((secondClaimCall?.[1] as any)?.abandonExisting).toBe(true)
+    expect((secondClaimCall?.[1])?.abandonExisting).toBe(true)
   } finally {
     await mounted.dispose()
   }
@@ -3768,12 +3771,12 @@ test('ProviderManager carries a confirmed API-key-choice abandonment into the at
 test('ProviderManager cancellation returns a live checkout to the resumable amount screen', async () => {
   delete process.env.AIMLAPI_EMAIL
   let provisionSequence = 0
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     provisionSequence += 1
     if (provisionSequence === 1) {
       options.onSession?.('live-checkout')
       await new Promise<never>((_resolve, reject) => {
-        options.signal.addEventListener('abort', () => reject(options.signal.reason), {
+        options.signal!.addEventListener('abort', () => reject(options.signal!.reason), {
           once: true,
         })
       })
@@ -3811,18 +3814,18 @@ test('ProviderManager cancellation returns a live checkout to the resumable amou
     mounted.stdin.write('\r')
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 1)
 
-    const firstOptions = provisionAimlapiKey.mock.calls[0]?.[0] as any
+    const firstOptions = provisionAimlapiKey.mock.calls[0]?.[0]
     mounted.stdin.write('\x1b')
     const amountOutput = await waitForFrameOutput(mounted.getOutput, frame =>
       frame.includes('Add credits'),
     )
     expect(amountOutput).not.toContain('Do you have an aimlapi.com key?')
-    expect(firstOptions.signal.aborted).toBe(true)
+    expect(firstOptions.signal!.aborted).toBe(true)
 
     await Bun.sleep(25)
     mounted.stdin.write('\r')
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 2)
-    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0] as any
+    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0]
     expect(secondOptions.resumeSessionToken).toBe('live-checkout')
     expect(secondOptions.paymentSessionId).toBe(firstOptions.paymentSessionId)
   } finally {
@@ -3951,7 +3954,7 @@ test('ProviderManager warns before abandoning an already-open checkout on re-edi
   delete process.env.AIMLAPI_EMAIL
   delete process.env.AIMLAPI_CODE
 
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     // Open a checkout URL, then stay on the progress screen (never resolve) so
     // the user can go back and edit the amount.
     options.onStatus?.('opening-checkout', 'https://checkout.test/pay')
@@ -4034,7 +4037,7 @@ test('ProviderManager keeps the open checkout resumable through an edit that is 
   delete process.env.AIMLAPI_EMAIL
   delete process.env.AIMLAPI_CODE
 
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     // Open a checkout URL, then stay on the progress screen (never resolve) so
     // the user can go back and edit the amount.
     options.onSession?.('live-checkout')
@@ -4072,7 +4075,7 @@ test('ProviderManager keeps the open checkout resumable through an edit that is 
       frame.includes('Opening checkout in browser...'),
     )
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 1)
-    const firstOptions = provisionAimlapiKey.mock.calls[0]?.[0] as any
+    const firstOptions = provisionAimlapiKey.mock.calls[0]?.[0]
 
     // Go back and start editing the amount — a draft edit, never submitted.
     mounted.stdin.write('\x1b')
@@ -4092,7 +4095,7 @@ test('ProviderManager keeps the open checkout resumable through an edit that is 
     // discarded the durable receipt for the checkout that's still live in the
     // browser.
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 2)
-    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0] as any
+    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0]
     expect(secondOptions.resumeSessionToken).toBe('live-checkout')
     expect(secondOptions.paymentSessionId).toBe(firstOptions.paymentSessionId)
     const output = mounted.getOutput()
@@ -4106,7 +4109,7 @@ test('ProviderManager requires abandon confirmation for a persisted session back
   delete process.env.AIMLAPI_EMAIL
   delete process.env.AIMLAPI_CODE
 
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     // A session is elected/recorded (mirrors resolveTopupSession's onSession
     // call inside createSession) but the flow never reaches 'opening-checkout'
     // — e.g. the request to /pay is still in flight when the user backs out.
@@ -4142,7 +4145,7 @@ test('ProviderManager requires abandon confirmation for a persisted session back
     // fires opening-checkout), so aimlapiOpenedCheckoutRef is never armed.
     mounted.stdin.write('\r')
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 1)
-    const firstOptions = provisionAimlapiKey.mock.calls[0]?.[0] as any
+    const firstOptions = provisionAimlapiKey.mock.calls[0]?.[0]
 
     // Back out before a checkout URL ever appeared, then edit the amount.
     mounted.stdin.write('\x1b')
@@ -4164,7 +4167,7 @@ test('ProviderManager requires abandon confirmation for a persisted session back
     // Confirm → abandons the pending session and starts a genuinely new one.
     mounted.stdin.write('\r')
     await waitForCondition(() => provisionAimlapiKey.mock.calls.length === 2)
-    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0] as any
+    const secondOptions = provisionAimlapiKey.mock.calls[1]?.[0]
     expect(secondOptions.paymentSessionId).not.toBe(firstOptions.paymentSessionId)
   } finally {
     await mounted.dispose()
@@ -4185,7 +4188,7 @@ test('ProviderManager preserves receipt ownership when terminal-session cleanup 
     throw new Error('lock timeout')
   })
   let provisionSequence = 0
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     provisionSequence += 1
     if (provisionSequence === 1) {
       options.onSession?.('pending-session')
@@ -4258,7 +4261,7 @@ test('ProviderManager requires abandon confirmation when Esc backs all the way o
   delete process.env.AIMLAPI_EMAIL
   delete process.env.AIMLAPI_CODE
 
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     options.onSession?.('live-checkout')
     await new Promise(() => {})
     return { apiKey: 'k', apiKeyId: 'id', baseUrl: 'https://api.aimlapi.com/v1', model: 'gpt-4o' }
@@ -4320,7 +4323,7 @@ test('ProviderManager recovers a settled receipt without re-provisioning', async
   delete process.env.AIMLAPI_EMAIL
   delete process.env.AIMLAPI_CODE
 
-  const addProviderProfile = mock((payload: any) => ({ id: 'aimlapi_profile', ...payload }))
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({ id: 'aimlapi_profile', ...payload }))
   const provisionAimlapiKey = mock(async () => {
     throw new Error('provisionAimlapiKey must not run when a settled receipt exists')
   })
@@ -4391,16 +4394,16 @@ test('ProviderManager can top up AI/ML API and save the issued key', async () =>
   delete process.env.AIMLAPI_CODE
 
   const events: string[] = []
-  const addProviderProfile = mock((payload: any) => {
+  const addProviderProfile = mock((payload: ProviderProfileInput) => {
     events.push('profile')
     return { id: 'aimlapi_profile', ...payload }
   })
-  const saveAimlapiTopupStateAsync = mock(async (state: any) => {
+  const saveAimlapiTopupStateAsync = mock(async (state: AimlapiPersistedTopup) => {
     if (state?.settled) events.push(`receipt:${String(state.apiKey)}`)
   })
   const checkoutUrl =
     'https://checkout.stripe.com/c/pay/cs_test_1234567890#signed-checkout-fragment-that-must-remain-visible-across-terminal-lines-tail'
-  const provisionAimlapiKey = mock(async (options: any) => {
+  const provisionAimlapiKey = mock(async (options: Parameters<typeof realProviderManagerAimlapi.provisionAimlapiKey>[0]) => {
     options.onStatus?.('creating-session')
     await Bun.sleep(150)
     options.onStatus?.('opening-checkout', checkoutUrl)
@@ -4557,7 +4560,7 @@ test('ProviderManager can top up AI/ML API and save the issued key', async () =>
 }, 20_000)
 
 test('ProviderManager saves MiniMax preset with Anthropic-compatible endpoint and type', async () => {
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'minimax_profile',
     ...payload,
   }))
@@ -4634,7 +4637,7 @@ test('ProviderManager edit flow keeps MiniMax on Anthropic-compatible provider p
     model: 'MiniMax-M2.7',
     apiKey: 'minimax-key',
   }
-  const updateProviderProfile = mock((id: string, payload: any) => ({
+  const updateProviderProfile = mock((id: string, payload: Parameters<typeof realProviderProfiles.updateProviderProfile>[1]) => ({
     ...minimaxProfile,
     id,
     ...payload,
@@ -4712,7 +4715,7 @@ test('ProviderManager edit flow keeps MiniMax on Anthropic-compatible provider p
 })
 
 test('ProviderManager saves Hicap preset non-GPT model with Chat Completions', async () => {
-  const addProviderProfile = mock((payload: any) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'hicap_profile',
     ...payload,
   }))
@@ -4781,7 +4784,7 @@ test('ProviderManager clears hidden Hicap auth fields when editing', async () =>
       'X-Regular-Header': 'kept',
     },
   }
-  const updateProviderProfile = mock((id: string, payload: any) => ({
+  const updateProviderProfile = mock((id: string, payload: Parameters<typeof realProviderProfiles.updateProviderProfile>[1]) => ({
     ...legacyHicapProfile,
     id,
     ...payload,
@@ -4933,13 +4936,7 @@ test('ProviderManager first-run Ollama preset auto-detects installed models', as
   delete process.env.GH_TOKEN
 
   const onDone = mock(() => {})
-  const addProviderProfile = mock((payload: {
-    provider: string
-    name: string
-    baseUrl: string
-    model: string
-    apiKey?: string
-  }) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'provider_ollama',
     provider: payload.provider,
     name: payload.name,
@@ -5062,13 +5059,7 @@ test('ProviderManager first-run Atomic Chat preset auto-detects loaded models', 
   delete process.env.GH_TOKEN
 
   const onDone = mock(() => {})
-  const addProviderProfile = mock((payload: {
-    provider: string
-    name: string
-    baseUrl: string
-    model: string
-    apiKey?: string
-  }) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'provider_atomic_chat',
     provider: payload.provider,
     name: payload.name,
@@ -5159,13 +5150,7 @@ test('ProviderManager first-run Codex OAuth switches the current session after l
     model: 'codexplan',
     apiKey: '',
   }))
-  const addProviderProfile = mock((payload: {
-    provider: string
-    name: string
-    baseUrl: string
-    model: string
-    apiKey?: string
-  }) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'provider_codex_oauth',
     provider: payload.provider,
     name: payload.name,
@@ -5412,13 +5397,7 @@ test('ProviderManager first-run Codex OAuth surfaces credential storage warnings
     model: 'codexplan',
     apiKey: '',
   }))
-  const addProviderProfile = mock((payload: {
-    provider: string
-    name: string
-    baseUrl: string
-    model: string
-    apiKey?: string
-  }) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'provider_codex_oauth',
     provider: payload.provider,
     name: payload.name,
@@ -5506,13 +5485,7 @@ test('ProviderManager first-run Codex OAuth reports next-startup fallback when s
     model: 'codexplan',
     apiKey: '',
   }))
-  const addProviderProfile = mock((payload: {
-    provider: string
-    name: string
-    baseUrl: string
-    model: string
-    apiKey?: string
-  }) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'provider_codex_oauth',
     provider: payload.provider,
     name: payload.name,
@@ -5599,13 +5572,7 @@ test('ProviderManager does not hijack a manual Codex profile when OAuth credenti
     model: 'gpt-5.4',
     apiKey: 'manual-key',
   }
-  const addProviderProfile = mock((payload: {
-    provider: string
-    name: string
-    baseUrl: string
-    model: string
-    apiKey?: string
-  }) => ({
+  const addProviderProfile = mock((payload: ProviderProfileInput) => ({
     id: 'provider_codex_oauth',
     provider: payload.provider,
     name: payload.name,
@@ -5781,7 +5748,7 @@ test('ProviderManager activating a multi-model provider sets the session model t
   }
 
   const setActiveProviderProfile = mock(() => multiModelProfile)
-  const appStateChanges: Array<{ newState: any; oldState: any }> = []
+  const appStateChanges: Array<{ newState: AppState; oldState: AppState }> = []
 
   mockProviderManagerDependencies(
     () => undefined,
@@ -5796,7 +5763,7 @@ test('ProviderManager activating a multi-model provider sets the session model t
   const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)
   const mounted = await mountProviderManager(ProviderManager, {
     onChangeAppState: args => {
-      appStateChanges.push(args as { newState: any; oldState: any })
+      appStateChanges.push(args as { newState: AppState; oldState: AppState })
     },
   })
 
@@ -5863,7 +5830,7 @@ test('ProviderManager editing an active multi-model provider keeps app state on 
   }
 
   const updateProviderProfile = mock(() => multiModelProfile)
-  const appStateChanges: Array<{ newState: any; oldState: any }> = []
+  const appStateChanges: Array<{ newState: AppState; oldState: AppState }> = []
 
   mockProviderManagerDependencies(
     () => undefined,
@@ -5879,7 +5846,7 @@ test('ProviderManager editing an active multi-model provider keeps app state on 
   const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)
   const mounted = await mountProviderManager(ProviderManager, {
     onChangeAppState: args => {
-      appStateChanges.push(args as { newState: any; oldState: any })
+      appStateChanges.push(args as { newState: AppState; oldState: AppState })
     },
   })
 
@@ -6169,7 +6136,7 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
     }))
 
     const onDoneResults: Array<Record<string, unknown>> = []
-    const appStateChanges: Array<{ newState: any; oldState: any }> = []
+    const appStateChanges: Array<{ newState: AppState; oldState: AppState }> = []
     const nonce = `${Date.now()}-${Math.random()}`
     const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)
     mounted = await mountProviderManager(ProviderManager, {
@@ -6179,7 +6146,7 @@ test('ProviderManager switches back to Anthropic via the manager UI: resets the 
         }
       },
       onChangeAppState: args => {
-        appStateChanges.push(args as { newState: any; oldState: any })
+        appStateChanges.push(args as { newState: AppState; oldState: AppState })
       },
     })
 

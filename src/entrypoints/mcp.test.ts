@@ -13,7 +13,7 @@ const originalDisableExperimentalBetas =
   process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
 
 // Mock the MCP client service to control the tools and connections returned
-const mockGetMcpToolsCommandsAndResources = mock(async (onConnectionAttempt: any) => {})
+const mockGetMcpToolsCommandsAndResources = mock(async (onConnectionAttempt: Parameters<typeof import('../services/mcp/client.js').getMcpToolsCommandsAndResources>[0]) => {})
 const realMcpClient = await import(
   `../services/mcp/client.js?real=${Date.now()}-${Math.random()}`
 )

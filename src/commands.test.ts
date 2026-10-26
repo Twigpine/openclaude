@@ -1,3 +1,4 @@
+import type { ToolUseContext } from './Tool.js'
 ﻿import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -214,15 +215,15 @@ describe('builtInCommandNames', () => {
       options: {
         debug: false,
         mainLoopModel: '',
-        tools: {} as any,
+        tools: {},
         verbose: false,
-        thinkingConfig: {} as any,
-        mcpClients: [] as any,
-        mcpResources: {} as any,
+        thinkingConfig: {},
+        mcpClients: [],
+        mcpResources: {},
         isNonInteractiveSession: false,
-        agentDefinitions: {} as any,
+        agentDefinitions: {},
       },
-    }) as any
+    } as unknown as ToolUseContext)
 
   /** Retry rm on EBUSY (Windows: dir held by spawned shell handle). */
   async function rmRetry(dir: string, retries = 5, delay = 200): Promise<void> {
@@ -234,7 +235,7 @@ describe('builtInCommandNames', () => {
         try {
           await rm(dir, { recursive: true, force: true })
           return
-        } catch (e: any) {
+        } catch (e: unknown) {
           if ((e as NodeJS.ErrnoException).code === 'EBUSY' && i < retries - 1) {
             await new Promise(r => setTimeout(r, delay))
             continue
@@ -618,7 +619,7 @@ describe('formatDescriptionWithSource', () => {
       type: 'prompt',
       source: 'builtin',
       description: undefined,
-    } as any
+    } as unknown as import('./commands.js').Command
 
     expect(formatDescriptionWithSource(command)).toBe('')
   })
@@ -634,7 +635,7 @@ describe('formatDescriptionWithSource', () => {
           name: 'MyPlugin',
         },
       },
-    } as any
+    } as unknown as import('./commands.js').Command
 
     expect(formatDescriptionWithSource(command)).toBe('(MyPlugin) ')
   })
@@ -646,7 +647,7 @@ describe('formatDescriptionWithSource', () => {
       source: 'builtin',
       description: 'Review a pull request',
       localizationKey: 'commands.review.description',
-    } as any
+    } as unknown as import('./commands.js').Command
 
     useLanguage('english')
     expect(formatDescriptionWithSource(command)).toBe('Review a pull request')
@@ -662,7 +663,7 @@ describe('formatDescriptionWithSource', () => {
       source: 'builtin',
       description: 'English fallback description',
       localizationKey: 'commands.example.missing.description',
-    } as any
+    } as unknown as import('./commands.js').Command
 
     useLanguage('vietnamese')
     expect(formatDescriptionWithSource(command)).toBe(
@@ -678,7 +679,7 @@ describe('formatDescriptionWithSource', () => {
         type: 'prompt',
         source,
         description,
-      }) as any
+      } as import("./commands.js").Command)
 
     useLanguage('vietnamese')
 
@@ -716,7 +717,7 @@ describe('formatDescriptionWithSource', () => {
           name: 'MyPlugin',
         },
       },
-    } as any
+    } as unknown as import('./commands.js').Command
 
     useLanguage('vietnamese')
 
@@ -730,7 +731,7 @@ describe('formatDescriptionWithSource', () => {
       name: 'external-review',
       type: 'local',
       description: 'Review a pull request',
-    } as any
+    } as unknown as import('./commands.js').Command
 
     useLanguage('vietnamese')
 
@@ -744,7 +745,7 @@ describe('formatDescriptionWithSource', () => {
       description:
         "Copy Claude's last response to clipboard (or /copy N for the Nth-latest)",
       localizationKey: 'commands.copy.description',
-    } as any
+    } as unknown as import('./commands.js').Command
 
     useLanguage('vietnamese')
     expect(formatDescriptionWithSource(command)).toBe(

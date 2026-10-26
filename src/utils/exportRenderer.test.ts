@@ -184,7 +184,7 @@ describe('renderMessagesToMarkdown', () => {
   })
 
   test('handles null/undefined messages gracefully', () => {
-    const md = renderMessagesToMarkdown([null, undefined] as any)
+    const md = renderMessagesToMarkdown([null, undefined])
     expect(md).toContain('# Conversation Export')
   })
 
@@ -276,7 +276,7 @@ describe('renderMessagesToMarkdown', () => {
           content: '<local-command-stdout>command output</local-command-stdout>',
         },
       },
-    ] as any)
+    ])
     expect(md).toContain('## Local Command Output')
     expect(md).toContain('command output')
     expect(md).not.toContain('<local-command-stdout>')
@@ -291,7 +291,7 @@ describe('renderMessagesToMarkdown', () => {
           content: '<bash-stdout>stdout text</bash-stdout><bash-stderr>stderr text</bash-stderr>',
         },
       },
-    ] as any)
+    ])
     expect(md).toContain('## Bash Output')
     expect(md).toContain('### STDOUT')
     expect(md).toContain('stdout text')
@@ -310,7 +310,7 @@ describe('renderMessagesToMarkdown', () => {
           content: [{ type: 'text', text: '<bash-input>ls -la</bash-input>' }],
         },
       },
-    ] as any)
+    ])
     expect(md).toContain('## Bash Input')
     expect(md).toContain('ls -la')
     expect(md).not.toContain('<bash-input>')
@@ -328,7 +328,7 @@ describe('renderMessagesToMarkdown', () => {
           ],
         },
       },
-    ] as any)
+    ])
     expect(md).toContain('## Bash Output')
     expect(md).toContain('stdout text')
     expect(md).not.toContain('## User')
@@ -357,7 +357,7 @@ describe('renderMessagesToMarkdown', () => {
         type: 42,
         message: { content: [{ type: 'text', text: 'numeric type' }] },
       },
-    ] as any)
+    ])
     expect(md).toContain('## 42')
     expect(md).toContain('numeric type')
   })
@@ -382,7 +382,7 @@ describe('renderMessagesToMarkdown', () => {
         message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>hidden array</system-reminder>' }] },
       },
       userMessage('visible user text'),
-    ] as any)
+    ])
     expect(md).not.toContain('internal caveat')
     expect(md).not.toContain('<command-name>')
     expect(md).not.toContain('<system-reminder>')
@@ -401,7 +401,7 @@ describe('renderMessagesToMarkdown', () => {
           ],
         },
       },
-    ] as any)
+    ])
     expect(md).toContain('## User')
     expect(md).toContain('real user content')
     expect(md).not.toContain('<command-name>')
@@ -416,7 +416,7 @@ describe('renderMessagesToMarkdown', () => {
           content: [{ type: 'text', text: 'visible before <command-name>/export</command-name> visible after' }],
         },
       },
-    ] as any)
+    ])
     expect(md).toContain('## User')
     expect(md).toContain('visible before  visible after')
     expect(md).not.toContain('<command-name>')
@@ -437,7 +437,7 @@ describe('renderMessagesToMarkdown', () => {
         type: 'custom',
         content: { value: 42 },
       },
-    ] as any)
+    ])
     expect(md).toContain('## Custom')
     expect(md).toContain('*[unknown content]*')
     expect(md).toContain('"value": 42')
@@ -452,7 +452,7 @@ describe('renderMessagesToMarkdown', () => {
           content: ['primitive content'],
         },
       },
-    ] as any)
+    ])
     expect(md).toContain('## Assistant')
     expect(md).toContain('*[unknown content]*')
     expect(md).toContain('primitive content')
@@ -596,7 +596,7 @@ describe('renderMessagesToJSON', () => {
   })
 
   test('safely handles non-serializable content', () => {
-    const cyclic: any = { a: 1 }
+    const cyclic: { a: number; self?: unknown } = { a: 1 }
     cyclic.self = cyclic
     const msg = {
       type: 'assistant',
@@ -641,7 +641,7 @@ describe('renderMessagesToJSON', () => {
   })
 
   test('does not emit empty rawType for malformed messages without a type', () => {
-    const parsed = JSON.parse(renderMessagesToJSON([{}] as any))
+    const parsed = JSON.parse(renderMessagesToJSON([{}]))
     expect(parsed.messages[0].type).toBe('unknown')
     expect(parsed.messages[0].role).toBe('unknown')
     expect(parsed.messages[0].rawType).toBeUndefined()
@@ -735,7 +735,7 @@ describe('renderMessagesToJSON', () => {
           content: '<local-command-stderr>command failed</local-command-stderr>',
         },
       },
-    ] as any))
+    ]))
     expect(parsed.messages[0].type).toBe('system')
     expect(parsed.messages[0].role).toBe('system')
     expect(parsed.messages[0].subtype).toBe('local_command')
@@ -752,7 +752,7 @@ describe('renderMessagesToJSON', () => {
           content: '<bash-stdout format="persisted">persisted output</bash-stdout>',
         },
       },
-    ] as any))
+    ]))
     expect(parsed.messages[0].type).toBe('system')
     expect(parsed.messages[0].subtype).toBe('bash_output')
     expect(parsed.messages[0].content[0].text).toBe('persisted output')
@@ -782,7 +782,7 @@ describe('renderMessagesToJSON', () => {
           ],
         },
       },
-    ] as any))
+    ]))
     expect(parsed.messages[0].content[0].content[0].text).toBe('visible')
     expect(JSON.stringify(parsed)).not.toContain('system-reminder')
     expect(JSON.stringify(parsed)).not.toContain('hidden')
@@ -797,7 +797,7 @@ describe('renderMessagesToJSON', () => {
           content: '<bash-stdout>stdout text</bash-stdout><bash-stderr>stderr text</bash-stderr>',
         },
       },
-    ] as any))
+    ]))
     expect(parsed.messages[0].type).toBe('system')
     expect(parsed.messages[0].role).toBe('system')
     expect(parsed.messages[0].subtype).toBe('bash_output')
@@ -817,7 +817,7 @@ describe('renderMessagesToJSON', () => {
           content: [{ type: 'text', text: '<bash-input>npm test</bash-input>' }],
         },
       },
-    ] as any))
+    ]))
     expect(parsed.messages[0].type).toBe('system')
     expect(parsed.messages[0].role).toBe('system')
     expect(parsed.messages[0].subtype).toBe('bash_input')
@@ -837,7 +837,7 @@ describe('renderMessagesToJSON', () => {
           ],
         },
       },
-    ] as any))
+    ]))
     expect(parsed.messages[0].type).toBe('system')
     expect(parsed.messages[0].role).toBe('system')
     expect(parsed.messages[0].subtype).toBe('bash_output')
@@ -849,7 +849,7 @@ describe('renderMessagesToJSON', () => {
     const parsed = JSON.parse(renderMessagesToJSON([
       { type: 'progress', message: { role: 'user', content: [{ type: 'text', text: 'loading' }] } },
       userMessage('visible'),
-    ] as any))
+    ]))
     expect(parsed.messages[0].index).toBe(0)
     expect(parsed.messages[0].sourceIndex).toBe(1)
   })
@@ -871,7 +871,7 @@ describe('renderMessagesToJSON', () => {
         },
       },
       userMessage('visible'),
-    ] as any))
+    ]))
     expect(parsed.messageCount).toBe(1)
     expect(parsed.messages[0].content[0].text).toBe('visible')
   })
@@ -894,7 +894,7 @@ describe('renderMessagesToJSON', () => {
         },
       },
       userMessage('visible'),
-    ] as any))
+    ]))
     expect(parsed.messageCount).toBe(1)
     expect(parsed.messages[0].content[0].text).toBe('visible')
   })
@@ -937,7 +937,7 @@ describe('renderMessagesToJSON', () => {
         message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>hidden array</system-reminder>' }] },
       },
       userMessage('visible user text'),
-    ] as any))
+    ]))
     expect(parsed.messageCount).toBe(1)
     expect(parsed.messages[0].content[0].text).toBe('visible user text')
   })
@@ -954,7 +954,7 @@ describe('renderMessagesToJSON', () => {
           ],
         },
       },
-    ] as any))
+    ]))
     expect(parsed.messageCount).toBe(1)
     expect(parsed.messages[0].content).toEqual([{ type: 'text', text: 'real user content' }])
   })
@@ -968,7 +968,7 @@ describe('renderMessagesToJSON', () => {
           content: [{ type: 'text', text: 'visible before <command-name>/export</command-name> visible after' }],
         },
       },
-    ] as any))
+    ]))
     expect(parsed.messageCount).toBe(1)
     expect(parsed.messages[0].type).toBe('user')
     expect(parsed.messages[0].content[0].text).toBe('visible before  visible after')
