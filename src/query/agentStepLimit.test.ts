@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 import { PassThrough } from 'node:stream'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import { createElement } from 'react'
 import { z } from 'zod/v4'
 
@@ -14,6 +15,7 @@ import { resolveProviderRequest } from '../services/api/providerConfig.js'
 import { FallbackTriggeredError } from '../services/api/withRetry.js'
 import {
   createAssistantMessage,
+  createAssistantAPIErrorMessage,
   createUserMessage,
   normalizeMessagesForAPI,
 } from '../utils/messages.js'
@@ -49,7 +51,7 @@ const echoTool = buildTool({
   async prompt() {
     return ''
   },
-  async call(input) {
+  async call(input, _context: QueryParams['toolUseContext']) {
     echoCalls.push(input.text)
     return { data: `echo:${input.text}` }
   },
@@ -182,6 +184,197 @@ function gatewayEffort(requestModel: string): string | undefined {
 }
 
 describe('fork request selection at context boundaries', () => {
+  test.each((['microcompact', 'autocompact'] as const).flatMap(interval =>
+    (['ambient', 'explicit', 'fixed'] as const).map(choice => ({ interval, choice })),
+  ))('refreshes $choice selection after awaiting $interval', async ({ interval, choice }) => {
+    let providerId = 'provider-a'
+    const active = spyOn(providerProfiles, 'getActiveProviderProfile').mockImplementation(
+      () => ({ id: providerId }) as ReturnType<typeof providerProfiles.getActiveProviderProfile>,
+    )
+    const requests: string[] = []
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: 'done' })
+    })
+    const state = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({ ...state, mainLoopModel: `${providerId}-only` })
+    params.toolUseContext.options.mainLoopModel = 'provider-a-only'
+    if (choice === 'fixed') params.toolUseContext.options.providerOverride = {
+      model: 'provider-a-only', baseURL: 'https://fixed.example/v1', apiKey: 'test-key',
+    }
+    const child = createSubagentContext(params.toolUseContext, choice === 'explicit'
+      ? { options: { ...params.toolUseContext.options } } : undefined)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const waitForSwitch = async () => { entered.resolve(); await release.promise }
+    params.deps = { ...params.deps!,
+      microcompact: async messages => {
+        if (interval === 'microcompact') await waitForSwitch()
+        return { messages }
+      },
+      autocompact: async () => {
+        if (interval === 'autocompact') await waitForSwitch()
+        return { wasCompacted: false }
+      },
+    }
+    const running = drain({ ...params, toolUseContext: child })
+    try {
+      await entered.promise
+      providerId = 'provider-b'
+      release.resolve()
+      await running
+      expect(requests).toEqual([choice === 'ambient' ? 'provider-b-only' : 'provider-a-only'])
+    } finally {
+      release.resolve()
+      await running
+      active.mockRestore()
+    }
+  })
+
+  test.each((['provider', 'model'] as const).flatMap(recovery =>
+    (['ambient', 'explicit', 'fixed'] as const).map(choice => ({ recovery, choice })),
+  ))('preserves $choice origin through automatic $recovery fallback and a later tool switch', async ({ recovery, choice }) => {
+    const settingsModule = await import('../utils/settings/settings.js')
+    let providerId = 'provider-a'
+    const profiles = ['provider-a', 'provider-b', 'provider-c'].map(id => ({
+      id, name: id, provider: 'openai' as const, baseUrl: 'https://gateway.example/v1', model: `${id}-only`,
+    }))
+    const active = spyOn(providerProfiles, 'getActiveProviderProfile').mockImplementation(
+      () => profiles.find(p => p.id === providerId) as ReturnType<typeof providerProfiles.getActiveProviderProfile>,
+    )
+    const allProfiles = spyOn(providerProfiles, 'getProviderProfiles').mockReturnValue(profiles)
+    const activate = spyOn(providerProfiles, 'setActiveProviderProfile').mockImplementation(id => {
+      providerId = id
+      return profiles.find(p => p.id === id) ?? null
+    })
+    const settings = spyOn(settingsModule, 'getSettings_DEPRECATED').mockReturnValue({
+      providerFallbackChain: recovery === 'provider' ? ['provider-a', 'provider-b'] : [],
+    })
+    const requests: string[] = []
+    let nestedContext: QueryParams['toolUseContext'] | undefined
+    const echo = spyOn(echoTool, 'call').mockImplementation(async (_input, context) => {
+      providerId = 'provider-c'
+      nestedContext = createSubagentContext(context)
+      return { data: 'switched' }
+    })
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      if (requests.length === 1) {
+        if (recovery === 'model') throw new FallbackTriggeredError('provider-a-only', 'provider-b-only')
+        yield createAssistantAPIErrorMessage({ content: 'rate limited', error: 'rate_limit' })
+      } else {
+        yield createAssistantMessage({ content: requests.length === 2
+          ? [{ type: 'tool_use', id: 'toolu_fallback_switch', name: 'Echo', input: { text: 'switch' } }]
+          : 'done' })
+      }
+    })
+    const state = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({ ...state, mainLoopModel: `${providerId}-only` })
+    params.toolUseContext.options.mainLoopModel = 'provider-a-only'
+    params.toolUseContext.options.tools = [echoTool]
+    if (choice === 'fixed') params.toolUseContext.options.providerOverride = {
+      model: 'provider-a-only', baseURL: 'https://fixed.example/v1', apiKey: 'test-key',
+    }
+    const child = createSubagentContext(params.toolUseContext, choice === 'explicit'
+      ? { options: { ...params.toolUseContext.options } } : undefined)
+    try {
+      await drain({ ...params, toolUseContext: child, fallbackModel: 'provider-b-only' })
+      expect(nestedContext).toBeDefined()
+      await drain({ ...params, toolUseContext: nestedContext! })
+      expect(requests).toEqual(['provider-a-only', 'provider-b-only',
+        choice === 'ambient' ? 'provider-c-only' : 'provider-b-only',
+        choice === 'ambient' ? 'provider-c-only' : 'provider-b-only'])
+    } finally {
+      echo.mockRestore()
+      settings.mockRestore()
+      activate.mockRestore()
+      allProfiles.mockRestore()
+      active.mockRestore()
+    }
+  })
+
+  test.each((['hook', 'skill', 'definition'] as const).flatMap(source =>
+    (['denied', 'allowed', 'default'] as const).map(policy => ({ source, policy })),
+  ))('$source model selection obeys the real allowlist: $policy', async ({ source, policy }) => {
+    const settingsModule = await import('../utils/settings/settings.js')
+    const queryModule = await import('../query.js')
+    const commands = await import('../commands.js')
+    const models = await import('../utils/model/model.js')
+    const transcripts = await import('../utils/sessionStorage.js')
+    const { execAgentHook } = await import('../utils/hooks/execAgentHook.js')
+    const { SkillTool } = await import('../tools/SkillTool/SkillTool.js')
+    const { runAgent } = await import('../tools/AgentTool/runAgent.js')
+    const originalQuery = queryModule.query
+    const requested = policy === 'default' ? undefined : 'gpt-4o'
+    const configured = {
+      availableModels: policy === 'default' ? [] : policy === 'allowed' ? ['gpt-5', 'gpt-4o'] : ['gpt-5'],
+      smartRouting: { enabled: true, simpleModel: 'gpt-5', strongModel: 'gpt-5' },
+    }
+    const settings = spyOn(settingsModule, 'getSettings_DEPRECATED').mockReturnValue(configured)
+    const initialSettings = spyOn(settingsModule, 'getInitialSettings').mockReturnValue(configured)
+    const smallModel = spyOn(models, 'getSmallFastModel').mockReturnValue('gpt-5')
+    const transcript = spyOn(transcripts, 'recordSidechainTranscript').mockResolvedValue(undefined)
+    const metadata = spyOn(transcripts, 'writeAgentMetadata').mockResolvedValue(undefined)
+    const commandList = spyOn(commands, 'getCommands').mockResolvedValue([{
+      type: 'prompt', name: 'selection-test', description: 'test', progressMessage: 'test',
+      contentLength: 0, source: 'builtin', model: requested,
+      getPromptForCommand: async () => [{ type: 'text', text: 'inspect' }],
+    }])
+    const requests: string[] = []
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: source === 'hook'
+        ? [{ type: 'tool_use', id: 'toolu_policy_hook', name: 'StructuredOutput', input: { ok: true } }]
+        : 'done' })
+    })
+    const state = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({ ...state, mainLoopModel: 'gpt-5', settings: configured, mcp: { ...state.mcp, commands: [] } })
+    params.toolUseContext.options.mainLoopModel = 'gpt-5'
+    const childQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    try {
+      expect(modelAllowlist.isModelAllowed('gpt-4o')).toBe(policy === 'allowed')
+      let failure: unknown
+      if (source === 'hook') {
+        const result = await execAgentHook(
+          { type: 'agent', prompt: 'verify', model: requested, timeout: 2 },
+          'Stop:0', 'Stop', '{}', params.toolUseContext.abortController.signal, params.toolUseContext, undefined, params.messages,
+        )
+        failure = result.message?.type === 'attachment' && result.message.attachment.type !== 'hook_success' ? result : undefined
+      } else {
+        try {
+          if (source === 'skill') {
+            const child = createSubagentContext(params.toolUseContext)
+            const result = await SkillTool.call({ skill: 'selection-test' }, child, params.canUseTool,
+              createAssistantMessage({ content: [{ type: 'tool_use', id: 'toolu_skill_policy', name: 'Skill', input: { skill: 'selection-test' } }] }))
+            await drain({ ...params, toolUseContext: result.contextModifier?.(child) ?? child })
+          } else {
+            for await (const _message of runAgent({
+              agentDefinition: { agentType: 'selection-test', whenToUse: 'test', source: 'userSettings', tools: [], model: requested, getSystemPrompt: () => 'test' },
+              promptMessages: params.messages, toolUseContext: params.toolUseContext, canUseTool: params.canUseTool,
+              isAsync: false, querySource: 'agent:custom', availableTools: [],
+              override: { userContext: {}, systemContext: {}, systemPrompt: asSystemPrompt([]) },
+            })) { /* Exhaust the actual agent query. */ }
+          }
+        } catch (error) { failure = error }
+      }
+      if (policy === 'denied') {
+        expect(requests).toEqual([])
+        expect(failure).toBeDefined()
+      } else {
+        expect(failure).toBeUndefined()
+        expect(requests).toEqual([requested ?? 'gpt-5'])
+      }
+    } finally {
+      childQuery.mockRestore()
+      commandList.mockRestore()
+      metadata.mockRestore()
+      transcript.mockRestore()
+      smallModel.mockRestore()
+      initialSettings.mockRestore()
+      settings.mockRestore()
+    }
+  })
+
   test.each((['transcript', 'tool'] as const).flatMap(interval =>
     (['ambient', 'explicit', 'fixed'] as const).map(choice => ({ interval, choice })),
   ))('existing $choice fork follows a provider switch during $interval', async ({ interval, choice }) => {
@@ -409,7 +602,7 @@ describe('fork request selection at context boundaries', () => {
       DISABLE_AUTO_COMPACT: '1',
       DISABLE_COMPACT: '1',
     }
-    const previous = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]]))
+    const restoreEnv = snapshotEnv(Object.keys(environment))
     const previousCap = getSessionContextWindowOverride('gpt-5.6-sol')
     Object.assign(process.env, environment)
     clearSessionContextWindowOverride('gpt-5.6-sol')
@@ -457,10 +650,7 @@ describe('fork request selection at context boundaries', () => {
     } finally {
       clearSessionContextWindowOverride('gpt-5.6-sol')
       if (previousCap !== undefined) setSessionContextWindowOverride('gpt-5.6-sol', previousCap)
-      for (const [key, value] of Object.entries(previous)) {
-        if (value === undefined) delete process.env[key]
-        else process.env[key] = value
-      }
+      restoreEnv()
     }
   })
 

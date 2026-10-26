@@ -1247,6 +1247,12 @@ async function* queryLoop(
       }
     }
 
+    // Compaction can await while the active provider changes. Refresh before
+    // request selection and the tool executor capture this context.
+    toolUseContext = refreshAmbientQueryModelSelection(toolUseContext)
+    const followsProvider = !toolUseContext.agentId ||
+      getQueryModelSelection(toolUseContext)?.followsProvider === true
+
     //TODO: no need to set toolUseContext.messages during set-up since it is updated here
     toolUseContext = {
       ...toolUseContext,
@@ -1567,8 +1573,9 @@ async function* queryLoop(
               runtimeModel: currentModel,
               requestModel,
               providerId: getActiveProviderProfile()?.id,
-              followsProvider: !toolUseContext.agentId ||
-                getQueryModelSelection(toolUseContext)?.followsProvider === true,
+              // Automatic model retries may mutate options; that is not an
+              // explicit user choice and must not change the selection origin.
+              followsProvider,
             }
             for await (const message of deps.callModel({
             messages: prependUserContext(
@@ -2457,6 +2464,7 @@ async function* queryLoop(
       if (isWithheldRateLimit) {
         const fallback = resolveNextFallbackProviderFromState()
         if (fallback !== null) {
+          const selection = getQueryModelSelection(toolUseContext)
           const activated = setActiveProviderProfile(fallback.nextProfileId)
           if (activated) {
             const fromLabel = fallback.fromProfileId ?? 'previous provider'
@@ -2478,7 +2486,23 @@ async function* queryLoop(
                 mainLoopModel: activatedModel,
                 mainLoopModelForSession: null,
               }))
-              toolUseContext.options.mainLoopModel = activatedModel
+              const runtimeModel = parseUserSpecifiedModel(activatedModel)
+              const options = { ...toolUseContext.options, mainLoopModel: runtimeModel }
+              // Recovery replaces the pair, not its origin. Clone so retained
+              // contexts still own their earlier snapshot, even if setAppState
+              // is a no-op in this child.
+              toolUseContext = {
+                ...toolUseContext, options,
+                queryModelSelection: {
+                  agentId: toolUseContext.agentId,
+                  ...(selection && { current: {
+                    ...selection, options, model: runtimeModel,
+                    selectedModel: activatedModel, runtimeModel,
+                    requestModel: getProviderRequestModel(activatedModel, runtimeModel),
+                    providerId: activated.id,
+                  } }),
+                },
+              }
             }
             // System informational, NOT an assistant API error. The original
             // 429 is still withheld upstream, so SDK hosts that terminate on

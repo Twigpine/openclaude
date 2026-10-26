@@ -17,6 +17,7 @@ import { errorMessage } from '../errors.js'
 import type { HookResult } from '../hooks.js'
 import { createUserMessage, handleMessageFromStream } from '../messages.js'
 import { getSmallFastModel } from '../model/model.js'
+import { isModelAllowed } from '../model/modelAllowlist.js'
 import { hasPermissionsToUseTool } from '../permissions/permissions.js'
 import { getAgentTranscriptPath, getTranscriptPath } from '../sessionStorage.js'
 import type { AgentHook } from '../settings/types.js'
@@ -116,6 +117,11 @@ When done, return your result using the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool with:
       ])
 
       const model = hook.model ?? getSmallFastModel()
+      if (hook.model && !isModelAllowed(hook.model)) {
+        throw new Error(
+          `Model '${hook.model}' is not available. Your organization restricts model selection.`,
+        )
+      }
       const MAX_AGENT_TURNS = 50
 
       // Create unique agentId for this hook agent

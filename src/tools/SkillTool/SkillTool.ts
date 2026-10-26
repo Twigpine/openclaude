@@ -58,6 +58,7 @@ import { lazySchema } from '../../utils/lazySchema.js'
 import { createUserMessage, normalizeMessages } from '../../utils/messages.js'
 import type { ModelAlias } from '../../utils/model/aliases.js'
 import { resolveSkillModelOverride } from '../../utils/model/model.js'
+import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
 import { recordSkillUsage } from '../../utils/suggestions/skillUsageTracking.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { runAgent } from '../AgentTool/runAgent.js'
@@ -661,6 +662,12 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     // Extract metadata from the command
     const allowedTools = processedCommand.allowedTools || []
     const model = processedCommand.model
+    if (model && !isModelAllowed(model) &&
+      !isModelAllowed(resolveSkillModelOverride(model, context.options.mainLoopModel))) {
+      throw new Error(
+        `Model '${model}' is not available. Your organization restricts model selection.`,
+      )
+    }
     const effort = command?.type === 'prompt' ? command.effort : undefined
 
     const isBuiltIn = builtInCommandNames().has(commandName)

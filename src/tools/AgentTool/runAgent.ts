@@ -417,6 +417,21 @@ export async function* runAgent({
     )
   }
 
+  // Definitions that resolve to the inherited/default model need no new
+  // selection permission. A route has its own effective-model check above.
+  if (
+    effectiveModel === resolvedAgentModel &&
+    !providerOverride &&
+    agentDefinition.model &&
+    resolvedAgentModel !== getAgentModel(undefined, toolUseContext.options.mainLoopModel, model, permissionMode) &&
+    !isModelAllowed(agentDefinition.model) &&
+    !isModelAllowed(resolvedAgentModel)
+  ) {
+    throw new Error(
+      `Model '${resolvedAgentModel}' is not available. Your organization restricts model selection.`,
+    )
+  }
+
   const agentId = override?.agentId ? override.agentId : createAgentId()
 
   // Route this agent's transcript into a grouping subdirectory if requested
