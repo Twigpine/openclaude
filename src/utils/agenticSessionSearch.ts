@@ -135,7 +135,7 @@ function logContainsQuery(log: LogOption, queryLower: string): boolean {
 }
 
 /**
- * Performs an agentic search using the configured model to find relevant sessions
+ * Performs an agentic search using the background search model to find relevant sessions
  * based on semantic understanding of the query.
  */
 export async function agenticSessionSearch(
