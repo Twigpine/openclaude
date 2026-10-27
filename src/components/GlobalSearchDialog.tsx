@@ -296,7 +296,6 @@ function _temp4(
       return;
     }
     collected = collected + parsed.length;
-    collected;
     setMatches_0(prev => {
       const seen = new Set(prev.map(matchKey));
       const fresh = parsed.filter(p => !seen.has(matchKey(p)));

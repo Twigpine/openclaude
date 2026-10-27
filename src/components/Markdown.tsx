@@ -146,7 +146,6 @@ function MarkdownBody(t0) {
         elements.push(<MarkdownTable key={elements.length} token={token as Tokens.Table} highlight={highlight} />);
       } else {
         nonTableContent = nonTableContent + formatToken(token, theme, 0, null, null, highlight, tokens[index - 1]);
-        nonTableContent;
       }
     }
     flushNonTableContent();
