@@ -129,6 +129,19 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
               assert.equal(fresh.sessionId, null);
               assert.deepEqual(fresh.getMessages(), []);
               assert.ok(!updates.some(message => message.type === 'restore_messages'));
+
+              // An ordinary send must not cancel the selected history load.
+              const ordinaryResume = receive({ type: 'resume_session', sessionId: id });
+              const ordinarySend = fresh.sendMessage('sent while loading');
+              await new Promise(setImmediate);
+              children.at(-1).stdout.write(JSON.stringify({ type: 'system', session_id: 'interim-id' }) + '\n');
+              await ordinarySend;
+              finishLoad([{ role: 'user', text: 'selected history' }]);
+              await ordinaryResume;
+              assert.equal(fresh.sessionId, id);
+              assert.deepEqual(fresh.getMessages(), [{ role: 'user', text: 'selected history' }]);
+              assert.equal(resumeValue(), file);
+              fresh.stopSession();
             } finally {
               manager.loadSession = loadSession;
               registrations.forEach(registration => registration.dispose());

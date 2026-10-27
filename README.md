@@ -225,7 +225,9 @@ session you are currently in is not listed and cannot be deleted.
 
 In `/resume`, type a search query, then press Down and Enter on **Search deeply
 using Claude** to search conversation contents with the configured model. This
-explicit action can make a model request; ordinary filtering stays local.
+explicit action can make a model request; ordinary filtering stays local. Deep
+search considers up to 100 loaded sessions within the active filters, so older
+history may not be included.
 
 ### Background sessions
 

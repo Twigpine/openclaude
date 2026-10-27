@@ -1263,6 +1263,7 @@ function renderChatHtml({ nonce, platform }) {
         break;
 
       case 'session_cleared':
+        setStreaming(false);
         messagesEl.innerHTML = '';
         if (welcomeEl) {
           messagesEl.appendChild(welcomeEl);

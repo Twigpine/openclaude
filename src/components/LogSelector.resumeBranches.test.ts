@@ -479,6 +479,9 @@ test('deep search is offered only with a callback and runs from the keyboard', a
     stdin.write('\r')
     await waitForFrame(getOutput, frame => frame.includes('Recovered session'))
     expect(queries).toEqual(['z'])
+    stdin.write('\t')
+    await waitForFrame(getOutput, frame => !frame.includes('Recovered session') &&
+      frame.includes('Searches a limited set of loaded sessions.'))
   } finally {
     renderer?.unmount()
     stdin.end()
