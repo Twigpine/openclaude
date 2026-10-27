@@ -41,8 +41,6 @@ import {
   resolveRouteIdFromBaseUrl,
 } from '../integrations/routeMetadata.js'
 import {
-  maskSecretForDisplay,
-  redactSecretValueForDisplay,
   sanitizeApiKey,
   sanitizeProviderConfigValue,
   type SecretValueSource,

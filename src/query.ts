@@ -92,9 +92,9 @@ import {
 const skillPrefetch = feature('EXPERIMENTAL_SKILL_SEARCH')
   ? (require('./services/skillSearch/prefetch.js') as typeof import('./services/skillSearch/prefetch.js'))
   : null
-const jobClassifier = feature('TEMPLATES')
-  ? (require('./jobs/classifier.js') as typeof import('./jobs/classifier.js'))
-  : null
+if (feature('TEMPLATES')) {
+  require('./jobs/classifier.js')
+}
 /* eslint-enable @typescript-eslint/no-require-imports */
 import {
   remove as removeFromQueue,
@@ -138,7 +138,6 @@ import {
 import { AGENT_STEP_LIMIT_TOOL_RESULT_PREFIX } from './query/agentStepLimit.js'
 import { buildQueryConfig } from './query/config.js'
 import {
-  MAX_MESSAGES_COMPACTION_THRESHOLDS,
   getGlobalConfig,
   isValidMaxMessagesCompactionThreshold,
   normalizeMaxMessagesCompactionThreshold,

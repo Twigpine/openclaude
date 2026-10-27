@@ -1,5 +1,5 @@
 import { queryInternals, sessionInternals } from './helpers/query-test-doubles.js'
-import { describe, test, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test'
+import { describe, test, expect, vi, beforeAll, afterAll } from 'bun:test'
 import { unstable_v2_createSession } from '../../src/entrypoints/sdk/index.js'
 import { query } from '../../src/entrypoints/sdk/index.js'
 import type { MCPServerConnection } from '../../src/services/mcp/types.js'

@@ -448,11 +448,6 @@ async function captureChatCompletionRequest(
   return { authorization, headers, url }
 }
 
-function makeCodexSseResponse(responseData: Record<string, unknown>): Response {
-  const data = JSON.stringify(responseData)
-  return makeSseResponse([`event: response.completed\ndata: ${data}\n\n`])
-}
-
 beforeEach(async () => {
   await acquireSharedMutationLock('openaiShim.test.ts')
   process.env.OPENAI_BASE_URL = 'http://example.test/v1'

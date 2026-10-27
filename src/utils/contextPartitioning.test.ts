@@ -1,5 +1,5 @@
 import type { Message } from '../types/message.js'
-import { describe, expect, it, beforeEach } from 'bun:test'
+import { describe, expect, it } from 'bun:test'
 import {
   partitionContext,
   getZoneMessages,

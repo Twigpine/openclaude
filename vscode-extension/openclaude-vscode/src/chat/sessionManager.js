@@ -13,7 +13,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const readline = require('readline');
-const crypto = require('crypto');
+require('crypto');
 
 // Keep in sync with src/utils/sessionStoragePortable.ts.
 const MAX_SANITIZED_LENGTH = 200;

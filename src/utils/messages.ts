@@ -85,7 +85,7 @@ import {
   memoryHeader,
 } from './attachments.js'
 import { quote } from './bash/shellQuote.js'
-import { formatNumber, formatTokens } from './format.js'
+import { formatNumber } from './format.js'
 import { jsonStringify } from './slowOperations.js'
 
 // Hook attachments that have a hookName field (excludes HookPermissionDecisionAttachment)
@@ -115,13 +115,6 @@ import {
 } from 'src/tools/FileReadTool/prompt.js'
 import type { DeepImmutable } from 'src/types/utils.js'
 import { getStrictToolResultPairing } from '../bootstrap/state.js'
-import {
-  COMMAND_ARGS_TAG,
-  COMMAND_MESSAGE_TAG,
-  COMMAND_NAME_TAG,
-  LOCAL_COMMAND_CAVEAT_TAG,
-  LOCAL_COMMAND_STDOUT_TAG,
-} from '../constants/xml.js'
 import { DiagnosticTrackingService } from '../services/diagnosticTracking.js'
 import {
   findToolByName,
@@ -140,26 +133,16 @@ import { TASK_UPDATE_TOOL_NAME } from '../tools/TaskUpdateTool/constants.js'
 import type { PermissionMode } from '../types/permissions.js'
 import { normalizeToolInput, normalizeToolInputForAPI } from './api.js'
 import { logAntError, logForDebugging } from './debug.js'
-import { hasEmbeddedSearchTools } from './embeddedTools.js'
 import { formatFileSize } from './format.js'
 import { validateImagesForAPI } from './imageValidation.js'
 import { safeParseJSON } from './json.js'
 import { logError, logMCPDebug } from './log.js'
 import { normalizeLegacyToolName } from './permissions/permissionRuleParser.js'
-import { isDangerousPermissionMode } from './permissions/PermissionMode.js'
-import {
-  getPlanModeV2AgentCount,
-  getPlanModeV2ExploreAgentCount,
-  isPlanModeInterviewPhaseEnabled,
-} from './planModeV2.js'
 import { isTodoV2Enabled } from './tasks.js'
 import {
-  CANCEL_MESSAGE,
   createUserMessage,
-  INTERRUPT_MESSAGE,
   INTERRUPT_MESSAGE_FOR_TOOL_USE,
   isSyntheticApiErrorMessage,
-  REJECT_MESSAGE,
 } from './messages/factories.js'
 import {
   formatToolResultPairingIssue,

@@ -1208,9 +1208,7 @@ export async function checkPermissionsAndCallTool(
     permissionDecision.behavior !== 'ask' &&
     !toolUseContext.toolDecisions?.has(toolUseID)
   ) {
-    const decision =
-      permissionDecision.behavior === 'allow' ? 'accept' : 'reject'
-    const source = decisionReasonToOTelSource(
+    decisionReasonToOTelSource(
       permissionDecision.decisionReason,
       permissionDecision.behavior,
     )
@@ -1234,7 +1232,7 @@ export async function checkPermissionsAndCallTool(
 
   if (permissionDecision.behavior !== 'allow') {
     logForDebugging(`${tool.name} tool permission denied`)
-    const decisionInfo = toolUseContext.toolDecisions?.get(toolUseID)
+    toolUseContext.toolDecisions?.get(toolUseID)
 
     if (!shouldSkipSessionPersistence()) {
       try {
@@ -1397,7 +1395,7 @@ export async function checkPermissionsAndCallTool(
   // Prepare tool parameters for logging in tool_result event.
   // Gated by OTEL_LOG_TOOL_DETAILS — tool parameters can contain sensitive
   // content (bash commands, MCP server names, etc.) so they're opt-in only.
-  const telemetryToolInput = extractToolInputForTelemetry(processedInput)
+  extractToolInputForTelemetry(processedInput)
   let toolParameters: Record<string, unknown> = {}
   if (isToolDetailsLoggingEnabled()) {
     if (tool.name === BASH_TOOL_NAME && 'command' in processedInput) {
@@ -1594,9 +1592,9 @@ export async function checkPermissionsAndCallTool(
     }
 
     // Log tool result event for OTLP with tool parameters and decision context
-    const mcpServerScope = isMcpTool(tool)
-      ? getMcpServerScopeFromToolName(tool.name)
-      : null
+    if (isMcpTool(tool)) {
+      getMcpServerScopeFromToolName(tool.name)
+    }
 
 
     // Run PostToolUse hooks
@@ -1896,9 +1894,9 @@ export async function checkPermissionsAndCallTool(
         ),
       })
       // Log tool result error event for OTLP with tool parameters and decision context
-      const mcpServerScope = isMcpTool(tool)
-        ? getMcpServerScopeFromToolName(tool.name)
-        : null
+      if (isMcpTool(tool)) {
+        getMcpServerScopeFromToolName(tool.name)
+      }
 
           }
     const content = formatError(error)

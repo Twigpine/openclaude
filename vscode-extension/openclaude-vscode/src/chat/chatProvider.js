@@ -359,7 +359,6 @@ class ChatController {
       // Show turn info: if the model stopped without using tools (num_turns=1),
       // the user knows the model chose not to edit
       if (msg.num_turns !== undefined) {
-        const reason = msg.stop_reason || 'done';
         this._broadcast({
           type: 'status',
           content: msg.num_turns > 1

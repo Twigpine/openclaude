@@ -2,7 +2,7 @@ import type { AppState } from '../../src/state/AppStateStore.js'
 import type { AssistantMessage, ProgressMessage } from '../../src/types/message.js'
 import type { SDKMessage } from '../../src/entrypoints/sdk/shared.js'
 import { describe, test, expect, afterEach, beforeAll, afterAll } from 'bun:test'
-import { query, forkSession, getSessionMessages, unstable_v2_createSession } from '../../src/entrypoints/sdk/index.js'
+import { query, unstable_v2_createSession } from '../../src/entrypoints/sdk/index.js'
 import {
   buildPermissionContext,
   createDefaultCanUseTool,

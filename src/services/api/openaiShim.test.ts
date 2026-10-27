@@ -3,7 +3,7 @@ import { getEventListeners } from 'node:events'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import { snapshotEnv } from '../../test/envSnapshot.js'
 import { asMockFetch } from '../../test/typedMocks.js'
-import { _clearRegistryForTesting, ensureIntegrationsLoaded, registerGateway } from '../../integrations/index.ts'
+import { _clearRegistryForTesting, ensureIntegrationsLoaded } from '../../integrations/index.ts'
 import { applyProviderFlag } from '../../utils/providerFlag.ts'
 import { applyProviderProfileToProcessEnv } from '../../utils/providerProfiles.ts'
 import { PROFILE_ORCAROUTER_KEY_SHA256 } from '../../utils/providerProfile.js'
@@ -11,10 +11,6 @@ import {
   __resetInterruptionTraceForTests,
   __waitForInterruptionTraceFlushForTests,
 } from '../../utils/interruptionTrace.js'
-import {
-  getAssistantMessageFromError,
-  OPENCODE_GO_FREE_LIMIT_ERROR_MESSAGE,
-} from './errors.ts'
 import { accumulateUsage, updateUsage } from './claude.js'
 import { EMPTY_USAGE } from './emptyUsage.js'
 import {
@@ -23,11 +19,9 @@ import {
 } from './openaiErrorClassification.ts'
 import {
   createOpenAIShimClient,
-  hasMistralApiHost,
   parseTextToolCalls,
   parseXmlToolCalls,
 } from './openaiShim.ts'
-import * as realGithubModelsCredentials from '../../utils/githubModelsCredentials.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
 import type { AssistantMessage } from '../../types/message.js'
 
@@ -434,24 +428,6 @@ function makeGithubChatFallbackResponse(): Response {
       error: { message: '/chat/completions is not accessible for this model' },
     }),
     { status: 400, headers: { 'Content-Type': 'application/json' } },
-  )
-}
-
-function makeResponsesApiResponse(model: string): Response {
-  return new Response(
-    JSON.stringify({
-      id: 'resp-fallback-test',
-      model,
-      output: [
-        {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'output_text', text: 'ok' }],
-        },
-      ],
-      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-    }),
-    { headers: { 'Content-Type': 'application/json' } },
   )
 }
 
@@ -6320,11 +6296,6 @@ test('preserves valid tool pairs after history pruning while dropping orphaned t
 // Extraction boundary: history pruning | executor Copilot refresh behavior.
 // The contiguous Copilot authentication retry block below moves with execution.
 // Keep this marker stable for independent adjacent test migrations.
-function makeCodexSseResponse(responseData: Record<string, unknown>): Response {
-  const data = JSON.stringify(responseData)
-  return makeSseResponse([`event: response.completed\ndata: ${data}\n\n`])
-}
-
 
 test('GitHub Copilot responses fallback does not replay after a pre-header timeout', async () => {
   process.env.CLAUDE_CODE_USE_GITHUB = '1'

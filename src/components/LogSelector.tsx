@@ -11,7 +11,7 @@ import type { Color } from '../ink/styles.js';
 import { Box, Text, useInput, useTerminalFocus, useTheme } from '../ink.js';
 import { useKeybinding } from '../keybindings/useKeybinding.js';
 import { logEvent } from '../services/analytics/index.js';
-import type { LogOption, SerializedMessage } from '../types/logs.js';
+import type { LogOption } from '../types/logs.js';
 import { formatLogMetadata, truncateToWidth } from '../utils/format.js';
 import { getWorktreePaths } from '../utils/getWorktreePaths.js';
 import { getBranch } from '../utils/git.js';
@@ -89,11 +89,6 @@ function normalizeAndTruncateToWidth(text: string, maxWidth: number): string {
 const PARENT_PREFIX_WIDTH = 2; // '▼ ' or '▶ '
 const CHILD_PREFIX_WIDTH = 4; // '  ▸ '
 
-// Deep search constants
-const DEEP_SEARCH_MAX_MESSAGES = 2000;
-const DEEP_SEARCH_CROP_SIZE = 1000;
-const DEEP_SEARCH_MAX_TEXT_LENGTH = 50000; // Cap searchable text per session
-const FUSE_THRESHOLD = 0.3;
 const SNIPPET_CONTEXT_CHARS = 50; // Characters to show before/after match
 
 type Snippet = {
@@ -258,7 +253,6 @@ export function LogSelector(t0: LogSelectorProps) {
     t3 = $[0];
   }
   const isResumeWithRenameEnabled = t3;
-  const isDeepSearchEnabled = false;
   const [themeName] = useTheme();
   let t4;
   if ($[1] !== themeName) {
@@ -409,7 +403,6 @@ export function LogSelector(t0: LogSelectorProps) {
     t18 = $[18];
   }
   React.useEffect(t17, t18);
-  const searchableTextByLog = new Map<LogOption, string>(logs.map(_temp));
   let t19;
   t19 = null;
   let t20;
@@ -1523,46 +1516,6 @@ function _temp2(log_1: LogOption): boolean {
     return true;
   }
   return false;
-}
-function _temp(log: LogOption): [LogOption, string] {
-  return [log, buildSearchableText(log)];
-}
-function extractSearchableText(message: SerializedMessage): string {
-  // Only extract from user and assistant messages that have content
-  if (message.type !== 'user' && message.type !== 'assistant') {
-    return '';
-  }
-  const content = 'message' in message ? message.message?.content : undefined;
-  if (!content) return '';
-
-  // Handle string content (simple messages)
-  if (typeof content === 'string') {
-    return content;
-  }
-
-  // Handle array of content blocks
-  if (Array.isArray(content)) {
-    return content.map(block => {
-      if (typeof block === 'string') return block;
-      if ('text' in block && typeof block.text === 'string') return block.text;
-      return '';
-      // we don't return thinking blocks and tool names here;
-      // they're not useful for search, as they can add noise to the fuzzy matching
-    }).filter(Boolean).join(' ');
-  }
-  return '';
-}
-
-/**
- * Builds searchable text for a log including messages, titles, summaries, and metadata.
- * Crops long transcripts to first/last N messages for performance.
- */
-function buildSearchableText(log: LogOption): string {
-  const searchableMessages = log.messages.length <= DEEP_SEARCH_MAX_MESSAGES ? log.messages : [...log.messages.slice(0, DEEP_SEARCH_CROP_SIZE), ...log.messages.slice(-DEEP_SEARCH_CROP_SIZE)];
-  const messageText = searchableMessages.map(extractSearchableText).filter(Boolean).join(' ');
-  const metadata = [getResumeLogDisplayTitle(log), log.customTitle, log.sessionBranch?.branchName, log.summary, log.firstPrompt, log.gitBranch, log.tag, log.prNumber ? `PR #${log.prNumber}` : undefined, log.prRepository].filter(Boolean).join(' ');
-  const fullText = `${metadata} ${messageText}`.trim();
-  return fullText.length > DEEP_SEARCH_MAX_TEXT_LENGTH ? fullText.slice(0, DEEP_SEARCH_MAX_TEXT_LENGTH) : fullText;
 }
 export function groupLogsByResumeBranch(filteredLogs: LogOption[]): ResumeLogGroup[] {
   type MutableGroup = {

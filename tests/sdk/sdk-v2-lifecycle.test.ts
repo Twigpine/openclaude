@@ -27,7 +27,6 @@ import {
 import { clearAgentDefinitionsCache } from '../../src/tools/AgentTool/loadAgentsDir.js'
 type SessionId = ReturnType<typeof getSessionId>
 import {
-  drainQuery,
   withTempDir,
   createSessionJsonl,
   createMinimalConversation,

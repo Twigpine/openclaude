@@ -59,7 +59,6 @@ import type { MCPServerConnection } from '../../services/mcp/types.js'
 import {
   acquireEnvMutex,
   releaseEnvMutex,
-  mapMessageToSDK,
   type SDKMessage,
   type SDKUserMessage,
   type SDKPermissionTimeoutMessage,
@@ -827,7 +826,7 @@ class QueryImpl implements Query {
       requestSdkRootAbort(this.abortController, source, 'sdk_query')
     }
     // Deny all pending permission prompts before clearing
-    for (const [toolUseId, pending] of this.pendingPermissionPrompts) {
+    for (const [, pending] of this.pendingPermissionPrompts) {
       pending.resolve({
         behavior: 'deny',
         message: 'Query interrupted',

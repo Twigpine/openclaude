@@ -17,7 +17,6 @@ import {
 } from './envUtils.js'
 import { getProviderValidationError } from './providerValidation.js'
 import {
-  applySavedProfileToCurrentSession,
   applyStartupEnvFromProfile,
   buildStartupEnvFromProfile,
   buildAtomicChatProfileEnv,
@@ -30,13 +29,11 @@ import {
   buildLaunchEnv,
   buildOllamaProfileEnv,
   buildOpenAIProfileEnv,
-  clearPersistedCodexOAuthProfile,
   createProfileFile,
   DEFAULT_STARTUP_PROVIDER_ENV_VAR,
   deleteProfileFile,
   getDefaultProfileFilePath,
   isDefaultStartupProviderEnv,
-  isPersistedCodexOAuthProfile,
   maskSecretForDisplay,
   loadProfileFile,
   PROFILE_FILE_NAME,

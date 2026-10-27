@@ -276,7 +276,7 @@ describe('conversationArc', () => {
 
   describe('finalizeArcTurn', () => {
     it('writes session summary file when goals completed', async () => {
-      const arc = initializeArc(memDir)
+      initializeArc(memDir)
       const goal = addGoal('Implement feature')
       updateGoalStatus(goal.id, 'completed')
       addDecision('Use TypeScript', 'Type safety')
