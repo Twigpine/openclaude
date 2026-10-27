@@ -101,10 +101,8 @@ type Output = z.input<ReturnType<typeof outputSchema>>;
 export function AgentPromptDisplay(t0) {
   const $ = _c(3);
   const {
-    prompt,
-    dim: t1
+    prompt
   } = t0;
-  t1 === undefined ? false : t1;
   let t2;
   if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
     t2 = <Text color="success" bold={true}>Prompt:</Text>;
