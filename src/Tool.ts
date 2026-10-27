@@ -214,8 +214,8 @@ export type ToolUseContext = {
       /** Concrete model used for the request, independent of source options. */
       runtimeModel: string
       requestModel: string
-      /** Ambient provider that accepted this pair; fixed provider overrides are independent. */
-      providerId: string | undefined
+      /** Provider category and optional saved profile; fixed overrides are independent. */
+      providerKey: string
       /** Default ambient inheritance may follow a provider switch; explicit model choices may not. */
       followsProvider: boolean
     }

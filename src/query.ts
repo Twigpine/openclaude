@@ -102,7 +102,7 @@ import {
 } from './utils/messageQueueManager.js'
 import { notifyCommandLifecycle } from './utils/commandLifecycle.js'
 import { headlessProfilerCheckpoint } from './utils/headlessProfiler.js'
-import { getOwnedQueryModelSelection, getQueryModelSelection, refreshAmbientQueryModelSelection } from './utils/forkedAgent.js'
+import { getAmbientQueryProviderKey, getOwnedQueryModelSelection, getQueryModelSelection, refreshAmbientQueryModelSelection } from './utils/forkedAgent.js'
 import {
   getDefaultMainLoopModelSetting,
   getProviderRequestModel,
@@ -1572,7 +1572,7 @@ async function* queryLoop(
               selectedModel,
               runtimeModel: currentModel,
               requestModel,
-              providerId: getActiveProviderProfile()?.id,
+              providerKey: getAmbientQueryProviderKey(),
               // Automatic model retries may mutate options; that is not an
               // explicit user choice and must not change the selection origin.
               followsProvider,
@@ -2501,7 +2501,7 @@ async function* queryLoop(
                     ...selection, options, model: runtimeModel,
                     selectedModel: activatedModel, runtimeModel,
                     requestModel: getProviderRequestModel(activatedModel, runtimeModel),
-                    providerId: activated.id,
+                    providerKey: getAmbientQueryProviderKey(),
                   } }),
                 },
               }

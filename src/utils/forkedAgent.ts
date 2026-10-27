@@ -37,6 +37,7 @@ import {
 } from './messages.js'
 import { getDefaultMainLoopModelSetting, getProviderRequestModel, parseUserSpecifiedModel } from './model/model.js'
 import { getActiveProviderProfile } from './providerProfiles.js'
+import { getAPIProvider } from './model/providers.js'
 import { createDenialTrackingState } from './permissions/denialTracking.js'
 import { parseToolListFromCLI } from './permissions/permissionSetup.js'
 import { recordSidechainTranscript } from './sessionStorage.js'
@@ -326,6 +327,11 @@ export type SubagentContextOverrides = {
   contentReplacementState?: ContentReplacementState
 }
 
+/** Include profileless transport changes, not just named-profile changes. */
+export function getAmbientQueryProviderKey(): string {
+  return `${getAPIProvider()}:${getActiveProviderProfile()?.id ?? ''}`
+}
+
 /** Return provenance only while its owner and model options are unchanged. */
 export function getOwnedQueryModelSelection(context: ToolUseContext) {
   const selection = context.queryModelSelection?.current
@@ -339,7 +345,7 @@ export function getOwnedQueryModelSelection(context: ToolUseContext) {
 export function getQueryModelSelection(context: ToolUseContext) {
   const selection = getOwnedQueryModelSelection(context)
   return !selection?.followsProvider || context.options.providerOverride ||
-    selection?.providerId === getActiveProviderProfile()?.id
+    selection?.providerKey === getAmbientQueryProviderKey()
     ? selection
     : undefined
 }
@@ -347,9 +353,9 @@ export function getQueryModelSelection(context: ToolUseContext) {
 /** Re-select an inherited ambient pair before consuming a context under a new provider. */
 export function refreshAmbientQueryModelSelection(context: ToolUseContext): ToolUseContext {
   const selection = getOwnedQueryModelSelection(context)
-  const providerId = getActiveProviderProfile()?.id
+  const providerKey = getAmbientQueryProviderKey()
   if (!selection?.followsProvider || context.options.providerOverride ||
-    selection.providerId === providerId) return context
+    selection.providerKey === providerKey) return context
 
   const state = context.getAppState()
   const selectedModel = state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting()
@@ -364,7 +370,7 @@ export function refreshAmbientQueryModelSelection(context: ToolUseContext): Tool
       current: {
         ...selection, options, model: runtimeModel, selectedModel, runtimeModel,
         requestModel: getProviderRequestModel(selectedModel, runtimeModel),
-        providerId,
+        providerKey,
       },
     },
   }
@@ -415,15 +421,17 @@ export function createSubagentContext(
 ): ToolUseContext {
   if (!overrides?.options) parentContext = refreshAmbientQueryModelSelection(parentContext)
   const selection = getQueryModelSelection(parentContext)
-  const providerId = getActiveProviderProfile()?.id
-  const runtimeModel = selection?.runtimeModel ?? parentContext.options.mainLoopModel
+  const providerKey = getAmbientQueryProviderKey()
+  let runtimeModel = selection?.runtimeModel ?? parentContext.options.mainLoopModel
   let requestModel = selection?.requestModel ?? parentContext.options.mainLoopModel
-  // Fresh root contexts (/btw and SDK fallback) have only a resolved model.
-  // Restore its configured alias only before an accepted selection exists.
-  // A mismatched saved selection or an explicit child must keep its override.
-  if (!overrides?.options && !parentContext.queryModelSelection?.current && !parentContext.agentId) {
+  // Fresh root options can predate async /btw or SDK preparation. Establish
+  // the concrete/request pair together from the current configured selection.
+  // Saved selections, explicit children and fixed providers keep their choices.
+  if (!overrides?.options && !parentContext.options.providerOverride &&
+    !parentContext.queryModelSelection?.current && !parentContext.agentId) {
     const state = parentContext.getAppState()
     const selectedModel = state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting()
+    runtimeModel = parseUserSpecifiedModel(selectedModel)
     requestModel = getProviderRequestModel(
       selectedModel,
       runtimeModel,
@@ -557,7 +565,7 @@ export function createSubagentContext(
           selectedModel: requestModel,
           runtimeModel: options.mainLoopModel,
           requestModel,
-          providerId,
+          providerKey,
           followsProvider: selection?.followsProvider ??
             (!parentContext.agentId && !parentContext.queryModelSelection?.current),
         },

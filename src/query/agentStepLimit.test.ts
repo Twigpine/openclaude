@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 import { PassThrough } from 'node:stream'
 import { snapshotEnv } from '../test/envSnapshot.js'
+import { REAL_PROVIDER_TEST_CHILD_ENV, REAL_PROVIDER_TEST_TIMEOUT_MS, runTestFileWithRealProviders } from '../test/providerModuleIsolation.js'
 import { createElement } from 'react'
 import { z } from 'zod/v4'
 
@@ -184,6 +185,185 @@ function gatewayEffort(requestModel: string): string | undefined {
 }
 
 describe('fork request selection at context boundaries', () => {
+  test.each((['sdk', 'btw'] as const).flatMap(entry =>
+    (['provider', 'model'] as const).map(change => ({ entry, change })),
+  ))('fresh $entry side question establishes its pair after a $change change during preparation', async ({ entry, change }) => {
+    const queryModule = await import('../query.js')
+    const contexts = await import('../context.js')
+    const prompts = await import('../constants/prompts.js')
+    const config = await import('../utils/config.js')
+    const sideQuestion = await import('../utils/sideQuestion.js')
+    const { buildSideQuestionFallbackParams } = await import('../utils/queryContext.js')
+    const { call } = await import('../commands/btw/btw.js')
+    const { createRoot } = await import('../ink.js')
+    const { AppStateProvider } = await import('../state/AppState.js')
+    const originalQuery = queryModule.query
+    const originalSideQuestion = sideQuestion.runSideQuestion
+    const savedBefore = getLastCacheSafeParams()
+    const overrideBefore = getMainLoopModelOverride()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const completed = Promise.withResolvers<void>()
+    const userContext = spyOn(contexts, 'getUserContext').mockImplementation(async () => {
+      entered.resolve()
+      await release.promise
+      return {}
+    })
+    const systemContext = spyOn(contexts, 'getSystemContext').mockResolvedValue({})
+    const systemPrompt = spyOn(prompts, 'getSystemPrompt').mockResolvedValue(['test system'])
+    const saveConfig = spyOn(config, 'saveGlobalConfig').mockImplementation(() => {})
+    let providerId = 'provider-a'
+    let configured = 'provider-a-only'
+    const profile = spyOn(providerProfiles, 'getActiveProviderProfile').mockImplementation(
+      () => ({ id: providerId }) as ReturnType<typeof providerProfiles.getActiveProviderProfile>,
+    )
+    const requests: string[] = []
+    const budgets: string[] = []
+    const params = makeAliasParent(async function* ({ options }) {
+      requests.push(options.requestModel ?? options.model)
+      yield createAssistantMessage({ content: 'done' })
+    })
+    const state = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({ ...state, mainLoopModel: configured })
+    params.toolUseContext.options.mainLoopModel = configured
+    params.deps = { ...params.deps!, autocompact: async (_messages, context) => {
+      budgets.push(context.options.mainLoopModel)
+      return { wasCompacted: false }
+    } }
+    const injectedQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    const runSideQuestion = spyOn(sideQuestion, 'runSideQuestion').mockImplementation(async input => {
+      try {
+        // Builders still carry their original options; inheritance must resolve
+        // a current pair at the fork boundary after this preparation wait.
+        expect(input.cacheSafeParams.toolUseContext.options.mainLoopModel).toBe('provider-a-only')
+        const result = await originalSideQuestion(input)
+        completed.resolve()
+        return result
+      } catch (error) { completed.reject(error); throw error }
+    })
+    const stdout = new PassThrough()
+    stdout.resume()
+    let root: Awaited<ReturnType<typeof createRoot>> | undefined
+    const deadline = setTimeout(() => { entered.reject(new Error('preparation was not reached')); completed.reject(new Error('side question did not finish')) }, 3000)
+    try {
+      saveCacheSafeParams(null)
+      setMainLoopModelOverride(configured)
+      const pending = entry === 'sdk' ? buildSideQuestionFallbackParams({
+        tools: [], commands: [], mcpClients: [], messages: params.messages,
+        readFileState: params.toolUseContext.readFileState,
+        getAppState: params.toolUseContext.getAppState, setAppState: () => {},
+        customSystemPrompt: 'test system', appendSystemPrompt: undefined,
+        thinkingConfig: { type: 'disabled' }, agents: [],
+      }) : undefined
+      if (entry === 'btw') {
+        root = await createRoot({ stdout: stdout as unknown as NodeJS.WriteStream, patchConsole: false })
+        root.render(createElement(AppStateProvider, null, await call(
+          () => {}, params.toolUseContext as Parameters<typeof call>[1], 'what happened?',
+        )))
+      }
+      await entered.promise
+      if (change === 'provider') providerId = 'provider-b'
+      configured = 'codexplan'
+      release.resolve()
+      if (pending) await sideQuestion.runSideQuestion({ question: 'what happened?', cacheSafeParams: await pending })
+      await completed.promise
+      expect(requests).toEqual(['codexplan'])
+      expect(budgets).toEqual(['gpt-5.6-sol'])
+      expect(gatewayEffort(requests[0]!)).toBe('high')
+    } finally {
+      clearTimeout(deadline)
+      release.resolve()
+      root?.unmount()
+      stdout.end()
+      runSideQuestion.mockRestore()
+      injectedQuery.mockRestore()
+      profile.mockRestore()
+      saveConfig.mockRestore()
+      systemPrompt.mockRestore()
+      systemContext.mockRestore()
+      userContext.mockRestore()
+      setMainLoopModelOverride(overrideBefore)
+      saveCacheSafeParams(savedBefore)
+    }
+  })
+
+  // Allow the isolated child its full deadline plus teardown/reporting time.
+  test('profileless provider switches preserve ambient, explicit and fixed choices before and after child creation', async () => {
+    // Other files replace provider modules globally. This boundary must exercise
+    // the real identity and clearing helpers, not a mocked profile ID.
+    if (process.env[REAL_PROVIDER_TEST_CHILD_ENV] !== '1') {
+      await runTestFileWithRealProviders(import.meta.path)
+      return
+    }
+    const config = await import('../utils/config.js')
+    const { getAPIProvider } = await import('../utils/model/providers.js')
+    const { mkdtemp, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const scratch = await mkdtemp(join(tmpdir(), 'query-provider-switch-'))
+    const environment = { CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: 'https://gateway.example/v1', OPENAI_MODEL: 'gateway-only', OPENAI_API_KEY: 'test-key' }
+    // Snapshot exactly the keys the real clear helper removes, plus our inputs.
+    const cleared = { ...process.env }
+    providerProfiles.clearProviderProfileEnvFromProcessEnv(cleared)
+    const changedKeys = [...new Set([...Object.keys(process.env).filter(key => !(key in cleared)), ...Object.keys(environment)])]
+    const restoreEnv = snapshotEnv(changedKeys)
+    let providerConfig = { ...config.getGlobalConfig(), providerProfiles: [], activeProviderProfileId: undefined } as ReturnType<typeof config.getGlobalConfig>
+    const readConfig = spyOn(config, 'getGlobalConfig').mockImplementation(() => providerConfig)
+    const writeConfig = spyOn(config, 'saveGlobalConfig').mockImplementation(update => { providerConfig = update(providerConfig) })
+    const observed: Array<{ creation: string; choice: string; requests: string[]; budgets: string[] }> = []
+    try {
+      for (const creation of ['before', 'after'] as const) {
+        for (const choice of ['ambient', 'explicit', 'fixed'] as const) {
+          providerProfiles.clearProviderProfileEnvFromProcessEnv()
+          Object.assign(process.env, environment)
+          providerConfig = { ...providerConfig, activeProviderProfileId: undefined }
+          expect(providerProfiles.getActiveProviderProfile()).toBeUndefined()
+          expect(getAPIProvider()).toBe('openai')
+          let configured = 'gateway-only'
+          const requests: string[] = []
+          const budgets: string[] = []
+          const params = makeAliasParent(async function* ({ options }) {
+            requests.push(options.requestModel ?? options.model)
+            yield createAssistantMessage({ content: 'done' })
+          })
+          const state = params.toolUseContext.getAppState()
+          params.toolUseContext.getAppState = () => ({ ...state, mainLoopModel: configured })
+          params.toolUseContext.options.mainLoopModel = configured
+          if (choice === 'fixed') params.toolUseContext.options.providerOverride = {
+            model: configured, baseURL: 'https://fixed.example/v1', apiKey: 'test-key',
+          }
+          await drain(params)
+          const fork = () => createSubagentContext(params.toolUseContext, choice === 'explicit'
+            ? { options: { ...params.toolUseContext.options } } : undefined)
+          let child = creation === 'before' ? fork() : undefined
+          providerProfiles.clearActiveProviderProfile({ configDir: scratch, cwd: scratch })
+          configured = 'claude-sonnet-4-6'
+          expect(providerProfiles.getActiveProviderProfile()).toBeUndefined()
+          expect(getAPIProvider()).toBe('firstParty')
+          child ??= fork()
+          params.deps = { ...params.deps!, autocompact: async (_messages, context) => {
+            budgets.push(context.options.mainLoopModel)
+            return { wasCompacted: false }
+          } }
+          await drain({ ...params, toolUseContext: child })
+          observed.push({ creation, choice, requests, budgets })
+        }
+      }
+      expect(observed).toEqual(['before', 'after'].flatMap(creation =>
+        ['ambient', 'explicit', 'fixed'].map(choice => ({
+          creation, choice,
+          requests: ['gateway-only', choice === 'ambient' ? 'claude-sonnet-4-6' : 'gateway-only'],
+          budgets: [choice === 'ambient' ? 'claude-sonnet-4-6' : 'gateway-only'],
+        })),
+      ))
+    } finally {
+      writeConfig.mockRestore()
+      readConfig.mockRestore()
+      restoreEnv()
+      await rm(scratch, { recursive: true, force: true })
+    }
+  }, REAL_PROVIDER_TEST_TIMEOUT_MS + 5_000)
+
   test.each((['microcompact', 'autocompact'] as const).flatMap(interval =>
     (['ambient', 'explicit', 'fixed'] as const).map(choice => ({ interval, choice })),
   ))('refreshes $choice selection after awaiting $interval', async ({ interval, choice }) => {
@@ -688,6 +868,14 @@ describe('fork request selection at context boundaries', () => {
     skill.options = { ...skill.options, mainLoopModel: 'gpt-5.6-sol' }
     await drain({ ...params, toolUseContext: skill })
     expect(requests.at(-1)).toBe('gpt-5.6-sol')
+
+    // A fresh fixed-provider root must not adopt the ambient codexplan setting.
+    const fixed = { ...params.toolUseContext, options: {
+      ...params.toolUseContext.options, mainLoopModel: 'gpt-4o',
+      providerOverride: { model: 'gpt-4o', baseURL: 'https://fixed.example/v1', apiKey: 'test-key' },
+    } }
+    await drain({ ...params, toolUseContext: createSubagentContext(fixed) })
+    expect(requests.at(-1)).toBe('gpt-4o')
   })
 
   test('agent hook cannot overwrite the saved parent selection', async () => {
