@@ -231,12 +231,14 @@ describe('fork request selection at context boundaries', () => {
     }
   })
 
-  test.each((['provider', 'model'] as const).flatMap(recovery =>
-    (['ambient', 'explicit', 'fixed'] as const).map(choice => ({ recovery, choice })),
-  ))('preserves $choice origin through automatic $recovery fallback and a later tool switch', async ({ recovery, choice }) => {
+  test.each([
+    ...(['provider', 'model'] as const).flatMap(recovery =>
+      (['ambient', 'explicit', 'fixed'] as const).map(choice => ({ recovery, choice, duringResponse: false }))),
+    { recovery: 'provider' as const, choice: 'ambient' as const, duringResponse: true },
+  ])('preserves $choice origin through automatic $recovery fallback and a later tool switch; response switch=$duringResponse', async ({ recovery, choice, duringResponse }) => {
     const settingsModule = await import('../utils/settings/settings.js')
     let providerId = 'provider-a'
-    const profiles = ['provider-a', 'provider-b', 'provider-c'].map(id => ({
+    const profiles = ['provider-a', 'provider-x', 'provider-b', 'provider-c'].map(id => ({
       id, name: id, provider: 'openai' as const, baseUrl: 'https://gateway.example/v1', model: `${id}-only`,
     }))
     const active = spyOn(providerProfiles, 'getActiveProviderProfile').mockImplementation(
@@ -248,7 +250,7 @@ describe('fork request selection at context boundaries', () => {
       return profiles.find(p => p.id === id) ?? null
     })
     const settings = spyOn(settingsModule, 'getSettings_DEPRECATED').mockReturnValue({
-      providerFallbackChain: recovery === 'provider' ? ['provider-a', 'provider-b'] : [],
+      providerFallbackChain: recovery === 'provider' ? ['provider-a', 'provider-x', 'provider-b'].filter(id => duringResponse || id !== 'provider-x') : [],
     })
     const requests: string[] = []
     let nestedContext: QueryParams['toolUseContext'] | undefined
@@ -261,6 +263,7 @@ describe('fork request selection at context boundaries', () => {
       requests.push(options.requestModel ?? options.model)
       if (requests.length === 1) {
         if (recovery === 'model') throw new FallbackTriggeredError('provider-a-only', 'provider-b-only')
+        if (duringResponse) providerId = 'provider-x'
         yield createAssistantAPIErrorMessage({ content: 'rate limited', error: 'rate_limit' })
       } else {
         yield createAssistantMessage({ content: requests.length === 2
@@ -318,6 +321,7 @@ describe('fork request selection at context boundaries', () => {
     const commandList = spyOn(commands, 'getCommands').mockResolvedValue([{
       type: 'prompt', name: 'selection-test', description: 'test', progressMessage: 'test',
       contentLength: 0, source: 'builtin', model: requested,
+      hooks: { PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: 'echo selection-test' }] }] },
       getPromptForCommand: async () => [{ type: 'text', text: 'inspect' }],
     }])
     const requests: string[] = []
@@ -327,8 +331,9 @@ describe('fork request selection at context boundaries', () => {
         ? [{ type: 'tool_use', id: 'toolu_policy_hook', name: 'StructuredOutput', input: { ok: true } }]
         : 'done' })
     })
-    const state = params.toolUseContext.getAppState()
+    let state = params.toolUseContext.getAppState()
     params.toolUseContext.getAppState = () => ({ ...state, mainLoopModel: 'gpt-5', settings: configured, mcp: { ...state.mcp, commands: [] } })
+    if (source === 'skill') params.toolUseContext.setAppState = update => { state = update(state) }
     params.toolUseContext.options.mainLoopModel = 'gpt-5'
     const childQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
     try {
@@ -343,7 +348,7 @@ describe('fork request selection at context boundaries', () => {
       } else {
         try {
           if (source === 'skill') {
-            const child = createSubagentContext(params.toolUseContext)
+            const child = createSubagentContext(params.toolUseContext, { shareSetAppState: true })
             const result = await SkillTool.call({ skill: 'selection-test' }, child, params.canUseTool,
               createAssistantMessage({ content: [{ type: 'tool_use', id: 'toolu_skill_policy', name: 'Skill', input: { skill: 'selection-test' } }] }))
             await drain({ ...params, toolUseContext: result.contextModifier?.(child) ?? child })
@@ -357,6 +362,7 @@ describe('fork request selection at context boundaries', () => {
           }
         } catch (error) { failure = error }
       }
+      if (source === 'skill') expect(state.sessionHooks.size).toBe(policy === 'denied' ? 0 : 1)
       if (policy === 'denied') {
         expect(requests).toEqual([])
         expect(failure).toBeDefined()

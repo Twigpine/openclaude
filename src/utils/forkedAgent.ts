@@ -327,7 +327,7 @@ export type SubagentContextOverrides = {
 }
 
 /** Return provenance only while its owner and model options are unchanged. */
-function getOwnedQueryModelSelection(context: ToolUseContext) {
+export function getOwnedQueryModelSelection(context: ToolUseContext) {
   const selection = context.queryModelSelection?.current
   return context.queryModelSelection?.agentId === context.agentId &&
     selection?.options === context.options &&

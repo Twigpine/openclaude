@@ -102,7 +102,7 @@ import {
 } from './utils/messageQueueManager.js'
 import { notifyCommandLifecycle } from './utils/commandLifecycle.js'
 import { headlessProfilerCheckpoint } from './utils/headlessProfiler.js'
-import { getQueryModelSelection, refreshAmbientQueryModelSelection } from './utils/forkedAgent.js'
+import { getOwnedQueryModelSelection, getQueryModelSelection, refreshAmbientQueryModelSelection } from './utils/forkedAgent.js'
 import {
   getDefaultMainLoopModelSetting,
   getProviderRequestModel,
@@ -2464,7 +2464,9 @@ async function* queryLoop(
       if (isWithheldRateLimit) {
         const fallback = resolveNextFallbackProviderFromState()
         if (fallback !== null) {
-          const selection = getQueryModelSelection(toolUseContext)
+          // Recovery needs the origin even if the active provider changed
+          // while the failed request was in flight; it replaces the pair below.
+          const selection = getOwnedQueryModelSelection(toolUseContext)
           const activated = setActiveProviderProfile(fallback.nextProfileId)
           if (activated) {
             const fromLabel = fallback.fromProfileId ?? 'previous provider'

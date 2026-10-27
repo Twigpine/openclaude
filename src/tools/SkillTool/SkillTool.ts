@@ -644,6 +644,15 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
       )
     }
 
+    // Reject before command expansion can register persistent skill hooks.
+    const requestedModel = command?.type === 'prompt' ? command.model : undefined
+    if (requestedModel && !isModelAllowed(requestedModel) &&
+      !isModelAllowed(resolveSkillModelOverride(requestedModel, context.options.mainLoopModel))) {
+      throw new Error(
+        `Model '${requestedModel}' is not available. Your organization restricts model selection.`,
+      )
+    }
+
     // Process the skill with optional args
     const { processPromptSlashCommand } = await import(
       'src/utils/processUserInput/processSlashCommand.js'
@@ -662,12 +671,6 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     // Extract metadata from the command
     const allowedTools = processedCommand.allowedTools || []
     const model = processedCommand.model
-    if (model && !isModelAllowed(model) &&
-      !isModelAllowed(resolveSkillModelOverride(model, context.options.mainLoopModel))) {
-      throw new Error(
-        `Model '${model}' is not available. Your organization restricts model selection.`,
-      )
-    }
     const effort = command?.type === 'prompt' ? command.effort : undefined
 
     const isBuiltIn = builtInCommandNames().has(commandName)
