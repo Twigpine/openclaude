@@ -290,6 +290,8 @@ export type ToolUseContext = {
   ) => void
   setConversationId?: (id: UUID) => void
   agentId?: AgentId // Only set for subagents; use getSessionId() for session ID. Hooks use this to distinguish subagent calls.
+  /** Private query-turn identity, preserved by tool-context copies. */
+  doomLoopKey?: object
   /** Last submitted transcript for this producer; undefined for other IDs. */
   getAgentTranscriptPath?: (agentId: AgentId) => string | undefined
   agentType?: string // Subagent type name. For the main thread's --agent type, hooks fall back to getMainThreadAgentType().

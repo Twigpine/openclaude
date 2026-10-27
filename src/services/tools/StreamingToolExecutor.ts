@@ -119,7 +119,7 @@ export class StreamingToolExecutor {
   addTool(block: ToolUseBlock, assistantMessage: AssistantMessage): void {
     const toolDefinition = findToolByName(this.toolDefinitions, block.name)
     if (!toolDefinition) {
-      recordDoomLoopProgress(this.toolUseContext.agentId)
+      recordDoomLoopProgress(this.toolUseContext.doomLoopKey ?? this.toolUseContext.agentId)
       this.tools.push({
         id: block.id,
         block,

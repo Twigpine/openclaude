@@ -24,6 +24,45 @@ import {
 
 const querySourceFile = new URL('../query.ts', import.meta.url)
 
+test('concurrent SDK turns cannot reset or terminate each other', async () => {
+  function session(name: string) {
+    let calls = 0
+    const tool = createToolFixture(z.object({}), {
+      name,
+      async call() { return { data: 'ok' } },
+    })
+    const params = makeQueryParams(async function* () {
+      calls++
+      yield createAssistantMessage({
+        content: calls <= 8 ? [toolUse(`${name}-${calls}`, name)] : 'done',
+      })
+    } as QueryDeps['callModel'], { querySource: 'sdk' })
+    params.toolUseContext.options.tools = [tool]
+    return { turn: query(params), calls: () => calls }
+  }
+  const first = session('FirstSessionTool')
+  const second = session('SecondSessionTool')
+  // Suspend the first turn after four blocks, while its generator still owns
+  // its state; run the second session all the way through terminal cleanup.
+  let next = await first.turn.next()
+  while (!next.done) {
+    if (first.calls() === 6 && next.value.type === 'user') break
+    next = await first.turn.next()
+  }
+  let secondTerminal: Message | undefined
+  for await (const message of second.turn) {
+    if (message.type === 'assistant') secondTerminal = message
+  }
+  let firstTerminal: Message | undefined
+  for await (const message of first.turn) {
+    if (message.type === 'assistant') firstTerminal = message
+  }
+  expect(first.calls()).toBe(7)
+  expect(second.calls()).toBe(7)
+  expect(JSON.stringify(firstTerminal)).toContain('FirstSessionTool was blocked 5 consecutive')
+  expect(JSON.stringify(secondTerminal)).toContain('SecondSessionTool was blocked 5 consecutive')
+})
+
 test('streaming doom termination wins over fallback and resets on unknown calls', async () => {
   await acquireSharedMutationLock('doom-loop-streaming-config')
   const config = queryConfig.buildQueryConfig()

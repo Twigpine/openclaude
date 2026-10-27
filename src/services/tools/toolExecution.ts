@@ -413,7 +413,7 @@ export async function* runToolUse(
   toolUseContext: ToolUseContext,
 ): AsyncGenerator<MessageUpdateLazy, void> {
   const toolName = toolUse.name
-  const terminalMessage = getDoomLoopState(toolUseContext.agentId).terminalMessage
+  const terminalMessage = getDoomLoopState(toolUseContext.doomLoopKey ?? toolUseContext.agentId).terminalMessage
   if (terminalMessage) {
     // Preserve tool-use/result pairing without starting more work in this batch.
     yield {
@@ -455,7 +455,7 @@ export async function* runToolUse(
 
   // Check if the tool exists
   if (!tool) {
-    recordDoomLoopProgress(toolUseContext.agentId)
+    recordDoomLoopProgress(toolUseContext.doomLoopKey ?? toolUseContext.agentId)
     const sanitizedToolName = sanitizeToolNameForAnalytics(toolName)
     logForDebugging(`Unknown tool ${toolName}: ${toolUse.id}`)
     logEvent('tengu_tool_use_error', {
@@ -502,11 +502,11 @@ export async function* runToolUse(
   // Doom loop detection: block after N consecutive identical tool calls.
   // Keyed by agent so concurrent subagents don't pollute each other's counters.
   const doomLoop = checkDoomLoop(toolName, toolUse.input, {
-    agentKey: toolUseContext.agentId,
+    agentKey: toolUseContext.doomLoopKey ?? toolUseContext.agentId,
   })
   if (doomLoop.blocked) {
     const error = `Blocked: ${doomLoop.count} consecutive calls to this tool with identical input — you are likely in a loop. Change the input, try a different tool, or ask the user for help. A deliberate repeat is fine once something observable has changed (new output to check, a modified file, an updated instruction).`
-    recordDoomLoopBlock(toolName, error, toolUseContext.agentId)
+    recordDoomLoopBlock(toolName, error, toolUseContext.doomLoopKey ?? toolUseContext.agentId)
     logForDebugging(`Doom loop detected for ${toolName} (${doomLoop.count} consecutive identical calls)`)
     // Observability for tuning: a burst of these against varied tools would
     // indicate false positives (e.g. legitimate polling), not stuck agents.
@@ -533,7 +533,7 @@ export async function* runToolUse(
     return
   }
 
-  recordDoomLoopProgress(toolUseContext.agentId)
+  recordDoomLoopProgress(toolUseContext.doomLoopKey ?? toolUseContext.agentId)
   const toolInput = toolUse.input as { [key: string]: string }
   try {
     if (toolUseContext.abortController.signal.aborted) {
@@ -598,7 +598,7 @@ export async function* runToolUse(
           block => block.type === 'tool_result' && !block.is_error,
         )
       ) {
-        recordDoomLoopProgress(toolUseContext.agentId)
+        recordDoomLoopProgress(toolUseContext.doomLoopKey ?? toolUseContext.agentId)
       }
       yield update
     }

@@ -29,9 +29,12 @@ interface DoomLoopState {
 }
 
 const stateByAgent = new Map<string, DoomLoopState>()
+let stateByTurn = new WeakMap<object, DoomLoopState>()
 
-function getState(agentKey: string): DoomLoopState {
-  let state = stateByAgent.get(agentKey)
+function getState(agentKey: string | object): DoomLoopState {
+  let state = typeof agentKey === 'string'
+    ? stateByAgent.get(agentKey)
+    : stateByTurn.get(agentKey)
   if (!state) {
     state = {
       lastSignature: null,
@@ -40,7 +43,8 @@ function getState(agentKey: string): DoomLoopState {
       consecutiveBlocks: 0,
       terminalMessage: null,
     }
-    stateByAgent.set(agentKey, state)
+    if (typeof agentKey === 'string') stateByAgent.set(agentKey, state)
+    else stateByTurn.set(agentKey, state)
   }
   return state
 }
@@ -68,7 +72,7 @@ function computeSignature(toolName: string, input: unknown): ToolSignature {
 export function checkDoomLoop(
   toolName: string,
   input: unknown,
-  options: { threshold?: number; agentKey?: string } = {},
+  options: { threshold?: number; agentKey?: string | object } = {},
 ): { blocked: boolean; count: number } {
   const threshold = options.threshold ?? DEFAULT_THRESHOLD
   const state = getState(options.agentKey ?? MAIN_AGENT_KEY)
@@ -94,7 +98,7 @@ export function checkDoomLoop(
 export function recordDoomLoopBlock(
   toolName: string,
   lastError: string,
-  agentKey: string = MAIN_AGENT_KEY,
+  agentKey: string | object = MAIN_AGENT_KEY,
 ): void {
   const state = getState(agentKey)
   if (state.terminalMessage) return
@@ -107,7 +111,7 @@ export function recordDoomLoopBlock(
 }
 
 /** A non-blocked call or successful result breaks the streak, until termination. */
-export function recordDoomLoopProgress(agentKey: string = MAIN_AGENT_KEY): void {
+export function recordDoomLoopProgress(agentKey: string | object = MAIN_AGENT_KEY): void {
   const state = getState(agentKey)
   if (!state.terminalMessage) state.consecutiveBlocks = 0
 }
@@ -116,20 +120,22 @@ export function recordDoomLoopProgress(agentKey: string = MAIN_AGENT_KEY): void 
  * Reset doom loop state for one agent (e.g., at the start of its query turn).
  * Defaults to the main thread, matching checkDoomLoop's default key.
  */
-export function resetDoomLoop(agentKey: string = MAIN_AGENT_KEY): void {
-  stateByAgent.delete(agentKey)
+export function resetDoomLoop(agentKey: string | object = MAIN_AGENT_KEY): void {
+  if (typeof agentKey === 'string') stateByAgent.delete(agentKey)
+  else stateByTurn.delete(agentKey)
 }
 
 /** Clear every agent's state. Test isolation only. */
 export function resetAllDoomLoops(): void {
   stateByAgent.clear()
+  stateByTurn = new WeakMap()
 }
 
 /**
  * Get current doom loop state for diagnostics.
  */
 export function getDoomLoopState(
-  agentKey: string = MAIN_AGENT_KEY,
+  agentKey: string | object = MAIN_AGENT_KEY,
 ): Readonly<DoomLoopState> {
   return { ...getState(agentKey) }
 }

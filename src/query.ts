@@ -674,7 +674,19 @@ export async function* query(
   ) {
     params.toolUseContext.queryModelSelection = { agentId: params.toolUseContext.agentId }
   }
-  const terminal = yield* queryLoop(params, consumedCommandUuids)
+  // SDK sessions can query concurrently without an agentId. A fresh private
+  // key also separates nested/subsequent queries that inherit a tool context.
+  const doomLoopKey = {}
+  const { resetDoomLoop } = await import('./utils/doomLoop.js')
+  let terminal: Terminal
+  try {
+    terminal = yield* queryLoop({
+      ...params,
+      toolUseContext: { ...params.toolUseContext, doomLoopKey },
+    }, consumedCommandUuids)
+  } finally {
+    resetDoomLoop(doomLoopKey)
+  }
   // Only reached if queryLoop returned normally. Skipped on throw (error
   // propagates through yield*) and on .return() (Return completion closes
   // both generators). This gives the same asymmetric started-without-completed
@@ -696,11 +708,7 @@ async function* queryLoop(
   | ToolUseSummaryMessage,
   Terminal
 > {
-  // Reset this agent's doom loop detection at the start of each query turn.
-  // Keyed by agentId so a subagent starting mid-turn doesn't wipe the main
-  // thread's counter (or a sibling agent's).
-  const { resetDoomLoop, getDoomLoopState } = await import('./utils/doomLoop.js')
-  resetDoomLoop(params.toolUseContext.agentId)
+  const { getDoomLoopState } = await import('./utils/doomLoop.js')
 
   // Start a new turn for multi-turn context tracking
   if (
@@ -1620,7 +1628,7 @@ async function* queryLoop(
               queryTracking,
               queryLifecycle: toolUseContext.queryLifecycle,
               onProviderRequestStart: () => {
-                if (getDoomLoopState(toolUseContext.agentId).terminalMessage) {
+                if (getDoomLoopState(toolUseContext.doomLoopKey ?? toolUseContext.agentId).terminalMessage) {
                   providerDispatchRejected = true
                   return false
                 }
@@ -1866,7 +1874,7 @@ async function* queryLoop(
             }
             }
             if (providerDispatchRejected) {
-              if (getDoomLoopState(toolUseContext.agentId).terminalMessage) break
+              if (getDoomLoopState(toolUseContext.doomLoopKey ?? toolUseContext.agentId).terminalMessage) break
               if (toolUseContext.abortController.signal.aborted) {
                 return yield* emitAbortedStreaming(
                   toolUseContext.abortController.signal,
@@ -1910,7 +1918,7 @@ async function* queryLoop(
         } catch (innerError) {
           // Streaming tools can trip the breaker before the model stream ends.
           // Preserve their results and terminate instead of dispatching a fallback.
-          if (getDoomLoopState(toolUseContext.agentId).terminalMessage) break
+          if (getDoomLoopState(toolUseContext.doomLoopKey ?? toolUseContext.agentId).terminalMessage) break
           if (innerError instanceof FallbackTriggeredError && fallbackModel) {
             // Fallback was triggered - switch model and retry
             currentModel = fallbackModel
@@ -2071,13 +2079,14 @@ async function* queryLoop(
       return { reason: 'model_error', error }
     }
 
-    const streamingDoomTerminal = getDoomLoopState(toolUseContext.agentId).terminalMessage
+    const streamingDoomTerminal = getDoomLoopState(toolUseContext.doomLoopKey ?? toolUseContext.agentId).terminalMessage
     if (streamingDoomTerminal) {
       if (streamingToolExecutor) {
         for await (const update of streamingToolExecutor.getRemainingResults()) {
           if (update.message) yield update.message
         }
       }
+      await cleanupComputerUseAtTerminal(toolUseContext)
       yield createAssistantAPIErrorMessage({ content: streamingDoomTerminal })
       return { reason: 'tool_failure_loop' }
     }
@@ -2912,8 +2921,9 @@ async function* queryLoop(
       )
     }
 
-    const doomLoopTerminal = getDoomLoopState(toolUseContext.agentId).terminalMessage
+    const doomLoopTerminal = getDoomLoopState(toolUseContext.doomLoopKey ?? toolUseContext.agentId).terminalMessage
     if (doomLoopTerminal) {
+      await cleanupComputerUseAtTerminal(toolUseContext)
       yield createAssistantAPIErrorMessage({ content: doomLoopTerminal })
       return { reason: 'tool_failure_loop' }
     }
