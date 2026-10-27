@@ -1,3 +1,4 @@
+import { feature } from 'bun:bundle'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import {
   logEvent,
@@ -209,7 +210,6 @@ import {
 } from './messages.js'
 import { isHumanTurn } from './messagePredicates.js'
 import { isEnvTruthy, getClaudeConfigHomeDir } from './envUtils.js'
-import { feature } from 'bun:bundle'
 /* eslint-disable @typescript-eslint/no-require-imports */
 const BRIEF_TOOL_NAME: string | null =
   feature('KAIROS') || feature('KAIROS_BRIEF')
