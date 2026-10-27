@@ -51,10 +51,6 @@ export function AssistantToolUseMessage(t0) {
   const [theme] = useTheme();
   const bg = useSelectedMessageBg();
   const pendingWorkerRequest = useAppStateMaybeOutsideOfProvider(_temp);
-  const permissionMode = useAppStateMaybeOutsideOfProvider(_temp2);
-  const hasStrippedRules = useAppStateMaybeOutsideOfProvider(_temp3);
-  const isAutoClassifier = permissionMode === "auto" || permissionMode === "plan" && hasStrippedRules;
-  const isClassifierChecking = false;
   let t1;
   if ($[0] !== param.input || $[1] !== param.name || $[2] !== tools) {
     bb0: {
@@ -234,15 +230,13 @@ export function AssistantToolUseMessage(t0) {
     t12 = $[53];
   }
   let t13;
-  if ($[54] !== inProgressToolCallCount || $[55] !== isAutoClassifier || $[56] !== isClassifierChecking || $[57] !== isQueued || $[58] !== isResolved || $[59] !== isTranscriptMode || $[60] !== isWaitingForPermission || $[61] !== lookups || $[62] !== param.id || $[63] !== progressMessagesForMessage || $[64] !== terminalSize || $[65] !== tool_0 || $[66] !== tools || $[67] !== verbose) {
-    t13 = !isResolved && !isQueued && (isClassifierChecking ? <MessageResponse height={1}><Text dimColor={true}>{isAutoClassifier ? "Auto classifier checking\u2026" : "Bash classifier checking\u2026"}</Text></MessageResponse> : isWaitingForPermission ? <MessageResponse height={1}><Text dimColor={true}>Waiting for permission…</Text></MessageResponse> : renderToolUseProgressMessage(tool_0, tools, lookups, param.id, progressMessagesForMessage, {
+  if ($[54] !== inProgressToolCallCount || $[57] !== isQueued || $[58] !== isResolved || $[59] !== isTranscriptMode || $[60] !== isWaitingForPermission || $[61] !== lookups || $[62] !== param.id || $[63] !== progressMessagesForMessage || $[64] !== terminalSize || $[65] !== tool_0 || $[66] !== tools || $[67] !== verbose) {
+    t13 = !isResolved && !isQueued && (isWaitingForPermission ? <MessageResponse height={1}><Text dimColor={true}>Waiting for permission…</Text></MessageResponse> : renderToolUseProgressMessage(tool_0, tools, lookups, param.id, progressMessagesForMessage, {
       verbose,
       inProgressToolCallCount,
       isTranscriptMode
     }, terminalSize));
     $[54] = inProgressToolCallCount;
-    $[55] = isAutoClassifier;
-    $[56] = isClassifierChecking;
     $[57] = isQueued;
     $[58] = isResolved;
     $[59] = isTranscriptMode;
@@ -289,12 +283,6 @@ export function AssistantToolUseMessage(t0) {
     t16 = $[80];
   }
   return t16;
-}
-function _temp3(state_1) {
-  return !!state_1.toolPermissionContext.strippedDangerousRules;
-}
-function _temp2(state_0) {
-  return state_0.toolPermissionContext.mode;
 }
 function _temp(state) {
   return state.pendingWorkerRequest;
