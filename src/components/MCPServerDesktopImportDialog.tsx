@@ -118,7 +118,6 @@ export function MCPServerDesktopImportDialog(t0) {
   } else {
     t7 = $[13];
   }
-  done;
   const handleEscCancel = t7;
   const t8 = serverNames.length;
   let t9;
