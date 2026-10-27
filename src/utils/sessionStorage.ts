@@ -3093,7 +3093,9 @@ export function stripPersistedToolUseResultsFromJSONLBuffer(buf: Buffer): Buffer
 function forEachParsedJSONLBufferEntry<T>(
   buf: Buffer,
   visit: (entry: T) => void,
+  logParseContent = true,
 ): void {
+  const parse = logParseContent ? jsonParse : JSON.parse
   const bufLen = buf.length
   let start = 0
 
@@ -3110,7 +3112,7 @@ function forEachParsedJSONLBufferEntry<T>(
     if (!line) continue
 
     try {
-      visit(jsonParse(line) as T)
+      visit(parse(line) as T)
     } catch {
       // Skip malformed lines
     }
@@ -4126,8 +4128,12 @@ export function isLiteLog(log: LogOption): boolean {
  * Returns a new LogOption with populated messages array.
  * Explicit paths select the latest non-sidechain leaf and retain its session ID.
  * If the log is already full or loading fails, returns the original/empty log.
+ * Set logParseContent to false to keep transcript bytes out of slow diagnostics.
  */
-export async function loadFullLog(source: LogOption | string): Promise<LogOption> {
+export async function loadFullLog(
+  source: LogOption | string,
+  opts?: { logParseContent?: boolean },
+): Promise<LogOption> {
   // Explicit file resumes use the same metadata restoration as the picker.
   // The leaf supplies their identity; filenames may have been renamed.
   const fromPath = typeof source === 'string'
@@ -4177,7 +4183,7 @@ export async function loadFullLog(source: LogOption | string): Promise<LogOption
       contextCollapseCommits,
       contextCollapseSnapshot,
       leafUuids,
-    } = await loadTranscriptFile(sessionFile)
+    } = await loadTranscriptFile(sessionFile, opts)
 
     if (messages.size === 0) {
       return log
@@ -4679,7 +4685,7 @@ function walkChainBeforeParse(buf: Buffer): Buffer {
  */
 export async function loadTranscriptFile(
   filePath: string,
-  opts?: { keepAllLeaves?: boolean },
+  opts?: { keepAllLeaves?: boolean; logParseContent?: boolean },
 ): Promise<{
   messages: Map<UUID, TranscriptMessage>
   summaries: Map<UUID, string>
@@ -4828,7 +4834,7 @@ export async function loadTranscriptFile(
         } else if (entry.type === 'session-branch' && entry.sessionId) {
           sessionBranches.set(entry.sessionId, entry)
         }
-      })
+      }, opts?.logParseContent)
     }
 
     // Bridge map for legacy progress entries: progress_uuid → progress_parent_uuid.
@@ -4916,7 +4922,7 @@ export async function loadTranscriptFile(
       } else if (entry.type === 'marble-origami-snapshot') {
         contextCollapseSnapshot = entry
       }
-    })
+    }, opts?.logParseContent)
   } catch {
     // File doesn't exist or can't be read
   }

@@ -179,7 +179,7 @@ export async function agenticSessionSearch(
   const logsWithTranscriptsPromises = logsToSearch.map(async log => {
     if (isLiteLog(log)) {
       try {
-        return await loadFullLog(log)
+        return await loadFullLog(log, { logParseContent: false })
       } catch {
         logError(new Error('Agentic session transcript loading failed'))
         // If loading fails, use the lite log (no transcript)
