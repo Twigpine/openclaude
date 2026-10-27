@@ -272,7 +272,7 @@ export function LogSelector(t0: LogSelectorProps) {
     t5 = $[4];
   }
   const highlightColor = t5;
-  const isAgenticSearchEnabled = false;
+  const isAgenticSearchEnabled = typeof onAgenticSearch === "function";
   const [currentBranch, setCurrentBranch] = React.useState<string | null>(null);
   const [branchFilterEnabled, setBranchFilterEnabled] = React.useState(false);
   const [showAllWorktrees, setShowAllWorktrees] = React.useState(false);
@@ -1098,7 +1098,7 @@ export function LogSelector(t0: LogSelectorProps) {
             exitSearchMode();
           } else {
             if (key.return || key.downArrow) {
-              if (searchQuery.trim() && onAgenticSearch && false && agenticSearchState.status !== "results") {
+              if (searchQuery.trim() && onAgenticSearch && isAgenticSearchEnabled && agenticSearchState.status !== "results") {
                 setIsAgenticSearchOptionFocused(true);
               }
             }
@@ -1381,7 +1381,7 @@ export function LogSelector(t0: LogSelectorProps) {
   }
   let t69;
   if ($[197] !== agenticSearchState.status || $[198] !== isAgenticSearchOptionFocused || $[199] !== onAgenticSearch || $[200] !== searchQuery) {
-    t69 = Boolean(searchQuery.trim()) && onAgenticSearch && false && agenticSearchState.status !== "searching" && agenticSearchState.status !== "results" && agenticSearchState.status !== "error" && <Box flexShrink={0} flexDirection="column"><Box flexDirection="row" gap={1}><Text color={isAgenticSearchOptionFocused ? "suggestion" : undefined}>{isAgenticSearchOptionFocused ? figures.pointer : " "}</Text><Text color={isAgenticSearchOptionFocused ? "suggestion" : undefined} bold={isAgenticSearchOptionFocused}>Search deeply using Claude →</Text></Box><Box height={1} /></Box>;
+    t69 = Boolean(searchQuery.trim()) && onAgenticSearch && isAgenticSearchEnabled && agenticSearchState.status !== "searching" && agenticSearchState.status !== "results" && agenticSearchState.status !== "error" && <Box flexShrink={0} flexDirection="column"><Box flexDirection="row" gap={1}><Text color={isAgenticSearchOptionFocused ? "suggestion" : undefined}>{isAgenticSearchOptionFocused ? figures.pointer : " "}</Text><Text color={isAgenticSearchOptionFocused ? "suggestion" : undefined} bold={isAgenticSearchOptionFocused}>Search deeply using Claude →</Text></Box><Box height={1} /></Box>;
     $[197] = agenticSearchState.status;
     $[198] = isAgenticSearchOptionFocused;
     $[199] = onAgenticSearch;

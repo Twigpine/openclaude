@@ -1311,7 +1311,7 @@ function activate(context) {
 
   // ── New chat commands ──
   const newChatCommand = vscode.commands.registerCommand('openclaude.newChat', () => {
-    chatController.stopSession();
+    chatController.resetForNewSession();
     chatController.broadcast({ type: 'session_cleared' });
   });
 

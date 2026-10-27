@@ -223,6 +223,10 @@ then `d` again to delete it; any other key in between cancels. Deleting removes
 the transcript and its sidecar files from disk and cannot be undone. The
 session you are currently in is not listed and cannot be deleted.
 
+In `/resume`, type a search query, then press Down and Enter on **Search deeply
+using Claude** to search conversation contents with the configured model. This
+explicit action can make a model request; ordinary filtering stays local.
+
 ### Background sessions
 
 Run long non-interactive prompts detached from the current terminal:

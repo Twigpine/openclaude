@@ -89,7 +89,7 @@ test('executeShellCommandsInPrompt normalizes null shell output', async () => {
   })
 })
 
-test('executeShellCommandsInPrompt applies per-prefix line limits', async () => {
+test.each([0, 3])('executeShellCommandsInPrompt applies a %s-line cap', async limit => {
   BashTool.call = (async () => ({
     data: {
       stdout: 'line1\nline2\nline3\nline4\nline5\n',
@@ -137,10 +137,10 @@ test('executeShellCommandsInPrompt applies per-prefix line limits', async () => 
     } as never,
     'bughunter',
     undefined,
-    { lineLimits: { 'git diff HEAD -- .': 3 } },
+    { lineLimits: { 'git diff HEAD -- .': limit } },
   )
 
-  expect(result).toBe('line1\nline2\nline3')
+  expect(result).toBe(limit === 0 ? '(Bash completed with no output)' : 'line1\nline2\nline3')
 })
 
 test('executeShellCommandsInPrompt does not truncate below the cap', async () => {
@@ -317,4 +317,58 @@ test('granularFallback still surfaces permission denials as MalformedCommandErro
       { granularFallback: true },
     ),
   ).rejects.toBeInstanceOf(MalformedCommandError)
+})
+
+test.each([-1, NaN, Infinity, -Infinity, 1.5])('ignores invalid line limit %s and uses the longest valid prefix', async invalid => {
+  BashTool.call = (async () => ({
+    data: {
+      stdout: 'line1\nline2\nline3\nline4\nline5\n',
+      stderr: '',
+      interrupted: false,
+    },
+  })) as unknown as typeof BashTool.call
+
+  BashTool.mapToolResultToToolResultBlockParam = (result, toolUseID) =>
+    originalMapToolResultToToolResultBlockParam(
+      result as never,
+      toolUseID,
+    )
+
+  const result = await executeShellCommandsInPrompt(
+    '```!\ngit diff HEAD -- .\n```',
+    {
+      abortController: new AbortController(),
+      options: {
+        commands: [],
+        debug: false,
+        mainLoopModel: 'sonnet',
+        tools: new Map(),
+        verbose: false,
+        thinkingConfig: { type: 'disabled' },
+        mcpClients: [],
+        mcpResources: {},
+        isNonInteractiveSession: false,
+        agentDefinitions: {
+          systemDefinitions: [],
+          projectDefinitions: [],
+          userDefinitions: [],
+        },
+      },
+      readFileState: new Map(),
+      getAppState() {
+        return {
+          toolPermissionContext: {
+            ...getEmptyToolPermissionContext(),
+            alwaysAllowRules: { command: ['Bash(*)'] },
+          },
+        }
+      },
+      setAppState() {},
+    } as never,
+    'bughunter',
+    undefined,
+    { lineLimits: { 'git diff': 3, 'git diff HEAD -- .': invalid } },
+  )
+
+  expect(result).toBe('line1\nline2\nline3')
 })

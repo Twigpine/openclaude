@@ -137,3 +137,20 @@ test('a zero-byte exact transcript does not hide a populated alternate history',
   assert.deepEqual(await manager.loadSession(sessionId), [{ role: 'user', text: 'Recovered history' }]);
   assert.equal(await manager.getResumeTarget(sessionId), alternatePath);
 });
+
+test('session lookup rejects path components before reading outside project history', async () => {
+  const configDir = resolveClaudeConfigHomeDir({ homeDir: home });
+  const cwd = '/workspace/demo';
+  await writeSession(configDir, cwd, 'Valid history');
+  await fs.writeFile(path.join(configDir, 'projects', 'outside.jsonl'),
+    JSON.stringify({ type: 'user', message: { content: 'Outside history' } }) + '\n');
+  const manager = new SessionManager();
+  for (const workspace of [cwd, null]) {
+    manager.setCwd(workspace);
+    for (const invalid of ['../outside', '..\\outside', 'nested/../../outside', '', null, 42]) {
+      assert.equal(await manager.resolveSessionPath(invalid), null);
+      assert.equal(await manager.loadSession(invalid), null);
+    }
+    assert.deepEqual(await manager.loadSession(sessionId), [{ role: 'user', text: 'Valid history' }]);
+  }
+});

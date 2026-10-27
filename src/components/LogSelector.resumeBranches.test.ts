@@ -423,3 +423,49 @@ test('rendered picker expands branch groups and selects child branch logs', asyn
     releaseSharedMutationLock()
   }
 })
+
+test('deep search is offered only with a callback and runs from the keyboard', async () => {
+  await acquireSharedMutationLock('components/LogSelector.resumeBranches.test.tsx')
+  let renderer: Awaited<ReturnType<typeof createRoot>> | null = null
+  const { stdout, stdin, getOutput } = createTestStreams()
+  const logs = [log(id(60), 'Original history', 10, { projectPath: getOriginalCwd() })]
+  const recovered = log(id(61), 'Recovered session', 20, { projectPath: getOriginalCwd() })
+  const queries: string[] = []
+  const onAgenticSearch = async (query: string, candidates: LogOption[], signal?: AbortSignal) => {
+    queries.push(query)
+    expect(candidates).toEqual(logs)
+    expect(signal?.aborted).toBe(false)
+    return [recovered]
+  }
+  const renderPicker = (enabled: boolean) => renderer!.render(
+    React.createElement(AppStateProvider, null,
+      React.createElement(KeybindingSetup, null,
+        React.createElement(LogSelector, {
+          logs, maxHeight: 30, forceWidth: 100, onSelect: () => {},
+          onAgenticSearch: enabled ? onAgenticSearch : undefined,
+        }))),
+  )
+  try {
+    renderer = await createRoot({
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      patchConsole: false,
+    })
+    renderPicker(false)
+    await waitForFrame(getOutput, frame => frame.includes('Original history'))
+    stdin.write('z')
+    const noCallback = await waitForFrame(getOutput, frame => frame.includes('⌕ z'))
+    expect(noCallback).not.toContain('Search deeply using Claude')
+    renderPicker(true)
+    await waitForFrame(getOutput, frame => frame.includes('Search deeply using Claude'))
+    stdin.write('\x1B[B')
+    await waitForFrame(getOutput, frame => frame.includes('❯ Search deeply using Claude'))
+    stdin.write('\r')
+    await waitForFrame(getOutput, frame => frame.includes('Recovered session'))
+    expect(queries).toEqual(['z'])
+  } finally {
+    renderer?.unmount()
+    stdin.end()
+    releaseSharedMutationLock()
+  }
+})

@@ -50,7 +50,7 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
       return originalLoad.call(this, name, ...rest);
     };
     const { SessionManager } = require('./sessionManager');
-    const { ChatController } = require('./chatProvider');
+    const { ChatController, OpenClaudeChatViewProvider, OpenClaudeChatPanelManager } = require('./chatProvider');
     const { ProcessManager } = require('./processManager');
     (async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vscode-resume-'));
@@ -82,6 +82,56 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
         assert.equal(resumeValue(), file);
         assert.equal(controller.sessionId, id);
         controller.stopSession();
+
+        // Both UI entry points must reset identity/history, not reconnect it.
+        const fresh = new ChatController(manager);
+        try {
+          for (const Provider of [OpenClaudeChatViewProvider, OpenClaudeChatPanelManager]) {
+            await fresh.startSession({ sessionId: id });
+            children.at(-1).stdout.write(JSON.stringify({ type: 'system', session_id: id }) + '\n');
+            await fresh.sendMessage('old prompt');
+            let receive;
+            const updates = [];
+            const webview = {
+              onDidReceiveMessage: handler => { receive = handler; },
+              postMessage: message => updates.push(message),
+            };
+            new Provider(fresh)._attachMessageHandler(webview);
+            await receive({ type: 'new_session' });
+            assert.equal(fresh.sessionId, null);
+            assert.deepEqual(fresh.getMessages(), []);
+            assert.ok(updates.some(message => message.type === 'session_cleared'));
+            await receive({ type: 'restore_request' });
+            assert.ok(!updates.some(message => message.type === 'restore_messages'));
+            const next = fresh.sendMessage('fresh prompt');
+            const child = children.at(-1);
+            assert.ok(!calls.at(-1).args.includes('--resume'));
+            child.stdout.write(JSON.stringify({ type: 'system', session_id: 'new-id' }) + '\n');
+            await next;
+            assert.equal(fresh.sessionId, 'new-id');
+            assert.deepEqual(fresh.getMessages(), [{ role: 'user', text: 'fresh prompt' }]);
+            assert.ok(child.stdin.read().toString().includes('fresh prompt'));
+            fresh.stopSession();
+          }
+          // An old send waiting for CLI readiness must not enter the new chat.
+          await fresh.startSession({ sessionId: id });
+          const releaseOldReady = fresh._readyResolve;
+          const oldSend = fresh.sendMessage('stale pending prompt');
+          await new Promise(setImmediate);
+          fresh.resetForNewSession();
+          const newSend = fresh.sendMessage('new pending prompt');
+          await new Promise(setImmediate);
+          const newReady = fresh._readyPromise;
+          releaseOldReady();
+          await oldSend;
+          assert.equal(fresh._readyPromise, newReady);
+          assert.deepEqual(fresh.getMessages(), []);
+          children.at(-1).stdout.write(JSON.stringify({ type: 'system', session_id: 'fresh-id' }) + '\n');
+          await newSend;
+          assert.deepEqual(fresh.getMessages(), [{ role: 'user', text: 'new pending prompt' }]);
+        } finally {
+          fresh.stopSession();
+        }
 
         // A stop during the new asynchronous lookup must not spawn an orphan.
         let finish;

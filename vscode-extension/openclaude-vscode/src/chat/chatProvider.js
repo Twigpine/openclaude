@@ -167,6 +167,12 @@ class ChatController {
     this._pendingPermissions.clear();
   }
 
+  resetForNewSession() {
+    this.stopSession();
+    this._currentSessionId = null;
+    this._messages = [];
+  }
+
   async sendMessage(text) {
     // Reuse a pending restart so simultaneous sends retain both messages.
     // A stop or a new selection cancels sends waiting on the old startup.
@@ -181,11 +187,14 @@ class ChatController {
 
   async _doSend(text) {
     if (!this._process) return;
+    const process = this._process;
+    const generation = this._startGeneration;
     // On first message after process start, wait for CLI to be ready.
     // On subsequent messages, the process is already running and accepting input.
     if (this._readyPromise) {
       const grace = new Promise(resolve => setTimeout(resolve, 8000));
       await Promise.race([this._readyPromise, grace]);
+      if (generation !== this._startGeneration || process !== this._process) return;
       this._readyPromise = null;
     }
     this._accumulatedText = '';
@@ -527,7 +536,7 @@ class OpenClaudeChatViewProvider {
           this._chatController.abort();
           break;
         case 'new_session':
-          this._chatController.stopSession();
+          this._chatController.resetForNewSession();
           webview.postMessage({ type: 'session_cleared' });
           break;
         case 'resume_session':
@@ -636,7 +645,7 @@ class OpenClaudeChatPanelManager {
           this._chatController.abort();
           break;
         case 'new_session':
-          this._chatController.stopSession();
+          this._chatController.resetForNewSession();
           webview.postMessage({ type: 'session_cleared' });
           break;
         case 'resume_session':
