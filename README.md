@@ -224,12 +224,17 @@ the transcript and its sidecar files from disk and cannot be undone. The
 session you are currently in is not listed and cannot be deleted.
 
 In `/resume`, type a search query, then press Down and Enter on **Search deeply
-using a background model** to search conversation contents with the background search model,
-which can differ from the active chat model. This explicit action can make a model request; ordinary filtering stays local. Deep
-search considers up to 100 loaded sessions within the active filters, so older
-history may not be included. Results remain available as more history loads;
-changing the query or active filters clears the previous search. If a search
-fails, the picker shows an error and lets you retry the same query.
+using a background model** to search conversation contents with the background
+search model, which can differ from the active chat model. This explicit action
+sends transcript excerpts and session metadata to the model provider, including
+from loaded sessions that do not match the query locally. Ordinary filtering
+stays local. Deep search considers up to 100 loaded sessions within the active
+filters, so older history may not be included. Transcript extraction uses up to
+100 messages (the first 50 and last 50 for longer sessions), then keeps only the
+first 2,000 extracted characters. Matches outside that excerpt may be missed.
+Results remain available as more history loads; changing the query or active
+filters clears the previous search. If a search fails, the picker shows an error
+and lets you retry the same query.
 
 ### Background sessions
 
