@@ -25,7 +25,6 @@ import { readFileSync } from 'fs';
 import mapValues from 'lodash-es/mapValues.js';
 import pickBy from 'lodash-es/pickBy.js';
 import uniqBy from 'lodash-es/uniqBy.js';
-import React from 'react';
 import { getOauthConfig } from './constants/oauth.js';
 import { parseSshFlags, sshArgvImpliesHeadless } from './utils/sshPreParse.js';
 import { hasPrintFlag } from './utils/printFlag.js';
