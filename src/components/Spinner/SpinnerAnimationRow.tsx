@@ -214,9 +214,9 @@ export function SpinnerAnimationRow({
   // Prefer layout with the mode glyph when it fits alongside other status.
   let reserveModeGlyph = !hasRunningTeammates;
   let showSuffix = Boolean(spinnerSuffix);
-  let effectiveSuffixWidth = showSuffix ? suffixWidth : 0;
-  let parensWidth = BASE_PARENS_WIDTH + (reserveModeGlyph ? MODE_GLYPH_RESERVE : 0);
-  let availableSpace = columns - messageWidth - parensWidth;
+  const effectiveSuffixWidth = showSuffix ? suffixWidth : 0;
+  const parensWidth = BASE_PARENS_WIDTH + (reserveModeGlyph ? MODE_GLYPH_RESERVE : 0);
+  const availableSpace = columns - messageWidth - parensWidth;
   // Try full effort text against the looser leader glyph chrome before shrinking,
   // so "(↓ · thinking with high effort)" wins when it physically fits.
   let showThinking = wantsThinking && availableSpace > effectiveSuffixWidth + thinkingWidthValue;
@@ -233,9 +233,9 @@ export function SpinnerAnimationRow({
       showThinking = true;
     }
   }
-  let usedAfterThinking = effectiveSuffixWidth + (showThinking ? thinkingWidthValue + sep : 0);
+  const usedAfterThinking = effectiveSuffixWidth + (showThinking ? thinkingWidthValue + sep : 0);
   let showTimer = wantsTimer && availableSpace > usedAfterThinking + timerWidth;
-  let usedAfterTimer = usedAfterThinking + (showTimer ? timerWidth + sep : 0);
+  const usedAfterTimer = usedAfterThinking + (showTimer ? timerWidth + sep : 0);
   let showTokens = wantsTokens && hasTokenContent && availableSpace > usedAfterTimer + tokensWidth;
   // Re-check without the glyph. Keep it when it fits alongside the same
   // content, but prefer higher-value status when reserving the glyph hides it.
@@ -278,8 +278,6 @@ export function SpinnerAnimationRow({
     const glyphRecoveryLosesTokens = showTokens && !bareShowTokens && !preferTokensOverTimerOnly;
     if ((glyphHidesThinking || glyphHidesTimer || glyphHidesTokens || preferTokensOverTimerOnly || preferThinkingOverTimerOnly) && !glyphRecoveryLosesTokens) {
       reserveModeGlyph = false;
-      parensWidth = BASE_PARENS_WIDTH;
-      availableSpace = columns - messageWidth - BASE_PARENS_WIDTH;
       if (preferTokensOverTimerOnly) {
         // Tie-break: when tokens and thinking both unlock by dropping the glyph
         // (preferTokensOverTimerOnly && preferThinkingOverTimerOnly), tokens win.
@@ -289,15 +287,12 @@ export function SpinnerAnimationRow({
         const timerTokensWidth = timerAndTokensFitBare ? timerWidth + sep + tokensWidth : tokensWidth;
         if (showSuffix && bareAvailableSpace < effectiveSuffixWidth + timerTokensWidth) {
           showSuffix = false;
-          effectiveSuffixWidth = 0;
         }
         showThinking = false;
         showTimer = Boolean(wantsTimer && (showSuffix ? bareAvailableSpace >= effectiveSuffixWidth + timerWidth + sep + tokensWidth : timerAndTokensFitBare));
         showTokens = true;
         thinkingText = fullThinkingText;
         thinkingWidthValue = fullThinkingWidth;
-        usedAfterThinking = effectiveSuffixWidth;
-        usedAfterTimer = usedAfterThinking + (showTimer ? timerWidth + sep : 0);
       } else if (preferThinkingOverTimerOnly && !bareShowTimer) {
         // Thinking fits bare; timer does not fit alongside — drop timer.
         thinkingText = bareThinkingText ?? fullThinkingText;
@@ -305,15 +300,11 @@ export function SpinnerAnimationRow({
         showThinking = true;
         showTimer = false;
         showTokens = false;
-        usedAfterThinking = effectiveSuffixWidth + thinkingWidthValue + sep;
-        usedAfterTimer = usedAfterThinking;
       } else {
         thinkingText = bareThinkingText ?? fullThinkingText;
         thinkingWidthValue = bareThinkingWidth;
         showThinking = bareShowThinking;
-        usedAfterThinking = bareUsedAfterThinking;
         showTimer = bareShowTimer;
-        usedAfterTimer = bareUsedAfterTimer;
         showTokens = bareShowTokens;
       }
     }
@@ -330,11 +321,8 @@ export function SpinnerAnimationRow({
     if (!suffixFitsWithGlyph) {
       if (reserveModeGlyph && suffixFitsBare) {
         reserveModeGlyph = false;
-        parensWidth = BASE_PARENS_WIDTH;
-        availableSpace = columns - messageWidth - BASE_PARENS_WIDTH;
       } else {
         showSuffix = false;
-        effectiveSuffixWidth = 0;
       }
     }
   }
@@ -374,7 +362,6 @@ export function SpinnerAnimationRow({
         suffixTextWidth + sep + timerWidth + sep + thinkingWidthForSuffix;
     if (hasTokenContent && physicalBareBudget >= tokensWidth && physicalBareBudget < suffixWithAllVisibleFit) {
       showSuffix = false;
-      effectiveSuffixWidth = 0;
     } else if (
       timerWantedVisible &&
       wantsThinking &&
@@ -383,7 +370,6 @@ export function SpinnerAnimationRow({
     ) {
       // Timer+thinking fit without suffix; keep them and drop suffix until all three fit.
       showSuffix = false;
-      effectiveSuffixWidth = 0;
     } else if (
       !hasTokenContent &&
       wantsThinking &&
@@ -391,7 +377,6 @@ export function SpinnerAnimationRow({
       !thinkingWithSuffixFit
     ) {
       showSuffix = false;
-      effectiveSuffixWidth = 0;
     }
   }
   // After dropping a crowding suffix (or preferring tokens/thinking over it),
@@ -408,16 +393,12 @@ export function SpinnerAnimationRow({
       if (tokensFitBareAlone) {
         showTokens = true;
         showTimer = Boolean(timerAndTokensFitBare);
-        usedAfterThinking = 0;
-        usedAfterTimer = showTimer ? timerWidth + sep : 0;
-        const recoveredWidth = usedAfterTimer + tokensWidth;
+        const recoveredWidth = (showTimer ? timerWidth + sep : 0) + tokensWidth;
         if (reserveModeGlyph && !(withGlyphSpace > recoveredWidth)) {
           reserveModeGlyph = false;
         }
       } else if (!wantsThinking && timerFitBareAlone) {
         showTimer = true;
-        usedAfterThinking = 0;
-        usedAfterTimer = timerWidth + sep;
         if (reserveModeGlyph && !(withGlyphSpace > timerWidth)) {
           reserveModeGlyph = false;
         }
@@ -431,25 +412,19 @@ export function SpinnerAnimationRow({
         physicalBareBudget >= timerWidth + sep + thinkingWidthValue + sep + tokensWidth;
       if (showThinking && timerThinkingTokensFit) {
         showTokens = true;
-        usedAfterTimer = timerWidth + sep + tokensWidth;
       } else if (thinkingAndTokensFit) {
         // Prefer tokens + thinking over timer + thinking when timer crowds tokens.
         showTimer = false;
         showTokens = true;
-        usedAfterThinking = thinkingWidthValue + sep;
-        usedAfterTimer = 0;
       } else if (
         timerAndTokensFitBare &&
         physicalBareBudget >= timerWidth + sep + tokensWidth + (showThinking ? sep + thinkingWidthValue : 0)
       ) {
         showTokens = true;
-        usedAfterTimer = timerWidth + sep + tokensWidth;
       } else if (!showThinking) {
         // Prefer tokens over timer-only when both cannot share the row.
         showTimer = false;
         showTokens = true;
-        usedAfterThinking = 0;
-        usedAfterTimer = 0;
       }
     } else if (showThinking && !showTokens && tokensFitBareAlone) {
       // Thinking recovered after suffix drop — co-restore tokens when they fit.
@@ -469,8 +444,6 @@ export function SpinnerAnimationRow({
           reserveModeGlyph = false;
         }
         showTimer = true;
-        usedAfterThinking = showThinking ? thinkingWidthValue + sep : 0;
-        usedAfterTimer = timerWidth + sep + tokensWidth;
       }
     }
   }
@@ -492,10 +465,7 @@ export function SpinnerAnimationRow({
       reserveModeGlyph = false;
       if (showSuffix && physicalBareBudget < suffixWidth + tokensWidth) {
         showSuffix = false;
-        effectiveSuffixWidth = 0;
       }
-      usedAfterThinking = effectiveSuffixWidth;
-      usedAfterTimer = usedAfterThinking;
     }
   }
   // Thinking-only prefers the mode glyph inside outer parens for leaders
@@ -564,8 +534,6 @@ export function SpinnerAnimationRow({
     const usedBeforeTimer = (showTokens ? tokensWidth + sep : 0) + thinkingWidthValue + sep;
     if (space > usedBeforeTimer + timerWidth) {
       showTimer = true;
-      usedAfterThinking = thinkingWidthValue + sep;
-      usedAfterTimer = timerWidth + sep + (showTokens ? tokensWidth : 0);
     }
   }
   // Prefer live tokens over active thinking when both cannot share bare chrome
@@ -579,8 +547,6 @@ export function SpinnerAnimationRow({
       showTimer = Boolean(wantsTimer && physicalBareBudget >= timerWidth + sep + tokensWidth);
       suppressModeGlyphForBareThinking = false;
       reserveModeGlyph = false;
-      usedAfterThinking = 0;
-      usedAfterTimer = showTimer ? timerWidth + sep : 0;
     }
   }
   // If thinking could not claim an empty post-suffix row, recover timer-only
