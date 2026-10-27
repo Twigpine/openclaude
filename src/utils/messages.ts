@@ -1660,7 +1660,7 @@ export function normalizeMessagesForAPI(
           // tool_result content, as these are only valid with the tool search beta.
           // When tool search IS enabled, strip only tool_reference blocks for
           // tools that no longer exist (e.g., MCP server was disconnected).
-          let normalizedMessage = message
+          let normalizedMessage: UserMessage
           if (!isToolSearchEnabledOptimistic()) {
             normalizedMessage = stripToolReferenceBlocksFromUserMessage(message)
           } else {
