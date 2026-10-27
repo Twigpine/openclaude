@@ -890,6 +890,7 @@ export function LogSelector(t0: LogSelectorProps) {
           status: "error",
           message
         });
+        setIsAgenticSearchOptionFocused(true);
         logEvent("tengu_agentic_search_error", {
           query_length: searchQuery.length
         });
@@ -907,7 +908,7 @@ export function LogSelector(t0: LogSelectorProps) {
   if ($[98] !== agenticResultsQuery || $[99] !== agenticSearchState.status || $[100] !== searchQuery) {
     t36 = () => {
       if (agenticSearchState.status !== "idle" && agenticSearchState.status !== "searching") {
-        if (agenticSearchState.status === "results" && agenticSearchState.query !== searchQuery || agenticSearchState.status === "error") {
+        if (agenticSearchState.status === "results" && agenticSearchState.query !== searchQuery) {
           setAgenticSearchState({
             status: "idle"
           });
@@ -1389,7 +1390,7 @@ export function LogSelector(t0: LogSelectorProps) {
   }
   let t68;
   if ($[194] !== agenticSearchState.status || $[195] !== filteredLogs) {
-    t68 = agenticSearchState.status === "error" && filteredLogs.length === 0 && <Box paddingLeft={1} marginBottom={1} flexShrink={0}><Text dimColor={true} italic={true}>No matching sessions found.</Text></Box>;
+    t68 = agenticSearchState.status === "error" && <Box paddingLeft={1} marginBottom={1} flexShrink={0}><Text dimColor={true} italic={true}>Search failed. Please try again.</Text></Box>;
     $[194] = agenticSearchState.status;
     $[195] = filteredLogs;
     $[196] = t68;
@@ -1398,7 +1399,7 @@ export function LogSelector(t0: LogSelectorProps) {
   }
   let t69;
   if ($[197] !== agenticSearchState.status || $[198] !== isAgenticSearchOptionFocused || $[199] !== onAgenticSearch || $[200] !== searchQuery) {
-    t69 = Boolean(searchQuery.trim()) && onAgenticSearch && isAgenticSearchEnabled && agenticSearchState.status !== "searching" && agenticSearchState.status !== "results" && agenticSearchState.status !== "error" && <Box flexShrink={0} flexDirection="column"><Box flexDirection="row" gap={1}><Text color={isAgenticSearchOptionFocused ? "suggestion" : undefined}>{isAgenticSearchOptionFocused ? figures.pointer : " "}</Text><Text color={isAgenticSearchOptionFocused ? "suggestion" : undefined} bold={isAgenticSearchOptionFocused}>Search deeply using configured model →</Text></Box><Text dimColor>Searches a limited set of loaded sessions.</Text><Box height={1} /></Box>;
+    t69 = Boolean(searchQuery.trim()) && onAgenticSearch && isAgenticSearchEnabled && agenticSearchState.status !== "searching" && agenticSearchState.status !== "results" && <Box flexShrink={0} flexDirection="column"><Box flexDirection="row" gap={1}><Text color={isAgenticSearchOptionFocused ? "suggestion" : undefined}>{isAgenticSearchOptionFocused ? figures.pointer : " "}</Text><Text color={isAgenticSearchOptionFocused ? "suggestion" : undefined} bold={isAgenticSearchOptionFocused}>Search deeply using configured model →</Text></Box><Text dimColor>Searches a limited set of loaded sessions.</Text><Box height={1} /></Box>;
     $[197] = agenticSearchState.status;
     $[198] = isAgenticSearchOptionFocused;
     $[199] = onAgenticSearch;

@@ -438,6 +438,7 @@ test('deep search is offered only with a callback and runs from the keyboard', a
   let selectionComplete: () => void = () => {}
   const selection = new Promise<void>(resolve => { selectionComplete = resolve })
   let finishSearch: (results: LogOption[]) => void = () => {}
+  let failSearch: (error: Error) => void = () => {}
   let searchSignal: AbortSignal | undefined
   let pageRequests = 0
   const onLoadMore = () => { pageRequests++ }
@@ -448,7 +449,7 @@ test('deep search is offered only with a callback and runs from the keyboard', a
     expect(candidates).toEqual([logs[0]])
     expect(signal?.aborted).toBe(false)
     searchSignal = signal
-    return new Promise<LogOption[]>(resolve => { finishSearch = resolve })
+    return new Promise<LogOption[]>((resolve, reject) => { finishSearch = resolve; failSearch = reject })
   }
   function Picker({ enabled }: { enabled: boolean }) {
     const [loaded, setLoaded] = React.useState(logs)
@@ -496,6 +497,13 @@ test('deep search is offered only with a callback and runs from the keyboard', a
     await waitForFrame(getOutput, frame => frame.includes('❯ Search deeply using configured model'))
     stdin.write('\r')
     await waitForFrame(getOutput, frame => frame.includes('Searching with configured model'))
+    failSearch(new Error('private failure details'))
+    const failedFrame = await waitForFrame(getOutput, frame => frame.includes('Search failed. Please try again.'))
+    expect(failedFrame).not.toContain('private failure details')
+    expect(failedFrame).not.toContain('No matching sessions found.')
+    expect(failedFrame).toContain('Search deeply using configured model')
+    stdin.write('\r')
+    await waitForFrame(getOutput, frame => frame.includes('Searching with configured model'))
     expect(pageRequests).toBeGreaterThan(0)
     await deliverPage(63)
     expect(searchSignal?.aborted).toBe(false)
@@ -506,7 +514,7 @@ test('deep search is offered only with a callback and runs from the keyboard', a
     stdin.write('\r')
     await recoveredSelected
     expect(selected.at(-1)).toEqual(recovered)
-    expect(queries).toEqual(['z'])
+    expect(queries).toEqual(['z', 'z'])
     stdin.write('\t')
     await waitForFrame(getOutput, frame => !frame.includes('Recovered session') &&
       frame.includes('Searches a limited set of loaded sessions.'))

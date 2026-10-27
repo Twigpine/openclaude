@@ -228,7 +228,8 @@ using configured model** to search conversation contents with the configured mod
 explicit action can make a model request; ordinary filtering stays local. Deep
 search considers up to 100 loaded sessions within the active filters, so older
 history may not be included. Results remain available as more history loads;
-changing the query or active filters clears the previous search.
+changing the query or active filters clears the previous search. If a search
+fails, the picker shows an error and lets you retry the same query.
 
 ### Background sessions
 

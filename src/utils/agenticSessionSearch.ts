@@ -5,7 +5,6 @@ import { getLogDisplayTitle, logError } from './log.js'
 import { getSmallFastModel } from './model/model.js'
 import { isLiteLog, loadFullLog } from './sessionStorage.js'
 import { sideQuery } from './sideQuery.js'
-import { jsonParse } from './slowOperations.js'
 
 // Limits for transcript extraction
 const MAX_TRANSCRIPT_CHARS = 2000 // Max chars of transcript per session
@@ -274,7 +273,8 @@ Find the sessions that are most relevant to this query.`
       return []
     }
 
-    const result: unknown = jsonParse(jsonMatch[0])
+    // The instrumented parser can log input; model output may contain private text.
+    const result: unknown = JSON.parse(jsonMatch[0])
     const relevantIndices = result && typeof result === 'object' &&
       'relevant_indices' in result && Array.isArray(result.relevant_indices)
       ? result.relevant_indices : []
@@ -297,6 +297,6 @@ Find the sessions that are most relevant to this query.`
     // Parser/provider errors may contain excerpts of private conversation content.
     logError(new Error('Agentic session search failed'))
     logForDebugging('Agentic session search failed')
-    return []
+    throw new Error('Agentic session search failed')
   }
 }
