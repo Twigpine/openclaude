@@ -5,6 +5,9 @@ import { FallbackTriggeredError } from '../services/api/withRetry.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
 import { z } from 'zod/v4'
 import { createToolFixture } from '../test/toolFixtures.js'
+import { createTaskStateBase } from '../Task.js'
+import type { LocalShellTaskState } from '../tasks/LocalShellTask/guards.js'
+import { TaskOutputTool } from '../tools/TaskOutputTool/TaskOutputTool.js'
 
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import { query, type QueryParams } from '../query.js'
@@ -12,6 +15,7 @@ import type { QueryDeps } from './deps.js'
 import { getMissingToolResultAbortMessage } from '../utils/abortReasons.js'
 import { resetDoomLoop } from '../utils/doomLoop.js'
 import { handleOrphanedPermission } from '../utils/queryHelpers.js'
+import { withTimeout } from '../utils/sleep.js'
 import type { ProcessUserInputContext } from '../utils/processUserInput/processUserInput.js'
 import {
   createAssistantMessage,
@@ -161,6 +165,87 @@ test('streaming doom termination wins over fallback and resets on unknown calls'
     releaseSharedMutationLock()
   }
 })
+
+for (const streaming of [false, true]) {
+  test(`post-latch task success cannot resume execution (streaming=${streaming})`, async () => {
+    await acquireSharedMutationLock('doom-loop-post-latch')
+    const config = queryConfig.buildQueryConfig()
+    const configSpy = spyOn(queryConfig, 'buildQueryConfig').mockReturnValue({
+      ...config, gates: { ...config.gates, streamingToolExecution: streaming },
+    })
+    const task: LocalShellTaskState = {
+      ...createTaskStateBase('bdoomlate', 'local_bash', 'pending task'),
+      type: 'local_bash', status: 'running', command: '', shellCommand: null,
+      completionStatusSentInAttachment: false, lastReportedTotalLines: 0, isBackgrounded: true,
+    }
+    let started = 0
+    let markStarted!: () => void
+    const bothStarted = new Promise<void>(resolve => { markStarted = resolve })
+    const pending: Promise<unknown>[] = []
+    const taskTool = {
+      ...TaskOutputTool,
+      call(...args: Parameters<typeof TaskOutputTool.call>) {
+        if (++started === 2) markStarted()
+        const result = TaskOutputTool.call(...args)
+        pending.push(result)
+        return result
+      },
+    }
+    let extraExecutions = 0
+    const afterLatchTool = createToolFixture(z.object({}), {
+      name: 'AfterLatchTool',
+      async call() { extraExecutions++; return { data: 'unexpected' } },
+    })
+    let modelCalls = 0
+    const ids = Array.from({ length: 7 }, (_, i) => `parallel-${i + 1}`)
+    const params = makeQueryParams(async function* () {
+      modelCalls++
+      yield createAssistantMessage({ content: modelCalls === 1
+        ? [...ids.map(id => toolUse(id, taskTool.name, { task_id: task.id, block: true, timeout: 30000 })),
+            toolUse('after-latch', afterLatchTool.name)]
+        : 'done' })
+    } as QueryDeps['callModel'])
+    params.toolUseContext.options.tools = [taskTool, afterLatchTool]
+    const getAppState = params.toolUseContext.getAppState
+    params.toolUseContext.getAppState = () => ({ ...getAppState(), tasks: { [task.id]: task } })
+    params.toolUseContext.setAppState = () => {}
+    const results: { id: string; error: boolean; content: string }[] = []
+    let terminal: Message | undefined
+    try {
+      for await (const message of query(params)) {
+        if (message.type === 'assistant') terminal = message
+        if (message.type !== 'user' || !Array.isArray(message.message.content)) continue
+        for (const block of message.message.content) {
+          if (block.type !== 'tool_result') continue
+          results.push({ id: block.tool_use_id, error: Boolean(block.is_error), content: String(block.content) })
+          if (block.tool_use_id === 'parallel-7') {
+            expect(String(block.content)).toContain('Blocked: 7 consecutive calls')
+            await withTimeout(bothStarted, 2000, 'Both permitted task calls must enter their wait')
+            expect(task.status).toBe('running')
+            task.status = 'completed'
+            task.result = { code: 0, interrupted: false }
+          }
+        }
+      }
+      expect(started).toBe(2)
+      expect(results.map(result => result.id).sort()).toEqual([...ids, 'after-latch'].sort())
+      for (const id of ['parallel-1', 'parallel-2']) {
+        expect(results.find(result => result.id === id)).toMatchObject({ error: false, content: expect.stringContaining('<retrieval_status>success') })
+      }
+      expect(results.find(result => result.id === 'after-latch')?.error).toBe(true)
+      expect(extraExecutions).toBe(0)
+      expect(modelCalls).toBe(1)
+      expect(terminal).toMatchObject({ type: 'assistant', isApiErrorMessage: true })
+      expect(JSON.stringify(terminal)).toContain('force-terminated')
+    } finally {
+      task.status = 'completed'
+      params.toolUseContext.abortController.abort()
+      await Promise.allSettled(pending)
+      configSpy.mockRestore()
+      releaseSharedMutationLock()
+    }
+  })
+}
 
 test('doom-loop blocks terminate the query after five consecutive blocks', async () => {
   let modelCalls = 0
