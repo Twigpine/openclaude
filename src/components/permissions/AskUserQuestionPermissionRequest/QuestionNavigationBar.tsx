@@ -1,6 +1,6 @@
 import { c as _c } from "react-compiler-runtime";
 import figures from 'figures';
-import React, { useMemo } from 'react';
+import React from 'react';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { stringWidth } from '../../../ink/stringWidth.js';
 import { Box, Text } from '../../../ink.js';

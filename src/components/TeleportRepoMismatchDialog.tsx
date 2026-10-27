@@ -1,5 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
-import React, { useCallback, useState } from 'react';
+import React, { useState } from 'react';
 import { Box, Text } from '../ink.js';
 import { getDisplayPath } from '../utils/file.js';
 import { removePathFromRepo, validateRepoAtPath } from '../utils/githubRepoPathMapping.js';

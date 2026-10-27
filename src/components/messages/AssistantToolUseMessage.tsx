@@ -1,6 +1,6 @@
 import { c as _c } from "react-compiler-runtime";
 import type { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs';
-import React, { useMemo } from 'react';
+import React from 'react';
 import { useTerminalSize } from 'src/hooks/useTerminalSize.js';
 import type { ThemeName } from 'src/utils/theme.js';
 import type { Command } from '../../commands.js';

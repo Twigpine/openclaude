@@ -1,7 +1,6 @@
 import { c as _c } from "react-compiler-runtime";
 import sample from 'lodash-es/sample.js';
 import * as React from 'react';
-import { useMemo } from 'react';
 import { Box, Text } from '../../ink.js';
 import { extractTag } from '../../utils/messages.js';
 import { MessageResponse } from '../MessageResponse.js';
