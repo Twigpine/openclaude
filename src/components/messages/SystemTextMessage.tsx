@@ -733,41 +733,6 @@ function MemoryFileRow(t0) {
   }
   return t8;
 }
-function ThinkingMessage(t0) {
-  const $ = _c(7);
-  const {
-    message,
-    addMargin
-  } = t0;
-  const bg = useSelectedMessageBg();
-  const t1 = addMargin ? 1 : 0;
-  let t2;
-  if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
-    t2 = <Box minWidth={2}><Text dimColor={true}>{TEARDROP_ASTERISK}</Text></Box>;
-    $[0] = t2;
-  } else {
-    t2 = $[0];
-  }
-  let t3;
-  if ($[1] !== message.content) {
-    t3 = <Text dimColor={true}>{message.content}</Text>;
-    $[1] = message.content;
-    $[2] = t3;
-  } else {
-    t3 = $[2];
-  }
-  let t4;
-  if ($[3] !== bg || $[4] !== t1 || $[5] !== t3) {
-    t4 = <Box flexDirection="row" marginTop={t1} backgroundColor={bg} width="100%">{t2}{t3}</Box>;
-    $[3] = bg;
-    $[4] = t1;
-    $[5] = t3;
-    $[6] = t4;
-  } else {
-    t4 = $[6];
-  }
-  return t4;
-}
 function BridgeStatusMessage(t0) {
   const $ = _c(13);
   const {

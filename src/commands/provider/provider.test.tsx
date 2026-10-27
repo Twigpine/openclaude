@@ -7,7 +7,6 @@ import { stripVTControlCharacters as stripAnsi } from 'node:util'
 import { type Instance, createRoot, render, useApp } from '../../ink.js'
 import { AppStateProvider } from '../../state/AppState.js'
 import {
-  applySavedProfileToCurrentSession,
   buildCodexOAuthProfileEnv,
   buildCurrentProviderSummary,
   buildProfileSaveMessage,

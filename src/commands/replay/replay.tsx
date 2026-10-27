@@ -15,22 +15,7 @@ import { loadReplayIndex } from '../../utils/replayIndex.js';
 import { getWorktreePaths } from '../../utils/getWorktreePaths.js';
 import { getSessionIdFromLog, getTranscriptPathForSession, isLiteLog, loadFullLog, loadSameRepoMessageLogs } from '../../utils/sessionStorage.js';
 import { validateUuid } from '../../utils/uuid.js';
-import { agenticSessionSearch } from '../../utils/agenticSessionSearch.js';
 import { ReplayTimeline } from './ReplayTimeline.js';
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  const minutes = Math.floor(ms / 60000)
-  const seconds = Math.floor((ms % 60000) / 1000)
-  return `${minutes}m ${seconds}s`
-}
-
-function formatToolBreakdown(breakdown: Record<string, number>): string {
-  return Object.entries(breakdown)
-    .map(([tool, count]) => `${count} ${tool}`)
-    .join(', ')
-}
 
 async function findLogBySessionId(sessionId: UUID): Promise<LogOption | undefined> {
   const logs = await loadSameRepoMessageLogs(await getWorktreePaths(getOriginalCwd()));

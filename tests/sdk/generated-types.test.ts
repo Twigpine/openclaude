@@ -11,7 +11,6 @@ import {
   SDKCompactBoundaryMessageSchema,
   SDKMessageSchema,
   SDKUserMessageSchema,
-  SDKResultMessageSchema,
   SDKResultSuccessSchema,
   SDKResultErrorSchema,
   SDKSessionInfoSchema,
@@ -22,10 +21,8 @@ import {
   ModelUsageSchema,
   ModelInfoSchema,
   FastModeStateSchema,
-  HookInputSchema,
   ExitReasonSchema,
 } from '../../src/entrypoints/sdk/coreSchemas.js'
-import { z } from 'zod/v4'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 const generatedTypesPath = fileURLToPath(

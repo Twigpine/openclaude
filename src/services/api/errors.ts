@@ -32,7 +32,6 @@ import {
 import { getModelStrings } from 'src/utils/model/modelStrings.js'
 import {
   getAPIProvider,
-  isFirstPartyAnthropicBaseUrl,
   isFirstPartyAnthropicProvider,
 } from 'src/utils/model/providers.js'
 import { getIsNonInteractiveSession } from '../../bootstrap/state.js'

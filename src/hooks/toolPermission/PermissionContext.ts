@@ -45,7 +45,6 @@ import {
   supportsPersistence,
 } from '../../utils/permissions/PermissionUpdate.js'
 import {
-  applyPermissionUpdateToLiveContext,
   applyPermissionUpdatesToLiveContext,
   getPermissionModeChangeRequestDecision,
 } from '../../utils/permissions/permissionSetup.js'

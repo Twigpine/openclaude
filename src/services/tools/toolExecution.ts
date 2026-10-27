@@ -23,10 +23,6 @@ import {
   getReplayIndexBuilder,
   getStatsStore,
 } from '../../bootstrap/state.js'
-import {
-  buildCodeEditToolAttributes,
-  isCodeEditingTool,
-} from '../../hooks/toolPermission/permissionLogging.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import {
   findToolByName,

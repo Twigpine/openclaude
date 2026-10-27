@@ -16,13 +16,6 @@ import {
 } from './cronTasks.js'
 import { lazySchema } from './lazySchema.js'
 
-// How often to re-fetch tengu_kairos_cron_config from GrowthBook. Short because
-// this is an incident lever — when we push a config change to shed :00 load,
-// we want the fleet to converge within a minute, not on the next process
-// restart. The underlying call is a synchronous cache read; the refresh just
-// clears the memoized entry so the next read triggers a background fetch.
-const JITTER_CONFIG_REFRESH_MS = 60 * 1000
-
 // Upper bounds here are defense-in-depth against fat-fingered GrowthBook
 // pushes. Like pollConfig.ts, Zod rejects the whole object on any violation
 // rather than partially trusting it — a config with one bad field falls back
@@ -56,7 +49,7 @@ const cronJitterConfigSchema = lazySchema(() =>
  * Read `tengu_kairos_cron_config` from GrowthBook, validate, fall back to
  * defaults on absent/malformed/out-of-bounds config. Called from check()
  * every tick via the `getJitterConfig` callback — cheap (synchronous cache
- * hit). Refresh window: JITTER_CONFIG_REFRESH_MS.
+ * hit).
  *
  * Exported so ops runbooks can point at a single function when documenting
  * the lever, and so tests can spy on it without mocking GrowthBook itself.
@@ -65,8 +58,7 @@ const cronJitterConfigSchema = lazySchema(() =>
  * contexts. Daemon/SDK callers omit getJitterConfig and get defaults.
  */
 export function getCronJitterConfig(): CronJitterConfig {
-  // The local growthbook shim takes no refresh-interval argument;
-  // JITTER_CONFIG_REFRESH_MS documents the intended cadence.
+  // The local growthbook shim takes no refresh-interval argument.
   const raw = getFeatureValue_CACHED_WITH_REFRESH<unknown>(
     'tengu_kairos_cron_config',
     DEFAULT_CRON_JITTER_CONFIG,

@@ -19,7 +19,6 @@ import { ReadMcpResourceTool } from 'src/tools/ReadMcpResourceTool/ReadMcpResour
 import { TaskOutputTool } from 'src/tools/TaskOutputTool/TaskOutputTool.js';
 import { TaskStopTool } from 'src/tools/TaskStopTool/TaskStopTool.js';
 import { TodoWriteTool } from 'src/tools/TodoWriteTool/TodoWriteTool.js';
-import { TungstenTool } from 'src/tools/TungstenTool/TungstenTool.js';
 import { WebFetchTool } from 'src/tools/WebFetchTool/WebFetchTool.js';
 import { WebSearchTool } from 'src/tools/WebSearchTool/WebSearchTool.js';
 import type { KeyboardEvent } from '../../ink/events/keyboard-event.js';

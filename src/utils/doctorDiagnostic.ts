@@ -374,15 +374,6 @@ async function detectMultipleInstallations(): Promise<
   return installations
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await getFsImplementation().stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
 export async function detectStaleProjectSettingsPaths(
   cwd?: string,
 ): Promise<{ issue: string; fix: string } | null> {

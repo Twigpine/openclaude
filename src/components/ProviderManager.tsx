@@ -20,7 +20,7 @@ import {
   parseProfileCustomHeadersInput,
   serializeProfileCustomHeaders,
 } from '../utils/providerCustomHeaders.js'
-import { getPrimaryModel, hasMultipleModels, parseModelList } from '../utils/providerModels.js'
+import { getPrimaryModel, parseModelList } from '../utils/providerModels.js'
 import {
   applySavedProfileToCurrentSession,
   buildCodexOAuthProfileEnv,
