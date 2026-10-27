@@ -575,8 +575,7 @@ export async function* runToolUse(
   } catch (error) {
     logError(error)
     const errorMessage = error instanceof Error ? error.message : String(error)
-    const toolInfo = tool ? ` (${tool.name})` : ''
-    const detailedError = `Error calling tool${toolInfo}: ${errorMessage}`
+    const detailedError = `Error calling tool (${tool.name}): ${errorMessage}`
 
     yield {
       message: createUserMessage({

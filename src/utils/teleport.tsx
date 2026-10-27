@@ -182,10 +182,10 @@ export async function validateGitState(): Promise<void> {
 
 /**
  * Fetches a specific branch from remote origin
- * @param branch The branch to fetch. If not specified, fetches all branches.
+ * @param branch The branch to fetch.
  */
-async function fetchFromOrigin(branch?: string): Promise<void> {
-  const fetchArgs = branch ? ['fetch', 'origin', `${branch}:${branch}`] : ['fetch', 'origin'];
+async function fetchFromOrigin(branch: string): Promise<void> {
+  const fetchArgs = ['fetch', 'origin', `${branch}:${branch}`];
   const {
     code: fetchCode,
     stderr: fetchStderr
@@ -193,7 +193,7 @@ async function fetchFromOrigin(branch?: string): Promise<void> {
   if (fetchCode !== 0) {
     // If fetching a specific branch fails, it might not exist locally yet
     // Try fetching just the ref without mapping to local branch
-    if (branch && fetchStderr.includes('refspec')) {
+    if (fetchStderr.includes('refspec')) {
       logForDebugging(`Specific branch fetch failed, trying to fetch ref: ${branch}`);
       const {
         code: refFetchCode,

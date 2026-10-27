@@ -687,7 +687,6 @@ export async function loadConversationForResume(
 } | null> {
   try {
     let log: LogOption | null = null
-    let messages: Message[] | null = null
     let sessionId: UUID | undefined
     let goal: LogOption['goal'] | undefined
 
@@ -718,40 +717,38 @@ export async function loadConversationForResume(
       log = source
     }
 
-    if (!log && !messages) {
+    if (!log) {
       return null
     }
 
-    if (log) {
-      // Load full messages for lite logs
-      if (isLiteLog(log)) {
-        log = await loadFullLog(log)
-      }
-
-      // Determine sessionId first so we can pass it to copy functions
-      if (!sessionId) {
-        sessionId = getSessionIdFromLog(log) as UUID
-      }
-      goal = log.goal
-      // Pass the original session ID to ensure the plan slug is associated with
-      // the session we're resuming, not the temporary session ID before resume
-      if (sessionId) {
-        await copyPlanForResume(log, asSessionId(sessionId))
-      }
-
-      // Copy file history for resume
-      void copyFileHistoryForResume(log)
-
-      messages = log.messages
-      checkResumeConsistency(messages)
+    // Load full messages for lite logs
+    if (isLiteLog(log)) {
+      log = await loadFullLog(log)
     }
+
+    // Determine sessionId first so we can pass it to copy functions
+    if (!sessionId) {
+      sessionId = getSessionIdFromLog(log) as UUID
+    }
+    goal = log.goal
+    // Pass the original session ID to ensure the plan slug is associated with
+    // the session we're resuming, not the temporary session ID before resume
+    if (sessionId) {
+      await copyPlanForResume(log, asSessionId(sessionId))
+    }
+
+    // Copy file history for resume
+    void copyFileHistoryForResume(log)
+
+    let messages: Message[] = log.messages
+    checkResumeConsistency(messages)
 
     // Restore skill state from invoked_skills attachments before deserialization.
     // This ensures skills survive multiple compaction cycles after resume.
-    restoreSkillStateFromMessages(messages!)
+    restoreSkillStateFromMessages(messages)
 
     // Deserialize messages to handle unresolved tool uses and ensure proper format
-    const deserialized = deserializeMessagesWithInterruptDetection(messages!)
+    const deserialized = deserializeMessagesWithInterruptDetection(messages)
     messages = deserialized.messages
 
     // Reject oversized resumes before running side-effectful resume hooks.
