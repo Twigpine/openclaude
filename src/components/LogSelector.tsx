@@ -95,7 +95,6 @@ const DEEP_SEARCH_MAX_MESSAGES = 2000;
 const DEEP_SEARCH_CROP_SIZE = 1000;
 const DEEP_SEARCH_MAX_TEXT_LENGTH = 50000; // Cap searchable text per session
 const FUSE_THRESHOLD = 0.3;
-const DATE_TIE_THRESHOLD_MS = 60 * 1000; // 1 minute - use relevance as tie-breaker within this window
 const SNIPPET_CONTEXT_CHARS = 50; // Characters to show before/after match
 
 type Snippet = {
@@ -549,15 +548,8 @@ export function LogSelector(t0: LogSelectorProps) {
   let t26;
   if ($[46] !== debouncedDeepSearchQuery) {
     t25 = () => {
-      if (true || !debouncedDeepSearchQuery || true) {
-        setDeepSearchResults(null);
-        setIsSearching(false);
-        return;
-      }
-      const timeoutId_0 = setTimeout(_temp5, 0, null, debouncedDeepSearchQuery, setDeepSearchResults, setIsSearching);
-      return () => {
-        clearTimeout(timeoutId_0);
-      };
+      setDeepSearchResults(null);
+      setIsSearching(false);
     };
     t26 = [debouncedDeepSearchQuery, null, false];
     $[46] = debouncedDeepSearchQuery;
@@ -1528,31 +1520,6 @@ function _temp7(r_0: DeepSearchResult): LogOption {
 }
 function _temp6(log_6: LogOption): string | undefined {
   return log_6.messages[0]?.uuid;
-}
-function _temp5(fuseIndex_0, debouncedDeepSearchQuery_0, setDeepSearchResults_0, setIsSearching_0) {
-  const results = fuseIndex_0.search(debouncedDeepSearchQuery_0);
-  results.sort(_temp3);
-  setDeepSearchResults_0({
-    results: results.map(_temp4),
-    query: debouncedDeepSearchQuery_0
-  });
-  setIsSearching_0(false);
-}
-function _temp4(r) {
-  return {
-    log: r.item.log,
-    score: r.score,
-    searchableText: r.item.searchableText
-  };
-}
-function _temp3(a, b) {
-  const aTime = new Date(a.item.log.modified).getTime();
-  const bTime = new Date(b.item.log.modified).getTime();
-  const timeDiff = bTime - aTime;
-  if (Math.abs(timeDiff) > DATE_TIE_THRESHOLD_MS) {
-    return timeDiff;
-  }
-  return (a.score ?? 1) - (b.score ?? 1);
 }
 function _temp2(log_1: LogOption): boolean {
   const currentSessionId = getSessionId();
