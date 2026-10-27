@@ -10,7 +10,6 @@ import { Box, Text, useTheme } from '../../ink.js';
 import { useAppStateMaybeOutsideOfProvider } from '../../state/AppState.js';
 import { findToolByName, type Tool, type ToolProgressData, type Tools } from '../../Tool.js';
 import type { ProgressMessage } from '../../types/message.js';
-import { useIsClassifierChecking } from '../../utils/classifierApprovalsHook.js';
 import { logError } from '../../utils/log.js';
 import type { buildMessageLookups } from '../../utils/messages.js';
 import { MessageResponse } from '../MessageResponse.js';
@@ -52,7 +51,6 @@ export function AssistantToolUseMessage(t0) {
   const [theme] = useTheme();
   const bg = useSelectedMessageBg();
   const pendingWorkerRequest = useAppStateMaybeOutsideOfProvider(_temp);
-  useIsClassifierChecking(param.id);
   const permissionMode = useAppStateMaybeOutsideOfProvider(_temp2);
   const hasStrippedRules = useAppStateMaybeOutsideOfProvider(_temp3);
   const isAutoClassifier = permissionMode === "auto" || permissionMode === "plan" && hasStrippedRules;

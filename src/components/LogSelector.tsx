@@ -525,24 +525,6 @@ export function LogSelector(t0: LogSelectorProps) {
     t22 = t23;
   }
   const titleFilteredLogs = t22;
-  let t23;
-  let t24;
-  if ($[42] !== debouncedDeepSearchQuery || $[43] !== deferredSearchQuery) {
-    t23 = () => {
-      if (false && deferredSearchQuery && deferredSearchQuery !== debouncedDeepSearchQuery) {
-        setIsSearching(true);
-      }
-    };
-    t24 = [deferredSearchQuery, debouncedDeepSearchQuery, false];
-    $[42] = debouncedDeepSearchQuery;
-    $[43] = deferredSearchQuery;
-    $[44] = t23;
-    $[45] = t24;
-  } else {
-    t23 = $[44];
-    t24 = $[45];
-  }
-  React.useEffect(t23, t24);
   let t25;
   let t26;
   if ($[46] !== debouncedDeepSearchQuery) {

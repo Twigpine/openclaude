@@ -219,7 +219,6 @@ export function getAllBaseTools(): Tools {
       ? (() => { const tct = getTeamCreateTool(); const tdt = getTeamDeleteTool(); return [tct, tdt].filter(Boolean) })()
       : []),
     ...(VerifyPlanExecutionTool ? [VerifyPlanExecutionTool] : []),
-    ...(process.env.USER_TYPE === 'ant' && REPLTool ? [REPLTool] : []),
     ...(WorkflowTool ? [WorkflowTool] : []),
     ...(SleepTool ? [SleepTool] : []),
     ...(cronTools ?? []),

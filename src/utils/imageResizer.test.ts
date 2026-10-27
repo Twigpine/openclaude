@@ -3,7 +3,6 @@ import { randomBytes } from 'crypto'
 
 // Mutable controls for the mocked image processor (image_processor_napi / sharp).
 let mockMetadata: unknown = { width: 10, height: 10, format: 'png' }
-let throwOnSharpConstruction = false
 const defaultBuffer = Buffer.from('rendered')
 
 type MockImageProcessor = {
@@ -28,9 +27,6 @@ function makeSharpInstance(): MockImageProcessor {
 }
 
 function sharpFactory(input: Buffer): MockImageProcessor {
-  if (throwOnSharpConstruction) {
-    throw new Error('image_processor_napi crashed')
-  }
   return makeSharpInstance()
 }
 
@@ -47,7 +43,6 @@ const originalImageProcessorExports = { ...actualImageProcessor }
 
 afterEach(() => {
   mockMetadata = { width: 10, height: 10, format: 'png' }
-  throwOnSharpConstruction = false
   mock.module(imageProcessorPath, () => originalImageProcessorExports)
   mock.restore()
 })
