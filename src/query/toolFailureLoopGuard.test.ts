@@ -10,6 +10,9 @@ import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import { query, type QueryParams } from '../query.js'
 import type { QueryDeps } from './deps.js'
 import { getMissingToolResultAbortMessage } from '../utils/abortReasons.js'
+import { resetDoomLoop } from '../utils/doomLoop.js'
+import { handleOrphanedPermission } from '../utils/queryHelpers.js'
+import type { ProcessUserInputContext } from '../utils/processUserInput/processUserInput.js'
 import {
   createAssistantMessage,
   createCompactBoundaryMessage,
@@ -23,6 +26,59 @@ import {
 } from './toolFailureLoopGuard.js'
 
 const querySourceFile = new URL('../query.ts', import.meta.url)
+
+test('independent recovered approvals do not inherit another turn’s doom state', async () => {
+  resetDoomLoop()
+  const executedValues: number[] = []
+  const resultIds: string[] = []
+  const errors: string[] = []
+  const tool = createToolFixture(z.object({ value: z.number() }), {
+    name: 'RecoveredApprovalTool',
+    maxResultSizeChars: 1000,
+    async call({ value }) {
+      executedValues.push(value)
+      return { data: 'ok' }
+    },
+  })
+  try {
+    for (let i = 0; i < 8; i++) {
+      const params = makeQueryParams(async function* () {
+        yield createAssistantMessage({ content: 'done' })
+      } as QueryDeps['callModel'], { querySource: 'sdk' })
+      params.toolUseContext.options.tools = [tool]
+      const context: ProcessUserInputContext = {
+        ...params.toolUseContext,
+        options: { ...params.toolUseContext.options, ideInstallationStatus: null, theme: 'dark' },
+        setMessages: () => {},
+        onChangeAPIKey: () => {},
+      }
+      const id = `recovered-${i}`
+      const input = { value: i < 7 ? 1 : 2 }
+      for await (const message of handleOrphanedPermission({
+        permissionResult: { behavior: 'allow', toolUseID: id, updatedInput: input },
+        assistantMessage: createAssistantMessage({ content: [toolUse(id, tool.name, input)] }),
+      }, [tool], [], context)) {
+        if (message.type !== 'user' || !Array.isArray(message.message.content)) continue
+        for (const block of message.message.content) {
+          if (
+            typeof block !== 'object' || block === null ||
+            !('type' in block) || block.type !== 'tool_result' ||
+            !('tool_use_id' in block) || typeof block.tool_use_id !== 'string'
+          ) continue
+          resultIds.push(block.tool_use_id)
+          if ('is_error' in block && block.is_error) errors.push(JSON.stringify(block))
+        }
+      }
+      // QueryEngine continues with an ordinary query after the recovered tool.
+      for await (const _message of query(params)) { /* drain */ }
+    }
+    expect(executedValues).toEqual([1, 1, 1, 1, 1, 1, 1, 2])
+    expect(resultIds).toEqual(Array.from({ length: 8 }, (_, i) => `recovered-${i}`))
+    expect(errors).toEqual([])
+  } finally {
+    resetDoomLoop()
+  }
+})
 
 test('concurrent SDK turns cannot reset or terminate each other', async () => {
   function session(name: string) {
