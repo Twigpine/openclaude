@@ -24,7 +24,7 @@ import { IT2_COMMAND, isInsideTmuxSync } from '../../utils/swarm/backends/detect
 import { ensureBackendsRegistered, getBackendByType, getCachedBackend } from '../../utils/swarm/backends/registry.js';
 import type { PaneBackendType } from '../../utils/swarm/backends/types.js';
 import { getSwarmSocketName, TMUX_COMMAND } from '../../utils/swarm/constants.js';
-import { addHiddenPaneId, removeHiddenPaneId, removeMemberFromTeam, setMemberMode, setMultipleMemberModes } from '../../utils/swarm/teamHelpers.js';
+import { removeMemberFromTeam, setMemberMode, setMultipleMemberModes } from '../../utils/swarm/teamHelpers.js';
 import { listTasks, type Task, unassignTeammateTasks } from '../../utils/tasks.js';
 import { getTeammateStatuses, type TeammateStatus, type TeamSummary } from '../../utils/teamDiscovery.js';
 import { createModeSetRequestMessage, sendShutdownRequestToMailbox, writeToMailbox } from '../../utils/teammateMailbox.js';

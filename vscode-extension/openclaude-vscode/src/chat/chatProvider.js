@@ -9,9 +9,8 @@ const { ProcessManager } = require('./processManager');
 const { buildPermissionControlResult } = require('./permissionResponse');
 const { toViewModel } = require('./messageParser');
 const { renderChatHtml } = require('./chatRenderer');
-const { isAssistantMessage, isPartialMessage, isStreamEvent,
-        isContentBlockDelta, isContentBlockStart, isMessageStart,
-        isResultMessage, isControlRequest, isToolProgressMessage,
+const { isAssistantMessage, isStreamEvent,
+        isControlRequest, isToolProgressMessage,
         isStatusMessage, isRateLimitEvent, getTextContent,
         getToolUseBlocks } = require('./protocol');
 

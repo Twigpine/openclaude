@@ -181,7 +181,7 @@ function logPermissionDecision(
   args: PermissionDecisionArgs,
   permissionPromptStartTimeMs?: number,
 ): void {
-  const { tool, input, toolUseContext, messageId, toolUseID } = ctx
+  const { tool, toolUseContext, messageId, toolUseID } = ctx
   const { decision, source } = args
 
   const waiting_for_user_permission_ms =

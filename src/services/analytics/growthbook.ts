@@ -9,7 +9,7 @@
  * Priority: OPENCLAUDE_FEATURE_FLAGS_FILE env > CLAUDE_FEATURE_FLAGS_FILE env > ~/.openclaude/feature-flags.json > defaultValue
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 

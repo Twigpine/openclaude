@@ -3,7 +3,7 @@ import * as React from 'react';
 import { PRODUCT_DISPLAY_NAME } from 'src/constants/product.js';
 import { Box, Text } from 'src/ink.js';
 import { type NetworkHostPattern, shouldAllowManagedSandboxDomainsOnly } from 'src/utils/sandbox/sandbox-adapter.js';
-import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
+import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../../services/analytics/index.js';
 import { Select } from '../CustomSelect/select.js';
 import { PermissionDialog } from './PermissionDialog.js';
 export type SandboxPermissionRequestProps = {

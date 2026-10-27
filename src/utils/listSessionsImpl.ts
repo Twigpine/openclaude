@@ -10,7 +10,7 @@
 import type { Dirent } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import { basename, join } from 'path'
-import { getClaudeConfigHomeDir, getProjectsDir } from './envUtils.js'
+import { getProjectsDir } from './envUtils.js'
 import { getWorktreePathsPortable } from './getWorktreePathsPortable.js'
 import type { LiteSessionFile } from './sessionStoragePortable.js'
 import {

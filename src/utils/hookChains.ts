@@ -256,21 +256,6 @@ let configCache: ConfigCacheState | null = null
 const ruleCooldownUntil = new Map<string, number>()
 const dedupKeyUntil = new Map<string, number>()
 
-function getHookChainScopeKey(
-  runtime?: { dedupScope?: string | null } | null,
-  event?: { payload?: { session_id?: string | null } | null } | null,
-): string {
-  const scope = runtime?.dedupScope ?? event?.payload?.session_id
-  return scope && scope.length > 0 ? scope : '__global__'
-}
-
-function getRuleCooldownKey(
-  ruleId: string,
-  runtime?: { dedupScope?: string | null } | null,
-  event?: { payload?: { session_id?: string | null } | null } | null,
-): string {
-  return `${getHookChainScopeKey(runtime, event)}:${ruleId}`
-}
 function asAnalyticsString(
   value: string,
 ): AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS {

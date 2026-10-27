@@ -2,10 +2,6 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { DiagnosticTrackingService } from './diagnosticTracking.js'
 import type { MCPServerConnection } from './mcp/types.js'
 
-// Mock the IDE client utility
-const mockGetConnectedIdeClient = (clients: MCPServerConnection[]) => 
-  clients.find(client => client.type === 'connected')
-
 describe('DiagnosticTrackingService', () => {
   let service: DiagnosticTrackingService
   let mockClients: MCPServerConnection[]

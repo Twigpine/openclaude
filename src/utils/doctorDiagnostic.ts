@@ -11,7 +11,7 @@ import {
   type InstallMethod,
 } from './config.js'
 import { getCwd } from './cwd.js'
-import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
+import { isEnvTruthy } from './envUtils.js'
 import { execFileNoThrow } from './execFileNoThrow.js'
 import { getFsImplementation } from './fsOperations.js'
 import {

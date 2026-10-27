@@ -15,7 +15,6 @@ import {
 import {
   saveSession,
   loadSession,
-  listSessions,
   createSession,
 } from '../utils/sessionPersistence.js'
 
