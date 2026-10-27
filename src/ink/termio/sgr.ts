@@ -46,9 +46,9 @@ function parseParams(str: string): Param[] {
   let num = ''
   let inSub = false
 
-  for (let i = 0; i <= str.length; i++) {
-    const c = str[i]
-    if (c === ';' || c === undefined) {
+  // A trailing separator flushes the final parameter without reading past the end.
+  for (const c of str + ';') {
+    if (c === ';') {
       const n = num === '' ? null : parseInt(num, 10)
       if (inSub) {
         if (n !== null) current.subparams.push(n)
