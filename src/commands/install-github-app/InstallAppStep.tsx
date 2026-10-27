@@ -40,7 +40,7 @@ export function InstallAppStep(t0) {
   }
   let t4;
   if ($[3] === Symbol.for("react.memo_cache_sentinel")) {
-    t4 = <Box marginBottom={1}><Text>If your browser doesn't open automatically, visit:</Text></Box>;
+    t4 = <Box marginBottom={1}><Text>If your browser doesn&apos;t open automatically, visit:</Text></Box>;
     $[3] = t4;
   } else {
     t4 = $[3];
@@ -69,7 +69,7 @@ export function InstallAppStep(t0) {
   }
   let t8;
   if ($[8] === Symbol.for("react.memo_cache_sentinel")) {
-    t8 = <Box><Text bold={true} color="permission">Press Enter once you've installed the app{figures.ellipsis}</Text></Box>;
+    t8 = <Box><Text bold={true} color="permission">Press Enter once you&apos;ve installed the app{figures.ellipsis}</Text></Box>;
     $[8] = t8;
   } else {
     t8 = $[8];
