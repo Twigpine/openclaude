@@ -1861,7 +1861,6 @@ async function loadAndCacheMarketplace(
               )
             }
           }
-          cleanupNeeded = false // Clone is the live cache (renamed, copied, or kept)
         } catch (error) {
           const errorMsg = errorMessage(error)
           throw new Error(
