@@ -1,5 +1,10 @@
 import type { Message } from '../types/message.js'
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
+import * as queryConfig from './config.js'
+import { FallbackTriggeredError } from '../services/api/withRetry.js'
+import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
+import { z } from 'zod/v4'
+import { createToolFixture } from '../test/toolFixtures.js'
 
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import { query, type QueryParams } from '../query.js'
@@ -18,6 +23,128 @@ import {
 } from './toolFailureLoopGuard.js'
 
 const querySourceFile = new URL('../query.ts', import.meta.url)
+
+test('streaming doom termination wins over fallback and resets on unknown calls', async () => {
+  await acquireSharedMutationLock('doom-loop-streaming-config')
+  const config = queryConfig.buildQueryConfig()
+  const configSpy = spyOn(queryConfig, 'buildQueryConfig').mockReturnValue({
+    ...config,
+    gates: { ...config.gates, streamingToolExecution: true },
+  })
+  try {
+    let modelCalls = 0
+    const tool = createToolFixture(z.object({}), {
+      name: 'StreamingDoomTool',
+      async call() { return { data: 'ok' } },
+    })
+    const params = makeQueryParams(async function* () {
+      modelCalls++
+      yield createAssistantMessage({ content: [
+        toolUse(`stream-${modelCalls}`, modelCalls === 7 ? 'UnknownTool' : tool.name),
+      ] })
+      if (modelCalls === 12) throw new FallbackTriggeredError('test-model', 'fallback')
+      if (modelCalls > 12) throw new Error('Unexpected fallback model request')
+    } as QueryDeps['callModel'], { fallbackModel: 'fallback' })
+    params.toolUseContext.options.tools = [tool]
+    let terminal: Message | undefined
+    const resultIds: string[] = []
+    for await (const message of query(params)) {
+      if (message.type === 'assistant') terminal = message
+      if (message.type === 'user' && Array.isArray(message.message.content)) {
+        for (const block of message.message.content) {
+          if (block.type === 'tool_result') resultIds.push(block.tool_use_id)
+        }
+      }
+    }
+    // Two allowed, four blocked, unknown (resets), then five blocked calls.
+    expect(modelCalls).toBe(12)
+    expect(resultIds).toEqual(Array.from({ length: 12 }, (_, i) => `stream-${i + 1}`))
+    expect(terminal).toMatchObject({ type: 'assistant', isApiErrorMessage: true })
+    expect(JSON.stringify(terminal)).toContain('force-terminated')
+  } finally {
+    configSpy.mockRestore()
+    releaseSharedMutationLock()
+  }
+})
+
+test('doom-loop blocks terminate the query after five consecutive blocks', async () => {
+  let modelCalls = 0
+  let executions = 0
+  const tool = createToolFixture(z.object({ value: z.string() }), {
+    name: 'DoomLoopTestTool',
+    async call() {
+      executions++
+      return { data: 'ok' }
+    },
+  })
+  const params = makeQueryParams(async function* () {
+    modelCalls++
+    // Bound the broken baseline without relying on a timeout to prove failure.
+    yield createAssistantMessage({
+      content: modelCalls <= 8
+        ? [toolUse(`repeat-${modelCalls}`, tool.name, { value: 'same' })]
+        : 'model finally stopped',
+    })
+  } as QueryDeps['callModel'])
+  params.toolUseContext.options.tools = [tool]
+  const messages: Message[] = []
+  const turn = query(params)
+  let next = await turn.next()
+  while (!next.done) {
+    if (next.value.type === 'assistant') messages.push(next.value)
+    next = await turn.next()
+  }
+  expect(executions).toBe(2)
+  expect(modelCalls).toBe(7)
+  expect(next.value).toEqual({ reason: 'tool_failure_loop' })
+  const terminal = messages.at(-1)
+  expect(terminal).toMatchObject({ type: 'assistant', isApiErrorMessage: true })
+  if (terminal?.type !== 'assistant') throw new Error('Missing terminal error')
+  expect(terminal.message.content).toEqual([
+    expect.objectContaining({
+      type: 'text',
+      text: expect.stringContaining('force-terminated'),
+    }),
+  ])
+  const text = JSON.stringify(terminal.message.content)
+  expect(text).toContain(tool.name)
+  expect(text).toContain('5 consecutive')
+  expect(text).toContain('Blocked: 7 consecutive calls')
+
+  // A subsequent user turn starts clean even after a latched termination.
+  modelCalls = 0
+  for await (const _message of query({ ...params, maxTurns: 1 })) { /* drain */ }
+  expect(executions).toBe(3)
+  expect(modelCalls).toBe(1)
+})
+
+test('changed arguments reset doom blocks during a progressing query', async () => {
+  let modelCalls = 0
+  let executions = 0
+  const tool = createToolFixture(z.object({ value: z.number() }), {
+    name: 'DoomLoopProgressTool',
+    async call() {
+      executions++
+      return { data: 'ok' }
+    },
+  })
+  const params = makeQueryParams(async function* () {
+    modelCalls++
+    yield createAssistantMessage({
+      content: modelCalls <= 12
+        ? [toolUse(`progress-${modelCalls}`, tool.name, {
+            value: modelCalls <= 6 ? 1 : 2,
+          })]
+        : 'done',
+    })
+  } as QueryDeps['callModel'])
+  params.toolUseContext.options.tools = [tool]
+  for await (const message of query(params)) {
+    if (message.type === 'assistant') expect(message.isApiErrorMessage).not.toBe(true)
+  }
+  expect(modelCalls).toBe(13)
+  expect(executions).toBe(4)
+})
 
 function toolUse(
   id: string,

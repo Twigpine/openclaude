@@ -573,6 +573,14 @@ host. Without this variable the behavior is unchanged.
 | `OPENCLAUDE_DISABLE_CO_AUTHORED_BY` | No | Suppress the default `Co-Authored-By` trailer in generated git commits |
 | `OPENCLAUDE_LOG_TOKEN_USAGE` | No | When truthy (e.g. `verbose`), emits one JSON line on stderr per API request with input/output/cache tokens and the resolved provider. **User-facing debug output** — complements the REPL display controlled by `/config showCacheStats`. Distinct from `CLAUDE_CODE_ENABLE_TOKEN_USAGE_ATTACHMENT`, which is **model-facing** (injects context usage info into the prompt itself). Both can run together. |
 
+Repeated identical tool calls are blocked starting with the third call. If a model
+ignores that feedback, five consecutive doom-loop blocks force-terminate its turn
+without another model request. A non-blocked call or successful tool result resets
+the consecutive-block count; each agent and new user turn tracks its own streak.
+Headless runs (`--bare -p`) print the terminal error and exit with status 1. Change
+the approach or tool arguments before retrying. This safeguard applies even when
+the general tool-failure threshold or turn limit is disabled.
+
 Model env vars are provider-scoped: first-party Anthropic sessions read
 `ANTHROPIC_MODEL`, OpenAI-compatible sessions read `OPENAI_MODEL`, Gemini reads
 `GEMINI_MODEL`, Gemini on Vertex reads `GEMINI_VERTEX_MODEL`, and Mistral reads
