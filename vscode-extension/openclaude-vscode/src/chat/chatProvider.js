@@ -171,6 +171,7 @@ class ChatController {
     this.stopSession();
     this._currentSessionId = null;
     this._messages = [];
+    this.broadcast({ type: 'session_cleared' });
   }
 
   async sendMessage(text) {
@@ -537,13 +538,16 @@ class OpenClaudeChatViewProvider {
           break;
         case 'new_session':
           this._chatController.resetForNewSession();
-          webview.postMessage({ type: 'session_cleared' });
           break;
         case 'resume_session':
           this._chatController.stopSession();
           webview.postMessage({ type: 'session_cleared' });
-          await this._loadAndDisplaySession(webview, msg.sessionId);
-          await this._chatController.startSession({ sessionId: msg.sessionId });
+          {
+            const generation = this._chatController._startGeneration;
+            await this._loadAndDisplaySession(webview, msg.sessionId);
+            if (generation !== this._chatController._startGeneration) break;
+            await this._chatController.startSession({ sessionId: msg.sessionId });
+          }
           break;
         case 'permission_response':
           this._chatController.sendPermissionResponse(msg.requestId, msg.action, msg.toolUseId);
@@ -586,7 +590,9 @@ class OpenClaudeChatViewProvider {
   async _loadAndDisplaySession(webview, sessionId) {
     if (!this._chatController.sessionManager) return;
     try {
+      const generation = this._chatController._startGeneration;
       const messages = await this._chatController.sessionManager.loadSession(sessionId);
+      if (generation !== this._chatController._startGeneration) return;
       if (messages && messages.length > 0) {
         this._chatController._messages = messages;
         webview.postMessage({ type: 'restore_messages', messages });
@@ -646,13 +652,16 @@ class OpenClaudeChatPanelManager {
           break;
         case 'new_session':
           this._chatController.resetForNewSession();
-          webview.postMessage({ type: 'session_cleared' });
           break;
         case 'resume_session':
           this._chatController.stopSession();
           webview.postMessage({ type: 'session_cleared' });
-          await this._loadAndDisplaySession(webview, msg.sessionId);
-          await this._chatController.startSession({ sessionId: msg.sessionId });
+          {
+            const generation = this._chatController._startGeneration;
+            await this._loadAndDisplaySession(webview, msg.sessionId);
+            if (generation !== this._chatController._startGeneration) break;
+            await this._chatController.startSession({ sessionId: msg.sessionId });
+          }
           break;
         case 'permission_response':
           this._chatController.sendPermissionResponse(msg.requestId, msg.action, msg.toolUseId);
@@ -695,7 +704,9 @@ class OpenClaudeChatPanelManager {
   async _loadAndDisplaySession(webview, sessionId) {
     if (!this._chatController.sessionManager) return;
     try {
+      const generation = this._chatController._startGeneration;
       const messages = await this._chatController.sessionManager.loadSession(sessionId);
+      if (generation !== this._chatController._startGeneration) return;
       if (messages && messages.length > 0) {
         this._chatController._messages = messages;
         webview.postMessage({ type: 'restore_messages', messages });

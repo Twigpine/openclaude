@@ -1,3 +1,4 @@
+import { clearManagedProfileEnv } from '../src/utils/providerProfile.ts'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -131,6 +132,8 @@ describe('development process launches', () => {
 test('auto-profile launches preserve CLI arguments after the passthrough boundary', () => {
   const directory = mkdtempSync(join(tmpdir(), 'provider-launch-'))
   try {
+    const childEnv = { ...process.env }
+    clearManagedProfileEnv(childEnv)
     writeFileSync(join(directory, '.openclaude-profile.json'), JSON.stringify({
       profile: 'openai', env: { OPENAI_API_KEY: 'test-launch-key' },
     }))
@@ -151,7 +154,7 @@ test('auto-profile launches preserve CLI arguments after the passthrough boundar
       const result = captureSync(process.execPath, ['--preload', preload,
         join(import.meta.dir, 'provider-launch.ts'), ...args!], {
         cwd: directory,
-        env: { ...process.env, OPENCLAUDE_CONFIG_DIR: directory, LAUNCH_ARGS: JSON.stringify(args) },
+        env: { ...childEnv, OPENCLAUDE_CONFIG_DIR: directory, LAUNCH_ARGS: JSON.stringify(args) },
         timeout: 5000,
       })
       expect(result.error).toBeUndefined()

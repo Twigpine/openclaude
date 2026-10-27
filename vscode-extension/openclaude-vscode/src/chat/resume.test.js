@@ -96,11 +96,15 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
               onDidReceiveMessage: handler => { receive = handler; },
               postMessage: message => updates.push(message),
             };
+            const otherUpdates = [];
+            const registrations = [fresh.registerWebview(webview),
+              fresh.registerWebview({ postMessage: message => otherUpdates.push(message) })];
             new Provider(fresh)._attachMessageHandler(webview);
             await receive({ type: 'new_session' });
             assert.equal(fresh.sessionId, null);
             assert.deepEqual(fresh.getMessages(), []);
             assert.ok(updates.some(message => message.type === 'session_cleared'));
+            assert.ok(otherUpdates.some(message => message.type === 'session_cleared'));
             await receive({ type: 'restore_request' });
             assert.ok(!updates.some(message => message.type === 'restore_messages'));
             const next = fresh.sendMessage('fresh prompt');
@@ -112,6 +116,23 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
             assert.deepEqual(fresh.getMessages(), [{ role: 'user', text: 'fresh prompt' }]);
             assert.ok(child.stdin.read().toString().includes('fresh prompt'));
             fresh.stopSession();
+            const loadSession = manager.loadSession;
+            let finishLoad;
+            manager.loadSession = () => new Promise(resolve => { finishLoad = resolve; });
+            try {
+              const resume = receive({ type: 'resume_session', sessionId: id });
+              await receive({ type: 'new_session' });
+              const count = calls.length;
+              finishLoad([{ role: 'user', text: 'late old history' }]);
+              await resume;
+              assert.equal(calls.length, count);
+              assert.equal(fresh.sessionId, null);
+              assert.deepEqual(fresh.getMessages(), []);
+              assert.ok(!updates.some(message => message.type === 'restore_messages'));
+            } finally {
+              manager.loadSession = loadSession;
+              registrations.forEach(registration => registration.dispose());
+            }
           }
           // An old send waiting for CLI readiness must not enter the new chat.
           await fresh.startSession({ sessionId: id });

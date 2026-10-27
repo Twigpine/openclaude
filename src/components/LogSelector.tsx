@@ -834,7 +834,7 @@ export function LogSelector(t0: LogSelectorProps) {
   }
   const enterSearchMode = t34;
   let t35;
-  if ($[94] !== logs || $[95] !== onAgenticSearch || $[96] !== searchQuery) {
+  if ($[94] !== baseFilteredLogs || $[95] !== onAgenticSearch || $[96] !== searchQuery) {
     t35 = async () => {
       const runAgenticSearch = onAgenticSearch;
       if (!searchQuery.trim() || !runAgenticSearch || !isAgenticSearchEnabled) {
@@ -851,7 +851,7 @@ export function LogSelector(t0: LogSelectorProps) {
       });
       ;
       try {
-        const results_0 = await runAgenticSearch(searchQuery, logs, abortController.signal);
+        const results_0 = await runAgenticSearch(searchQuery, baseFilteredLogs, abortController.signal);
         if (abortController.signal.aborted) {
           return;
         }
@@ -878,7 +878,7 @@ export function LogSelector(t0: LogSelectorProps) {
         });
       }
     };
-    $[94] = logs;
+    $[94] = baseFilteredLogs;
     $[95] = onAgenticSearch;
     $[96] = searchQuery;
     $[97] = t35;
@@ -1097,7 +1097,7 @@ export function LogSelector(t0: LogSelectorProps) {
           if (input.toLowerCase() === "n" && key.ctrl) {
             exitSearchMode();
           } else {
-            if (key.return || key.downArrow) {
+            if (key.downArrow) {
               if (searchQuery.trim() && onAgenticSearch && isAgenticSearchEnabled && agenticSearchState.status !== "results") {
                 setIsAgenticSearchOptionFocused(true);
               }
