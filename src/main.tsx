@@ -277,7 +277,7 @@ if (isBeingDebugged()) {
   // Use process.exit directly here since we're in the top-level code before imports
   // and gracefulShutdown is not yet available
   // eslint-disable-next-line custom-rules/no-top-level-side-effects
-  process.stderr.write('[openclaude] Debugger detected. Attaching a debugger is not supported in external builds. Exiting.\n')
+  process.stderr.write('[openclaude] Debugger detected. Attaching a debugger is not supported in external builds. Exiting.\n');
   process.exit(1);
 }
 

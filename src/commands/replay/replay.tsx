@@ -77,7 +77,7 @@ function ReplaySessionPicker({
       return;
     }
 
-    let fullLog: LogOption
+    let fullLog: LogOption;
     try {
       fullLog = isLiteLog(log) ? await loadFullLog(log) : log;
     } catch {

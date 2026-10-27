@@ -53,7 +53,7 @@ beforeAll(async () => {
   ;({ PLAN_AGENT } = await import('../tools/AgentTool/built-in/planAgent.js'))
   ;({ STATUSLINE_SETUP_AGENT } = await import(
     '../tools/AgentTool/built-in/statuslineSetup.js'
-  ))
+  ));
 })
 
 afterAll(() => {

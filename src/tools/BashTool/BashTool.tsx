@@ -927,11 +927,11 @@ export const BashTool = buildTool({
         const errorExtraction = extractClaudeCodeHints(
           outputWithSbFailures,
           input.command,
-        )
-        let errorStdout = errorExtraction.stripped
+        );
+        let errorStdout = errorExtraction.stripped;
         if (isMainThread) {
           for (const hint of errorExtraction.hints) {
-            maybeRecordPluginHint(hint)
+            maybeRecordPluginHint(hint);
           }
         }
         if (result.outputFilePath && result.outputTaskId) {
@@ -940,7 +940,7 @@ export const BashTool = buildTool({
             result.outputTaskId,
             MAX_PERSISTED_SHELL_OUTPUT_SIZE,
             input.command,
-          )
+          );
           if (persistedForError) {
             if (isMainThread) {
               for (const hint of persistedForError.previewHints ?? []) {
@@ -949,8 +949,8 @@ export const BashTool = buildTool({
                     captured.v === hint.v &&
                     captured.type === hint.type &&
                     captured.value === hint.value,
-                )
-                if (!alreadyCaptured) maybeRecordPluginHint(hint)
+                );
+                if (!alreadyCaptured) maybeRecordPluginHint(hint);
               }
             }
             errorStdout = appendPersistedOutputHint(
@@ -961,7 +961,7 @@ export const BashTool = buildTool({
               persistedForError.preview,
               persistedForError.previewStrategy,
               sandboxDiagnostics,
-            )
+            );
           }
         }
         throw new ShellError(errorStdout, result.stderr || '', result.code, result.interrupted, {
