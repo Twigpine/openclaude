@@ -168,46 +168,17 @@ export {
  * )
  * ```
  */
-export function tool<Schema = unknown, JsonInput extends object = Record<string, unknown>>(
-  name: string,
-  description: string,
-  inputSchema: Schema,
-  // Check callbacks strictly; the definition method stays bivariant for tool arrays.
-  handler: (...args: Parameters<import('./v2.js').SdkMcpToolDefinition<Schema, JsonInput>['handler']>) => Promise<CallToolResult>,
-  extras?: {
-    annotations?: ToolAnnotations
-    searchHint?: string
-    alwaysLoad?: boolean
-  },
-): import('./v2.js').SdkMcpToolDefinition<Schema, JsonInput>
-
-// Supplying only Schema disables inference of JsonInput. Preserve the original
-// JSON callback compatibility without bypassing schema-derived Zod checks.
 export function tool<Schema = unknown>(
   name: string,
   description: string,
   inputSchema: Schema,
-  handler: Schema extends { [Key in keyof Schema]: { _input: unknown } } | { _input: unknown }
-    ? keyof Schema extends never ? import('./v2.js').SdkMcpToolDefinition['handler'] : never
-    : import('./v2.js').SdkMcpToolDefinition['handler'],
+  handler: (args: any, extra: unknown) => Promise<CallToolResult>,
   extras?: {
     annotations?: ToolAnnotations
     searchHint?: string
     alwaysLoad?: boolean
   },
-): import('./v2.js').SdkMcpToolDefinition<Schema>
-
-export function tool(
-  name: string,
-  description: string,
-  inputSchema: unknown,
-  handler: import('./v2.js').SdkMcpToolDefinition['handler'],
-  extras?: {
-    annotations?: ToolAnnotations
-    searchHint?: string
-    alwaysLoad?: boolean
-  },
-): import('./v2.js').SdkMcpToolDefinition {
+): import('./v2.js').SdkMcpToolDefinition<Schema> {
   return {
     name,
     description,

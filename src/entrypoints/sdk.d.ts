@@ -461,32 +461,11 @@ export interface SDKSession {
 // MCP tool types
 // ============================================================================
 
-// Zod 4 distinguishes a missing key from a value that accepts undefined.
-// Keep the Zod 3 input-union rule for validators without Zod 4 metadata.
-type SdkMcpOptionalInput<Field extends { _input: unknown }> = Field extends { _zod: unknown }
-  ? Field extends { _zod: { optin: 'optional' | 'defaulted' } } ? true : false
-  : undefined extends Field['_input'] ? true : false
-
-// A raw shape can have an `_input` field, so recognize shapes before schema metadata.
-type SdkMcpToolInput<Schema, JsonInput extends object> = Schema extends { [Key in keyof Schema]: { _input: unknown } }
-  // No known keys cannot distinguish an empty JSON schema from an empty raw shape.
-  ? keyof Schema extends never
-    ? { [Key in keyof JsonInput]: JsonInput[Key] }
-    : { -readonly [Key in keyof Schema as SdkMcpOptionalInput<Schema[Key]> extends true ? never : Key]: Schema[Key]['_input'] }
-      & { -readonly [Key in keyof Schema as SdkMcpOptionalInput<Schema[Key]> extends true ? Key : never]?: Schema[Key]['_input'] }
-  : Schema extends { _input: infer Input }
-    ? Input
-    // Materialize named interface keys so typed handlers also fit tool arrays.
-    : { [Key in keyof JsonInput]: JsonInput[Key] }
-
-// Definitions may erase the input type for heterogeneous registration.
-// The factory retains its Record fallback and infers annotated JSON inputs.
-// The erased default preserves both named-interface and contextual handlers.
-export interface SdkMcpToolDefinition<Schema = unknown, JsonInput extends object = Record<string, any>> {
+export interface SdkMcpToolDefinition<Schema = unknown> {
   name: string
   description: string
   inputSchema: Schema
-  handler(args: SdkMcpToolInput<Schema, JsonInput>, extra: unknown): Promise<CallToolResult>
+  handler: (args: any, extra: unknown) => Promise<CallToolResult>
   annotations?: ToolAnnotations
   searchHint?: string
   alwaysLoad?: boolean
@@ -566,28 +545,11 @@ export function unstable_v2_prompt(
 // MCP tool functions
 // ============================================================================
 
-export function tool<Schema = unknown, JsonInput extends object = Record<string, unknown>>(
-  name: string,
-  description: string,
-  inputSchema: Schema,
-  // Check callbacks strictly; the definition method stays bivariant for tool arrays.
-  handler: (...args: Parameters<SdkMcpToolDefinition<Schema, JsonInput>['handler']>) => Promise<CallToolResult>,
-  extras?: {
-    annotations?: ToolAnnotations
-    searchHint?: string
-    alwaysLoad?: boolean
-  },
-): SdkMcpToolDefinition<Schema, JsonInput>
-
-// Supplying only Schema disables inference of JsonInput. Preserve the original
-// JSON callback compatibility without bypassing schema-derived Zod checks.
 export function tool<Schema = unknown>(
   name: string,
   description: string,
   inputSchema: Schema,
-  handler: Schema extends { [Key in keyof Schema]: { _input: unknown } } | { _input: unknown }
-    ? keyof Schema extends never ? SdkMcpToolDefinition['handler'] : never
-    : SdkMcpToolDefinition['handler'],
+  handler: (args: any, extra: unknown) => Promise<CallToolResult>,
   extras?: {
     annotations?: ToolAnnotations
     searchHint?: string
