@@ -361,7 +361,7 @@ export function MCPRemoteServerMenu({
             </Box>
             <Link url={authorizationUrl} />
           </Box>}
-        {isAuthenticating && authorizationUrl && manualCallbackSubmit && <Box flexDirection="column" marginTop={1}>
+        {authorizationUrl && manualCallbackSubmit && <Box flexDirection="column" marginTop={1}>
             <Text dimColor>
               If the redirect page shows a connection error, paste the URL from
               your browser&apos;s address bar:

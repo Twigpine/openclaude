@@ -791,13 +791,6 @@ export function BrowseMarketplace({
           <Text dimColor> {figures.arrowDown} more below</Text>
         </Box>}
 
-      {/* Error messages shown in the UI */}
-      {error && <Box marginTop={1}>
-          <Text color="error">
-            {figures.cross} {error}
-          </Text>
-        </Box>}
-
       <PluginSelectionKeyHint hasSelection={selectedForInstall.size > 0} />
     </Box>;
 }

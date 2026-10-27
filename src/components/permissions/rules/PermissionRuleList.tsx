@@ -1129,7 +1129,7 @@ export function PermissionRuleList(t0: Props): React.ReactNode {
     t22 = $[81];
   }
   const sharedRulesProps = t22;
-  const isHidden = !!selectedRule || !!addingRuleToTab || !!validatedRule || isAddingWorkspaceDirectory || !!removingDirectory;
+  const isHidden = false;
   const t23 = !isSearchMode;
   let tModeTab;
   if ($[132] !== handleHeaderFocusChange || $[133] !== handleModeChange || $[134] !== handleRulesCancel || $[135] !== modeMessage || $[136] !== toolPermissionContext) {

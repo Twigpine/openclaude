@@ -527,7 +527,7 @@ export function SpinnerAnimationRow({
       const bareAvailable = physicalBareBudget;
       const tokensFitBareAlone = wantsTokens && hasTokenContent && bareAvailable >= tokensWidth;
       const thinkingAndTokensFitBare = bareAvailable >= fullThinkingWidth + sep + tokensWidth;
-      if (typeof thinkingStatus === 'number' && tokensFitBareAlone && !thinkingAndTokensFitBare && !showTokens) {
+      if (typeof thinkingStatus === 'number' && tokensFitBareAlone && !thinkingAndTokensFitBare) {
         showTokens = true;
         showTimer = false;
         reserveModeGlyph = false;
