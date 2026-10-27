@@ -140,7 +140,7 @@ function logContainsQuery(log: LogOption, queryLower: string): boolean {
 }
 
 /**
- * Performs an agentic search using Claude to find relevant sessions
+ * Performs an agentic search using the configured model to find relevant sessions
  * based on semantic understanding of the query.
  */
 export async function agenticSessionSearch(
@@ -176,7 +176,7 @@ export async function agenticSessionSearch(
 
   // Debug: log what data we have
   logForDebugging(
-    `Agentic search: ${logsToSearch.length}/${logs.length} logs, query="${query}", ` +
+    `Agentic search: ${logsToSearch.length}/${logs.length} logs, ` +
       `matching: ${matchingLogs.length}, with messages: ${count(logsToSearch, l => l.messages?.length > 0)}`,
   )
 
@@ -252,11 +252,6 @@ Search query: "${query}"
 
 Find the sessions that are most relevant to this query.`
 
-  // Debug: log first part of the session list
-  logForDebugging(
-    `Agentic search prompt (first 500 chars): ${userMessage.slice(0, 500)}...`,
-  )
-
   try {
     const model = getSmallFastModel()
     logForDebugging(`Agentic search using model: ${model}`)
@@ -275,9 +270,6 @@ Find the sessions that are most relevant to this query.`
       logForDebugging('No text content in agentic search response')
       return []
     }
-
-    // Debug: log the response
-    logForDebugging(`Agentic search response: ${textContent.text}`)
 
     // Parse the JSON response
     const jsonMatch = textContent.text.match(/\{[\s\S]*\}/)
