@@ -476,9 +476,10 @@ describe('fork request selection at context boundaries', () => {
     }
   })
 
-  test.each((['hook', 'skill', 'definition'] as const).flatMap(source =>
-    (['denied', 'allowed', 'default'] as const).map(policy => ({ source, policy })),
-  ))('$source model selection obeys the real allowlist: $policy', async ({ source, policy }) => {
+  test.each((['hook', 'skill', 'definition'] as const).flatMap(source => [
+    ...(['denied', 'allowed', 'default'] as const).map(policy => ({ source, policy, rootAlias: undefined })),
+    ...(['haiku', 'opusplan'] as const).map(rootAlias => ({ source, policy: 'allowed' as const, rootAlias })),
+  ]))('$source model selection obeys the real allowlist: $policy, root=$rootAlias', async ({ source, policy, rootAlias }) => {
     const settingsModule = await import('../utils/settings/settings.js')
     const queryModule = await import('../query.js')
     const commands = await import('../commands.js')
@@ -488,14 +489,18 @@ describe('fork request selection at context boundaries', () => {
     const { SkillTool } = await import('../tools/SkillTool/SkillTool.js')
     const { runAgent } = await import('../tools/AgentTool/runAgent.js')
     const originalQuery = queryModule.query
-    const requested = policy === 'default' ? undefined : 'gpt-4o'
+    const overrideBefore = getMainLoopModelOverride()
+    const explicitModel = rootAlias ? 'claude-haiku-4-5-20251001' : 'gpt-4o'
+    const parentModel = rootAlias ? explicitModel : 'gpt-5'
+    const requested = policy === 'default' ? undefined : explicitModel
     const configured = {
-      availableModels: policy === 'default' ? [] : policy === 'allowed' ? ['gpt-5', 'gpt-4o'] : ['gpt-5'],
-      smartRouting: { enabled: true, simpleModel: 'gpt-5', strongModel: 'gpt-5' },
+      availableModels: rootAlias === 'opusplan' ? undefined : rootAlias ? [explicitModel]
+        : policy === 'default' ? [] : policy === 'allowed' ? ['gpt-5', 'gpt-4o'] : ['gpt-5'],
+      smartRouting: { enabled: true, simpleModel: parentModel, strongModel: parentModel },
     }
     const settings = spyOn(settingsModule, 'getSettings_DEPRECATED').mockReturnValue(configured)
     const initialSettings = spyOn(settingsModule, 'getInitialSettings').mockReturnValue(configured)
-    const smallModel = spyOn(models, 'getSmallFastModel').mockReturnValue('gpt-5')
+    const smallModel = spyOn(models, 'getSmallFastModel').mockReturnValue(parentModel)
     const transcript = spyOn(transcripts, 'recordSidechainTranscript').mockResolvedValue(undefined)
     const metadata = spyOn(transcripts, 'writeAgentMetadata').mockResolvedValue(undefined)
     const commandList = spyOn(commands, 'getCommands').mockResolvedValue([{
@@ -509,15 +514,22 @@ describe('fork request selection at context boundaries', () => {
       requests.push(options.requestModel ?? options.model)
       yield createAssistantMessage({ content: source === 'hook'
         ? [{ type: 'tool_use', id: 'toolu_policy_hook', name: 'StructuredOutput', input: { ok: true } }]
+        : rootAlias && requests.length === 1
+          ? [{ type: 'tool_use', id: 'toolu_policy_plan', name: 'Echo', input: { text: 'inspect' } }]
         : 'done' })
     })
     let state = params.toolUseContext.getAppState()
-    params.toolUseContext.getAppState = () => ({ ...state, mainLoopModel: 'gpt-5', settings: configured, mcp: { ...state.mcp, commands: [] } })
+    params.toolUseContext.getAppState = () => ({ ...state, mainLoopModel: rootAlias ?? parentModel, settings: configured,
+      toolPermissionContext: { ...state.toolPermissionContext, mode: rootAlias ? 'plan' : 'default' },
+      mcp: { ...state.mcp, commands: [] } })
     if (source === 'skill') params.toolUseContext.setAppState = update => { state = update(state) }
-    params.toolUseContext.options.mainLoopModel = 'gpt-5'
+    params.toolUseContext.options.mainLoopModel = parentModel
+    if (rootAlias) params.toolUseContext.options.tools = [echoTool]
     const childQuery = spyOn(queryModule, 'query').mockImplementation(input => originalQuery({ ...input, deps: params.deps }))
+    if (rootAlias) setMainLoopModelOverride(rootAlias)
     try {
-      expect(modelAllowlist.isModelAllowed('gpt-4o')).toBe(policy === 'allowed')
+      expect(modelAllowlist.isModelAllowed(explicitModel)).toBe(policy === 'allowed')
+      if (rootAlias) expect(models.getUserSpecifiedModelSetting()).toBe(rootAlias)
       let failure: unknown
       if (source === 'hook') {
         const result = await execAgentHook(
@@ -534,9 +546,9 @@ describe('fork request selection at context boundaries', () => {
             await drain({ ...params, toolUseContext: result.contextModifier?.(child) ?? child })
           } else {
             for await (const _message of runAgent({
-              agentDefinition: { agentType: 'selection-test', whenToUse: 'test', source: 'userSettings', tools: [], model: requested, getSystemPrompt: () => 'test' },
+              agentDefinition: { agentType: 'selection-test', whenToUse: 'test', source: 'userSettings', tools: rootAlias ? ['Echo'] : [], model: requested, getSystemPrompt: () => 'test' },
               promptMessages: params.messages, toolUseContext: params.toolUseContext, canUseTool: params.canUseTool,
-              isAsync: false, querySource: 'agent:custom', availableTools: [],
+              isAsync: false, querySource: 'agent:custom', availableTools: rootAlias ? [echoTool] : [],
               override: { userContext: {}, systemContext: {}, systemPrompt: asSystemPrompt([]) },
             })) { /* Exhaust the actual agent query. */ }
           }
@@ -548,7 +560,7 @@ describe('fork request selection at context boundaries', () => {
         expect(failure).toBeDefined()
       } else {
         expect(failure).toBeUndefined()
-        expect(requests).toEqual([requested ?? 'gpt-5'])
+        expect(requests).toEqual(Array(rootAlias && source !== 'hook' ? 2 : 1).fill(requested ?? parentModel))
       }
     } finally {
       childQuery.mockRestore()
@@ -558,6 +570,8 @@ describe('fork request selection at context boundaries', () => {
       smallModel.mockRestore()
       initialSettings.mockRestore()
       settings.mockRestore()
+      setMainLoopModelOverride(overrideBefore)
+      echoCalls.length = 0
     }
   })
 
@@ -1041,6 +1055,70 @@ describe('fork request selection at context boundaries', () => {
 })
 
 describe('agent step limits', () => {
+  test.each([
+    ...(['haiku', 'opusplan'] as const).flatMap(rootAlias =>
+      [true, false].map(routing => ({ rootAlias, routing, mode: 'plan' as const }))),
+    { rootAlias: 'sonnet', routing: true, mode: 'plan' as const },
+    { rootAlias: 'haiku', routing: true, mode: 'default' as const },
+  ])('preserves assigned child models under $rootAlias/$mode, routing=$routing', async ({ rootAlias, routing, mode }) => {
+    const models = await import('../utils/model/model.js')
+    const settingsModule = await import('../utils/settings/settings.js')
+    const overrideBefore = getMainLoopModelOverride()
+    const assignedModel = 'claude-haiku-4-5-20251001'
+    const configured = {
+      availableModels: rootAlias === 'haiku' ? [assignedModel] : undefined,
+      smartRouting: { enabled: routing, simpleModel: assignedModel, strongModel: assignedModel },
+    }
+    const settings = spyOn(settingsModule, 'getSettings_DEPRECATED').mockReturnValue(configured)
+    const requests: Array<{ model: string; requestModel?: string }> = []
+    const params = makeParams(async function* ({ options }) {
+      requests.push({ model: options.model, requestModel: options.requestModel })
+      yield createAssistantMessage({ content: requests.length === 1
+        ? [{ type: 'tool_use', id: 'toolu_plan_selection', name: 'Echo', input: { text: 'inspect' } }]
+        : 'done' })
+    }, [echoTool])
+    delete params.toolUseContext.agentId
+    const appState = params.toolUseContext.getAppState()
+    params.toolUseContext.getAppState = () => ({ ...appState, mainLoopModel: rootAlias,
+      settings: configured, toolPermissionContext: { ...appState.toolPermissionContext, mode } })
+    params.toolUseContext.options.mainLoopModel = assignedModel
+    params.toolUseContext.readFileState = createFileStateCacheWithSizeLimit(10)
+    setMainLoopModelOverride(rootAlias)
+    clearSmartRoutingSessionDisable(getSessionId())
+    resetRoutingTally()
+    try {
+      expect(models.getUserSpecifiedModelSetting()).toBe(rootAlias)
+      expect(modelAllowlist.isModelAllowed(assignedModel)).toBe(true)
+      if (rootAlias === 'haiku') expect(modelAllowlist.isModelAllowed('claude-sonnet-4-6')).toBe(false)
+      // Without routing, root plan promotion must still occur. Default forks
+      // inherit that accepted result; an explicit child keeps its own model.
+      const rootModel = routing ? assignedModel : rootAlias === 'opusplan'
+        ? models.getDefaultOpusModel() : models.getDefaultSonnetModel()
+      const pair = (model: string) => ({ model, requestModel: model })
+      await drain(params)
+      expect(requests).toEqual([pair(rootModel), pair(rootModel)])
+      const child = createSubagentContext(params.toolUseContext)
+      const nested = createSubagentContext(child)
+      const explicit = createSubagentContext(params.toolUseContext, {
+        options: { ...params.toolUseContext.options, mainLoopModel: assignedModel },
+      })
+      const observed: Array<typeof requests> = []
+      for (const context of [child, nested, explicit]) {
+        requests.length = 0
+        await drain({ ...params, toolUseContext: context })
+        observed.push([...requests])
+      }
+      expect(observed).toEqual([rootModel, rootModel, assignedModel].map(model => [pair(model), pair(model)]))
+      expect(getRoutingTally().simple + getRoutingTally().strong).toBe(routing ? 1 : 0)
+    } finally {
+      settings.mockRestore()
+      setMainLoopModelOverride(overrideBefore)
+      resetRoutingTally()
+      clearSmartRoutingSessionDisable(getSessionId())
+      echoCalls.length = 0
+    }
+  })
+
   test.each([
     { route: 'gpt-5.6-sol', requestModel: 'gpt-5.6-sol', effort: undefined },
     { route: 'gpt-5.6-sol?reasoning=low', requestModel: 'gpt-5.6-sol?reasoning=low', effort: 'low' },

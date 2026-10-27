@@ -1288,23 +1288,23 @@ async function* queryLoop(
     const selectedModel = toolUseContext.agentId
       ? getQueryModelSelection(toolUseContext)?.requestModel ?? toolUseContext.options.mainLoopModel
       : appStateMainLoopModel
-    let currentModel = getRuntimeMainLoopModel({
-      permissionMode,
-      // A child's concrete runtime model and raw request selection are distinct;
-      // neither should be reconstructed from the root's session setting.
-      mainLoopModel: parseUserSpecifiedModel(
-        toolUseContext.agentId ? toolUseContext.options.mainLoopModel : selectedModel,
-      ),
-      exceeds200kTokens:
-        permissionMode === 'plan' &&
-        doesMostRecentAssistantMessageExceed200k(messagesForQuery),
-    })
+    // Children already have an assigned model. Root plan aliases must not
+    // promote that assignment again, even when smart routing is disabled.
+    let currentModel = toolUseContext.agentId
+      ? parseUserSpecifiedModel(toolUseContext.options.mainLoopModel)
+      : getRuntimeMainLoopModel({
+          permissionMode,
+          mainLoopModel: parseUserSpecifiedModel(selectedModel),
+          exceeds200kTokens:
+            permissionMode === 'plan' &&
+            doesMostRecentAssistantMessageExceed200k(messagesForQuery),
+        })
 
     // Smart routing (opt-in): classify once per user turn (transition===undefined)
     // and pin the decision; reuse the pin on every continuation pass. Applied
     // BEFORE the blocking-limit math below so the token-budget guard and the
     // model call agree on the model. Disabled/misconfigured → pin is `routed:false`
-    // and currentModel keeps today's resolution (byte-for-byte unchanged).
+    // and currentModel keeps the root's resolution or child's assigned model.
     if (state.transition === undefined) {
       pinnedTurnRoute = decideTurnModel({
         settings: appState.settings as unknown as Parameters<typeof decideTurnModel>[0]['settings'],
