@@ -8,8 +8,9 @@
  * KEENABLE_API_KEY only lifts the keyless rate limits. Keyless requests must
  * name the calling app in X-Keenable-Title.
  *
- * Results carry the page text in `snippet` (`description` is empty), often
- * several thousand characters with newlines, so it is flattened and capped.
+ * Results carry the page text in `snippet`, often several thousand characters
+ * with newlines, so it is flattened and capped. `description` is usually
+ * empty and is used only when a result has no snippet.
  */
 
 import type { SearchInput, SearchProvider } from './types.js'
@@ -98,7 +99,7 @@ export const keenableProvider: SearchProvider = {
       return [{
         title: typeof rec.title === 'string' && rec.title ? rec.title : url,
         url,
-        description: describeSnippet(rec.snippet),
+        description: describeSnippet(rec.snippet) ?? describeSnippet(rec.description),
         source: safeHostname(url),
       }]
     })

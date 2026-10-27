@@ -141,7 +141,7 @@ Run `/search anysearch` to use its general web search without a key, or `/search
 
 Run `/search keenable` to use it without a key, or `/search key keenable` to add an optional key through hidden input. Keyless access is rate-limited per IP; a key lifts those limits. `/search remove-key keenable` removes a key saved by `/search`; keys from the shell or `settings.json` remain controlled by those sources.
 
-Without a key, OpenClaude sends `query` and `max_results` (10) to `POST https://api.keenable.ai/v1/search/public` with an `X-Keenable-Title: OpenClaude` header. With `KEENABLE_API_KEY` set, the same body goes to `POST https://api.keenable.ai/v1/search` with the key in `X-API-Key`. Result text comes from each result's `snippet`, flattened to one line and capped at 800 characters. Domain filters are applied to the returned hits.
+Without a key, OpenClaude sends `query` and `max_results` (10) to `POST https://api.keenable.ai/v1/search/public` with an `X-Keenable-Title: OpenClaude` header. With `KEENABLE_API_KEY` set, the same body goes to `POST https://api.keenable.ai/v1/search` with the key in `X-API-Key`. Result text comes from each result's `snippet` (or its `description` when there is no snippet), flattened to one line and capped at 800 characters. Domain filters are applied to the returned hits.
 
 ```json
 {"query":"search terms","max_results":10}

@@ -67,6 +67,19 @@ describe('Keenable search', () => {
     }])
   })
 
+  test('falls back to the description when a result has no snippet', async () => {
+    globalThis.fetch = (async () => jsonResponse({
+      results: [
+        { title: 'Summary only', url: 'https://example.com/summary', description: 'A short\nsummary' },
+        { title: 'No text', url: 'https://example.com/bare', description: '  ', snippet: '' },
+      ],
+    })) as typeof fetch
+
+    const output = await keenableProvider.search({ query: 'summary only' })
+
+    expect(output.hits.map(hit => hit.description)).toEqual(['A short summary', undefined])
+  })
+
   test('uses the keyed endpoint with a key, caps long snippets, and applies domain filters', async () => {
     process.env.KEENABLE_API_KEY = '  kn-secret  '
     let requestedUrl = ''
