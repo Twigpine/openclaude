@@ -97,10 +97,6 @@ async function resolveAtomicChatDefaultModel(): Promise<string | null> {
   return models[0] ?? null
 }
 
-function runCommand(command: string, env: NodeJS.ProcessEnv): Promise<number> {
-  return runProcess(command, [], env)
-}
-
 export async function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   try {
     const child = Bun.spawn([command, ...args], {

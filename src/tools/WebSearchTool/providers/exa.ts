@@ -28,7 +28,7 @@
 
 import { isEnvDefinedFalsy } from '../../../utils/envUtils.js'
 import type { SearchInput, SearchProvider } from './types.js'
-import { applyDomainFilters, safeHostname, type ProviderOutput } from './types.js'
+import { safeHostname, type ProviderOutput } from './types.js'
 import { fetchJsonWithWebSearchTimeout } from './timeout.js'
 
 export const DEFAULT_EXA_NUM_RESULTS = 15

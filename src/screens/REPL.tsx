@@ -225,7 +225,6 @@ import { IdeOnboardingDialog } from '../components/IdeOnboardingDialog.js';
 import { EffortCallout, shouldShowEffortCallout } from '../components/EffortCallout.js';
 import { getDisplayedEffortLevel, type EffortValue } from '../utils/effort.js';
 import { RemoteCallout } from '../components/RemoteCallout.js';
-import { getAPIProvider } from '../utils/model/providers.js';
 import { activityManager } from '../utils/activityManager.js';
 import { createAbortController } from '../utils/abortController.js';
 import {
@@ -359,12 +358,6 @@ async function launchUltraplan(_opts: {
   onSessionReady: (msg: string) => void;
 }): Promise<string> {
   throw new Error('Ultraplan is not available in this build');
-}
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? Math.round((sorted[mid - 1]! + sorted[mid]!) / 2) : sorted[mid]!;
 }
 
 /**

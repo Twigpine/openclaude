@@ -1,7 +1,7 @@
 import { c as _c } from "react-compiler-runtime";
 import chalk from 'chalk';
 import { extname } from 'path';
-import React, { Suspense, use, useMemo } from 'react';
+import React, { Suspense, use } from 'react';
 import { Ansi, Text } from '../../ink.js';
 import { getCliHighlightPromise } from '../../utils/cliHighlight.js';
 import { logForDebugging } from '../../utils/debug.js';

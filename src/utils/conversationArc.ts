@@ -17,7 +17,6 @@ import {
   rebuildIndex,
   clearIndex,
 } from '../memdir/vectorIndex.js'
-import { extractKeywords } from './knowledgeGraph.js'
 import { isMemoryWriteApprovalRequired } from './governancePolicy.js'
 import { sanitizeMemoryIdentifier, sanitizeMemoryText } from '../memdir/memorySecurity.js'
 

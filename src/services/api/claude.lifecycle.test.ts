@@ -357,26 +357,6 @@ async function drainGenerator<T>(
   }
 }
 
-async function waitForPromise<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  timeoutMessage: string,
-): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error(timeoutMessage))
-        }, timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId)
-  }
-}
-
 function makeParams(context: { model: string }): BetaMessageStreamParams {
   return {
     model: context.model,

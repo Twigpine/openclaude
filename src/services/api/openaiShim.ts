@@ -91,7 +91,6 @@ import { executeOpenAIRequest } from './openaiShim/requestExecutor.js'
 import {
   getLocalProviderRetryBaseUrls,
   isAzureStyleBaseUrl,
-  isLocalProviderUrl,
   resolveProviderRequest,
   shouldAttemptLocalToollessRetry,
 } from './providerConfig.js'
@@ -103,11 +102,6 @@ import {
 } from './openaiErrorClassification.js'
 import { redactSecretValueForDisplay } from '../../utils/providerProfile.js'
 import { logApiCallStart, logApiCallEnd } from '../../utils/requestLogging.js'
-import {
-  createStreamState,
-  processStreamChunk,
-  getStreamStats,
-} from '../../utils/streamingOptimizer.js'
 import { stableStringifyJson } from '../../utils/stableStringify.js'
 import {
   type NonStreamingOpenAIResponse,
@@ -124,7 +118,6 @@ import {
   hasGeminiApiHost as matchesGeminiApiHost,
   hasMistralApiHost,
   isGithubModelsMode,
-  isGeminiModelName,
   mergeGeminiThoughtSignature,
   shouldPreserveGeminiThoughtSignature as shouldPreserveGeminiThoughtSignatureForRoute,
 } from './openaiShim/providerCompatibility.js'
@@ -147,8 +140,6 @@ import {
 const GITHUB_429_MAX_RETRIES = 3
 const GITHUB_429_BASE_DELAY_SEC = 1
 const GITHUB_429_MAX_DELAY_SEC = 32
-const CREDENTIAL_POOL_COOLDOWN_MS = 30_000
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000
 const GEMINI_API_HOST = 'generativelanguage.googleapis.com'
 function isCopilotTokenExpiredError(text: string): boolean {
   const lower = text.toLowerCase()

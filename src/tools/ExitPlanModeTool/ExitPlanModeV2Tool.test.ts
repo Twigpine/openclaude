@@ -67,20 +67,6 @@ afterAll(async () => {
   }
 })
 
-function makeCtx() {
-  const toolPermissionContext = getEmptyToolPermissionContext()
-  return {
-    abortController: new AbortController(),
-    agentId: undefined,
-    options: { isNonInteractiveSession: false, tools: [] },
-    getAppState: () => ({ toolPermissionContext } as never),
-    setAppState: () => undefined,
-    setToolJSX: undefined,
-    toolUseId: 'test-exit-plan-mode',
-    addNotification: undefined,
-  } as never
-}
-
 test('surfaces write error when plan file write fails and asserts no side effects (standard)', async () => {
   const persistFileSnapshotIfRemoteMock = mock(() => Promise.resolve())
   const unwritablePlanPath = makeUnwritablePlanPath()

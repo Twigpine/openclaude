@@ -1,7 +1,6 @@
 import {
   afterAll,
   afterEach,
-  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -20,7 +19,6 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { Message } from '../../types/message.js'
-import * as realConfig from '../../utils/config.js'
 import {
   __getInterruptionTraceSnapshotForTests,
   __resetInterruptionTraceForTests,
