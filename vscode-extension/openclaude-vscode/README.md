@@ -41,7 +41,8 @@ CLI so both read the same history. Claude Code's `CLAUDE_CONFIG_DIR` and
 
 The chat's **New Chat** button and **OpenClaude: New Chat** command clear the
 active session and displayed history. The next message starts a fresh conversation;
-saved transcripts remain available through Resume Session.
+saved transcripts remain available through Resume Session. Switching to a saved
+conversation during a response keeps Send disabled until that session starts.
 
 ## Commands
 

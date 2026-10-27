@@ -52,6 +52,8 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
     const { SessionManager } = require('./sessionManager');
     const { ChatController, OpenClaudeChatViewProvider, OpenClaudeChatPanelManager } = require('./chatProvider');
     const { ProcessManager } = require('./processManager');
+    const { renderChatHtml } = require('./chatRenderer');
+    const vm = require('node:vm');
     (async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vscode-resume-'));
       const controller = new ChatController(new SessionManager());
@@ -89,32 +91,91 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
           for (const Provider of [OpenClaudeChatViewProvider, OpenClaudeChatPanelManager]) {
             await fresh.startSession({ sessionId: id });
             children.at(-1).stdout.write(JSON.stringify({ type: 'system', session_id: id }) + '\n');
-            await fresh.sendMessage('old prompt');
             let receive;
             const updates = [];
+            const elements = new Map();
+            const element = () => ({ style: {}, value: '', scrollHeight: 20, listeners: {},
+              classList: { toggle() {} }, appendChild() {},
+              addEventListener(name, listener) { this.listeners[name] = listener; } });
+            const getElement = name => {
+              if (!elements.has(name)) elements.set(name, element());
+              return elements.get(name);
+            };
+            let receiveInRenderer;
+            let lastAction;
+            const rendererSends = [];
             const webview = {
               onDidReceiveMessage: handler => { receive = handler; },
-              postMessage: message => updates.push(message),
+              postMessage: message => {
+                updates.push(message);
+                receiveInRenderer?.({ data: message });
+              },
+            };
+            const html = renderChatHtml({ nonce: 'test', platform: 'linux' });
+            vm.runInNewContext(html.match(/<script nonce="test">([\s\S]*?)<\/script>/)[1], {
+              document: { getElementById: getElement, createElement: element, addEventListener() {} },
+              window: { addEventListener(_name, listener) { receiveInRenderer = listener; } },
+              acquireVsCodeApi: () => ({ getState: () => null, postMessage: message => {
+                if (message.type === 'send_message') rendererSends.push(message.text);
+                lastAction = receive?.(message);
+              } }),
+              requestAnimationFrame: callback => callback(),
+            });
+            const submitPrompt = text => {
+              getElement('chatInput').value = text;
+              getElement('sendBtn').listeners.click();
+              return lastAction;
             };
             const otherUpdates = [];
             const registrations = [fresh.registerWebview(webview),
               fresh.registerWebview({ postMessage: message => otherUpdates.push(message) })];
             new Provider(fresh)._attachMessageHandler(webview);
+            const oldChild = children.at(-1);
+            const oldDelivery = new Promise(resolve => oldChild.stdin.once('data', resolve));
+            await submitPrompt('old prompt');
+            await oldDelivery;
+            const loadForResume = manager.loadSession;
+            let releaseResume;
+            manager.loadSession = () => new Promise(resolve => { releaseResume = resolve; });
+            try {
+              const selectedId = '48f67e50-946e-4d74-b0b6-c19759b99623';
+              const loading = receive({ type: 'resume_session', sessionId: selectedId });
+              const launchCount = calls.length;
+              const sendCount = rendererSends.length;
+              await submitPrompt('must not reach the previous session');
+              assert.equal(rendererSends.length, sendCount);
+              assert.equal(calls.length, launchCount);
+              assert.equal(oldChild.stdin.read(), null);
+              releaseResume([{ role: 'user', text: 'selected transcript' }]);
+              await loading;
+              assert.equal(fresh.sessionId, selectedId);
+              assert.equal(resumeValue(), selectedId);
+              const selectedChild = children.at(-1);
+              selectedChild.stdout.write(JSON.stringify({ type: 'system', session_id: selectedId }) + '\n');
+              const selectedDelivery = new Promise(resolve => selectedChild.stdin.once('data', resolve));
+              await submitPrompt('continue selected session');
+              assert.ok((await selectedDelivery).toString().includes('continue selected session'));
+            } finally {
+              manager.loadSession = loadForResume;
+            }
             await receive({ type: 'new_session' });
             assert.equal(fresh.sessionId, null);
             assert.deepEqual(fresh.getMessages(), []);
-            assert.ok(updates.some(message => message.type === 'session_cleared'));
-            assert.ok(otherUpdates.some(message => message.type === 'session_cleared'));
+            assert.ok(updates.some(message => message.type === 'session_cleared' && message.resetStreaming));
+            assert.ok(otherUpdates.some(message => message.type === 'session_cleared' && message.resetStreaming));
+            updates.length = 0;
             await receive({ type: 'restore_request' });
             assert.ok(!updates.some(message => message.type === 'restore_messages'));
-            const next = fresh.sendMessage('fresh prompt');
+            const next = submitPrompt('fresh prompt');
             const child = children.at(-1);
+            const freshDelivery = new Promise(resolve => child.stdin.once('data', resolve));
             assert.ok(!calls.at(-1).args.includes('--resume'));
             child.stdout.write(JSON.stringify({ type: 'system', session_id: 'new-id' }) + '\n');
             await next;
+            const deliveredPrompt = await freshDelivery;
             assert.equal(fresh.sessionId, 'new-id');
             assert.deepEqual(fresh.getMessages(), [{ role: 'user', text: 'fresh prompt' }]);
-            assert.ok(child.stdin.read().toString().includes('fresh prompt'));
+            assert.ok(deliveredPrompt.toString().includes('fresh prompt'));
             fresh.stopSession();
             const loadSession = manager.loadSession;
             let finishLoad;

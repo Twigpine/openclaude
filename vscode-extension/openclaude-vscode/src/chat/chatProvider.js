@@ -173,7 +173,7 @@ class ChatController {
     this.stopSession();
     this._currentSessionId = null;
     this._messages = [];
-    this.broadcast({ type: 'session_cleared' });
+    this.broadcast({ type: 'session_cleared', resetStreaming: true });
   }
 
   async sendMessage(text) {

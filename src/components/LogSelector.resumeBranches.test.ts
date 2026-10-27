@@ -437,19 +437,37 @@ test('deep search is offered only with a callback and runs from the keyboard', a
   const selected: LogOption[] = []
   let selectionComplete: () => void = () => {}
   const selection = new Promise<void>(resolve => { selectionComplete = resolve })
+  let finishSearch: (results: LogOption[]) => void = () => {}
+  let searchSignal: AbortSignal | undefined
+  let pageRequests = 0
+  const onLoadMore = () => { pageRequests++ }
+  let deliverPage: (n: number) => Promise<void> = async () => {}
+  let pageCommitted: () => void = () => {}
   const onAgenticSearch = async (query: string, candidates: LogOption[], signal?: AbortSignal) => {
     queries.push(query)
     expect(candidates).toEqual([logs[0]])
     expect(signal?.aborted).toBe(false)
-    return [recovered]
+    searchSignal = signal
+    return new Promise<LogOption[]>(resolve => { finishSearch = resolve })
+  }
+  function Picker({ enabled }: { enabled: boolean }) {
+    const [loaded, setLoaded] = React.useState(logs)
+    React.useEffect(() => { pageCommitted() }, [loaded])
+    deliverPage = n => new Promise<void>(resolve => {
+      pageCommitted = resolve
+      setLoaded(previous => previous.concat(log(id(n), 'Paged history', n, {
+        projectPath: getOriginalCwd(), tag: n === 63 ? 'aaa-new-tag' : 'zzz-new-tag',
+      })))
+    })
+    return React.createElement(LogSelector, {
+      logs: loaded, maxHeight: 30, forceWidth: 100,
+      onSelect: item => { selected.push(item); selectionComplete() }, onLoadMore,
+      onAgenticSearch: enabled ? onAgenticSearch : undefined,
+    })
   }
   const renderPicker = (enabled: boolean) => renderer!.render(
     React.createElement(AppStateProvider, null,
-      React.createElement(KeybindingSetup, null,
-        React.createElement(LogSelector, {
-          logs, maxHeight: 30, forceWidth: 100, onSelect: item => { selected.push(item); selectionComplete() },
-          onAgenticSearch: enabled ? onAgenticSearch : undefined,
-        }))),
+      React.createElement(KeybindingSetup, null, React.createElement(Picker, { enabled }))),
   )
   try {
     renderer = await createRoot({
@@ -477,7 +495,17 @@ test('deep search is offered only with a callback and runs from the keyboard', a
     stdin.write('\x1B[B')
     await waitForFrame(getOutput, frame => frame.includes('❯ Search deeply using configured model'))
     stdin.write('\r')
+    await waitForFrame(getOutput, frame => frame.includes('Searching with configured model'))
+    expect(pageRequests).toBeGreaterThan(0)
+    await deliverPage(63)
+    expect(searchSignal?.aborted).toBe(false)
+    finishSearch([recovered])
     await waitForFrame(getOutput, frame => frame.includes('Recovered session'))
+    await deliverPage(64)
+    const recoveredSelected = new Promise<void>(resolve => { selectionComplete = resolve })
+    stdin.write('\r')
+    await recoveredSelected
+    expect(selected.at(-1)).toEqual(recovered)
     expect(queries).toEqual(['z'])
     stdin.write('\t')
     await waitForFrame(getOutput, frame => !frame.includes('Recovered session') &&

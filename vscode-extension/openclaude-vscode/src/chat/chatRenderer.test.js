@@ -34,7 +34,7 @@ test('New Chat during streaming enables sending the next prompt', () => {
   assert.equal(getElement('sendBtn').disabled, true);
   getElement('newChatBtn').listeners.click();
   assert.equal(sent.at(-1).type, 'new_session');
-  receive({ data: { type: 'session_cleared' } });
+  receive({ data: { type: 'session_cleared', resetStreaming: true } });
   assert.equal(getElement('sendBtn').disabled, false);
   assert.equal(getElement('abortBtn').style.display, 'none');
   assert.equal(getElement('statusText').textContent, 'Ready');

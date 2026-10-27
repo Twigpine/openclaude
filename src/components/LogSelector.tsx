@@ -300,7 +300,7 @@ export function LogSelector(t0: LogSelectorProps) {
   const [viewMode, setViewMode] = React.useState<ViewMode>("list");
   const [previewLog, setPreviewLog] = React.useState<LogOption | null>(null);
   const prevFocusedIdRef = React.useRef<string | null>(null);
-  const [selectedTagIndex, setSelectedTagIndex] = React.useState(0);
+  const [selectedTag, setSelectedTag] = React.useState("All");
   let t8: AgenticSearchState;
   if ($[7] === Symbol.for("react.memo_cache_sentinel")) {
     t8 = {
@@ -425,7 +425,7 @@ export function LogSelector(t0: LogSelectorProps) {
     t21 = $[23];
   }
   const tagTabs = t21;
-  const effectiveTagIndex = tagTabs.length > 0 && selectedTagIndex < tagTabs.length ? selectedTagIndex : 0;
+  const effectiveTagIndex = Math.max(0, tagTabs.indexOf(selectedTag));
   const selectedTab = tagTabs[effectiveTagIndex];
   const tagFilter = selectedTab === "All" ? undefined : selectedTab;
   const tagTabsLines = hasTags ? 1 : 0;
@@ -500,10 +500,23 @@ export function LogSelector(t0: LogSelectorProps) {
     filtered = t22;
   }
   const baseFilteredLogs = filtered;
+  const branchScope = branchFilterEnabled ? currentBranch : null;
+  const currentWorktreeOnly = hasMultipleWorktrees && !showAllWorktrees;
   React.useEffect(() => {
     agenticSearchAbortRef.current?.abort();
     setAgenticSearchState({ status: "idle" });
-  }, [baseFilteredLogs]);
+  }, [tagFilter, branchScope, currentWorktreeOnly, showAllProjects, searchQuery]);
+  const previousLogsRef = React.useRef(logs);
+  React.useEffect(() => {
+    const previousLogs = previousLogsRef.current;
+    previousLogsRef.current = logs;
+    // Progressive loading appends candidates without changing the search snapshot.
+    if (logs.length >= previousLogs.length && previousLogs.every((log, index) => logs[index] === log)) {
+      return;
+    }
+    agenticSearchAbortRef.current?.abort();
+    setAgenticSearchState({ status: "idle" });
+  }, [logs]);
   let t22;
   bb0: {
     if (!searchQuery) {
@@ -1128,15 +1141,15 @@ export function LogSelector(t0: LogSelectorProps) {
           }
           if (hasTags && key.tab) {
             const offset = key.shift ? -1 : 1;
-            setSelectedTagIndex(prev => {
-              const current = prev < tagTabs.length ? prev : 0;
+            setSelectedTag(prev => {
+              const current = Math.max(0, tagTabs.indexOf(prev));
               const newIndex = (current + tagTabs.length + offset) % tagTabs.length;
               const newTab = tagTabs[newIndex];
               logEvent("tengu_session_tag_filter_changed", {
                 is_all: newTab === "All",
                 tag_count: uniqueTags.length
               });
-              return newIndex;
+              return newTab!;
             });
             return;
           }
@@ -1357,7 +1370,7 @@ export function LogSelector(t0: LogSelectorProps) {
   }
   let t66;
   if ($[187] !== agenticResults || $[188] !== agenticSearchState.status) {
-    t66 = agenticSearchState.status === "results" && agenticResults.length > 0 && <Box paddingLeft={1} marginBottom={1} flexShrink={0}><Text dimColor={true} italic={true}>Claude found these results:</Text></Box>;
+    t66 = agenticSearchState.status === "results" && agenticResults.length > 0 && <Box paddingLeft={1} marginBottom={1} flexShrink={0}><Text dimColor={true} italic={true}>Matching sessions:</Text></Box>;
     $[187] = agenticResults;
     $[188] = agenticSearchState.status;
     $[189] = t66;
@@ -1451,7 +1464,7 @@ export function LogSelector(t0: LogSelectorProps) {
   }
   let t71;
   if ($[222] !== agenticSearchState.status || $[223] !== currentBranch || $[224] !== exitState.keyName || $[225] !== exitState.pending || $[226] !== getExpandCollapseHint || $[227] !== hasMultipleWorktrees || $[228] !== isAgenticSearchOptionFocused || $[229] !== isSearching || $[230] !== onToggleAllProjects || $[231] !== showAllProjects || $[232] !== showAllWorktrees || $[233] !== viewMode) {
-    t71 = <Box paddingLeft={2}>{exitState.pending ? <Text dimColor={true}>Press {exitState.keyName} again to exit</Text> : viewMode === "rename" ? <Text dimColor={true}><Byline><KeyboardShortcutHint shortcut="Enter" action="save" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : agenticSearchState.status === "searching" ? <Text dimColor={true}><Byline><Text>Searching with Claude…</Text><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : isAgenticSearchOptionFocused ? <Text dimColor={true}><Byline><KeyboardShortcutHint shortcut="Enter" action="search" /><KeyboardShortcutHint shortcut={"\u2193"} action="skip" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : viewMode === "search" ? <Text dimColor={true}><Byline><Text>{isSearching && false ? "Searching\u2026" : "Type to Search"}</Text><KeyboardShortcutHint shortcut="Enter" action="select" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="clear" /></Byline></Text> : <Text dimColor={true}><Byline>{onToggleAllProjects && <KeyboardShortcutHint shortcut="Ctrl+A" action={`show ${showAllProjects ? "current dir" : "all projects"}`} />}{currentBranch && <KeyboardShortcutHint shortcut="Ctrl+B" action="toggle branch" />}{hasMultipleWorktrees && <KeyboardShortcutHint shortcut="Ctrl+W" action={`show ${showAllWorktrees ? "current worktree" : "all worktrees"}`} />}<KeyboardShortcutHint shortcut="Ctrl+V" action="preview" /><KeyboardShortcutHint shortcut="Ctrl+R" action="rename" /><Text>Type to search</Text><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" />{getExpandCollapseHint() && <Text>{getExpandCollapseHint()}</Text>}</Byline></Text>}</Box>;
+    t71 = <Box paddingLeft={2}>{exitState.pending ? <Text dimColor={true}>Press {exitState.keyName} again to exit</Text> : viewMode === "rename" ? <Text dimColor={true}><Byline><KeyboardShortcutHint shortcut="Enter" action="save" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : agenticSearchState.status === "searching" ? <Text dimColor={true}><Byline><Text>Searching with configured model…</Text><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : isAgenticSearchOptionFocused ? <Text dimColor={true}><Byline><KeyboardShortcutHint shortcut="Enter" action="search" /><KeyboardShortcutHint shortcut={"\u2193"} action="skip" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" /></Byline></Text> : viewMode === "search" ? <Text dimColor={true}><Byline><Text>{isSearching && false ? "Searching\u2026" : "Type to Search"}</Text><KeyboardShortcutHint shortcut="Enter" action="select" /><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="clear" /></Byline></Text> : <Text dimColor={true}><Byline>{onToggleAllProjects && <KeyboardShortcutHint shortcut="Ctrl+A" action={`show ${showAllProjects ? "current dir" : "all projects"}`} />}{currentBranch && <KeyboardShortcutHint shortcut="Ctrl+B" action="toggle branch" />}{hasMultipleWorktrees && <KeyboardShortcutHint shortcut="Ctrl+W" action={`show ${showAllWorktrees ? "current worktree" : "all worktrees"}`} />}<KeyboardShortcutHint shortcut="Ctrl+V" action="preview" /><KeyboardShortcutHint shortcut="Ctrl+R" action="rename" /><Text>Type to search</Text><ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" />{getExpandCollapseHint() && <Text>{getExpandCollapseHint()}</Text>}</Byline></Text>}</Box>;
     $[222] = agenticSearchState.status;
     $[223] = currentBranch;
     $[224] = exitState.keyName;

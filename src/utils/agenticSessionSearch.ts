@@ -47,10 +47,6 @@ Return sessions ordered by relevance (most relevant first). If truly no sessions
 Respond with ONLY the JSON object, no markdown formatting:
 {"relevant_indices": [2, 5, 0]}`
 
-type AgenticSearchResult = {
-  relevant_indices: number[]
-}
-
 /**
  * Extracts searchable text content from a message.
  */
@@ -185,8 +181,8 @@ export async function agenticSessionSearch(
     if (isLiteLog(log)) {
       try {
         return await loadFullLog(log)
-      } catch (error) {
-        logError(error as Error)
+      } catch {
+        logError(new Error('Agentic session transcript loading failed'))
         // If loading fails, use the lite log (no transcript)
         return log
       }
@@ -278,22 +274,29 @@ Find the sessions that are most relevant to this query.`
       return []
     }
 
-    const result: AgenticSearchResult = jsonParse(jsonMatch[0])
-    const relevantIndices = result.relevant_indices || []
+    const result: unknown = jsonParse(jsonMatch[0])
+    const relevantIndices = result && typeof result === 'object' &&
+      'relevant_indices' in result && Array.isArray(result.relevant_indices)
+      ? result.relevant_indices : []
 
     // Map indices back to logs (indices are relative to logsWithTranscripts)
     const relevantLogs = relevantIndices
-      .filter(index => index >= 0 && index < logsWithTranscripts.length)
-      .map(index => logsWithTranscripts[index]!)
+      .filter((index): index is number => typeof index === 'number' &&
+        Number.isInteger(index) && index >= 0 && index < logsWithTranscripts.length)
+      .flatMap(index => {
+        const log = logsWithTranscripts[index]
+        return log ? [log] : []
+      })
 
     logForDebugging(
       `Agentic search found ${relevantLogs.length} relevant sessions`,
     )
 
     return relevantLogs
-  } catch (error) {
-    logError(error as Error)
-    logForDebugging(`Agentic search error: ${error}`)
+  } catch {
+    // Parser/provider errors may contain excerpts of private conversation content.
+    logError(new Error('Agentic session search failed'))
+    logForDebugging('Agentic session search failed')
     return []
   }
 }
