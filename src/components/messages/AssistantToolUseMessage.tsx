@@ -52,11 +52,11 @@ export function AssistantToolUseMessage(t0) {
   const [theme] = useTheme();
   const bg = useSelectedMessageBg();
   const pendingWorkerRequest = useAppStateMaybeOutsideOfProvider(_temp);
-  const isClassifierCheckingRaw = useIsClassifierChecking(param.id);
+  useIsClassifierChecking(param.id);
   const permissionMode = useAppStateMaybeOutsideOfProvider(_temp2);
   const hasStrippedRules = useAppStateMaybeOutsideOfProvider(_temp3);
   const isAutoClassifier = permissionMode === "auto" || permissionMode === "plan" && hasStrippedRules;
-  const isClassifierChecking = false && isClassifierCheckingRaw && permissionMode !== "auto";
+  const isClassifierChecking = false;
   let t1;
   if ($[0] !== param.input || $[1] !== param.name || $[2] !== tools) {
     bb0: {
