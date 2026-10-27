@@ -469,8 +469,11 @@ type SdkMcpOptionalInput<Field extends { _input: unknown }> = Field extends { _z
 
 // A raw shape can have an `_input` field, so recognize shapes before schema metadata.
 type SdkMcpToolInput<Schema, JsonInput extends object> = Schema extends { [Key in keyof Schema]: { _input: unknown } }
-  ? { -readonly [Key in keyof Schema as SdkMcpOptionalInput<Schema[Key]> extends true ? never : Key]: Schema[Key]['_input'] }
-    & { -readonly [Key in keyof Schema as SdkMcpOptionalInput<Schema[Key]> extends true ? Key : never]?: Schema[Key]['_input'] }
+  // No known keys cannot distinguish an empty JSON schema from an empty raw shape.
+  ? keyof Schema extends never
+    ? { [Key in keyof JsonInput]: JsonInput[Key] }
+    : { -readonly [Key in keyof Schema as SdkMcpOptionalInput<Schema[Key]> extends true ? never : Key]: Schema[Key]['_input'] }
+      & { -readonly [Key in keyof Schema as SdkMcpOptionalInput<Schema[Key]> extends true ? Key : never]?: Schema[Key]['_input'] }
   : Schema extends { _input: infer Input }
     ? Input
     // Materialize named interface keys so typed handlers also fit tool arrays.
@@ -583,7 +586,7 @@ export function tool<Schema = unknown>(
   description: string,
   inputSchema: Schema,
   handler: Schema extends { [Key in keyof Schema]: { _input: unknown } } | { _input: unknown }
-    ? never
+    ? keyof Schema extends never ? SdkMcpToolDefinition['handler'] : never
     : SdkMcpToolDefinition['handler'],
   extras?: {
     annotations?: ToolAnnotations

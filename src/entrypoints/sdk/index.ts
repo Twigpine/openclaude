@@ -188,7 +188,7 @@ export function tool<Schema = unknown>(
   description: string,
   inputSchema: Schema,
   handler: Schema extends { [Key in keyof Schema]: { _input: unknown } } | { _input: unknown }
-    ? never
+    ? keyof Schema extends never ? import('./v2.js').SdkMcpToolDefinition['handler'] : never
     : import('./v2.js').SdkMcpToolDefinition['handler'],
   extras?: {
     annotations?: ToolAnnotations

@@ -303,3 +303,98 @@ function assertInputCompatibility(): void {
 }
 
 void assertInputCompatibility
+
+// Empty JSON schemas and widened object types provide no evidence of Zod fields.
+function assertKeylessSchemaCompatibility(): void {
+  const jsonHandler = async (args: JsonArgs) => ({
+    content: [{ type: 'text' as const, text: args.path }],
+  })
+  const widenedSchema: object = { type: 'object' }
+  const disjointShape = {} as { path: z.ZodString } | { count: z.ZodNumber }
+
+  function sourceCompatibility(): void {
+    const inferred = tool('empty-json', '', {}, jsonHandler)
+    const explicit = tool<{}>('explicit-empty-json', '', {}, jsonHandler)
+    const specialized = tool<{}>
+    const instantiated = specialized('specialized-empty-json', '', {}, jsonHandler)
+    const fullyTyped = tool<{}, JsonArgs>('typed-empty-json', '', {}, jsonHandler)
+    const widened = tool('widened-json', '', widenedSchema, jsonHandler)
+    tool('contextual-empty-json', '', {}, async args => {
+      type _Fallback = Assert<Equal<typeof args, Record<string, unknown>>>
+      return { content: [{ type: 'text', text: String(args.path) }] }
+    })
+    tool('contextual-widened-json', '', widenedSchema, async args => {
+      type _Fallback = Assert<Equal<typeof args, Record<string, unknown>>>
+      return { content: [{ type: 'text', text: String(args.path) }] }
+    })
+    void inferred.handler({ path: 'file.txt' }, undefined)
+    void explicit.handler({ path: 'file.txt' }, undefined)
+    void instantiated.handler({ path: 'file.txt' }, undefined)
+    void fullyTyped.handler({ path: 'file.txt' }, undefined)
+    void widened.handler({ path: 'file.txt' }, undefined)
+    // @ts-expect-error An empty schema must retain the inferred JSON handler input.
+    void inferred.handler({ path: 1 }, undefined)
+    // @ts-expect-error Explicit JSON input types still constrain direct calls.
+    void fullyTyped.handler({ path: 1 }, undefined)
+    // No common keys does not make a union of actual raw shapes a JSON schema.
+    // @ts-expect-error The callback must accept both alternatives of the raw shape.
+    tool<typeof disjointShape>('disjoint-raw', '', disjointShape, jsonHandler)
+    tool('empty-zod-object', '', z.object({}), async args => {
+      type _EmptyInput = Assert<Equal<typeof args, z.input<z.ZodObject<{}>>>>
+      return { content: [] }
+    })
+    const namedDefinition: import('./v2.js').SdkMcpToolDefinition<{}> = {
+      name: 'named', description: '', inputSchema: {}, handler: jsonHandler,
+    }
+    const contextualDefinition: import('./v2.js').SdkMcpToolDefinition<object> = {
+      name: 'contextual', description: '', inputSchema: widenedSchema,
+      handler: async args => ({ content: [{ type: 'text', text: String(args.path) }] }),
+    }
+    createSdkMcpServer({ type: 'sdk', name: 'keyless', tools: [inferred, explicit, instantiated, fullyTyped, widened, namedDefinition, contextualDefinition] })
+  }
+  void sourceCompatibility
+
+  function publishedCompatibility(): void {
+    const inferred = declaredTool('empty-json', '', {}, jsonHandler)
+    const explicit = declaredTool<{}>('explicit-empty-json', '', {}, jsonHandler)
+    const specialized = declaredTool<{}>
+    const instantiated = specialized('specialized-empty-json', '', {}, jsonHandler)
+    const fullyTyped = declaredTool<{}, JsonArgs>('typed-empty-json', '', {}, jsonHandler)
+    const widened = declaredTool('widened-json', '', widenedSchema, jsonHandler)
+    declaredTool('contextual-empty-json', '', {}, async args => {
+      type _Fallback = Assert<Equal<typeof args, Record<string, unknown>>>
+      return { content: [{ type: 'text', text: String(args.path) }] }
+    })
+    declaredTool('contextual-widened-json', '', widenedSchema, async args => {
+      type _Fallback = Assert<Equal<typeof args, Record<string, unknown>>>
+      return { content: [{ type: 'text', text: String(args.path) }] }
+    })
+    void inferred.handler({ path: 'file.txt' }, undefined)
+    void explicit.handler({ path: 'file.txt' }, undefined)
+    void instantiated.handler({ path: 'file.txt' }, undefined)
+    void fullyTyped.handler({ path: 'file.txt' }, undefined)
+    void widened.handler({ path: 'file.txt' }, undefined)
+    // @ts-expect-error An empty schema must retain the inferred JSON handler input.
+    void inferred.handler({ path: 1 }, undefined)
+    // @ts-expect-error Explicit JSON input types still constrain direct calls.
+    void fullyTyped.handler({ path: 1 }, undefined)
+    // No common keys does not make a union of actual raw shapes a JSON schema.
+    // @ts-expect-error The callback must accept both alternatives of the raw shape.
+    declaredTool<typeof disjointShape>('disjoint-raw', '', disjointShape, jsonHandler)
+    declaredTool('empty-zod-object', '', z.object({}), async args => {
+      type _EmptyInput = Assert<Equal<typeof args, z.input<z.ZodObject<{}>>>>
+      return { content: [] }
+    })
+    const namedDefinition: import('../sdk.js').SdkMcpToolDefinition<{}> = {
+      name: 'named', description: '', inputSchema: {}, handler: jsonHandler,
+    }
+    const contextualDefinition: import('../sdk.js').SdkMcpToolDefinition<object> = {
+      name: 'contextual', description: '', inputSchema: widenedSchema,
+      handler: async args => ({ content: [{ type: 'text', text: String(args.path) }] }),
+    }
+    declaredServer({ type: 'sdk', name: 'keyless', tools: [inferred, explicit, instantiated, fullyTyped, widened, namedDefinition, contextualDefinition] })
+  }
+  void publishedCompatibility
+}
+
+void assertKeylessSchemaCompatibility
