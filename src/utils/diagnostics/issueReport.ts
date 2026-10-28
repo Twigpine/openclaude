@@ -659,6 +659,7 @@ function formatStatus(ok: boolean): string {
 
 function tableEscape(value: string | number | boolean | null | undefined): string {
   return String(value ?? '')
+    .replace(/\\/g, '\\\\')
     .replace(/\|/g, '\\|')
     .replace(/\r?\n/g, ' ')
 }

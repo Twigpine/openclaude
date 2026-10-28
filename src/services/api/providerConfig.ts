@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createHmac } from 'node:crypto'
 import { isIP } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -210,8 +210,10 @@ type ModelDescriptor = {
 const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1'])
 
 function hashCacheScopePartition(value: unknown): string {
-  return createHash('sha256')
-    .update(JSON.stringify(value))
+  // Credential-keyed fingerprint, not a password hash. Keep it deterministic
+  // because model discovery scopes are persisted across CLI runs.
+  return createHmac('sha256', JSON.stringify(value))
+    .update('openclaude:additional-model-options:v1')
     .digest('hex')
     .slice(0, 16)
 }

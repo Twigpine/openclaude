@@ -57,7 +57,7 @@ function assertReadonlyCollectionTypes(
   readonlyTuple[0].a.push('mutates')
 
   // @ts-expect-error DeepImmutable preserves readonly tuple arity.
-  readonlyTuple[2]
+  void readonlyTuple[2]
 }
 
 void assertReadonlyCollectionTypes

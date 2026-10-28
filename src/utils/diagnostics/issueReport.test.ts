@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { marked } from "marked";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -113,7 +114,14 @@ describe("diagnostic issue report", () => {
       errors: [],
     });
 
+    report.checks = [{
+      label: "Path",
+      ok: true,
+      detail: String.raw`C:\tools\bin | next\|cell`,
+    }];
     const markdown = formatIssueReportAsMarkdown(report);
+    const html = marked.parse(markdown) as string;
+    expect(html).toContain(String.raw`<td>C:\tools\bin | next\|cell</td>`);
 
     expect(markdown).toContain("# OpenClaude diagnostic report");
     expect(markdown).toContain("## Summary");

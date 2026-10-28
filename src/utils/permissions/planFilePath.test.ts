@@ -145,7 +145,7 @@ test('rejects unencoded-percent lookalikes the producer never emits', () => {
   const sub = join(PLANS, AGENT_PLANS_SUBDIR)
   for (const rawComponent of [
     'writer@100%', // canonical form is writer@100%25
-    'writer@a%2Fb'.replace('%2F', '%'), // writer@a%b -> canonical writer@a%25b
+    'writer@a%b', // writer@a%b -> canonical writer@a%25b
     'a%', // bare trailing percent
     'a%zz', // percent not starting a known escape
     'a%2', // truncated escape
