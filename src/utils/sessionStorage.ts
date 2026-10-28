@@ -1047,12 +1047,14 @@ class Project {
   currentSessionBranch: SessionBranchEntry | undefined
 
   sessionFile: string | null = null
-  // Entries buffered while sessionFile is null, keyed by the session they
-  // belong to. Flushed by materializeSessionFile on that session's first
+  // A conversation can start without a file when persistence is disabled.
+  private hasStartedSession = false
+  // Entries buffered while sessionFile is null, keyed by their transcript path
+  // (session ID and project directory). Flushed on that destination's first
   // user/assistant message — prevents metadata-only session files without
   // letting one session's buffer leak into another's transcript. Keyed rather
   // than a single slot: a switch away and back must not lose them.
-  private pendingEntries = new Map<UUID, Entry[]>()
+  private pendingEntries = new Map<string, Entry[]>()
   private remoteIngressUrl: string | null = null
   private internalEventWriter: InternalEventWriter | null = null
   private internalEventReader: InternalEventReader | null = null
@@ -1385,7 +1387,8 @@ class Project {
     // Startup selections are cached before --continue/--resume chooses a
     // transcript. Keep only those deferred fields through its switch and
     // explicit reset; metadata from an established session must be cleared.
-    const startupMetadata = this.sessionFile === null
+    if (this.sessionFile !== null) this.hasStartedSession = true
+    const startupMetadata = !this.hasStartedSession
       ? {
           title: this.currentSessionTitle,
           agentSetting: this.currentSessionAgentSetting,
@@ -1752,17 +1755,19 @@ class Project {
    * buffered entries. Called on the first user/assistant message.
    */
   private async materializeSessionFile(): Promise<void> {
+    // Runtime metadata must not become startup selections just because this
+    // conversation opted out of writing its transcript.
+    this.hasStartedSession = true
     // Guard here too — reAppendSessionMetadata writes via appendEntryToFile
     // (not appendEntry) so it would bypass the per-entry persistence check
     // and create a metadata-only file despite --no-session-persistence.
     if (this.shouldSkipPersistence()) return
-    const sessionId = getSessionId() as UUID
-    this.ensureCurrentSessionFile()
+    const sessionFile = resolvePath(this.ensureCurrentSessionFile())
     // mode/agentSetting are cache-only pre-materialization; write them now.
     this.reAppendSessionMetadata()
-    const buffered = this.pendingEntries.get(sessionId)
+    const buffered = this.pendingEntries.get(sessionFile)
     if (buffered && buffered.length > 0) {
-      this.pendingEntries.delete(sessionId)
+      this.pendingEntries.delete(sessionFile)
       for (const entry of buffered) {
         await this.appendEntry(entry)
       }
@@ -2030,10 +2035,11 @@ class Project {
     if (isCurrentSession) {
       // Buffer until materializeSessionFile runs (first user/assistant message).
       if (this.sessionFile === null) {
-        let buffered = this.pendingEntries.get(currentSessionId)
+        const pendingPath = resolvePath(getTranscriptPath())
+        let buffered = this.pendingEntries.get(pendingPath)
         if (!buffered) {
           buffered = []
-          this.pendingEntries.set(currentSessionId, buffered)
+          this.pendingEntries.set(pendingPath, buffered)
         }
         buffered.push(entry)
         return
@@ -2220,7 +2226,7 @@ class Project {
     this.deletedSessionFiles.add(resolvePath(transcriptPath))
     this.existingSessionFiles.delete(sessionId)
     // The session is gone; its buffered entries have nowhere to go.
-    this.pendingEntries.delete(sessionId)
+    this.pendingEntries.delete(resolvePath(transcriptPath))
     if (this.sessionFile && this.isDeletedSessionFile(this.sessionFile)) {
       this.resetSessionFile()
     }

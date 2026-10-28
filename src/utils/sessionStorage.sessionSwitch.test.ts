@@ -308,6 +308,34 @@ test('a same-id switch to another project directory moves the pointer', async ()
   expect(await readFile(first, 'utf8')).not.toContain('written there')
 })
 
+test('buffered entries stay with their directory across a same-id round trip', async () => {
+  const here = join(testRoot, 'here')
+  const there = join(testRoot, 'there')
+  await mkdir(here, { recursive: true })
+  await mkdir(there, { recursive: true })
+  switchSession(FIRST as never, here)
+  const snapshotId = randomUUID()
+  await recordAttributionSnapshot({
+    type: 'attribution-snapshot',
+    messageId: snapshotId,
+    surface: 'sdk',
+    fileStates: {},
+  })
+  const first = getTranscriptPathForSession(FIRST)
+  expect(existsSync(first)).toBe(false)
+
+  switchSession(FIRST as never, there)
+  await recordTranscript([message(randomUUID(), 'written there')])
+  await flushSessionStorage()
+  const second = getTranscriptPathForSession(FIRST)
+  expect(await readFile(second, 'utf8')).not.toContain(snapshotId)
+
+  switchSession(FIRST as never, here)
+  await recordTranscript([message(randomUUID(), 'written here')])
+  await flushSessionStorage()
+  expect(await readFile(first, 'utf8')).toContain(snapshotId)
+})
+
 /**
  * Pointer-following must survive another test file wiping the signal.
  *
@@ -451,3 +479,33 @@ test.each(['explicit clear', 'session switch'])(
     expect(await readFile(getTranscriptPathForSession(SECOND), 'utf8')).not.toContain('private')
   },
 )
+
+test('a nonpersisted session does not pass runtime worktree metadata to the next session', async () => {
+  const skipHistory = process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY
+  const testPersistence = process.env.TEST_ENABLE_SESSION_PERSISTENCE
+  try {
+    // query(options.env) can disable persistence for one SDK session while
+    // its EnterWorktree tool still caches worktree state.
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = 'false'
+    process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY = '1'
+    switchSession(FIRST as never, null)
+    await recordTranscript([message(randomUUID(), 'nonpersisted turn')])
+    saveWorktreeState({
+      originalCwd: getOriginalCwd(),
+      worktreePath: join(testRoot, 'private-worktree'),
+      worktreeName: 'private-worktree',
+      sessionId: FIRST,
+    })
+    expect(existsSync(getTranscriptPathForSession(FIRST))).toBe(false)
+  } finally {
+    if (skipHistory === undefined) delete process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY
+    else process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY = skipHistory
+    if (testPersistence === undefined) delete process.env.TEST_ENABLE_SESSION_PERSISTENCE
+    else process.env.TEST_ENABLE_SESSION_PERSISTENCE = testPersistence
+  }
+
+  switchSession(SECOND as never, null)
+  await recordTranscript([message(randomUUID(), 'persisted turn')])
+  await flushSessionStorage()
+  expect(await readFile(getTranscriptPathForSession(SECOND), 'utf8')).not.toContain('private-worktree')
+})
