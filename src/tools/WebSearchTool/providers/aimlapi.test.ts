@@ -24,6 +24,7 @@ interface CapturedRequest {
   method: string
   headers: Record<string, string>
   body: unknown
+  redirect: RequestRedirect | undefined
 }
 
 /** Replace fetch with a queue of canned responses and record every request. */
@@ -35,6 +36,7 @@ function mockFetch(responses: Array<() => Response>): CapturedRequest[] {
       method: init?.method ?? 'GET',
       headers: (init?.headers ?? {}) as Record<string, string>,
       body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      redirect: init?.redirect,
     })
     const next = responses.shift()
     if (!next) throw new Error(`unexpected request to ${String(input)}`)
@@ -135,16 +137,17 @@ describe('aimlapiProvider search', () => {
     const [run] = requests
     expect(run.url).toBe('https://tools.aimlapi.com/v1/tools/run')
     expect(run.method).toBe('POST')
+    expect(run.redirect).toBe('error')
     expect(run.headers.Authorization).toBe(`Bearer ${TEST_KEY}`)
     expect(run.headers['X-AIMLAPI-Source']).toBe('agent/openclaude')
     expect(run.headers['X-AIMLAPI-Partner-ID']).toBe('part_62yQoGYDq4Yqnrj2R1iGrDNJ')
     expect(run.body).toEqual({
       tool: 'web/search',
       input: { query: 'hello', max_results: 10 },
-      max_cost_usd: AIMLAPI_SEARCH_MAX_COST_USD,
+      max_cost_usd: 0.025,
       wait_ms: 13_000,
     })
-    expect(AIMLAPI_SEARCH_MAX_COST_USD).toBeLessThanOrEqual(0.05)
+    expect(AIMLAPI_SEARCH_MAX_COST_USD).toBe(0.025)
   })
 
   test('maps output.results into SearchHit shape', async () => {
@@ -223,10 +226,26 @@ describe('aimlapiProvider search', () => {
     ])
     for (const poll of requests.slice(1)) {
       expect(poll.body).toBeUndefined()
+      expect(poll.redirect).toBe('error')
       expect(poll.headers.Authorization).toBe(`Bearer ${TEST_KEY}`)
       expect(poll.headers['X-AIMLAPI-Source']).toBe('agent/openclaude')
       expect(poll.headers['X-AIMLAPI-Partner-ID']).toBe('part_62yQoGYDq4Yqnrj2R1iGrDNJ')
     }
+  })
+
+  test('refuses a redirect, so the key and attribution never leave the Toolbox host', async () => {
+    const requests: Array<{ url: string; redirect: RequestRedirect | undefined }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(input), redirect: init?.redirect })
+      // What fetch does with a 3xx response when redirect is 'error'.
+      if (init?.redirect === 'error') throw new TypeError('unexpected redirect')
+      return new Response(null, { status: 302, headers: { Location: 'https://elsewhere.example/' } })
+    }) as typeof fetch
+
+    await expect(aimlapiProvider.search({ query: 'q' })).rejects.toThrow('unexpected redirect')
+    expect(requests).toEqual([
+      { url: 'https://tools.aimlapi.com/v1/tools/run', redirect: 'error' },
+    ])
   })
 
   test('throws when a polled run ends without completing', async () => {
