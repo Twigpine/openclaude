@@ -32,11 +32,11 @@ function getMcpOAuthCallbackPort(): number | undefined {
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : undefined
 }
 
-function probePort(port: number): Promise<void> {
+function probePort(port: number, host?: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const testServer = createServer()
     testServer.once('error', reject)
-    testServer.listen(port, '127.0.0.1', () => {
+    testServer.listen(port, host, () => {
       testServer.close(error => error ? reject(error) : resolve())
     })
   })
@@ -54,13 +54,14 @@ export async function findAvailablePort(): Promise<number> {
   const configuredPort = getMcpOAuthCallbackPort()
   if (configuredPort) {
     try {
-      await probePort(configuredPort)
+      await probePort(configuredPort, '127.0.0.1')
       return configuredPort
     } catch {
       // The override is unavailable; use the usual random/fallback selection.
     }
   }
 
+  // Preserve wildcard probes for random/fallback ports advertised as localhost.
   const { min, max } = REDIRECT_PORT_RANGE
   const range = max - min + 1
   const maxAttempts = Math.min(range, 100) // Don't try forever
