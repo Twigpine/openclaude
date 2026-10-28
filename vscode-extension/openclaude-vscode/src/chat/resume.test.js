@@ -195,9 +195,10 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
               for (const OtherProvider of [OpenClaudeChatViewProvider, OpenClaudeChatPanelManager]) {
                 for (const olderFinishesFirst of [true, false]) {
                   let receiveOther;
+                  const newerUpdates = [];
                   new OtherProvider(fresh)._attachMessageHandler({
                     onDidReceiveMessage: handler => { receiveOther = handler; },
-                    postMessage: message => updates.push(message),
+                    postMessage: message => newerUpdates.push(message),
                   });
                   updates.length = 0;
                   const older = receive({ type: 'resume_session', sessionId: id });
@@ -221,7 +222,9 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
                   assert.equal(resumeValue(), newerId);
                   assert.equal(fresh.sessionId, newerId);
                   assert.deepEqual(fresh.getMessages(), [{ role: 'user', text: 'newer history' }]);
-                  assert.ok(!updates.some(message => message.type === 'restore_messages' &&
+                  assert.ok(newerUpdates.some(message => message.type === 'restore_messages' &&
+                    message.messages.some(item => item.text === 'newer history')));
+                  assert.ok(![...updates, ...newerUpdates].some(message => message.type === 'restore_messages' &&
                     message.messages.some(item => item.text === 'stale history')));
                   fresh.stopSession();
                 }

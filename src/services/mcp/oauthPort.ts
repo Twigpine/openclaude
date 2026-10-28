@@ -44,7 +44,10 @@ function probePort(port: number): Promise<void> {
 
 /**
  * Finds an available port in the specified range for OAuth redirect
- * Uses random selection for better security
+ * Uses random selection for better security.
+ * An invalid or unavailable MCP_OAUTH_CALLBACK_PORT falls back to random/fallback
+ * selection, so the redirect URI can change. Providers requiring an exact
+ * pre-registered redirect URI may reject that flow; keep their configured port free.
  */
 export async function findAvailablePort(): Promise<number> {
   // First, try the configured port if specified
