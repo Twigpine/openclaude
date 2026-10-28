@@ -49,12 +49,11 @@ test('OAuth callback port selection preserves the configured port override', asy
 test('OAuth callback port overrides reject incomplete and out-of-range values', async () => {
   const restoreEnv = snapshotEnv(['MCP_OAUTH_CALLBACK_PORT'])
   try {
-    for (const value of ['70000', '43210abc', '43210.5', '-1', '0', ' 43210', '43210\n']) {
+    for (const value of ['70000', '12345abc', '12345.5', '-1', '0', ' 12345', '12345\n']) {
       process.env.MCP_OAUTH_CALLBACK_PORT = value
       const port = await findAvailablePort()
       const windows = getPlatform() === 'windows'
       assert.ok(port === 3118 || (port >= (windows ? 39152 : 49152) && port <= (windows ? 49151 : 65535)), value)
-      assert.notEqual(port, 43210, value)
     }
   } finally {
     restoreEnv()
