@@ -157,6 +157,14 @@ export const providers: Provider[] = [
     notes: 'Multi-provider model router with Chat Completions, Responses, authenticated catalog discovery, and routing policies.',
   },
   {
+    id: 'orcarouter',
+    name: 'OrcaRouter',
+    group: 'gateways',
+    setup: '/provider or ORCAROUTER_API_KEY with --provider orcarouter',
+    envVars: ['ORCAROUTER_API_KEY'],
+    notes: 'OpenAI-compatible model routing gateway with named auto routing. Existing environment setups must replace OPENAI_API_KEY with ORCAROUTER_API_KEY, even when a custom authentication header supplies the request credential. Custom headers remain supported.',
+  },
+  {
     id: 'near-ai',
     name: 'NEAR AI',
     group: 'gateways',
@@ -170,7 +178,7 @@ export const providers: Provider[] = [
     group: 'gateways',
     setup: '/provider or env vars',
     envVars: ['OPENCODE_API_KEY'],
-    notes: 'Pay-as-you-go gateway (Zen, 48 models) and a $10/mo subscription for open models (Go); one key for both.',
+    notes: 'Pay-as-you-go gateway (Zen) and a $10/mo subscription for open models (Go); one key for both.',
   },
   {
     id: 'clinepass',
@@ -292,7 +300,7 @@ export const providers: Provider[] = [
     group: 'vendors',
     setup: '/provider or env vars',
     envVars: ['MINIMAX_API_KEY'],
-    notes: 'Anthropic-compatible MiniMax endpoint; defaults to MiniMax-M3.',
+    notes: 'Anthropic-compatible MiniMax endpoint; defaults to MiniMax-M3.1-Flash.',
   },
   {
     id: 'longcat',

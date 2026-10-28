@@ -3,7 +3,7 @@ import type { UUID } from 'crypto'
 import { randomUUID } from 'crypto'
 import uniqBy from 'lodash-es/uniqBy.js'
 import { logForDebugging } from 'src/utils/debug.js'
-import { getProjectRoot, getSessionId } from '../../bootstrap/state.js'
+import { getProjectRoot } from '../../bootstrap/state.js'
 import { getCommand, getSkillToolCommands, hasCommand } from '../../commands.js'
 import {
   DEFAULT_AGENT_PROMPT,
@@ -414,6 +414,21 @@ export async function* runAgent({
   ) {
     throw new Error(
       `Model '${effectiveModel}' is not available. Your organization restricts model selection.`,
+    )
+  }
+
+  // Definitions that resolve to the inherited/default model need no new
+  // selection permission. A route has its own effective-model check above.
+  if (
+    effectiveModel === resolvedAgentModel &&
+    !providerOverride &&
+    agentDefinition.model &&
+    resolvedAgentModel !== getAgentModel(undefined, toolUseContext.options.mainLoopModel, model, permissionMode) &&
+    !isModelAllowed(agentDefinition.model) &&
+    !isModelAllowed(resolvedAgentModel)
+  ) {
+    throw new Error(
+      `Model '${resolvedAgentModel}' is not available. Your organization restricts model selection.`,
     )
   }
 

@@ -7,11 +7,13 @@ import {
 } from '../test/sharedMutationLock.js'
 import {
   getGeminiProjectIdHint,
+  getGeminiVertexGlobalEndpointError,
   getGeminiVertexLocation,
   getGeminiVertexModel,
   getGeminiVertexProjectId,
   mayHaveGeminiAdcCredentials,
   resolveGeminiCredential,
+  resolveGeminiVertexAuthMode,
 } from './geminiAuth.ts'
 
 const existingFilePath = import.meta.path
@@ -257,6 +259,17 @@ describe('Gemini auth helpers', () => {
     ).toBe('legacy-project')
   })
 
+  test('global-only models require the global location', () => {
+    expect(
+      getGeminiVertexGlobalEndpointError('gemini-3.5-flash', 'us-central1'),
+    ).toBe(
+      'Gemini Vertex model "gemini-3.5-flash" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "us-central1") to use it.',
+    )
+    expect(getGeminiVertexGlobalEndpointError('gemini-3.5-flash', 'global')).toBeNull()
+    expect(getGeminiVertexGlobalEndpointError('gemini-2.5-flash', 'us-central1')).toBeNull()
+    expect(getGeminiVertexGlobalEndpointError(undefined, 'us-central1')).toBeNull()
+  })
+
   test('detects explicit project id hints', () => {
     process.env.GOOGLE_PROJECT_ID = 'project-a'
     expect(getGeminiProjectIdHint(process.env)).toBe('project-a')
@@ -279,5 +292,32 @@ describe('Gemini auth helpers', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe('resolveGeminiVertexAuthMode', () => {
+  test('honours an explicit (case/space-normalized) GEMINI_VERTEX_AUTH_MODE', () => {
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_VERTEX_AUTH_MODE: '  Access-Token ' } as NodeJS.ProcessEnv),
+    ).toBe('access-token')
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_VERTEX_AUTH_MODE: 'adc' } as NodeJS.ProcessEnv),
+    ).toBe('adc')
+  })
+
+  test('infers access-token from a present token when the mode is unset', () => {
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_ACCESS_TOKEN: 'ya29.tok' } as NodeJS.ProcessEnv),
+    ).toBe('access-token')
+  })
+
+  test('defaults to adc for empty/whitespace token or invalid mode', () => {
+    expect(resolveGeminiVertexAuthMode({} as NodeJS.ProcessEnv)).toBe('adc')
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_ACCESS_TOKEN: '   ' } as NodeJS.ProcessEnv),
+    ).toBe('adc')
+    expect(
+      resolveGeminiVertexAuthMode({ GEMINI_VERTEX_AUTH_MODE: 'bogus' } as NodeJS.ProcessEnv),
+    ).toBe('adc')
   })
 })

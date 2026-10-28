@@ -16,6 +16,7 @@
 
 const { spawn } = require('child_process');
 const vscode = require('vscode');
+const { buildWindowsCommand } = require('./windowsArguments');
 const { parseStdoutLine, serializeStdinMessage, buildUserMessage, buildControlResponse } = require('./protocol');
 
 class ProcessManager {
@@ -25,6 +26,7 @@ class ProcessManager {
    * @param {string} [opts.cwd] - Working directory
    * @param {Record<string,string>} [opts.env] - Extra env vars
    * @param {string} [opts.sessionId] - Session to resume
+   * @param {string} [opts.resumeTarget] - Resolved transcript path or session ID
    * @param {boolean} [opts.continueSession] - Use --continue instead of --resume
    * @param {string} [opts.model] - Model override
    * @param {string[]} [opts.extraArgs] - Additional CLI flags
@@ -34,6 +36,7 @@ class ProcessManager {
     this._cwd = opts.cwd || undefined;
     this._env = opts.env || {};
     this._sessionId = opts.sessionId || null;
+    this._resumeTarget = opts.resumeTarget || this._sessionId;
     this._continueSession = opts.continueSession || false;
     this._model = opts.model || null;
     this._permissionMode = opts.permissionMode || 'acceptEdits';
@@ -72,7 +75,7 @@ class ProcessManager {
     ];
 
     if (this._sessionId) {
-      args.push('--resume', this._sessionId);
+      args.push('--resume', this._resumeTarget);
     } else if (this._continueSession) {
       args.push('--continue');
     }
@@ -87,15 +90,16 @@ class ProcessManager {
     const isWin = process.platform === 'win32';
 
     if (isWin) {
-      // On Windows, npm global installs create .cmd shims that spawn()
-      // cannot find without a shell.  Build one command string so the
-      // deprecation warning about unsanitised args does not fire.
-      const cmdLine = [this._command, ...args].join(' ');
-      this._process = spawn(cmdLine, [], {
+      // npm installs use .cmd shims. Keep argument quotes balanced through
+      // both cmd.exe and the shim's %* forwarding; disable delayed expansion.
+      this._process = spawn(process.env.ComSpec || 'cmd.exe', [
+        '/d', '/e:on', '/v:off', '/s', '/c',
+        buildWindowsCommand(this._command, args),
+      ], {
         cwd: this._cwd,
         env: spawnEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: true,
+        windowsVerbatimArguments: true,
         windowsHide: true,
       });
     } else {

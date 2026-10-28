@@ -1,3 +1,4 @@
+import { getGeminiVertexModel } from '../geminiAuth.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 /**
  * Ensure that any model codenames introduced here are also added to
@@ -91,6 +92,11 @@ export function getSmallFastModel(): ModelName {
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite'
   }
+  // Gemini on Vertex AI: keep requests inside the same provider so background
+  // helper tasks don't try a non-existent Claude name on the Vertex endpoint.
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+  }
   if (getAPIProvider() === 'mistral') {
     return process.env.MISTRAL_MODEL || 'ministral-3b-latest'
   }
@@ -112,10 +118,9 @@ export function getSmallFastModel(): ModelName {
   if (getAPIProvider() === 'nvidia-nim') {
     return process.env.OPENAI_MODEL || 'meta/llama-3.1-8b-instruct'
   }
-  // MiniMax — OPENAI_MODEL carries the active MiniMax model; fall back to
-  // the fastest tier (M2.5-highspeed) when missing.
+  // MiniMax uses the configured model or the shared Flash route default.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M2.5-highspeed'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo — OPENAI_MODEL carries the active MiMo model; fall back to
   // the fast tier when missing.
@@ -189,6 +194,7 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
       : activeRouteId === 'api-route'
         ? getAllowedApiRouteConfigModel()
         : (provider === 'gemini' ? process.env.GEMINI_MODEL : undefined) ||
+        (provider === 'gemini-vertex' ? getGeminiVertexModel() : undefined) ||
         (provider === 'mistral' ? process.env.MISTRAL_MODEL : undefined) ||
         (provider === 'minimax' ? getMiniMaxModelEnv() : undefined) ||
         (isOpenAIShimProvider ? process.env.OPENAI_MODEL : undefined) ||
@@ -238,6 +244,10 @@ export function getDefaultOpusModel(): ModelName {
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || 'gemini-2.5-pro'
   }
+  // Gemini on Vertex AI
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-pro'
+  }
   // Mistral provider
   if (getAPIProvider() === 'mistral') {
     return process.env.MISTRAL_MODEL || 'devstral-latest'
@@ -260,7 +270,7 @@ export function getDefaultOpusModel(): ModelName {
   }
   // MiniMax — flagship tier for "opus"-equivalent.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M2.7'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo — flagship tier for "opus"-equivalent.
   if (getAPIProvider() === 'xiaomi-mimo') {
@@ -288,6 +298,10 @@ export function getDefaultSonnetModel(): ModelName {
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL
   }
+  // Gemini on Vertex AI
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+  }
   // Mistral provider
   if (getAPIProvider() === 'mistral') {
     return process.env.MISTRAL_MODEL || 'mistral-medium-latest'
@@ -310,7 +324,7 @@ export function getDefaultSonnetModel(): ModelName {
   }
   // MiniMax — mid tier for "sonnet"-equivalent.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M2.5'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo — flagship model for "sonnet"-equivalent.
   if (getAPIProvider() === 'xiaomi-mimo') {
@@ -352,13 +366,17 @@ export function getDefaultHaikuModel(): ModelName {
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite'
   }
+  // Gemini on Vertex AI — Claude haiku is not available on this endpoint.
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+  }
   // NVIDIA NIM
   if (getAPIProvider() === 'nvidia-nim') {
     return process.env.OPENAI_MODEL || 'meta/llama-3.1-8b-instruct'
   }
   // MiniMax — fastest tier for "haiku"-equivalent.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M2.5-highspeed'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo — fast tier for "haiku"-equivalent.
   if (getAPIProvider() === 'xiaomi-mimo') {
@@ -445,6 +463,10 @@ export function getDefaultMainLoopModelSetting(): ModelName | ModelAlias {
   if (getAPIProvider() === 'gemini') {
     return process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL
   }
+  // Gemini on Vertex AI: always use the configured Vertex Gemini model
+  if (getAPIProvider() === 'gemini-vertex') {
+    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+  }
   if (getAPIProvider() === 'mistral') {
     return process.env.MISTRAL_MODEL || 'devstral-latest'
   }
@@ -470,11 +492,9 @@ export function getDefaultMainLoopModelSetting(): ModelName | ModelAlias {
     return process.env.OPENAI_MODEL || getRouteDefaultModel('xai') || 'grok-4.6'
   }
   // MiniMax provider: always use the configured MiniMax model.
-  // Keep the env-only fallback aligned with the MiniMax descriptor default
-  // (MiniMax-M3) so a session with only MINIMAX_API_KEY / a MiniMax base URL
-  // defaults to the same model as --provider minimax and saved profiles.
+  // Share the route default across env-only sessions, --provider, and profiles.
   if (getAPIProvider() === 'minimax') {
-    return getMiniMaxModelEnv() || 'MiniMax-M3'
+    return getMiniMaxModelEnv() || getRouteDefaultModel('minimax')!
   }
   // Xiaomi MiMo provider: always use the configured MiMo model
   if (getAPIProvider() === 'xiaomi-mimo') {

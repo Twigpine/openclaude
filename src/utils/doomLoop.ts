@@ -14,6 +14,7 @@
 import { createHash } from 'crypto'
 
 const DEFAULT_THRESHOLD = 3
+const MAX_CONSECUTIVE_BLOCKS = 5
 
 const MAIN_AGENT_KEY = 'main'
 
@@ -23,15 +24,27 @@ interface DoomLoopState {
   lastSignature: ToolSignature | null
   consecutiveCount: number
   blocked: boolean
+  consecutiveBlocks: number
+  terminalMessage: string | null
 }
 
 const stateByAgent = new Map<string, DoomLoopState>()
+let stateByTurn = new WeakMap<object, DoomLoopState>()
 
-function getState(agentKey: string): DoomLoopState {
-  let state = stateByAgent.get(agentKey)
+function getState(agentKey: string | object): DoomLoopState {
+  let state = typeof agentKey === 'string'
+    ? stateByAgent.get(agentKey)
+    : stateByTurn.get(agentKey)
   if (!state) {
-    state = { lastSignature: null, consecutiveCount: 0, blocked: false }
-    stateByAgent.set(agentKey, state)
+    state = {
+      lastSignature: null,
+      consecutiveCount: 0,
+      blocked: false,
+      consecutiveBlocks: 0,
+      terminalMessage: null,
+    }
+    if (typeof agentKey === 'string') stateByAgent.set(agentKey, state)
+    else stateByTurn.set(agentKey, state)
   }
   return state
 }
@@ -59,7 +72,7 @@ function computeSignature(toolName: string, input: unknown): ToolSignature {
 export function checkDoomLoop(
   toolName: string,
   input: unknown,
-  options: { threshold?: number; agentKey?: string } = {},
+  options: { threshold?: number; agentKey?: string | object } = {},
 ): { blocked: boolean; count: number } {
   const threshold = options.threshold ?? DEFAULT_THRESHOLD
   const state = getState(options.agentKey ?? MAIN_AGENT_KEY)
@@ -81,24 +94,48 @@ export function checkDoomLoop(
   return { blocked: state.blocked, count: state.consecutiveCount }
 }
 
+/** Count actual guard blocks; latch termination so late parallel results cannot undo it. */
+export function recordDoomLoopBlock(
+  toolName: string,
+  lastError: string,
+  agentKey: string | object = MAIN_AGENT_KEY,
+): void {
+  const state = getState(agentKey)
+  if (state.terminalMessage) return
+  state.consecutiveBlocks++
+  if (state.consecutiveBlocks >= MAX_CONSECUTIVE_BLOCKS) {
+    state.terminalMessage =
+      `Turn force-terminated: ${toolName} was blocked ${state.consecutiveBlocks} consecutive times by the doom-loop guard. ` +
+      `Last error: ${lastError} Ask the user for help before retrying.`
+  }
+}
+
+/** A non-blocked call or successful result breaks the streak, until termination. */
+export function recordDoomLoopProgress(agentKey: string | object = MAIN_AGENT_KEY): void {
+  const state = getState(agentKey)
+  if (!state.terminalMessage) state.consecutiveBlocks = 0
+}
+
 /**
  * Reset doom loop state for one agent (e.g., at the start of its query turn).
  * Defaults to the main thread, matching checkDoomLoop's default key.
  */
-export function resetDoomLoop(agentKey: string = MAIN_AGENT_KEY): void {
-  stateByAgent.delete(agentKey)
+export function resetDoomLoop(agentKey: string | object = MAIN_AGENT_KEY): void {
+  if (typeof agentKey === 'string') stateByAgent.delete(agentKey)
+  else stateByTurn.delete(agentKey)
 }
 
 /** Clear every agent's state. Test isolation only. */
 export function resetAllDoomLoops(): void {
   stateByAgent.clear()
+  stateByTurn = new WeakMap()
 }
 
 /**
  * Get current doom loop state for diagnostics.
  */
 export function getDoomLoopState(
-  agentKey: string = MAIN_AGENT_KEY,
+  agentKey: string | object = MAIN_AGENT_KEY,
 ): Readonly<DoomLoopState> {
   return { ...getState(agentKey) }
 }

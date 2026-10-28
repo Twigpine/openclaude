@@ -401,7 +401,7 @@ class SDKSessionImpl implements SDKSession {
       requestSdkRootAbort(this._abortController, source, 'sdk_session')
     }
     // Deny all pending permission prompts before clearing
-    for (const [toolUseId, pending] of this.pendingPermissionPrompts) {
+    for (const [, pending] of this.pendingPermissionPrompts) {
       pending.resolve({
         behavior: 'deny',
         message: 'Session interrupted',

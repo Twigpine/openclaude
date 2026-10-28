@@ -1,3 +1,6 @@
+import { getMainLoopModelOverride, setMainLoopModelOverride } from '../../bootstrap/state.js'
+import { spyOn } from 'bun:test'
+import * as geminiAuthModule from '../../utils/geminiAuth.js'
 import Anthropic from '@anthropic-ai/sdk'
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
@@ -8,6 +11,12 @@ import {
 } from '../../integrations/index.js'
 import { publicBuildVersion } from '../../utils/version.js'
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
+import {
+  buildLaunchEnv,
+  buildStartupEnvFromProfile,
+  createProfileFile,
+} from '../../utils/providerProfile.js'
 
 // bun:test keeps mock.module() registrations process-global across test files.
 // Load and re-register the real module before importing the client so a prior
@@ -65,12 +74,20 @@ const originalEnv = {
   CLAUDE_CODE_USE_VERTEX: process.env.CLAUDE_CODE_USE_VERTEX,
   CLAUDE_CODE_USE_FOUNDRY: process.env.CLAUDE_CODE_USE_FOUNDRY,
   CLAUDE_CODE_USE_GEMINI: process.env.CLAUDE_CODE_USE_GEMINI,
+  CLAUDE_CODE_USE_GEMINI_VERTEX: process.env.CLAUDE_CODE_USE_GEMINI_VERTEX,
   CLAUDE_CODE_USE_GITHUB: process.env.CLAUDE_CODE_USE_GITHUB,
   CLAUDE_CODE_USE_MISTRAL: process.env.CLAUDE_CODE_USE_MISTRAL,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   GEMINI_MODEL: process.env.GEMINI_MODEL,
   GEMINI_BASE_URL: process.env.GEMINI_BASE_URL,
   GEMINI_AUTH_MODE: process.env.GEMINI_AUTH_MODE,
+  GEMINI_VERTEX_PROJECT: process.env.GEMINI_VERTEX_PROJECT,
+  GEMINI_VERTEX_LOCATION: process.env.GEMINI_VERTEX_LOCATION,
+  GEMINI_VERTEX_MODEL: process.env.GEMINI_VERTEX_MODEL,
+  GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
+  GEMINI_ACCESS_TOKEN: process.env.GEMINI_ACCESS_TOKEN,
+  GEMINI_VERTEX_AUTH_MODE: process.env.GEMINI_VERTEX_AUTH_MODE,
+  GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
   GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
@@ -196,7 +213,15 @@ beforeEach(async () => {
   delete process.env.CLAUDE_CODE_USE_VERTEX
   delete process.env.CLAUDE_CODE_USE_FOUNDRY
   delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
   delete process.env.CLAUDE_CODE_USE_MISTRAL
+  delete process.env.GEMINI_VERTEX_PROJECT
+  delete process.env.GEMINI_VERTEX_LOCATION
+  delete process.env.GEMINI_VERTEX_MODEL
+  delete process.env.GOOGLE_CLOUD_PROJECT
+  delete process.env.GEMINI_ACCESS_TOKEN
+  delete process.env.GEMINI_VERTEX_AUTH_MODE
+  delete process.env.GOOGLE_APPLICATION_CREDENTIALS
   delete process.env.GOOGLE_API_KEY
   delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_BASE_URL
@@ -255,12 +280,20 @@ afterEach(() => {
     restoreEnv('CLAUDE_CODE_USE_VERTEX', originalEnv.CLAUDE_CODE_USE_VERTEX)
     restoreEnv('CLAUDE_CODE_USE_FOUNDRY', originalEnv.CLAUDE_CODE_USE_FOUNDRY)
     restoreEnv('CLAUDE_CODE_USE_GEMINI', originalEnv.CLAUDE_CODE_USE_GEMINI)
+    restoreEnv('CLAUDE_CODE_USE_GEMINI_VERTEX', originalEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)
     restoreEnv('CLAUDE_CODE_USE_GITHUB', originalEnv.CLAUDE_CODE_USE_GITHUB)
     restoreEnv('CLAUDE_CODE_USE_MISTRAL', originalEnv.CLAUDE_CODE_USE_MISTRAL)
     restoreEnv('GEMINI_API_KEY', originalEnv.GEMINI_API_KEY)
     restoreEnv('GEMINI_MODEL', originalEnv.GEMINI_MODEL)
     restoreEnv('GEMINI_BASE_URL', originalEnv.GEMINI_BASE_URL)
     restoreEnv('GEMINI_AUTH_MODE', originalEnv.GEMINI_AUTH_MODE)
+    restoreEnv('GEMINI_VERTEX_PROJECT', originalEnv.GEMINI_VERTEX_PROJECT)
+    restoreEnv('GEMINI_VERTEX_LOCATION', originalEnv.GEMINI_VERTEX_LOCATION)
+    restoreEnv('GEMINI_VERTEX_MODEL', originalEnv.GEMINI_VERTEX_MODEL)
+    restoreEnv('GOOGLE_CLOUD_PROJECT', originalEnv.GOOGLE_CLOUD_PROJECT)
+    restoreEnv('GEMINI_ACCESS_TOKEN', originalEnv.GEMINI_ACCESS_TOKEN)
+    restoreEnv('GEMINI_VERTEX_AUTH_MODE', originalEnv.GEMINI_VERTEX_AUTH_MODE)
+    restoreEnv('GOOGLE_APPLICATION_CREDENTIALS', originalEnv.GOOGLE_APPLICATION_CREDENTIALS)
     restoreEnv('GOOGLE_API_KEY', originalEnv.GOOGLE_API_KEY)
     restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
     restoreEnv('OPENAI_API_KEYS', originalEnv.OPENAI_API_KEYS)
@@ -348,6 +381,7 @@ test('first-party Anthropic requests execute the configured fetch wrapper withou
   delete process.env.CLAUDE_CODE_USE_VERTEX
   delete process.env.CLAUDE_CODE_USE_FOUNDRY
   delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
   delete process.env.CLAUDE_CODE_USE_MISTRAL
   delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_BASE_URL
@@ -686,6 +720,118 @@ test('routes Gemini provider requests through the OpenAI-compatible shim', async
   })
 })
 
+test('routes Gemini Vertex provider requests through the native client', async () => {
+  let capturedUrl: string | undefined
+  let capturedHeaders: Headers | undefined
+  let capturedBody: Record<string, unknown> | undefined
+
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  // A regional location requires a regionally-available model (gemini-3.5-flash
+  // is global-only and would be rejected — see the dedicated test below).
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
+  process.env.OPENAI_MODEL = 'gpt-5.5'
+
+  globalThis.fetch = (async (input, init) => {
+    capturedUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+    capturedHeaders = new Headers(init?.headers)
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    )
+  }) as FetchType
+
+  const client = (await getAnthropicClient({
+    maxRetries: 0,
+    model: 'gemini-2.5-flash',
+  })) as unknown as ShimClient
+
+  const response = await client.beta.messages.create({
+    model: 'gemini-2.5-flash',
+    messages: [{ role: 'user', content: 'hello' }],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  expect(capturedUrl).toBe(
+    'https://us-central1-aiplatform.googleapis.com/v1/projects/project-test-1234/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
+  )
+  expect(capturedHeaders?.get('authorization')).toBe('Bearer vertex-access-token')
+  expect(capturedHeaders?.get('x-goog-user-project')).toBe('project-test-1234')
+  expect(capturedBody?.contents).toEqual([
+    { role: 'user', parts: [{ text: 'hello' }] },
+  ])
+  expect(response).toMatchObject({
+    role: 'assistant',
+    model: 'gemini-2.5-flash',
+  })
+})
+
+test('Gemini Vertex provider uses GEMINI_VERTEX_MODEL instead of generic OPENAI_MODEL', async () => {
+  let capturedUrl: string | undefined
+
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
+  process.env.OPENAI_MODEL = 'gemini-3.0-flash'
+
+  globalThis.fetch = (async (input, _init) => {
+    capturedUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'vertex ok' }] } }],
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  const previousModel = getMainLoopModelOverride()
+  try {
+    setMainLoopModelOverride(undefined)
+    const { getUserSpecifiedModelSetting } = await import('../../utils/model/model.js')
+    const model = getUserSpecifiedModelSetting()
+    expect(model).toBe('gemini-2.5-flash')
+    const client = await getAnthropicClient({ maxRetries: 0, model: model ?? undefined })
+    await client.beta.messages.create({
+      model: model!, messages: [{ role: 'user', content: 'hello' }], max_tokens: 64,
+    })
+    expect(capturedUrl).toBe(
+      'https://us-central1-aiplatform.googleapis.com/v1/projects/project-test-1234/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
+    )
+  } finally {
+    setMainLoopModelOverride(previousModel)
+  }
+})
+
 test('routes env-only MiniMax requests through the Anthropic-compatible API', async () => {
   let capturedUrl: string | undefined
   let capturedHeaders: Headers | undefined
@@ -754,6 +900,66 @@ test('routes env-only MiniMax requests through the Anthropic-compatible API', as
     model: 'MiniMax-M2.5',
   })
 })
+
+for (const host of ['api.minimax.io', 'api.minimaxi.com']) {
+  for (const protocol of ['anthropic', 'openai'] as const) {
+    for (const savedModel of [undefined, 'MiniMax-M3', 'MiniMax-M2.7', 'custom-minimax-deployment']) {
+      test(`MiniMax ${host} ${protocol} serializes ${savedModel ?? 'Flash default'} unchanged`, async () => {
+        clearEnvForMiniMaxOnlyTest()
+        process.env.MINIMAX_API_KEY = 'minimax-test-key'
+        if (protocol === 'anthropic') {
+          process.env.ANTHROPIC_BASE_URL = `https://${host}/anthropic`
+          if (savedModel) process.env.ANTHROPIC_MODEL = savedModel
+        } else {
+          process.env.CLAUDE_CODE_USE_OPENAI = '1'
+          process.env.OPENAI_BASE_URL = `https://${host}/v1`
+          if (savedModel) process.env.OPENAI_MODEL = savedModel
+        }
+        const { getDefaultMainLoopModel } = await import('../../utils/model/model.js')
+        const model = getDefaultMainLoopModel()
+        expect(model).toBe(savedModel ?? 'MiniMax-M3.1-Flash')
+        let requestURL = ''
+        let requestHeaders = new Headers()
+        let requestBody: Record<string, unknown> = {}
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = new Request(input, init)
+          requestURL = request.url
+          requestHeaders = request.headers
+          requestBody = await request.json() as Record<string, unknown>
+          const response = protocol === 'anthropic'
+            ? { id: 'msg-minimax', type: 'message', role: 'assistant', model, content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }
+            : { id: 'chat-minimax', object: 'chat.completion', model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+          return new Response(JSON.stringify(response), { headers: { 'content-type': 'application/json' } })
+        }) as FetchType
+        const client = await getAnthropicClient({ maxRetries: 0, model })
+        await client.beta.messages.create({
+          model, max_tokens: 16,
+          messages: [{ role: 'user', content: savedModel ? 'hello' : [
+            { type: 'text', text: 'describe this image' },
+            { type: 'image', source: { type: 'url', url: 'https://example.com/fixture.png' } },
+          ] }],
+        })
+        if (!savedModel) {
+          expect(requestBody.messages).toEqual([{
+            role: 'user', content: [
+              { type: 'text', text: 'describe this image' },
+              protocol === 'anthropic'
+                ? { type: 'image', source: { type: 'url', url: 'https://example.com/fixture.png' } }
+                : { type: 'image_url', image_url: { url: 'https://example.com/fixture.png' } },
+            ],
+          }])
+        }
+        expect(requestURL).toContain(`https://${host}/${protocol === 'anthropic' ? 'anthropic/v1/messages' : 'v1/chat/completions'}`)
+        expect(requestHeaders.get(protocol === 'anthropic' ? 'x-api-key' : 'authorization')).toBe(protocol === 'anthropic' ? 'minimax-test-key' : 'Bearer minimax-test-key')
+        expect(requestBody.model).toBe(model)
+        expect(requestBody.service_tier).toBeUndefined()
+        expect(requestBody.thinking).not.toEqual({ type: 'disabled' })
+        expect(requestBody.reasoning_effort).not.toBe('none')
+        expect(requestBody.reasoning_split).not.toBe(false)
+      })
+    }
+  }
+}
 
 for (const credentialEnv of ['ANTHROPIC_API_KEY', 'MINIMAX_API_KEY']) {
   for (const dormantBaseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
@@ -832,6 +1038,77 @@ for (const baseEnv of ['OPENAI_BASE_URL', 'OPENAI_API_BASE']) {
     })
   }
 }
+
+for (const source of ['persisted', 'ambient'] as const) {
+  test(`profile launch uses the Venice credential despite a ${source} MiniMax alias`, async () => {
+    clearEnvForMiniMaxOnlyTest()
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted: createProfileFile('openai', {
+        OPENAI_BASE_URL: 'https://api.minimax.io/v1',
+        OPENAI_MODEL: 'MiniMax-M3',
+        OPENAI_API_KEY: 'saved-minimax-key',
+        MINIMAX_API_KEY: 'saved-minimax-key',
+      }),
+      goal: 'coding',
+      processEnv: {
+        OPENAI_BASE_URL: 'https://api.venice.ai/api/v1',
+        OPENAI_MODEL: 'venice-uncensored',
+        VENICE_API_KEY: 'selected-venice-key',
+        ...(source === 'ambient' ? {
+          OPENAI_API_KEY: 'ambient-minimax-key',
+          MINIMAX_API_KEY: 'ambient-minimax-key',
+        } : {}),
+      },
+    })
+    const restore = snapshotEnv(Object.keys(env))
+    try {
+      Object.assign(process.env, env)
+      let capturedUrl: string | undefined
+      let capturedHeaders: Headers | undefined
+      globalThis.fetch = (async (input, init) => {
+        capturedUrl = String(input)
+        capturedHeaders = new Headers(init?.headers)
+        return new Response(JSON.stringify({
+          id: 'chat-venice', object: 'chat.completion', model: 'venice-uncensored',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }), { headers: { 'Content-Type': 'application/json' } })
+      }) as FetchType
+      const client = await getAnthropicClient({ maxRetries: 0, model: 'venice-uncensored' })
+      await client.beta.messages.create({
+        model: 'venice-uncensored', max_tokens: 16,
+        messages: [{ role: 'user', content: 'hello' }],
+      })
+      expect(capturedUrl).toBe('https://api.venice.ai/api/v1/chat/completions')
+      expect(capturedHeaders?.get('authorization')).toBe('Bearer selected-venice-key')
+      expect(env.MINIMAX_API_KEY).toBeUndefined()
+    } finally {
+      restore()
+    }
+  })
+}
+
+test('saved OpenAI startup keeps its provider label despite an ambient MiniMax key', async () => {
+  clearEnvForMiniMaxOnlyTest()
+  const env = await buildStartupEnvFromProfile({
+    persisted: createProfileFile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'saved-openai-key',
+    }),
+    processEnv: { MINIMAX_API_KEY: 'ambient-minimax-key' },
+  })
+  const restore = snapshotEnv(Object.keys(env))
+  try {
+    Object.assign(process.env, env)
+    const { detectProvider } = await import('../../components/StartupScreen.js')
+    expect(detectProvider().name).toBe('OpenAI')
+    expect(env.MINIMAX_API_KEY).toBeUndefined()
+  } finally {
+    restore()
+  }
+})
 
 test('selected Gemini ignores dormant native MiniMax transport settings', async () => {
   clearEnvForMiniMaxOnlyTest()
@@ -3553,4 +3830,87 @@ test('rejects CRLF-injected custom headers before sending OpenAI-compatible shim
   expect(capturedHeaders?.get('x-safe-header')).toBeNull()
   expect(capturedHeaders?.get('x-injected')).toBeNull()
   expect(capturedHeaders?.get('authorization')).toBe('Bearer openai-test-key')
+})
+
+test('native Vertex discovers fileless ADC through client refresh and validation', async () => {
+  const fs = await import('node:fs')
+  const files = spyOn(fs, 'existsSync').mockReturnValue(false)
+  const resolveCredential = geminiAuthModule.resolveGeminiCredential
+  let discoveries = 0
+  const createGoogleAuth = async () => ({
+    getClient: async () => ({ getAccessToken: async () => ({ token: `metadata-token-${++discoveries}` }) }),
+    getProjectId: async () => 'metadata-project',
+  })
+  const resolver = spyOn(geminiAuthModule, 'resolveGeminiCredential').mockImplementation(
+    (env, options) => resolveCredential(env, { ...options, createGoogleAuth }),
+  )
+  const restore = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_AUTH_MODE'], { clear: true })
+  try {
+    // Direct Gemini retains its prior policy; native callers opt into discovery.
+    expect(await resolveCredential({ GEMINI_AUTH_MODE: 'adc' }, { createGoogleAuth })).toEqual({ kind: 'none' })
+    expect(discoveries).toBe(0)
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_AUTH_MODE = 'adc'
+    let authorization: string | null = null
+    let url = ''
+    const client = await getAnthropicClient({
+      maxRetries: 0, model: 'gemini-2.5-flash',
+      fetchOverride: async (input, init) => {
+        url = String(input)
+        authorization = new Headers(init?.headers).get('authorization')
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }))
+      },
+    })
+    await client.beta.messages.create({ model: 'gemini-2.5-flash', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 })
+    expect(url).toContain('/projects/metadata-project/')
+    expect(authorization as string | null).toBe('Bearer metadata-token-2')
+    const { getProviderValidationError } = await import('../../utils/providerValidation.js')
+    expect(await getProviderValidationError()).toBeNull()
+    expect(discoveries).toBe(3)
+  } finally {
+    resolver.mockRestore()
+    files.mockRestore()
+    restore()
+  }
+})
+
+
+test.each([false, true])('native factory preserves requested model, refreshed bearer and response metadata (stream=%s)', async stream => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'test-project'
+  process.env.GEMINI_VERTEX_LOCATION = 'global'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+  process.env.GEMINI_ACCESS_TOKEN = 'initial-token'
+  let url = ''
+  let authorization: string | null = null
+  const client = await getAnthropicClient({
+    maxRetries: 0, model: 'gemini-2.5-pro',
+    fetchOverride: async (input, init) => {
+      url = String(input)
+      authorization = new Headers(init?.headers).get('authorization')
+      return Response.json({
+        candidates: [{ content: { parts: [{ text: 'partial answer' }] }, finishReason: 'MAX_TOKENS' }],
+        usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 2, thoughtsTokenCount: 31 },
+      })
+    },
+  })
+  process.env.GEMINI_ACCESS_TOKEN = 'refreshed-token'
+  const params = { model: 'gemini-2.5-pro', max_tokens: 32, messages: [{ role: 'user' as const, content: 'hello' }] }
+  if (stream) {
+    const { data: response } = await client.beta.messages.create({ ...params, stream: true }).withResponse()
+    let observed = false
+    for await (const event of response) {
+      if (event.type !== 'message_delta') continue
+      observed = true
+      expect(event.delta.stop_reason).toBe('max_tokens')
+      expect(event.usage.output_tokens).toBe(33)
+    }
+    expect(observed).toBe(true)
+  } else {
+    const response = await client.beta.messages.create({ ...params, stream: false })
+    expect(response.stop_reason).toBe('max_tokens')
+    expect(response.usage).toMatchObject({ input_tokens: 7, output_tokens: 33 })
+  }
+  expect(url).toContain('/models/gemini-2.5-pro:generateContent')
+  expect(authorization as string | null).toBe('Bearer refreshed-token')
 })

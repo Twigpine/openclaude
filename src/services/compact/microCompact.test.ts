@@ -8,9 +8,6 @@ import { createAssistantMessage, createUserMessage } from '../../utils/messages.
 // verify the core predicate: MCP tools (prefixed 'mcp__') should be
 // compactable alongside the built-in tool set.
 
-// Import internals we can test
-import { evaluateTimeBasedTrigger } from './microCompact.js'
-
 /**
  * Helper: build a minimal assistant message with a tool_use block.
  */

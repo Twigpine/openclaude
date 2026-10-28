@@ -223,6 +223,19 @@ then `d` again to delete it; any other key in between cancels. Deleting removes
 the transcript and its sidecar files from disk and cannot be undone. The
 session you are currently in is not listed and cannot be deleted.
 
+In `/resume`, type a search query, then press Down and Enter on **Search deeply
+using a background model** to search conversation contents with the background
+search model, which can differ from the active chat model. This explicit action
+sends transcript excerpts and session metadata to the model provider, including
+from loaded sessions that do not match the query locally. Ordinary filtering
+stays local. Deep search considers up to 100 loaded sessions within the active
+filters, so older history may not be included. Transcript extraction uses up to
+100 messages (the first 50 and last 50 for longer sessions), then keeps only the
+first 2,000 extracted characters. Matches outside that excerpt may be missed.
+Results remain available as more history loads; changing the query or active
+filters clears the previous search. If a search fails, the picker shows an error
+and lets you retry the same query.
+
 ### Background sessions
 
 Run long non-interactive prompts detached from the current terminal:
@@ -357,16 +370,18 @@ Advanced and source-build guides:
 | ApiSmart | `/provider` or `APISMART_API_KEY` | Uses `https://gw.apismart.ai/v1`, defaults to `DEEPSEEK_V4_FLASH`, and supports optional `APISMART_MODEL` plus authenticated model discovery |
 | API Route | `/provider` or `API_ROUTE_API_KEY` | Uses `https://global.api-route.com/v1`, defaults to `claude-sonnet-4-6`, and supports optional `API_ROUTE_MODEL` plus authenticated model discovery |
 | GMI Cloud | `/provider`, `--provider gmi-cloud`, or env vars | Uses `GMI_API_KEY` at `https://api.gmi-serving.com/v1` and defaults to `Qwen/Qwen3.8-Max`; `--provider gmi-cloud` also reads an optional `GMI_MODEL`, and the model list comes from authenticated discovery |
+| OrcaRouter | `/provider`, or `ORCAROUTER_API_KEY` with `--provider orcarouter` | OpenAI-compatible model routing gateway at `https://api.orcarouter.ai/v1`, defaults to `openai/gpt-5.5`, with `orcarouter/auto` smart routing and authenticated model discovery. Existing environment setups must replace `OPENAI_API_KEY` with `ORCAROUTER_API_KEY`, even when a custom authentication header supplies the request credential. Custom headers remain supported. |
 | Hicap | `/provider` or OpenAI-compatible env vars | Uses `api-key` auth, discovers models from unauthenticated `/models`, and supports Responses mode for `gpt-` models |
 | Fireworks AI | `/provider` or env vars | First-class provider with 276 curated models (DeepSeek, Qwen, Llama, Gemma, and more); uses `FIREWORKS_API_KEY` |
 | LongCat | `/provider` or env vars | Meituan LongCat OpenAI-compatible API at `https://api.longcat.chat/openai/v1`; uses `LONGCAT_API_KEY` and defaults to `LongCat-2.0` |
 | ClinePass | `/provider` or env vars | AI model gateway with usage limits (5hr, weekly, monthly); uses `CLINE_API_KEY` at `https://api.cline.bot/api/v1` |
 | Gemini | `/provider` or env vars | Supports API key only |
+| Gemini on Vertex AI | `--provider gemini-vertex` or env vars | Native Gemini requests with Google ADC or an access token; [setup](docs/advanced-setup.md#gemini-on-vertex-ai-native) |
 | GitHub Models | `/onboard-github` | Interactive onboarding with saved credentials |
 | Codex OAuth | `/provider` | Opens ChatGPT sign-in in your browser and stores Codex credentials securely |
 | Codex | `/provider` | Uses existing Codex CLI auth, OpenClaude secure storage, or env credentials |
 | Twigpine Opengateway | Startup default, `/provider`, or env vars | Smart gateway at `https://opengateway.gitlawb.com/v1`; requires an API key from https://gitlawb.com/opengateway/keys and routes Xiaomi MiMo and other partner models by `OPENAI_MODEL` |
-| OpenCode Zen | `/provider` or env vars | Pay-as-you-go AI gateway (48 models); uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/v1`; shared key with OpenCode Go |
+| OpenCode Zen | `/provider` or env vars | Pay-as-you-go AI gateway; uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/v1`; shared key with OpenCode Go |
 | OpenCode Go | `/provider` or env vars | $10/mo subscription for open models (13 models); uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/go/v1`; shared key with OpenCode Zen |
 | Xiaomi MiMo | `/provider` or env vars | OpenAI-compatible API at `https://mimo.mi.com`; uses `MIMO_API_KEY` and defaults to `mimo-v2.5-pro` |
 | NEAR AI | `/provider` or env vars | Unified gateway (Claude, GPT, Gemini + TEE open models); uses `NEARAI_API_KEY` at `https://cloud-api.near.ai/v1` |

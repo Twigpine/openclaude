@@ -9,9 +9,8 @@ const { ProcessManager } = require('./processManager');
 const { buildPermissionControlResult } = require('./permissionResponse');
 const { toViewModel } = require('./messageParser');
 const { renderChatHtml } = require('./chatRenderer');
-const { isAssistantMessage, isPartialMessage, isStreamEvent,
-        isContentBlockDelta, isContentBlockStart, isMessageStart,
-        isResultMessage, isControlRequest, isToolProgressMessage,
+const { isAssistantMessage, isStreamEvent,
+        isControlRequest, isToolProgressMessage,
         isStatusMessage, isRateLimitEvent, getTextContent,
         getToolUseBlocks } = require('./protocol');
 
@@ -41,6 +40,9 @@ class ChatController {
   constructor(sessionManager) {
     this._sessionManager = sessionManager;
     this._process = null;
+    this._startGeneration = 0;
+    this._resetGeneration = 0;
+    this._pendingStart = null;
     this._webviews = new Set();
     this._accumulatedText = '';
     this._toolUses = [];
@@ -77,8 +79,16 @@ class ChatController {
     this.broadcast(msg);
   }
 
-  async startSession(opts = {}) {
+  startSession(opts = {}) {
     this.stopSession();
+    const pending = this._startSession(opts).finally(() => {
+      if (this._pendingStart === pending) this._pendingStart = null;
+    });
+    this._pendingStart = pending;
+    return pending;
+  }
+
+  async _startSession(opts) {
     this._accumulatedText = '';
     this._toolUses = [];
     // Only clear messages if this is a brand new session (not continuing)
@@ -89,11 +99,19 @@ class ChatController {
 
     const { command, cwd, env, permissionMode } = getLaunchConfig();
 
+    const generation = this._startGeneration;
+    const resumeTarget = opts.sessionId
+      ? await this._sessionManager.getResumeTarget(opts.sessionId)
+      : undefined;
+    // A stop or another selection can arrive while resolving the transcript.
+    if (generation !== this._startGeneration) return;
+
     this._process = new ProcessManager({
       command,
       cwd,
       env,
       sessionId: opts.sessionId,
+      resumeTarget,
       continueSession: opts.continueSession || false,
       model: opts.model,
       permissionMode,
@@ -141,6 +159,8 @@ class ChatController {
   }
 
   stopSession() {
+    this._startGeneration++;
+    this._pendingStart = null;
     if (this._process) {
       this._process.dispose();
       this._process = null;
@@ -148,25 +168,36 @@ class ChatController {
     this._pendingPermissions.clear();
   }
 
+  resetForNewSession() {
+    this._resetGeneration++;
+    this.stopSession();
+    this._currentSessionId = null;
+    this._messages = [];
+    this.broadcast({ type: 'session_cleared', resetStreaming: true });
+  }
+
   async sendMessage(text) {
-    // Keep the process alive for multi-turn — just send directly.
-    // The CLI maintains full session state (tools, history) across turns.
-    // Only start a new process if none exists or it died.
-    if (!this._process || !this._process.running) {
-      await this.startSession({
-        sessionId: this._currentSessionId || undefined,
-      });
-    }
+    // Reuse a pending restart so simultaneous sends retain both messages.
+    // A stop or a new selection cancels sends waiting on the old startup.
+    const pending = this._pendingStart || ((!this._process || !this._process.running)
+      ? this.startSession({ sessionId: this._currentSessionId || undefined })
+      : null);
+    const generation = this._startGeneration;
+    if (pending) await pending;
+    if (generation !== this._startGeneration) return;
     await this._doSend(text);
   }
 
   async _doSend(text) {
     if (!this._process) return;
+    const process = this._process;
+    const generation = this._startGeneration;
     // On first message after process start, wait for CLI to be ready.
     // On subsequent messages, the process is already running and accepting input.
     if (this._readyPromise) {
       const grace = new Promise(resolve => setTimeout(resolve, 8000));
       await Promise.race([this._readyPromise, grace]);
+      if (generation !== this._startGeneration || process !== this._process) return;
       this._readyPromise = null;
     }
     this._accumulatedText = '';
@@ -180,6 +211,14 @@ class ChatController {
   }
 
   abort() {
+    if (this._pendingStart && !this._process) {
+      // Discovery has no child to signal yet. Invalidate its startup and all
+      // sends waiting on it, just as stopping or replacing the session does.
+      this.stopSession();
+      this._broadcast({ type: 'stream_end', text: '', usage: null, final: true });
+      this._onDidChangeState.fire('idle');
+      return;
+    }
     if (this._process) {
       this._process.abort();
       this._broadcast({ type: 'stream_end', text: this._accumulatedText, usage: null });
@@ -332,7 +371,6 @@ class ChatController {
       // Show turn info: if the model stopped without using tools (num_turns=1),
       // the user knows the model chose not to edit
       if (msg.num_turns !== undefined) {
-        const reason = msg.stop_reason || 'done';
         this._broadcast({
           type: 'status',
           content: msg.num_turns > 1
@@ -501,14 +539,17 @@ class OpenClaudeChatViewProvider {
           this._chatController.abort();
           break;
         case 'new_session':
-          this._chatController.stopSession();
-          webview.postMessage({ type: 'session_cleared' });
+          this._chatController.resetForNewSession();
           break;
         case 'resume_session':
           this._chatController.stopSession();
           webview.postMessage({ type: 'session_cleared' });
-          await this._loadAndDisplaySession(webview, msg.sessionId);
-          await this._chatController.startSession({ sessionId: msg.sessionId });
+          {
+            const generation = this._chatController._resetGeneration;
+            await this._loadAndDisplaySession(webview, msg.sessionId);
+            if (generation !== this._chatController._resetGeneration) break;
+            await this._chatController.startSession({ sessionId: msg.sessionId });
+          }
           break;
         case 'permission_response':
           this._chatController.sendPermissionResponse(msg.requestId, msg.action, msg.toolUseId);
@@ -551,7 +592,9 @@ class OpenClaudeChatViewProvider {
   async _loadAndDisplaySession(webview, sessionId) {
     if (!this._chatController.sessionManager) return;
     try {
+      const generation = this._chatController._resetGeneration;
       const messages = await this._chatController.sessionManager.loadSession(sessionId);
+      if (generation !== this._chatController._resetGeneration) return;
       if (messages && messages.length > 0) {
         this._chatController._messages = messages;
         webview.postMessage({ type: 'restore_messages', messages });
@@ -610,14 +653,17 @@ class OpenClaudeChatPanelManager {
           this._chatController.abort();
           break;
         case 'new_session':
-          this._chatController.stopSession();
-          webview.postMessage({ type: 'session_cleared' });
+          this._chatController.resetForNewSession();
           break;
         case 'resume_session':
           this._chatController.stopSession();
           webview.postMessage({ type: 'session_cleared' });
-          await this._loadAndDisplaySession(webview, msg.sessionId);
-          await this._chatController.startSession({ sessionId: msg.sessionId });
+          {
+            const generation = this._chatController._resetGeneration;
+            await this._loadAndDisplaySession(webview, msg.sessionId);
+            if (generation !== this._chatController._resetGeneration) break;
+            await this._chatController.startSession({ sessionId: msg.sessionId });
+          }
           break;
         case 'permission_response':
           this._chatController.sendPermissionResponse(msg.requestId, msg.action, msg.toolUseId);
@@ -660,7 +706,9 @@ class OpenClaudeChatPanelManager {
   async _loadAndDisplaySession(webview, sessionId) {
     if (!this._chatController.sessionManager) return;
     try {
+      const generation = this._chatController._resetGeneration;
       const messages = await this._chatController.sessionManager.loadSession(sessionId);
+      if (generation !== this._chatController._resetGeneration) return;
       if (messages && messages.length > 0) {
         this._chatController._messages = messages;
         webview.postMessage({ type: 'restore_messages', messages });

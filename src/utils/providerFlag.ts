@@ -47,6 +47,8 @@ import {
   argsBeforeModelOwningSubcommand,
   parseRootOptionValue,
 } from './printFlag.js'
+import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
+import { isEnvTruthy } from './envUtils.js'
 
 const PREFERRED_PROVIDER_ORDER = [
   'anthropic',
@@ -312,20 +314,15 @@ export function applyModelFlagFromArgs(
     if (error) return { error }
   }
 
-  const useGemini =
-    process.env.CLAUDE_CODE_USE_GEMINI === '1' ||
-    process.env.CLAUDE_CODE_USE_GEMINI === 'true'
-  const useMistral =
-    process.env.CLAUDE_CODE_USE_MISTRAL === '1' ||
-    process.env.CLAUDE_CODE_USE_MISTRAL === 'true'
-  const useOpenAI =
-    process.env.CLAUDE_CODE_USE_OPENAI === '1' ||
-    process.env.CLAUDE_CODE_USE_OPENAI === 'true'
-  const useGithub =
-    process.env.CLAUDE_CODE_USE_GITHUB === '1' ||
-    process.env.CLAUDE_CODE_USE_GITHUB === 'true'
+  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
+  const useGemini = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
+  const useMistral = isEnvTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
+  const useOpenAI = isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
+  const useGithub = isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
 
-  if (useGemini) {
+  if (useGeminiVertex) {
+    process.env.GEMINI_VERTEX_MODEL = effectiveModel
+  } else if (useGemini) {
     process.env.GEMINI_MODEL = effectiveModel
   } else if (useMistral) {
     process.env.MISTRAL_MODEL = effectiveModel
@@ -406,6 +403,9 @@ export function applyProviderFlag(
                           process.env.OPENAI_API_KEY === process.env.GMI_API_KEY
                         ? 'gmi-cloud'
                       : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.ORCAROUTER_API_KEY
+                        ? 'orcarouter'
+                      : process.env.OPENAI_API_KEY !== undefined &&
                           process.env.OPENAI_API_KEY === process.env.APISMART_API_KEY
                         ? 'apismart'
                         : process.env.OPENAI_API_KEY !== undefined &&
@@ -446,13 +446,12 @@ export function applyProviderFlag(
                       ? 'cloudflare'
                       : null
 
-  delete process.env.CLAUDE_CODE_USE_OPENAI
-  delete process.env.CLAUDE_CODE_USE_GEMINI
-  delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_GITHUB
-  delete process.env.CLAUDE_CODE_USE_BEDROCK
-  delete process.env.CLAUDE_CODE_USE_VERTEX
-  delete process.env.CLAUDE_CODE_USE_FOUNDRY
+  // Clear every provider-selection flag so switching providers never leaves
+  // a stale selection behind (includes CLAUDE_CODE_USE_FOUNDRY, which the
+  // hardcoded list used to miss).
+  for (const flag of PROVIDER_SELECTION_FLAGS) {
+    delete process.env[flag]
+  }
   delete process.env.NVIDIA_NIM
   if (copiedOpenAIKeyProvider && provider !== copiedOpenAIKeyProvider) {
     delete process.env.OPENAI_API_KEY
@@ -561,6 +560,11 @@ export function applyProviderFlag(
       process.env.CLAUDE_CODE_USE_VERTEX = '1'
       break
 
+    case 'gemini-vertex':
+      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+      if (model) process.env.GEMINI_VERTEX_MODEL = model
+      break
+
     case 'ollama':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
       applyOpenAIBaseUrlDefault(
@@ -610,7 +614,7 @@ export function applyProviderFlag(
       delete process.env.OPENAI_AUTH_SCHEME
       delete process.env.OPENAI_AUTH_HEADER_VALUE
       process.env.ANTHROPIC_BASE_URL = defaultBaseUrl ?? 'https://api.minimax.io/anthropic'
-      process.env.ANTHROPIC_MODEL = defaultModel ?? 'MiniMax-M3'
+      process.env.ANTHROPIC_MODEL = defaultModel ?? 'MiniMax-M3.1-Flash'
       if (model) process.env.ANTHROPIC_MODEL = model
       if (process.env.MINIMAX_API_KEY && !process.env.ANTHROPIC_API_KEY) {
         process.env.ANTHROPIC_API_KEY = process.env.MINIMAX_API_KEY

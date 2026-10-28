@@ -11,7 +11,7 @@ import {
   type InstallMethod,
 } from './config.js'
 import { getCwd } from './cwd.js'
-import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
+import { isEnvTruthy } from './envUtils.js'
 import { execFileNoThrow } from './execFileNoThrow.js'
 import { getFsImplementation } from './fsOperations.js'
 import {
@@ -372,15 +372,6 @@ async function detectMultipleInstallations(): Promise<
   }
 
   return installations
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await getFsImplementation().stat(path)
-    return true
-  } catch {
-    return false
-  }
 }
 
 export async function detectStaleProjectSettingsPaths(

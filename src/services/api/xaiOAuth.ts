@@ -30,7 +30,6 @@ import {
   getXaiOAuthCallbackHost,
   getXaiOAuthCallbackPort,
   getXaiOAuthClientId,
-  getXaiOAuthRedirectUri,
   requireTrustedXaiOAuthEndpoint,
   XAI_DEVICE_CODE_GRANT_TYPE,
   XAI_OAUTH_CALLBACK_PATH,

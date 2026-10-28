@@ -50,7 +50,7 @@ const RELOAD_DEBOUNCE_MS = 3000
 const RELOAD_COOLDOWN_MS = 5000
 
 /**
- * Polling interval for chokidar when usePolling is enabled.
+ * Polling interval for chokidar when the polling backend is enabled.
  * Skill files change rarely (manual edits, git operations), so a 2s interval
  * trades negligible latency for far fewer stat() calls than the default 100ms.
  */
@@ -226,8 +226,8 @@ function watchPaths(paths: string[], allowSkillLinks = false): FSWatcher | null 
       return path.split(platformPath.sep).some(dir => dir === '.git')
     },
     ignorePermissionErrors: true,
-    usePolling: USE_POLLING,
-    interval: testOverrides?.chokidarInterval ?? POLLING_INTERVAL_MS,
+    backend: USE_POLLING ? 'polling' : 'auto',
+    pollingInterval: testOverrides?.chokidarInterval ?? POLLING_INTERVAL_MS,
     atomic: true,
   })
 

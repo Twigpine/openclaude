@@ -162,7 +162,7 @@ async function maybeApplyProfile(
   return true
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2))
   const ollamaAvailable =
     options.provider !== 'openai' &&

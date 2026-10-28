@@ -1,3 +1,4 @@
+import type { Message } from '../types/message.js'
 import { describe, expect, it } from 'bun:test'
 import {
   splitContext,
@@ -7,11 +8,11 @@ import {
   getHybridStats,
 } from './hybridContextStrategy.js'
 
-function createMessage(role: string, content: string, createdAt: number = Date.now()): any {
+function createMessage(role: string, content: string, createdAt: number = Date.now()): Message {
   return {
     message: { role, content, id: 'test', type: 'message', created_at: createdAt },
     sender: role,
-  }
+  } as unknown as Message
 }
 
 describe('hybridContextStrategy', () => {
@@ -159,7 +160,7 @@ describe('hybridContextStrategy', () => {
             created_at: 3000,
           },
         },
-      ] as any[]
+      ] as unknown as Message[]
 
       const result = applyHybridStrategy(messages, {
         cacheWeight: 0.5,
@@ -168,10 +169,10 @@ describe('hybridContextStrategy', () => {
       })
 
       const hasToolUse = result.selectedMessages.some(
-        m => Array.isArray(m.message?.content) && m.message.content.some((b: any) => b.type === 'tool_use')
+        m => Array.isArray(m.message?.content) && m.message.content.some((b) => b.type === 'tool_use')
       )
       const hasToolResult = result.selectedMessages.some(
-        m => Array.isArray(m.message?.content) && m.message.content.some((b: any) => b.type === 'tool_result')
+        m => Array.isArray(m.message?.content) && m.message.content.some((b) => b.type === 'tool_result')
       )
 
       expect(hasToolUse).toBe(true)
@@ -191,7 +192,7 @@ describe('hybridContextStrategy', () => {
             created_at: 1000,
           },
         },
-      ] as any[]
+      ] as unknown as Message[]
 
       const result = applyHybridStrategy(messages, {
         cacheWeight: 0.5,
@@ -216,7 +217,7 @@ describe('hybridContextStrategy', () => {
             created_at: 1000,
           },
         },
-      ] as any[]
+      ] as unknown as Message[]
 
       const result = applyHybridStrategy(messages, {
         cacheWeight: 0.5,

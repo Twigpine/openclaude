@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import * as realIndexModule from './index.js'
 
-const mockPush = mock<(state: any) => Promise<any>>()
+const mockPush = mock<typeof realIndexModule.pushTeamMemory>()
 
 let resolvePush: (() => void) | null = null
 
@@ -108,7 +108,7 @@ describe('rescheduleCount behavior', () => {
   test('skips the capped follow-up push when suppression is set mid-flight', async () => {
     mod = await freshMod()
     let callCount = 0
-    let resolveFirst!: (v: unknown) => void
+    let resolveFirst!: (v: Awaited<ReturnType<typeof realIndexModule.pushTeamMemory>>) => void
     mockPush.mockImplementation(() => {
       callCount++
       if (callCount === 1) {
@@ -145,7 +145,7 @@ describe('rescheduleCount behavior', () => {
   test('capped reschedule chains follow-up push after in-flight push completes', async () => {
     mod = await freshMod()
     let callCount = 0
-    let resolveFirst!: (v: unknown) => void
+    let resolveFirst!: (v: Awaited<ReturnType<typeof realIndexModule.pushTeamMemory>>) => void
     let firstPushStarted = false
     let secondPushStarted = false
 
@@ -196,7 +196,7 @@ describe('rescheduleCount behavior', () => {
   test('does not queue multiple duplicate follow-up pushes when one is already queued', async () => {
     mod = await freshMod()
     let callCount = 0
-    let resolveFirst!: (v: unknown) => void
+    let resolveFirst!: (v: Awaited<ReturnType<typeof realIndexModule.pushTeamMemory>>) => void
     mockPush.mockImplementation(() => {
       callCount++
       if (callCount === 1) {

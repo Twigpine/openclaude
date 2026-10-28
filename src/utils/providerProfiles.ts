@@ -1,6 +1,9 @@
+import { getGeminiVertexProjectId, geminiVertexAdcWillResolveProject } from './geminiAuth.js'
+import { isEnvTruthy } from './envUtils.js'
 import { randomBytes } from 'crypto'
 import {
   getAdditionalModelOptionsCacheScope,
+  isLocalProviderUrl,
   isCodexAlias,
   isCodexBaseUrl,
   isCodexEligibleGpt5Model,
@@ -12,7 +15,9 @@ import {
   type ProviderProfile,
 } from './config.js'
 import type { ModelOption } from './model/modelOptions.js'
+import { isCurrentMiniMaxModelOption } from './model/minimaxCatalog.js'
 import { getPrimaryModel, parseModelList } from './providerModels.js'
+import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
 import {
   buildCompatibilityProcessEnv,
   createProfileFile,
@@ -33,6 +38,9 @@ import {
   buildApismartProfileEnv,
   buildVertexProfileEnv,
   clearManagedProfileEnv,
+  isManagedOrcarouterCredential,
+  orcarouterCredentialFingerprint,
+  PROFILE_ORCAROUTER_KEY_SHA256,
   deleteProfileFile,
   type ProfileFileLocation,
   type ProfileEnv,
@@ -65,7 +73,9 @@ import {
   isFireworksBaseUrl,
   isGmiCloudBaseUrl,
   isLongcatBaseUrl,
+  isMiniMaxBaseUrl,
   isNearaiBaseUrl,
+  isVeniceBaseUrl,
   isXaiBaseUrl,
   isXiaomiMimoBaseUrl,
   resolveEnvOnlyProviderRouteId,
@@ -109,6 +119,21 @@ export type ProviderPresetDefaults = Omit<ProviderProfileInput, 'provider'> & {
 
 const PROFILE_ENV_APPLIED_FLAG = 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED'
 const PROFILE_ENV_APPLIED_ID = 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID'
+
+function rememberManagedOrcarouterCredential(
+  profile: ProviderProfile,
+  processEnv: NodeJS.ProcessEnv = process.env,
+): void {
+  const value = sanitizeApiKey(profile.apiKey)?.trim()
+  if (value && resolveRouteIdFromBaseUrl(profile.baseUrl) === 'orcarouter' &&
+    processEnv[PROFILE_ENV_APPLIED_FLAG] === '1' &&
+    trimOrUndefined(processEnv[PROFILE_ENV_APPLIED_ID]) === profile.id &&
+    sanitizeApiKey(processEnv.ORCAROUTER_API_KEY)?.trim() === value) {
+    // Inherit provenance with the applied markers: saved config can change
+    // before a child starts, so it cannot reconstruct ownership from config.
+    processEnv[PROFILE_ORCAROUTER_KEY_SHA256] = orcarouterCredentialFingerprint(value)
+  }
+}
 
 type ProfileCompatibilityMode =
   | 'anthropic'
@@ -423,6 +448,8 @@ function sanitizeProfile(profile: ProviderProfile): ProviderProfile | null {
   const id = trimValue(profile.id)
   const name = trimValue(profile.name)
   const provider = trimValue(profile.provider)
+  // Native Vertex is env/CLI-only until its profile setup is implemented.
+  if (provider === 'gemini-vertex') return null
   const baseUrl = normalizeBaseUrl(profile.baseUrl)
   const model = trimValue(profile.model)
   const apiFormat = parseOpenAICompatibleApiFormat(profile.apiFormat)
@@ -661,15 +688,7 @@ export function hasProviderProfiles(config = getGlobalConfig()): boolean {
 function hasProviderSelectionFlags(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return (
-    processEnv.CLAUDE_CODE_USE_OPENAI !== undefined ||
-    processEnv.CLAUDE_CODE_USE_GEMINI !== undefined ||
-    processEnv.CLAUDE_CODE_USE_MISTRAL !== undefined ||
-    processEnv.CLAUDE_CODE_USE_GITHUB !== undefined ||
-    processEnv.CLAUDE_CODE_USE_BEDROCK !== undefined ||
-    processEnv.CLAUDE_CODE_USE_VERTEX !== undefined ||
-    processEnv.CLAUDE_CODE_USE_FOUNDRY !== undefined
-  )
+  return PROVIDER_SELECTION_FLAGS.some(flag => processEnv[flag] !== undefined)
 }
 
 /**
@@ -689,6 +708,9 @@ function hasProviderSelectionFlags(
 function hasCompleteProviderSelection(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): boolean {
+  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+    return !!getGeminiVertexProjectId(processEnv) || geminiVertexAdcWillResolveProject(processEnv)
+  }
   if (resolveEnvOnlyProviderRouteId(processEnv) !== null) return true
   if (
     trimOrUndefined(processEnv.ANTHROPIC_BASE_URL) !== undefined &&
@@ -789,6 +811,133 @@ function serializeProfileContextWindows(
         maxContextLength,
       ]),
     ),
+  )
+}
+
+/**
+ * Dedicated provider credential env vars a profile's API key must be mirrored
+ * into, for the family of vendors detected by exact base-URL host (and, where
+ * the caller has it, the resolved route id / vendor id). Single source of truth
+ * so live application, startup-env persistence, and env/profile alignment agree
+ * on which host owns which dedicated key — previously each path reconstructed
+ * the mapping independently and drifted (MiniMax was absent from the startup
+ * builder and the alignment check; MiMo used a substring match). Credentials
+ * detected by route id or profile shape (aimlapi, apismart, atlas, cloudflare,
+ * bankr, nvidia, …) keep their own predicates at each site.
+ */
+const HOST_DEDICATED_ROUTE_IDS = new Set([
+  'minimax',
+  'venice',
+  'xai',
+  'xiaomi-mimo',
+  'xiaomi-mimo-token',
+])
+
+/**
+ * Route identity already established for this exact profile in the managed
+ * process env (launch reconstruction). Honor it on reconcile reapply when the
+ * profile URL does not resolve to a different provider. Do not infer it from
+ * a URL substring, and do not copy it onto a different profile.
+ */
+function managedExplicitHostRouteId(
+  profile: ProviderProfile,
+  processEnv: NodeJS.ProcessEnv,
+): string | undefined {
+  if (trimOrUndefined(processEnv[PROFILE_ENV_APPLIED_ID]) !== profile.id) {
+    return undefined
+  }
+  const routeId = trimOrUndefined(processEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID)
+  if (!routeId || !HOST_DEDICATED_ROUTE_IDS.has(routeId)) {
+    return undefined
+  }
+  const resolvedFromUrl = resolveRouteIdFromBaseUrl(profile.baseUrl)
+  if (
+    resolvedFromUrl &&
+    resolvedFromUrl !== 'openai' &&
+    resolvedFromUrl !== routeId
+  ) {
+    return undefined
+  }
+  return routeId
+}
+
+function hostDedicatedRouteForProfile(
+  profile: ProviderProfile,
+  processEnv: NodeJS.ProcessEnv,
+  profileRoute: { routeId?: string; vendorId?: string },
+): { routeId?: string; vendorId?: string } {
+  const managedRouteId = managedExplicitHostRouteId(profile, processEnv)
+  if (
+    !managedRouteId ||
+    (profileRoute.routeId && HOST_DEDICATED_ROUTE_IDS.has(profileRoute.routeId))
+  ) {
+    return profileRoute
+  }
+  return { routeId: managedRouteId, vendorId: profileRoute.vendorId }
+}
+
+function getHostDedicatedCredentialEnv(
+  baseUrl: string | undefined,
+  apiKey: string,
+  route?: { routeId?: string; vendorId?: string },
+): Record<string, string> {
+  const env: Record<string, string> = {}
+  if (apiKey && resolveRouteIdFromBaseUrl(baseUrl) === 'orcarouter') {
+    env.ORCAROUTER_API_KEY = apiKey
+  }
+  if (route?.routeId === 'xai' || isXaiBaseUrl(baseUrl)) {
+    env.XAI_API_KEY = apiKey
+  }
+  if (
+    route?.routeId === 'minimax' ||
+    route?.vendorId === 'minimax' ||
+    isMiniMaxBaseUrl(baseUrl)
+  ) {
+    env.MINIMAX_API_KEY = apiKey
+  }
+  if (route?.routeId === 'venice' || isVeniceBaseUrl(baseUrl)) {
+    env.VENICE_API_KEY = apiKey
+  }
+  if (
+    route?.routeId === 'xiaomi-mimo' ||
+    route?.routeId === 'xiaomi-mimo-token' ||
+    isXiaomiMimoBaseUrl(baseUrl)
+  ) {
+    env.MIMO_API_KEY = apiKey
+  }
+  return env
+}
+
+/**
+ * Whether the process env carries the profile-owned value for every dedicated
+ * host credential the profile expects. Uses getHostDedicatedCredentialEnv so
+ * the alignment contract can never fall behind what application/persistence
+ * mirror, including absent credentials on keyless profiles.
+ */
+function hostDedicatedCredentialsAligned(
+  processEnv: NodeJS.ProcessEnv,
+  profile: ProviderProfile,
+  includeApiKey: boolean,
+): boolean {
+  if (!includeApiKey) {
+    return true
+  }
+  if (!profile.apiKey &&
+    resolveRouteIdFromBaseUrl(profile.baseUrl) === 'orcarouter' &&
+    isManagedOrcarouterCredential(processEnv)) {
+    return false
+  }
+  const dedicated = getHostDedicatedCredentialEnv(
+    profile.baseUrl,
+    profile.apiKey ?? '',
+    hostDedicatedRouteForProfile(
+      profile,
+      processEnv,
+      resolveProfileRoute(profile.provider),
+    ),
+  )
+  return Object.entries(dedicated).every(([key, value]) =>
+    sameOptionalEnvValue(processEnv[key], value),
   )
 }
 
@@ -945,22 +1094,10 @@ function isProcessEnvAlignedWithProfile(
       ? !includeApiKey ||
         sameOptionalEnvValue(processEnv.BNKR_API_KEY, profile.apiKey)
       : true) &&
-    (isXaiBaseUrl(profile.baseUrl)
-      ? !includeApiKey ||
-        sameOptionalEnvValue(processEnv.XAI_API_KEY, profile.apiKey)
-      : true) &&
+    hostDedicatedCredentialsAligned(processEnv, profile, includeApiKey) &&
     (isAimlapiRoute
       ? !includeApiKey ||
         sameOptionalEnvValue(processEnv.AIMLAPI_API_KEY, profile.apiKey)
-      : true) &&
-    (profile.baseUrl?.toLowerCase().includes('api.venice.ai')
-      ? !includeApiKey ||
-        sameOptionalEnvValue(processEnv.VENICE_API_KEY, profile.apiKey)
-      : true) &&
-    (profile.baseUrl?.toLowerCase().includes('api.xiaomimimo.com') ||
-      profile.baseUrl?.toLowerCase().includes('api.mimo-v2.com')
-      ? !includeApiKey ||
-        sameOptionalEnvValue(processEnv.MIMO_API_KEY, profile.apiKey)
       : true) &&
     (profile.baseUrl?.toLowerCase().includes('atlascloud')
       ? !includeApiKey ||
@@ -1072,6 +1209,7 @@ export function applyProviderProfileToProcessEnv(
   profile: ProviderProfile,
   options?: { primaryModel?: string },
 ): void {
+  delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
   const { route, compatibilityMode } = resolveProfileCompatibility(profile.provider)
   const primaryModel = options?.primaryModel ?? getPrimaryModel(profile.model)
   let profileEnv: ProfileEnv
@@ -1158,6 +1296,17 @@ export function applyProviderProfileToProcessEnv(
       OPENAI_BASE_URL: normalizedProfileBaseUrl,
       OPENAI_MODEL: primaryModel,
     }
+    // Keyless canonical profiles already accept the dedicated shell key.
+    // Reuse only actual shell input, not a key installed by this or another
+    // profile, including when another CLI removed this profile's saved key.
+    // Changing profile IDs does not change the origin of genuine shell input.
+    if (!profile.apiKey &&
+      resolveRouteIdFromBaseUrl(normalizedProfileBaseUrl) === 'orcarouter') {
+      const ambientKey = sanitizeApiKey(process.env.ORCAROUTER_API_KEY)
+      if (ambientKey && !isManagedOrcarouterCredential(process.env)) {
+        openAIProfileEnv.ORCAROUTER_API_KEY = ambientKey
+      }
+    }
     const isAimlapiProfile =
       profile.provider === 'aimlapi' ||
       route.routeId === 'aimlapi' ||
@@ -1206,8 +1355,30 @@ export function applyProviderProfileToProcessEnv(
       !withholdRetargetedGmiCloudCredential
     ) {
       openAIProfileEnv.OPENAI_API_KEY = profile.apiKey
-      if (route.vendorId === 'minimax' || normalizedProfileBaseUrl.toLowerCase().includes('minimax')) {
-        openAIProfileEnv.MINIMAX_API_KEY = profile.apiKey
+      // Host/route-detected dedicated keys (xai, minimax, venice, mimo) come
+      // from the shared mapping so this path, startup persistence, and env
+      // alignment stay in lockstep. A generic OpenAI profile keeps an explicit
+      // host route only when this same profile's managed env already has it
+      // (launch reconstruction); reconcile must not drop that credential.
+      const dedicatedRoute = hostDedicatedRouteForProfile(
+        profile,
+        process.env,
+        route,
+      )
+      Object.assign(
+        openAIProfileEnv,
+        getHostDedicatedCredentialEnv(
+          profile.baseUrl,
+          profile.apiKey,
+          dedicatedRoute,
+        ),
+      )
+      if (
+        dedicatedRoute.routeId &&
+        HOST_DEDICATED_ROUTE_IDS.has(dedicatedRoute.routeId) &&
+        route.routeId !== dedicatedRoute.routeId
+      ) {
+        openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = dedicatedRoute.routeId
       }
       if (
         route.gatewayId === 'nvidia-nim' ||
@@ -1219,21 +1390,8 @@ export function applyProviderProfileToProcessEnv(
       if (route.routeId === 'bankr' || normalizedProfileBaseUrl.toLowerCase().includes('bankr')) {
         openAIProfileEnv.BNKR_API_KEY = profile.apiKey
       }
-      if (route.routeId === 'xai' || isXaiBaseUrl(profile.baseUrl)) {
-        openAIProfileEnv.XAI_API_KEY = profile.apiKey
-      }
       if (isAimlapiProfile) {
         openAIProfileEnv.AIMLAPI_API_KEY = profile.apiKey
-      }
-      if (route.routeId === 'venice' || normalizedProfileBaseUrl.toLowerCase().includes('api.venice.ai')) {
-        openAIProfileEnv.VENICE_API_KEY = profile.apiKey
-      }
-      if (
-        route.routeId === 'xiaomi-mimo' ||
-        route.routeId === 'xiaomi-mimo-token' ||
-        isXiaomiMimoBaseUrl(profile.baseUrl)
-      ) {
-        openAIProfileEnv.MIMO_API_KEY = profile.apiKey
       }
       if (route.routeId === 'atlas-cloud' || normalizedProfileBaseUrl.toLowerCase().includes('atlascloud')) {
         openAIProfileEnv.ATLAS_CLOUD_API_KEY = profile.apiKey
@@ -1422,6 +1580,7 @@ export function applyProviderProfileToProcessEnv(
   Object.assign(process.env, nextEnv)
   process.env[PROFILE_ENV_APPLIED_FLAG] = '1'
   process.env[PROFILE_ENV_APPLIED_ID] = profile.id
+  rememberManagedOrcarouterCredential(profile)
 }
 
 export function applyActiveProviderProfileFromConfig(
@@ -1458,6 +1617,10 @@ export function applyActiveProviderProfileFromConfig(
   if (!activeProfile) {
     return undefined
   }
+
+  // Bootstrap older inherited environments while the matching saved keyed
+  // record is available; new environments already carry their fingerprint.
+  rememberManagedOrcarouterCredential(activeProfile, processEnv)
 
   const isCurrentEnvProfileManaged =
     processEnv[PROFILE_ENV_APPLIED_FLAG] === '1' &&
@@ -1575,6 +1738,7 @@ export function updateProviderProfile(
     }
 
     wasUpdated = true
+    rememberManagedOrcarouterCredential(currentProfiles[profileIndex]!)
 
     const nextProfiles = [...currentProfiles]
     nextProfiles[profileIndex] = updatedProfile
@@ -1668,9 +1832,14 @@ export function getProfileModelOptions(
   config = getGlobalConfig(),
 ): ModelOption[] {
   const configuredOptions = getConfiguredProfileModelOptions(profile)
+  const routeId = resolveProfileCapabilityRouteId(profile.provider, profile.baseUrl)
+  const localEndpoint = isLocalProviderUrl(profile.baseUrl)
   return mergeModelOptionsByValue(
     configuredOptions,
-    getModelCacheByProfile(profile.id, config),
+    getModelCacheByProfile(profile.id, config).filter(option =>
+      typeof option.value === 'string' &&
+      isCurrentMiniMaxModelOption(option.value, routeId, localEndpoint),
+    ),
   )
 }
 
@@ -1739,6 +1908,17 @@ function buildOpenAICompatibleStartupEnv(
             activeProfile.maxContextLength,
           )
       }
+      // The strict env omitted the host-detected dedicated keys, so a keyed
+      // generic profile on a canonical MiniMax/Venice/xAI/MiMo host persisted
+      // only OPENAI_API_KEY and relaunched without its dedicated credential.
+      // Mirror them from the shared mapping, same as the fallback path below.
+      Object.assign(
+        strictEnv,
+        getHostDedicatedCredentialEnv(
+          activeProfile.baseUrl,
+          activeProfile.apiKey,
+        ),
+      )
       if (isAimlapiProfile) {
         strictEnv.AIMLAPI_API_KEY = activeProfile.apiKey
         strictEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
@@ -1858,23 +2038,18 @@ function buildOpenAICompatibleStartupEnv(
     !withholdRetargetedCommandcodeCredential
   ) {
     env.OPENAI_API_KEY = activeProfile.apiKey
+    // Host-detected dedicated keys (xai, minimax, venice, mimo) from the shared
+    // mapping — this adds the previously-absent MiniMax mirror and replaces the
+    // MiMo substring match with the exact-host predicate.
+    Object.assign(
+      env,
+      getHostDedicatedCredentialEnv(activeProfile.baseUrl, activeProfile.apiKey),
+    )
     if (activeProfile.baseUrl?.toLowerCase().includes('bankr')) {
       env.BNKR_API_KEY = activeProfile.apiKey
     }
-    if (isXaiBaseUrl(activeProfile.baseUrl)) {
-      env.XAI_API_KEY = activeProfile.apiKey
-    }
     if (isAimlapiProfile) {
       env.AIMLAPI_API_KEY = activeProfile.apiKey
-    }
-    if (activeProfile.baseUrl?.toLowerCase().includes('api.venice.ai')) {
-      env.VENICE_API_KEY = activeProfile.apiKey
-    }
-    if (
-      activeProfile.baseUrl?.toLowerCase().includes('api.xiaomimimo.com') ||
-      activeProfile.baseUrl?.toLowerCase().includes('api.mimo-v2.com')
-    ) {
-      env.MIMO_API_KEY = activeProfile.apiKey
     }
     if (activeProfile.baseUrl?.toLowerCase().includes('atlascloud')) {
       env.ATLAS_CLOUD_API_KEY = activeProfile.apiKey

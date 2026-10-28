@@ -1186,12 +1186,11 @@ export async function migrateFromEnabledPlugins(): Promise<void> {
 
         const { entry, marketplaceInstallLocation } = pluginInfo
 
-        let installPath: string
         let version = 'unknown'
         let gitCommitSha: string | undefined = undefined
 
         if (typeof entry.source === 'string') {
-          installPath = join(marketplaceInstallLocation, entry.source)
+          const installPath = join(marketplaceInstallLocation, entry.source)
           version = getPluginVersionFromManifest(installPath, pluginId)
           gitCommitSha = await getGitCommitSha(installPath)
         } else {
@@ -1217,8 +1216,6 @@ export async function migrateFromEnabledPlugins(): Promise<void> {
             )
             continue
           }
-
-          installPath = pluginCachePath
 
           // Only read manifest if the .claude-plugin dir is present
           if (dirEntries.includes('.claude-plugin')) {

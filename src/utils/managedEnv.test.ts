@@ -24,6 +24,7 @@ import {
 } from './managedEnv.js'
 
 const ENV_KEYS = [
+  'GEMINI_ACCESS_TOKEN',
   'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
   'CLAUDE_CODE_USE_GEMINI',
   'CLAUDE_CODE_USE_MISTRAL',
@@ -111,9 +112,11 @@ describe('host-managed API Route settings boundary', () => {
       process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
       process.env.OPENAI_MODEL = 'host-model'
       process.env.OPENAI_API_KEY = 'host-key'
+      process.env.GEMINI_ACCESS_TOKEN = 'host-google-token'
       saveGlobalConfig(current => ({
         ...current,
         env: {
+          GEMINI_ACCESS_TOKEN: 'settings-google-token',
           API_ROUTE_API_KEY: 'settings-api-route-key',
           API_ROUTE_MODEL: 'settings-api-route-model',
         },
@@ -126,6 +129,7 @@ describe('host-managed API Route settings boundary', () => {
       expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
       expect(process.env.OPENAI_MODEL).toBe('host-model')
       expect(process.env.OPENAI_API_KEY).toBe('host-key')
+      expect(process.env.GEMINI_ACCESS_TOKEN).toBe('host-google-token')
     })
   }
 })

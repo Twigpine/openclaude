@@ -1,3 +1,4 @@
+import type { AssistantMessage } from '../types/message.js'
 import { describe, expect, it } from 'bun:test'
 import { extractThinkingTokens } from './tokens.js'
 
@@ -11,7 +12,7 @@ describe('extractThinkingTokens', () => {
           { type: 'text', text: 'Here is my answer.' },
         ],
       },
-    } as any
+    } as unknown as import('../types/message.js').AssistantMessage
 
     const result = extractThinkingTokens(message)
 
@@ -26,7 +27,7 @@ describe('extractThinkingTokens', () => {
       message: {
         content: [{ type: 'text', text: 'Hello world' }],
       },
-    } as any
+    } as unknown as import('../types/message.js').AssistantMessage
 
     const result = extractThinkingTokens(message)
 
@@ -43,7 +44,7 @@ describe('extractThinkingTokens', () => {
           { type: 'text', text: 'Answer here.' },
         ],
       },
-    } as any
+    } as unknown as import('../types/message.js').AssistantMessage
 
     const result = extractThinkingTokens(message)
 
@@ -60,7 +61,7 @@ describe('extractThinkingTokens', () => {
           { type: 'text', text: 'Ran command.' },
         ],
       },
-    } as any
+    } as unknown as import('../types/message.js').AssistantMessage
 
     const result = extractThinkingTokens(message)
 

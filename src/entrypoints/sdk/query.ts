@@ -36,6 +36,9 @@ import {
   bindSdkContextToAsyncGenerator,
   runOutsideSdkContext,
 } from '../../bootstrap/state.js'
+import type { HookCallback, HookCallbackMatcher } from '../../types/hooks.js'
+import type { HookEvent } from '../agentSdkTypes.js'
+import { isHookEvent } from '../../types/hooks.js'
 import type { SessionId } from '../../types/ids.js'
 import {
   getAgentDefinitionsWithOverrides,
@@ -56,7 +59,6 @@ import type { MCPServerConnection } from '../../services/mcp/types.js'
 import {
   acquireEnvMutex,
   releaseEnvMutex,
-  mapMessageToSDK,
   type SDKMessage,
   type SDKUserMessage,
   type SDKPermissionTimeoutMessage,
@@ -402,6 +404,7 @@ class QueryImpl implements Query {
   private permissionContext: ToolPermissionContext
   private timeoutQueue: SDKPermissionTimeoutMessage[] = []
   private agentFailureQueue: SDKAgentLoadFailureMessage[] = []
+  private hookCallbacks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {}
 
   constructor(
     engine: QueryEngine | null,
@@ -417,6 +420,7 @@ class QueryImpl implements Query {
     userAgents?: QueryOptions['agents'],
     mcpServers?: Record<string, unknown>,
     permissionContext: ToolPermissionContext = getEmptyToolPermissionContext(),
+    hooks?: QueryOptions['hooks'],
   ) {
     this._engineWasInjected = engine !== null
     if (engine) this._engine = engine
@@ -433,6 +437,28 @@ class QueryImpl implements Query {
     this.userAgents = userAgents
     this.mcpServers = mcpServers
     this.permissionContext = permissionContext
+    // Keep SDK callbacks on this query, never in the process-global registry.
+    for (const [event, matchers] of Object.entries(hooks ?? {})) {
+      if (!isHookEvent(event) || !Array.isArray(matchers)) continue
+      const callbackMatchers: HookCallbackMatcher[] = []
+      for (const matcher of matchers) {
+        if (!matcher || typeof matcher !== 'object' || !('hooks' in matcher)) continue
+        if (!Array.isArray(matcher.hooks)) continue
+        if ('matcher' in matcher && matcher.matcher !== undefined && typeof matcher.matcher !== 'string') continue
+        const callbacks = matcher.hooks.filter(
+          (hook): hook is HookCallback['callback'] => typeof hook === 'function',
+        )
+        if (callbacks.length === 0) continue
+        callbackMatchers.push({
+          matcher: 'matcher' in matcher && typeof matcher.matcher === 'string' ? matcher.matcher : '',
+          hooks: callbacks.map(callback => ({
+            type: 'callback',
+            callback: async (...args) => callback(...args),
+          })),
+        })
+      }
+      if (callbackMatchers.length > 0) this.hookCallbacks[event] = callbackMatchers
+    }
   }
 
   /** The session ID for this query. Available immediately after query() returns. */
@@ -508,6 +534,7 @@ class QueryImpl implements Query {
       sessionProjectDir: null as string | null, // Resolved below after session resolution
       cwd: this.cwd,
       originalCwd: this.cwd,
+      registeredHooks: this.hookCallbacks,
     }
 
     const self = this
@@ -726,7 +753,11 @@ class QueryImpl implements Query {
       })(),
     )
 
-    yield* inner
+    try {
+      yield* inner
+    } finally {
+      this.clearHookCallbacks()
+    }
   }
 
   async setModel(model: string): Promise<void> {
@@ -758,7 +789,15 @@ class QueryImpl implements Query {
     this.engine.updateTools(updatedTools)
   }
 
+  private clearHookCallbacks(): void {
+    // Mutate the context's shared object so detached async work sees cleanup too.
+    for (const event of Object.keys(this.hookCallbacks)) {
+      delete this.hookCallbacks[event as HookEvent]
+    }
+  }
+
   close(): void {
+    this.clearHookCallbacks()
     const wrapperController = this.abortController
     this.interruptWithSource('sdk_close')
     requestSdkRootAbort(wrapperController, 'sdk_close', 'sdk_query')
@@ -787,7 +826,7 @@ class QueryImpl implements Query {
       requestSdkRootAbort(this.abortController, source, 'sdk_query')
     }
     // Deny all pending permission prompts before clearing
-    for (const [toolUseId, pending] of this.pendingPermissionPrompts) {
+    for (const [, pending] of this.pendingPermissionPrompts) {
       pending.resolve({
         behavior: 'deny',
         message: 'Query interrupted',
@@ -1120,7 +1159,7 @@ export function query(params: {
   // Also pass sessionId, fork/forkSession, continue, cwd, resumeSessionAt, and agents.
   const effectiveSessionId = options.sessionId || options.resume
   const shouldFork = options.fork || options.forkSession
-  const queryImpl = new QueryImpl(null, prompt, ac, appStateStore, envOverrides, effectiveSessionId, shouldFork, options.continue, cwd, options.resumeSessionAt, options.agents, options.mcpServers, permissionContext)
+  const queryImpl = new QueryImpl(null, prompt, ac, appStateStore, envOverrides, effectiveSessionId, shouldFork, options.continue, cwd, options.resumeSessionAt, options.agents, options.mcpServers, permissionContext, options.hooks)
 
   // Build the canUseTool that supports external permission resolution.
   // When no user canUseTool callback is provided, this creates a pending

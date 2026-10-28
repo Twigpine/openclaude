@@ -50,6 +50,24 @@ For `deepseek_compatible`, metadata levels must be limited to `high` and/or `xhi
 
 For `zai_compatible`, exact route/model entries may expose verified `low`, `high`, and `xhigh` levels. These serialize as provider `low`, `high`, and `max`, respectively. `medium` is not a distinct GLM-5.3-Flash level, and standard OpenClaude `max` is not added as another picker level. Disabling thinking must be verified separately; low effort is not equivalent to no reasoning.
 
+## Explicit native Ollama thinking
+
+For a local Ollama endpoint using native `/api/chat`, the model options
+`?thinking=enabled` and `?thinking=disabled` send `think: true` and
+`think: false`, respectively. For example, with an Ollama provider configured:
+
+```bash
+openclaude --model 'qwen3:8b?thinking=disabled'
+```
+
+Without a `thinking` option, OpenClaude omits `think` and preserves Ollama's
+model-specific default. An explicit thinking option takes precedence over a
+`?reasoning=` option. Generic reasoning effort is not translated into Ollama
+thinking levels; `/effort` support still requires verified per-model controls.
+This explicit override does not mark a model as reasoning-capable. Whether
+thinking can be enabled or disabled depends on the selected model; see
+[Ollama's thinking controls](https://docs.ollama.com/capabilities/thinking).
+
 ## Adding Support
 
 Before adding `reasoning` metadata for a model:

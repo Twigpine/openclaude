@@ -1,3 +1,5 @@
+import { isEnvTruthy } from '../utils/envUtils.js'
+import { getGeminiVertexModel, getGeminiVertexLocation, getGeminiVertexProjectId, geminiVertexAdcWillResolveProject } from '../utils/geminiAuth.js'
 /**
  * OpenClaude startup screen — filled-block text logo with sunset gradient.
  * Called once at CLI startup before the Ink UI renders.
@@ -78,10 +80,20 @@ const LOGO_CLAUDE = [
 // ─── Provider detection ───────────────────────────────────────────────────────
 
 export function detectProvider(modelOverride?: string): { name: string; model: string; baseUrl: string; isLocal: boolean } {
+  const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = process.env.CLAUDE_CODE_USE_GEMINI === '1' || process.env.CLAUDE_CODE_USE_GEMINI === 'true'
   const useGithub = process.env.CLAUDE_CODE_USE_GITHUB === '1' || process.env.CLAUDE_CODE_USE_GITHUB === 'true'
   const useOpenAI = process.env.CLAUDE_CODE_USE_OPENAI === '1' || process.env.CLAUDE_CODE_USE_OPENAI === 'true'
   const useMistral = process.env.CLAUDE_CODE_USE_MISTRAL === '1' || process.env.CLAUDE_CODE_USE_MISTRAL === 'true'
+
+  if (useGeminiVertex) {
+    const model = modelOverride?.trim() || getGeminiVertexModel(process.env) || 'gemini-2.5-flash'
+    const location = getGeminiVertexLocation(process.env)
+    const project = getGeminiVertexProjectId(process.env) ??
+      (geminiVertexAdcWillResolveProject(process.env) ? '<ADC-resolved project>' : '<set GEMINI_VERTEX_PROJECT>')
+    const baseUrl = `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${location}`
+    return { name: 'Gemini Vertex', model, baseUrl, isLocal: false }
+  }
 
   if (useGemini) {
     const model = modelOverride || process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL

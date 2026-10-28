@@ -5385,7 +5385,7 @@ async function loadInitialMessages(
           return { messages: [] }
         }
 
-        result.messages = index >= 0 ? result.messages.slice(0, index + 1) : []
+        result.messages = result.messages.slice(0, index + 1)
       }
 
       // Match coordinator mode to the resumed session's mode

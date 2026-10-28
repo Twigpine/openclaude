@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import type { Message } from '../../types/message.js'
+import type { Message, UserMessage } from '../../types/message.js'
 import { isToolResultMessage, isTurnStart, MIN_COLLAPSE_TOKENS, selectCollapseSpan, computeRisk } from './spanSelection.js'
 
-function userMsg(content: any = 'hi', extra: Record<string, unknown> = {}): Message {
+function userMsg(content: UserMessage["message"]["content"] = 'hi', extra: Record<string, unknown> = {}): Message {
   return { type: 'user', uuid: 'u', timestamp: '', message: { role: 'user', content }, ...extra } as unknown as Message
 }
 function assistantMsg(): Message {

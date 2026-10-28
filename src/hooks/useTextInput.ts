@@ -184,9 +184,6 @@ export function applyCoalescedDelInput(
       )
       if (insertedCursor) {
         nextCursor = insertedCursor
-        shouldCommit = true
-      } else {
-        shouldCommit = false
       }
     }
 

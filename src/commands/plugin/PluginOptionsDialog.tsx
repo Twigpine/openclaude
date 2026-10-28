@@ -1,6 +1,6 @@
 import { c as _c } from "react-compiler-runtime";
 import figures from 'figures';
-import React, { useCallback, useState } from 'react';
+import React, { useState } from 'react';
 import { Dialog } from '../../components/design-system/Dialog.js';
 import { stringWidth } from '../../ink/stringWidth.js';
 // eslint-disable-next-line custom-rules/prefer-use-keybindings -- raw text input for config dialog

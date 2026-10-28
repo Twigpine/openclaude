@@ -152,9 +152,9 @@ function extractQuotedContent(command: string, isJq = false): QuoteExtraction {
 
     if (char === '\\' && !inSingleQuote) {
       escaped = true
-      if (!inSingleQuote) withDoubleQuotes += char
-      if (!inSingleQuote && !inDoubleQuote) fullyUnquoted += char
-      if (!inSingleQuote && !inDoubleQuote) unquotedKeepQuoteChars += char
+      withDoubleQuotes += char
+      if (!inDoubleQuote) fullyUnquoted += char
+      if (!inDoubleQuote) unquotedKeepQuoteChars += char
       continue
     }
 

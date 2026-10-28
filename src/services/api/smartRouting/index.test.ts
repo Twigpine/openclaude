@@ -177,6 +177,33 @@ describe('decideTurnModel', () => {
     expect(d).toMatchObject({ routed: true, complexity: 'strong', model: 'gpt-5' })
   })
 
+  test('sub-agent loops are never routed, so an agentRouting model is not overwritten', () => {
+    mockGlobalAllowlist(undefined)
+    for (const userText of ['ok thanks', 'refactor the auth module please']) {
+      const d = decideTurnModel({
+        settings: enabledSettings(),
+        parentModel: 'agent-routed-model',
+        input: { userText, turnNumber: 3 },
+        sessionId: 'sess-1',
+        agentId: 'agent-1',
+      })
+      expect(d).toEqual({ routed: false })
+    }
+  })
+
+  test('a sub-agent loop does not disable routing for the session', () => {
+    const spy = mockGlobalAllowlist(['some-other-model'])
+    decideTurnModel({
+      settings: enabledSettings(),
+      parentModel: PARENT,
+      input: { userText: 'ok thanks', turnNumber: 3 },
+      sessionId: 'sess-1',
+      agentId: 'agent-1',
+    })
+    expect(isSmartRoutingDisabledForSession('sess-1')).toBe(false)
+    spy.mockRestore()
+  })
+
   test('disallowed simple model coerces to strong', () => {
     // Distinct, non-prefix-colliding model ids so the allowlist genuinely blocks
     // simple while permitting strong.

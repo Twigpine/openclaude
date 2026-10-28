@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, expect, test } from 'bun:test'
 import { applyAgentProviderOverrideToEnv } from '../services/api/agentRouting.js'
-import { ensureIntegrationsLoaded, getAllGateways } from '../integrations/index.js'
+import { ensureIntegrationsLoaded } from '../integrations/index.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -29,6 +29,14 @@ const ENV_KEYS = [
   'GITHUB_TOKEN',
   'GH_TOKEN',
   'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_LOCATION',
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_AUTH_MODE',
+  'GOOGLE_CLOUD_PROJECT',
+  'GCLOUD_PROJECT',
+  'GOOGLE_PROJECT_ID',
   'CLAUDE_CODE_USE_MISTRAL',
   'CLAUDE_CODE_SIMPLE',
   'MISTRAL_API_KEY',
@@ -100,6 +108,201 @@ test('accepts GEMINI_ACCESS_TOKEN as valid Gemini auth', async () => {
   process.env.GEMINI_ACCESS_TOKEN = 'token-123'
 
   await expect(getProviderValidationError(process.env)).resolves.toBeNull()
+})
+
+test('disabled native Vertex flags skip credential discovery while another provider validates', async () => {
+  for (const flag of ['off', 'unexpected', '0', 'false', 'no', '']) {
+    let credentialLoads = 0
+    const error = await getProviderValidationError({
+      CLAUDE_CODE_USE_GEMINI_VERTEX: flag,
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'http://localhost:11434/v1',
+      OPENAI_MODEL: 'llama3.1:8b',
+    }, {
+      resolveGeminiCredential: async () => {
+        credentialLoads++
+        return { kind: 'none' }
+      },
+    })
+    expect(error).toBeNull()
+    expect(credentialLoads).toBe(0)
+  }
+})
+
+test('native Vertex validation accepts the runtime truthy flag spellings', async () => {
+  for (const flag of ['1', 'true', ' YES ', 'on']) {
+    let credentialLoads = 0
+    const error = await getProviderValidationError({
+      CLAUDE_CODE_USE_GEMINI_VERTEX: flag,
+    }, {
+      resolveGeminiCredential: async () => {
+        credentialLoads++
+        return { kind: 'none' }
+      },
+    })
+    expect(error).toContain('Gemini Vertex authentication')
+    expect(credentialLoads).toBe(1)
+  }
+})
+
+test('accepts Gemini Vertex project env aliases without requiring API-key Gemini auth', async () => {
+  const projectEnvVars = [
+    'GEMINI_VERTEX_PROJECT',
+    'GOOGLE_CLOUD_PROJECT',
+    'GCLOUD_PROJECT',
+    'GOOGLE_PROJECT_ID',
+  ] as const
+
+  for (const projectEnvVar of projectEnvVars) {
+    for (const key of projectEnvVars) {
+      delete process.env[key]
+    }
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+    process.env[projectEnvVar] = 'project-test-1234'
+
+    await expect(
+      getProviderValidationError(process.env, {
+        // Deterministic credential so this case tests project resolution, not
+        // the ambient machine's ADC.
+        resolveGeminiCredential: async () => ({
+          kind: 'access-token',
+          credential: 'vertex-token',
+        }),
+      }),
+    ).resolves.toBeNull()
+  }
+})
+
+test('rejects Gemini Vertex when the selected credential path is missing', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+  delete process.env.GEMINI_ACCESS_TOKEN
+
+  await expect(
+    getProviderValidationError(process.env, {
+      resolveGeminiCredential: async () => ({ kind: 'none' }),
+    }),
+  ).resolves.toBe(
+    'Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN (access-token mode) or Google ADC credentials.',
+  )
+})
+
+test('requires a project id for Gemini Vertex when ADC does not supply one', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+  delete process.env.GEMINI_VERTEX_PROJECT
+  delete process.env.GOOGLE_CLOUD_PROJECT
+  delete process.env.GCLOUD_PROJECT
+  delete process.env.GOOGLE_PROJECT_ID
+
+  // access-token mode: the credential resolves but carries no project id.
+  await expect(
+    getProviderValidationError(process.env, {
+      resolveGeminiCredential: async () => ({
+        kind: 'access-token',
+        credential: 'vertex-token',
+      }),
+    }),
+  ).resolves.toBe(
+    'Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT (or an ADC-derived project).',
+  )
+})
+
+test('accepts an ADC-derived project for Gemini Vertex when no project env is set', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  delete process.env.GEMINI_VERTEX_PROJECT
+  delete process.env.GOOGLE_CLOUD_PROJECT
+  delete process.env.GCLOUD_PROJECT
+  delete process.env.GOOGLE_PROJECT_ID
+
+  // ADC resolves both the credential and the project id, like the native client
+  // (client.ts falls back to credential.projectId), so validation must pass.
+  await expect(
+    getProviderValidationError(process.env, {
+      resolveGeminiCredential: async () => ({
+        kind: 'adc',
+        credential: 'adc-token',
+        projectId: 'adc-derived-project',
+      }),
+    }),
+  ).resolves.toBeNull()
+})
+
+test('requires a non-empty model for Gemini Vertex', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_MODEL = '   '
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+
+  await expect(getProviderValidationError(process.env)).resolves.toBe(
+    'Gemini Vertex model is required via GEMINI_VERTEX_MODEL.',
+  )
+})
+
+test('accepts Gemini Vertex with project id and access token', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+
+  await expect(
+    getProviderValidationError(process.env, {
+      // Stub the access-token path explicitly so this case exercises it
+      // deterministically rather than the machine's ambient ADC.
+      resolveGeminiCredential: async () => ({
+        kind: 'access-token',
+        credential: 'vertex-token',
+      }),
+    }),
+  ).resolves.toBeNull()
+})
+
+test('rejects a global-only Gemini Vertex model on a regional location', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-test-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  process.env.GEMINI_VERTEX_AUTH_MODE = 'access-token'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-token'
+
+  await expect(
+    getProviderValidationError(process.env, {
+      resolveGeminiCredential: async () => ({
+        kind: 'access-token',
+        credential: 'vertex-token',
+      }),
+    }),
+  ).resolves.toBe(
+    'Gemini Vertex model "gemini-3.5-flash" is only available on the global endpoint; set GEMINI_VERTEX_LOCATION=global (currently "us-central1") to use it.',
+  )
+})
+
+test('global-endpoint validation redacts a credential from its supplied environment', async () => {
+  const secret = 'vertex-private-location-token'
+  const env = {
+    ...process.env,
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+    GEMINI_VERTEX_PROJECT: 'project-test-1234',
+    GEMINI_VERTEX_MODEL: 'gemini-3.5-flash',
+    GEMINI_VERTEX_LOCATION: secret,
+    GEMINI_VERTEX_AUTH_MODE: 'access-token',
+    GEMINI_ACCESS_TOKEN: secret,
+  }
+  const error = await getProviderValidationError(env, {
+    resolveGeminiCredential: async () => ({ kind: 'access-token', credential: secret }),
+  })
+  expect(error).toContain('GEMINI_VERTEX_LOCATION=global')
+  expect(error).not.toContain(secret)
 })
 
 test('accepts ADC credentials for Gemini auth', async () => {
@@ -1073,4 +1276,24 @@ test.each([undefined, '', 'undefined', 'null', 'SUA_CHAVE', 'merge-key'])('Merge
   expect(validation === null).toBe(usable)
   expect(getProviderPresetUiMetadata('merge-gateway', env).apiKey).toBe(usable ? key : '')
   expect(resolveRouteCredentialValue({routeId: 'merge-gateway', baseUrl: env.OPENAI_BASE_URL, processEnv: env})).toBe(usable ? key : undefined)
+})
+
+test.each([
+  ['GEMINI_VERTEX_LOCATION', 'evil.example/x#'],
+  ['GEMINI_VERTEX_PROJECT', 'project/other'],
+  ['GEMINI_VERTEX_MODEL', '../../projects/other'],
+] as const)('startup rejects unsafe native %s', async (key, value) => {
+  expect(await getProviderValidationError({
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1', GEMINI_VERTEX_AUTH_MODE: 'access-token',
+    GEMINI_ACCESS_TOKEN: 'fixture-token', GEMINI_VERTEX_PROJECT: 'sk-openclaude',
+    GEMINI_VERTEX_LOCATION: 'global', [key]: value,
+  })).toContain(key)
+})
+
+test('startup rejects unsafe ADC-derived project routing', async () => {
+  expect(await getProviderValidationError({
+    CLAUDE_CODE_USE_GEMINI_VERTEX: '1', GEMINI_VERTEX_AUTH_MODE: 'adc',
+  }, { resolveGeminiCredential: async () => ({
+    kind: 'adc', credential: 'fixture-token', projectId: 'project/other',
+  }) })).toContain('GEMINI_VERTEX_PROJECT')
 })

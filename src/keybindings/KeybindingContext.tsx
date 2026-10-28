@@ -1,5 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
-import React, { createContext, type RefObject, useContext, useLayoutEffect, useMemo } from 'react';
+import React, { createContext, type RefObject, useContext, useLayoutEffect } from 'react';
 import type { Key } from '../ink.js';
 import { type ChordResolveResult, getBindingDisplayText, resolveKeyWithChordState } from './resolver.js';
 import type { KeybindingContextName, ParsedBinding, ParsedKeystroke } from './types.js';

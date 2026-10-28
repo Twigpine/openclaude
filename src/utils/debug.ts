@@ -84,9 +84,7 @@ export const getDebugFilter = memoize((): DebugFilter | null => {
 })
 
 export const isDebugToStdErr = memoize((): boolean => {
-  return (
-    process.argv.includes('--debug-to-stderr') || process.argv.includes('-d2e')
-  )
+  return process.argv.includes('--debug-to-stderr')
 })
 
 export const getDebugFilePath = memoize((): string | null => {

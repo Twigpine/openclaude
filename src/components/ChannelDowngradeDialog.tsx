@@ -42,7 +42,7 @@ export function ChannelDowngradeDialog(t0: Props) {
   const handleCancel = t2;
   let t3;
   if ($[4] !== currentVersion) {
-    t3 = <Text>The stable channel may have an older version than what you're currently running ({currentVersion}).</Text>;
+    t3 = <Text>The stable channel may have an older version than what you&apos;re currently running ({currentVersion}).</Text>;
     $[4] = currentVersion;
     $[5] = t3;
   } else {

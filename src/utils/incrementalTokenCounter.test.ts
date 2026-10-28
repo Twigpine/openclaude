@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'bun:test'
+import { describe, expect, it } from 'bun:test'
 import { roughTokenCountEstimationForMessages } from '../services/tokenEstimation.js'
 import { IncrementalTokenCounter, CounterFactory } from './incrementalTokenCounter.js'
 import type { Message } from '../types/message.js'

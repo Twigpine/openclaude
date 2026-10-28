@@ -26,10 +26,32 @@ test('createAssistantMessage builds a synthetic assistant message', () => {
   const message = createAssistantMessage({ content: 'hello' })
 
   expect(message.type).toBe('assistant')
+  expect(message.message.usage.output_tokens_details).toBeNull()
+  expect(message.message.usage.fallback_credit).toBeNull()
   expect(message.message.content[0]).toMatchObject({
     type: 'text',
     text: 'hello',
   })
+})
+
+test('createAssistantMessage preserves supplied output token details', () => {
+  const usage = {
+    ...createAssistantMessage({ content: 'default' }).message.usage,
+    output_tokens: 7,
+    output_tokens_details: { thinking_tokens: 4 },
+  }
+  const message = createAssistantMessage({ content: 'hello', usage })
+  expect(message.message.usage.output_tokens_details).toEqual({ thinking_tokens: 4 })
+  expect(message.message.usage.output_tokens).toBe(7)
+})
+
+test('createAssistantMessage preserves supplied fallback-credit outcomes', () => {
+  const usage = {
+    ...createAssistantMessage({ content: 'default' }).message.usage,
+    fallback_credit: { status: { type: 'redeemed' as const } },
+  }
+  const message = createAssistantMessage({ content: 'hello', usage })
+  expect(message.message.usage.fallback_credit).toEqual(usage.fallback_credit)
 })
 
 test('createAssistantAPIErrorMessage builds a synthetic API error message', () => {

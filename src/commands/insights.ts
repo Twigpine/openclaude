@@ -1,4 +1,3 @@
-import { execFileSync } from 'child_process'
 import { diffLines } from 'diff'
 import {
   mkdir,

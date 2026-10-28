@@ -42,7 +42,6 @@ import {
   buildConversationChain,
   flushSessionStorage,
   getAgentTranscriptPath,
-  getProjectDir,
   getTranscriptPathForSession,
   hydrateFromCCRv2InternalEvents,
   hydrateRemoteSession,

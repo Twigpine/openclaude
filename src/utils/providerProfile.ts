@@ -1,3 +1,5 @@
+import { getGeminiVertexProjectId, geminiVertexAdcWillResolveProject } from './geminiAuth.js'
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import {
@@ -39,8 +41,6 @@ import {
   resolveRouteIdFromBaseUrl,
 } from '../integrations/routeMetadata.js'
 import {
-  maskSecretForDisplay,
-  redactSecretValueForDisplay,
   sanitizeApiKey,
   sanitizeProviderConfigValue,
   type SecretValueSource,
@@ -63,7 +63,23 @@ export const DEFAULT_MISTRAL_MODEL = 'mistral-vibe-cli-latest'
 export const DEFAULT_STARTUP_PROVIDER_ENV_VAR =
   'CLAUDE_CODE_DEFAULT_STARTUP_PROVIDER'
 
+export const PROFILE_ORCAROUTER_KEY_SHA256 =
+  'CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256'
+
+export function orcarouterCredentialFingerprint(value: string): string {
+  return createHash('sha256').update(sanitizeApiKey(value)?.trim() ?? '').digest('hex')
+}
+
+export function isManagedOrcarouterCredential(env: NodeJS.ProcessEnv): boolean {
+  const key = sanitizeApiKey(env.ORCAROUTER_API_KEY)
+  // Credential origin is independent of selection markers: legacy profile
+  // files have no plural profile id, and rebuilding an env can reset selection.
+  return !!key && env[PROFILE_ORCAROUTER_KEY_SHA256] === orcarouterCredentialFingerprint(key)
+}
+
 const PROFILE_ENV_KEYS = [
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
+  PROFILE_ORCAROUTER_KEY_SHA256,
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_GEMINI',
@@ -120,6 +136,7 @@ const PROFILE_ENV_KEYS = [
   'MIMO_API_KEY',
   'ATLAS_CLOUD_API_KEY',
   'GMI_API_KEY',
+  'ORCAROUTER_API_KEY',
   'APISMART_API_KEY',
   'APISMART_MODEL',
   'API_ROUTE_API_KEY',
@@ -179,6 +196,7 @@ export type ProviderProfile =
   | 'clinepass'
 
 export type ProfileEnv = {
+  CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256?: string
   ANTHROPIC_BASE_URL?: string
   ANTHROPIC_MODEL?: string
   ANTHROPIC_API_KEY?: string
@@ -226,6 +244,7 @@ export type ProfileEnv = {
   MIMO_API_KEY?: string
   ATLAS_CLOUD_API_KEY?: string
   GMI_API_KEY?: string
+  ORCAROUTER_API_KEY?: string
   APISMART_API_KEY?: string
   API_ROUTE_API_KEY?: string
   CLINE_API_KEY?: string
@@ -1068,6 +1087,9 @@ export function buildOpenAIProfileEnv(options: {
   return {
     ...(resolveRouteIdFromBaseUrl(resolvedBaseUrl) === 'aimlapi' && key
       ? { AIMLAPI_API_KEY: key }
+      : {}),
+    ...(resolveRouteIdFromBaseUrl(resolvedBaseUrl) === 'orcarouter' && key
+      ? { ORCAROUTER_API_KEY: key }
       : {}),
     OPENAI_BASE_URL: resolvedBaseUrl,
     OPENAI_MODEL: normalizedModel,
@@ -2304,6 +2326,7 @@ export async function buildLaunchEnv(options: {
   for (const dedicatedKey of [
     'ATLAS_CLOUD_API_KEY',
     'GMI_API_KEY',
+    'ORCAROUTER_API_KEY',
     'APISMART_API_KEY',
     'CONCENTRATE_API_KEY',
     'LLMTR_API_KEY',
@@ -2315,6 +2338,7 @@ export async function buildLaunchEnv(options: {
     'FIREWORKS_API_KEY',
     'LONGCAT_API_KEY',
     'AIMLAPI_API_KEY',
+    'MINIMAX_API_KEY',
     'MIMO_API_KEY',
     'NVIDIA_API_KEY',
     'VENICE_API_KEY',
@@ -2326,7 +2350,25 @@ export async function buildLaunchEnv(options: {
     if (dedicatedKey === 'AIMLAPI_API_KEY' && effectiveOpenAIRouteId !== 'aimlapi') {
       continue
     }
+    // These aliases also affect copied-key precedence and provider display.
+    // Admit them only for the selected route, including after a URL override.
+    if (dedicatedKey === 'MINIMAX_API_KEY' && effectiveOpenAIRouteId !== 'minimax') {
+      continue
+    }
+    if (dedicatedKey === 'VENICE_API_KEY' && effectiveOpenAIRouteId !== 'venice') {
+      continue
+    }
+    if (
+      dedicatedKey === 'MIMO_API_KEY' &&
+      effectiveOpenAIRouteId !== 'xiaomi-mimo' &&
+      effectiveOpenAIRouteId !== 'xiaomi-mimo-token'
+    ) {
+      continue
+    }
     if (dedicatedKey === 'APISMART_API_KEY' && effectiveOpenAIRouteId !== 'apismart') {
+      continue
+    }
+    if (dedicatedKey === 'ORCAROUTER_API_KEY' && effectiveOpenAIRouteId !== 'orcarouter') {
       continue
     }
     if (dedicatedKey === 'CONCENTRATE_API_KEY' && effectiveOpenAIRouteId !== 'concentrate') {
@@ -2481,18 +2523,35 @@ export async function buildLaunchEnv(options: {
             ? sanitizeApiKey(persistedOpenAICredential.value)
             : undefined)
         : undefined
+    // Recover only the selected canonical profile's own key, including older
+    // files that predate its dedicated alias. Never promote a shell generic key.
+    const persistedOrcarouterProfileKey =
+      dedicatedKey === 'ORCAROUTER_API_KEY' &&
+      effectiveOpenAIRouteId === 'orcarouter' &&
+      resolveRouteIdFromBaseUrl(persistedOpenAIBaseUrl) === 'orcarouter'
+        ? sanitizeApiKey(persistedEnv.ORCAROUTER_API_KEY) ||
+          (persistedOpenAICredential?.kind === 'usable'
+            ? sanitizeApiKey(persistedOpenAICredential.value)
+            : undefined)
+        : undefined
     const dedicatedValue = withholdAmbientDedicatedKey
       ? sanitizeApiKey(persistedEnv[dedicatedKey])
       : backfillDedicatedFromOpenAI ||
         persistedLlmtrProfileKey ||
         persistedMergeGatewayProfileKey ||
         persistedCommandcodeProfileKey ||
+        persistedOrcarouterProfileKey ||
         sanitizeApiKey(processEnv[dedicatedKey]) ||
         sanitizeApiKey(persistedEnv[dedicatedKey]) ||
         backfillLegacyApismartProfileKey ||
         backfillLegacyConcentrateProfileKey
     if (dedicatedValue) {
       env[dedicatedKey] = dedicatedValue
+      if (dedicatedKey === 'ORCAROUTER_API_KEY' &&
+        (persistedOrcarouterProfileKey ||
+          (!sanitizeApiKey(processEnv.ORCAROUTER_API_KEY) && persistedEnv.ORCAROUTER_API_KEY))) {
+        env[PROFILE_ORCAROUTER_KEY_SHA256] = orcarouterCredentialFingerprint(dedicatedValue)
+      }
     }
   }
   if (effectiveOpenAIRouteId === 'nvidia-nim') {
@@ -2541,6 +2600,11 @@ export async function buildStartupEnvFromProfile(options?: {
   readGeminiAccessToken?: () => string | undefined
 }): Promise<NodeJS.ProcessEnv> {
   const processEnv = options?.processEnv ?? process.env
+  // Explicit native selection must precede saved-profile/default adoption.
+  if (
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX) &&
+    (getGeminiVertexProjectId(processEnv) || geminiVertexAdcWillResolveProject(processEnv))
+  ) return processEnv
   const persisted =
     options && 'persisted' in options ? options.persisted : loadProfileFile()
 
@@ -2676,8 +2740,16 @@ export function applyProfileEnvToProcessEnv(
   targetEnv: NodeJS.ProcessEnv,
   nextEnv: NodeJS.ProcessEnv,
 ): void {
+  const retainedOrcarouterOrigin =
+    isManagedOrcarouterCredential(targetEnv) &&
+    sanitizeApiKey(targetEnv.ORCAROUTER_API_KEY) === sanitizeApiKey(nextEnv.ORCAROUTER_API_KEY)
+      ? targetEnv[PROFILE_ORCAROUTER_KEY_SHA256]
+      : undefined
   clearManagedProfileEnv(targetEnv)
   Object.assign(targetEnv, nextEnv)
+  if (retainedOrcarouterOrigin) {
+    targetEnv[PROFILE_ORCAROUTER_KEY_SHA256] = retainedOrcarouterOrigin
+  }
 }
 
 type StartupEnvOptions = NonNullable<Parameters<typeof buildStartupEnvFromProfile>[0]>
@@ -2795,6 +2867,7 @@ export async function applySavedProfileToCurrentSession(options: {
   delete baseEnv.CLAUDE_CODE_USE_OPENAI
   delete baseEnv.CLAUDE_CODE_USE_GITHUB
   delete baseEnv.CLAUDE_CODE_USE_GEMINI
+  delete baseEnv.CLAUDE_CODE_USE_GEMINI_VERTEX
   delete baseEnv.CLAUDE_CODE_USE_MISTRAL
   delete baseEnv.CLAUDE_CODE_USE_BEDROCK
   delete baseEnv.CLAUDE_CODE_USE_VERTEX

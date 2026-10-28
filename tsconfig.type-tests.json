@@ -4,6 +4,7 @@
     "noEmit": true
   },
   "files": [
+    "src/Tool.types.test.ts",
     "src/state/AppState.types.test.tsx",
     "src/state/AppState.tsx",
     "src/optionalModules.d.ts",

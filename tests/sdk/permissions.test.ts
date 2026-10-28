@@ -1,3 +1,4 @@
+import type { SDKPermissionRequestMessage, SDKPermissionTimeoutMessage } from '../../src/entrypoints/sdk/shared.js'
 import { describe, test, expect, vi } from 'bun:test'
 import { z } from 'zod/v4'
 import {
@@ -23,7 +24,7 @@ const sdkAskTool = {
       updatedInput: { normalized: true },
     }
   },
-} as any
+}
 
 const sdkGuidanceTool = {
   name: 'SDKGuidanceTool',
@@ -38,7 +39,7 @@ const sdkGuidanceTool = {
       updatedInput: { normalized: true },
     }
   },
-} as any
+}
 
 function toolUseContextForPermissionMode(mode: string) {
   return {
@@ -51,7 +52,7 @@ function toolUseContextForPermissionMode(mode: string) {
           mode === 'bypassPermissions' || mode === 'fullAccess',
       },
     }),
-  } as any
+  }
 }
 
 function mutableToolUseContextForPermissionMode(initialMode: string) {
@@ -67,7 +68,7 @@ function mutableToolUseContextForPermissionMode(initialMode: string) {
             mode === 'bypassPermissions' || mode === 'fullAccess',
         },
       }),
-    } as any,
+    },
     setMode(nextMode: string) {
       mode = nextMode
     },
@@ -80,7 +81,7 @@ const sdkConditionalTool = {
   isReadOnly(input: { operation: 'read' | 'write' }) {
     return input.operation === 'read'
   },
-} as any
+}
 
 describe('buildPermissionContext', () => {
   test('returns default mode when no permissionMode specified', () => {
@@ -230,10 +231,10 @@ describe('createDefaultCanUseTool', () => {
     const canUseTool = createDefaultCanUseTool(ctx)
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       { command: 'rm -rf /' },
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       undefined,
       undefined,
     )
@@ -247,10 +248,10 @@ describe('createDefaultCanUseTool', () => {
 
     const forced = { behavior: 'allow' as const }
     const result = await canUseTool(
-      { name: 'Bash' } as any,
+      ({ name: 'Bash' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       undefined,
       forced,
     )
@@ -264,10 +265,10 @@ describe('createDefaultCanUseTool', () => {
     const forced = { behavior: 'ask' as const, message: 'confirm?' }
 
     const result = await canUseTool(
-      sdkAskTool,
+      (sdkAskTool as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      toolUseContextForPermissionMode('default'),
-      {} as any,
+      (toolUseContextForPermissionMode('default') as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'default-force-ask',
       forced,
     )
@@ -290,10 +291,10 @@ describe('createDefaultCanUseTool', () => {
     const canUseTool = createDefaultCanUseTool(ctx, logger)
 
     await canUseTool(
-      { name: 'Bash' } as any,
+      ({ name: 'Bash' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       undefined,
       { behavior: 'allow' as const },
     )
@@ -307,10 +308,10 @@ describe('createDefaultCanUseTool', () => {
     const canUseTool = createDefaultCanUseTool(ctx, logger)
 
     const result = await canUseTool(
-      { name: 'Bash' } as any,
+      ({ name: 'Bash' } as unknown as Parameters<typeof canUseTool>[0]),
       { command: 'git status' },
-      toolUseContextForPermissionMode('fullAccess'),
-      {} as any,
+      (toolUseContextForPermissionMode('fullAccess') as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'full-access-default-force-ask',
       {
         behavior: 'ask' as const,
@@ -320,7 +321,7 @@ describe('createDefaultCanUseTool', () => {
     )
 
     expect(result.behavior).toBe('deny')
-    expect(result.message).toContain('no canUseTool or onPermissionRequest callback provided')
+    expect('message' in result ? result.message : undefined).toContain('no canUseTool or onPermissionRequest callback provided')
   })
 
   test('fullAccess remains fail-closed without callbacks', async () => {
@@ -329,16 +330,16 @@ describe('createDefaultCanUseTool', () => {
     const canUseTool = createDefaultCanUseTool(ctx, logger)
 
     const result = await canUseTool(
-      sdkAskTool,
+      (sdkAskTool as unknown as Parameters<typeof canUseTool>[0]),
       { raw: true },
-      toolUseContextForPermissionMode('fullAccess'),
-      {} as any,
+      (toolUseContextForPermissionMode('fullAccess') as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'full-access-default-no-force',
       undefined,
     )
 
     expect(result.behavior).toBe('deny')
-    expect(result.message).toContain('no canUseTool or onPermissionRequest callback provided')
+    expect('message' in result ? result.message : undefined).toContain('no canUseTool or onPermissionRequest callback provided')
   })
 })
 
@@ -355,10 +356,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      sdkConditionalTool,
+      (sdkConditionalTool as unknown as Parameters<typeof canUseTool>[0]),
       { operation: 'read' },
-      state.context,
-      {} as any,
+      (state.context as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'plan-user-callback-rewrite',
       undefined,
     )
@@ -390,10 +391,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      sdkConditionalTool,
+      (sdkConditionalTool as unknown as Parameters<typeof canUseTool>[0]),
       { operation: 'read' },
-      state.context,
-      {} as any,
+      (state.context as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'pending-plan-host-rewrite',
       undefined,
     )
@@ -409,7 +410,7 @@ describe('createExternalCanUseTool synchronous host response', () => {
     // so a host that responds synchronously finds the entry in the map.
     const permissionTarget = createPermissionTarget()
 
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       // Simulate a host that resolves synchronously from the callback
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       expect(pending).toBeDefined() // Must be registered before this callback fires
@@ -426,10 +427,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'sync-response-id',
       undefined,
     )
@@ -440,7 +441,7 @@ describe('createExternalCanUseTool synchronous host response', () => {
 
   test('fullAccess still routes forced ask through host permission callbacks', async () => {
     const permissionTarget = createPermissionTarget()
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       pending!.resolve({ behavior: 'allow' as const })
     })
@@ -456,10 +457,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       { action: 'run' },
-      toolUseContextForPermissionMode('fullAccess'),
-      {} as any,
+      (toolUseContextForPermissionMode('fullAccess') as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'full-access-external-force-ask',
       {
         behavior: 'ask' as const,
@@ -495,10 +496,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      sdkAskTool,
+      (sdkAskTool as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      toolUseContextForPermissionMode('default'),
-      {} as any,
+      (toolUseContextForPermissionMode('default') as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'default-external-force-ask',
       forced,
     )
@@ -511,7 +512,7 @@ describe('createExternalCanUseTool synchronous host response', () => {
 
   test('fullAccess preserves forced guidance prompts for SDK callbacks', async () => {
     const permissionTarget = createPermissionTarget()
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       pending!.resolve({
         behavior: 'allow' as const,
@@ -530,10 +531,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      sdkGuidanceTool,
+      (sdkGuidanceTool as unknown as Parameters<typeof canUseTool>[0]),
       { raw: true },
-      toolUseContextForPermissionMode('fullAccess'),
-      {} as any,
+      (toolUseContextForPermissionMode('fullAccess') as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'full-access-forced-guidance',
       {
         behavior: 'ask' as const,
@@ -575,10 +576,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      sdkAskTool,
+      (sdkAskTool as unknown as Parameters<typeof canUseTool>[0]),
       { raw: true },
-      toolUseContextForPermissionMode('fullAccess'),
-      {} as any,
+      (toolUseContextForPermissionMode('fullAccess') as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'full-access-external-no-force',
       undefined,
     )
@@ -600,7 +601,7 @@ describe('createExternalCanUseTool synchronous host response', () => {
 
   test('fullAccess preserves SDK callbacks for guidance prompts', async () => {
     const permissionTarget = createPermissionTarget()
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       pending!.resolve({
         behavior: 'allow' as const,
@@ -619,10 +620,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      sdkGuidanceTool,
+      (sdkGuidanceTool as unknown as Parameters<typeof canUseTool>[0]),
       { raw: true },
-      toolUseContextForPermissionMode('fullAccess'),
-      {} as any,
+      (toolUseContextForPermissionMode('fullAccess') as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'full-access-guidance',
       undefined,
     )
@@ -639,7 +640,7 @@ describe('createExternalCanUseTool synchronous host response', () => {
     // which requires uuid and session_id fields (not optional).
     const permissionTarget = createPermissionTarget()
 
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       // Verify message shape matches generated schema requirements
       expect(message.type).toBe('permission_request')
       expect(message.request_id).toBeDefined()
@@ -665,10 +666,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'shape-test-id',
       undefined,
     )
@@ -685,7 +686,7 @@ describe('createExternalCanUseTool synchronous host response', () => {
     // to explicitly indicate standalone permission prompt context.
     const permissionTarget = createPermissionTarget()
 
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       expect(message.session_id).toBe(NO_SESSION_PLACEHOLDER)
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       pending!.resolve({ behavior: 'allow' as const })
@@ -703,10 +704,10 @@ describe('createExternalCanUseTool synchronous host response', () => {
     )
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'no-session-test-id',
       undefined,
     )
@@ -742,10 +743,10 @@ describe('createExternalCanUseTool race condition', () => {
 
     // Start the canUseTool call
     const resultPromise = canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       toolUseID,
       undefined,
     )
@@ -763,7 +764,7 @@ describe('createExternalCanUseTool race condition', () => {
 
     // Wait for result - should NOT throw "promise already resolved" error
     // Explicitly wrap in try-catch to verify no error is thrown during race condition
-    let result: PermissionResolveDecision
+    let result: Awaited<typeof resultPromise>
     let errorThrown: Error | null = null
     try {
       result = await resultPromise
@@ -799,10 +800,10 @@ describe('createExternalCanUseTool race condition', () => {
 
     // Start the canUseTool call
     const resultPromise = canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       toolUseID,
       undefined,
     )
@@ -840,10 +841,10 @@ describe('createExternalCanUseTool race condition', () => {
 
     // Start the canUseTool call — this registers a pending permission
     const resultPromise = canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       toolUseID,
       undefined,
     )
@@ -879,7 +880,7 @@ describe('createExternalCanUseTool race condition', () => {
 
     // Result stays 'deny' — timeout decision is immutable
     expect(result.behavior).toBe('deny')
-    expect((result as any).updatedInput).toBeUndefined()
+    expect('updatedInput' in result ? result.updatedInput : undefined).toBeUndefined()
   })
 })
 
@@ -971,7 +972,7 @@ describe('createOnceOnlyResolve', () => {
     wrapped({ behavior: 'allow' as const, updatedInput: { injected: true } })
     expect(rawCallCount).toBe(1) // NOT 2 — second call was a no-op
     expect(rawResolvedValue!.behavior).toBe('deny') // Unchanged
-    expect((rawResolvedValue as any).updatedInput).toBeUndefined()
+    expect(rawResolvedValue && 'updatedInput' in rawResolvedValue ? rawResolvedValue.updatedInput : undefined).toBeUndefined()
   })
 })
 
@@ -1021,16 +1022,16 @@ describe('createExternalCanUseTool error handling', () => {
     )
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'test-id',
       undefined,
     )
 
     expect(result.behavior).toBe('deny')
-    expect(result.message).toContain('Custom error from callback')
+    expect('message' in result ? result.message : undefined).toContain('Custom error from callback')
   })
 
   test('throwing onPermissionRequest cleans up pending resolver and denies', async () => {
@@ -1053,17 +1054,17 @@ describe('createExternalCanUseTool error handling', () => {
     )
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'throw-id',
       undefined,
     )
 
     // Should deny with error message, NOT throw
     expect(result.behavior).toBe('deny')
-    expect(result.message).toContain('host boom')
+    expect('message' in result ? result.message : undefined).toContain('host boom')
     expect(throwingCallback).toHaveBeenCalledTimes(1)
 
     // Critical: pending resolver must be cleaned up, not leaked
@@ -1086,7 +1087,7 @@ describe('createExternalCanUseTool warning suppression', () => {
       permissionTarget,
     )
 
-    await canUseTool({ name: 'TestTool' } as any, {}, {} as any, {} as any, 'test-id', undefined)
+    await canUseTool(({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]), {}, ({} as unknown as Parameters<typeof canUseTool>[2]), ({} as unknown as Parameters<typeof canUseTool>[3]), 'test-id', undefined)
 
     // User callback allowed the tool — default fallback warning should NOT fire
     expect(logger.warn).not.toHaveBeenCalled()
@@ -1098,7 +1099,7 @@ describe('createExternalCanUseTool warning suppression', () => {
     const fallback = createDefaultCanUseTool(ctx, logger)
 
     const permissionTarget = createPermissionTarget()
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       pending!.resolve({ behavior: 'allow' as const })
     })
@@ -1112,7 +1113,7 @@ describe('createExternalCanUseTool warning suppression', () => {
       50,
     )
 
-    await canUseTool({ name: 'TestTool' } as any, {}, {} as any, {} as any, 'test-id', undefined)
+    await canUseTool(({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]), {}, ({} as unknown as Parameters<typeof canUseTool>[2]), ({} as unknown as Parameters<typeof canUseTool>[3]), 'test-id', undefined)
 
     // onPermissionRequest resolved — default fallback warning should NOT fire
     expect(logger.warn).not.toHaveBeenCalled()
@@ -1137,10 +1138,10 @@ describe('createExternalCanUseTool timeout scenarios', () => {
     )
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'test-id',
       undefined,
     )
@@ -1149,7 +1150,7 @@ describe('createExternalCanUseTool timeout scenarios', () => {
     // A timeout reports itself. Falling through to the fallback would report
     // "no canUseTool or onPermissionRequest callback provided", which is not
     // true here -- onPermissionRequest was supplied, it just did not answer.
-    expect(result.message).toContain('timed out')
+    expect('message' in result ? result.message : undefined).toContain('timed out')
     expect(onTimeout).toHaveBeenCalled()
     expect(onTimeout.mock.calls[0][0].type).toBe('permission_timeout')
     expect(onTimeout.mock.calls[0][0].tool_name).toBe('TestTool')
@@ -1167,16 +1168,16 @@ describe('createExternalCanUseTool timeout scenarios', () => {
     )
 
     const result = await canUseTool(
-      { name: 'TestTool' } as any,
+      ({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]),
       {},
-      {} as any,
-      {} as any,
+      ({} as unknown as Parameters<typeof canUseTool>[2]),
+      ({} as unknown as Parameters<typeof canUseTool>[3]),
       'test-id',
       undefined,
     )
 
     expect(result.behavior).toBe('deny')
-    expect(result.message).toBe('fallback denial')
+    expect('message' in result ? result.message : undefined).toBe('fallback denial')
   })
 })
 
@@ -1201,7 +1202,7 @@ describe('permission session_id dynamic resolution', () => {
     const permissionTarget = createPermissionTarget()
     let capturedSessionId: string | undefined
 
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       capturedSessionId = message.session_id
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       pending!.resolve({ behavior: 'allow' as const })
@@ -1217,7 +1218,7 @@ describe('permission session_id dynamic resolution', () => {
       'static-session-123', // Static value
     )
 
-    await canUseTool({ name: 'TestTool' } as any, {}, {} as any, {} as any, 'test-id', undefined)
+    await canUseTool(({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]), {}, ({} as unknown as Parameters<typeof canUseTool>[2]), ({} as unknown as Parameters<typeof canUseTool>[3]), 'test-id', undefined)
 
     expect(capturedSessionId).toBe('static-session-123')
   })
@@ -1227,7 +1228,7 @@ describe('permission session_id dynamic resolution', () => {
     let currentSessionId = 'initial-session'
     let capturedSessionId: string | undefined
 
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       capturedSessionId = message.session_id
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       pending!.resolve({ behavior: 'allow' as const })
@@ -1247,7 +1248,7 @@ describe('permission session_id dynamic resolution', () => {
     // Change sessionId BEFORE the permission request is emitted
     currentSessionId = 'updated-session'
 
-    await canUseTool({ name: 'TestTool' } as any, {}, {} as any, {} as any, 'test-id', undefined)
+    await canUseTool(({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]), {}, ({} as unknown as Parameters<typeof canUseTool>[2]), ({} as unknown as Parameters<typeof canUseTool>[3]), 'test-id', undefined)
 
     // Should use the value at event emission time, not initial value
     expect(capturedSessionId).toBe('updated-session')
@@ -1257,7 +1258,7 @@ describe('permission session_id dynamic resolution', () => {
     const permissionTarget = createPermissionTarget()
     let capturedSessionId: string | undefined
 
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       capturedSessionId = message.session_id
       const pending = permissionTarget.pendingPermissionPrompts.get(message.tool_use_id)
       pending!.resolve({ behavior: 'allow' as const })
@@ -1273,7 +1274,7 @@ describe('permission session_id dynamic resolution', () => {
       () => undefined, // Getter returns undefined
     )
 
-    await canUseTool({ name: 'TestTool' } as any, {}, {} as any, {} as any, 'test-id', undefined)
+    await canUseTool(({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]), {}, ({} as unknown as Parameters<typeof canUseTool>[2]), ({} as unknown as Parameters<typeof canUseTool>[3]), 'test-id', undefined)
 
     expect(capturedSessionId).toBe(NO_SESSION_PLACEHOLDER)
   })
@@ -1283,11 +1284,11 @@ describe('permission session_id dynamic resolution', () => {
     let currentSessionId = 'timeout-session' // Set before call
     let capturedTimeoutSessionId: string | undefined
 
-    const onPermissionRequest = vi.fn((message: any) => {
+    const onPermissionRequest = vi.fn((message: SDKPermissionRequestMessage) => {
       // Don't resolve - let it timeout
     })
 
-    const onTimeout = vi.fn((message: any) => {
+    const onTimeout = vi.fn((message: SDKPermissionTimeoutMessage) => {
       capturedTimeoutSessionId = message.session_id
     })
 
@@ -1301,7 +1302,7 @@ describe('permission session_id dynamic resolution', () => {
       () => currentSessionId,
     )
 
-    await canUseTool({ name: 'TestTool' } as any, {}, {} as any, {} as any, 'test-id', undefined)
+    await canUseTool(({ name: 'TestTool' } as unknown as Parameters<typeof canUseTool>[0]), {}, ({} as unknown as Parameters<typeof canUseTool>[2]), ({} as unknown as Parameters<typeof canUseTool>[3]), 'test-id', undefined)
 
     // Timeout message should use dynamic sessionId
     expect(capturedTimeoutSessionId).toBe('timeout-session')

@@ -11,6 +11,17 @@ const minimaxM2Capabilities = {
 
 export default [
   defineModel({
+    id: 'minimax-m3.1-flash',
+    label: 'MiniMax M3.1 Flash',
+    brandId: 'minimax',
+    vendorId: 'minimax',
+    classification: ['chat', 'reasoning', 'vision', 'coding'],
+    defaultModel: 'MiniMax-M3.1-Flash',
+    capabilities: minimaxM2Capabilities,
+    contextWindow: 1_000_000,
+    maxOutputTokens: 524_288,
+  }),
+  defineModel({
     id: 'minimax-m2',
     label: 'MiniMax M2',
     brandId: 'minimax',
@@ -99,7 +110,7 @@ export default [
     classification: ['chat', 'reasoning', 'coding'],
     defaultModel: 'MiniMax-M3',
     capabilities: minimaxM2Capabilities,
-    contextWindow: 1_048_576,
+    contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
   }),
   defineModel({

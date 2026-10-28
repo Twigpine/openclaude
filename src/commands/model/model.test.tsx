@@ -1,4 +1,5 @@
 import { PassThrough } from 'node:stream'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 
 import { afterAll, afterEach, beforeEach, expect, mock, setSystemTime, test } from 'bun:test'
 import React from 'react'
@@ -696,6 +697,70 @@ test('/model still applies a Claude alias on a non-Command-Code OpenAI route', a
 
   expect(messages[0]).toContain('Set model to')
   expect(messages[0]).not.toContain('requires the Anthropic Messages protocol')
+})
+
+test.each([
+  ['MiniMax-M2.5', true],
+  ['MiniMax-M2.7', true],
+  ['MiniMax-Text-01', true],
+  ['abab6.5s-chat', true],
+  ['abab6.5-chat', true],
+  ['abab6.5g-chat', true],
+  ['abab6-chat', true],
+  ['MiniMax-M3', true],
+  ['MiniMax-M3.1-Flash', true],
+  ['custom-minimax-deployment', false],
+])('/model preserves explicit MiniMax selection validity for %s', async (model, valid) => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.minimax.io/v1'
+  process.env.OPENAI_API_KEY = 'minimax-test-key'
+  process.env.OPENAI_MODEL = 'MiniMax-M3.1-Flash'
+  for (const key of [
+    'OPENAI_API_BASE', 'CLAUDE_CODE_USE_GEMINI', 'CLAUDE_CODE_USE_GITHUB',
+    'CLAUDE_CODE_USE_MISTRAL', 'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+  ]) delete process.env[key]
+  mockProviderProfiles()
+
+  const { call } = await importFreshModelModule(`minimax-explicit-${model}`)
+  const { AppStateProvider, getDefaultAppState, useAppState } = await import('../../state/AppState.js')
+  const { render } = await import('../../ink.js')
+  const messages: string[] = []
+  let selectedModel: ModelSetting | undefined
+  function CaptureModel() {
+    selectedModel = useAppState(state => state.mainLoopModel)
+    return null
+  }
+  const stdout = new PassThrough()
+  ;(stdout as unknown as { columns: number }).columns = 120
+  const originalFetch = globalThis.fetch
+  const fetch = mock(async () => { throw new Error('Known model validation must not call the API') })
+  globalThis.fetch = fetch as unknown as typeof globalThis.fetch
+  let instance: Awaited<ReturnType<typeof render>> | undefined
+  try {
+    const element = await call(result => { if (result) messages.push(result) }, {} as never, model)
+    instance = await render(
+      <AppStateProvider initialState={{ ...getDefaultAppState(), mainLoopModel: 'MiniMax-M3.1-Flash' }}>
+        {element}
+        <CaptureModel />
+      </AppStateProvider>,
+      stdout as unknown as NodeJS.WriteStream,
+    )
+    await waitForCondition(() => messages.length > 0)
+    if (valid) {
+      expect(messages[0]).toContain('Set model to')
+      await waitForCondition(() => selectedModel === model)
+      expect(selectedModel).toBe(model)
+    } else {
+      expect(messages[0]).toContain(`Model '${model}' not found in MiniMax catalog`)
+      expect(selectedModel).toBe('MiniMax-M3.1-Flash')
+    }
+    expect(fetch).not.toHaveBeenCalled()
+  } finally {
+    instance?.unmount()
+    stdout.end()
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('opens the model picker without awaiting descriptor-backed route refresh', async () => {
@@ -3300,6 +3365,54 @@ test('/model refresh treats empty legacy OpenAI-compatible discovery as failed n
   expect(scopedCache.getState().additionalModelOptionsCache).toEqual(
     cachedOptions,
   )
+})
+
+test.each([
+  ['ollama', 'http://localhost:11434/v1'],
+  ['lmstudio', 'http://localhost:1234/v1'],
+  ['atomic-chat', 'http://127.0.0.1:1337/v1'],
+  ['openrouter', 'https://openrouter.ai/api/v1'],
+])('%s picker retains advertised MiniMax models before and after refresh', async (provider, baseUrl) => {
+  const restoreEnv = snapshotEnv([
+    'CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_API_BASE',
+    'OPENAI_API_KEY', 'OPENAI_MODEL', 'CLAUDE_CODE_USE_GEMINI',
+    'CLAUDE_CODE_USE_GITHUB', 'CLAUDE_CODE_USE_MISTRAL',
+    'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED', 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
+  ], { clear: true })
+  let rendered: Awaited<ReturnType<typeof renderModelCommandWithCapturedPicker>> | undefined
+  try {
+    const activeProfile = {
+      id: 'local-profile', name: provider, provider,
+      baseUrl, model: 'qwen3:latest', apiKey: '',
+    }
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = activeProfile.baseUrl
+    process.env.OPENAI_MODEL = activeProfile.model
+    process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
+    process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
+    mockProviderProfiles({ getActiveProviderProfile: () => activeProfile })
+    const models = provider === 'openrouter'
+      ? ['minimax/minimax-m2.5', 'minimax/minimax-m2.7']
+      : ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m']
+    mockDescriptorDiscovery({
+      routeId: provider,
+      cachedModels: [{ id: models[0]!, apiName: models[0]! }],
+      discoveredModels: models.map(id => ({ id, apiName: id })),
+    })
+    rendered = await renderModelCommandWithCapturedPicker(`${provider}-minimax-discovery`)
+    const pickerValues = () => (rendered!.getCapturedProps().optionsOverride as ModelOption[]).map(option => option.value)
+    expect(pickerValues()).toContain(models[0])
+    expect(pickerValues()).not.toContain(models[1])
+    expect(rendered.getCapturedProps().onRefresh).toEqual(expect.any(Function))
+    rendered.getCapturedProps().onRefresh!()
+    await waitForCondition(() => pickerValues().includes(models[1]!))
+    for (const model of models) expect(pickerValues()).toContain(model)
+  } finally {
+    rendered?.instance.unmount()
+    rendered?.stdout.end()
+    restoreEnv()
+  }
 })
 
 test('interactive model picker refresh keeps descriptor options allowlist-filtered', async () => {

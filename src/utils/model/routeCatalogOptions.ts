@@ -1,5 +1,6 @@
 import type { ModelCatalogEntry } from '../../integrations/descriptors.js'
 import type { ModelOption } from './modelOptions.js'
+import { isCurrentMiniMaxModelOption } from './minimaxCatalog.js'
 
 function toDescription(
   entry: ModelCatalogEntry,
@@ -45,7 +46,11 @@ export function buildRouteCatalogModelOptions(
   routeLabel: string,
   entries: ModelCatalogEntry[],
   routeDefaultModel?: string,
+  routeId?: string,
 ): ModelOption[] {
+  // Preserve raw catalog metadata for explicit legacy IDs, but do not offer
+  // retired MiniMax text models as ordinary suggestions (including discovery).
+  entries = entries.filter(entry => isCurrentMiniMaxModelOption(entry.apiName, routeId))
   const seen = new Set<string>()
   const options: ModelOption[] = []
   const apiNameCounts = new Map<string, number>()

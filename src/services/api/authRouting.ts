@@ -120,7 +120,7 @@ function resolveCurrentAnthropicAttributionAuth(): AnthropicAttributionAuth {
     // Missing credentials are an ambiguous state, not an error for policy.
   }
 
-  let authTokenSource: ReturnType<typeof getAuthTokenSource>['source'] = 'none'
+  let authTokenSource: ReturnType<typeof getAuthTokenSource>['source']
   try {
     ;({ source: authTokenSource } = getAuthTokenSource())
   } catch {

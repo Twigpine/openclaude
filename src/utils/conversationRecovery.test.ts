@@ -11,6 +11,7 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 import type { NormalizedMessage } from '../types/message.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 
 const nonce = `${Date.now()}-${Math.random()}`
 const realProviders = {
@@ -219,6 +220,33 @@ test('loadConversationForResume accepts a small transcript from jsonl path', asy
   expect(result?.messages.length).toBeGreaterThan(0)
 })
 
+test('jsonl resume retains the selected main conversation, metadata, and write directory', async () => {
+  const restoreEnv = snapshotEnv(['CLAUDE_CODE_SIMPLE'])
+  try {
+    process.env.CLAUDE_CODE_SIMPLE = '1'
+    const childSessionId = id(89)
+    const path = await writeJsonlEntries([
+      user(id(80), 'inherited prompt'),
+      { ...assistant(id(81), 'continued answer', id(80)), sessionId: childSessionId },
+      { ...user(id(82), 'unrelated agent'), isSidechain: true,
+        timestamp: '2026-04-03T00:00:00.000Z' },
+      { type: 'custom-title', sessionId: childSessionId, customTitle: 'Selected history' },
+      { type: 'tag', sessionId: childSessionId, tag: 'keep-tag' },
+      { type: 'agent-setting', sessionId: childSessionId, agentSetting: 'reviewer' },
+    ])
+    const { loadConversationForResume } = await importFreshConversationRecovery()
+    const result = await loadConversationForResume('fixture', path)
+    expect(result?.sessionId).toBe(childSessionId)
+    expect(result?.fullPath).toBe(path)
+    expect(result?.customTitle).toBe('Selected history')
+    expect(result?.tag).toBe('keep-tag')
+    expect(result?.agentSetting).toBe('reviewer')
+    expect(result?.messages.map(message => message.uuid)).toEqual([id(80), id(81)])
+  } finally {
+    restoreEnv()
+  }
+})
+
 test('loadConversationForResume preserves goal metadata from a loaded log option', async () => {
   process.env.CLAUDE_CODE_SIMPLE = '1'
   const goal = activeGoal('keep going after resume')
@@ -236,7 +264,7 @@ test('loadConversationForResume preserves goal metadata from a loaded log option
       isSidechain: false,
       sessionId,
       goal,
-    } as any,
+    },
     undefined,
   )
 
@@ -276,18 +304,18 @@ test('findResumeLogByPrSelector selects the first non-sidechain PR match', async
     prNumber: 1642,
     prUrl: 'https://github.com/Twigpine/openclaude/pull/1642',
     prRepository: 'Twigpine/openclaude',
-  } as any
+  }
   const sidechain = {
     ...linked,
     isSidechain: true,
     sessionId: id(13),
-  } as any
+  }
   const unrelated = {
     ...linked,
     sessionId: id(14),
     prNumber: 17,
     prUrl: 'https://github.com/Twigpine/openclaude/pull/17',
-  } as any
+  }
 
   expect(findResumeLogByPrSelector([sidechain, linked, unrelated], true)).toBe(
     linked,
@@ -418,10 +446,10 @@ test('deserializeMessages preserves thinking blocks for GitHub native Claude tra
           { type: 'text', text: 'working on it' },
         ],
       },
-    } as any,
+    },
   ])
 
-  const content = (deserialized[0] as any)?.message?.content as Array<{
+  const content = (deserialized[0])?.message?.content as Array<{
     type: string
   }>
   expect(content.some(block => block.type === 'thinking')).toBe(true)
@@ -435,10 +463,10 @@ test('deserializeMessages strips dangerous permission modes from rewindable user
     {
       ...user(id(3), 'run it'),
       permissionMode: 'fullAccess',
-    } as any,
+    },
   ])
 
-  expect((deserialized[0] as any)?.permissionMode).toBeUndefined()
+  expect((deserialized[0])?.permissionMode).toBeUndefined()
 })
 
 test('deserializeMessages drops an attachment message with missing attachment payload', async () => {
@@ -453,15 +481,15 @@ test('deserializeMessages drops an attachment message with missing attachment pa
       parentUuid: id(20),
       timestamp: ts,
       sessionId,
-    } as any,
-    assistant(id(22), 'after') as any,
+    },
+    assistant(id(22), 'after'),
   ])
 
   expect(deserialized.map(message => message.type)).toEqual([
     'user',
     'assistant',
   ])
-  expect((deserialized[1] as any).message.content[0].text).toBe('after')
+  expect((deserialized[1]).message.content[0].text).toBe('after')
 })
 
 test('deserializeMessages drops an attachment message with null attachment payload', async () => {
@@ -470,15 +498,15 @@ test('deserializeMessages drops an attachment message with null attachment paylo
 
   const deserialized = deserializeMessages([
     user(id(23), 'before'),
-    attachment(id(24), null, id(23)) as any,
-    assistant(id(25), 'after', id(24)) as any,
+    attachment(id(24), null, id(23)),
+    assistant(id(25), 'after', id(24)),
   ])
 
   expect(deserialized.map(message => message.type)).toEqual([
     'user',
     'assistant',
   ])
-  expect((deserialized[1] as any).message.content[0].text).toBe('after')
+  expect((deserialized[1]).message.content[0].text).toBe('after')
 })
 
 const invalidLegacyPathValues: Array<[string, unknown]> = [
@@ -504,8 +532,8 @@ for (const [label, filename] of invalidLegacyPathValues) {
 
     const deserialized = deserializeMessages([
       user(id(30), 'before'),
-      attachment(id(31), legacyAttachment, id(30)) as any,
-      assistant(id(32), 'after', id(31)) as any,
+      attachment(id(31), legacyAttachment, id(30)),
+      assistant(id(32), 'after', id(31)),
     ])
 
     expect(deserialized.map(message => message.type)).toEqual([
@@ -530,8 +558,8 @@ for (const [label, directoryPath] of invalidLegacyPathValues) {
 
     const deserialized = deserializeMessages([
       user(id(33), 'before'),
-      attachment(id(34), legacyAttachment, id(33)) as any,
-      assistant(id(35), 'after', id(34)) as any,
+      attachment(id(34), legacyAttachment, id(33)),
+      assistant(id(35), 'after', id(34)),
     ])
 
     expect(deserialized.map(message => message.type)).toEqual([
@@ -557,7 +585,7 @@ test('deserializeMessages preserves valid legacy file and directory displayPath 
         content: { type: 'text', text: 'legacy file' },
       },
       id(40),
-    ) as any,
+    ),
     attachment(
       id(42),
       {
@@ -566,13 +594,13 @@ test('deserializeMessages preserves valid legacy file and directory displayPath 
         content: 'legacy directory',
       },
       id(41),
-    ) as any,
-    assistant(id(43), 'after', id(42)) as any,
+    ),
+    assistant(id(43), 'after', id(42)),
   ])
 
   const attachments = deserialized.filter(
     message => message.type === 'attachment',
-  ) as any[]
+  )
 
   expect(attachments).toHaveLength(2)
   expect(attachments[0].attachment).toMatchObject({
@@ -593,11 +621,11 @@ test('restoreSkillStateFromMessages ignores invoked_skills attachments with miss
 
   expect(() =>
     restoreSkillStateFromMessages([
-      attachment(id(50), { type: 'invoked_skills' }) as any,
+      attachment(id(50), { type: 'invoked_skills' }),
       attachment(id(51), {
         type: 'invoked_skills',
         skills: 'not an array',
-      }) as any,
+      }),
     ]),
   ).not.toThrow()
   expect(getInvokedSkills().size).toBe(0)
@@ -618,7 +646,7 @@ test('restoreSkillStateFromMessages restores only complete valid invoked skill r
         { name: 'missing-content', path: '/skills/missing-content' },
         { name: '', path: '/skills/empty-name', content: 'empty name' },
       ],
-    }) as any,
+    }),
   ])
 
   expect([...getInvokedSkills().values()]).toMatchObject([
@@ -657,7 +685,7 @@ test('loadConversationForResume keeps valid messages around a malformed attachme
     'user',
     'assistant',
   ])
-  expect((recoveredTranscriptMessages[1] as any).message.content[0].text).toBe(
+  expect((recoveredTranscriptMessages[1]).message.content[0].text).toBe(
     'after',
   )
 })
@@ -668,14 +696,14 @@ test('deserializeMessages drops malformed attachments before sentinel normalizat
 
   const deserialized = deserializeMessages([
     user(id(63), 'before'),
-    attachment(id(64), { type: 42 }, id(63)) as any,
+    attachment(id(64), { type: 42 }, id(63)),
   ])
 
   expect(deserialized.map(message => message.type)).toEqual([
     'user',
     'assistant',
   ])
-  expect((deserialized[1] as any).message.content[0].text).toBe(
+  expect((deserialized[1]).message.content[0].text).toBe(
     'No response requested.',
   )
 })
@@ -703,10 +731,10 @@ test('deserializeMessages preserves thinking blocks for DeepSeek 3P provider (#9
           { type: 'text', text: 'answer' },
         ],
       },
-    } as any,
+    },
   ])
 
-  const content = (deserialized[0] as any)?.message?.content as Array<{
+  const content = (deserialized[0])?.message?.content as Array<{
     type: string
   }>
   expect(content.some(block => block.type === 'thinking')).toBe(true)
@@ -722,7 +750,7 @@ test('stripThinkingBlocksIfProviderAllows preserves thinking for preserve-reason
   const { stripThinkingBlocksIfProviderAllows } = await importFreshConversationRecovery()
 
   const result = stripThinkingBlocksIfProviderAllows([assistantThinkingMessage()])
-  const content = (result[0] as any)?.message?.content as Array<{ type: string }>
+  const content = (result[0])?.message?.content as Array<{ type: string }>
   expect(content.some(block => block.type === 'thinking')).toBe(true)
 })
 
@@ -734,7 +762,7 @@ test('stripThinkingBlocksIfProviderAllows strips thinking for generic OpenAI 3P'
   const { stripThinkingBlocksIfProviderAllows } = await importFreshConversationRecovery()
 
   const result = stripThinkingBlocksIfProviderAllows([assistantThinkingMessage()])
-  const content = (result[0] as any)?.message?.content as Array<{ type: string }>
+  const content = (result[0])?.message?.content as Array<{ type: string }>
   expect(content.some(block => block.type === 'thinking')).toBe(false)
 })
 
@@ -758,10 +786,10 @@ test('deserializeMessages still strips thinking blocks for generic OpenAI 3P (no
           { type: 'text', text: 'answer' },
         ],
       },
-    } as any,
+    },
   ])
 
-  const content = (deserialized[0] as any)?.message?.content as Array<{
+  const content = (deserialized[0])?.message?.content as Array<{
     type: string
   }>
   expect(content.some(block => block.type === 'thinking')).toBe(false)

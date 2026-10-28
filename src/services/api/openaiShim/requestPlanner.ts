@@ -71,6 +71,7 @@ type RequestBodyPlannerContext = {
   request: {
     resolvedModel: string
     reasoning?: { effort?: string }
+    thinking?: { type: 'enabled' | 'disabled' }
   }
   params: ShimRequestParams
   effectiveTransport: RequestTransport
@@ -429,6 +430,10 @@ export function createRequestBodyPlanner(context: RequestBodyPlannerContext) {
       messages: normalizeOllamaNativeMessages(body.messages),
       stream: params.stream ?? false,
       options,
+      // Only an explicit model option overrides Ollama's model-specific default.
+      ...(request.thinking
+        ? { think: request.thinking.type === 'enabled' }
+        : {}),
       ...(body.tools ? { tools: body.tools } : {}),
     }
   }

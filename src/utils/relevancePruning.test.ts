@@ -1,3 +1,4 @@
+import type { Message } from '../types/message.js'
 import { describe, expect, it, test } from 'bun:test'
 import {
   DEFAULT_COMPACT_TAIL_TURNS,
@@ -9,11 +10,11 @@ import {
   hasErrors,
 } from './relevancePruning.js'
 
-function createMessage(role: string, content: string, createdAt: number = Date.now()): any {
+function createMessage(role: string, content: string, createdAt: number = Date.now()): Message {
   return {
     message: { role, content, id: 'test', type: 'message', created_at: createdAt },
     sender: role,
-  }
+  } as unknown as Message
 }
 
 describe('relevancePruning', () => {
@@ -47,7 +48,7 @@ describe('relevancePruning', () => {
         { message: { role: 'assistant', content: 'Hello', id: 'msg1', created_at: 1000 } },
         { message: { role: 'tool_result', content: 'Result', id: 'msg1', created_at: 1001 } },
         { message: { role: 'user', content: 'New request', id: 'msg2', created_at: 2000 } },
-      ] as any[]
+      ] as unknown as Message[]
 
       const result = pruneByRelevance(messages, { targetTokens: 500 })
 
@@ -67,7 +68,7 @@ describe('relevancePruning', () => {
         { type: 'assistant', message: { role: 'assistant', content: 'Response 1', id: 'api-round-2', created_at: 2000 } },
         { type: 'user', message: { role: 'user', content: 'User question', id: 'api-round-3', created_at: 3000 } },
         { type: 'assistant', message: { role: 'assistant', content: 'Response 2', id: 'api-round-4', created_at: 4000 } },
-      ] as any[]
+      ] as unknown as Message[]
 
       const result = pruneByRelevance(messages, { targetTokens: 200, preserveRecent: 1 })
 
@@ -148,10 +149,10 @@ describe('relevancePruning', () => {
     // Production Message objects carry the chronological key on the envelope
     // `timestamp` (an ISO string), not on `message.created_at`. Build that real
     // shape here so the final "restore chronological order" sort is exercised.
-    function envMessage(idx: number): any {
+    function envMessage(idx: number): Message {
       return {
         type: 'user',
-        uuid: `u${idx}`,
+        uuid: `u${idx}` as import("../types/message.js").UserMessage["uuid"],
         timestamp: new Date(1_700_000_000_000 + idx * 1000).toISOString(),
         message: { role: 'user', content: `message number ${idx} content here`, id: `m${idx}` },
       }

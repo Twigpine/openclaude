@@ -386,7 +386,7 @@ function blockedConstraintMatches(
     return true
   }
   // If blocklist specifies a constraint, source must match exactly
-  return (blockedValue || undefined) === (sourceValue || undefined)
+  return blockedValue === sourceValue
 }
 
 /**

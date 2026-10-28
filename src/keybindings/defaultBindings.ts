@@ -16,13 +16,12 @@ const IMAGE_PASTE_KEY = getPlatform() === 'windows' ? 'alt+v' : 'ctrl+v'
 
 // Modifier-only chords (like shift+tab) may fail on Windows Terminal without VT mode
 // See: https://github.com/microsoft/terminal/issues/879#issuecomment-618801651
-// Node enabled VT mode in 24.2.0 / 22.17.0: https://github.com/nodejs/node/pull/58358
+// Every supported Node version enables VT mode.
 // Bun enabled VT mode in 1.2.23: https://github.com/oven-sh/bun/pull/21161
 const SUPPORTS_TERMINAL_VT_MODE =
   getPlatform() !== 'windows' ||
-  (isRunningWithBun()
-    ? satisfies(process.versions.bun, '>=1.2.23')
-    : satisfies(process.versions.node, '>=22.17.0 <23.0.0 || >=24.2.0'))
+  !isRunningWithBun() ||
+  satisfies(process.versions.bun, '>=1.2.23')
 
 // Platform-specific mode cycle shortcut:
 // - Windows without VT mode: meta+m (shift+tab doesn't work reliably)

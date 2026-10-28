@@ -6,16 +6,18 @@
  *   1. assistant text response
  *   2. result (success)
  */
+import type { QueryEngineConfig } from '../../../src/QueryEngine.js'
+import type { Message } from '../../../src/types/message.js'
 import type { SDKMessage } from '../../../src/entrypoints/sdk/index.js'
 
 export class MockQueryEngine {
   config = {
-    mcpClients: [] as unknown[],
-    tools: [] as unknown[],
-    agents: [] as unknown[],
+    mcpClients: [] as QueryEngineConfig['mcpClients'],
+    tools: [] as QueryEngineConfig['tools'],
+    agents: [] as QueryEngineConfig['agents'],
   }
 
-  private _messages: unknown[] = []
+  private _messages: Message[] = []
   private _sessionId = 'mock-session-id'
   private _aborted = false
 
@@ -50,27 +52,27 @@ export class MockQueryEngine {
     } as unknown as SDKMessage
   }
 
-  injectMessages(messages: unknown[]): void {
+  injectMessages(messages: Message[]): void {
     this._messages.push(...messages)
   }
 
-  injectAgents(agents: unknown[]): void {
+  injectAgents(agents: QueryEngineConfig['agents']): void {
     this.config.agents = agents
   }
 
-  updateTools(tools: unknown[]): void {
+  updateTools(tools: QueryEngineConfig['tools']): void {
     this.config.tools = tools
   }
 
-  getMcpClients(): readonly unknown[] {
+  getMcpClients(): Readonly<QueryEngineConfig['mcpClients']> {
     return this.config.mcpClients
   }
 
-  setMcpClients(clients: unknown[]): void {
+  setMcpClients(clients: QueryEngineConfig['mcpClients']): void {
     this.config.mcpClients = clients
   }
 
-  getMessages(): unknown[] {
+  getMessages(): Message[] {
     return this._messages
   }
 

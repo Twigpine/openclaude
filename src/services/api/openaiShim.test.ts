@@ -1,19 +1,16 @@
-import { APIError } from '@anthropic-ai/sdk'
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { getEventListeners } from 'node:events'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import { asMockFetch } from '../../test/typedMocks.js'
-import { _clearRegistryForTesting, ensureIntegrationsLoaded, registerGateway } from '../../integrations/index.ts'
+import { _clearRegistryForTesting, ensureIntegrationsLoaded } from '../../integrations/index.ts'
 import { applyProviderFlag } from '../../utils/providerFlag.ts'
 import { applyProviderProfileToProcessEnv } from '../../utils/providerProfiles.ts'
+import { PROFILE_ORCAROUTER_KEY_SHA256 } from '../../utils/providerProfile.js'
 import {
   __resetInterruptionTraceForTests,
   __waitForInterruptionTraceFlushForTests,
 } from '../../utils/interruptionTrace.js'
-import {
-  getAssistantMessageFromError,
-  OPENCODE_GO_FREE_LIMIT_ERROR_MESSAGE,
-} from './errors.ts'
 import { accumulateUsage, updateUsage } from './claude.js'
 import { EMPTY_USAGE } from './emptyUsage.js'
 import {
@@ -22,11 +19,9 @@ import {
 } from './openaiErrorClassification.ts'
 import {
   createOpenAIShimClient,
-  hasMistralApiHost,
   parseTextToolCalls,
   parseXmlToolCalls,
 } from './openaiShim.ts'
-import * as realGithubModelsCredentials from '../../utils/githubModelsCredentials.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
 import type { AssistantMessage } from '../../types/message.js'
 
@@ -70,6 +65,7 @@ const originalEnv = {
   LONGCAT_API_KEY: process.env.LONGCAT_API_KEY,
   CLINE_API_KEY: process.env.CLINE_API_KEY,
   GMI_API_KEY: process.env.GMI_API_KEY,
+  ORCAROUTER_API_KEY: process.env.ORCAROUTER_API_KEY,
   OPENGATEWAY_API_KEY: process.env.OPENGATEWAY_API_KEY,
   OPENGATEWAY_BASE_URL: process.env.OPENGATEWAY_BASE_URL,
   OPENCODE_API_KEY: process.env.OPENCODE_API_KEY,
@@ -80,6 +76,7 @@ const originalEnv = {
 }
 
 const originalFetch = globalThis.fetch
+let restoreOrcarouterCredentialOrigin: () => void
 
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) {
@@ -434,24 +431,6 @@ function makeGithubChatFallbackResponse(): Response {
   )
 }
 
-function makeResponsesApiResponse(model: string): Response {
-  return new Response(
-    JSON.stringify({
-      id: 'resp-fallback-test',
-      model,
-      output: [
-        {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'output_text', text: 'ok' }],
-        },
-      ],
-      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-    }),
-    { headers: { 'Content-Type': 'application/json' } },
-  )
-}
-
 function pendingFetchUntilAbort(
   init: RequestInit | undefined,
 ): Promise<Response> {
@@ -495,6 +474,7 @@ async function captureChatCompletionRequest(
 
 beforeEach(async () => {
   await acquireSharedMutationLock('openaiShim.test.ts')
+  restoreOrcarouterCredentialOrigin = snapshotEnv([PROFILE_ORCAROUTER_KEY_SHA256], { clear: true })
   process.env.OPENAI_BASE_URL = 'http://example.test/v1'
   delete process.env.OPENAI_API_BASE
   process.env.OPENAI_API_KEY = 'test-key'
@@ -532,6 +512,7 @@ beforeEach(async () => {
   delete process.env.LONGCAT_API_KEY
   delete process.env.CLINE_API_KEY
   delete process.env.GMI_API_KEY
+  delete process.env.ORCAROUTER_API_KEY
   delete process.env.OPENGATEWAY_API_KEY
   delete process.env.OPENGATEWAY_BASE_URL
   delete process.env.OPENCODE_API_KEY
@@ -581,6 +562,7 @@ afterEach(() => {
     restoreEnv('LONGCAT_API_KEY', originalEnv.LONGCAT_API_KEY)
     restoreEnv('CLINE_API_KEY', originalEnv.CLINE_API_KEY)
     restoreEnv('GMI_API_KEY', originalEnv.GMI_API_KEY)
+    restoreEnv('ORCAROUTER_API_KEY', originalEnv.ORCAROUTER_API_KEY)
     restoreEnv('OPENGATEWAY_API_KEY', originalEnv.OPENGATEWAY_API_KEY)
     restoreEnv('OPENGATEWAY_BASE_URL', originalEnv.OPENGATEWAY_BASE_URL)
     restoreEnv('OPENCODE_API_KEY', originalEnv.OPENCODE_API_KEY)
@@ -592,6 +574,7 @@ afterEach(() => {
     _clearRegistryForTesting()
     ensureIntegrationsLoaded()
   } finally {
+    restoreOrcarouterCredentialOrigin()
     releaseSharedMutationLock()
   }
 })
@@ -2694,6 +2677,20 @@ test('longcat prefers its dedicated credential over a copied key from another pr
   const captured = await captureChatCompletionRequest('LongCat-2.0')
 
   expect(captured.authorization).toBe('Bearer fake-longcat-key')
+})
+
+test('an Orca profile sends its selected key instead of the ambient parent key', async () => {
+  process.env.ORCAROUTER_API_KEY = 'ambient-parent-key'
+  applyProviderProfileToProcessEnv({
+    id: 'orca-wire', name: 'Orca wire', provider: 'orcarouter',
+    baseUrl: 'https://api.orcarouter.ai/v1', model: 'openai/gpt-5.5',
+    apiKey: 'selected-orca-key',
+  })
+
+  const captured = await captureChatCompletionRequest('openai/gpt-5.5')
+
+  expect(captured.url).toBe('https://api.orcarouter.ai/v1/chat/completions')
+  expect(captured.authorization).toBe('Bearer selected-orca-key')
 })
 
 test('longcat provider flag never falls back to an OPENAI_API_KEYS pool', async () => {
@@ -5042,17 +5039,26 @@ test('disarms the API timeout after headers arrive while the body keeps streamin
 // Native Ollama endpoint selection remains an adapter/facade integration concern.
 // Keep this marker stable for independent adjacent test migrations.
 // openaiShim test extraction seam 129 start: uses native Ollama chat endpoint when local base URL omits /v1
-test('uses native Ollama chat endpoint when local base URL omits /v1', async () => {
-  process.env.OPENAI_BASE_URL = 'http://localhost:11434'
+test.each([
+  ['', '', undefined],
+  ['/v1', '?thinking=enabled', true],
+  ['', '?thinking=disabled', false],
+  ['/v1', '?reasoning=high', undefined],
+  ['', '?thinking=enabled&reasoning=low', true],
+  ['/v1', '?thinking=disabled&reasoning=high', false],
+] as const)('native Ollama preserves defaults and explicit thinking (%s, %s)', async (basePath, modelOptions, think) => {
+  process.env.OPENAI_BASE_URL = `http://localhost:11434${basePath}`
 
   const requestUrls: string[] = []
-  globalThis.fetch = (async (input, _init) => {
+  let requestBody: Record<string, unknown> | undefined
+  globalThis.fetch = (async (input, init) => {
+    requestBody = JSON.parse(String(init?.body))
     const url = typeof input === 'string' ? input : input.url
     requestUrls.push(url)
 
     return new Response(
       JSON.stringify({
-        model: 'qwen2.5-coder:7b',
+        model: 'qwen3:8b',
         message: {
           role: 'assistant',
           content: 'hello from native Ollama',
@@ -5075,7 +5081,7 @@ test('uses native Ollama chat endpoint when local base URL omits /v1', async () 
 
   await expect(
     client.beta.messages.create({
-      model: 'qwen2.5-coder:7b',
+      model: `qwen3:8b${modelOptions}`,
       messages: [{ role: 'user', content: 'hello' }],
       max_tokens: 64,
       stream: false,
@@ -5083,6 +5089,12 @@ test('uses native Ollama chat endpoint when local base URL omits /v1', async () 
   ).resolves.toBeDefined()
 
   expect(requestUrls).toEqual(['http://localhost:11434/api/chat'])
+  expect(requestBody?.model).toBe('qwen3:8b')
+  if (think === undefined) {
+    expect(requestBody).not.toHaveProperty('think')
+  } else {
+    expect(requestBody).toHaveProperty('think', think)
+  }
 })
 // openaiShim test extraction seam 132 end
 
@@ -6284,11 +6296,6 @@ test('preserves valid tool pairs after history pruning while dropping orphaned t
 // Extraction boundary: history pruning | executor Copilot refresh behavior.
 // The contiguous Copilot authentication retry block below moves with execution.
 // Keep this marker stable for independent adjacent test migrations.
-function makeCodexSseResponse(responseData: Record<string, unknown>): Response {
-  const data = JSON.stringify(responseData)
-  return makeSseResponse([`event: response.completed\ndata: ${data}\n\n`])
-}
-
 
 test('GitHub Copilot responses fallback does not replay after a pre-header timeout', async () => {
   process.env.CLAUDE_CODE_USE_GITHUB = '1'
@@ -6525,3 +6532,36 @@ test('JSON fallback: recovers Tencent HY3 text tool calls into tool_use blocks',
   expect(stopEvent?.delta?.stop_reason).toBe('tool_use')
 })
 // openaiShim test extraction seam 204 end
+
+test.each([
+  ['signed Vertex ID', [`toolu_vertex_k9x_3~~sig~~${'S'.repeat(1700)}`]],
+  ['punctuated IDs', ['call.one', 'call.two']],
+  ['valid IDs', ['call_one', 'call_two']],
+] as const)('sanitizes and pairs distinct tool IDs for the chat/completions wire: %s', async (_label, ids) => {
+  const { __test } = await import('./openaiShim.ts')
+
+  const messages = __test.convertMessages(
+    [
+      {
+        role: 'assistant',
+        content: ids.map(id => ({ type: 'tool_use', id, name: 'Read', input: { file_path: '/tmp/x' } })),
+      },
+      {
+        role: 'user',
+        content: ids.map(id => ({ type: 'tool_result', tool_use_id: id, content: 'done' })),
+      },
+    ],
+    undefined,
+  )
+
+  const assistant = messages.find(m => m.role === 'assistant' && m.tool_calls?.length)
+  const callIds = assistant?.tool_calls?.map(call => call.id) ?? []
+  expect(callIds).toHaveLength(ids.length)
+  expect(new Set(callIds).size).toBe(ids.length)
+  for (const id of callIds) {
+    expect(id.length).toBeLessThanOrEqual(40)
+    expect(id).toMatch(/^[A-Za-z0-9_-]+$/)
+  }
+  expect(messages.filter(m => m.role === 'tool').map(m => m.tool_call_id)).toEqual(callIds)
+  if (ids.every(id => /^[A-Za-z0-9_-]+$/.test(id))) expect(callIds).toEqual([...ids])
+})

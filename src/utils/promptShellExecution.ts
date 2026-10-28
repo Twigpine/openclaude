@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import type { Tool, ToolUseContext } from '../Tool.js'
 import { BashTool } from '../tools/BashTool/BashTool.js'
 import { logForDebugging } from './debug.js'
-import { errorMessage, MalformedCommandError, ShellError } from './errors.js'
+import { errorMessage, MalformedCommandError } from './errors.js'
 import type { FrontmatterShell } from './frontmatterParser.js'
 import { createAssistantMessage } from './messages.js'
 import { hasPermissionsToUseTool } from './permissions/permissions.js'
@@ -72,7 +72,8 @@ const INLINE_PATTERN = /(?<=^|\s)!`([^`]+)`/gm
  * @param options.lineLimits - Map of command-prefix → max output lines.
  *   When a snippet's executed command (trimmed) starts with one of the
  *   prefixes, the output is sliced to that many lines before being
- *   substituted. Use to bound diffs or other potentially-large outputs
+ *   substituted. Invalid limits (nonfinite, fractional, or negative) are ignored.
+ *   Use to bound diffs or other potentially-large outputs
  *   without widening the Bash allowlist (avoids `| head -N` in commands,
  *   which the permission parser treats as a compound and may reject).
  */
@@ -256,6 +257,9 @@ function applyLineLimit(
   let bestPrefix = ''
   let bestLimit = Infinity
   for (const [prefix, limit] of Object.entries(limits)) {
+    if (!Number.isFinite(limit) || !Number.isInteger(limit) || limit < 0) {
+      continue
+    }
     if (trimmed === prefix || trimmed.startsWith(prefix + ' ')) {
       if (prefix.length > bestPrefix.length) {
         bestPrefix = prefix

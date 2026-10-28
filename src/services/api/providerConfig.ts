@@ -11,6 +11,7 @@ import {
 } from '../../utils/codexCredentials.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
+import { PROVIDER_SELECTION_FLAGS } from '../../utils/providerSelectionFlags.js'
 import {
   asTrimmedString,
   parseChatgptAccountId,
@@ -30,6 +31,12 @@ import {
   isClinePassBaseUrl,
 } from '../../integrations/routeMetadata.js'
 import { hasUsableOpenAICredential } from './credentialPool.js'
+import {
+  getGeminiVertexLocation,
+  getGeminiVertexModel,
+  getGeminiVertexProjectId,
+  DEFAULT_GEMINI_VERTEX_MODEL,
+} from '../../utils/geminiAuth.js'
 import {
   openAIShimSupportsApiFormatForModel,
   resolveOpenAIShimRuntimeContext,
@@ -167,6 +174,8 @@ export type ResolvedProviderRequest = {
   requestedModel: string
   resolvedModel: string
   baseUrl: string
+  vertexProject?: string
+  vertexLocation?: string
   reasoning?: {
     effort: ReasoningEffort
   }
@@ -382,7 +391,11 @@ export function parseOpenAICompatibleApiFormat(
   return undefined
 }
 
-function parseModelDescriptor(model: string): ModelDescriptor {
+function parseModelIdentity(model: string): {
+  raw: string
+  baseModel: string
+  query: string | undefined
+} {
   // A trailing [1m] suffix is the client-side 1M-context opt-in (see
   // has1mContext) — never part of the wire model id or the ?query syntax.
   // Strip it before parsing so tagged aliases keep their mapping and effort
@@ -391,14 +404,25 @@ function parseModelDescriptor(model: string): ModelDescriptor {
   // on the base id (`gpt-5.5[1m]`); both forms are handled.
   const trimmed = model.trim().replace(/\[1m]$/i, '').trim()
   const queryIndex = trimmed.indexOf('?')
-  if (queryIndex === -1) {
-    const alias = trimmed.toLowerCase() as CodexAlias
+  return {
+    raw: trimmed,
+    baseModel: (queryIndex === -1 ? trimmed : trimmed.slice(0, queryIndex))
+      .trim()
+      .replace(/\[1m]$/i, ''),
+    query: queryIndex === -1 ? undefined : trimmed.slice(queryIndex + 1),
+  }
+}
+
+function parseModelDescriptor(model: string): ModelDescriptor {
+  const { raw, baseModel, query } = parseModelIdentity(model)
+  if (query === undefined) {
+    const alias = baseModel.toLowerCase() as CodexAlias
     const aliasConfig = Object.hasOwn(CODEX_ALIAS_MODELS, alias)
       ? CODEX_ALIAS_MODELS[alias]
       : undefined
     if (aliasConfig) {
       return {
-        raw: trimmed,
+        raw,
         baseModel: aliasConfig.model,
         reasoning: aliasConfig.reasoningEffort
           ? { effort: aliasConfig.reasoningEffort }
@@ -407,16 +431,12 @@ function parseModelDescriptor(model: string): ModelDescriptor {
       }
     }
     return {
-      raw: trimmed,
-      baseModel: trimmed,
+      raw,
+      baseModel,
     }
   }
 
-  const baseModel = trimmed
-    .slice(0, queryIndex)
-    .trim()
-    .replace(/\[1m]$/i, '')
-  const params = new URLSearchParams(trimmed.slice(queryIndex + 1))
+  const params = new URLSearchParams(query)
   const alias = baseModel.toLowerCase() as CodexAlias
   const aliasConfig = Object.hasOwn(CODEX_ALIAS_MODELS, alias)
     ? CODEX_ALIAS_MODELS[alias]
@@ -431,7 +451,7 @@ function parseModelDescriptor(model: string): ModelDescriptor {
   const thinking = parseThinkingType(params.get('thinking') ?? undefined)
 
   return {
-    raw: trimmed,
+    raw,
     baseModel: resolvedBaseModel,
     reasoning: typeof reasoning === 'string' ? { effort: reasoning } : reasoning,
     reasoningFromAlias:
@@ -441,15 +461,13 @@ function parseModelDescriptor(model: string): ModelDescriptor {
 }
 
 export function isCodexAlias(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
-  const base = normalized.split('?', 1)[0] ?? normalized
-  return Object.hasOwn(CODEX_ALIAS_MODELS, base)
+  const { baseModel } = parseModelIdentity(model)
+  return Object.hasOwn(CODEX_ALIAS_MODELS, baseModel.toLowerCase())
 }
 
 function isOpenAICodexShortcutAlias(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
-  const base = normalized.split('?', 1)[0] ?? normalized
-  return OPENAI_CODEX_SHORTCUT_ALIASES.has(base)
+  const { baseModel } = parseModelIdentity(model)
+  return OPENAI_CODEX_SHORTCUT_ALIASES.has(baseModel.toLowerCase())
 }
 
 export function shouldUseCodexTransport(
@@ -944,7 +962,9 @@ export function resolveProviderRequest(options?: {
   const processEnv = options?.processEnv ?? process.env
   const isGithubMode = isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB)
   const isMistralMode = isEnvTruthy(processEnv.CLAUDE_CODE_USE_MISTRAL)
-  const isGeminiMode = isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI)
+  const isGeminiVertexMode = isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)
+  const isGeminiMode = isGeminiVertexMode || isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI)
+  const geminiVertexModel = getGeminiVertexModel(processEnv)
   const isClinePassMode = Boolean(processEnv.CLINE_API_KEY?.trim())
   const isApismartMode = hasUsableOpenAICredential(processEnv.APISMART_API_KEY)
   const explicitBaseUrl = asEnvUrl(options?.baseUrl)
@@ -1020,7 +1040,7 @@ export function resolveProviderRequest(options?: {
     (isMistralMode
       ? processEnv.MISTRAL_MODEL?.trim()
       : isGeminiMode
-        ? processEnv.GEMINI_MODEL?.trim()
+        ? (isGeminiVertexMode ? geminiVertexModel : processEnv.GEMINI_MODEL?.trim())
         : effectiveClinePassMode
           ? processEnv.CLINE_API_MODEL?.trim() ||
             processEnv.OPENAI_MODEL?.trim()
@@ -1029,6 +1049,7 @@ export function resolveProviderRequest(options?: {
               asUsableModelEnvValue(processEnv.OPENAI_MODEL)
             : processEnv.OPENAI_MODEL?.trim()) ||
     options?.fallbackModel?.trim() ||
+    (isGeminiVertexMode ? DEFAULT_GEMINI_VERTEX_MODEL : undefined) ||
     (isGeminiMode ? DEFAULT_GEMINI_MODEL : undefined) ||
     clinePassDefaultModel ||
     apismartDefaultModel ||
@@ -1070,9 +1091,19 @@ export function resolveProviderRequest(options?: {
     descriptor.baseModel === envResolvedCodexModel
   const isCodexAliasModel =
     isOpenAICodexShortcutAlias(requestedModel) || requestedMatchesEnvCodexShortcut
+  // A non-shortcut Codex alias launched with no endpoint identity anywhere
+  // still selects the codex_responses transport (shouldUseCodexTransport
+  // treats every alias as Codex once the base URL is absent), leaving it
+  // paired with the public OpenAI fallback URL (#2066). Promote bare-alias
+  // launches to the Codex backend so transport and baseUrl describe one
+  // route. An explicit base URL — even set to the literal default value —
+  // still pins the direct OpenAI route.
+  const isBareCodexAliasLaunch =
+    !isGithubMode && !isCodexAliasModel && !rawBaseUrl && isCodexAlias(requestedModel)
   const hasUserSetBaseUrl = rawBaseUrl && rawBaseUrl !== DEFAULT_OPENAI_BASE_URL
   const finalBaseUrlRaw =
-    !isGithubMode && isCodexAliasModel && !hasUserSetBaseUrl
+    !isGithubMode &&
+    ((isCodexAliasModel && !hasUserSetBaseUrl) || isBareCodexAliasLaunch)
       ? DEFAULT_CODEX_BASE_URL
       : rawBaseUrl
   const finalBaseUrl = normalizeGitlawbOpengatewayBaseUrl(finalBaseUrlRaw)
@@ -1227,6 +1258,8 @@ export function resolveProviderRequest(options?: {
               ? GITHUB_COPILOT_BASE_URL
               : DEFAULT_OPENAI_BASE_URL))))
       ).replace(/\/+$/, ''),
+    vertexProject: isGeminiVertexMode ? getGeminiVertexProjectId(processEnv) : undefined,
+    vertexLocation: isGeminiVertexMode ? getGeminiVertexLocation(processEnv) : undefined,
     reasoning,
     thinking: descriptor.thinking,
   }
@@ -1234,12 +1267,11 @@ export function resolveProviderRequest(options?: {
 
 export function getAdditionalModelOptionsCacheScope(): string | null {
   if (!isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)) {
-    if (!isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI) &&
-        !isEnvTruthy(process.env.CLAUDE_CODE_USE_MISTRAL) &&
-        !isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB) &&
-        !isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK) &&
-        !isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX) &&
-        !isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)) {
+    const anotherProviderSelected = PROVIDER_SELECTION_FLAGS.some(
+      flag =>
+        flag !== 'CLAUDE_CODE_USE_OPENAI' && isEnvTruthy(process.env[flag]),
+    )
+    if (!anotherProviderSelected) {
       return 'firstParty'
     }
     return null

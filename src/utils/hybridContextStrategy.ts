@@ -227,7 +227,7 @@ export function applyHybridStrategy(
   const cfg = { ...DEFAULT_CONFIG, ...config }
   
   // Preserve message chains (tool_use/tool_result pairs)
-  const { chains, orphans } = getMessageChain(messages)
+  const { chains } = getMessageChain(messages)
   
   // Always preserve the conversation tail (last N messages)
   const tailMessages = messages.slice(-MIN_TAILMessages)

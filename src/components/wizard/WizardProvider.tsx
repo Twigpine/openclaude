@@ -1,5 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
-import React, { createContext, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { createContext, type ReactNode, useEffect, useState } from 'react';
 import { useExitOnCtrlCDWithKeybindings } from '../../hooks/useExitOnCtrlCDWithKeybindings.js';
 import type { WizardContextValue, WizardProviderProps } from './types.js';
 

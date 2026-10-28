@@ -105,7 +105,7 @@ jobs:
         run: bun run build
 
       - name: Run unit tests
-        run: bun test --feature=UNATTENDED_RETRY --max-concurrency=1
+        run: bun run test
 
       - name: Smoke test
         run: bun run smoke

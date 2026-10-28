@@ -40,7 +40,7 @@ test('custom error responses log the error redirect analytics event', async () =
     end: () => {},
   }
 
-  ;(listener as any).pendingResponse = response
+  ;(listener).pendingResponse = response
 
   listener.handleErrorRedirect(res => {
     res.writeHead(400, {
@@ -92,7 +92,7 @@ test('custom handlers that do not end the response are closed automatically and 
   )
   const listener = new AuthCodeListener('/callback')
 
-  ;(listener as any).pendingResponse = response
+  ;(listener).pendingResponse = response
 
   listener.handleErrorRedirect(res => {
     res.writeHead(400, {
@@ -101,7 +101,7 @@ test('custom handlers that do not end the response are closed automatically and 
   })
 
   expect(response.writableEnded).toBe(true)
-  expect((listener as any).pendingResponse).toBeNull()
+  expect((listener).pendingResponse).toBeNull()
   expect(events).toEqual([
     {
       name: 'tengu_oauth_automatic_redirect_error',
@@ -152,7 +152,7 @@ test('custom handlers that throw are logged, converted to a fallback response, a
   )
   const listener = new AuthCodeListener('/callback')
 
-  ;(listener as any).pendingResponse = response
+  ;(listener).pendingResponse = response
 
   listener.handleErrorRedirect(() => {
     throw new Error('handler exploded')
@@ -161,7 +161,7 @@ test('custom handlers that throw are logged, converted to a fallback response, a
   expect(response.statusCode).toBe(500)
   expect(response.body).toBe('Authentication redirect failed')
   expect(response.writableEnded).toBe(true)
-  expect((listener as any).pendingResponse).toBeNull()
+  expect((listener).pendingResponse).toBeNull()
   expect(loggedErrors).toHaveLength(1)
   expect(events).toEqual([])
 })

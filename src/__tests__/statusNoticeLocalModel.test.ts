@@ -292,6 +292,7 @@ describe('checkLocalModelContextLoad', () => {
         CLAUDE_CODE_USE_OPENAI: undefined,
         CLAUDE_CODE_USE_GITHUB: undefined,
         CLAUDE_CODE_USE_GEMINI: undefined,
+        CLAUDE_CODE_USE_GEMINI_VERTEX: undefined,
         CLAUDE_CODE_USE_MISTRAL: undefined,
         CLAUDE_CODE_USE_BEDROCK: undefined,
         CLAUDE_CODE_USE_VERTEX: undefined,
@@ -364,6 +365,15 @@ describe('active provider local detection', () => {
     expect(
       isActiveProviderLocalModel({
         OPENAI_BASE_URL: 'http://localhost:11434/v1',
+      }),
+    ).toBe(false)
+  })
+
+  test('does not treat Gemini Vertex as local when OPENAI_API_BASE is stale', () => {
+    expect(
+      isActiveProviderLocalModel({
+        CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
+        OPENAI_API_BASE: 'http://localhost:11434/v1',
       }),
     ).toBe(false)
   })

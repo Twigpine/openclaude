@@ -79,7 +79,7 @@ import { updateSessionName } from './concurrentSessions.js'
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
-import { getClaudeConfigHomeDir, getProjectsDir, isEnvTruthy } from './envUtils.js'
+import { getProjectsDir, isEnvTruthy } from './envUtils.js'
 import { getErrnoCode, isFsInaccessible } from './errors.js'
 import { getTaskOutputPath } from './task/diskOutput.js'
 import type { FileHistorySnapshot } from './fileHistory.js'
@@ -88,7 +88,6 @@ import { getFsImplementation } from './fsOperations.js'
 import { getWorktreePaths } from './getWorktreePaths.js'
 import { getBranch } from './git.js'
 import { gracefulShutdownSync, isShuttingDown } from './gracefulShutdown.js'
-import { parseJSONL } from './json.js'
 import { logError } from './log.js'
 import {
   extractTag,
@@ -3094,7 +3093,9 @@ export function stripPersistedToolUseResultsFromJSONLBuffer(buf: Buffer): Buffer
 function forEachParsedJSONLBufferEntry<T>(
   buf: Buffer,
   visit: (entry: T) => void,
+  logParseContent = true,
 ): void {
+  const parse = logParseContent ? jsonParse : JSON.parse
   const bufLen = buf.length
   let start = 0
 
@@ -3111,7 +3112,7 @@ function forEachParsedJSONLBufferEntry<T>(
     if (!line) continue
 
     try {
-      visit(jsonParse(line) as T)
+      visit(parse(line) as T)
     } catch {
       // Skip malformed lines
     }
@@ -4123,13 +4124,34 @@ export function isLiteLog(log: LogOption): boolean {
 }
 
 /**
- * Loads full messages for a lite log by reading its JSONL file.
+ * Loads messages and resume metadata from a lite log or an explicit JSONL path.
  * Returns a new LogOption with populated messages array.
- * If the log is already full or loading fails, returns the original log.
+ * Explicit paths select the latest non-sidechain leaf and retain its session ID.
+ * If the log is already full or loading fails, returns the original/empty log.
+ * Set logParseContent to false to keep transcript bytes out of slow diagnostics.
  */
-export async function loadFullLog(log: LogOption): Promise<LogOption> {
+export async function loadFullLog(
+  source: LogOption | string,
+  opts?: { logParseContent?: boolean },
+): Promise<LogOption> {
+  // Explicit file resumes use the same metadata restoration as the picker.
+  // The leaf supplies their identity; filenames may have been renamed.
+  const fromPath = typeof source === 'string'
+  const log: LogOption = fromPath
+    ? {
+        fullPath: source,
+        date: '',
+        messages: [],
+        value: 0,
+        created: new Date(0),
+        modified: new Date(0),
+        firstPrompt: '',
+        messageCount: 0,
+        isSidechain: false,
+      }
+    : source
   // If already full, return as-is
-  if (!isLiteLog(log)) {
+  if (!fromPath && !isLiteLog(log)) {
     return log
   }
 
@@ -4161,18 +4183,20 @@ export async function loadFullLog(log: LogOption): Promise<LogOption> {
       contextCollapseCommits,
       contextCollapseSnapshot,
       leafUuids,
-    } = await loadTranscriptFile(sessionFile)
+    } = await loadTranscriptFile(sessionFile, opts)
 
     if (messages.size === 0) {
       return log
     }
 
-    // Find the most recent user/assistant leaf message from the transcript
+    // Keep explicit-path resume on the main chain; preserve picker selection.
     const mostRecentLeaf = findLatestMessage(
       messages.values(),
       msg =>
         leafUuids.has(msg.uuid) &&
-        (msg.type === 'user' || msg.type === 'assistant'),
+        (fromPath
+          ? !msg.isSidechain
+          : msg.type === 'user' || msg.type === 'assistant'),
     )
     if (!mostRecentLeaf) {
       return log
@@ -4185,6 +4209,7 @@ export async function loadFullLog(log: LogOption): Promise<LogOption> {
     const sessionId = mostRecentLeaf.sessionId as UUID | undefined
     return {
       ...log,
+      sessionId: fromPath ? sessionId : log.sessionId,
       messages: removeExtraFields(transcript),
       firstPrompt: extractFirstPrompt(transcript),
       messageCount: countVisibleMessages(transcript),
@@ -4660,7 +4685,7 @@ function walkChainBeforeParse(buf: Buffer): Buffer {
  */
 export async function loadTranscriptFile(
   filePath: string,
-  opts?: { keepAllLeaves?: boolean },
+  opts?: { keepAllLeaves?: boolean; logParseContent?: boolean },
 ): Promise<{
   messages: Map<UUID, TranscriptMessage>
   summaries: Map<UUID, string>
@@ -4809,7 +4834,7 @@ export async function loadTranscriptFile(
         } else if (entry.type === 'session-branch' && entry.sessionId) {
           sessionBranches.set(entry.sessionId, entry)
         }
-      })
+      }, opts?.logParseContent)
     }
 
     // Bridge map for legacy progress entries: progress_uuid → progress_parent_uuid.
@@ -4897,7 +4922,7 @@ export async function loadTranscriptFile(
       } else if (entry.type === 'marble-origami-snapshot') {
         contextCollapseSnapshot = entry
       }
-    })
+    }, opts?.logParseContent)
   } catch {
     // File doesn't exist or can't be read
   }

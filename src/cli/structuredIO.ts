@@ -44,14 +44,22 @@ import {
 import { writeToStdout } from 'src/utils/process.js'
 import { jsonStringify } from 'src/utils/slowOperations.js'
 import { z } from 'zod/v4'
+import { clearCACertsCache } from '../utils/caCerts.js'
 import { notifyCommandLifecycle } from '../utils/commandLifecycle.js'
 import { normalizeControlMessageKeys } from '../utils/controlMessageCompat.js'
 import { executePermissionRequestHooks } from '../utils/hooks.js'
+import { clearMTLSCache } from '../utils/mtls.js'
 import {
   filterPermissionRequestHookUpdates,
   persistPermissionUpdates,
 } from '../utils/permissions/PermissionUpdate.js'
 import { applyPermissionUpdatesToLiveContext } from '../utils/permissions/permissionSetup.js'
+import {
+  AGENT_CONFIG_ENV_VARS,
+  clearProxyCache,
+  configureGlobalAgents,
+  getNoProxy,
+} from '../utils/proxy.js'
 import {
   notifySessionStateChanged,
   type RequiresActionDetails,
@@ -126,7 +134,8 @@ function buildRequiresActionDetails(
 type PendingRequest<T> = {
   resolve: (result: T) => void
   reject: (error: unknown) => void
-  schema?: z.Schema
+  // Response consumers only parse; avoid comparing Zod's fluent builder types.
+  schema?: Pick<z.Schema, 'parse'>
   request: SDKControlRequest
 }
 
@@ -357,11 +366,22 @@ export class StructuredIO {
         // Used by bridge session runner for auth token refresh
         // (CLAUDE_CODE_SESSION_ACCESS_TOKEN) which must be readable
         // by the REPL process itself, not just child Bash commands.
+        const previousNoProxy = getNoProxy()
         const keys = Object.keys(message.variables)
+        let agentConfigUpdated = false
         for (const [key, value] of Object.entries(message.variables)) {
           if (typeof value === 'string') {
             process.env[key] = value
+            agentConfigUpdated ||= AGENT_CONFIG_ENV_VARS.has(key)
           }
+        }
+        // Rebuild cached/global agents for TLS/proxy settings and effective
+        // bypass changes, including wildcard normalization pinned by undici.
+        if (agentConfigUpdated || getNoProxy() !== previousNoProxy) {
+          clearCACertsCache()
+          clearMTLSCache()
+          clearProxyCache()
+          configureGlobalAgents()
         }
         logForDebugging(
           `[structuredIO] applied update_environment_variables: ${keys.join(', ')}`,
@@ -477,7 +497,7 @@ export class StructuredIO {
 
   private async sendRequest<Response>(
     request: SDKControlRequest['request'],
-    schema: z.Schema,
+    schema: Pick<z.Schema, 'parse'>,
     signal?: AbortSignal,
     requestId: string = randomUUID(),
   ): Promise<Response> {
@@ -779,7 +799,7 @@ export class StructuredIO {
         message,
       },
       z.object({
-        mcp_response: z.any() as z.Schema<JSONRPCMessage>,
+        mcp_response: z.any() as z.core.$ZodType<JSONRPCMessage>,
       }),
     )
     return response.mcp_response

@@ -124,12 +124,12 @@ function buildConversation(numToolExchanges: number, resultLength = 5_000): Msg[
 
 function getResultMessages(messages: Msg[]): Msg[] {
   return messages.filter(
-    m => Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_result'),
+    m => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_result'),
   )
 }
 
 function getResultBlock(msg: Msg): Block {
-  return (msg.content as Block[]).find((b: any) => b.type === 'tool_result') as Block
+  return (msg.content as Block[]).find((b) => b.type === 'tool_result') as Block
 }
 
 function getResultText(msg: Msg): string {
@@ -138,8 +138,8 @@ function getResultText(msg: Msg): string {
   if (typeof c === 'string') return c
   if (Array.isArray(c)) {
     return c
-      .filter((b: any) => b.type === 'text')
-      .map((b: any) => b.text)
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
       .join('\n')
   }
   return ''
@@ -361,7 +361,7 @@ test('tool_use blocks always preserved', () => {
   const useCount = (msgs: Msg[]) =>
     msgs.reduce((sum, m) => {
       if (!Array.isArray(m.content)) return sum
-      return sum + m.content.filter((b: any) => b.type === 'tool_use').length
+      return sum + m.content.filter((b) => b.type === 'tool_use').length
     }, 0)
 
   expect(useCount(result as Msg[])).toBe(useCount(messages))
@@ -385,7 +385,7 @@ test('text blocks always preserved', () => {
   ]
   const result = compressToolHistoryForTest(messages, 'gpt-4o')
   const assistantMsg = (result as Msg[])[1]
-  const textBlock = (assistantMsg.content as Block[]).find((b: any) => b.type === 'text')
+  const textBlock = (assistantMsg.content as Block[]).find((b) => b.type === 'text')
 
   expect(textBlock).toEqual({ type: 'text', text: 'reasoning before tool' })
 })
@@ -408,7 +408,7 @@ test('thinking blocks always preserved', () => {
   ]
   const result = compressToolHistoryForTest(messages, 'gpt-4o')
   const assistantMsg = (result as Msg[])[1]
-  const thinking = (assistantMsg.content as Block[]).find((b: any) => b.type === 'thinking')
+  const thinking = (assistantMsg.content as Block[]).find((b) => b.type === 'thinking')
 
   expect(thinking).toEqual({
     type: 'thinking',
@@ -451,18 +451,18 @@ test('wrapped shape ({ message: { role, content } }) handled', () => {
   type WrappedMsg = { message: { role: string; content: Block[] | string } }
   const wrap = (m: Msg): WrappedMsg => ({ message: { role: m.role, content: m.content } })
   const messages = buildConversation(20, 5_000).map(wrap)
-  const result = compressToolHistoryForTest(messages as any, 'gpt-4o')
+  const result = compressToolHistoryForTest(messages, 'gpt-4o')
 
   // First wrapped tool-result message should have stub content (old tier)
   const firstResultMsg = (result as WrappedMsg[]).find(
     m =>
       Array.isArray(m.message.content) &&
-      m.message.content.some((b: any) => b.type === 'tool_result'),
+      m.message.content.some((b) => b.type === 'tool_result'),
   )
   const block = (firstResultMsg!.message.content as Block[]).find(
-    (b: any) => b.type === 'tool_result',
+    (b) => b.type === 'tool_result',
   ) as Block
-  const text = ((block.content as Block[])[0] as any).text
+  const text = ((block.content as Block[])[0]).text
   expect(text).toMatch(/^\[Read args=.*→ 5000 chars omitted\]$/)
 })
 

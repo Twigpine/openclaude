@@ -936,7 +936,7 @@ function skipNewlines(P: ParseState): void {
  * pipeline(a,|,b), 2>nul), |, c).
  */
 function parsePipeline(P: ParseState): TsNode | null {
-  let first = parseCommand(P)
+  const first = parseCommand(P)
   if (!first) return null
   const parts: TsNode[] = [first]
   while (true) {
@@ -977,7 +977,6 @@ function parsePipeline(P: ParseState): TsNode | null {
         )
         parts.length = 0
         parts.push(wrapped)
-        first = wrapped
         continue
       }
       parts.push(op, next)

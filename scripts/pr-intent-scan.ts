@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { captureSync } from './subprocess.ts'
 
 export type FindingSeverity = 'high' | 'medium'
 
@@ -378,9 +378,7 @@ export function scanAddedLines(lines: DiffLine[]): Finding[] {
 }
 
 export function getGitDiff(baseRef: string, headRef = 'HEAD'): string {
-  const mergeBase = spawnSync('git', ['merge-base', baseRef, headRef], {
-    encoding: 'utf8',
-  })
+  const mergeBase = captureSync('git', ['merge-base', baseRef, headRef])
 
   if (mergeBase.status !== 0) {
     throw new Error(
@@ -389,10 +387,9 @@ export function getGitDiff(baseRef: string, headRef = 'HEAD'): string {
   }
 
   const base = mergeBase.stdout.trim()
-  const diff = spawnSync(
+  const diff = captureSync(
     'git',
     ['diff', '--unified=0', '--no-ext-diff', `${base}...${headRef}`],
-    { encoding: 'utf8' },
   )
 
   if (diff.status !== 0) {

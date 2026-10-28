@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type {
   BetaMessage,
   BetaMessageStreamParams,
@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  resetModelStringsForTestingOnly,
   setAllowedSettingSources,
   setFlagSettingsInline,
   setFlagSettingsPath,
@@ -23,6 +24,7 @@ import {
   __getInterruptionTraceSnapshotForTests,
   __resetInterruptionTraceForTests,
   __waitForInterruptionTraceFlushForTests,
+  isInterruptionTraceEnabled,
 } from '../../utils/interruptionTrace.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
 import { getClaudeAIOAuthTokens } from '../../utils/auth.js'
@@ -105,6 +107,9 @@ const hadSavedMacro = Object.hasOwn(globalThis, 'MACRO')
 const savedMacro = (globalThis as Record<string, unknown>).MACRO
 const originalNodeEnv = process.env.NODE_ENV
 let fixturesRoot: string | undefined
+const unexpectedInterruptionTraces: ReturnType<
+  typeof __getInterruptionTraceSnapshotForTests
+>[] = []
 
 type FetchOverride = NonNullable<Options['fetchOverride']>
 type LifecycleSnapshot = ReturnType<QueryLifecycleOperationTracker['snapshot']>
@@ -144,6 +149,7 @@ function makeBetaMessage(): BetaMessage {
     content: [],
     container: null,
     context_management: null,
+    diagnostics: null,
     stop_details: null,
     stop_reason: 'end_turn',
     stop_sequence: null,
@@ -351,26 +357,6 @@ async function drainGenerator<T>(
   }
 }
 
-async function waitForPromise<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  timeoutMessage: string,
-): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error(timeoutMessage))
-        }, timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId)
-  }
-}
-
 function makeParams(context: { model: string }): BetaMessageStreamParams {
   return {
     model: context.model,
@@ -503,6 +489,7 @@ function setIgnoredApiKeyHelper(): void {
 
 beforeEach(async () => {
   await acquireSharedMutationLock('claude.lifecycle.test.ts')
+  resetModelStringsForTestingOnly()
   setFlagSettingsPath(undefined)
   setFlagSettingsInline(null)
   setAllowedSettingSources([...SETTING_SOURCES])
@@ -520,8 +507,12 @@ afterEach(async () => {
         flushTimeout = setTimeout(resolve, 500)
       }),
     ])
-    // Trace-enabled cases reset their snapshots before use. Resetting here
-    // makes Bun 1.3.13 crash while running subsequent isolated test files.
+    // Only cases that enabled tracing may leave entries before cleanup.
+    if (!isInterruptionTraceEnabled()) {
+      const trace = __getInterruptionTraceSnapshotForTests()
+      if (trace.length > 0) unexpectedInterruptionTraces.push(trace)
+    }
+    __resetInterruptionTraceForTests()
     for (const key of envKeys) {
       if (originalEnv[key] === undefined) {
         delete process.env[key]
@@ -543,6 +534,7 @@ afterEach(async () => {
     setFlagSettingsPath(undefined)
     setFlagSettingsInline(null)
     setAllowedSettingSources([...SETTING_SOURCES])
+    resetModelStringsForTestingOnly()
     resetSettingsCache()
     getClaudeAIOAuthTokens.cache?.clear?.()
     resetGrowthBook()
@@ -554,6 +546,10 @@ afterEach(async () => {
     if (flushTimeout !== undefined) clearTimeout(flushTimeout)
     releaseSharedMutationLock()
   }
+})
+
+afterAll(() => {
+  expect(unexpectedInterruptionTraces).toEqual([])
 })
 
 if (runInProviderIsolatedChild) {

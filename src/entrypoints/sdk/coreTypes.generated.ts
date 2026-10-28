@@ -1483,7 +1483,7 @@ export type AccountInfo = {
   subscriptionType?: string
   tokenSource?: string
   apiKeySource?: string
-  apiProvider?: "firstParty" | "bedrock" | "vertex" | "foundry" | "openai" | "gemini" | "github" | "codex" | "nvidia-nim" | "minimax" | "mistral" | "xai" | "xiaomi-mimo"
+  apiProvider?: "firstParty" | "bedrock" | "vertex" | "foundry" | "openai" | "gemini" | "gemini-vertex" | "github" | "codex" | "nvidia-nim" | "minimax" | "mistral" | "xai" | "xiaomi-mimo"
 }
 
 export type AgentMcpServerSpec = string | (Record<string, ({

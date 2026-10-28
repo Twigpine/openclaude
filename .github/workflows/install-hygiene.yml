@@ -13,6 +13,7 @@
 name: Install hygiene
 
 on:
+  pull_request:
   schedule:
     - cron: '17 6 * * *' # daily, off the top-of-hour rush
   workflow_dispatch:
@@ -20,8 +21,36 @@ on:
 permissions:
   contents: read
 
+# Supersede stale runs for the same pull request. Scheduled and manual runs
+# get a per-run group and are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      install: ${{ steps.filter.outputs.install }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          filters: |
+            install:
+              - 'package.json'
+              - 'bun.lock'
+              - 'src/utils/imageResizer.native.test.ts'
+              - '.github/workflows/install-hygiene.yml'
+
   verify-published-install:
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.install == 'true' }}
     name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -48,5 +77,31 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Verify native image processing
+        run: bun test src/utils/imageResizer.native.test.ts
+
       - name: Verify published package installs clean
         run: bun run scripts/verify-clean-install.ts --published
+
+  required:
+    name: Install hygiene required
+    if: ${{ always() }}
+    needs: [changes, verify-published-install]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify applicable checks passed
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          node <<'NODE'
+          const jobs = JSON.parse(process.env.JOB_RESULTS);
+          const selected = process.env.EVENT_NAME === 'pull_request' ? jobs.changes.outputs.install : 'true';
+          const expected = selected === 'true' ? 'success' : 'skipped';
+          if (jobs.changes.result !== 'success' || !['true', 'false'].includes(selected) || jobs['verify-published-install'].result !== expected) {
+            console.error('Change detection must succeed and applicable checks must pass.', jobs);
+            process.exit(1);
+          }
+          console.log('Applicable checks passed; untouched surfaces were skipped.');
+          NODE

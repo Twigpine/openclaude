@@ -12,6 +12,7 @@ import {
 } from './context.ts'
 
 const originalEnv = {
+  CLAUDE_CODE_USE_GEMINI_VERTEX: process.env.CLAUDE_CODE_USE_GEMINI_VERTEX,
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS,
   CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS:
@@ -39,6 +40,7 @@ const originalEnv = {
 beforeEach(async () => {
   await acquireSharedMutationLock('context.test.ts')
   clearSessionContextWindowOverride()
+  delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
   delete process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS
@@ -61,6 +63,12 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    if (originalEnv.CLAUDE_CODE_USE_GEMINI_VERTEX === undefined) {
+      delete process.env.CLAUDE_CODE_USE_GEMINI_VERTEX
+    } else {
+      process.env.CLAUDE_CODE_USE_GEMINI_VERTEX =
+        originalEnv.CLAUDE_CODE_USE_GEMINI_VERTEX
+    }
     if (originalEnv.CLAUDE_CODE_USE_OPENAI === undefined) {
       delete process.env.CLAUDE_CODE_USE_OPENAI
     } else {
@@ -176,6 +184,18 @@ test('calculateContextPercentages preserves tiny nonzero usage', () => {
     used: 0.01,
     remaining: 99.99,
   })
+})
+
+test('gemini-3.5-flash uses Gemini Vertex metadata for context and output caps', () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+
+  expect(getContextWindowForModel('gemini-3.5-flash')).toBe(1_048_576)
+  expect(getModelMaxOutputTokens('gemini-3.5-flash')).toEqual({
+    default: 65_536,
+    upperLimit: 65_536,
+  })
+  expect(getMaxOutputTokensForModel('gemini-3.5-flash')).toBe(65_536)
 })
 
 test('deepseek-v4-flash uses the gateway-safe output cap by default', () => {
@@ -510,7 +530,9 @@ test('MiniMax China uses the M3 context limit before client setup', () => {
   try {
     process.env.ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
     process.env.ANTHROPIC_API_KEY = 'china-test-key'
-    expect(getContextWindowForModel('MiniMax-M3')).toBe(1_048_576)
+    expect(getContextWindowForModel('MiniMax-M3')).toBe(1_000_000)
+    expect(getContextWindowForModel('MiniMax-M3.1-Flash')).toBe(1_000_000)
+    expect(getMaxOutputTokensForModel('MiniMax-M3.1-Flash')).toBe(524_288)
   } finally {
     if (savedBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL
     else process.env.ANTHROPIC_BASE_URL = savedBaseUrl
@@ -1287,3 +1309,12 @@ test('clearSessionContextWindowOverride resets state for session isolation', () 
   expect(getSessionContextWindowOverride('gpt-4o')).toBeUndefined()
   expect(getContextWindowForModel('gpt-4o')).not.toBe(256_000)
 })
+
+test.each([[32_000, 32_000], [90_000, 64_000]])(
+  'Orca Sonnet output request %s uses its routed ceiling', (requested, expected) => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://api.orcarouter.ai/v1'
+    process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(requested)
+    expect(getMaxOutputTokensForModel('anthropic/claude-sonnet-4.6')).toBe(expected)
+  },
+)

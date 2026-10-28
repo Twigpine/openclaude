@@ -128,6 +128,15 @@ their `transportConfig.openaiShim` so the first request is compatible. Native
 transports such as direct Ollama build their own request payloads and are
 unaffected.
 
+OpenAI-compatible HTTP 403 responses retry with the existing backoff and retry
+budget only when the body explicitly reports request throttling, such as
+`Too many requests` or `rate_limit_exceeded`. Authentication, permission, and
+billing/quota signals take precedence; empty bodies and generic `try again`
+messages remain terminal. An explicit `x-should-retry: false` header still
+prevents the outer retry. When the primary request returns a recognized
+throttle, credential pools cool the key instead of permanently discarding it.
+The GitHub fallback from chat completions to Responses does not update pool cooldowns.
+
 ### Reasoning support is per model and per route
 
 `capabilities.supportsReasoning` is descriptive. It says the model is known to

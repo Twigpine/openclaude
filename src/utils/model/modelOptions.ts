@@ -8,6 +8,7 @@ import {
 } from '../../integrations/routeMetadata.js'
 import {
   getAdditionalModelOptionsCacheScope,
+  isLocalProviderUrl,
   resolveProviderRequest,
 } from '../../services/api/providerConfig.js'
 import {
@@ -45,14 +46,17 @@ import { getGlobalConfig } from '../config.js'
 import {
   getActiveOpenAIModelOptionsCache,
   getActiveProviderProfile,
+  getConfiguredProfileModelOptions,
   getProfileModelOptions,
   getProviderProfiles,
+  resolveProfileCapabilityRouteId,
 } from '../providerProfiles.js'
 import { getCachedOllamaModelOptions, isOllamaProvider } from './ollamaModels.js'
 import { getCachedNvidiaNimModelOptions, isNvidiaNimProvider } from './nvidiaNimModels.js'
 import { getCachedMiniMaxModelOptions, isMiniMaxProvider } from './minimaxModels.js'
 import { getCachedXiaomiMimoModelOptions, isXiaomiMimoProvider } from './xiaomi-mimoModels.js'
 import { getAntModels } from './antModels.js'
+import { isCurrentMiniMaxModelOption } from './minimaxCatalog.js'
 
 // @[MODEL LAUNCH]: Update all the available and default model option strings below.
 
@@ -1071,7 +1075,42 @@ export function getModelOptions(fastMode = false): ModelOption[] {
     return filterModelOptionsByAllowlist(getModelOptionsBase(fastMode))
   }
 
-  const options = getModelOptionsBase(fastMode)
+  const activeProfile = process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED === '1'
+    ? getActiveProviderProfile()
+    : undefined
+  const configuredOptions = activeProfile
+    ? getConfiguredProfileModelOptions(activeProfile)
+    : []
+  // Most models need no retirement decision. Resolve the route only for a
+  // filtered MiniMax name, and share that metadata lookup across this build.
+  let suggestionRouteId: string | null | undefined
+  let suggestionUsesLocalEndpoint = false
+  const isSuggestedModel = (model: ModelSetting): boolean => {
+    if (isCurrentMiniMaxModelOption(model)) return true
+    if (suggestionRouteId === undefined) {
+      const provider = getAPIProvider()
+      suggestionRouteId = provider === 'openai' && isOllamaProvider()
+        ? 'ollama'
+        : activeProfile
+          ? resolveProfileCapabilityRouteId(activeProfile.provider, activeProfile.baseUrl)
+          : getActiveOpenAIRouteId()
+      suggestionUsesLocalEndpoint = provider === 'openai' &&
+        isLocalProviderUrl(resolveProviderRequest().baseUrl)
+    }
+    return isCurrentMiniMaxModelOption(model, suggestionRouteId, suggestionUsesLocalEndpoint)
+  }
+  const options = getModelOptionsBase(fastMode).filter(option =>
+    option.switchToProfileId ||
+    isSuggestedModel(option.value) ||
+    configuredOptions.some(configured => configured.value === option.value),
+  )
+
+  for (const configured of configuredOptions) {
+    if (!isSuggestedModel(configured.value) &&
+      !options.some(option => option.value === configured.value)) {
+      options.push(configured)
+    }
+  }
 
   // Route-catalog lookup state is built once per options build (on first use)
   // and shared by every catalog check below, so repeated lookups — the env
@@ -1104,6 +1143,7 @@ export function getModelOptions(fastMode = false): ModelOption[] {
 
   // Append additional model options fetched during bootstrap
   for (const opt of getScopedAdditionalModelOptions()) {
+    if (!isSuggestedModel(opt.value)) continue
     const catalogOption = findRouteCatalogOption(
       getSharedRouteCatalogContext(),
       opt.value,

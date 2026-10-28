@@ -7,7 +7,7 @@ process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= 'true'
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { ZodError } from 'zod'
+import { ZodError } from 'zod/v4'
 import {
   CallToolRequestSchema,
   type CallToolResult,
@@ -35,7 +35,7 @@ import { getMainLoopModel } from '../utils/model/model.js'
 import { hasPermissionsToUseTool } from '../utils/permissions/permissions.js'
 import { setCwd } from '../utils/Shell.js'
 import { jsonStringify } from '../utils/slowOperations.js'
-import { getErrorParts } from '../utils/toolErrors.js'
+import { formatMcpValidationError, getErrorParts } from '../utils/toolErrors.js'
 import { zodToJsonSchema } from '../utils/zodToJsonSchema.js'
 
 type ToolInput = Tool['inputSchema']
@@ -233,7 +233,7 @@ export async function startMCPServer(
             content: [
               {
                 type: 'text',
-                text: `Tool ${name} input is invalid:\n${error.errors.map(e => `- ${e.path.join('.')}: ${e.message}`).join('\n')}`,
+                text: formatMcpValidationError(name, error),
               },
             ],
           }

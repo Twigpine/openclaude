@@ -14,11 +14,14 @@ import {
   clearPluginSettingsBase,
   resetSettingsCache,
 } from '../settings/settingsCache.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
+let restoreVertexEnv: () => void
 let allowedModels: Set<string> | undefined
 
 async function importFreshModelModule() {
   mock.restore()
   const getAPIProvider = () => {
+    if (process.env.CLAUDE_CODE_USE_GEMINI_VERTEX) return 'gemini-vertex'
     if (process.env.NVIDIA_NIM) return 'nvidia-nim'
     if (process.env.MINIMAX_API_KEY) return 'minimax'
     if (process.env.MIMO_API_KEY) return 'xiaomi-mimo'
@@ -129,6 +132,7 @@ beforeEach(async () => {
   resetStateForTests()
   resetSettingsCache()
   clearPluginSettingsBase()
+  restoreVertexEnv = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_MODEL'], { clear: true })
   allowedModels = undefined
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
@@ -171,6 +175,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   try {
+    restoreVertexEnv()
     mock.restore()
     resetStateForTests()
     resetSettingsCache()
@@ -342,15 +347,23 @@ test('getDefaultOpusModel returns OPENAI_MODEL for MiniMax', async () => {
   expect(getDefaultOpusModel()).toBe('MiniMax-M2.7')
 })
 
-test('getDefaultMainLoopModelSetting defaults MiniMax to M3', async () => {
+test('MiniMax default tiers share the Flash route default', async () => {
   process.env.MINIMAX_API_KEY = 'minimax-test'
 
   const {
     getDefaultMainLoopModel,
     getDefaultMainLoopModelSetting,
+    getDefaultOpusModel,
+    getDefaultSonnetModel,
+    getDefaultHaikuModel,
+    getSmallFastModel,
   } = await importFreshModelModule()
-  expect(getDefaultMainLoopModelSetting()).toBe('MiniMax-M3')
-  expect(getDefaultMainLoopModel()).toBe('MiniMax-M3')
+  expect(getDefaultSonnetModel()).toBe('MiniMax-M3.1-Flash')
+  expect(getDefaultHaikuModel()).toBe('MiniMax-M3.1-Flash')
+  expect(getSmallFastModel()).toBe('MiniMax-M3.1-Flash')
+  expect(getDefaultMainLoopModelSetting()).toBe('MiniMax-M3.1-Flash')
+  expect(getDefaultMainLoopModel()).toBe('MiniMax-M3.1-Flash')
+  expect(getDefaultOpusModel()).toBe('MiniMax-M3.1-Flash')
 })
 
 test('Concentrate selects its dedicated model before client normalization', async () => {
@@ -625,4 +638,14 @@ test('default helpers do not leak claude-* names to Xiaomi MiMo', async () => {
     expect(model.toLowerCase()).not.toContain('claude')
     expect(model.toLowerCase()).not.toContain('opus')
   }
+})
+
+
+test('Vertex without a model override ignores a saved model from another provider', async () => {
+  saveGlobalConfig(current => ({ ...current, model: 'claude-sonnet-4-6' }))
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  const { getUserSpecifiedModelSetting } = await importFreshModelModule()
+  expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-flash')
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
+  expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-pro')
 })

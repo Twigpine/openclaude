@@ -1,5 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
-import React, { useCallback } from 'react';
+import React from 'react';
 import { Text } from '../ink.js';
 import { getGlobalConfig, saveGlobalConfig } from '../utils/config.js';
 import { isSupportedTerminal } from '../utils/ide.js';

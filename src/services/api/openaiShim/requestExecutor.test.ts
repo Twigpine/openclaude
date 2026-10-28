@@ -1,15 +1,17 @@
+import type Anthropic from '@anthropic-ai/sdk'
 import { APIError } from '@anthropic-ai/sdk'
+import { snapshotEnv } from '../../../test/envSnapshot.js'
+import { CannotRetryError, withRetry } from '../withRetry.js'
 import { afterEach, beforeEach, expect, jest, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../../test/sharedMutationLock.js'
 import { asMockFetch } from '../../../test/typedMocks.js'
-import { _clearRegistryForTesting, ensureIntegrationsLoaded, registerGateway } from '../../../integrations/index.ts'
+import { _clearRegistryForTesting, ensureIntegrationsLoaded } from '../../../integrations/index.ts'
 import { applyProviderFlag } from '../../../utils/providerFlag.ts'
-import { applyProviderProfileToProcessEnv } from '../../../utils/providerProfiles.ts'
 import {
+  categorizeRetryableAPIError,
   getAssistantMessageFromError,
-  OPENCODE_GO_FREE_LIMIT_ERROR_MESSAGE,
 } from '../errors.ts'
-import { createOpenAIShimClient, hasMistralApiHost } from '../openaiShim.ts'
+import { createOpenAIShimClient } from '../openaiShim.ts'
 import { formatRetryAfterHint, sleepMs } from './requestExecutor.js'
 import * as realGithubModelsCredentials from '../../../utils/githubModelsCredentials.js'
 
@@ -108,255 +110,6 @@ function makeSseResponse(lines: string[]): Response {
   )
 }
 
-function withResponseUrl(response: Response, url: string): Response {
-  Object.defineProperty(response, 'url', {
-    value: url,
-    configurable: true,
-  })
-  return response
-}
-
-type StallingResponse = {
-  response: Response
-  cancelReasons: unknown[]
-  close: () => void
-}
-
-function makeStallingResponse(
-  firstChunk: string,
-  url = 'https://api.example.test/v1/chat/completions',
-  contentType = 'text/event-stream',
-): StallingResponse {
-  const encoder = new TextEncoder()
-  const cancelReasons: unknown[] = []
-  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined
-  let closed = false
-
-  const response = new Response(
-    new ReadableStream<Uint8Array>({
-      start(controller) {
-        streamController = controller
-        controller.enqueue(encoder.encode(firstChunk))
-      },
-      cancel(reason) {
-        closed = true
-        cancelReasons.push(reason)
-      },
-    }),
-    {
-      headers: {
-        'Content-Type': contentType,
-      },
-    },
-  )
-
-  return {
-    response: withResponseUrl(response, url),
-    cancelReasons,
-    close: () => {
-      if (closed) return
-      closed = true
-      try {
-        streamController?.close()
-      } catch {
-        // The test may already have cancelled the stream.
-      }
-    },
-  }
-}
-
-type ShimStream = AsyncIterable<Record<string, unknown>> & {
-  controller: AbortController
-}
-
-type StreamDrainOutcome =
-  | { status: 'completed'; events: Array<Record<string, unknown>> }
-  | {
-    status: 'rejected'
-    events: Array<Record<string, unknown>>
-    error: unknown
-  }
-
-async function waitForPromise<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  message: string,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer)
-    }
-  }
-}
-
-async function expectAbortStopsStream({
-  abort,
-  cancelReasons,
-  expectedEventsBeforeAbort,
-  label,
-  stream,
-}: {
-  abort: () => void
-  cancelReasons: unknown[]
-  expectedEventsBeforeAbort: number
-  label: string
-  stream: ShimStream
-}): Promise<StreamDrainOutcome> {
-  const events: Array<Record<string, unknown>> = []
-  let resolveReady!: () => void
-  const ready = new Promise<void>(resolve => {
-    resolveReady = resolve
-  })
-
-  const drain = (async (): Promise<StreamDrainOutcome> => {
-    try {
-      for await (const event of stream) {
-        events.push(event)
-        if (events.length >= expectedEventsBeforeAbort) {
-          resolveReady()
-        }
-      }
-      return { status: 'completed', events }
-    } catch (error) {
-      return { status: 'rejected', events, error }
-    }
-  })()
-
-  await waitForPromise(
-    ready,
-    500,
-    `${label} did not produce initial stream events`,
-  )
-  // Let the for-await loop ask the stream reader for the next chunk, so the
-  // abort has to wake a real pending read rather than only flipping a flag.
-  await Promise.resolve()
-  await Promise.resolve()
-
-  abort()
-
-  const outcome = await waitForPromise(
-    drain,
-    500,
-    `${label} did not stop promptly after abort`,
-  )
-  expect(cancelReasons).toHaveLength(1)
-  expect(outcome.status).toBe('rejected')
-  if (outcome.status === 'rejected') {
-    expect((outcome.error as { name?: unknown }).name).toBe('AbortError')
-  }
-  return outcome
-}
-
-async function expectPausedAbortCancelsStream({
-  cancelReasons,
-  label,
-  stream,
-}: {
-  cancelReasons: unknown[]
-  label: string
-  stream: ShimStream
-}): Promise<IteratorResult<Record<string, unknown>>> {
-  const iterator = stream[Symbol.asyncIterator]()
-  const first = await waitForPromise(
-    iterator.next(),
-    500,
-    `${label} did not produce first stream event`,
-  )
-  expect(first.done).toBe(false)
-
-  stream.controller.abort()
-  await waitForPromise(
-    (async () => {
-      for (let i = 0; i < 10; i++) {
-        if (cancelReasons.length > 0) return
-        await Promise.resolve()
-      }
-      throw new Error(`${label} did not cancel source on controller abort`)
-    })(),
-    500,
-    `${label} did not cancel source on controller abort`,
-  )
-
-  const returned = await waitForPromise(
-    Promise.resolve(iterator.return?.()),
-    500,
-    `${label} did not return promptly after abort while paused`,
-  )
-  expect(cancelReasons).toHaveLength(1)
-  return returned as IteratorResult<Record<string, unknown>>
-}
-
-async function expectBufferedAbortRejectsNext({
-  expectedText,
-  label,
-  stream,
-}: {
-  expectedText?: string
-  label: string
-  stream: ShimStream
-}): Promise<void> {
-  const iterator = stream[Symbol.asyncIterator]()
-
-  try {
-    let firstDelta: Record<string, unknown> | undefined
-    for (let i = 0; i < 5; i++) {
-      const next = await waitForPromise(
-        iterator.next(),
-        500,
-        `${label} did not produce expected pre-abort events`,
-      )
-      expect(next.done).toBe(false)
-      if (next.value?.type === 'content_block_delta') {
-        firstDelta = next.value
-        break
-      }
-    }
-
-    expect(firstDelta).toBeDefined()
-    if (expectedText !== undefined) {
-      expect((firstDelta as { delta?: { text?: string } }).delta?.text).toBe(expectedText)
-    }
-
-    stream.controller.abort()
-    const afterAbort = await waitForPromise(
-      iterator.next().then(
-        value => ({ status: 'resolved' as const, value }),
-        error => ({ status: 'rejected' as const, error }),
-      ),
-      500,
-      `${label} did not stop after abort`,
-    )
-
-    if (afterAbort.status !== 'rejected') {
-      throw new Error(`${label} yielded after abort: ${JSON.stringify(afterAbort.value)}`)
-    }
-    expect((afterAbort.error as { name?: unknown }).name).toBe('AbortError')
-  } finally {
-    await Promise.resolve(iterator.return?.()).catch(() => {})
-  }
-}
-
-function makeOpenAIStreamFrame(
-  delta: Record<string, unknown>,
-  finishReason: string | null = null,
-): string {
-  return `data: ${JSON.stringify({
-    id: 'chatcmpl-abort-test',
-    object: 'chat.completion.chunk',
-    created: 1_780_000_000,
-    model: 'test-model',
-    choices: [{ index: 0, delta, finish_reason: finishReason }],
-  })}\n\n`
-}
-
 function makeStreamChunks(chunks: unknown[]): string[] {
   return [
     ...chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`),
@@ -368,25 +121,6 @@ function importFreshOpenAIShim(
   cacheKey: string,
 ): Promise<typeof import('../openaiShim.ts')> {
   return import(`../openaiShim.ts?${cacheKey}`)
-}
-
-type StreamIdleTestApi = {
-  StreamIdleTimeoutError: new (timeoutMs: number) => Error
-  getStreamIdleTimeoutMs: () => number
-  readWithIdleTimeout: (
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-    timeoutMs: number,
-    options?: { signal?: AbortSignal; onTimeout?: () => void },
-  ) => Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>>
-}
-
-async function getStreamIdleTestApi(cacheKey: string): Promise<StreamIdleTestApi> {
-  const mod = await importFreshOpenAIShim(cacheKey)
-  const testApi = mod.__test as unknown as Partial<StreamIdleTestApi>
-  expect(typeof testApi.StreamIdleTimeoutError).toBe('function')
-  expect(typeof testApi.getStreamIdleTimeoutMs).toBe('function')
-  expect(typeof testApi.readWithIdleTimeout).toBe('function')
-  return testApi as StreamIdleTestApi
 }
 
 function makeChatCompletionResponse(model: string): Response {
@@ -442,11 +176,6 @@ async function captureChatCompletionRequest(
   })
 
   return { authorization, headers, url }
-}
-
-function makeCodexSseResponse(responseData: Record<string, unknown>): Response {
-  const data = JSON.stringify(responseData)
-  return makeSseResponse([`event: response.completed\ndata: ${data}\n\n`])
 }
 
 beforeEach(async () => {
@@ -874,6 +603,202 @@ test('OPENAI_API_KEYS rotates to the next key on rate-limit failure', async () =
   })
 
   expect(authorizations).toEqual(['Bearer key-a', 'Bearer key-b'])
+})
+
+test.each([
+  { body: 'Too many requests, try again in 30s', retries: true },
+  { body: 'Rate limit exceeded for this API key', retries: true },
+  { body: 'Rate limit exceeded for this API key, streaming is disabled', retries: true },
+  { body: 'Rate limit exceeded for this API key, currently streaming is disabled', retries: true },
+  { body: 'Rate limit exceeded for this OAuth token', retries: true },
+  { body: 'Too many requests; no tokens remaining in the rate limit bucket', retries: true },
+  { body: 'Too many requests; empty token bucket', retries: true },
+  { body: 'Too many requests; no tokens found in the rate limit bucket', retries: true },
+  { body: 'Rate limit exceeded for this API key: bad gateway', retries: true },
+  { body: 'Rate limit exceeded for this API key: upstream response is empty', retries: true },
+  { body: 'Rate limit exceeded for this API key, bad gateway', retries: true },
+  { body: 'Rate limit exceeded for this API key, empty response received', retries: true },
+  { body: 'Token is invalid; too many requests', retries: false },
+  { body: 'No API key was provided; too many requests', retries: false },
+  { body: 'No valid API key found; too many requests', retries: false },
+  { body: 'No API key found; too many requests', retries: false },
+  { body: 'No token provided; rate limit exceeded', retries: false },
+  { body: 'API key is empty; too many requests', retries: false },
+  { body: '{"error":{"code":"bad_api_key","message":"Too many requests"}}', retries: false },
+  { body: 'Too many requests; your API key is no longer valid', retries: false },
+  { body: 'Too many requests; your API key does not exist', retries: false },
+  { body: 'Too many requests; API key, which is no longer valid', retries: false },
+  { body: 'API key, now empty; too many requests', retries: false },
+  { body: 'Account disabled; too many requests', retries: false },
+  { body: '{"error":{"code":"account_disabled","message":"Too many requests"}}', retries: false },
+  { body: 'Key is invalid; too many requests', retries: false },
+  { body: 'API key has been permanently disabled; too many requests', retries: false },
+  { body: 'Token has been permanently disabled; too many requests', retries: false },
+  { body: 'Rate limit exceeded; API key is invalid', retries: false },
+  { body: 'Rate limit exceeded; API key\nis invalid', retries: false },
+  { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: true },
+  { body: '', retries: false },
+  { body: 'Try again later', retries: false },
+  { body: 'Forbidden: too many requests', retries: false },
+  { body: 'Quota exceeded; too many requests', retries: false },
+  { body: 'Too many requests', retries: false, noRetry: true },
+  { body: '{"message":"Too many requests","type":"overloaded_error"}', retries: true },
+  { body: '{"message":"Too many requests","type":"overloaded_error"}', retries: false, noRetry: true },
+  { body: 'Too many requests: {"type":"overloaded_error"}', retries: false, noRetry: true },
+  { body: 'Too many requests: {"type":"overloaded_error"}', retries: false, noRetry: true, remote: true },
+  { body: 'Too many requests', retries: false, noRetry: true, remote: true },
+  { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: false, noRetry: true, remote: true },
+  { body: 'Too many requests', retries: true, remote: true },
+  { body: 'Too many requests', retries: true, baseUrl: 'https://billing.example.com/v1' },
+  { body: '{"error":{"code":"rate_limit_exceeded"}}', retries: true, baseUrl: 'https://billing.example.com/v1' },
+  { body: 'Too many requests', retries: false, noRetry: true, baseUrl: 'https://billing.example.com/v1' },
+  { body: 'Quota exceeded; too many requests', retries: false, baseUrl: 'https://billing.example.com/v1' },
+  { body: 'Too many requests', retries: true, status: 429, baseUrl: 'https://billing.example.com/v1' },
+  { body: 'Billing required; too many requests', retries: false, status: 429, baseUrl: 'https://billing.example.com/v1' },
+])('throttle responses through the shim and retry loop: %j', async ({ body, retries, noRetry, remote, baseUrl, status = 403 }) => {
+  const restoreRetryEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS', 'CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_REMOTE', 'OPENAI_BASE_URL'])
+  if (baseUrl) process.env.OPENAI_BASE_URL = baseUrl
+  if (remote) process.env.CLAUDE_CODE_REMOTE = '1'
+  else delete process.env.CLAUDE_CODE_REMOTE
+  process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  let attempts = 0
+  globalThis.fetch = asMockFetch(mock(async () => {
+    attempts++
+    return attempts === 1
+      ? new Response(body, {
+          status,
+          headers: noRetry ? { 'x-should-retry': 'false' } : {},
+        })
+      : makeChatCompletionResponse('gpt-5.5')
+  }))
+  const client = createOpenAIShimClient({}) as Anthropic
+  const countdowns: unknown[] = []
+  const retryCategories: string[] = []
+  let caught: unknown
+  let result: unknown
+  try {
+    const generator = withRetry(
+      async () => client,
+      api => api.beta.messages.create({
+        model: 'gpt-5.5',
+        messages: [{ role: 'user', content: 'hello' }],
+        max_tokens: 32,
+        stream: false,
+      }),
+      { maxRetries: 2, model: 'gpt-5.5', thinkingConfig: { type: 'disabled' } },
+    )
+    while (true) {
+      const next = await generator.next()
+      if (next.done) {
+        result = next.value
+        break
+      }
+      countdowns.push(next.value)
+      // QueryEngine uses this same projection for public SDK api_retry events.
+      retryCategories.push(categorizeRetryableAPIError(next.value.error))
+    }
+  } catch (error) {
+    caught = error
+  } finally {
+    restoreRetryEnv()
+  }
+  expect(attempts).toBe(retries ? 2 : 1)
+  expect(retryCategories).toEqual(retries ? ['rate_limit'] : [])
+  if (retries) {
+    expect(caught).toBeUndefined()
+    expect(result).toMatchObject({ content: [{ type: 'text', text: 'ok' }] })
+    expect(countdowns).toEqual([expect.objectContaining({
+      type: 'system', subtype: 'api_error', retryAttempt: 1, maxRetries: 2,
+    })])
+  } else {
+    expect(caught).toBeInstanceOf(CannotRetryError)
+    expect(countdowns).toEqual([])
+    if (/account|key|token/i.test(body)) {
+      const message = getAssistantMessageFromError((caught as CannotRetryError).originalError, 'gpt-5.5')
+      expect(JSON.stringify(message)).toContain('Authentication failed')
+      expect(JSON.stringify(message)).not.toContain('Provider rate limit reached')
+    }
+  }
+})
+
+test.each([
+  'Too many requests',
+  '{"error":{"code":"rate_limit_exceeded","message":"Too many requests"}}',
+])('throttle-403 exhausts the bounded retry budget with rate-limit guidance: %s', async body => {
+  const restoreRetryEnv = snapshotEnv(['OPENCLAUDE_RETRY_DELAY_MS', 'CLAUDE_CODE_USE_OPENAI'])
+  process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  let attempts = 0
+  globalThis.fetch = asMockFetch(mock(async () => {
+    attempts++
+    return new Response(body, { status: 403, headers: { 'request-id': 'throttle-request' } })
+  }))
+  const client = createOpenAIShimClient({}) as Anthropic
+  let caught: unknown
+  try {
+    for await (const _ of withRetry(
+      async () => client,
+      api => api.beta.messages.create({
+        model: 'gpt-5.5', messages: [{ role: 'user', content: 'hello' }], max_tokens: 32,
+      }),
+      { maxRetries: 2, model: 'gpt-5.5', thinkingConfig: { type: 'disabled' } },
+    )) { /* drain countdowns */ }
+  } catch (error) {
+    caught = error
+  } finally {
+    restoreRetryEnv()
+  }
+  expect(attempts).toBe(3)
+  expect(caught).toBeInstanceOf(CannotRetryError)
+  const originalError = (caught as CannotRetryError).originalError as APIError
+  expect(originalError.status).toBe(403)
+  expect(originalError.requestID).toBe('throttle-request')
+  if (body.startsWith('{')) expect(originalError.error).toEqual(JSON.parse(body))
+  const message = getAssistantMessageFromError(originalError, 'gpt-5.5')
+  expect(JSON.stringify(message)).toContain('Provider rate limit reached')
+  expect(JSON.stringify(message)).not.toContain('Authentication failed')
+})
+
+test.each([
+  { body: 'Rate limit exceeded for this OAuth token', recoverable: true },
+  { body: 'Rate limit exceeded for this API key, bad gateway', recoverable: true },
+  { body: 'Account disabled; too many requests', recoverable: false },
+  { body: 'No API key was provided; too many requests', recoverable: false },
+  { body: 'No valid API key found; too many requests', recoverable: false },
+  { body: 'Too many requests; API key, which is no longer valid', recoverable: false },
+  { body: '{"error":{"code":"bad_api_key","message":"Too many requests"}}', recoverable: false },
+  { body: '{"error":{"code":"account_deactivated","message":"Too many requests"}}', recoverable: false },
+])('throttle-403 credential recovery follows fault precedence: %j', async ({ body, recoverable }) => {
+  const restorePoolEnv = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'OPENAI_API_KEYS', 'OPENAI_API_KEY'])
+  try {
+    jest.useFakeTimers()
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_API_KEYS = 'key-a,key-b'
+    delete process.env.OPENAI_API_KEY
+    const authorizations: Array<string | null> = []
+    globalThis.fetch = asMockFetch(mock(async (_input, init) => {
+      const headers = new Headers(init?.headers)
+      authorizations.push(headers.get('authorization'))
+      return authorizations.length === 1
+        ? new Response(body, { status: 403 })
+        : makeChatCompletionResponse('gpt-5.5')
+    }))
+    const client = createOpenAIShimClient({}) as Anthropic
+    const request = () => client.beta.messages.create({
+      model: 'gpt-5.5', messages: [{ role: 'user', content: 'hello' }], max_tokens: 32,
+    })
+    await request()
+    await request()
+    expect(authorizations).toEqual(['Bearer key-a', 'Bearer key-b', 'Bearer key-b'])
+    jest.advanceTimersByTime(30_001)
+    await request()
+    expect(authorizations).toEqual([
+      'Bearer key-a', 'Bearer key-b', 'Bearer key-b', recoverable ? 'Bearer key-a' : 'Bearer key-b',
+    ])
+  } finally {
+    restorePoolEnv()
+  }
 })
 
 test('GitHub 429 cools the active pooled credential before retrying', async () => {

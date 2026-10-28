@@ -229,7 +229,6 @@ export async function executeOpenAIRequest(
     params,
     options,
     requestProcessEnv,
-    fastPath,
     shimConfig,
     runtimeShimContext,
     body,
@@ -775,15 +774,22 @@ export async function executeOpenAIRequest(
       { level: 'warn' },
     )
 
-    throw APIError.generate(
+    const message = buildOpenAICompatibilityErrorMessage(
+      `OpenAI API error ${status}: ${safeErrorBody}${rateHint}`,
+      failureWithUrl,
+    )
+    const apiError = APIError.generate(
       status,
       safeParsedBody,
-      buildOpenAICompatibilityErrorMessage(
-        `OpenAI API error ${status}: ${safeErrorBody}${rateHint}`,
-        failureWithUrl,
-      ),
+      message,
       headersWithRequestUrl(responseHeaders, requestUrl),
     )
+    // The SDK prefers a JSON error body over the supplied message. Retain the
+    // throttle marker needed by withRetry without discarding the error payload.
+    if (status === 403 && failure.category === 'rate_limited') {
+      apiError.message = message
+    }
+    throw apiError
   }
 
   let response: Response | undefined
@@ -1098,7 +1104,9 @@ export async function executeOpenAIRequest(
     const credentialFailureKind =
       failure.category === 'auth_invalid' && !failure.retryable
         ? 'auth'
-        : response.status === 402 || response.status === 429
+        : response.status === 402 ||
+            response.status === 429 ||
+            (response.status === 403 && failure.category === 'rate_limited')
           ? 'cooldown'
           : null
     if (credentialPool && credentialPool.size > 1 && credentialFailureKind) {

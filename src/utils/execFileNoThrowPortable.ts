@@ -9,8 +9,8 @@ type ExecSyncOptions = {
   abortSignal?: AbortSignal
   timeout?: number
   input?: string
-  // Sync variant: execaSync rejects async-only stdio values like 'overlapped'
-  stdio?: ExecaSyncOptions['stdio']
+  // This wrapper uses UTF-8 output, so exclude binary-only stdio transforms.
+  stdio?: Extract<ExecaSyncOptions, { encoding?: 'utf8' | 'utf16le' }>['stdio']
 }
 
 /**

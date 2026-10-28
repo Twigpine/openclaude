@@ -50,7 +50,6 @@ import {
   getContextWindowForModel,
   getModelMaxOutputTokens,
 } from './utils/context.js'
-import { isFastModeEnabled } from './utils/fastMode.js'
 import { formatDuration, formatNumber } from './utils/format.js'
 import type { FpsMetrics } from './utils/fpsTracker.js'
 import { getCanonicalName } from './utils/model/model.js'
@@ -392,11 +391,6 @@ export function addToTotalSessionCost(
       }) + '\n',
     )
   }
-
-  const attrs =
-    isFastModeEnabled() && usage.speed === 'fast'
-      ? { model, speed: 'fast' }
-      : { model }
 
   let totalCost = cost
   for (const advisorUsage of getAdvisorUsage(usage)) {

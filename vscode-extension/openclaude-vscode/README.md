@@ -31,6 +31,19 @@ A practical VS Code companion for OpenClaude with a project-aware **Control Cent
 - VS Code `1.95+`
 - `openclaude` available in your terminal PATH (`npm install -g @twigpine/openclaude@latest`)
 
+## Resuming sessions
+
+**OpenClaude: Resume Session** reads the current workspace's saved conversations
+from `~/.openclaude/projects/`, including long workspace paths. When a session lives in an alternate runtime directory, resume passes its resolved transcript path to the CLI so continued messages stay with that history. If you use
+`OPENCLAUDE_CONFIG_DIR`, start VS Code with the same environment override as the
+CLI so both read the same history. Claude Code's `CLAUDE_CONFIG_DIR` and
+`~/.claude/` are separate and are not used for OpenClaude session discovery.
+
+The chat's **New Chat** button and **OpenClaude: New Chat** command clear the
+active session and displayed history. The next message starts a fresh conversation;
+saved transcripts remain available through Resume Session. Switching to a saved
+conversation during a response keeps Send disabled until that session starts.
+
 ## Commands
 
 - `OpenClaude: Open Control Center`
@@ -62,6 +75,14 @@ If you use `.openclaude-profile.json` for the same workspace, leave Azure inject
 - `openclaude.permissionMode` — chat permission mode
 
 `openclaude.useOpenAIShim` only injects `CLAUDE_CODE_USE_OPENAI=1` when Azure injection did not already set it. It does not configure endpoints or keys by itself.
+
+On Windows, chat launches through `cmd.exe` to support npm's `.cmd` shims.
+The configured launch command is trusted shell text; quote executable paths that
+contain spaces. Model names, resume targets, and additional CLI arguments are
+passed as literal arguments. CR/LF in those arguments is rejected because
+`cmd.exe` cannot represent it safely. Custom batch wrappers must preserve quoted
+arguments (as npm's `%*` forwarding does); wrappers that re-evaluate arguments
+with `CALL` or delayed expansion are not supported by this quoting contract.
 
 ## Notes on Status Detection
 

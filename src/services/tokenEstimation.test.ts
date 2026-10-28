@@ -1,7 +1,26 @@
 import type { Anthropic } from '@anthropic-ai/sdk'
 import { expect, mock, test } from 'bun:test'
 import { jsonStringify } from '../utils/slowOperations.js'
-import { __test, roughTokenCountEstimation } from './tokenEstimation.js'
+import { __test, roughTokenCountEstimation, roughTokenCountEstimationForMessage } from './tokenEstimation.js'
+
+test('rough estimation handles browser state alongside text, images and tool references in tool results', () => {
+  const browserState: Anthropic.BrowserStateBlockParam = { type: 'browser_state', tabs: [] }
+  const reference: Anthropic.ToolReferenceBlockParam = { type: 'tool_reference', tool_name: 'lookup_docs' }
+  const toolResult: Anthropic.ToolResultBlockParam = {
+    type: 'tool_result', tool_use_id: 'tool_browser',
+    content: [
+      { type: 'text', text: 'page loaded' }, browserState, reference,
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(10000) } },
+    ],
+  }
+  expect(roughTokenCountEstimationForMessage({
+    type: 'user', message: { content: [toolResult] },
+  })).toBe(
+    roughTokenCountEstimation('page loaded') +
+    roughTokenCountEstimation(jsonStringify(browserState)) +
+    roughTokenCountEstimation(jsonStringify(reference)) + 2000,
+  )
+})
 
 function createTextTool(): Anthropic.Beta.Messages.BetaToolUnion {
   return {

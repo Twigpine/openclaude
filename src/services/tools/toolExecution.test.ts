@@ -16,7 +16,9 @@ import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
 import { FILE_EDIT_TOOL_NAME } from '../../tools/FileEditTool/constants.js'
 import { FILE_WRITE_TOOL_NAME } from '../../tools/FileWriteTool/constants.js'
 import { NOTEBOOK_EDIT_TOOL_NAME } from '../../tools/NotebookEditTool/constants.js'
+import { asAgentId } from '../../types/ids.js'
 import { AbortError } from '../../utils/errors.js'
+import { getDoomLoopState, resetDoomLoop } from '../../utils/doomLoop.js'
 import { CANCEL_MESSAGE, createAssistantMessage } from '../../utils/messages.js'
 import {
   type QueryActiveOperationSnapshot,
@@ -143,6 +145,55 @@ async function collectRunToolUse(
   }
   return updates
 }
+
+test('a late successful tool result resets doom blocks without clearing another agent', async () => {
+  const agentId = asAgentId('doom-loop-late-success')
+  const siblingId = asAgentId('doom-loop-sibling')
+  let finish!: () => void
+  let started!: () => void
+  const ready = new Promise<void>(resolve => { started = resolve })
+  const pending = new Promise<void>(resolve => { finish = resolve })
+  let calls = 0
+  const tool = createToolFixture(z.object({ value: z.string() }), {
+    name: 'DoomLoopLateSuccessTool',
+    async call() {
+      if (++calls === 2) {
+        started()
+        await pending
+      }
+      return { data: 'ok' }
+    },
+  })
+  const context = createLifecycleToolUseContext([tool], new CountingQueryLifecycleTracker())
+  context.agentId = agentId
+  const sibling = { ...context, agentId: siblingId }
+  let inFlight: Promise<MessageUpdateLazy[]> | undefined
+  try {
+    await collectRunToolUse(tool, { value: 'same' }, context)
+    inFlight = collectRunToolUse(tool, { value: 'same' }, context)
+    await ready
+    for (let i = 0; i < 4; i++) await collectRunToolUse(tool, { value: 'same' }, context)
+    for (let i = 0; i < 6; i++) await collectRunToolUse(tool, { value: 'same' }, sibling)
+    expect(getDoomLoopState(agentId).consecutiveBlocks).toBe(4)
+    finish()
+    await inFlight
+    expect(getDoomLoopState(agentId).consecutiveBlocks).toBe(0)
+    expect(getDoomLoopState(siblingId).consecutiveBlocks).toBe(4)
+    for (let i = 0; i < 4; i++) await collectRunToolUse(tool, { value: 'same' }, context)
+    expect(getDoomLoopState(agentId).terminalMessage).toBeNull()
+    await collectRunToolUse(tool, { value: 'same' }, context)
+    expect(getDoomLoopState(agentId).terminalMessage).toContain('5 consecutive')
+    const executedBefore = calls
+    const skipped = await collectRunToolUse(tool, { value: 'different' }, context)
+    expect(calls).toBe(executedBefore)
+    expect(firstToolResultText(skipped[0]?.message)).toContain('force-terminated')
+  } finally {
+    finish()
+    await inFlight
+    resetDoomLoop(agentId)
+    resetDoomLoop(siblingId)
+  }
+})
 
 describe('getSchemaValidationErrorOverride', () => {
   test('returns actionable missing-skill error for SkillTool', () => {

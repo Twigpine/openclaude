@@ -39,10 +39,16 @@ import {
 } from '../services/api/providerConfig.js'
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { getGlobalClaudeFile } from './env.js'
-import { isBareMode } from './envUtils.js'
+import { isBareMode, isEnvTruthy as isRuntimeFlagTruthy } from './envUtils.js'
 import {
   type GeminiResolvedCredential,
+  getGeminiVertexEndpointError,
+  getGeminiVertexGlobalEndpointError,
+  getGeminiVertexLocation,
+  getGeminiVertexModel,
+  getGeminiVertexProjectId,
   resolveGeminiCredential,
+  resolveGeminiVertexAuthMode,
 } from './geminiAuth.js'
 import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
 import { readXaiCredentialsAsync } from './xaiCredentials.js'
@@ -248,6 +254,8 @@ function getRuntimeValidationTarget(
   const validationTargets = getValidationTargets()
 
   const enabledTarget = validationTargets.find(target => {
+    // Native Vertex is handled by its credential/project branch before this search.
+    if (target.descriptor.id === 'gemini-vertex') return false
     const routing = getValidationRouting(target)
     if (!routing?.enablementEnvVar || !isEnvTruthy(env[routing.enablementEnvVar])) {
       return false
@@ -596,6 +604,58 @@ export async function getProviderValidationError(
     hasStoredXaiOAuthCredentials?: () => Promise<boolean>
   },
 ): Promise<string | null> {
+  if (isRuntimeFlagTruthy(env.CLAUDE_CODE_USE_GEMINI_VERTEX)) {
+    // Resolve the credential first, mirroring getAnthropicClient: ADC can supply
+    // both the access token and the project id (credential.projectId), so a
+    // missing project env var is only fatal once we know ADC didn't provide one.
+    const vertexCredential = await (
+      options?.resolveGeminiCredential ??
+      ((credentialEnv: NodeJS.ProcessEnv) =>
+        resolveGeminiCredential(credentialEnv, { allowAmbientAdc: true }))
+    )({
+      ...env,
+      GEMINI_AUTH_MODE: resolveGeminiVertexAuthMode(env),
+      GEMINI_API_KEY: undefined,
+      GOOGLE_API_KEY: undefined,
+    } as NodeJS.ProcessEnv)
+    if (vertexCredential.kind === 'none') {
+      return 'Gemini Vertex authentication requires GEMINI_ACCESS_TOKEN (access-token mode) or Google ADC credentials.'
+    }
+    const hasEnvProject =
+      hasNonEmptyEnvValue(env, 'GEMINI_VERTEX_PROJECT') ||
+      hasNonEmptyEnvValue(env, 'GOOGLE_CLOUD_PROJECT') ||
+      hasNonEmptyEnvValue(env, 'GCLOUD_PROJECT') ||
+      hasNonEmptyEnvValue(env, 'GOOGLE_PROJECT_ID')
+    const hasAdcProject =
+      vertexCredential.kind === 'adc' &&
+      typeof vertexCredential.projectId === 'string' &&
+      vertexCredential.projectId.trim() !== ''
+    if (!hasEnvProject && !hasAdcProject) {
+      return 'Gemini Vertex project is required via GEMINI_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT (or an ADC-derived project).'
+    }
+    if (env.GEMINI_VERTEX_MODEL !== undefined && !hasNonEmptyEnvValue(env, 'GEMINI_VERTEX_MODEL')) {
+      return 'Gemini Vertex model is required via GEMINI_VERTEX_MODEL.'
+    }
+    const endpointError = getGeminiVertexEndpointError({
+      project: getGeminiVertexProjectId(env) ??
+        (vertexCredential.kind === 'adc' ? vertexCredential.projectId?.trim() : undefined),
+      location: getGeminiVertexLocation(env),
+      model: getGeminiVertexModel(env),
+    })
+    if (endpointError) return endpointError
+    // Same model/location pair the client refuses. Unset model uses the
+    // Vertex default (regional-capable); a set global-only model must be global.
+    const globalEndpointError = getGeminiVertexGlobalEndpointError(
+      getGeminiVertexModel(env),
+      getGeminiVertexLocation(env),
+      env,
+    )
+    if (globalEndpointError) {
+      return globalEndpointError
+    }
+    return null
+  }
+
   const secretSource = env as SecretValueSource
   const useOpenAI = isEnvTruthy(env.CLAUDE_CODE_USE_OPENAI)
   const validationTarget = getRuntimeValidationTarget(env)

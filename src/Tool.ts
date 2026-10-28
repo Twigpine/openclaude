@@ -201,6 +201,25 @@ export type ToolUseContext = {
     /** Per-agent provider override from agentRouting config */
     providerOverride?: { model: string; baseURL: string; apiKey: string }
   }
+  /** Shared by copies with the same options; internal options clones retain separate snapshots. */
+  queryModelSelection?: {
+    agentId: ToolUseContext['agentId']
+    /** Inherited selection; accepted requests replace it within this options snapshot. */
+    current?: {
+      /** Identity and value invalidate provenance after an explicit model override. */
+      options: ToolUseContext['options']
+      model: string
+      /** Selection before routing/resolution, to detect later configuration changes. */
+      selectedModel: string
+      /** Concrete model used for the request, independent of source options. */
+      runtimeModel: string
+      requestModel: string
+      /** Provider category and optional saved profile; fixed overrides are independent. */
+      providerKey: string
+      /** Default ambient inheritance may follow a provider switch; explicit model choices may not. */
+      followsProvider: boolean
+    }
+  }
   abortController: AbortController
   readFileState: FileStateCache
   getAppState(): AppState
@@ -271,6 +290,8 @@ export type ToolUseContext = {
   ) => void
   setConversationId?: (id: UUID) => void
   agentId?: AgentId // Only set for subagents; use getSessionId() for session ID. Hooks use this to distinguish subagent calls.
+  /** Private query-turn identity, preserved by tool-context copies. */
+  doomLoopKey?: object
   /** Last submitted transcript for this producer; undefined for other IDs. */
   getAgentTranscriptPath?: (agentId: AgentId) => string | undefined
   agentType?: string // Subagent type name. For the main thread's --agent type, hooks fall back to getMainThreadAgentType().
@@ -383,8 +404,15 @@ export type ToolCallProgress<P extends ToolProgressData = ToolProgressData> = (
   progress: ToolProgress<P>,
 ) => void
 
-// Type for any schema that outputs an object with string keys
-export type AnyObject = z.ZodType<{ [key: string]: unknown }>
+// Consumers only parse/convert schemas. Comparing the full fluent ZodType
+// interface recursively instantiates builders for every concrete tool schema.
+type ToolSchema<Output> = Pick<
+  z.ZodType<Output>,
+  '_zod' | '~standard' | 'parse' | 'safeParse'
+>
+
+// Type for any schema that outputs an object with string keys.
+export type AnyObject = ToolSchema<{ [key: string]: unknown }>
 
 /**
  * Checks if a tool matches the given name (primary name or alias).
@@ -441,7 +469,7 @@ export type Tool<
   readonly inputJSONSchema?: ToolInputJSONSchema
   // Optional because TungstenTool doesn't define this. TODO: Make it required.
   // When we do that, we can also go through and make this a bit more type-safe.
-  outputSchema?: z.ZodType<unknown>
+  outputSchema?: ToolSchema<unknown>
   inputsEquivalent?(a: z.infer<Input>, b: z.infer<Input>): boolean
   isConcurrencySafe(input: z.infer<Input>): boolean
   isEnabled(): boolean

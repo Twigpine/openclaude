@@ -58,6 +58,7 @@ import { lazySchema } from '../../utils/lazySchema.js'
 import { createUserMessage, normalizeMessages } from '../../utils/messages.js'
 import type { ModelAlias } from '../../utils/model/aliases.js'
 import { resolveSkillModelOverride } from '../../utils/model/model.js'
+import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
 import { recordSkillUsage } from '../../utils/suggestions/skillUsageTracking.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { runAgent } from '../AgentTool/runAgent.js'
@@ -640,6 +641,15 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
         canUseTool,
         parentMessage,
         onProgress,
+      )
+    }
+
+    // Reject before command expansion can register persistent skill hooks.
+    const requestedModel = command?.type === 'prompt' ? command.model : undefined
+    if (requestedModel && !isModelAllowed(requestedModel) &&
+      !isModelAllowed(resolveSkillModelOverride(requestedModel, context.options.mainLoopModel))) {
+      throw new Error(
+        `Model '${requestedModel}' is not available. Your organization restricts model selection.`,
       )
     }
 

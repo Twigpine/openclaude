@@ -1,5 +1,4 @@
 import { logForDebugging } from '../debug.js'
-import { withResolvers } from '../withResolvers.js'
 import { requireComputerUseSwift } from './swiftLoader.js'
 
 /**
@@ -69,7 +68,7 @@ export async function drainRunLoop<T>(fn: () => Promise<T>): Promise<T> {
     // validation) still reaches release() — otherwise the pump leaks.
     const work = fn()
     work.catch(() => {})
-    const timeout = withResolvers<never>()
+    const timeout = Promise.withResolvers<never>()
     timer = setTimeout(timeoutReject, TIMEOUT_MS, timeout.reject)
     return await Promise.race([work, timeout.promise])
   } finally {

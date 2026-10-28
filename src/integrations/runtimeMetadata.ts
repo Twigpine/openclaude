@@ -592,11 +592,14 @@ export function usesAnthropicNativeMessageFormat(options?: {
     | 'foundry'
     | 'openai'
     | 'gemini'
+    | 'gemini-vertex'
     | 'github'
     | 'codex'
     | 'nvidia-nim'
     | 'minimax'
     | 'mistral'
+    | 'xai'
+    | 'xiaomi-mimo'
 }): boolean {
   const processEnv = options?.processEnv ?? process.env
   const providerCategory = options?.providerCategory

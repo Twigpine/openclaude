@@ -39,6 +39,7 @@ type Step = 'menu' | 'ghe-url' | 'copilot-key' | 'device-busy' | 'error'
 const PROVIDER_SPECIFIC_KEYS = new Set([
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CODE_USE_FOUNDRY',
@@ -113,6 +114,7 @@ export function buildGithubOnboardingSettingsEnv(
     OPENAI_API_BASE: undefined,
     CLAUDE_CODE_USE_OPENAI: undefined,
     CLAUDE_CODE_USE_GEMINI: undefined,
+    CLAUDE_CODE_USE_GEMINI_VERTEX: undefined,
     CLAUDE_CODE_USE_BEDROCK: undefined,
     CLAUDE_CODE_USE_VERTEX: undefined,
     CLAUDE_CODE_USE_FOUNDRY: undefined,
@@ -143,6 +145,7 @@ export function applyGithubOnboardingProcessEnv(
 
   delete env.CLAUDE_CODE_USE_OPENAI
   delete env.CLAUDE_CODE_USE_GEMINI
+  delete env.CLAUDE_CODE_USE_GEMINI_VERTEX
   delete env.CLAUDE_CODE_USE_BEDROCK
   delete env.CLAUDE_CODE_USE_VERTEX
   delete env.CLAUDE_CODE_USE_FOUNDRY

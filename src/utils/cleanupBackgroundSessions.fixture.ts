@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, utimes } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, utimes } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
   createBackgroundSession,
@@ -8,6 +8,7 @@ import {
 import { killHandler } from '../cli/bg.js'
 import { enableConfigs } from './config.js'
 import { eagerLoadSettingsFromArgs } from './settings/flagSettings.js'
+import { resetSettingsCache } from './settings/settingsCache.js'
 import {
   cleanupBackgroundSessionsAfterFinalization,
   cleanupBackgroundSessionsInBackground,
@@ -17,7 +18,7 @@ import {
 
 try {
   const mode = process.env.OPENCLAUDE_CLEANUP_FIXTURE_MODE
-  if (mode === 'pass-outcome') {
+  if (mode === 'pass-outcome' || mode === 'policy-outcome') {
     enableConfigs()
     const settingsPath = join(
       process.env.OPENCLAUDE_CONFIG_DIR!,
@@ -32,15 +33,27 @@ try {
       process.env.OPENCLAUDE_CLEANUP_TRIGGER === 'periodic-retention'
         ? 'periodic-retention'
         : 'periodic-recovery'
+    let rejectAfterLock =
+      process.env.OPENCLAUDE_CLEANUP_REJECT_AFTER_LOCK === '1'
+    const phases: string[] = []
+    let policyHookLockHeld: boolean | null = null
     const afterLock = async () => {
-      if (process.env.OPENCLAUDE_CLEANUP_REJECT_AFTER_LOCK === '1') {
+      if (rejectAfterLock) {
+        phases.push('policy-hook')
+        policyHookLockHeld = await stat(join(
+          process.env.OPENCLAUDE_CONFIG_DIR!,
+          'bg-sessions',
+          trigger === 'periodic-recovery'
+            ? '.recovery-pass.lock'
+            : '.retention-pass.lock',
+        )).then(lock => lock.isDirectory(), () => false)
         await Bun.write(
           settingsPath,
           JSON.stringify({ cleanupPeriodDays: 'invalid' }),
         )
       }
     }
-    const result = await runBackgroundSessionRetention(
+    const runPass = () => runBackgroundSessionRetention(
       trigger === 'periodic-recovery'
         ? { trigger, _afterThrottleLockForTesting: afterLock }
         : {
@@ -74,7 +87,83 @@ try {
             },
           },
     )
-    process.stdout.write(`${JSON.stringify({ result })}\n`)
+    if (mode === 'policy-outcome') {
+      const root = join(process.env.OPENCLAUDE_CONFIG_DIR!, 'bg-sessions')
+      const marker = join(
+        root,
+        trigger === 'periodic-recovery' ? '.recovery-pass' : '.retention-pass',
+      )
+      const snapshot = async (result: Awaited<ReturnType<typeof runPass>>) => ({
+        result,
+        metadataPresent: await Bun.file(
+          join(root, 'sessions', 'bg-rejected-policy.json'),
+        ).exists(),
+        markerPresent: await Bun.file(marker).exists(),
+        cursorPresent: await Bun.file(
+          join(root, '.recovery-cursor.json'),
+        ).exists(),
+        journal: await readFile(join(root, '.recovery-journal'), 'utf8'),
+      })
+      const freshPass = () => {
+        // Match a fresh process's settings read at each phase boundary.
+        resetSettingsCache()
+        return runPass()
+      }
+      const originalDateNow = Date.now
+      const now = Date.now()
+      try {
+        // Scheduling must not age the recovery marker between these phases.
+        Date.now = () => now
+        const rejected = await snapshot(await freshPass())
+        rejectAfterLock = false
+        await Bun.write(settingsPath, JSON.stringify({ cleanupPeriodDays: 0 }))
+        const retriedState = await snapshot(await freshPass())
+        const retried = {
+          result: retriedState.result,
+          metadataPresent: retriedState.metadataPresent,
+          journal: retriedState.journal,
+          markerPresent: retriedState.markerPresent,
+        }
+        // Anchor the throttle check to the published marker's time.
+        const markerNow = Math.max(now, Math.ceil((await stat(marker)).mtimeMs))
+        Date.now = () => markerNow
+        phases.push('threshold')
+        const throttled = await freshPass()
+        await rm(marker)
+        const rerunSession = await createBackgroundSession({
+          id: 'bg-policy-rerun',
+          pid: process.pid,
+          cwd: process.cwd(),
+          command: ['openclaude', '--print', 'fixture'],
+          sessionId: 'bg-policy-rerun-conversation',
+        })
+        recordBackgroundSessionNaturalTerminationSync(
+          rerunSession.id,
+          { exitCode: 0 },
+          {
+            ownerPid: process.pid,
+            expectedSession: rerunSession,
+            now: new Date(markerNow - 1_000),
+          },
+        )
+        const rerunState = await snapshot(await freshPass())
+        const rerun = {
+          result: rerunState.result,
+          metadataPresent: await Bun.file(
+            join(root, 'sessions', `${rerunSession.id}.json`),
+          ).exists(),
+          markerPresent: rerunState.markerPresent,
+        }
+        process.stdout.write(
+          `${JSON.stringify({ rejected, retried, throttled, rerun, phases, policyHookLockHeld })}\n`,
+        )
+      } finally {
+        Date.now = originalDateNow
+      }
+    } else {
+      const result = await runPass()
+      process.stdout.write(`${JSON.stringify({ result })}\n`)
+    }
   } else if (
     mode === 'periodic-retention' ||
     mode === 'periodic-retention-policy-recheck'

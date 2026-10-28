@@ -51,6 +51,11 @@ export OPENAI_MODEL=gpt-4o
 `codexplan` maps to GPT-5.6 Sol on the Codex backend with high reasoning.
 `codexspark` maps to GPT-5.3 Codex Spark for faster loops.
 
+Full Codex aliases such as `gpt-5.6-sol` also use the Codex backend when no
+base URL is configured. To use the direct OpenAI API with those model names,
+set `OPENAI_BASE_URL=https://api.openai.com/v1` explicitly. The `[1m]` context
+tag preserves the same route, including when combined with a reasoning query.
+
 If you use the in-app provider wizard, choose `Codex OAuth` to open ChatGPT sign-in in your browser and let OpenClaude store Codex credentials securely.
 
 If you already use the Codex CLI, OpenClaude reads `~/.codex/auth.json` automatically. You can also point it elsewhere with `CODEX_AUTH_JSON_PATH` or override the token directly with `CODEX_API_KEY`.
@@ -89,11 +94,45 @@ export GEMINI_API_KEY=...
 export GEMINI_MODEL=gemini-3-flash-preview
 ```
 
+### Gemini on Vertex AI (native)
+
+Use the native Gemini endpoint with an explicit CLI or environment selection:
+
+```bash
+# For global npm installs, install the optional ADC package:
+npm i -g google-auth-library
+gcloud auth application-default login
+export GEMINI_VERTEX_PROJECT=my-gcp-project
+export GEMINI_VERTEX_LOCATION=global
+openclaude --provider gemini-vertex --model gemini-2.5-flash
+```
+
+Alternatively set `CLAUDE_CODE_USE_GEMINI_VERTEX=1` and
+`GEMINI_VERTEX_MODEL=gemini-2.5-flash`. Project aliases are checked in order:
+`GEMINI_VERTEX_PROJECT`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`,
+`GOOGLE_PROJECT_ID`. ADC may supply the project when none is set. ADC supports
+`GOOGLE_APPLICATION_CREDENTIALS` and the ambient Google credential chain.
+
+For bearer authentication, set `GEMINI_ACCESS_TOKEN` to a Google OAuth access
+token and supply a project. `GEMINI_VERTEX_AUTH_MODE=adc` or `access-token`
+selects the mode explicitly; otherwise a nonblank token selects access-token
+mode and the default is ADC. An explicit `--model` or session `/model`
+overrides `GEMINI_VERTEX_MODEL`. Location defaults to `global`;
+`gemini-3.5-flash` requires the global endpoint.
+
+This routing stage supports env/CLI selection. Saved native Vertex profiles,
+the `/provider` setup preset, and profile launcher/bootstrap integration are
+deferred to the profile/UI follow-up. Existing saved profiles for other providers
+remain available. Native requests support text, tools, and base64 images/PDFs;
+URL media sources must be supplied as base64. Streaming emits the completed
+response as Anthropic-shaped events.
+
 ### Claude on Vertex AI
 
 The Vertex route uses Anthropic's Claude-on-Vertex API. It is not a general
 Vertex AI Model Garden adapter for Gemini or arbitrary partner models; use the
-Gemini provider for Gemini models and OpenAI-compatible routes for compatible
+native Gemini-on-Vertex route above for Gemini on Vertex, the direct Gemini
+provider for Google AI Studio, and OpenAI-compatible routes for compatible
 third-party gateways.
 
 Authentication uses Google Application Default Credentials through
@@ -256,8 +295,8 @@ export OPENAI_MODEL=gpt-5.4
 openclaude
 ```
 
-OpenCode Zen is a pay-as-you-go AI gateway with 48 models (GPT, Claude, Gemini,
-Qwen, MiniMax, GLM, Kimi, Grok, Big Pickle, DeepSeek, Nemotron). Uses the same
+OpenCode Zen is a pay-as-you-go AI gateway with models including GPT, Claude, Gemini,
+Qwen, MiniMax, GLM, Kimi, Grok, Big Pickle, DeepSeek, and Nemotron. Uses the same
 `OPENCODE_API_KEY` as OpenCode Go. Get your key from https://opencode.ai.
 
 ### OpenCode Go (subscription)
@@ -405,9 +444,9 @@ missing. Install only what you need:
 | --- | --- | --- |
 | AWS Bedrock | `CLAUDE_CODE_USE_BEDROCK=1` | `npm i -g @anthropic-ai/bedrock-sdk`. Profile-based auth (`~/.aws/credentials`) additionally needs `@aws-sdk/credential-providers` and `@aws-sdk/client-sts`; model listing needs `@aws-sdk/client-bedrock`. Proxy and skip-auth setups may also need `@aws-sdk/credential-provider-node`, `@smithy/node-http-handler`, or `@smithy/core`. The CLI prints the exact missing package if you hit one. |
 | Azure Foundry | `CLAUDE_CODE_USE_FOUNDRY=1` | `npm i -g @anthropic-ai/foundry-sdk @azure/identity` |
-| Claude on Vertex AI / Gemini ADC | `CLAUDE_CODE_USE_VERTEX=1` / Gemini ADC auth | `npm i -g google-auth-library` |
+| Claude on Vertex AI / Gemini ADC / Gemini on Vertex AI | `CLAUDE_CODE_USE_VERTEX=1` / Gemini ADC auth / `CLAUDE_CODE_USE_GEMINI_VERTEX=1` | `npm i -g google-auth-library` |
 | Reading/processing images (clipboard paste, drag-and-drop paths, FileReadTool local decode) | local image decode — **not** pre-encoded URL/base64 passthrough | `npm i -g sharp` (intentionally opt-in; prebuilt releases load it externally only when processing requires it) |
-| Optional error reporting | `SENTRY_DSN` is set | `npm i -g @sentry/node`. Without this package installed, setting `SENTRY_DSN` has no effect and reporting is silently disabled. |
+| Optional error reporting | `SENTRY_DSN` is set | `npm i -g @sentry/node@11.9.0`. Without this package installed, setting `SENTRY_DSN` has no effect and reporting is silently disabled. |
 
 When installing OpenClaude from source (`bun install`), all of these are
 already present as dev dependencies, so source/dev builds need no extra steps.
@@ -534,9 +573,18 @@ host. Without this variable the behavior is unchanged.
 | `OPENCLAUDE_DISABLE_CO_AUTHORED_BY` | No | Suppress the default `Co-Authored-By` trailer in generated git commits |
 | `OPENCLAUDE_LOG_TOKEN_USAGE` | No | When truthy (e.g. `verbose`), emits one JSON line on stderr per API request with input/output/cache tokens and the resolved provider. **User-facing debug output** — complements the REPL display controlled by `/config showCacheStats`. Distinct from `CLAUDE_CODE_ENABLE_TOKEN_USAGE_ATTACHMENT`, which is **model-facing** (injects context usage info into the prompt itself). Both can run together. |
 
+Repeated identical tool calls are blocked starting with the third call. If a model
+ignores that feedback, five consecutive doom-loop blocks force-terminate its turn
+without another model request. A non-blocked call or successful tool result resets
+the consecutive-block count; each agent and new user turn tracks its own streak.
+Headless runs (`--bare -p`) print the terminal error and exit with status 1. Change
+the approach or tool arguments before retrying. This safeguard applies even when
+the general tool-failure threshold or turn limit is disabled.
+
 Model env vars are provider-scoped: first-party Anthropic sessions read
 `ANTHROPIC_MODEL`, OpenAI-compatible sessions read `OPENAI_MODEL`, Gemini reads
-`GEMINI_MODEL`, and Mistral reads `MISTRAL_MODEL`. For manual Bedrock, Vertex,
+`GEMINI_MODEL`, Gemini on Vertex reads `GEMINI_VERTEX_MODEL`, and Mistral reads
+`MISTRAL_MODEL`. For manual Bedrock, Claude on Vertex,
 or Foundry launches, select the model with `--model`.
 
 An OpenAI-compatible provider profile's maximum context length applies to every
@@ -694,6 +742,8 @@ Notes:
 - Reporting is skipped even when `SENTRY_DSN` is set if `DISABLE_TELEMETRY` or
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, matching the same privacy
   levels used for existing telemetry (see [Runtime Hardening](#runtime-hardening)).
+- Automatic integrations, tracing, message stack traces, and SDK data collection
+  are disabled. Self-hosted Sentry requires version 26.4.2 or later.
 - Only sanitized, telemetry-safe error messages are sent — never raw error
   messages, which may contain file paths or other identifying information.
 - `@sentry/node` is an optional dev dependency and is **not included** in the
@@ -703,7 +753,7 @@ Notes:
   disabled (no error, no crash). Install it explicitly with:
 
 ```bash
-  npm i -g @sentry/node
+  npm i -g @sentry/node@11.9.0
 ```
 
   Source builds (`bun install`) already include it as a dev dependency, so no
@@ -733,6 +783,8 @@ export OPENCLAUDE_SAFETY_LEVEL=permissive   # relax benign-task false positives
 
 ## Runtime Hardening
 
+Run the development diagnostics under Bun. Their subprocess probes capture output and
+check exit status before reporting results; the installed CLI still runs under Node.
 Use these commands to validate your setup and catch mistakes early:
 
 ```bash
@@ -778,7 +830,13 @@ Notes:
 
 ## Provider Launch Profiles
 
-Use profile launchers to avoid repeated environment setup:
+Use profile launchers to avoid repeated environment setup. The profile defaults
+to `auto` when omitted. Put launcher options (`--fast` and `--goal`) before CLI
+arguments; the first CLI argument starts passthrough, so prompts and option values
+are forwarded unchanged. A leading provider name such as `ollama` still selects
+that profile. To use it as a prompt, pass it as a CLI argument, for example
+`bun run scripts/provider-launch.ts -p ollama`, or pass a `--` separator through
+to the launcher before the prompt (some Bun invocations consume that separator):
 
 ```bash
 # one-time profile bootstrap (prefer viable local Ollama, otherwise OpenAI)
@@ -834,10 +892,28 @@ bun run dev:atomic-chat
 
 If no profile exists yet, `dev:profile` uses the same goal-aware defaults when picking the initial model.
 
+Profiles activated through `/provider` for canonical MiniMax, Venice, and MiMo
+endpoints retain a provider-specific key, including profiles configured as generic
+OpenAI-compatible providers. On the same route, that saved key takes precedence over an ambient
+`OPENAI_API_KEY` or `OPENAI_API_KEYS` pool. To override it for a launch, set
+`MINIMAX_API_KEY`, `VENICE_API_KEY`, or `MIMO_API_KEY` in your shell; the live
+provider-specific value takes precedence over the saved value. This applies to
+both MiMo API and token-plan routes.
+
+Launch reconstruction retains these dedicated keys only for their matching
+routes. A shell override to another provider's URL does not carry the saved
+source provider's dedicated key into the new launch.
+
 ### Provider Profile Model Picker Mode
 
 When a saved provider profile is active, `/model` can either show the provider's
 catalog/discovered models or only the models explicitly listed in the profile.
+MiniMax text-model retirement applies to the direct MiniMax route; other
+providers retain the MiniMax IDs their own catalogs or discovery advertise.
+OpenCode Zen excludes its obsolete `minimax-m3-free` and
+`minimax-m3.1-flash-free` suggestions. Saved or explicitly configured selections
+remain available.
+
 Configure this in `~/.openclaude.json`:
 
 ```json

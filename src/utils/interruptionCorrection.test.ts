@@ -488,10 +488,7 @@ test('does not restore a consumed reminder after programmatic auto-restore cance
 
   const reminder = tracker.takeReminder()!
   const correction = createUserMessage({ content: 'do B instead' })
-  const correctionTurn = buildInterruptionCorrectionMessageViews(
-    [],
-    [reminder, correction],
-  )
+  buildInterruptionCorrectionMessageViews([], [reminder, correction])
   const programmaticRestore = queryGuard.tryStart({
     queryId: 'programmatic-restore',
     querySource: 'repl_main_thread',

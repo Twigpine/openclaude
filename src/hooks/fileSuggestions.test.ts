@@ -94,39 +94,6 @@ function restoreFileSuggestionsDependencyMocks(): void {
   }
 }
 
-function createIgnoreModuleMock() {
-  return {
-    default: () => {
-      const patterns: string[] = []
-      const api = {
-        add(input: string) {
-          patterns.push(
-            ...input
-              .split(/\r?\n/)
-              .map(line => line.trim())
-              .filter(line => line.length > 0 && !line.startsWith('#')),
-          )
-          return api
-        },
-        ignores(filePath: string) {
-          const normalized = filePath.replaceAll('\\', '/')
-          if (normalized.split('/').includes('..')) {
-            throw new Error('path should be a `path.relative()`d string')
-          }
-          return patterns.some(pattern => {
-            const normalizedPattern = pattern.replaceAll('\\', '/')
-            if (normalizedPattern.endsWith('/')) {
-              return normalized.startsWith(normalizedPattern)
-            }
-            return normalized === normalizedPattern
-          })
-        },
-      }
-      return api
-    },
-  }
-}
-
 function isGitCommand(command: string): boolean {
   const basename = path.basename(command).toLowerCase()
   return basename === 'git.exe' || basename === 'git'

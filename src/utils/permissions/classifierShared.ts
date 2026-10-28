@@ -27,10 +27,10 @@ export function extractToolUseBlock(
  * Parse and validate classifier response from tool use block.
  * Returns null if parsing fails.
  */
-export function parseClassifierResponse<T extends z.ZodTypeAny>(
+export function parseClassifierResponse<T>(
   toolUseBlock: Extract<BetaContentBlock, { type: 'tool_use' }>,
-  schema: T,
-): z.infer<T> | null {
+  schema: Pick<z.ZodType<T>, 'safeParse'>,
+): T | null {
   const parseResult = schema.safeParse(toolUseBlock.input)
   if (!parseResult.success) {
     return null

@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { APIConnectionTimeoutError, APIUserAbortError } from '@anthropic-ai/sdk'
+import { expect, jest, test } from 'bun:test'
 import { createGeminiVertexClient, type GeminiVertexStreamEvent } from './geminiVertexClient.js'
 
 function createJsonVertexResponse(text: string) {
@@ -11,6 +12,80 @@ function createJsonVertexResponse(text: string) {
     { headers: { 'Content-Type': 'application/json', 'x-request-id': 'vertex-request-123' } },
   )
 }
+
+test.each([false, true])('Vertex request cancellation reaches fetch and settles (stream=%s)', async stream => {
+  const started = Promise.withResolvers<void>()
+  const response = Promise.withResolvers<Response>()
+  const controller = new AbortController()
+  let fetchSignal: AbortSignal | null | undefined
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => 'token',
+    fetch: async (_input, init) => {
+      fetchSignal = init?.signal
+      fetchSignal?.addEventListener('abort', () => response.reject(fetchSignal?.reason), { once: true })
+      started.resolve()
+      return response.promise
+    },
+  })
+  const request = (stream ? client.beta.messages : client.messages).create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }], stream,
+  }, { signal: controller.signal })
+  const outcome = (stream ? request.withResponse() : request).then(() => undefined, error => error)
+  try {
+    await started.promise
+    controller.abort()
+    response.resolve(createJsonVertexResponse('late'))
+    expect(await outcome).toBeInstanceOf(APIUserAbortError)
+    expect(fetchSignal?.aborted).toBe(true)
+  } finally {
+    controller.abort()
+    response.resolve(createJsonVertexResponse('cleanup'))
+    await outcome
+  }
+})
+
+test('Vertex honors an explicit request timeout and releases its timer', async () => {
+  jest.useFakeTimers()
+  const started = Promise.withResolvers<void>()
+  const response = Promise.withResolvers<Response>()
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => 'token',
+    fetch: async (_input, init) => {
+      init?.signal?.addEventListener('abort', () => response.reject(init.signal?.reason), { once: true })
+      started.resolve()
+      return response.promise
+    },
+  })
+  const outcome = client.messages.create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }],
+  }, { timeout: 5 }).then(() => undefined, error => error)
+  try {
+    await started.promise
+    jest.advanceTimersByTime(5)
+    response.resolve(createJsonVertexResponse('late'))
+    expect(await outcome).toBeInstanceOf(APIConnectionTimeoutError)
+    expect(jest.getTimerCount()).toBe(0)
+  } finally {
+    response.resolve(createJsonVertexResponse('cleanup'))
+    await outcome
+    jest.useRealTimers()
+  }
+})
+
+test('an already-cancelled Vertex request never resolves credentials or sends a request', async () => {
+  let calls = 0
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => { calls++; return 'token' },
+    fetch: async () => { calls++; return createJsonVertexResponse('unexpected') },
+  })
+  await expect(client.messages.create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }],
+  }, { signal: AbortSignal.abort() })).rejects.toBeInstanceOf(APIUserAbortError)
+  expect(calls).toBe(0)
+})
 
 test('Gemini Vertex client uses root aiplatform host for global location', async () => {
   let capturedUrl: string | undefined
@@ -548,4 +623,65 @@ test('Gemini Vertex client propagates HTTP errors', async () => {
     max_tokens: 1,
     messages: [{ role: 'user', content: 'Salut' }],
   })).rejects.toThrow('Gemini Vertex request failed: 403 permission denied')
+})
+
+test('native wire preserves direct media and FileRead images without mixing function responses', async () => {
+  const { FileReadTool } = await import('../../tools/FileReadTool/FileReadTool.js')
+  const image = { type: 'image' as const, source: {
+    type: 'base64' as const, media_type: 'image/png' as const, data: 'cG5n',
+  } }
+  const pdf = { type: 'document' as const, source: {
+    type: 'base64' as const, media_type: 'application/pdf' as const, data: 'cGRm',
+  } }
+  const result = FileReadTool.mapToolResultToToolResultBlockParam({
+    type: 'image', file: { base64: image.source.data, type: image.source.media_type, originalSize: 3 },
+  }, 'read-image')
+  let sent: Record<string, unknown> | undefined
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => 'token',
+    fetch: async (_url, init) => {
+      sent = JSON.parse(String(init?.body))
+      return createJsonVertexResponse('seen')
+    },
+  })
+  await client.messages.create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [
+      { role: 'user', content: [image] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'read-image', name: 'Read', input: {} }] },
+      { role: 'user', content: [result] },
+      { role: 'user', content: [pdf] },
+    ],
+  })
+  expect(sent?.contents).toEqual([
+    { role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: 'cG5n' } }] },
+    { role: 'model', parts: [{ functionCall: { name: 'Read', args: {} } }] },
+    { role: 'user', parts: [{ functionResponse: { name: 'Read', response: { result: '' } } }] },
+    { role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: 'cG5n' } }] },
+    { role: 'user', parts: [{ inlineData: { mimeType: 'application/pdf', data: 'cGRm' } }] },
+  ])
+})
+
+test('native wire rejects unsupported URL media before sending instead of losing it', async () => {
+  let requests = 0
+  const client = createGeminiVertexClient({
+    project: 'project-test', location: 'global', model: 'gemini-2.5-flash',
+    getAccessToken: async () => 'token',
+    fetch: async () => { requests++; return createJsonVertexResponse('unexpected') },
+  })
+  await expect(client.messages.create({
+    model: 'gemini-2.5-flash', max_tokens: 8, messages: [{
+      role: 'user', content: [{ type: 'image', source: { type: 'url', url: 'https://example.invalid/secret' } }],
+    }],
+  })).rejects.toThrow(/base64/)
+  expect(requests).toBe(0)
+})
+
+test('direct native client rejects a host-changing location before resolving a bearer', () => {
+  let credentials = 0
+  expect(() => createGeminiVertexClient({
+    project: 'project-test', location: 'evil.example/x#', model: 'gemini-2.5-flash',
+    getAccessToken: async () => { credentials++; return 'token' },
+  })).toThrow('GEMINI_VERTEX_LOCATION')
+  expect(credentials).toBe(0)
 })

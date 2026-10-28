@@ -13,6 +13,7 @@ export default defineBrand({
     supportsPreciseTokenCount: false,
   },
   modelIds: [
+    'minimax-m3.1-flash',
     'minimax-m3',
     'minimax-m2',
     'minimax-m2.1',

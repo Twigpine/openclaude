@@ -1,3 +1,4 @@
+import { feature } from 'bun:bundle'
 import type {
   BetaContentBlock,
   BetaContentBlockParam,
@@ -120,7 +121,6 @@ const autoModeStateModule = feature('TRANSCRIPT_CLASSIFIER')
   ? (require('../../utils/permissions/autoModeState.js') as typeof import('../../utils/permissions/autoModeState.js'))
   : null
 
-import { feature } from 'bun:bundle'
 import type { ClientOptions } from '@anthropic-ai/sdk'
 import {
   APIError,
@@ -3508,6 +3508,9 @@ export function updateUsage(
         ? partUsage.cache_read_input_tokens
         : usage.cache_read_input_tokens,
     output_tokens: partUsage.output_tokens ?? usage.output_tokens,
+    output_tokens_details:
+      partUsage.output_tokens_details ?? usage.output_tokens_details,
+    fallback_credit: partUsage.fallback_credit ?? usage.fallback_credit,
     server_tool_use: {
       web_search_requests:
         partUsage.server_tool_use?.web_search_requests ??
@@ -3566,6 +3569,11 @@ export function accumulateUsage(
     cache_read_input_tokens:
       totalUsage.cache_read_input_tokens + messageUsage.cache_read_input_tokens,
     output_tokens: totalUsage.output_tokens + messageUsage.output_tokens,
+    output_tokens_details: {
+      thinking_tokens:
+        totalUsage.output_tokens_details.thinking_tokens +
+        messageUsage.output_tokens_details.thinking_tokens,
+    },
     server_tool_use: {
       web_search_requests:
         totalUsage.server_tool_use.web_search_requests +
@@ -3575,6 +3583,7 @@ export function accumulateUsage(
         messageUsage.server_tool_use.web_fetch_requests,
     },
     service_tier: messageUsage.service_tier, // Use the most recent service tier
+    fallback_credit: messageUsage.fallback_credit, // Use the most recent outcome
     cache_creation: {
       ephemeral_1h_input_tokens:
         totalUsage.cache_creation.ephemeral_1h_input_tokens +

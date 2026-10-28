@@ -423,3 +423,104 @@ test('rendered picker expands branch groups and selects child branch logs', asyn
     releaseSharedMutationLock()
   }
 })
+
+test('deep search is offered only with a callback and runs from the keyboard', async () => {
+  await acquireSharedMutationLock('components/LogSelector.resumeBranches.test.tsx')
+  let renderer: Awaited<ReturnType<typeof createRoot>> | null = null
+  const { stdout, stdin, getOutput } = createTestStreams()
+  const logs = [
+    log(id(60), 'Original history', 10, { projectPath: getOriginalCwd(), tag: 'included' }),
+    log(id(62), 'Excluded history', 5, { projectPath: getOriginalCwd(), tag: 'other' }),
+  ]
+  const recovered = log(id(61), 'Recovered session', 20, { projectPath: getOriginalCwd() })
+  const queries: string[] = []
+  const selected: LogOption[] = []
+  let selectionComplete: () => void = () => {}
+  const selection = new Promise<void>(resolve => { selectionComplete = resolve })
+  let finishSearch: (results: LogOption[]) => void = () => {}
+  let failSearch: (error: Error) => void = () => {}
+  let searchSignal: AbortSignal | undefined
+  let pageRequests = 0
+  const onLoadMore = () => { pageRequests++ }
+  let deliverPage: (n: number) => Promise<void> = async () => {}
+  let pageCommitted: () => void = () => {}
+  const onAgenticSearch = async (query: string, candidates: LogOption[], signal?: AbortSignal) => {
+    queries.push(query)
+    expect(candidates).toEqual([logs[0]])
+    expect(signal?.aborted).toBe(false)
+    searchSignal = signal
+    return new Promise<LogOption[]>((resolve, reject) => { finishSearch = resolve; failSearch = reject })
+  }
+  function Picker({ enabled }: { enabled: boolean }) {
+    const [loaded, setLoaded] = React.useState(logs)
+    React.useEffect(() => { pageCommitted() }, [loaded])
+    deliverPage = n => new Promise<void>(resolve => {
+      pageCommitted = resolve
+      setLoaded(previous => previous.concat(log(id(n), 'Paged history', n, {
+        projectPath: getOriginalCwd(), tag: n === 63 ? 'aaa-new-tag' : 'zzz-new-tag',
+      })))
+    })
+    return React.createElement(LogSelector, {
+      logs: loaded, maxHeight: 30, forceWidth: 100,
+      onSelect: item => { selected.push(item); selectionComplete() }, onLoadMore,
+      onAgenticSearch: enabled ? onAgenticSearch : undefined,
+    })
+  }
+  const renderPicker = (enabled: boolean) => renderer!.render(
+    React.createElement(AppStateProvider, null,
+      React.createElement(KeybindingSetup, null, React.createElement(Picker, { enabled }))),
+  )
+  try {
+    renderer = await createRoot({
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      patchConsole: false,
+    })
+    renderPicker(false)
+    await waitForFrame(getOutput, frame => frame.includes('Original history'))
+    stdin.write('\t')
+    await waitForFrame(getOutput, frame => frame.includes('Original history') && !frame.includes('Excluded history'))
+    stdin.write('Original')
+    const noCallback = await waitForFrame(getOutput, frame => frame.includes('⌕ Original'))
+    expect(noCallback).not.toContain('Search deeply using a background model')
+    renderPicker(true)
+    await waitForFrame(getOutput, frame => frame.includes('Search deeply using a background model'))
+    stdin.write('\r')
+    await waitForFrame(getOutput, frame => frame.includes('Type to search'))
+    stdin.write('\r')
+    await selection
+    expect(selected).toEqual([logs[0]])
+    expect(queries).toEqual([])
+    stdin.write('z')
+    await waitForFrame(getOutput, frame => frame.includes('⌕ z'))
+    stdin.write('\x1B[B')
+    await waitForFrame(getOutput, frame => frame.includes('❯ Search deeply using a background model'))
+    stdin.write('\r')
+    await waitForFrame(getOutput, frame => frame.includes('Searching with a background model'))
+    failSearch(new Error('private failure details'))
+    const failedFrame = await waitForFrame(getOutput, frame => frame.includes('Search failed. Please try again.'))
+    expect(failedFrame).not.toContain('private failure details')
+    expect(failedFrame).not.toContain('No matching sessions found.')
+    expect(failedFrame).toContain('Search deeply using a background model')
+    stdin.write('\r')
+    await waitForFrame(getOutput, frame => frame.includes('Searching with a background model'))
+    expect(pageRequests).toBeGreaterThan(0)
+    await deliverPage(63)
+    expect(searchSignal?.aborted).toBe(false)
+    finishSearch([recovered])
+    await waitForFrame(getOutput, frame => frame.includes('Recovered session'))
+    await deliverPage(64)
+    const recoveredSelected = new Promise<void>(resolve => { selectionComplete = resolve })
+    stdin.write('\r')
+    await recoveredSelected
+    expect(selected.at(-1)).toEqual(recovered)
+    expect(queries).toEqual(['z', 'z'])
+    stdin.write('\t')
+    await waitForFrame(getOutput, frame => !frame.includes('Recovered session') &&
+      frame.includes('Searches a limited set of loaded sessions.'))
+  } finally {
+    renderer?.unmount()
+    stdin.end()
+    releaseSharedMutationLock()
+  }
+})

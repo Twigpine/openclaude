@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test'
 import { mock } from 'bun:test'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
 import {
@@ -498,7 +499,7 @@ test('getModelOptionsBase: local OpenAI-compatible scope still appends inactive 
   }
 })
 
-test('getModelOptionsBase: active Ollama profile still surfaces inactive profile options', async () => {
+test.each(['llama3.2', 'minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud'])('getModelOptionsBase: active Ollama profile offers discovered %s and inactive profiles', async discoveredModel => {
   // Regression for #1164: the `isOllamaProvider()` early return ran before the
   // inactive-profile compute, so a user whose active profile is a local Ollama
   // endpoint only saw the Ollama models and lost the cross-profile switcher,
@@ -508,7 +509,7 @@ test('getModelOptionsBase: active Ollama profile still surfaces inactive profile
     id: 'profile_ollama',
     name: 'Local Ollama',
     baseUrl: 'http://localhost:11434/v1',
-    model: 'llama3.2',
+    model: 'qwen3:latest',
   })
   const inactive = buildProviderProfileFixture({
     id: 'profile_remote',
@@ -523,7 +524,7 @@ test('getModelOptionsBase: active Ollama profile still surfaces inactive profile
   // `[default, ...ollamaModels, ...inactiveProfileOptions]` return path.
   activeOllamaOverride = {
     cachedModels: [
-      { value: 'llama3.2', label: 'llama3.2', description: 'Local Ollama' },
+      { value: discoveredModel, label: discoveredModel, description: 'Local Ollama' },
     ],
   }
   try {
@@ -538,7 +539,7 @@ test('getModelOptionsBase: active Ollama profile still surfaces inactive profile
 
     const options = getModelOptions(false)
     // The Ollama model is still present...
-    expect(options.some(o => o.value === 'llama3.2')).toBe(true)
+    expect(options.some(o => o.value === discoveredModel)).toBe(true)
     // ...and the inactive profile now appears as a switch option.
     const switchOptions = options.filter(o => o.switchToProfileId !== undefined)
     expect(switchOptions.length).toBeGreaterThan(0)
@@ -551,6 +552,75 @@ test('getModelOptionsBase: active Ollama profile still surfaces inactive profile
     } else {
       process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = previousFlag
     }
+  }
+})
+
+test.each([
+  ['ollama', 'http://localhost:11434/v1'],
+  ['lmstudio', 'http://localhost:1234/v1'],
+  ['atomic-chat', 'http://127.0.0.1:1337/v1'],
+  ['custom', 'http://localhost:8080/v1'],
+])('getModelOptions appends scoped %s discoveries when the prefetch cache is empty', async (provider, baseUrl) => {
+  const restoreEnv = snapshotEnv(['CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_API_BASE', 'OPENAI_MODEL', 'OLLAMA_BASE_URL'])
+  const { getGlobalConfig, saveGlobalConfig } = await import('../config.js')
+  const previousOptions = getGlobalConfig().additionalModelOptionsCache
+  const previousScope = getGlobalConfig().additionalModelOptionsCacheScope
+  const models = ['minimax-m3.1-flash:cloud', 'minimax-m3:cloud', 'minimax-m2.7:cloud', 'minimaxai/minimax-m2.7', 'minimax-m3.1-flash-q4_k_m']
+  if (provider === 'ollama') activeOllamaOverride = { cachedModels: [] }
+  activeCacheScopeOverride = `openai:${baseUrl}:fixture`
+  try {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = baseUrl
+    process.env.OPENAI_MODEL = 'qwen3:latest'
+    delete process.env.OPENAI_API_BASE
+    delete process.env.OLLAMA_BASE_URL
+    saveGlobalConfig(current => ({
+      ...current,
+      additionalModelOptionsCache: models.map(value => ({ value, label: value, description: `Discovered from ${provider}` })),
+      additionalModelOptionsCacheScope: activeCacheScopeOverride!,
+    }))
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => undefined,
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    for (const model of models) expect(values).toContain(model)
+  } finally {
+    saveGlobalConfig(current => ({
+      ...current,
+      additionalModelOptionsCache: previousOptions,
+      additionalModelOptionsCacheScope: previousScope,
+    }))
+    restoreEnv()
+  }
+})
+
+test.each(['firstParty', 'openai:http://localhost:11434/v1:fixture'])('getModelOptions ignores malformed bootstrap values in %s scope', async scope => {
+  const { getGlobalConfig, saveGlobalConfig } = await import('../config.js')
+  const previousOptions = getGlobalConfig().additionalModelOptionsCache
+  const previousScope = getGlobalConfig().additionalModelOptionsCacheScope
+  activeCacheScopeOverride = scope
+  activeApiProviderOverride = scope === 'firstParty' ? 'firstParty' : 'openai'
+  saveGlobalConfig(current => ({
+    ...current,
+    additionalModelOptionsCacheScope: scope,
+    additionalModelOptionsCache: JSON.parse('[{},{"value":42},{"value":false},{"value":{}},{"value":[]},{"value":null},{"value":"valid-cache-control","label":"control","description":"control"}]'),
+  }))
+  try {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => undefined,
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expect(values).toContain(null)
+    expect(values).toContain('valid-cache-control')
+    expect(values.every(value => value === null || typeof value === 'string')).toBe(true)
+  } finally {
+    saveGlobalConfig(current => ({
+      ...current,
+      additionalModelOptionsCache: previousOptions,
+      additionalModelOptionsCacheScope: previousScope,
+    }))
   }
 })
 
@@ -742,8 +812,11 @@ test('getModelOptionsBase: Claude subscriber branch appends inactive profile opt
 
 test('getModelOptionsBase: MiniMax catalog branch appends inactive profile options', async () => {
   const { active, inactive } = activeAndInactivePair()
+  active.provider = 'minimax'
+  active.baseUrl = 'https://api.minimax.io/anthropic'
   activeMiniMaxOverride = {
     cachedModels: [
+      { value: 'MiniMax-M3.1-Flash', label: 'MiniMax-M3.1-Flash', description: 'MiniMax' },
       { value: 'MiniMax-M2.7', label: 'MiniMax-M2.7', description: 'MiniMax' },
     ],
   }
@@ -756,13 +829,67 @@ test('getModelOptionsBase: MiniMax catalog branch appends inactive profile optio
       ],
     })
     const options = getModelOptions(false)
-    expect(options.some(o => o.value === 'MiniMax-M2.7')).toBe(true)
+    expect(options.some(o => o.value === 'MiniMax-M3.1-Flash')).toBe(true)
+    expect(options.some(o => o.value === 'MiniMax-M2.7')).toBe(false)
     expect(
       options
         .filter(o => o.switchToProfileId !== undefined)
         .map(o => o.switchToProfileId),
     ).toContain('profile_remote')
   })
+})
+
+test.each(['MiniMax-M2.7', 'minimax-m3-free', 'minimax-m3.1-flash-free'])('MiniMax picker keeps saved %s without restoring other retired suggestions', async savedModel => {
+  const { active, inactive } = activeAndInactivePair()
+  active.provider = 'minimax'
+  active.baseUrl = 'https://api.minimax.io/anthropic'
+  active.model = savedModel
+  activeMiniMaxOverride = {
+    cachedModels: ['MiniMax-M3.1-Flash', 'MiniMax-M3', 'MiniMax-M2.5', 'minimax-m3-free', 'minimax-m3.1-flash-free'].map(value => ({ value, label: value, description: 'MiniMax' })),
+  }
+  await withProfileEnvApplied(async () => {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [active, inactive],
+      getActiveProviderProfile: () => active,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expect(values).toContain('MiniMax-M3.1-Flash')
+    expect(values).toContain('MiniMax-M3')
+    expect(values).toContain(savedModel)
+    expect(values).not.toContain('MiniMax-M2.5')
+    for (const retired of ['minimax-m3-free', 'minimax-m3.1-flash-free']) {
+      if (retired !== savedModel) expect(values).not.toContain(retired)
+    }
+    expect(active.model).toBe(savedModel)
+  })
+})
+
+test.each([
+  ['https://opencode.ai/zen/v1', 'gpt-5.4'],
+  ['https://opencode.ai/zen/go/v1', 'glm-5.1'],
+])('getModelOptions retains available MiniMax gateway choices on %s', async (baseUrl, model) => {
+  const restoreEnv = snapshotEnv([
+    'CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_API_BASE', 'OPENAI_MODEL',
+    'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED', 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
+  ], { clear: true })
+  try {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = baseUrl
+    process.env.OPENAI_MODEL = model
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => undefined,
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expect(values).toContain('minimax-m2.7')
+    expect(values).not.toContain('minimax-m3-free')
+    expect(values).not.toContain('minimax-m3.1-flash-free')
+  } finally {
+    restoreEnv()
+  }
 })
 
 test('getModelOptionsBase: Xiaomi MiMo catalog branch appends inactive profile options', async () => {

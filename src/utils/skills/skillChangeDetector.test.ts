@@ -259,6 +259,11 @@ describe('skillChangeDetector reload batching', () => {
       ),
     ).toBe(true)
     expect(watchOptions.depth).toBeUndefined()
+    expect(watchOptions).toMatchObject({
+      backend: 'polling',
+      pollingInterval: 2000,
+      atomic: true,
+    })
   })
 
   test('watches enabled sibling skills homes', async () => {

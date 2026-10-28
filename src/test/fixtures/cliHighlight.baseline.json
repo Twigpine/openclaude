@@ -1,0 +1,80 @@
+[
+  {
+    "name": "javascript",
+    "language": "javascript",
+    "code": "const value = true;\nconsole.log(\"<&> \\\"quotes\\\"\", 42); // comment\nfunction sum(a) { return /ab+/g.test(a); }",
+    "output": "\u001b[34mconst\u001b[39m value = \u001b[34mtrue\u001b[39m;\n\u001b[36mconsole\u001b[39m.log(\u001b[31m\"<&> \\\"quotes\\\"\"\u001b[39m, \u001b[32m42\u001b[39m); \u001b[32m// comment\u001b[39m\n\u001b[33m\u001b[34mfunction\u001b[39m\u001b[33m sum(a) \u001b[39m{ \u001b[34mreturn\u001b[39m \u001b[31m/ab+/g\u001b[39m.test(a); }"
+  },
+  {
+    "name": "typescript",
+    "language": "ts",
+    "code": "interface Result { name: string; count: number }\nclass Example { value: Result | null = null; }",
+    "output": "\u001b[34minterface\u001b[39m Result { name: \u001b[36mstring\u001b[39m; count: \u001b[36mnumber\u001b[39m }\n\u001b[34m\u001b[34mclass\u001b[39m\u001b[34m Example \u001b[39m{ value: Result | \u001b[34mnull\u001b[39m = \u001b[34mnull\u001b[39m; }"
+  },
+  {
+    "name": "json",
+    "language": "json",
+    "code": "{\"key\": \"value\", \"count\": 42, \"ok\": true}",
+    "output": "{\u001b[36m\"key\"\u001b[39m: \u001b[31m\"value\"\u001b[39m, \u001b[36m\"count\"\u001b[39m: \u001b[32m42\u001b[39m, \u001b[36m\"ok\"\u001b[39m: \u001b[34mtrue\u001b[39m}"
+  },
+  {
+    "name": "markup",
+    "language": "xml",
+    "code": "<section title=\"<&>\">hello &amp; world</section>",
+    "output": "\u001b[90m<\u001b[34msection\u001b[39m\u001b[90m \u001b[36mtitle\u001b[39m\u001b[90m=\u001b[31m\"<&>\"\u001b[39m\u001b[90m>\u001b[39mhello &amp; world\u001b[90m</\u001b[34msection\u001b[39m\u001b[90m>\u001b[39m"
+  },
+  {
+    "name": "sublanguages",
+    "language": "xml",
+    "code": "<script>const n = 2;</script>\n<style>.item { color: red; }</style>",
+    "output": "\u001b[90m<\u001b[34mscript\u001b[39m\u001b[90m>\u001b[39m\u001b[34mconst\u001b[39m n = \u001b[32m2\u001b[39m;\u001b[90m</\u001b[34mscript\u001b[39m\u001b[90m>\u001b[39m\n\u001b[90m<\u001b[34mstyle\u001b[39m\u001b[90m>\u001b[39m.item { color: red; }\u001b[90m</\u001b[34mstyle\u001b[39m\u001b[90m>\u001b[39m"
+  },
+  {
+    "name": "templates",
+    "language": "javascript",
+    "code": "const value = `hello ${Math.max(1, 2)}`;",
+    "output": "\u001b[34mconst\u001b[39m value = \u001b[31m`hello ${\u001b[36mMath\u001b[39m\u001b[31m.max(\u001b[32m1\u001b[39m\u001b[31m, \u001b[32m2\u001b[39m\u001b[31m)}`\u001b[39m;"
+  },
+  {
+    "name": "markdown styles",
+    "language": "markdown",
+    "code": "# Heading\n**bold** *italic* [label](target)\n> quote\n- list\n`code`",
+    "output": "# Heading\n\u001b[1m**bold**\u001b[22m \u001b[3m*italic*\u001b[23m [\u001b[31mlabel\u001b[39m](\u001b[4mtarget\u001b[24m)\n> quote\n- list\n`code`"
+  },
+  {
+    "name": "diff colors",
+    "language": "diff",
+    "code": "@@ -1 +1 @@\n-removed\n+added",
+    "output": "@@ -1 +1 @@\n\u001b[31m-removed\u001b[39m\n\u001b[32m+added\u001b[39m"
+  },
+  {
+    "name": "meta",
+    "language": "cpp",
+    "code": "#include <vector>\n#define COUNT 12\nint main() { return 0; }",
+    "output": "\u001b[90m#\u001b[90minclude\u001b[39m\u001b[90m \u001b[90m<vector>\u001b[39m\u001b[90m\u001b[39m\n\u001b[90m#\u001b[90mdefine\u001b[39m\u001b[90m COUNT 12\u001b[39m\n\u001b[33m\u001b[34mint\u001b[39m\u001b[33m main() \u001b[39m{ \u001b[34mreturn\u001b[39m \u001b[32m0\u001b[39m; }"
+  },
+  {
+    "name": "type style",
+    "language": "haskell",
+    "code": "value :: Int\nvalue = 42",
+    "output": "value :: \u001b[36m\u001b[2mInt\u001b[22m\u001b[39m\nvalue = \u001b[32m42\u001b[39m"
+  },
+  {
+    "name": "plaintext escapes",
+    "language": "plaintext",
+    "code": "<span class=\"hljs-keyword\"> &amp; &#x27; > ' 😀\n",
+    "output": "<span class=\"hljs-keyword\"> &amp; &#x27; > ' 😀\n"
+  },
+  {
+    "name": "line endings",
+    "language": "plaintext",
+    "code": "first\r\nsecond\rthird\u0000last\n",
+    "output": "first\nsecond\nthirdlast\n"
+  },
+  {
+    "name": "empty",
+    "language": "plaintext",
+    "code": "",
+    "output": ""
+  }
+]

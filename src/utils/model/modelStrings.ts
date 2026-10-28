@@ -27,7 +27,12 @@ const MODEL_KEYS = Object.keys(LEGACY_PROVIDER_MODEL_CONFIGS) as ModelKey[]
 function getBuiltinModelStrings(provider: LegacyAPIProvider): ModelStrings {
   // Codex piggybacks on the OpenAI provider transport for Anthropic tier aliases.
   // Reuse OpenAI mappings so model string lookups never return undefined.
-  const providerKey = provider === 'codex' || provider === 'github' ? 'openai' : provider
+  // Native Vertex resolves Gemini defaults in model.ts, outside this Claude
+  // compatibility table. Keep canonical Claude IDs here so initializing its
+  // display cache cannot poison a later switch back to built-in Anthropic.
+  const providerKey = provider === 'gemini-vertex'
+    ? 'firstParty'
+    : provider === 'codex' || provider === 'github' ? 'openai' : provider
   const out = {} as ModelStrings
   for (const key of MODEL_KEYS) {
     out[key] = (

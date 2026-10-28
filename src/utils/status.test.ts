@@ -44,7 +44,8 @@ async function readPropertyValue(
     | 'openai'
     | 'codex'
     | 'nvidia-nim'
-    | 'minimax',
+    | 'minimax'
+    | 'gemini-vertex',
 ): Promise<unknown> {
   mock.restore()
   mock.module('./model/providers.js', () => ({
@@ -247,6 +248,23 @@ test('buildAPIProviderProperties redacts token-bearing Gemini base URLs', async 
   const serialized = JSON.stringify(properties)
   expect(serialized).not.toContain('GEMINI_LEAK')
   expect(serialized).not.toContain('fragment-leak')
+})
+
+test('buildAPIProviderProperties renders the Gemini Vertex route, model, and endpoint', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  process.env.GEMINI_VERTEX_PROJECT = 'project-status-1234'
+  process.env.GEMINI_VERTEX_LOCATION = 'us-central1'
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+  process.env.GEMINI_ACCESS_TOKEN = 'vertex-access-token'
+
+  expect(await readPropertyValue('API provider', 'gemini-vertex')).toBe(
+    'Google Vertex AI (Gemini)',
+  )
+  expect(await readPropertyValue('Vertex endpoint', 'gemini-vertex')).toBe(
+    'https://aiplatform.googleapis.com/v1/projects/project-status-1234/locations/us-central1',
+  )
+  expect(await readPropertyValue('Model', 'gemini-vertex')).toBe('gemini-2.5-flash')
+  expect(await readPropertyValue('Credential', 'gemini-vertex')).toBe('access token')
 })
 
 test('buildAPIProviderProperties redacts token-bearing direct provider base URLs', async () => {

@@ -23,7 +23,7 @@ import { z } from 'zod/v4'
  *   semanticNumber(z.number().optional())         → number | undefined
  *   semanticNumber(z.number().default(0))         → number
  */
-export function semanticNumber<T extends z.ZodType>(
+export function semanticNumber<T extends z.core.$ZodType>(
   inner: T = z.number() as unknown as T,
 ) {
   return z.preprocess((v: unknown) => {

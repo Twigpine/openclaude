@@ -32,7 +32,7 @@ function getUserClaudeMdDisplayPath(): string {
   return getDisplayPath(join(getClaudeConfigHomeDir(), 'CLAUDE.md'));
 }
 export function ClaudeMdExternalIncludesDialog(t0: Props) {
-  const $ = _c(18);
+  _c(18);
   const { onDone, isStandaloneDialog, externalIncludes, scope } = t0;
   React.useEffect(_temp, []);
   const handleSelection = React.useCallback((value: 'yes' | 'no') => {

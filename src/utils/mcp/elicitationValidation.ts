@@ -132,7 +132,9 @@ export function getEnumLabel(schema: EnumSchema, value: string): string {
   return index >= 0 ? (getEnumLabels(schema)[index] ?? value) : value
 }
 
-function getZodSchema(schema: PrimitiveSchemaDefinition): z.ZodTypeAny {
+function getZodSchema(
+  schema: PrimitiveSchemaDefinition,
+): Pick<z.ZodType<string | number | boolean>, 'safeParse'> {
   if (isEnumSchema(schema)) {
     const [first, ...rest] = getEnumValues(schema)
     if (!first) {
@@ -144,36 +146,36 @@ function getZodSchema(schema: PrimitiveSchemaDefinition): z.ZodTypeAny {
     let stringSchema = z.string()
     if (schema.minLength !== undefined) {
       stringSchema = stringSchema.min(schema.minLength, {
-        message: `Must be at least ${schema.minLength} ${plural(schema.minLength, 'character')}`,
+        error: `Must be at least ${schema.minLength} ${plural(schema.minLength, 'character')}`,
       })
     }
     if (schema.maxLength !== undefined) {
       stringSchema = stringSchema.max(schema.maxLength, {
-        message: `Must be at most ${schema.maxLength} ${plural(schema.maxLength, 'character')}`,
+        error: `Must be at most ${schema.maxLength} ${plural(schema.maxLength, 'character')}`,
       })
     }
     switch (schema.format) {
       case 'email':
-        stringSchema = stringSchema.email({
-          message: 'Must be a valid email address, e.g. user@example.com',
-        })
+        stringSchema = stringSchema.check(z.email({
+          error: 'Must be a valid email address, e.g. user@example.com',
+        }))
         break
       case 'uri':
-        stringSchema = stringSchema.url({
-          message: 'Must be a valid URI, e.g. https://example.com',
-        })
+        stringSchema = stringSchema.check(z.url({
+          error: 'Must be a valid URI, e.g. https://example.com',
+        }))
         break
       case 'date':
-        stringSchema = stringSchema.date(
+        stringSchema = stringSchema.check(z.iso.date(
           'Must be a valid date, e.g. 2024-03-15, today, next Monday',
-        )
+        ))
         break
       case 'date-time':
-        stringSchema = stringSchema.datetime({
+        stringSchema = stringSchema.check(z.iso.datetime({
           offset: true,
-          message:
+          error:
             'Must be a valid date-time, e.g. 2024-03-15T14:30:00Z, tomorrow at 3pm',
-        })
+        }))
         break
       default:
         // No specific format validation
@@ -201,16 +203,16 @@ function getZodSchema(schema: PrimitiveSchemaDefinition): z.ZodTypeAny {
       error: rangeMsg,
     })
     if (schema.type === 'integer') {
-      numberSchema = numberSchema.int({ message: rangeMsg })
+      numberSchema = numberSchema.int({ error: rangeMsg })
     }
     if (schema.minimum !== undefined) {
       numberSchema = numberSchema.min(schema.minimum, {
-        message: rangeMsg,
+        error: rangeMsg,
       })
     }
     if (schema.maximum !== undefined) {
       numberSchema = numberSchema.max(schema.maximum, {
-        message: rangeMsg,
+        error: rangeMsg,
       })
     }
     return numberSchema

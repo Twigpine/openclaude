@@ -474,7 +474,7 @@ export const PROVIDER_PRESET_MANIFEST = [
     "routeId": "opencode",
     "vendorId": "openai",
     "gatewayId": "opencode",
-    "description": "OpenCode Zen - pay-as-you-go AI gateway (48 models)",
+    "description": "OpenCode Zen - pay-as-you-go AI gateway",
     "apiKeyEnvVars": [
       "OPENCODE_API_KEY"
     ],
@@ -491,6 +491,17 @@ export const PROVIDER_PRESET_MANIFEST = [
     "description": "OpenRouter OpenAI-compatible endpoint",
     "apiKeyEnvVars": [
       "OPENROUTER_API_KEY"
+    ]
+  },
+  {
+    "preset": "orcarouter",
+    "routeKind": "gateway",
+    "routeId": "orcarouter",
+    "vendorId": "openai",
+    "gatewayId": "orcarouter",
+    "description": "OrcaRouter OpenAI-compatible endpoint",
+    "apiKeyEnvVars": [
+      "ORCAROUTER_API_KEY"
     ]
   },
   {
@@ -666,6 +677,7 @@ export const ORDERED_PROVIDER_PRESETS = [
   "opencode-go",
   "opencode",
   "openrouter",
+  "orcarouter",
   "together",
   "venice",
   "xai",

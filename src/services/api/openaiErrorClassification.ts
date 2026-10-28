@@ -413,6 +413,38 @@ function isQuotaExhaustedMessage(body: string): boolean {
   )
 }
 
+function isExplicitThrottleMessage(body: string): boolean {
+  // A 403 is normally an authorization failure. Require positive throttling
+  // evidence, with auth/quota signals taking precedence even in mixed bodies.
+  // Empty bodies and generic "try again" / "busy" responses are ambiguous.
+  // A comma may continue the credential's predicate ("key, now disabled" or
+  // "key, supplied here, is invalid"). Keep that evidence together, without
+  // joining a separate subject such as "key, streaming is disabled".
+  const credentialFaultBody = body.replace(
+    /,\s*(?:[^,.;!?]*,\s*)?(?=(?:(?:which|that)\b[^,.;!?]*|(?:(?:is|are|was|were|has|have|had|been|being|now|still|already|[a-z]+ly)\s+)*)(?:invalid|missing|incorrect|disabled|deactivated|unusable|required|not[ _-](?:valid|found|provided|configured|set))\b)/gi,
+    continuation => continuation.replace(/,/g, ' '),
+  )
+  if (
+    /unauthori[sz]ed|unauthenticated|not[ _-]auth|forbidden|access[ _-]denied|permission|credential|denied|suspended|blocked|banned|insufficient[ _-]funds|revoked|expired|not[ _-]allowed|quota|billing|credit|payment|allotment/i.test(body) ||
+    /auth(?:entication|ori[sz]ation)?[\s\S]{0,20}(?:error|fail|invalid|required|missing)|(?:invalid|failed|missing|required)[\s\S]{0,20}auth/i.test(body) ||
+    // New absence/state forms must describe the credential directly. Do not
+    // scan across an unrelated subject such as a bad gateway or empty response.
+    /(?:\b|_)(?:no(?:[\s_-]+valid)?|bad|empty)[\s_-]+(?:accounts?|(?:api[\s_-]*)?keys?|tokens?)(?:\b|_)(?:[\s_-]+(?:(?:is|are|was|were|has|have|had|been|being)[\s_-]+)*(?:provided|configured|set)(?:\b|_)|(?=\s*(?:$|[,.;!?:'"}\]])))/i.test(body) ||
+    // A key/account lookup failure is explicit absence; unqualified tokens
+    // can instead describe a rate-limit bucket, so require credential validity.
+    /(?:\b|_)no[\s_-]+(?:(?:valid[\s_-]+)?(?:accounts?|(?:api[\s_-]*)?keys?)|valid[\s_-]+tokens?)[\s_-]+(?:(?:is|are|was|were|has|have|had|been|being)[\s_-]+)*found(?:\b|_)/i.test(body) ||
+    /(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:,\s*[^,.;!?]*,)?(?:[\s_-]+|,\s*)(?:(?:which|that)[\s_-]+)?(?:(?:is|are|was|were|has|have|had|been|being|now|still|already|[a-z]+ly)[\s_-]+)+empty(?:\b|_)/i.test(body) ||
+    /(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:,\s*[^,.;!?]*,)?(?:[\s_-]+|,\s*)(?:(?:which|that)[\s_-]+)?(?:(?:is|are|was|were|has|have|had|been|being|now|still|already|[a-z]+ly)[\s_-]+)*(?:no[\s_-]longer[\s_-]valid|does[\s_-]not[\s_-]exist)(?:\b|_)/i.test(body) ||
+    // Rate limits can name valid accounts, keys or OAuth tokens. Match faults
+    // in either word order within a clause, including line wraps and codes;
+    // an arbitrary character limit can miss "has been permanently disabled".
+    /(?:\b|_)(?:invalid|missing|incorrect|disabled|deactivated|unusable)[^,.;!?]*(?:accounts?|(?:api[ _-]?)?keys?|tokens?)(?:\b|_)|(?:\b|_)(?:accounts?|(?:api[ _-]?)?keys?|tokens?)[^,.;!?]*(?:invalid|missing|incorrect|disabled|deactivated|unusable|required|not[ _-](?:valid|found|provided|configured|set))(?:\b|_)/i.test(credentialFaultBody)
+  ) {
+    return false
+  }
+  return /\brate[ _-]limit(?:ed|ing|[ _-](?:exceeded|reached))\b|\btoo[ _-]many[ _-]requests\b|\bthrottl(?:ed|ing)\b/i.test(body)
+}
+
 export function formatOpenAICategoryMarker(
   category: OpenAICompatibilityFailureCategory,
   host?: string,
@@ -542,6 +574,17 @@ export function classifyOpenAIHttpFailure(options: {
       status: options.status,
       message: body,
       hint: 'Provider quota or usage allotment has run out. Enable billing or switch provider.',
+    }
+  }
+
+  if (options.status === 403 && isExplicitThrottleMessage(body)) {
+    return {
+      source: 'http',
+      category: 'rate_limited',
+      retryable: true,
+      status: options.status,
+      message: body,
+      hint: 'Provider rate-limited the request. Retry after backoff.',
     }
   }
 

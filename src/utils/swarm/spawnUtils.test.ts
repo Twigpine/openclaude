@@ -1,3 +1,4 @@
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
 import {
@@ -94,6 +95,29 @@ test('buildInheritedEnvVars forwards the official Command Code credential alias'
   expect(envVars).toContain('COMMAND_CODE_API_KEY=official-key')
   expect(envVars).not.toContain('CLAUDE_CODE_USE_OPENAI=1')
   expect(envVars).not.toContain('OPENAI_BASE_URL=')
+})
+
+test('buildInheritedEnvVars forwards every Gemini Vertex project alias to teammates', () => {
+  // Gemini Vertex accepts GEMINI_VERTEX_PROJECT, GOOGLE_CLOUD_PROJECT,
+  // GCLOUD_PROJECT and GOOGLE_PROJECT_ID as project sources. An env-only
+  // teammate (access token + one of the aliases) must keep the project hint.
+  const aliases = [
+    'GEMINI_VERTEX_PROJECT',
+    'GOOGLE_CLOUD_PROJECT',
+    'GCLOUD_PROJECT',
+    'GOOGLE_PROJECT_ID',
+  ] as const
+  const restoreEnv = snapshotEnv([...aliases, 'CLAUDE_CODE_USE_GEMINI_VERTEX'])
+  try {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+    for (const k of aliases) process.env[k] = `value-${k}`
+    const envVars = buildInheritedEnvVars()
+    for (const k of aliases) {
+      expect(envVars).toContain(`${k}=value-${k}`)
+    }
+  } finally {
+    restoreEnv()
+  }
 })
 
 test('buildInheritedEnvVars forwards PATH for source-built teammate tool lookups', () => {

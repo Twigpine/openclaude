@@ -245,7 +245,6 @@ export async function completeAimlapiCodeSignIn(
       const minted = await mintOrAdoptSignInKey(client, email, auth.token, signal)
       apiKey = minted.apiKey
       apiKeyId = minted.apiKeyId
-      mintedKey = true
       try {
         const balance = await client.getBalance(apiKey, signal)
         return {

@@ -1,3 +1,4 @@
+import type { ToolUseContext } from '../../Tool.js'
 import { describe, expect, test } from 'bun:test'
 
 import { getDefaultAppState, type AppState } from '../../state/AppStateStore.js'
@@ -47,7 +48,7 @@ function makeContext(goal = createGoalState('finish implementation')) {
     options: {
       isNonInteractiveSession: false,
     },
-  } as any
+  } as ToolUseContext
 
   return {
     context,
@@ -56,10 +57,10 @@ function makeContext(goal = createGoalState('finish implementation')) {
   }
 }
 
-async function drain(
-  generator: AsyncGenerator<any, any>,
-): Promise<{ yielded: any[]; returned: any }> {
-  const yielded: any[] = []
+async function drain<Yield, Return>(
+  generator: AsyncGenerator<Yield, Return>,
+): Promise<{ yielded: Yield[]; returned: Return }> {
+  const yielded: Yield[] = []
   while (true) {
     const next = await generator.next()
     if (next.done) return { yielded, returned: next.value }
@@ -283,7 +284,7 @@ describe('goal continuation controller', () => {
       evaluateGoalAfterTurn({
         messagesForQuery: Array.from({ length: 100 }, (_, i) =>
           assistant(`prior-${i}`, `prior ${i}`),
-        ) as any,
+        ),
         assistantMessages: [assistant('assistant-1', 'Done.')],
         toolUseContext: context,
         querySource: 'sdk',
@@ -292,7 +293,7 @@ describe('goal continuation controller', () => {
     )
 
     expect(observedMessages.length).toBeLessThanOrEqual(24)
-    expect((observedMessages.at(-1) as any).uuid).toBe('assistant-1')
+    expect((observedMessages.at(-1) as { uuid: string }).uuid).toBe('assistant-1')
   })
 
   test('no goal evaluation for subagents/agent query sources', async () => {
@@ -310,7 +311,7 @@ describe('goal continuation controller', () => {
       evaluateGoalAfterTurn({
         messagesForQuery: [],
         assistantMessages: [assistant('assistant-1', 'Done.')],
-        toolUseContext: { ...context, agentId: 'agent-1' },
+        toolUseContext: { ...context, agentId: 'agent-1' as import('../../types/ids.js').AgentId },
         querySource: 'repl_main_thread',
         deps,
       }),
@@ -499,7 +500,7 @@ describe('goal continuation controller', () => {
       ...context,
       getAppState: () => ({
         ...context.getAppState(),
-        elicitation: { queue: [{}] },
+        elicitation: { queue: [{} as AppState["elicitation"]["queue"][number]] },
       }),
     }
     let calls = 0

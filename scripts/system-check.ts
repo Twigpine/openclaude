@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { captureSync } from './subprocess.ts'
 import {
   resolveCodexApiCredentials,
   resolveProviderRequest,
@@ -766,11 +766,9 @@ export function formatReachabilityFailureDetail(
 }
 
 export function readNodeExecutableVersion(
-  spawn = spawnSync,
+  spawn = captureSync,
 ): NodeExecutableVersionProbe {
-  const result = spawn('node', ['--version'], {
-    encoding: 'utf8',
-  })
+  const result = spawn('node', ['--version'])
 
   if (result.error) {
     return {
@@ -1403,11 +1401,10 @@ function checkOllamaProcessorMode(): CheckResult {
     return pass('Ollama processor mode', 'Skipped (Atomic Chat local provider detected, not Ollama).')
   }
 
-  const result = spawnSync('ollama', ['ps'], {
-    cwd: process.cwd(),
-    encoding: 'utf8',
-    shell: true,
-  })
+  // Keep the existing shell lookup, including command wrappers on Windows.
+  const result = process.platform === 'win32'
+    ? captureSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'ollama ps'], { cwd: process.cwd() })
+    : captureSync('/bin/sh', ['-c', 'ollama ps'], { cwd: process.cwd() })
 
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout || 'Unable to run ollama ps').trim()

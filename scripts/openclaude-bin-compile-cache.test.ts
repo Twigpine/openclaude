@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { captureSync } from './subprocess.ts'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -43,9 +43,8 @@ function runLauncher(
   env: NodeJS.ProcessEnv,
   nodeArgs: string[] = [],
 ): LauncherResult {
-  const result = spawnSync('node', [...nodeArgs, BIN_PATH, '--version'], {
+  const result = captureSync('node', [...nodeArgs, BIN_PATH, '--version'], {
     cwd: REPO_ROOT,
-    encoding: 'utf8',
     env,
     timeout: 30_000,
   })
@@ -63,7 +62,7 @@ function expectNormalVersion(result: LauncherResult): void {
 }
 
 function nodeSupportsCompileCache(): boolean {
-  return spawnSync(
+  return captureSync(
     'node',
     ['-e', "process.exit(typeof require('node:module').enableCompileCache === 'function' ? 0 : 1)"],
   ).status === 0

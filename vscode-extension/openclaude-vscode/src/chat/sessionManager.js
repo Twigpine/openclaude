@@ -5,16 +5,18 @@
  * Session files live under:
  *   ~/.openclaude/projects/<sanitized-cwd>/<sessionId>.jsonl
  *
- * Falls back to ~/.claude/projects/ for legacy installs.
+ * OPENCLAUDE_CONFIG_DIR overrides the config root, matching the CLI.
  */
 
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
-const crypto = require('crypto');
+const readline = require('readline');
+require('crypto');
 
-const MAX_SANITIZED_LENGTH = 80;
+// Keep in sync with src/utils/sessionStoragePortable.ts.
+const MAX_SANITIZED_LENGTH = 200;
 
 function sanitizePath(name) {
   const sanitized = name.replace(/[^a-zA-Z0-9]/g, '-');
@@ -32,23 +34,38 @@ function simpleHash(str) {
 }
 
 function resolveConfigDir() {
-  const envDir = process.env.CLAUDE_CONFIG_DIR;
-  if (envDir) return envDir;
-  const home = os.homedir();
-  const openClaudeDir = path.join(home, '.openclaude');
-  const legacyDir = path.join(home, '.claude');
-  if (!fs.existsSync(openClaudeDir) && fs.existsSync(legacyDir)) {
-    return legacyDir;
-  }
-  return openClaudeDir;
+  // Match src/utils/envUtils.ts: OpenClaude and Claude Code are independent.
+  return (process.env.OPENCLAUDE_CONFIG_DIR || path.join(os.homedir(), '.openclaude')).normalize('NFC');
 }
 
 function getProjectsDir() {
   return path.join(resolveConfigDir(), 'projects');
 }
 
-function getProjectDir(cwd) {
-  return path.join(getProjectsDir(), sanitizePath(cwd));
+/** Same rule as resolveSessionFilePath: a zero-byte file is not a session. */
+async function hasTranscriptBytes(filePath) {
+  try {
+    const stat = await fsp.stat(filePath);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Return the Node directory first, followed by alternate long-path hashes. */
+async function getProjectDirs(cwd) {
+  const sanitized = sanitizePath(cwd);
+  const exact = path.join(getProjectsDir(), sanitized);
+  if (sanitized.length <= MAX_SANITIZED_LENGTH) return [exact];
+  try {
+    const prefix = sanitized.slice(0, MAX_SANITIZED_LENGTH) + '-';
+    const entries = await fsp.readdir(getProjectsDir(), { withFileTypes: true });
+    return [exact, ...entries
+      .filter(e => e.isDirectory() && e.name !== sanitized && e.name.startsWith(prefix))
+      .map(e => path.join(getProjectsDir(), e.name))];
+  } catch {
+    return [exact];
+  }
 }
 
 class SessionManager {
@@ -61,18 +78,18 @@ class SessionManager {
   }
 
   async listSessions() {
-    const projectDir = this._cwd
-      ? getProjectDir(this._cwd)
-      : null;
-
-    const dirs = projectDir
-      ? [projectDir]
-      : await this._allProjectDirs();
+    const cwd = this._cwd;
+    const dirs = cwd ? await getProjectDirs(cwd) : await this._allProjectDirs();
 
     const sessions = [];
-    for (const dir of dirs) {
-      const items = await this._readSessionDir(dir);
-      sessions.push(...items);
+    const seenIds = new Set();
+    for (const [index, dir] of dirs.entries()) {
+      const items = await this._readSessionDir(dir, cwd && index > 0 ? cwd : null);
+      for (const item of items) {
+        if (cwd && seenIds.has(item.id)) continue;
+        seenIds.add(item.id);
+        sessions.push(item);
+      }
     }
 
     sessions.sort((a, b) => b.timestamp - a.timestamp);
@@ -92,7 +109,7 @@ class SessionManager {
     }
   }
 
-  async _readSessionDir(dir) {
+  async _readSessionDir(dir, expectedCwd = null) {
     if (!fs.existsSync(dir)) return [];
     try {
       const files = await fsp.readdir(dir);
@@ -102,6 +119,8 @@ class SessionManager {
       for (const file of jsonlFiles) {
         const filePath = path.join(dir, file);
         try {
+          if (!await hasTranscriptBytes(filePath)) continue;
+          if (expectedCwd && !await this._matchesWorkspace(filePath, expectedCwd)) continue;
           const meta = await this._extractSessionMeta(filePath);
           if (meta) results.push(meta);
         } catch { /* skip unreadable */ }
@@ -110,6 +129,27 @@ class SessionManager {
       return results;
     } catch {
       return [];
+    }
+  }
+
+  /** Verify alternate hashes using the first transcript cwd, not just a shared prefix. */
+  async _matchesWorkspace(filePath, cwd) {
+    const input = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const lines = readline.createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        let entry;
+        try { entry = JSON.parse(line); } catch { continue; }
+        if (entry && (entry.type === 'user' || entry.type === 'assistant') && typeof entry.cwd === 'string') {
+          return entry.cwd === cwd;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      lines.close();
+      input.destroy();
     }
   }
 
@@ -170,17 +210,38 @@ class SessionManager {
     };
   }
 
-  async loadSession(sessionId) {
-    const projectDir = this._cwd ? getProjectDir(this._cwd) : null;
-    const dirs = projectDir ? [projectDir] : await this._allProjectDirs();
+  /** Resolve the same transcript used by the history view and CLI resume. */
+  async resolveSessionPath(sessionId) {
+    // History IDs name a single transcript, never a relative or absolute path.
+    if (typeof sessionId !== 'string' || !sessionId || /[/\\\0]/.test(sessionId)) {
+      return null;
+    }
 
-    for (const dir of dirs) {
+    const cwd = this._cwd;
+    const dirs = cwd ? await getProjectDirs(cwd) : await this._allProjectDirs();
+
+    for (const [index, dir] of dirs.entries()) {
       const filePath = path.join(dir, `${sessionId}.jsonl`);
-      if (fs.existsSync(filePath)) {
-        return this._parseSessionFile(filePath);
+      if (await hasTranscriptBytes(filePath)) {
+        if (cwd && index > 0 && !await this._matchesWorkspace(filePath, cwd)) continue;
+        return filePath;
       }
     }
     return null;
+  }
+
+  /** Keep UUID resume for exact absolute stores; stabilize all other file targets. */
+  async getResumeTarget(sessionId) {
+    const filePath = await this.resolveSessionPath(sessionId);
+    const exact = this._cwd && path.join(getProjectsDir(), sanitizePath(this._cwd), `${sessionId}.jsonl`);
+    return filePath && (filePath !== exact || !path.isAbsolute(filePath))
+      ? path.resolve(filePath)
+      : sessionId;
+  }
+
+  async loadSession(sessionId) {
+    const filePath = await this.resolveSessionPath(sessionId);
+    return filePath ? this._parseSessionFile(filePath) : null;
   }
 
   async _parseSessionFile(filePath) {

@@ -174,12 +174,18 @@ function getRouteBaseUrl(
   return options?.baseUrl ?? getRouteDescriptor(routeId)?.defaultBaseUrl
 }
 
-// Keep custom endpoint authentication identical for requests and cache readers.
+function supportsCustomDiscoveryAuth(routeId: string): boolean {
+  // Orca's named route preserves the custom authentication its endpoint
+  // supported before registration, including cache and in-flight identity.
+  return routeId === 'custom' || routeId === 'orcarouter'
+}
+
+// Keep configurable authentication identical for requests and cache readers.
 function getCustomDiscoveryAuth(
   routeId: string,
   options?: { apiKey?: string; baseUrl?: string; processEnv?: NodeJS.ProcessEnv },
 ): Record<string, string> | undefined {
-  if (routeId !== 'custom') return undefined
+  if (!supportsCustomDiscoveryAuth(routeId)) return undefined
   const env = options?.processEnv ?? process.env
   const name = env.OPENAI_AUTH_HEADER?.trim()
   if (!name || !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(name)) return undefined
@@ -241,7 +247,7 @@ function getRouteDiscoveryApiKey(
       routeId,
       baseUrl,
       processEnv:
-        routeId === 'custom' ? options?.processEnv ?? process.env : process.env,
+        supportsCustomDiscoveryAuth(routeId) ? options?.processEnv ?? process.env : process.env,
     }),
   )
 }
@@ -260,7 +266,7 @@ export async function resolveDiscoveryRequestOptions<
   resolverOptions?: { refreshXaiOAuth?: boolean },
 ): Promise<T> {
   const next = { ...(options ?? {}) } as T
-  if (routeId === 'custom') {
+  if (supportsCustomDiscoveryAuth(routeId)) {
     // Profile activation can change the global env while cache I/O is pending.
     next.processEnv = { ...(next.processEnv ?? process.env) }
     return next
@@ -548,7 +554,7 @@ export async function discoverModelsForRoute(
   try {
     const discoveryOptions = await resolveDiscoveryRequestOptions(
       routeId,
-      routeId === 'custom' ? cachedOptions : options,
+      supportsCustomDiscoveryAuth(routeId) ? cachedOptions : options,
     )
     const discoveryCacheKey = getDiscoveryCacheKey(routeId, discoveryOptions)
     const discovered = await runDiscovery(routeId, discoveryOptions)
@@ -635,7 +641,7 @@ export async function refreshStartupDiscoveryForRoute(
   }
 
   return discoverModelsForRoute(routeId, {
-    ...(routeId === 'custom' ? cachedOptions : options),
+    ...(supportsCustomDiscoveryAuth(routeId) ? cachedOptions : options),
     forceRefresh: true,
   })
 }

@@ -1,3 +1,4 @@
+import { snapshotEnv } from '../test/envSnapshot.js'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 const actualSettings = await import('../utils/settings/settings.js')
@@ -38,6 +39,7 @@ const ENV_KEYS = [
   'CI',
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GEMINI_VERTEX',
   'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
@@ -450,4 +452,24 @@ describe('detectProvider — modelOverride from --model flag', () => {
     expect(result.name).toBe('Anthropic')
     expect(result.model).toContain('sonnet')
   })
+})
+
+test.each([
+  ['my-project', undefined, 'my-project'],
+  [undefined, 'adc', '<ADC-resolved project>'],
+] as const)('native startup displays the project or ADC placeholder', (project, mode, displayed) => {
+  const restore = snapshotEnv(['CLAUDE_CODE_USE_GEMINI_VERTEX', 'GEMINI_VERTEX_PROJECT',
+    'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_PROJECT_ID',
+    'GEMINI_VERTEX_LOCATION', 'GEMINI_VERTEX_MODEL', 'GEMINI_VERTEX_AUTH_MODE'], { clear: true })
+  try {
+    process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = 'yes'
+    if (project) process.env.GEMINI_VERTEX_PROJECT = project
+    if (mode) process.env.GEMINI_VERTEX_AUTH_MODE = mode
+    expect(detectProvider()).toMatchObject({
+      name: 'Gemini Vertex', model: 'gemini-2.5-flash',
+      baseUrl: 'https://aiplatform.googleapis.com/v1/projects/' + displayed + '/locations/global',
+    })
+  } finally {
+    restore()
+  }
 })

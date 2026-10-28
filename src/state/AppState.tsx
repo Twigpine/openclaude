@@ -142,7 +142,7 @@ function useAppStore(): AppStateStore {
  * ```
  */
 export function useAppState<T>(selector: (state: AppState) => T): T;
-export function useAppState<T>(selector: IfAny<T, T, never>): any;
+export function useAppState<T>(selector: IfAny<T, T, never>): T;
 export function useAppState<T>(selector: (state: AppState) => T): T {
   const store = useAppStore();
   const selectorRef = React.useRef<(state: AppState) => T>(selector);
@@ -184,7 +184,7 @@ export function useAppStateMaybeOutsideOfProvider<T>(
 ): T | undefined;
 export function useAppStateMaybeOutsideOfProvider<T>(
   selector: IfAny<T, T, never>,
-): any;
+): T | undefined;
 export function useAppStateMaybeOutsideOfProvider<T>(
   selector: (state: AppState) => T,
 ): T | undefined {

@@ -35,6 +35,9 @@ import {
   extractTextContent,
   getLastAssistantMessage,
 } from './messages.js'
+import { getDefaultMainLoopModelSetting, getProviderRequestModel, parseUserSpecifiedModel } from './model/model.js'
+import { getActiveProviderProfile } from './providerProfiles.js'
+import { getAPIProvider } from './model/providers.js'
 import { createDenialTrackingState } from './permissions/denialTracking.js'
 import { parseToolListFromCLI } from './permissions/permissionSetup.js'
 import { recordSidechainTranscript } from './sessionStorage.js'
@@ -324,6 +327,55 @@ export type SubagentContextOverrides = {
   contentReplacementState?: ContentReplacementState
 }
 
+/** Include profileless transport changes, not just named-profile changes. */
+export function getAmbientQueryProviderKey(): string {
+  return `${getAPIProvider()}:${getActiveProviderProfile()?.id ?? ''}`
+}
+
+/** Return provenance only while its owner and model options are unchanged. */
+export function getOwnedQueryModelSelection(context: ToolUseContext) {
+  const selection = context.queryModelSelection?.current
+  return context.queryModelSelection?.agentId === context.agentId &&
+    selection?.options === context.options &&
+    selection.model === context.options.mainLoopModel
+    ? selection
+    : undefined
+}
+
+export function getQueryModelSelection(context: ToolUseContext) {
+  const selection = getOwnedQueryModelSelection(context)
+  return !selection?.followsProvider || context.options.providerOverride ||
+    selection?.providerKey === getAmbientQueryProviderKey()
+    ? selection
+    : undefined
+}
+
+/** Re-select an inherited ambient pair before consuming a context under a new provider. */
+export function refreshAmbientQueryModelSelection(context: ToolUseContext): ToolUseContext {
+  const selection = getOwnedQueryModelSelection(context)
+  const providerKey = getAmbientQueryProviderKey()
+  if (!selection?.followsProvider || context.options.providerOverride ||
+    selection.providerKey === providerKey) return context
+
+  const state = context.getAppState()
+  const selectedModel = state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting()
+  const runtimeModel = parseUserSpecifiedModel(selectedModel)
+  const options = { ...context.options, mainLoopModel: runtimeModel }
+  // A retained reader still owns its earlier options/selection snapshot.
+  return {
+    ...context,
+    options,
+    queryModelSelection: {
+      agentId: context.agentId,
+      current: {
+        ...selection, options, model: runtimeModel, selectedModel, runtimeModel,
+        requestModel: getProviderRequestModel(selectedModel, runtimeModel),
+        providerKey,
+      },
+    },
+  }
+}
+
 /**
  * Creates an isolated ToolUseContext for subagents.
  *
@@ -367,6 +419,31 @@ export function createSubagentContext(
   parentContext: ToolUseContext,
   overrides?: SubagentContextOverrides,
 ): ToolUseContext {
+  if (!overrides?.options) parentContext = refreshAmbientQueryModelSelection(parentContext)
+  const selection = getQueryModelSelection(parentContext)
+  const providerKey = getAmbientQueryProviderKey()
+  let runtimeModel = selection?.runtimeModel ?? parentContext.options.mainLoopModel
+  let requestModel = selection?.requestModel ?? parentContext.options.mainLoopModel
+  // Fresh root options can predate async /btw or SDK preparation. Establish
+  // the concrete/request pair together from the current configured selection.
+  // Saved selections, explicit children and fixed providers keep their choices.
+  if (!overrides?.options && !parentContext.options.providerOverride &&
+    !parentContext.queryModelSelection?.current && !parentContext.agentId) {
+    const state = parentContext.getAppState()
+    const selectedModel = state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting()
+    runtimeModel = parseUserSpecifiedModel(selectedModel)
+    requestModel = getProviderRequestModel(
+      selectedModel,
+      runtimeModel,
+    )
+  }
+  // Explicit options (including same-runtime model overrides) take precedence.
+  const options = overrides?.options ?? {
+    ...parentContext.options,
+    mainLoopModel: runtimeModel,
+  }
+  const agentId = overrides?.agentId ?? createAgentId()
+
   // Determine abortController: explicit override > share parent's > new child
   const abortController =
     overrides?.abortController ??
@@ -472,10 +549,28 @@ export function createSubagentContext(
     openMessageSelector: undefined,
 
     // Fields that can be overridden or copied from parent
-    options: overrides?.options ?? parentContext.options,
+    options,
     messages: overrides?.messages ?? parentContext.messages,
     // Generate new agentId for subagents (each subagent should have its own ID)
-    agentId: overrides?.agentId ?? createAgentId(),
+    agentId,
+    // Runtime options retain the concrete model for budgets and capabilities.
+    // Request aliases/reasoning travel separately, owned by this child. Explicit
+    // options start a new selection even when the concrete model is unchanged.
+    queryModelSelection: {
+      agentId,
+      ...(!overrides?.options && {
+        current: {
+          options,
+          model: options.mainLoopModel,
+          selectedModel: requestModel,
+          runtimeModel: options.mainLoopModel,
+          requestModel,
+          providerKey,
+          followsProvider: selection?.followsProvider ??
+            (!parentContext.agentId && !parentContext.queryModelSelection?.current),
+        },
+      }),
+    },
     agentType: overrides?.agentType,
     ...(overrides?.queryLifecycle
       ? { queryLifecycle: overrides.queryLifecycle }

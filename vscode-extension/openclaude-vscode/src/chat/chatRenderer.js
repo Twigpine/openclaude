@@ -1263,6 +1263,8 @@ function renderChatHtml({ nonce, platform }) {
         break;
 
       case 'session_cleared':
+        // Resume also clears the view before the selected session is ready.
+        if (msg.resetStreaming) setStreaming(false);
         messagesEl.innerHTML = '';
         if (welcomeEl) {
           messagesEl.appendChild(welcomeEl);

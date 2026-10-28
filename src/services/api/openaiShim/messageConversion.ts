@@ -1,3 +1,6 @@
+import { sanitizeToolUseIdForWire } from '../../../utils/toolUseIds.js'
+
+const CHAT_TOOL_CALL_ID_MAX_LENGTH = 40
 import { stripEchoedToolResultsMarker } from './markerEchoGuard.js'
 
 export type OpenAIContentPart =
@@ -163,7 +166,7 @@ export function convertMessages(
     const content = (msg.message ?? msg).content
     if (!Array.isArray(content)) continue
     for (const block of content) {
-      if (block?.type === 'tool_result' && block.tool_use_id) toolResultIds.add(block.tool_use_id)
+      if (block?.type === 'tool_result' && block.tool_use_id) toolResultIds.add(sanitizeToolUseIdForWire(block.tool_use_id, CHAT_TOOL_CALL_ID_MAX_LENGTH))
     }
   }
 
@@ -188,7 +191,7 @@ export function convertMessages(
           otherContent.push(block)
           continue
         }
-        const id = block.tool_use_id ?? 'unknown'
+        const id = sanitizeToolUseIdForWire(block.tool_use_id ?? 'unknown', CHAT_TOOL_CALL_ID_MAX_LENGTH)
         if (knownToolCallIds.has(id)) {
           result.push({
             role: 'tool',
@@ -239,7 +242,7 @@ export function convertMessages(
     }
     const mappedToolCalls: NonNullable<ConvertedOpenAIMessage['tool_calls']> = []
     for (const toolUse of toolUses) {
-      const id = toolUse.id ?? `call_${crypto.randomUUID().replace(/-/g, '')}`
+      const id = toolUse.id ? sanitizeToolUseIdForWire(toolUse.id, CHAT_TOOL_CALL_ID_MAX_LENGTH) : `call_${crypto.randomUUID().replace(/-/g, '')}`
       if (!toolResultIds.has(id) && !isLastInHistory) continue
       knownToolCallIds.add(id)
       const toolCall: NonNullable<ConvertedOpenAIMessage['tool_calls']>[number] = {

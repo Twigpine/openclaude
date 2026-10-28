@@ -1,7 +1,7 @@
 import { APIError } from '@anthropic-ai/sdk'
 import { expect, test } from 'bun:test'
 
-import { getAssistantMessageFromError } from './errors.js'
+import { categorizeRetryableAPIError, getAssistantMessageFromError } from './errors.js'
 
 function getFirstText(message: ReturnType<typeof getAssistantMessageFromError>): string {
   const first = message.message.content[0]
@@ -10,6 +10,17 @@ function getFirstText(message: ReturnType<typeof getAssistantMessageFromError>):
   }
   return typeof first.text === 'string' ? first.text : ''
 }
+
+test.each([401, 403])('keeps native authentication retry categories for HTTP %i', status => {
+  const error = APIError.generate(
+    status,
+    undefined,
+    'Infrastructure auth unavailable',
+    new Headers(),
+  )
+
+  expect(categorizeRetryableAPIError(error)).toBe('authentication_failed')
+})
 
 test('maps endpoint_not_found category markers to actionable setup guidance', () => {
   const error = APIError.generate(

@@ -44,9 +44,7 @@ const McpOAuthConfigSchema = lazySchema(() =>
   z.object({
     clientId: z.string().optional(),
     callbackPort: z.number().int().positive().optional(),
-    authServerMetadataUrl: z
-      .string()
-      .url()
+    authServerMetadataUrl: z.url()
       .startsWith('https://', {
         message: 'authServerMetadataUrl must use https://',
       })

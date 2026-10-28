@@ -391,7 +391,7 @@ export async function initializeKeybindingWatcher(): Promise<void> {
       pollInterval: FILE_STABILITY_POLL_INTERVAL_MS,
     },
     ignorePermissionErrors: true,
-    usePolling: false,
+    backend: 'auto',
     atomic: true,
   })
 

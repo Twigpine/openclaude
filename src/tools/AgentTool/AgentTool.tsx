@@ -100,21 +100,29 @@ const baseInputSchema = lazySchema(() => z.object({
 }));
 
 // Full schema combining base + multi-agent params + isolation
-export const fullInputSchema = lazySchema(() => {
+const fullInputObjectSchema = lazySchema(() => {
   // Multi-agent parameters
   const multiAgentInputSchema = z.object({
     name: z.string().optional().describe('Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.'),
     team_name: z.string().optional().describe('Team name for spawning. Uses current team context if omitted.'),
     mode: permissionModeSchema().optional().describe('Permission mode for spawned teammate (e.g., "plan" to require plan approval).')
   });
-  return baseInputSchema().merge(multiAgentInputSchema).extend({
+  return baseInputSchema().extend(multiAgentInputSchema.shape).extend({
     isolation: z.enum(['worktree']).optional().describe('Isolation mode. "worktree" creates a temporary git worktree so the agent works on an isolated copy of the repo. When the session is outside a git repository (for example a parent of multiple repos), pass cwd set to the target repository root so the worktree is created from that repo.'),
     cwd: z.string().optional().describe('Absolute path to run the agent in. Overrides the working directory for all filesystem and shell operations within this agent. When isolation is "worktree", cwd selects which git repository to create the worktree from — use this when the session cwd is not itself a git repo (for example a folder parenting multiple repos).')
-  }).refine(input => input.cwd === undefined || isAbsolute(input.cwd), {
-    path: ['cwd'],
-    message: 'cwd must be an absolute path.',
   });
 });
+
+const isAbsoluteCwd = (input: { cwd?: string }): boolean =>
+  input.cwd === undefined || isAbsolute(input.cwd);
+const cwdRefinementParams = {
+  path: ['cwd'],
+  message: 'cwd must be an absolute path.',
+};
+
+export const fullInputSchema = lazySchema(() =>
+  fullInputObjectSchema().refine(isAbsoluteCwd, cwdRefinementParams)
+);
 
 // Strip optional fields from the schema when the backing feature is off so
 // the model never sees them. Done via .omit() rather than conditional spread
@@ -125,7 +133,8 @@ export const fullInputSchema = lazySchema(() => {
 export const inputSchema = lazySchema(() => {
   // cwd stays available in the open build so multi-repo parent sessions can
   // pin subagents (and worktree isolation) to a child repository (#2052).
-  const schema = fullInputSchema();
+  // Zod requires object omission before adding refinements.
+  const schema = fullInputObjectSchema();
 
   // GrowthBook-in-lazySchema is acceptable here (unlike subagent_type, which
   // was removed in 906da6c723): the divergence window is one-session-per-
@@ -134,9 +143,10 @@ export const inputSchema = lazySchema(() => {
   // by forceAsync) or "schema hides a param that would've worked" (gate
   // flips off mid-session: everything still runs async via memoized
   // forceAsync). No Zod rejection, no crash — unlike required→optional.
-  return isBackgroundTasksDisabled || isForkSubagentEnabled() ? schema.omit({
+  const gatedSchema = isBackgroundTasksDisabled || isForkSubagentEnabled() ? schema.omit({
     run_in_background: true
   }) : schema;
+  return gatedSchema.refine(isAbsoluteCwd, cwdRefinementParams);
 });
 type InputSchema = ReturnType<typeof inputSchema>;
 

@@ -76,7 +76,7 @@ export type AllowedPrompt = z.infer<ReturnType<typeof allowedPromptSchema>>
 
 const inputSchema = lazySchema(() =>
   z
-    .strictObject({
+    .looseObject({
       // Prompt-based permissions requested by the plan
       allowedPrompts: z
         .array(allowedPromptSchema())
@@ -84,8 +84,7 @@ const inputSchema = lazySchema(() =>
         .describe(
           'Prompt-based permissions needed to implement the plan. These describe categories of actions rather than specific commands.',
         ),
-    })
-    .passthrough(),
+    }),
 )
 type InputSchema = ReturnType<typeof inputSchema>
 

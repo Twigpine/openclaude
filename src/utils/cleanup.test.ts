@@ -67,6 +67,7 @@ async function runCleanupFixture(
   mode:
     | 'once'
     | 'pass-outcome'
+    | 'policy-outcome'
     | 'marker-failure'
     | 'periodic-policy-recheck'
     | 'periodic-recovery'
@@ -400,6 +401,11 @@ describe('cleanupOldMessageFilesInBackground', () => {
       expect(await Bun.file(targetPath).exists()).toBe(true)
       await rm(join(root, '.recovery-pass'), { force: true })
 
+      const freshPath = await createCompletedBackgroundSession(
+        configDir,
+        'bg-progress-fresh',
+        new Date(Date.now() - 60_000),
+      )
       expect(
         await runCleanupFixture(
           configDir,
@@ -407,6 +413,7 @@ describe('cleanupOldMessageFilesInBackground', () => {
           { OPENCLAUDE_CLEANUP_RECOVERY_LIMIT: '2' },
         ),
       ).toEqual({ result: 'ran' })
+      expect(await Bun.file(freshPath).exists()).toBe(false)
       expect(await Bun.file(targetPath).exists()).toBe(false)
     },
     30_000,
@@ -447,40 +454,36 @@ describe('cleanupOldMessageFilesInBackground', () => {
         )
         const journal = join(root, '.recovery-journal')
         const before = await readFile(journal, 'utf8')
-        expect(
-          await runCleanupFixture(configDir, 'pass-outcome', {
-            OPENCLAUDE_CLEANUP_TRIGGER: trigger,
-            OPENCLAUDE_CLEANUP_REJECT_AFTER_LOCK:
-              timing === 'after' ? '1' : '0',
-          }),
-        ).toEqual({ result: 'invalid-policy' })
-        expect(await Bun.file(metadataPath).exists()).toBe(true)
-        expect(await Bun.file(marker).exists()).toBe(false)
-        expect(
-          await Bun.file(join(root, '.recovery-cursor.json')).exists(),
-        ).toBe(false)
-        expect(await readFile(journal, 'utf8')).toBe(before)
-
-        await writeFile(settingsPath, validPolicy)
-        expect(
-          await runCleanupFixture(configDir, 'pass-outcome', {
-            OPENCLAUDE_CLEANUP_TRIGGER: trigger,
-          }),
-        ).toEqual({ result: 'ran' })
+        const outcomes = await runCleanupFixture(configDir, 'policy-outcome', {
+          OPENCLAUDE_CLEANUP_TRIGGER: trigger,
+          OPENCLAUDE_CLEANUP_REJECT_AFTER_LOCK:
+            timing === 'after' ? '1' : '0',
+        })
+        expect(outcomes).toEqual({
+          phases: timing === 'after' ? ['policy-hook', 'threshold'] : ['threshold'],
+          policyHookLockHeld: timing === 'after' ? true : null,
+          rejected: {
+            result: 'invalid-policy',
+            metadataPresent: true,
+            markerPresent: false,
+            cursorPresent: false,
+            journal: before,
+          },
+          retried: {
+            result: 'ran',
+            metadataPresent: false,
+            journal: '',
+            markerPresent: true,
+          },
+          throttled: 'skipped',
+          rerun: {
+            result: 'ran',
+            metadataPresent: false,
+            markerPresent: true,
+          },
+        })
         expect(await Bun.file(metadataPath).exists()).toBe(false)
         expect(await readFile(journal, 'utf8')).toBe('')
-        expect(await Bun.file(marker).exists()).toBe(true)
-        expect(
-          await runCleanupFixture(configDir, 'pass-outcome', {
-            OPENCLAUDE_CLEANUP_TRIGGER: trigger,
-          }),
-        ).toEqual({ result: 'skipped' })
-        await rm(marker)
-        expect(
-          await runCleanupFixture(configDir, 'pass-outcome', {
-            OPENCLAUDE_CLEANUP_TRIGGER: trigger,
-          }),
-        ).toEqual({ result: 'ran' })
         expect(await Bun.file(marker).exists()).toBe(true)
       }, 30_000)
     }

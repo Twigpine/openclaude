@@ -6,8 +6,6 @@ import {
 
 import {
   DEFAULT_GITHUB_DEVICE_SCOPE,
-  GitHubDeviceFlowError,
-  pollAccessToken,
   requestDeviceCode,
 } from './deviceFlow.js'
 

@@ -1,28 +1,10 @@
 import { c as _c } from "react-compiler-runtime";
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs';
 import { useEffect, useRef } from 'react';
-import { logError } from 'src/utils/log.js';
-import { z } from 'zod/v4';
 import { callIdeRpc } from '../services/mcp/client.js';
 import type { ConnectedMCPServer, MCPServerConnection } from '../services/mcp/types.js';
 import type { PermissionMode } from '../types/permissions.js';
-import { CLAUDE_IN_CHROME_MCP_SERVER_NAME, isTrackedClaudeInChromeTabId } from '../utils/claudeInChrome/common.js';
-import { lazySchema } from '../utils/lazySchema.js';
-import { enqueuePendingNotification } from '../utils/messageQueueManager.js';
-
-// Schema for the prompt notification from Chrome extension (JSON-RPC 2.0 format)
-const ClaudeInChromePromptNotificationSchema = lazySchema(() => z.object({
-  method: z.literal('notifications/message'),
-  params: z.object({
-    prompt: z.string(),
-    image: z.object({
-      type: z.literal('base64'),
-      media_type: z.enum(['image/jpeg', 'image/png', 'image/gif', 'image/webp']),
-      data: z.string()
-    }).optional(),
-    tabId: z.number().optional()
-  })
-}));
+import { CLAUDE_IN_CHROME_MCP_SERVER_NAME } from '../utils/claudeInChrome/common.js';
 
 export function getClaudeInChromePermissionMode(toolPermissionMode: PermissionMode): 'ask' | 'skip_all_permission_checks' {
   return toolPermissionMode === 'fullAccess'

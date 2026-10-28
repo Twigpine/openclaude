@@ -34,7 +34,7 @@ describe('shouldPromptCompactOnResume', () => {
   test('returns false for non-interactive sessions', async () => {
     const { shouldPromptCompactOnResume } = await importResumeCompactPrompt()
     const messages = Array.from({ length: 20 }, (_, i) => ({ id: i }))
-    expect(shouldPromptCompactOnResume(messages as any, fakeModel, true)).toBe(false)
+    expect(shouldPromptCompactOnResume(messages, fakeModel, true)).toBe(false)
   })
 
   test('returns false when token count is below 70% threshold', async () => {
@@ -49,7 +49,7 @@ describe('shouldPromptCompactOnResume', () => {
 
     const { shouldPromptCompactOnResume } = await importResumeCompactPrompt()
     const messages = Array.from({ length: 5 }, (_, i) => ({ id: i }))
-    expect(shouldPromptCompactOnResume(messages as any, fakeModel, false)).toBe(false)
+    expect(shouldPromptCompactOnResume(messages, fakeModel, false)).toBe(false)
   })
 
   test('returns true when token count exceeds 70% threshold', async () => {
@@ -63,7 +63,7 @@ describe('shouldPromptCompactOnResume', () => {
     const { shouldPromptCompactOnResume } = await importResumeCompactPrompt()
     // 8 * 100 = 800 > 700
     const messages = Array.from({ length: 8 }, (_, i) => ({ id: i }))
-    expect(shouldPromptCompactOnResume(messages as any, fakeModel, false)).toBe(true)
+    expect(shouldPromptCompactOnResume(messages, fakeModel, false)).toBe(true)
   })
 
   test('returns true when token count exactly equals threshold', async () => {
@@ -77,6 +77,6 @@ describe('shouldPromptCompactOnResume', () => {
     const { shouldPromptCompactOnResume } = await importResumeCompactPrompt()
     // 7 * 100 = 700 == 700
     const messages = Array.from({ length: 7 }, (_, i) => ({ id: i }))
-    expect(shouldPromptCompactOnResume(messages as any, fakeModel, false)).toBe(true)
+    expect(shouldPromptCompactOnResume(messages, fakeModel, false)).toBe(true)
   })
 })

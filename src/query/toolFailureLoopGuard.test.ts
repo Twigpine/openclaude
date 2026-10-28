@@ -1,9 +1,22 @@
-import { expect, test } from 'bun:test'
+import type { Message } from '../types/message.js'
+import { expect, spyOn, test } from 'bun:test'
+import * as queryConfig from './config.js'
+import { FallbackTriggeredError } from '../services/api/withRetry.js'
+import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
+import { z } from 'zod/v4'
+import { createToolFixture } from '../test/toolFixtures.js'
+import { createTaskStateBase } from '../Task.js'
+import type { LocalShellTaskState } from '../tasks/LocalShellTask/guards.js'
+import { TaskOutputTool } from '../tools/TaskOutputTool/TaskOutputTool.js'
 
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import { query, type QueryParams } from '../query.js'
 import type { QueryDeps } from './deps.js'
 import { getMissingToolResultAbortMessage } from '../utils/abortReasons.js'
+import { resetDoomLoop } from '../utils/doomLoop.js'
+import { handleOrphanedPermission } from '../utils/queryHelpers.js'
+import { withTimeout } from '../utils/sleep.js'
+import type { ProcessUserInputContext } from '../utils/processUserInput/processUserInput.js'
 import {
   createAssistantMessage,
   createCompactBoundaryMessage,
@@ -17,6 +30,301 @@ import {
 } from './toolFailureLoopGuard.js'
 
 const querySourceFile = new URL('../query.ts', import.meta.url)
+
+test('independent recovered approvals do not inherit another turn’s doom state', async () => {
+  resetDoomLoop()
+  const executedValues: number[] = []
+  const resultIds: string[] = []
+  const errors: string[] = []
+  const tool = createToolFixture(z.object({ value: z.number() }), {
+    name: 'RecoveredApprovalTool',
+    maxResultSizeChars: 1000,
+    async call({ value }) {
+      executedValues.push(value)
+      return { data: 'ok' }
+    },
+  })
+  try {
+    for (let i = 0; i < 8; i++) {
+      const params = makeQueryParams(async function* () {
+        yield createAssistantMessage({ content: 'done' })
+      } as QueryDeps['callModel'], { querySource: 'sdk' })
+      params.toolUseContext.options.tools = [tool]
+      const context: ProcessUserInputContext = {
+        ...params.toolUseContext,
+        options: { ...params.toolUseContext.options, ideInstallationStatus: null, theme: 'dark' },
+        setMessages: () => {},
+        onChangeAPIKey: () => {},
+      }
+      const id = `recovered-${i}`
+      const input = { value: i < 7 ? 1 : 2 }
+      for await (const message of handleOrphanedPermission({
+        permissionResult: { behavior: 'allow', toolUseID: id, updatedInput: input },
+        assistantMessage: createAssistantMessage({ content: [toolUse(id, tool.name, input)] }),
+      }, [tool], [], context)) {
+        if (message.type !== 'user' || !Array.isArray(message.message.content)) continue
+        for (const block of message.message.content) {
+          if (
+            typeof block !== 'object' || block === null ||
+            !('type' in block) || block.type !== 'tool_result' ||
+            !('tool_use_id' in block) || typeof block.tool_use_id !== 'string'
+          ) continue
+          resultIds.push(block.tool_use_id)
+          if ('is_error' in block && block.is_error) errors.push(JSON.stringify(block))
+        }
+      }
+      // QueryEngine continues with an ordinary query after the recovered tool.
+      for await (const _message of query(params)) { /* drain */ }
+    }
+    expect(executedValues).toEqual([1, 1, 1, 1, 1, 1, 1, 2])
+    expect(resultIds).toEqual(Array.from({ length: 8 }, (_, i) => `recovered-${i}`))
+    expect(errors).toEqual([])
+  } finally {
+    resetDoomLoop()
+  }
+})
+
+test('concurrent SDK turns cannot reset or terminate each other', async () => {
+  function session(name: string) {
+    let calls = 0
+    const tool = createToolFixture(z.object({}), {
+      name,
+      async call() { return { data: 'ok' } },
+    })
+    const params = makeQueryParams(async function* () {
+      calls++
+      yield createAssistantMessage({
+        content: calls <= 8 ? [toolUse(`${name}-${calls}`, name)] : 'done',
+      })
+    } as QueryDeps['callModel'], { querySource: 'sdk' })
+    params.toolUseContext.options.tools = [tool]
+    return { turn: query(params), calls: () => calls }
+  }
+  const first = session('FirstSessionTool')
+  const second = session('SecondSessionTool')
+  // Suspend the first turn after four blocks, while its generator still owns
+  // its state; run the second session all the way through terminal cleanup.
+  let next = await first.turn.next()
+  while (!next.done) {
+    if (first.calls() === 6 && next.value.type === 'user') break
+    next = await first.turn.next()
+  }
+  let secondTerminal: Message | undefined
+  for await (const message of second.turn) {
+    if (message.type === 'assistant') secondTerminal = message
+  }
+  let firstTerminal: Message | undefined
+  for await (const message of first.turn) {
+    if (message.type === 'assistant') firstTerminal = message
+  }
+  expect(first.calls()).toBe(7)
+  expect(second.calls()).toBe(7)
+  expect(JSON.stringify(firstTerminal)).toContain('FirstSessionTool was blocked 5 consecutive')
+  expect(JSON.stringify(secondTerminal)).toContain('SecondSessionTool was blocked 5 consecutive')
+})
+
+test('streaming doom termination wins over fallback and resets on unknown calls', async () => {
+  await acquireSharedMutationLock('doom-loop-streaming-config')
+  const config = queryConfig.buildQueryConfig()
+  const configSpy = spyOn(queryConfig, 'buildQueryConfig').mockReturnValue({
+    ...config,
+    gates: { ...config.gates, streamingToolExecution: true },
+  })
+  try {
+    let modelCalls = 0
+    const tool = createToolFixture(z.object({}), {
+      name: 'StreamingDoomTool',
+      async call() { return { data: 'ok' } },
+    })
+    const params = makeQueryParams(async function* () {
+      modelCalls++
+      yield createAssistantMessage({ content: [
+        toolUse(`stream-${modelCalls}`, modelCalls === 7 ? 'UnknownTool' : tool.name),
+      ] })
+      if (modelCalls === 12) throw new FallbackTriggeredError('test-model', 'fallback')
+      if (modelCalls > 12) throw new Error('Unexpected fallback model request')
+    } as QueryDeps['callModel'], { fallbackModel: 'fallback' })
+    params.toolUseContext.options.tools = [tool]
+    let terminal: Message | undefined
+    const resultIds: string[] = []
+    for await (const message of query(params)) {
+      if (message.type === 'assistant') terminal = message
+      if (message.type === 'user' && Array.isArray(message.message.content)) {
+        for (const block of message.message.content) {
+          if (block.type === 'tool_result') resultIds.push(block.tool_use_id)
+        }
+      }
+    }
+    // Two allowed, four blocked, unknown (resets), then five blocked calls.
+    expect(modelCalls).toBe(12)
+    expect(resultIds).toEqual(Array.from({ length: 12 }, (_, i) => `stream-${i + 1}`))
+    expect(terminal).toMatchObject({ type: 'assistant', isApiErrorMessage: true })
+    expect(JSON.stringify(terminal)).toContain('force-terminated')
+  } finally {
+    configSpy.mockRestore()
+    releaseSharedMutationLock()
+  }
+})
+
+for (const streaming of [false, true]) {
+  test(`post-latch task success cannot resume execution (streaming=${streaming})`, async () => {
+    await acquireSharedMutationLock('doom-loop-post-latch')
+    const config = queryConfig.buildQueryConfig()
+    const configSpy = spyOn(queryConfig, 'buildQueryConfig').mockReturnValue({
+      ...config, gates: { ...config.gates, streamingToolExecution: streaming },
+    })
+    const task: LocalShellTaskState = {
+      ...createTaskStateBase('bdoomlate', 'local_bash', 'pending task'),
+      type: 'local_bash', status: 'running', command: '', shellCommand: null,
+      completionStatusSentInAttachment: false, lastReportedTotalLines: 0, isBackgrounded: true,
+    }
+    let started = 0
+    let markStarted!: () => void
+    const bothStarted = new Promise<void>(resolve => { markStarted = resolve })
+    const pending: Promise<unknown>[] = []
+    const taskTool = {
+      ...TaskOutputTool,
+      call(...args: Parameters<typeof TaskOutputTool.call>) {
+        if (++started === 2) markStarted()
+        const result = TaskOutputTool.call(...args)
+        pending.push(result)
+        return result
+      },
+    }
+    let extraExecutions = 0
+    const afterLatchTool = createToolFixture(z.object({}), {
+      name: 'AfterLatchTool',
+      async call() { extraExecutions++; return { data: 'unexpected' } },
+    })
+    let modelCalls = 0
+    const ids = Array.from({ length: 7 }, (_, i) => `parallel-${i + 1}`)
+    const params = makeQueryParams(async function* () {
+      modelCalls++
+      yield createAssistantMessage({ content: modelCalls === 1
+        ? [...ids.map(id => toolUse(id, taskTool.name, { task_id: task.id, block: true, timeout: 30000 })),
+            toolUse('after-latch', afterLatchTool.name)]
+        : 'done' })
+    } as QueryDeps['callModel'])
+    params.toolUseContext.options.tools = [taskTool, afterLatchTool]
+    const getAppState = params.toolUseContext.getAppState
+    params.toolUseContext.getAppState = () => ({ ...getAppState(), tasks: { [task.id]: task } })
+    params.toolUseContext.setAppState = () => {}
+    const results: { id: string; error: boolean; content: string }[] = []
+    let terminal: Message | undefined
+    try {
+      for await (const message of query(params)) {
+        if (message.type === 'assistant') terminal = message
+        if (message.type !== 'user' || !Array.isArray(message.message.content)) continue
+        for (const block of message.message.content) {
+          if (block.type !== 'tool_result') continue
+          results.push({ id: block.tool_use_id, error: Boolean(block.is_error), content: String(block.content) })
+          if (block.tool_use_id === 'parallel-7') {
+            expect(String(block.content)).toContain('Blocked: 7 consecutive calls')
+            await withTimeout(bothStarted, 2000, 'Both permitted task calls must enter their wait')
+            expect(task.status).toBe('running')
+            task.status = 'completed'
+            task.result = { code: 0, interrupted: false }
+          }
+        }
+      }
+      expect(started).toBe(2)
+      expect(results.map(result => result.id).sort()).toEqual([...ids, 'after-latch'].sort())
+      for (const id of ['parallel-1', 'parallel-2']) {
+        expect(results.find(result => result.id === id)).toMatchObject({ error: false, content: expect.stringContaining('<retrieval_status>success') })
+      }
+      expect(results.find(result => result.id === 'after-latch')?.error).toBe(true)
+      expect(extraExecutions).toBe(0)
+      expect(modelCalls).toBe(1)
+      expect(terminal).toMatchObject({ type: 'assistant', isApiErrorMessage: true })
+      expect(JSON.stringify(terminal)).toContain('force-terminated')
+    } finally {
+      task.status = 'completed'
+      params.toolUseContext.abortController.abort()
+      await Promise.allSettled(pending)
+      configSpy.mockRestore()
+      releaseSharedMutationLock()
+    }
+  })
+}
+
+test('doom-loop blocks terminate the query after five consecutive blocks', async () => {
+  let modelCalls = 0
+  let executions = 0
+  const tool = createToolFixture(z.object({ value: z.string() }), {
+    name: 'DoomLoopTestTool',
+    async call() {
+      executions++
+      return { data: 'ok' }
+    },
+  })
+  const params = makeQueryParams(async function* () {
+    modelCalls++
+    // Bound the broken baseline without relying on a timeout to prove failure.
+    yield createAssistantMessage({
+      content: modelCalls <= 8
+        ? [toolUse(`repeat-${modelCalls}`, tool.name, { value: 'same' })]
+        : 'model finally stopped',
+    })
+  } as QueryDeps['callModel'])
+  params.toolUseContext.options.tools = [tool]
+  const messages: Message[] = []
+  const turn = query(params)
+  let next = await turn.next()
+  while (!next.done) {
+    if (next.value.type === 'assistant') messages.push(next.value)
+    next = await turn.next()
+  }
+  expect(executions).toBe(2)
+  expect(modelCalls).toBe(7)
+  expect(next.value).toEqual({ reason: 'tool_failure_loop' })
+  const terminal = messages.at(-1)
+  expect(terminal).toMatchObject({ type: 'assistant', isApiErrorMessage: true })
+  if (terminal?.type !== 'assistant') throw new Error('Missing terminal error')
+  expect(terminal.message.content).toEqual([
+    expect.objectContaining({
+      type: 'text',
+      text: expect.stringContaining('force-terminated'),
+    }),
+  ])
+  const text = JSON.stringify(terminal.message.content)
+  expect(text).toContain(tool.name)
+  expect(text).toContain('5 consecutive')
+  expect(text).toContain('Blocked: 7 consecutive calls')
+
+  // A subsequent user turn starts clean even after a latched termination.
+  modelCalls = 0
+  for await (const _message of query({ ...params, maxTurns: 1 })) { /* drain */ }
+  expect(executions).toBe(3)
+  expect(modelCalls).toBe(1)
+})
+
+test('changed arguments reset doom blocks during a progressing query', async () => {
+  let modelCalls = 0
+  let executions = 0
+  const tool = createToolFixture(z.object({ value: z.number() }), {
+    name: 'DoomLoopProgressTool',
+    async call() {
+      executions++
+      return { data: 'ok' }
+    },
+  })
+  const params = makeQueryParams(async function* () {
+    modelCalls++
+    yield createAssistantMessage({
+      content: modelCalls <= 12
+        ? [toolUse(`progress-${modelCalls}`, tool.name, {
+            value: modelCalls <= 6 ? 1 : 2,
+          })]
+        : 'done',
+    })
+  } as QueryDeps['callModel'])
+  params.toolUseContext.options.tools = [tool]
+  for await (const message of query(params)) {
+    if (message.type === 'assistant') expect(message.isApiErrorMessage).not.toBe(true)
+  }
+  expect(modelCalls).toBe(13)
+  expect(executions).toBe(4)
+})
 
 function toolUse(
   id: string,
@@ -1189,7 +1497,7 @@ test('query loop emits a path-safe diagnostic when the guard trips', async () =>
 })
 
 test('query loop forwards an advisory to the next model turn', async () => {
-  const modelRequests: unknown[][] = []
+  const modelRequests: Message[][] = []
   let modelCalls = 0
 
   for await (const _message of query(
@@ -1218,7 +1526,7 @@ test('query loop forwards an advisory to the next model turn', async () => {
   }
 
   const advisory = modelRequests[2]?.find(
-    (message: any) =>
+    (message) =>
       message?.type === 'user' &&
       message.isMeta === true &&
       typeof message.message?.content === 'string' &&
@@ -1230,7 +1538,7 @@ test('query loop forwards an advisory to the next model turn', async () => {
 })
 
 test('query loop does not forward an advisory when maxTurns prevents a next turn', async () => {
-  const modelRequests: unknown[][] = []
+  const modelRequests: Message[][] = []
   let modelCalls = 0
 
   for await (const _message of query(
@@ -1258,7 +1566,7 @@ test('query loop does not forward an advisory when maxTurns prevents a next turn
   expect(modelCalls).toBe(2)
   expect(modelRequests).toHaveLength(2)
   expect(modelRequests[1]?.some(
-    (message: any) =>
+    (message) =>
       message?.type === 'user' &&
       message.isMeta === true &&
       typeof message.message?.content === 'string' &&
@@ -1267,7 +1575,7 @@ test('query loop does not forward an advisory when maxTurns prevents a next turn
 })
 
 test('query loop does not emit an advisory before a no-tools step-limit summary', async () => {
-  const modelRequests: unknown[][] = []
+  const modelRequests: Message[][] = []
   const toolCounts: number[] = []
   let modelCalls = 0
 
@@ -1304,7 +1612,7 @@ test('query loop does not emit an advisory before a no-tools step-limit summary'
   expect(toolCounts).toEqual([1, 1, 0])
   expect(
     modelRequests[2]?.some(
-      (message: any) =>
+      (message) =>
         message?.type === 'user' &&
         typeof message.message?.content === 'string' &&
         message.message.content.includes('Warning: repeated tool failures'),
@@ -1313,7 +1621,7 @@ test('query loop does not emit an advisory before a no-tools step-limit summary'
 })
 
 test('query loop forwards a compacted advisory only once', async () => {
-  const modelRequests: unknown[][] = []
+  const modelRequests: Message[][] = []
   let modelCalls = 0
 
   const params = makeQueryParams(
@@ -1374,7 +1682,7 @@ test('query loop forwards a compacted advisory only once', async () => {
 
   const compactedRequest = modelRequests[2] ?? []
   const advisoryCount = compactedRequest.filter(
-    (message: any) =>
+    (message) =>
       message?.type === 'user' &&
       message.isMeta === true &&
       typeof message.message?.content === 'string' &&

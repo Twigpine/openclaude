@@ -24,6 +24,13 @@ import type { ThemeName } from './theme.js';
 import { getKnownProviderSecretEnvKeys, redactSecretSubstringsForDisplay, redactSecretValueForDisplay, sanitizeApiKey, type SecretValueSource } from './providerSecrets.js';
 import { redactPathForStatus, redactUrlForStatus } from './redaction.js';
 import {
+  geminiVertexAdcWillResolveProject,
+  getGeminiVertexLocation,
+  getGeminiVertexModel,
+  getGeminiVertexProjectId,
+  resolveGeminiVertexAuthMode,
+} from './geminiAuth.js';
+import {
   getRouteCredentialEnvVars,
   getRouteDefaultBaseUrl,
   getRouteDefaultModel,
@@ -44,6 +51,7 @@ const API_PROVIDER_LABELS: Partial<Record<APIProvider, string>> = {
   openai: 'OpenAI-compatible',
   codex: 'Codex',
   gemini: 'Google AI / Gemini',
+  'gemini-vertex': 'Google Vertex AI (Gemini)',
   github: 'GitHub Models',
   'nvidia-nim': 'NVIDIA NIM',
   minimax: 'MiniMax',
@@ -773,6 +781,29 @@ export function buildAPIProviderProperties(): Property[] {
     pushRedactedUrlProperty(properties, 'Gemini base URL', geminiBaseUrl, secretSource);
     const geminiModel = process.env.GEMINI_MODEL;
     pushRedactedProperty(properties, 'Model', geminiModel, secretSource);
+  } else if (apiProvider === 'gemini-vertex') {
+    // Mirror the /provider summary's native Vertex endpoint/model display. By the
+    // time /status runs the explicit provider env has been applied to
+    // process.env, matching getAnthropicClient's env-only routing.
+    const location = getGeminiVertexLocation(process.env);
+    const project = getGeminiVertexProjectId(process.env);
+    // An explicit ADC credential lets the native client derive the project at
+    // runtime; show a neutral placeholder there instead of an actionable hint.
+    const projectSegment =
+      project ??
+      (geminiVertexAdcWillResolveProject(process.env)
+        ? '<ADC-resolved project>'
+        : '<set GEMINI_VERTEX_PROJECT>');
+    const endpoint = `https://aiplatform.googleapis.com/v1/projects/${projectSegment}/locations/${location}`;
+    pushRedactedUrlProperty(properties, 'Vertex endpoint', endpoint, secretSource);
+    pushRedactedProperty(properties, 'Model', getGeminiVertexModel(process.env), secretSource);
+    properties.push({
+      label: 'Credential',
+      value:
+        resolveGeminiVertexAuthMode(process.env) === 'access-token'
+          ? 'access token'
+          : 'Google ADC',
+    });
   } else if (apiProvider === 'mistral') {
     const mistralBaseUrl = process.env.MISTRAL_BASE_URL;
     pushRedactedUrlProperty(properties, 'Mistral base URL', mistralBaseUrl, secretSource);

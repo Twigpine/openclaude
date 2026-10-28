@@ -21,6 +21,12 @@ import {
   resolveRuntimeCodexCredentials,
 } from '../../services/api/providerConfig.js'
 import { getInMemoryErrors } from '../log.js'
+import {
+  getGeminiVertexEndpointError,
+  getGeminiVertexLocation,
+  getGeminiVertexModel,
+  getGeminiVertexProjectId,
+} from '../geminiAuth.js'
 import { getRipgrepStatus, testRipgrepOnFirstUse } from '../ripgrep.js'
 import {
   getSettingsWithErrors,
@@ -215,6 +221,9 @@ function detectSource(cwd: string): IssueReport['openclaude']['source'] {
 }
 
 function resolveProviderModel(routeId: string, env: NodeJS.ProcessEnv): string {
+  if (routeId === 'gemini-vertex') {
+    return getGeminiVertexModel(env) ?? 'unknown'
+  }
   if (routeId === 'gemini') {
     return env.GEMINI_MODEL?.trim() || getRouteDefaultModel(routeId) || 'unknown'
   }
@@ -231,6 +240,16 @@ function resolveProviderBaseUrl(
   routeId: string,
   env: NodeJS.ProcessEnv,
 ): string | undefined {
+  if (routeId === 'gemini-vertex') {
+    const project = getGeminiVertexProjectId(env)
+    if (!project) return undefined // Ambient ADC may supply it at request time.
+    const location = getGeminiVertexLocation(env)
+    if (getGeminiVertexEndpointError({ project, location })) return undefined
+    const host = location === 'global'
+      ? 'aiplatform.googleapis.com'
+      : `${location}-aiplatform.googleapis.com`
+    return `https://${host}/v1/projects/${project}/locations/${location}/publishers/google`
+  }
   if (routeId === 'gemini') {
     return env.GEMINI_BASE_URL?.trim() || getRouteDefaultBaseUrl(routeId)
   }

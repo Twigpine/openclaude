@@ -1,3 +1,5 @@
+import type { ToolUseContext } from '../../Tool.js'
+import type { AppState } from '../../state/AppStateStore.js'
 import { randomUUID } from 'crypto'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { UUID } from 'crypto'
@@ -49,7 +51,7 @@ function makeFakeToolUseContext() {
       commands: [],
       debug: false,
       mainLoopModel: 'claude-sonnet-4',
-      tools: [] as any,
+      tools: [],
       verbose: false,
       thinkingConfig: {},
       mcpClients: [],
@@ -58,11 +60,11 @@ function makeFakeToolUseContext() {
       agentDefinitions: { maxTurns: 10 },
     },
     abortController: new AbortController(),
-    readFileState: {} as any,
-    getAppState: () => ({} as any),
-    setAppState: (_f: any) => {},
+    readFileState: {},
+    getAppState: () => ({}),
+    setAppState: (_f: (state: AppState) => AppState) => {},
     messages: [],
-  } as any
+  } as unknown as ToolUseContext
 }
 
 // Module state is shared across ALL test files. We clean between groups.
@@ -237,14 +239,14 @@ describe('hasActiveReduction', () => {
 describe('isMainThreadSource', () => {
   test('true for main-thread sources, false for subagent/fork sources', async () => {
     const idx = await import('./index.js')
-    expect(idx.isMainThreadSource('repl_main_thread' as any)).toBe(true)
-    expect(idx.isMainThreadSource('repl_main_thread:resume' as any)).toBe(true)
-    expect(idx.isMainThreadSource('sdk' as any)).toBe(true)
+    expect(idx.isMainThreadSource('repl_main_thread')).toBe(true)
+    expect(idx.isMainThreadSource('repl_main_thread:resume')).toBe(true)
+    expect(idx.isMainThreadSource('sdk')).toBe(true)
     expect(idx.isMainThreadSource(undefined)).toBe(true)
-    expect(idx.isMainThreadSource('agent:explore' as any)).toBe(false)
-    expect(idx.isMainThreadSource('marble_origami' as any)).toBe(false)
-    expect(idx.isMainThreadSource('compact' as any)).toBe(false)
-    expect(idx.isMainThreadSource('session_memory' as any)).toBe(false)
+    expect(idx.isMainThreadSource('agent:explore')).toBe(false)
+    expect(idx.isMainThreadSource('marble_origami')).toBe(false)
+    expect(idx.isMainThreadSource('compact')).toBe(false)
+    expect(idx.isMainThreadSource('session_memory')).toBe(false)
   })
 })
 
@@ -285,7 +287,7 @@ describe('subagent sources do not touch the shared store', () => {
     const { messages } = await idx.applyCollapsesIfNeeded(
       fullHistory,
       makeFakeToolUseContext(),
-      'agent:explore' as any,
+      'agent:explore',
     )
     // Untouched: the archived span is still present, no summary injected.
     expect(messages).toEqual(fullHistory)
@@ -294,7 +296,7 @@ describe('subagent sources do not touch the shared store', () => {
     const main = await idx.applyCollapsesIfNeeded(
       fullHistory,
       makeFakeToolUseContext(),
-      'repl_main_thread' as any,
+      'repl_main_thread',
     )
     expect(main.messages.map(m => m.uuid)).toContain(uid('sum'))
     expect(main.messages.map(m => m.uuid)).not.toContain(uid('a2'))
@@ -314,9 +316,9 @@ describe('subagent sources do not touch the shared store', () => {
       lastSpawnTokens: 1000,
     })
     const msg = makeAssistantMsg('a', 'prompt too long')
-    expect(idx.isWithheldPromptTooLong(msg, () => true, 'agent:explore' as any)).toBe(false)
+    expect(idx.isWithheldPromptTooLong(msg, () => true, 'agent:explore')).toBe(false)
     // Main thread with the same staged span does withhold.
-    expect(idx.isWithheldPromptTooLong(msg, () => true, 'repl_main_thread' as any)).toBe(true)
+    expect(idx.isWithheldPromptTooLong(msg, () => true, 'repl_main_thread')).toBe(true)
   })
 
   test('recoverFromOverflow does not drain staged spans for an agent:* source', async () => {
@@ -332,7 +334,7 @@ describe('subagent sources do not touch the shared store', () => {
       armed: true,
       lastSpawnTokens: 1000,
     })
-    const result = idx.recoverFromOverflow(fullHistory, 'agent:explore' as any)
+    const result = idx.recoverFromOverflow(fullHistory, 'agent:explore')
     expect(result.committed).toBe(0)
     expect(result.messages).toEqual(fullHistory)
     expect(idx.getStats().stagedSpans).toBe(1)
@@ -345,7 +347,7 @@ describe('core API (no staged spans)', () => {
     const idx = await import('./index.js')
     idx.initContextCollapse()
     const msgs = [makeUserMsg('a'), makeAssistantMsg('b')]
-    const result = await idx.applyCollapsesIfNeeded(msgs, makeFakeToolUseContext(), 'user_prompt' as any)
+    const result = await idx.applyCollapsesIfNeeded(msgs, makeFakeToolUseContext(), 'user_prompt')
     expect(result.messages).toEqual(msgs)
   })
 
@@ -354,7 +356,7 @@ describe('core API (no staged spans)', () => {
     const idx = await import('./index.js')
     idx.initContextCollapse()
     const msgs = [makeUserMsg('a'), makeAssistantMsg('b')]
-    const result = await idx.applyCollapsesIfNeeded(msgs, makeFakeToolUseContext(), 'marble_origami' as any)
+    const result = await idx.applyCollapsesIfNeeded(msgs, makeFakeToolUseContext(), 'marble_origami')
     expect(result.messages).toEqual(msgs)
   })
 
@@ -363,7 +365,7 @@ describe('core API (no staged spans)', () => {
     const idx = await import('./index.js')
     idx.initContextCollapse()
     const msg = makeAssistantMsg('a', 'prompt too long')
-    expect(idx.isWithheldPromptTooLong(msg, () => true, 'user_prompt' as any)).toBe(false)
+    expect(idx.isWithheldPromptTooLong(msg, () => true, 'user_prompt')).toBe(false)
   })
 
   test('isWithheldPromptTooLong: false for non-assistant', async () => {
@@ -371,14 +373,14 @@ describe('core API (no staged spans)', () => {
     const idx = await import('./index.js')
     idx.initContextCollapse()
     const user = makeUserMsg('a')
-    expect(idx.isWithheldPromptTooLong(user, () => true, 'user_prompt' as any)).toBe(false)
+    expect(idx.isWithheldPromptTooLong(user, () => true, 'user_prompt')).toBe(false)
   })
 
   test('isWithheldPromptTooLong: false for undefined', async () => {
     await cleanState()
     const idx = await import('./index.js')
     idx.initContextCollapse()
-    expect(idx.isWithheldPromptTooLong(undefined, () => true, 'user_prompt' as any)).toBe(false)
+    expect(idx.isWithheldPromptTooLong(undefined, () => true, 'user_prompt')).toBe(false)
   })
 
   test('recoverFromOverflow: zero committed on clean state', async () => {
@@ -386,7 +388,7 @@ describe('core API (no staged spans)', () => {
     const idx = await import('./index.js')
     idx.initContextCollapse()
     const msgs = [makeUserMsg('a'), makeAssistantMsg('b')]
-    const result = idx.recoverFromOverflow(msgs, 'user_prompt' as any)
+    const result = idx.recoverFromOverflow(msgs, 'user_prompt')
     expect(result.committed).toBe(0)
     expect(result.messages).toEqual(msgs)
   })
@@ -559,7 +561,7 @@ describe('applyCollapsesIfNeeded projection', () => {
     const { messages } = await idx.applyCollapsesIfNeeded(
       fullHistory,
       makeFakeToolUseContext(),
-      'repl_main_thread' as any,
+      'repl_main_thread',
     )
 
     const uuids = messages.map(m => m.uuid)
@@ -615,7 +617,7 @@ describe('applyCollapsesIfNeeded projection', () => {
     const { messages } = await idx.applyCollapsesIfNeeded(
       fullHistory,
       makeFakeToolUseContext(),
-      'repl_main_thread' as any,
+      'repl_main_thread',
     )
 
     // Collapse applied, and the stale staged span is gone (not stuck forever).

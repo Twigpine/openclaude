@@ -151,7 +151,8 @@ export function resolveActiveProviderBaseUrl(
   if (
     isEnvTruthy(processEnv.CLAUDE_CODE_USE_FOUNDRY) ||
     isEnvTruthy(processEnv.CLAUDE_CODE_USE_BEDROCK) ||
-    isEnvTruthy(processEnv.CLAUDE_CODE_USE_VERTEX)
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_VERTEX) ||
+    isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI_VERTEX)
   ) {
     return undefined
   }

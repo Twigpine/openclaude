@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 import { readFileSync, realpathSync, statSync } from 'fs'
 import { open, readFile, realpath, stat } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
-import { basename, dirname, join, resolve, sep } from 'path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'path'
 import { hasBinaryExtension, isBinaryContent } from '../constants/files.js'
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
@@ -25,15 +25,34 @@ import { whichSync } from './which.js'
 const GIT_ROOT_NOT_FOUND = Symbol('git-root-not-found')
 
 const findGitRootImpl = memoizeWithLRU(
-  (startPath: string): string | typeof GIT_ROOT_NOT_FOUND => {
+  (startPath: string, ceilingDirectories: string): string | typeof GIT_ROOT_NOT_FOUND => {
     const startTime = Date.now()
     logForDiagnosticsNoPII('info', 'find_git_root_started')
 
     let current = resolve(startPath)
-    const root = current.substring(0, current.indexOf(sep) + 1) || sep
+    const ceilings = new Set<string>()
+    let resolveSymlinks = true
+    for (const entry of ceilingDirectories.split(delimiter)) {
+      if (!entry) {
+        resolveSymlinks = false
+      } else if (isAbsolute(entry)) {
+        try {
+          ceilings.add(resolveSymlinks ? realpathSync(entry) : entry)
+        } catch {
+          // Git ignores ceiling entries that cannot be resolved.
+        }
+      }
+    }
+    if (ceilings.size) {
+      try {
+        current = realpathSync(current)
+      } catch {
+        // Keep lexical discovery for missing paths.
+      }
+    }
     let statCount = 0
 
-    while (current !== root) {
+    while (true) {
       try {
         const gitPath = join(current, '.git')
         statCount++
@@ -51,27 +70,11 @@ const findGitRootImpl = memoizeWithLRU(
         // .git doesn't exist at this level, continue up
       }
       const parent = dirname(current)
-      if (parent === current) {
+      // A ceiling excludes ascent into that directory, never the starting cwd.
+      if (parent === current || ceilings.has(parent)) {
         break
       }
       current = parent
-    }
-
-    // Check root directory as well
-    try {
-      const gitPath = join(root, '.git')
-      statCount++
-      const stat = statSync(gitPath)
-      if (stat.isDirectory() || stat.isFile()) {
-        logForDiagnosticsNoPII('info', 'find_git_root_completed', {
-          duration_ms: Date.now() - startTime,
-          stat_count: statCount,
-          found: true,
-        })
-        return root.normalize('NFC')
-      }
-    } catch {
-      // .git doesn't exist at root
     }
 
     logForDiagnosticsNoPII('info', 'find_git_root_completed', {
@@ -81,7 +84,7 @@ const findGitRootImpl = memoizeWithLRU(
     })
     return GIT_ROOT_NOT_FOUND
   },
-  path => path,
+  (path, ceilings) => JSON.stringify([path, ceilings]),
   50,
 )
 
@@ -89,8 +92,9 @@ const findGitRootImpl = memoizeWithLRU(
  * Find the git root by walking up the directory tree.
  * Looks for a .git directory or file (worktrees/submodules use a file).
  * Returns the directory containing .git, or null if not found.
+ * Honors GIT_CEILING_DIRECTORIES, matching Git subprocess discovery.
  *
- * Memoized per startPath with an LRU cache (max 50 entries) to prevent
+ * Memoized per startPath and ceiling setting with an LRU cache (max 50 entries) to prevent
  * unbounded growth — gitDiff calls this with dirname(file), so editing many
  * files across different directories would otherwise accumulate entries forever.
  */
@@ -101,7 +105,7 @@ function createFindGitRoot(): {
   cache: typeof findGitRootImpl.cache
 } {
   function wrapper(startPath: string): string | null {
-    const result = findGitRootImpl(startPath)
+    const result = findGitRootImpl(startPath, process.env.GIT_CEILING_DIRECTORIES ?? '')
     return result === GIT_ROOT_NOT_FOUND ? null : result
   }
   wrapper.cache = findGitRootImpl.cache

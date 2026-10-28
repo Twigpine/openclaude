@@ -5,7 +5,6 @@ import { getLogDisplayTitle, logError } from './log.js'
 import { getSmallFastModel } from './model/model.js'
 import { isLiteLog, loadFullLog } from './sessionStorage.js'
 import { sideQuery } from './sideQuery.js'
-import { jsonParse } from './slowOperations.js'
 
 // Limits for transcript extraction
 const MAX_TRANSCRIPT_CHARS = 2000 // Max chars of transcript per session
@@ -46,10 +45,6 @@ Return sessions ordered by relevance (most relevant first). If truly no sessions
 
 Respond with ONLY the JSON object, no markdown formatting:
 {"relevant_indices": [2, 5, 0]}`
-
-type AgenticSearchResult = {
-  relevant_indices: number[]
-}
 
 /**
  * Extracts searchable text content from a message.
@@ -140,7 +135,7 @@ function logContainsQuery(log: LogOption, queryLower: string): boolean {
 }
 
 /**
- * Performs an agentic search using Claude to find relevant sessions
+ * Performs an agentic search using the background search model to find relevant sessions
  * based on semantic understanding of the query.
  */
 export async function agenticSessionSearch(
@@ -176,7 +171,7 @@ export async function agenticSessionSearch(
 
   // Debug: log what data we have
   logForDebugging(
-    `Agentic search: ${logsToSearch.length}/${logs.length} logs, query="${query}", ` +
+    `Agentic search: ${logsToSearch.length}/${logs.length} logs, ` +
       `matching: ${matchingLogs.length}, with messages: ${count(logsToSearch, l => l.messages?.length > 0)}`,
   )
 
@@ -184,9 +179,9 @@ export async function agenticSessionSearch(
   const logsWithTranscriptsPromises = logsToSearch.map(async log => {
     if (isLiteLog(log)) {
       try {
-        return await loadFullLog(log)
-      } catch (error) {
-        logError(error as Error)
+        return await loadFullLog(log, { logParseContent: false })
+      } catch {
+        logError(new Error('Agentic session transcript loading failed'))
         // If loading fails, use the lite log (no transcript)
         return log
       }
@@ -252,11 +247,6 @@ Search query: "${query}"
 
 Find the sessions that are most relevant to this query.`
 
-  // Debug: log first part of the session list
-  logForDebugging(
-    `Agentic search prompt (first 500 chars): ${userMessage.slice(0, 500)}...`,
-  )
-
   try {
     const model = getSmallFastModel()
     logForDebugging(`Agentic search using model: ${model}`)
@@ -276,9 +266,6 @@ Find the sessions that are most relevant to this query.`
       return []
     }
 
-    // Debug: log the response
-    logForDebugging(`Agentic search response: ${textContent.text}`)
-
     // Parse the JSON response
     const jsonMatch = textContent.text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
@@ -286,22 +273,30 @@ Find the sessions that are most relevant to this query.`
       return []
     }
 
-    const result: AgenticSearchResult = jsonParse(jsonMatch[0])
-    const relevantIndices = result.relevant_indices || []
+    // The instrumented parser can log input; model output may contain private text.
+    const result: unknown = JSON.parse(jsonMatch[0])
+    const relevantIndices = result && typeof result === 'object' &&
+      'relevant_indices' in result && Array.isArray(result.relevant_indices)
+      ? result.relevant_indices : []
 
     // Map indices back to logs (indices are relative to logsWithTranscripts)
     const relevantLogs = relevantIndices
-      .filter(index => index >= 0 && index < logsWithTranscripts.length)
-      .map(index => logsWithTranscripts[index]!)
+      .filter((index): index is number => typeof index === 'number' &&
+        Number.isInteger(index) && index >= 0 && index < logsWithTranscripts.length)
+      .flatMap(index => {
+        const log = logsWithTranscripts[index]
+        return log ? [log] : []
+      })
 
     logForDebugging(
       `Agentic search found ${relevantLogs.length} relevant sessions`,
     )
 
     return relevantLogs
-  } catch (error) {
-    logError(error as Error)
-    logForDebugging(`Agentic search error: ${error}`)
-    return []
+  } catch {
+    // Parser/provider errors may contain excerpts of private conversation content.
+    logError(new Error('Agentic session search failed'))
+    logForDebugging('Agentic session search failed')
+    throw new Error('Agentic session search failed')
   }
 }

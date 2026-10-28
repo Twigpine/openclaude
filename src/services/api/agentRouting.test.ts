@@ -735,6 +735,7 @@ describe('applyAgentProviderOverrideToEnv', () => {
   test('switches a spawned teammate process to OpenAI-compatible routing', () => {
     const env: Record<string, string | undefined> = {
       CLAUDE_CODE_USE_GEMINI: '1',
+      CLAUDE_CODE_USE_GEMINI_VERTEX: '1',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED: '1',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID: 'saved-gemini',
       GEMINI_MODEL: 'gemini-parent',
@@ -760,6 +761,7 @@ describe('applyAgentProviderOverrideToEnv', () => {
     expect(env.OPENAI_BASE_URL).toBe('https://api.deepseek.com/v1')
     expect(env.OPENAI_API_KEY).toBe('sk-ds')
     expect(env.CLAUDE_CODE_USE_GEMINI).toBeUndefined()
+    expect(env.CLAUDE_CODE_USE_GEMINI_VERTEX).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID).toBeUndefined()
     expect(env.GEMINI_MODEL).toBeUndefined()
@@ -873,3 +875,20 @@ describe('resolveAgentRunModelRouting: in-process teammate route identity', () =
     })
   })
 })
+
+test.each([undefined, 'parent-orca-key'])(
+  'spawned Orca override owns its key with ambient %s', ambient => {
+    const env: NodeJS.ProcessEnv = { ORCAROUTER_API_KEY: ambient }
+    applyAgentProviderOverrideToEnv({
+      model: 'openai/gpt-5.5', baseURL: 'https://api.orcarouter.ai/v1',
+      apiKey: 'configured-agent-key',
+    }, env)
+    expect(env.ORCAROUTER_API_KEY).toBe('configured-agent-key')
+    expect(env.OPENAI_API_KEY).toBe('configured-agent-key')
+    applyAgentProviderOverrideToEnv({
+      model: 'custom', baseURL: 'https://custom.example/v1', apiKey: 'custom-key',
+    }, env)
+    expect(env.ORCAROUTER_API_KEY).toBeUndefined()
+    expect(env.OPENAI_API_KEY).toBe('custom-key')
+  },
+)

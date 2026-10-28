@@ -35,6 +35,7 @@ const EXPECTED_PRESETS = [
   'merge-gateway',
   'azure-openai',
   'openrouter',
+  'orcarouter',
   'lmstudio',
   'dashscope-cn',
   'dashscope-intl',

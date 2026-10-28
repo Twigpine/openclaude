@@ -53,7 +53,7 @@ function bigTranscript(): Message[] {
   return out
 }
 
-let forkReturn: { messages: Message[]; totalUsage: any } | Error = {
+let forkReturn: { messages: Message[]; totalUsage: Record<string, number> } | Error = {
   messages: [
     { type: 'assistant', uuid: 'sum', timestamp: '', message: { role: 'assistant', content: [{ type: 'text', text: 'A concise summary.' }] } } as unknown as Message,
   ],
@@ -63,8 +63,8 @@ let forkReturn: { messages: Message[]; totalUsage: any } | Error = {
 beforeEach(() => {
   // Mock spanSelection to return a deterministic span so we can test the fork path.
   mock.module('./spanSelection.js', () => ({
-    isToolResultMessage: (msg: any) => false,
-    isTurnStart: (msg: any) => msg.type === 'user',
+    isToolResultMessage: (msg: Message) => false,
+    isTurnStart: (msg: Message) => msg.type === 'user',
     selectCollapseSpan: () => ({
       startUuid: 'm0',
       endUuid: 'm19',
@@ -84,18 +84,18 @@ beforeEach(() => {
       return forkReturn
     },
     getLastCacheSafeParams: () => ({
-      systemPrompt: {} as any,
+      systemPrompt: {},
       userContext: {},
       systemContext: {},
-      toolUseContext: {} as any,
+      toolUseContext: {},
       forkContextMessages: [],
     }),
     saveCacheSafeParams: () => {},
     createCacheSafeParams: () => ({
-      systemPrompt: {} as any,
+      systemPrompt: {},
       userContext: {},
       systemContext: {},
-      toolUseContext: {} as any,
+      toolUseContext: {},
       forkContextMessages: [],
     }),
     createSubagentContext: () => ({}),
@@ -173,8 +173,8 @@ afterEach(async () => {
   idx.initContextCollapse()
 })
 
-function ctx(): any {
-  return { options: { mainLoopModel: 'claude-sonnet-4', tools: [] }, abortController: new AbortController() }
+function ctx() {
+  return { options: { mainLoopModel: 'claude-sonnet-4', tools: [] }, abortController: new AbortController() } as unknown as import('../../Tool.js').ToolUseContext
 }
 
 describe('spawnCtxAgent (via maybeSpawnCtxAgent)', () => {

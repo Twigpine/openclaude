@@ -11,6 +11,7 @@ import {
 } from '../../bootstrap/state.js'
 import { quote } from '../bash/shellQuote.js'
 import { isInBundledMode } from '../bundledMode.js'
+import { PROVIDER_SELECTION_FLAGS } from '../providerSelectionFlags.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getTeammateModeFromSnapshot } from './backends/teammateModeSnapshot.js'
 import { TEAMMATE_COMMAND_ENV_VAR } from './constants.js'
@@ -98,29 +99,43 @@ export function buildInheritedCliFlags(options?: {
 const TEAMMATE_ENV_VARS = [
   // API provider selection — without these, teammates default to firstParty
   // and send requests to the wrong endpoint (GitHub issue #23561)
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'CLAUDE_CODE_USE_GITHUB',
-  'CLAUDE_CODE_USE_GEMINI',
-  'CLAUDE_CODE_USE_MISTRAL',
-  'CLAUDE_CODE_USE_OPENAI',
+  ...PROVIDER_SELECTION_FLAGS,
   'GITHUB_TOKEN',
   'GH_TOKEN',
   'OPENAI_API_KEYS',
   'OPENAI_API_KEY',
+  // Saved-profile launches can select these ahead of ambient generic keys.
+  // Preserve that selection in the pane's explicit environment.
+  'MINIMAX_API_KEY',
+  'VENICE_API_KEY',
+  'MIMO_API_KEY',
   'LLMTR_API_KEY',
   'MERGE_GATEWAY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
   'GMI_API_KEY',
+  'ORCAROUTER_API_KEY',
+  // Preserve saved-key origin across panes for subsequent keyless selection.
+  'CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256',
   'OPENAI_BASE_URL',
   'OPENAI_API_BASE',
   'OPENAI_MODEL',
   'GEMINI_API_KEY',
   'GEMINI_BASE_URL',
   'GEMINI_MODEL',
+  'GEMINI_VERTEX_AUTH_MODE',
+  'GEMINI_VERTEX_MODEL',
+  'GEMINI_VERTEX_PROJECT',
+  'GEMINI_VERTEX_LOCATION',
+  'GEMINI_ACCESS_TOKEN',
+  // All project-id sources Gemini Vertex accepts (getGeminiVertexProjectId /
+  // validation), so an env-only teammate keeps the same project hint as the
+  // leader regardless of which alias was set.
+  'GOOGLE_CLOUD_PROJECT',
+  'GCLOUD_PROJECT',
+  'GOOGLE_PROJECT_ID',
+  'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_API_KEY',
   'MISTRAL_API_KEY',
   'MISTRAL_MODEL',

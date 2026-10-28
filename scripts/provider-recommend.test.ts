@@ -1,5 +1,10 @@
-import { describe, expect, test } from 'bun:test'
-import { getOpenAIConfigurationState } from './provider-recommend.ts'
+import { describe, expect, spyOn, test } from 'bun:test'
+import { snapshotEnv } from '../src/test/envSnapshot.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../src/test/sharedMutationLock.js'
+import { getOpenAIConfigurationState, main } from './provider-recommend.ts'
 
 function envWithOpenAI(
   patch: Record<string, string | undefined>,
@@ -11,10 +16,6 @@ function envWithOpenAI(
     }
   }
   return env
-}
-
-async function readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
-  return await new Response(stream).text()
 }
 
 describe('provider-recommend OpenAI credential detection', () => {
@@ -61,36 +62,45 @@ describe('provider-recommend OpenAI credential detection', () => {
   })
 
   test('profile:recommend openai path runs with pooled credentials', async () => {
-    const env = envWithOpenAI({
-      OPENAI_API_KEYS: 'key-a,key-b',
-      OPENAI_API_KEY: undefined,
-      NO_COLOR: '1',
+    await acquireSharedMutationLock('scripts/provider-recommend.test.ts')
+    const restoreEnv = snapshotEnv(['OPENAI_API_KEYS', 'OPENAI_API_KEY', 'NO_COLOR'])
+    const originalArgv = process.argv
+    const stdout = spyOn(console, 'log').mockImplementation(() => {})
+    const stderr = spyOn(console, 'error').mockImplementation(() => {})
+    const exit = spyOn(process, 'exit').mockImplementation(code => {
+      throw new Error(`Unexpected process.exit(${code})`)
     })
-    const proc = Bun.spawn(
-      [
+    const fetch = spyOn(globalThis, 'fetch').mockImplementation(() => {
+      throw new Error('Explicit OpenAI recommendations must not use discovery')
+    })
+
+    try {
+      process.env.OPENAI_API_KEYS = 'key-a,key-b'
+      delete process.env.OPENAI_API_KEY
+      process.env.NO_COLOR = '1'
+      process.argv = [
         process.execPath,
-        'run',
         'scripts/provider-recommend.ts',
         '--provider',
         'openai',
         '--json',
-      ],
-      {
-        cwd: process.cwd(),
-        env,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      },
-    )
+      ]
 
-    const [stdout, stderr, exitCode] = await Promise.all([
-      readStream(proc.stdout),
-      readStream(proc.stderr),
-      proc.exited,
-    ])
-
-    expect(stderr).toBe('')
-    expect(exitCode).toBe(0)
-    expect(JSON.parse(stdout).openAIConfigured).toBe(true)
+      // Exercise the real CLI path without racing child startup and cold imports.
+      await expect(main()).resolves.toBeUndefined()
+      expect(stderr).not.toHaveBeenCalled()
+      expect(exit).not.toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+      expect(stdout).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(stdout.mock.calls[0]![0]).openAIConfigured).toBe(true)
+    } finally {
+      fetch.mockRestore()
+      exit.mockRestore()
+      stderr.mockRestore()
+      stdout.mockRestore()
+      process.argv = originalArgv
+      restoreEnv()
+      releaseSharedMutationLock()
+    }
   })
 })

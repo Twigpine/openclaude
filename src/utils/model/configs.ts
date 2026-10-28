@@ -10,7 +10,8 @@ import type { LegacyAPIProvider } from './providers.js'
 // routes codex to the `openai` key, and the only real reader is
 // getHardcodedTeammateModelFallback() (via CLAUDE_OPUS_4_8_CONFIG). We keep
 // them in sync with the Codex runtime default (gpt-5.6-sol) for consistency.
-export type LegacyProviderModelConfig = Record<LegacyAPIProvider, ModelName>
+type LegacyClaudeModelConfigProvider = Exclude<LegacyAPIProvider, 'gemini-vertex'>
+export type LegacyProviderModelConfig = Record<LegacyClaudeModelConfigProvider, ModelName>
 
 // Backward-compatible alias for existing imports.
 export type ModelConfig = LegacyProviderModelConfig

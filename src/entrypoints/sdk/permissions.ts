@@ -206,7 +206,7 @@ export function buildPermissionContext(options: PermissionContextOptions): ToolP
   }
 
   // Map SDK permission mode to internal PermissionMode
-  let internalMode: string = 'default'
+  let internalMode: string
   switch (mode) {
     case 'plan':
       internalMode = 'plan'

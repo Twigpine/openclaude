@@ -25,9 +25,13 @@ afterEach(() => {
   }
 })
 
-test('MiniMax picker catalog includes current M2.7 models', () => {
+test('MiniMax picker offers Flash first, M3, and unchanged vision models', () => {
   const values = getCachedMiniMaxModelOptions().map(option => option.value)
 
-  expect(values).toContain('MiniMax-M2.7')
-  expect(values).toContain('MiniMax-M2.7-highspeed')
+  expect(values).toEqual([
+    'MiniMax-M3.1-Flash',
+    'MiniMax-M3',
+    'MiniMax-Vision-01',
+    'MiniMax-Vision-01-Fast',
+  ])
 })

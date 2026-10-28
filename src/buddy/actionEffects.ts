@@ -103,7 +103,6 @@ const arrowFx: ActionEffect = {
 }
 
 // ── Kaio: charging orb, then a full-width energy wave ──────────────────
-const ORB_FRAMES = ['∘', '○', '◎', '●']
 const kaioFx: ActionEffect = {
   drawMs: 500, // longer charge — the orb grows during this phase
   travelMs: 700,

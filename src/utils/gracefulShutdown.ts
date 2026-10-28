@@ -30,7 +30,11 @@ import {
   wrapForMultiplexer,
 } from '../ink/termio/osc.js'
 import { shutdownDatadog } from '../services/analytics/datadog.js'
-import { reportErrorToSentry } from './sentry.js'
+import {
+  flushSentry,
+  reportErrorToSentry,
+  SENTRY_FLUSH_TIMEOUT_MS,
+} from './sentry.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -370,10 +374,11 @@ export function gracefulShutdownSync(
   process.exitCode = exitCode
 
   pendingShutdown = gracefulShutdown(exitCode, reason, options)
-    .catch(error => {
+    .catch(async error => {
       logForDebugging(`Graceful shutdown failed: ${error}`, { level: 'error' })
       cleanupTerminalModes()
       printResumeHint()
+      await flushSentry()
       forceExit(exitCode)
     })
     // Prevent unhandled rejection: forceExit re-throws in test mode,
@@ -441,14 +446,16 @@ export async function gracefulShutdown(
 
   // Failsafe: guarantee process exits even if cleanup hangs (e.g., MCP connections).
   // Runs cleanupTerminalModes first so a hung cleanup doesn't leave the terminal dirty.
-  // Budget = max(5s, hook budget + 3.5s headroom for cleanup + analytics flush).
+  // Budget = max(5s, hook budget + 3.5s cleanup/analytics headroom + Sentry drain).
+  // If cleanup hangs, the failsafe gives Sentry one bounded drain before exit.
   failsafeTimer = setTimeout(
-    code => {
+    async code => {
       cleanupTerminalModes(true)
       printResumeHint()
+      await flushSentry()
       forceExit(code)
     },
-    Math.max(5000, sessionEndTimeoutMs + 3500),
+    Math.max(5000, sessionEndTimeoutMs + 3500 + SENTRY_FLUSH_TIMEOUT_MS),
     exitCode,
   )
   failsafeTimer.unref()
@@ -558,6 +565,7 @@ export async function gracefulShutdown(
   flushInterruptionTrace('graceful_shutdown')
   await Promise.race([waitForInterruptionTraceFlush(), sleep(500)])
 
+  await flushSentry()
   forceExit(exitCode)
 }
 

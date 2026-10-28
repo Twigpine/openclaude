@@ -68,7 +68,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Smoke and static checks
+      - name: Lint, smoke, and static checks
         run: bun run check:static
 
   pr-intent-scan:
@@ -346,3 +346,39 @@ jobs:
 
       - name: Build web
         run: bun run --cwd web build
+
+  required:
+    name: PR checks required
+    if: ${{ always() }}
+    needs: [changes, pr-intent-scan, smoke-and-tests, unit-tests, dedicated-tests, launcher-compatibility, launcher-node-floor, typecheck, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify all applicable PR checks passed
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          node <<'NODE'
+          const jobs = JSON.parse(process.env.JOB_RESULTS);
+          const outputs = jobs.changes.outputs;
+          if (jobs.changes.result !== 'success' || jobs['pr-intent-scan'].result !== 'success') {
+            console.error('Change detection and PR intent scan must succeed.');
+            process.exit(1);
+          }
+          for (const [name, job] of Object.entries(jobs)) {
+            if (name === 'changes' || name === 'pr-intent-scan') continue;
+            const surface = name === 'web' ? 'web' : 'code';
+            const selected = process.env.EVENT_NAME === 'push' ? 'true' : outputs[surface];
+            if (!['true', 'false'].includes(selected)) {
+              console.error(`Missing change-detection result for ${surface}.`);
+              process.exit(1);
+            }
+            const expected = selected === 'true' ? 'success' : 'skipped';
+            if (job.result !== expected) {
+              console.error(`${name}: expected ${expected}, received ${job.result}.`);
+              process.exit(1);
+            }
+          }
+          console.log('All applicable PR checks passed; untouched surfaces were skipped.');
+          NODE

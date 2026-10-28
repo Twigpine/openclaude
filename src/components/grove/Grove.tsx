@@ -35,7 +35,7 @@ function GracePeriodContentBody() {
   }
   let t1;
   if ($[1] === Symbol.for("react.memo_cache_sentinel")) {
-    t1 = <Text>What's changing?</Text>;
+    t1 = <Text>What&apos;s changing?</Text>;
     $[1] = t1;
   } else {
     t1 = $[1];
@@ -60,7 +60,7 @@ function GracePeriodContentBody() {
   }
   let t5;
   if ($[5] === Symbol.for("react.memo_cache_sentinel")) {
-    t5 = <Box flexDirection="column">{t1}{t4}<Box paddingLeft={1}><Text><Text>· </Text><Text bold={true}>Updates to data retention </Text><Text>— To help us improve our AI models and safety protections, we're extending data retention to 5 years.</Text></Text></Box></Box>;
+    t5 = <Box flexDirection="column">{t1}{t4}<Box paddingLeft={1}><Text><Text>· </Text><Text bold={true}>Updates to data retention </Text><Text>— To help us improve our AI models and safety protections, we&apos;re extending data retention to 5 years.</Text></Text></Box></Box>;
     $[5] = t5;
   } else {
     t5 = $[5];
@@ -92,14 +92,14 @@ function PostGracePeriodContentBody() {
   const $ = _c(7);
   let t0;
   if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
-    t0 = <Text>We've updated our Consumer Terms and Privacy Policy.</Text>;
+    t0 = <Text>We&apos;ve updated our Consumer Terms and Privacy Policy.</Text>;
     $[0] = t0;
   } else {
     t0 = $[0];
   }
   let t1;
   if ($[1] === Symbol.for("react.memo_cache_sentinel")) {
-    t1 = <Text>What's changing?</Text>;
+    t1 = <Text>What&apos;s changing?</Text>;
     $[1] = t1;
   } else {
     t1 = $[1];
@@ -291,7 +291,7 @@ export function GroveDialog(t0: Props) {
   }
   let t9;
   if ($[18] === Symbol.for("react.memo_cache_sentinel")) {
-    t9 = <Box flexDirection="column"><Text bold={true}>Please select how you'd like to continue</Text><Text>Your choice takes effect immediately upon confirmation.</Text></Box>;
+    t9 = <Box flexDirection="column"><Text bold={true}>Please select how you&apos;d like to continue</Text><Text>Your choice takes effect immediately upon confirmation.</Text></Box>;
     $[18] = t9;
   } else {
     t9 = $[18];

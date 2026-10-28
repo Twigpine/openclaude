@@ -23,10 +23,6 @@ import {
   getReplayIndexBuilder,
   getStatsStore,
 } from '../../bootstrap/state.js'
-import {
-  buildCodeEditToolAttributes,
-  isCodeEditingTool,
-} from '../../hooks/toolPermission/permissionLogging.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import {
   findToolByName,
@@ -67,7 +63,12 @@ import {
   shouldCreateUserInterruptionMessage,
 } from '../../utils/abortReasons.js'
 import { logForDebugging } from '../../utils/debug.js'
-import { checkDoomLoop } from '../../utils/doomLoop.js'
+import {
+  checkDoomLoop,
+  getDoomLoopState,
+  recordDoomLoopBlock,
+  recordDoomLoopProgress,
+} from '../../utils/doomLoop.js'
 import {
   AbortError,
   errorMessage,
@@ -412,6 +413,22 @@ export async function* runToolUse(
   toolUseContext: ToolUseContext,
 ): AsyncGenerator<MessageUpdateLazy, void> {
   const toolName = toolUse.name
+  const terminalMessage = getDoomLoopState(toolUseContext.doomLoopKey ?? toolUseContext.agentId).terminalMessage
+  if (terminalMessage) {
+    // Preserve tool-use/result pairing without starting more work in this batch.
+    yield {
+      message: createUserMessage({
+        content: [{
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          content: terminalMessage,
+          is_error: true,
+        }],
+        sourceToolAssistantUUID: assistantMessage.uuid,
+      }),
+    }
+    return
+  }
   // First try to find in the available tools (what the model sees)
   let tool = findToolByName(toolUseContext.options.tools, toolName)
 
@@ -438,6 +455,7 @@ export async function* runToolUse(
 
   // Check if the tool exists
   if (!tool) {
+    recordDoomLoopProgress(toolUseContext.doomLoopKey ?? toolUseContext.agentId)
     const sanitizedToolName = sanitizeToolNameForAnalytics(toolName)
     logForDebugging(`Unknown tool ${toolName}: ${toolUse.id}`)
     logEvent('tengu_tool_use_error', {
@@ -484,9 +502,11 @@ export async function* runToolUse(
   // Doom loop detection: block after N consecutive identical tool calls.
   // Keyed by agent so concurrent subagents don't pollute each other's counters.
   const doomLoop = checkDoomLoop(toolName, toolUse.input, {
-    agentKey: toolUseContext.agentId,
+    agentKey: toolUseContext.doomLoopKey ?? toolUseContext.agentId,
   })
   if (doomLoop.blocked) {
+    const error = `Blocked: ${doomLoop.count} consecutive calls to this tool with identical input — you are likely in a loop. Change the input, try a different tool, or ask the user for help. A deliberate repeat is fine once something observable has changed (new output to check, a modified file, an updated instruction).`
+    recordDoomLoopBlock(toolName, error, toolUseContext.doomLoopKey ?? toolUseContext.agentId)
     logForDebugging(`Doom loop detected for ${toolName} (${doomLoop.count} consecutive identical calls)`)
     // Observability for tuning: a burst of these against varied tools would
     // indicate false positives (e.g. legitimate polling), not stuck agents.
@@ -501,7 +521,7 @@ export async function* runToolUse(
         content: [
           {
             type: 'tool_result',
-            content: `<tool_use_error>Blocked: ${doomLoop.count} consecutive calls to this tool with identical input — you are likely in a loop. Change the input, try a different tool, or ask the user for help. A deliberate repeat is fine once something observable has changed (new output to check, a modified file, an updated instruction).</tool_use_error>`,
+            content: `<tool_use_error>${error}</tool_use_error>`,
             is_error: true,
             tool_use_id: toolUse.id,
           },
@@ -513,6 +533,7 @@ export async function* runToolUse(
     return
   }
 
+  recordDoomLoopProgress(toolUseContext.doomLoopKey ?? toolUseContext.agentId)
   const toolInput = toolUse.input as { [key: string]: string }
   try {
     if (toolUseContext.abortController.signal.aborted) {
@@ -570,13 +591,21 @@ export async function* runToolUse(
       mcpServerType,
       mcpServerBaseUrl,
     )) {
+      if (
+        update.message?.type === 'user' &&
+        Array.isArray(update.message.message.content) &&
+        update.message.message.content.some(
+          block => block.type === 'tool_result' && !block.is_error,
+        )
+      ) {
+        recordDoomLoopProgress(toolUseContext.doomLoopKey ?? toolUseContext.agentId)
+      }
       yield update
     }
   } catch (error) {
     logError(error)
     const errorMessage = error instanceof Error ? error.message : String(error)
-    const toolInfo = tool ? ` (${tool.name})` : ''
-    const detailedError = `Error calling tool${toolInfo}: ${errorMessage}`
+    const detailedError = `Error calling tool (${tool.name}): ${errorMessage}`
 
     yield {
       message: createUserMessage({
@@ -1213,9 +1242,7 @@ export async function checkPermissionsAndCallTool(
     permissionDecision.behavior !== 'ask' &&
     !toolUseContext.toolDecisions?.has(toolUseID)
   ) {
-    const decision =
-      permissionDecision.behavior === 'allow' ? 'accept' : 'reject'
-    const source = decisionReasonToOTelSource(
+    decisionReasonToOTelSource(
       permissionDecision.decisionReason,
       permissionDecision.behavior,
     )
@@ -1239,7 +1266,7 @@ export async function checkPermissionsAndCallTool(
 
   if (permissionDecision.behavior !== 'allow') {
     logForDebugging(`${tool.name} tool permission denied`)
-    const decisionInfo = toolUseContext.toolDecisions?.get(toolUseID)
+    toolUseContext.toolDecisions?.get(toolUseID)
 
     if (!shouldSkipSessionPersistence()) {
       try {
@@ -1402,7 +1429,7 @@ export async function checkPermissionsAndCallTool(
   // Prepare tool parameters for logging in tool_result event.
   // Gated by OTEL_LOG_TOOL_DETAILS — tool parameters can contain sensitive
   // content (bash commands, MCP server names, etc.) so they're opt-in only.
-  const telemetryToolInput = extractToolInputForTelemetry(processedInput)
+  extractToolInputForTelemetry(processedInput)
   let toolParameters: Record<string, unknown> = {}
   if (isToolDetailsLoggingEnabled()) {
     if (tool.name === BASH_TOOL_NAME && 'command' in processedInput) {
@@ -1599,9 +1626,9 @@ export async function checkPermissionsAndCallTool(
     }
 
     // Log tool result event for OTLP with tool parameters and decision context
-    const mcpServerScope = isMcpTool(tool)
-      ? getMcpServerScopeFromToolName(tool.name)
-      : null
+    if (isMcpTool(tool)) {
+      getMcpServerScopeFromToolName(tool.name)
+    }
 
 
     // Run PostToolUse hooks
@@ -1901,9 +1928,9 @@ export async function checkPermissionsAndCallTool(
         ),
       })
       // Log tool result error event for OTLP with tool parameters and decision context
-      const mcpServerScope = isMcpTool(tool)
-        ? getMcpServerScopeFromToolName(tool.name)
-        : null
+      if (isMcpTool(tool)) {
+        getMcpServerScopeFromToolName(tool.name)
+      }
 
           }
     const content = formatError(error)

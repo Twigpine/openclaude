@@ -9,6 +9,7 @@ import vendorAnthropic from '../vendors/anthropic.js'
 import vendorBankr from '../vendors/bankr.js'
 import vendorDeepseek from '../vendors/deepseek.js'
 import vendorFireworks from '../vendors/fireworks.js'
+import vendorGeminiVertex from '../vendors/gemini-vertex.js'
 import vendorGemini from '../vendors/gemini.js'
 import vendorLongcat from '../vendors/longcat.js'
 import vendorMinimax from '../vendors/minimax.js'
@@ -49,6 +50,7 @@ import gatewayOllama from '../gateways/ollama.js'
 import gatewayOpencodeGo from '../gateways/opencode-go.js'
 import gatewayOpencode from '../gateways/opencode.js'
 import gatewayOpenrouter from '../gateways/openrouter.js'
+import gatewayOrcarouter from '../gateways/orcarouter.js'
 import gatewayTogether from '../gateways/together.js'
 import gatewayVertex from '../gateways/vertex.js'
 import gatewayXiaomiMimoToken from '../gateways/xiaomi-mimo-token.js'
@@ -95,8 +97,8 @@ import modelTencent from '../models/tencent.js'
 import modelXai from '../models/xai.js'
 import modelXiaomiMimo from '../models/xiaomi-mimo.js'
 
-export const VENDOR_DESCRIPTORS = [vendorAnthropic, vendorBankr, vendorDeepseek, vendorFireworks, vendorGemini, vendorLongcat, vendorMinimax, vendorMoonshot, vendorNearai, vendorOpenai, vendorVenice, vendorXai, vendorXiaomiMimo, vendorZai] as const satisfies readonly VendorDescriptor[]
-export const GATEWAY_DESCRIPTORS = [gatewayAimlapi, gatewayApiRoute, gatewayApismart, gatewayAtlasCloud, gatewayAtomicChat, gatewayAzureOpenai, gatewayBedrock, gatewayClinepass, gatewayCloudflare, gatewayCommandcode, gatewayConcentrate, gatewayCustom, gatewayDashscopeCn, gatewayDashscopeIntl, gatewayGithubEnterprise, gatewayGithub, gatewayGitlawbOpengateway, gatewayGmiCloud, gatewayGroq, gatewayHicap, gatewayKimiCode, gatewayLlmtr, gatewayLmstudio, gatewayMergeGateway, gatewayMistral, gatewayNvidiaNim, gatewayOllama, gatewayOpencodeGo, gatewayOpencode, gatewayOpenrouter, gatewayTogether, gatewayVertex, gatewayXiaomiMimoToken] as const satisfies readonly GatewayDescriptor[]
+export const VENDOR_DESCRIPTORS = [vendorAnthropic, vendorBankr, vendorDeepseek, vendorFireworks, vendorGeminiVertex, vendorGemini, vendorLongcat, vendorMinimax, vendorMoonshot, vendorNearai, vendorOpenai, vendorVenice, vendorXai, vendorXiaomiMimo, vendorZai] as const satisfies readonly VendorDescriptor[]
+export const GATEWAY_DESCRIPTORS = [gatewayAimlapi, gatewayApiRoute, gatewayApismart, gatewayAtlasCloud, gatewayAtomicChat, gatewayAzureOpenai, gatewayBedrock, gatewayClinepass, gatewayCloudflare, gatewayCommandcode, gatewayConcentrate, gatewayCustom, gatewayDashscopeCn, gatewayDashscopeIntl, gatewayGithubEnterprise, gatewayGithub, gatewayGitlawbOpengateway, gatewayGmiCloud, gatewayGroq, gatewayHicap, gatewayKimiCode, gatewayLlmtr, gatewayLmstudio, gatewayMergeGateway, gatewayMistral, gatewayNvidiaNim, gatewayOllama, gatewayOpencodeGo, gatewayOpencode, gatewayOpenrouter, gatewayOrcarouter, gatewayTogether, gatewayVertex, gatewayXiaomiMimoToken] as const satisfies readonly GatewayDescriptor[]
 export const ANTHROPIC_PROXY_DESCRIPTORS = [anthropicproxyCustom] as const satisfies readonly AnthropicProxyDescriptor[]
 export const BRAND_DESCRIPTORS = [brandClaude, brandDeepseek, brandFireworks, brandGemini, brandGlm, brandGpt, brandKimi, brandLing, brandLlama, brandLongcat, brandMacaron, brandMinimax, brandMistral, brandNearai, brandNemotron, brandOpenaiCompatibleAlias, brandQwen, brandTencent, brandXai, brandXiaomiMimo] as const satisfies readonly BrandDescriptor[]
 export const MODEL_DESCRIPTOR_GROUPS = [modelClaude, modelDeepseek, modelFireworksMerged, modelGemini, modelGlm, modelGpt, modelKimi, modelLing, modelLlama, modelLongcat, modelMacaron, modelMinimax, modelMistral, modelNearai, modelNemotron, modelOpenaiCompatibleAlias, modelOpencode, modelQwen, modelTencent, modelXai, modelXiaomiMimo] as const satisfies readonly (readonly ModelDescriptor[])[]

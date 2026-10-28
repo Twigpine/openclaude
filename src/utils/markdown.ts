@@ -41,7 +41,9 @@ export function applyMarkdown(
   configureMarked()
   return marked
     .lexer(stripPromptXMLTags(content))
-    .map(_ => formatToken(_, theme, 0, null, null, highlight))
+    .map((token, index, tokens) =>
+      formatToken(token, theme, 0, null, null, highlight, tokens[index - 1]),
+    )
     .join('')
     .trim()
 }
@@ -53,11 +55,14 @@ export function formatToken(
   orderedListNumber: number | null = null,
   parent: Token | null = null,
   highlight: CliHighlight | null = null,
+  previousToken?: Token,
 ): string {
   switch (token.type) {
     case 'blockquote': {
       const inner = (token.tokens ?? [])
-        .map(_ => formatToken(_, theme, 0, null, null, highlight))
+        .map((child, index, tokens) =>
+          formatToken(child, theme, 0, null, null, highlight, tokens[index - 1]),
+        )
         .join('')
       // Prefix each line with a dim vertical bar. Keep text italic but at
       // normal brightness — chalk.dim is nearly invisible on dark themes.
@@ -70,8 +75,12 @@ export function formatToken(
         .join(EOL)
     }
     case 'code': {
+      const text =
+        token.codeBlockStyle === 'indented'
+          ? token.text.replace(/\n+$/, '')
+          : token.text
       if (!highlight) {
-        return token.text + EOL
+        return text + EOL
       }
       let language = 'plaintext'
       if (token.lang) {
@@ -83,7 +92,7 @@ export function formatToken(
           )
         }
       }
-      return highlight.highlight(token.text, { language }) + EOL
+      return highlight.highlight(text, { language }) + EOL
     }
     case 'codespan': {
       // inline code
@@ -176,17 +185,34 @@ export function formatToken(
     case 'list_item':
       return (token.tokens ?? [])
         .map(
-          _ =>
-            `${'  '.repeat(listDepth)}${formatToken(_, theme, listDepth + 1, orderedListNumber, token, highlight)}`,
+          (child, index, tokens) =>
+            child.type === 'checkbox'
+              ? ''
+              : `${'  '.repeat(listDepth)}${formatToken(child, theme, listDepth + 1, orderedListNumber, token, highlight, tokens[index - 1])}`,
         )
         .join('')
     case 'paragraph':
+      // Loose list children are paragraphs; retain the list marker path.
+      if (parent?.type === 'list_item') {
+        return formatToken(
+          { ...token, type: 'text' }, theme, listDepth,
+          orderedListNumber, parent, highlight,
+        )
+      }
       return (
         (token.tokens ?? [])
           .map(_ => formatToken(_, theme, 0, null, null, highlight))
           .join('') + EOL
       )
     case 'space':
+      // These blocks already supply their spacing. Their trailing blank lines
+      // are separate space tokens in marked 18.
+      if (
+        previousToken && (
+          ['heading', 'table', 'html', 'def'].includes(previousToken.type) ||
+          (previousToken.type === 'code' && previousToken.codeBlockStyle === 'indented')
+        )
+      ) return ''
       return EOL
     case 'br':
       return EOL

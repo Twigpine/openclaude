@@ -43,7 +43,7 @@ async function scrapeWithFirecrawl(
 
 const inputSchema = lazySchema(() =>
   z.strictObject({
-    url: z.string().url().describe('The URL to fetch content from'),
+    url: z.url().describe('The URL to fetch content from'),
     prompt: z.string().describe('The prompt to run on the fetched content'),
   }),
 )

@@ -38,7 +38,7 @@ export function ModelSelector(t0) {
   const defaultModel = initialModel ?? "sonnet";
   let t2;
   if ($[2] === Symbol.for("react.memo_cache_sentinel")) {
-    t2 = <Box marginBottom={1}><Text dimColor={true}>Model determines the agent's reasoning capabilities and speed.</Text></Box>;
+    t2 = <Box marginBottom={1}><Text dimColor={true}>Model determines the agent&apos;s reasoning capabilities and speed.</Text></Box>;
     $[2] = t2;
   } else {
     t2 = $[2];

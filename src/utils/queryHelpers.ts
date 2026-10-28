@@ -331,7 +331,9 @@ export async function* handleOrphanedPermission(
     [finalToolUseBlock],
     [assistantMessage],
     canUseTool,
-    processUserInputContext,
+    // Recovery runs before query() assigns a turn identity. Keep each
+    // independently approved action out of the process-wide fallback state.
+    { ...processUserInputContext, doomLoopKey: {} },
   )) {
     if (update.message) {
       mutableMessages.push(update.message)

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { captureSync } from './subprocess.ts'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,9 +16,8 @@ function line(content: string, overrides: Partial<DiffLine> = {}): DiffLine {
 }
 
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync('git', args, {
+  const result = captureSync('git', args, {
     cwd,
-    encoding: 'utf8',
   })
   if (result.status !== 0) {
     throw new Error(

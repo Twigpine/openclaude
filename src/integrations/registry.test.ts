@@ -5,7 +5,6 @@ import { ensureIntegrationsLoaded } from './index.js'
 import {
   _clearRegistryForTesting,
   getAllAnthropicProxies,
-  getAllBrands,
   getAllGateways,
   getAllModels,
   getAllVendors,

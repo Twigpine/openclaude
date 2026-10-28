@@ -11,8 +11,8 @@ type OpenCodeModelSpec = {
   id: string
   label: string
   defaultModel: string
-  contextWindow: number
-  maxOutputTokens: number
+  contextWindow?: number
+  maxOutputTokens?: number
   reasoning?: boolean
   vision?: boolean
   coding?: boolean
@@ -45,6 +45,9 @@ function openCodeModel(spec: OpenCodeModelSpec) {
 }
 
 const zenModels: OpenCodeModelSpec[] = [
+  // Zen publishes no token limits. Historical descriptors do not imply availability.
+  { id: 'opencode-minimax-m3.1-flash-free', label: 'MiniMax M3.1 Flash Free', defaultModel: 'minimax-m3.1-flash-free', reasoning: true, coding: true },
+  { id: 'opencode-minimax-m3', label: 'MiniMax M3', defaultModel: 'minimax-m3', reasoning: true, coding: true },
   { id: 'opencode-claude-fable-5', label: 'Claude Fable 5', defaultModel: 'claude-fable-5', contextWindow: 1_000_000, maxOutputTokens: 128_000, reasoning: true, vision: true },
   { id: 'opencode-claude-opus-4-8', label: 'Claude Opus 4.8', defaultModel: 'claude-opus-4-8', contextWindow: 1_000_000, maxOutputTokens: 128_000, reasoning: true, vision: true },
   { id: 'opencode-claude-opus-4-7', label: 'Claude Opus 4.7', defaultModel: 'claude-opus-4-7', contextWindow: 1_000_000, maxOutputTokens: 128_000, reasoning: true, vision: true },

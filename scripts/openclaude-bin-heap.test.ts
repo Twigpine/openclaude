@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { captureSync } from './subprocess.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
@@ -8,7 +8,6 @@ import {
   HEAP_PERCENTAGE_ENV,
   HEAP_PERCENTAGE_FLAG,
   HEAP_SIZE_ENV,
-  HEAP_SIZE_FLAG,
   formatPercentageUnavailableStderr,
   getAvailableMemoryBytes,
   hasHeapLimitFlag,
@@ -24,7 +23,7 @@ const HEAP_LIMIT_PATH = join(import.meta.dir, '..', 'bin', 'heap-limit.mjs')
 const FOUR_GIB = 4 * 1024 * 1024 * 1024
 
 function expectSuccessfulLauncherSpawn(
-  result: ReturnType<typeof spawnSync>,
+  result: ReturnType<typeof captureSync>,
 ): void {
   expect(result.error).toBeUndefined()
   expect(result.status).toBe(0)
@@ -41,7 +40,16 @@ describe('openclaude launcher heap guard', () => {
     expect(source).toContain("resolved.source === 'percentage-unavailable'")
     expect(source).toContain('--expose-gc')
     expect(source).toContain('spawnSync(process.execPath')
-    expect(source).toContain("from './heap-limit.mjs'")
+    // The launcher must not statically import its bin/*.mjs siblings: distro
+    // layouts that copy only the launcher file (issue #2255) would otherwise
+    // crash with ERR_MODULE_NOT_FOUND before any code runs. Siblings load
+    // dynamically with inline fallbacks instead.
+    expect(source).not.toContain("from './heap-limit.mjs'")
+    expect(source).not.toContain("from './node-compile-cache.mjs'")
+    expect(source).toContain("'./heap-limit.mjs'")
+    expect(source).toContain("'./node-compile-cache.mjs'")
+    expect(source).toContain('fallbackResolveHeapSizeMb')
+    expect(source).toContain('fallbackEnableNodeCompileCacheIfAvailable')
     const importingBranch = source.slice(source.indexOf('if (existsSync(distPath))'))
     const relaunchIndex = importingBranch.indexOf('relaunchWithLongSessionHeapIfNeeded()')
     const compileCacheIndex = importingBranch.indexOf('enableNodeCompileCacheIfAvailable()')
@@ -80,7 +88,7 @@ describe('openclaude launcher heap guard', () => {
     }
     delete env.OPENCLAUDE_HEAP_RELAUNCHED
     delete env.OPENCLAUDE_DISABLE_HEAP_RELAUNCH
-    const result = spawnSync(
+    const result = captureSync(
       process.execPath,
       [
         '--expose-gc',
@@ -89,7 +97,6 @@ describe('openclaude launcher heap guard', () => {
         '--version',
       ],
       {
-        encoding: 'utf8',
         timeout: 8000,
         env,
       },
@@ -108,11 +115,10 @@ describe('openclaude launcher heap guard', () => {
       OPENCLAUDE_DISABLE_HEAP_RELAUNCH: '1',
     }
     delete env.OPENCLAUDE_HEAP_RELAUNCHED
-    const result = spawnSync(
+    const result = captureSync(
       process.execPath,
       [BIN_PATH, '--max-old-space-size-percentage=50', '--version'],
       {
-        encoding: 'utf8',
         timeout: 8000,
         env,
       },
@@ -131,11 +137,10 @@ describe('openclaude launcher heap guard', () => {
       OPENCLAUDE_HEAP_RELAUNCHED: '1',
     }
     delete env.OPENCLAUDE_DISABLE_HEAP_RELAUNCH
-    const result = spawnSync(
+    const result = captureSync(
       process.execPath,
       [BIN_PATH, '--max-old-space-size-percentage=50', '--version'],
       {
-        encoding: 'utf8',
         timeout: 8000,
         env,
       },

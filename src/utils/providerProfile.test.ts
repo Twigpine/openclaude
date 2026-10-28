@@ -7,6 +7,7 @@ import test, { afterEach, beforeEach } from 'node:test'
 import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
 import {
   resolveActiveRouteIdFromEnv,
+  resolveEnvOnlyProviderRouteId,
   resolveRouteCredentialValue,
 } from '../integrations/routeMetadata.js'
 import { DEFAULT_CODEX_BASE_URL } from '../services/api/providerConfig.js'
@@ -16,7 +17,6 @@ import {
 } from './envUtils.js'
 import { getProviderValidationError } from './providerValidation.js'
 import {
-  applySavedProfileToCurrentSession,
   applyStartupEnvFromProfile,
   buildStartupEnvFromProfile,
   buildAtomicChatProfileEnv,
@@ -29,13 +29,11 @@ import {
   buildLaunchEnv,
   buildOllamaProfileEnv,
   buildOpenAIProfileEnv,
-  clearPersistedCodexOAuthProfile,
   createProfileFile,
   DEFAULT_STARTUP_PROVIDER_ENV_VAR,
   deleteProfileFile,
   getDefaultProfileFilePath,
   isDefaultStartupProviderEnv,
-  isPersistedCodexOAuthProfile,
   maskSecretForDisplay,
   loadProfileFile,
   PROFILE_FILE_NAME,
@@ -205,7 +203,7 @@ test('openai launch omits api key when no key is resolved', async () => {
     }),
     goal: 'balanced',
     processEnv: {
-      OPENAI_API_KEY: undefined as any,
+      OPENAI_API_KEY: undefined,
     },
   })
 
@@ -295,6 +293,97 @@ test('openai launch preserves a persisted GMI Cloud key and prefers a live one',
   })
 
   assert.equal(rotated.GMI_API_KEY, 'gmi-rotated-key')
+})
+
+for (const { baseUrl, routeId } of [
+  { baseUrl: 'https://api.minimax.io/v1' },
+  { baseUrl: 'https://api.minimaxi.com/v1' },
+  { baseUrl: 'https://minimax-proxy.example.com/v1', routeId: 'minimax' },
+]) {
+  test(`openai launch preserves a persisted MiniMax credential and route at ${baseUrl}`, async () => {
+    // Keep the dedicated key for canonical endpoints and an explicitly saved
+    // route identity without changing the OpenAI-compatible endpoint/protocol.
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted: profile('openai', {
+        OPENAI_BASE_URL: baseUrl,
+        OPENAI_MODEL: 'MiniMax-M2.5',
+        ...(routeId ? { CLAUDE_CODE_PROVIDER_ROUTE_ID: routeId } : {}),
+        OPENAI_API_KEY: 'minimax-secret-key',
+        MINIMAX_API_KEY: 'minimax-secret-key',
+      }),
+      goal: 'coding',
+      processEnv: {},
+    })
+
+    assert.equal(env.OPENAI_BASE_URL, baseUrl)
+    assert.equal(env.MINIMAX_API_KEY, 'minimax-secret-key')
+    // Provider identity and wire protocol are separate contracts.
+    assert.equal(env.CLAUDE_CODE_USE_OPENAI, '1')
+    assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'minimax')
+  })
+}
+
+for (const [routeId, key] of [
+  ['venice', 'VENICE_API_KEY'],
+  ['xiaomi-mimo', 'MIMO_API_KEY'],
+  ['xiaomi-mimo-token', 'MIMO_API_KEY'],
+] as const) {
+  test(`openai launch retains ${routeId} credentials for an explicitly saved route`, async () => {
+    const baseUrl = 'https://configured-proxy.example/v1'
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted: profile('openai', {
+        OPENAI_BASE_URL: baseUrl,
+        OPENAI_MODEL: 'configured-model',
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: routeId,
+        OPENAI_API_KEY: 'saved-key',
+        [key]: 'saved-key',
+      }),
+      goal: 'coding',
+      processEnv: {},
+    })
+    assert.equal(env.OPENAI_BASE_URL, baseUrl)
+    assert.equal(env.CLAUDE_CODE_USE_OPENAI, '1')
+    assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, routeId)
+    assert.equal(env[key], 'saved-key')
+  })
+}
+
+test('openai launch prefers a live MiniMax key over the persisted one', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.minimax.io/v1',
+      OPENAI_MODEL: 'MiniMax-M2.5',
+      OPENAI_API_KEY: 'persisted-key',
+      MINIMAX_API_KEY: 'persisted-key',
+    }),
+    goal: 'coding',
+    processEnv: { MINIMAX_API_KEY: 'live-shell-key' },
+  })
+
+  assert.equal(env.MINIMAX_API_KEY, 'live-shell-key')
+  assert.equal(resolveEnvOnlyProviderRouteId(env), 'minimax')
+})
+
+test('openai launch does not synthesize a MiniMax credential for a generic profile', async () => {
+  // A generic OpenAI-compatible profile on an unrelated host never persisted a
+  // MINIMAX_API_KEY (the host guard on the persistence side withholds it), so a
+  // clean relaunch must not conjure one or route to MiniMax.
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.example.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'generic-key',
+    }),
+    goal: 'coding',
+    processEnv: {},
+  })
+
+  assert.equal(env.MINIMAX_API_KEY, undefined)
+  assert.notEqual(resolveEnvOnlyProviderRouteId(env), 'minimax')
 })
 
 test('openai launch preserves persisted ApiSmart dedicated credentials across restart', async () => {
@@ -3686,4 +3775,39 @@ test('buildStartupEnvFromProfile applies saved API Route proxy profile even when
   assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'api-route')
   assert.equal(env.OPENAI_API_KEY, undefined)
   assert.equal(env.OPENAI_API_KEYS, undefined)
+})
+
+test('Orca relaunch migrates only the selected canonical profile credential', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai', goal: 'balanced',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.orcarouter.ai/v1',
+      OPENAI_MODEL: 'openai/gpt-5.5', OPENAI_API_KEY: 'saved-orca-key',
+    }),
+    processEnv: { ORCAROUTER_API_KEY: 'ambient-other-account' },
+  })
+  assert.equal(resolveRouteCredentialValue({
+    routeId: 'orcarouter', baseUrl: env.OPENAI_BASE_URL, processEnv: env,
+  }), 'saved-orca-key')
+  const ambientOnly = await buildLaunchEnv({
+    profile: 'openai', persisted: null, goal: 'balanced',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.orcarouter.ai/v1',
+      OPENAI_MODEL: 'openai/gpt-5.5', OPENAI_API_KEY: 'unrelated-generic-key',
+    },
+  })
+  assert.equal(ambientOnly.ORCAROUTER_API_KEY, undefined)
+})
+
+test('OpenAI profile builder materializes the canonical Orca key only at its route', () => {
+  const env = buildOpenAIProfileEnv({
+    goal: 'balanced', baseUrl: 'https://api.orcarouter.ai/v1',
+    model: 'openai/gpt-5.5', apiKey: 'selected-orca-key', processEnv: {},
+  })
+  assert.equal(env?.ORCAROUTER_API_KEY, 'selected-orca-key')
+  const custom = buildOpenAIProfileEnv({
+    goal: 'balanced', baseUrl: 'https://custom.example/v1',
+    model: 'custom', apiKey: 'custom-key', processEnv: {},
+  })
+  assert.equal(custom?.ORCAROUTER_API_KEY, undefined)
 })

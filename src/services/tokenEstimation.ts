@@ -582,13 +582,16 @@ export function roughTokenCountEstimationForMessage(message: {
   return 0
 }
 
+type ToolResultContentBlock = Exclude<
+  Anthropic.ToolResultBlockParam['content'], string | undefined
+>[number]
+
 function roughTokenCountEstimationForContent(
   content:
     | string
     | Array<Anthropic.ContentBlock>
-    // ToolReferenceBlockParam appears nested in tool_result content but is
-    // not part of the top-level ContentBlockParam union.
-    | Array<Anthropic.ContentBlockParam | Anthropic.ToolReferenceBlockParam>
+    // Nested tool results can include blocks absent from the top-level union.
+    | Array<Anthropic.ContentBlockParam | ToolResultContentBlock>
     | undefined,
 ): number {
   if (!content) {
@@ -610,7 +613,7 @@ function roughTokenCountEstimationForBlock(
     | Anthropic.ContentBlock
     | Anthropic.ContentBlockParam
     // Nested tool_result content block; falls through to the stringify path.
-    | Anthropic.ToolReferenceBlockParam,
+    | ToolResultContentBlock,
 ): number {
   if (typeof block === 'string') {
     return roughTokenCountEstimation(block)

@@ -9,12 +9,13 @@
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 
 /**
- * API usage with every nullable field made required and non-null.
+ * API usage with counters made required and non-null.
  *
  * The Anthropic API types most usage fields as `T | null`; internally the
  * CLI zero-initializes them (see EMPTY_USAGE in services/api/emptyUsage.ts)
- * so accumulation code doesn't have to null-check on every add.
+ * so accumulation code doesn't have to null-check on every add. Fallback-credit
+ * metadata stays nullable because absence is distinct from a redemption outcome.
  */
 export type NonNullableUsage = {
-  [K in keyof Usage]: NonNullable<Usage[K]>
-}
+  [K in keyof Omit<Usage, 'fallback_credit'>]: NonNullable<Usage[K]>
+} & Pick<Usage, 'fallback_credit'>

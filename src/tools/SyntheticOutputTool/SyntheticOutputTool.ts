@@ -8,7 +8,7 @@ import type { PermissionResult } from '../../utils/permissions/PermissionResult.
 import { jsonStringify } from '../../utils/slowOperations.js'
 
 // Allow any input object since the schema is provided dynamically
-const inputSchema = lazySchema(() => z.object({}).passthrough())
+const inputSchema = lazySchema(() => z.looseObject({}))
 type InputSchema = ReturnType<typeof inputSchema>
 
 const outputSchema = lazySchema(() =>

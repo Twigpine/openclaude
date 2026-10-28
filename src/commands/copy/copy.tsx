@@ -34,7 +34,9 @@ function extractCodeBlocks(markdown: string): CodeBlock[] {
     if (token.type === 'code') {
       const codeToken = token as Tokens.Code;
       blocks.push({
-        code: codeToken.text,
+        code: codeToken.codeBlockStyle === 'indented'
+          ? codeToken.text.replace(/\n+$/, '')
+          : codeToken.text,
         lang: codeToken.lang
       });
     }

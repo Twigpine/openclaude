@@ -17,7 +17,7 @@ function makeContext() {
         state = updater(state)
       },
       messages: [],
-    } as any,
+    } as unknown as Parameters<typeof processSlashCommand>[4],
     getState: () => state,
   }
 }
