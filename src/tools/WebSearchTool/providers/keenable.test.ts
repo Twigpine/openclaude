@@ -68,7 +68,7 @@ describe('Keenable search', () => {
   })
 
   test('falls back to the description when a result has no snippet', async () => {
-    globalThis.fetch = (async () => jsonResponse({
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({
       results: [
         { title: 'Summary only', url: 'https://example.com/summary', description: 'A short\nsummary' },
         { title: 'No text', url: 'https://example.com/bare', description: '  ', snippet: '' },
