@@ -179,6 +179,10 @@ function usesBuiltInSearch(nativeSearchAvailable: boolean): boolean {
   return mode === 'native' || (mode === 'auto' && nativeSearchAvailable)
 }
 
+/** The npm package does not ship docs/, so point at the published page. */
+const AIMLAPI_SETUP_DOCS_URL =
+  'https://github.com/Twigpine/openclaude/blob/main/docs/aimlapi-setup.md'
+
 /**
  * Where a backend that reuses a model-provider key gets it. Never names the
  * key's value, only its variable.
@@ -186,7 +190,7 @@ function usesBuiltInSearch(nativeSearchAvailable: boolean): boolean {
 function providerKeyMessage(option: SearchBackendOption): string {
   return (
     `${option.label} uses ${option.providerKeyEnv} from your ${option.label} provider setup; ` +
-    '/search does not store it. Set it up with /provider (see docs/aimlapi-setup.md).'
+    `/search does not store it. Set it up with /provider (see ${AIMLAPI_SETUP_DOCS_URL}).`
   )
 }
 
