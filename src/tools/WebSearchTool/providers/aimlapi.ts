@@ -228,6 +228,9 @@ export const aimlapiProvider: SearchProvider = {
           max_cost_usd: AIMLAPI_SEARCH_MAX_COST_USD,
           wait_ms: waitMs(timeoutMs),
         }),
+        // Never follow a redirect: the key and attribution headers must not
+        // reach any host but the Toolbox.
+        redirect: 'error',
         signal: combinedSignal,
       })
       let body = await readJson(response)
@@ -243,6 +246,7 @@ export const aimlapiProvider: SearchProvider = {
         const statusUrl = `${TOOLBOX_BASE_URL}/runs/${encodeURIComponent(id)}`
         const poll = await fetch(statusUrl, {
           headers: toolboxHeaders(statusUrl, key),
+          redirect: 'error',
           signal: combinedSignal,
         })
         body = await readJson(poll)
