@@ -42,11 +42,14 @@ test.each(['indices', 'diagnostics'] as const)('deep search validates %s at the 
       assert.ok(prompt.includes(text), 'search input must retain ' + text)
     }
     if (${JSON.stringify(mode)} === 'indices') {
-      for (const field of [[], [0], [0, 0.5, null, false, true, '0', '0.0', [], [0], {}, -1, 1], null, 0, '0', {}, undefined]) {
+      for (const field of [[], [0], [0, 0, 0], [0, 0.5, null, false, true, '0', '0.0', [], [0], {}, -1, 1], null, 0, '0', {}, undefined]) {
         responseText = JSON.stringify({ relevant_indices: field })
         const result = await agenticSessionSearch('private-query', [log])
         assert.deepEqual(result, Array.isArray(field) && field.includes(0) ? [log] : [])
       }
+      const other = { ...log, firstPrompt: 'second session' }
+      responseText = '{"relevant_indices":[1,0,1,-1,"0",0]}'
+      assert.deepEqual(await agenticSessionSearch('private-query', [log, other]), [other, log])
     } else {
       responseText = '{"relevant_indices":[private-transcript]}'
       await assert.rejects(agenticSessionSearch('private-query', [log]), /^Error: Agentic session search failed$/)

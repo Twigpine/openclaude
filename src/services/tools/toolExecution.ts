@@ -88,7 +88,6 @@ import {
   withMemoryCorrectionHint,
 } from '../../utils/messages.js'
 import type {
-  PermissionDecisionReason,
   PermissionResult,
 } from '../../utils/permissions/PermissionResult.js'
 import {
@@ -240,85 +239,6 @@ export function classifyToolError(error: unknown): string {
     return 'Error'
   }
   return 'UnknownError'
-}
-
-/**
- * Map a rule's origin to the documented OTel `source` vocabulary, matching
- * the interactive path's semantics (permissionLogging.ts:81): session-scoped
- * grants are temporary, on-disk grants are permanent, and user-authored
- * denies are user_reject regardless of persistence. Everything the user
- * didn't write (cliArg, policySettings, projectSettings, flagSettings) is
- * config.
- */
-function ruleSourceToOTelSource(
-  ruleSource: string,
-  behavior: 'allow' | 'deny',
-): string {
-  switch (ruleSource) {
-    case 'session':
-      return behavior === 'allow' ? 'user_temporary' : 'user_reject'
-    case 'localSettings':
-    case 'userSettings':
-      return behavior === 'allow' ? 'user_permanent' : 'user_reject'
-    default:
-      return 'config'
-  }
-}
-
-/**
- * Map a PermissionDecisionReason to the OTel `source` label for the
- * non-interactive tool_decision path, staying within the documented
- * vocabulary (config, hook, user_permanent, user_temporary, user_reject).
- *
- * For permissionPromptTool, the SDK host may set decisionClassification on
- * the PermissionResult to tell us exactly what happened (once vs always vs
- * cache hit — the host knows, we can't tell from {behavior:'allow'} alone).
- * Without it, we fall back conservatively: allow → user_temporary,
- * deny → user_reject.
- */
-function decisionReasonToOTelSource(
-  reason: PermissionDecisionReason | undefined,
-  behavior: 'allow' | 'deny',
-): string {
-  if (!reason) {
-    return 'config'
-  }
-  switch (reason.type) {
-    case 'permissionPromptTool': {
-      // toolResult is typed `unknown` on PermissionDecisionReason but carries
-      // the parsed Output from PermissionPromptToolResultSchema. Narrow at
-      // runtime rather than widen the cross-file type.
-      const toolResult = reason.toolResult as
-        | { decisionClassification?: string }
-        | undefined
-      const classified = toolResult?.decisionClassification
-      if (
-        classified === 'user_temporary' ||
-        classified === 'user_permanent' ||
-        classified === 'user_reject'
-      ) {
-        return classified
-      }
-      return behavior === 'allow' ? 'user_temporary' : 'user_reject'
-    }
-    case 'rule':
-      return ruleSourceToOTelSource(reason.rule.source, behavior)
-    case 'hook':
-      return 'hook'
-    case 'mode':
-    case 'classifier':
-    case 'subcommandResults':
-    case 'asyncAgent':
-    case 'sandboxOverride':
-    case 'workingDir':
-    case 'safetyCheck':
-    case 'other':
-      return 'config'
-    default: {
-      const _exhaustive: never = reason
-      return 'config'
-    }
-  }
 }
 
 function getNextImagePasteId(messages: Message[]): number {
@@ -1234,20 +1154,6 @@ export async function checkPermissionsAndCallTool(
     )
   }
 
-  // Emit tool_decision OTel event and code-edit counter if the interactive
-  // permission path didn't already log it (headless mode bypasses permission
-  // logging, so we need to emit both the generic event and the code-edit
-  // counter here)
-  if (
-    permissionDecision.behavior !== 'ask' &&
-    !toolUseContext.toolDecisions?.has(toolUseID)
-  ) {
-    decisionReasonToOTelSource(
-      permissionDecision.decisionReason,
-      permissionDecision.behavior,
-    )
-  }
-
   // Add message if permission was granted/denied by PermissionRequest hook
   if (
     permissionDecision.decisionReason?.type === 'hook' &&
@@ -1711,7 +1617,7 @@ export async function checkPermissionsAndCallTool(
       })
     }
 
-    // TOOD(hackyon): refactor so we don't have different experiences for MCP tools
+    // TODO(hackyon): refactor so we don't have different experiences for MCP tools
     if (!isMcpTool(tool)) {
       await addToolResult(toolOutput, mappedToolResultBlock)
     }

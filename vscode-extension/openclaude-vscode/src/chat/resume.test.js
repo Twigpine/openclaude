@@ -191,6 +191,43 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
               assert.deepEqual(fresh.getMessages(), []);
               assert.ok(!updates.some(message => message.type === 'restore_messages'));
 
+              // Newer selections win in both views, even across a shared controller.
+              for (const OtherProvider of [OpenClaudeChatViewProvider, OpenClaudeChatPanelManager]) {
+                for (const olderFinishesFirst of [true, false]) {
+                  let receiveOther;
+                  new OtherProvider(fresh)._attachMessageHandler({
+                    onDidReceiveMessage: handler => { receiveOther = handler; },
+                    postMessage: message => updates.push(message),
+                  });
+                  updates.length = 0;
+                  const older = receive({ type: 'resume_session', sessionId: id });
+                  const finishOlder = finishLoad;
+                  const newerId = 'newer-session';
+                  const newer = receiveOther({ type: 'resume_session', sessionId: newerId });
+                  const finishNewer = finishLoad;
+                  const before = calls.length;
+                  if (olderFinishesFirst) {
+                    finishOlder([{ role: 'user', text: 'stale history' }]);
+                    await older;
+                    assert.equal(calls.length, before, 'stale selection cannot launch while newer load is pending');
+                  }
+                  finishNewer([{ role: 'user', text: 'newer history' }]);
+                  await newer;
+                  if (!olderFinishesFirst) {
+                    finishOlder([{ role: 'user', text: 'stale history' }]);
+                    await older;
+                  }
+                  assert.equal(calls.length, before + 1, 'only the newest selection launches');
+                  assert.equal(resumeValue(), newerId);
+                  assert.equal(fresh.sessionId, newerId);
+                  assert.deepEqual(fresh.getMessages(), [{ role: 'user', text: 'newer history' }]);
+                  assert.ok(!updates.some(message => message.type === 'restore_messages' &&
+                    message.messages.some(item => item.text === 'stale history')));
+                  fresh.stopSession();
+                }
+              }
+
+              fresh.resetForNewSession();
               // An ordinary send must not cancel the selected history load.
               const ordinaryResume = receive({ type: 'resume_session', sessionId: id });
               const ordinarySend = fresh.sendMessage('sent while loading');

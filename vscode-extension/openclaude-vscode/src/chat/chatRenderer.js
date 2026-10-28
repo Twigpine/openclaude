@@ -711,9 +711,6 @@ function renderChatHtml({ nonce, platform }) {
     html = html.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
     html = html.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
 
-    // links
-    html = html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" title="$2">$1</a>');
-
     // unordered lists (simple)
     html = html.replace(/^[\\-\\*] (.+)$/gm, '<li>$1</li>');
     html = html.replace(/((?:<li>.*<\\/li>\\n?)+)/g, '<ul>$1</ul>');
@@ -735,6 +732,17 @@ function renderChatHtml({ nonce, platform }) {
     html = html.replace(/(<hr\\/>)<\\/p>/g, '$1');
     html = html.replace(/<p>(<div class="code-wrapper">)/g, '$1');
     html = html.replace(/(<\\/div>)<\\/p>/g, '$1');
+
+    // Render links last so later Markdown substitutions cannot alter attributes.
+    // Input entities were already escaped by escapeForMd; escape only the
+    // remaining attribute delimiters (including markup generated above).
+    html = html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, (_, label, destination) => {
+      const href = destination.trim();
+      if (!/^(https?:|mailto:)/i.test(href)) return label;
+      const attribute = href.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      return '<a href="' + attribute + '" title="' + attribute + '">' + label + '</a>';
+    });
 
     return html;
   }

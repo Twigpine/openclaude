@@ -280,9 +280,10 @@ Find the sessions that are most relevant to this query.`
       ? result.relevant_indices : []
 
     // Map indices back to logs (indices are relative to logsWithTranscripts)
-    const relevantLogs = relevantIndices
+    const uniqueIndices = new Set(relevantIndices
       .filter((index): index is number => typeof index === 'number' &&
-        Number.isInteger(index) && index >= 0 && index < logsWithTranscripts.length)
+        Number.isInteger(index) && index >= 0 && index < logsWithTranscripts.length))
+    const relevantLogs = Array.from(uniqueIndices)
       .flatMap(index => {
         const log = logsWithTranscripts[index]
         return log ? [log] : []

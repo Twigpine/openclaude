@@ -41,7 +41,8 @@ class ChatController {
     this._sessionManager = sessionManager;
     this._process = null;
     this._startGeneration = 0;
-    this._resetGeneration = 0;
+    // Transcript selections and New Chat invalidate pending history loads.
+    this._selectionGeneration = 0;
     this._pendingStart = null;
     this._webviews = new Set();
     this._accumulatedText = '';
@@ -169,7 +170,7 @@ class ChatController {
   }
 
   resetForNewSession() {
-    this._resetGeneration++;
+    this._selectionGeneration++;
     this.stopSession();
     this._currentSessionId = null;
     this._messages = [];
@@ -542,12 +543,13 @@ class OpenClaudeChatViewProvider {
           this._chatController.resetForNewSession();
           break;
         case 'resume_session':
+          this._chatController._selectionGeneration++;
           this._chatController.stopSession();
           webview.postMessage({ type: 'session_cleared' });
           {
-            const generation = this._chatController._resetGeneration;
+            const generation = this._chatController._selectionGeneration;
             await this._loadAndDisplaySession(webview, msg.sessionId);
-            if (generation !== this._chatController._resetGeneration) break;
+            if (generation !== this._chatController._selectionGeneration) break;
             await this._chatController.startSession({ sessionId: msg.sessionId });
           }
           break;
@@ -592,9 +594,9 @@ class OpenClaudeChatViewProvider {
   async _loadAndDisplaySession(webview, sessionId) {
     if (!this._chatController.sessionManager) return;
     try {
-      const generation = this._chatController._resetGeneration;
+      const generation = this._chatController._selectionGeneration;
       const messages = await this._chatController.sessionManager.loadSession(sessionId);
-      if (generation !== this._chatController._resetGeneration) return;
+      if (generation !== this._chatController._selectionGeneration) return;
       if (messages && messages.length > 0) {
         this._chatController._messages = messages;
         webview.postMessage({ type: 'restore_messages', messages });
@@ -656,12 +658,13 @@ class OpenClaudeChatPanelManager {
           this._chatController.resetForNewSession();
           break;
         case 'resume_session':
+          this._chatController._selectionGeneration++;
           this._chatController.stopSession();
           webview.postMessage({ type: 'session_cleared' });
           {
-            const generation = this._chatController._resetGeneration;
+            const generation = this._chatController._selectionGeneration;
             await this._loadAndDisplaySession(webview, msg.sessionId);
-            if (generation !== this._chatController._resetGeneration) break;
+            if (generation !== this._chatController._selectionGeneration) break;
             await this._chatController.startSession({ sessionId: msg.sessionId });
           }
           break;
@@ -706,9 +709,9 @@ class OpenClaudeChatPanelManager {
   async _loadAndDisplaySession(webview, sessionId) {
     if (!this._chatController.sessionManager) return;
     try {
-      const generation = this._chatController._resetGeneration;
+      const generation = this._chatController._selectionGeneration;
       const messages = await this._chatController.sessionManager.loadSession(sessionId);
-      if (generation !== this._chatController._resetGeneration) return;
+      if (generation !== this._chatController._selectionGeneration) return;
       if (messages && messages.length > 0) {
         this._chatController._messages = messages;
         webview.postMessage({ type: 'restore_messages', messages });
