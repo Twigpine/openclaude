@@ -202,7 +202,7 @@ describe('AI/ML API backend', () => {
       expect(action.kind).toBe('error')
       expect(action.kind === 'error' && action.message).toBe(
         'AI/ML API uses AIMLAPI_API_KEY from your AI/ML API provider setup; /search does not store it. ' +
-          'Set it up with /provider (see docs/aimlapi-setup.md).',
+          'Set it up with /provider (see https://github.com/Twigpine/openclaude/blob/main/docs/aimlapi-setup.md).',
       )
     }
   })
