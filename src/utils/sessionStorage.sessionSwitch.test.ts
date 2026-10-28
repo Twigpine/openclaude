@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import type { UUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { randomUUID, type UUID } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -16,6 +16,8 @@ import {
 } from '../bootstrap/state.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
 import type { Message } from '../types/message.js'
+import { getDefaultAppState } from '../state/AppStateStore.js'
+import { processResumedConversation } from './sessionRestore.js'
 import {
   getClaudeConfigHomeDirOverrideForTesting,
   setClaudeConfigHomeDirForTesting,
@@ -26,6 +28,13 @@ import {
   recordAttributionSnapshot,
   recordTranscript,
   resetProjectForTesting,
+  cacheSessionTitle,
+  clearSessionMetadata,
+  getCurrentSessionTitle,
+  resetSessionFilePointer,
+  restoreSessionMetadata,
+  saveAgentSetting,
+  saveWorktreeState,
 } from './sessionStorage.js'
 
 /**
@@ -346,3 +355,99 @@ test('the switch listener is re-registered after the signal is cleared', async (
   expect(second.length).toBeGreaterThan(0)
   expect(second.every(id => id === SECOND)).toBe(true)
 })
+
+test.each([undefined, 'saved title'])(
+  'interactive startup name survives resume and adoption (saved title: %s)',
+  async customTitle => {
+    process.env.NODE_ENV = 'test'
+    const path = getTranscriptPathForSession(FIRST)
+    await mkdir(dirname(path), { recursive: true })
+    const previous = message(randomUUID(), 'previous turn')
+    await writeFile(path, JSON.stringify({ ...previous, sessionId: FIRST }) + '\n')
+    cacheSessionTitle('requested title')
+
+    await processResumedConversation(
+      { messages: [previous], sessionId: FIRST as UUID, customTitle },
+      { forkSession: false, transcriptPath: path },
+      {
+        modeApi: null,
+        mainThreadAgentDefinition: undefined,
+        agentDefinitions: { activeAgents: [], allAgents: [] },
+        currentCwd: getOriginalCwd(),
+        cliAgents: [],
+        initialState: getDefaultAppState(),
+      },
+    )
+    await flushSessionStorage()
+
+    expect(getCurrentSessionTitle(getSessionId())).toBe('requested title')
+    const entries = (await readFile(path, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    expect(entries.filter(entry => entry.type === 'custom-title').at(-1)?.customTitle)
+      .toBe('requested title')
+    // Adoption must persist the name even when no new message is sent.
+    expect(entries.filter(entry => entry.type === 'user')).toHaveLength(1)
+  },
+)
+
+test.each(['custom-title', 'agent-setting', 'worktree-state'])(
+  'print resume persists deferred startup %s after both pointer resets',
+  async type => {
+    const worktree = {
+      originalCwd: getOriginalCwd(),
+      worktreePath: join(testRoot, 'worktree'),
+      worktreeName: 'startup-worktree',
+      sessionId: FIRST,
+    }
+    const path = getTranscriptPathForSession(FIRST)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, JSON.stringify({
+      ...message(randomUUID(), 'previous turn'), sessionId: FIRST,
+    }) + '\n')
+    cacheSessionTitle('startup title')
+    saveAgentSetting('startup-agent')
+    saveWorktreeState(worktree)
+
+    // Storage order used by print's continue/resume initialization. There is
+    // no saved metadata to replace the explicit startup selections.
+    switchSession(FIRST as never, null)
+    await resetSessionFilePointer()
+    restoreSessionMetadata({})
+    await recordTranscript([message(randomUUID(), 'next turn')])
+    await flushSessionStorage()
+
+    const entries = (await readFile(getTranscriptPathForSession(FIRST), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line))
+    const entry = entries.filter(entry => entry.type === type).at(-1)
+    expect(entry).toBeDefined()
+    expect(entry.sessionId).toBe(FIRST)
+    if (type === 'custom-title') expect(entry.customTitle).toBe('startup title')
+    if (type === 'agent-setting') expect(entry.agentSetting).toBe('startup-agent')
+    if (type === 'worktree-state') expect(entry.worktreeSession).toEqual(worktree)
+  },
+)
+
+test.each(['explicit clear', 'session switch'])(
+  '%s does not carry startup metadata into another conversation',
+  async reset => {
+    switchSession(FIRST as never, null)
+    cacheSessionTitle('private title')
+    saveAgentSetting('private-agent')
+    saveWorktreeState({
+      originalCwd: getOriginalCwd(),
+      worktreePath: join(testRoot, 'private-worktree'),
+      worktreeName: 'private-worktree',
+      sessionId: FIRST,
+    })
+    if (reset === 'explicit clear') {
+      clearSessionMetadata()
+    } else {
+      await recordTranscript([message(randomUUID(), 'first')])
+      await flushSessionStorage()
+    }
+    switchSession(SECOND as never, null)
+    await resetSessionFilePointer()
+    await recordTranscript([message(randomUUID(), 'second')])
+    await flushSessionStorage()
+    expect(await readFile(getTranscriptPathForSession(SECOND), 'utf8')).not.toContain('private')
+  },
+)

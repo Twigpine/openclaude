@@ -1382,6 +1382,16 @@ class Project {
   }
 
   resetSessionFile(): void {
+    // Startup selections are cached before --continue/--resume chooses a
+    // transcript. Keep only those deferred fields through its switch and
+    // explicit reset; metadata from an established session must be cleared.
+    const startupMetadata = this.sessionFile === null
+      ? {
+          title: this.currentSessionTitle,
+          agentSetting: this.currentSessionAgentSetting,
+          worktree: this.currentSessionWorktree,
+        }
+      : undefined
     this.sessionFile = null
     // The "current session only" metadata caches must not survive the move to
     // another session: reAppendSessionMetadata would otherwise write them into
@@ -1390,6 +1400,11 @@ class Project {
     // REPL.tsx); doing it here makes the SDK path follow the same rule, since
     // it has no restoreSessionMetadata call to put them back.
     this.clearSessionMetadata()
+    if (startupMetadata) {
+      this.currentSessionTitle = startupMetadata.title
+      this.currentSessionAgentSetting = startupMetadata.agentSetting
+      this.currentSessionWorktree = startupMetadata.worktree
+    }
     // Buffered entries are deliberately NOT dropped: they belong to the
     // session that recorded them and are flushed when THAT session
     // materializes. A switch away and back must keep them.
