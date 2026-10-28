@@ -36,7 +36,7 @@ function probePort(port: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const testServer = createServer()
     testServer.once('error', reject)
-    testServer.listen(port, () => {
+    testServer.listen(port, '127.0.0.1', () => {
       testServer.close(error => error ? reject(error) : resolve())
     })
   })

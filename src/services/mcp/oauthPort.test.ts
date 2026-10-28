@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { networkInterfaces } from 'node:os'
 import test from 'node:test'
 
 import { snapshotEnv } from '../../test/envSnapshot.js'
@@ -22,7 +23,7 @@ test('OAuth callback port selection works without weak randomness and releases i
     assert.equal(buildRedirectUri(port), `http://localhost:${port}/callback`)
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
-      server.listen(port, resolve)
+      server.listen(port, '127.0.0.1', resolve)
     })
   } finally {
     Math.random = originalRandom
@@ -37,11 +38,20 @@ test('OAuth callback port selection works without weak randomness and releases i
 
 test('OAuth callback port selection preserves the configured port override', async () => {
   const restoreEnv = snapshotEnv(['MCP_OAUTH_CALLBACK_PORT'])
-  process.env.MCP_OAUTH_CALLBACK_PORT = '43210'
+  const server = createServer()
   try {
-    assert.equal(await findAvailablePort(), 43210)
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    process.env.MCP_OAUTH_CALLBACK_PORT = String(address.port)
+    assert.equal(await findAvailablePort(), address.port)
   } finally {
     restoreEnv()
+    if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()))
   }
 })
 
@@ -67,7 +77,7 @@ test('OAuth callback port selection skips an occupied override and releases the 
   try {
     await new Promise<void>((resolve, reject) => {
       occupied.once('error', reject)
-      occupied.listen(0, resolve)
+      occupied.listen(0, '127.0.0.1', resolve)
     })
     const address = occupied.address()
     assert.ok(address && typeof address === 'object')
@@ -76,11 +86,43 @@ test('OAuth callback port selection skips an occupied override and releases the 
     assert.notEqual(port, address.port)
     await new Promise<void>((resolve, reject) => {
       selected.once('error', reject)
-      selected.listen(port, resolve)
+      selected.listen(port, '127.0.0.1', resolve)
     })
   } finally {
     restoreEnv()
     for (const server of [occupied, selected]) {
+      if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  }
+})
+
+
+test('OAuth callback override remains usable when another interface owns the port', async t => {
+  const otherAddress = Object.values(networkInterfaces()).flat()
+    .find(address => address?.family === 'IPv4' && !address.internal)?.address
+  if (!otherAddress) {
+    t.skip('No secondary IPv4 interface available')
+    return
+  }
+  const restoreEnv = snapshotEnv(['MCP_OAUTH_CALLBACK_PORT'])
+  const other = createServer()
+  const callback = createServer()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      other.once('error', reject)
+      other.listen(0, otherAddress, resolve)
+    })
+    const address = other.address()
+    assert.ok(address && typeof address === 'object')
+    process.env.MCP_OAUTH_CALLBACK_PORT = String(address.port)
+    assert.equal(await findAvailablePort(), address.port)
+    await new Promise<void>((resolve, reject) => {
+      callback.once('error', reject)
+      callback.listen(address.port, '127.0.0.1', resolve)
+    })
+  } finally {
+    restoreEnv()
+    for (const server of [other, callback]) {
       if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()))
     }
   }
