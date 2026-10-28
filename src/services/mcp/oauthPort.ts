@@ -2,6 +2,7 @@
  * OAuth redirect port helpers — extracted from auth.ts to break the
  * auth.ts ↔ xaaIdpLogin.ts circular dependency.
  */
+import { randomInt } from 'crypto'
 import { createServer } from 'http'
 import { getPlatform } from '../../utils/platform.js'
 
@@ -45,7 +46,7 @@ export async function findAvailablePort(): Promise<number> {
   const maxAttempts = Math.min(range, 100) // Don't try forever
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const port = min + Math.floor(Math.random() * range)
+    const port = randomInt(min, max + 1)
 
     try {
       await new Promise<void>((resolve, reject) => {
