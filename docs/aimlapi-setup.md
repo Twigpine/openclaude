@@ -94,7 +94,8 @@ openclaude plugin disable aimlapi@builtin
 ```
 
 - The plugin signs in with the AI/ML API key you already configured. It reads the key from `AIMLAPI_API_KEY`, which an active aimlapi.com provider profile sets for the session. You can also export the variable yourself. The settings file only stores `"aimlapi@builtin": true`. The key is never written there.
-- The plugin is off by default, so having a key does not connect the server. It is also hidden when no `AIMLAPI_API_KEY` is set. It stays hidden when your aimlapi profile points at a proxy base URL, so a proxy credential is never sent to aimlapi.com.
+- The plugin is off by default, so having a key does not connect the server. It is also hidden when no `AIMLAPI_API_KEY` is set. It stays hidden when your aimlapi profile points at a proxy base URL (`OPENAI_BASE_URL` or `OPENAI_API_BASE`), so a proxy credential is never sent to aimlapi.com.
+- If `AIMLAPI_API_KEY` holds a comma-separated pool, only its first usable key is sent to the MCP server, with no rotation across keys.
 - The server appears as `plugin:aimlapi:aimlapi`, and its tools appear as `mcp__plugin_aimlapi_aimlapi__<tool>`, for example `mcp__plugin_aimlapi_aimlapi__tools_search`.
 - To check it, run `openclaude mcp list`. You should see `plugin:aimlapi:aimlapi: https://mcp.aimlapi.com/mcp (HTTP) - ✓ Connected`. In a session, `/mcp` shows the same server.
 
