@@ -500,7 +500,7 @@ With Firecrawl enabled:
 
 Free tier at [firecrawl.dev](https://firecrawl.dev) includes 500 credits. The key is optional.
 
-`WebFetch` can also scrape pages through the [AI/ML API](https://aimlapi.com) Toolbox with your AI/ML API key. Each fetched page is one paid Toolbox run (about $0.0013, capped at $0.005), so it is used only when you choose it:
+`WebFetch` can also scrape pages through the [AI/ML API](https://aimlapi.com) Toolbox with your AI/ML API key. Each fetched page is one paid Toolbox run (about $0.0013; each run requests a $0.005 cost limit), so it is used only when you choose it:
 
 ```bash
 export AIMLAPI_API_KEY=your-aimlapi-key
