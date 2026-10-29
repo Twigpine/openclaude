@@ -12,14 +12,32 @@
  * configures proxies, mTLS and remote settings process-wide.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 
 import { resetEnvMutexForTesting } from './shared'
 import type { SDKMessage } from './coreTypes'
 import { getAnthropicClient } from '../../services/api/client'
 import { snapshotEnv } from '../../test/envSnapshot'
+import { clearOAuthTokenCache } from '../../utils/auth'
+import * as secureStorage from '../../utils/secureStorage/index'
 
 const KEY = 'OPENCLAUDE_TEST_SESSION_ENV_TURN'
+
+const authEnvKeys = [
+  'OPENCLAUDE_CONFIG_DIR', 'CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_USE_OPENAI', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_USE_GITHUB', 'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GEMINI_VERTEX', 'CLAUDE_CODE_USE_MISTRAL',
+  'MINIMAX_API_KEY', 'MIMO_API_KEY', 'XAI_API_KEY', 'NEARAI_API_KEY',
+  'FIREWORKS_API_KEY', 'LONGCAT_API_KEY', 'AIMLAPI_API_KEY', 'APISMART_API_KEY',
+  'CONCENTRATE_API_KEY', 'API_ROUTE_API_KEY', 'GEMINI_AUTH_MODE',
+  'GEMINI_ACCESS_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_COPILOT_KEY',
+  'CLAUDE_CODE_GITHUB_TOKEN_HYDRATED', 'OPENAI_API_KEY', 'OPENAI_API_KEYS',
+]
 
 /** What the engine saw in the environment, one entry per yielded message. */
 let seen: (string | undefined)[] = []
@@ -303,6 +321,137 @@ describe('SDKSessionOptions.env through a turn', () => {
         restore()
       }
     })
+  }
+
+
+  for (const exit of ['complete', 'break', 'throw'] as const) {
+    test(`OAuth identity follows scoped and ambient environments after ${exit}`, async () => {
+      const restore = snapshotEnv(authEnvKeys, { clear: true })
+      const configDir = mkdtempSync(join(tmpdir(), 'sdk-env-oauth-'))
+      const globals = globalThis as Record<string, unknown>
+      const originalMacro = globals.MACRO
+      globals.MACRO = { VERSION: 'test-version' }
+      const authorization: (string | null)[] = []
+      try {
+        process.env.OPENCLAUDE_CONFIG_DIR = configDir
+        // A stable credentials file prevents ENOENT/mtime invalidation from
+        // hiding a token cached under another environment.
+        writeFileSync(join(configDir, '.credentials.json'), '{}')
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = 'ambient-token'
+        clearOAuthTokenCache()
+        const request = async () => {
+          const client = await getAnthropicClient({
+            maxRetries: 0,
+            fetchOverride: async (_input, init) => {
+              authorization.push(new Headers(init?.headers).get('authorization'))
+              return Response.json({
+                id: 'msg-test', type: 'message', role: 'assistant',
+                model: 'claude-sonnet-4-6', content: [], stop_reason: 'end_turn',
+                usage: { input_tokens: 1, output_tokens: 0 },
+              })
+            },
+          })
+          await client.beta.messages.create({
+            model: 'claude-sonnet-4-6', max_tokens: 16,
+            messages: [{ role: 'user', content: 'hello' }],
+          })
+        }
+        // Prewarm ambient auth, then check entry AND exit without manually
+        // clearing caches between any of the observed requests.
+        await request()
+        for (const token of ['first-token', 'second-token']) {
+          const one = session({ CLAUDE_CODE_OAUTH_TOKEN: token })
+          const engine = engineSeeingEnv(1)
+          engine.submitMessage = async function* () {
+            await request()
+            if (exit === 'throw') throw new Error('engine-turn-failure')
+            yield* engineSeeingEnv(1).submitMessage()
+          }
+          ;(one as unknown as { setEngine: (engine: unknown) => void }).setEngine(engine)
+          try {
+            const drain = async () => {
+              for await (const _ of one.sendMessage('hi')) {
+                if (exit === 'break') break
+              }
+            }
+            if (exit === 'throw') await expect(drain()).rejects.toThrow('engine-turn-failure')
+            else await drain()
+          } finally {
+            one.close()
+          }
+          expect(process.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('ambient-token')
+          await request()
+        }
+        expect(authorization).toEqual([
+          'Bearer ambient-token', 'Bearer first-token', 'Bearer ambient-token',
+          'Bearer second-token', 'Bearer ambient-token',
+        ])
+      } finally {
+        restore()
+        clearOAuthTokenCache()
+        if (originalMacro === undefined) delete globals.MACRO
+        else globals.MACRO = originalMacro
+        rmSync(configDir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  for (const route of ['gemini', 'github-token', 'github-key'] as const) {
+    for (const original of [undefined, ' '] as const) {
+      test(`restores ${route} hydration outputs originally ${original === undefined ? 'absent' : 'present'}`, async () => {
+        const restore = snapshotEnv(authEnvKeys, { clear: true })
+        const globals = globalThis as Record<string, unknown>
+        const originalMacro = globals.MACRO
+        globals.MACRO = { VERSION: 'test-version' }
+        const data = {
+          claudeAiOauth: undefined,
+          gemini: { accessToken: 'stored-gemini-secret' },
+          githubModels: {
+            accessToken: 'stored-github-secret',
+            credentialType: route === 'github-key' ? 'copilot_key' : 'copilot_token',
+          },
+        }
+        const storage = spyOn(secureStorage, 'getSecureStorage').mockReturnValue({
+          name: 'session-env-fixture', read: () => data, readAsync: async () => data,
+          update: () => ({ success: true }), delete: () => true,
+        })
+        const outputs = [
+          'GEMINI_ACCESS_TOKEN', 'GITHUB_TOKEN', 'GITHUB_COPILOT_KEY',
+          'CLAUDE_CODE_GITHUB_TOKEN_HYDRATED',
+        ]
+        for (const key of outputs) {
+          if (original !== undefined) process.env[key] = original
+        }
+        const before = outputs.map(key => [Object.hasOwn(process.env, key), process.env[key]])
+        const one = session(route === 'gemini'
+          ? { CLAUDE_CODE_USE_GEMINI: '1', GEMINI_AUTH_MODE: 'access-token' }
+          : { CLAUDE_CODE_USE_GITHUB: '1' })
+        try {
+          const engine = engineSeeingEnv(1)
+          engine.submitMessage = async function* () {
+            await getAnthropicClient({
+              maxRetries: 0, model: route === 'gemini' ? 'gemini-2.5-flash' : 'gpt-4.1',
+            })
+            // Prove real hydration ran; the storage double only supplies data.
+            const key = route === 'gemini' ? 'GEMINI_ACCESS_TOKEN'
+              : route === 'github-key' ? 'GITHUB_COPILOT_KEY' : 'GITHUB_TOKEN'
+            expect(process.env[key]).toBe(route === 'gemini'
+              ? 'stored-gemini-secret' : 'stored-github-secret')
+            yield* engineSeeingEnv(1).submitMessage()
+          }
+          ;(one as unknown as { setEngine: (engine: unknown) => void }).setEngine(engine)
+          for await (const _ of one.sendMessage('hi')) { /* drain */ }
+          expect(outputs.map(key => [Object.hasOwn(process.env, key), process.env[key]])).toEqual(before)
+        } finally {
+          one.close()
+          storage.mockRestore()
+          restore()
+          clearOAuthTokenCache()
+          if (originalMacro === undefined) delete globals.MACRO
+          else globals.MACRO = originalMacro
+        }
+      })
+    }
   }
 
   /**

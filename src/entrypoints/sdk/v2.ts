@@ -19,6 +19,7 @@ import {
 } from '../../Tool.js'
 import { assembleToolPool, getTools } from '../../tools.js'
 import { createFileStateCacheWithSizeLimit } from '../../utils/fileStateCache.js'
+import { clearOAuthTokenCache } from '../../utils/auth.js'
 import { requestSdkRootAbort } from './interruption.js'
 import { init } from '../init.js'
 import {
@@ -338,8 +339,8 @@ class SDKSessionImpl implements SDKSession {
     // of being remembered — leaving the one key we must restore unrestorable.
     const snapshot: Record<string, string | undefined> = Object.create(null)
     try {
-      // getAnthropicClient's env-only provider normalizers also write/delete
-      // these fields. They belong to this turn even when not explicit overrides.
+      // Provider construction normalizes routing and hydrates saved credentials.
+      // These outputs belong to the turn even when not explicit overrides.
       const keys = new Set([
         ...entries.map(([key]) => key),
         'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
@@ -347,6 +348,8 @@ class SDKSessionImpl implements SDKSession {
         'OPENAI_API_KEY', 'OPENAI_API_KEYS', 'OPENAI_BASE_URL', 'OPENAI_MODEL',
         'OPENAI_API_FORMAT', 'OPENAI_AZURE_STYLE', 'OPENAI_AUTH_HEADER',
         'OPENAI_AUTH_SCHEME', 'OPENAI_AUTH_HEADER_VALUE',
+        'GEMINI_ACCESS_TOKEN', 'GITHUB_TOKEN', 'GITHUB_COPILOT_KEY',
+        'CLAUDE_CODE_GITHUB_TOKEN_HYDRATED',
       ])
       for (const key of keys) {
         snapshot[key] = Object.hasOwn(process.env, key) ? process.env[key] : undefined
@@ -358,6 +361,8 @@ class SDKSessionImpl implements SDKSession {
           process.env[key] = value
         }
       }
+      // The OAuth reader memoizes env tokens independently of process.env.
+      clearOAuthTokenCache()
     } catch (error) {
       this.restoreSessionEnv(snapshot)
       throw error
@@ -376,6 +381,7 @@ class SDKSessionImpl implements SDKSession {
         process.env[key] = original
       }
     }
+    clearOAuthTokenCache()
     releaseEnvMutex()
   }
 
