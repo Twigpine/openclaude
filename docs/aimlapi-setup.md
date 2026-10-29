@@ -86,9 +86,9 @@ export WEB_FETCH_PROVIDER=aimlapi
 ```
 
 - **Opt-in.** Each fetched page is one Toolbox run of `search1api/crawl`, billed
-  to your AI/ML API balance (about $0.0013 per page on 2026-10-19). Every run is
-  sent with `max_cost_usd` set to $0.005, so a price above that is refused
-  instead of charged. An AI/ML API key on its own never turns this on.
+  to your AI/ML API balance (about $0.0013 per page on 2026-10-19). Every run
+  requests a cost limit with `max_cost_usd: 0.005`. An AI/ML API key on its own
+  never turns this on.
 - `WEB_FETCH_PROVIDER=aimlapi` takes precedence over `FIRECRAWL_API_KEY` /
   `FIRECRAWL_API_URL` for `WebFetch`. `WebSearch` is not affected.
 - Like the Firecrawl backend, a failed scrape (a page that does not exist, a
@@ -98,8 +98,10 @@ export WEB_FETCH_PROVIDER=aimlapi
 - The key and the attribution headers below are sent only to
   `https://tools.aimlapi.com`, which is fixed and cannot be overridden. When
   the active aimlapi profile points at your own proxy (a non-canonical
-  `OPENAI_BASE_URL`), its key is treated as the proxy's and is not sent; set
-  up a canonical AI/ML API key to use this backend. A
+  `OPENAI_BASE_URL` or `OPENAI_API_BASE`), its key is treated as the proxy's
+  and is not sent; set up a canonical AI/ML API key to use this backend. When
+  `AIMLAPI_API_KEY` holds a comma-separated pool, only its first usable key is
+  sent, with no rotation across keys. Requests never follow redirects. A
   scraped page is untrusted web content and goes through the same `WebFetch`
   processing as a page fetched over plain HTTP.
 
