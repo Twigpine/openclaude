@@ -322,3 +322,28 @@ test('MCP attribution restamps a configured partner id instead of combining it',
   expect(new Headers(resolved).get('x-aimlapi-partner-id')).not.toContain(',')
   expect(resolved['X-Tenant']).toBe('acme')
 })
+
+test('MCP Authorization keeps only the first key of a pooled credential', () => {
+  expect(
+    resolveAimlapiMcpHeaders(
+      { Authorization: 'Bearer aiml-first-key, aiml-second-key' },
+      AIMLAPI_MCP_URL,
+    ).Authorization,
+  ).toBe('Bearer aiml-first-key')
+  // A single key and a non-bearer value pass through unchanged.
+  expect(
+    resolveAimlapiMcpHeaders({ Authorization: 'Bearer aiml-only-key' }, AIMLAPI_MCP_URL)
+      .Authorization,
+  ).toBe('Bearer aiml-only-key')
+  expect(
+    resolveAimlapiMcpHeaders({ authorization: 'Basic abc,def' }, AIMLAPI_MCP_URL)
+      .authorization,
+  ).toBe('Basic abc,def')
+  // Other MCP servers keep exactly what they were configured with.
+  expect(
+    resolveAimlapiMcpHeaders(
+      { Authorization: 'Bearer first, second' },
+      'https://mcp.example.test/mcp',
+    ),
+  ).toEqual({ Authorization: 'Bearer first, second' })
+})

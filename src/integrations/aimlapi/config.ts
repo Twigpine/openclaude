@@ -9,6 +9,8 @@
  * Override any single URL via the corresponding `AIMLAPI_*_URL` env var.
  */
 
+import { firstUsableCredential } from '../../services/api/credentialPool.js'
+
 export type AimlapiEndpoints = {
   /** app/auth service - mints the user access (Bearer) token. */
   authBaseUrl: string
@@ -277,6 +279,19 @@ export function isAimlapiMcpUrl(url: string): boolean {
 }
 
 /**
+ * An aimlapi provider profile can export a comma-separated credential pool as
+ * AIMLAPI_API_KEY, so `Bearer ${AIMLAPI_API_KEY}` can expand to several keys.
+ * The MCP server takes one key: keep the first usable one, as the web search
+ * backend does. Any other Authorization value is returned unchanged.
+ */
+function singleBearerCredential(value: string): string {
+  const match = /^Bearer\s+(.+)$/i.exec(value.trim())
+  if (!match?.[1]?.includes(',')) return value
+  const key = firstUsableCredential(match[1])
+  return key ? `Bearer ${key}` : value
+}
+
+/**
  * Stamp the mandatory attribution headers onto an MCP server's request headers
  * when (and only when) the server is the AI/ML API MCP host. This covers both
  * the built-in `aimlapi` plugin server and a server the user added by hand
@@ -289,8 +304,14 @@ export function resolveAimlapiMcpHeaders(
   url: string,
 ): Record<string, string> {
   if (!isAimlapiMcpUrl(url)) return { ...headers }
+  const single: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    single[name] = name.trim().toLowerCase() === 'authorization'
+      ? singleBearerCredential(value)
+      : value
+  }
   // An undefined base URL selects the canonical (attributed) branch.
-  return resolveAimlapiAttributionHeaders(headers, undefined)
+  return resolveAimlapiAttributionHeaders(single, undefined)
 }
 
 /**
