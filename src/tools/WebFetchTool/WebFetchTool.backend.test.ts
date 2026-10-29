@@ -10,10 +10,9 @@ import { asMockFetch } from '../../test/typedMocks.js'
 import { createAssistantMessage } from '../../utils/messages/factories.js'
 
 // WebFetch hands scraped markdown to the secondary model. Each test routes
-// queryHaiku to this stub through a spy, which mock.restore() removes, so the
-// tests exercise only backend selection and later test files get the real
-// queryHaiku. Calls are counted on the stub: when an earlier file left
-// claude.js module-mocked, the spy reuses that mock and its call history.
+// queryHaiku to this stub only for the duration of the WebFetch call. A spy
+// can reuse an earlier file's mock, so preserve that mock's implementation
+// and count calls on our own stub.
 const haikuStub = mock(async ({ userPrompt }: { userPrompt: string }) =>
   createAssistantMessage({
     content: `summary of: ${userPrompt.includes('# Scraped page') ? 'scraped page' : 'other'}`,
@@ -39,7 +38,6 @@ beforeEach(async () => {
   await acquireSharedMutationLock('tools/WebFetchTool/WebFetchTool.backend.test.ts')
   restoreEnv = snapshotEnv(ENV_KEYS, { clear: true })
   haikuStub.mockClear()
-  spyOn(claudeApi, 'queryHaiku').mockImplementation(haikuStub)
   fetchMock.mockReset()
   fetchMock.mockImplementation(async (input: unknown) => {
     const host = new URL(String(input)).hostname
@@ -63,7 +61,6 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     globalThis.fetch = originalFetch
-    mock.restore()
     restoreEnv?.()
     restoreEnv = undefined
   } finally {
@@ -74,13 +71,25 @@ afterEach(() => {
 async function runWebFetch(url = 'https://example.com/page') {
   const nonce = `${Date.now()}-${Math.random()}`
   const { WebFetchTool } = await import(`./WebFetchTool.js?ts=${nonce}`)
-  return WebFetchTool.call(
-    { url, prompt: 'summarize' },
-    {
-      abortController: new AbortController(),
-      options: { isNonInteractiveSession: true },
-    } as Parameters<typeof WebFetchTool.call>[1],
-  )
+  const previousQueryHaiku = claudeApi.queryHaiku
+  const haikuSpy = spyOn(claudeApi, 'queryHaiku')
+  try {
+    let result!: Awaited<ReturnType<typeof WebFetchTool.call>>
+    await haikuSpy.withImplementation(haikuStub, async () => {
+      result = await WebFetchTool.call(
+        { url, prompt: 'summarize' },
+        {
+          abortController: new AbortController(),
+          options: { isNonInteractiveSession: true },
+        } as Parameters<typeof WebFetchTool.call>[1],
+      )
+    })
+    return result
+  } finally {
+    // withImplementation restores inherited mocks, including on rejection.
+    // Only remove the spy when this call created it.
+    if (haikuSpy !== previousQueryHaiku) haikuSpy.mockRestore()
+  }
 }
 
 function requestedHosts(): string[] {
