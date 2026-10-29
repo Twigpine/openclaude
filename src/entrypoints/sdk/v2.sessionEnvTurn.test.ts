@@ -21,7 +21,9 @@ import { resetEnvMutexForTesting } from './shared'
 import type { SDKMessage } from './coreTypes'
 import { getAnthropicClient } from '../../services/api/client'
 import { snapshotEnv } from '../../test/envSnapshot'
-import { clearOAuthTokenCache } from '../../utils/auth'
+import { clearApiKeyHelperCache, clearAwsCredentialsCache, clearOAuthTokenCache, refreshAndGetAwsCredentials } from '../../utils/auth'
+import * as settings from '../../utils/settings/settings'
+import * as aws from '../../utils/aws'
 import * as secureStorage from '../../utils/secureStorage/index'
 
 const KEY = 'OPENCLAUDE_TEST_SESSION_ENV_TURN'
@@ -394,6 +396,114 @@ describe('SDKSessionOptions.env through a turn', () => {
         rmSync(configDir, { recursive: true, force: true })
       }
     })
+  }
+
+  for (const credentialSource of ['apiKeyHelper', 'awsCredentialExport'] as const) {
+    for (const exit of ['complete', 'break', 'throw'] as const) {
+      test(`${credentialSource} identity follows scoped and ambient environments after ${exit}`, async () => {
+        const restore = snapshotEnv([...authEnvKeys, KEY, 'NODE_ENV', 'CI'], { clear: true })
+        const configDir = mkdtempSync(join(tmpdir(), 'sdk-env-helper-'))
+        const globals = globalThis as Record<string, unknown>
+        const originalMacro = globals.MACRO
+        globals.MACRO = { VERSION: 'test-version' }
+        process.env.OPENCLAUDE_CONFIG_DIR = configDir
+        process.env.NODE_ENV = 'production'
+        process.env[KEY] = 'ambient'
+        const helperPath = join(configDir, 'credential-helper.cjs')
+        // Real, cross-platform helper execution: the command inherits the turn
+        // environment; only network/storage dependencies are substituted.
+        writeFileSync(helperPath, credentialSource === 'apiKeyHelper'
+          ? `process.stdout.write(process.env.${KEY})`
+          : `process.stdout.write(JSON.stringify({ Credentials: {
+              AccessKeyId: process.env.${KEY}, SecretAccessKey: 'test-secret', SessionToken: 'test-token',
+            } }))`)
+        const helperSettings = { [credentialSource]: `"${process.execPath}" "${helperPath}"` }
+        const mergedSettings = spyOn(settings, 'getSettings_DEPRECATED').mockReturnValue(helperSettings)
+        const sourceSettings = spyOn(settings, 'getSettingsForSource')
+          .mockImplementation(source => source === 'userSettings' ? helperSettings : null)
+        const storage = spyOn(secureStorage, 'getSecureStorage').mockReturnValue({
+          name: 'session-env-helper-fixture', read: () => null, readAsync: async () => null,
+          update: () => ({ success: true }), delete: () => true,
+        })
+        const sts = credentialSource === 'awsCredentialExport'
+          ? spyOn(aws, 'checkStsCallerIdentity').mockRejectedValue(new Error('export required'))
+          : undefined
+        const ini = credentialSource === 'awsCredentialExport'
+          ? spyOn(aws, 'clearAwsIniCache').mockResolvedValue(undefined)
+          : undefined
+        clearApiKeyHelperCache()
+        clearAwsCredentialsCache()
+        clearOAuthTokenCache()
+        const identities: (string | null | undefined)[] = []
+        const request = async () => {
+          if (credentialSource === 'awsCredentialExport') {
+            // This is the credential object getAnthropicClient passes to
+            // Bedrock; STS and INI operations above avoid live AWS access.
+            identities.push((await refreshAndGetAwsCredentials())?.accessKeyId)
+            return
+          }
+          const client = await getAnthropicClient({
+            maxRetries: 0,
+            fetchOverride: async (_input, init) => {
+              identities.push(new Headers(init?.headers).get('authorization'))
+              return Response.json({
+                id: 'msg-helper', type: 'message', role: 'assistant',
+                model: 'claude-sonnet-4-6', content: [], stop_reason: 'end_turn',
+                usage: { input_tokens: 1, output_tokens: 0 },
+              })
+            },
+          })
+          await client.beta.messages.create({
+            model: 'claude-sonnet-4-6', max_tokens: 16,
+            messages: [{ role: 'user', content: 'hello' }],
+          })
+        }
+        try {
+          // A warm ambient cache must not supply the scoped request. Conversely,
+          // each scope's cached result must disappear before the ambient read.
+          await request()
+          for (const identity of ['first', 'second']) {
+            const one = session({ [KEY]: identity })
+            const engine = engineSeeingEnv(1)
+            engine.submitMessage = async function* () {
+              await request()
+              if (exit === 'throw') throw new Error('helper-turn-failure')
+              yield* engineSeeingEnv(1).submitMessage()
+            }
+            ;(one as unknown as { setEngine: (engine: unknown) => void }).setEngine(engine)
+            try {
+              const drain = async () => {
+                for await (const _ of one.sendMessage('hi')) {
+                  if (exit === 'break') break
+                }
+              }
+              if (exit === 'throw') await expect(drain()).rejects.toThrow('helper-turn-failure')
+              else await drain()
+            } finally {
+              one.close()
+            }
+            expect(process.env[KEY]).toBe('ambient')
+            await request()
+          }
+          expect(identities).toEqual(credentialSource === 'apiKeyHelper'
+            ? ['Bearer ambient', 'Bearer first', 'Bearer ambient', 'Bearer second', 'Bearer ambient']
+            : ['ambient', 'first', 'ambient', 'second', 'ambient'])
+        } finally {
+          ini?.mockRestore()
+          sts?.mockRestore()
+          storage.mockRestore()
+          sourceSettings.mockRestore()
+          mergedSettings.mockRestore()
+          restore()
+          clearApiKeyHelperCache()
+          clearAwsCredentialsCache()
+          clearOAuthTokenCache()
+          if (originalMacro === undefined) delete globals.MACRO
+          else globals.MACRO = originalMacro
+          rmSync(configDir, { recursive: true, force: true })
+        }
+      })
+    }
   }
 
   for (const route of ['gemini', 'github-token', 'github-key'] as const) {

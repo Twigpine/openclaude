@@ -19,7 +19,11 @@ import {
 } from '../../Tool.js'
 import { assembleToolPool, getTools } from '../../tools.js'
 import { createFileStateCacheWithSizeLimit } from '../../utils/fileStateCache.js'
-import { clearOAuthTokenCache } from '../../utils/auth.js'
+import {
+  clearApiKeyHelperCache,
+  clearAwsCredentialsCache,
+  clearOAuthTokenCache,
+} from '../../utils/auth.js'
 import { requestSdkRootAbort } from './interruption.js'
 import { init } from '../init.js'
 import {
@@ -361,8 +365,11 @@ class SDKSessionImpl implements SDKSession {
           process.env[key] = value
         }
       }
-      // The OAuth reader memoizes env tokens independently of process.env.
+      // Authentication readers cache results independently of process.env.
+      // A scoped turn must not reuse credentials from the previous environment.
       clearOAuthTokenCache()
+      clearApiKeyHelperCache()
+      clearAwsCredentialsCache()
     } catch (error) {
       this.restoreSessionEnv(snapshot)
       throw error
@@ -382,6 +389,8 @@ class SDKSessionImpl implements SDKSession {
       }
     }
     clearOAuthTokenCache()
+    clearApiKeyHelperCache()
+    clearAwsCredentialsCache()
     releaseEnvMutex()
   }
 
