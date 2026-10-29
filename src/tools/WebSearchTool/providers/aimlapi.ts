@@ -21,7 +21,7 @@ import {
   resolvePartnerId,
   SOURCE_HEADER_NAME,
 } from '../../../integrations/aimlapi/config.js'
-import { sanitizeApiKey } from '../../../utils/providerSecrets.js'
+import { firstUsableCredential } from '../../../services/api/credentialPool.js'
 import type { SearchHit, SearchInput, SearchProvider } from './types.js'
 import { applyDomainFilters, safeHostname, type ProviderOutput } from './types.js'
 import { getWebSearchTimeoutMs, toAbortError, withWebSearchTimeout } from './timeout.js'
@@ -59,9 +59,9 @@ function apiKey(): string | undefined {
   if (process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'aimlapi' && baseUrl && !canonicalBaseUrl) {
     return undefined
   }
-  const dedicated = sanitizeApiKey(process.env.AIMLAPI_API_KEY)
+  const dedicated = firstUsableCredential(process.env.AIMLAPI_API_KEY)
   if (dedicated) return dedicated
-  return canonicalBaseUrl ? sanitizeApiKey(process.env.OPENAI_API_KEY) : undefined
+  return canonicalBaseUrl ? firstUsableCredential(process.env.OPENAI_API_KEY) : undefined
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

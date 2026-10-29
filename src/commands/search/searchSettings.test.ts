@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { getAllowedSettingSources, setAllowedSettingSources } from '../../bootstrap/state.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
+import { buildLaunchEnv, buildOpenAIProfileEnv } from '../../utils/providerProfile.js'
 import { snapshotEnv } from '../../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
@@ -278,6 +279,58 @@ describe('AI/ML API backend', () => {
 
     expect(requestedUrl).toBe('https://tools.aimlapi.com/v1/tools/run')
     expect(message).toContain('Search OK via AI/ML API: 1 results')
+  })
+
+  test.each(['profile', 'primary', 'alias'] as const)('selects and polls with one key from a %s credential pool', async source => {
+    const pool = 'aiml-first, aiml-second'
+    if (source === 'profile') {
+      const env = buildOpenAIProfileEnv({
+        goal: 'coding',
+        baseUrl: 'https://api.aimlapi.com/v1',
+        apiKey: pool,
+        processEnv: {},
+      })
+      if (!env) throw new Error('Profile setup rejected usable credentials')
+      const restored = await buildLaunchEnv({
+        profile: 'openai',
+        persisted: { profile: 'openai', env, createdAt: '2026-10-28T00:00:00.000Z' },
+        goal: 'coding',
+        processEnv: {},
+      })
+      expect(restored.AIMLAPI_API_KEY).toBe('aiml-first,aiml-second')
+      for (const key of ['AIMLAPI_API_KEY', 'OPENAI_BASE_URL', 'CLAUDE_CODE_PROVIDER_ROUTE_ID'] as const) {
+        const value = restored[key]
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    } else {
+      process.env.OPENAI_API_KEY = pool
+      process.env[source === 'primary' ? 'OPENAI_BASE_URL' : 'OPENAI_API_BASE'] = 'https://api.aimlapi.com/v1'
+    }
+    const store = recordingStore()
+    expect(applySearchSelection(backend('aimlapi'), undefined, false, store))
+      .toStartWith('Web search set to AI/ML API.')
+    expect(store.saves).toEqual([{ set: { WEB_SEARCH_PROVIDER: 'aimlapi' }, unset: [] }])
+    expect(describeSearchStatus(false)).toContain('Searches go to: AI/ML API')
+
+    const requests: Array<{ url: string; method: string; authorization: string | null }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get('Authorization')
+      requests.push({ url: String(input), method: init?.method ?? 'GET', authorization })
+      // The service accepts an individual credential, never the entire configured list.
+      if (authorization !== 'Bearer aiml-first') {
+        return Response.json({ message: 'Invalid credential' }, { status: 401 })
+      }
+      return requests.length === 1
+        ? Response.json({ id: 'run_pool', status: 'queued', next_poll_hint_ms: 1 }, { status: 202 })
+        : Response.json({ status: 'completed', output: { results: [{ url: 'https://nodejs.org/', title: 'Node.js' }] } })
+    }) as typeof fetch
+
+    expect(await runSearchTest('node', false)).toContain('Search OK via AI/ML API: 1 results')
+    expect(requests).toEqual([
+      { url: 'https://tools.aimlapi.com/v1/tools/run', method: 'POST', authorization: 'Bearer aiml-first' },
+      { url: 'https://tools.aimlapi.com/v1/tools/runs/run_pool', method: 'GET', authorization: 'Bearer aiml-first' },
+    ])
   })
 
   test.each([undefined, '  '])('selects and searches with the canonical alias when the primary URL is %p', async primary => {
