@@ -279,6 +279,34 @@ describe('AI/ML API backend', () => {
     expect(requestedUrl).toBe('https://tools.aimlapi.com/v1/tools/run')
     expect(message).toContain('Search OK via AI/ML API: 1 results')
   })
+
+  test.each([undefined, '  '])('selects and searches with the canonical alias when the primary URL is %p', async primary => {
+    if (primary !== undefined) process.env.OPENAI_BASE_URL = primary
+    process.env.OPENAI_API_BASE = 'https://api.aimlapi.com/v1'
+    process.env.OPENAI_API_KEY = 'canonical-alias-key'
+    const store = recordingStore()
+
+    expect(applySearchSelection(backend('aimlapi'), undefined, false, store))
+      .toStartWith('Web search set to AI/ML API.')
+    expect(store.saves).toEqual([{ set: { WEB_SEARCH_PROVIDER: 'aimlapi' }, unset: [] }])
+    expect(describeSearchStatus(false)).toContain('Searches go to: AI/ML API')
+
+    const requests: Array<{ url: string; authorization: string | null }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(input), authorization: new Headers(init?.headers).get('Authorization') })
+      return Response.json({
+        status: 'completed',
+        output: { results: [{ url: 'https://nodejs.org/', title: 'Node.js' }] },
+      })
+    }) as typeof fetch
+
+    expect(await runSearchTest('node', false)).toContain('Search OK via AI/ML API: 1 results')
+    expect(requests).toEqual([{
+      url: 'https://tools.aimlapi.com/v1/tools/run',
+      authorization: 'Bearer canonical-alias-key',
+    }])
+    expect(process.env.AIMLAPI_API_KEY).toBeUndefined()
+  })
 })
 
 describe('needsApiKey', () => {

@@ -186,8 +186,9 @@ Content-Type: application/json
 
 `allowed_domains` are sent as `include_domains`; the tool has no exclude field, so
 `blocked_domains` are applied to the results. Both lists are also enforced on the
-results like every other backend. `wait_ms` is the search timeout minus two seconds
-(`WEB_SEARCH_TIMEOUT_SEC`, default 15s).
+results like every other backend. `wait_ms` is the search timeout minus two seconds,
+clamped to 1000–30000 ms (13000 ms with the default `WEB_SEARCH_TIMEOUT_SEC=15`).
+This server-side wait is separate from the overall search timeout, which also covers polling.
 
 **Response:** `200` with the finished run, or `202` while it is still queued — OpenClaude
 then polls `GET https://tools.aimlapi.com/v1/tools/runs/{id}` (free) after

@@ -12,6 +12,7 @@ const originalEnv = {
   AIMLAPI_API_KEY: process.env.AIMLAPI_API_KEY,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
+  OPENAI_API_BASE: process.env.OPENAI_API_BASE,
   CLAUDE_CODE_PROVIDER_ROUTE_ID: process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID,
   WEB_SEARCH_TIMEOUT_SEC: process.env.WEB_SEARCH_TIMEOUT_SEC,
 }
@@ -66,6 +67,7 @@ beforeEach(() => {
   delete process.env.WEB_SEARCH_TIMEOUT_SEC
   delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_API_BASE
   delete process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID
 })
 
@@ -93,26 +95,26 @@ describe('aimlapiProvider isConfigured', () => {
     expect(aimlapiProvider.isConfigured()).toBe(false)
   })
 
-  test('uses OPENAI_API_KEY only while the AI/ML API endpoint is the active base URL', async () => {
+  test.each(['OPENAI_BASE_URL', 'OPENAI_API_BASE'])('uses OPENAI_API_KEY only while %s is canonical', async baseEnv => {
     delete process.env.AIMLAPI_API_KEY
     process.env.OPENAI_API_KEY = 'openai-route-key'
 
-    process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+    process.env[baseEnv] = 'https://api.openai.com/v1'
     expect(aimlapiProvider.isConfigured()).toBe(false)
-    process.env.OPENAI_BASE_URL = 'https://proxy.example.com/aimlapi/v1'
+    process.env[baseEnv] = 'https://proxy.example.com/aimlapi/v1'
     expect(aimlapiProvider.isConfigured()).toBe(false)
 
-    process.env.OPENAI_BASE_URL = 'https://api.aimlapi.com/v1'
+    process.env[baseEnv] = 'https://api.aimlapi.com/v1'
     expect(aimlapiProvider.isConfigured()).toBe(true)
     const requests = mockFetch([json(completedRun([]))])
     await aimlapiProvider.search({ query: 'q' })
     expect(requests[0].headers.Authorization).toBe('Bearer openai-route-key')
   })
 
-  test('withholds the key of an aimlapi profile that points at a proxy', async () => {
-    // What an aimlapi provider profile on the user's own proxy exports.
+  test.each(['OPENAI_BASE_URL', 'OPENAI_API_BASE'])('withholds a proxy-marked key when %s is noncanonical', async baseEnv => {
+    // A proxy-marked environment must not share its credential with the Toolbox.
     process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
-    process.env.OPENAI_BASE_URL = 'https://proxy.example.com/v1'
+    process.env[baseEnv] = 'https://proxy.example.com/v1'
     process.env.AIMLAPI_API_KEY = 'proxy-credential'
     process.env.OPENAI_API_KEY = 'proxy-credential'
 
@@ -121,9 +123,27 @@ describe('aimlapiProvider isConfigured', () => {
     await expect(aimlapiProvider.search({ query: 'q' })).rejects.toThrow(/AIMLAPI_API_KEY/)
     expect(requests).toHaveLength(0)
 
-    // The same profile on the canonical endpoint keeps working.
-    process.env.OPENAI_BASE_URL = 'https://api.aimlapi.com/v1'
+    // The same marker with a canonical endpoint keeps working.
+    process.env[baseEnv] = 'https://api.aimlapi.com/v1'
     expect(aimlapiProvider.isConfigured()).toBe(true)
+  })
+
+  test.each([
+    ['https://api.aimlapi.com/v1', 'https://proxy.example.com/v1', true],
+    ['https://proxy.example.com/v1', 'https://api.aimlapi.com/v1', false],
+  ] as const)('keeps primary base %s ahead of alias %s', async (primary, alias, configured) => {
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+    process.env.OPENAI_BASE_URL = primary
+    process.env.OPENAI_API_BASE = alias
+    expect(aimlapiProvider.isConfigured()).toBe(configured)
+    const requests = mockFetch([json(completedRun([]))])
+    if (configured) {
+      await aimlapiProvider.search({ query: 'q' })
+      expect(requests[0].headers.Authorization).toBe(`Bearer ${TEST_KEY}`)
+    } else {
+      await expect(aimlapiProvider.search({ query: 'q' })).rejects.toThrow(/AIMLAPI_API_KEY/)
+      expect(requests).toHaveLength(0)
+    }
   })
 })
 
