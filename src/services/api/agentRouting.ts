@@ -57,6 +57,7 @@ const PROVIDER_ENV_VARS_TO_CLEAR_FOR_OVERRIDE = [
   'OPENAI_AUTH_SCHEME',
   'OPENAI_AUTH_HEADER_VALUE',
   'MERGE_GATEWAY_API_KEY',
+  'ORCAROUTER_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -365,6 +366,9 @@ export function applyAgentProviderOverrideToEnv(
   env.OPENAI_MODEL = providerOverride.model
   env.OPENAI_BASE_URL = providerOverride.baseURL
   env.OPENAI_API_KEY = providerOverride.apiKey
+  if (resolveRouteIdFromBaseUrl(providerOverride.baseURL) === 'orcarouter') {
+    env.ORCAROUTER_API_KEY = providerOverride.apiKey
+  }
   if (resolveRouteIdFromBaseUrl(providerOverride.baseURL) === 'merge-gateway') {
     const key = sanitizeApiKey(providerOverride.apiKey)
     if (key) env.MERGE_GATEWAY_API_KEY = key

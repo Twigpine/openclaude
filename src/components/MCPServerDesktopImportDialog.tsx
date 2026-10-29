@@ -1,5 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { gracefulShutdown } from 'src/utils/gracefulShutdown.js';
 import { writeToStdout } from 'src/utils/process.js';
 import { Box, color, Text, useTheme } from '../ink.js';
@@ -118,7 +118,6 @@ export function MCPServerDesktopImportDialog(t0) {
   } else {
     t7 = $[13];
   }
-  done;
   const handleEscCancel = t7;
   const t8 = serverNames.length;
   let t9;

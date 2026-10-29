@@ -1,5 +1,4 @@
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js'
-import { FILE_WRITE_TOOL_NAME } from './constants.js'
 
 export { FILE_WRITE_TOOL_NAME } from './constants.js'
 export const DESCRIPTION = 'Write a file to the local filesystem.'

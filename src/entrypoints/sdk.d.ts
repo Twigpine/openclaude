@@ -408,6 +408,28 @@ export type SDKSessionOptions = {
   allowDangerouslySkipPermissions?: boolean
   abortController?: AbortController
   /**
+   * Environment variables to apply while this session's turns run.
+   *
+   * Applied around each turn and restored afterwards, under the same
+   * process-wide env mutex `query()` uses. Turns belonging to sessions with
+   * different environments therefore serialise rather than overlap.
+   *
+   * A turn that sets no environment takes no mutex, so it may run alongside
+   * one that does — and, since `process.env` is one object per process, it
+   * can read that turn's variables while they are in place. Nothing survives
+   * the turn either way. Give a session its own `env` if its turns must not
+   * see another's.
+   *
+   * Provider-derived routing/authentication variables are restored too.
+   * A value of `undefined` removes the variable for the turn.
+   *
+   * A paused iterator holds the mutex: finish the turn or leave the loop
+   * with `break`/`return` before awaiting another env-carrying turn.
+   * A `canUseTool` callback runs inside the turn and must not await an
+   * env-carrying `query()` or session turn, which would wait on its mutex.
+   */
+  env?: Record<string, string | undefined>
+  /**
    * Callback invoked before each tool use. Return `{ behavior: 'allow' }` to
    * permit the call or `{ behavior: 'deny', message?: string }` to reject it.
    *

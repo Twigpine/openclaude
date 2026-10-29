@@ -18,8 +18,9 @@ import type { Message } from '../../types/message.js';
 import { createAbortController } from '../../utils/abortController.js';
 import { saveGlobalConfig } from '../../utils/config.js';
 import { errorMessage } from '../../utils/errors.js';
-import { type CacheSafeParams, getLastCacheSafeParams } from '../../utils/forkedAgent.js';
+import { type CacheSafeParams, getLastCacheSafeParams, getQueryModelSelection } from '../../utils/forkedAgent.js';
 import { getMessagesAfterCompactBoundary } from '../../utils/messages.js';
+import { getDefaultMainLoopModelSetting, parseUserSpecifiedModel } from '../../utils/model/model.js';
 import type { ProcessUserInputContext } from '../../utils/processUserInput/processUserInput.js';
 import { runSideQuestion } from '../../utils/sideQuestion.js';
 import { asSystemPrompt } from '../../utils/systemPromptType.js';
@@ -209,11 +210,29 @@ async function buildCacheSafeParams(context: ProcessUserInputContext): Promise<C
   const forkContextMessages = getMessagesAfterCompactBoundary(stripInProgressAssistantMessage(context.messages));
   const saved = getLastCacheSafeParams();
   if (saved) {
+    const parent = saved.toolUseContext;
+    const selection = getQueryModelSelection(parent);
+    let toolUseContext = context;
+    // Commands get fresh options. Carry the accepted request only while both
+    // its source and the current configured selection are still unchanged.
+    if (!context.agentId && !context.queryModelSelection && selection) {
+      const state = context.getAppState();
+      const selectedModel = state.mainLoopModelForSession ?? state.mainLoopModel ?? getDefaultMainLoopModelSetting();
+      if (selectedModel === selection.selectedModel && context.options.mainLoopModel === parseUserSpecifiedModel(selectedModel)) {
+        toolUseContext = {
+          ...context,
+          queryModelSelection: {
+            agentId: context.agentId,
+            current: { ...selection, options: context.options, model: context.options.mainLoopModel }
+          }
+        };
+      }
+    }
     return {
       systemPrompt: saved.systemPrompt,
       userContext: saved.userContext,
       systemContext: saved.systemContext,
-      toolUseContext: context,
+      toolUseContext,
       forkContextMessages
     };
   }

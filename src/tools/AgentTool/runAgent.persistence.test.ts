@@ -81,7 +81,7 @@ test('skips transcript write if identity metadata fails to persist', async () =>
   } as unknown as ToolUseContext
 
   const runParams = {
-    agentId: 'test-agent' as any,
+    agentId: 'test-agent',
     agentDefinition,
     prompt: 'review this',
     promptMessages: [{ role: 'user', content: 'review this' }],
@@ -90,10 +90,10 @@ test('skips transcript write if identity metadata fails to persist', async () =>
       abortController: new AbortController(),
     },
     querySource: 'subagent',
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' }),
     availableTools: [],
     allowedTools: undefined,
-  } as any
+  }
 
   const iterator = runAgent(runParams)
   let chunkCount = 0

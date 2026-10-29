@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, jest, mock, test } from 'bun:test'
+import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1195,7 +1195,17 @@ test('a settled interrupted run resumes the profile write without re-provisionin
 
   // Retry without --model: the default would be gpt-4o, but the settled receipt
   // must win.
-  await runAimlapiTopup({ email: 'user@example.com', amountUsd: '25', noOpen: true })
+  const output = spyOn(console, 'log').mockImplementation(() => {})
+  try {
+    await runAimlapiTopup({ email: 'user@example.com', amountUsd: '25', noOpen: true })
+    const logged = output.mock.calls.flat().join('\n')
+    expect(logged).toContain('Balance topped up and provider configured.')
+    expect(logged).not.toContain('exchanged-key')
+    expect(logged).not.toContain('exchan')
+    expect(logged).not.toContain('exchanged-id')
+  } finally {
+    output.mockRestore()
+  }
 
   // The retained settled key finished the write — no account check/provisioning,
   // the persisted model is preserved, and the checkout state is cleared.

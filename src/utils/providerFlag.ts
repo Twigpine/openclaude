@@ -403,6 +403,9 @@ export function applyProviderFlag(
                           process.env.OPENAI_API_KEY === process.env.GMI_API_KEY
                         ? 'gmi-cloud'
                       : process.env.OPENAI_API_KEY !== undefined &&
+                          process.env.OPENAI_API_KEY === process.env.ORCAROUTER_API_KEY
+                        ? 'orcarouter'
+                      : process.env.OPENAI_API_KEY !== undefined &&
                           process.env.OPENAI_API_KEY === process.env.APISMART_API_KEY
                         ? 'apismart'
                         : process.env.OPENAI_API_KEY !== undefined &&

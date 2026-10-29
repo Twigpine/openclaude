@@ -70,7 +70,7 @@
     "deadcode": "knip --include files,dependencies",
     "lint": "eslint .",
     "lint:any-budget": "bun run scripts/any-usage-report.ts --check",
-    "check:static": "bun run lint:any-budget && bun run smoke && bun run deadcode",
+    "check:static": "bun run lint && bun run lint:any-budget && bun run smoke && bun run deadcode",
     "check": "bun run check:static && bun run test:full",
     "check:strict": "bun run typecheck && bun run lint && bun run lint:any-budget && bun run smoke && bun run deadcode && bun run test:full",
     "verify:privacy": "bun run scripts/verify-no-phone-home.ts",

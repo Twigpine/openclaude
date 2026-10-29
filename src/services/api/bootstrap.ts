@@ -12,7 +12,6 @@ import {
   getVendor,
 } from '../../integrations/index.js'
 import {
-  getRouteDescriptor,
   resolveRouteCredentialValue,
 } from '../../integrations/routeMetadata.js'
 import { firstUsableCredential, hasInvalidCredentialPlaceholder } from './credentialPool.js'

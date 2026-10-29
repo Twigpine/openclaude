@@ -78,7 +78,7 @@ export function TranscriptSharePrompt(t0) {
   }
   let t7;
   if ($[10] === Symbol.for("react.memo_cache_sentinel")) {
-    t7 = <Box flexDirection="column" marginTop={1}>{t3}{t4}<Box marginLeft={2}>{t5}{t6}<Box><Text><Text color="ansi:cyan">3</Text>: Don't ask again</Text></Box></Box></Box>;
+    t7 = <Box flexDirection="column" marginTop={1}>{t3}{t4}<Box marginLeft={2}>{t5}{t6}<Box><Text><Text color="ansi:cyan">3</Text>: Don&apos;t ask again</Text></Box></Box></Box>;
     $[10] = t7;
   } else {
     t7 = $[10];

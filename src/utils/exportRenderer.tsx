@@ -513,7 +513,6 @@ function safeJsonValue(value: unknown, seen = new WeakSet<object>()): unknown {
   if (typeof value === 'bigint') return `${value}n`
   if (typeof value === 'symbol') return value.toString()
   if (typeof value === 'function') return '[Function]'
-  if (typeof value === 'undefined') return null
 
   if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? null : value.toISOString()

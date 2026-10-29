@@ -2,9 +2,6 @@ name: VS Code Windows launcher
 
 on:
   pull_request:
-    paths:
-      - 'vscode-extension/openclaude-vscode/**'
-      - '.github/workflows/vscode-launcher.yml'
   push:
     branches: [main]
     paths:
@@ -15,7 +12,27 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      extension: ${{ steps.filter.outputs.extension }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          filters: |
+            extension:
+              - 'vscode-extension/openclaude-vscode/**'
+              - '.github/workflows/vscode-launcher.yml'
+
   windows-launcher:
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.extension == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -25,5 +42,31 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
+      - name: Lint extension JavaScript
+        working-directory: vscode-extension/openclaude-vscode
+        run: npm run lint
       - name: Exercise Windows executable and npm batch launcher routes
         run: node --test vscode-extension/openclaude-vscode/src/chat/processManager.test.js
+
+  required:
+    name: VS Code launcher required
+    if: ${{ always() }}
+    needs: [changes, windows-launcher]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify applicable checks passed
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          node <<'NODE'
+          const jobs = JSON.parse(process.env.JOB_RESULTS);
+          const selected = process.env.EVENT_NAME === 'pull_request' ? jobs.changes.outputs.extension : 'true';
+          const expected = selected === 'true' ? 'success' : 'skipped';
+          if (jobs.changes.result !== 'success' || !['true', 'false'].includes(selected) || jobs['windows-launcher'].result !== expected) {
+            console.error('Change detection must succeed and applicable checks must pass.', jobs);
+            process.exit(1);
+          }
+          console.log('Applicable checks passed; untouched surfaces were skipped.');
+          NODE

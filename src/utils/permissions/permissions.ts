@@ -136,8 +136,6 @@ import {
   formatActionForClassifier,
 } from './yoloClassifier.js'
 
-const CLASSIFIER_FAIL_CLOSED_REFRESH_MS = 30 * 60 * 1000 // 30 minutes
-
 const PERMISSION_RULE_SOURCES = [
   ...SETTING_SOURCES,
   'cliArg',
@@ -926,8 +924,7 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
         // the tengu_iron_gate_closed gate.
         if (classifierResult.unavailable) {
           if (
-            // The local growthbook shim takes no refresh-interval argument;
-            // CLASSIFIER_FAIL_CLOSED_REFRESH_MS documents the intended cadence.
+            // The local growthbook shim takes no refresh-interval argument.
             getFeatureValue_CACHED_WITH_REFRESH('tengu_iron_gate_closed', true)
           ) {
             logForDebugging(

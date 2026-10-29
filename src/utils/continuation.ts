@@ -1,4 +1,3 @@
-import { tokenCountWithEstimation } from './tokens.js'
 
 /**
  * Heuristics to detect if the agent intends to continue its task
@@ -174,7 +173,7 @@ export function analyzeContinuationIntent(
   if (hasLateContinuationSignal) {
     // If the sentence is punctuated but has a transition word, only nudge if 
     // it's a strong 1st person intent or open tasks are present.
-    const hasTerminalPunctuation = /[.!??"'`)\]]\s*$/.test(lastText) || lastText.endsWith('`')
+    const hasTerminalPunctuation = /[.!?"'`)\]]\s*$/.test(lastText) || lastText.endsWith('`')
     if (hasTerminalPunctuation) {
       const strongIntent = /\b(i (will|shall|need to|must|should|now)|let (me|us)|je (vais|reviens)|passons à|moving on to|continuing with|proceeding to|next step is to)\b/i.test(lowerText) || 
                            /je suis en train d'/i.test(lowerText) || /◻/.test(lastText)
@@ -203,7 +202,7 @@ export function analyzeContinuationIntent(
   }
 
   // Global fallback for unpunctuated signals (must be a clear transition)
-  const hasTerminalPunctuation = /[.!??"'`)\]]\s*$/.test(lastText) || lastText.endsWith('`')
+  const hasTerminalPunctuation = /[.!?"'`)\]]\s*$/.test(lastText) || lastText.endsWith('`')
   if (
     CONTINUATION_SIGNALS.some(re => re.test(lowerText)) && 
     !hasTerminalPunctuation

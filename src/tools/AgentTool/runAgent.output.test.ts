@@ -806,7 +806,7 @@ for (const phase of ['initial', 'incremental'] as const) {
       yield createAssistantMessage({ content: 'fork answer' })
     } }))
     const controller = new AbortController()
-    const context = { abortController: controller, readFileState: createFileStateCacheWithSizeLimit(READ_FILE_STATE_CACHE_SIZE), getAppState: getDefaultAppState, options: {}, messages: [] } as unknown as ToolUseContext
+    const context = { abortController: controller, readFileState: createFileStateCacheWithSizeLimit(READ_FILE_STATE_CACHE_SIZE), getAppState: getDefaultAppState, options: { mainLoopModel: 'test-model' }, messages: [] } as unknown as ToolUseContext
     const clear = spyOn(FileStateCache.prototype, 'clear')
     const fork = runForkedAgent({ promptMessages: [createUserMessage({ content: 'fork initial' })], cacheSafeParams: { toolUseContext: context, forkContextMessages: [], systemPrompt: [] as never, userContext: {}, systemContext: {} }, canUseTool: async () => ({ behavior: 'allow' }), querySource: 'compact', forkLabel: 'compact' })
     const outcome = fork.then(() => 'finished', error => error)

@@ -137,6 +137,8 @@ test('partitions local openai-compatible model cache scope by credentials and he
   process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Route: first'
 
   const firstScope = getAdditionalModelOptionsCacheScope()
+  expect(getAdditionalModelOptionsCacheScope()).toBe(firstScope)
+  expect(firstScope).not.toContain('first-key')
 
   process.env.OPENAI_API_KEY = 'second-key'
   const secondScope = getAdditionalModelOptionsCacheScope()
@@ -144,6 +146,8 @@ test('partitions local openai-compatible model cache scope by credentials and he
   process.env.OPENAI_API_KEY = 'first-key'
   process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Route: second'
   const thirdScope = getAdditionalModelOptionsCacheScope()
+  process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Route: first'
+  expect(getAdditionalModelOptionsCacheScope()).toBe(firstScope)
 
   delete process.env.OPENAI_API_KEY
   process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Route: first'

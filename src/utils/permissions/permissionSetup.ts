@@ -951,10 +951,6 @@ export function initialPermissionModeFromCLI({
     result = { mode: 'default', notification }
   }
 
-  if (!result) {
-    result = { mode: 'default', notification }
-  }
-
   if (feature('TRANSCRIPT_CLASSIFIER') && result.mode === 'auto') {
     autoModeStateModule?.setAutoModeActive(true)
   }

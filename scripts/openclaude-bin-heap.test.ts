@@ -8,7 +8,6 @@ import {
   HEAP_PERCENTAGE_ENV,
   HEAP_PERCENTAGE_FLAG,
   HEAP_SIZE_ENV,
-  HEAP_SIZE_FLAG,
   formatPercentageUnavailableStderr,
   getAvailableMemoryBytes,
   hasHeapLimitFlag,

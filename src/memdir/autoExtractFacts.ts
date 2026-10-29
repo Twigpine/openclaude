@@ -7,7 +7,7 @@
  */
 
 import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'fs'
-import { join, dirname } from 'path'
+import { join } from 'path'
 import { getAutoMemPath } from './paths.js'
 import { isAutoMemoryEnabled } from './paths.js'
 import { isMemoryWriteApprovalRequired } from '../utils/governancePolicy.js'

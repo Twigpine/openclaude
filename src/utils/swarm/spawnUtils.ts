@@ -115,6 +115,9 @@ const TEAMMATE_ENV_VARS = [
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
   'GMI_API_KEY',
+  'ORCAROUTER_API_KEY',
+  // Preserve saved-key origin across panes for subsequent keyless selection.
+  'CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256',
   'OPENAI_BASE_URL',
   'OPENAI_API_BASE',
   'OPENAI_MODEL',

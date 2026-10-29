@@ -1,5 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
-import React, { createContext, useCallback, useContext, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useEffect } from 'react';
 import { saveCurrentProjectConfig } from '../utils/config.js';
 export type StatsStore = {
   increment(name: string, value?: number): void;

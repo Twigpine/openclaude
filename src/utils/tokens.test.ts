@@ -1,3 +1,4 @@
+import { createUserMessage } from './messages.js'
 import { describe, expect, it } from 'bun:test'
 import {
   roughTokenCountEstimationForMessage,
@@ -268,7 +269,7 @@ describe('IncrementalTokenCounter', () => {
     const counter = new IncrementalTokenCounter()
     
     counter.getCount([
-      { type: 'user', message: { content: 'hello' } } as any,
+      createUserMessage({ content: 'hello' }),
     ])
     
     expect(counter.cachedCount).toBeGreaterThan(0)
@@ -278,12 +279,12 @@ describe('IncrementalTokenCounter', () => {
     const counter = new IncrementalTokenCounter()
     
     const count1 = counter.getCount([
-      { type: 'user', message: { content: 'hello' } } as any,
+      createUserMessage({ content: 'hello' }),
     ])
     
     const count2 = counter.getCount([
-      { type: 'user', message: { content: 'hello' } } as any,
-      { type: 'user', message: { content: 'world' } } as any,
+      createUserMessage({ content: 'hello' }),
+      createUserMessage({ content: 'world' }),
     ])
     
     expect(count2).toBeGreaterThan(count1)
@@ -292,7 +293,7 @@ describe('IncrementalTokenCounter', () => {
   it('resets correctly', () => {
     const counter = new IncrementalTokenCounter()
     
-    counter.getCount([{ type: 'user', message: { content: 'hello' } } as any])
+    counter.getCount([createUserMessage({ content: 'hello' })])
     counter.reset()
     
     expect(counter.cachedCount).toBe(0)

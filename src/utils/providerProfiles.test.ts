@@ -25,6 +25,7 @@ const originalFetch = globalThis.fetch
 const RESTORED_KEYS = [
   'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
   'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
+  'CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256',
   'CLAUDE_CODE_PROVIDER_ROUTE_ID',
   'CLAUDE_CONFIG_DIR',
   'OPENCLAUDE_CONFIG_DIR',
@@ -85,6 +86,7 @@ const RESTORED_KEYS = [
   'MIMO_API_KEY',
   'ATLAS_CLOUD_API_KEY',
   'GMI_API_KEY',
+  'ORCAROUTER_API_KEY',
   'APISMART_API_KEY',
   'APISMART_MODEL',
   'API_ROUTE_API_KEY',
@@ -851,7 +853,7 @@ describe('applyProviderProfileToProcessEnv', () => {
     const unchanged = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any)
+    })
 
     expect(unchanged?.id).toBe(activeProfile.id)
     expect(process.env.GITHUB_ENTERPRISE_URL).toBe(
@@ -862,7 +864,7 @@ describe('applyProviderProfileToProcessEnv', () => {
     const updated = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any)
+    })
 
     expect(updated?.id).toBe(activeProfile.id)
     expect(String(process.env.GITHUB_ENTERPRISE_URL)).toBe(
@@ -2903,7 +2905,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBe('http://localhost:11434/v1')
@@ -2949,7 +2951,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_moonshot',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_moonshot')
     expect(process.env.OPENAI_BASE_URL!).toBe('https://api.moonshot.ai/v1')
@@ -2982,7 +2984,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [profile],
       activeProviderProfileId: 'minimax_generic',
-    } as any)
+    })
 
     expect(applied?.id).toBe('minimax_generic')
     // Cast past control-flow narrowing: TS pins this to `undefined` after the
@@ -3060,7 +3062,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
       applyActiveProviderProfileFromConfig({
         providerProfiles: [profile],
         activeProviderProfileId: profile.id,
-      } as any)
+      })
 
       expect(process.env.OPENAI_API_KEY).toBe('correct-key')
       expect(process.env.MINIMAX_API_KEY).toBe('correct-key')
@@ -3092,7 +3094,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     applyActiveProviderProfileFromConfig({
       providerProfiles: [profile],
       activeProviderProfileId: 'minimax_lookalike',
-    } as any)
+    })
 
     expect(process.env.MINIMAX_API_KEY).toBeUndefined()
   })
@@ -3116,7 +3118,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_moonshot',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBe('http://192.168.1.1:8080/v1')
@@ -3138,7 +3140,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_moonshot',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o-mini')
@@ -3161,7 +3163,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_GITHUB).toBe('1')
@@ -3253,7 +3255,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.MINIMAX_API_KEY).toBe('minimax-live-key')
@@ -3282,7 +3284,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(String(process.env.CLAUDE_CODE_USE_OPENAI)).toBe('1')
@@ -3313,7 +3315,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_openai')
     expect(process.env.OPENAI_MODEL).toBe('kimi-k2.5:cloud')
@@ -3331,7 +3333,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: 'saved_commandcode',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_commandcode')
     expect(process.env.CMD_API_KEY).toBe('cmd-test-key')
@@ -3363,7 +3365,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_openai')
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
@@ -3396,7 +3398,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_GITHUB).toBe('1')
@@ -3415,7 +3417,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [xaiProfile],
       activeProviderProfileId: 'saved_xai',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_xai')
     expect(String(process.env.XAI_API_KEY)).toBe('xai-test-key')
@@ -3433,7 +3435,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [fwProfile],
       activeProviderProfileId: 'saved_fw',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_fw')
     expect(String(process.env.FIREWORKS_API_KEY)).toBe('fireworks-test-key')
@@ -3458,7 +3460,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [aimlapiProfile],
       activeProviderProfileId: 'saved_aimlapi',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_aimlapi')
     expect(String(process.env.AIMLAPI_API_KEY)).toBe('aimlapi-test-key')
@@ -3477,7 +3479,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [xaiProfile],
       activeProviderProfileId: 'saved_xai',
-    } as any)
+    })
 
     // Returns profile without re-applying since env is aligned
     expect(applied?.id).toBe('saved_xai')
@@ -3508,7 +3510,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
         }),
       ],
       activeProviderProfileId: 'saved_openai',
-    } as any)
+    })
 
     expect(applied?.id).toBe('saved_openai')
     expect(String(process.env.CLAUDE_CODE_USE_OPENAI)).toBe('1')
@@ -3565,7 +3567,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
       const config = {
         providerProfiles: [activeProfile],
         activeProviderProfileId: activeProfile.id,
-      } as any
+      }
       const expectedContextWindows = JSON.stringify({
         'glm-5.2': 200_000,
         'gpt-5.2': 200_000,
@@ -3644,7 +3646,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const applied = applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any)
+    })
 
     expect(applied?.id).toBe(activeProfile.id)
     expect(process.env.OPENAI_BASE_URL).toBe(
@@ -3655,7 +3657,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const saved = getProviderProfiles({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any).find((profile: ProviderProfile) => profile.id === activeProfile.id)
+    }).find((profile: ProviderProfile) => profile.id === activeProfile.id)
     expect(saved?.model).toBe('codexplan')
   })
 
@@ -3678,7 +3680,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     const config = {
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any
+    }
 
     _setSavedModelOverrideForTesting('gpt-5.1-codex')
     applyActiveProviderProfileFromConfig(config)
@@ -3727,7 +3729,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     applyActiveProviderProfileFromConfig({
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
-    } as any)
+    })
     expect(process.env.OPENAI_MODEL).toBe('codexplan[1m]')
   })
 
@@ -3781,7 +3783,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
           }),
         ],
         activeProviderProfileId: ANTHROPIC_DEFAULT_PROFILE_ID,
-      } as any)
+      })
 
       // Built-in Anthropic resolves to no profile, but env is now marked handled
       // and carries no third-party provider selection.
@@ -6475,3 +6477,86 @@ test('DEFAULT_MISTRAL_MODEL matches the mistral gateway defaultModel', async () 
   expect(mistralGateway.defaultModel).toBeDefined()
   expect(DEFAULT_MISTRAL_MODEL).toBe(mistralGateway.defaultModel!)
 })
+
+test('keyless canonical Orca profile retains the dedicated shell credential', async () => {
+  const { applyProviderProfileToProcessEnv } = await importFreshProviderProfileModules()
+  process.env.ORCAROUTER_API_KEY = 'ambient-orca-key'
+  const saved = buildProfile({
+    provider: 'openai', baseUrl: 'https://api.orcarouter.ai/v1',
+    model: 'openai/gpt-5.5', apiKey: undefined,
+  })
+  applyProviderProfileToProcessEnv(saved)
+  expect(resolveRouteCredentialValue({
+    routeId: 'orcarouter', baseUrl: saved.baseUrl,
+  })).toBe('ambient-orca-key')
+  applyProviderProfileToProcessEnv(saved)
+  expect(process.env.ORCAROUTER_API_KEY).toBe('ambient-orca-key')
+  applyProviderProfileToProcessEnv({ ...saved, baseUrl: 'https://custom.example/v1' })
+  expect(process.env.ORCAROUTER_API_KEY).toBeUndefined()
+})
+
+test.each([false, true])('a keyless Orca selection rejects another profile key (generic removed: %s)', async removeGeneric => {
+  const { setActiveProviderProfile } = await importFreshProviderProfileModules()
+  const keyed = buildProfile({ id: 'keyed-orca', provider: 'orcarouter',
+    baseUrl: 'https://api.orcarouter.ai/v1', model: 'openai/gpt-5.5', apiKey: 'account-a-key' })
+  const keyless = { ...keyed, id: 'keyless-orca', apiKey: undefined }
+  saveMockGlobalConfig(current => ({ ...current, providerProfiles: [keyed, keyless] }))
+  setActiveProviderProfile(keyed.id, { configDir: testConfigDir! })
+  if (removeGeneric) delete process.env.OPENAI_API_KEY
+  setActiveProviderProfile(keyless.id, { configDir: testConfigDir! })
+  expect(process.env.ORCAROUTER_API_KEY).toBeUndefined()
+  expect(resolveRouteCredentialValue({ routeId: 'orcarouter', baseUrl: keyless.baseUrl }))
+    .toBeUndefined()
+  const persisted = JSON.parse(readFileSync(join(testConfigDir!, '.openclaude-profile.json'), 'utf8'))
+  expect(persisted.env.ORCAROUTER_API_KEY).toBeUndefined()
+})
+
+test.each([
+  ['removed-account-key', undefined],
+  ['replacement-shell-key', 'replacement-shell-key'],
+] as const)('removing the active Orca profile key handles current key %s', async (currentKey, expected) => {
+  const { setActiveProviderProfile, updateProviderProfile } = await importFreshProviderProfileModules()
+  const keyed = buildProfile({ provider: 'orcarouter', baseUrl: 'https://api.orcarouter.ai/v1',
+    model: 'openai/gpt-5.5', apiKey: 'removed-account-key' })
+  saveMockGlobalConfig(current => ({ ...current, providerProfiles: [keyed] }))
+  setActiveProviderProfile(keyed.id, { configDir: testConfigDir! })
+  process.env.ORCAROUTER_API_KEY = currentKey
+  delete process.env.OPENAI_API_KEY
+  const edited = updateProviderProfile(keyed.id, { name: keyed.name, provider: keyed.provider,
+    baseUrl: keyed.baseUrl, model: keyed.model, apiKey: undefined })
+  expect(edited?.apiKey).toBeUndefined()
+  if (expected === undefined) expect(process.env.ORCAROUTER_API_KEY).toBeUndefined()
+  else expect(process.env.ORCAROUTER_API_KEY).toBe(expected)
+})
+
+for (const provider of ['orcarouter', 'openai']) {
+  test(`${provider} Orca profile owns its credential through apply, persist and relaunch`, async () => {
+    const { setActiveProviderProfile, applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    const saved = buildProfile({
+      provider, apiKey: 'selected-orca-key',
+      baseUrl: 'https://api.orcarouter.ai/v1', model: 'openai/gpt-5.5',
+    })
+    saveMockGlobalConfig(current => ({ ...current, providerProfiles: [saved] }))
+    process.env.ORCAROUTER_API_KEY = 'ambient-parent-key'
+    setActiveProviderProfile(saved.id, { configDir: testConfigDir! })
+    expect(resolveRouteCredentialValue({
+      routeId: 'orcarouter', baseUrl: saved.baseUrl,
+    })).toBe('selected-orca-key')
+    process.env.ORCAROUTER_API_KEY = 'drifted-key'
+    expect(applyActiveProviderProfileFromConfig()?.id).toBe(saved.id)
+    expect(process.env.ORCAROUTER_API_KEY).toBe('selected-orca-key')
+
+    const persisted = JSON.parse(readFileSync(
+      join(testConfigDir!, '.openclaude-profile.json'), 'utf8',
+    ))
+    expect(persisted.env.ORCAROUTER_API_KEY).toBe('selected-orca-key')
+    const { buildStartupEnvFromProfile } = await import('./providerProfile.js')
+    const env = await buildStartupEnvFromProfile({
+      persisted, processEnv: { ORCAROUTER_API_KEY: 'other-ambient-key' },
+    })
+    expect(resolveRouteCredentialValue({
+      routeId: 'orcarouter', baseUrl: saved.baseUrl, processEnv: env,
+    })).toBe('selected-orca-key')
+  })
+}

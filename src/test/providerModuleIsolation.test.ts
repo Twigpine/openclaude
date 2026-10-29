@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -75,33 +75,47 @@ for (const scenario of [
   }, { timeout: testTimeout })
 }
 
-test('propagates child assertion failures through the launcher', async () => {
-  await withFixture('assertion-failure', async (entry, env) => {
-    // Run the real launcher in a disposable process so coordinator env and mocks
-    // remain untouched even when other suites share this process.
-    const runner = join(entry, '..', 'launcher.ts')
-    writeFileSync(runner, `
-      import { runTestFileWithRealProviders } from ${JSON.stringify(
-        join(import.meta.dir, 'providerModuleIsolation.ts'),
-      )}
-      await runTestFileWithRealProviders(${JSON.stringify(entry)})
-    `)
-    const child = Bun.spawn({
-      cmd: [process.execPath, runner],
-      env,
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: fixtureTimeout,
-      killSignal: process.platform === 'win32' ? undefined : 'SIGKILL',
+for (const scenario of ['assertion-failure', 'early-exit', 'complete']) {
+  test(`verifies isolated child completion: ${scenario}`, async () => {
+    await withFixture(scenario, async (entry, env) => {
+      // Run the real launcher in a disposable process so coordinator env and mocks
+      // remain untouched even when other suites share this process.
+      const runner = join(entry, '..', 'launcher.test.ts')
+      writeFileSync(runner, `
+        import { test } from 'bun:test'
+        import { runTestFileWithRealProviders } from ${JSON.stringify(
+          join(import.meta.dir, 'providerModuleIsolation.ts'),
+        )}
+        test('nested launcher', () => runTestFileWithRealProviders(${JSON.stringify(entry)}), ${REAL_PROVIDER_TEST_TIMEOUT_MS + 5_000})
+      `)
+      const child = Bun.spawn({
+        cmd: [process.execPath, join(import.meta.dir, '../../scripts/run-tests.ts'), runner],
+        env: { ...env, TMPDIR: join(entry, '..'), TMP: join(entry, '..'), TEMP: join(entry, '..') },
+        stdout: 'pipe',
+        stderr: 'pipe',
+        timeout: fixtureTimeout,
+        killSignal: process.platform === 'win32' ? undefined : 'SIGKILL',
+      })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      const output = `${stdout}\n${stderr}`
+      expect(exitCode, output).toBe(scenario === 'complete' ? 0 : 1)
+      if (scenario !== 'complete') {
+        expect(output).toContain('provider-isolated test process failed')
+        expect(output).toMatch(/^\s*1 fail$/m)
+        expect(output).toContain(scenario === 'early-exit'
+          ? 'without a complete JUnit report'
+          : 'expected child value')
+        if (scenario === 'assertion-failure') expect(output).toContain('child assertion failure sentinel')
+      } else {
+        expect(output).toMatch(/^\s*1 pass$/m)
+      }
+      expect(readdirSync(join(entry, '..')).filter(name =>
+        name.startsWith('openclaude-test-report-'),
+      )).toEqual([])
     })
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ])
-    expect(exitCode).not.toBe(0)
-    expect(`${stdout}\n${stderr}`).toContain('provider-isolated test process failed')
-    expect(`${stdout}\n${stderr}`).toContain('child assertion failure sentinel')
-    expect(`${stdout}\n${stderr}`).toContain('expected child value')
-  })
-}, { timeout: testTimeout })
+  }, { timeout: testTimeout })
+}

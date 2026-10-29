@@ -12,7 +12,7 @@ import { c as _c } from "react-compiler-runtime";
  * in-menu for all four types would be a maintenance burden.
  */
 import * as React from 'react';
-import { useCallback, useMemo, useState } from 'react';
+import { useState } from 'react';
 import { PRODUCT_DISPLAY_NAME } from '../../constants/product.js';
 import type { HookEvent } from 'src/entrypoints/agentSdkTypes.js';
 import { useAppState, useAppStateStore } from 'src/state/AppState.js';

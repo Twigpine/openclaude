@@ -17,7 +17,6 @@ import {
 } from './envUtils.js'
 import { getProviderValidationError } from './providerValidation.js'
 import {
-  applySavedProfileToCurrentSession,
   applyStartupEnvFromProfile,
   buildStartupEnvFromProfile,
   buildAtomicChatProfileEnv,
@@ -30,13 +29,11 @@ import {
   buildLaunchEnv,
   buildOllamaProfileEnv,
   buildOpenAIProfileEnv,
-  clearPersistedCodexOAuthProfile,
   createProfileFile,
   DEFAULT_STARTUP_PROVIDER_ENV_VAR,
   deleteProfileFile,
   getDefaultProfileFilePath,
   isDefaultStartupProviderEnv,
-  isPersistedCodexOAuthProfile,
   maskSecretForDisplay,
   loadProfileFile,
   PROFILE_FILE_NAME,
@@ -206,7 +203,7 @@ test('openai launch omits api key when no key is resolved', async () => {
     }),
     goal: 'balanced',
     processEnv: {
-      OPENAI_API_KEY: undefined as any,
+      OPENAI_API_KEY: undefined,
     },
   })
 
@@ -3778,4 +3775,39 @@ test('buildStartupEnvFromProfile applies saved API Route proxy profile even when
   assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'api-route')
   assert.equal(env.OPENAI_API_KEY, undefined)
   assert.equal(env.OPENAI_API_KEYS, undefined)
+})
+
+test('Orca relaunch migrates only the selected canonical profile credential', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai', goal: 'balanced',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.orcarouter.ai/v1',
+      OPENAI_MODEL: 'openai/gpt-5.5', OPENAI_API_KEY: 'saved-orca-key',
+    }),
+    processEnv: { ORCAROUTER_API_KEY: 'ambient-other-account' },
+  })
+  assert.equal(resolveRouteCredentialValue({
+    routeId: 'orcarouter', baseUrl: env.OPENAI_BASE_URL, processEnv: env,
+  }), 'saved-orca-key')
+  const ambientOnly = await buildLaunchEnv({
+    profile: 'openai', persisted: null, goal: 'balanced',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://api.orcarouter.ai/v1',
+      OPENAI_MODEL: 'openai/gpt-5.5', OPENAI_API_KEY: 'unrelated-generic-key',
+    },
+  })
+  assert.equal(ambientOnly.ORCAROUTER_API_KEY, undefined)
+})
+
+test('OpenAI profile builder materializes the canonical Orca key only at its route', () => {
+  const env = buildOpenAIProfileEnv({
+    goal: 'balanced', baseUrl: 'https://api.orcarouter.ai/v1',
+    model: 'openai/gpt-5.5', apiKey: 'selected-orca-key', processEnv: {},
+  })
+  assert.equal(env?.ORCAROUTER_API_KEY, 'selected-orca-key')
+  const custom = buildOpenAIProfileEnv({
+    goal: 'balanced', baseUrl: 'https://custom.example/v1',
+    model: 'custom', apiKey: 'custom-key', processEnv: {},
+  })
+  assert.equal(custom?.ORCAROUTER_API_KEY, undefined)
 })

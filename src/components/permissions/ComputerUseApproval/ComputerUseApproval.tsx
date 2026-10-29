@@ -4,7 +4,7 @@ import type { CuPermissionRequest, CuPermissionResponse } from '@ant/computer-us
 import { DEFAULT_GRANT_FLAGS } from '@ant/computer-use-mcp/types';
 import figures from 'figures';
 import * as React from 'react';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { PRODUCT_DISPLAY_NAME } from '../../../constants/product.js';
 import { Box, Text } from '../../../ink.js';
 import { execFileNoThrow } from '../../../utils/execFileNoThrow.js';

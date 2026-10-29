@@ -573,6 +573,14 @@ host. Without this variable the behavior is unchanged.
 | `OPENCLAUDE_DISABLE_CO_AUTHORED_BY` | No | Suppress the default `Co-Authored-By` trailer in generated git commits |
 | `OPENCLAUDE_LOG_TOKEN_USAGE` | No | When truthy (e.g. `verbose`), emits one JSON line on stderr per API request with input/output/cache tokens and the resolved provider. **User-facing debug output** — complements the REPL display controlled by `/config showCacheStats`. Distinct from `CLAUDE_CODE_ENABLE_TOKEN_USAGE_ATTACHMENT`, which is **model-facing** (injects context usage info into the prompt itself). Both can run together. |
 
+Repeated identical tool calls are blocked starting with the third call. If a model
+ignores that feedback, five consecutive doom-loop blocks force-terminate its turn
+without another model request. A non-blocked call or successful tool result resets
+the consecutive-block count; each agent and new user turn tracks its own streak.
+Headless runs (`--bare -p`) print the terminal error and exit with status 1. Change
+the approach or tool arguments before retrying. This safeguard applies even when
+the general tool-failure threshold or turn limit is disabled.
+
 Model env vars are provider-scoped: first-party Anthropic sessions read
 `ANTHROPIC_MODEL`, OpenAI-compatible sessions read `OPENAI_MODEL`, Gemini reads
 `GEMINI_MODEL`, Gemini on Vertex reads `GEMINI_VERTEX_MODEL`, and Mistral reads
@@ -597,9 +605,10 @@ search (`/search test`). `/search` saves its choices to the `env` block of
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `WEB_SEARCH_PROVIDER` | No | `auto` (default): keyed Exa first, then other configured backends in the auto chain, then the Exa free tier, then DuckDuckGo. Anthropic first-party, Vertex, Foundry, and Codex keep their built-in search in `auto`. Set one backend (`exa`, `anysearch`, `tavily`, `brave`, `firecrawl`, `you`, `jina`, `bing`, `mojeek`, `linkup`, `ollama`, `ddg`, `custom`, or `native`) to use only that backend and fail instead of falling back. AnySearch is explicit-only and does not join `auto`. |
+| `WEB_SEARCH_PROVIDER` | No | `auto` (default): keyed Exa first, then other configured backends in the auto chain, then the Exa free tier, then DuckDuckGo. Anthropic first-party, Vertex, Foundry, and Codex keep their built-in search in `auto`. Set one backend (`exa`, `anysearch`, `keenable`, `aimlapi`, `tavily`, `brave`, `firecrawl`, `you`, `jina`, `bing`, `mojeek`, `linkup`, `ollama`, `ddg`, `custom`, or `native`) to use only that backend and fail instead of falling back. AnySearch, Keenable and AI/ML API (`aimlapi`, billed per search, uses `AIMLAPI_API_KEY`) are explicit-only and do not join `auto`. |
 | `ANYSEARCH_API_KEY` | No | Optional AnySearch API key. Without one, `/search anysearch` sends anonymous requests without an Authorization header. Add or remove a saved key with `/search key anysearch` or `/search remove-key anysearch`. |
 | `ANYSEARCH_MAX_RESULTS` | No | Requested AnySearch results, integer 1–10 (default `10`; invalid values use the default). |
+| `KEENABLE_API_KEY` | No | Optional Keenable API key for higher rate limits. Without one, `/search keenable` uses the keyless endpoint. Add or remove a saved key with `/search key keenable` or `/search remove-key keenable`. |
 | `EXA_API_KEY` | No | Exa API key for higher limits than the free tier. Free keys: https://dashboard.exa.ai/api-keys |
 | `EXA_SEARCH_TYPE` | No | Exa search type with a key: `auto` (default), `instant`, `fast`, `deep-lite`, `deep`, or `deep-reasoning`. The deep types can need a higher `WEB_SEARCH_TIMEOUT_SEC`. |
 | `EXA_NUM_RESULTS` | No | Results per Exa search, 1–50 (default `15`). |
@@ -821,7 +830,13 @@ Notes:
 
 ## Provider Launch Profiles
 
-Use profile launchers to avoid repeated environment setup:
+Use profile launchers to avoid repeated environment setup. The profile defaults
+to `auto` when omitted. Put launcher options (`--fast` and `--goal`) before CLI
+arguments; the first CLI argument starts passthrough, so prompts and option values
+are forwarded unchanged. A leading provider name such as `ollama` still selects
+that profile. To use it as a prompt, pass it as a CLI argument, for example
+`bun run scripts/provider-launch.ts -p ollama`, or pass a `--` separator through
+to the launcher before the prompt (some Bun invocations consume that separator):
 
 ```bash
 # one-time profile bootstrap (prefer viable local Ollama, otherwise OpenAI)

@@ -1,6 +1,6 @@
 import { c as _c } from "react-compiler-runtime";
 import type { UUID } from 'crypto';
-import React, { useCallback } from 'react';
+import React from 'react';
 import { Box, Text } from '../ink.js';
 import { useKeybinding } from '../keybindings/useKeybinding.js';
 import { getAllBaseTools } from '../tools.js';

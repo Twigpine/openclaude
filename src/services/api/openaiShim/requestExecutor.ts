@@ -229,7 +229,6 @@ export async function executeOpenAIRequest(
     params,
     options,
     requestProcessEnv,
-    fastPath,
     shimConfig,
     runtimeShimContext,
     body,

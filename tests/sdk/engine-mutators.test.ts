@@ -1,3 +1,7 @@
+import { createToolFixture } from '../../src/test/toolFixtures.js'
+import { z } from 'zod/v4'
+import { getDefaultAppState } from '../../src/state/AppStateStore.js'
+import { createFileStateCacheWithSizeLimit } from '../../src/utils/fileStateCache.js'
 import { describe, test, expect, afterEach, beforeAll, afterAll } from 'bun:test'
 import {
   unstable_v2_createSession,
@@ -35,7 +39,7 @@ import { getToolSchemaCache, clearToolSchemaCache } from '../../src/utils/toolSc
 // ---------------------------------------------------------------------------
 
 function makeTool(name: string) {
-  return { name, call: async () => '', description: `${name} tool` }
+  return createToolFixture(z.object({}), { name, call: async () => ({ data: '' }), description: async () => `${name} tool` })
 }
 
 function makeConfig(overrides: Partial<QueryEngineConfig> = {}): QueryEngineConfig {
@@ -46,9 +50,9 @@ function makeConfig(overrides: Partial<QueryEngineConfig> = {}): QueryEngineConf
     mcpClients: [],
     agents: [],
     canUseTool: async () => ({ behavior: 'allow' as const }),
-    getAppState: () => ({}) as any,
+    getAppState: getDefaultAppState,
     setAppState: () => {},
-    readFileCache: {},
+    readFileCache: createFileStateCacheWithSizeLimit(100),
     ...overrides,
   }
 }
@@ -105,7 +109,7 @@ describe('updateTools transactional safety', () => {
     const engine = new QueryEngine(makeConfig({
       tools: [...originalTools],
       agents: [
-        { agentType: 'test-agent', tools: ['toolC'] } as any,
+        { agentType: 'test-agent', tools: ['toolC'] } as QueryEngineConfig['agents'][number],
       ],
     }))
 
@@ -115,7 +119,7 @@ describe('updateTools transactional safety', () => {
     )
 
     // config.tools must remain unchanged — old tool set preserved
-    const currentTools = (engine as any).config.tools as Tools
+    const currentTools = engine['config'].tools as Tools
     expect(currentTools.map(t => t.name)).toEqual(['toolA', 'toolB'])
   })
 
@@ -123,13 +127,13 @@ describe('updateTools transactional safety', () => {
     const engine = new QueryEngine(makeConfig({
       tools: [makeTool('toolA'), makeTool('toolB')],
       agents: [
-        { agentType: 'test-agent', tools: ['toolA'] } as any,
+        { agentType: 'test-agent', tools: ['toolA'] } as QueryEngineConfig['agents'][number],
       ],
     }))
 
     engine.updateTools([makeTool('toolA'), makeTool('toolC')])
 
-    const currentTools = (engine as any).config.tools as Tools
+    const currentTools = engine['config'].tools as Tools
     expect(currentTools.map(t => t.name)).toEqual(['toolA', 'toolC'])
   })
 
@@ -137,28 +141,28 @@ describe('updateTools transactional safety', () => {
     const engine = new QueryEngine(makeConfig({
       tools: [makeTool('toolA')],
       agents: [
-        { agentType: 'wildcard-agent', tools: ['*'] } as any,
+        { agentType: 'wildcard-agent', tools: ['*'] } as QueryEngineConfig['agents'][number],
       ],
     }))
 
     // Wildcard '*' means all tools are allowed — should not throw
     expect(() => engine.updateTools([makeTool('toolX')])).not.toThrow()
-    expect(((engine as any).config.tools as Tools).map(t => t.name)).toEqual(['toolX'])
+    expect((engine['config'].tools as Tools).map(t => t.name)).toEqual(['toolX'])
   })
 
   test('updateTools rejects non-iterable input', () => {
     const engine = new QueryEngine(makeConfig())
-    expect(() => engine.updateTools(42 as any)).toThrow(/expected iterable/)
+    expect(() => engine.updateTools(42 as unknown as Tools)).toThrow(/expected iterable/)
   })
 
   test('updateTools rejects tool without name', () => {
     const engine = new QueryEngine(makeConfig())
-    expect(() => engine.updateTools([{ call: async () => '' }] as any)).toThrow(/name/)
+    expect(() => engine.updateTools([{ call: async () => '' }] as unknown as Tools)).toThrow(/name/)
   })
 
   test('updateTools rejects tool without call', () => {
     const engine = new QueryEngine(makeConfig())
-    expect(() => engine.updateTools([{ name: 'bad' }] as any)).toThrow(/call/)
+    expect(() => engine.updateTools([{ name: 'bad' }] as unknown as Tools)).toThrow(/call/)
   })
 })
 
@@ -173,7 +177,7 @@ describe('updateTools cache invalidation', () => {
 
   test('toolSchemaCache is cleared after updateTools', () => {
     const cache = getToolSchemaCache()
-    cache.set('test_tool', { name: 'test_tool' } as any)
+    cache.set('test_tool', { name: 'test_tool' } as Parameters<typeof cache.set>[1])
     expect(cache.has('test_tool')).toBe(true)
 
     const engine = new QueryEngine(makeConfig({
@@ -188,11 +192,11 @@ describe('updateTools cache invalidation', () => {
 
   test('toolSchemaCache is NOT cleared when updateTools throws', () => {
     const cache = getToolSchemaCache()
-    cache.set('keep_me', { name: 'keep_me' } as any)
+    cache.set('keep_me', { name: 'keep_me' } as Parameters<typeof cache.set>[1])
 
     const engine = new QueryEngine(makeConfig({
       tools: [makeTool('toolA')],
-      agents: [{ agentType: 'a', tools: ['toolA'] } as any],
+      agents: [{ agentType: 'a', tools: ['toolA'] } as QueryEngineConfig['agents'][number]],
     }))
 
     // This should throw — agent references toolA but new set doesn't have it

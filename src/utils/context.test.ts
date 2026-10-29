@@ -1309,3 +1309,12 @@ test('clearSessionContextWindowOverride resets state for session isolation', () 
   expect(getSessionContextWindowOverride('gpt-4o')).toBeUndefined()
   expect(getContextWindowForModel('gpt-4o')).not.toBe(256_000)
 })
+
+test.each([[32_000, 32_000], [90_000, 64_000]])(
+  'Orca Sonnet output request %s uses its routed ceiling', (requested, expected) => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://api.orcarouter.ai/v1'
+    process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(requested)
+    expect(getMaxOutputTokensForModel('anthropic/claude-sonnet-4.6')).toBe(expected)
+  },
+)

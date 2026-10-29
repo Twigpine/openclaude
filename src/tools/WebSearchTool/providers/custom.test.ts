@@ -277,7 +277,7 @@ describe('built-in preset request shapes', () => {
 
     let capturedUrl = ''
     let capturedHeaders: Record<string, string> = {}
-    globalThis.fetch = (async (input: any, init: any) => {
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
       capturedUrl = typeof input === 'string' ? input : input.toString()
       capturedHeaders = (init?.headers ?? {}) as Record<string, string>
       return new Response(JSON.stringify({ items: [] }), { status: 200 })
@@ -323,7 +323,7 @@ describe('built-in preset request shapes', () => {
     delete process.env.WEB_AUTH_SCHEME
 
     let capturedHeaders: Record<string, string> = {}
-    globalThis.fetch = (async (_input: any, init: any) => {
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
       capturedHeaders = (init?.headers ?? {}) as Record<string, string>
       return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 })
     }) as typeof fetch

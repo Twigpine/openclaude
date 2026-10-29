@@ -38,6 +38,9 @@ import {
   buildApismartProfileEnv,
   buildVertexProfileEnv,
   clearManagedProfileEnv,
+  isManagedOrcarouterCredential,
+  orcarouterCredentialFingerprint,
+  PROFILE_ORCAROUTER_KEY_SHA256,
   deleteProfileFile,
   type ProfileFileLocation,
   type ProfileEnv,
@@ -116,6 +119,21 @@ export type ProviderPresetDefaults = Omit<ProviderProfileInput, 'provider'> & {
 
 const PROFILE_ENV_APPLIED_FLAG = 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED'
 const PROFILE_ENV_APPLIED_ID = 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID'
+
+function rememberManagedOrcarouterCredential(
+  profile: ProviderProfile,
+  processEnv: NodeJS.ProcessEnv = process.env,
+): void {
+  const value = sanitizeApiKey(profile.apiKey)?.trim()
+  if (value && resolveRouteIdFromBaseUrl(profile.baseUrl) === 'orcarouter' &&
+    processEnv[PROFILE_ENV_APPLIED_FLAG] === '1' &&
+    trimOrUndefined(processEnv[PROFILE_ENV_APPLIED_ID]) === profile.id &&
+    sanitizeApiKey(processEnv.ORCAROUTER_API_KEY)?.trim() === value) {
+    // Inherit provenance with the applied markers: saved config can change
+    // before a child starts, so it cannot reconstruct ownership from config.
+    processEnv[PROFILE_ORCAROUTER_KEY_SHA256] = orcarouterCredentialFingerprint(value)
+  }
+}
 
 type ProfileCompatibilityMode =
   | 'anthropic'
@@ -864,6 +882,9 @@ function getHostDedicatedCredentialEnv(
   route?: { routeId?: string; vendorId?: string },
 ): Record<string, string> {
   const env: Record<string, string> = {}
+  if (apiKey && resolveRouteIdFromBaseUrl(baseUrl) === 'orcarouter') {
+    env.ORCAROUTER_API_KEY = apiKey
+  }
   if (route?.routeId === 'xai' || isXaiBaseUrl(baseUrl)) {
     env.XAI_API_KEY = apiKey
   }
@@ -900,6 +921,11 @@ function hostDedicatedCredentialsAligned(
 ): boolean {
   if (!includeApiKey) {
     return true
+  }
+  if (!profile.apiKey &&
+    resolveRouteIdFromBaseUrl(profile.baseUrl) === 'orcarouter' &&
+    isManagedOrcarouterCredential(processEnv)) {
+    return false
   }
   const dedicated = getHostDedicatedCredentialEnv(
     profile.baseUrl,
@@ -1270,6 +1296,17 @@ export function applyProviderProfileToProcessEnv(
       OPENAI_BASE_URL: normalizedProfileBaseUrl,
       OPENAI_MODEL: primaryModel,
     }
+    // Keyless canonical profiles already accept the dedicated shell key.
+    // Reuse only actual shell input, not a key installed by this or another
+    // profile, including when another CLI removed this profile's saved key.
+    // Changing profile IDs does not change the origin of genuine shell input.
+    if (!profile.apiKey &&
+      resolveRouteIdFromBaseUrl(normalizedProfileBaseUrl) === 'orcarouter') {
+      const ambientKey = sanitizeApiKey(process.env.ORCAROUTER_API_KEY)
+      if (ambientKey && !isManagedOrcarouterCredential(process.env)) {
+        openAIProfileEnv.ORCAROUTER_API_KEY = ambientKey
+      }
+    }
     const isAimlapiProfile =
       profile.provider === 'aimlapi' ||
       route.routeId === 'aimlapi' ||
@@ -1543,6 +1580,7 @@ export function applyProviderProfileToProcessEnv(
   Object.assign(process.env, nextEnv)
   process.env[PROFILE_ENV_APPLIED_FLAG] = '1'
   process.env[PROFILE_ENV_APPLIED_ID] = profile.id
+  rememberManagedOrcarouterCredential(profile)
 }
 
 export function applyActiveProviderProfileFromConfig(
@@ -1579,6 +1617,10 @@ export function applyActiveProviderProfileFromConfig(
   if (!activeProfile) {
     return undefined
   }
+
+  // Bootstrap older inherited environments while the matching saved keyed
+  // record is available; new environments already carry their fingerprint.
+  rememberManagedOrcarouterCredential(activeProfile, processEnv)
 
   const isCurrentEnvProfileManaged =
     processEnv[PROFILE_ENV_APPLIED_FLAG] === '1' &&
@@ -1696,6 +1738,7 @@ export function updateProviderProfile(
     }
 
     wasUpdated = true
+    rememberManagedOrcarouterCredential(currentProfiles[profileIndex]!)
 
     const nextProfiles = [...currentProfiles]
     nextProfiles[profileIndex] = updatedProfile

@@ -59,17 +59,10 @@ function parseLaunchOptions(argv: string[]): LaunchOptions {
       continue
     }
 
-    if (arg.startsWith('--')) {
-      passthroughArgs.push(arg)
-      continue
-    }
-
-    if (requestedProfile === 'auto') {
-      requestedProfile = null
-      break
-    }
-
-    passthroughArgs.push(arg)
+    // The first CLI argument ends launcher-option parsing. In particular,
+    // option values and prompts may themselves look like provider names.
+    passthroughArgs.push(...argv.slice(arg === '--' ? i + 1 : i))
+    break
   }
 
   return {
@@ -95,10 +88,6 @@ async function resolveOllamaDefaultModel(
 async function resolveAtomicChatDefaultModel(): Promise<string | null> {
   const models = await listAtomicChatModels()
   return models[0] ?? null
-}
-
-function runCommand(command: string, env: NodeJS.ProcessEnv): Promise<number> {
-  return runProcess(command, [], env)
 }
 
 export async function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {

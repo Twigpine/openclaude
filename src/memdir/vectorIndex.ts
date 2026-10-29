@@ -273,7 +273,8 @@ export async function rebuildIndex(memoryDir: string): Promise<void> {
   try {
     await rebuild
   } finally {
-    if (state.pending === rebuild) {
+    // Compare the in-flight operations themselves, not their resolved values.
+    if (Object.is(state.pending, rebuild)) {
       state.pending = null
     }
   }

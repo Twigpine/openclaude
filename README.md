@@ -223,6 +223,19 @@ then `d` again to delete it; any other key in between cancels. Deleting removes
 the transcript and its sidecar files from disk and cannot be undone. The
 session you are currently in is not listed and cannot be deleted.
 
+In `/resume`, type a search query, then press Down and Enter on **Search deeply
+using a background model** to search conversation contents with the background
+search model, which can differ from the active chat model. This explicit action
+sends transcript excerpts and session metadata to the model provider, including
+from loaded sessions that do not match the query locally. Ordinary filtering
+stays local. Deep search considers up to 100 loaded sessions within the active
+filters, so older history may not be included. Transcript extraction uses up to
+100 messages (the first 50 and last 50 for longer sessions), then keeps only the
+first 2,000 extracted characters. Matches outside that excerpt may be missed.
+Results remain available as more history loads; changing the query or active
+filters clears the previous search. If a search fails, the picker shows an error
+and lets you retry the same query.
+
 ### Background sessions
 
 Run long non-interactive prompts detached from the current terminal:
@@ -357,6 +370,7 @@ Advanced and source-build guides:
 | ApiSmart | `/provider` or `APISMART_API_KEY` | Uses `https://gw.apismart.ai/v1`, defaults to `DEEPSEEK_V4_FLASH`, and supports optional `APISMART_MODEL` plus authenticated model discovery |
 | API Route | `/provider` or `API_ROUTE_API_KEY` | Uses `https://global.api-route.com/v1`, defaults to `claude-sonnet-4-6`, and supports optional `API_ROUTE_MODEL` plus authenticated model discovery |
 | GMI Cloud | `/provider`, `--provider gmi-cloud`, or env vars | Uses `GMI_API_KEY` at `https://api.gmi-serving.com/v1` and defaults to `Qwen/Qwen3.8-Max`; `--provider gmi-cloud` also reads an optional `GMI_MODEL`, and the model list comes from authenticated discovery |
+| OrcaRouter | `/provider`, or `ORCAROUTER_API_KEY` with `--provider orcarouter` | OpenAI-compatible model routing gateway at `https://api.orcarouter.ai/v1`, defaults to `openai/gpt-5.5`, with `orcarouter/auto` smart routing and authenticated model discovery. Existing environment setups must replace `OPENAI_API_KEY` with `ORCAROUTER_API_KEY`, even when a custom authentication header supplies the request credential. Custom headers remain supported. |
 | Hicap | `/provider` or OpenAI-compatible env vars | Uses `api-key` auth, discovers models from unauthenticated `/models`, and supports Responses mode for `gpt-` models |
 | Fireworks AI | `/provider` or env vars | First-class provider with 276 curated models (DeepSeek, Qwen, Llama, Gemma, and more); uses `FIREWORKS_API_KEY` |
 | LongCat | `/provider` or env vars | Meituan LongCat OpenAI-compatible API at `https://api.longcat.chat/openai/v1`; uses `LONGCAT_API_KEY` and defaults to `LongCat-2.0` |
@@ -453,11 +467,17 @@ See [Agent Routing and Step Limits](docs/agent-routing.md) for the full guide.
 /search test         # run a test search
 /search anysearch    # select AnySearch (works without a key)
 /search key anysearch # optionally add an AnySearch API key in the hidden input
+/search keenable     # select Keenable (works without a key)
+/search key keenable # optionally add a Keenable API key in the hidden input
 ```
 
 Other backends in the auto chain that you configure with a key (Tavily, Brave, Firecrawl, …) run before the Exa free tier, and DuckDuckGo is the last-resort fallback. When the active provider is Ollama, OpenClaude uses the signed-in local Ollama Web Search endpoint ahead of the free tier. Set `OLLAMA_API_KEY` to enable the hosted Ollama endpoint as a fallback. Set `EXA_FREE_TIER=0` if searches should never go to Exa without a key. See [Web Search Providers](src/tools/WebSearchTool/README_SEARCH_PROVIDERS.md) for every backend and option.
 
+If you use AI/ML API as your model provider, `/search aimlapi` (or `WEB_SEARCH_PROVIDER=aimlapi`) runs searches through the AI/ML API Toolbox `web/search` tool with your configured AI/ML API credential: `AIMLAPI_API_KEY`, or `OPENAI_API_KEY` when `OPENAI_BASE_URL` is the canonical `https://api.aimlapi.com/v1` endpoint. Each search is billed to your AI/ML API balance at a variable price, and every run requests a $0.025 cost limit. It is only used when you select it and never joins the `auto` order. See [Web Search Providers](src/tools/WebSearchTool/README_SEARCH_PROVIDERS.md#aiml-api-toolbox-websearch) for credential restrictions and request details.
+
 AnySearch is available as an explicit backend with `/search anysearch` or `WEB_SEARCH_PROVIDER=anysearch`. `ANYSEARCH_API_KEY` is optional; anonymous access has lower service limits. Set `ANYSEARCH_MAX_RESULTS` to an integer from 1 to 10 (default 10) to control the requested result count. AnySearch does not change the `auto` search order.
+
+Keenable is available as an explicit backend with `/search keenable` or `WEB_SEARCH_PROVIDER=keenable`. `KEENABLE_API_KEY` is optional; keyless access is rate-limited per IP. Keenable does not change the `auto` search order.
 
 > **Note:** DuckDuckGo fallback works by scraping search results and may be rate-limited, blocked, or subject to DuckDuckGo's Terms of Service.
 

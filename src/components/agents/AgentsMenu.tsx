@@ -1,7 +1,7 @@
 import { c as _c } from "react-compiler-runtime";
 import chalk from 'chalk';
 import * as React from 'react';
-import { useCallback, useMemo, useState } from 'react';
+import { useState } from 'react';
 import type { SettingSource } from 'src/utils/settings/constants.js';
 import type { CommandResultDisplay } from '../../commands.js';
 import { useExitOnCtrlCDWithKeybindings } from '../../hooks/useExitOnCtrlCDWithKeybindings.js';
@@ -15,7 +15,6 @@ import { toError } from '../../utils/errors.js';
 import { logError } from '../../utils/log.js';
 import { Select } from '../CustomSelect/select.js';
 import { Dialog } from '../design-system/Dialog.js';
-import { AgentDetail } from './AgentDetail.js';
 import { AgentDetailDialog } from './AgentDetailDialog.js';
 import { AgentEditor } from './AgentEditor.js';
 import { AgentNavigationFooter } from './AgentNavigationFooter.js';

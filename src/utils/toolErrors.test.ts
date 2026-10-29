@@ -67,9 +67,10 @@ describe('getErrorParts', () => {
   })
 
   test('non-ShellError: returns message + stderr + stdout if present', () => {
-    const err = new Error('something broke')
-    ;(err as any).stderr = 'stderr data'
-    ;(err as any).stdout = 'stdout data'
+    const err = Object.assign(new Error('something broke'), {
+      stderr: 'stderr data',
+      stdout: 'stdout data',
+    })
     const parts = getErrorParts(err)
     expect(parts[0]).toBe('something broke')
     expect(parts[1]).toBe('stderr data')

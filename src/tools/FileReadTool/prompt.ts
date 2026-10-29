@@ -1,6 +1,5 @@
 import { isPDFSupported } from '../../utils/pdfUtils.js'
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
-import { FILE_READ_TOOL_NAME } from './constants.js'
 export { FILE_READ_TOOL_NAME } from './constants.js'
 
 export const FILE_UNCHANGED_STUB =

@@ -1,3 +1,5 @@
+import { queryInternals, isTextBlock } from './helpers/query-test-doubles.js'
+import type { SDKMessage } from '../../src/entrypoints/sdk/shared.js'
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { MockQueryEngine } from './helpers/mock-engine.js'
 import {
@@ -54,7 +56,7 @@ function createMockedQuery(prompt: string): ReturnType<typeof query> {
   // Replace the real engine with our mock before any iteration occurs.
   // The real QueryEngine was created synchronously in query() but
   // submitMessage() is only called when the async iterator is consumed.
-  ;(q as any).setEngine(mockEngine)
+  ;queryInternals(q).setEngine(mockEngine)
   return q
 }
 
@@ -62,7 +64,7 @@ describe('Query happy-path — full lifecycle', () => {
   test('single-turn query completes with assistant + result messages', async () => {
     const q = createMockedQuery('hello from test')
 
-    const messages: unknown[] = []
+    const messages: SDKMessage[] = []
     for await (const msg of q) {
       messages.push(msg)
     }
@@ -71,10 +73,10 @@ describe('Query happy-path — full lifecycle', () => {
     expect(messages.length).toBeGreaterThanOrEqual(2)
 
     const assistantMsgs = messages.filter(
-      (m: any) => m?.type === 'assistant',
+      (m) => m?.type === 'assistant',
     )
     const resultMsgs = messages.filter(
-      (m: any) => m?.type === 'result',
+      (m) => m?.type === 'result',
     )
 
     expect(assistantMsgs.length).toBeGreaterThanOrEqual(1)
@@ -84,16 +86,16 @@ describe('Query happy-path — full lifecycle', () => {
   test('result message has success subtype and session_id', async () => {
     const q = createMockedQuery('check result fields')
 
-    const messages: unknown[] = []
+    const messages: SDKMessage[] = []
     for await (const msg of q) {
       messages.push(msg)
     }
 
-    const result = messages.find((m: any) => m?.type === 'result') as any
+    const result = messages.find((m) => m?.type === 'result')
     expect(result).toBeDefined()
-    expect(result.subtype).toBe('success')
-    expect(result.session_id).toBeDefined()
-    expect(typeof result.session_id).toBe('string')
+    expect(result!.subtype).toBe('success')
+    expect(result!.session_id).toBeDefined()
+    expect(typeof result!.session_id).toBe('string')
   })
 
   test('query sessionId is accessible before iteration', () => {
@@ -109,7 +111,7 @@ describe('Query happy-path — full lifecycle', () => {
     const q = createMockedQuery('no error collection')
 
     // This must NOT throw — if it does, the query failed
-    const messages: unknown[] = []
+    const messages: SDKMessage[] = []
     for await (const msg of q) {
       messages.push(msg)
     }
@@ -121,16 +123,16 @@ describe('Query happy-path — full lifecycle', () => {
     const prompt = 'unique-test-prompt-12345'
     const q = createMockedQuery(prompt)
 
-    const messages: unknown[] = []
+    const messages: SDKMessage[] = []
     for await (const msg of q) {
       messages.push(msg)
     }
 
-    const assistant = messages.find((m: any) => m?.type === 'assistant') as any
+    const assistant = messages.find((m) => m?.type === 'assistant')
     expect(assistant).toBeDefined()
     // Mock engine echoes the prompt in its response
     const textContent = assistant?.message?.content?.find(
-      (c: any) => c?.type === 'text',
+      isTextBlock,
     )
     expect(textContent?.text).toContain(prompt)
   })
@@ -154,9 +156,9 @@ describe('Query happy-path — full lifecycle', () => {
         },
       },
     })
-    ;(q as any).setEngine(mockEngine)
+    ;queryInternals(q).setEngine(mockEngine)
 
-    const messages: any[] = []
+    const messages: SDKMessage[] = []
     for await (const msg of q) {
       messages.push(msg)
     }
@@ -165,7 +167,7 @@ describe('Query happy-path — full lifecycle', () => {
       type: 'agent_load_failure',
       stage: 'injection',
     })
-    expect(messages[0].error_message).toContain("Invalid SDK agent 'broken'")
+    expect((messages[0] as Extract<SDKMessage, { type: 'agent_load_failure' }>).error_message).toContain("Invalid SDK agent 'broken'")
     const loadFailures = messages.filter(
       message => message?.type === 'agent_load_failure',
     )
@@ -184,7 +186,7 @@ describe('Query happy-path — full lifecycle', () => {
     expect(messages.some(message => message?.type === 'assistant')).toBe(true)
     expect(
       mockEngine.config.agents.some(
-        (agent: any) => agent?.agentType === 'badLimit',
+        (agent) => agent?.agentType === 'badLimit',
       ),
     ).toBe(false)
   })
@@ -204,26 +206,26 @@ describe('Query happy-path — full lifecycle', () => {
         },
       },
     })
-    ;(q as any).setEngine(mockEngine)
+    ;queryInternals(q).setEngine(mockEngine)
 
-    const messages: unknown[] = []
+    const messages: SDKMessage[] = []
     for await (const msg of q) {
       messages.push(msg)
     }
 
-    expect(messages.some((message: any) => message?.type === 'assistant')).toBe(
+    expect(messages.some((message) => message?.type === 'assistant')).toBe(
       true,
     )
     expect(
       mockEngine.config.agents.some(
-        (agent: any) => agent?.agentType === 'helper' && agent?.maxSteps === 2,
+        (agent) => agent?.agentType === 'helper' && agent?.maxSteps === 2,
       ),
     ).toBe(true)
     expect(
-      (q as any).appStateStore
+      queryInternals(q).appStateStore
         .getState()
         .agentDefinitions.allAgents.some(
-          (agent: any) => agent?.agentType === 'helper',
+          (agent) => agent?.agentType === 'helper',
         ),
     ).toBe(true)
     expect(q.supportedAgents()).toContain('helper')
@@ -247,9 +249,9 @@ describe('Query happy-path — full lifecycle', () => {
         },
       },
     })
-    ;(q as any).setEngine(mockEngine)
+    ;queryInternals(q).setEngine(mockEngine)
 
-    const messages: any[] = []
+    const messages: SDKMessage[] = []
     for await (const msg of q) {
       messages.push(msg)
     }
@@ -267,10 +269,10 @@ describe('Query happy-path — full lifecycle', () => {
     expect(failureIndex).toBeLessThan(assistantIndex)
     expect(q.supportedAgents()).not.toContain('leaky')
     expect(
-      (q as any).appStateStore
+      queryInternals(q).appStateStore
         .getState()
         .agentDefinitions.allAgents.some(
-          (agent: any) => agent?.agentType === 'leaky',
+          (agent) => agent?.agentType === 'leaky',
         ),
     ).toBe(false)
   })
@@ -303,19 +305,19 @@ describe('Query happy-path — full lifecycle', () => {
         },
       },
     })
-    const initialToolNames = (q as any).engine.config.tools.map(
-      (entry: any) => entry?.name,
+    const initialToolNames = queryInternals(q).engine.config.tools.map(
+      (entry) => entry?.name,
     )
     expect(initialToolNames.length).toBeGreaterThan(0)
-    mockEngine.config.tools = [...(q as any).engine.config.tools]
-    ;(q as any).setEngine(mockEngine)
+    mockEngine.config.tools = [...queryInternals(q).engine.config.tools]
+    ;queryInternals(q).setEngine(mockEngine)
 
-    const messages: any[] = []
+    const messages: SDKMessage[] = []
     for await (const msg of q) {
       messages.push(msg)
     }
 
-    const toolNames = mockEngine.config.tools.map((entry: any) => entry?.name)
+    const toolNames = mockEngine.config.tools.map((entry) => entry?.name)
     for (const initialToolName of initialToolNames) {
       expect(toolNames).toContain(initialToolName)
     }
@@ -337,14 +339,14 @@ describe('mcpServerStatus() reads from engine.config.mcpClients', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
     // Simulate what connectSdkMcpServers does: write to engine.config.mcpClients
-    ;(q as any).engine.config.mcpClients = [
+    ;queryInternals(q).engine.config.mcpClients = [
       {
         name: 'test-server',
         type: 'connected',
         serverInfo: { name: 'TestServer', version: '1.0' },
         config: { scope: 'project' },
       },
-    ]
+    ] as unknown as import('../../src/services/mcp/types.js').MCPServerConnection[]
 
     const status = q.mcpServerStatus()
     expect(status).toHaveLength(1)
@@ -358,14 +360,14 @@ describe('mcpServerStatus() reads from engine.config.mcpClients', () => {
   test('maps failed client with error', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    ;(q as any).engine.config.mcpClients = [
+    ;queryInternals(q).engine.config.mcpClients = [
       {
         name: 'broken-server',
         type: 'failed',
         error: 'connection refused',
         config: { scope: 'user' },
       },
-    ]
+    ] as unknown as import('../../src/services/mcp/types.js').MCPServerConnection[]
 
     const status = q.mcpServerStatus()
     expect(status).toHaveLength(1)
@@ -379,11 +381,11 @@ describe('mcpServerStatus() reads from engine.config.mcpClients', () => {
   test('maps multiple clients of different types', () => {
     const q = query({ prompt: 'test', options: { cwd: process.cwd() } })
 
-    ;(q as any).engine.config.mcpClients = [
+    ;queryInternals(q).engine.config.mcpClients = [
       { name: 'srv-connected', type: 'connected' },
       { name: 'srv-failed', type: 'failed', error: 'timeout' },
       { name: 'srv-pending', type: 'pending' },
-    ]
+    ] as unknown as import('../../src/services/mcp/types.js').MCPServerConnection[]
 
     const status = q.mcpServerStatus()
     expect(status).toHaveLength(3)

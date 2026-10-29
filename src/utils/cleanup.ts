@@ -727,12 +727,10 @@ async function runWithBackgroundRetentionThrottle(
       return false
     }
   }
-  let locked = false
   try {
     if (await markerIsFresh()) return 'skipped'
     await fs.mkdir(dirname(markerPath), { recursive: true })
     await lockfile.lock(markerPath, { retries: 0, realpath: false })
-    locked = true
   } catch {
     return 'skipped'
   }
@@ -751,9 +749,7 @@ async function runWithBackgroundRetentionThrottle(
     logError(error instanceof Error ? error : new Error(String(error)))
     return 'failed'
   } finally {
-    if (locked) {
-      await lockfile.unlock(markerPath, { realpath: false }).catch(() => {})
-    }
+    await lockfile.unlock(markerPath, { realpath: false }).catch(() => {})
   }
 }
 

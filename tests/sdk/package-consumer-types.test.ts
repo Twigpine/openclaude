@@ -10,7 +10,7 @@
  * - Self-referential type wrappers
  */
 import { afterAll, describe, expect, test } from 'bun:test'
-import { execFile, execSync } from 'child_process'
+import { execFile, execFileSync, execSync } from 'child_process'
 import { promisify } from 'node:util'
 import { existsSync, mkdirSync, rmSync, writeFileSync, cpSync, readFileSync } from 'fs'
 import { join } from 'path'
@@ -112,17 +112,18 @@ async function tsc(tmpDir: string, compiler = TSC_BIN, timeout = 20_000): Promis
   }
 }
 
-/** Build the CLI and SDK when package-export validation needs missing distribution artifacts. */
+let artifactsBuilt = false
+
+/** Build current sources once before validating package exports and runtime behavior. */
 function ensureBuildArtifacts(): void {
-  const distCli = join(ROOT, 'dist', 'cli.mjs')
-  const distSdk = join(ROOT, 'dist', 'sdk.mjs')
-  if (existsSync(distCli) && existsSync(distSdk)) return
+  if (artifactsBuilt) return
 
   execSync('bun run build', {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 180000,
   })
+  artifactsBuilt = true
 }
 
 afterAll(() => {
@@ -361,5 +362,26 @@ describe('package exports resolution', () => {
     expect(existsSync(join(ROOT, 'dist', 'cli.mjs'))).toBe(true)
     expect(existsSync(join(ROOT, 'dist', 'sdk.mjs'))).toBe(true)
     expect(existsSync(join(ROOT, 'src', 'entrypoints', 'sdk.d.ts'))).toBe(true)
-  })
+  }, 180_000)
 })
+
+test('built Node SDK preserves absence of inherited environment names', () => {
+  ensureBuildArtifacts()
+  const sdkUrl = new URL('../../dist/sdk.mjs', import.meta.url).href
+  const result = execFileSync('node', ['--input-type=module', '-e', `
+    import { unstable_v2_createSession } from ${JSON.stringify(sdkUrl)};
+    const keys = ['__proto__', 'constructor', 'toString'];
+    for (const key of keys) delete process.env[key];
+    const session = unstable_v2_createSession({
+      cwd: process.cwd(), env: Object.fromEntries(keys.map(key => [key, 'during'])),
+    });
+    const snapshot = await session.applySessionEnv();
+    session.restoreSessionEnv(snapshot);
+    session.close();
+    if (keys.some(key => Object.hasOwn(process.env, key))) {
+      throw new Error('restoration created an originally absent environment entry');
+    }
+    console.log('restored absence');
+  `], { cwd: ROOT, encoding: 'utf8', timeout: 20_000 })
+  expect(result.trim()).toBe('restored absence')
+}, 180_000)

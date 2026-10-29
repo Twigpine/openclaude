@@ -536,25 +536,6 @@ export function buildProfileSaveMessage(
   return lines.join('\n')
 }
 
-function buildUsageText(): string {
-  const summary = buildCurrentProviderSummary()
-  const availableProviders = isBareMode()
-    ? 'Choose Auto, Ollama, OpenAI-compatible, Google AI / Gemini, or Codex, then save a provider profile.'
-    : 'Choose Auto, Ollama, OpenAI-compatible, Google AI / Gemini, Codex, or Codex OAuth, then save a provider profile.'
-  return [
-    'Usage: /provider',
-    '',
-    'Guided setup for saved provider profiles.',
-    '',
-    `Current provider: ${summary.providerLabel}`,
-    `Current model: ${summary.modelLabel}`,
-    `Current endpoint: ${summary.endpointLabel}`,
-    `Saved profile: ${summary.savedProfileLabel}`,
-    '',
-    availableProviders,
-  ].join('\n')
-}
-
 function finishProfileSave(
   onDone: LocalJSXCommandOnDone,
   profile: ProviderProfile,
@@ -685,7 +666,7 @@ function ProviderChooser({
   const canUseCodexOAuth = !isBareMode()
   const ollamaMetadata = getProviderPresetUiMetadata('ollama')
   const openAIMetadata = getProviderPresetUiMetadata('openai')
-  const geminiMetadata = getProviderPresetUiMetadata('gemini')
+  getProviderPresetUiMetadata('gemini')
   const mistralMetadata = getProviderPresetUiMetadata('mistral')
   const helperText = canUseCodexOAuth
     ? 'Save a provider profile without editing environment variables first. Codex profiles backed by env, auth.json, or OpenClaude secure storage can switch this session immediately when validation succeeds.'

@@ -53,7 +53,7 @@ Before opening a PR:
 - Read [`AGENTS.md`](AGENTS.md) for repo-specific coding-agent conventions, validation commands, provider guidance, and architecture rules.
 - Re-check open and recently closed PRs for duplicates.
 - Keep the branch focused on one issue or one clearly scoped improvement.
-- Run narrow checks while iterating, then complete the required [Validation](#validation) contract before opening the PR.
+- Run the checks required for the affected surfaces in [Validation](#validation) before opening the PR. After pushing, monitor CI and automated review until the PR is ready for maintainer review.
 
 Every PR needs a reason. Your PR description must include:
 
@@ -65,7 +65,7 @@ Every PR needs a reason. Your PR description must include:
 - screenshots when the PR touches UI, terminal presentation, or the VS Code extension
 - which provider path was tested when the PR changes provider behavior
 
-The PR author is responsible for ensuring their PR is merge-ready. PRs with merge conflicts will not be reviewed or approved until the conflicts are resolved.
+The PR author is responsible for a reviewable, merge-ready contribution: passing applicable local checks, green CI on the current revision, and addressed automated review feedback. This applies to the initial PR and follow-up pushes. Keep work in progress as a draft; do not request maintainer review with unresolved PR-owned failures. PRs with merge conflicts will not be reviewed or approved until the conflicts are resolved. Verified pre-existing failures follow the exception in [Validation](#validation).
 
 Issues are the recommended starting point for anything non-trivial — opening one first helps avoid wasted effort if the change is out of scope or already being worked on. Small fixes, doc corrections, and obvious improvements can stand on their own without a linked issue, as long as the PR description explains the intent.
 
@@ -73,20 +73,20 @@ Issues are the recommended starting point for anything non-trivial — opening o
 
 We use [CodeRabbit](https://coderabbit.ai) to assist with PR reviews. CodeRabbit will automatically review your PR and leave comments on potential issues, bugs, or style concerns.
 
-**PR authors must address CodeRabbit findings** — do not ignore its comments and wait for a maintainer override. If you're waiting for a maintainer review and CodeRabbit has completed its review with findings, fix those findings first. Maintainer reviews will not proceed until automated review feedback has been addressed.
+**PR authors must follow up on CodeRabbit findings until CodeRabbit approves the current revision**, or a maintainer explicitly accepts a documented exception. Fix valid, in-scope findings, reply with the resolution, and request another automated review when needed. A PR may not receive maintainer review while requested fixes remain unaddressed, even if CI is green. Do not leave the maintainer to chase feedback or finish the author's validation.
 
 One important caveat: **verify each suggested change against your PR's stated scope and intent before applying it.** Automated reviewers can suggest fixes that accidentally force changes to surfaces you never intended to touch, or that quietly pull the PR away from its original framing. When a suggestion would cause that kind of drift:
 
 - you may decline it with a brief justification in the comment thread
 - when unsure whether a suggestion is in scope, ask a maintainer before applying or declining it
 
-Declining an out-of-scope suggestion with a clear reason is acceptable. Silently ignoring findings is not — every finding should end up either fixed, declined with justification, or escalated to a maintainer.
+Declining an incorrect or out-of-scope suggestion with evidence and a clear reason is acceptable. Explain why it is incorrect or would cause scope drift in the comment thread, continue resolving the remaining findings, and seek a maintainer decision if the disagreement still blocks approval. Do not expand the PR merely to obtain automated approval. Silently ignoring findings is not acceptable: every finding needs a fix, a justified decline, or an explicit escalation.
 
 ### Keep Your Branch Current
 
-The PR author is responsible for keeping their branch current with `main`. Rebase onto `main` whenever you resume work on a PR, and before pushing follow-up fixes.
+Keep the PR mergeable. **Rebase when conflicts need resolving**, or when a maintainer identifies a specific upstream change needed for correctness or validation. You do not need to rebase merely because `main` advanced, you resumed work, or you are pushing a review fix. Ordinary follow-ups can be new commits on the existing branch.
 
-Stale branches cause real problems: maintainers end up requesting fixes for issues that are already resolved on `main`, which produces endless fix-churn requests for work nobody needs to do again. A quick rebase before each update keeps review feedback relevant and avoids wasted rounds on both sides.
+Check relevant upstream changes before acting on stale review feedback. After a rebase or conflict resolution, rerun checks whose inputs or behavior changed under [Validation](#validation); use the full local preflight when the integration has broad impact.
 
 Before rebasing an already-pushed PR branch, fetch the current remote PR head, record its exact commit SHA, and incorporate any commits that were added to the remote branch. Then fetch upstream `main` and rebase. Publish with an explicit lease pinned to the PR-head SHA you recorded, never an unguarded `--force` or an unqualified lease:
 
@@ -96,7 +96,7 @@ git push --force-with-lease=refs/heads/<pr-branch>:<recorded-pr-head-sha> <pr-re
 
 Pinning the expected SHA prevents a background fetch from silently moving a remote-tracking ref and weakening the lease. If the lease is rejected, stop: fetch and inspect the new remote PR head, incorporate its commits, redo the rebase, and retry with that newly recorded SHA. If the branch is shared or does not allow force-pushes, coordinate with a maintainer and use a repository-approved non-rewriting update path instead of discarding remote work.
 
-Note that PRs with merge conflicts will not be reviewed or approved regardless (see [Pull Requests](#pull-requests)) — staying current prevents that state entirely.
+Resolve conflicts before requesting review. A branch being behind `main` is not by itself a reason to rewrite it or repeat unrelated local checks.
 
 ### PR Follow-Up Requirements
 
@@ -107,6 +107,8 @@ Submitting a PR is a commitment to see it through to the end. Review here is in-
 - **PRs with no activity for 2 weeks after a review request** will be closed as abandoned. At that point, another contributor may pick up the work under a new PR
 
 This policy ensures the project stays maintainable and that contributor queue doesn't grow stale. We understand life happens — a quick note explaining a delay goes a long way.
+
+Once applicable CI is green and automated feedback is resolved, the PR is ready for maintainer review. Maintainers own the final design review, acceptance decision, and merge. They may choose to take over integration or follow-up work, but contributors should not assume that handoff: continue to address new requests unless a maintainer explicitly takes ownership. While waiting, no periodic rebase, full local rerun, or new push is required solely to keep the PR active. Green checks make a PR eligible for review; they do not guarantee acceptance.
 
 If you find yourself getting fix requests on every round, treat that as a signal rather than noise: repeated findings on the same PR usually trace back to a core design issue, with each surface-level patch exposing another symptom. Investigate the root cause of what reviewers are flagging instead of patching the reported problem. And if you are driving the work with an AI agent, this is also the moment to re-evaluate how you are prompting it — vague or narrow prompts produce surface fixes; detailed instructions to investigate the requested change and its surrounding design produce fixes that hold up under review.
 
@@ -458,7 +460,71 @@ bun run dev:profile
 
 ## Validation
 
-PR Checks skips the static check, unit shard, dedicated test, launcher, and typecheck jobs when a PR changes only Markdown files or files under `docs/`, unless any change is under `.github/`. CI runs the PR intent scan on every PR, including documentation-only PRs. The web job is selected independently by website paths; every job runs on pushes to `main` (see `.github/workflows/pr-checks.yml`). This section is the **authoritative local pre-push validation contract** — `AGENTS.md` defers to it. **Run every locally applicable check before every push to an open PR, including follow-up pushes during review.** Do not wait for GitHub CI to discover failures you could have caught locally — wasted Actions minutes are a real cost on this repo.
+This section is the **authoritative local validation contract**; `AGENTS.md` and the PR template defer to it. Select checks by what the change can affect, not just its size. Applicable lint, static checks, type checks, and regression tests are mandatory. A focused test pass does not replace these checks, and green CI does not excuse deliberately skipping applicable local validation.
+
+CI evaluates the **complete PR diff**, including after a small follow-up push. PR Checks skips code jobs for Markdown/docs-only PRs unless `.github/` is touched; otherwise its code filter selects all unit shards, static checks, type checks, and launcher checks, not individual subsystems. The web job is selected independently. The intent scan runs on every PR, and every PR Checks job runs on pushes to `main`. See `.github/workflows/pr-checks.yml` for exact filters.
+
+### Required merge checks
+
+The stable checks are `PR checks required`, `Install hygiene required`, and `VS Code launcher required`. Each reports on every PR: selected jobs must pass, while jobs for untouched surfaces may skip. Failed change detection, failed or cancelled jobs, and unexpectedly skipped applicable jobs fail the corresponding check. Documentation-only PRs still run the intent scan and existing CodeQL checks; they do not wait for unrelated application, install, or extension jobs.
+
+For repository administrators: after these workflows are merged into `main`, add these three check names to the branch ruleset as required checks from GitHub Actions, preserving the existing CodeQL requirements. Do not require individual matrix jobs or path-filtered workflow names. Enable the requirements only after the workflows are available on the base branch; existing PRs may need an update to pick up the new jobs. Keep the requirement to update branches before merging disabled unless a separate policy change is intended.
+
+### Select the required local checks
+
+Before the initial PR, apply this table to the complete proposed diff. Combine rows when more than one surface is affected. Before a follow-up push, apply it to the update since the last successfully validated revision, subject to the reuse rules below.
+
+| Affected surface | Required local validation |
+| --- | --- |
+| Prose-only Markdown/docs, including PR-template wording, with no executable examples or site/build inputs changed | Review rendering, links, and documented commands for accuracy; `git diff --check`; PR intent scan. No application build, lint, typecheck, or unit suite is required solely for prose. |
+| CLI, SDK, providers, shared source, root tests or scripts | Core checks below, plus the regression tests for the changed behavior and affected callers. Use the full preflight for broad impact. |
+| Website content, assets, templates or tooling under `web/`, or shared inputs affecting the site | Website typecheck/build below and relevant site tests. Add core/full checks when root code or shared tooling is also affected. |
+| Root dependencies/lockfile, runtime/toolchain pins, lint/type/build/test configuration, CI workflows, or changes spanning shared runtime behavior | Full local preflight below, plus website checks when its inputs are affected. |
+| VS Code extension | `npm --prefix vscode-extension/openclaude-vscode run lint` and `bun run --cwd vscode-extension/openclaude-vscode test`; add core checks if CLI behavior is affected. Windows launcher changes also need the launcher test in `.github/workflows/vscode-launcher.yml`; disclose local platform limits and follow that CI result. |
+
+For a documentation change to executable examples, run the relevant commands/tests as well. A Markdown extension does not make executable content safe to leave unchecked. When the impact is uncertain, broaden validation; do not guess that a check is inapplicable.
+
+### Follow-up pushes
+
+- Rerun the applicable lint, static and type checks whenever their inputs change. For a root code/test fix, run the core checks and affected regression tests; the full unit suite is not required merely because another commit is being pushed.
+- Reuse a successful result only while its inputs, dependencies, configuration and relevant upstream behavior are unchanged. Record the previously validated revision and which results remain applicable. Rebase/conflict resolutions invalidate affected results, not automatically every result.
+- A prose-only follow-up to a code PR can reuse its earlier code validation, but CI still evaluates the whole PR. A dependency, shared-runtime or configuration change requires broader validation even if its diff is one line.
+- Update the PR's testing notes with the new commands/results, the validation scope, and reasons for any inapplicable or blocked checks. An unrun, failed or incomplete applicable check is not a pass; document a blocker and keep the PR in draft until it is resolved or a maintainer explicitly accepts an exception.
+- After every push, monitor CI and CodeRabbit, diagnose failures and fix PR-owned problems before requesting maintainer review. Initial and follow-up CI success remains the author's responsibility. Do not repeatedly push known failures and leave maintainers to investigate them.
+
+### Commands
+
+Install root dependencies with `bun install --frozen-lockfile` before validation in a fresh checkout, and again when the root manifest or lockfile changes. An unchanged, successfully installed dependency tree may be reused between follow-ups. Keep lockfiles in sync; a cache hit does not replace the required checks.
+
+Core checks for root code/test changes:
+
+```bash
+bun run check:static
+bun run typecheck:fast
+bun run typecheck:type-tests
+node bin/openclaude --version
+```
+
+`check:static` includes **ESLint**, the any-usage budget, the smoke build, and deadcode checks. It is also the static-check command run by CI. `bun run lint` runs ESLint alone; do not run it a second time after a successful `check:static` unless its inputs changed. ESLint's current configuration warns on explicit `any` and excludes the website and extension; the separate budget check enforces the tracked limits. A passing root lint does not replace those surfaces' own checks.
+
+Add focused tests using the guarded runner (replace the example path):
+
+```bash
+bun run test ./path/to/test-file.test.ts
+```
+
+Include affected callers and integration paths, not only the edited file. Run `bun run test:conversation-arc` or `bun run test:context-efficiency` when changing those feature paths; their flags differ from the default unit pass. For provider changes, test the affected provider/model path as described above.
+
+Full local preflight for broad changes (use this **instead of** separately running `check:static` and the same unit tests):
+
+```bash
+bun run check
+bun run typecheck:fast
+bun run typecheck:type-tests
+node bin/openclaude --version
+```
+
+Run the compile-cache-disabled launcher check below whenever core or full checks apply. Run the PR intent scan before every push, including documentation changes. The scan reads commits: commit the validated changes before scanning `HEAD`, and rerun it if you add or amend commits before pushing. A scan of an unchanged `HEAD` does not cover uncommitted edits.
 
 The security scan requires the commit ancestry needed to find the PR's merge base. Check whether your clone is shallow:
 
@@ -472,19 +538,14 @@ If that prints `true`, fetch the rest of the current branch's history before run
 git fetch --unshallow
 ```
 
-Required local preflight:
+PR intent scan (fetching does not rebase your branch):
 
 ```bash
-bun install --frozen-lockfile
-bun run check
-bun run typecheck:fast
-bun run typecheck:type-tests
-node bin/openclaude --version
 git fetch https://github.com/Twigpine/openclaude.git main
 bun run security:pr-scan -- --base FETCH_HEAD --head HEAD
 ```
 
-Also run the compile-cache-disabled launcher check using the syntax for your shell.
+Compile-cache-disabled launcher check, when core or full checks apply, using the syntax for your shell:
 
 Bash, zsh, and similar shells:
 
@@ -522,11 +583,11 @@ Notes on the local preflight:
 
 - `bun run typecheck:fast` runs Bun's builtin type checker against `tsconfig.json` and is the CI typecheck. Its wrapper resolves the config relative to the script and runs from outside the repository because the package's `check` script shadows `bun check` inside the project. Use `bun run typecheck:fast` from the root or a subdirectory; from elsewhere, use `bun run --cwd /path/to/openclaude typecheck:fast`. `bun run typecheck:type-tests` also runs in CI and uses TypeScript for focused type assertions. Keep the `typescript` devDependency for these assertions, ESLint, and `@astrojs/check`.
 - PR Checks caches Bun package downloads using OS-scoped keys derived from `bun.lock` for root installs and `web/bun.lock` for web installs, with separate restore prefixes. Dependency installs still run with `--frozen-lockfile` on cache hits. Keep the relevant lockfile in sync with dependency changes and run the required local preflight regardless of cache status.
-- `bun run check` runs `check:static` (the any-usage budget, smoke build, and deadcode checks), then the full unit pass (`test:full`) — do not run those separately, or you execute work twice.
+- `bun run check` runs `check:static` (ESLint, the any-usage budget, smoke build, and deadcode checks), then the full unit pass (`test:full`) — do not run those separately, or you execute work twice.
 - `bun run test` runs test files in a shared process and requires Bun's completed JUnit report as well as a successful exit. `test:full` runs all eight native Bun shards serially to release memory between groups. Use `bun run scripts/run-tests.ts --shards=N --shard-index=K` with the same test flags to run only shard K of N. `test:full` then applies the same completion check to the conversation-arc pass and the context-efficiency pass with `HISTORY_SNIP` enabled. Every shard must produce a complete report; a failed shard does not prevent the remaining shards from running. A test that terminates the runner early fails the command, even if it exits with code zero. Each shard has a ten-minute deadline (override with `--shard-timeout-ms=<milliseconds>`), reports its start/end and elapsed time, and kills its process group on timeout or cancellation. A timeout stops the remaining shards and exits nonzero. On Linux, shard output is relayed from temporary regular files; diagnostics remain visible during execution. Temporary reports and logs are removed after the check. CI runs `check:static` in `smoke-and-tests`, runs the eight unit shards as parallel `unit-tests` jobs, and runs each dedicated feature pass once in `dedicated-tests`. Each unit shard builds the CLI before testing. CI caps these jobs at 15 minutes each and the other jobs at five minutes.
 - Fetching upstream `main` by URL avoids assuming that a fork checkout's `origin` points at Twigpine/openclaude. `FETCH_HEAD` is the fetched upstream tip. The scan deliberately uses local `HEAD` so it includes commits that have not been pushed yet; CI uses the pushed PR head SHA after the push.
 - The web CI job runs on PRs that change `web/**`, root `package.json` or `bun.lock`, `.bun-version`, or `.github/workflows/pr-checks.yml`, and on every push to `main`. Contributors do not need to run the web suite locally for changes that cannot affect the site.
-- This preflight covers the same command families as CI, but it does not reproduce CI exactly in one shell. When selected, CI runs static checks with Node 26 available for smoke checks, runs the unit shards and dedicated feature passes under Node 26, separately builds and checks launcher compatibility under Node 24.22.1 and 26, separately builds and launches under exact Node 24.22.1, and executes every job on a clean runner.
+- The full preflight covers the same command families as PR Checks, but focused local validation deliberately runs fewer tests. Neither reproduces CI exactly in one shell. When selected, CI runs static checks with Node 26 available for smoke checks, runs the unit shards and dedicated feature passes under Node 26, separately builds and checks launcher compatibility under Node 24.22.1 and 26, separately builds and launches under exact Node 24.22.1, and executes every job on a clean runner.
 
 If a local or GitHub CI check fails, first determine whether the PR owns the failure. Treat a failure as pre-existing only when you can reproduce it on the PR's current base (or link to the same failure on a current `main` CI run) and the PR neither changes the causal surface nor claims to fix that problem.
 
@@ -538,17 +599,11 @@ For a verified pre-existing failure:
 
 The contributor may then proceed and is not responsible for repairing that failure in the current PR. A maintainer may still need to rerun or waive a required GitHub check, or land the separate fix, before branch protection permits a merge. Failures caused by the PR, or in behavior the PR claims to fix, remain the author's responsibility and must be resolved.
 
-PRs with unresolved PR-owned CI failures will not be merged. Verified pre-existing failures follow the exception above.
+PRs with unresolved PR-owned CI failures are not ready for maintainer review and will not be merged. All applicable CI must pass on the final revision before merge; jobs legitimately skipped by their path filters are not failures. Verified pre-existing failures follow the exception above.
 
 ### Recommended Local Checks
 
 These are not enforced by CI but are worth running locally before submitting.
-
-Focused tests:
-
-```bash
-bun test ./path/to/test-file.test.ts
-```
 
 Additional local TypeScript check against the same `tsconfig.json`:
 

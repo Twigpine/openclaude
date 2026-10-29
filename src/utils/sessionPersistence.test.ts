@@ -7,8 +7,7 @@ import {
   deleteSession,
 } from './sessionPersistence.js'
 import { join } from 'node:path'
-import { unlink } from 'node:fs/promises'
-import { mkdirSync, rmSync } from 'fs'
+import { mkdirSync } from 'fs'
 
 describe('sessionPersistence', () => {
   const testSessionDir = join(process.env.TEMP_DIR ?? '/tmp', 'openclaude-test-sessions')

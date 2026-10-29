@@ -40,7 +40,7 @@ describe('projectSnippedView', () => {
       { uuid: 'ddd', type: 'user' },
     ]
     const result = projectSnippedView(messages)
-    expect(result.map((m: any) => m.uuid)).toEqual(['ccc', 'snip-boundary', 'ddd'])
+    expect(result.map((m) => m.uuid)).toEqual(['ccc', 'snip-boundary', 'ddd'])
   })
 
   test('accumulates removedUuids from multiple snip boundaries', () => {
@@ -52,7 +52,7 @@ describe('projectSnippedView', () => {
       { uuid: 'ccc', type: 'user' },
     ]
     const result = projectSnippedView(messages)
-    expect(result.map((m: any) => m.uuid)).toEqual(['b1', 'b2', 'ccc'])
+    expect(result.map((m) => m.uuid)).toEqual(['b1', 'b2', 'ccc'])
   })
 
   test('handles boundaries with no removedUuids gracefully', () => {
@@ -77,6 +77,6 @@ describe('projectSnippedView', () => {
       snipMetadata: { removedUuids: ['aaa', 'bbb'] },
     }
     const result = projectSnippedView([...store, boundary])
-    expect(result.map((m: any) => m.uuid)).toEqual(['ccc', 'bnd'])
+    expect(result.map((m) => m.uuid)).toEqual(['ccc', 'bnd'])
   })
 })

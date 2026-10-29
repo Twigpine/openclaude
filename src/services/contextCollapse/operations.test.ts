@@ -74,7 +74,7 @@ describe('projectView', () => {
 
     expect(result.length).toBe(2)
     expect(result[0]!.type).toBe('system')
-    expect((result[0]! as any).content).toContain('test summary')
+    expect((result[0]!).content).toContain('test summary')
     expect(result[1]!.uuid).toBe(uid('c'))
   })
 

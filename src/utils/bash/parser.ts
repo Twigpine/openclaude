@@ -65,7 +65,7 @@ export async function parseCommand(
   if (feature('TREE_SITTER_BASH')) {
     await ensureParserInitialized()
     const mod = getParserModule()
-    logLoadOnce(mod !== null)
+    logLoadOnce(Boolean(mod))
     if (!mod) return null
 
     try {
@@ -108,7 +108,7 @@ export async function parseCommandRaw(
   if (feature('TREE_SITTER_BASH') || feature('TREE_SITTER_BASH_SHADOW')) {
     await ensureParserInitialized()
     const mod = getParserModule()
-    logLoadOnce(mod !== null)
+    logLoadOnce(Boolean(mod))
     if (!mod) return null
     try {
       const result = mod.parse(command)

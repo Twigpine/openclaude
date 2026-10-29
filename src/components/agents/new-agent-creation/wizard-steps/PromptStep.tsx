@@ -1,5 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
-import React, { type ReactNode, useCallback, useState } from 'react';
+import React, { type ReactNode, useState } from 'react';
 import { Box, Text } from '../../../../ink.js';
 import { useKeybinding } from '../../../../keybindings/useKeybinding.js';
 import { editPromptInEditor } from '../../../../utils/promptEditor.js';

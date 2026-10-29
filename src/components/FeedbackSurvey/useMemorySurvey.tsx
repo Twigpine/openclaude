@@ -6,7 +6,7 @@ import { isAutoMemoryEnabled } from '../../memdir/paths.js';
 import { isPolicyAllowed } from '../../services/policyLimits/index.js';
 import { FILE_READ_TOOL_NAME } from '../../tools/FileReadTool/prompt.js';
 import type { Message } from '../../types/message.js';
-import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js';
+import { saveGlobalConfig } from '../../utils/config.js';
 import { isEnvTruthy } from '../../utils/envUtils.js';
 import { isAutoManagedMemoryFile } from '../../utils/memoryFileDetection.js';
 import { extractTextContent, getLastAssistantMessage } from '../../utils/messages.js';

@@ -2,15 +2,15 @@ import { describe, expect, test } from 'bun:test'
 
 import { buildTranscriptForClassifier } from './yoloClassifier.js'
 
-const tools = [
+const tools: import("../../Tool.js").Tools = [
   {
     name: 'Bash',
     aliases: [],
     toAutoClassifierInput(input: Record<string, unknown>) {
       return String(input.command ?? '')
     },
-  },
-] as any
+  } as unknown as import("../../Tool.js").Tool,
+]
 
 describe('buildTranscriptForClassifier', () => {
   test('keeps the most recent transcript entries within budget', () => {
@@ -51,7 +51,7 @@ describe('buildTranscriptForClassifier', () => {
           ],
         },
       },
-    ] as any
+    ] as unknown as import('../../types/message.js').Message[]
 
     const transcript = buildTranscriptForClassifier(messages, tools, 32)
 
@@ -69,7 +69,7 @@ describe('buildTranscriptForClassifier', () => {
           content: 'x'.repeat(40_000),
         },
       },
-    ] as any
+    ] as unknown as import('../../types/message.js').Message[]
 
     const transcript = buildTranscriptForClassifier(messages, tools)
 

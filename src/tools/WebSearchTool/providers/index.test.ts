@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from 'bun:test'
+import { snapshotEnv } from '../../../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -7,44 +8,39 @@ import { getProviderMode, getProviderChain, getAvailableProviders } from './inde
 import { resetExaFreeRateLimiterForTests } from './exaFree.js'
 import type { ProviderMode } from './index.js'
 
-const savedWebSearchEnv = {
-  WEB_SEARCH_PROVIDER: process.env.WEB_SEARCH_PROVIDER,
-  WEB_SEARCH_TIMEOUT_SEC: process.env.WEB_SEARCH_TIMEOUT_SEC,
-  FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY,
-  FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL,
-  TAVILY_API_KEY: process.env.TAVILY_API_KEY,
-  ANYSEARCH_API_KEY: process.env.ANYSEARCH_API_KEY,
-  EXA_API_KEY: process.env.EXA_API_KEY,
-  EXA_FREE_TIER: process.env.EXA_FREE_TIER,
-  YOU_API_KEY: process.env.YOU_API_KEY,
-  JINA_API_KEY: process.env.JINA_API_KEY,
-  BRAVE_API_KEY: process.env.BRAVE_API_KEY,
-  BING_API_KEY: process.env.BING_API_KEY,
-  MOJEEK_API_KEY: process.env.MOJEEK_API_KEY,
-  LINKUP_API_KEY: process.env.LINKUP_API_KEY,
-  OLLAMA_API_KEY: process.env.OLLAMA_API_KEY,
-  OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL,
-  CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
-  OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
-  OPENAI_API_BASE: process.env.OPENAI_API_BASE,
-  CLAUDE_CODE_PROVIDER_ROUTE_ID: process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID,
-}
+const WEB_SEARCH_ENV_KEYS = [
+  'WEB_SEARCH_PROVIDER',
+  'WEB_SEARCH_TIMEOUT_SEC',
+  'FIRECRAWL_API_KEY',
+  'FIRECRAWL_API_URL',
+  'TAVILY_API_KEY',
+  'ANYSEARCH_API_KEY',
+  'KEENABLE_API_KEY',
+  'AIMLAPI_API_KEY',
+  'OPENAI_API_KEY',
+  'EXA_API_KEY',
+  'EXA_FREE_TIER',
+  'YOU_API_KEY',
+  'JINA_API_KEY',
+  'BRAVE_API_KEY',
+  'BING_API_KEY',
+  'MOJEEK_API_KEY',
+  'LINKUP_API_KEY',
+  'OLLAMA_API_KEY',
+  'OLLAMA_BASE_URL',
+  'CLAUDE_CODE_USE_OPENAI',
+  'OPENAI_BASE_URL',
+  'OPENAI_API_BASE',
+  'CLAUDE_CODE_PROVIDER_ROUTE_ID',
+] as const
+let restoreWebSearchEnv: () => void = () => {}
 
 const originalFetch = globalThis.fetch
 const originalConsoleError = console.error
 
-function restoreWebSearchEnv() {
-  for (const [key, value] of Object.entries(savedWebSearchEnv)) {
-    if (value === undefined) {
-      delete process.env[key]
-    } else {
-      process.env[key] = value
-    }
-  }
-}
-
 beforeEach(async () => {
   await acquireSharedMutationLock('WebSearchTool/providers/index.test.ts')
+  restoreWebSearchEnv = snapshotEnv(WEB_SEARCH_ENV_KEYS, { clear: true })
   // The keyless Exa free tier is always configured, so it would join every
   // auto chain and make real network calls. Tests that exercise it opt in.
   process.env.EXA_FREE_TIER = '0'
@@ -134,6 +130,11 @@ describe('getProviderMode', () => {
     expect(getProviderMode()).toBe('anysearch')
   })
 
+  test('returns keenable mode', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'keenable'
+    expect(getProviderMode()).toBe('keenable')
+  })
+
   test('returns native mode', () => {
     process.env.WEB_SEARCH_PROVIDER = 'native'
     expect(getProviderMode()).toBe('native')
@@ -172,6 +173,36 @@ describe('getProviderChain', () => {
     const chain = getProviderChain('anysearch' as ProviderMode)
     expect(chain).toHaveLength(1)
     expect(chain[0].name).toBe('anysearch')
+    expect(chain[0].isConfigured()).toBe(true)
+  })
+
+  test('auto mode does not select Keenable, even with a key', () => {
+    process.env.KEENABLE_API_KEY = 'kn-test-key'
+    const chain = getProviderChain('auto')
+    expect(chain.some(p => p.name === 'keenable')).toBe(false)
+  })
+
+  test('keenable mode selects the built-in provider without a key', () => {
+    delete process.env.KEENABLE_API_KEY
+    const chain = getProviderChain('keenable' as ProviderMode)
+    expect(chain).toHaveLength(1)
+    expect(chain[0].name).toBe('keenable')
+    expect(chain[0].isConfigured()).toBe(true)
+  })
+
+  test('auto mode never selects AI/ML API, even with an AIMLAPI_API_KEY set', () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-key'
+    expect(getProviderChain('auto').some(p => p.name === 'aimlapi')).toBe(false)
+    expect(getAvailableProviders().some(p => p.name === 'aimlapi')).toBe(false)
+  })
+
+  test('aimlapi mode selects the AI/ML API provider when the key is set', () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-key'
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    expect(getProviderMode()).toBe('aimlapi')
+    const chain = getProviderChain('aimlapi' as ProviderMode)
+    expect(chain).toHaveLength(1)
+    expect(chain[0].name).toBe('aimlapi')
     expect(chain[0].isConfigured()).toBe(true)
   })
 
@@ -226,6 +257,76 @@ describe('runSearch', () => {
     expect(requestCount).toBe(1)
   })
 
+  test('explicit Keenable failure does not fall back to another provider', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'keenable'
+    delete process.env.KEENABLE_API_KEY
+    let requestCount = 0
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      requestCount += 1
+      return new Response(JSON.stringify({ error: 'Too Many Requests' }), { status: 429 })
+    }) as typeof fetch
+
+    const { runSearch } = await import('./index.js')
+    await expect(runSearch({ query: 'quota' })).rejects.toThrow(/Keenable search error HTTP 429/)
+    expect(requestCount).toBe(1)
+  })
+
+  test('auto mode with an AIMLAPI_API_KEY never calls the AI/ML API Toolbox', async () => {
+    configureAutoModeWithOnlyBrave()
+    process.env.AIMLAPI_API_KEY = 'aiml-key'
+    console.error = () => {}
+    const hosts: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      hosts.push(new URL(String(input)).hostname)
+      return new Response('unavailable', { status: 503 })
+    }) as typeof fetch
+    mockDuckDuckGoSearch(async () => ({
+      results: [{ title: 'Fallback result', url: 'https://example.com/fallback' }],
+    }))
+
+    const { runSearch } = await import('./index.js')
+    const output = await runSearch({ query: 'q' })
+
+    expect(output.providerName).toBe('duckduckgo')
+    expect(hosts).toEqual(['api.search.brave.com'])
+  })
+
+  test('explicit aimlapi mode without a key fails before any request', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    delete process.env.AIMLAPI_API_KEY
+    let requestCount = 0
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      requestCount += 1
+      return new Response('{}', { status: 200 })
+    }) as typeof fetch
+
+    const { runSearch } = await import('./index.js')
+    await expect(runSearch({ query: 'q' })).rejects.toThrow(
+      /Search provider "aimlapi" is not configured.*AIMLAPI_API_KEY/,
+    )
+    expect(requestCount).toBe(0)
+  })
+
+  test('aimlapi mode on a proxy aimlapi profile is not configured and sends nothing', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+    process.env.OPENAI_BASE_URL = 'https://proxy.example.com/v1'
+    process.env.AIMLAPI_API_KEY = 'proxy-credential'
+    process.env.OPENAI_API_KEY = 'proxy-credential'
+    const hosts: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      hosts.push(new URL(String(input)).hostname)
+      return new Response('{}', { status: 200 })
+    }) as typeof fetch
+
+    const { runSearch } = await import('./index.js')
+    await expect(runSearch({ query: 'q' })).rejects.toThrow(
+      /Search provider "aimlapi" is not configured/,
+    )
+    expect(hosts).not.toContain('tools.aimlapi.com')
+    expect(hosts).toEqual([])
+  })
+
   test('AbortError stops the chain immediately in auto mode', async () => {
     // Use AbortController to cancel
     const controller = new AbortController()
@@ -263,7 +364,7 @@ describe('runSearch', () => {
     configureAutoModeWithOnlyBrave()
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
     console.error = () => {}
-    globalThis.fetch = (async (_input: any, _init: any) =>
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) =>
       new Promise<Response>(() => undefined)) as typeof fetch
     mockDuckDuckGoSearch(async () => ({
       results: [
@@ -287,7 +388,7 @@ describe('runSearch', () => {
     configureAutoModeWithOnlyBrave()
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
     console.error = () => {}
-    globalThis.fetch = (async (_input: any, _init?: any) =>
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
       stalledJsonResponse()) as unknown as typeof fetch
     mockDuckDuckGoSearch(async () => ({
       results: [
@@ -366,7 +467,7 @@ describe('runSearch', () => {
     process.env.WEB_SEARCH_TIMEOUT_SEC = '1'
 
     let fetchCalls = 0
-    globalThis.fetch = (async (_input: any, _init: any) => {
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => {
       fetchCalls++
       return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 })
     }) as typeof fetch

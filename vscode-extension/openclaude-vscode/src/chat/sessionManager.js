@@ -13,7 +13,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const readline = require('readline');
-const crypto = require('crypto');
+require('crypto');
 
 // Keep in sync with src/utils/sessionStoragePortable.ts.
 const MAX_SANITIZED_LENGTH = 200;
@@ -212,6 +212,11 @@ class SessionManager {
 
   /** Resolve the same transcript used by the history view and CLI resume. */
   async resolveSessionPath(sessionId) {
+    // History IDs name a single transcript, never a relative or absolute path.
+    if (typeof sessionId !== 'string' || !sessionId || /[/\\\0]/.test(sessionId)) {
+      return null;
+    }
+
     const cwd = this._cwd;
     const dirs = cwd ? await getProjectDirs(cwd) : await this._allProjectDirs();
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, expect, test } from 'bun:test'
 import { applyAgentProviderOverrideToEnv } from '../services/api/agentRouting.js'
-import { ensureIntegrationsLoaded, getAllGateways } from '../integrations/index.js'
+import { ensureIntegrationsLoaded } from '../integrations/index.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,

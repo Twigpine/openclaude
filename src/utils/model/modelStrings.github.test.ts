@@ -67,5 +67,5 @@ test('GitHub provider model strings are safe to parse', () => {
 
   const modelStrings = getModelStrings()
 
-  expect(() => parseUserSpecifiedModel(modelStrings.sonnet46 as any)).not.toThrow()
+  expect(() => parseUserSpecifiedModel(modelStrings.sonnet46)).not.toThrow()
 })

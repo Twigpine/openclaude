@@ -9,7 +9,6 @@ import {
   resolveActiveRouteIdFromEnv,
 } from '../integrations/routeMetadata.js'
 import { getCanonicalName } from './model/model.js'
-import { getModelCapability } from './model/modelCapabilities.js'
 import { resolveAntModel } from './model/antModels.js'
 import { getActiveProviderProfile } from './providerProfiles.js'
 
@@ -268,17 +267,6 @@ export function getContextWindowForModel(
     return OPENAI_FALLBACK_CONTEXT_WINDOW
   }
 
-  const cap = getModelCapability(model)
-  if (cap?.max_input_tokens && cap.max_input_tokens >= 100_000) {
-    if (
-      cap.max_input_tokens > MODEL_CONTEXT_WINDOW_DEFAULT &&
-      is1mContextDisabled()
-    ) {
-      return MODEL_CONTEXT_WINDOW_DEFAULT
-    }
-    return cap.max_input_tokens
-  }
-
   if (betas?.includes(CONTEXT_1M_BETA_HEADER) && modelSupports1M(model)) {
     return 1_000_000
   }
@@ -425,12 +413,6 @@ export function getModelMaxOutputTokens(model: string): {
   } else {
     defaultTokens = MAX_OUTPUT_TOKENS_DEFAULT
     upperLimit = MAX_OUTPUT_TOKENS_UPPER_LIMIT
-  }
-
-  const cap = getModelCapability(model)
-  if (cap?.max_tokens && cap.max_tokens >= 4_096) {
-    upperLimit = cap.max_tokens
-    defaultTokens = Math.min(defaultTokens, upperLimit)
   }
 
   return { default: defaultTokens, upperLimit }

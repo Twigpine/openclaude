@@ -11,7 +11,7 @@ describe('QueryEngine goal status visibility', () => {
         type: 'system',
         subtype: 'informational',
         content: 'Goal achieved: tests pass',
-      } as any),
+      }),
     ).toBe(true)
 
     expect(
@@ -19,7 +19,7 @@ describe('QueryEngine goal status visibility', () => {
         type: 'system',
         subtype: 'informational',
         content: 'Goal not complete: tests missing',
-      } as any),
+      }),
     ).toBe(true)
 
     expect(
@@ -27,7 +27,7 @@ describe('QueryEngine goal status visibility', () => {
         type: 'system',
         subtype: 'informational',
         content: 'Goal paused: evaluator failed',
-      } as any),
+      }),
     ).toBe(true)
 
     expect(
@@ -35,7 +35,7 @@ describe('QueryEngine goal status visibility', () => {
         type: 'system',
         subtype: 'informational',
         content: 'Stop hook failed: bad hook',
-      } as any),
+      }),
     ).toBe(false)
   })
 

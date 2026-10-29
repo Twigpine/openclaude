@@ -4,6 +4,7 @@ import { execa } from 'execa'
 import capitalize from 'lodash-es/capitalize.js'
 import memoize from 'lodash-es/memoize.js'
 import { createConnection } from 'net'
+import { pipeline } from 'node:stream/promises'
 import * as os from 'os'
 import { basename, join, sep as pathSeparator, resolve } from 'path'
 import { logEvent } from 'src/services/analytics/index.js'
@@ -1465,11 +1466,7 @@ async function installFromArtifactory(command: string): Promise<string> {
 
       // Write the downloaded file to disk
       const writeStream = getFsImplementation().createWriteStream(tempVsixPath)
-      await new Promise<void>((resolve, reject) => {
-        vsixResponse.data.pipe(writeStream)
-        writeStream.on('finish', resolve)
-        writeStream.on('error', reject)
-      })
+      await pipeline(vsixResponse.data, writeStream)
 
       // Install the .vsix file
       // Add delay to prevent code command crashes

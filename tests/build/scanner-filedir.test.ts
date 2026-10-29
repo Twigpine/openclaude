@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from 'fs'
-import { join, dirname, resolve, basename } from 'path'
+import { join, dirname, resolve } from 'path'
 import { tmpdir } from 'os'
 
 /**

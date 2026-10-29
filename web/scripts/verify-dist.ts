@@ -79,7 +79,8 @@ export function verifyDist(dist: string): string[] {
   if (existsSync(sitemapFile)) {
     const sitemap = readFileSync(sitemapFile, 'utf8')
     for (const route of ['/buddy/'])
-      expect(sitemap, `${SITE.url}${route}`, `sitemap entry ${route}`)
+      if (!sitemap.includes(`${SITE.url}${route}`))
+        failures.push(`sitemap entry ${route}: missing ${JSON.stringify(`${SITE.url}${route}`)}`)
   } else {
     failures.push('missing dist/sitemap-0.xml')
   }

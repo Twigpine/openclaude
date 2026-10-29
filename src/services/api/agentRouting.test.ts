@@ -875,3 +875,20 @@ describe('resolveAgentRunModelRouting: in-process teammate route identity', () =
     })
   })
 })
+
+test.each([undefined, 'parent-orca-key'])(
+  'spawned Orca override owns its key with ambient %s', ambient => {
+    const env: NodeJS.ProcessEnv = { ORCAROUTER_API_KEY: ambient }
+    applyAgentProviderOverrideToEnv({
+      model: 'openai/gpt-5.5', baseURL: 'https://api.orcarouter.ai/v1',
+      apiKey: 'configured-agent-key',
+    }, env)
+    expect(env.ORCAROUTER_API_KEY).toBe('configured-agent-key')
+    expect(env.OPENAI_API_KEY).toBe('configured-agent-key')
+    applyAgentProviderOverrideToEnv({
+      model: 'custom', baseURL: 'https://custom.example/v1', apiKey: 'custom-key',
+    }, env)
+    expect(env.ORCAROUTER_API_KEY).toBeUndefined()
+    expect(env.OPENAI_API_KEY).toBe('custom-key')
+  },
+)

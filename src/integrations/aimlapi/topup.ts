@@ -167,10 +167,6 @@ export function setAimlapiTopupTestDoubles(
   promptHiddenFn = doubles?.promptHidden ?? promptHidden
 }
 
-function maskKey(key: string): string {
-  return key.length <= 10 ? '****' : `${key.slice(0, 6)}...${key.slice(-4)}`
-}
-
 // A session the provider reports as `exchanged` has already minted its one-shot
 // key; it can never be paid or exchanged again. Both the poll loop and the
 // resume path use this so neither opens a second, separately chargeable checkout
@@ -262,7 +258,6 @@ export async function runAimlapiTopup(options: AimlapiTopupOptions): Promise<voi
       )
     }
     console.log(chalk.green('\n  [OK] Balance topped up and provider configured.'))
-    console.log(`    key      ${chalk.dim(maskKey(provisioned.apiKey))}  (id ${provisioned.apiKeyId})`)
     console.log(`    base URL ${chalk.dim(provisioned.baseUrl)}`)
     console.log(`    model    ${chalk.dim(provisioned.model)}`)
     console.log(`    profile  ${chalk.dim(profilePath)}`)

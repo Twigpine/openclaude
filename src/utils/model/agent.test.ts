@@ -579,7 +579,7 @@ describe('getAgentModelOptions', () => {
         'deepseek-chat': { base_url: 'https://api.deepseek.com/v1', api_key: 'sk-ds' },
         'gpt-4o': { base_url: 'https://api.openai.com/v1', api_key: 'sk-oai' },
       },
-    } as any)
+    })
 
     expect(options.length).toBe(6)
     expect(options[4]?.value).toBe('deepseek-chat')
@@ -595,7 +595,7 @@ describe('getAgentModelOptions', () => {
         'sonnet': { base_url: 'https://api.custom.com/v1', api_key: 'sk-123' },
         'deepseek-chat': { base_url: 'https://api.deepseek.com/v1', api_key: 'sk-ds' },
       },
-    } as any)
+    })
 
     expect(options.length).toBe(5)
     // 'sonnet' should not be duplicated
@@ -612,7 +612,7 @@ describe('getAgentModelOptions', () => {
           api_key: 'sk-secret-test-key',
         },
       },
-    } as any)
+    })
 
     const displayText = options
       .map(option => `${option.label} ${option.description}`)

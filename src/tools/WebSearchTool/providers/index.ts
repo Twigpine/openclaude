@@ -9,6 +9,9 @@
  *   "firecrawl" — use Firecrawl only (fail loudly)
  *   "tavily"    — use Tavily only (fail loudly)
  *   "anysearch" — use AnySearch only, with an optional API key (fail loudly)
+ *   "keenable"  — use Keenable only, with an optional API key (fail loudly)
+ *   "aimlapi"   — use the AI/ML API Toolbox web/search tool only, billed to the
+ *                 AIMLAPI_API_KEY balance (fail loudly)
  *   "exa"       — use Exa only (fail loudly): the keyed API when EXA_API_KEY
  *                 is set, otherwise the keyless free tier
  *   "you"       — use You.com only (fail loudly)
@@ -25,6 +28,9 @@
  *
  * NOTE: "custom" is NOT included in the "auto" fallback chain.
  *       It is only used when WEB_SEARCH_PROVIDER=custom is explicitly selected.
+ *       Neither are "anysearch" and "aimlapi": every aimlapi search is billed,
+ *       so an AIMLAPI_API_KEY (set for the model provider) must never make
+ *       auto mode spend from that balance.
  */
 
 import type { SearchInput, SearchProvider } from './types.js'
@@ -35,6 +41,8 @@ import { duckduckgoProvider } from './duckduckgo.js'
 import { firecrawlProvider } from './firecrawl.js'
 import { tavilyProvider } from './tavily.js'
 import { anysearchProvider } from './anysearch.js'
+import { keenableProvider } from './keenable.js'
+import { aimlapiProvider } from './aimlapi.js'
 import { exaProvider } from './exa.js'
 import { exaFreeProvider } from './exaFree.js'
 import { youProvider } from './you.js'
@@ -64,6 +72,9 @@ export { extractHits } from './custom.js'
 // NOTE: customProvider is intentionally excluded from the auto chain.
 //       It is only available when WEB_SEARCH_PROVIDER=custom is explicitly set.
 //       This prevents the generic outbound provider from silently becoming the default backend.
+// NOTE: aimlapiProvider is excluded too. It is configured whenever the AI/ML API
+//       model provider is (AIMLAPI_API_KEY) and every run is billed, so it is
+//       only used when WEB_SEARCH_PROVIDER=aimlapi is explicitly set.
 
 const ALL_PROVIDERS: SearchProvider[] = [
   exaProvider,
@@ -96,6 +107,8 @@ export type ProviderMode =
   | 'ddg'
   | 'tavily'
   | 'anysearch'
+  | 'keenable'
+  | 'aimlapi'
   | 'exa'
   | 'you'
   | 'jina'
@@ -112,6 +125,8 @@ const PROVIDER_BY_NAME: Record<string, SearchProvider> = {
   ddg: duckduckgoProvider,
   tavily: tavilyProvider,
   anysearch: anysearchProvider,
+  keenable: keenableProvider,
+  aimlapi: aimlapiProvider,
   exa: exaProvider,
   you: youProvider,
   jina: jinaProvider,

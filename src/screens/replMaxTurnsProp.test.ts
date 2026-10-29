@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import {
   Command as CommanderCommand,
-  InvalidArgumentError,
   Option,
 } from '@commander-js/extra-typings'
 import {

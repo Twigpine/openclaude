@@ -711,9 +711,6 @@ function renderChatHtml({ nonce, platform }) {
     html = html.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
     html = html.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
 
-    // links
-    html = html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" title="$2">$1</a>');
-
     // unordered lists (simple)
     html = html.replace(/^[\\-\\*] (.+)$/gm, '<li>$1</li>');
     html = html.replace(/((?:<li>.*<\\/li>\\n?)+)/g, '<ul>$1</ul>');
@@ -736,6 +733,17 @@ function renderChatHtml({ nonce, platform }) {
     html = html.replace(/<p>(<div class="code-wrapper">)/g, '$1');
     html = html.replace(/(<\\/div>)<\\/p>/g, '$1');
 
+    // Render links last so later Markdown substitutions cannot alter attributes.
+    // Input entities were already escaped by escapeForMd; escape only the
+    // remaining attribute delimiters (including markup generated above).
+    html = html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, (_, label, destination) => {
+      const href = destination.trim();
+      if (!/^(https?:|mailto:)/i.test(href)) return label;
+      const attribute = href.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      return '<a href="' + attribute + '" title="' + attribute + '">' + label + '</a>';
+    });
+
     return html;
   }
 
@@ -744,6 +752,10 @@ function renderChatHtml({ nonce, platform }) {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
+  }
+
+  function escapeAttribute(text) {
+    return escapeForMd(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   function highlightCode(code, lang) {
@@ -870,10 +882,10 @@ function renderChatHtml({ nonce, platform }) {
 
     var isFileTool = inputSummary && !toolUse.input?.command;
     var fileLink = isFileTool
-      ? '<a class="file-link" data-filepath="' + escapeForMd(inputSummary) + '" title="Open in editor">' + escapeForMd(inputSummary.split(/[\\/]/).pop() || inputSummary) + '</a>'
+      ? '<a class="file-link" data-filepath="' + escapeAttribute(inputSummary) + '" title="Open in editor">' + escapeForMd(inputSummary.split(/[\\/]/).pop() || inputSummary) + '</a>'
       : (inputSummary ? escapeForMd(inputSummary.split(/[\\/]/).pop() || inputSummary) : '');
     var pathDisplay = isFileTool
-      ? '<div class="tool-input-label">Path</div><div class="tool-input-content"><a class="file-link" data-filepath="' + escapeForMd(inputSummary) + '" title="Open in editor">' + escapeForMd(inputSummary) + '</a></div>'
+      ? '<div class="tool-input-label">Path</div><div class="tool-input-content"><a class="file-link" data-filepath="' + escapeAttribute(inputSummary) + '" title="Open in editor">' + escapeForMd(inputSummary) + '</a></div>'
       : (inputSummary ? '<div class="tool-input-label">' + (toolUse.input?.command ? 'Command' : 'Path') + '</div><div class="tool-input-content">' + escapeForMd(inputSummary) + '</div>' : '');
 
     card.innerHTML =
@@ -936,7 +948,7 @@ function renderChatHtml({ nonce, platform }) {
       const fp = input.file_path || input.path;
       const shortName = fp.split(/[\\/]/).pop() || fp;
       if (!nameEl.querySelector('.tool-path')) {
-        nameEl.insertAdjacentHTML('beforeend', ' <span class="tool-path"><a class="file-link" data-filepath="' + escapeForMd(fp) + '" title="Open in editor">' + escapeForMd(shortName) + '</a></span>');
+        nameEl.insertAdjacentHTML('beforeend', ' <span class="tool-path"><a class="file-link" data-filepath="' + escapeAttribute(fp) + '" title="Open in editor">' + escapeForMd(shortName) + '</a></span>');
       }
     }
 
@@ -945,7 +957,7 @@ function renderChatHtml({ nonce, platform }) {
     if (input.file_path || input.path) {
       var fp = input.file_path || input.path;
       pathHtml = '<div class="tool-input-label">Path</div><div class="tool-input-content">' +
-        '<a class="file-link" data-filepath="' + escapeForMd(fp) + '" title="Open in editor">' + escapeForMd(fp) + '</a></div>';
+        '<a class="file-link" data-filepath="' + escapeAttribute(fp) + '" title="Open in editor">' + escapeForMd(fp) + '</a></div>';
     }
     if (input.command) {
       pathHtml = '<div class="tool-input-label">Command</div><div class="tool-input-content">' +
@@ -1263,6 +1275,8 @@ function renderChatHtml({ nonce, platform }) {
         break;
 
       case 'session_cleared':
+        // Resume also clears the view before the selected session is ready.
+        if (msg.resetStreaming) setStreaming(false);
         messagesEl.innerHTML = '';
         if (welcomeEl) {
           messagesEl.appendChild(welcomeEl);

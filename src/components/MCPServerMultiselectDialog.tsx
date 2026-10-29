@@ -1,6 +1,6 @@
 import { c as _c } from "react-compiler-runtime";
 import partition from 'lodash-es/partition.js';
-import React, { useCallback } from 'react';
+import React from 'react';
 import { logEvent } from 'src/services/analytics/index.js';
 import { Box, Text } from '../ink.js';
 import { getSettings_DEPRECATED, updateSettingsForSource } from '../utils/settings/settings.js';

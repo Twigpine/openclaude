@@ -157,10 +157,6 @@ function makeToolSchema(input: Input): BetaWebSearchTool20250305 {
   }
 }
 
-function isClaudeModel(model: string): boolean {
-  return /claude/i.test(model)
-}
-
 function isCodexResponsesWebSearchEnabled(): boolean {
   if (getAPIProvider() !== 'openai') {
     return false

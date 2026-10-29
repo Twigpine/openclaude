@@ -8,7 +8,7 @@
  */
 
 import { readFileSync, existsSync, readdirSync, rmSync, mkdirSync, writeFileSync, statSync } from 'fs'
-import { join, basename } from 'path'
+import { join } from 'path'
 import { getAutoMemPath } from '../memdir/paths.js'
 import { searchMemdirIndex, clearIndex, getIndexPath, getIndexMetaPath } from '../memdir/vectorIndex.js'
 import { parseFrontmatter } from './frontmatterParser.js'

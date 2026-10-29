@@ -50,6 +50,7 @@ const ENV_KEYS = [
   'MIMO_API_KEY',
   'ATLAS_CLOUD_API_KEY',
   'GMI_API_KEY',
+  'ORCAROUTER_API_KEY',
   'GMI_MODEL',
   'APISMART_API_KEY',
   'APISMART_MODEL',
@@ -2084,6 +2085,18 @@ describe('applyProviderFlag - api-route', () => {
     expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
     expect(resolveActiveRouteIdFromEnv(process.env)).toBe('openai')
   })
+})
+
+test.each([
+  ['orca-key', undefined], ['independent-openai-key', 'independent-openai-key'],
+] as const)('OpenAI startup handles Orca generic alias %s', (generic, expected) => {
+  process.env.OPENAI_BASE_URL = 'https://api.orcarouter.ai/v1'
+  process.env.ORCAROUTER_API_KEY = 'orca-key'
+  process.env.OPENAI_API_KEY = generic
+  expect(applyProviderFlag('openai', [])).toEqual({})
+  expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
+  if (expected === undefined) expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  else expect(process.env.OPENAI_API_KEY).toBe(expected)
 })
 
 

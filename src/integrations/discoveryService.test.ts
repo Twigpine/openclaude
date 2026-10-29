@@ -1636,13 +1636,18 @@ const customAuthCases: Array<{
   { name: 'invalid header', value: undefined, scheme: undefined, expected: { authorization: 'Bearer pooled-key' } },
 ]
 for (const auth of customAuthCases) {
-  test(`custom discovery auth ${auth.name}/${auth.scheme}/${auth.value}`, async () => {
+  test.each([
+    ['custom', 'https://custom.example/v1'],
+    ['orcarouter', 'https://api.orcarouter.ai/v1'],
+  ] as const)(`%s discovery auth ${auth.name}/${auth.scheme}/${auth.value}`, async (routeId, baseUrl) => {
     const { refreshStartupDiscoveryForActiveRoute, discoverModelsForRoute, getDiscoveryCacheKey } = await loadDiscoveryServiceModule()
     const { resolveModelRuntimeLimits } = await import('./runtimeMetadata.js')
     const env: NodeJS.ProcessEnv = {
       CLAUDE_CODE_USE_OPENAI: '1',
-      OPENAI_BASE_URL: 'https://custom.example/v1',
-      OPENAI_API_KEYS: 'pooled-key,second-key',
+      OPENAI_BASE_URL: baseUrl,
+      ...(routeId === 'custom'
+        ? { OPENAI_API_KEYS: 'pooled-key,second-key' }
+        : { ORCAROUTER_API_KEY: 'pooled-key' }),
       OPENAI_AUTH_HEADER: auth.name,
       OPENAI_AUTH_HEADER_VALUE: auth.value,
       OPENAI_AUTH_SCHEME: auth.scheme,
@@ -1660,22 +1665,24 @@ for (const auth of customAuthCases) {
       new Headers(init?.headers).forEach((value, name) => { headers[name] = value })
       requests.push({ url: String(input), headers })
       return Promise.resolve(new Response(JSON.stringify({
-        data: [{ id: 'remote-model', context_window: 123456 }],
+        data: [{ id: 'remote-model', [routeId === 'custom' ? 'context_window' : 'context_length']: 123456 }],
       }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     }) as unknown as typeof globalThis.fetch)
-    const first = await refreshStartupDiscoveryForActiveRoute({ processEnv: env })
+    const first = routeId === 'custom'
+      ? await refreshStartupDiscoveryForActiveRoute({ processEnv: env })
+      : await discoverModelsForRoute(routeId, { baseUrl, processEnv: env, headers: callerHeaders })
     expect(first?.source).toBe('network')
-    expect(requests).toEqual([{ url: 'https://custom.example/v1/models', headers: { ...auth.expected, 'x-tenant': 'tenant-a' } }])
+    expect(requests).toEqual([{ url: `${baseUrl}/models`, headers: { ...auth.expected, 'x-tenant': 'tenant-a' } }])
     // The picker supplies the resolved credential; startup supplies its env.
-    const cached = await discoverModelsForRoute('custom', {
+    const cached = await discoverModelsForRoute(routeId, {
       baseUrl: env.OPENAI_BASE_URL, apiKey: 'pooled-key', processEnv: env, headers: callerHeaders,
     })
     expect(cached?.source).toBe('cache')
     expect(requests).toHaveLength(1)
     expect(resolveModelRuntimeLimits({ model: 'remote-model', processEnv: env }).contextWindow).toBe(123456)
     const identityOptions = { baseUrl: env.OPENAI_BASE_URL, apiKey: 'pooled-key', processEnv: env }
-    expect(getDiscoveryCacheKey('custom', { ...identityOptions, headers: callerHeaders })).toBe(
-      getDiscoveryCacheKey('custom', { ...identityOptions, headers: { 'X-Tenant': 'tenant-a' } }),
+    expect(getDiscoveryCacheKey(routeId, { ...identityOptions, headers: callerHeaders })).toBe(
+      getDiscoveryCacheKey(routeId, { ...identityOptions, headers: { 'X-Tenant': 'tenant-a' } }),
     )
     // An explicit custom-auth value selects a different account/catalog.
     if (auth.name === 'Authorization') {
@@ -1715,3 +1722,60 @@ test('custom startup discovery retains its auth when another profile activates',
     },
   }).contextWindow).toBe(123456)
 })
+
+test('Orca discovery preserves reported context through the cache and runtime', async () => {
+  const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+  const { resolveModelRuntimeLimits } = await import('./runtimeMetadata.js')
+  const env: NodeJS.ProcessEnv = {
+    CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: 'https://api.orcarouter.ai/v1',
+    ORCAROUTER_API_KEY: 'orca-key',
+  }
+  const fetchMock = mock((_input: RequestInfo | URL, init?: RequestInit) => {
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer orca-key')
+    return Promise.resolve(Response.json({ data: [
+      { id: 'anthropic/claude-sonnet-4.6', context_length: 1_000_000 },
+      { id: 'discovered-chat-model', context_length: 262_144 },
+    ] }))
+  })
+  setMockFetch(fetchMock as unknown as typeof globalThis.fetch)
+  const options = { baseUrl: env.OPENAI_BASE_URL, apiKey: 'orca-key' }
+  expect((await discoverModelsForRoute('orcarouter', {
+    ...options, forceRefresh: true,
+  }))?.source).toBe('network')
+  expect((await discoverModelsForRoute('orcarouter', options))?.source).toBe('cache')
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  for (const [model, contextWindow] of [
+    ['anthropic/claude-sonnet-4.6', 1_000_000],
+    ['discovered-chat-model', 262_144],
+  ] as const) {
+    expect(resolveModelRuntimeLimits({ model, processEnv: env }).contextWindow)
+      .toBe(contextWindow)
+  }
+})
+
+// Capture the caller's identity before disk cache I/O, including the normal
+// dedicated-key path when no explicit auth override exists.
+test.each([undefined, 'profile-a-secret'])(
+  'Orca discovery retains launch identity across a profile change (override: %s)', async override => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    const { resolveModelRuntimeLimits } = await import('./runtimeMetadata.js')
+    const env: NodeJS.ProcessEnv = {
+      CLAUDE_CODE_USE_OPENAI: '1', OPENAI_BASE_URL: 'https://api.orcarouter.ai/v1',
+      ORCAROUTER_API_KEY: 'profile-a-key',
+      ...(override ? { OPENAI_AUTH_HEADER: 'Authorization', OPENAI_AUTH_HEADER_VALUE: override } : {}),
+    }
+    const launchEnv = { ...env }
+    const headers: Array<string | null> = []
+    setMockFetch(mock((_input, init) => {
+      headers.push(new Headers(init?.headers).get('authorization'))
+      return Promise.resolve(Response.json({ data: [{ id: 'account-model', context_length: 123456 }] }))
+    }) as unknown as typeof globalThis.fetch)
+    const pending = discoverModelsForRoute('orcarouter', { processEnv: env, baseUrl: env.OPENAI_BASE_URL })
+    env.ORCAROUTER_API_KEY = 'profile-b-key'
+    if (override) env.OPENAI_AUTH_HEADER_VALUE = 'profile-b-secret'
+    expect((await pending)?.source).toBe('network')
+    expect(headers).toEqual([`Bearer ${override ?? 'profile-a-key'}`])
+    expect(resolveModelRuntimeLimits({ model: 'account-model', processEnv: launchEnv }).contextWindow).toBe(123456)
+    expect(resolveModelRuntimeLimits({ model: 'account-model', processEnv: env }).contextWindow).toBeUndefined()
+  },
+)

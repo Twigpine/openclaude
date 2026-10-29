@@ -2,10 +2,6 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { DiagnosticTrackingService } from './diagnosticTracking.js'
 import type { MCPServerConnection } from './mcp/types.js'
 
-// Mock the IDE client utility
-const mockGetConnectedIdeClient = (clients: MCPServerConnection[]) => 
-  clients.find(client => client.type === 'connected')
-
 describe('DiagnosticTrackingService', () => {
   let service: DiagnosticTrackingService
   let mockClients: MCPServerConnection[]
@@ -90,19 +86,19 @@ describe('DiagnosticTrackingService', () => {
   describe('new explicit client methods', () => {
     test('beforeFileEdited should require client parameter', async () => {
       // Should not work without client
-      const result = await service.beforeFileEdited('/test/file.ts', undefined as any)
+      const result = await service.beforeFileEdited('/test/file.ts', undefined as unknown as Parameters<typeof service.beforeFileEdited>[1])
       expect(result).toBeUndefined()
     })
 
     test('getNewDiagnostics should require client parameter', async () => {
       // Should not work without client
-      const result = await service.getNewDiagnostics(undefined as any)
+      const result = await service.getNewDiagnostics(undefined as unknown as Parameters<typeof service.getNewDiagnostics>[0])
       expect(result).toEqual([])
     })
 
     test('ensureFileOpened should require client parameter', async () => {
       // Should not work without client
-      const result = await service.ensureFileOpened('/test/file.ts', undefined as any)
+      const result = await service.ensureFileOpened('/test/file.ts', undefined as unknown as Parameters<typeof service.beforeFileEdited>[1])
       expect(result).toBeUndefined()
     })
   })

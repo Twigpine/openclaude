@@ -52,7 +52,8 @@ async function getQuery(language: NonNullable<ReturnType<typeof getLanguageForFi
   try {
     return await promise
   } finally {
-    if (queryLoadPromises.get(language) === promise) {
+    // A cache reset may have started a newer load; compare operation identity.
+    if (Object.is(queryLoadPromises.get(language), promise)) {
       queryLoadPromises.delete(language)
     }
   }

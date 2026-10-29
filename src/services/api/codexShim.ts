@@ -91,9 +91,39 @@ type ResponsesTool = {
   strict?: boolean
 }
 
+type CodexOutputItem = {
+  type?: string
+  role?: string
+  id?: string
+  call_id?: string
+  name?: string
+  arguments?: string
+  content?: Array<{ type?: string; text?: string }>
+}
+
+type CodexResponse = {
+  id?: string
+  model?: string
+  output?: CodexOutputItem[]
+  usage?: Record<string, unknown>
+  incomplete_details?: { reason?: string }
+  error?: { message?: string }
+}
+
+type CodexEventData = {
+  type?: string
+  response?: CodexResponse
+  error?: { message?: string }
+  item?: CodexOutputItem
+  part?: { type?: string }
+  delta?: string
+  item_id?: string
+  arguments?: string
+}
+
 type CodexSseEvent = {
   event: string
-  data: Record<string, any>
+  data: CodexEventData
 }
 
 function makeUsage(usage?: Record<string, unknown>): AnthropicUsage {
@@ -836,14 +866,14 @@ async function* readSseEvents(
           continue
         }
 
-        let data: Record<string, any>
+        let data: CodexEventData
         try {
           const parsed = JSON.parse(rawData)
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
             ignoredFrameCount++
             continue
           }
-          data = parsed as Record<string, any>
+          data = parsed as CodexEventData
         } catch {
           ignoredFrameCount++
           continue
@@ -938,7 +968,7 @@ async function* readSseEvents(
 }
 
 function determineStopReason(
-  response: Record<string, any> | undefined,
+  response: CodexResponse | undefined,
   sawToolUse: boolean,
 ): 'end_turn' | 'tool_use' | 'max_tokens' {
   const output = Array.isArray(response?.output) ? response.output : []
@@ -963,8 +993,8 @@ function determineStopReason(
 export async function collectCodexCompletedResponse(
   response: Response,
   signal?: AbortSignal,
-): Promise<Record<string, any>> {
-  let completedResponse: Record<string, any> | undefined
+): Promise<CodexResponse> {
+  let completedResponse: CodexResponse | undefined
 
   for await (const event of readSseEvents(response, signal)) {
     if (event.event === 'response.failed') {
@@ -1007,7 +1037,7 @@ async function* codexStreamToAnthropicWithReadOptions(
   const thinkFilter = createThinkTagFilter()
   let nextContentBlockIndex = 0
   let sawToolUse = false
-  let finalResponse: Record<string, any> | undefined
+  let finalResponse: CodexResponse | undefined
   let streamComplete = false
   let providerTerminalObserved = false
   let converterFailed = false
@@ -1338,7 +1368,7 @@ export function __codexStreamToAnthropicForTests(
 }
 
 export function convertCodexResponseToAnthropicMessage(
-  data: Record<string, any>,
+  data: CodexResponse,
   model: string,
 ): Record<string, unknown> {
   const content: Array<Record<string, unknown>> = []

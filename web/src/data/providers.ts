@@ -157,6 +157,14 @@ export const providers: Provider[] = [
     notes: 'Multi-provider model router with Chat Completions, Responses, authenticated catalog discovery, and routing policies.',
   },
   {
+    id: 'orcarouter',
+    name: 'OrcaRouter',
+    group: 'gateways',
+    setup: '/provider or ORCAROUTER_API_KEY with --provider orcarouter',
+    envVars: ['ORCAROUTER_API_KEY'],
+    notes: 'OpenAI-compatible model routing gateway with named auto routing. Existing environment setups must replace OPENAI_API_KEY with ORCAROUTER_API_KEY, even when a custom authentication header supplies the request credential. Custom headers remain supported.',
+  },
+  {
     id: 'near-ai',
     name: 'NEAR AI',
     group: 'gateways',

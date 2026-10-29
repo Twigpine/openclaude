@@ -1,3 +1,5 @@
+import type { ContentBlockParam, TextBlockParam, ToolResultBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs'
+import type { AssistantMessage } from '../../types/message.js'
 import { describe, expect, test } from 'bun:test'
 import { feature } from 'bun:bundle'
 import {
@@ -247,12 +249,12 @@ describe('appendMessageTagToUserMessage', () => {
       uuid: UUID,
     }
     const out = appendMessageTagToUserMessage(msg as UserMessage)
-    const blocks = out.message.content as any[]
-    expect(blocks[blocks.length - 1].text).toContain('first')
-    expect(blocks[blocks.length - 1].text).toContain(tagFor(UUID))
-    expect(blocks[blocks.length - 1].text).toContain('do not discuss in thinking')
-    expect(blocks[blocks.length - 1].text).not.toContain('[id:')
-    expect(blocks[blocks.length - 1].text).not.toContain('user-provided')
+    const blocks = out.message.content as ContentBlockParam[]
+    expect((blocks[blocks.length - 1] as TextBlockParam).text).toContain('first')
+    expect((blocks[blocks.length - 1] as TextBlockParam).text).toContain(tagFor(UUID))
+    expect((blocks[blocks.length - 1] as TextBlockParam).text).toContain('do not discuss in thinking')
+    expect((blocks[blocks.length - 1] as TextBlockParam).text).not.toContain('[id:')
+    expect((blocks[blocks.length - 1] as TextBlockParam).text).not.toContain('user-provided')
   })
 
   test('adds internal snip metadata to a pure tool_result message (large Read/Bash output)', () => {
@@ -269,7 +271,7 @@ describe('appendMessageTagToUserMessage', () => {
       uuid: UUID,
     }
     const out = appendMessageTagToUserMessage(msg as UserMessage)
-    const blocks = out.message.content as any[]
+    const blocks = out.message.content as ContentBlockParam[]
     // The tool_result block is preserved so snip pairing still works.
     expect(blocks.some(b => b.type === 'tool_result')).toBe(true)
     // Internal metadata is present for snip without looking user-authored.
@@ -323,7 +325,7 @@ describe('appendMessageTagToUserMessage', () => {
     const once = appendMessageTagToUserMessage(msg as UserMessage)
     const twice = appendMessageTagToUserMessage(once as UserMessage)
     expect(countTags(twice)).toBe(1)
-    const blocks = twice.message.content as any[]
+    const blocks = twice.message.content as ContentBlockParam[]
     // Exactly one added text block, and the tool_result is preserved.
     expect(blocks.filter(b => b.type === 'text').length).toBe(1)
     expect(blocks.some(b => b.type === 'tool_result')).toBe(true)
@@ -358,7 +360,7 @@ describe('appendMessageTagToUserMessage', () => {
     expect(flattened).toContain(tagFor(UUID_B))
     expect(flattened).not.toContain('[id:')
     // Both tool_result blocks are preserved for snip pairing.
-    const blocks = merged.message.content as any[]
+    const blocks = merged.message.content as ContentBlockParam[]
     expect(blocks.filter(b => b.type === 'tool_result').length).toBe(2)
   })
 
@@ -392,7 +394,7 @@ describe('API cleanup transforms', () => {
     })
 
     const output = stripToolReferenceBlocksFromUserMessage(message)
-    const content = (output.message.content as any[])[0].content
+    const content = (output.message.content as ToolResultBlockParam[])[0].content
     expect(content).toEqual([{ type: 'text', text: 'keep this result' }])
   })
 
@@ -407,9 +409,9 @@ describe('API cleanup transforms', () => {
       },
     }
 
-    const output = stripCallerFieldFromAssistantMessage(message as any)
+    const output = stripCallerFieldFromAssistantMessage(message as unknown as AssistantMessage)
     expect(output.message.content[0]).not.toHaveProperty('caller')
-    expect(output.message.content[1] as any).toEqual({
+    expect<unknown>(output.message.content[1]).toEqual({
       type: 'text',
       text: 'keep this text block',
     })

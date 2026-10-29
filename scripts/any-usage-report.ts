@@ -103,7 +103,6 @@ function stripNonCode(source: string): string {
       const end = source.indexOf('*/', i + 2)
       if (end === -1) {
         out += ' '.repeat(n - i)
-        i = n
         break
       }
       // Replace with spaces, keep newlines so line numbers stay stable.

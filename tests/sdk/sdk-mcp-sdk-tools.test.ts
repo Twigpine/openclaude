@@ -6,7 +6,7 @@ import { connectSdkMcpServers } from '../../src/entrypoints/sdk/permissions.js'
 type AssertToolsField = {
   type: 'sdk'
   name: string
-  tools?: any[]
+  tools?: import('../../src/entrypoints/sdk/index.js').SdkMcpToolDefinition[]
 }
 
 describe('SDK MCP type:sdk tools wiring', () => {

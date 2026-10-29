@@ -85,7 +85,7 @@ export function ManagedSettingsSecurityDialog(t0) {
   }
   let t14;
   if ($[10] === Symbol.for("react.memo_cache_sentinel")) {
-    t14 = <Text>Only accept if you trust your organization's IT administration and expect these settings to be configured.</Text>;
+    t14 = <Text>Only accept if you trust your organization&apos;s IT administration and expect these settings to be configured.</Text>;
     $[10] = t14;
   } else {
     t14 = $[10];

@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { getAllowedSettingSources, setAllowedSettingSources } from '../../bootstrap/state.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
+import { buildLaunchEnv, buildOpenAIProfileEnv } from '../../utils/providerProfile.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -35,6 +37,10 @@ const SEARCH_ENV_KEYS = [
   'TAVILY_API_KEY',
   'ANYSEARCH_API_KEY',
   'ANYSEARCH_MAX_RESULTS',
+  'KEENABLE_API_KEY',
+  'AIMLAPI_API_KEY',
+  'OPENAI_API_KEY',
+  'WEB_SEARCH_TIMEOUT_SEC',
   'FIRECRAWL_API_KEY',
   'FIRECRAWL_API_URL',
   'YOU_API_KEY',
@@ -133,6 +139,11 @@ describe('parseSearchArgs', () => {
       option: { mode: 'anysearch' },
       typedInline: false,
     })
+    expect(parseSearchArgs('keenable')).toMatchObject({
+      kind: 'set',
+      option: { mode: 'keenable' },
+      typedInline: false,
+    })
   })
 
   test('extra tokens after a backend are flagged as an inline key', () => {
@@ -192,6 +203,165 @@ describe('parseSearchArgs', () => {
   })
 })
 
+describe('AI/ML API backend', () => {
+  test('/search key and remove-key point at the provider setup instead of storing the key', () => {
+    for (const args of ['key aimlapi', 'remove-key aimlapi']) {
+      const action = parseSearchArgs(args)
+      expect(action.kind).toBe('error')
+      expect(action.kind === 'error' && action.message).toBe(
+        'AI/ML API uses AIMLAPI_API_KEY from your AI/ML API provider setup; /search does not store it. ' +
+          'Set it up with /provider (see https://github.com/Twigpine/openclaude/blob/main/docs/aimlapi-setup.md).',
+      )
+    }
+  })
+
+  test('selecting it without AIMLAPI_API_KEY changes nothing', () => {
+    const store = recordingStore()
+    const message = applySearchSelection(backend('aimlapi'), undefined, false, store)
+
+    expect(store.saves).toEqual([])
+    expect(process.env.WEB_SEARCH_PROVIDER).toBeUndefined()
+    expect(message).toStartWith('Web search settings unchanged. AI/ML API uses AIMLAPI_API_KEY')
+  })
+
+  test('selecting it is refused when the key belongs to a proxy aimlapi profile', () => {
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+    process.env.OPENAI_BASE_URL = 'https://proxy.example.com/v1'
+    process.env.AIMLAPI_API_KEY = 'proxy-credential'
+    const store = recordingStore()
+    const message = applySearchSelection(backend('aimlapi'), undefined, false, store)
+
+    expect(store.saves).toEqual([])
+    expect(message).toStartWith('Web search settings unchanged.')
+    expect(message).not.toContain('proxy-credential')
+  })
+
+  test('selecting it reuses the provider key, saves only the mode, and states the billing', () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-provider-key'
+    const store = recordingStore()
+    const message = applySearchSelection(backend('aimlapi'), 'stray', false, store)
+
+    expect(store.saves).toEqual([{ set: { WEB_SEARCH_PROVIDER: 'aimlapi' }, unset: [] }])
+    expect(message).toBe(
+      'Web search set to AI/ML API.\n' +
+        'Each search runs the AI/ML API Toolbox tool web/search and is billed to your AI/ML API balance (requested cost limit: $0.025 per search).',
+    )
+  })
+
+  test('status names the missing provider key, or the billed backend once it is set', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    expect(describeSearchStatus(false)).toContain(
+      'AI/ML API is not configured — it needs AIMLAPI_API_KEY from the AI/ML API provider setup (/provider).',
+    )
+
+    process.env.AIMLAPI_API_KEY = 'aiml-provider-key'
+    const status = describeSearchStatus(false)
+    expect(status).toContain('Searches go to: AI/ML API')
+    expect(status).toContain('Each search is billed to your AI/ML API balance.')
+    expect(status).not.toContain('Fallbacks')
+  })
+
+  test('/search test runs through the Toolbox when AI/ML API is selected', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+    process.env.AIMLAPI_API_KEY = 'aiml-provider-key'
+    let requestedUrl = ''
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      requestedUrl = String(input)
+      return new Response(JSON.stringify({
+        id: 'run_1',
+        status: 'completed',
+        is_error: false,
+        output: { results: [{ url: 'https://nodejs.org/', title: 'Node.js', snippet: 's' }] },
+      }), { status: 200 })
+    }) as typeof fetch
+
+    const message = await runSearchTest('node', false)
+
+    expect(requestedUrl).toBe('https://tools.aimlapi.com/v1/tools/run')
+    expect(message).toContain('Search OK via AI/ML API: 1 results')
+  })
+
+  test.each(['profile', 'primary', 'alias'] as const)('selects and polls with one key from a %s credential pool', async source => {
+    const pool = 'aiml-first, aiml-second'
+    if (source === 'profile') {
+      const env = buildOpenAIProfileEnv({
+        goal: 'coding',
+        baseUrl: 'https://api.aimlapi.com/v1',
+        apiKey: pool,
+        processEnv: {},
+      })
+      if (!env) throw new Error('Profile setup rejected usable credentials')
+      const restored = await buildLaunchEnv({
+        profile: 'openai',
+        persisted: { profile: 'openai', env, createdAt: '2026-10-28T00:00:00.000Z' },
+        goal: 'coding',
+        processEnv: {},
+      })
+      expect(restored.AIMLAPI_API_KEY).toBe('aiml-first,aiml-second')
+      for (const key of ['AIMLAPI_API_KEY', 'OPENAI_BASE_URL', 'CLAUDE_CODE_PROVIDER_ROUTE_ID'] as const) {
+        const value = restored[key]
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    } else {
+      process.env.OPENAI_API_KEY = pool
+      process.env[source === 'primary' ? 'OPENAI_BASE_URL' : 'OPENAI_API_BASE'] = 'https://api.aimlapi.com/v1'
+    }
+    const store = recordingStore()
+    expect(applySearchSelection(backend('aimlapi'), undefined, false, store))
+      .toStartWith('Web search set to AI/ML API.')
+    expect(store.saves).toEqual([{ set: { WEB_SEARCH_PROVIDER: 'aimlapi' }, unset: [] }])
+    expect(describeSearchStatus(false)).toContain('Searches go to: AI/ML API')
+
+    const requests: Array<{ url: string; method: string; authorization: string | null }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get('Authorization')
+      requests.push({ url: String(input), method: init?.method ?? 'GET', authorization })
+      // The service accepts an individual credential, never the entire configured list.
+      if (authorization !== 'Bearer aiml-first') {
+        return Response.json({ message: 'Invalid credential' }, { status: 401 })
+      }
+      return requests.length === 1
+        ? Response.json({ id: 'run_pool', status: 'queued', next_poll_hint_ms: 1 }, { status: 202 })
+        : Response.json({ status: 'completed', output: { results: [{ url: 'https://nodejs.org/', title: 'Node.js' }] } })
+    }) as typeof fetch
+
+    expect(await runSearchTest('node', false)).toContain('Search OK via AI/ML API: 1 results')
+    expect(requests).toEqual([
+      { url: 'https://tools.aimlapi.com/v1/tools/run', method: 'POST', authorization: 'Bearer aiml-first' },
+      { url: 'https://tools.aimlapi.com/v1/tools/runs/run_pool', method: 'GET', authorization: 'Bearer aiml-first' },
+    ])
+  })
+
+  test.each([undefined, '  '])('selects and searches with the canonical alias when the primary URL is %p', async primary => {
+    if (primary !== undefined) process.env.OPENAI_BASE_URL = primary
+    process.env.OPENAI_API_BASE = 'https://api.aimlapi.com/v1'
+    process.env.OPENAI_API_KEY = 'canonical-alias-key'
+    const store = recordingStore()
+
+    expect(applySearchSelection(backend('aimlapi'), undefined, false, store))
+      .toStartWith('Web search set to AI/ML API.')
+    expect(store.saves).toEqual([{ set: { WEB_SEARCH_PROVIDER: 'aimlapi' }, unset: [] }])
+    expect(describeSearchStatus(false)).toContain('Searches go to: AI/ML API')
+
+    const requests: Array<{ url: string; authorization: string | null }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(input), authorization: new Headers(init?.headers).get('Authorization') })
+      return Response.json({
+        status: 'completed',
+        output: { results: [{ url: 'https://nodejs.org/', title: 'Node.js' }] },
+      })
+    }) as typeof fetch
+
+    expect(await runSearchTest('node', false)).toContain('Search OK via AI/ML API: 1 results')
+    expect(requests).toEqual([{
+      url: 'https://tools.aimlapi.com/v1/tools/run',
+      authorization: 'Bearer canonical-alias-key',
+    }])
+    expect(process.env.AIMLAPI_API_KEY).toBeUndefined()
+  })
+})
+
 describe('needsApiKey', () => {
   test('keyed-only backends need a key until one is set', () => {
     expect(needsApiKey(backend('tavily'))).toBe(true)
@@ -204,6 +374,7 @@ describe('needsApiKey', () => {
     expect(needsApiKey(backend('ddg'))).toBe(false)
     expect(needsApiKey(backend('auto'))).toBe(false)
     expect(needsApiKey(backend('anysearch'))).toBe(false)
+    expect(needsApiKey(backend('keenable'))).toBe(false)
   })
 
   test('Exa needs a key when the free tier is turned off', () => {
@@ -250,6 +421,11 @@ describe('describeSearchStatus', () => {
     expect(describeSearchStatus(false)).toContain('Searches go to: AnySearch')
   })
 
+  test('an explicit Keenable selection reports the active backend without a key', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'keenable'
+    expect(describeSearchStatus(false)).toContain('Searches go to: Keenable')
+  })
+
   test('native mode without built-in search reports searches as unavailable', () => {
     process.env.WEB_SEARCH_PROVIDER = 'native'
     expect(describeSearchStatus(false)).toContain('searches are unavailable')
@@ -265,6 +441,16 @@ describe('applySearchSelection', () => {
       { set: { WEB_SEARCH_PROVIDER: 'anysearch' }, unset: [] },
     ])
     expect(message).toBe('Web search set to AnySearch.')
+  })
+
+  test('saves Keenable selection without requiring an API key', () => {
+    const store = recordingStore()
+    const message = applySearchSelection(backend('keenable'), undefined, false, store)
+
+    expect(store.saves).toEqual([
+      { set: { WEB_SEARCH_PROVIDER: 'keenable' }, unset: [] },
+    ])
+    expect(message).toBe('Web search set to Keenable.')
   })
 
   test('saves the backend and its key, and applies them to this session', () => {
@@ -475,6 +661,46 @@ describe('findSettingsEnvOverride', () => {
 })
 
 describe('runSearchTest', () => {
+  test.each(['http', 'run', 'poll'] as const)(
+    'redacts an echoed AI/ML API key from %s errors through the selected backend',
+    async kind => {
+      const restoreEnv = snapshotEnv(['WEB_SEARCH_PROVIDER', 'AIMLAPI_API_KEY'])
+      const key = 'secret-marker-123456789'
+      try {
+        process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+        process.env.AIMLAPI_API_KEY = key
+        let requests = 0
+        globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => {
+          requests += 1
+          if (kind === 'poll' && requests === 1) {
+            return Response.json({ id: 'run_1', status: 'queued', next_poll_hint_ms: 1 }, { status: 202 })
+          }
+          return kind === 'http'
+            ? Response.json({ error: {
+              code: `invalid_key_${key}`,
+              message: `${'x'.repeat(290)} ${key}`,
+              request_id: `request_${key}`,
+            } }, { status: 401 })
+            : Response.json({
+              status: `failed_${key}`,
+              is_error: true,
+              error: { message: `Invalid credential ${key}`, retryable: true },
+            })
+        }) as typeof fetch
+
+        const message = await runSearchTest('test query', false)
+
+        expect(message).toStartWith('Search failed for "test query": AI/ML API')
+        expect(message).not.toContain('secret-')
+        expect(message).toContain('[redacted]')
+        expect(message).toContain(kind === 'http' ? 'HTTP 401' : '(retryable)')
+        expect(requests).toBe(kind === 'poll' ? 2 : 1)
+      } finally {
+        restoreEnv()
+      }
+    },
+  )
+
   const output: ProviderOutput = {
     hits: [{ title: 'Node.js 24', url: 'https://nodejs.org/en/blog/release' }],
     providerName: 'exa-free',
@@ -497,6 +723,23 @@ describe('runSearchTest', () => {
     expect(requestedUrl).toBe('https://api.anysearch.com/v1/search')
     expect(message).toContain('Search OK via AnySearch: 1 results')
     expect(message).toContain('Top result: Any result — https://example.com/result')
+  })
+
+  test('uses the selected Keenable backend through the normal test entry', async () => {
+    process.env.WEB_SEARCH_PROVIDER = 'keenable'
+    let requestedUrl = ''
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+      requestedUrl = String(input)
+      return new Response(JSON.stringify({
+        results: [{ title: 'Keenable result', url: 'https://example.com/result', snippet: 'text' }],
+      }), { status: 200 })
+    }) as typeof fetch
+
+    const message = await runSearchTest('keenable query', false)
+
+    expect(requestedUrl).toBe('https://api.keenable.ai/v1/search/public')
+    expect(message).toContain('Search OK via Keenable: 1 results')
+    expect(message).toContain('Top result: Keenable result — https://example.com/result')
   })
 
   test('reports the backend, count, timing, and top result', async () => {

@@ -28,7 +28,7 @@ function makeContext(initialGoal: AppState['goal'] = null) {
       setAppState: (updater: (prev: AppState) => AppState) => {
         state = updater(state)
       },
-    } as any,
+    } as Parameters<typeof call>[1],
     getState: () => state,
   }
 }
