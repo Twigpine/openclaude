@@ -112,17 +112,18 @@ async function tsc(tmpDir: string, compiler = TSC_BIN, timeout = 20_000): Promis
   }
 }
 
-/** Build the CLI and SDK when package-export validation needs missing distribution artifacts. */
+let artifactsBuilt = false
+
+/** Build current sources once before validating package exports and runtime behavior. */
 function ensureBuildArtifacts(): void {
-  const distCli = join(ROOT, 'dist', 'cli.mjs')
-  const distSdk = join(ROOT, 'dist', 'sdk.mjs')
-  if (existsSync(distCli) && existsSync(distSdk)) return
+  if (artifactsBuilt) return
 
   execSync('bun run build', {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 180000,
   })
+  artifactsBuilt = true
 }
 
 afterAll(() => {
@@ -361,7 +362,7 @@ describe('package exports resolution', () => {
     expect(existsSync(join(ROOT, 'dist', 'cli.mjs'))).toBe(true)
     expect(existsSync(join(ROOT, 'dist', 'sdk.mjs'))).toBe(true)
     expect(existsSync(join(ROOT, 'src', 'entrypoints', 'sdk.d.ts'))).toBe(true)
-  })
+  }, 180_000)
 })
 
 test('built Node SDK preserves absence of inherited environment names', () => {
