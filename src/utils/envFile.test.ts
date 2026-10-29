@@ -15,6 +15,7 @@ import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
 
 const TEST_ENV_KEYS = [
   'NODE_OPTIONS',
+  'AIMLAPI_API_KEY',
   'AZURE_OPENAI_API_VERSION',
   'CLAUDE_CODE_USE_OPENAI',
   'CODEX_AUTH_JSON_PATH',
@@ -57,6 +58,7 @@ const TEST_ENV_KEYS = [
   'WEB_CUSTOM_ALLOW_PRIVATE',
   'WEB_CUSTOM_MAX_BODY_KB',
   'WEB_CUSTOM_TIMEOUT_SEC',
+  'WEB_FETCH_PROVIDER',
   'WEB_HEADERS',
   'WEB_JSON_PATH',
   'WEB_KEY',
@@ -381,6 +383,21 @@ describe('loadEnvFile', () => {
     process.env.MERGE_GATEWAY_API_KEY = 'shell-merge-key'
     expect(loadEnvFile(filePath)).toEqual({})
     expect(process.env.MERGE_GATEWAY_API_KEY).toBe('shell-merge-key')
+  })
+
+  it('loads the documented AI/ML API key and WebFetch provider values', () => {
+    const filePath = writeTempEnvFile(
+      ['AIMLAPI_API_KEY=aimlapi-key', 'WEB_FETCH_PROVIDER=aimlapi'].join('\n'),
+    )
+
+    const loaded = loadEnvFile(filePath)
+
+    expect(process.env.AIMLAPI_API_KEY).toBe('aimlapi-key')
+    expect(process.env.WEB_FETCH_PROVIDER).toBe('aimlapi')
+    expect(loaded).toEqual({
+      AIMLAPI_API_KEY: 'aimlapi-key',
+      WEB_FETCH_PROVIDER: 'aimlapi',
+    })
   })
 
   it('loads the dedicated LLMTR credential without selecting a route', () => {
