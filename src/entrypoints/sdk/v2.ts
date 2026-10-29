@@ -116,6 +116,7 @@ export type SDKSessionOptions = {
    * environment there is no honest alternative, and serialising is the
    * behaviour that is correct rather than merely concurrent.
    *
+   * Provider-derived routing/authentication variables are restored too.
    * A value of `undefined` removes the variable for the turn.
    *
    * What it does NOT do, exactly as in `query()`: a turn belonging to a
@@ -197,7 +198,7 @@ export interface SDKSession {
   getMessages(): SDKMessage[]
   /** Abort the current in-flight query. */
   interrupt(): void
-  /** Close the session and release resources. */
+  /** Close the session; active turns unwind before their environment is restored. */
   close(): void
   /**
    * Respond to a pending permission prompt asynchronously.
@@ -255,6 +256,8 @@ class SDKSessionImpl implements SDKSession {
     return this._appStateStore
   }
   private _abortController: AbortController | null = null
+  private closed = false
+  private activeEnvTurns = new Set<AsyncGenerator<SDKMessage>>()
   private agentsLoaded = false
   private mcpServers?: Record<string, unknown>
   private mcpConnected = false
@@ -335,8 +338,18 @@ class SDKSessionImpl implements SDKSession {
     // of being remembered — leaving the one key we must restore unrestorable.
     const snapshot: Record<string, string | undefined> = Object.create(null)
     try {
-      for (const [key] of entries) {
-        snapshot[key] = process.env[key]
+      // getAnthropicClient's env-only provider normalizers also write/delete
+      // these fields. They belong to this turn even when not explicit overrides.
+      const keys = new Set([
+        ...entries.map(([key]) => key),
+        'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
+        'ANTHROPIC_CUSTOM_HEADERS', 'CLAUDE_CODE_USE_OPENAI',
+        'OPENAI_API_KEY', 'OPENAI_API_KEYS', 'OPENAI_BASE_URL', 'OPENAI_MODEL',
+        'OPENAI_API_FORMAT', 'OPENAI_AZURE_STYLE', 'OPENAI_AUTH_HEADER',
+        'OPENAI_AUTH_SCHEME', 'OPENAI_AUTH_HEADER_VALUE',
+      ])
+      for (const key of keys) {
+        snapshot[key] = Object.hasOwn(process.env, key) ? process.env[key] : undefined
       }
       for (const [key, value] of entries) {
         if (value === undefined) {
@@ -380,9 +393,10 @@ class SDKSessionImpl implements SDKSession {
       (async function* (): AsyncGenerator<SDKMessage> {
         // Fast exit: if the caller's AbortController was already aborted
         // before iteration starts, do not initialize or submit a turn.
-        if (self._abortController?.signal.aborted) return
+        if (self.closed || self._abortController?.signal.aborted) return
 
         await runOutsideSdkContext(init)
+        if (self.closed) return
 
         // The session's own environment, for the length of the turn and no
         // longer. Applied AFTER init() with a full-duration mutex, the way
@@ -395,6 +409,7 @@ class SDKSessionImpl implements SDKSession {
         // the generator's return, which runs this finally with it.
         const envSnapshot = await self.applySessionEnv()
         try {
+          if (self.closed || self._abortController?.signal.aborted) return
           // Load agent definitions once (not on every sendMessage call)
           if (!self.agentsLoaded) {
             let agentDefs: AgentDefinitionsResult = { activeAgents: [], allAgents: [] }
@@ -407,6 +422,7 @@ class SDKSessionImpl implements SDKSession {
             }
             try {
               agentDefs = await getAgentDefinitionsWithOverrides(self.options.cwd)
+              if (self.closed) return
               for (const failedFile of agentDefs.failedFiles ?? []) {
                 reportDefinitionFailure(
                   `Failed to load agent definition '${failedFile.path}': ${failedFile.error}`,
@@ -482,10 +498,10 @@ class SDKSessionImpl implements SDKSession {
           switchSession(self._sessionId as SessionId, self._sessionProjectDir)
 
           try {
-            if (self._abortController?.signal.aborted) return
+            if (self.closed || self._abortController?.signal.aborted) return
             yield* self.drainAgentFailureQueue()
             for await (const engineMsg of self.engine.submitMessage(content)) {
-              if (self._abortController?.signal.aborted) break
+              if (self.closed || self._abortController?.signal.aborted) break
               yield engineMsg
               yield* self.drainTimeoutQueue()
               yield* self.drainAgentFailureQueue()
@@ -503,7 +519,12 @@ class SDKSessionImpl implements SDKSession {
       })(),
     )
 
-    yield* inner
+    if (this.options.env) this.activeEnvTurns.add(inner)
+    try {
+      yield* inner
+    } finally {
+      this.activeEnvTurns.delete(inner)
+    }
   }
 
   getMessages(): SDKMessage[] {
@@ -533,6 +554,8 @@ class SDKSessionImpl implements SDKSession {
   }
 
   close(): void {
+    if (this.closed) return
+    this.closed = true
     const wrapperController = this._abortController
     this.interruptWithSource('sdk_close')
     if (wrapperController) {
@@ -549,9 +572,27 @@ class SDKSessionImpl implements SDKSession {
         })
       }
     }
-    // Clear engine and store references to prevent memory leaks
-    this._engine = null
-    this._appStateStore = null
+    // Returning the inner generator also reaches a turn paused at a yield.
+    // A pending next() or engine finally runs first, while its env is still
+    // installed. Keep its engine/store alive until that cleanup completes.
+    const clearReferences = () => {
+      this._engine = null
+      this._appStateStore = null
+    }
+    const turns = [...this.activeEnvTurns]
+    this.activeEnvTurns.clear()
+    if (turns.length === 0) {
+      clearReferences()
+    } else {
+      void Promise.allSettled(turns.map(turn => turn.return(undefined))).then(results => {
+        clearReferences()
+        for (const result of results) {
+          if (result.status === 'rejected') {
+            console.warn('SDK: turn cleanup error:', result.reason)
+          }
+        }
+      })
+    }
   }
 
   /**

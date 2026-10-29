@@ -420,6 +420,7 @@ export type SDKSessionOptions = {
    * the turn either way. Give a session its own `env` if its turns must not
    * see another's.
    *
+   * Provider-derived routing/authentication variables are restored too.
    * A value of `undefined` removes the variable for the turn.
    */
   env?: Record<string, string | undefined>

@@ -16,6 +16,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bu
 
 import { resetEnvMutexForTesting } from './shared'
 import type { SDKMessage } from './coreTypes'
+import { getAnthropicClient } from '../../services/api/client'
+import { snapshotEnv } from '../../test/envSnapshot'
 
 const KEY = 'OPENCLAUDE_TEST_SESSION_ENV_TURN'
 
@@ -51,7 +53,7 @@ beforeAll(async () => {
   // `mock.module` registration is process-global and `mock.restore()` does
   // not remove it, so a stubbed `init` would go on standing in for the real
   // one in every test file that runs after this one in the same bun process.
-  realInit = await import('../init.js')
+  realInit = { ...(await import('../init.js')) }
   mock.module('../init.js', () => ({ init: async () => {} }))
   createSession = (await import('./v2')).unstable_v2_createSession
 })
@@ -115,6 +117,192 @@ describe('SDKSessionOptions.env through a turn', () => {
     one.close()
     two.close()
   })
+
+  test('close returns a paused turn and admits the next scoped turn', async () => {
+    process.env[KEY] = 'before'
+    const one = session({ [KEY]: 'during' })
+    const iterator = one.sendMessage('hi')[Symbol.asyncIterator]()
+    try {
+      await iterator.next()
+      one.close()
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(process.env[KEY]).toBe('before')
+      const two = session({ [KEY]: 'next' })
+      try {
+        for await (const _ of two.sendMessage('hi')) break
+        expect(seen).toEqual(['during', 'next'])
+      } finally {
+        two.close()
+      }
+    } finally {
+      await iterator.return?.()
+      one.close()
+    }
+  })
+
+  test('close waits for active engine cleanup before restoring the environment', async () => {
+    let finish!: () => void
+    const cleanup = new Promise<void>(resolve => { finish = resolve })
+    const one = session({ [KEY]: 'during' })
+    const engine = engineSeeingEnv(1)
+    engine.submitMessage = async function* () {
+      try {
+        yield* engineSeeingEnv(1).submitMessage()
+      } finally {
+        await cleanup
+        seen.push(process.env[KEY])
+      }
+    }
+    ;(one as unknown as { setEngine: (engine: unknown) => void }).setEngine(engine)
+    const iterator = one.sendMessage('hi')[Symbol.asyncIterator]()
+    try {
+      await iterator.next()
+      one.close()
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(process.env[KEY]).toBe('during')
+      finish()
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(seen).toEqual(['during', 'during'])
+      expect(Object.hasOwn(process.env, KEY)).toBe(false)
+    } finally {
+      finish()
+      await iterator.return?.()
+      one.close()
+    }
+  })
+
+  test('close during a pending next waits for work without yielding another message', async () => {
+    let finish!: () => void
+    let entered!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const work = new Promise<void>(resolve => { finish = resolve })
+    const one = session({ [KEY]: 'during' })
+    const engine = engineSeeingEnv(1)
+    engine.submitMessage = async function* () {
+      entered()
+      await work
+      yield* engineSeeingEnv(1).submitMessage()
+    }
+    ;(one as unknown as { setEngine: (engine: unknown) => void }).setEngine(engine)
+    const iterator = one.sendMessage('hi')[Symbol.asyncIterator]()
+    const next = iterator.next()
+    try {
+      await started
+      one.close()
+      one.close()
+      expect(process.env[KEY]).toBe('during')
+      finish()
+      expect((await next).done).toBe(true)
+      expect(seen).toEqual(['during'])
+      expect(Object.hasOwn(process.env, KEY)).toBe(false)
+    } finally {
+      finish()
+      await iterator.return?.()
+      one.close()
+    }
+  })
+
+  test('closing a turn queued for the mutex never submits its engine', async () => {
+    const first = session({ [KEY]: 'first' })
+    const second = session({ [KEY]: 'second' })
+    const firstIterator = first.sendMessage('hi')[Symbol.asyncIterator]()
+    const secondIterator = second.sendMessage('hi')[Symbol.asyncIterator]()
+    try {
+      await firstIterator.next()
+      const pending = secondIterator.next()
+      await new Promise(resolve => setTimeout(resolve, 10))
+      second.close()
+      first.close()
+      expect((await pending).done).toBe(true)
+      expect(seen).toEqual(['first'])
+      expect(Object.hasOwn(process.env, KEY)).toBe(false)
+      const third = session({ [KEY]: 'third' })
+      try {
+        for await (const _ of third.sendMessage('hi')) break
+        expect(seen).toEqual(['first', 'third'])
+      } finally {
+        third.close()
+      }
+    } finally {
+      await firstIterator.return?.()
+      await secondIterator.return?.()
+      first.close()
+      second.close()
+    }
+  })
+
+  for (const route of [
+    { key: 'XAI_API_KEY', model: 'grok-4', host: 'api.x.ai', native: false },
+    { key: 'MINIMAX_API_KEY', model: 'MiniMax-M2.5', host: 'api.minimax.io', native: true },
+    { key: 'API_ROUTE_API_KEY', model: 'claude-sonnet-4-6', host: 'global.api-route.com', native: false },
+  ]) {
+    test(`restores provider-derived environment after a ${route.key} request`, async () => {
+      const keys = [
+        'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
+        'ANTHROPIC_CUSTOM_HEADERS', 'OPENAI_API_KEY', 'OPENAI_API_KEYS',
+        'OPENAI_BASE_URL', 'OPENAI_MODEL', 'OPENAI_API_FORMAT',
+        'OPENAI_AZURE_STYLE', 'OPENAI_AUTH_HEADER', 'OPENAI_AUTH_SCHEME',
+        'OPENAI_AUTH_HEADER_VALUE', 'CLAUDE_CODE_USE_OPENAI', route.key,
+      ]
+      const restore = snapshotEnv(keys, { clear: true })
+      const originalFetch = globalThis.fetch
+      const globals = globalThis as Record<string, unknown>
+      const originalMacro = globals.MACRO
+      globals.MACRO = { VERSION: 'test-version' }
+      const requests: { url: string; headers: Headers }[] = []
+      const one = session({ [route.key]: 'session-test-secret' })
+      try {
+        // These ambient values are deleted or overwritten by normalization.
+        process.env.OPENAI_AUTH_HEADER = 'X-Ambient-Key'
+        process.env.OPENAI_AUTH_SCHEME = 'Bearer'
+        process.env.OPENAI_AUTH_HEADER_VALUE = 'ambient-auth'
+        process.env.OPENAI_AZURE_STYLE = '1'
+        process.env.OPENAI_API_FORMAT = 'responses'
+        if (route.native) {
+          process.env.ANTHROPIC_API_KEY = 'ambient-native-key'
+          process.env.ANTHROPIC_MODEL = 'ambient-model'
+          process.env.CLAUDE_CODE_USE_OPENAI = '1'
+        }
+        if (route.key === 'API_ROUTE_API_KEY') {
+          process.env.OPENAI_API_KEYS = 'ambient-pool-key'
+          process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Ambient: before'
+        }
+        const before = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+        globalThis.fetch = (async (input, init) => {
+          requests.push({ url: String(input), headers: new Headers(init?.headers) })
+          return Response.json(route.native
+            ? { id: 'msg-test', type: 'message', role: 'assistant', model: route.model,
+                content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
+                usage: { input_tokens: 1, output_tokens: 1 } }
+            : { id: 'chat-test', object: 'chat.completion', model: route.model,
+                choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 1, completion_tokens: 1 } })
+        }) as typeof fetch
+        const engine = engineSeeingEnv(1)
+        engine.submitMessage = async function* () {
+          const client = await getAnthropicClient({ maxRetries: 0, model: route.model })
+          await client.beta.messages.create({
+            model: route.model, max_tokens: 16,
+            messages: [{ role: 'user', content: 'hello' }],
+          })
+          yield* engineSeeingEnv(1).submitMessage()
+        }
+        ;(one as unknown as { setEngine: (engine: unknown) => void }).setEngine(engine)
+        for await (const _ of one.sendMessage('hi')) { /* drain */ }
+        expect(requests).toHaveLength(1)
+        expect(new URL(requests[0]!.url).hostname).toBe(route.host)
+        expect(requests[0]!.headers.get(route.native ? 'x-api-key' : 'authorization'))
+          .toBe(route.native ? 'session-test-secret' : 'Bearer session-test-secret')
+        expect(Object.fromEntries(keys.map(key => [key, process.env[key]]))).toEqual(before)
+      } finally {
+        one.close()
+        globalThis.fetch = originalFetch
+        if (originalMacro === undefined) delete globals.MACRO
+        else globals.MACRO = originalMacro
+        restore()
+      }
+    })
+  }
 
   /**
    * Two turns, two environments, one process. They may not interleave, and the
