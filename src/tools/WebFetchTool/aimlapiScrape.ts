@@ -18,6 +18,7 @@ import {
   SOURCE_HEADER_NAME,
 } from '../../integrations/aimlapi/config.js'
 import { sleep } from '../../integrations/aimlapi/transport.js'
+import { firstUsableCredential } from '../../services/api/credentialPool.js'
 import { createCombinedAbortSignal } from '../../utils/combinedAbortSignal.js'
 
 /**
@@ -99,7 +100,7 @@ export function isAimlapiWebFetchSelected(): boolean {
  * must never be sent to tools.aimlapi.com: treat it as no key at all.
  */
 function isProxiedAimlapiProfileKey(): boolean {
-  const baseUrl = (process.env.OPENAI_BASE_URL ?? process.env.OPENAI_API_BASE)?.trim()
+  const baseUrl = process.env.OPENAI_BASE_URL?.trim() || process.env.OPENAI_API_BASE?.trim()
   return (
     process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'aimlapi' &&
     Boolean(baseUrl) &&
@@ -107,8 +108,15 @@ function isProxiedAimlapiProfileKey(): boolean {
   )
 }
 
+/**
+ * A provider profile can export a comma-separated credential pool as
+ * AIMLAPI_API_KEY. Use its first usable key, as the web search backend does;
+ * there is no rotation or retry across keys for billed runs.
+ */
 function resolveApiKey(options: AimlapiScrapeOptions): string {
-  const ambientKey = isProxiedAimlapiProfileKey() ? undefined : process.env.AIMLAPI_API_KEY
+  const ambientKey = isProxiedAimlapiProfileKey()
+    ? undefined
+    : firstUsableCredential(process.env.AIMLAPI_API_KEY)
   const apiKey = (options.apiKey ?? ambientKey ?? '').trim()
   if (!apiKey) {
     throw new Error(
@@ -153,15 +161,21 @@ function pollDelayMs(run: ToolboxRun): number {
   return Math.min(Math.max(hint, MIN_POLL_INTERVAL_MS), MAX_POLL_INTERVAL_MS)
 }
 
-async function requestError(response: Response, action: string): Promise<Error> {
+/** Remove an echoed credential before error text is shown. */
+function redact(value: string | undefined, apiKey: string): string | undefined {
+  return value?.split(apiKey).join('[redacted]')
+}
+
+async function requestError(response: Response, action: string, apiKey: string): Promise<Error> {
   const body = await readJson<ToolboxErrorBody>(response)
-  const code = body?.error?.code ? ` (${body.error.code})` : ''
-  const message = body?.error?.message ? `: ${body.error.message}` : ''
+  const code = body?.error?.code ? ` (${redact(body.error.code, apiKey)})` : ''
+  const message = body?.error?.message ? `: ${redact(body.error.message, apiKey)}` : ''
   return new Error(`AI/ML API Toolbox ${action} error ${response.status}${code}${message}`)
 }
 
 async function startRun(
   url: string,
+  apiKey: string,
   headers: Record<string, string>,
   signal: AbortSignal,
   maxAttempts: number,
@@ -180,6 +194,9 @@ async function startRun(
       method: 'POST',
       headers,
       body,
+      // Never follow a redirect: the key and attribution headers must not
+      // reach any host but the Toolbox.
+      redirect: 'error',
       signal,
     })
     if (response.ok) {
@@ -188,7 +205,7 @@ async function startRun(
       return run
     }
     if (!RETRYABLE_HTTP_STATUSES.has(response.status) || attempt >= maxAttempts - 1) {
-      throw await requestError(response, 'run')
+      throw await requestError(response, 'run', apiKey)
     }
     await response.body?.cancel()
     await sleep(retryDelayMs(response, attempt, backoffMs), signal)
@@ -197,6 +214,7 @@ async function startRun(
 
 async function waitForRun(
   run: ToolboxRun,
+  apiKey: string,
   headers: Record<string, string>,
   signal: AbortSignal,
 ): Promise<ToolboxRun> {
@@ -206,13 +224,13 @@ async function waitForRun(
     await sleep(pollDelayMs(current), signal)
     const response = await fetch(
       `${AIMLAPI_TOOLBOX_BASE_URL}/runs/${encodeURIComponent(current.id)}`,
-      { method: 'GET', headers, signal },
+      { method: 'GET', headers, redirect: 'error', signal },
     )
     if (RETRYABLE_HTTP_STATUSES.has(response.status)) {
       await response.body?.cancel()
       continue
     }
-    if (!response.ok) throw await requestError(response, 'run status')
+    if (!response.ok) throw await requestError(response, 'run status', apiKey)
     const next = await readJson<ToolboxRun>(response)
     if (!next) throw new Error('AI/ML API Toolbox run status returned an invalid response')
     current = { ...next, id: next.id ?? current.id }
@@ -246,7 +264,8 @@ export async function scrapeWithAimlapi(
   if (!url.trim()) {
     throw new Error('AI/ML API Toolbox URL cannot be empty')
   }
-  const headers = buildHeaders(resolveApiKey(options))
+  const apiKey = resolveApiKey(options)
+  const headers = buildHeaders(apiKey)
   const { signal, cleanup } = createCombinedAbortSignal(options.signal, {
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   })
@@ -254,15 +273,16 @@ export async function scrapeWithAimlapi(
   try {
     const started = await startRun(
       url,
+      apiKey,
       headers,
       signal,
       options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
       options.backoffMs ?? DEFAULT_BACKOFF_MS,
     )
-    const run = await waitForRun(started, headers, signal)
+    const run = await waitForRun(started, apiKey, headers, signal)
 
     if (run.is_error || run.status !== 'completed') {
-      const reason = run.error?.message ?? `run ended with status ${run.status}`
+      const reason = redact(run.error?.message, apiKey) ?? `run ended with status ${redact(run.status, apiKey)}`
       const retry = run.error?.retryable ? ' (retryable)' : ''
       throw new Error(
         `AI/ML API Toolbox ${AIMLAPI_WEB_FETCH_TOOL_ID} failed for ${url}: ${reason}${retry}.${capNote(run)}`,

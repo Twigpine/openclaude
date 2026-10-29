@@ -87,6 +87,7 @@ describe('scrapeWithAimlapi', () => {
     const fetchMock = mock(async (input: unknown, init?: RequestInit) => {
       expect(String(input)).toBe('https://tools.aimlapi.com/v1/tools/run')
       expect(init?.method).toBe('POST')
+      expect(init?.redirect).toBe('error')
       const headers = init?.headers as Record<string, string>
       expect(headers.Authorization).toBe('Bearer aiml-test-key')
       expect(headers['X-AIMLAPI-Source']).toBe('agent/openclaude')
@@ -150,6 +151,57 @@ describe('scrapeWithAimlapi', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  test('does not send a proxy profile key when only the OPENAI_API_BASE alias is set', async () => {
+    process.env.AIMLAPI_API_KEY = 'proxy-credential'
+    process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'aimlapi'
+    process.env.OPENAI_API_BASE = 'https://my-proxy.example.com/v1'
+    const fetchMock = mock(async () => json(completedRun('unused')))
+    globalThis.fetch = asMockFetch(fetchMock)
+
+    await expect(scrapeWithAimlapi('https://example.com')).rejects.toThrow(
+      'WEB_FETCH_PROVIDER=aimlapi needs an AI/ML API key',
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test('sends only the first key of a pooled AIMLAPI_API_KEY', async () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-first-key, aiml-second-key'
+    const fetchMock = mock(async (_input: unknown, init?: RequestInit) => {
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer aiml-first-key')
+      return json(completedRun('# Pooled'))
+    })
+    globalThis.fetch = asMockFetch(fetchMock)
+
+    await expect(scrapeWithAimlapi('https://example.com')).resolves.toMatchObject({
+      markdown: '# Pooled',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test('refuses a redirect, so the key and attribution never leave the Toolbox host', async () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-test-key'
+    const fetchMock = mock(async (_input: unknown, init?: RequestInit) => {
+      // What fetch does with a 3xx response when redirect is 'error'.
+      if (init?.redirect === 'error') throw new TypeError('unexpected redirect')
+      return new Response(null, { status: 302, headers: { Location: 'https://elsewhere.example/' } })
+    })
+    globalThis.fetch = asMockFetch(fetchMock)
+
+    await expect(scrapeWithAimlapi('https://example.com')).rejects.toThrow('unexpected redirect')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test('redacts the key when the Toolbox echoes it in an error', async () => {
+    process.env.AIMLAPI_API_KEY = 'aiml-echoed-key'
+    globalThis.fetch = asMockFetch(mock(async () =>
+      json({ error: { code: 'invalid_api_key', message: 'Key aiml-echoed-key is not valid.' } }, 401),
+    ))
+
+    const error = String(await scrapeWithAimlapi('https://example.com').catch(e => e))
+    expect(error).toContain('AI/ML API Toolbox run error 401 (invalid_api_key): Key [redacted] is not valid.')
+    expect(error).not.toContain('aiml-echoed-key')
+  })
+
   test('polls a queued (202) run until it completes', async () => {
     process.env.AIMLAPI_API_KEY = 'aiml-test-key'
     const responses = [
@@ -168,6 +220,7 @@ describe('scrapeWithAimlapi', () => {
     const [pollUrl, pollInit] = callArgs(fetchMock, 1) as [string, RequestInit]
     expect(pollUrl).toBe('https://tools.aimlapi.com/v1/tools/runs/run%207')
     expect(pollInit.method).toBe('GET')
+    expect(pollInit.redirect).toBe('error')
     expect((pollInit.headers as Record<string, string>)['X-AIMLAPI-Partner-ID']).toBe(
       'part_62yQoGYDq4Yqnrj2R1iGrDNJ',
     )
