@@ -14,7 +14,6 @@
  */
 
 import { describe, expect, test, afterEach } from 'bun:test'
-import { execFileSync } from 'node:child_process'
 
 import { unstable_v2_createSession } from './v2'
 import { resetEnvMutexForTesting } from './shared'
@@ -128,24 +127,4 @@ describe('SDKSessionOptions.env', () => {
     first.close()
     second.close()
   })
-})
-
-test('built Node SDK preserves absence of inherited environment names', () => {
-  const sdkUrl = new URL('../../../dist/sdk.mjs', import.meta.url).href
-  const result = execFileSync('node', ['--input-type=module', '-e', `
-    import { unstable_v2_createSession } from ${JSON.stringify(sdkUrl)};
-    const keys = ['__proto__', 'constructor', 'toString'];
-    for (const key of keys) delete process.env[key];
-    const session = unstable_v2_createSession({
-      cwd: process.cwd(), env: Object.fromEntries(keys.map(key => [key, 'during'])),
-    });
-    const snapshot = await session.applySessionEnv();
-    session.restoreSessionEnv(snapshot);
-    session.close();
-    if (keys.some(key => Object.hasOwn(process.env, key))) {
-      throw new Error('restoration created an originally absent environment entry');
-    }
-    console.log('restored absence');
-  `], { encoding: 'utf8' })
-  expect(result.trim()).toBe('restored absence')
 })

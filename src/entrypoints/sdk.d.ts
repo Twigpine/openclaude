@@ -422,6 +422,11 @@ export type SDKSessionOptions = {
    *
    * Provider-derived routing/authentication variables are restored too.
    * A value of `undefined` removes the variable for the turn.
+   *
+   * A paused iterator holds the mutex: finish the turn or leave the loop
+   * with `break`/`return` before awaiting another env-carrying turn.
+   * A `canUseTool` callback runs inside the turn and must not await an
+   * env-carrying `query()` or session turn, which would wait on its mutex.
    */
   env?: Record<string, string | undefined>
   /**
