@@ -545,7 +545,8 @@ class OpenClaudeChatViewProvider {
         case 'resume_session':
           this._chatController._selectionGeneration++;
           this._chatController.stopSession();
-          webview.postMessage({ type: 'session_cleared' });
+          this._chatController._messages = [];
+          this._chatController.broadcast({ type: 'session_cleared' });
           {
             const generation = this._chatController._selectionGeneration;
             await this._loadAndDisplaySession(webview, msg.sessionId);
@@ -660,7 +661,8 @@ class OpenClaudeChatPanelManager {
         case 'resume_session':
           this._chatController._selectionGeneration++;
           this._chatController.stopSession();
-          webview.postMessage({ type: 'session_cleared' });
+          this._chatController._messages = [];
+          this._chatController.broadcast({ type: 'session_cleared' });
           {
             const generation = this._chatController._selectionGeneration;
             await this._loadAndDisplaySession(webview, msg.sessionId);

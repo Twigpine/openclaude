@@ -140,6 +140,8 @@ test('resume hands the selected transcript to the CLI, including reconnect and W
             try {
               const selectedId = '48f67e50-946e-4d74-b0b6-c19759b99623';
               const loading = receive({ type: 'resume_session', sessionId: selectedId });
+              assert.deepEqual(fresh.getMessages(), [], 'pending resume must not retain old controller history');
+              assert.equal(otherUpdates.at(-1).type, 'session_cleared', 'resume clears every registered view');
               const launchCount = calls.length;
               const sendCount = rendererSends.length;
               await submitPrompt('must not reach the previous session');

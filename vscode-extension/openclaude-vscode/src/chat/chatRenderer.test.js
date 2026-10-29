@@ -87,3 +87,57 @@ test('assistant Markdown links allow safe schemes without injecting attributes o
   assert.ok(formatted.includes('<strong>safe</strong>'));
   assert.ok(formatted.includes('href="https://example.com/?a=1&amp;b=2"'));
 });
+
+
+test('tool file links escape attribute delimiters on initial render and input updates', () => {
+  const created = [];
+  const inserted = [];
+  const element = () => {
+    const children = new Map();
+    const el = {
+      style: {}, value: '', textContent: '', scrollHeight: 20, dataset: {},
+      classList: { toggle() {}, add() {} }, addEventListener() {}, appendChild() {},
+      querySelector(selector) {
+        if (selector === '.tool-path' || selector === '[data-tool-output]') return null;
+        if (!children.has(selector)) children.set(selector, element());
+        return children.get(selector);
+      },
+      insertAdjacentHTML(_position, html) { inserted.push(html); },
+    };
+    created.push(el);
+    return el;
+  };
+  const elements = new Map();
+  let receive;
+  const script = renderChatHtml({ nonce: 'test', platform: 'linux' })
+    .match(/<script nonce="test">([\s\S]*?)<\/script>/)[1];
+  vm.runInNewContext(script, {
+    document: {
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, element());
+        return elements.get(id);
+      },
+      createElement: element, addEventListener() {},
+      querySelector: () => created.find(el => el.dataset.toolId === 'file-tool'),
+    },
+    window: { addEventListener(_name, listener) { receive = listener; } },
+    acquireVsCodeApi: () => ({ postMessage() {}, getState: () => null }),
+    requestAnimationFrame: callback => callback(),
+  });
+  const filePath = '/tmp/a" onclick="bad & <tag> \' name.txt';
+  const escaped = '/tmp/a&quot; onclick=&quot;bad &amp; &lt;tag&gt; &#39; name.txt';
+  receive({ data: { type: 'tool_use', toolUse: {
+    id: 'file-tool', name: 'Read', input: { file_path: filePath }, inputPreview: filePath,
+  } } });
+  const card = created.find(el => el.dataset.toolId === 'file-tool');
+  const checkLinks = (html, count) => {
+    const paths = [...html.matchAll(/data-filepath="([^"]*)"/g)].map(match => match[1]);
+    assert.deepEqual(paths, Array(count).fill(escaped));
+    assert.ok(!/<a\b[^>]*" onclick="/.test(html));
+    assert.ok(!html.includes('<tag>'));
+  };
+  checkLinks(card.innerHTML, 2);
+  receive({ data: { type: 'tool_input_ready', toolUseId: 'file-tool', input: { path: filePath }, name: 'Read' } });
+  checkLinks(inserted.at(-1), 1);
+  checkLinks(card.querySelector('.tool-body').innerHTML, 1);
+});

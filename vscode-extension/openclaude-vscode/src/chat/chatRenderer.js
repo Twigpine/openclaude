@@ -754,6 +754,10 @@ function renderChatHtml({ nonce, platform }) {
       .replace(/>/g, '&gt;');
   }
 
+  function escapeAttribute(text) {
+    return escapeForMd(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   function highlightCode(code, lang) {
     let result = code;
     const kwPattern = /\\b(const|let|var|function|return|if|else|for|while|class|import|export|from|async|await|try|catch|throw|new|typeof|instanceof|switch|case|break|default|continue|do|in|of|yield|void|delete|true|false|null|undefined|this|super|extends|implements|interface|type|enum|public|private|protected|static|readonly|abstract|def|print|self|elif|except|finally|with|as|lambda|pass|raise|None|True|False)\\b/g;
@@ -878,10 +882,10 @@ function renderChatHtml({ nonce, platform }) {
 
     var isFileTool = inputSummary && !toolUse.input?.command;
     var fileLink = isFileTool
-      ? '<a class="file-link" data-filepath="' + escapeForMd(inputSummary) + '" title="Open in editor">' + escapeForMd(inputSummary.split(/[\\/]/).pop() || inputSummary) + '</a>'
+      ? '<a class="file-link" data-filepath="' + escapeAttribute(inputSummary) + '" title="Open in editor">' + escapeForMd(inputSummary.split(/[\\/]/).pop() || inputSummary) + '</a>'
       : (inputSummary ? escapeForMd(inputSummary.split(/[\\/]/).pop() || inputSummary) : '');
     var pathDisplay = isFileTool
-      ? '<div class="tool-input-label">Path</div><div class="tool-input-content"><a class="file-link" data-filepath="' + escapeForMd(inputSummary) + '" title="Open in editor">' + escapeForMd(inputSummary) + '</a></div>'
+      ? '<div class="tool-input-label">Path</div><div class="tool-input-content"><a class="file-link" data-filepath="' + escapeAttribute(inputSummary) + '" title="Open in editor">' + escapeForMd(inputSummary) + '</a></div>'
       : (inputSummary ? '<div class="tool-input-label">' + (toolUse.input?.command ? 'Command' : 'Path') + '</div><div class="tool-input-content">' + escapeForMd(inputSummary) + '</div>' : '');
 
     card.innerHTML =
@@ -944,7 +948,7 @@ function renderChatHtml({ nonce, platform }) {
       const fp = input.file_path || input.path;
       const shortName = fp.split(/[\\/]/).pop() || fp;
       if (!nameEl.querySelector('.tool-path')) {
-        nameEl.insertAdjacentHTML('beforeend', ' <span class="tool-path"><a class="file-link" data-filepath="' + escapeForMd(fp) + '" title="Open in editor">' + escapeForMd(shortName) + '</a></span>');
+        nameEl.insertAdjacentHTML('beforeend', ' <span class="tool-path"><a class="file-link" data-filepath="' + escapeAttribute(fp) + '" title="Open in editor">' + escapeForMd(shortName) + '</a></span>');
       }
     }
 
@@ -953,7 +957,7 @@ function renderChatHtml({ nonce, platform }) {
     if (input.file_path || input.path) {
       var fp = input.file_path || input.path;
       pathHtml = '<div class="tool-input-label">Path</div><div class="tool-input-content">' +
-        '<a class="file-link" data-filepath="' + escapeForMd(fp) + '" title="Open in editor">' + escapeForMd(fp) + '</a></div>';
+        '<a class="file-link" data-filepath="' + escapeAttribute(fp) + '" title="Open in editor">' + escapeForMd(fp) + '</a></div>';
     }
     if (input.command) {
       pathHtml = '<div class="tool-input-label">Command</div><div class="tool-input-content">' +

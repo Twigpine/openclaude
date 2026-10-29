@@ -2767,8 +2767,8 @@ function extractFirstPrompt(transcript: TranscriptMessage[]): string {
 }
 
 /**
- * Gets the last user message that was processed (i.e., before any non-user message appears).
- * Used to determine if a session has valid user interaction.
+ * Returns the first meaningful user text from the transcript, scanning from the start.
+ * Skips meta/compact-summary entries and non-meaningful command or metadata content.
  */
 export function getFirstMeaningfulUserMessageTextContent<T extends Message>(
   transcript: T[],
@@ -3524,7 +3524,7 @@ export function checkResumeConsistency(chain: Message[]): void {
 }
 
 /**
- * Builds a filie history snapshot chain from the conversation
+ * Builds a file history snapshot chain from the conversation
  */
 function buildFileHistorySnapshotChain(
   fileHistorySnapshots: Map<UUID, FileHistorySnapshotMessage>,
@@ -4093,7 +4093,8 @@ export function clearSessionMetadata(): void {
 /**
  * Re-append cached session metadata (custom title, tag) to the end of the
  * transcript file. Call this after compaction so the metadata stays within
- * the 16KB tail window that readLiteMetadata reads during progressive loading.
+ * the bounded tail window (LITE_READ_BUF_SIZE) that readLiteMetadata scans
+ * during progressive loading.
  * Without this, enough post-compaction messages can push the metadata entry
  * out of the window, causing `--resume` to show the auto-generated firstPrompt
  * instead of the user-set session name.
