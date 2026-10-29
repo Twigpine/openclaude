@@ -6,6 +6,7 @@ import * as React from 'react'
 
 import { createRoot } from '../../ink.js'
 import { AppStateProvider } from '../../state/AppState.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -38,14 +39,17 @@ const ENV_KEYS = [
   'ANYSEARCH_API_KEY',
   'KEENABLE_API_KEY',
   'AIMLAPI_API_KEY',
+  'OPENAI_API_KEY',
   'OPENAI_BASE_URL',
+  'OPENAI_API_BASE',
+  'CLAUDE_CODE_PROVIDER_ROUTE_ID',
 ] as const
-const savedEnv = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]))
+let restoreEnv: () => void = () => {}
 const originalFetch = globalThis.fetch
 
 beforeEach(async () => {
   await acquireSharedMutationLock('commands/search/search.test.tsx')
-  for (const key of ENV_KEYS) delete process.env[key]
+  restoreEnv = snapshotEnv(ENV_KEYS, { clear: true })
   for (const key of Object.keys(savedEnvBlock)) delete savedEnvBlock[key]
   setSearchEnvStoreForTests(memoryStore)
 })
@@ -54,10 +58,7 @@ afterEach(() => {
   try {
     setSearchEnvStoreForTests(undefined)
     globalThis.fetch = originalFetch
-    for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
+    restoreEnv()
   } finally {
     releaseSharedMutationLock()
   }

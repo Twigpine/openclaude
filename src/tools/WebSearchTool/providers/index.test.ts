@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from 'bun:test'
+import { snapshotEnv } from '../../../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -7,47 +8,39 @@ import { getProviderMode, getProviderChain, getAvailableProviders } from './inde
 import { resetExaFreeRateLimiterForTests } from './exaFree.js'
 import type { ProviderMode } from './index.js'
 
-const savedWebSearchEnv = {
-  WEB_SEARCH_PROVIDER: process.env.WEB_SEARCH_PROVIDER,
-  WEB_SEARCH_TIMEOUT_SEC: process.env.WEB_SEARCH_TIMEOUT_SEC,
-  FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY,
-  FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL,
-  TAVILY_API_KEY: process.env.TAVILY_API_KEY,
-  ANYSEARCH_API_KEY: process.env.ANYSEARCH_API_KEY,
-  KEENABLE_API_KEY: process.env.KEENABLE_API_KEY,
-  AIMLAPI_API_KEY: process.env.AIMLAPI_API_KEY,
-  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  EXA_API_KEY: process.env.EXA_API_KEY,
-  EXA_FREE_TIER: process.env.EXA_FREE_TIER,
-  YOU_API_KEY: process.env.YOU_API_KEY,
-  JINA_API_KEY: process.env.JINA_API_KEY,
-  BRAVE_API_KEY: process.env.BRAVE_API_KEY,
-  BING_API_KEY: process.env.BING_API_KEY,
-  MOJEEK_API_KEY: process.env.MOJEEK_API_KEY,
-  LINKUP_API_KEY: process.env.LINKUP_API_KEY,
-  OLLAMA_API_KEY: process.env.OLLAMA_API_KEY,
-  OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL,
-  CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
-  OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
-  OPENAI_API_BASE: process.env.OPENAI_API_BASE,
-  CLAUDE_CODE_PROVIDER_ROUTE_ID: process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID,
-}
+const WEB_SEARCH_ENV_KEYS = [
+  'WEB_SEARCH_PROVIDER',
+  'WEB_SEARCH_TIMEOUT_SEC',
+  'FIRECRAWL_API_KEY',
+  'FIRECRAWL_API_URL',
+  'TAVILY_API_KEY',
+  'ANYSEARCH_API_KEY',
+  'KEENABLE_API_KEY',
+  'AIMLAPI_API_KEY',
+  'OPENAI_API_KEY',
+  'EXA_API_KEY',
+  'EXA_FREE_TIER',
+  'YOU_API_KEY',
+  'JINA_API_KEY',
+  'BRAVE_API_KEY',
+  'BING_API_KEY',
+  'MOJEEK_API_KEY',
+  'LINKUP_API_KEY',
+  'OLLAMA_API_KEY',
+  'OLLAMA_BASE_URL',
+  'CLAUDE_CODE_USE_OPENAI',
+  'OPENAI_BASE_URL',
+  'OPENAI_API_BASE',
+  'CLAUDE_CODE_PROVIDER_ROUTE_ID',
+] as const
+let restoreWebSearchEnv: () => void = () => {}
 
 const originalFetch = globalThis.fetch
 const originalConsoleError = console.error
 
-function restoreWebSearchEnv() {
-  for (const [key, value] of Object.entries(savedWebSearchEnv)) {
-    if (value === undefined) {
-      delete process.env[key]
-    } else {
-      process.env[key] = value
-    }
-  }
-}
-
 beforeEach(async () => {
   await acquireSharedMutationLock('WebSearchTool/providers/index.test.ts')
+  restoreWebSearchEnv = snapshotEnv(WEB_SEARCH_ENV_KEYS, { clear: true })
   // The keyless Exa free tier is always configured, so it would join every
   // auto chain and make real network calls. Tests that exercise it opt in.
   process.env.EXA_FREE_TIER = '0'
