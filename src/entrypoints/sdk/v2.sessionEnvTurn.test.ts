@@ -212,6 +212,7 @@ describe('SDKSessionOptions.env through a turn', () => {
       const pending = secondIterator.next()
       await new Promise(resolve => setTimeout(resolve, 10))
       second.close()
+      expect(() => second.getMessages()).toThrow('engine not initialized')
       first.close()
       expect((await pending).done).toBe(true)
       expect(seen).toEqual(['first'])

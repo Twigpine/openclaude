@@ -435,6 +435,7 @@ class SDKSessionImpl implements SDKSession {
               reportDefinitionFailure(errorMessage)
             }
 
+            if (self.closed) return
             const userAgents = buildSdkUserAgents(
               self.options.agents,
               (name, errorMessage) => {
@@ -480,6 +481,7 @@ class SDKSessionImpl implements SDKSession {
           if (!self.mcpConnected && self.mcpServers && Object.keys(self.mcpServers).length > 0) {
             try {
               const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers)
+              if (self.closed) return
               if (mcpClients.length > 0) {
                 self.engine.setMcpClients(mcpClients)
               }
@@ -572,27 +574,17 @@ class SDKSessionImpl implements SDKSession {
         })
       }
     }
-    // Returning the inner generator also reaches a turn paused at a yield.
-    // A pending next() or engine finally runs first, while its env is still
-    // installed. Keep its engine/store alive until that cleanup completes.
-    const clearReferences = () => {
-      this._engine = null
-      this._appStateStore = null
-    }
-    const turns = [...this.activeEnvTurns]
-    this.activeEnvTurns.clear()
-    if (turns.length === 0) {
-      clearReferences()
-    } else {
-      void Promise.allSettled(turns.map(turn => turn.return(undefined))).then(results => {
-        clearReferences()
-        for (const result of results) {
-          if (result.status === 'rejected') {
-            console.warn('SDK: turn cleanup error:', result.reason)
-          }
-        }
+    // Return paused turns and let pending engine work unwind before their
+    // finally restores the environment. A queued turn has not acquired an
+    // environment and must not keep the closed session's engine/store alive.
+    for (const turn of this.activeEnvTurns) {
+      void turn.return(undefined).catch(error => {
+        console.warn('SDK: turn cleanup error:', error)
       })
     }
+    this.activeEnvTurns.clear()
+    this._engine = null
+    this._appStateStore = null
   }
 
   /**
