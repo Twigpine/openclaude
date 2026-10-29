@@ -74,7 +74,7 @@ Turn it on with `/search aimlapi` (or `WEB_SEARCH_PROVIDER=aimlapi`). It reuses 
 `AIMLAPI_API_KEY` this setup provides, so there is no second key to paste.
 
 Each search is billed to your AI/ML API balance — about $0.01 for the 10 results
-OpenClaude requests, and every run is capped at `max_cost_usd: 0.025`. Because it costs
+OpenClaude requests. Every run requests a cost limit with `max_cost_usd: 0.025`. Because it costs
 money, it is never chosen automatically: having an `AIMLAPI_API_KEY` does not put it in
 the `auto` search order. Switch back with `/search auto`. See
 [Web Search Providers](../src/tools/WebSearchTool/README_SEARCH_PROVIDERS.md#aiml-api-toolbox-websearch)

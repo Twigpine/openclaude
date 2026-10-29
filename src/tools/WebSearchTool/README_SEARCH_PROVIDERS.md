@@ -168,8 +168,8 @@ key, `/search aimlapi` leaves your settings unchanged and says how to set it up.
 
 Each search runs the Toolbox tool `web/search` and is billed to your AI/ML API balance.
 The tool publishes a $0.0091–$0.0221 price range per run (as of 2026-10); a 10-result
-search was charged $0.0091. Every run carries `max_cost_usd: 0.025`; a run that would
-cost more is refused by the service before it is charged.
+search was charged $0.0091. Every run requests a cost limit with `max_cost_usd: 0.025`;
+enforcement is handled by the Toolbox service.
 
 **Request:**
 ```

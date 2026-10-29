@@ -33,7 +33,7 @@ const MAX_RESULTS = 10
 /**
  * Spend cap per search. web/search publishes a $0.0091–$0.0221 price range
  * (2026-10; a 10-result run was charged $0.0091). The cap covers the tool's
- * own maximum, so it only refuses a run whose price went up.
+ * published maximum; enforcement is handled by the Toolbox service.
  */
 export const AIMLAPI_SEARCH_MAX_COST_USD = 0.025
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped', 'timed_out'])
@@ -71,6 +71,11 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/** Remove echoed credentials before error fields are clipped or displayed. */
+function errorText(value: unknown, key: string): string | undefined {
+  return text(value)?.split(key.trim()).join('[redacted]')
 }
 
 function clip(message: string): string {
@@ -132,12 +137,12 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 /** Error text for a refused request (4xx/5xx). Never includes the key. */
-function httpError(status: number, body: unknown): Error {
+function httpError(status: number, body: unknown, key: string): Error {
   const envelope = record(body)
   const error = record(envelope?.error)
-  const code = text(error?.code)
-  const message = text(error?.message) ?? text(envelope?.message)
-  const requestId = text(error?.request_id) ?? text(envelope?.requestId)
+  const code = errorText(error?.code, key)
+  const message = errorText(error?.message, key) ?? errorText(envelope?.message, key)
+  const requestId = errorText(error?.request_id, key) ?? errorText(envelope?.requestId, key)
   const hint =
     status === 401
       ? ' (check AIMLAPI_API_KEY)'
@@ -153,14 +158,14 @@ function httpError(status: number, body: unknown): Error {
 }
 
 /** Turn a finished run into hits, or throw if the run failed. */
-function runResults(run: Record<string, unknown>): unknown[] {
+function runResults(run: Record<string, unknown>, key: string): unknown[] {
   const status = text(run.status) ?? 'unknown'
   if (run.is_error === true || status !== 'completed') {
     const error = record(run.error)
-    const message = text(error?.message)
+    const message = errorText(error?.message, key)
     const retry = error?.retryable === true ? ' (retryable)' : ''
     throw new Error(
-      `AI/ML API ${WEB_SEARCH_TOOL} run ${status}${message ? `: ${clip(message)}` : ''}${retry}`,
+      `AI/ML API ${WEB_SEARCH_TOOL} run ${errorText(status, key)}${message ? `: ${clip(message)}` : ''}${retry}`,
     )
   }
   const output = record(run.output)
@@ -234,7 +239,7 @@ export const aimlapiProvider: SearchProvider = {
         signal: combinedSignal,
       })
       let body = await readJson(response)
-      if (!response.ok) throw httpError(response.status, body)
+      if (!response.ok) throw httpError(response.status, body, key)
 
       let run = record(body)
       if (!run) throw new Error('AI/ML API search returned an invalid response')
@@ -250,11 +255,11 @@ export const aimlapiProvider: SearchProvider = {
           signal: combinedSignal,
         })
         body = await readJson(poll)
-        if (!poll.ok) throw httpError(poll.status, body)
+        if (!poll.ok) throw httpError(poll.status, body, key)
         run = record(body)
         if (!run) throw new Error('AI/ML API search returned an invalid run status')
       }
-      return runResults(run)
+      return runResults(run, key)
     }, signal, { providerName: 'AI/ML API', timeoutMs })
 
     const hits = results.map(toHit).filter((h): h is SearchHit => h !== null)

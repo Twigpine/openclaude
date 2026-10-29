@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { getAllowedSettingSources, setAllowedSettingSources } from '../../bootstrap/state.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -242,7 +243,7 @@ describe('AI/ML API backend', () => {
     expect(store.saves).toEqual([{ set: { WEB_SEARCH_PROVIDER: 'aimlapi' }, unset: [] }])
     expect(message).toBe(
       'Web search set to AI/ML API.\n' +
-        'Each search runs the AI/ML API Toolbox tool web/search and is billed to your AI/ML API balance (at most $0.025 per search).',
+        'Each search runs the AI/ML API Toolbox tool web/search and is billed to your AI/ML API balance (requested cost limit: $0.025 per search).',
     )
   })
 
@@ -579,6 +580,46 @@ describe('findSettingsEnvOverride', () => {
 })
 
 describe('runSearchTest', () => {
+  test.each(['http', 'run', 'poll'] as const)(
+    'redacts an echoed AI/ML API key from %s errors through the selected backend',
+    async kind => {
+      const restoreEnv = snapshotEnv(['WEB_SEARCH_PROVIDER', 'AIMLAPI_API_KEY'])
+      const key = 'secret-marker-123456789'
+      try {
+        process.env.WEB_SEARCH_PROVIDER = 'aimlapi'
+        process.env.AIMLAPI_API_KEY = key
+        let requests = 0
+        globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => {
+          requests += 1
+          if (kind === 'poll' && requests === 1) {
+            return Response.json({ id: 'run_1', status: 'queued', next_poll_hint_ms: 1 }, { status: 202 })
+          }
+          return kind === 'http'
+            ? Response.json({ error: {
+              code: `invalid_key_${key}`,
+              message: `${'x'.repeat(290)} ${key}`,
+              request_id: `request_${key}`,
+            } }, { status: 401 })
+            : Response.json({
+              status: `failed_${key}`,
+              is_error: true,
+              error: { message: `Invalid credential ${key}`, retryable: true },
+            })
+        }) as typeof fetch
+
+        const message = await runSearchTest('test query', false)
+
+        expect(message).toStartWith('Search failed for "test query": AI/ML API')
+        expect(message).not.toContain('secret-')
+        expect(message).toContain('[redacted]')
+        expect(message).toContain(kind === 'http' ? 'HTTP 401' : '(retryable)')
+        expect(requests).toBe(kind === 'poll' ? 2 : 1)
+      } finally {
+        restoreEnv()
+      }
+    },
+  )
+
   const output: ProviderOutput = {
     hits: [{ title: 'Node.js 24', url: 'https://nodejs.org/en/blog/release' }],
     providerName: 'exa-free',

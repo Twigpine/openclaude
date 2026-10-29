@@ -450,7 +450,7 @@ export function applySearchSelection(
   }
   if (option.mode === 'aimlapi') {
     lines.push(
-      `Each search runs the AI/ML API Toolbox tool web/search and is billed to your AI/ML API balance (at most $${AIMLAPI_SEARCH_MAX_COST_USD} per search).`,
+      `Each search runs the AI/ML API Toolbox tool web/search and is billed to your AI/ML API balance (requested cost limit: $${AIMLAPI_SEARCH_MAX_COST_USD} per search).`,
     )
   }
   if (option.mode === 'auto' && nativeSearchAvailable) {
