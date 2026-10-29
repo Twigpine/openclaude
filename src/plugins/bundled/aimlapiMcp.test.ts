@@ -29,6 +29,7 @@ const TEST_KEY = 'aimlapi-test-key-not-real'
 const envNames = [
   'AIMLAPI_API_KEY',
   'OPENAI_BASE_URL',
+  'OPENAI_API_BASE',
   'CLAUDE_CODE_PROVIDER_ROUTE_ID',
 ] as const
 const originalEnv = Object.fromEntries(
@@ -112,6 +113,23 @@ test('enabling the plugin exposes the MCP server with the configured key and att
   })
 })
 
+test('a pooled AIMLAPI_API_KEY sends only its first key to the MCP server', async () => {
+  process.env.AIMLAPI_API_KEY = `${TEST_KEY}, aimlapi-second-key-not-real`
+  useEnabledPlugins({ [PLUGIN_ID]: true })
+
+  const plugin = getBuiltinPlugins().enabled.find(
+    candidate => candidate.name === AIMLAPI_MCP_PLUGIN_NAME,
+  )
+  const servers = await getPluginMcpServers(plugin!)
+  const server = servers?.[`plugin:${AIMLAPI_MCP_PLUGIN_NAME}:aimlapi`] as
+    | McpHTTPServerConfig
+    | undefined
+
+  expect(
+    (await getMcpServerHeaders('plugin:aimlapi:aimlapi', server!)).Authorization,
+  ).toBe(`Bearer ${TEST_KEY}`)
+})
+
 test('the stored server config references the key instead of embedding it', () => {
   process.env.AIMLAPI_API_KEY = TEST_KEY
   useEnabledPlugins({ [PLUGIN_ID]: true })
@@ -138,6 +156,14 @@ test('is hidden without an AIMLAPI key even when enabled', () => {
 test('withholds a credential the aimlapi route exported for a proxy base URL', () => {
   expect(hasAimlapiMcpCredential({ AIMLAPI_API_KEY: TEST_KEY })).toBe(true)
   expect(hasAimlapiMcpCredential({ AIMLAPI_API_KEY: '  ' })).toBe(false)
+  expect(hasAimlapiMcpCredential({ AIMLAPI_API_KEY: 'null' })).toBe(false)
+  expect(
+    hasAimlapiMcpCredential({
+      AIMLAPI_API_KEY: TEST_KEY,
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'aimlapi',
+      OPENAI_API_BASE: 'https://proxy.example.test/v1',
+    }),
+  ).toBe(false)
   expect(
     hasAimlapiMcpCredential({
       AIMLAPI_API_KEY: TEST_KEY,

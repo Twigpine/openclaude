@@ -2,6 +2,7 @@ import {
   AIMLAPI_MCP_URL,
   isCanonicalAimlapiInferenceBaseUrl,
 } from '../../integrations/aimlapi/config.js'
+import { firstUsableCredential } from '../../services/api/credentialPool.js'
 import { registerBuiltinPlugin } from '../builtinPlugins.js'
 
 export const AIMLAPI_MCP_PLUGIN_NAME = 'aimlapi'
@@ -25,8 +26,8 @@ const AIMLAPI_MCP_AUTHORIZATION = 'Bearer ${AIMLAPI_API_KEY}'
 export function hasAimlapiMcpCredential(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  if (!env.AIMLAPI_API_KEY?.trim()) return false
-  const baseUrl = env.OPENAI_BASE_URL?.trim()
+  if (!firstUsableCredential(env.AIMLAPI_API_KEY)) return false
+  const baseUrl = env.OPENAI_BASE_URL?.trim() || env.OPENAI_API_BASE?.trim()
   if (
     env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'aimlapi' &&
     baseUrl &&
