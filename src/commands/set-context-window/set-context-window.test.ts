@@ -233,6 +233,36 @@ test('/set-context-window --save reports a plain save when it replaces an invali
   )
 })
 
+test.each([
+  ['the active model', '1000000 --save'],
+  ['an explicit model', `${SAVE_MODEL} 1000000 --save`],
+])('/set-context-window --save reports env settings that a repair makes loadable (%s)', async (_form, args) => {
+  const contextWindows = JSON.stringify({ [SAVE_MODEL]: 200_000 })
+  await withCustomProviderSettings(
+    JSON.stringify({
+      env: { CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS: contextWindows },
+      modelLimits: { [SAVE_MODEL]: { contextWindow: -5 } },
+    }),
+    async settingsPath => {
+      // Startup ignored the invalid file, so its env was never applied.
+      expect(process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS).toBeUndefined()
+
+      const output = await runSetContextWindow(args)
+
+      expect(output).toContain(`Saved to modelLimits["${SAVE_MODEL}"] in ${settingsPath}.`)
+      expect(output).toContain(
+        `${settingsPath} had invalid settings before this save, so this session did not load its env settings (CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS). They can apply after a restart and change which window is used; this report does not account for them.`,
+      )
+      expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual({
+        env: { CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS: contextWindows },
+        modelLimits: { [SAVE_MODEL]: { contextWindow: 1_000_000 } },
+      })
+      expect(process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS).toBeUndefined()
+      expect(getContextWindowForModel(SAVE_MODEL)).toBe(1_000_000)
+    },
+  )
+})
+
 test('/set-context-window --save keeps the session override when saving fails', async () => {
   await withCustomProviderSettings('{ not json', async settingsPath => {
     const output = await runSetContextWindow('1000000 --save')

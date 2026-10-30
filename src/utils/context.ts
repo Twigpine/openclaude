@@ -265,8 +265,8 @@ export function getContextWindowForModel(
 /**
  * Resolve the context window together with the precedence step that supplied
  * it, so diagnostics can report the real source instead of inferring it from
- * the value. `ignoreSessionOverride` resolves the window a restarted session
- * would use.
+ * the value. `ignoreSessionOverride` skips the session override; the result
+ * still uses this process's environment and settings.
  */
 export function resolveContextWindowForModel(
   model: string,

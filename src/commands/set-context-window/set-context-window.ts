@@ -34,7 +34,8 @@ so it survives restarts. Other settings, including the model's
 maxOutputTokens, are kept. After a restart the saved value follows the
 modelLimits precedence below, and --save reports when another source will
 take precedence over it, or when other invalid settings in the file stop it
-from loading.
+from loading. If the save fixes a file this session could not load, it also
+names the env settings in that file, which this check cannot account for.
 
 For a permanent override (survives restart), use modelLimits in settings.json
 for custom/discovered models, for example:
@@ -47,6 +48,10 @@ function saveContextWindow(model: string, tokens: number): string {
   const settingsPath = getSettingsFilePathForSource('userSettings')
   const key = getBaseModelApiName(model) ?? model
   const patch = { modelLimits: { [key]: { contextWindow: tokens } } }
+  // Startup ignores an invalid file, including its env settings, and the
+  // settings watcher skips this command's own write. Keep the state from
+  // before the write so a repair that makes the env load can be reported.
+  const before = settingsPath ? parseSettingsFile(settingsPath) : null
   // The session override accepts values the settings schema rejects (such as
   // integers above Number.MAX_SAFE_INTEGER). Writing one would stop the whole
   // user settings file from loading, so check the entry before writing it.
@@ -73,6 +78,18 @@ function saveContextWindow(model: string, tokens: number): string {
       .join('')
     return `${saved}\nAfter a restart, the saved value will not apply: ${settingsPath} has invalid settings, so the whole file is ignored until they are fixed.${details}`
   }
+  // The restart check below reads this session's environment, which lacks
+  // env settings from a file that only became valid with this save.
+  const unloadedEnvKeys =
+    before?.settings === null
+      ? Object.entries(written?.settings?.env ?? {})
+          .filter(([name, value]) => process.env[name] !== value)
+          .map(([name]) => name)
+      : []
+  const unloadedEnvNote =
+    unloadedEnvKeys.length > 0
+      ? `\n${settingsPath} had invalid settings before this save, so this session did not load its env settings (${unloadedEnvKeys.join(', ')}). They can apply after a restart and change which window is used; this report does not account for them.`
+      : ''
   const afterRestart = resolveContextWindowForModel(
     model,
     getSdkBetas(),
@@ -83,13 +100,13 @@ function saveContextWindow(model: string, tokens: number): string {
     afterRestart.source === 'model-limits' &&
     afterRestart.contextWindow === tokens
   ) {
-    return saved
+    return `${saved}${unloadedEnvNote}`
   }
   const shadowingSource =
     afterRestart.source === 'model-limits'
       ? 'a higher-priority modelLimits entry'
       : CONTEXT_WINDOW_SOURCE_LABELS[afterRestart.source]
-  return `${saved}\nAfter a restart, ${shadowingSource} will set ${afterRestart.contextWindow.toLocaleString()} tokens instead of the saved value.`
+  return `${saved}\nAfter a restart, ${shadowingSource} will set ${afterRestart.contextWindow.toLocaleString()} tokens instead of the saved value.${unloadedEnvNote}`
 }
 
 export const call: LocalCommandCall = async (args, context) => {
