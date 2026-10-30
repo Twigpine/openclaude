@@ -1,5 +1,4 @@
 import memoize from 'lodash-es/memoize.js'
-import * as path from 'path'
 import * as pathWin32 from 'path/win32'
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
@@ -54,15 +53,20 @@ function findExecutable(executable: string): string | null {
     // SECURITY: Filter out any results from the current directory
     // to prevent executing malicious git.bat/cmd/exe files
     const paths = result.split('\r\n').filter(Boolean)
-    const cwd = getCwd().toLowerCase()
+    const cwd = pathWin32.resolve(getCwd()).toLowerCase()
 
     for (const candidatePath of paths) {
-      // Normalize and compare paths to ensure we're not in current directory
-      const normalizedPath = path.resolve(candidatePath).toLowerCase()
-      const pathDir = path.dirname(normalizedPath).toLowerCase()
+      // Normalize and compare paths to ensure we're not in current directory.
+      // path.relative handles drive roots, where cwd already ends in a separator.
+      const normalizedPath = pathWin32.resolve(candidatePath).toLowerCase()
+      const relativePath = pathWin32.relative(cwd, normalizedPath)
 
       // Skip if the executable is in the current working directory
-      if (pathDir === cwd || normalizedPath.startsWith(cwd + path.sep)) {
+      if (
+        !pathWin32.isAbsolute(relativePath) &&
+        relativePath !== '..' &&
+        !relativePath.startsWith(`..${pathWin32.sep}`)
+      ) {
         logForDebugging(
           `Skipping potentially malicious executable in current directory: ${candidatePath}`,
         )

@@ -2,27 +2,42 @@
  * Package consumer validation test.
  *
  * Ensures the packed SDK types compile correctly for a real TypeScript consumer.
- * Reproduces: npm pack → install into temp project → tsc with skipLibCheck:false.
+ * Reproduces: npm pack file list → install into temp project → tsc with skipLibCheck:false.
  *
  * This catches issues like:
  * - Constructor parameter properties in .d.ts (not allowed)
  * - Missing local imports for re-exported types
  * - Self-referential type wrappers
+ * - Declaration files or exports targets missing from the published `files`
  */
 import { afterAll, describe, expect, test } from 'bun:test'
 import { execFile, execFileSync, execSync } from 'child_process'
 import { promisify } from 'node:util'
 import { existsSync, mkdirSync, rmSync, writeFileSync, cpSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 
 const ROOT = join(import.meta.dir, '..', '..')
-const SDK_DTS = join(ROOT, 'src', 'entrypoints', 'sdk.d.ts')
-const CORE_TYPES_TS = join(ROOT, 'src', 'entrypoints', 'sdk', 'coreTypes.generated.ts')
 const TSC_BIN = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc')
 
 /** All temp dirs created during tests — cleaned up in afterAll */
 const tempDirs: string[] = []
+
+let packedFiles: string[] | undefined
+
+/** Files npm would publish, resolved from the real package.json `files` rules. */
+function getPackedFiles(): string[] {
+  packedFiles ??= (
+    JSON.parse(
+      execSync('npm pack --dry-run --json --ignore-scripts', {
+        cwd: ROOT,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    ) as Array<{ files: Array<{ path: string }> }>
+  )[0]!.files.map(file => file.path)
+  return packedFiles
+}
 
 /**
  * Set up a minimal TypeScript consumer project that imports from the SDK.
@@ -54,39 +69,25 @@ function setupConsumerProject(name: string): string {
     ),
   )
 
-  // Simulate node_modules/@twigpine/openclaude structure
-  const pkgDir = join(tmpDir, 'node_modules', '@twigpine', 'openclaude')
-  mkdirSync(pkgDir, { recursive: true })
-  mkdirSync(join(pkgDir, 'src', 'entrypoints', 'sdk'), { recursive: true })
-  mkdirSync(join(pkgDir, 'dist'), { recursive: true })
-
-  // Package.json with "exports" mapping (matches real package)
+  // The consumer's own package.json stops TypeScript from self-resolving
+  // @twigpine/openclaude through the repository root package.json.
   writeFileSync(
-    join(pkgDir, 'package.json'),
-    JSON.stringify(
-      {
-        name: '@twigpine/openclaude',
-        version: '0.0.0-test',
-        type: 'module',
-        exports: {
-          './package.json': './package.json',
-          './dist/cli.mjs': './dist/cli.mjs',
-          './sdk': {
-            types: './src/entrypoints/sdk.d.ts',
-            import: './dist/sdk.mjs',
-          },
-        },
-      },
-      null,
-      2,
-    ),
+    join(tmpDir, 'package.json'),
+    JSON.stringify({ name: `sdk-consumer-${name}`, private: true, type: 'module' }, null, 2),
   )
 
-  // Copy type files
-  cpSync(SDK_DTS, join(pkgDir, 'src', 'entrypoints', 'sdk.d.ts'))
-  cpSync(CORE_TYPES_TS, join(pkgDir, 'src', 'entrypoints', 'sdk', 'coreTypes.generated.ts'))
+  // Install the packed package contents, including its real package.json, so
+  // `files` and `exports` mistakes fail here as they would for npm consumers.
+  const pkgDir = join(tmpDir, 'node_modules', '@twigpine', 'openclaude')
+  for (const file of getPackedFiles()) {
+    // Build output is not needed for type resolution and may be absent before a build
+    if (file.startsWith('dist/')) continue
+    mkdirSync(dirname(join(pkgDir, file)), { recursive: true })
+    cpSync(join(ROOT, file), join(pkgDir, file))
+  }
 
   // Dummy dist file so module resolution doesn't fail
+  mkdirSync(join(pkgDir, 'dist'), { recursive: true })
   writeFileSync(join(pkgDir, 'dist', 'sdk.mjs'), 'export {}')
 
   return tmpDir

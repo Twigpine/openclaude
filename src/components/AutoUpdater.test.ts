@@ -70,3 +70,23 @@ test('disabled initial and timer callbacks skip version lookups, with an enabled
     ordinaryNotice: true,
   })
 }, 10_000) // Longer than the child deadline to allow assertion and cleanup.
+
+test('global updates install the checked channel version and always clear the updating state', async () => {
+  const child = Bun.spawn([
+    process.execPath, 'run',
+    `${import.meta.dir}/../../scripts/fixtures/auto-updater-install.ts`,
+  ], {
+    cwd: `${import.meta.dir}/../..`,
+    env: { ...process.env, NODE_ENV: 'production' },
+    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 8_000,
+  })
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ])
+  expect(code, stderr).toBe(0)
+  expect(JSON.parse(stdout)).toEqual({
+    installs: ['0.33.1'],
+    stable: { updating: [true, false], results: [{ version: '0.33.1', status: 'success' }] },
+    failed: { updating: [true, false], results: [{ version: '0.33.1', status: 'install_failed' }] },
+  })
+}, 10_000) // Longer than the child deadline to allow assertion and cleanup.

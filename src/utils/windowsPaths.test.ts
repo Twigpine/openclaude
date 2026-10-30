@@ -93,4 +93,25 @@ describe('Windows Git Bash discovery', () => {
       })
     }
   })
+
+  test('skips where.exe results below a drive-root working directory', () => {
+    spyOn(cwd, 'getCwd').mockReturnValue('C:\\')
+    const file = join(tempDir, 'executable')
+    writeFileSync(file, '')
+    const fs = getFsImplementation()
+    const executableStat = fs.statSync(file)
+    const plantedBash = 'C:\\repo\\bin\\bash.exe'
+    const trustedBash = 'D:\\Git\\bin\\bash.exe'
+    spyOn(fs, 'statSync').mockImplementation(candidate => {
+      if (candidate === plantedBash || candidate === trustedBash) return executableStat
+      throw new Error('file not found')
+    })
+    spyOn(execSyncWrapper, 'execSync_DEPRECATED').mockReturnValue(
+      'C:\\repo\\cmd\\git.exe\r\nD:\\Git\\cmd\\git.exe\r\n',
+    )
+
+    setShellIfWindows()
+
+    expect(process.env.SHELL).toBe(trustedBash)
+  })
 })
