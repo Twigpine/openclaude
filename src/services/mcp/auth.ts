@@ -794,9 +794,17 @@ async function performMCPXaaAuth(
       throw e
     }
 
-    // Discover the IdP's token endpoint for the RFC 8693 exchange.
+    // Discover the IdP's token endpoint for the RFC 8693 exchange. Under the
+    // flow's signal, like the login's discovery and the exchange: a cancel
+    // ends the request rather than leaving it to its own timeout.
     failureStage = 'discovery'
-    const oidc = await discoverOidc(idp.issuer)
+    let oidc
+    try {
+      oidc = await discoverOidc(idp.issuer, abortSignal)
+    } catch (e) {
+      if (abortSignal?.aborted) throw new AuthenticationCancelledError()
+      throw e
+    }
 
     // Run the exchange. performCrossAppAccess throws XaaTokenExchangeError
     // for the IdP leg and "jwt-bearer grant failed" for the AS leg.
@@ -2515,6 +2523,10 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   async discoveryState(
     abortSignal?: AbortSignal,
   ): Promise<OAuthDiscoveryState | undefined> {
+    // The SDK calls this with no signal during an interactive flow; the
+    // flow's own signal then covers the configured-metadata request below,
+    // as it covers the flow's other requests.
+    const signal = abortSignal ?? this.abortSignal
     const storage = getSecureStorage()
     const data = storage.read()
     const serverKey = getServerKey(this.serverName, this.serverConfig)
@@ -2544,7 +2556,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           this.serverName,
           this.serverConfig.url,
           metadataUrl,
-          createAuthFetch(abortSignal),
+          createAuthFetch(signal),
         )
         if (metadata) {
           return {
@@ -2554,7 +2566,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           }
         }
       } catch (error) {
-        throwIfAborted(abortSignal, 'MCP token refresh aborted')
+        throwIfAborted(signal, 'MCP token refresh aborted')
         if (isAbortError(error)) throw error
         logMCPDebug(
           this.serverName,

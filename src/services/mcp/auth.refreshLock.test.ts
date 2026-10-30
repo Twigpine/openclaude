@@ -2268,6 +2268,102 @@ test.each([
   expect(activeStorage.getData()).toEqual(initialData)
 })
 
+test.each([
+  ['before the login, with no id_token cached', false],
+  ['for the exchange, with an id_token cached', true],
+])("an XAA sign-in cancelled while the IdP's metadata answers ends there: %s", async (_, cached) => {
+  // The IdP is discovered twice — before the browser login, and again for
+  // the RFC 8693 exchange — and both discoveries belong to the flow, as its
+  // exchanges do: a cancel landing while the IdP's metadata is still
+  // arriving ends the request and the sign-in, instead of leaving both to
+  // wait on a server that may never finish.
+  const { config, initialData } = makeXaaFixture()
+  if (!cached) delete initialData.mcpXaaIdp
+  activeStorage = createSharedStorage(initialData, [])
+  installSuccessfulXaaFetch()
+  const xaaFetch = globalThis.fetch
+  const body = deferred()
+  let discoverySignal: AbortSignal | null | undefined
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    if (input.toString() === `${IDP_ISSUER}/.well-known/openid-configuration`) {
+      discoverySignal = init?.signal
+      return heldJsonResponse(
+        {
+          issuer: IDP_ISSUER,
+          authorization_endpoint: `${IDP_ISSUER}/authorize`,
+          token_endpoint: `${IDP_ISSUER}/token`,
+          response_types_supported: ['code'],
+          code_challenge_methods_supported: ['S256'],
+        },
+        body.promise,
+        init?.signal,
+      )
+    }
+    return xaaFetch(input, init)
+  }) as unknown as typeof globalThis.fetch
+  const session = new AbortController()
+
+  const flow = performMCPOAuthFlow('enterprise', config, () => {}, session.signal, {
+    skipBrowserOpen: true,
+  })
+  await waitFor(() => discoverySignal !== undefined)
+  session.abort()
+
+  expect(discoverySignal?.aborted).toBe(true)
+  await expect(settlesSoon(flow)).rejects.toBeInstanceOf(AuthenticationCancelledError)
+  body.resolve()
+  expect(activeStorage.getData()).toEqual(initialData)
+})
+
+test("the provider's configured-metadata discovery ends with the flow it belongs to", async () => {
+  // The MCP SDK calls discoveryState() with no signal of its own during an
+  // interactive flow. The provider was built with the flow's signal for its
+  // writes; the request it makes here runs under that signal too, so closing
+  // the session ends it rather than leaving it to its own timeout.
+  const config: McpHTTPServerConfig = {
+    type: 'http',
+    url: MCP_URL,
+    oauth: { authServerMetadataUrl: `${AS_ISSUER}/.well-known/oauth-authorization-server` },
+  }
+  activeStorage = createSharedStorage({}, [])
+  const body = deferred()
+  let requested: string | undefined
+  let requestSignal: AbortSignal | null | undefined
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    requested = input.toString()
+    requestSignal = init?.signal
+    return heldJsonResponse(
+      {
+        issuer: AS_ISSUER,
+        authorization_endpoint: `${AS_ISSUER}/authorize`,
+        token_endpoint: `${AS_ISSUER}/token`,
+        response_types_supported: ['code'],
+      },
+      body.promise,
+      init?.signal,
+    )
+  }) as unknown as typeof globalThis.fetch
+  const session = new AbortController()
+  const provider = new ClaudeAuthProvider(
+    'enterprise',
+    config,
+    undefined,
+    true,
+    undefined,
+    true,
+    session.signal,
+  )
+
+  const discovery = provider.discoveryState()
+  await waitFor(() => requestSignal !== undefined)
+  expect(requested).toBe(config.oauth!.authServerMetadataUrl)
+  session.abort()
+
+  expect(requestSignal?.aborted).toBe(true)
+  await expect(settlesSoon(discovery)).rejects.toThrow()
+  body.resolve()
+})
+
 test('a cancelled flow\'s provider writes nothing to the server\'s entry', async () => {
   // Behind the cancelled exchange, the provider is the last line: the SDK
   // writes through it, and an entry a newer sign-in owns must not change.

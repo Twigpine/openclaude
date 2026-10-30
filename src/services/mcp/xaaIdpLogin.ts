@@ -435,7 +435,7 @@ export async function acquireIdpIdToken(
 
   logMCPDebug('xaa', `No cached id_token for ${idpIssuer}; starting OIDC login`)
 
-  const metadata = await discoverOidc(idpIssuer)
+  const metadata = await discoverOidc(idpIssuer, opts.abortSignal)
   const port = opts.callbackPort ?? (await findAvailablePort())
   const redirectUri = buildRedirectUri(port)
   const state = randomBytes(32).toString('base64url')
