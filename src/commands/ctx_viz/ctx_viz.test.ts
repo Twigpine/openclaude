@@ -196,6 +196,7 @@ describe('/ctx command surface (PR #1610)', () => {
       autoCompactThreshold: 167_000,
       messageCountCompactAt: 200,
       messageCountHardCap: 1000,
+      lastCompaction: { trigger: 'auto', autoCompactReason: 'token-threshold' },
       maxOutput: { default: 32_000, upperLimit: 64_000 },
       canonicalName: 'claude-sonnet-4',
       autoCompactEnabled: true,
@@ -224,6 +225,7 @@ describe('/ctx command surface (PR #1610)', () => {
     expect(out).toContain('Window source:      default')
     expect(out).not.toContain('Model limit unknown')
     expect(out).toMatch(/Message-count at: +\S*200\S* messages \(hard cap 1000\)/)
+    expect(out).toContain('Last compaction:    automatic (token threshold)')
     // Current Context block + total.
     expect(out).toContain('Current Context (what the model sees)')
     expect(out).toContain('Total:')
@@ -257,7 +259,7 @@ describe('/ctx command surface (PR #1610)', () => {
     expect(out).not.toContain('System tools (deferred)')
   })
 
-  test('reports the context-window source and disabled compaction triggers', async () => {
+  test('reports the context-window source, disabled triggers, and last compaction', async () => {
     const mod = (await import(
       `./ctx-noninteractive.ts?render=${Date.now()}-${Math.random()}`
     )) as {
@@ -295,27 +297,53 @@ describe('/ctx command surface (PR #1610)', () => {
       linesAdded: 0,
       linesRemoved: 0,
       modelUsageMap: {},
-    } satisfies Omit<RenderInput, 'contextWindowSource' | 'messageCountCompactAt' | 'messageCountHardCap'>
+    } satisfies Omit<RenderInput, 'contextWindowSource' | 'messageCountCompactAt' | 'messageCountHardCap' | 'lastCompaction'>
 
     const fallback = mod.renderCtxReport({
       ...input,
       contextWindowSource: 'fallback',
       messageCountCompactAt: 1000,
       messageCountHardCap: 1000,
+      lastCompaction: null,
     })
     expect(fallback).toContain('Window source:      fallback for unknown model')
     expect(fallback).toContain('/set-context-window')
     expect(fallback).toMatch(/Auto-compact at: +\S*off/)
     expect(fallback).toMatch(/Message-count at: +\S*1000\S* messages \(hard cap\)/)
+    expect(fallback).toContain('Last compaction:    none')
 
     const discovered = mod.renderCtxReport({
       ...input,
       contextWindowSource: 'discovery',
       messageCountCompactAt: 0,
       messageCountHardCap: 0,
+      lastCompaction: { trigger: 'auto', autoCompactReason: 'context-overflow' },
     })
     expect(discovered).toContain('Window source:      provider model discovery')
     expect(discovered).not.toContain('Model limit unknown')
     expect(discovered).toMatch(/Message-count at: +\S*off/)
+    // Provider-overflow recovery still compacts when auto-compact is off.
+    expect(discovered).toContain('Last compaction:    automatic (context-overflow recovery)')
+
+    const lastCompactionLine = (lastCompaction: RenderInput['lastCompaction']) =>
+      mod
+        .renderCtxReport({
+          ...input,
+          contextWindowSource: 'discovery',
+          messageCountCompactAt: 0,
+          messageCountHardCap: 0,
+          lastCompaction,
+        })
+        .split('\n')
+        .find(line => line.includes('Last compaction:'))
+    expect(lastCompactionLine({ trigger: 'manual' })).toContain('Last compaction:    manual')
+    expect(lastCompactionLine({ trigger: 'auto', autoCompactReason: 'message-count' })).toContain(
+      'automatic (message count)',
+    )
+    expect(lastCompactionLine({ trigger: 'auto', autoCompactReason: 'memory-pressure' })).toContain(
+      'automatic (memory pressure)',
+    )
+    // Boundaries written before the reason was recorded: say so, don't infer.
+    expect(lastCompactionLine({ trigger: 'auto' })).toContain('automatic (reason not recorded)')
   })
 })

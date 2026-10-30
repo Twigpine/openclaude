@@ -990,7 +990,12 @@ precedence over that legacy value. `OPENCLAUDE_MAX_ACTIVE_MESSAGES_HARD_CAP`
 can override the safety cap; set it to `0` only for diagnostics.
 
 `/ctx` shows the resolved message-count threshold next to the token threshold,
-including `off` when neither the setting nor the hard cap applies.
+including `off` when neither the setting nor the hard cap applies. Its
+**Last compaction** line shows whether the most recent compaction was manual or
+automatic and, for automatic compaction, which trigger fired: token threshold,
+message count, memory pressure, or context-overflow recovery. It shows `none`
+before the first compaction and `reason not recorded` for automatic compactions
+saved by earlier versions.
 
 ### Long-session memory guard validation
 

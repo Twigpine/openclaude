@@ -61,6 +61,16 @@ export type CompactMetadata = {
   preTokens: number
   userContext?: string
   messagesSummarized?: number
+  /**
+   * Why automatic compaction ran. Recorded only by autoCompactIfNeeded;
+   * absent for manual compaction and for boundaries written before this
+   * field existed.
+   */
+  autoCompactReason?:
+    | 'token-threshold'
+    | 'message-count'
+    | 'memory-pressure'
+    | 'context-overflow'
   preservedSegment?: {
     headUuid: UUID
     anchorUuid: UUID

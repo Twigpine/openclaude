@@ -66,6 +66,9 @@ export const call: LocalCommandCall = async (args, context) => {
           context.agentId,
         )
         if (sessionMemoryResult) {
+          // The session-memory builder is shared with autocompact and marks
+          // its boundary auto; this one was requested by the user.
+          sessionMemoryResult.boundaryMarker.compactMetadata.trigger = 'manual'
           getUserContext.cache.clear?.()
           runPostCompactCleanup()
           // Reset cache read baseline so the post-compact drop isn't flagged

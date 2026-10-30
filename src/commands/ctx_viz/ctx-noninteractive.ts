@@ -7,7 +7,7 @@ import type { AppState } from '../../state/AppStateStore.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Tools } from '../../Tool.js'
 import type { AgentDefinitionsResult } from '../../tools/AgentTool/loadAgentsDir.js'
-import type { Message } from '../../types/message.js'
+import type { CompactMetadata, Message } from '../../types/message.js'
 import { analyzeContextUsage, type ContextData } from '../../utils/analyzeContext.js'
 import { getGlobalConfig } from '../../utils/config.js'
 import {
@@ -21,7 +21,7 @@ import {
   getMessageCountCompactionTrigger,
   resolveMessageCountCompactionLimit,
 } from '../../utils/maxActiveMessages.js'
-import { getMessagesAfterCompactBoundary } from '../../utils/messages.js'
+import { getMessagesAfterCompactBoundary, isCompactBoundaryMessage } from '../../utils/messages.js'
 import { getCanonicalName } from '../../utils/model/model.js'
 import {
   getSdkBetas,
@@ -68,6 +68,7 @@ export async function collectCtxData(context: CtxDataInput): Promise<{
   autoCompactThreshold: number
   messageCountCompactAt: number
   messageCountHardCap: number
+  lastCompaction: Pick<CompactMetadata, 'trigger' | 'autoCompactReason'> | null
   maxOutput: { default: number; upperLimit: number }
   canonicalName: string
   autoCompactEnabled: boolean
@@ -107,6 +108,7 @@ export async function collectCtxData(context: CtxDataInput): Promise<{
   const model = mainLoopModel
   const contextWindow = resolveContextWindowForModel(model, getSdkBetas())
   const autoCompactEnabled = isAutoCompactEnabled()
+  const lastBoundary = messages.findLast(isCompactBoundaryMessage)
 
   return {
     contextData,
@@ -123,6 +125,12 @@ export async function collectCtxData(context: CtxDataInput): Promise<{
       autoCompactEnabled,
     ),
     messageCountHardCap: getMaxActiveMessagesHardCap(),
+    lastCompaction: lastBoundary
+      ? {
+          trigger: lastBoundary.compactMetadata.trigger,
+          autoCompactReason: lastBoundary.compactMetadata.autoCompactReason,
+        }
+      : null,
     maxOutput: getModelMaxOutputTokens(model),
     canonicalName: getCanonicalName(model),
     autoCompactEnabled,
@@ -158,6 +166,21 @@ const CONTEXT_WINDOW_SOURCE_LABELS: Record<ContextWindowSource, string> = {
   '1m-experiment': '1M context experiment',
   'internal-model-config': 'internal model config',
   default: 'default',
+}
+
+const AUTO_COMPACT_REASON_LABELS: Record<NonNullable<CompactMetadata['autoCompactReason']>, string> = {
+  'token-threshold': 'token threshold',
+  'message-count': 'message count',
+  'memory-pressure': 'memory pressure',
+  'context-overflow': 'context-overflow recovery',
+}
+
+function formatLastCompaction(last: RenderInput['lastCompaction']): string {
+  if (!last) return 'none'
+  if (last.trigger === 'manual') return 'manual'
+  // Boundaries from older sessions carry no reason; do not guess one.
+  const reason = last.autoCompactReason ? AUTO_COMPACT_REASON_LABELS[last.autoCompactReason] : undefined
+  return `automatic (${reason ?? 'reason not recorded'})`
 }
 
 function themeColorToChalk(themeColor: string): (text: string) => string {
@@ -224,6 +247,7 @@ export function renderCtxReport(d: RenderInput): string {
   } else {
     lines.push(`    ${figures.bullet} Message-count at:   ${chalk.bold('off')}`)
   }
+  lines.push(`    ${figures.bullet} Last compaction:    ${formatLastCompaction(d.lastCompaction)}`)
   lines.push('')
 
   lines.push(chalk.bold('  Current Context (what the model sees)'))

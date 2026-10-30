@@ -549,7 +549,11 @@ export async function autoCompactIfNeeded(
     toolUseContext.agentId,
     recompactionInfo.autoCompactThreshold,
   )
+  // Not forced means shouldAutoCompact passed the token-threshold check.
+  const autoCompactReason = forcedBy ?? 'token-threshold'
   if (sessionMemoryResult) {
+    sessionMemoryResult.boundaryMarker.compactMetadata.autoCompactReason =
+      autoCompactReason
     // Reset lastSummarizedMessageId since session memory compaction prunes messages
     // and the old message UUID will no longer exist after the REPL replaces messages
     setLastSummarizedMessageId(undefined)
@@ -579,6 +583,8 @@ export async function autoCompactIfNeeded(
       true, // isAutoCompact
       recompactionInfo,
     )
+    compactionResult.boundaryMarker.compactMetadata.autoCompactReason =
+      autoCompactReason
 
     // Reset lastSummarizedMessageId since legacy compaction replaces all messages
     // and the old message UUID will no longer exist in the new messages array

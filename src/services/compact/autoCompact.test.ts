@@ -12,6 +12,7 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { Message } from '../../types/message.js'
+import { createCompactBoundaryMessage } from '../../utils/messages/systemFactories.js'
 
 const nonce = `${Date.now()}-${Math.random()}`
 const realConfig = {
@@ -194,6 +195,7 @@ function cacheSafeParams(messages: Message[]) {
 
 function compactResult() {
   return {
+    boundaryMarker: createCompactBoundaryMessage('auto', 10_000),
     summaryMessages: [userMessage('summary')],
     attachments: [],
     hookResults: [],
@@ -812,6 +814,73 @@ describe('autoCompactIfNeeded circuit breaker', () => {
 
     expect(compactConversation).toHaveBeenCalledTimes(1)
     expect(result.wasCompacted).toBe(true)
+  })
+
+  test('records why automatic compaction ran on the boundary', async () => {
+    const compactConversation = mock(async () => compactResult())
+    const trySessionMemoryCompaction = mock(async () => null)
+    const { autoCompactIfNeeded } = await importAutoCompact({
+      compactConversation,
+      trySessionMemoryCompaction,
+    })
+
+    const overThreshold = overThresholdMessages()
+    const threshold = await autoCompactIfNeeded(
+      overThreshold,
+      toolUseContext(),
+      cacheSafeParams(overThreshold),
+      'repl_main_thread',
+      { compacted: false, turnCounter: 0, turnId: 'turn' },
+    )
+    expect(
+      threshold.compactionResult?.boundaryMarker.compactMetadata
+        .autoCompactReason,
+    ).toBe('token-threshold')
+
+    const underThreshold = underThresholdMessages()
+    const forced = await autoCompactIfNeeded(
+      underThreshold,
+      toolUseContext(),
+      cacheSafeParams(underThreshold),
+      'repl_main_thread',
+      {
+        compacted: false,
+        turnCounter: 0,
+        turnId: 'turn',
+        forceReason: 'context-overflow',
+      },
+    )
+    expect(
+      forced.compactionResult?.boundaryMarker.compactMetadata.autoCompactReason,
+    ).toBe('context-overflow')
+  })
+
+  test('records the reason on session-memory compaction boundaries', async () => {
+    const compactConversation = mock(async () => compactResult())
+    const trySessionMemoryCompaction = mock(async () => compactResult())
+    const { autoCompactIfNeeded } = await importAutoCompact({
+      compactConversation,
+      trySessionMemoryCompaction,
+    })
+
+    const messages = underThresholdMessages()
+    const result = await autoCompactIfNeeded(
+      messages,
+      toolUseContext(),
+      cacheSafeParams(messages),
+      'repl_main_thread',
+      {
+        compacted: false,
+        turnCounter: 0,
+        turnId: 'turn',
+        forceReason: 'message-count',
+      },
+    )
+
+    expect(compactConversation).not.toHaveBeenCalled()
+    expect(
+      result.compactionResult?.boundaryMarker.compactMetadata.autoCompactReason,
+    ).toBe('message-count')
   })
 
   test('expired cooldown allows a half-open compaction attempt', async () => {
