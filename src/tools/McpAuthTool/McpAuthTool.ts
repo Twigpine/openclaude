@@ -96,6 +96,8 @@ export type McpAuthToolOptions = {
    * The CLI's environment does not change, so it passes none.
    */
   captureCredentialScope?: () => CredentialScope
+  /** SDK root owner, distinct from an executor's per-tool cancellation. */
+  sessionSignal?: AbortSignal
 }
 
 export function createMcpAuthTool(
@@ -128,11 +130,17 @@ export function createMcpAuthTool(
    * cli/print.ts does for mcp_authenticate.
    */
   function beginSessionSignIn(
-    session: AbortController,
+    toolSignal: AbortSignal,
     serverConfig: McpSSEServerConfig | McpHTTPServerConfig,
+    resultSignal?: AbortSignal,
   ) {
-    if (session.signal.aborted) {
-      return { signal: session.signal, release: () => {} }
+    const sessionSignal = options.sessionSignal ?? toolSignal
+    const aborted = [sessionSignal, toolSignal, resultSignal].find(signal => signal?.aborted)
+    if (aborted) {
+      return {
+        signal: aborted,
+        release: () => {}, returnedUrl: () => {},
+      }
     }
     const serverKey = getServerKey(serverName, serverConfig)
     // Default storage can read/write either the native entry or its plaintext
@@ -148,8 +156,15 @@ export function createMcpAuthTool(
     pendingSignIn = attempt
     for (const key of entryKeys) pendingSdkSignIns.set(key, attempt)
     const stop = () => attempt.abort()
+    const separateToolSignal = toolSignal !== sessionSignal && toolSignal !== resultSignal
+    // A completed tool hands background ownership to the session/result.
+    const returnedUrl = () => {
+      if (separateToolSignal) toolSignal.removeEventListener('abort', stop)
+    }
     const release = () => {
-      session.signal.removeEventListener('abort', stop)
+      sessionSignal.removeEventListener('abort', stop)
+      resultSignal?.removeEventListener('abort', stop)
+      returnedUrl()
       attempt.signal.removeEventListener('abort', release)
       if (pendingSignIn === attempt) pendingSignIn = undefined
       for (const key of entryKeys) {
@@ -157,9 +172,11 @@ export function createMcpAuthTool(
       }
     }
     attempt.signal.addEventListener('abort', release, { once: true })
-    session.signal.addEventListener('abort', stop, { once: true })
-    if (session.signal.aborted) stop()
-    return { signal: attempt.signal, release }
+    sessionSignal.addEventListener('abort', stop, { once: true })
+    resultSignal?.addEventListener('abort', stop, { once: true })
+    if (separateToolSignal) toolSignal.addEventListener('abort', stop, { once: true })
+    if (sessionSignal.aborted || toolSignal.aborted || resultSignal?.aborted) stop()
+    return { signal: attempt.signal, release, returnedUrl }
   }
 
   return {
@@ -224,12 +241,12 @@ export function createMcpAuthTool(
       })
 
       // The CLI's flow outlives the turn that started it, so nothing aborts it
-      // but its own timeout. An embedder's flow belongs to its session: the
-      // context controller descends from the root its close() and interrupt()
-      // abort, which shuts the callback listener.
+      // but its own timeout. The SDK supplies its root owner so a completed
+      // tool's callback survives sibling failures, while close/interrupt and
+      // intentional discard still shut it down.
       const signIn = realToolsInCurrentContext
-        ? { signal: new AbortController().signal, release: () => {} }
-        : beginSessionSignIn(context.abortController, sseOrHttpConfig)
+        ? { signal: new AbortController().signal, release: () => {}, returnedUrl: () => {} }
+        : beginSessionSignIn(context.abortController.signal, sseOrHttpConfig, context.toolResultAbortSignal)
       const { setAppState } = context
       // Captured now, inside the call: the flow's reads and writes after the
       // user's browser comes back belong here, however the environment has
@@ -318,6 +335,7 @@ export function createMcpAuthTool(
         ])
 
         if (authUrl) {
+          signIn.returnedUrl()
           return {
             data: {
               status: 'auth_url' as const,

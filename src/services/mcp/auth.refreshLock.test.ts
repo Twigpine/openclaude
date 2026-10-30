@@ -17,9 +17,9 @@ import { resetSettingsCache, setSessionSettingsCache } from '../../utils/setting
 import type { McpHTTPServerConfig } from './types.js'
 
 const realSecureStorage = await import('../../utils/secureStorage/index.js')
-const realKeychainHelpers = await import(
+const realKeychainHelpers = { ...(await import(
   '../../utils/secureStorage/macOsKeychainHelpers.js'
-)
+)) }
 const realLockfile = await import('../../utils/lockfile.js')
 const realSleep = await import('../../utils/sleep.js')
 const realDebug = await import('../../utils/debug.js')

@@ -22,7 +22,8 @@ import {
 import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
-import { connectToServer, fetchToolsForClient } from '../../services/mcp/client.js'
+import { connectToServer, fetchToolsForClient, getServerCacheKey } from '../../services/mcp/client.js'
+import { ClaudeAuthProvider } from '../../services/mcp/auth.js'
 import type { ActiveCredentialScope, CredentialScope } from '../../services/mcp/credentialScope.js'
 import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import {
@@ -502,6 +503,8 @@ export function createExternalCanUseTool(
 function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): CredentialScope {
   // Captured inside the turn's tool call, where its variables are applied.
   const turnEnv = new Map(Object.entries(process.env))
+  // Initial discovery/registration writes happen before any continuation.
+  clearKeychainCache()
   const set = (key: string, value: string | undefined) => {
     if (value === undefined) {
       delete process.env[key]
@@ -553,6 +556,7 @@ function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): Credent
 export async function connectSdkMcpServers(
   mcpServers: Record<string, unknown> | undefined,
   runInOriginEnv?: ActiveCredentialScope,
+  sessionSignal?: AbortSignal,
 ): Promise<{ clients: MCPServerConnection[]; tools: Tool[] }> {
   if (!mcpServers || Object.keys(mcpServers).length === 0) {
     return { clients: [], tools: [] }
@@ -639,6 +643,23 @@ export async function connectSdkMcpServers(
       }
 
       try {
+        // Equivalent configs can have different memo keys while sharing
+        // credentials. Retry disconnected results when this environment has
+        // tokens, without changing the global key or touching connected clients.
+        const serverConfig = scopedConfig as unknown as ScopedMcpServerConfig
+        if (serverConfig.type === 'http' || serverConfig.type === 'sse') {
+          const key = getServerCacheKey(name, serverConfig)
+          const cached = connectToServer.cache.get(key)
+          if (cached && (await cached).type !== 'connected') {
+            clearKeychainCache()
+            if (
+              await new ClaudeAuthProvider(name, serverConfig).tokens() &&
+              connectToServer.cache.get(key) === cached
+            ) {
+              connectToServer.cache.delete(key)
+            }
+          }
+        }
         // Connect to the server
         // Note: SDK 'session' scope is not part of internal ConfigScope,
         // but connectToServer accepts any object with scope field
@@ -675,6 +696,7 @@ export async function connectSdkMcpServers(
               createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig, {
                 realToolsInCurrentContext: false,
                 captureCredentialScope: () => captureCredentialScope(runInOriginEnv),
+                sessionSignal,
               }),
             ],
           }

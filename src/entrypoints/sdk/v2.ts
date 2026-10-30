@@ -495,7 +495,7 @@ class SDKSessionImpl implements SDKSession {
           // Connect MCP servers once (lazy, on first message)
           if (!self.mcpConnected && self.mcpServers && Object.keys(self.mcpServers).length > 0) {
             try {
-              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers)
+              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, undefined, self._abortController?.signal)
               if (self.closed) return
               if (mcpClients.length > 0) {
                 self.engine.setMcpClients(mcpClients)

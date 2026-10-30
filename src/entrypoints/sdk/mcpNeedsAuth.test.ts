@@ -1113,3 +1113,117 @@ test.each(['USER', 'namespace'])('fallback sign-ins sharing a file replace each 
     restoreEnv()
   }
 }, 30_000)
+
+test("initial SDK sign-in discards a previous query's native credential cache", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  const { clearKeychainCache, keychainCacheState } = await import('../../utils/secureStorage/macOsKeychainHelpers.js')
+  const realExec = { ...(await import('../../utils/execFileNoThrowPortable.js')) }
+  const originalStorage = { ...memoryStorage }
+  const origin = join(configHome, 'origin')
+  const other = join(configHome, 'other')
+  const session = openSession()
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const config = { gated: { type: 'http', url } }
+    await connectSdkMcpServers(config)
+    stores.set(storeIn(origin), { ...stored(storeIn(origin)), pluginSecrets: { plugin: { key: 'origin-secret' } } })
+    stores.set(storeIn(other), { pluginSecrets: { plugin: { key: 'other-secret' } } })
+    mock.module('../../utils/execFileNoThrowPortable.js', () => ({ ...realExec, execSyncWithDefaults_DEPRECATED: () => JSON.stringify(stored()) }))
+    const { macOsKeychainStorage } = await import('../../utils/secureStorage/macOsKeychainStorage.js')
+    memoryStorage.read = () => macOsKeychainStorage.read()
+    memoryStorage.readAsync = async () => macOsKeychainStorage.read()
+    memoryStorage.update = data => { clearKeychainCache(); return originalStorage.update(data) }
+    const { query } = await import('./query.js')
+    for (const dir of [other, origin]) {
+      let tools: Tool[] = []
+      const q = query({ prompt: 'fixture', options: { cwd: configHome, abortController: dir === origin ? session : openSession(), env: { OPENCLAUDE_CONFIG_DIR: dir }, ...(dir === origin ? { mcpServers: config } : {}) } })
+      ;(q as unknown as { setEngine: (engine: unknown) => void }).setEngine({
+        injectAgents() {}, getMcpClients: () => [], getMessages: () => [], interrupt() {}, setMcpClients() {}, updateTools(pool: Tool[]) { tools = pool },
+        async *submitMessage() {
+          if (dir === other) { keychainCacheState.cache.cachedAt = 0; memoryStorage.read() }
+          else {
+            expect(stored(storeIn(origin)).pluginSecrets).toEqual({ plugin: { key: 'origin-secret' } })
+            expect((await startSignIn(tools.find(t => t.name === 'mcp__gated__authenticate')!, session)).result.status).toBe('auth_url')
+          }
+          yield { type: 'assistant', message: { content: [] }, session_id: 'fixture' }
+        },
+      })
+      try { for await (const _ of q) {} } finally { q.close() }
+    }
+    expect(stored(storeIn(origin)).pluginSecrets).toEqual({ plugin: { key: 'origin-secret' } })
+  } finally {
+    session.abort()
+    await Promise.all(flows)
+    Object.assign(memoryStorage, originalStorage)
+    mock.module('../../utils/execFileNoThrowPortable.js', () => realExec)
+    clearKeychainCache()
+    restoreEnv()
+  }
+}, 30_000)
+
+test.each(['property order', 'OAuth client'])('a new session retries saved credentials across %s configurations', async variant => {
+  const url = serveNeedingAuth()
+  const firstConfig = { gated: { type: 'http' as const, url } }
+  const secondConfig = { gated: variant === 'property order'
+    ? { url, type: 'http' as const }
+    : { type: 'http' as const, url, oauth: { clientId: 'fixed-client' } } }
+  const first = await connectSdkMcpServers(firstConfig)
+  const second = await connectSdkMcpServers(secondConfig)
+  expect(first.clients[0]!.type).toBe('needs-auth')
+  expect(second.clients[0]!.type).toBe('needs-auth')
+  const a = await startSignIn(second.tools[0]!, openSession())
+  expect((await fetch(callbackFor(a.result.authUrl!))).status).toBe(200)
+  await flowEnded(0)
+  for (const config of [firstConfig, secondConfig]) {
+    const next = await connectSdkMcpServers(config)
+    try {
+      expect(next.clients[0]!.type).toBe('connected')
+      expect(next.tools.map(t => t.name)).toEqual(['mcp__gated__hello'])
+    } finally { for (const client of next.clients) if (client.type === 'connected') await client.cleanup() }
+  }
+}, 30_000)
+
+test.each(['success', 'sibling-error', 'close', 'discard', 'sibling-error-close', 'sibling-error-discard'])('SDK sign-in keeps session ownership after executor result: %s', async outcome => {
+  const { StreamingToolExecutor } = await import('../../services/tools/StreamingToolExecutor.js')
+  const { createToolFixture } = await import('../../test/toolFixtures.js')
+  const { z } = await import('zod/v4')
+  const { getEmptyToolPermissionContext } = await import('../../Tool.js')
+  const { QueryLifecycleOperationTracker } = await import('../../utils/queryLifecycle.js')
+  const url = serveNeedingAuth()
+  const root = openSession()
+  const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } }, undefined, root.signal)
+  const original = tools[0]!
+  let auth: McpAuthOutput | undefined
+  const authTool = { ...original, async call(...args: Parameters<typeof original.call>) {
+    const result = await original.call(...args)
+    auth = result.data as McpAuthOutput
+    return result
+  } }
+  const bash = createToolFixture(z.object({}), { name: 'Bash', async call() {
+    if (outcome.startsWith('sibling-error')) throw new Error('controlled Bash failure')
+    return { data: 'ok' }
+  } })
+  const defs = [authTool, bash]
+  const context = {
+    abortController: root, messages: [], queryLifecycle: new QueryLifecycleOperationTracker(),
+    options: { tools: defs, commands: [], debug: false, verbose: false, mainLoopModel: 'test-model', mcpClients: [], mcpResources: {}, isNonInteractiveSession: false },
+    getAppState: () => ({ toolPermissionContext: getEmptyToolPermissionContext(), sessionHooks: new Map() }),
+    setAppState() {}, setInProgressToolUseIDs() {}, setHasInterruptibleToolInProgress() {}, setResponseLength() {}, updateFileHistoryState() {}, updateAttributionState() {},
+  }
+  const executor = new StreamingToolExecutor(defs, (async () => ({ behavior: 'allow' })) as never, context as never)
+  const assistant = { uuid: 'fixture', requestId: 'fixture', message: { id: 'fixture', content: [] } }
+  try {
+    for (const [index, tool] of defs.entries()) {
+      executor.addTool({ type: 'tool_use', id: `tool-${index}`, name: tool.name, input: {} } as never, assistant as never)
+      for await (const _ of executor.getRemainingResults()) {}
+      if (index === 0) expect(auth?.status).toBe('auth_url')
+    }
+    if (outcome.endsWith('close')) root.abort()
+    if (outcome.endsWith('discard')) executor.discard()
+    expect(root.signal.aborted).toBe(outcome.endsWith('close'))
+    let status: number | undefined
+    try { status = (await fetch(callbackFor(auth!.authUrl!))).status } catch {}
+    expect(status).toBe(outcome.endsWith('close') || outcome.endsWith('discard') ? undefined : 200)
+  } finally { root.abort(); await Promise.all(flows) }
+}, 30_000)

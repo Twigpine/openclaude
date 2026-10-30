@@ -648,7 +648,7 @@ class QueryImpl implements Query {
           // Connect MCP servers if provided
           if (self.mcpServers && Object.keys(self.mcpServers).length > 0) {
             try {
-              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, runInQueryEnv)
+              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, runInQueryEnv, self.abortController.signal)
               self.sdkMcpTools = mcpTools
               if (mcpClients.length > 0) {
                 self.engine.setMcpClients(mcpClients)
