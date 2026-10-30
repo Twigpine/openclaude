@@ -104,6 +104,15 @@ let rememberedProviderFlag:
     }
   | null = null
 
+const PROFILE_ENV_APPLIED_ID = 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID'
+
+let rememberedModelFlag:
+  | {
+      model: string
+      profileId?: string
+    }
+  | null = null
+
 /**
  * Extract the value of --provider from argv.
  * Returns null if the flag is absent or has no value.
@@ -298,6 +307,9 @@ function usableProviderModelEnvValue(
  */
 export function applyModelFlagFromArgs(
   args: string[],
+  options?: {
+    rememberForSettingsEnv?: boolean
+  },
 ): { error?: string } | undefined {
   if (parseProviderFlag(args)) return
   const model = parseModelFlag(args)
@@ -314,6 +326,33 @@ export function applyModelFlagFromArgs(
     if (error) return { error }
   }
 
+  applyModelToActiveProviderEnv(effectiveModel)
+  if (options?.rememberForSettingsEnv) {
+    rememberedModelFlag = {
+      model: effectiveModel,
+      profileId: process.env[PROFILE_ENV_APPLIED_ID]?.trim() || undefined,
+    }
+  }
+
+  return {}
+}
+
+// Settings env merges re-apply the active saved profile, which restores the
+// profile's model over a standalone --model (#2388). Restore the flag only
+// while the profile it was applied to is still active, so a mid-session
+// provider switch does not inherit the startup model.
+export function reapplyRememberedModelFlag(): void {
+  if (!rememberedModelFlag) return
+  const profileId = process.env[PROFILE_ENV_APPLIED_ID]?.trim() || undefined
+  if (profileId !== rememberedModelFlag.profileId) return
+  applyModelToActiveProviderEnv(rememberedModelFlag.model)
+}
+
+export function clearRememberedModelFlagForTests(): void {
+  rememberedModelFlag = null
+}
+
+function applyModelToActiveProviderEnv(effectiveModel: string): void {
   const useGeminiVertex = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI_VERTEX)
   const useGemini = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
   const useMistral = isEnvTruthy(process.env.CLAUDE_CODE_USE_MISTRAL)
@@ -331,8 +370,6 @@ export function applyModelFlagFromArgs(
   } else {
     process.env.ANTHROPIC_MODEL = effectiveModel
   }
-
-  return {}
 }
 
 /**

@@ -87,7 +87,10 @@ const mockRefreshGithubModelsTokenIfNeeded = mock(async () => {})
 const mockHydrateGithubModelsTokenFromSecureStorage = mock(() => {})
 const mockValidateProviderEnvForStartupOrExit = mock(async () => {})
 const mockApplyModelFlagFromArgs = mock(
-  (_args: string[]): ReturnType<typeof applyModelFlagFromArgs> => undefined,
+  (
+    _args: string[],
+    _options?: Parameters<typeof applyModelFlagFromArgs>[1],
+  ): ReturnType<typeof applyModelFlagFromArgs> => undefined,
 )
 const mockPrintStartupScreen = mock((_model: string | undefined) => {})
 const mockStartCapturingEarlyInput = mock(() => {})
@@ -761,7 +764,7 @@ describe('cli.tsx — background routing behavior', () => {
       'anthropic',
       '--model',
       'sonnet',
-    ])
+    ], { rememberForSettingsEnv: true })
     expect(consoleErrorMock).not.toHaveBeenCalled()
     expect(exitMock).not.toHaveBeenCalled()
     expect(mockValidateProviderEnvForStartupOrExit).toHaveBeenCalledTimes(1)
@@ -794,7 +797,7 @@ describe('cli.tsx — background routing behavior', () => {
     expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith([
       '--provider=anthropic',
       '--model=sonnet',
-    ])
+    ], { rememberForSettingsEnv: true })
     expect(consoleErrorMock).not.toHaveBeenCalled()
     expect(exitMock).not.toHaveBeenCalled()
     expect(mockValidateProviderEnvForStartupOrExit).toHaveBeenCalledTimes(1)
@@ -888,7 +891,7 @@ describe('cli.tsx — background routing behavior', () => {
 
     expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith([
       '--model=deepseek/deepseek-v4-flash',
-    ])
+    ], { rememberForSettingsEnv: true })
     expect(mockPrintStartupScreen).toHaveBeenCalledWith(
       'deepseek/deepseek-v4-flash',
     )
@@ -899,7 +902,9 @@ describe('cli.tsx — background routing behavior', () => {
 
     await runCliEntrypoint(args, bgOptions)
 
-    expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith(args)
+    expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith(args, {
+      rememberForSettingsEnv: true,
+    })
     expect(mockPrintStartupScreen).toHaveBeenCalledWith('aimlapi')
   })
 
@@ -914,7 +919,9 @@ describe('cli.tsx — background routing behavior', () => {
 
     await runCliEntrypoint(args, bgOptions)
 
-    expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith(args)
+    expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith(args, {
+      rememberForSettingsEnv: true,
+    })
     expect(mockPrintStartupScreen).toHaveBeenCalledWith(
       'deepseek/deepseek-v4-flash',
     )
@@ -933,7 +940,9 @@ describe('cli.tsx — background routing behavior', () => {
     expect(mockApplyStartupEnvFromProfile.mock.calls[0]?.[0]).toMatchObject({
       modelOverride: 'deepseek/deepseek-v4-flash',
     })
-    expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith(args)
+    expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith(args, {
+      rememberForSettingsEnv: true,
+    })
     expect(mockPrintStartupScreen).toHaveBeenCalledWith(
       'deepseek/deepseek-v4-flash',
     )
@@ -1107,7 +1116,9 @@ describe('cli.tsx — background routing behavior', () => {
 
     await runCliEntrypoint(args, bgOptions)
 
-    expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith(args)
+    expect(mockApplyModelFlagFromArgs).toHaveBeenCalledWith(args, {
+      rememberForSettingsEnv: true,
+    })
     expect(mockValidateProviderEnvForStartupOrExit).toHaveBeenCalledTimes(1)
     expect(mockPrintStartupScreen).toHaveBeenCalledWith(
       'deepseek/deepseek-v4-flash',

@@ -593,7 +593,9 @@ export async function main(
     earlyModelFlag =
       appliedTeammateModel ?? parsedRootModel ?? undefined
     if (!appliedTeammateModel) {
-      const result = applyModelFlagFromArgs(modelOptionArgs)
+      const result = applyModelFlagFromArgs(modelOptionArgs, {
+        rememberForSettingsEnv: true,
+      })
       if (result?.error) {
         console.error(`Error: ${result.error}`)
         process.exit(1)

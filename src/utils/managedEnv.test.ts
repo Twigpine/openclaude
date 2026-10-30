@@ -22,6 +22,12 @@ import {
   applyConfigEnvironmentVariables,
   applySafeConfigEnvironmentVariables,
 } from './managedEnv.js'
+import {
+  applyModelFlagFromArgs,
+  clearRememberedModelFlagForTests,
+} from './providerFlag.js'
+import { applyProviderProfileToProcessEnv } from './providerProfiles.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 
 const ENV_KEYS = [
   'GEMINI_ACCESS_TOKEN',
@@ -204,5 +210,72 @@ describe('applyConfigEnvironmentVariables', () => {
     expect(process.env.OPENAI_API_KEY).toBe('file-key')
     expect(process.env.OPENAI_BASE_URL).toBe('https://file.example/v1')
     expect(process.env.OPENAI_MODEL).toBe('file-model')
+  })
+})
+
+describe('standalone --model with an active saved profile', () => {
+  const codexProfile = {
+    id: 'codex-oauth',
+    name: 'Codex OAuth',
+    provider: 'openai',
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+    model: 'codexplan',
+    apiKey: '',
+  }
+  let restoreEnv: () => void
+
+  beforeEach(() => {
+    restoreEnv = snapshotEnv([
+      'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
+      'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
+      'CLAUDE_CODE_PROVIDER_ROUTE_ID',
+      'CLAUDE_CODE_USE_OPENAI',
+      'OPENAI_BASE_URL',
+      'OPENAI_MODEL',
+      'OPENAI_API_KEY',
+    ], { clear: true })
+    saveGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [codexProfile],
+      activeProviderProfileId: codexProfile.id,
+    }))
+  })
+
+  afterEach(() => {
+    clearRememberedModelFlagForTests()
+    restoreEnv()
+  })
+
+  it('keeps the --model flag when settings env merges re-apply the profile (#2388)', () => {
+    applySafeConfigEnvironmentVariables()
+    expect(process.env.OPENAI_MODEL).toBe('codexplan')
+
+    applyModelFlagFromArgs(['--model', 'gpt-5.6-terra'], {
+      rememberForSettingsEnv: true,
+    })
+    applySafeConfigEnvironmentVariables()
+    expect(process.env.OPENAI_MODEL).toBe('gpt-5.6-terra')
+
+    applyConfigEnvironmentVariables()
+    expect(process.env.OPENAI_MODEL).toBe('gpt-5.6-terra')
+    expect(process.env.OPENAI_BASE_URL).toBe(codexProfile.baseUrl)
+  })
+
+  it('does not carry the --model flag onto a profile activated later', () => {
+    applySafeConfigEnvironmentVariables()
+    applyModelFlagFromArgs(['--model', 'gpt-5.6-terra'], {
+      rememberForSettingsEnv: true,
+    })
+
+    const otherProfile = { ...codexProfile, id: 'codex-other', model: 'gpt-5.5' }
+    saveGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [codexProfile, otherProfile],
+      activeProviderProfileId: otherProfile.id,
+    }))
+    applyProviderProfileToProcessEnv(otherProfile)
+    applyConfigEnvironmentVariables()
+
+    expect(process.env.OPENAI_MODEL).toBe('gpt-5.5')
   })
 })

@@ -10,7 +10,10 @@ import {
 import { clearMTLSCache } from './mtls.js'
 import { clearProxyCache, configureGlobalAgents } from './proxy.js'
 import { applyActiveProviderProfileFromConfig } from './providerProfiles.js'
-import { reapplyRememberedProviderFlag } from './providerFlag.js'
+import {
+  reapplyRememberedModelFlag,
+  reapplyRememberedProviderFlag,
+} from './providerFlag.js'
 import { isSettingSourceEnabled } from './settings/constants.js'
 import {
   getSettings_DEPRECATED,
@@ -187,9 +190,11 @@ export function applySafeConfigEnvironmentVariables(): void {
   // settings.env was loaded, restore those explicit routing inputs after every
   // settings merge so saved env cannot clobber the selected provider endpoint
   // or compatibility key mapping. Reapply --provider last so it keeps the
-  // highest precedence if both flags are present.
+  // highest precedence if both flags are present. A standalone --model then
+  // overrides the model restored by the active profile.
   reapplyRememberedEnvFileValues()
   reapplyRememberedProviderFlag()
+  reapplyRememberedModelFlag()
 }
 
 /**
@@ -209,6 +214,7 @@ export function applyConfigEnvironmentVariables(): void {
   applyActiveProviderProfileFromConfig()
   reapplyRememberedEnvFileValues()
   reapplyRememberedProviderFlag()
+  reapplyRememberedModelFlag()
 
   // Clear caches so agents are rebuilt with the new env vars
   clearCACertsCache()
