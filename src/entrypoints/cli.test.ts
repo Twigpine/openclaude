@@ -1115,7 +1115,7 @@ describe('cli.tsx — background routing behavior', () => {
   })
 })
 
-describe('Node 24 premature exit regression (issue #1678)', () => {
+describe('built Node CLI startup regressions', () => {
   let buildDir: string
 
   beforeAll(async () => {
@@ -1149,6 +1149,76 @@ describe('Node 24 premature exit regression (issue #1678)', () => {
   afterAll(async () => {
     if (buildDir) await rm(buildDir, { recursive: true, force: true })
   })
+
+  async function discoverBeforeInput(aimlapiEnabled: boolean) {
+    const root = mkdtempSync(join(tmpdir(), 'openclaude-mcp-startup-'))
+    const cli = join(buildDir, 'dist/cli.mjs')
+    // Keep stdin open without sending text: discovery must finish before the
+    // input await, and no setup, MCP connection or model request should start.
+    const proc = Bun.spawn({
+      cmd: ['node', cli, '--print', '--debug-to-stderr', '--settings', JSON.stringify({
+        enabledPlugins: { 'aimlapi@builtin': aimlapiEnabled },
+      })],
+      cwd: root,
+      env: {
+        PATH: process.env.PATH,
+        SystemRoot: process.env.SystemRoot,
+        TMPDIR: process.env.TMPDIR,
+        TMP: process.env.TMP,
+        TEMP: process.env.TEMP,
+        OPENCLAUDE_CONFIG_DIR: root,
+        GIT_CEILING_DIRECTORIES: root,
+        CLAUDE_CODE_USE_OPENAI: '1',
+        OPENAI_BASE_URL: 'http://127.0.0.1:1/v1',
+        OPENAI_API_KEY: 'unused-test-key',
+        AIMLAPI_API_KEY: 'unused-aimlapi-test-key',
+        OPENCLAUDE_DISABLE_EARLY_INPUT: '1',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      },
+      stdin: 'pipe',
+      stdout: 'ignore',
+      stderr: 'pipe',
+    })
+    // Each child gets ten seconds; the test leaves five more for teardown.
+    const deadline = setTimeout(() => proc.kill('SIGKILL'), 10_000)
+    let stderr = ''
+    const reader = proc.stderr.getReader()
+    const decoder = new TextDecoder()
+    const discoveryPattern = /Found (\d+) plugins \((\d+) enabled, (\d+) disabled\)/
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        stderr += decoder.decode(value, { stream: true })
+        if (discoveryPattern.test(stderr)) break
+      }
+      const discovery = stderr.match(discoveryPattern)
+      if (!discovery) throw new Error(`Plugin discovery did not complete: ${stderr}`)
+      expect(stderr).not.toContain('[STARTUP] Running setup()')
+      return {
+        total: Number(discovery[1]),
+        enabled: Number(discovery[2]),
+        disabled: Number(discovery[3]),
+      }
+    } finally {
+      clearTimeout(deadline)
+      proc.kill('SIGKILL')
+      await proc.exited
+      await reader.cancel()
+      reader.releaseLock()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('session discovers the enabled aimlapi builtin before delayed pipe input arrives', async () => {
+    const disabled = await discoverBeforeInput(false)
+    const enabled = await discoverBeforeInput(true)
+    // Only aimlapi's setting changes, so unrelated builtins do not affect this
+    // comparison and cannot satisfy it when aimlapi is missing from discovery.
+    expect(enabled.total).toBe(disabled.total)
+    expect(enabled.enabled).toBe(disabled.enabled + 1)
+    expect(enabled.disabled).toBe(disabled.disabled - 1)
+  }, 25_000)
 
   it('built CLI stays alive during initialization in interactive mode without premature exit', async () => {
     const scriptPath = join(buildDir, 'startup.mjs')
