@@ -169,6 +169,27 @@ test('/set-context-window --save reports when a higher-precedence source will sh
   })
 })
 
+test.each([
+  ['the active model', '9007199254740992 --save'],
+  ['an explicit model', `${SAVE_MODEL} 9007199254740992 --save`],
+])('/set-context-window --save does not write a window the settings schema rejects (%s)', async (_form, args) => {
+  const initialSettings = JSON.stringify({
+    env: { KEEP_ME: '1' },
+    modelLimits: { [SAVE_MODEL]: { maxOutputTokens: 32_768 } },
+  })
+  await withCustomProviderSettings(initialSettings, async settingsPath => {
+    const output = await runSetContextWindow(args)
+
+    expect(output).toContain(
+      `Not saved: modelLimits.${SAVE_MODEL}.contextWindow: Too big: expected int to be <=9007199254740991`,
+    )
+    expect(output).toContain('The override applies to this session only.')
+    expect(output).not.toContain('Saved to modelLimits')
+    expect(readFileSync(settingsPath, 'utf8')).toBe(initialSettings)
+    expect(getContextWindowForModel(SAVE_MODEL)).toBe(9_007_199_254_740_992)
+  })
+})
+
 test('/set-context-window --save keeps the session override when saving fails', async () => {
   await withCustomProviderSettings('{ not json', async settingsPath => {
     const output = await runSetContextWindow('1000000 --save')

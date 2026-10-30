@@ -12,6 +12,8 @@ import {
   getSettingsFilePathForSource,
   updateSettingsForSource,
 } from '../../utils/settings/settings.js'
+import { SettingsSchema } from '../../utils/settings/types.js'
+import { formatZodError } from '../../utils/settings/validation.js'
 
 const HELP = `Usage: /set-context-window [model] <tokens> [--save]
 
@@ -42,9 +44,18 @@ See docs/advanced-setup.md (Per-model limit overrides).`
 function saveContextWindow(model: string, tokens: number): string {
   const settingsPath = getSettingsFilePathForSource('userSettings')
   const key = getBaseModelApiName(model) ?? model
-  const { error } = updateSettingsForSource('userSettings', {
-    modelLimits: { [key]: { contextWindow: tokens } },
-  })
+  const patch = { modelLimits: { [key]: { contextWindow: tokens } } }
+  // The session override accepts values the settings schema rejects (such as
+  // integers above Number.MAX_SAFE_INTEGER). Writing one would stop the whole
+  // user settings file from loading, so check the entry before writing it.
+  const validation = SettingsSchema().safeParse(patch)
+  const error = validation.success
+    ? updateSettingsForSource('userSettings', patch).error
+    : new Error(
+        formatZodError(validation.error, settingsPath ?? 'settings')
+          .map(issue => `${issue.path}: ${issue.message}`)
+          .join('; '),
+      )
   if (error) {
     return `Not saved: ${error.message}\nThe override applies to this session only.`
   }
