@@ -282,11 +282,12 @@ export function isAimlapiMcpUrl(url: string): boolean {
  * An aimlapi provider profile can export a comma-separated credential pool as
  * AIMLAPI_API_KEY, so `Bearer ${AIMLAPI_API_KEY}` can expand to several keys.
  * The MCP server takes one key: keep the first usable one, as the web search
- * backend does. Any other Authorization value is returned unchanged.
+ * backend does, including trimming a single key the availability gate accepts.
+ * Other Authorization values are returned unchanged.
  */
 function singleBearerCredential(value: string): string {
   const match = /^Bearer\s+(.+)$/is.exec(value.trim())
-  if (!match?.[1]?.includes(',')) return value
+  if (!match?.[1]) return value
   const key = firstUsableCredential(match[1])
   return key ? `Bearer ${key}` : value
 }

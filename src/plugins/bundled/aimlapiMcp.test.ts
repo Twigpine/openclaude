@@ -127,12 +127,16 @@ test('enabling the plugin exposes the MCP server with the configured key and att
 })
 
 test.each([
+  TEST_KEY,
+  ` ${TEST_KEY} `,
+  `\n${TEST_KEY}\n`,
+  `\r\n${TEST_KEY}\r\n`,
   `${TEST_KEY}, aimlapi-second-key-not-real`,
   `${TEST_KEY},\naimlapi-second-key-not-real`,
   `${TEST_KEY},\r\naimlapi-second-key-not-real`,
   `,\n${TEST_KEY}, aimlapi-second-key-not-real`,
-])('a pooled AIMLAPI_API_KEY sends one HTTP-safe key: %j', async pool => {
-  process.env.AIMLAPI_API_KEY = pool
+])('AIMLAPI_API_KEY sends its first usable HTTP-safe key: %j', async credential => {
+  process.env.AIMLAPI_API_KEY = credential
   useEnabledPlugins({ [PLUGIN_ID]: true })
 
   const plugin = getBuiltinPlugins().enabled.find(

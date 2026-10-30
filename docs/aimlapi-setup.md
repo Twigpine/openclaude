@@ -100,7 +100,7 @@ If AI/ML API is already your provider, turn the server on with:
 openclaude plugin enable aimlapi@builtin
 ```
 
-You can also open `/plugin` in a session, find the built-in **aimlapi** plugin and enable it there. To turn it off again:
+Use the CLI command above for initial activation. To turn it off again:
 
 ```bash
 openclaude plugin disable aimlapi@builtin

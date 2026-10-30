@@ -43,7 +43,7 @@ export function hasAimlapiMcpCredential(
  * image/video/audio generation, model and account tools). Disabled by default:
  * Toolbox runs and generations are billed to the user's AI/ML API balance, so
  * a key being present must never connect it on its own. Enable it with
- * `openclaude plugin enable aimlapi@builtin` or from the /plugin UI. Attribution
+ * `openclaude plugin enable aimlapi@builtin` for initial activation. Attribution
  * headers are added for the MCP host by `getMcpServerHeaders`.
  */
 export function registerAimlapiMcpPlugin(): void {
