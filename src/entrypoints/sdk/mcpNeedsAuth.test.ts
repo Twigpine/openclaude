@@ -53,6 +53,31 @@ mock.module('../../utils/secureStorage/index.js', () => ({
   getSecureStorage: () => memoryStorage,
 }))
 
+// The tool returns its URL and carries on in the background: the OAuth flow
+// finishes later, and the CLI would then reconnect. Watch both, passing every
+// call through, so a test can wait for a flow to end and see whether a
+// reconnect started instead of sleeping and hoping.
+const realAuth = { ...(await import('../../services/mcp/auth.js')) }
+/** Each flow the tool started; resolves once that flow has ended, either way. */
+let flows: Promise<unknown>[] = []
+mock.module('../../services/mcp/auth.js', () => ({
+  ...realAuth,
+  performMCPOAuthFlow: (...args: Parameters<typeof realAuth.performMCPOAuthFlow>) => {
+    const flow = realAuth.performMCPOAuthFlow(...args)
+    flows.push(flow.catch(() => {}))
+    return flow
+  },
+}))
+const realClient = { ...(await import('../../services/mcp/client.js')) }
+let reconnects = 0
+mock.module('../../services/mcp/client.js', () => ({
+  ...realClient,
+  reconnectMcpServerImpl: (...args: Parameters<typeof realClient.reconnectMcpServerImpl>) => {
+    reconnects++
+    return realClient.reconnectMcpServerImpl(...args)
+  },
+}))
+
 const { connectSdkMcpServers } = await import('./permissions.js')
 
 let server: ReturnType<typeof Bun.serve> | null = null
@@ -60,8 +85,6 @@ let configHome = ''
 let originalConfigOverride: string | undefined
 let hadMacro = false
 let savedMacro: unknown
-/** Requests that reached the MCP endpoint carrying a token — a reconnect. */
-let authorizedMcpRequests = 0
 /** Clients registered so far; each sign-in attempt registers its own. */
 let registrations = 0
 /** Code exchanges the stand-in refused because another client presented the code. */
@@ -141,7 +164,6 @@ function serveNeedingAuth(): string {
           expires_in: 3600,
         })
       }
-      if (request.headers.has('authorization')) authorizedMcpRequests++
       return Response.json(
         { error: 'invalid_token', error_description: 'sign in first' },
         {
@@ -218,6 +240,16 @@ function callbackFor(authUrl: string): string {
   return callback.toString()
 }
 
+/**
+ * Waits for the flow a sign-in started to end, then for what the tool chains
+ * onto it — the reconnect, or not — to have begun.
+ */
+async function flowEnded(index: number): Promise<void> {
+  await waitFor(() => flows.length > index)
+  await flows[index]
+  await new Promise(resolve => setImmediate(resolve))
+}
+
 async function waitFor(condition: () => boolean): Promise<void> {
   const deadline = Date.now() + 10_000
   while (!condition()) {
@@ -247,6 +279,8 @@ beforeAll(async () => {
 })
 
 afterAll(() => {
+  mock.module('../../services/mcp/client.js', () => realClient)
+  mock.module('../../services/mcp/auth.js', () => realAuth)
   mock.module('../../utils/secureStorage/index.js', () => realSecureStorage)
   if (hadMacro) (globalThis as Record<string, unknown>).MACRO = savedMacro
   else delete (globalThis as Record<string, unknown>).MACRO
@@ -261,7 +295,8 @@ beforeEach(async () => {
   configHome = await mkdtemp(join(tmpdir(), 'openclaude-mcp-auth-'))
   setClaudeConfigHomeDirForTesting(configHome)
   stored = {}
-  authorizedMcpRequests = 0
+  flows = []
+  reconnects = 0
   registrations = 0
   refusedExchanges = 0
 })
@@ -320,9 +355,9 @@ test('the tool hands back a sign-in URL, and closing the session stops the flow'
 
   // The user finishing in the browser after close reaches nothing.
   await expect(fetch(callbackFor(result.authUrl!))).rejects.toThrow()
-  await Bun.sleep(50)
+  await flowEnded(0)
   expect(storedAccessTokens()).toEqual([])
-  expect(authorizedMcpRequests).toBe(0)
+  expect(reconnects).toBe(0)
 }, 30_000)
 
 /**
@@ -339,17 +374,14 @@ test('finishing sign-in stores the tokens without opening a client the session c
   const callback = await fetch(callbackFor(result.authUrl!))
   expect(callback.status).toBe(200)
 
-  await waitFor(() => storedAccessTokens().length > 0)
-  expect(storedAccessTokens()).toEqual([`token-for-${new URL(result.authUrl!).searchParams.get('client_id')}`])
-  // Give a reconnect, were one started, time to reach the server.
-  await Bun.sleep(250)
-  expect(authorizedMcpRequests).toBe(0)
+  await flowEnded(0)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(result)}`])
+  expect(reconnects).toBe(0)
   expect(setAppState).not.toHaveBeenCalled()
 
-  // Closing afterwards has nothing left to stop.
+  // Closing afterwards has nothing left to stop, and changes nothing.
   session.abort()
-  await Bun.sleep(50)
-  expect(authorizedMcpRequests).toBe(0)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(result)}`])
 }, 30_000)
 
 /**
@@ -373,16 +405,16 @@ test('asking to sign in again stops the earlier attempt, and the new one complet
 
   // The first link no longer leads anywhere.
   await expect(fetch(callbackFor(first.result.authUrl!))).rejects.toThrow()
-  await Bun.sleep(50)
+  await flowEnded(0)
   expect(refusedExchanges).toBe(0)
   expect(storedAccessTokens()).toEqual([])
 
   // The second does, with the client it was issued to.
   expect((await fetch(callbackFor(second.result.authUrl!))).status).toBe(200)
-  await waitFor(() => storedAccessTokens().length > 0)
+  await flowEnded(1)
   expect(storedAccessTokens()).toEqual([`token-for-${secondClient}`])
   expect(refusedExchanges).toBe(0)
-  expect(authorizedMcpRequests).toBe(0)
+  expect(reconnects).toBe(0)
 }, 30_000)
 
 /**
@@ -410,13 +442,38 @@ test.each([
   const second = await startSignIn(tools[0]!, session)
   const secondClient = clientOf(second.result)
   expect((await fetch(callbackFor(second.result.authUrl!))).status).toBe(200)
-  await waitFor(() => storedAccessTokens().length > 0)
+  await flowEnded(1)
+  expect(storedAccessTokens()).toEqual([`token-for-${secondClient}`])
 
   slow.answer()
-  // Give the late answer, were its attempt still owned, time to be written.
-  await Bun.sleep(250)
+  await flowEnded(0)
   expect(storedAccessTokens()).toEqual([`token-for-${secondClient}`])
   expect(Object.values(stored.mcpOAuth ?? {}).map(entry => entry.clientId)).toEqual([secondClient])
+}, 30_000)
+
+/**
+ * A sign-in asked for once the session has closed belongs to nothing and must
+ * change nothing. Every flow starts by clearing the server's stored entry
+ * for a fresh registration, so starting one regardless would throw away the
+ * sign-in the user already completed.
+ */
+test('a sign-in asked for after the session closed leaves the stored sign-in alone', async () => {
+  const url = serveNeedingAuth()
+  const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  const session = openSession()
+
+  const done = await startSignIn(tools[0]!, session)
+  expect((await fetch(callbackFor(done.result.authUrl!))).status).toBe(200)
+  await flowEnded(0)
+  const signedIn = structuredClone(stored)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(done.result)}`])
+
+  session.abort()
+  const late = await startSignIn(tools[0]!, session)
+
+  expect(late.result.status).toBe('error')
+  await flowEnded(1)
+  expect(stored).toEqual(signedIn)
 }, 30_000)
 
 /**

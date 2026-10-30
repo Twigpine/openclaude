@@ -958,6 +958,11 @@ export async function performMCPOAuthFlow(
   const cachedResourceMetadataUrl =
     cachedEntry?.discoveryState?.resourceMetadataUrl
 
+  // A flow cancelled before it starts writes nothing, like one cancelled
+  // later (see ClaudeAuthProvider): clearing below would discard a sign-in
+  // that is still good for an attempt that will never replace it.
+  if (abortSignal?.aborted) throw new AuthenticationCancelledError()
+
   // Clear any existing stored credentials to ensure fresh client registration.
   // Note: this deletes the entire entry (including discoveryState/stepUpScope),
   // but we already read the cached values above.
@@ -1348,10 +1353,12 @@ export async function performMCPOAuthFlow(
       if (statusMatch) {
         httpStatus = Number(statusMatch[1])
       }
-      // If client not found, clear the stored client ID and suggest retry
+      // If client not found, clear the stored client ID and suggest retry —
+      // unless this flow was cancelled, when the entry may be a newer flow's.
       if (
         error.errorCode === 'invalid_client' &&
-        error.message.includes('Client not found')
+        error.message.includes('Client not found') &&
+        !abortSignal?.aborted
       ) {
         const storage = getSecureStorage()
         const existingData = storage.read() || {}
