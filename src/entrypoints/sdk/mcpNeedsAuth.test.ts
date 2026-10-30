@@ -97,6 +97,8 @@ let heldExchange: {
   answer: () => void
   answered: Promise<void>
 } | null = null
+/** Authorization-server metadata the stand-in sends headers for, then holds. */
+let heldMetadata: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
 /** Every session a test opens; teardown closes them, whatever the test did. */
 const sessions: AbortController[] = []
 
@@ -119,6 +121,30 @@ function serveNeedingAuth(): string {
         path.startsWith('/.well-known/oauth-authorization-server') ||
         path.startsWith('/.well-known/openid-configuration')
       ) {
+        const metadata = {
+          issuer: base,
+          authorization_endpoint: `${base}/authorize`,
+          token_endpoint: `${base}/token`,
+          registration_endpoint: `${base}/register`,
+          response_types_supported: ['code'],
+          code_challenge_methods_supported: ['S256'],
+        }
+        const held = heldMetadata
+        if (held) {
+          held.arrived = true
+          return new Response(
+            new ReadableStream({
+              async start(stream) {
+                // A first byte sends the headers; the rest waits.
+                stream.enqueue(new TextEncoder().encode(' '))
+                await held.answered
+                stream.enqueue(new TextEncoder().encode(JSON.stringify(metadata)))
+                stream.close()
+              },
+            }),
+            { headers: { 'Content-Type': 'application/json' } },
+          )
+        }
         return Response.json({
           issuer: base,
           authorization_endpoint: `${base}/authorize`,
@@ -149,20 +175,32 @@ function serveNeedingAuth(): string {
           refusedExchanges++
           return Response.json({ error: 'invalid_grant' }, { status: 400 })
         }
+        const tokens = { access_token: `token-for-${clientId}`, token_type: 'Bearer', expires_in: 3600 }
         // Captured: teardown clears the shared slot while this answer waits.
         const held = heldExchange
         if (held && held.clientId === clientId) {
           held.arrived = true
-          await held.answered
           if (held.refuse) {
+            await held.answered
             return Response.json({ error: 'invalid_grant' }, { status: 400 })
           }
+          // A grant's headers go out at once and its body waits, as a slow
+          // or stalled server's would.
+          const answered = held.answered
+          return new Response(
+            new ReadableStream({
+              async start(stream) {
+                // A first byte sends the headers; the rest waits.
+                stream.enqueue(new TextEncoder().encode(' '))
+                await answered
+                stream.enqueue(new TextEncoder().encode(JSON.stringify(tokens)))
+                stream.close()
+              },
+            }),
+            { headers: { 'Content-Type': 'application/json' } },
+          )
         }
-        return Response.json({
-          access_token: `token-for-${clientId}`,
-          token_type: 'Bearer',
-          expires_in: 3600,
-        })
+        return Response.json(tokens)
       }
       return Response.json(
         { error: 'invalid_token', error_description: 'sign in first' },
@@ -198,7 +236,8 @@ function openSession(): AbortController {
 
 /**
  * Makes the stand-in hold its answer to this client's code exchange, then
- * grant it or — as a server that has since let the code go would — refuse it.
+ * grant it — headers at once, the body held — or, as a server that has since
+ * let the code go would, refuse it.
  */
 function holdExchangeFor(clientId: string, refuse: boolean) {
   let answer!: () => void
@@ -305,6 +344,8 @@ afterEach(async () => {
   for (const session of sessions.splice(0)) session.abort()
   heldExchange?.answer()
   heldExchange = null
+  heldMetadata?.answer()
+  heldMetadata = null
   server?.stop(true)
   server = null
   stored = {}
@@ -449,6 +490,62 @@ test.each([
   await flowEnded(0)
   expect(storedAccessTokens()).toEqual([`token-for-${secondClient}`])
   expect(Object.values(stored.mcpOAuth ?? {}).map(entry => entry.clientId)).toEqual([secondClient])
+}, 30_000)
+
+/**
+ * Closing the session has to end a sign-in even while its code exchange is
+ * still answering: the flow belongs to the session, and a server that never
+ * finishes answering must not keep it alive.
+ */
+test('closing the session while the code exchange answers ends the flow', async () => {
+  const url = serveNeedingAuth()
+  const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  const session = openSession()
+
+  const { result } = await startSignIn(tools[0]!, session)
+  const slow = holdExchangeFor(clientOf(result), false)
+  expect((await fetch(callbackFor(result.authUrl!))).status).toBe(200)
+  await waitFor(() => slow.arrived)
+  session.abort()
+
+  await Promise.race([
+    flowEnded(0),
+    Bun.sleep(2_000).then(() => {
+      throw new Error('sign-in still pending after the session closed')
+    }),
+  ])
+  expect(storedAccessTokens()).toEqual([])
+  expect(reconnects).toBe(0)
+}, 30_000)
+
+/**
+ * The same holds before there is a URL to hand back: the flow first reads the
+ * authorization server's metadata, and a server that sends the headers and
+ * then stalls must not keep the sign-in — or the tool call — alive past close.
+ */
+test('closing the session while the server metadata answers ends the sign-in', async () => {
+  const url = serveNeedingAuth()
+  const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  const session = openSession()
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldMetadata = { arrived: false, answer, answered }
+  const held = heldMetadata
+
+  const call = startSignIn(tools[0]!, session)
+  await waitFor(() => held.arrived)
+  session.abort()
+
+  const { result } = await Promise.race([
+    call,
+    Bun.sleep(2_000).then(() => {
+      throw new Error('sign-in still pending after the session closed')
+    }),
+  ])
+  expect(result.status).toBe('error')
+  expect(storedAccessTokens()).toEqual([])
 }, 30_000)
 
 /**

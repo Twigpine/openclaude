@@ -480,15 +480,21 @@ export async function acquireIdpIdToken(
     authorizationCode,
     codeVerifier,
     redirectUri,
-    fetchFn: (url, init) => {
+    // The login's signal and the timeout cover the whole exchange, body
+    // included: it is read before cleanup and handed back buffered.
+    fetchFn: async (url, init) => {
       const { signal, cleanup } = createCombinedAbortSignal(init?.signal ?? undefined, {
+        signalB: opts.abortSignal,
         timeoutMs: IDP_REQUEST_TIMEOUT_MS,
       })
-      // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
-      return fetch(url, {
-        ...init,
-        signal,
-      }).finally(cleanup)
+      try {
+        // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
+        const response = await fetch(url, { ...init, signal })
+        // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
+        return new Response(response.body && (await response.arrayBuffer()), response)
+      } finally {
+        cleanup()
+      }
     },
   })
   if (!tokens.id_token) {
@@ -505,9 +511,9 @@ export async function acquireIdpIdToken(
     ? expFromJwt * 1000
     : Date.now() + (tokens.expires_in ?? 3600) * 1000
 
-  // The code exchange above does not observe the signal, so a login cancelled
-  // during it still gets here. Caching its id_token would replace whatever a
-  // newer login has cached for this issuer.
+  // A login cancelled once the exchange has answered still gets here. Caching
+  // its id_token would replace whatever a newer login has cached for this
+  // issuer.
   if (opts.abortSignal?.aborted) {
     throw new Error('XAA IdP: login cancelled')
   }

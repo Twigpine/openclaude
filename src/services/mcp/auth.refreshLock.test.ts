@@ -186,6 +186,42 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve }
 }
 
+/**
+ * A JSON response whose body arrives only once `release` resolves. Like a real
+ * fetch, aborting the request's signal errors the body mid-read.
+ */
+function heldJsonResponse(
+  json: unknown,
+  release: Promise<void>,
+  signal: AbortSignal | null | undefined,
+): Response {
+  return new Response(
+    new ReadableStream({
+      start(stream) {
+        signal?.addEventListener('abort', () => stream.error(signal.reason), {
+          once: true,
+        })
+        void release.then(() => {
+          if (signal?.aborted) return
+          stream.enqueue(new TextEncoder().encode(JSON.stringify(json)))
+          stream.close()
+        })
+      },
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+/** Fails, rather than hanging the suite, if a cancelled flow stays pending. */
+function settlesSoon<T>(promise: Promise<T>): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error('still pending after cancel')), 2000),
+    ),
+  ])
+}
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 2000
   while (!predicate()) {
@@ -2135,11 +2171,14 @@ test('fresh-token threshold skips just above five minutes and refreshes below it
   }
 })
 
-test('an XAA sign-in cancelled while its token response arrives stores nothing', async () => {
-  // The XAA fetch lets go of the flow's signal once response headers arrive,
-  // so a cancel — the SDK session closing, or a newer sign-in replacing this
-  // one — can land while the body is still being read, and the exchange then
-  // returns tokens anyway.
+test.each([
+  ['the request stops', true],
+  ['the request cannot be stopped', false],
+])('an XAA sign-in cancelled while its token response arrives stores nothing: %s', async (_, stoppable) => {
+  // A cancel — the SDK session closing, or a newer sign-in replacing this
+  // one — can land while the token response body is still arriving. The flow
+  // has to end there rather than wait on a body the server may never finish;
+  // and where the request runs on regardless, its answer is still not kept.
   const { config, initialData } = makeXaaFixture()
   activeStorage = createSharedStorage(initialData, [])
   installSuccessfulXaaFetch()
@@ -2149,20 +2188,10 @@ test('an XAA sign-in cancelled while its token response arrives stores nothing',
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
     if (input.toString() === `${AS_ISSUER}/token` && init?.method === 'POST') {
       tokenRequested = true
-      const late = JSON.stringify({
-        access_token: 'late-access-secret',
-        token_type: 'Bearer',
-        expires_in: 3600,
-      })
-      return new Response(
-        new ReadableStream({
-          async start(stream) {
-            await body.promise
-            stream.enqueue(new TextEncoder().encode(late))
-            stream.close()
-          },
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      return heldJsonResponse(
+        { access_token: 'late-access-secret', token_type: 'Bearer', expires_in: 3600 },
+        body.promise,
+        stoppable ? init.signal : undefined,
       )
     }
     return xaaFetch(input, init)
@@ -2174,15 +2203,19 @@ test('an XAA sign-in cancelled while its token response arrives stores nothing',
   })
   await waitFor(() => tokenRequested)
   session.abort()
-  body.resolve()
 
-  await expect(flow).rejects.toBeInstanceOf(AuthenticationCancelledError)
+  if (!stoppable) body.resolve()
+  await expect(settlesSoon(flow)).rejects.toBeInstanceOf(AuthenticationCancelledError)
+  body.resolve()
   expect(activeStorage.getData()).toEqual(initialData)
 })
 
-test('an XAA IdP login cancelled while its code exchange answers caches no id_token', async () => {
-  // The IdP code exchange does not observe the flow's signal at all, so a
-  // cancel landing during it still returns an id_token. Caching it would
+test.each([
+  ['the request stops', true],
+  ['the request cannot be stopped', false],
+])('an XAA IdP login cancelled while its code exchange answers caches no id_token: %s', async (_, stoppable) => {
+  // The IdP code exchange belongs to the same flow: a cancel landing while it
+  // answers must end the login, and must not cache an id_token that would
   // replace whatever identity a newer sign-in has cached for this issuer.
   const { config, initialData } = makeXaaFixture()
   delete initialData.mcpXaaIdp
@@ -2201,20 +2234,10 @@ test('an XAA IdP login cancelled while its code exchange answers caches no id_to
       const payload = Buffer.from(
         JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
       ).toString('base64url')
-      const late = JSON.stringify({
-        access_token: 'idp-access',
-        token_type: 'Bearer',
-        id_token: `e30.${payload}.sig`,
-      })
-      return new Response(
-        new ReadableStream({
-          async start(stream) {
-            await body.promise
-            stream.enqueue(new TextEncoder().encode(late))
-            stream.close()
-          },
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      return heldJsonResponse(
+        { access_token: 'idp-access', token_type: 'Bearer', id_token: `e30.${payload}.sig` },
+        body.promise,
+        stoppable ? init?.signal : undefined,
       )
     }
     return xaaFetch(input, init)
@@ -2238,8 +2261,51 @@ test('an XAA IdP login cancelled while its code exchange answers caches no id_to
   expect((await originalFetch(callback)).status).toBe(200)
   await waitFor(() => codeExchanged)
   session.abort()
-  body.resolve()
 
-  await expect(flow).rejects.toBeInstanceOf(AuthenticationCancelledError)
+  if (!stoppable) body.resolve()
+  await expect(settlesSoon(flow)).rejects.toBeInstanceOf(AuthenticationCancelledError)
+  body.resolve()
+  expect(activeStorage.getData()).toEqual(initialData)
+})
+
+test('a cancelled flow\'s provider writes nothing to the server\'s entry', async () => {
+  // Behind the cancelled exchange, the provider is the last line: the SDK
+  // writes through it, and an entry a newer sign-in owns must not change.
+  const config: McpHTTPServerConfig = { type: 'http', url: MCP_URL }
+  const serverKey = getServerKey('enterprise', config)
+  const initialData: SecureStorageData = {
+    mcpOAuth: {
+      [serverKey]: {
+        serverName: 'enterprise',
+        serverUrl: MCP_URL,
+        accessToken: 'newer-access-secret',
+        clientId: 'newer-client',
+        expiresAt: Date.now() + 60_000,
+      },
+    },
+  }
+  activeStorage = createSharedStorage(initialData, [])
+  const session = new AbortController()
+  session.abort()
+  const provider = new ClaudeAuthProvider(
+    'enterprise',
+    config,
+    undefined,
+    true,
+    undefined,
+    true,
+    session.signal,
+  )
+
+  const writes = [
+    () => provider.saveTokens({ access_token: 'late', token_type: 'Bearer' }),
+    () => provider.saveClientInformation({ client_id: 'late', redirect_uris: [] }),
+    () => provider.saveDiscoveryState({ authorizationServerUrl: AS_ISSUER }),
+    () => provider.invalidateCredentials('all'),
+  ]
+  for (const write of writes) {
+    await expect(write()).rejects.toBeInstanceOf(AuthenticationCancelledError)
+  }
+  expect(activeStorage.updateCalls).toBe(0)
   expect(activeStorage.getData()).toEqual(initialData)
 })

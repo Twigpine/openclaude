@@ -40,13 +40,21 @@ const ID_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:id_token'
  * rather than being clobbered by the timeout signal.
  */
 function makeXaaFetch(abortSignal?: AbortSignal): FetchLike {
-  return (url, init) => {
+  return async (url, init) => {
     const { signal, cleanup } = createCombinedAbortSignal(init?.signal ?? undefined, {
       signalB: abortSignal,
       timeoutMs: XAA_REQUEST_TIMEOUT_MS,
     })
-    // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
-    return fetch(url, { ...init, signal }).finally(cleanup)
+    try {
+      // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
+      const response = await fetch(url, { ...init, signal })
+      // Read the body before cleanup so the signal and timeout cover it too;
+      // callers then read a buffered copy.
+      // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
+      return new Response(response.body && (await response.arrayBuffer()), response)
+    } finally {
+      cleanup()
+    }
   }
 }
 

@@ -262,8 +262,13 @@ export async function normalizeOAuthErrorBody(
 
 /**
  * Creates a fetch function with a fresh 30-second timeout for each OAuth request.
- * Used by ClaudeAuthProvider for metadata discovery and token refresh.
+ * Used by ClaudeAuthProvider for metadata discovery and token refresh, and by
+ * performMCPOAuthFlow for its whole sign-in.
  * Prevents stale timeout signals from affecting auth operations.
+ *
+ * The timeout and the caller's signal cover the response body too: it is read
+ * here, before cleanup, and handed back buffered. Returned after the headers
+ * alone, a body the server never finishes would outlive both.
  */
 function createAuthFetch(abortSignal?: AbortSignal): FetchLike {
   return async (url: string | URL, init?: RequestInit) => {
@@ -278,7 +283,9 @@ function createAuthFetch(abortSignal?: AbortSignal): FetchLike {
     try {
       // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
       const response = await fetch(url, { ...init, signal })
-      return isPost ? await normalizeOAuthErrorBody(response) : response
+      // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
+      const whole = new Response(response.body && (await response.arrayBuffer()), response)
+      return isPost ? await normalizeOAuthErrorBody(whole) : whole
     } finally {
       cleanup()
     }
@@ -838,9 +845,9 @@ async function performMCPXaaAuth(
       throw e
     }
 
-    // A cancelled flow writes nothing, as in the consent flow. The XAA fetch
-    // stops observing the signal once response headers arrive, so a cancel
-    // during the body read still returns tokens here.
+    // A cancelled flow writes nothing, as in the consent flow. Its requests
+    // end on cancel, but one that ran to completion regardless — or a cancel
+    // landing just after — still returns tokens here.
     if (abortSignal?.aborted) throw new AuthenticationCancelledError()
 
     // Save tokens via the same storage path as normal OAuth. We write directly
@@ -1032,6 +1039,10 @@ export async function performMCPOAuthFlow(
       options?.skipBrowserOpen,
       abortSignal,
     )
+    // The flow's requests — metadata, discovery, registration, the code
+    // exchange — run under its signal and a timeout, so cancelling the flow
+    // ends them instead of leaving it waiting on a server that never answers.
+    const authFetch = createAuthFetch(abortSignal)
 
     // Fetch and store OAuth metadata for scope information
     try {
@@ -1039,7 +1050,7 @@ export async function performMCPOAuthFlow(
         serverName,
         serverConfig.url,
         serverConfig.oauth?.authServerMetadataUrl,
-        undefined,
+        authFetch,
         wwwAuthParams.resourceMetadataUrl,
       )
       if (metadata) {
@@ -1235,6 +1246,7 @@ export async function performMCPOAuthFlow(
             serverUrl: serverConfig.url,
             scope: wwwAuthParams.scope,
             resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
+            fetchFn: authFetch,
           })
           logMCPDebug(serverName, `Initial auth result: ${result}`)
 
@@ -1277,6 +1289,7 @@ export async function performMCPOAuthFlow(
       serverUrl: serverConfig.url,
       authorizationCode,
       resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
+      fetchFn: authFetch,
     })
 
     logMCPDebug(serverName, `Auth result: ${result}`)
@@ -1668,10 +1681,9 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
 
   /**
    * A cancelled interactive flow writes nothing more to this server's entry.
-   * The callback listener stops observing the signal once the code arrives,
-   * and the exchange after it does not observe it at all, so a flow closed or
-   * replaced mid-exchange still reaches the SDK's writes — by then possibly
-   * over a newer flow that owns the entry.
+   * Its requests end on cancel, but one that ran to completion regardless —
+   * or a cancel landing between the answer and the write — still reaches the
+   * SDK's writes, by then possibly over a newer flow that owns the entry.
    */
   private throwIfFlowCancelled(): void {
     if (this.abortSignal?.aborted) throw new AuthenticationCancelledError()
