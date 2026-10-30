@@ -10,6 +10,7 @@ import {
 } from '../../utils/context.js'
 import {
   getSettingsFilePathForSource,
+  parseSettingsFile,
   updateSettingsForSource,
 } from '../../utils/settings/settings.js'
 import { SettingsSchema } from '../../utils/settings/types.js'
@@ -32,7 +33,8 @@ Add --save to also write the value to modelLimits in your user settings.json
 so it survives restarts. Other settings, including the model's
 maxOutputTokens, are kept. After a restart the saved value follows the
 modelLimits precedence below, and --save reports when another source will
-take precedence over it.
+take precedence over it, or when other invalid settings in the file stop it
+from loading.
 
 For a permanent override (survives restart), use modelLimits in settings.json
 for custom/discovered models, for example:
@@ -61,6 +63,16 @@ function saveContextWindow(model: string, tokens: number): string {
   }
 
   const saved = `Saved to modelLimits["${key}"] in ${settingsPath}.`
+  // The writer keeps invalid fields already in the file, and the loader then
+  // ignores the whole file. Report that rather than naming whichever source
+  // wins without it as the one taking precedence.
+  const written = settingsPath ? parseSettingsFile(settingsPath) : null
+  if (written?.settings === null) {
+    const details = written.errors
+      .map(issue => `\n  ${issue.path}: ${issue.message}`)
+      .join('')
+    return `${saved}\nAfter a restart, the saved value will not apply: ${settingsPath} has invalid settings, so the whole file is ignored until they are fixed.${details}`
+  }
   const afterRestart = resolveContextWindowForModel(
     model,
     getSdkBetas(),

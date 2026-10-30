@@ -190,6 +190,49 @@ test.each([
   })
 })
 
+test('/set-context-window --save reports when other invalid settings stop the saved file from loading', async () => {
+  await withCustomProviderSettings(
+    JSON.stringify({
+      env: { KEEP_ME: '1' },
+      modelLimits: { [SAVE_MODEL]: { maxOutputTokens: -1 } },
+    }),
+    async settingsPath => {
+      const output = await runSetContextWindow('1000000 --save')
+
+      expect(output).toContain(`Saved to modelLimits["${SAVE_MODEL}"] in ${settingsPath}.`)
+      expect(output).toContain(
+        `After a restart, the saved value will not apply: ${settingsPath} has invalid settings, so the whole file is ignored until they are fixed.\n  modelLimits.${SAVE_MODEL}.maxOutputTokens: Number must be greater than or equal to 0`,
+      )
+      expect(output).not.toContain('instead of the saved value')
+      expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual({
+        env: { KEEP_ME: '1' },
+        modelLimits: {
+          [SAVE_MODEL]: { maxOutputTokens: -1, contextWindow: 1_000_000 },
+        },
+      })
+      expect(getContextWindowForModel(SAVE_MODEL)).toBe(1_000_000)
+    },
+  )
+})
+
+test('/set-context-window --save reports a plain save when it replaces an invalid saved window', async () => {
+  await withCustomProviderSettings(
+    JSON.stringify({ modelLimits: { [SAVE_MODEL]: { contextWindow: -5 } } }),
+    async settingsPath => {
+      const output = await runSetContextWindow('1000000 --save')
+
+      expect(output).toContain(`Saved to modelLimits["${SAVE_MODEL}"] in ${settingsPath}.`)
+      expect(output).not.toContain('After a restart')
+      clearSessionContextWindowOverride()
+      resetSettingsCache()
+      expect(resolveContextWindowForModel(SAVE_MODEL)).toEqual({
+        contextWindow: 1_000_000,
+        source: 'model-limits',
+      })
+    },
+  )
+})
+
 test('/set-context-window --save keeps the session override when saving fails', async () => {
   await withCustomProviderSettings('{ not json', async settingsPath => {
     const output = await runSetContextWindow('1000000 --save')
