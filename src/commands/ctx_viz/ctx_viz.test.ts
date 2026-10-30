@@ -45,6 +45,7 @@ import {
   setSessionSettingsCache,
 } from '../../utils/settings/settingsCache.js'
 import type { RenderInput } from './ctx-noninteractive.js'
+import { createCompactBoundaryMessage, createUserMessage } from '../../utils/messages.js'
 
 function findCtx(commands: ReturnType<typeof getCommands> extends Promise<infer T> ? T : never) {
   return commands.find(c => c.name === 'ctx')
@@ -65,6 +66,64 @@ afterEach(() => {
 })
 
 describe('/ctx command surface (PR #1610)', () => {
+  test('collects the latest operation across preserved partial-compaction prefixes', async () => {
+    const realAnalyze = { ...await import('../../utils/analyzeContext.js') }
+    // Token accounting is independent of boundary selection and requires
+    // build-time prompt macros. Exercise the real collector and renderer.
+    mock.module('../../utils/analyzeContext.js', () => ({
+      ...realAnalyze,
+      analyzeContextUsage: async () => ({
+        categories: [], totalTokens: 0, percentage: 0, apiUsage: null,
+      }),
+    }))
+    try {
+      const { collectCtxData, renderCtxReport } = await import('./ctx-noninteractive.js')
+      const old = createCompactBoundaryMessage('auto', 10_000)
+      old.compactMetadata.autoCompactReason = 'message-count'
+      const kept = createUserMessage({ content: 'preserved context' })
+      const manual = createCompactBoundaryMessage('manual', 5000)
+      // Real prefix-preserving partial compaction anchors the kept chain to
+      // the new boundary; resume relinks that chain into the same order.
+      manual.compactMetadata.preservedSegment = {
+        headUuid: old.uuid, anchorUuid: manual.uuid, tailUuid: kept.uuid,
+      }
+      // Identity, rather than wall-clock ordering, distinguishes operations.
+      manual.timestamp = old.timestamp
+      const later = createCompactBoundaryMessage('auto', 6000)
+      later.compactMetadata.autoCompactReason = 'context-overflow'
+      const nested = createCompactBoundaryMessage('manual', 4000)
+      nested.compactMetadata.preservedSegment = {
+        headUuid: manual.uuid, anchorUuid: nested.uuid, tailUuid: kept.uuid,
+      }
+      const cases = [
+        { messages: [], expected: 'none' },
+        { messages: [old, kept], expected: 'automatic (message count)' },
+        { messages: [manual, old, kept], expected: 'manual' },
+        // Fullscreen scrollback contains the kept UUIDs before and after manual.
+        { messages: [old, kept, manual, old, kept], expected: 'manual' },
+        { messages: [nested, manual, old, kept], expected: 'manual' },
+        { messages: [manual, old, kept, later], expected: 'automatic (context-overflow recovery)' },
+      ]
+      for (const { messages, expected } of cases) {
+        const data = await collectCtxData({
+          messages,
+          getAppState: () => ({
+            toolPermissionContext: {
+              mode: 'default', additionalWorkingDirectories: new Map(), alwaysAllowRules: {},
+            },
+          }) as never,
+          options: {
+            mainLoopModel: 'claude-sonnet-4', tools: [], customSystemPrompt: 'Test prompt',
+            agentDefinitions: { activeAgents: [], allAgents: [] },
+          },
+        })
+        expect(renderCtxReport(data)).toContain(`Last compaction:    ${expected}`)
+      }
+    } finally {
+      mock.module('../../utils/analyzeContext.js', () => realAnalyze)
+    }
+  })
+
   test('is registered in the public COMMANDS list for normal users', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'oc-test-ctx-pub-'))
     try {

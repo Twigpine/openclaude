@@ -108,7 +108,23 @@ export async function collectCtxData(context: CtxDataInput): Promise<{
   const model = mainLoopModel
   const contextWindow = resolveContextWindowForModel(model, getSdkBetas())
   const autoCompactEnabled = isAutoCompactEnabled()
-  const lastBoundary = messages.findLast(isCompactBoundaryMessage)
+  let lastBoundary: Extract<Message, { subtype: 'compact_boundary' }> | undefined
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!
+    if (!isCompactBoundaryMessage(message)) continue
+    lastBoundary = message
+    // Partial "from" compaction puts its kept prefix after the new boundary,
+    // including older boundaries. Resume restores that same segment order.
+    // Skip the preserved prefix when identifying operations, without changing
+    // the model-facing history. Fullscreen may also have these UUIDs earlier.
+    const segment = message.compactMetadata.preservedSegment
+    if (segment?.anchorUuid === message.uuid) {
+      const tailIndex = messages.findIndex(
+        (candidate, index) => index > i && candidate.uuid === segment.tailUuid,
+      )
+      if (tailIndex > i) i = tailIndex
+    }
+  }
 
   return {
     contextData,
