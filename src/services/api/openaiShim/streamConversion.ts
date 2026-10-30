@@ -99,6 +99,28 @@ const JSON_REPAIR_SUFFIXES = [
   '}', '"}', ']}', '"]}', '}}', '"}}', ']}}', '"]}}', '"]}]}', '}]}',
 ]
 
+/**
+ * Applies the streaming think filter to `text` but copies tool-call blocks that
+ * open in visible text verbatim, so think tags inside their arguments survive.
+ * Blocks that open inside reasoning are filtered out with it.
+ */
+function visibleTextKeepingToolCallBlocks(
+  text: string,
+  blockRanges: Array<[number, number]>,
+): string {
+  const filter = createThinkTagFilter()
+  let visible = ''
+  let position = 0
+  for (const [start, end] of blockRanges) {
+    if (start < position) continue
+    visible += filter.feed(text.slice(position, start))
+    const block = text.slice(start, end)
+    visible += filter.isInsideBlock() ? filter.feed(block) : block
+    position = end
+  }
+  return visible + filter.feed(text.slice(position))
+}
+
 export function convertOpenAIStreamUsage(
   usage: Record<string, unknown> | undefined,
 ): Partial<AnthropicUsage> | undefined {
@@ -803,15 +825,25 @@ export async function* openaiStreamToAnthropic(
             let toolCallSource = accumulatedText
             let { calls: textToolCalls, toolCallRanges } = parseTextToolCalls(accumulatedText)
             // Qwen-family templates wrap tool calls in `<tool_call>` tags, which
-            // Ollama can leave unparsed in message.content (#2040). Parse only the
-            // think-filtered visible text so markup inside reasoning never
-            // becomes an executable call.
+            // Ollama can leave unparsed in message.content (#2040). Only blocks
+            // that open in visible text count: re-parse without reasoning so
+            // markup inside it never becomes an executable call.
             if (textToolCalls.length === 0) {
-              toolCallSource = ollamaTextBuffer
               ;({ calls: textToolCalls, toolCallRanges } = parseXmlToolCalls(
-                toolCallSource,
+                accumulatedText,
                 allowHy3ToolCalls,
               ))
+              const visibleSource = visibleTextKeepingToolCallBlocks(
+                accumulatedText,
+                toolCallRanges,
+              )
+              if (textToolCalls.length > 0 && visibleSource !== accumulatedText) {
+                toolCallSource = visibleSource
+                ;({ calls: textToolCalls, toolCallRanges } = parseXmlToolCalls(
+                  toolCallSource,
+                  allowHy3ToolCalls,
+                ))
+              }
             }
             if (textToolCalls.length > 0) {
               ollamaClosedContentBlock = true

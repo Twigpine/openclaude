@@ -777,6 +777,17 @@ describe('Ollama streaming — <tool_call>-wrapped JSON text fallback (#2040)', 
     expect(stopReason).toBe('tool_use')
   })
 
+  test('think tags inside a visible call\'s arguments are kept verbatim', async () => {
+    const args = { file_path: 'notes.md', content: 'a <think>keep</think> b' }
+    const { text, tools, inputs, stopReason } = await streamOllamaContent(
+      `<think>plan</think>Saving.\n<tool_call>${JSON.stringify({ name: 'Write', arguments: args })}</tool_call>`,
+    )
+    expect(text).toBe('Saving.')
+    expect(tools).toEqual(['Write'])
+    expect(inputs).toEqual([args])
+    expect(stopReason).toBe('tool_use')
+  })
+
   test('XML-looking text inside JSON arguments does not change the recovered tool', async () => {
     const command = "printf '%s' '<function=Read><parameter=file_path>README.md</parameter>'"
     const { text, tools, inputs, stopReason } = await streamOllamaContent(

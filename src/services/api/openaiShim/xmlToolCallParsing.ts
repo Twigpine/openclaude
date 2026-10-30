@@ -54,9 +54,8 @@ const XML_TOOL_CALL_OPENERS = [
   HY3_TOOL_CALLS_OPEN,
   HY3_TOOL_CALL_OPEN,
 ]
-// Non-greedy block matcher; the `$` alternative tolerates a truncated final
-// block (stream cut off before the closing tag).
-const XML_TOOL_CALL_BLOCK_RE = /<tool_call>([\s\S]*?)(?:<\/tool_call>|$)/g
+const XML_TOOL_CALL_CLOSE = '</tool_call>'
+const XML_TOOL_CALL_CLOSE_AFTER_JSON_RE = /^\s*(?:<\/tool_call>|$)/
 const HY3_TOOL_CALLS_BLOCK_RE = /<tool_calls:[^>\s]+>([\s\S]*?)(?:<\/tool_calls(?::[^>\s]+)?>|$)/g
 const HY3_TOOL_CALL_BLOCK_RE = /<tool_call:[^>\s]+>([\s\S]*?)(?:<\/tool_call(?::[^>\s]+)?>|$)/g
 const XML_FUNCTION_NAME_RE = /<function=([^>\s]+)\s*>/
@@ -92,6 +91,52 @@ export function findXmlToolCallOpener(text: string, allowHy3: boolean): number {
     const index = text.indexOf(opener)
     return index === -1 ? first : first === -1 ? index : Math.min(first, index)
   }, -1)
+}
+
+function isJsonText(raw: string): boolean {
+  try {
+    JSON.parse(raw)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Finds standard `<tool_call>` blocks. A JSON-envelope body (dialect C) ends at
+ * its balanced closing brace, so a `</tool_call>` inside a JSON string is data
+ * and cannot end the block early. Other bodies end at the first closing tag; a
+ * missing closing tag runs to the end of the text (stream cut off).
+ */
+function findStandardXmlToolCallBlocks(
+  text: string,
+): Array<{ range: [number, number]; inner: string }> {
+  const blocks: Array<{ range: [number, number]; inner: string }> = []
+  let start = text.indexOf(XML_TOOL_CALL_OPEN)
+  while (start !== -1) {
+    const bodyStart = start + XML_TOOL_CALL_OPEN.length
+    let bodyEnd = -1
+    let end = -1
+    const jsonStart = bodyStart + /^\s*/.exec(text.slice(bodyStart))![0].length
+    if (text[jsonStart] === '{') {
+      const json = extractBalancedJson(text, jsonStart)
+      const close = json && isJsonText(json)
+        ? XML_TOOL_CALL_CLOSE_AFTER_JSON_RE.exec(text.slice(jsonStart + json.length))
+        : null
+      if (json && close) {
+        bodyEnd = jsonStart + json.length
+        end = bodyEnd + close[0].length
+      }
+    }
+    if (end === -1) {
+      const closeIndex = text.indexOf(XML_TOOL_CALL_CLOSE, bodyStart)
+      bodyEnd = closeIndex === -1 ? text.length : closeIndex
+      end = closeIndex === -1 ? text.length : closeIndex + XML_TOOL_CALL_CLOSE.length
+    }
+    blocks.push({ range: [start, end], inner: text.slice(bodyStart, bodyEnd) })
+    start = text.indexOf(XML_TOOL_CALL_OPEN, end)
+  }
+  return blocks
 }
 
 /**
@@ -221,12 +266,8 @@ export function parseXmlToolCalls(
     })
   }
 
-  for (const block of text.matchAll(XML_TOOL_CALL_BLOCK_RE)) {
-    const range: [number, number] = [
-      block.index!,
-      block.index! + block[0].length,
-    ]
-    const { name, args } = parseStandardXmlToolCallInner(block[1] ?? '')
+  for (const { range, inner } of findStandardXmlToolCallBlocks(text)) {
+    const { name, args } = parseStandardXmlToolCallInner(inner)
     if (!name) continue
     candidates.push({
       range,
