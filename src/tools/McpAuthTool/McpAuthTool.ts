@@ -58,7 +58,10 @@ export type McpAuthToolOptions = {
    * once authorization completes. Defaults to `true` (the CLI behavior).
    * Pass `false` from an embedder whose session will not pick them up, so the
    * model is told to start a new session rather than promised automatic
-   * availability.
+   * availability. The flow then also belongs to the calling context: its
+   * abort signal (the embedder's close/interrupt) releases the pending
+   * callback listener, and completion stores the tokens without opening a
+   * client the session would never use or clean up.
    */
   realToolsInCurrentContext?: boolean
 }
@@ -143,14 +146,20 @@ export function createMcpAuthTool(
         resolveAuthUrl = resolve
       })
 
-      const controller = new AbortController()
+      // The CLI's flow outlives the turn that started it, so nothing aborts it
+      // but its own timeout. An embedder's flow belongs to its session: the
+      // context controller descends from the root its close() and interrupt()
+      // abort, which shuts the callback listener.
+      const abortSignal = realToolsInCurrentContext
+        ? new AbortController().signal
+        : context.abortController.signal
       const { setAppState } = context
 
       const oauthPromise = performMCPOAuthFlow(
         serverName,
         sseOrHttpConfig,
         u => resolveAuthUrl?.(u),
-        controller.signal,
+        abortSignal,
         { skipBrowserOpen: true },
       )
 
@@ -159,7 +168,15 @@ export function createMcpAuthTool(
       // pseudo-tool since it shares the mcp__<server>__ prefix.
       void oauthPromise
         .then(async () => {
+          // Drop the needs-auth cache either way, so the next connection —
+          // here or in a new session — tries the stored tokens.
           clearMcpAuthCache()
+          if (!realToolsInCurrentContext) {
+            // Nothing here would use a reconnected client, and the session's
+            // cleanup would never close it. A new session connects instead.
+            logMCPDebug(serverName, `OAuth complete; tools available in a new session`)
+            return
+          }
           const result = await reconnectMcpServerImpl(serverName, config)
           const prefix = getMcpPrefix(serverName)
           setAppState(prev => ({
