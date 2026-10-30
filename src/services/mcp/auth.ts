@@ -838,6 +838,11 @@ async function performMCPXaaAuth(
       throw e
     }
 
+    // A cancelled flow writes nothing, as in the consent flow. The XAA fetch
+    // stops observing the signal once response headers arrive, so a cancel
+    // during the body read still returns tokens here.
+    if (abortSignal?.aborted) throw new AuthenticationCancelledError()
+
     // Save tokens via the same storage path as normal OAuth. We write directly
     // (instead of ClaudeAuthProvider.saveTokens) to avoid instantiating the
     // whole provider just to write the same keys.

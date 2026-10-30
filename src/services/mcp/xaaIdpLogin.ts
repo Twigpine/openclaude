@@ -505,6 +505,12 @@ export async function acquireIdpIdToken(
     ? expFromJwt * 1000
     : Date.now() + (tokens.expires_in ?? 3600) * 1000
 
+  // The code exchange above does not observe the signal, so a login cancelled
+  // during it still gets here. Caching its id_token would replace whatever a
+  // newer login has cached for this issuer.
+  if (opts.abortSignal?.aborted) {
+    throw new Error('XAA IdP: login cancelled')
+  }
   saveIdpIdToken(idpIssuer, tokens.id_token, expiresAt)
   logMCPDebug(
     'xaa',

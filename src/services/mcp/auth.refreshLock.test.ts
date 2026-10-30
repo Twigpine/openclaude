@@ -109,8 +109,13 @@ mock.module('./xaaIdpLogin.js', () => ({
   }),
 }))
 
-const { ClaudeAuthProvider, getServerKey, wrapFetchWithStepUpDetection } =
-  await import('./auth.js')
+const {
+  AuthenticationCancelledError,
+  ClaudeAuthProvider,
+  getServerKey,
+  performMCPOAuthFlow,
+  wrapFetchWithStepUpDetection,
+} = await import('./auth.js')
 const { getMcpRefreshLockPath } = await import('./refreshLock.js')
 
 const JWT_BEARER_GRANT = 'urn:ietf:params:oauth:grant-type:jwt-bearer'
@@ -2128,4 +2133,113 @@ test('fresh-token threshold skips just above five minutes and refreshes below it
   } finally {
     Date.now = originalDateNow
   }
+})
+
+test('an XAA sign-in cancelled while its token response arrives stores nothing', async () => {
+  // The XAA fetch lets go of the flow's signal once response headers arrive,
+  // so a cancel — the SDK session closing, or a newer sign-in replacing this
+  // one — can land while the body is still being read, and the exchange then
+  // returns tokens anyway.
+  const { config, initialData } = makeXaaFixture()
+  activeStorage = createSharedStorage(initialData, [])
+  installSuccessfulXaaFetch()
+  const xaaFetch = globalThis.fetch
+  const body = deferred()
+  let tokenRequested = false
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    if (input.toString() === `${AS_ISSUER}/token` && init?.method === 'POST') {
+      tokenRequested = true
+      const late = JSON.stringify({
+        access_token: 'late-access-secret',
+        token_type: 'Bearer',
+        expires_in: 3600,
+      })
+      return new Response(
+        new ReadableStream({
+          async start(stream) {
+            await body.promise
+            stream.enqueue(new TextEncoder().encode(late))
+            stream.close()
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+    return xaaFetch(input, init)
+  }) as unknown as typeof globalThis.fetch
+  const session = new AbortController()
+
+  const flow = performMCPOAuthFlow('enterprise', config, () => {}, session.signal, {
+    skipBrowserOpen: true,
+  })
+  await waitFor(() => tokenRequested)
+  session.abort()
+  body.resolve()
+
+  await expect(flow).rejects.toBeInstanceOf(AuthenticationCancelledError)
+  expect(activeStorage.getData()).toEqual(initialData)
+})
+
+test('an XAA IdP login cancelled while its code exchange answers caches no id_token', async () => {
+  // The IdP code exchange does not observe the flow's signal at all, so a
+  // cancel landing during it still returns an id_token. Caching it would
+  // replace whatever identity a newer sign-in has cached for this issuer.
+  const { config, initialData } = makeXaaFixture()
+  delete initialData.mcpXaaIdp
+  activeStorage = createSharedStorage(initialData, [])
+  installSuccessfulXaaFetch()
+  const xaaFetch = globalThis.fetch
+  const body = deferred()
+  let codeExchanged = false
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    const isCodeExchange =
+      input.toString() === `${IDP_ISSUER}/token` &&
+      init?.method === 'POST' &&
+      String(init.body).includes('grant_type=authorization_code')
+    if (isCodeExchange) {
+      codeExchanged = true
+      const payload = Buffer.from(
+        JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+      ).toString('base64url')
+      const late = JSON.stringify({
+        access_token: 'idp-access',
+        token_type: 'Bearer',
+        id_token: `e30.${payload}.sig`,
+      })
+      return new Response(
+        new ReadableStream({
+          async start(stream) {
+            await body.promise
+            stream.enqueue(new TextEncoder().encode(late))
+            stream.close()
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+    return xaaFetch(input, init)
+  }) as unknown as typeof globalThis.fetch
+  const session = new AbortController()
+  let loginUrl: URL | undefined
+
+  const flow = performMCPOAuthFlow(
+    'enterprise',
+    config,
+    url => {
+      loginUrl = new URL(url)
+    },
+    session.signal,
+    { skipBrowserOpen: true },
+  )
+  await waitFor(() => loginUrl !== undefined)
+  const callback = new URL(loginUrl!.searchParams.get('redirect_uri')!)
+  callback.searchParams.set('code', 'idp-code')
+  callback.searchParams.set('state', loginUrl!.searchParams.get('state')!)
+  expect((await originalFetch(callback)).status).toBe(200)
+  await waitFor(() => codeExchanged)
+  session.abort()
+  body.resolve()
+
+  await expect(flow).rejects.toBeInstanceOf(AuthenticationCancelledError)
+  expect(activeStorage.getData()).toEqual(initialData)
 })
