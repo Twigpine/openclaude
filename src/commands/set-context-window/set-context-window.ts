@@ -56,13 +56,23 @@ function saveContextWindow(model: string, tokens: number): string {
   // integers above Number.MAX_SAFE_INTEGER). Writing one would stop the whole
   // user settings file from loading, so check the entry before writing it.
   const validation = SettingsSchema().safeParse(patch)
-  const error = validation.success
-    ? updateSettingsForSource('userSettings', patch).error
-    : new Error(
-        formatZodError(validation.error, settingsPath ?? 'settings')
-          .map(issue => `${issue.path}: ${issue.message}`)
-          .join('; '),
-      )
+  let error: Error | null
+  if (!validation.success) {
+    error = new Error(
+      formatZodError(validation.error, settingsPath ?? 'settings')
+        .map(issue => `${issue.path}: ${issue.message}`)
+        .join('; '),
+    )
+  } else if (!Object.hasOwn(validation.data.modelLimits ?? {}, key)) {
+    // Parsing also drops keys a settings object cannot hold, such as
+    // "__proto__", without an error. The writer and the loader drop the entry
+    // the same way, so it would never be saved or loaded.
+    error = new Error(
+      `modelLimits["${key}"]: settings cannot store this model name`,
+    )
+  } else {
+    error = updateSettingsForSource('userSettings', patch).error
+  }
   if (error) {
     return `Not saved: ${error.message}\nThe override applies to this session only.`
   }

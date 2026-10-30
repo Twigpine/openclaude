@@ -190,6 +190,32 @@ test.each([
   })
 })
 
+test.each([
+  ['the active model', '1000000 --save'],
+  ['an explicit model', '__proto__ 1000000 --save'],
+])('/set-context-window --save does not report a save for a model name settings cannot store (%s)', async (_form, args) => {
+  const initialSettings = JSON.stringify({ env: { KEEP_ME: '1' } })
+  await withCustomProviderSettings(initialSettings, async settingsPath => {
+    try {
+      const result = await setContextWindow(args, {
+        options: { mainLoopModel: '__proto__' },
+      } as never)
+
+      expect(result).toMatchObject({ type: 'text' })
+      const output = result.type === 'text' ? result.value : ''
+      expect(output).toContain(
+        'Not saved: modelLimits["__proto__"]: settings cannot store this model name',
+      )
+      expect(output).toContain('The override applies to this session only.')
+      expect(output).not.toContain('Saved to modelLimits')
+      expect(readFileSync(settingsPath, 'utf8')).toBe(initialSettings)
+      expect(getContextWindowForModel('__proto__')).toBe(1_000_000)
+    } finally {
+      clearSessionContextWindowOverride('__proto__')
+    }
+  })
+})
+
 test('/set-context-window --save reports when other invalid settings stop the saved file from loading', async () => {
   await withCustomProviderSettings(
     JSON.stringify({
