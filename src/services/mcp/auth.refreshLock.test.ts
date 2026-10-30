@@ -2492,6 +2492,10 @@ test.each(['stored', 'rejected'] as const)(
     }) as typeof globalThis.fetch
     let loginUrl: URL | undefined
     let scopeEntries = 0
+    // The test owns the flow, so one that fails part way still closes its
+    // callback listener and settles before the next test.
+    const session = new AbortController()
+    let settled: Promise<unknown> | undefined
 
     Date.now = () => now
     try {
@@ -2501,7 +2505,7 @@ test.each(['stored', 'rejected'] as const)(
         url => {
           loginUrl = new URL(url)
         },
-        undefined,
+        session.signal,
         {
           skipBrowserOpen: true,
           credentialScope: async work => {
@@ -2516,7 +2520,7 @@ test.each(['stored', 'rejected'] as const)(
           },
         },
       )
-      const settled = flow.then(() => undefined, (error: unknown) => error)
+      settled = flow.then(() => undefined, (error: unknown) => error)
       await waitFor(() => loginUrl !== undefined)
       // The turn ends: another store is live by the time the user is back.
       activeStorage = ambient
@@ -2544,6 +2548,9 @@ test.each(['stored', 'rejected'] as const)(
       expect(activeStorage).toBe(ambient)
     } finally {
       Date.now = realNow
+      session.abort()
+      // Bounded, so a flow that cannot settle keeps the failure that found it.
+      if (settled) await settlesSoon(settled).catch(() => {})
     }
   },
 )
