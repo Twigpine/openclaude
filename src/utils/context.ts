@@ -236,6 +236,24 @@ export type ContextWindowSource =
   | 'internal-model-config'
   | 'default'
 
+export const CONTEXT_WINDOW_SOURCE_LABELS: Record<ContextWindowSource, string> = {
+  'internal-env-override': 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+  'session-override': 'session override (/set-context-window)',
+  '1m-suffix': '[1m] model suffix',
+  'env-exact': 'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS (exact match)',
+  'route-catalog': 'provider route catalog',
+  'env-prefix': 'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS (prefix match)',
+  'model-limits': 'modelLimits in settings',
+  discovery: 'provider model discovery',
+  'model-descriptor': 'built-in model metadata',
+  'runtime-limits': 'provider runtime limits',
+  fallback: 'fallback for unknown model',
+  '1m-beta': '1M context beta',
+  '1m-experiment': '1M context experiment',
+  'internal-model-config': 'internal model config',
+  default: 'default',
+}
+
 export function getContextWindowForModel(
   model: string,
   betas?: string[],
@@ -247,12 +265,14 @@ export function getContextWindowForModel(
 /**
  * Resolve the context window together with the precedence step that supplied
  * it, so diagnostics can report the real source instead of inferring it from
- * the value.
+ * the value. `ignoreSessionOverride` resolves the window a restarted session
+ * would use.
  */
 export function resolveContextWindowForModel(
   model: string,
   betas?: string[],
   runtimeLimits?: { contextWindow?: number },
+  options?: { ignoreSessionOverride?: boolean },
 ): { contextWindow: number; source: ContextWindowSource } {
   // Allow override via environment variable (internal-only)
   // This takes precedence over all other context window resolution, including 1M detection,
@@ -270,7 +290,9 @@ export function resolveContextWindowForModel(
 
   // Session-scoped override — set via /set_context_window command.
   // Takes precedence over all resolution except the internal env var above.
-  const sessionOverride = getSessionContextWindowOverride(model)
+  const sessionOverride = options?.ignoreSessionOverride
+    ? undefined
+    : getSessionContextWindowOverride(model)
   if (sessionOverride !== undefined) {
     return { contextWindow: sessionOverride, source: 'session-override' }
   }

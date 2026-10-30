@@ -11,6 +11,7 @@ import type { CompactMetadata, Message } from '../../types/message.js'
 import { analyzeContextUsage, type ContextData } from '../../utils/analyzeContext.js'
 import { getGlobalConfig } from '../../utils/config.js'
 import {
+  CONTEXT_WINDOW_SOURCE_LABELS,
   type ContextWindowSource,
   getModelMaxOutputTokens,
   resolveContextWindowForModel,
@@ -165,24 +166,6 @@ export async function collectCtxData(context: CtxDataInput): Promise<{
 
 /** Shape returned by collectCtxData, accepted by renderCtxReport. */
 export type RenderInput = Awaited<ReturnType<typeof collectCtxData>>
-
-const CONTEXT_WINDOW_SOURCE_LABELS: Record<ContextWindowSource, string> = {
-  'internal-env-override': 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
-  'session-override': 'session override (/set-context-window)',
-  '1m-suffix': '[1m] model suffix',
-  'env-exact': 'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS (exact match)',
-  'route-catalog': 'provider route catalog',
-  'env-prefix': 'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS (prefix match)',
-  'model-limits': 'modelLimits in settings',
-  discovery: 'provider model discovery',
-  'model-descriptor': 'built-in model metadata',
-  'runtime-limits': 'provider runtime limits',
-  fallback: 'fallback for unknown model',
-  '1m-beta': '1M context beta',
-  '1m-experiment': '1M context experiment',
-  'internal-model-config': 'internal model config',
-  default: 'default',
-}
 
 const AUTO_COMPACT_REASON_LABELS: Record<NonNullable<CompactMetadata['autoCompactReason']>, string> = {
   'token-threshold': 'token threshold',

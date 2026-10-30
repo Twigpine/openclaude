@@ -97,7 +97,7 @@ export const commands: SlashCommand[] = [
   { name: 'model', description: 'Set the AI model for the session', category: 'models', args: '[model]' },
   { name: 'provider', description: 'Manage API provider profiles', category: 'models' },
   { name: 'effort', description: 'Set effort level for model usage', category: 'models', args: '[low|medium|high|xhigh|max|ultracode|auto]' },
-  { name: 'set-context-window', description: 'Set a session-scoped context window override for a model', category: 'models', args: '[model] <tokens>' },
+  { name: 'set-context-window', description: 'Set a session-scoped context window override for a model', category: 'models', args: '[model] <tokens> [--save]' },
   { name: 'clear-context-window', description: 'Clear session-scoped context window overrides', category: 'models', args: '[model]' },
   { name: 'smartroute', description: 'Configure smart auto-routing (experimental): route simple turns to your configured simple model', category: 'models', args: '[on|off|simple <key>|strong <key>]' },
   { name: 'login', description: 'Sign in with your Anthropic account', category: 'models' },

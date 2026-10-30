@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -8,7 +11,14 @@ import { call as setContextWindow } from './set-context-window.js'
 import {
   clearSessionContextWindowOverride,
   getContextWindowForModel,
+  resolveContextWindowForModel,
 } from '../../utils/context.js'
+import {
+  getClaudeConfigHomeDirOverrideForTesting,
+  setClaudeConfigHomeDirForTesting,
+} from '../../utils/envUtils.js'
+import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import {
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
@@ -62,4 +72,110 @@ test('/set-context-window updates tokens and compaction immediately; clear resto
   expect(getContextWindowForModel('claude-sonnet-4')).toBe(200_000)
   expect(getEffectiveContextWindowSize('claude-sonnet-4')).toBe(80_000)
   expect(getAutoCompactThreshold('claude-sonnet-4')).toBe(50_000)
+})
+
+const SAVE_MODEL = 'my-private-model'
+
+async function withCustomProviderSettings(
+  initialSettings: string | undefined,
+  run: (settingsPath: string) => Promise<void>,
+): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), 'openclaude-set-context-window-'))
+  const settingsPath = join(root, 'settings.json')
+  if (initialSettings !== undefined) {
+    writeFileSync(settingsPath, initialSettings)
+  }
+  const restoreEnv = snapshotEnv(
+    [
+      'CLAUDE_CODE_USE_OPENAI',
+      'OPENAI_BASE_URL',
+      'OPENAI_API_BASE',
+      'OPENAI_MODEL',
+      'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS',
+    ],
+    { clear: true },
+  )
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://llm.example.test/v1'
+  const previousConfigDir = getClaudeConfigHomeDirOverrideForTesting()
+  setClaudeConfigHomeDirForTesting(root)
+  resetSettingsCache()
+  try {
+    await run(settingsPath)
+  } finally {
+    clearSessionContextWindowOverride(SAVE_MODEL)
+    setClaudeConfigHomeDirForTesting(previousConfigDir)
+    resetSettingsCache()
+    restoreEnv()
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+const saveContext = { options: { mainLoopModel: SAVE_MODEL } } as never
+
+async function runSetContextWindow(args: string): Promise<string> {
+  const result = await setContextWindow(args, saveContext)
+  if (result.type !== 'text') throw new Error(`unexpected result type ${result.type}`)
+  return result.value
+}
+
+test('/set-context-window --save persists the active model window for the next session', async () => {
+  await withCustomProviderSettings(
+    JSON.stringify({
+      env: { KEEP_ME: '1' },
+      modelLimits: { [SAVE_MODEL]: { maxOutputTokens: 32_768 } },
+    }),
+    async settingsPath => {
+      expect(await runSetContextWindow('500000')).toContain('(session only)')
+      expect(JSON.parse(readFileSync(settingsPath, 'utf8')).modelLimits).toEqual({
+        [SAVE_MODEL]: { maxOutputTokens: 32_768 },
+      })
+
+      const output = await runSetContextWindow('1000000 --save')
+      expect(output).toContain(`Saved to modelLimits["${SAVE_MODEL}"] in ${settingsPath}.`)
+      expect(output).not.toContain('After a restart')
+      expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual({
+        env: { KEEP_ME: '1' },
+        modelLimits: {
+          [SAVE_MODEL]: { maxOutputTokens: 32_768, contextWindow: 1_000_000 },
+        },
+      })
+
+      // A new session starts without session overrides and re-reads settings.
+      clearSessionContextWindowOverride()
+      resetSettingsCache()
+      expect(resolveContextWindowForModel(SAVE_MODEL)).toEqual({
+        contextWindow: 1_000_000,
+        source: 'model-limits',
+      })
+    },
+  )
+})
+
+test('/set-context-window --save reports when a higher-precedence source will shadow the saved value', async () => {
+  await withCustomProviderSettings(undefined, async settingsPath => {
+    process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS = JSON.stringify({ [SAVE_MODEL]: 200_000 })
+
+    const output = await runSetContextWindow(`${SAVE_MODEL} 1000000 --save`)
+
+    expect(output).toContain(`Saved to modelLimits["${SAVE_MODEL}"] in ${settingsPath}.`)
+    expect(output).toContain(
+      'After a restart, CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS (exact match) will set 200,000 tokens instead of the saved value.',
+    )
+    expect(JSON.parse(readFileSync(settingsPath, 'utf8')).modelLimits).toEqual({
+      [SAVE_MODEL]: { contextWindow: 1_000_000 },
+    })
+    expect(getContextWindowForModel(SAVE_MODEL)).toBe(1_000_000)
+  })
+})
+
+test('/set-context-window --save keeps the session override when saving fails', async () => {
+  await withCustomProviderSettings('{ not json', async settingsPath => {
+    const output = await runSetContextWindow('1000000 --save')
+
+    expect(output).toContain(`Not saved: Invalid JSON syntax in settings file at ${settingsPath}`)
+    expect(output).toContain('The override applies to this session only.')
+    expect(readFileSync(settingsPath, 'utf8')).toBe('{ not json')
+    expect(getContextWindowForModel(SAVE_MODEL)).toBe(1_000_000)
+  })
 })

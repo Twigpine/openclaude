@@ -54,7 +54,7 @@ function normalizeModelApiName(
   return baseModel ? baseModel.toLowerCase() : null
 }
 
-function getBaseModelApiName(value: string | undefined): string | null {
+export function getBaseModelApiName(value: string | undefined): string | null {
   const trimmed = value?.trim()
   if (!trimmed) {
     return null

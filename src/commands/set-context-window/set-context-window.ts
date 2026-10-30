@@ -1,21 +1,36 @@
+import { getSdkBetas } from '../../bootstrap/state.js'
+import { getBaseModelApiName } from '../../integrations/runtimeMetadata.js'
 import type { LocalCommandCall } from '../../types/command.js'
 import {
+  CONTEXT_WINDOW_SOURCE_LABELS,
+  resolveContextWindowForModel,
   setSessionContextWindowOverride,
   getSessionContextWindowOverride,
   getSessionContextWindowOverrides,
 } from '../../utils/context.js'
+import {
+  getSettingsFilePathForSource,
+  updateSettingsForSource,
+} from '../../utils/settings/settings.js'
 
-const HELP = `Usage: /set-context-window [model] <tokens>
+const HELP = `Usage: /set-context-window [model] <tokens> [--save]
 
 Set a session-scoped context window override. Defaults to the active model.
 
 Examples:
   /set-context-window 256000
   /set-context-window gpt-4o 200000
+  /set-context-window my-model 1000000 --save
   /set-context-window status
 
 The override takes precedence over discovery, catalog, and provider defaults
 for this session only. Use /clear-context-window to remove it.
+
+Add --save to also write the value to modelLimits in your user settings.json
+so it survives restarts. Other settings, including the model's
+maxOutputTokens, are kept. After a restart the saved value follows the
+modelLimits precedence below, and --save reports when another source will
+take precedence over it.
 
 For a permanent override (survives restart), use modelLimits in settings.json
 for custom/discovered models, for example:
@@ -23,6 +38,36 @@ for custom/discovered models, for example:
 For a catalogued model, use an exact CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS entry;
 catalog values take precedence over modelLimits and prefix env entries.
 See docs/advanced-setup.md (Per-model limit overrides).`
+
+function saveContextWindow(model: string, tokens: number): string {
+  const settingsPath = getSettingsFilePathForSource('userSettings')
+  const key = getBaseModelApiName(model) ?? model
+  const { error } = updateSettingsForSource('userSettings', {
+    modelLimits: { [key]: { contextWindow: tokens } },
+  })
+  if (error) {
+    return `Not saved: ${error.message}\nThe override applies to this session only.`
+  }
+
+  const saved = `Saved to modelLimits["${key}"] in ${settingsPath}.`
+  const afterRestart = resolveContextWindowForModel(
+    model,
+    getSdkBetas(),
+    undefined,
+    { ignoreSessionOverride: true },
+  )
+  if (
+    afterRestart.source === 'model-limits' &&
+    afterRestart.contextWindow === tokens
+  ) {
+    return saved
+  }
+  const shadowingSource =
+    afterRestart.source === 'model-limits'
+      ? 'a higher-priority modelLimits entry'
+      : CONTEXT_WINDOW_SOURCE_LABELS[afterRestart.source]
+  return `${saved}\nAfter a restart, ${shadowingSource} will set ${afterRestart.contextWindow.toLocaleString()} tokens instead of the saved value.`
+}
 
 export const call: LocalCommandCall = async (args, context) => {
   const trimmed = args.trim()
@@ -42,7 +87,9 @@ export const call: LocalCommandCall = async (args, context) => {
     return { type: 'text', value: `Active context window overrides:\n${lines}` }
   }
 
-  const parts = trimmed.split(/\s+/)
+  const allParts = trimmed.split(/\s+/)
+  const save = allParts.includes('--save')
+  const parts = allParts.filter(part => part !== '--save')
 
   let model: string
   let tokensStr: string
@@ -72,8 +119,11 @@ export const call: LocalCommandCall = async (args, context) => {
   const prevDisplay = previous !== undefined
     ? `${previous.toLocaleString()} tokens`
     : 'none (using default)'
+  const summary = save
+    ? `Context window for "${result.normalizedModel}" set to ${tokens.toLocaleString()} tokens for this session.\n${saveContextWindow(model, tokens)}`
+    : `Context window for "${result.normalizedModel}" set to ${tokens.toLocaleString()} tokens (session only).`
   return {
     type: 'text',
-    value: `Context window for "${result.normalizedModel}" set to ${tokens.toLocaleString()} tokens (session only).\nPrevious: ${prevDisplay}`,
+    value: `${summary}\nPrevious: ${prevDisplay}`,
   }
 }

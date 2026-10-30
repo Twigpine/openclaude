@@ -661,6 +661,13 @@ addition to the `CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS` /
   catalogued model. For a custom or discovered model, use `modelLimits` or an
   exact env entry. Use `/set-context-window <tokens>` for the current session
   only.
+- **Saving from the command** — `/set-context-window [model] <tokens> --save`
+  applies the session override and also writes
+  `modelLimits["<model>"].contextWindow` to your user `settings.json`, keeping
+  other settings and the entry's `maxOutputTokens`. The saved value follows the
+  precedence above after a restart; if an env override, the catalog, or another
+  `modelLimits` entry would take precedence, the command says so. If the save
+  fails, the override still applies to the current session.
 - **Checking the active source** — `/ctx` shows a **Window source** line naming
   the step that supplied the current window (for example an env override,
   `modelLimits`, provider discovery, or the fallback for an unknown model).
