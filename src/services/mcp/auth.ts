@@ -778,6 +778,12 @@ async function performMCPXaaAuth(
   // acquireIdpIdToken potentially writes a fresh one.
   const idTokenCacheHit = getCachedIdpIdToken(idp.issuer) !== undefined
 
+  // Whether acquisition handed out its login URL, which it does only when it
+  // sends the user to the IdP. The peek above cannot say: it is a separate
+  // read, and a cached id_token can cross its expiry buffer before
+  // acquisition reads it again.
+  let sentToBrowser = false
+
   let failureStage: XaaFailureStage = 'idp_login'
   try {
     let idToken
@@ -787,7 +793,10 @@ async function performMCPXaaAuth(
         idpClientId: idp.clientId,
         idpClientSecret,
         callbackPort: idp.callbackPort,
-        onAuthorizationUrl,
+        onAuthorizationUrl: url => {
+          sentToBrowser = true
+          onAuthorizationUrl(url)
+        },
         skipBrowserOpen,
         abortSignal,
         credentialScope,
@@ -797,12 +806,12 @@ async function performMCPXaaAuth(
       throw e
     }
 
-    // A cache miss meant a browser login, and the turn that started the flow
-    // may have ended while the user was there: what is written from here on
-    // is written where the flow began (see CredentialScope). A cache hit
-    // stays silent and is still awaited by whoever started it, so it writes
-    // as it is.
-    const resumeScope = idTokenCacheHit ? undefined : credentialScope
+    // A login in the browser hands its caller the URL and leaves it, and the
+    // turn that started the flow may have ended while the user was there:
+    // what is written from here on is written where the flow began (see
+    // CredentialScope). A silent acquisition is still awaited by whoever
+    // started it, so it writes as it is.
+    const resumeScope = sentToBrowser ? credentialScope : undefined
 
     // Discover the IdP's token endpoint for the RFC 8693 exchange. Under the
     // flow's signal, like the login's discovery and the exchange: a cancel

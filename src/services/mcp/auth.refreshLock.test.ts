@@ -48,6 +48,8 @@ let debugShouldThrow = false
 let browserOpenCalls = 0
 let lockOverride: typeof originalLock | undefined
 let sleepOverride: typeof originalSleep | undefined
+/** Runs once the flow has peeked at the id_token cache, before acquisition reads it. */
+let afterIdTokenPeek: (() => void) | undefined
 
 mock.module('../../utils/secureStorage/index.js', () => ({
   ...realSecureStorage,
@@ -96,8 +98,10 @@ mock.module('./xaaIdpLogin.js', () => ({
   getCachedIdpIdToken: (idpIssuer: string) => {
     const issuer = idpIssuer.endsWith('/') ? idpIssuer : `${idpIssuer}/`
     const entry = activeStorage.read()?.mcpXaaIdp?.[issuer]
-    if (!entry || entry.expiresAt <= Date.now() + 60_000) return undefined
-    return entry.idToken
+    const idToken =
+      !entry || entry.expiresAt <= Date.now() + 60_000 ? undefined : entry.idToken
+    afterIdTokenPeek?.()
+    return idToken
   },
   getIdpClientSecret: (idpIssuer: string) => {
     const issuer = idpIssuer.endsWith('/') ? idpIssuer : `${idpIssuer}/`
@@ -334,6 +338,7 @@ beforeEach(async () => {
   browserOpenCalls = 0
   lockOverride = undefined
   sleepOverride = undefined
+  afterIdTokenPeek = undefined
   setSessionSettingsCache({
     settings: {
       xaaIdp: { issuer: IDP_ISSUER, clientId: 'idp-client' },
@@ -2440,6 +2445,150 @@ test('an XAA sign-in finishing after its turn caches the id_token and stores the
   // And the live store is the process's own again once the flow is done.
   expect(activeStorage).toBe(ambient)
 })
+
+test.each(['stored', 'rejected'] as const)(
+  'an XAA sign-in whose cached id_token expires before acquisition reads it finishes where it began: %s',
+  async outcome => {
+    // The flow peeks at the id_token cache for analytics, and acquisition
+    // reads it again. A token that crosses the expiry buffer in between is a
+    // hit to the peek and a miss to acquisition, which sends the user to the
+    // IdP — and the turn may end before they are back. What follows the
+    // callback still lands where the flow began: the AS tokens stored, or the
+    // rejected id_token dropped, not another store's.
+    const { config, initialData } = makeXaaFixture()
+    const realNow = Date.now
+    const start = realNow()
+    let now = start
+    initialData.mcpXaaIdp![`${IDP_ISSUER}/`]!.expiresAt = start + 60_001
+    afterIdTokenPeek = () => {
+      now += 2
+    }
+    const origin = createSharedStorage(initialData, [])
+    const ambientData: SecureStorageData = {
+      mcpXaaIdp: {
+        [`${IDP_ISSUER}/`]: { idToken: 'ambient-id-token', expiresAt: start + 3_600_000 },
+      },
+    }
+    const ambient = createSharedStorage(ambientData, [])
+    activeStorage = origin
+    installSuccessfulXaaFetch()
+    const xaaFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (input.toString() === `${IDP_ISSUER}/token` && init?.method === 'POST') {
+        if (String(init.body).includes('grant_type=authorization_code')) {
+          const payload = Buffer.from(
+            JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+          ).toString('base64url')
+          return jsonResponse({
+            access_token: 'idp-access',
+            token_type: 'Bearer',
+            id_token: `e30.${payload}.sig`,
+          })
+        }
+        if (outcome === 'rejected') return jsonResponse({ error: 'invalid_grant' }, 400)
+      }
+      return xaaFetch(input, init)
+    }) as typeof globalThis.fetch
+    let loginUrl: URL | undefined
+    let scopeEntries = 0
+
+    Date.now = () => now
+    try {
+      const flow = performMCPOAuthFlow(
+        'enterprise',
+        config,
+        url => {
+          loginUrl = new URL(url)
+        },
+        undefined,
+        {
+          skipBrowserOpen: true,
+          credentialScope: async work => {
+            scopeEntries++
+            const was = activeStorage
+            activeStorage = origin
+            try {
+              return await work()
+            } finally {
+              activeStorage = was
+            }
+          },
+        },
+      )
+      const settled = flow.then(() => undefined, (error: unknown) => error)
+      await waitFor(() => loginUrl !== undefined)
+      // The turn ends: another store is live by the time the user is back.
+      activeStorage = ambient
+      const callback = new URL(loginUrl!.searchParams.get('redirect_uri')!)
+      callback.searchParams.set('code', 'idp-code')
+      callback.searchParams.set('state', loginUrl!.searchParams.get('state')!)
+      expect((await originalFetch(callback)).status).toBe(200)
+      const error = await settled
+
+      expect(scopeEntries).toBe(2)
+      expect(ambient.updateCalls).toBe(0)
+      expect(ambient.readCalls).toBe(0)
+      expect(ambient.getData()).toEqual(ambientData)
+      const data = origin.getData()
+      if (outcome === 'stored') {
+        expect(error).toBeUndefined()
+        expect(data.mcpXaaIdp?.[`${IDP_ISSUER}/`]?.idToken).toStartWith('e30.')
+        const serverKey = getServerKey('enterprise', config)
+        expect(data.mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
+      } else {
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).message).toContain('HTTP 400')
+        expect(data.mcpXaaIdp?.[`${IDP_ISSUER}/`]).toBeUndefined()
+      }
+      expect(activeStorage).toBe(ambient)
+    } finally {
+      Date.now = realNow
+    }
+  },
+)
+
+test.each(['before the flow peeks', 'between the peek and acquisition'] as const)(
+  'a silent XAA sign-in never enters its credential scope: id_token cached %s',
+  async cached => {
+    // No one went to the browser, so the caller is still waiting on the flow —
+    // in the SDK, a tool call inside a turn that may hold the env mutex the
+    // scope takes. Entering it then would wait on that same turn. The peek is
+    // no guide: another sign-in to the IdP can cache an id_token after it.
+    const { config, initialData } = makeXaaFixture()
+    const idpCache = initialData.mcpXaaIdp
+    if (cached === 'between the peek and acquisition') {
+      delete initialData.mcpXaaIdp
+      afterIdTokenPeek = () => {
+        activeStorage.setData({ ...activeStorage.getData(), mcpXaaIdp: idpCache })
+      }
+    }
+    activeStorage = createSharedStorage(initialData, [])
+    installSuccessfulXaaFetch()
+    let loginUrls = 0
+    let scopeEntries = 0
+
+    await performMCPOAuthFlow(
+      'enterprise',
+      config,
+      () => {
+        loginUrls++
+      },
+      undefined,
+      {
+        skipBrowserOpen: true,
+        credentialScope: async () => {
+          scopeEntries++
+          throw new Error('entered the credential scope of a silent sign-in')
+        },
+      },
+    )
+
+    expect(loginUrls).toBe(0)
+    expect(scopeEntries).toBe(0)
+    const serverKey = getServerKey('enterprise', config)
+    expect(activeStorage.getData().mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
+  },
+)
 
 test.each([
   ['idp-cache', false], ['idp-cache', true],
