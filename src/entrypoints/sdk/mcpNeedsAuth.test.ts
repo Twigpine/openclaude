@@ -62,17 +62,22 @@ let hadMacro = false
 let savedMacro: unknown
 /** Requests that reached the MCP endpoint carrying a token — a reconnect. */
 let authorizedMcpRequests = 0
+/** Clients registered so far; each sign-in attempt registers its own. */
+let registrations = 0
+/** Code exchanges the stand-in refused because another client presented the code. */
+let refusedExchanges = 0
 
 /**
  * A server that asks to be signed into, and answers the discovery the MCP
  * SDK does on the way there. It issues a token only when a test completes
- * the browser step by calling the callback itself.
+ * the browser step by calling the callback itself, and — like a real
+ * authorization server — only to the client the code was issued to.
  */
 function serveNeedingAuth(): string {
   let base = ''
   server = Bun.serve({
     port: 0,
-    fetch: request => {
+    fetch: async request => {
       const path = new URL(request.url).pathname
       if (path.startsWith('/.well-known/oauth-protected-resource')) {
         return Response.json({ resource: `${base}/mcp`, authorization_servers: [base] })
@@ -93,7 +98,7 @@ function serveNeedingAuth(): string {
       if (path === '/register') {
         return Response.json(
           {
-            client_id: 'stand-in-client',
+            client_id: `stand-in-client-${++registrations}`,
             client_secret: 'not-a-secret',
             redirect_uris: ['http://127.0.0.1:1/callback'],
             client_id_issued_at: Math.floor(Date.now() / 1000),
@@ -102,8 +107,17 @@ function serveNeedingAuth(): string {
         )
       }
       if (path === '/token') {
+        const form = new URLSearchParams(await request.text())
+        const basic = request.headers.get('authorization')?.replace(/^Basic /, '')
+        const clientId =
+          form.get('client_id') ??
+          (basic ? decodeURIComponent(atob(basic).split(':')[0]!) : undefined)
+        if (form.get('code') !== codeFor(clientId)) {
+          refusedExchanges++
+          return Response.json({ error: 'invalid_grant' }, { status: 400 })
+        }
         return Response.json({
-          access_token: 'stand-in-token',
+          access_token: `token-for-${clientId}`,
           token_type: 'Bearer',
           expires_in: 3600,
         })
@@ -146,11 +160,16 @@ async function startSignIn(tool: Tool, session: AbortController) {
   return { result: data as McpAuthOutput, setAppState }
 }
 
+/** The code the stand-in issues to one client, and accepts only from it. */
+function codeFor(clientId: string | null | undefined): string {
+  return `code-for-${clientId}`
+}
+
 /** The browser's last step: the provider redirects back with a code. */
 function callbackFor(authUrl: string): string {
   const params = new URL(authUrl).searchParams
   const callback = new URL(params.get('redirect_uri')!)
-  callback.searchParams.set('code', 'stand-in-code')
+  callback.searchParams.set('code', codeFor(params.get('client_id')))
   callback.searchParams.set('state', params.get('state')!)
   return callback.toString()
 }
@@ -199,6 +218,8 @@ beforeEach(async () => {
   setClaudeConfigHomeDirForTesting(configHome)
   stored = {}
   authorizedMcpRequests = 0
+  registrations = 0
+  refusedExchanges = 0
 })
 
 afterEach(async () => {
@@ -272,7 +293,7 @@ test('finishing sign-in stores the tokens without opening a client the session c
   expect(callback.status).toBe(200)
 
   await waitFor(() => storedAccessTokens().length > 0)
-  expect(storedAccessTokens()).toEqual(['stand-in-token'])
+  expect(storedAccessTokens()).toEqual([`token-for-${new URL(result.authUrl!).searchParams.get('client_id')}`])
   // Give a reconnect, were one started, time to reach the server.
   await Bun.sleep(250)
   expect(authorizedMcpRequests).toBe(0)
@@ -282,6 +303,41 @@ test('finishing sign-in stores the tokens without opening a client the session c
   session.abort()
   await Bun.sleep(50)
   expect(authorizedMcpRequests).toBe(0)
+}, 30_000)
+
+/**
+ * Asking again replaces the first attempt rather than racing it. Each attempt
+ * registers its own client in the one stored entry for the server, so the
+ * first one, left running, would finish its exchange with the second's
+ * client: the authorization server refuses that, and the user who opened the
+ * first link gets nothing for it. The CLI's mcp_authenticate handler aborts
+ * the earlier flow for the same reason (cli/print.ts).
+ */
+test('asking to sign in again stops the earlier attempt, and the new one completes', async () => {
+  const url = serveNeedingAuth()
+  const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  const session = new AbortController()
+
+  const first = await startSignIn(tools[0]!, session)
+  const second = await startSignIn(tools[0]!, session)
+  const firstClient = new URL(first.result.authUrl!).searchParams.get('client_id')
+  const secondClient = new URL(second.result.authUrl!).searchParams.get('client_id')
+  expect(secondClient).not.toBe(firstClient)
+
+  // The first link no longer leads anywhere.
+  await expect(fetch(callbackFor(first.result.authUrl!))).rejects.toThrow()
+  await Bun.sleep(50)
+  expect(refusedExchanges).toBe(0)
+  expect(storedAccessTokens()).toEqual([])
+
+  // The second does, with the client it was issued to.
+  expect((await fetch(callbackFor(second.result.authUrl!))).status).toBe(200)
+  await waitFor(() => storedAccessTokens().length > 0)
+  expect(storedAccessTokens()).toEqual([`token-for-${secondClient}`])
+  expect(refusedExchanges).toBe(0)
+  expect(authorizedMcpRequests).toBe(0)
+
+  session.abort()
 }, 30_000)
 
 /**

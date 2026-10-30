@@ -60,8 +60,9 @@ export type McpAuthToolOptions = {
    * model is told to start a new session rather than promised automatic
    * availability. The flow then also belongs to the calling context: its
    * abort signal (the embedder's close/interrupt) releases the pending
-   * callback listener, and completion stores the tokens without opening a
-   * client the session would never use or clean up.
+   * callback listener, a newer call replaces an attempt still pending, and
+   * completion stores the tokens without opening a client the session would
+   * never use or clean up.
    */
   realToolsInCurrentContext?: boolean
 }
@@ -84,6 +85,33 @@ export function createMcpAuthTool(
     `The \`${serverName}\` MCP server (${location}) is installed but requires authentication. ` +
     `Call this tool to start the OAuth flow — you'll receive an authorization URL to share with the user. ` +
     afterAuth
+
+  // An embedder builds this tool per server for each session, so this is the
+  // session's one pending sign-in for the server.
+  let pendingSignIn: AbortController | undefined
+
+  /**
+   * Starts an embedder's attempt, owned by the session's controller. Every
+   * attempt clears the server's stored entry and registers its own client
+   * there, so an older attempt left running would exchange its code with the
+   * newer one's client and fail after the user had signed in. Stop it, as
+   * cli/print.ts does for mcp_authenticate.
+   */
+  function beginSessionSignIn(session: AbortController) {
+    pendingSignIn?.abort()
+    const attempt = new AbortController()
+    pendingSignIn = attempt
+    const stop = () => attempt.abort()
+    session.signal.addEventListener('abort', stop, { once: true })
+    if (session.signal.aborted) stop()
+    return {
+      signal: attempt.signal,
+      release: () => {
+        session.signal.removeEventListener('abort', stop)
+        if (pendingSignIn === attempt) pendingSignIn = undefined
+      },
+    }
+  }
 
   return {
     name: buildMcpToolName(serverName, 'authenticate'),
@@ -150,16 +178,16 @@ export function createMcpAuthTool(
       // but its own timeout. An embedder's flow belongs to its session: the
       // context controller descends from the root its close() and interrupt()
       // abort, which shuts the callback listener.
-      const abortSignal = realToolsInCurrentContext
-        ? new AbortController().signal
-        : context.abortController.signal
+      const signIn = realToolsInCurrentContext
+        ? { signal: new AbortController().signal, release: () => {} }
+        : beginSessionSignIn(context.abortController)
       const { setAppState } = context
 
       const oauthPromise = performMCPOAuthFlow(
         serverName,
         sseOrHttpConfig,
         u => resolveAuthUrl?.(u),
-        abortSignal,
+        signIn.signal,
         { skipBrowserOpen: true },
       )
 
@@ -210,6 +238,7 @@ export function createMcpAuthTool(
             `OAuth flow failed after tool-triggered start: ${errorMessage(err)}`,
           )
         })
+        .finally(signIn.release)
 
       try {
         // Race: get the URL, or the flow completes without needing one
