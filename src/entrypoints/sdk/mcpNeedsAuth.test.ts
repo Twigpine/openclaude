@@ -14,11 +14,12 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import type { McpAuthOutput } from '../../tools/McpAuthTool/McpAuthTool.js'
 import type { Tool } from '../../Tool.js'
 import {
@@ -26,29 +27,34 @@ import {
   setClaudeConfigHomeDirForTesting,
 } from '../../utils/envUtils.js'
 import type { SecureStorage, SecureStorageData } from '../../utils/secureStorage/index.js'
+import { acquireEnvMutex, releaseEnvMutex, resetEnvMutexForTesting } from './shared.js'
 
 // Discovery and client registration write credentials through
 // getSecureStorage, which prefers the OS vault (Keychain, libsecret) under a
 // service name taken from OPENCLAUDE_CONFIG_DIR before any test override —
 // outside the temporary config home and possibly the developer's own. Keep
-// them in memory instead. The module is swapped before the code under test
-// is imported, so that code never sees the real one.
+// them in memory instead, one store per OPENCLAUDE_CONFIG_DIR as the real
+// backends keep one per config home. The module is swapped before the code
+// under test is imported, so that code never sees the real one.
 //
 // A copy of the exports, not the live namespace: mock.module rewrites the
 // namespace's bindings, so restoring the namespace in afterAll would restore
 // the mock.
 const realSecureStorage = { ...(await import('../../utils/secureStorage/index.js')) }
-let stored: SecureStorageData = {}
+const stores = new Map<string, SecureStorageData>()
+const namespace = () => process.env.OPENCLAUDE_CONFIG_DIR ?? ''
+/** What is stored for one config home — the process's own unless named. */
+const stored = (configDir = namespace()): SecureStorageData => stores.get(configDir) ?? {}
 const memoryStorage: SecureStorage = {
   name: 'mcp-needs-auth-test',
-  read: () => stored,
-  readAsync: async () => stored,
+  read: () => stored(),
+  readAsync: async () => stored(),
   update: data => {
-    stored = data
+    stores.set(namespace(), data)
     return { success: true }
   },
   delete: () => {
-    stored = {}
+    stores.delete(namespace())
     return true
   },
 }
@@ -319,12 +325,16 @@ async function waitFor(condition: () => boolean): Promise<void> {
   }
 }
 
-function storedAccessTokens(): string[] {
-  return Object.values(stored.mcpOAuth ?? {}).map(entry => entry.accessToken).filter(Boolean)
+function storedAccessTokens(configDir?: string): string[] {
+  return Object.values(stored(configDir).mcpOAuth ?? {}).map(entry => entry.accessToken).filter(Boolean)
 }
 
-beforeAll(async () => {
-  await acquireSharedMutationLock('entrypoints/sdk/mcpNeedsAuth.test.ts')
+// Not under the shared mutation lock: that lock is the SDK's env mutex, and
+// a sign-in's completion takes that mutex to finish in the store it started
+// in, as a session's turn takes it to apply its `env` (v2.sessionEnvTurn
+// runs without the lock for the same reason). Globals are restored in
+// teardown instead.
+beforeAll(() => {
   // Build-time constants the connection path reads through. Absent, the
   // failure is "MACRO is not defined" and says nothing about MCP.
   hadMacro = Object.hasOwn(globalThis, 'MACRO')
@@ -345,7 +355,8 @@ afterAll(() => {
   mock.module('../../utils/secureStorage/index.js', () => realSecureStorage)
   if (hadMacro) (globalThis as Record<string, unknown>).MACRO = savedMacro
   else delete (globalThis as Record<string, unknown>).MACRO
-  releaseSharedMutationLock()
+  // A test that failed while holding the mutex must not lock the next file out.
+  resetEnvMutexForTesting()
 })
 
 beforeEach(async () => {
@@ -355,7 +366,7 @@ beforeEach(async () => {
   // nor the next test.
   configHome = await mkdtemp(join(tmpdir(), 'openclaude-mcp-auth-'))
   setClaudeConfigHomeDirForTesting(configHome)
-  stored = {}
+  stores.clear()
   flows = []
   reconnects = 0
   registrations = 0
@@ -370,7 +381,7 @@ afterEach(async () => {
   heldMetadata = null
   server?.stop(true)
   server = null
-  stored = {}
+  stores.clear()
   setClaudeConfigHomeDirForTesting(originalConfigOverride)
   await rm(configHome, { recursive: true, force: true })
 })
@@ -383,7 +394,7 @@ test('A SERVER THAT NEEDS SIGNING INTO ARRIVES WITH THE AUTHENTICATE TOOL', asyn
   expect(clients.map(one => one.type)).toEqual(['needs-auth'])
   expect(tools.map(one => one.name)).toEqual(['mcp__gated__authenticate'])
   // The registration landed in the stand-in store, not the OS vault.
-  expect(JSON.stringify(stored)).toContain('stand-in-client')
+  expect(JSON.stringify(stored())).toContain('stand-in-client')
   // The description is what the model reads to decide whether to call it, so
   // it has to name the server and say what calling it does.
   // Both arguments are ignored by this tool — the text is fixed when it is
@@ -511,7 +522,7 @@ test.each([
   slow.answer()
   await flowEnded(0)
   expect(storedAccessTokens()).toEqual([`token-for-${secondClient}`])
-  expect(Object.values(stored.mcpOAuth ?? {}).map(entry => entry.clientId)).toEqual([secondClient])
+  expect(Object.values(stored().mcpOAuth ?? {}).map(entry => entry.clientId)).toEqual([secondClient])
 }, 30_000)
 
 /**
@@ -584,7 +595,7 @@ test('a sign-in asked for after the session closed leaves the stored sign-in alo
   const done = await startSignIn(tools[0]!, session)
   expect((await fetch(callbackFor(done.result.authUrl!))).status).toBe(200)
   await flowEnded(0)
-  const signedIn = structuredClone(stored)
+  const signedIn = structuredClone(stored())
   expect(storedAccessTokens()).toEqual([`token-for-${clientOf(done.result)}`])
 
   session.abort()
@@ -592,7 +603,100 @@ test('a sign-in asked for after the session closed leaves the stored sign-in alo
 
   expect(late.result.status).toBe('error')
   await flowEnded(1)
-  expect(stored).toEqual(signedIn)
+  expect(stored()).toEqual(signedIn)
+}, 30_000)
+
+/**
+ * A sign-in finishes where it started. The session applies its `env` for the
+ * turn and puts the process's own environment back when the turn ends
+ * (v2.ts, applySessionEnv), and the credential store — and the needs-auth
+ * cache beside it — is chosen from OPENCLAUDE_CONFIG_DIR at each read and
+ * write. The user comes back from the browser after the turn: the exchange
+ * must still find the client the flow registered, and the tokens and the
+ * dropped cache entry must land in the store the model was signing into, not
+ * whichever the process has by then. Both ways a client comes about, since a
+ * registered one is only in the store it was registered in.
+ */
+test.each([
+  ['a registered client', {}],
+  ['a configured client', { oauth: { clientId: 'fixed-client' } }],
+])('a sign-in finishing after the turn restored the environment lands in the store it started in: %s', async (_, oauth) => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so the needs-auth cache file is where a session's
+  // OPENCLAUDE_CONFIG_DIR puts it rather than under the test override.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  const cacheFile = (configDir: string) => join(configDir, 'mcp-needs-auth-cache.json')
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url, ...oauth } })
+    await waitFor(() => existsSync(cacheFile(origin)))
+    const session = openSession()
+    const { result } = await startSignIn(tools[0]!, session)
+
+    // The turn ends: the session restores the process's own environment.
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    expect((await fetch(callbackFor(result.authUrl!))).status).toBe(200)
+    await flowEnded(0)
+
+    expect(refusedExchanges).toBe(0)
+    expect(storedAccessTokens(origin)).toEqual([`token-for-${clientOf(result)}`])
+    expect(stores.has(ambient)).toBe(false)
+    await waitFor(() => !existsSync(cacheFile(origin)))
+    expect(existsSync(cacheFile(ambient))).toBe(false)
+    // And the process's own environment is back once the flow is done with it.
+    expect(process.env.OPENCLAUDE_CONFIG_DIR).toBe(ambient)
+  } finally {
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The environment is one per process, so a flow puts its own
+ * OPENCLAUDE_CONFIG_DIR back only under the mutex the sessions' turns hold:
+ * a sign-in whose user comes back during another session's turn waits for
+ * that turn rather than finishing under its variables.
+ */
+test("a sign-in finishing during another session's turn waits for that turn", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  const origin = join(configHome, 'origin')
+  const other = join(configHome, 'other')
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+    const session = openSession()
+    const { result } = await startSignIn(tools[0]!, session)
+    const slow = holdExchangeFor(clientOf(result), false)
+
+    // Another session's turn, with its own environment, holds the mutex.
+    await acquireEnvMutex()
+    process.env.OPENCLAUDE_CONFIG_DIR = other
+    try {
+      expect((await fetch(callbackFor(result.authUrl!))).status).toBe(200)
+      // Bounded wait for what must not happen: no exchange, no write, no
+      // change to the running turn's environment.
+      await Bun.sleep(200)
+      expect(slow.arrived).toBe(false)
+      expect(stores.has(other)).toBe(false)
+      expect(process.env.OPENCLAUDE_CONFIG_DIR).toBe(other)
+    } finally {
+      delete process.env.OPENCLAUDE_CONFIG_DIR
+      releaseEnvMutex()
+    }
+
+    await waitFor(() => slow.arrived)
+    slow.answer()
+    await flowEnded(0)
+    expect(storedAccessTokens(origin)).toEqual([`token-for-${clientOf(result)}`])
+    expect(stores.has(other)).toBe(false)
+    expect(stores.has('')).toBe(false)
+    expect(process.env.OPENCLAUDE_CONFIG_DIR).toBeUndefined()
+  } finally {
+    restoreEnv()
+  }
 }, 30_000)
 
 /**

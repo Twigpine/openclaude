@@ -2364,6 +2364,83 @@ test("the provider's configured-metadata discovery ends with the flow it belongs
   body.resolve()
 })
 
+test('an XAA sign-in finishing after its turn caches the id_token and stores the tokens where it began', async () => {
+  // An embedder's turn restores its environment before the user is back from
+  // the IdP, and the store is chosen from the environment at each write. The
+  // flow takes a credentialScope for the part that follows the IdP's callback
+  // (the SDK supplies one that puts the turn's OPENCLAUDE_CONFIG_DIR back
+  // under the env mutex; mcpNeedsAuth.test.ts covers that one). Here the
+  // scope is a stand-in that switches which store is live, which shows every
+  // write after the callback goes through it: the id_token cached by the IdP
+  // login, then the AS tokens stored by the exchange.
+  const { config, initialData } = makeXaaFixture()
+  delete initialData.mcpXaaIdp
+  const origin = createSharedStorage(initialData, [])
+  const ambient = createSharedStorage({}, [])
+  activeStorage = origin
+  installSuccessfulXaaFetch()
+  const xaaFetch = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    const isCodeExchange =
+      input.toString() === `${IDP_ISSUER}/token` &&
+      init?.method === 'POST' &&
+      String(init.body).includes('grant_type=authorization_code')
+    if (isCodeExchange) {
+      const payload = Buffer.from(
+        JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+      ).toString('base64url')
+      return jsonResponse({
+        access_token: 'idp-access',
+        token_type: 'Bearer',
+        id_token: `e30.${payload}.sig`,
+      })
+    }
+    return xaaFetch(input, init)
+  }) as unknown as typeof globalThis.fetch
+  let loginUrl: URL | undefined
+  let scopeEntries = 0
+
+  const flow = performMCPOAuthFlow(
+    'enterprise',
+    config,
+    url => {
+      loginUrl = new URL(url)
+    },
+    undefined,
+    {
+      skipBrowserOpen: true,
+      credentialScope: async work => {
+        scopeEntries++
+        const was = activeStorage
+        activeStorage = origin
+        try {
+          return await work()
+        } finally {
+          activeStorage = was
+        }
+      },
+    },
+  )
+  await waitFor(() => loginUrl !== undefined)
+  // The turn ends: another store is live by the time the user is back.
+  activeStorage = ambient
+  const callback = new URL(loginUrl!.searchParams.get('redirect_uri')!)
+  callback.searchParams.set('code', 'idp-code')
+  callback.searchParams.set('state', loginUrl!.searchParams.get('state')!)
+  expect((await originalFetch(callback)).status).toBe(200)
+  await flow
+
+  expect(scopeEntries).toBe(2)
+  expect(ambient.updateCalls).toBe(0)
+  expect(ambient.readCalls).toBe(0)
+  const serverKey = getServerKey('enterprise', config)
+  const data = origin.getData()
+  expect(data.mcpXaaIdp?.[`${IDP_ISSUER}/`]?.idToken).toStartWith('e30.')
+  expect(data.mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
+  // And the live store is the process's own again once the flow is done.
+  expect(activeStorage).toBe(ambient)
+})
+
 test('a cancelled flow\'s provider writes nothing to the server\'s entry', async () => {
   // Behind the cancelled exchange, the provider is the last line: the SDK
   // writes through it, and an entry a newer sign-in owns must not change.

@@ -23,11 +23,15 @@ import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
 import { connectToServer, fetchToolsForClient } from '../../services/mcp/client.js'
-import type {
-  QueryPermissionMode,
-  CanUseToolCallback,
-  SDKPermissionRequestMessage,
-  SDKPermissionTimeoutMessage,
+import type { CredentialScope } from '../../services/mcp/credentialScope.js'
+import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
+import {
+  acquireEnvMutex,
+  releaseEnvMutex,
+  type QueryPermissionMode,
+  type CanUseToolCallback,
+  type SDKPermissionRequestMessage,
+  type SDKPermissionTimeoutMessage,
 } from './shared.js'
 
 // ============================================================================
@@ -478,6 +482,44 @@ export function createExternalCanUseTool(
 // ============================================================================
 
 /**
+ * The credential namespace of the turn a sign-in starts in, for the part of
+ * the sign-in that runs after the user's browser has come back. By then the
+ * turn may have put the process's own environment back (v2.ts
+ * `applySessionEnv`, query.ts), or another session's turn may have applied
+ * its own, and the credential store is chosen from `OPENCLAUDE_CONFIG_DIR`
+ * at each read and write. So the turn's value is put back for the duration,
+ * under the env mutex the turns themselves hold — a turn holding it finishes
+ * first, and the sign-in never writes under another session's variables —
+ * and the process's value is restored afterwards.
+ *
+ * The native stores keep one read cache for the process, not one per
+ * namespace, so it is dropped on the way in and out, as a reconnect drops it
+ * before reading fresh credentials.
+ */
+function captureCredentialScope(): CredentialScope {
+  const configDir = process.env.OPENCLAUDE_CONFIG_DIR
+  const apply = (value: string | undefined) => {
+    if (value === undefined) {
+      delete process.env.OPENCLAUDE_CONFIG_DIR
+    } else {
+      process.env.OPENCLAUDE_CONFIG_DIR = value
+    }
+    clearKeychainCache()
+  }
+  return async work => {
+    await acquireEnvMutex()
+    const current = process.env.OPENCLAUDE_CONFIG_DIR
+    try {
+      if (current !== configDir) apply(configDir)
+      return await work()
+    } finally {
+      if (current !== configDir) apply(current)
+      releaseEnvMutex()
+    }
+  }
+}
+
+/**
  * Connects to MCP servers from SDK options.
  * Takes the mcpServers config and connects to each server,
  * returning connected clients and their tools.
@@ -608,6 +650,7 @@ export async function connectSdkMcpServers(
             tools: [
               createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig, {
                 realToolsInCurrentContext: false,
+                captureCredentialScope,
               }),
             ],
           }

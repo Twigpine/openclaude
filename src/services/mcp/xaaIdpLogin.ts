@@ -31,6 +31,7 @@ import { jsonParse } from '../../utils/slowOperations.js'
 import {
   validateXaaIdpCallbackParams,
 } from './xaaIdpCallback.js'
+import { type CredentialScope, resumeIn } from './credentialScope.js'
 import { buildRedirectUri, findAvailablePort } from './oauthPort.js'
 
 export function isXaaEnabled(): boolean {
@@ -77,6 +78,12 @@ export type IdpLoginOptions = {
   /** If true, don't auto-open the browser — just call onAuthorizationUrl */
   skipBrowserOpen?: boolean
   abortSignal?: AbortSignal
+  /**
+   * Where the login finishes once the user is back from the IdP, for a
+   * caller whose environment will not be the same by then. See
+   * `CredentialScope`.
+   */
+  credentialScope?: CredentialScope
 }
 
 /**
@@ -497,7 +504,8 @@ export async function acquireIdpIdToken(
       }
     },
   })
-  if (!tokens.id_token) {
+  const idToken = tokens.id_token
+  if (!idToken) {
     throw new Error(
       'XAA IdP: token response missing id_token (check scope=openid)',
     )
@@ -506,7 +514,7 @@ export async function acquireIdpIdToken(
   // Prefer the id_token's own exp claim; fall back to expires_in.
   // expires_in is for the access_token and may differ from the id_token
   // lifetime. If neither is present, default to 1h.
-  const expFromJwt = jwtExp(tokens.id_token)
+  const expFromJwt = jwtExp(idToken)
   const expiresAt = expFromJwt
     ? expFromJwt * 1000
     : Date.now() + (tokens.expires_in ?? 3600) * 1000
@@ -517,11 +525,16 @@ export async function acquireIdpIdToken(
   if (opts.abortSignal?.aborted) {
     throw new Error('XAA IdP: login cancelled')
   }
-  saveIdpIdToken(idpIssuer, tokens.id_token, expiresAt)
+  // The user has been to the IdP, and the turn that started the login may
+  // have ended while they were there: the id_token is cached where the login
+  // began (see CredentialScope).
+  await resumeIn(opts.credentialScope, async () =>
+    saveIdpIdToken(idpIssuer, idToken, expiresAt),
+  )
   logMCPDebug(
     'xaa',
     `Cached id_token for ${idpIssuer} (expires ${new Date(expiresAt).toISOString()})`,
   )
 
-  return tokens.id_token
+  return idToken
 }

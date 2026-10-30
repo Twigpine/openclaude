@@ -9,6 +9,10 @@ import {
   reconnectMcpServerImpl,
 } from '../../services/mcp/client.js'
 import {
+  type CredentialScope,
+  resumeIn,
+} from '../../services/mcp/credentialScope.js'
+import {
   buildMcpToolName,
   getMcpPrefix,
 } from '../../services/mcp/mcpStringUtils.js'
@@ -69,6 +73,19 @@ export type McpAuthToolOptions = {
    * opening a client the session would never use or clean up.
    */
   realToolsInCurrentContext?: boolean
+  /**
+   * Captures the credential namespace a call runs in, for the part of the
+   * sign-in that runs after the call has returned: the user's return from the
+   * browser, the token exchange, the stored tokens and the dropped needs-auth
+   * cache entry. An embedder's session applies its `env` for the turn and
+   * restores the process's own afterwards, while the credential store is
+   * chosen from `OPENCLAUDE_CONFIG_DIR` at each read and write; without this
+   * a sign-in started in one session's store would finish in another's. The
+   * scope re-applies the turn's variable under the env mutex the turns hold,
+   * so a sign-in finishing during another session's turn waits for it. The
+   * CLI's environment does not change, so it passes none.
+   */
+  captureCredentialScope?: () => CredentialScope
 }
 
 export function createMcpAuthTool(
@@ -186,13 +203,17 @@ export function createMcpAuthTool(
         ? { signal: new AbortController().signal, release: () => {} }
         : beginSessionSignIn(context.abortController)
       const { setAppState } = context
+      // Captured now, inside the call: the flow's reads and writes after the
+      // user's browser comes back belong here, however the environment has
+      // changed by then.
+      const credentialScope = options.captureCredentialScope?.()
 
       const oauthPromise = performMCPOAuthFlow(
         serverName,
         sseOrHttpConfig,
         u => resolveAuthUrl?.(u),
         signIn.signal,
-        { skipBrowserOpen: true },
+        { skipBrowserOpen: true, credentialScope },
       )
 
       // Background continuation: once OAuth completes, reconnect and swap
@@ -201,8 +222,9 @@ export function createMcpAuthTool(
       void oauthPromise
         .then(async () => {
           // Drop the needs-auth cache either way, so the next connection —
-          // here or in a new session — tries the stored tokens.
-          clearMcpAuthCache()
+          // here or in a new session — tries the stored tokens. The cache
+          // file lives in the config home the flow began in.
+          await resumeIn(credentialScope, async () => clearMcpAuthCache())
           if (!realToolsInCurrentContext) {
             // Nothing here would use a reconnected client, and the session's
             // cleanup would never close it. A new session connects instead —

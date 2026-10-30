@@ -44,6 +44,7 @@ import { jsonParse, jsonStringify } from '../../utils/slowOperations.js'
 import { jsonRedactor } from '../../utils/redaction.js'
 import { logEvent } from '../analytics/index.js'
 import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../analytics/metadata.js'
+import { type CredentialScope, resumeIn } from './credentialScope.js'
 import { buildRedirectUri, findAvailablePort } from './oauthPort.js'
 import type { McpHTTPServerConfig, McpSSEServerConfig } from './types.js'
 import { getLoggingSafeMcpBaseUrl } from './utils.js'
@@ -724,6 +725,7 @@ async function performMCPXaaAuth(
   onAuthorizationUrl: (url: string) => void,
   abortSignal?: AbortSignal,
   skipBrowserOpen?: boolean,
+  credentialScope?: CredentialScope,
 ): Promise<void> {
   if (!serverConfig.oauth?.xaa) {
     throw new Error('XAA: oauth.xaa must be set') // guarded by caller
@@ -788,11 +790,19 @@ async function performMCPXaaAuth(
         onAuthorizationUrl,
         skipBrowserOpen,
         abortSignal,
+        credentialScope,
       })
     } catch (e) {
       if (abortSignal?.aborted) throw new AuthenticationCancelledError()
       throw e
     }
+
+    // A cache miss meant a browser login, and the turn that started the flow
+    // may have ended while the user was there: what is written from here on
+    // is written where the flow began (see CredentialScope). A cache hit
+    // stays silent and is still awaited by whoever started it, so it writes
+    // as it is.
+    const resumeScope = idTokenCacheHit ? undefined : credentialScope
 
     // Discover the IdP's token endpoint for the RFC 8693 exchange. Under the
     // flow's signal, like the login's discovery and the exchange: a cancel
@@ -833,7 +843,7 @@ async function performMCPXaaAuth(
       // → clear; 5xx IdP outage → preserve) rather than substring matching.
       if (e instanceof XaaTokenExchangeError) {
         if (e.shouldClearIdToken) {
-          clearIdpIdToken(idp.issuer)
+          await resumeIn(resumeScope, async () => clearIdpIdToken(idp.issuer))
           logMCPDebug(
             serverName,
             'XAA: cleared cached id_token after token-exchange failure',
@@ -861,33 +871,35 @@ async function performMCPXaaAuth(
     // Save tokens via the same storage path as normal OAuth. We write directly
     // (instead of ClaudeAuthProvider.saveTokens) to avoid instantiating the
     // whole provider just to write the same keys.
-    const storage = getSecureStorage()
-    const existingData = storage.read() || {}
-    const serverKey = getServerKey(serverName, serverConfig)
-    const prev = existingData.mcpOAuth?.[serverKey]
-    storage.update({
-      ...existingData,
-      mcpOAuth: {
-        ...existingData.mcpOAuth,
-        [serverKey]: {
-          ...prev,
-          serverName,
-          serverUrl: serverConfig.url,
-          accessToken: tokens.access_token,
-          // AS may omit refresh_token on jwt-bearer — preserve any existing one
-          refreshToken: tokens.refresh_token ?? prev?.refreshToken,
-          expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
-          scope: tokens.scope,
-          clientId,
-          clientSecret,
-          // Persist the AS URL so _doRefresh and revokeServerTokens can locate
-          // the token/revocation endpoints when MCP URL ≠ AS URL (the common
-          // XAA topology).
-          discoveryState: {
-            authorizationServerUrl: tokens.authorizationServerUrl,
+    await resumeIn(resumeScope, async () => {
+      const storage = getSecureStorage()
+      const existingData = storage.read() || {}
+      const serverKey = getServerKey(serverName, serverConfig)
+      const prev = existingData.mcpOAuth?.[serverKey]
+      storage.update({
+        ...existingData,
+        mcpOAuth: {
+          ...existingData.mcpOAuth,
+          [serverKey]: {
+            ...prev,
+            serverName,
+            serverUrl: serverConfig.url,
+            accessToken: tokens.access_token,
+            // AS may omit refresh_token on jwt-bearer — preserve any existing one
+            refreshToken: tokens.refresh_token ?? prev?.refreshToken,
+            expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
+            scope: tokens.scope,
+            clientId,
+            clientSecret,
+            // Persist the AS URL so _doRefresh and revokeServerTokens can locate
+            // the token/revocation endpoints when MCP URL ≠ AS URL (the common
+            // XAA topology).
+            discoveryState: {
+              authorizationServerUrl: tokens.authorizationServerUrl,
+            },
           },
         },
-      },
+      })
     })
 
     logMCPDebug(serverName, 'XAA: tokens saved')
@@ -920,6 +932,12 @@ export async function performMCPOAuthFlow(
   options?: {
     skipBrowserOpen?: boolean
     onWaitingForCallback?: (submit: (callbackUrl: string) => void) => void
+    /**
+     * Where the flow finishes once the user is back from the browser, for a
+     * caller whose environment will not be the same by then. See
+     * `CredentialScope`.
+     */
+    credentialScope?: CredentialScope
   },
 ): Promise<void> {
   // XAA (SEP-990): if configured, bypass the per-server consent dance.
@@ -964,6 +982,7 @@ export async function performMCPOAuthFlow(
       onAuthorizationUrl,
       abortSignal,
       options?.skipBrowserOpen,
+      options?.credentialScope,
     )
     return
   }
@@ -1291,48 +1310,58 @@ export async function performMCPOAuthFlow(
 
     authorizationCodeObtained = true
 
-    // Now complete the auth flow with the received code
-    logMCPDebug(serverName, `Completing auth flow with authorization code`)
-    const result = await sdkAuth(provider, {
-      serverUrl: serverConfig.url,
-      authorizationCode,
-      resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
-      fetchFn: authFetch,
-    })
+    // The user is back from the browser, and the turn that started the flow
+    // may have ended while they were there: the exchange reads the client
+    // registered above and stores its tokens where the flow began (see
+    // CredentialScope).
+    await resumeIn(options?.credentialScope, async () => {
+      // A cancel that landed while the user was away, or while this waited
+      // its turn, ends the flow before it touches the entry.
+      if (abortSignal?.aborted) throw new AuthenticationCancelledError()
 
-    logMCPDebug(serverName, `Auth result: ${result}`)
+      // Now complete the auth flow with the received code
+      logMCPDebug(serverName, `Completing auth flow with authorization code`)
+      const result = await sdkAuth(provider, {
+        serverUrl: serverConfig.url,
+        authorizationCode,
+        resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
+        fetchFn: authFetch,
+      })
 
-    if (result === 'AUTHORIZED') {
-      // Debug: Check if tokens were properly saved
-      const savedTokens = await provider.tokens()
-      logMCPDebug(
-        serverName,
-        `Tokens after auth: ${savedTokens ? 'Present' : 'Missing'}`,
-      )
-      if (savedTokens) {
+      logMCPDebug(serverName, `Auth result: ${result}`)
+
+      if (result === 'AUTHORIZED') {
+        // Debug: Check if tokens were properly saved
+        const savedTokens = await provider.tokens()
         logMCPDebug(
           serverName,
-          `Token access_token length: ${savedTokens.access_token?.length}`,
+          `Tokens after auth: ${savedTokens ? 'Present' : 'Missing'}`,
         )
-        logMCPDebug(serverName, `Token expires_in: ${savedTokens.expires_in}`)
-      }
+        if (savedTokens) {
+          logMCPDebug(
+            serverName,
+            `Token access_token length: ${savedTokens.access_token?.length}`,
+          )
+          logMCPDebug(serverName, `Token expires_in: ${savedTokens.expires_in}`)
+        }
 
-      logEvent('tengu_mcp_oauth_flow_success', {
-        flowAttemptId:
-          flowAttemptId as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        transportType:
-          serverConfig.type as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        ...(getLoggingSafeMcpBaseUrl(serverConfig)
-          ? {
-              mcpServerBaseUrl: getLoggingSafeMcpBaseUrl(
-                serverConfig,
-              ) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-            }
-          : {}),
-      })
-    } else {
-      throw new Error('Unexpected auth result: ' + result)
-    }
+        logEvent('tengu_mcp_oauth_flow_success', {
+          flowAttemptId:
+            flowAttemptId as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          transportType:
+            serverConfig.type as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          ...(getLoggingSafeMcpBaseUrl(serverConfig)
+            ? {
+                mcpServerBaseUrl: getLoggingSafeMcpBaseUrl(
+                  serverConfig,
+                ) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+              }
+            : {}),
+        })
+      } else {
+        throw new Error('Unexpected auth result: ' + result)
+      }
+    })
   } catch (error) {
     logMCPDebug(serverName, `Error during auth completion: ${error}`)
 
@@ -1386,14 +1415,22 @@ export async function performMCPOAuthFlow(
         error.message.includes('Client not found') &&
         !abortSignal?.aborted
       ) {
-        const storage = getSecureStorage()
-        const existingData = storage.read() || {}
-        const serverKey = getServerKey(serverName, serverConfig)
-        if (existingData.mcpOAuth?.[serverKey]) {
-          delete existingData.mcpOAuth[serverKey].clientId
-          delete existingData.mcpOAuth[serverKey].clientSecret
-          storage.update(existingData)
+        const dropClient = async () => {
+          const storage = getSecureStorage()
+          const existingData = storage.read() || {}
+          const serverKey = getServerKey(serverName, serverConfig)
+          if (existingData.mcpOAuth?.[serverKey]) {
+            delete existingData.mcpOAuth[serverKey].clientId
+            delete existingData.mcpOAuth[serverKey].clientSecret
+            storage.update(existingData)
+          }
         }
+        // The entry to clear is the one the exchange just read — where the
+        // flow began, once the user has been to the browser.
+        await resumeIn(
+          authorizationCodeObtained ? options?.credentialScope : undefined,
+          dropClient,
+        )
       }
     }
 
