@@ -843,7 +843,10 @@ async function performMCPXaaAuth(
       // → clear; 5xx IdP outage → preserve) rather than substring matching.
       if (e instanceof XaaTokenExchangeError) {
         if (e.shouldClearIdToken) {
-          await resumeIn(resumeScope, async () => clearIdpIdToken(idp.issuer))
+          await resumeIn(resumeScope, async () => {
+            if (abortSignal?.aborted) throw new AuthenticationCancelledError()
+            clearIdpIdToken(idp.issuer)
+          })
           logMCPDebug(
             serverName,
             'XAA: cleared cached id_token after token-exchange failure',
@@ -872,6 +875,8 @@ async function performMCPXaaAuth(
     // (instead of ClaudeAuthProvider.saveTokens) to avoid instantiating the
     // whole provider just to write the same keys.
     await resumeIn(resumeScope, async () => {
+      // Acquiring the credential scope may have waited behind another turn.
+      if (abortSignal?.aborted) throw new AuthenticationCancelledError()
       const storage = getSecureStorage()
       const existingData = storage.read() || {}
       const serverKey = getServerKey(serverName, serverConfig)
@@ -1416,6 +1421,7 @@ export async function performMCPOAuthFlow(
         !abortSignal?.aborted
       ) {
         const dropClient = async () => {
+          if (abortSignal?.aborted) throw new AuthenticationCancelledError()
           const storage = getSecureStorage()
           const existingData = storage.read() || {}
           const serverKey = getServerKey(serverName, serverConfig)

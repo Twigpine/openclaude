@@ -528,9 +528,13 @@ export async function acquireIdpIdToken(
   // The user has been to the IdP, and the turn that started the login may
   // have ended while they were there: the id_token is cached where the login
   // began (see CredentialScope).
-  await resumeIn(opts.credentialScope, async () =>
-    saveIdpIdToken(idpIssuer, idToken, expiresAt),
-  )
+  await resumeIn(opts.credentialScope, async () => {
+    // Cancellation can also arrive while the scope waits for another turn.
+    if (opts.abortSignal?.aborted) {
+      throw new Error('XAA IdP: login cancelled')
+    }
+    saveIdpIdToken(idpIssuer, idToken, expiresAt)
+  })
   logMCPDebug(
     'xaa',
     `Cached id_token for ${idpIssuer} (expires ${new Date(expiresAt).toISOString()})`,

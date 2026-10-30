@@ -2441,6 +2441,93 @@ test('an XAA sign-in finishing after its turn caches the id_token and stores the
   expect(activeStorage).toBe(ambient)
 })
 
+test.each([
+  ['idp-cache', false], ['idp-cache', true],
+  ['as-tokens', false], ['as-tokens', true],
+  ['idp-clear', false], ['idp-clear', true],
+] as const)('queued XAA %s honours cancellation: %s', async (stage, cancelled) => {
+  const { config, initialData } = makeXaaFixture()
+  delete initialData.mcpXaaIdp
+  activeStorage = createSharedStorage(initialData, [])
+  installSuccessfulXaaFetch()
+  const xaaFetch = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    if (input.toString() === `${IDP_ISSUER}/token` && init?.method === 'POST') {
+      if (String(init.body).includes('grant_type=authorization_code')) {
+        const payload = Buffer.from(JSON.stringify({
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        })).toString('base64url')
+        return jsonResponse({
+          access_token: 'idp-access', token_type: 'Bearer',
+          id_token: `e30.${payload}.sig`,
+        })
+      }
+      if (stage === 'idp-clear') return jsonResponse({ error: 'invalid_grant' }, 400)
+    }
+    return xaaFetch(input, init)
+  }) as typeof globalThis.fetch
+
+  let loginUrl: URL | undefined
+  let scopeEntries = 0
+  const queuedEntry = stage === 'idp-cache' ? 1 : 2
+  const resume = deferred()
+  const session = new AbortController()
+  const flow = performMCPOAuthFlow('enterprise', config, url => {
+    loginUrl = new URL(url)
+  }, session.signal, {
+    skipBrowserOpen: true,
+    credentialScope: async work => {
+      // Model the SDK scope waiting for another session's env turn. Run the
+      // real flow callback only after that turn has released credential access.
+      if (++scopeEntries === queuedEntry) await resume.promise
+      return work()
+    },
+  })
+  const outcome = flow.catch(error => error)
+  try {
+    await waitFor(() => loginUrl !== undefined)
+    const callback = new URL(loginUrl!.searchParams.get('redirect_uri')!)
+    callback.searchParams.set('code', 'idp-code')
+    callback.searchParams.set('state', loginUrl!.searchParams.get('state')!)
+    expect((await originalFetch(callback)).status).toBe(200)
+    await waitFor(() => scopeEntries === queuedEntry)
+
+    if (cancelled) session.abort()
+    const newer = activeStorage.getData()
+    newer.mcpXaaIdp = {
+      [`${IDP_ISSUER}/`]: {
+        idToken: 'newer-selected-account', expiresAt: Date.now() + 3_600_000,
+      },
+    }
+    const serverKey = getServerKey('enterprise', config)
+    newer.mcpOAuth![serverKey]!.accessToken = 'newer-selected-access'
+    activeStorage.setData(newer)
+    const writesBeforeResume = activeStorage.updateCalls
+    resume.resolve()
+    const error = await outcome
+    if (cancelled) {
+      expect(activeStorage.getData()).toEqual(newer)
+      expect(activeStorage.updateCalls).toBe(writesBeforeResume)
+      expect(error).toBeInstanceOf(AuthenticationCancelledError)
+    } else if (stage === 'idp-clear') {
+      expect(error).toBeInstanceOf(Error)
+      expect(error.message).toContain('HTTP 400')
+      expect(activeStorage.getData().mcpXaaIdp?.[`${IDP_ISSUER}/`]).toBeUndefined()
+      expect(activeStorage.getData().mcpOAuth).toEqual(newer.mcpOAuth)
+    } else {
+      expect(error).toBeUndefined()
+      expect(activeStorage.getData().mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
+      const idToken = activeStorage.getData().mcpXaaIdp?.[`${IDP_ISSUER}/`]?.idToken
+      if (stage === 'idp-cache') expect(idToken).toStartWith('e30.')
+      else expect(idToken).toBe('newer-selected-account')
+    }
+  } finally {
+    session.abort()
+    resume.resolve()
+    await outcome
+  }
+})
+
 test('a cancelled flow\'s provider writes nothing to the server\'s entry', async () => {
   // Behind the cancelled exchange, the provider is the last line: the SDK
   // writes through it, and an entry a newer sign-in owns must not change.

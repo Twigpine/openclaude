@@ -119,7 +119,7 @@ const sessions: AbortController[] = []
  * authorization server — only to the client the code was issued to. Shown
  * a token it issued, it answers as an MCP server with one tool, `hello`.
  */
-function serveNeedingAuth(): string {
+function serveNeedingAuth(invalidClient = false): string {
   let base = ''
   server = Bun.serve({
     port: 0,
@@ -177,6 +177,12 @@ function serveNeedingAuth(): string {
         )
       }
       if (path === '/token') {
+        if (invalidClient) {
+          return Response.json(
+            { error: 'invalid_client', error_description: 'Client not found' },
+            { status: 400 },
+          )
+        }
         const form = new URLSearchParams(await request.text())
         const basic = request.headers.get('authorization')?.replace(/^Basic /, '')
         const clientId =
@@ -730,6 +736,56 @@ test('after sign-in, a new session with the same server reaches its real tools',
     for (const client of next.clients) {
       if (client.type === 'connected') await client.cleanup()
     }
+  }
+}, 30_000)
+
+test.each([false, true])('queued invalid-client cleanup honours cancellation: %s', async cancelled => {
+  const url = serveNeedingAuth(true)
+  const session = openSession()
+  const config = { type: 'http' as const, url, oauth: { clientId: 'fixed-client' } }
+  let loginUrl: string | undefined
+  let scopeEntries = 0
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const flow = realAuth.performMCPOAuthFlow('gated', config, value => {
+    loginUrl = value
+  }, session.signal, {
+    skipBrowserOpen: true,
+    credentialScope: async work => {
+      // The first entry exchanges the code. Its failure releases the scope;
+      // cleanup must acquire it again and may wait behind another SDK turn.
+      if (++scopeEntries === 2) await gate
+      return work()
+    },
+  })
+  const outcome = flow.catch(error => error)
+  try {
+    await waitFor(() => loginUrl !== undefined)
+    expect((await fetch(callbackFor(loginUrl!))).status).toBe(200)
+    await waitFor(() => scopeEntries === 2)
+    if (cancelled) session.abort()
+    const key = realAuth.getServerKey('gated', config)
+    const entry = {
+      serverName: 'gated', serverUrl: url, clientId: 'newer-client',
+      clientSecret: 'newer-secret', accessToken: 'newer-token',
+      expiresAt: Date.now() + 3_600_000,
+    }
+    stores.set(namespace(), { mcpOAuth: { [key]: { ...entry } } })
+    release()
+    const error = await outcome
+    expect(error).toBeInstanceOf(Error)
+    if (cancelled) {
+      expect(stored().mcpOAuth?.[key]).toEqual(entry)
+      expect(error).toBeInstanceOf(realAuth.AuthenticationCancelledError)
+    } else {
+      expect(error.message).toContain('Client not found')
+      const { clientId: _id, clientSecret: _secret, ...retained } = entry
+      expect(stored().mcpOAuth?.[key]).toEqual(retained)
+    }
+  } finally {
+    session.abort()
+    release()
+    await outcome
   }
 }, 30_000)
 
