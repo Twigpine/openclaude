@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 const ALLOWED_ENV_FILE_KEYS = new Set([
+  'AIMLAPI_API_KEY',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
@@ -140,6 +141,7 @@ const ALLOWED_ENV_FILE_KEYS = new Set([
   'WEB_CUSTOM_ALLOW_PRIVATE',
   'WEB_CUSTOM_MAX_BODY_KB',
   'WEB_CUSTOM_TIMEOUT_SEC',
+  'WEB_FETCH_PROVIDER',
   'WEB_HEADERS',
   'WEB_JSON_PATH',
   'WEB_KEY',

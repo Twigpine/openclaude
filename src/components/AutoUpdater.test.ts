@@ -46,3 +46,27 @@ describe('shouldRemoveInstalledSymlinkForNpmUpdate', () => {
     expect(shouldRemoveInstalledSymlinkForNpmUpdate(undefined, true)).toBe(true)
   })
 })
+
+test('disabled initial and timer callbacks skip version lookups, with an enabled control', async () => {
+  // The isolated child exercises the component callbacks with mocked hook
+  // scheduling and network boundaries; it does not mount the terminal UI.
+  const child = Bun.spawn([
+    process.execPath, 'run',
+    `${import.meta.dir}/../../scripts/fixtures/auto-updater-disabled.ts`,
+  ], {
+    cwd: `${import.meta.dir}/../..`,
+    env: { ...process.env, NODE_ENV: 'production' },
+    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 8_000,
+  })
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ])
+  expect(code, stderr).toBe(0)
+  expect(JSON.parse(stdout)).toEqual({
+    initial: { latest: 0, maximum: 0 },
+    timer: { latest: 0, maximum: 0 },
+    enabled: { latest: 1, maximum: 1 },
+    recoveryNotice: true,
+    ordinaryNotice: true,
+  })
+}, 10_000) // Longer than the child deadline to allow assertion and cleanup.

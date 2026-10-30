@@ -4,7 +4,7 @@ import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEve
 import { useInterval } from 'usehooks-ts';
 import { useUpdateNotification } from '../hooks/useUpdateNotification.js';
 import { Box, Text } from '../ink.js';
-import { type AutoUpdaterResult, getLatestVersion, getMaxVersion, type InstallStatus, installGlobalPackage, shouldSkipVersion } from '../utils/autoUpdater.js';
+import { type AutoUpdaterResult, getLatestVersion, getMaxVersion, type InstallStatus, installGlobalPackage, shouldSkipVersion, UPDATE_RECOVERY_MESSAGE } from '../utils/autoUpdater.js';
 import { getAutoUpdaterNpmMethod, shouldRemoveInstalledSymlinkForNpmUpdate } from '../utils/autoUpdaterRouting.js';
 import { getGlobalConfig, isAutoUpdaterDisabled } from '../utils/config.js';
 import { logForDebugging } from '../utils/debug.js';
@@ -57,8 +57,12 @@ export function AutoUpdater({
     }
     const currentVersion = MACRO.VERSION;
     const channel = getInitialSettings()?.autoUpdatesChannel ?? 'latest';
-    let latestVersion = await getLatestVersion(channel);
     const isDisabled = isAutoUpdaterDisabled();
+    if (isDisabled) {
+      logForDebugging('AutoUpdater: Auto-updater disabled, skipping check');
+      return;
+    }
+    let latestVersion = await getLatestVersion(channel);
 
     // Check if max version is set (server-side kill switch for auto-updates)
     const maxVersion = await getMaxVersion();
@@ -189,6 +193,7 @@ export function AutoUpdater({
         </> : autoUpdaterResult?.status === 'success' && showSuccessMessage && updateSemver && <Text color="success" wrap="truncate">
             ✓ Update installed · Restart to apply
           </Text>}
+      {autoUpdaterResult?.status === 'termination_uncertain' && <Text color="error">{UPDATE_RECOVERY_MESSAGE}</Text>}
       {(autoUpdaterResult?.status === 'install_failed' || autoUpdaterResult?.status === 'no_permissions') && <Text color="error" wrap="truncate">
           ✗ Auto-update failed &middot; Try <Text bold>openclaude doctor</Text> or{' '}
           <Text bold>

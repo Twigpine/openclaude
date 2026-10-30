@@ -5,6 +5,7 @@ import { Box, render, Text } from '../../ink.js'
 import {
   getLatestVersion,
   installGlobalPackage,
+  UPDATE_RECOVERY_MESSAGE,
 } from '../../utils/autoUpdater.js'
 import {
   getGlobalConfig,
@@ -45,7 +46,7 @@ type UpdateState =
   | { type: 'up-to-date'; version: string }
   | { type: 'updating'; version: string; via: string }
   | { type: 'success'; version: string; via: string }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; requiresLockRecovery?: boolean }
 
 export function PackageManagerUpdateGuidance({
   manager,
@@ -198,11 +199,14 @@ function Update({ onDone, force, target }: UpdateProps): React.ReactNode {
                 'Insufficient permissions for the install. Re-run with the right permissions (e.g. sudo) or fix your install directory ownership.',
             })
             break
+          case 'termination_uncertain':
+            setState({ type: 'error', message: UPDATE_RECOVERY_MESSAGE, requiresLockRecovery: true })
+            break
           case 'in_progress':
             setState({
               type: 'error',
               message:
-                'Another update is already in progress. Try again in a moment.',
+                'Could not acquire the update lock. Wait for any active update to finish; for interrupted updates, see the README update-lock recovery instructions.',
             })
             break
           default:
@@ -316,11 +320,11 @@ function Update({ onDone, force, target }: UpdateProps): React.ReactNode {
             <Text color="error">Update failed</Text>
           </Box>
           <Text color="error">{state.message}</Text>
-          <Box marginTop={1}>
+          {!state.requiresLockRecovery && <Box marginTop={1}>
             <Text dimColor>
               You can update manually, e.g. npm install -g {PACKAGE_URL}@latest
             </Text>
-          </Box>
+          </Box>}
         </Box>
       )}
     </Box>
@@ -347,7 +351,7 @@ function terminalDoneMessage(state: UpdateState): {
     case 'no-package-manager':
       return { message: 'No supported package manager found', delay: 3000 }
     case 'error':
-      return { message: 'OpenClaude update failed', delay: 4000 }
+      return { message: state.requiresLockRecovery ? UPDATE_RECOVERY_MESSAGE : 'OpenClaude update failed', delay: 4000 }
     default:
       return { message: '', delay: 0 }
   }

@@ -285,7 +285,7 @@ export function isAimlapiMcpUrl(url: string): boolean {
  * backend does. Any other Authorization value is returned unchanged.
  */
 function singleBearerCredential(value: string): string {
-  const match = /^Bearer\s+(.+)$/i.exec(value.trim())
+  const match = /^Bearer\s+(.+)$/is.exec(value.trim())
   if (!match?.[1]?.includes(',')) return value
   const key = firstUsableCredential(match[1])
   return key ? `Bearer ${key}` : value

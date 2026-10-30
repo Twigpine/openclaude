@@ -6,12 +6,17 @@ import {
 } from '../../integrations/aimlapi/config.js'
 import { getMcpServerHeaders } from '../../services/mcp/headersHelper.js'
 import type { McpHTTPServerConfig } from '../../services/mcp/types.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { getPluginMcpServers } from '../../utils/plugins/mcpPluginIntegration.js'
-import { applyProviderProfileToProcessEnv } from '../../utils/providerProfiles.js'
+import { clearPluginCache, loadAllPluginsCacheOnly } from '../../utils/plugins/pluginLoader.js'
+import {
+  applyProviderProfileToProcessEnv,
+  clearProviderProfileEnvFromProcessEnv,
+} from '../../utils/providerProfiles.js'
 import {
   resetSettingsCache,
   setSessionSettingsCache,
@@ -32,9 +37,7 @@ const envNames = [
   'OPENAI_API_BASE',
   'CLAUDE_CODE_PROVIDER_ROUTE_ID',
 ] as const
-const originalEnv = Object.fromEntries(
-  envNames.map(name => [name, process.env[name]]),
-)
+let restoreEnv: () => void = () => {}
 
 // Test files share a process, and an earlier file can leave its own
 // settings.js mock registered. Built-in plugins read their enabled state
@@ -53,26 +56,36 @@ function useEnabledPlugins(enabledPlugins?: Record<string, boolean>): void {
 
 beforeEach(async () => {
   await acquireSharedMutationLock('plugins/bundled/aimlapiMcp.test.ts')
+  // Profile activation clears managed provider variables as well as setting
+  // these keys. Identify affected ambient keys without mutating process.env.
+  const retainedEnv = { ...process.env }
+  clearProviderProfileEnvFromProcessEnv(retainedEnv)
+  restoreEnv = snapshotEnv([
+    ...Object.keys(process.env).filter(name => !(name in retainedEnv)),
+    ...envNames,
+    'CLAUDE_CODE_USE_OPENAI',
+    'OPENAI_API_KEY',
+    'OPENAI_MODEL',
+    'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
+    'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
+  ], { clear: true })
   settingsForTest = {}
   mock.module('../../utils/settings/settings.js', () => ({
     ...realSettings,
     getSettings_DEPRECATED: () => settingsForTest,
   }))
-  for (const name of envNames) delete process.env[name]
+  clearPluginCache('aimlapi test setup')
   registerAimlapiMcpPlugin()
 })
 
 afterEach(() => {
   try {
+    clearPluginCache('aimlapi test cleanup')
     clearBuiltinPlugins()
     mock.module('../../utils/settings/settings.js', () => realSettings)
     resetSettingsCache()
     settingsForTest = {}
-    for (const name of envNames) {
-      const value = originalEnv[name]
-      if (value === undefined) delete process.env[name]
-      else process.env[name] = value
-    }
+    restoreEnv()
   } finally {
     releaseSharedMutationLock()
   }
@@ -113,8 +126,13 @@ test('enabling the plugin exposes the MCP server with the configured key and att
   })
 })
 
-test('a pooled AIMLAPI_API_KEY sends only its first key to the MCP server', async () => {
-  process.env.AIMLAPI_API_KEY = `${TEST_KEY}, aimlapi-second-key-not-real`
+test.each([
+  `${TEST_KEY}, aimlapi-second-key-not-real`,
+  `${TEST_KEY},\naimlapi-second-key-not-real`,
+  `${TEST_KEY},\r\naimlapi-second-key-not-real`,
+  `,\n${TEST_KEY}, aimlapi-second-key-not-real`,
+])('a pooled AIMLAPI_API_KEY sends one HTTP-safe key: %j', async pool => {
+  process.env.AIMLAPI_API_KEY = pool
   useEnabledPlugins({ [PLUGIN_ID]: true })
 
   const plugin = getBuiltinPlugins().enabled.find(
@@ -125,9 +143,8 @@ test('a pooled AIMLAPI_API_KEY sends only its first key to the MCP server', asyn
     | McpHTTPServerConfig
     | undefined
 
-  expect(
-    (await getMcpServerHeaders('plugin:aimlapi:aimlapi', server!)).Authorization,
-  ).toBe(`Bearer ${TEST_KEY}`)
+  const headers = await getMcpServerHeaders('plugin:aimlapi:aimlapi', server!)
+  expect(new Headers(headers).get('authorization')).toBe(`Bearer ${TEST_KEY}`)
 })
 
 test('the stored server config references the key instead of embedding it', () => {
@@ -188,46 +205,59 @@ test('withholds a credential the aimlapi route exported for a proxy base URL', (
   ).toBe(true)
 })
 
-function withRestoredProcessEnv(run: () => void): void {
-  const snapshot = { ...process.env }
-  try {
-    run()
-  } finally {
-    for (const name of Object.keys(process.env)) {
-      if (!(name in snapshot)) delete process.env[name]
-    }
-    Object.assign(process.env, snapshot)
-  }
-}
-
 test('a saved aimlapi.com provider profile supplies the key without exporting it', () => {
-  withRestoredProcessEnv(() => {
-    applyProviderProfileToProcessEnv({
-      id: 'provider_aimlapi',
-      name: 'AI/ML API',
-      provider: 'aimlapi',
-      baseUrl: 'https://api.aimlapi.com/v1',
-      model: 'gpt-4o',
-      apiKey: TEST_KEY,
-    })
-
-    expect(process.env.AIMLAPI_API_KEY).toBe(TEST_KEY)
-    expect(hasAimlapiMcpCredential()).toBe(true)
+  applyProviderProfileToProcessEnv({
+    id: 'provider_aimlapi',
+    name: 'AI/ML API',
+    provider: 'aimlapi',
+    baseUrl: 'https://api.aimlapi.com/v1',
+    model: 'gpt-4o',
+    apiKey: TEST_KEY,
   })
+
+  expect(process.env.AIMLAPI_API_KEY).toBe(TEST_KEY)
+  expect(hasAimlapiMcpCredential()).toBe(true)
 })
 
 test('a saved aimlapi profile retargeted to a proxy never offers its credential', () => {
-  withRestoredProcessEnv(() => {
-    applyProviderProfileToProcessEnv({
-      id: 'provider_aimlapi_proxy',
-      name: 'AI/ML API Proxy',
-      provider: 'aimlapi',
-      baseUrl: 'https://proxy.example.test/v1',
-      model: 'gpt-4o',
-      apiKey: 'proxy-credential',
-    })
-
-    expect(process.env.AIMLAPI_API_KEY).toBe('proxy-credential')
-    expect(hasAimlapiMcpCredential()).toBe(false)
+  applyProviderProfileToProcessEnv({
+    id: 'provider_aimlapi_proxy',
+    name: 'AI/ML API Proxy',
+    provider: 'aimlapi',
+    baseUrl: 'https://proxy.example.test/v1',
+    model: 'gpt-4o',
+    apiKey: 'proxy-credential',
   })
+
+  expect(process.env.AIMLAPI_API_KEY).toBe('proxy-credential')
+  expect(hasAimlapiMcpCredential()).toBe(false)
+})
+
+test('cached discovery withholds a newly activated proxy credential at MCP consumption', async () => {
+  useEnabledPlugins({ [PLUGIN_ID]: true })
+  applyProviderProfileToProcessEnv({
+    id: 'provider_aimlapi', name: 'AI/ML API', provider: 'aimlapi',
+    baseUrl: 'https://api.aimlapi.com/v1', model: 'gpt-4o', apiKey: TEST_KEY,
+  })
+  const discovery = await loadAllPluginsCacheOnly()
+  const plugin = discovery.enabled.find(candidate => candidate.source === PLUGIN_ID)
+  expect(plugin).toBeDefined()
+  const canonical = await getPluginMcpServers(plugin!)
+  const server = canonical?.['plugin:aimlapi:aimlapi'] as McpHTTPServerConfig
+  expect((await getMcpServerHeaders('plugin:aimlapi:aimlapi', server)).Authorization)
+    .toBe(`Bearer ${TEST_KEY}`)
+
+  applyProviderProfileToProcessEnv({
+    id: 'provider_aimlapi_proxy', name: 'AI/ML API Proxy', provider: 'aimlapi',
+    baseUrl: 'https://proxy.example.test/v1', model: 'gpt-4o', apiKey: 'proxy-credential',
+  })
+  expect(await loadAllPluginsCacheOnly()).toBe(discovery)
+  expect(process.env.AIMLAPI_API_KEY).toBe('proxy-credential')
+  expect(await getPluginMcpServers(plugin!)).toBeUndefined()
+
+  // Explicit manual authentication to the same host remains the user's choice.
+  expect((await getMcpServerHeaders('manual', {
+    type: 'http', url: AIMLAPI_MCP_URL,
+    headers: { Authorization: 'Bearer manual-key' },
+  })).Authorization).toBe('Bearer manual-key')
 })

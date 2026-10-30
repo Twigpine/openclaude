@@ -179,6 +179,14 @@ npm view @twigpine/openclaude dist-tags
 npm install -g @twigpine/openclaude@latest
 ```
 
+**Update-lock recovery:** Global updates use `.update.lock` in the OpenClaude
+configuration directory (`OPENCLAUDE_CONFIG_DIR`, or `~/.openclaude`). Existing
+locks are never removed automatically, even when old, to avoid overlapping
+package-manager installations. If an update was interrupted, first confirm that
+all OpenClaude update processes and their package-manager children have stopped;
+then remove only `.update.lock` from that directory and retry `openclaude update`.
+Do not remove the lock while an update is running.
+
 ### Start
 
 ```bash
@@ -499,6 +507,15 @@ With Firecrawl enabled:
 - `WebFetch` uses Firecrawl's scrape endpoint instead of raw HTTP, handling JS-rendered pages correctly
 
 Free tier at [firecrawl.dev](https://firecrawl.dev) includes 500 credits. The key is optional.
+
+`WebFetch` can also scrape pages through the [AI/ML API](https://aimlapi.com) Toolbox with your AI/ML API key. Each fetched page is one paid Toolbox run (about $0.0013; each run requests a $0.005 cost limit), so it is used only when you choose it:
+
+```bash
+export AIMLAPI_API_KEY=your-aimlapi-key
+export WEB_FETCH_PROVIDER=aimlapi
+```
+
+`WEB_FETCH_PROVIDER=aimlapi` takes precedence over a Firecrawl key for `WebFetch`. Having `AIMLAPI_API_KEY` set without it does not change how pages are fetched. See [AI/ML API Setup](docs/aimlapi-setup.md#webfetch-through-the-aiml-api-toolbox).
 
 ## Headless gRPC Server
 

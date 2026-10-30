@@ -4,6 +4,7 @@ import {
   getLatestVersion,
   type InstallStatus,
   installGlobalPackage,
+  UPDATE_RECOVERY_MESSAGE,
 } from 'src/utils/autoUpdater.js'
 import { regenerateCompletionCache } from 'src/utils/completionCache.js'
 import {
@@ -410,7 +411,7 @@ export async function update() {
     status = await installOrUpdateClaudePackage(channel)
   } else {
     logForDebugging('update: Calling installGlobalPackage() for global update')
-    status = await installGlobalPackage()
+    status = await installGlobalPackage(latestVersion)
   }
 
   logForDebugging(`update: Installation status: ${status}`)
@@ -439,6 +440,10 @@ export async function update() {
       }
       await gracefulShutdown(1)
       break
+    case 'termination_uncertain':
+      process.stderr.write(`Error: ${UPDATE_RECOVERY_MESSAGE}\n`)
+      await gracefulShutdown(1)
+      break
     case 'install_failed':
       process.stderr.write('Error: Failed to install update\n')
       if (useLocalUpdate) {
@@ -453,9 +458,9 @@ export async function update() {
       break
     case 'in_progress':
       process.stderr.write(
-        'Error: Another instance is currently performing an update\n',
+        'Error: Could not acquire the update lock\n',
       )
-      process.stderr.write('Please wait and try again later\n')
+      process.stderr.write('Wait for any active update to finish. For interrupted updates, see the README update-lock recovery instructions.\n')
       await gracefulShutdown(1)
       break
   }

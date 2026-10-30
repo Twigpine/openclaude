@@ -57,6 +57,10 @@ export type InstallStatus =
   | 'no_permissions'
   | 'install_failed'
   | 'in_progress'
+  | 'termination_uncertain'
+
+export const UPDATE_RECOVERY_MESSAGE =
+  'Installer may still be running. Wait until all updater and package-manager processes have stopped, then follow the README update-lock recovery instructions.'
 
 export type AutoUpdaterResult = {
   version: string | null
@@ -188,9 +192,6 @@ export function shouldSkipVersion(targetVersion: string): boolean {
   return shouldSkip
 }
 
-// Lock file for auto-updater to prevent concurrent updates
-const LOCK_TIMEOUT_MS = 5 * 60 * 1000 // 5 minute timeout for locks
-
 /**
  * Get the path to the lock file
  * This is a function to ensure it's evaluated at runtime after test setup
@@ -206,74 +207,28 @@ export function getLockFilePath(): string {
 async function acquireLock(): Promise<boolean> {
   const fs = getFsImplementation()
   const lockPath = getLockFilePath()
-
-  // Check for existing lock: 1 stat() on the happy path (fresh lock or ENOENT),
-  // 2 on stale-lock recovery (re-verify staleness immediately before unlink).
+  // Exclusive creation is the ownership boundary. Never reclaim an existing
+  // lock: a separate liveness/age check followed by unlink can remove a new
+  // owner's lock, and a slow installation may still be active at any age.
   try {
-    const stats = await fs.stat(lockPath)
-    const age = Date.now() - stats.mtimeMs
-    if (age < LOCK_TIMEOUT_MS) {
-      return false
-    }
-    // Lock is stale, remove it before taking over. Re-verify staleness
-    // immediately before unlinking to close a TOCTOU race: if two processes
-    // both observe the stale lock, A unlinks + writes a fresh lock, then B
-    // would unlink A's fresh lock and both believe they hold it. A fresh
-    // lock has a recent mtime, so re-checking staleness makes B back off.
-    try {
-      const recheck = await fs.stat(lockPath)
-      if (Date.now() - recheck.mtimeMs < LOCK_TIMEOUT_MS) {
-        return false
-      }
-      await fs.unlink(lockPath)
-    } catch (err) {
-      if (!isENOENT(err)) {
-        logError(err as Error)
-        return false
-      }
-    }
-  } catch (err) {
-    if (!isENOENT(err)) {
-      logError(err as Error)
-      return false
-    }
-    // ENOENT: no lock file, proceed to create one
-  }
-
-  // Create lock file atomically with O_EXCL (flag: 'wx'). If another process
-  // wins the race and creates it first, we get EEXIST and back off.
-  // Lazy-mkdir the config dir on ENOENT.
-  try {
-    await writeFile(lockPath, `${process.pid}`, {
-      encoding: 'utf8',
-      flag: 'wx',
-    })
+    await writeFile(lockPath, `${process.pid}`, { encoding: 'utf8', flag: 'wx' })
     return true
   } catch (err) {
-    const code = getErrnoCode(err)
-    if (code === 'EEXIST') {
-      return false
-    }
-    if (code === 'ENOENT') {
+    if (isENOENT(err)) {
       try {
-        // fs.mkdir from getFsImplementation() is always recursive:true and
-        // swallows EEXIST internally, so a dir-creation race cannot reach the
-        // catch below — only writeFile's EEXIST (true lock contention) can.
         await fs.mkdir(getClaudeConfigHomeDir())
-        await writeFile(lockPath, `${process.pid}`, {
-          encoding: 'utf8',
-          flag: 'wx',
-        })
+        await writeFile(lockPath, `${process.pid}`, { encoding: 'utf8', flag: 'wx' })
         return true
-      } catch (mkdirErr) {
-        if (getErrnoCode(mkdirErr) === 'EEXIST') {
-          return false
+      } catch (retryError) {
+        if (getErrnoCode(retryError) !== 'EEXIST') {
+          logError(retryError as Error)
         }
-        logError(mkdirErr as Error)
         return false
       }
     }
-    logError(err as Error)
+    if (getErrnoCode(err) !== 'EEXIST') {
+      logError(err as Error)
+    }
     return false
   }
 }
@@ -297,9 +252,11 @@ async function releaseLock(): Promise<void> {
   }
 }
 
-async function getInstallationPrefix(): Promise<string | null> {
+async function getInstallationPrefix(
+  packageManager: 'npm' | 'bun',
+): Promise<string | null> {
   // Run from home directory to avoid reading project-level .npmrc/.bunfig.toml
-  const isBun = env.isRunningWithBun()
+  const isBun = packageManager === 'bun'
   let prefixResult: Awaited<ReturnType<typeof execFileNoThrowWithCwd>> | null =
     null
   if (isBun) {
@@ -320,12 +277,14 @@ async function getInstallationPrefix(): Promise<string | null> {
   return prefixResult.stdout.trim()
 }
 
-export async function checkGlobalInstallPermissions(): Promise<{
+export async function checkGlobalInstallPermissions(
+  packageManager: 'npm' | 'bun' = env.isRunningWithBun() ? 'bun' : 'npm',
+): Promise<{
   hasPermissions: boolean
   npmPrefix: string | null
 }> {
   try {
-    const prefix = await getInstallationPrefix()
+    const prefix = await getInstallationPrefix(packageManager)
     if (!prefix) {
       return { hasPermissions: false, npmPrefix: null }
     }
@@ -521,7 +480,7 @@ export async function installGlobalPackage(
 ): Promise<InstallStatus> {
   if (!(await acquireLock())) {
     logError(
-      new AutoUpdaterError('Another process is currently installing an update'),
+      new AutoUpdaterError(`Update lock already exists or could not be created: ${getLockFilePath()}`),
     )
     // Log the lock contention
     logEvent('tengu_auto_updater_lock_contention', {
@@ -532,6 +491,7 @@ export async function installGlobalPackage(
     return 'in_progress'
   }
 
+  let releaseLockOnCompletion = true
   try {
     await removeClaudeAliasesFromShellConfigs()
 
@@ -568,7 +528,7 @@ To fix this issue:
     // for those managers. pnpm/yarn manage their own global store, so we let the
     // install command itself surface any permission error there.
     if (packageManager === 'npm' || packageManager === 'bun') {
-      const { hasPermissions } = await checkGlobalInstallPermissions()
+      const { hasPermissions } = await checkGlobalInstallPermissions(packageManager)
       if (!hasPermissions) {
         return 'no_permissions'
       }
@@ -586,6 +546,19 @@ To fix this issue:
       getGlobalInstallArgs(packageManager, packageSpec),
       { cwd: homedir() },
     )
+    // Early executor errors and signal-terminated managers do not establish that
+    // lifecycle children stopped. The executor reports signal names in error.
+    // Keep ownership for the documented manual recovery procedure.
+    if (
+      installResult.error === 'maxBuffer exceeded' ||
+      installResult.error?.startsWith('Command timed out after ') ||
+      installResult.error?.startsWith('kill ') ||
+      installResult.error?.startsWith('SIG')
+    ) {
+      releaseLockOnCompletion = false
+      logForDebugging('Auto-updater: installer termination uncertain; retaining update lock')
+      return 'termination_uncertain'
+    }
     if (installResult.code !== 0) {
       const error = new AutoUpdaterError(
         `Failed to install new version of claude: ${installResult.stdout} ${installResult.stderr}`,
@@ -602,8 +575,9 @@ To fix this issue:
 
     return 'success'
   } finally {
-    // Ensure we always release the lock
-    await releaseLock()
+    if (releaseLockOnCompletion) {
+      await releaseLock()
+    }
   }
 }
 

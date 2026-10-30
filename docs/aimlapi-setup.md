@@ -129,6 +129,41 @@ openclaude mcp add --transport http -s user aimlapi https://mcp.aimlapi.com/mcp
 
 If you configure the server both ways, the hand-added entry wins and the plugin copy is skipped as a duplicate. Note that `openclaude mcp get aimlapi` prints header values after expansion, which includes your key.
 
+## WebFetch through the AI/ML API Toolbox
+
+`WebFetch` normally fetches pages over plain HTTP and converts the HTML to
+Markdown, which can miss JavaScript-rendered content. With an AI/ML API key you
+can have it scrape pages through the
+[AI/ML API Toolbox](https://docs.aimlapi.com/quickstart/toolbox) instead:
+
+```bash
+export AIMLAPI_API_KEY="your-aimlapi-key"
+export WEB_FETCH_PROVIDER=aimlapi
+```
+
+- **Opt-in.** Each fetched page is one Toolbox run of `search1api/crawl`, billed
+  to your AI/ML API balance (about $0.0013 per page on 2026-10-19). Every run
+  requests a cost limit with `max_cost_usd: 0.005`. An AI/ML API key on its own
+  never turns this on.
+- **URL disclosure.** The full requested URL, including query parameters, is
+  sent to the external AI/ML API Toolbox. Do not use this backend for private,
+  internal, or token-bearing URLs.
+- `WEB_FETCH_PROVIDER=aimlapi` takes precedence over `FIRECRAWL_API_KEY` /
+  `FIRECRAWL_API_URL` for `WebFetch`. `WebSearch` is not affected.
+- Like the Firecrawl backend, a failed scrape (a page that does not exist, a
+  refused or failed run) is reported as a `WebFetch` error instead of being
+  retried over plain HTTP. Within one `WebFetch` call, retries of a run request
+  reuse the same input and idempotency key.
+- The key and the attribution headers below are sent only to
+  `https://tools.aimlapi.com`, which is fixed and cannot be overridden. When
+  the active aimlapi profile points at your own proxy (a non-canonical
+  `OPENAI_BASE_URL` or `OPENAI_API_BASE`), its key is treated as the proxy's
+  and is not sent; set up a canonical AI/ML API key to use this backend. When
+  `AIMLAPI_API_KEY` holds a comma-separated pool, only its first usable key is
+  sent, with no rotation across keys. Requests never follow redirects. A
+  scraped page is untrusted web content and goes through the same `WebFetch`
+  processing as a page fetched over plain HTTP.
+
 ## Notes
 
 - Model discovery uses the public, unauthenticated `GET /models` endpoint and surfaces only chat-completions models; image, audio, embeddings, and other modalities are intentionally not routed through the coding workflow.

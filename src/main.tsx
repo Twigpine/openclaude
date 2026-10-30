@@ -1726,6 +1726,12 @@ async function run(): Promise<CommanderCommand> {
       return allowed;
     }) : Promise.resolve({});
 
+    // Register before the first plugin discovery. Piped input can hold startup
+    // below while MCP loading memoizes its plugin list.
+    if (process.env.CLAUDE_CODE_ENTRYPOINT !== 'local-agent') {
+      initBuiltinPlugins();
+    }
+
     // Kick off MCP config loading early (safe - just reads files, no execution).
     // Both interactive and -p use getClaudeCodeMcpConfigs (local file reads only).
     // The local promise is awaited later (before prefetchAllMcpResources) to
@@ -1854,12 +1860,11 @@ async function run(): Promise<CommanderCommand> {
     // since --worktree makes setup() process.chdir() (setup.ts:203), and
     // commands/agents need the post-chdir cwd.
     const preSetupCwd = getCwd();
-    // Register bundled skills/plugins before kicking getCommands() — they're
+    // Register bundled skills before kicking getCommands() — they're
     // pure in-memory array pushes (<1ms, zero I/O) that getBundledSkills()
     // reads synchronously. Previously ran inside setup() after ~20ms of
     // await points, so the parallel getCommands() memoized an empty list.
     if (process.env.CLAUDE_CODE_ENTRYPOINT !== 'local-agent') {
-      initBuiltinPlugins();
       initBundledSkills();
     }
     const setupPromise = setup(preSetupCwd, permissionMode, allowDangerouslySkipPermissions, worktreeEnabled, worktreeName, tmuxEnabled, sessionId ? validateUuid(sessionId) : undefined, worktreePRNumber, messagingSocketPath);

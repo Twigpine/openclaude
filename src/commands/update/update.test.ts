@@ -66,3 +66,18 @@ describe('removeStaleNativeLauncherForNpmUpdate', () => {
     expect(removed).toBe(1)
   })
 })
+
+test('retained-lock errors show recovery in the view and completion without a manual-install bypass', async () => {
+  const child = Bun.spawn([process.execPath, 'run', `${import.meta.dir}/../../../scripts/fixtures/update-recovery.ts`], {
+    cwd: `${import.meta.dir}/../../..`, env: { ...process.env, NODE_ENV: 'production' },
+    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 15_000,
+  })
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ])
+  expect(code, stderr).toBe(0)
+  expect(JSON.parse(stdout)).toEqual([
+    { status: 'termination_uncertain', recovery: true, manual: false, recoveryOnDone: true },
+    { status: 'install_failed', recovery: false, manual: true, recoveryOnDone: false },
+  ])
+}, 20_000)

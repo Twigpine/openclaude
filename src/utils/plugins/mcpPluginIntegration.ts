@@ -1,4 +1,5 @@
 import { join } from 'path'
+import { getBuiltinPluginDefinition } from '../../plugins/builtinPlugins.js'
 import { expandEnvVarsInString } from '../../services/mcp/envExpansion.js'
 import {
   type McpServerConfig,
@@ -599,6 +600,13 @@ export async function getPluginMcpServers(
     plugin.mcpServers || (await loadPluginMcpServers(plugin, errors))
   if (!servers) {
     return undefined
+  }
+
+  // Discovery is cached, but credentials are expanded afresh below. A
+  // provider switch can make a builtin's current credential ineligible.
+  if (plugin.isBuiltin) {
+    const definition = getBuiltinPluginDefinition(plugin.name)
+    if (definition?.isAvailable && !definition.isAvailable()) return undefined
   }
 
   // Resolve environment variables. Same per-server try/catch as

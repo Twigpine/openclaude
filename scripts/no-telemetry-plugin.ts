@@ -7,7 +7,6 @@
  * Analytics and telemetry modules have been replaced at the source level and
  * no longer need build-time stubs. This plugin now only covers:
  *
- *   - Auto-updater (phones home to GCS + npm)
  *   - Plugin fetch telemetry
  *   - Transcript / feedback sharing
  *   - Internal employee logging
@@ -21,23 +20,6 @@ import type { BunPlugin } from 'bun'
 
 // Module path (relative to src/, without extension) → stub source
 const stubs: Record<string, string> = {
-
-	// ─── Auto-updater (phones home to GCS + npm) ──────────────────
-
-	'utils/autoUpdater': `
-export async function assertMinVersion() {}
-export async function getMaxVersion() { return undefined; }
-export async function getMaxVersionMessage() { return undefined; }
-export function shouldSkipVersion() { return true; }
-export function getLockFilePath() { return '/tmp/openclaude-update.lock'; }
-export async function checkGlobalInstallPermissions() { return { hasPermissions: false, npmPrefix: null }; }
-export async function getLatestVersion() { return null; }
-export async function getNpmDistTags() { return { latest: null, stable: null }; }
-export async function getLatestVersionFromGcs() { return null; }
-export async function getGcsDistTags() { return { latest: null, stable: null }; }
-export async function getVersionHistory() { return []; }
-export async function installGlobalPackage() { return 'success'; }
-`,
 
 	// ─── Plugin fetch telemetry (not the marketplace itself) ───────
 
