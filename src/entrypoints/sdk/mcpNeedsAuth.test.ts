@@ -66,6 +66,16 @@ let authorizedMcpRequests = 0
 let registrations = 0
 /** Code exchanges the stand-in refused because another client presented the code. */
 let refusedExchanges = 0
+/** A token exchange the stand-in keeps waiting until the test lets it answer. */
+let heldExchange: {
+  clientId: string
+  refuse: boolean
+  arrived: boolean
+  answer: () => void
+  answered: Promise<void>
+} | null = null
+/** Every session a test opens; teardown closes them, whatever the test did. */
+const sessions: AbortController[] = []
 
 /**
  * A server that asks to be signed into, and answers the discovery the MCP
@@ -116,6 +126,15 @@ function serveNeedingAuth(): string {
           refusedExchanges++
           return Response.json({ error: 'invalid_grant' }, { status: 400 })
         }
+        // Captured: teardown clears the shared slot while this answer waits.
+        const held = heldExchange
+        if (held && held.clientId === clientId) {
+          held.arrived = true
+          await held.answered
+          if (held.refuse) {
+            return Response.json({ error: 'invalid_grant' }, { status: 400 })
+          }
+        }
         return Response.json({
           access_token: `token-for-${clientId}`,
           token_type: 'Bearer',
@@ -145,10 +164,30 @@ function serveBroken(): string {
 }
 
 /**
- * Calls the authenticate tool the way the engine does, under a controller
- * standing in for the session's: SDK close() and interrupt() abort the root
- * every tool's controller descends from.
+ * A controller standing in for an SDK session's: close() and interrupt()
+ * abort the root every tool's controller descends from. Teardown aborts it
+ * too, so a failed test cannot leave a callback listener behind.
  */
+function openSession(): AbortController {
+  const session = new AbortController()
+  sessions.push(session)
+  return session
+}
+
+/**
+ * Makes the stand-in hold its answer to this client's code exchange, then
+ * grant it or — as a server that has since let the code go would — refuse it.
+ */
+function holdExchangeFor(clientId: string, refuse: boolean) {
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldExchange = { clientId, refuse, arrived: false, answer, answered }
+  return heldExchange
+}
+
+/** Calls the authenticate tool the way the engine does, within a session. */
 async function startSignIn(tool: Tool, session: AbortController) {
   const setAppState = mock(() => {})
   const { data } = await tool.call(
@@ -158,6 +197,11 @@ async function startSignIn(tool: Tool, session: AbortController) {
     {} as never,
   )
   return { result: data as McpAuthOutput, setAppState }
+}
+
+/** The client a sign-in URL was issued to. */
+function clientOf(result: McpAuthOutput): string {
+  return new URL(result.authUrl!).searchParams.get('client_id')!
 }
 
 /** The code the stand-in issues to one client, and accepts only from it. */
@@ -223,6 +267,9 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  for (const session of sessions.splice(0)) session.abort()
+  heldExchange?.answer()
+  heldExchange = null
   server?.stop(true)
   server = null
   stored = {}
@@ -260,7 +307,7 @@ test('A SERVER THAT NEEDS SIGNING INTO ARRIVES WITH THE AUTHENTICATE TOOL', asyn
 test('the tool hands back a sign-in URL, and closing the session stops the flow', async () => {
   const url = serveNeedingAuth()
   const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
-  const session = new AbortController()
+  const session = openSession()
 
   const { result } = await startSignIn(tools[0]!, session)
 
@@ -286,7 +333,7 @@ test('the tool hands back a sign-in URL, and closing the session stops the flow'
 test('finishing sign-in stores the tokens without opening a client the session cannot close', async () => {
   const url = serveNeedingAuth()
   const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
-  const session = new AbortController()
+  const session = openSession()
 
   const { result, setAppState } = await startSignIn(tools[0]!, session)
   const callback = await fetch(callbackFor(result.authUrl!))
@@ -316,12 +363,12 @@ test('finishing sign-in stores the tokens without opening a client the session c
 test('asking to sign in again stops the earlier attempt, and the new one completes', async () => {
   const url = serveNeedingAuth()
   const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
-  const session = new AbortController()
+  const session = openSession()
 
   const first = await startSignIn(tools[0]!, session)
   const second = await startSignIn(tools[0]!, session)
-  const firstClient = new URL(first.result.authUrl!).searchParams.get('client_id')
-  const secondClient = new URL(second.result.authUrl!).searchParams.get('client_id')
+  const firstClient = clientOf(first.result)
+  const secondClient = clientOf(second.result)
   expect(secondClient).not.toBe(firstClient)
 
   // The first link no longer leads anywhere.
@@ -336,8 +383,40 @@ test('asking to sign in again stops the earlier attempt, and the new one complet
   expect(storedAccessTokens()).toEqual([`token-for-${secondClient}`])
   expect(refusedExchanges).toBe(0)
   expect(authorizedMcpRequests).toBe(0)
+}, 30_000)
 
-  session.abort()
+/**
+ * Replacing an attempt has to reach past its callback. Once the browser has
+ * come back, the first attempt is exchanging its code — as the first client,
+ * read before the second attempt replaced it — and whatever the exchange
+ * answers is written to the server's one entry. Answering after the second
+ * attempt has finished, a grant would put the first client's tokens and
+ * registration over the second's, and a refusal would make the SDK
+ * invalidate the stored tokens, which by then are the second's.
+ */
+test.each([
+  ['grants the first code', false],
+  ['refuses the first code', true],
+])('a replaced attempt whose exchange answers late leaves the new sign-in alone: server %s', async (_, refuse) => {
+  const url = serveNeedingAuth()
+  const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  const session = openSession()
+
+  const first = await startSignIn(tools[0]!, session)
+  const slow = holdExchangeFor(clientOf(first.result), refuse)
+  expect((await fetch(callbackFor(first.result.authUrl!))).status).toBe(200)
+  await waitFor(() => slow.arrived)
+
+  const second = await startSignIn(tools[0]!, session)
+  const secondClient = clientOf(second.result)
+  expect((await fetch(callbackFor(second.result.authUrl!))).status).toBe(200)
+  await waitFor(() => storedAccessTokens().length > 0)
+
+  slow.answer()
+  // Give the late answer, were its attempt still owned, time to be written.
+  await Bun.sleep(250)
+  expect(storedAccessTokens()).toEqual([`token-for-${secondClient}`])
+  expect(Object.values(stored.mcpOAuth ?? {}).map(entry => entry.clientId)).toEqual([secondClient])
 }, 30_000)
 
 /**

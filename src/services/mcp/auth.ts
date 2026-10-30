@@ -1020,6 +1020,7 @@ export async function performMCPOAuthFlow(
       true,
       onAuthorizationUrl,
       options?.skipBrowserOpen,
+      abortSignal,
     )
 
     // Fetch and store OAuth metadata for scope information
@@ -1628,6 +1629,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   private _pendingStepUpScope?: string
   private onAuthorizationUrlCallback?: (url: string) => void
   private skipBrowserOpen: boolean
+  private abortSignal?: AbortSignal
 
   constructor(
     serverName: string,
@@ -1636,6 +1638,8 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     handleRedirection = false,
     onAuthorizationUrl?: (url: string) => void,
     skipBrowserOpen?: boolean,
+    /** An interactive flow's signal; once it aborts, the flow writes nothing. */
+    abortSignal?: AbortSignal,
   ) {
     this.serverName = serverName
     this.serverConfig = serverConfig
@@ -1643,10 +1647,22 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     this.handleRedirection = handleRedirection
     this.onAuthorizationUrlCallback = onAuthorizationUrl
     this.skipBrowserOpen = skipBrowserOpen ?? false
+    this.abortSignal = abortSignal
   }
 
   get redirectUrl(): string {
     return this.redirectUri
+  }
+
+  /**
+   * A cancelled interactive flow writes nothing more to this server's entry.
+   * The callback listener stops observing the signal once the code arrives,
+   * and the exchange after it does not observe it at all, so a flow closed or
+   * replaced mid-exchange still reaches the SDK's writes — by then possibly
+   * over a newer flow that owns the entry.
+   */
+  private throwIfFlowCancelled(): void {
+    if (this.abortSignal?.aborted) throw new AuthenticationCancelledError()
   }
 
   get authorizationUrl(): string | undefined {
@@ -1865,6 +1881,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   async saveClientInformation(
     clientInformation: OAuthClientInformationFull,
   ): Promise<void> {
+    this.throwIfFlowCancelled()
     const storage = getSecureStorage()
     const existingData = storage.read() || {}
     const serverKey = getServerKey(this.serverName, this.serverConfig)
@@ -2060,6 +2077,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
+    this.throwIfFlowCancelled()
     this._pendingStepUpScope = undefined
     const storage = getSecureStorage()
     // Keep the final whole-record read and synchronous update adjacent. An
@@ -2394,6 +2412,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   async invalidateCredentials(
     scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery',
   ): Promise<void> {
+    this.throwIfFlowCancelled()
     const storage = getSecureStorage()
     const existingData = storage.read()
     if (!existingData?.mcpOAuth) return
@@ -2429,6 +2448,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   }
 
   async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
+    this.throwIfFlowCancelled()
     const storage = getSecureStorage()
     const existingData = storage.read() || {}
     const serverKey = getServerKey(this.serverName, this.serverConfig)
