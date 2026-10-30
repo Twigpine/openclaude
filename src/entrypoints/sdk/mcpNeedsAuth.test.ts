@@ -110,7 +110,8 @@ const sessions: AbortController[] = []
  * A server that asks to be signed into, and answers the discovery the MCP
  * SDK does on the way there. It issues a token only when a test completes
  * the browser step by calling the callback itself, and — like a real
- * authorization server — only to the client the code was issued to.
+ * authorization server — only to the client the code was issued to. Shown
+ * a token it issued, it answers as an MCP server with one tool, `hello`.
  */
 function serveNeedingAuth(): string {
   let base = ''
@@ -205,6 +206,23 @@ function serveNeedingAuth(): string {
           )
         }
         return Response.json(tokens)
+      }
+      if (path === '/mcp' && request.headers.get('authorization')?.startsWith('Bearer token-for-')) {
+        if (request.method !== 'POST') return new Response(null, { status: 405 })
+        const rpc = (await request.json()) as { id?: string | number; method: string }
+        // A notification gets no body back.
+        if (rpc.id === undefined) return new Response(null, { status: 202 })
+        const result =
+          rpc.method === 'initialize'
+            ? {
+                protocolVersion: '2025-03-26',
+                capabilities: { tools: {} },
+                serverInfo: { name: 'gated', version: '1' },
+              }
+            : rpc.method === 'tools/list'
+              ? { tools: [{ name: 'hello', description: 'hello', inputSchema: { type: 'object', properties: {} } }] }
+              : {}
+        return Response.json({ jsonrpc: '2.0', id: rpc.id, result })
       }
       return Response.json(
         { error: 'invalid_token', error_description: 'sign in first' },
@@ -575,6 +593,40 @@ test('a sign-in asked for after the session closed leaves the stored sign-in alo
   expect(late.result.status).toBe('error')
   await flowEnded(1)
   expect(stored).toEqual(signedIn)
+}, 30_000)
+
+/**
+ * The tokens are for the next session, and that session connects through the
+ * same connector, which memoizes what it found by server name and config.
+ * Left in place, the needs-auth result — and the authenticate tool — would
+ * be what the next session gets, stored tokens or not. The stand-in accepts
+ * the token it issued, so a connection that tries it comes back with the
+ * server's real tool.
+ */
+test('after sign-in, a new session with the same server reaches its real tools', async () => {
+  const url = serveNeedingAuth()
+  const config = { gated: { type: 'http' as const, url } }
+  const first = await connectSdkMcpServers(config)
+  expect(first.tools.map(one => one.name)).toEqual(['mcp__gated__authenticate'])
+  const session = openSession()
+
+  const { result } = await startSignIn(first.tools[0]!, session)
+  expect((await fetch(callbackFor(result.authUrl!))).status).toBe(200)
+  await flowEnded(0)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(result)}`])
+  // The session is done; close() cleans up only clients it connected itself.
+  session.abort()
+
+  const next = await connectSdkMcpServers(config)
+  try {
+    expect(next.clients.map(one => one.type)).toEqual(['connected'])
+    expect(next.tools.map(one => one.name)).toEqual(['mcp__gated__hello'])
+    expect(reconnects).toBe(0)
+  } finally {
+    for (const client of next.clients) {
+      if (client.type === 'connected') await client.cleanup()
+    }
+  }
 }, 30_000)
 
 /**

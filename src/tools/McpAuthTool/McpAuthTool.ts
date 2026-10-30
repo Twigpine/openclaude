@@ -3,6 +3,9 @@ import { z } from 'zod/v4'
 import { performMCPOAuthFlow } from '../../services/mcp/auth.js'
 import {
   clearMcpAuthCache,
+  clearServerCache,
+  connectToServer,
+  getServerCacheKey,
   reconnectMcpServerImpl,
 } from '../../services/mcp/client.js'
 import {
@@ -61,8 +64,9 @@ export type McpAuthToolOptions = {
    * availability. The flow then also belongs to the calling context: its
    * abort signal (the embedder's close/interrupt) releases the pending
    * callback listener, a newer call replaces an attempt still pending, and
-   * completion stores the tokens without opening a client the session would
-   * never use or clean up.
+   * completion stores the tokens — and drops the connector's memoized
+   * needs-auth result, so the next session's connection tries them — without
+   * opening a client the session would never use or clean up.
    */
   realToolsInCurrentContext?: boolean
 }
@@ -201,7 +205,16 @@ export function createMcpAuthTool(
           clearMcpAuthCache()
           if (!realToolsInCurrentContext) {
             // Nothing here would use a reconnected client, and the session's
-            // cleanup would never close it. A new session connects instead.
+            // cleanup would never close it. A new session connects instead —
+            // through the connector, which memoizes what it found by server
+            // name and config and would hand the new session this needs-auth
+            // result back, stored tokens or not. Drop it, as the CLI's
+            // reconnect does, so the next connection dials with the tokens;
+            // and only when it is there, since clearing an absent entry would
+            // open a client first.
+            if (connectToServer.cache.has(getServerCacheKey(serverName, config))) {
+              await clearServerCache(serverName, config)
+            }
             logMCPDebug(serverName, `OAuth complete; tools available in a new session`)
             return
           }
