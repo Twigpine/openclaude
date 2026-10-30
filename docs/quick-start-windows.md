@@ -42,7 +42,7 @@ and Bash hooks. OpenClaude checks the default Git installation locations, then
 looks for Git on `PATH`. For a custom installation, set
 `CLAUDE_CODE_GIT_BASH_PATH` in the same PowerShell session before launching
 OpenClaude. Use the path to `bin\bash.exe`, not the `git-bash.exe` terminal
-launcher.
+launcher. An explicit override takes precedence over automatic discovery.
 
 If OpenClaude reports that the configured path cannot be found, check that it
 points to an existing file. Path validation uses the filesystem directly and
