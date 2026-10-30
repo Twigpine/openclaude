@@ -216,20 +216,21 @@ function heldJsonResponse(
   )
 }
 
-/** Fails, rather than hanging the suite, if a cancelled flow stays pending. */
+/** Fails, rather than hanging the suite, if a flow stays pending. */
 function settlesSoon<T>(promise: Promise<T>): Promise<T> {
   return Promise.race([
     promise,
     new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error('still pending after cancel')), 2000),
+      setTimeout(() => reject(new Error('flow still pending after 2s')), 2000),
     ),
   ])
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 2000
+  // Not Date.now: a test may freeze that clock while it waits.
+  const deadline = performance.now() + 2000
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error('Timed out waiting for test state')
+    if (performance.now() >= deadline) throw new Error('Timed out waiting for test state')
     await new Promise(resolve => setTimeout(resolve, 5))
   }
 }
@@ -2523,7 +2524,7 @@ test.each(['stored', 'rejected'] as const)(
       callback.searchParams.set('code', 'idp-code')
       callback.searchParams.set('state', loginUrl!.searchParams.get('state')!)
       expect((await originalFetch(callback)).status).toBe(200)
-      const error = await settled
+      const error = await settlesSoon(settled)
 
       expect(scopeEntries).toBe(2)
       expect(ambient.updateCalls).toBe(0)
