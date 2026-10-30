@@ -482,40 +482,52 @@ export function createExternalCanUseTool(
 // ============================================================================
 
 /**
- * The credential namespace of the turn a sign-in starts in, for the part of
- * the sign-in that runs after the user's browser has come back. By then the
- * turn may have put the process's own environment back (v2.ts
- * `applySessionEnv`, query.ts), or another session's turn may have applied
- * its own, and the credential store is chosen from `OPENCLAUDE_CONFIG_DIR`
- * at each read and write. So the turn's value is put back for the duration,
- * under the env mutex the turns themselves hold — a turn holding it finishes
- * first, and the sign-in never writes under another session's variables —
- * and the process's value is restored afterwards.
+ * The environment of the turn a sign-in starts in, for the part of the
+ * sign-in that runs after the user's browser has come back. By then the turn
+ * may have put the process's own environment back (v2.ts `applySessionEnv`,
+ * query.ts), or another session's turn may have applied its own, and the
+ * credential store is chosen from the environment at each read and write: the
+ * config home (`OPENCLAUDE_CONFIG_DIR`, or the home directory), and the
+ * native vault entry, whose service name also carries the OAuth namespace
+ * and whose account is `USER`. So the whole of the turn's environment is put
+ * back for the duration — what it had set and what it had removed — under
+ * the env mutex the turns themselves hold: a turn holding it finishes first,
+ * and the sign-in never writes under another session's variables. Every
+ * variable this changed is restored afterwards.
  *
  * The native stores keep one read cache for the process, not one per
  * namespace, so it is dropped on the way in and out, as a reconnect drops it
  * before reading fresh credentials.
  */
 function captureCredentialScope(): CredentialScope {
-  const configDir = process.env.OPENCLAUDE_CONFIG_DIR
-  const apply = (value: string | undefined) => {
+  // Captured inside the turn's tool call, where its variables are applied.
+  const turnEnv = new Map(Object.entries(process.env))
+  const set = (key: string, value: string | undefined) => {
     if (value === undefined) {
-      delete process.env.OPENCLAUDE_CONFIG_DIR
+      delete process.env[key]
     } else {
-      process.env.OPENCLAUDE_CONFIG_DIR = value
+      process.env[key] = value
     }
   }
   return async work => {
     await acquireEnvMutex()
-    const current = process.env.OPENCLAUDE_CONFIG_DIR
+    // What each changed variable was, to put back; recorded before it changes.
+    const displaced = new Map<string, string | undefined>()
     try {
-      if (current !== configDir) apply(configDir)
+      for (const key of new Set([...Object.keys(process.env), ...turnEnv.keys()])) {
+        const value = turnEnv.get(key)
+        if (process.env[key] === value) continue
+        displaced.set(key, process.env[key])
+        set(key, value)
+      }
       // The environment may already be restored while the process-wide
       // native cache still belongs to the query that just finished.
       clearKeychainCache()
       return await work()
     } finally {
-      if (current !== configDir) apply(current)
+      // Undone newest first, so a variable reached under two spellings — one
+      // variable on Windows — ends as it began.
+      for (const [key, value] of [...displaced].reverse()) set(key, value)
       clearKeychainCache()
       releaseEnvMutex()
     }

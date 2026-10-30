@@ -2368,8 +2368,8 @@ test('an XAA sign-in finishing after its turn caches the id_token and stores the
   // An embedder's turn restores its environment before the user is back from
   // the IdP, and the store is chosen from the environment at each write. The
   // flow takes a credentialScope for the part that follows the IdP's callback
-  // (the SDK supplies one that puts the turn's OPENCLAUDE_CONFIG_DIR back
-  // under the env mutex; mcpNeedsAuth.test.ts covers that one). Here the
+  // (the SDK supplies one that puts the turn's environment back under the
+  // env mutex; mcpNeedsAuth.test.ts covers that one). Here the
   // scope is a stand-in that switches which store is live, which shows every
   // write after the callback goes through it: the id_token cached by the IdP
   // login, then the AS tokens stored by the exchange.

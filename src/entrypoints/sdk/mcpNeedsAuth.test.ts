@@ -27,14 +27,20 @@ import {
   setClaudeConfigHomeDirForTesting,
 } from '../../utils/envUtils.js'
 import type { SecureStorage, SecureStorageData } from '../../utils/secureStorage/index.js'
+import {
+  CREDENTIALS_SERVICE_SUFFIX,
+  getSecureStorageServiceName,
+  getUsername,
+} from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import { acquireEnvMutex, releaseEnvMutex, resetEnvMutexForTesting } from './shared.js'
 
 // Discovery and client registration write credentials through
 // getSecureStorage, which prefers the OS vault (Keychain, libsecret) under a
 // service name taken from OPENCLAUDE_CONFIG_DIR before any test override —
 // outside the temporary config home and possibly the developer's own. Keep
-// them in memory instead, one store per OPENCLAUDE_CONFIG_DIR as the real
-// backends keep one per config home. The module is swapped before the code
+// them in memory instead, one store per vault entry, chosen as the real
+// backends choose theirs: by service name — which carries the config home and
+// the OAuth namespace — and account. The module is swapped before the code
 // under test is imported, so that code never sees the real one.
 //
 // A copy of the exports, not the live namespace: mock.module rewrites the
@@ -42,9 +48,10 @@ import { acquireEnvMutex, releaseEnvMutex, resetEnvMutexForTesting } from './sha
 // the mock.
 const realSecureStorage = { ...(await import('../../utils/secureStorage/index.js')) }
 const stores = new Map<string, SecureStorageData>()
-const namespace = () => process.env.OPENCLAUDE_CONFIG_DIR ?? ''
-/** What is stored for one config home — the process's own unless named. */
-const stored = (configDir = namespace()): SecureStorageData => stores.get(configDir) ?? {}
+const namespace = () =>
+  JSON.stringify([getSecureStorageServiceName(CREDENTIALS_SERVICE_SUFFIX), getUsername()])
+/** What is stored in one vault entry — the one the environment selects unless named. */
+const stored = (store = namespace()): SecureStorageData => stores.get(store) ?? {}
 const memoryStorage: SecureStorage = {
   name: 'mcp-needs-auth-test',
   read: () => stored(),
@@ -333,8 +340,19 @@ async function waitFor(condition: () => boolean): Promise<void> {
   }
 }
 
-function storedAccessTokens(configDir?: string): string[] {
-  return Object.values(stored(configDir).mcpOAuth ?? {}).map(entry => entry.accessToken).filter(Boolean)
+function storedAccessTokens(store?: string): string[] {
+  return Object.values(stored(store).mcpOAuth ?? {}).map(entry => entry.accessToken).filter(Boolean)
+}
+
+/** The vault entry a config home selects, the rest of the environment as it is. */
+function storeIn(configDir: string): string {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  process.env.OPENCLAUDE_CONFIG_DIR = configDir
+  try {
+    return namespace()
+  } finally {
+    restoreEnv()
+  }
 }
 
 // Not under the shared mutation lock: that lock is the SDK's env mutex, and
@@ -618,55 +636,80 @@ test('a sign-in asked for after the session closed leaves the stored sign-in alo
 /**
  * A sign-in finishes where it started. The session applies its `env` for the
  * turn and puts the process's own environment back when the turn ends
- * (v2.ts, applySessionEnv), and the credential store — and the needs-auth
- * cache beside it — is chosen from OPENCLAUDE_CONFIG_DIR at each read and
- * write. The user comes back from the browser after the turn: the exchange
- * must still find the client the flow registered, and the tokens and the
- * dropped cache entry must land in the store the model was signing into, not
- * whichever the process has by then. Both ways a client comes about, since a
- * registered one is only in the store it was registered in.
+ * (v2.ts, applySessionEnv), and the credential store is chosen from that
+ * environment at each read and write: the config home, which also holds the
+ * needs-auth cache, and the vault entry, whose service name carries the config
+ * home and the OAuth namespace and whose account is the user's. The user comes
+ * back from the browser after the turn: the exchange must still find the
+ * client the flow registered, and the tokens and the dropped cache entry must
+ * land in the store the model was signing into, not whichever the process has
+ * by then. A variable for each part of that store a turn can change, and both
+ * ways a client comes about, since a registered one is only in the store it
+ * was registered in.
  */
-test.each([
-  ['a registered client', {}],
-  ['a configured client', { oauth: { clientId: 'fixed-client' } }],
-])('a sign-in finishing after the turn restored the environment lands in the store it started in: %s', async (_, oauth) => {
-  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+const storeSelectors: Record<string, { variable: string; value: (turn: 'origin' | 'ambient') => string | undefined }> = {
+  'config home': { variable: 'OPENCLAUDE_CONFIG_DIR', value: turn => join(configHome, turn) },
+  'vault account': { variable: 'USER', value: turn => `${turn}-user` },
+  // An approved endpoint, whose sign-ins have a vault service of their own.
+  'OAuth namespace': {
+    variable: 'CLAUDE_CODE_CUSTOM_OAUTH_URL',
+    value: turn => (turn === 'origin' ? 'https://claude.fedstart.com' : undefined),
+  },
+}
+const clientsOf: Record<string, object> = {
+  'a registered client': {},
+  'a configured client': { oauth: { clientId: 'fixed-client' } },
+}
+test.each(
+  Object.keys(storeSelectors).flatMap(selector => Object.keys(clientsOf).map(client => [selector, client])),
+)('a sign-in finishing after the turn restored the environment lands in the store it started in: %s, %s', async (selector, client) => {
+  const { variable, value } = storeSelectors[selector]!
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR', variable])
+  const enterTurn = (turn: 'origin' | 'ambient') => {
+    const next = value(turn)
+    if (next === undefined) delete process.env[variable]
+    else process.env[variable] = next
+  }
   // Real config homes, so the needs-auth cache file is where a session's
   // OPENCLAUDE_CONFIG_DIR puts it rather than under the test override.
   setClaudeConfigHomeDirForTesting(undefined)
-  const origin = join(configHome, 'origin')
-  const ambient = join(configHome, 'ambient')
   const cacheFile = (configDir: string) => join(configDir, 'mcp-needs-auth-cache.json')
   try {
-    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    process.env.OPENCLAUDE_CONFIG_DIR = join(configHome, 'origin')
+    enterTurn('origin')
+    const originHome = process.env.OPENCLAUDE_CONFIG_DIR!
+    const origin = namespace()
     const url = serveNeedingAuth()
-    const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url, ...oauth } })
-    await waitFor(() => existsSync(cacheFile(origin)))
+    const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url, ...clientsOf[client] } })
+    await waitFor(() => existsSync(cacheFile(originHome)))
     const session = openSession()
     const { result } = await startSignIn(tools[0]!, session)
 
     // The turn ends: the session restores the process's own environment.
-    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    enterTurn('ambient')
+    const ambientHome = process.env.OPENCLAUDE_CONFIG_DIR!
+    const ambient = namespace()
+    expect(ambient).not.toBe(origin)
     expect((await fetch(callbackFor(result.authUrl!))).status).toBe(200)
     await flowEnded(0)
 
     expect(refusedExchanges).toBe(0)
     expect(storedAccessTokens(origin)).toEqual([`token-for-${clientOf(result)}`])
     expect(stores.has(ambient)).toBe(false)
-    await waitFor(() => !existsSync(cacheFile(origin)))
-    expect(existsSync(cacheFile(ambient))).toBe(false)
+    await waitFor(() => !existsSync(cacheFile(originHome)))
+    expect(existsSync(cacheFile(ambientHome))).toBe(false)
     // And the process's own environment is back once the flow is done with it.
-    expect(process.env.OPENCLAUDE_CONFIG_DIR).toBe(ambient)
+    expect(process.env[variable]).toBe(value('ambient'))
   } finally {
     restoreEnv()
   }
 }, 30_000)
 
 /**
- * The environment is one per process, so a flow puts its own
- * OPENCLAUDE_CONFIG_DIR back only under the mutex the sessions' turns hold:
- * a sign-in whose user comes back during another session's turn waits for
- * that turn rather than finishing under its variables.
+ * The environment is one per process, so a flow puts its own environment
+ * back only under the mutex the sessions' turns hold: a sign-in whose user
+ * comes back during another session's turn waits for that turn rather than
+ * finishing under its variables.
  */
 test("a sign-in finishing during another session's turn waits for that turn", async () => {
   const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
@@ -689,7 +732,7 @@ test("a sign-in finishing during another session's turn waits for that turn", as
       // change to the running turn's environment.
       await Bun.sleep(200)
       expect(slow.arrived).toBe(false)
-      expect(stores.has(other)).toBe(false)
+      expect(stores.has(storeIn(other))).toBe(false)
       expect(process.env.OPENCLAUDE_CONFIG_DIR).toBe(other)
     } finally {
       delete process.env.OPENCLAUDE_CONFIG_DIR
@@ -699,9 +742,9 @@ test("a sign-in finishing during another session's turn waits for that turn", as
     await waitFor(() => slow.arrived)
     slow.answer()
     await flowEnded(0)
-    expect(storedAccessTokens(origin)).toEqual([`token-for-${clientOf(result)}`])
-    expect(stores.has(other)).toBe(false)
-    expect(stores.has('')).toBe(false)
+    expect(storedAccessTokens(storeIn(origin))).toEqual([`token-for-${clientOf(result)}`])
+    expect(stores.has(storeIn(other))).toBe(false)
+    expect(stores.has(namespace())).toBe(false)
     expect(process.env.OPENCLAUDE_CONFIG_DIR).toBeUndefined()
   } finally {
     restoreEnv()
@@ -829,7 +872,7 @@ test("resuming sign-in discards another query's native credential cache", async 
     memoryStorage.read = () => macOsKeychainStorage.read()
     memoryStorage.readAsync = async () => macOsKeychainStorage.read()
     memoryStorage.update = data => { clearKeychainCache(); return originalStorage.update(data) }
-    stores.set(other, { pluginSecrets: { other: { key: 'other-account' } } })
+    stores.set(storeIn(other), { pluginSecrets: { other: { key: 'other-account' } } })
     const { query } = await import('./query.js')
     const otherQuery = query({ prompt: 'fixture', options: { cwd: configHome, env: { OPENCLAUDE_CONFIG_DIR: other } } })
     ;(otherQuery as unknown as { setEngine: (engine: unknown) => void }).setEngine({
@@ -848,9 +891,9 @@ test("resuming sign-in discards another query's native credential cache", async 
     expect(keychainCacheState.cache.data?.pluginSecrets).toEqual({ other: { key: 'other-account' } })
     expect((await fetch(callbackFor(result.authUrl!))).status).toBe(200)
     await flowEnded(0)
-    expect(storedAccessTokens(origin)).toEqual([`token-for-${clientOf(result)}`])
-    expect(stored(origin).pluginSecrets).toBeUndefined()
-    expect(stored(other).pluginSecrets).toEqual({ other: { key: 'other-account' } })
+    expect(storedAccessTokens(storeIn(origin))).toEqual([`token-for-${clientOf(result)}`])
+    expect(stored(storeIn(origin)).pluginSecrets).toBeUndefined()
+    expect(stored(storeIn(other)).pluginSecrets).toEqual({ other: { key: 'other-account' } })
   } finally {
     Object.assign(memoryStorage, originalStorage)
     mock.module('../../utils/execFileNoThrowPortable.js', () => realExec)
@@ -905,8 +948,8 @@ test.each(['store', 'server'])('SDK sign-ins for another %s remain independent',
     await flowEnded(1)
     expect((await fetch(callbackFor(a.result.authUrl!))).status).toBe(200)
     await flowEnded(0)
-    expect(storedAccessTokens(origin)).toContain(`token-for-${clientOf(a.result)}`)
-    expect(storedAccessTokens(other)).toContain(`token-for-${clientOf(b.result)}`)
+    expect(storedAccessTokens(storeIn(origin))).toContain(`token-for-${clientOf(a.result)}`)
+    expect(storedAccessTokens(storeIn(other))).toContain(`token-for-${clientOf(b.result)}`)
     expect(refusedExchanges).toBe(0)
   } finally { restoreEnv() }
 }, 30_000)

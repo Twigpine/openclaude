@@ -82,16 +82,16 @@ export type McpAuthToolOptions = {
    */
   realToolsInCurrentContext?: boolean
   /**
-   * Captures the credential namespace a call runs in, for the part of the
+   * Captures the environment a call runs in, for the part of the
    * sign-in that runs after the call has returned: the user's return from the
    * browser, the token exchange, the stored tokens and the dropped needs-auth
    * cache entry. An embedder's session applies its `env` for the turn and
    * restores the process's own afterwards, while the credential store is
-   * chosen from `OPENCLAUDE_CONFIG_DIR` at each read and write; without this
-   * a sign-in started in one session's store would finish in another's. The
-   * scope re-applies the turn's variable under the env mutex the turns hold,
-   * so a sign-in finishing during another session's turn waits for it. The
-   * CLI's environment does not change, so it passes none.
+   * chosen from the environment at each read and write; without this a
+   * sign-in started in one session's store would finish in another's. The
+   * scope re-applies the turn's environment under the env mutex the turns
+   * hold, so a sign-in finishing during another session's turn waits for it.
+   * The CLI's environment does not change, so it passes none.
    */
   captureCredentialScope?: () => CredentialScope
 }
