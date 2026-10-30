@@ -21,10 +21,14 @@
  * inside it. The SDK supplies a scope that puts the turn's environment back
  * under the env mutex its turns hold (permissions.ts); the CLI, whose
  * environment does not change, supplies none. A scope is never entered
- * while the caller is still waiting on the flow: a turn holding the env
- * mutex would then wait on itself.
+ * by taking the mutex again while its caller still owns it. A streaming
+ * query can instead lend its active environment to the continuation, and
+ * waits for that work before restoring it.
  */
 export type CredentialScope = <T>(work: () => Promise<T>) => Promise<T>
+
+/** Runs work under an existing owner, or declines once that owner is leaving. */
+export type ActiveCredentialScope = <T>(work: () => Promise<T>) => Promise<T> | undefined
 
 /** Runs `work` in `scope` where there is one, and as it is where there is not. */
 export function resumeIn<T>(

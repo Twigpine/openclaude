@@ -1,4 +1,5 @@
 import reject from 'lodash-es/reject.js'
+import { resolve } from 'node:path'
 import { z } from 'zod/v4'
 import { getServerKey, performMCPOAuthFlow } from '../../services/mcp/auth.js'
 import {
@@ -29,6 +30,7 @@ import {
   getUsername,
 } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import { logMCPDebug, logMCPError } from '../../utils/log.js'
+import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 
 const inputSchema = lazySchema(() => z.object({}))
@@ -132,23 +134,26 @@ export function createMcpAuthTool(
     if (session.signal.aborted) {
       return { signal: session.signal, release: () => {} }
     }
-    const entryKey = JSON.stringify([
-      getSecureStorageServiceName(CREDENTIALS_SERVICE_SUFFIX),
-      getUsername(),
-      getServerKey(serverName, serverConfig),
-    ])
+    const serverKey = getServerKey(serverName, serverConfig)
+    // Default storage can read/write either the native entry or its plaintext
+    // fallback. USER and OAuth namespace partition only the native entry;
+    // even a working vault may fall back on a later write. Own both aliases.
+    const entryKeys = [
+      JSON.stringify(['native', getSecureStorageServiceName(CREDENTIALS_SERVICE_SUFFIX), getUsername(), serverKey]),
+      JSON.stringify(['plaintext', resolve(getClaudeConfigHomeDir()), serverKey]),
+    ]
     pendingSignIn?.abort()
-    pendingSdkSignIns.get(entryKey)?.abort()
+    for (const key of entryKeys) pendingSdkSignIns.get(key)?.abort()
     const attempt = new AbortController()
     pendingSignIn = attempt
-    pendingSdkSignIns.set(entryKey, attempt)
+    for (const key of entryKeys) pendingSdkSignIns.set(key, attempt)
     const stop = () => attempt.abort()
     const release = () => {
       session.signal.removeEventListener('abort', stop)
       attempt.signal.removeEventListener('abort', release)
       if (pendingSignIn === attempt) pendingSignIn = undefined
-      if (pendingSdkSignIns.get(entryKey) === attempt) {
-        pendingSdkSignIns.delete(entryKey)
+      for (const key of entryKeys) {
+        if (pendingSdkSignIns.get(key) === attempt) pendingSdkSignIns.delete(key)
       }
     }
     attempt.signal.addEventListener('abort', release, { once: true })

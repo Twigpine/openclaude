@@ -27,6 +27,8 @@ import {
   setClaudeConfigHomeDirForTesting,
 } from '../../utils/envUtils.js'
 import type { SecureStorage, SecureStorageData } from '../../utils/secureStorage/index.js'
+import { createFallbackStorage } from '../../utils/secureStorage/fallbackStorage.js'
+import { plainTextStorage } from '../../utils/secureStorage/plainTextStorage.js'
 import {
   CREDENTIALS_SERVICE_SUFFIX,
   getSecureStorageServiceName,
@@ -65,9 +67,10 @@ const memoryStorage: SecureStorage = {
     return true
   },
 }
+let testStorage = memoryStorage
 mock.module('../../utils/secureStorage/index.js', () => ({
   ...realSecureStorage,
-  getSecureStorage: () => memoryStorage,
+  getSecureStorage: () => testStorage,
 }))
 
 // The tool returns its URL and carries on in the background: the OAuth flow
@@ -938,6 +941,8 @@ test.each(['store', 'server'])('SDK sign-ins for another %s remain independent',
   const other = different === 'store' ? join(configHome, 'other') : origin
   try {
     process.env.OPENCLAUDE_CONFIG_DIR = origin
+    // Both the native entry and its fallback must follow the selected home.
+    setClaudeConfigHomeDirForTesting(undefined)
     const url = serveNeedingAuth()
     const first = await connectSdkMcpServers({ gated: { type: 'http', url } })
     const a = await startSignIn(first.tools[0]!, openSession())
@@ -951,7 +956,10 @@ test.each(['store', 'server'])('SDK sign-ins for another %s remain independent',
     expect(storedAccessTokens(storeIn(origin))).toContain(`token-for-${clientOf(a.result)}`)
     expect(storedAccessTokens(storeIn(other))).toContain(`token-for-${clientOf(b.result)}`)
     expect(refusedExchanges).toBe(0)
-  } finally { restoreEnv() }
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
 }, 30_000)
 
 test("re-authentication preserves another session's connected client", async () => {
@@ -995,5 +1003,113 @@ test('auth completion also evicts a failed replacement connection', async () => 
     for (const client of next.clients) {
       if (client.type === 'connected') await client.cleanup()
     }
+  }
+}, 30_000)
+
+test.each(['open', 'ending', 'ended'])('streaming query sign-in completes with its input %s', async inputState => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  process.env.OPENCLAUDE_CONFIG_DIR = configHome
+  setClaudeConfigHomeDirForTesting(undefined)
+  const { query } = await import('./query.js')
+  const url = serveNeedingAuth()
+  const origin = join(configHome, 'query-origin')
+  const session = openSession()
+  let tools: Tool[] = []
+  let auth: McpAuthOutput | undefined
+  let waitingForInput = false
+  let finished = false
+  let finishInput!: () => void
+  const inputGate = new Promise<void>(resolve => { finishInput = resolve })
+  async function* prompts() {
+    yield { type: 'user', message: { role: 'user', content: 'sign in' }, parent_tool_use_id: null, session_id: '' } as const
+    waitingForInput = true
+    await inputGate
+  }
+  const q = query({ prompt: prompts(), options: {
+    cwd: configHome, env: { OPENCLAUDE_CONFIG_DIR: origin },
+    abortController: session, mcpServers: { gated: { type: 'http', url } },
+  } })
+  ;(q as unknown as { setEngine: (engine: unknown) => void }).setEngine({
+    injectAgents() {}, getMcpClients: () => [], getMessages: () => [], interrupt() {},
+    setMcpClients() {}, updateTools(pool: Tool[]) { tools = pool },
+    async *submitMessage() {
+      auth = (await startSignIn(tools.find(tool => tool.name === 'mcp__gated__authenticate')!, session)).result
+      yield { type: 'assistant', message: { content: [] }, session_id: 'fixture' }
+    },
+  })
+  const drain = (async () => { for await (const _ of q) { /* drive real query ownership */ } finished = true })()
+  try {
+    await waitFor(() => waitingForInput)
+    expect(auth?.status).toBe('auth_url')
+    if (inputState === 'ended') { finishInput(); await drain }
+    const exchange = holdExchangeFor(clientOf(auth!), false)
+    expect((await fetch(callbackFor(auth!.authUrl!))).status).toBe(200)
+    await waitFor(() => exchange.arrived)
+    if (inputState === 'ending') {
+      finishInput()
+      await new Promise(resolve => setImmediate(resolve))
+      expect(finished).toBe(false)
+      expect(process.env.OPENCLAUDE_CONFIG_DIR).toBe(origin)
+    }
+    exchange.answer()
+    await waitFor(() => storedAccessTokens(storeIn(origin)).length === 1)
+    await flowEnded(0)
+    expect(storedAccessTokens(storeIn(origin))).toEqual([`token-for-${clientOf(auth!)}`])
+    if (inputState === 'open') expect(finished).toBe(false)
+    finishInput()
+    await drain
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const next = await connectSdkMcpServers({ gated: { type: 'http', url } })
+    try {
+      // The memoized needs-auth result must be gone after completion.
+      expect(next.clients[0]!.type).toBe('connected')
+      expect(next.tools.map(tool => tool.name)).toEqual(['mcp__gated__hello'])
+    } finally {
+      for (const client of next.clients) if (client.type === 'connected') await client.cleanup()
+    }
+  } finally {
+    session.abort()
+    heldExchange?.answer()
+    finishInput()
+    await drain
+    q.close()
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+test.each(['USER', 'namespace'])('fallback sign-ins sharing a file replace each other across %s', async selector => {
+  const restoreEnv = snapshotEnv(['USER', 'CLAUDE_CODE_CUSTOM_OAUTH_URL'])
+  // Exercise the real fallback and file backend without touching an OS vault.
+  const unavailable: SecureStorage = {
+    name: 'unavailable-vault', read: () => null, readAsync: async () => null,
+    update: () => ({ success: false }), delete: () => true,
+  }
+  testStorage = createFallbackStorage(unavailable, plainTextStorage)
+  try {
+    const url = serveNeedingAuth()
+    const config = { gated: { type: 'http' as const, url } }
+    process.env.USER = 'account-A'
+    delete process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL
+    const first = await connectSdkMcpServers(config)
+    const a = await startSignIn(first.tools[0]!, openSession())
+    if (selector === 'USER') process.env.USER = 'account-B'
+    else process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL = 'https://claude.fedstart.com'
+    const second = await connectSdkMcpServers(config)
+    const b = await startSignIn(second.tools[0]!, openSession())
+    expect((await fetch(callbackFor(b.result.authUrl!))).status).toBe(200)
+    await flowEnded(1)
+    const tokens = () => Object.values(plainTextStorage.read()?.mcpOAuth ?? {}).map(entry => entry.accessToken)
+    expect(tokens()).toEqual([`token-for-${clientOf(b.result)}`])
+    // A stale callback must not erase the newer grant in the shared file.
+    try { await fetch(callbackFor(a.result.authUrl!)) } catch { /* cancelled listener */ }
+    await flowEnded(0)
+    expect(tokens()).toEqual([`token-for-${clientOf(b.result)}`])
+    expect(refusedExchanges).toBe(0)
+  } finally {
+    for (const session of sessions) session.abort()
+    await Promise.all(flows)
+    testStorage = memoryStorage
+    restoreEnv()
   }
 }, 30_000)

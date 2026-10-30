@@ -615,6 +615,18 @@ class QueryImpl implements Query {
         }
 
         let envMutexAcquired = false
+        let acceptingCredentialWork = true
+        const credentialWork = new Set<Promise<unknown>>()
+        // Only auth continuations belonging to this query may borrow its
+        // environment. Once the query leaves, they use their captured scope.
+        const runInQueryEnv = <T,>(work: () => Promise<T>): Promise<T> | undefined => {
+          if (!envMutexAcquired || !acceptingCredentialWork) return undefined
+          const pending = Promise.resolve().then(work)
+          credentialWork.add(pending)
+          const release = () => { credentialWork.delete(pending) }
+          void pending.then(release, release)
+          return pending
+        }
         try {
           // Apply env overrides AFTER init() with full-duration mutex (SEC-1)
           if (hasEnvOverrides) {
@@ -636,7 +648,7 @@ class QueryImpl implements Query {
           // Connect MCP servers if provided
           if (self.mcpServers && Object.keys(self.mcpServers).length > 0) {
             try {
-              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers)
+              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, runInQueryEnv)
               self.sdkMcpTools = mcpTools
               if (mcpClients.length > 0) {
                 self.engine.setMcpClients(mcpClients)
@@ -731,6 +743,10 @@ class QueryImpl implements Query {
           yield* self.drainTimeoutQueue()
           yield* self.drainAgentFailureQueue()
           } finally {
+            // Stop lending before waiting: later continuations take the mutex
+            // normally. An exchange already using our env must finish first.
+            acceptingCredentialWork = false
+            await Promise.allSettled(credentialWork)
             // Clean up timeout and agent failure queues
             self.timeoutQueue.length = 0
             self.agentFailureQueue.length = 0

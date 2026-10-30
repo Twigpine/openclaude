@@ -23,7 +23,7 @@ import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
 import { connectToServer, fetchToolsForClient } from '../../services/mcp/client.js'
-import type { CredentialScope } from '../../services/mcp/credentialScope.js'
+import type { ActiveCredentialScope, CredentialScope } from '../../services/mcp/credentialScope.js'
 import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import {
   acquireEnvMutex,
@@ -491,15 +491,15 @@ export function createExternalCanUseTool(
  * native vault entry, whose service name also carries the OAuth namespace
  * and whose account is `USER`. So the whole of the turn's environment is put
  * back for the duration — what it had set and what it had removed — under
- * the env mutex the turns themselves hold: a turn holding it finishes first,
- * and the sign-in never writes under another session's variables. Every
- * variable this changed is restored afterwards.
+ * the env mutex the turns themselves hold. An originating streaming query
+ * can lend its still-active environment; a different owner finishes first.
+ * Every variable this changed is restored afterwards.
  *
  * The native stores keep one read cache for the process, not one per
  * namespace, so it is dropped on the way in and out, as a reconnect drops it
  * before reading fresh credentials.
  */
-function captureCredentialScope(): CredentialScope {
+function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): CredentialScope {
   // Captured inside the turn's tool call, where its variables are applied.
   const turnEnv = new Map(Object.entries(process.env))
   const set = (key: string, value: string | undefined) => {
@@ -510,6 +510,14 @@ function captureCredentialScope(): CredentialScope {
     }
   }
   return async work => {
+    // The query keeps this environment until the borrowed work settles.
+    // Do not queue behind the same query's still-open input stream.
+    const owned = runInOriginEnv?.(async () => {
+      clearKeychainCache()
+      try { return await work() }
+      finally { clearKeychainCache() }
+    })
+    if (owned) return owned
     await acquireEnvMutex()
     // What each changed variable was, to put back; recorded before it changes.
     const displaced = new Map<string, string | undefined>()
@@ -544,6 +552,7 @@ function captureCredentialScope(): CredentialScope {
  */
 export async function connectSdkMcpServers(
   mcpServers: Record<string, unknown> | undefined,
+  runInOriginEnv?: ActiveCredentialScope,
 ): Promise<{ clients: MCPServerConnection[]; tools: Tool[] }> {
   if (!mcpServers || Object.keys(mcpServers).length === 0) {
     return { clients: [], tools: [] }
@@ -665,7 +674,7 @@ export async function connectSdkMcpServers(
             tools: [
               createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig, {
                 realToolsInCurrentContext: false,
-                captureCredentialScope,
+                captureCredentialScope: () => captureCredentialScope(runInOriginEnv),
               }),
             ],
           }
