@@ -9,6 +9,7 @@ import {
   getModelMaxOutputTokens,
   modelSupports1M,
   clearSessionContextWindowOverride,
+  resolveContextWindowForModel,
 } from './context.ts'
 
 const originalEnv = {
@@ -585,6 +586,30 @@ test('unknown openai-compatible models use the 128k fallback window (not 8k, see
   delete process.env.OPENAI_MODEL
 
   expect(getContextWindowForModel('some-unknown-3p-model')).toBe(128_000)
+})
+
+test('resolveContextWindowForModel reports the precedence step that won', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+
+  expect(resolveContextWindowForModel('some-unknown-3p-model')).toEqual({
+    contextWindow: 128_000,
+    source: 'fallback',
+  })
+
+  // An explicit 128k limit is the same number but not the fallback.
+  process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS = JSON.stringify({
+    'some-unknown-3p-model': 128_000,
+  })
+  expect(resolveContextWindowForModel('some-unknown-3p-model')).toEqual({
+    contextWindow: 128_000,
+    source: 'env-exact',
+  })
+
+  setSessionContextWindowOverride('some-unknown-3p-model', 64_000)
+  expect(resolveContextWindowForModel('some-unknown-3p-model')).toEqual({
+    contextWindow: 64_000,
+    source: 'session-override',
+  })
 })
 
 test('unknown openai-compatible model fallback logs one debug warning and no console errors', async () => {

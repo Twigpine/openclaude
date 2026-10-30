@@ -3,7 +3,11 @@ import { CONTEXT_1M_BETA_HEADER } from '../constants/betas.js'
 import { getGlobalConfig } from './config.js'
 import { logForDebugging } from './debug.js'
 import { isEnvTruthy } from './envUtils.js'
-import { resolveModelRuntimeLimits } from '../integrations/runtimeMetadata.js'
+import {
+  type ModelContextWindowSource,
+  resolveModelRuntimeLimits,
+  resolveModelRuntimeLimitsWithSource,
+} from '../integrations/runtimeMetadata.js'
 import {
   getTransportKindForRoute,
   resolveActiveRouteIdFromEnv,
@@ -220,11 +224,36 @@ function warnUnknownIntegrationRuntimeLimits(model: string): void {
   )
 }
 
+export type ContextWindowSource =
+  | 'internal-env-override'
+  | 'session-override'
+  | '1m-suffix'
+  | ModelContextWindowSource
+  | 'runtime-limits'
+  | 'fallback'
+  | '1m-beta'
+  | '1m-experiment'
+  | 'internal-model-config'
+  | 'default'
+
 export function getContextWindowForModel(
   model: string,
   betas?: string[],
   runtimeLimits?: { contextWindow?: number },
 ): number {
+  return resolveContextWindowForModel(model, betas, runtimeLimits).contextWindow
+}
+
+/**
+ * Resolve the context window together with the precedence step that supplied
+ * it, so diagnostics can report the real source instead of inferring it from
+ * the value.
+ */
+export function resolveContextWindowForModel(
+  model: string,
+  betas?: string[],
+  runtimeLimits?: { contextWindow?: number },
+): { contextWindow: number; source: ContextWindowSource } {
   // Allow override via environment variable (internal-only)
   // This takes precedence over all other context window resolution, including 1M detection,
   // so users can cap the effective context window for local decisions (auto-compact, etc.)
@@ -235,7 +264,7 @@ export function getContextWindowForModel(
   ) {
     const override = parseInt(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, 10)
     if (!isNaN(override) && override > 0) {
-      return override
+      return { contextWindow: override, source: 'internal-env-override' }
     }
   }
 
@@ -243,12 +272,12 @@ export function getContextWindowForModel(
   // Takes precedence over all resolution except the internal env var above.
   const sessionOverride = getSessionContextWindowOverride(model)
   if (sessionOverride !== undefined) {
-    return sessionOverride
+    return { contextWindow: sessionOverride, source: 'session-override' }
   }
 
   // [1m] suffix — explicit client-side opt-in, respected over all detection
   if (has1mContext(model)) {
-    return 1_000_000
+    return { contextWindow: 1_000_000, source: '1m-suffix' }
   }
 
   // OpenAI-compatible provider — use known context windows for the model.
@@ -256,30 +285,38 @@ export function getContextWindowForModel(
   // but that caused auto-compact to fire on every turn because the effective
   // context (8k minus output reservation) became negative (issue #635).
   if (runtimeLimits?.contextWindow !== undefined || shouldUseIntegrationRuntimeLimits()) {
-    const resolvedRuntimeLimits = runtimeLimits ?? resolveModelRuntimeLimits({
-      model,
-      activeProfileProvider: getAppliedActiveProfileProvider(),
-    })
+    const resolvedRuntimeLimits = runtimeLimits
+      ? { ...runtimeLimits, contextWindowSource: 'runtime-limits' as const }
+      : resolveModelRuntimeLimitsWithSource({
+          model,
+          activeProfileProvider: getAppliedActiveProfileProvider(),
+        })
     if (resolvedRuntimeLimits.contextWindow !== undefined) {
-      return resolvedRuntimeLimits.contextWindow
+      return {
+        contextWindow: resolvedRuntimeLimits.contextWindow,
+        source: resolvedRuntimeLimits.contextWindowSource ?? 'runtime-limits',
+      }
     }
     warnUnknownIntegrationRuntimeLimits(model)
-    return OPENAI_FALLBACK_CONTEXT_WINDOW
+    return { contextWindow: OPENAI_FALLBACK_CONTEXT_WINDOW, source: 'fallback' }
   }
 
   if (betas?.includes(CONTEXT_1M_BETA_HEADER) && modelSupports1M(model)) {
-    return 1_000_000
+    return { contextWindow: 1_000_000, source: '1m-beta' }
   }
   if (getSonnet1mExpTreatmentEnabled(model)) {
-    return 1_000_000
+    return { contextWindow: 1_000_000, source: '1m-experiment' }
   }
   if (process.env.USER_TYPE === 'ant') {
     const antModel = resolveAntModel(model)
     if (antModel?.contextWindow) {
-      return antModel.contextWindow
+      return {
+        contextWindow: antModel.contextWindow,
+        source: 'internal-model-config',
+      }
     }
   }
-  return MODEL_CONTEXT_WINDOW_DEFAULT
+  return { contextWindow: MODEL_CONTEXT_WINDOW_DEFAULT, source: 'default' }
 }
 
 export function getSonnet1mExpTreatmentEnabled(model: string): boolean {

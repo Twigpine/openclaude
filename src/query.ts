@@ -84,9 +84,9 @@ import {
 } from './utils/attachments.js'
 import {
   getMaxActiveMessagesHardCap,
+  getMessageCountCompactionTrigger,
   isAboveMaxActiveMessagesLimit,
-  parseMaxActiveMessagesLimit,
-  resolveMaxActiveMessagesLimit,
+  resolveMessageCountCompactionLimit,
 } from './utils/maxActiveMessages.js'
 /* eslint-disable @typescript-eslint/no-require-imports */
 const skillPrefetch = feature('EXPERIMENTAL_SKILL_SEARCH')
@@ -137,11 +137,7 @@ import {
 } from './query/toolFailureLoopGuard.js'
 import { AGENT_STEP_LIMIT_TOOL_RESULT_PREFIX } from './query/agentStepLimit.js'
 import { buildQueryConfig } from './query/config.js'
-import {
-  getGlobalConfig,
-  isValidMaxMessagesCompactionThreshold,
-  normalizeMaxMessagesCompactionThreshold,
-} from './utils/config.js'
+import { getGlobalConfig } from './utils/config.js'
 import { productionDeps, type QueryDeps } from './query/deps.js'
 import type { Terminal, Continue } from './query/transitions.js'
 import {
@@ -946,10 +942,6 @@ async function* queryLoop(
     let tracking = autoCompactTracking
     const configuredMaxMessagesCompactionThreshold =
       getGlobalConfig().maxMessagesCompactionThreshold
-    const maxMessagesCompactionThreshold =
-      normalizeMaxMessagesCompactionThreshold(
-        configuredMaxMessagesCompactionThreshold,
-      )
 
     // Enforce per-message budget on aggregate tool result size. Runs BEFORE
     // microcompact — cached MC operates purely by tool_use_id (never inspects
@@ -1062,39 +1054,23 @@ async function* queryLoop(
     // compaction and forcing would deadlock via recursive autocompaction.
     const canForceCompact =
       querySource !== 'compact' && querySource !== 'session_memory'
-    // An unset UI setting keeps the legacy environment override. Without that
-    // override, enforce the new effective 200-message default.
-    const hasValidLegacyActiveMessageLimit =
-      parseMaxActiveMessagesLimit(process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES) > 0
-    const maxMessagesLimitSetting =
-      configuredMaxMessagesCompactionThreshold === undefined &&
-      hasValidLegacyActiveMessageLimit
-        ? undefined
-        : maxMessagesCompactionThreshold
-    const hasExplicitMessageCountThreshold =
-      configuredMaxMessagesCompactionThreshold !== undefined &&
-      isValidMaxMessagesCompactionThreshold(configuredMaxMessagesCompactionThreshold) &&
-      configuredMaxMessagesCompactionThreshold !== 'off'
-    const hasActiveMessageLimitOverride =
-      hasExplicitMessageCountThreshold ||
-      ((configuredMaxMessagesCompactionThreshold === undefined ||
-        configuredMaxMessagesCompactionThreshold === 'off') &&
-        hasValidLegacyActiveMessageLimit)
+    const messageCountCompactionLimit = resolveMessageCountCompactionLimit(
+      configuredMaxMessagesCompactionThreshold,
+      process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES,
+    )
+    const { hasActiveMessageLimitOverride } = messageCountCompactionLimit
     const activeMessageLimit = canForceCompact
-      ? resolveMaxActiveMessagesLimit(
-          maxMessagesLimitSetting,
-          process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES,
-        )
+      ? messageCountCompactionLimit.activeMessageLimit
       : 0
     if (canForceCompact) {
       if (
-        isAboveMaxActiveMessagesLimit(messagesForQuery.length, activeMessageLimit) &&
-        (isAutoCompactEnabled() ||
-          hasActiveMessageLimitOverride ||
-          isAboveMaxActiveMessagesLimit(
-            messagesForQuery.length,
-            getMaxActiveMessagesHardCap(),
-          ))
+        isAboveMaxActiveMessagesLimit(
+          messagesForQuery.length,
+          getMessageCountCompactionTrigger(
+            messageCountCompactionLimit,
+            isAutoCompactEnabled(),
+          ),
+        )
       ) {
         tracking = {
           ...(tracking ?? { compacted: false, turnId: '', turnCounter: 0 }),

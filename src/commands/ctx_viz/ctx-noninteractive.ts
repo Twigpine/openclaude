@@ -9,8 +9,18 @@ import type { Tools } from '../../Tool.js'
 import type { AgentDefinitionsResult } from '../../tools/AgentTool/loadAgentsDir.js'
 import type { Message } from '../../types/message.js'
 import { analyzeContextUsage, type ContextData } from '../../utils/analyzeContext.js'
-import { getContextWindowForModel, getModelMaxOutputTokens } from '../../utils/context.js'
+import { getGlobalConfig } from '../../utils/config.js'
+import {
+  type ContextWindowSource,
+  getModelMaxOutputTokens,
+  resolveContextWindowForModel,
+} from '../../utils/context.js'
 import { formatNumber, formatDuration } from '../../utils/format.js'
+import {
+  getMaxActiveMessagesHardCap,
+  getMessageCountCompactionTrigger,
+  resolveMessageCountCompactionLimit,
+} from '../../utils/maxActiveMessages.js'
 import { getMessagesAfterCompactBoundary } from '../../utils/messages.js'
 import { getCanonicalName } from '../../utils/model/model.js'
 import {
@@ -53,8 +63,11 @@ function toApiView(messages: Message[]): Message[] {
 export async function collectCtxData(context: CtxDataInput): Promise<{
   contextData: ContextData
   contextWindow: number
+  contextWindowSource: ContextWindowSource
   effectiveContext: number
   autoCompactThreshold: number
+  messageCountCompactAt: number
+  messageCountHardCap: number
   maxOutput: { default: number; upperLimit: number }
   canonicalName: string
   autoCompactEnabled: boolean
@@ -92,15 +105,27 @@ export async function collectCtxData(context: CtxDataInput): Promise<{
   )
 
   const model = mainLoopModel
+  const contextWindow = resolveContextWindowForModel(model, getSdkBetas())
+  const autoCompactEnabled = isAutoCompactEnabled()
 
   return {
     contextData,
-    contextWindow: getContextWindowForModel(model, getSdkBetas()),
+    contextWindow: contextWindow.contextWindow,
+    contextWindowSource: contextWindow.source,
     effectiveContext: getEffectiveContextWindowSize(model),
     autoCompactThreshold: getAutoCompactThreshold(model),
+    // Same resolution the query loop uses to force message-count compaction.
+    messageCountCompactAt: getMessageCountCompactionTrigger(
+      resolveMessageCountCompactionLimit(
+        getGlobalConfig().maxMessagesCompactionThreshold,
+        process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES,
+      ),
+      autoCompactEnabled,
+    ),
+    messageCountHardCap: getMaxActiveMessagesHardCap(),
     maxOutput: getModelMaxOutputTokens(model),
     canonicalName: getCanonicalName(model),
-    autoCompactEnabled: isAutoCompactEnabled(),
+    autoCompactEnabled,
     sessionInput: getTotalInputTokens(),
     sessionOutput: getTotalOutputTokens(),
     sessionCacheRead: getTotalCacheReadInputTokens(),
@@ -116,6 +141,24 @@ export async function collectCtxData(context: CtxDataInput): Promise<{
 
 /** Shape returned by collectCtxData, accepted by renderCtxReport. */
 export type RenderInput = Awaited<ReturnType<typeof collectCtxData>>
+
+const CONTEXT_WINDOW_SOURCE_LABELS: Record<ContextWindowSource, string> = {
+  'internal-env-override': 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+  'session-override': 'session override (/set-context-window)',
+  '1m-suffix': '[1m] model suffix',
+  'env-exact': 'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS (exact match)',
+  'route-catalog': 'provider route catalog',
+  'env-prefix': 'CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS (prefix match)',
+  'model-limits': 'modelLimits in settings',
+  discovery: 'provider model discovery',
+  'model-descriptor': 'built-in model metadata',
+  'runtime-limits': 'provider runtime limits',
+  fallback: 'fallback for unknown model',
+  '1m-beta': '1M context beta',
+  '1m-experiment': '1M context experiment',
+  'internal-model-config': 'internal model config',
+  default: 'default',
+}
 
 function themeColorToChalk(themeColor: string): (text: string) => string {
   if (themeColor === 'error') return chalk.red
@@ -159,10 +202,27 @@ export function renderCtxReport(d: RenderInput): string {
 
   lines.push(chalk.bold('  Window Capacity'))
   lines.push(`    ${figures.bullet} Context window:    ${chalk.bold(formatNumber(d.contextWindow))} tokens`)
+  lines.push(`    ${figures.bullet} Window source:      ${CONTEXT_WINDOW_SOURCE_LABELS[d.contextWindowSource]}`)
+  if (d.contextWindowSource === 'fallback') {
+    lines.push(chalk.dim('      Model limit unknown. Set it with /set-context-window, modelLimits in settings, or CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS.'))
+  }
   lines.push(`    ${figures.bullet} Effective context:  ${chalk.bold(formatNumber(d.effectiveContext))} tokens`)
   lines.push(`    ${figures.bullet} Max output:         ${chalk.bold(formatNumber(d.maxOutput.default))} tokens${d.maxOutput.default !== d.maxOutput.upperLimit ? ` (up to ${formatNumber(d.maxOutput.upperLimit)})` : ''}`)
   if (d.autoCompactEnabled) {
     lines.push(`    ${figures.bullet} Auto-compact at:    ${chalk.bold(formatNumber(d.autoCompactThreshold))} tokens`)
+  } else {
+    lines.push(`    ${figures.bullet} Auto-compact at:    ${chalk.bold('off')}`)
+  }
+  if (d.messageCountCompactAt > 0) {
+    const hardCapNote =
+      d.messageCountHardCap > 0 && d.messageCountHardCap !== d.messageCountCompactAt
+        ? ` (hard cap ${d.messageCountHardCap})`
+        : d.messageCountHardCap === d.messageCountCompactAt
+          ? ' (hard cap)'
+          : ''
+    lines.push(`    ${figures.bullet} Message-count at:   ${chalk.bold(String(d.messageCountCompactAt))} messages${hardCapNote}`)
+  } else {
+    lines.push(`    ${figures.bullet} Message-count at:   ${chalk.bold('off')}`)
   }
   lines.push('')
 

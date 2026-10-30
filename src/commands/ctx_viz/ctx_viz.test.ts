@@ -191,8 +191,11 @@ describe('/ctx command surface (PR #1610)', () => {
         autoCompactThreshold: 167_000,
       },
       contextWindow: 200_000,
+      contextWindowSource: 'default',
       effectiveContext: 180_000,
       autoCompactThreshold: 167_000,
+      messageCountCompactAt: 200,
+      messageCountHardCap: 1000,
       maxOutput: { default: 32_000, upperLimit: 64_000 },
       canonicalName: 'claude-sonnet-4',
       autoCompactEnabled: true,
@@ -218,6 +221,9 @@ describe('/ctx command surface (PR #1610)', () => {
     // Auto-compact line is rendered because the fixture sets
     // isAutoCompactEnabled: true.
     expect(out).toContain('Auto-compact at:')
+    expect(out).toContain('Window source:      default')
+    expect(out).not.toContain('Model limit unknown')
+    expect(out).toMatch(/Message-count at: +\S*200\S* messages \(hard cap 1000\)/)
     // Current Context block + total.
     expect(out).toContain('Current Context (what the model sees)')
     expect(out).toContain('Total:')
@@ -249,5 +255,67 @@ describe('/ctx command surface (PR #1610)', () => {
     // Deferred tool categories (MCP tools (deferred), System tools (deferred))
     // should be filtered out since they aren't in the model-visible context.
     expect(out).not.toContain('System tools (deferred)')
+  })
+
+  test('reports the context-window source and disabled compaction triggers', async () => {
+    const mod = (await import(
+      `./ctx-noninteractive.ts?render=${Date.now()}-${Math.random()}`
+    )) as {
+      renderCtxReport: (d: RenderInput) => string
+    }
+    const input = {
+      contextData: {
+        categories: [],
+        totalTokens: 1_000,
+        maxTokens: 128_000,
+        rawMaxTokens: 128_000,
+        percentage: 1,
+        gridRows: [],
+        model: 'custom-model',
+        memoryFiles: [],
+        mcpTools: [],
+        agents: [],
+        apiUsage: null,
+        isAutoCompactEnabled: false,
+        autoCompactThreshold: 95_000,
+      },
+      contextWindow: 128_000,
+      effectiveContext: 108_000,
+      autoCompactThreshold: 95_000,
+      maxOutput: { default: 8_000, upperLimit: 8_000 },
+      canonicalName: 'custom-model',
+      autoCompactEnabled: false,
+      sessionInput: 0,
+      sessionOutput: 0,
+      sessionCacheRead: 0,
+      sessionCacheCreation: 0,
+      sessionCost: 0,
+      sessionApiDuration: 0,
+      sessionWallDuration: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      modelUsageMap: {},
+    } satisfies Omit<RenderInput, 'contextWindowSource' | 'messageCountCompactAt' | 'messageCountHardCap'>
+
+    const fallback = mod.renderCtxReport({
+      ...input,
+      contextWindowSource: 'fallback',
+      messageCountCompactAt: 1000,
+      messageCountHardCap: 1000,
+    })
+    expect(fallback).toContain('Window source:      fallback for unknown model')
+    expect(fallback).toContain('/set-context-window')
+    expect(fallback).toMatch(/Auto-compact at: +\S*off/)
+    expect(fallback).toMatch(/Message-count at: +\S*1000\S* messages \(hard cap\)/)
+
+    const discovered = mod.renderCtxReport({
+      ...input,
+      contextWindowSource: 'discovery',
+      messageCountCompactAt: 0,
+      messageCountHardCap: 0,
+    })
+    expect(discovered).toContain('Window source:      provider model discovery')
+    expect(discovered).not.toContain('Model limit unknown')
+    expect(discovered).toMatch(/Message-count at: +\S*off/)
   })
 })

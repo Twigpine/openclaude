@@ -201,9 +201,9 @@ test('resolveModelRuntimeLimits lets settings modelLimits beat discovery cache',
       },
     )
 
-    const { resolveModelRuntimeLimits } = await importFresh()
+    const { resolveModelRuntimeLimitsWithSource } = await importFresh()
     const resolveWithDiscovery = () =>
-      resolveModelRuntimeLimits({
+      resolveModelRuntimeLimitsWithSource({
         model: 'my-codex-combo',
         processEnv: {
           CLAUDE_CODE_USE_OPENAI: '1',
@@ -217,6 +217,8 @@ test('resolveModelRuntimeLimits lets settings modelLimits beat discovery cache',
     const discovered = resolveWithDiscovery()
     expect(discovered.contextWindow).toBe(128_000)
     expect(discovered.maxOutputTokens).toBe(8_192)
+    // A discovered 128k window must not be mistaken for the 128k fallback.
+    expect(discovered.contextWindowSource).toBe('discovery')
 
     mockSettings = {
       modelLimits: {
@@ -227,6 +229,7 @@ test('resolveModelRuntimeLimits lets settings modelLimits beat discovery cache',
 
     expect(overridden.contextWindow).toBe(1_000_000)
     expect(overridden.maxOutputTokens).toBe(32_768)
+    expect(overridden.contextWindowSource).toBe('model-limits')
   } finally {
     // Clears the module-level sync snapshot as well, so the fixture cannot leak
     // into a later suite once the temp dir is removed.

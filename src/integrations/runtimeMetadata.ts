@@ -499,6 +499,14 @@ function findCachedCatalogEntryForApiName(
   )
 }
 
+export type ModelContextWindowSource =
+  | 'env-exact'
+  | 'route-catalog'
+  | 'env-prefix'
+  | 'model-limits'
+  | 'discovery'
+  | 'model-descriptor'
+
 export function resolveModelRuntimeLimits(options: {
   model: string
   processEnv?: NodeJS.ProcessEnv
@@ -506,6 +514,22 @@ export function resolveModelRuntimeLimits(options: {
   activeProfileProvider?: string
   resolvedRouteId?: string | null
 }): ModelRuntimeLimits {
+  const { contextWindow, maxOutputTokens } =
+    resolveModelRuntimeLimitsWithSource(options)
+  return { contextWindow, maxOutputTokens }
+}
+
+/**
+ * Same resolution as resolveModelRuntimeLimits, also reporting which candidate
+ * supplied the context window (for diagnostics such as /ctx).
+ */
+export function resolveModelRuntimeLimitsWithSource(options: {
+  model: string
+  processEnv?: NodeJS.ProcessEnv
+  baseUrl?: string
+  activeProfileProvider?: string
+  resolvedRouteId?: string | null
+}): ModelRuntimeLimits & { contextWindowSource?: ModelContextWindowSource } {
   const processEnv = options.processEnv ?? process.env
   const runtimeEnv: NodeJS.ProcessEnv = { ...processEnv }
   if (options.baseUrl !== undefined) {
@@ -563,14 +587,22 @@ export function resolveModelRuntimeLimits(options: {
   // Keep `settings` strictly below `prefix` so a broad env-prefix override is
   // never silently overtaken by a settings entry — matching the scalar
   // getOpenAIContextWindow, where env (exact or prefix) beats settings.
+  const contextWindowCandidates: Array<
+    [ModelContextWindowSource, number | null | undefined]
+  > = [
+    ['env-exact', externalContextWindow.exact],
+    ['route-catalog', catalogEntry?.contextWindow],
+    ['env-prefix', externalContextWindow.prefix],
+    ['model-limits', externalContextWindow.settings],
+    ['discovery', cachedCatalogEntry?.contextWindow],
+    ['model-descriptor', modelDescriptor?.contextWindow],
+  ]
+  const contextWindowMatch = contextWindowCandidates.find(
+    ([, value]) => value !== undefined && value !== null,
+  )
   return {
-    contextWindow:
-      externalContextWindow.exact ??
-      catalogEntry?.contextWindow ??
-      externalContextWindow.prefix ??
-      externalContextWindow.settings ??
-      cachedCatalogEntry?.contextWindow ??
-      modelDescriptor?.contextWindow,
+    contextWindow: contextWindowMatch?.[1] ?? undefined,
+    contextWindowSource: contextWindowMatch?.[0],
     maxOutputTokens:
       externalMaxOutputTokens.exact ??
       catalogEntry?.maxOutputTokens ??

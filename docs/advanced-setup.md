@@ -661,6 +661,9 @@ addition to the `CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS` /
   catalogued model. For a custom or discovered model, use `modelLimits` or an
   exact env entry. Use `/set-context-window <tokens>` for the current session
   only.
+- **Checking the active source** — `/ctx` shows a **Window source** line naming
+  the step that supplied the current window (for example an env override,
+  `modelLimits`, provider discovery, or the fallback for an unknown model).
 
 ### Exact-model pricing overrides (`settings.json`)
 
@@ -985,6 +988,9 @@ The legacy `OPENCLAUDE_MAX_ACTIVE_MESSAGES` environment variable is honored
 when the setting is unset or `off`. An explicit numeric setting takes
 precedence over that legacy value. `OPENCLAUDE_MAX_ACTIVE_MESSAGES_HARD_CAP`
 can override the safety cap; set it to `0` only for diagnostics.
+
+`/ctx` shows the resolved message-count threshold next to the token threshold,
+including `off` when neither the setting nor the hard cap applies.
 
 ### Long-session memory guard validation
 
