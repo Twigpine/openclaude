@@ -1,9 +1,8 @@
 import reject from 'lodash-es/reject.js'
 import { z } from 'zod/v4'
-import { performMCPOAuthFlow } from '../../services/mcp/auth.js'
+import { getServerKey, performMCPOAuthFlow } from '../../services/mcp/auth.js'
 import {
   clearMcpAuthCache,
-  clearServerCache,
   connectToServer,
   getServerCacheKey,
   reconnectMcpServerImpl,
@@ -24,11 +23,20 @@ import type {
 import type { Tool } from '../../Tool.js'
 import { errorMessage } from '../../utils/errors.js'
 import { lazySchema } from '../../utils/lazySchema.js'
+import {
+  CREDENTIALS_SERVICE_SUFFIX,
+  getSecureStorageServiceName,
+  getUsername,
+} from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import { logMCPDebug, logMCPError } from '../../utils/log.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 
 const inputSchema = lazySchema(() => z.object({}))
 type InputSchema = ReturnType<typeof inputSchema>
+
+// SDK tools are rebuilt per session, but registrations share a credential
+// entry. Keep only active attempts; abort and settlement both release them.
+const pendingSdkSignIns = new Map<string, AbortController>()
 
 export type McpAuthOutput = {
   status: 'auth_url' | 'unsupported' | 'error'
@@ -107,8 +115,7 @@ export function createMcpAuthTool(
     `Call this tool to start the OAuth flow — you'll receive an authorization URL to share with the user. ` +
     afterAuth
 
-  // An embedder builds this tool per server for each session, so this is the
-  // session's one pending sign-in for the server.
+  // Also retain session-local replacement if its credential namespace changes.
   let pendingSignIn: AbortController | undefined
 
   /**
@@ -118,20 +125,36 @@ export function createMcpAuthTool(
    * newer one's client and fail after the user had signed in. Stop it, as
    * cli/print.ts does for mcp_authenticate.
    */
-  function beginSessionSignIn(session: AbortController) {
+  function beginSessionSignIn(
+    session: AbortController,
+    serverConfig: McpSSEServerConfig | McpHTTPServerConfig,
+  ) {
+    if (session.signal.aborted) {
+      return { signal: session.signal, release: () => {} }
+    }
+    const entryKey = JSON.stringify([
+      getSecureStorageServiceName(CREDENTIALS_SERVICE_SUFFIX),
+      getUsername(),
+      getServerKey(serverName, serverConfig),
+    ])
     pendingSignIn?.abort()
+    pendingSdkSignIns.get(entryKey)?.abort()
     const attempt = new AbortController()
     pendingSignIn = attempt
+    pendingSdkSignIns.set(entryKey, attempt)
     const stop = () => attempt.abort()
+    const release = () => {
+      session.signal.removeEventListener('abort', stop)
+      attempt.signal.removeEventListener('abort', release)
+      if (pendingSignIn === attempt) pendingSignIn = undefined
+      if (pendingSdkSignIns.get(entryKey) === attempt) {
+        pendingSdkSignIns.delete(entryKey)
+      }
+    }
+    attempt.signal.addEventListener('abort', release, { once: true })
     session.signal.addEventListener('abort', stop, { once: true })
     if (session.signal.aborted) stop()
-    return {
-      signal: attempt.signal,
-      release: () => {
-        session.signal.removeEventListener('abort', stop)
-        if (pendingSignIn === attempt) pendingSignIn = undefined
-      },
-    }
+    return { signal: attempt.signal, release }
   }
 
   return {
@@ -201,7 +224,7 @@ export function createMcpAuthTool(
       // abort, which shuts the callback listener.
       const signIn = realToolsInCurrentContext
         ? { signal: new AbortController().signal, release: () => {} }
-        : beginSessionSignIn(context.abortController)
+        : beginSessionSignIn(context.abortController, sseOrHttpConfig)
       const { setAppState } = context
       // Captured now, inside the call: the flow's reads and writes after the
       // user's browser comes back belong here, however the environment has
@@ -230,12 +253,18 @@ export function createMcpAuthTool(
             // cleanup would never close it. A new session connects instead —
             // through the connector, which memoizes what it found by server
             // name and config and would hand the new session this needs-auth
-            // result back, stored tokens or not. Drop it, as the CLI's
-            // reconnect does, so the next connection dials with the tokens;
-            // and only when it is there, since clearing an absent entry would
-            // open a client first.
-            if (connectToServer.cache.has(getServerCacheKey(serverName, config))) {
-              await clearServerCache(serverName, config)
+            // result back, stored tokens or not. Retry disconnected results,
+            // including a failed attempt made while auth was pending, but
+            // preserve another session's connected replacement. These results
+            // fetched no tools and need no client/fetch-cache cleanup.
+            const key = getServerCacheKey(serverName, config)
+            const cached = connectToServer.cache.get(key)
+            if (
+              cached &&
+              (await cached).type !== 'connected' &&
+              connectToServer.cache.get(key) === cached
+            ) {
+              connectToServer.cache.delete(key)
             }
             logMCPDebug(serverName, `OAuth complete; tools available in a new session`)
             return

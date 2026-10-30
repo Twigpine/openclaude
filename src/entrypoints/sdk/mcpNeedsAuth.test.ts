@@ -99,6 +99,7 @@ let savedMacro: unknown
 let registrations = 0
 /** Code exchanges the stand-in refused because another client presented the code. */
 let refusedExchanges = 0
+let failMcpRequests = false
 /** A token exchange the stand-in keeps waiting until the test lets it answer. */
 let heldExchange: {
   clientId: string
@@ -125,6 +126,7 @@ function serveNeedingAuth(invalidClient = false): string {
     port: 0,
     fetch: async request => {
       const path = new URL(request.url).pathname
+      if (path === '/mcp' && failMcpRequests) return new Response(null, { status: 500 })
       if (path.startsWith('/.well-known/oauth-protected-resource')) {
         return Response.json({ resource: `${base}/mcp`, authorization_servers: [base] })
       }
@@ -377,6 +379,7 @@ beforeEach(async () => {
   reconnects = 0
   registrations = 0
   refusedExchanges = 0
+  failMcpRequests = false
 })
 
 afterEach(async () => {
@@ -801,4 +804,153 @@ test('a server that fails for another reason still gets no tool', async () => {
 
   expect(clients.map(one => one.type)).toEqual(['failed'])
   expect(tools).toEqual([])
+}, 30_000)
+
+
+// A completed query can restore the config directory while leaving the native
+// cache populated from its own store. Exercise that handoff with real cache
+// reads and query orchestration; vault commands and provider work stay local.
+test("resuming sign-in discards another query's native credential cache", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  const { clearKeychainCache, keychainCacheState } = await import('../../utils/secureStorage/macOsKeychainHelpers.js')
+  const realExec = { ...(await import('../../utils/execFileNoThrowPortable.js')) }
+  const originalStorage = { ...memoryStorage }
+  const origin = join(configHome, 'origin')
+  const other = join(configHome, 'other')
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+    const { result } = await startSignIn(tools[0]!, openSession())
+    mock.module('../../utils/execFileNoThrowPortable.js', () => ({
+      ...realExec, execSyncWithDefaults_DEPRECATED: () => JSON.stringify(stored()),
+    }))
+    const { macOsKeychainStorage } = await import('../../utils/secureStorage/macOsKeychainStorage.js')
+    memoryStorage.read = () => macOsKeychainStorage.read()
+    memoryStorage.readAsync = async () => macOsKeychainStorage.read()
+    memoryStorage.update = data => { clearKeychainCache(); return originalStorage.update(data) }
+    stores.set(other, { pluginSecrets: { other: { key: 'other-account' } } })
+    const { query } = await import('./query.js')
+    const otherQuery = query({ prompt: 'fixture', options: { cwd: configHome, env: { OPENCLAUDE_CONFIG_DIR: other } } })
+    ;(otherQuery as unknown as { setEngine: (engine: unknown) => void }).setEngine({
+      injectAgents() {}, getMcpClients: () => [], getMessages: () => [], interrupt() {},
+      async *submitMessage() {
+        expect(process.env.OPENCLAUDE_CONFIG_DIR).toBe(other)
+        // Model a normal read after the native cache's TTL expires.
+        keychainCacheState.cache.cachedAt = 0
+        memoryStorage.read()
+        yield { type: 'assistant', message: { content: [] }, session_id: 'fixture' }
+      },
+    })
+    try { for await (const _ of otherQuery) { /* drain the real env lifecycle */ } }
+    finally { otherQuery.close() }
+    expect(process.env.OPENCLAUDE_CONFIG_DIR).toBe(origin)
+    expect(keychainCacheState.cache.data?.pluginSecrets).toEqual({ other: { key: 'other-account' } })
+    expect((await fetch(callbackFor(result.authUrl!))).status).toBe(200)
+    await flowEnded(0)
+    expect(storedAccessTokens(origin)).toEqual([`token-for-${clientOf(result)}`])
+    expect(stored(origin).pluginSecrets).toBeUndefined()
+    expect(stored(other).pluginSecrets).toEqual({ other: { key: 'other-account' } })
+  } finally {
+    Object.assign(memoryStorage, originalStorage)
+    mock.module('../../utils/execFileNoThrowPortable.js', () => realExec)
+    clearKeychainCache()
+    restoreEnv()
+  }
+}, 30_000)
+
+test.each([{}, { oauth: { clientId: 'fixed-client' } }])('separate SDK tools replace sign-ins sharing a credential entry: %j', async oauth => {
+  const url = serveNeedingAuth()
+  const first = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  const second = await connectSdkMcpServers({ gated: { type: 'http', url, ...oauth } })
+  const a = await startSignIn(first.tools[0]!, openSession())
+  const b = await startSignIn(second.tools[0]!, openSession())
+  expect((await fetch(callbackFor(b.result.authUrl!))).status).toBe(200)
+  await flowEnded(1)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(b.result)}`])
+  // Returning to an older browser tab cannot invalidate the completed grant.
+  await expect(fetch(callbackFor(a.result.authUrl!))).rejects.toThrow()
+  await flowEnded(0)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(b.result)}`])
+  expect(refusedExchanges).toBe(0)
+}, 30_000)
+
+test('a closed SDK context cannot replace another session\'s pending sign-in', async () => {
+  const url = serveNeedingAuth()
+  const config = { gated: { type: 'http' as const, url } }
+  const closed = await connectSdkMcpServers(config)
+  const live = await connectSdkMcpServers(config)
+  const session = openSession()
+  session.abort()
+  const b = await startSignIn(live.tools[0]!, openSession())
+  expect((await startSignIn(closed.tools[0]!, session)).result.status).toBe('error')
+  expect((await fetch(callbackFor(b.result.authUrl!))).status).toBe(200)
+  await flowEnded(0)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(b.result)}`])
+}, 30_000)
+
+test.each(['store', 'server'])('SDK sign-ins for another %s remain independent', async different => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  const origin = join(configHome, 'origin')
+  const other = different === 'store' ? join(configHome, 'other') : origin
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const first = await connectSdkMcpServers({ gated: { type: 'http', url } })
+    const a = await startSignIn(first.tools[0]!, openSession())
+    process.env.OPENCLAUDE_CONFIG_DIR = other
+    const second = await connectSdkMcpServers({ [different === 'store' ? 'gated' : 'other']: { type: 'http', url } })
+    const b = await startSignIn(second.tools[0]!, openSession())
+    expect((await fetch(callbackFor(b.result.authUrl!))).status).toBe(200)
+    await flowEnded(1)
+    expect((await fetch(callbackFor(a.result.authUrl!))).status).toBe(200)
+    await flowEnded(0)
+    expect(storedAccessTokens(origin)).toContain(`token-for-${clientOf(a.result)}`)
+    expect(storedAccessTokens(other)).toContain(`token-for-${clientOf(b.result)}`)
+    expect(refusedExchanges).toBe(0)
+  } finally { restoreEnv() }
+}, 30_000)
+
+test("re-authentication preserves another session's connected client", async () => {
+  const url = serveNeedingAuth()
+  const config = { gated: { type: 'http' as const, url } }
+  const first = await connectSdkMcpServers(config)
+  const session = openSession()
+  const a = await startSignIn(first.tools[0]!, session)
+  expect((await fetch(callbackFor(a.result.authUrl!))).status).toBe(200)
+  await flowEnded(0)
+  const next = await connectSdkMcpServers(config)
+  const client = next.clients[0]!
+  expect(client.type).toBe('connected')
+  if (client.type !== 'connected') throw new Error('expected connected client')
+  try {
+    expect((await client.client.listTools()).tools.map(tool => tool.name)).toEqual(['hello'])
+    const b = await startSignIn(first.tools[0]!, session)
+    expect((await fetch(callbackFor(b.result.authUrl!))).status).toBe(200)
+    await flowEnded(1)
+    expect((await client.client.listTools()).tools.map(tool => tool.name)).toEqual(['hello'])
+  } finally { await client.cleanup() }
+}, 30_000)
+
+test('auth completion also evicts a failed replacement connection', async () => {
+  const url = serveNeedingAuth()
+  const config = { gated: { type: 'http' as const, url } }
+  const first = await connectSdkMcpServers(config)
+  const a = await startSignIn(first.tools[0]!, openSession())
+  await realClient.clearServerCache('gated', first.clients[0]!.config)
+  failMcpRequests = true
+  const failed = await connectSdkMcpServers(config)
+  expect(failed.clients[0]!.type).toBe('failed')
+  failMcpRequests = false
+  expect((await fetch(callbackFor(a.result.authUrl!))).status).toBe(200)
+  await flowEnded(0)
+  const next = await connectSdkMcpServers(config)
+  try {
+    expect(next.clients[0]!.type).toBe('connected')
+    expect(next.tools.map(tool => tool.name)).toEqual(['mcp__gated__hello'])
+  } finally {
+    for (const client of next.clients) {
+      if (client.type === 'connected') await client.cleanup()
+    }
+  }
 }, 30_000)

@@ -504,16 +504,19 @@ function captureCredentialScope(): CredentialScope {
     } else {
       process.env.OPENCLAUDE_CONFIG_DIR = value
     }
-    clearKeychainCache()
   }
   return async work => {
     await acquireEnvMutex()
     const current = process.env.OPENCLAUDE_CONFIG_DIR
     try {
       if (current !== configDir) apply(configDir)
+      // The environment may already be restored while the process-wide
+      // native cache still belongs to the query that just finished.
+      clearKeychainCache()
       return await work()
     } finally {
       if (current !== configDir) apply(current)
+      clearKeychainCache()
       releaseEnvMutex()
     }
   }
