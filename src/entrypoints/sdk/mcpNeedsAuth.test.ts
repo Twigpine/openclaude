@@ -33,7 +33,11 @@ import type { SecureStorage, SecureStorageData } from '../../utils/secureStorage
 // outside the temporary config home and possibly the developer's own. Keep
 // them in memory instead. The module is swapped before the code under test
 // is imported, so that code never sees the real one.
-const realSecureStorage = await import('../../utils/secureStorage/index.js')
+//
+// A copy of the exports, not the live namespace: mock.module rewrites the
+// namespace's bindings, so restoring the namespace in afterAll would restore
+// the mock.
+const realSecureStorage = { ...(await import('../../utils/secureStorage/index.js')) }
 let stored: SecureStorageData = {}
 const memoryStorage: SecureStorage = {
   name: 'mcp-needs-auth-test',
