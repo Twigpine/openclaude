@@ -800,7 +800,15 @@ export async function* openaiStreamToAnthropic(
           const originalFinishReason = choice.finish_reason
           let ollamaClosedContentBlock = false
           if (isTerminalOllamaFinish) {
-            const { calls: textToolCalls, toolCallRanges } = parseTextToolCalls(accumulatedText)
+            let { calls: textToolCalls, toolCallRanges } = parseTextToolCalls(accumulatedText)
+            // Qwen-family templates wrap tool calls in `<tool_call>` tags, which
+            // Ollama can leave unparsed in message.content (#2040).
+            if (textToolCalls.length === 0) {
+              ({ calls: textToolCalls, toolCallRanges } = parseXmlToolCalls(
+                accumulatedText,
+                allowHy3ToolCalls,
+              ))
+            }
             if (textToolCalls.length > 0) {
               ollamaClosedContentBlock = true
               // Compute visible prose (tool-call JSON stripped, think-tags removed).

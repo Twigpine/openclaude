@@ -658,3 +658,66 @@ describe('Ollama streaming — non-stop terminal finish reasons flush buffer', (
     expect(delta?.stop_reason).not.toBe('tool_use')
   })
 })
+
+describe('Ollama streaming — <tool_call>-wrapped JSON text fallback (#2040)', () => {
+  let originalFetch: FetchType
+  let restoreEnv: () => void
+  beforeEach(() => {
+    originalFetch = globalThis.fetch
+    restoreEnv = snapshotEnv(ENV_KEYS)
+    process.env.OLLAMA_BASE_URL = 'http://localhost:11434'
+    process.env.OPENAI_API_KEY = 'test-key'
+    process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
+  })
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    restoreEnv()
+  })
+
+  test('Qwen-style <tool_call>{json}</tool_call> text becomes a tool_use block', async () => {
+    // Repro: Ollama returns the model's template-format tool call (prose then
+    // <tool_call>{json}</tool_call>) in message.content, not message.tool_calls.
+    globalThis.fetch = (async () =>
+      makeOllamaNativeStreamingResponse(
+        makeNdjsonChunks([
+          ollamaChunk('I will build the project.\n<tool_call>\n'),
+          ollamaChunk('{"name": "Bash", "arguments": {"command": "npm run build"}}\n'),
+          ollamaChunk('</tool_call>'),
+          ollamaChunk('', 'stop'),
+        ]),
+      )) as unknown as FetchType
+
+    const client = createOpenAIShimClient({}) as OpenAIShimClient
+    const result = await client.beta.messages
+      .create({
+        model: 'qwen2.5-coder:14b',
+        messages: [{ role: 'user', content: 'build the project' }],
+        max_tokens: 64,
+        stream: true,
+      })
+      .withResponse()
+
+    const events: Record<string, unknown>[] = []
+    for await (const event of result.data) events.push(event)
+
+    const allText = events
+      .filter(e => e.type === 'content_block_delta' && (e.delta as Record<string, string>)?.type === 'text_delta')
+      .map(e => (e.delta as Record<string, string>).text)
+      .join('')
+    expect(allText).toBe('I will build the project.')
+
+    const toolStarts = events.filter(
+      e => e.type === 'content_block_start' && (e.content_block as Record<string, string>)?.type === 'tool_use',
+    )
+    expect(toolStarts).toHaveLength(1)
+    expect((toolStarts[0].content_block as Record<string, string>).name).toBe('Bash')
+    const toolInput = events
+      .filter(e => e.type === 'content_block_delta' && (e.delta as Record<string, string>)?.type === 'input_json_delta')
+      .map(e => (e.delta as Record<string, string>).partial_json)
+      .join('')
+    expect(JSON.parse(toolInput)).toEqual({ command: 'npm run build' })
+
+    const messageDelta = events.find(e => e.type === 'message_delta') as Record<string, unknown> | undefined
+    expect((messageDelta?.delta as Record<string, unknown>)?.stop_reason).toBe('tool_use')
+  })
+})
