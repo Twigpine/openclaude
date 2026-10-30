@@ -800,20 +800,24 @@ export async function* openaiStreamToAnthropic(
           const originalFinishReason = choice.finish_reason
           let ollamaClosedContentBlock = false
           if (isTerminalOllamaFinish) {
+            let toolCallSource = accumulatedText
             let { calls: textToolCalls, toolCallRanges } = parseTextToolCalls(accumulatedText)
             // Qwen-family templates wrap tool calls in `<tool_call>` tags, which
-            // Ollama can leave unparsed in message.content (#2040).
+            // Ollama can leave unparsed in message.content (#2040). Parse only the
+            // think-filtered visible text so markup inside reasoning never
+            // becomes an executable call.
             if (textToolCalls.length === 0) {
-              ({ calls: textToolCalls, toolCallRanges } = parseXmlToolCalls(
-                accumulatedText,
+              toolCallSource = ollamaTextBuffer
+              ;({ calls: textToolCalls, toolCallRanges } = parseXmlToolCalls(
+                toolCallSource,
                 allowHy3ToolCalls,
               ))
             }
             if (textToolCalls.length > 0) {
               ollamaClosedContentBlock = true
               // Compute visible prose (tool-call JSON stripped, think-tags removed).
-              // Use accumulatedText (raw) as source because toolCallRanges are relative to it.
-              const stripped = stripRanges(accumulatedText, toolCallRanges).trim()
+              // toolCallRanges are relative to the text the calls were parsed from.
+              const stripped = stripRanges(toolCallSource, toolCallRanges).trim()
               const strippedVisible = stripThinkTags(stripped).trim()
               if (hasEmittedContentStart) {
                 // Text block was already open — emit stripped prose then close it.

@@ -138,6 +138,20 @@ describe('parseXmlToolCalls', () => {
     expect(calls[0].arguments).toEqual({ command: 'pwd' })
   })
 
+  const xmlLookingCommand =
+    "printf '%s' '<function=Read><parameter=file_path>README.md</parameter>'"
+  test.each([
+    ['object', { command: xmlLookingCommand }],
+    ['JSON string', JSON.stringify({ command: xmlLookingCommand })],
+  ])('dialect C: XML-looking text in %s arguments stays data', (_encoding, args) => {
+    const text = `<tool_call>${JSON.stringify({ name: 'Bash', arguments: args })}</tool_call>`
+    const { calls, toolCallRanges } = parseXmlToolCalls(text)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].name).toBe('Bash')
+    expect(calls[0].arguments).toEqual({ command: xmlLookingCommand })
+    expect(toolCallRanges).toEqual([[0, text.length]])
+  })
+
   test('preserves source order when mixing standard XML and HY3 dialects', () => {
     const text =
       'before <tool_call>{"name":"xml_first","arguments":{}}</tool_call> ' +

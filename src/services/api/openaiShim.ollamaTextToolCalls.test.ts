@@ -720,4 +720,71 @@ describe('Ollama streaming — <tool_call>-wrapped JSON text fallback (#2040)', 
     const messageDelta = events.find(e => e.type === 'message_delta') as Record<string, unknown> | undefined
     expect((messageDelta?.delta as Record<string, unknown>)?.stop_reason).toBe('tool_use')
   })
+
+  async function streamOllamaContent(content: string) {
+    globalThis.fetch = (async () =>
+      makeOllamaNativeStreamingResponse(
+        makeNdjsonChunks([ollamaChunk(content), ollamaChunk('', 'stop')]),
+      )) as unknown as FetchType
+
+    const client = createOpenAIShimClient({}) as OpenAIShimClient
+    const result = await client.beta.messages
+      .create({
+        model: 'qwen2.5-coder:14b',
+        messages: [{ role: 'user', content: 'go' }],
+        max_tokens: 64,
+        stream: true,
+      })
+      .withResponse()
+
+    const events: Record<string, unknown>[] = []
+    for await (const event of result.data) events.push(event)
+
+    const deltas = events
+      .filter(e => e.type === 'content_block_delta')
+      .map(e => e.delta as Record<string, string>)
+    const messageDelta = events.find(e => e.type === 'message_delta') as Record<string, unknown> | undefined
+    return {
+      text: deltas.filter(d => d.type === 'text_delta').map(d => d.text).join(''),
+      tools: events
+        .filter(e => e.type === 'content_block_start' && (e.content_block as Record<string, string>)?.type === 'tool_use')
+        .map(e => (e.content_block as Record<string, string>).name),
+      inputs: deltas.filter(d => d.type === 'input_json_delta').map(d => JSON.parse(d.partial_json)),
+      stopReason: (messageDelta?.delta as Record<string, unknown>)?.stop_reason,
+    }
+  }
+
+  const xmlCall = (command: string) =>
+    `<tool_call>{"name":"Bash","arguments":{"command":"${command}"}}</tool_call>`
+
+  test.each([
+    ['closed', `<think>I could call ${xmlCall('echo speculative')} but should ask first.</think>Please confirm the operation.`],
+    ['unterminated', `Please confirm the operation. <think>I could call ${xmlCall('echo speculative')}`],
+  ])('<tool_call> inside %s reasoning is not recovered as a tool call', async (_kind, content) => {
+    const { text, tools, stopReason } = await streamOllamaContent(content)
+    expect(text.trim()).toBe('Please confirm the operation.')
+    expect(tools).toEqual([])
+    expect(stopReason).toBe('end_turn')
+  })
+
+  test('only the visible <tool_call> is recovered when reasoning also contains one', async () => {
+    const { text, tools, inputs, stopReason } = await streamOllamaContent(
+      `<think>${xmlCall('echo private')}</think>${xmlCall('echo public')}`,
+    )
+    expect(text).toBe('')
+    expect(tools).toEqual(['Bash'])
+    expect(inputs).toEqual([{ command: 'echo public' }])
+    expect(stopReason).toBe('tool_use')
+  })
+
+  test('XML-looking text inside JSON arguments does not change the recovered tool', async () => {
+    const command = "printf '%s' '<function=Read><parameter=file_path>README.md</parameter>'"
+    const { text, tools, inputs, stopReason } = await streamOllamaContent(
+      `Printing markup.\n<tool_call>${JSON.stringify({ name: 'Bash', arguments: { command } })}</tool_call>`,
+    )
+    expect(text).toBe('Printing markup.')
+    expect(tools).toEqual(['Bash'])
+    expect(inputs).toEqual([{ command }])
+    expect(stopReason).toBe('tool_use')
+  })
 })

@@ -106,7 +106,11 @@ function parseStandardXmlToolCallInner(inner: string): {
   let name: string | undefined
   const args: Record<string, unknown> = {}
 
-  const fnMatch = inner.match(XML_FUNCTION_NAME_RE)
+  const trimmedInner = inner.trim()
+  // A JSON envelope (dialect C) owns the block: XML-looking text inside its
+  // argument strings is data, not dialect A/B markup.
+  const isJsonEnvelope = trimmedInner.startsWith('{')
+  const fnMatch = isJsonEnvelope ? null : inner.match(XML_FUNCTION_NAME_RE)
   if (fnMatch) {
     // Dialect A: <function=NAME><parameter=KEY>VALUE</parameter>…
     name = fnMatch[1]
@@ -115,9 +119,8 @@ function parseStandardXmlToolCallInner(inner: string): {
       if (key) args[key] = coerceXmlToolValue(p[2] ?? '')
     }
   } else {
-    const trimmedInner = inner.trim()
     const argPairs = [...inner.matchAll(XML_ARG_PAIR_RE)]
-    if (argPairs.length > 0 && !trimmedInner.startsWith('{')) {
+    if (argPairs.length > 0 && !isJsonEnvelope) {
       // Dialect B: leading token is the function name, then arg_key/arg_value.
       const nameTok = trimmedInner.split(/[\n<]/, 1)[0]?.trim()
       if (nameTok) name = nameTok
