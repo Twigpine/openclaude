@@ -21,6 +21,12 @@ import { resetSettingsCache } from './settingsCache.js'
 const SETTINGS_LOCK_RETRY_MS = 25
 const SETTINGS_LOCK_CONTENTION_LOG_MS = 100
 const SETTINGS_LOCK_WAIT_MS = 2_000
+const SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS = 1_000
+// PowerShell startup plus the Get-Process lookup legitimately exceeds one
+// second on real Windows installations (reported 1.3-1.7s under load); a 1s
+// budget turns a slow lookup into EIDENTITY before any settings write runs,
+// so the Windows path gets a wider budget.
+const WINDOWS_SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS = 10_000
 const SETTINGS_LOCK_HOST = hostname()
 const SETTINGS_LOCK_OWNER_FILE = 'owner.json'
 const waitBuffer = new Int32Array(new SharedArrayBuffer(4))
@@ -162,6 +168,7 @@ function readCommandProcessStartId(
   command: string,
   args: string[],
   prefix: string,
+  timeoutMs: number,
 ): string | null {
   try {
     const result = spawnSync(command, args, {
@@ -172,7 +179,7 @@ function readCommandProcessStartId(
         LC_ALL: 'C',
         TZ: 'UTC',
       },
-      timeout: 1_000,
+      timeout: timeoutMs,
       windowsHide: true,
     })
     if (result.error || result.status !== 0) return null
@@ -197,12 +204,14 @@ function readProcessStartId(pid: number): string | null {
         `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
       ],
       'windows',
+      WINDOWS_SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS,
     )
   }
   return readCommandProcessStartId(
     'ps',
     ['-p', String(pid), '-o', 'lstart='],
     'posix',
+    SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS,
   )
 }
 
