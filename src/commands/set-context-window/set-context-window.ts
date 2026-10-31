@@ -8,6 +8,9 @@ import {
   getSessionContextWindowOverride,
   getSessionContextWindowOverrides,
 } from '../../utils/context.js'
+import { errorMessage } from '../../utils/errors.js'
+import { readFileSync } from '../../utils/fileRead.js'
+import { safeParseJSON } from '../../utils/json.js'
 import {
   getSettingsFilePathForSource,
   parseSettingsFile,
@@ -44,6 +47,50 @@ For a catalogued model, use an exact CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS entry;
 catalog values take precedence over modelLimits and prefix env entries.
 See docs/advanced-setup.md (Per-model limit overrides).`
 
+function ownProperty(value: unknown, key: string): unknown {
+  return value !== null && typeof value === 'object' && Object.hasOwn(value, key)
+    ? (value as Record<string, unknown>)[key]
+    : undefined
+}
+
+// The writer reports success once it has written the file, not once the value
+// is in it. For an invalid file it merges into the raw JSON, where an array in
+// place of modelLimits or the model's entry keeps the new field only as a named
+// array property, which JSON drops. Read the file back before reporting a save.
+function checkContextWindowWritten(
+  settingsPath: string | undefined,
+  key: string,
+  tokens: number,
+): Error | null {
+  if (!settingsPath) {
+    return new Error('there is no user settings file to write to')
+  }
+  let data: unknown
+  try {
+    data = safeParseJSON(readFileSync(settingsPath), false)
+  } catch (e) {
+    return new Error(`could not read ${settingsPath} back: ${errorMessage(e)}`)
+  }
+  const modelLimits = ownProperty(data, 'modelLimits')
+  if (Array.isArray(modelLimits)) {
+    return new Error(
+      `modelLimits in ${settingsPath} is an array, so it cannot hold model entries`,
+    )
+  }
+  const entry = ownProperty(modelLimits, key)
+  if (Array.isArray(entry)) {
+    return new Error(
+      `modelLimits["${key}"] in ${settingsPath} is an array, so it cannot hold contextWindow`,
+    )
+  }
+  if (ownProperty(entry, 'contextWindow') !== tokens) {
+    return new Error(
+      `modelLimits["${key}"].contextWindow was not written to ${settingsPath}`,
+    )
+  }
+  return null
+}
+
 function saveContextWindow(model: string, tokens: number): string {
   const settingsPath = getSettingsFilePathForSource('userSettings')
   const key = getBaseModelApiName(model) ?? model
@@ -71,7 +118,9 @@ function saveContextWindow(model: string, tokens: number): string {
       `modelLimits["${key}"]: settings cannot store this model name`,
     )
   } else {
-    error = updateSettingsForSource('userSettings', patch).error
+    error =
+      updateSettingsForSource('userSettings', patch).error ??
+      checkContextWindowWritten(settingsPath, key, tokens)
   }
   if (error) {
     return `Not saved: ${error.message}\nThe override applies to this session only.`

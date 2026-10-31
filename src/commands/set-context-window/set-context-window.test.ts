@@ -289,6 +289,24 @@ test.each([
   )
 })
 
+test.each([
+  ['modelLimits', 'the active model', '1000000 --save', { modelLimits: [] }],
+  ['modelLimits', 'an explicit model', `${SAVE_MODEL} 1000000 --save`, { modelLimits: [] }],
+  [`modelLimits["${SAVE_MODEL}"]`, 'the active model', '1000000 --save', { modelLimits: { [SAVE_MODEL]: [] } }],
+  [`modelLimits["${SAVE_MODEL}"]`, 'an explicit model', `${SAVE_MODEL} 1000000 --save`, { modelLimits: { [SAVE_MODEL]: [] } }],
+])('/set-context-window --save does not report a save when %s is an array (%s)', async (container, _form, args, initial) => {
+  const initialSettings = { env: { KEEP_ME: '1' }, ...initial }
+  await withCustomProviderSettings(JSON.stringify(initialSettings), async settingsPath => {
+    const output = await runSetContextWindow(args)
+
+    expect(output).toContain(`Not saved: ${container} in ${settingsPath} is an array`)
+    expect(output).toContain('The override applies to this session only.')
+    expect(output).not.toContain('Saved to modelLimits')
+    expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual(initialSettings)
+    expect(getContextWindowForModel(SAVE_MODEL)).toBe(1_000_000)
+  })
+})
+
 test('/set-context-window --save keeps the session override when saving fails', async () => {
   await withCustomProviderSettings('{ not json', async settingsPath => {
     const output = await runSetContextWindow('1000000 --save')
