@@ -798,4 +798,53 @@ describe('Ollama streaming — <tool_call>-wrapped JSON text fallback (#2040)', 
     expect(inputs).toEqual([{ command }])
     expect(stopReason).toBe('tool_use')
   })
+
+  const nestedBash = '<tool_call><function=Bash><parameter=command>echo leaked</parameter></function></tool_call>'
+
+  test.each([
+    [
+      'a hidden call argument contains a reasoning close tag',
+      `<think><tool_call>${JSON.stringify({ name: 'Write', arguments: { file_path: 'a.md', content: `</think>${nestedBash}` } })}</tool_call></think>Please confirm.`,
+    ],
+    [
+      'a visible opener without a body reaches into reasoning',
+      `I'll use a <tool_call> block. <think>Maybe {"name":"Bash","arguments":{"command":"echo leaked"}}</think> Please confirm.`,
+    ],
+    [
+      'an unterminated visible call is followed by reasoning',
+      'Listing.\n<tool_call>\n<function=Bash>\n<parameter=command>\nls\n</parameter>\n</function>\n<think>else <parameter=command>echo leaked</parameter></think>',
+    ],
+    [
+      'an opener mentioned in reasoning runs into a visible call',
+      `<think>I'll emit a <tool_call> now.</think>\n<tool_call>${JSON.stringify({ name: 'Write', arguments: { file_path: 'n.md', content: 'a <think>keep</think> b' } })}</tool_call>`,
+    ],
+    [
+      'a reasoning close tag is split around a hidden call',
+      `<think>plan </<tool_call>${JSON.stringify({ name: 'Write', arguments: { file_path: 'a.md', content: 'x' } })}</tool_call>think>${xmlCall('echo leaked')}</think>Please confirm.`,
+    ],
+    [
+      'a hidden block that is not a named call contains a reasoning close tag',
+      `<think><tool_call>${JSON.stringify({ type: 'function', function: { name: 'Write', arguments: { content: '</think>' } } })}</tool_call>${nestedBash}</think>Please confirm.`,
+    ],
+    [
+      'a reasoning open tag runs into the call opener',
+      `<think${xmlCall('echo leaked')}</think>Please confirm.`,
+    ],
+    [
+      'an unclosed reasoning tag containing `<` runs into the call opener',
+      `Let me check.\n<thinking\nstep 1: if x<0\n${xmlCall('echo leaked')}\ndone`,
+    ],
+    [
+      'removing reasoning splices a call the raw text did not contain',
+      `<think>${xmlCall('echo private')}</think><tool_call>{"name":"Bash","arguments":{"command":"echo </tool_call><think>"x</think>; echo leaked"}}</tool_call>`,
+    ],
+    [
+      'reasoning markup splits a visible call\'s function tag',
+      `Running.\n${xmlCall('ls')}\n<tool_call><function<think>x</think>=Write><parameter=content>a <think>keep</think> b</parameter></function></tool_call>`,
+    ],
+  ])('no tool call is recovered when %s', async (_case, content) => {
+    const { tools, stopReason } = await streamOllamaContent(content)
+    expect(tools).toEqual([])
+    expect(stopReason).toBe('end_turn')
+  })
 })

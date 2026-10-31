@@ -17,6 +17,10 @@ import {
   processStreamChunk,
 } from '../../../utils/streamingOptimizer.js'
 import type { createProviderStreamTrace } from './streamControl.js'
+import {
+  findXmlToolCallBlockRanges,
+  isJsonEnvelopeXmlToolCallBlock,
+} from './xmlToolCallParsing.js'
 
 type ParsedRawToolCall = { id: string; name: string; argumentsJson: string }
 type ParsedTextToolCall = { id: string; name: string; arguments: unknown }
@@ -99,23 +103,53 @@ const JSON_REPAIR_SUFFIXES = [
   '}', '"}', ']}', '"]}', '}}', '"}}', ']}}', '"]}}', '"]}]}', '}]}',
 ]
 
+// Fed to the think filter at each block boundary. It cannot continue a tag, so
+// a partial tag held before a block never joins the text after it.
+const TOOL_CALL_BLOCK_BOUNDARY = '\u0000'
+
 /**
- * Applies the streaming think filter to `text` but copies tool-call blocks that
- * open in visible text verbatim, so think tags inside their arguments survive.
- * Blocks that open inside reasoning are filtered out with it.
+ * Whether reasoning markup touches the tool-call block at `start`: a reasoning
+ * tag inside a block that is not a JSON envelope, or a tag that runs from the
+ * preceding text into the block's opener (a tag ends at the first `>`, so any
+ * tag in the text after the last `>` before the block ends at its opener).
+ * Either way the block's range may cross a reasoning boundary.
+ */
+function reasoningMarkupTouchesBlock(text: string, start: number, block: string): boolean {
+  if (!isJsonEnvelopeXmlToolCallBlock(block) && stripThinkTags(block) !== block) return true
+  const lastTagEnd = start > 0 ? text.lastIndexOf('>', start - 1) : -1
+  const openerTail = text.slice(lastTagEnd + 1, text.indexOf('>', start) + 1)
+  return stripThinkTags(openerTail) !== openerTail
+}
+
+/**
+ * Applies the streaming think filter to `text` but treats each tool-call block
+ * as one unit that never reaches the filter: blocks that open in visible text
+ * are copied verbatim, so think tags inside their JSON arguments survive, and
+ * blocks that open inside reasoning are dropped, so nothing inside them can end
+ * the reasoning. Returns null when reasoning markup touches a block or blocks
+ * partially overlap: no call parsed from such a block can be attributed to
+ * visible text.
  */
 function visibleTextKeepingToolCallBlocks(
   text: string,
   blockRanges: Array<[number, number]>,
-): string {
+): string | null {
   const filter = createThinkTagFilter()
   let visible = ''
   let position = 0
   for (const [start, end] of blockRanges) {
-    if (start < position) continue
-    visible += filter.feed(text.slice(position, start))
+    if (start < position) {
+      if (end > position) return null
+      continue
+    }
     const block = text.slice(start, end)
-    visible += filter.isInsideBlock() ? filter.feed(block) : block
+    if (reasoningMarkupTouchesBlock(text, start, block)) return null
+    const before = filter.feed(text.slice(position, start) + TOOL_CALL_BLOCK_BOUNDARY)
+    if (filter.isInsideBlock()) {
+      visible += before
+    } else {
+      visible += before.slice(0, -1) + block
+    }
     position = end
   }
   return visible + filter.feed(text.slice(position))
@@ -827,22 +861,34 @@ export async function* openaiStreamToAnthropic(
             // Qwen-family templates wrap tool calls in `<tool_call>` tags, which
             // Ollama can leave unparsed in message.content (#2040). Only blocks
             // that open in visible text count: re-parse without reasoning so
-            // markup inside it never becomes an executable call.
+            // markup inside it never becomes an executable call, and recover
+            // nothing when a block crosses a reasoning boundary. Removing
+            // reasoning may only drop calls: a re-parsed call that the raw text
+            // did not contain was spliced across reasoning, so recover nothing.
             if (textToolCalls.length === 0) {
               ;({ calls: textToolCalls, toolCallRanges } = parseXmlToolCalls(
                 accumulatedText,
                 allowHy3ToolCalls,
               ))
-              const visibleSource = visibleTextKeepingToolCallBlocks(
-                accumulatedText,
-                toolCallRanges,
-              )
-              if (textToolCalls.length > 0 && visibleSource !== accumulatedText) {
+              const visibleSource = textToolCalls.length > 0
+                ? visibleTextKeepingToolCallBlocks(
+                  accumulatedText,
+                  findXmlToolCallBlockRanges(accumulatedText, allowHy3ToolCalls),
+                )
+                : accumulatedText
+              const callKey = (tc: ParsedTextToolCall) =>
+                `${tc.name}\0${JSON.stringify(tc.arguments)}`
+              const rawCallKeys = new Set(textToolCalls.map(callKey))
+              if (visibleSource !== null && visibleSource !== accumulatedText) {
                 toolCallSource = visibleSource
                 ;({ calls: textToolCalls, toolCallRanges } = parseXmlToolCalls(
                   toolCallSource,
                   allowHy3ToolCalls,
                 ))
+              }
+              if (visibleSource === null || textToolCalls.some(tc => !rawCallKeys.has(callKey(tc)))) {
+                textToolCalls = []
+                toolCallRanges = []
               }
             }
             if (textToolCalls.length > 0) {

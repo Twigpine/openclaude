@@ -103,6 +103,32 @@ function isJsonText(raw: string): boolean {
 }
 
 /**
+ * Locates a JSON-envelope body (dialect C) starting at `bodyStart`: a valid JSON
+ * object followed only by whitespace and the closing tag or the end of the text.
+ */
+function findJsonEnvelopeBody(
+  text: string,
+  bodyStart: number,
+): { bodyEnd: number; end: number } | null {
+  const jsonStart = bodyStart + /^\s*/.exec(text.slice(bodyStart))![0].length
+  if (text[jsonStart] !== '{') return null
+  const json = extractBalancedJson(text, jsonStart)
+  if (!json || !isJsonText(json)) return null
+  const bodyEnd = jsonStart + json.length
+  const close = XML_TOOL_CALL_CLOSE_AFTER_JSON_RE.exec(text.slice(bodyEnd))
+  return close ? { bodyEnd, end: bodyEnd + close[0].length } : null
+}
+
+/**
+ * Whether `block` is exactly one standard `<tool_call>` block with a JSON
+ * envelope body. Any tag-like text inside such a block lies in a JSON string.
+ */
+export function isJsonEnvelopeXmlToolCallBlock(block: string): boolean {
+  return block.startsWith(XML_TOOL_CALL_OPEN) &&
+    findJsonEnvelopeBody(block, XML_TOOL_CALL_OPEN.length)?.end === block.length
+}
+
+/**
  * Finds standard `<tool_call>` blocks. A JSON-envelope body (dialect C) ends at
  * its balanced closing brace, so a `</tool_call>` inside a JSON string is data
  * and cannot end the block early. Other bodies end at the first closing tag; a
@@ -115,19 +141,7 @@ function findStandardXmlToolCallBlocks(
   let start = text.indexOf(XML_TOOL_CALL_OPEN)
   while (start !== -1) {
     const bodyStart = start + XML_TOOL_CALL_OPEN.length
-    let bodyEnd = -1
-    let end = -1
-    const jsonStart = bodyStart + /^\s*/.exec(text.slice(bodyStart))![0].length
-    if (text[jsonStart] === '{') {
-      const json = extractBalancedJson(text, jsonStart)
-      const close = json && isJsonText(json)
-        ? XML_TOOL_CALL_CLOSE_AFTER_JSON_RE.exec(text.slice(jsonStart + json.length))
-        : null
-      if (json && close) {
-        bodyEnd = jsonStart + json.length
-        end = bodyEnd + close[0].length
-      }
-    }
+    let { bodyEnd, end } = findJsonEnvelopeBody(text, bodyStart) ?? { bodyEnd: -1, end: -1 }
     if (end === -1) {
       const closeIndex = text.indexOf(XML_TOOL_CALL_CLOSE, bodyStart)
       bodyEnd = closeIndex === -1 ? text.length : closeIndex
@@ -137,6 +151,25 @@ function findStandardXmlToolCallBlocks(
     start = text.indexOf(XML_TOOL_CALL_OPEN, end)
   }
   return blocks
+}
+
+/**
+ * Ranges of every tool-call block in `text`, whether or not it parses as a
+ * call, in source order. HY3 wrappers come before the blocks they contain.
+ */
+export function findXmlToolCallBlockRanges(
+  text: string,
+  allowHy3 = false,
+): Array<[number, number]> {
+  const ranges = findStandardXmlToolCallBlocks(text).map(block => block.range)
+  if (allowHy3) {
+    for (const blockRe of [HY3_TOOL_CALLS_BLOCK_RE, HY3_TOOL_CALL_BLOCK_RE]) {
+      for (const block of text.matchAll(blockRe)) {
+        ranges.push([block.index!, block.index! + block[0].length])
+      }
+    }
+  }
+  return ranges.sort((left, right) => left[0] - right[0] || right[1] - left[1])
 }
 
 /**
