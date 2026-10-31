@@ -19,7 +19,7 @@ import {
 import type { createProviderStreamTrace } from './streamControl.js'
 import {
   findXmlToolCallBlockRanges,
-  isJsonEnvelopeXmlToolCallBlock,
+  xmlToolCallBlockMarkup,
 } from './xmlToolCallParsing.js'
 
 type ParsedRawToolCall = { id: string; name: string; argumentsJson: string }
@@ -109,13 +109,15 @@ const TOOL_CALL_BLOCK_BOUNDARY = '\u0000'
 
 /**
  * Whether reasoning markup touches the tool-call block at `start`: a reasoning
- * tag inside a block that is not a JSON envelope, or a tag that runs from the
- * preceding text into the block's opener (a tag ends at the first `>`, so any
- * tag in the text after the last `>` before the block ends at its opener).
- * Either way the block's range may cross a reasoning boundary.
+ * tag inside the block (outside a JSON envelope's object, whose tag-like text
+ * is data), or a tag that runs from the preceding text into the block's opener
+ * (a tag ends at the first `>`, so any tag in the text after the last `>`
+ * before the block ends at its opener). Either way the block's range may cross
+ * a reasoning boundary.
  */
 function reasoningMarkupTouchesBlock(text: string, start: number, block: string): boolean {
-  if (!isJsonEnvelopeXmlToolCallBlock(block) && stripThinkTags(block) !== block) return true
+  const markup = xmlToolCallBlockMarkup(block)
+  if (stripThinkTags(markup) !== markup) return true
   const lastTagEnd = start > 0 ? text.lastIndexOf('>', start - 1) : -1
   const openerTail = text.slice(lastTagEnd + 1, text.indexOf('>', start) + 1)
   return stripThinkTags(openerTail) !== openerTail
