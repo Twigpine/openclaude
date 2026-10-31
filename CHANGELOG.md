@@ -1,5 +1,91 @@
 # Changelog
 
+## [0.34.0](https://github.com/Twigpine/openclaude/compare/v0.33.0...v0.34.0) (2026-10-31)
+
+
+### Features
+
+* add Keenable as an explicit web search backend ([#2435](https://github.com/Twigpine/openclaude/issues/2435)) ([e61e913](https://github.com/Twigpine/openclaude/commit/e61e913b034b00dd62bec83874f2191a4c5720a5))
+* add OrcaRouter gateway descriptor ([#2125](https://github.com/Twigpine/openclaude/issues/2125)) ([7b83353](https://github.com/Twigpine/openclaude/commit/7b83353db141722aa6603610dd06c52a2a4a3ca5))
+* **aimlapi:** add opt-in MCP plugin with safe credential refresh ([#2469](https://github.com/Twigpine/openclaude/issues/2469)) ([42b108d](https://github.com/Twigpine/openclaude/commit/42b108d19df54a7ae0960012010e2928fbd7248d))
+* **attachments:** make TODO reminders configurable ([#2214](https://github.com/Twigpine/openclaude/issues/2214)) ([23115eb](https://github.com/Twigpine/openclaude/commit/23115eb86d376b65c1552b075b613b38fe98c40b))
+* **ctx:** add --save to /set-context-window to persist overrides ([#2475](https://github.com/Twigpine/openclaude/issues/2475)) ([beecf58](https://github.com/Twigpine/openclaude/commit/beecf58f86c39c7af4ac63ede54b0afcb43274f2))
+* **ctx:** show context-window source and active compaction triggers ([#2473](https://github.com/Twigpine/openclaude/issues/2473)) ([354ce5f](https://github.com/Twigpine/openclaude/commit/354ce5fd8e993687c886c26eee20153a73fc127d)), closes [#2299](https://github.com/Twigpine/openclaude/issues/2299)
+* **ctx:** show why the last compaction happened ([#2474](https://github.com/Twigpine/openclaude/issues/2474)) ([d0b464e](https://github.com/Twigpine/openclaude/commit/d0b464eb5f7385df9c238b8ad3808f84722443ab))
+* **gateway:** add Merge Gateway provider ([#2317](https://github.com/Twigpine/openclaude/issues/2317)) ([a13ed45](https://github.com/Twigpine/openclaude/commit/a13ed45b14a25f0afde43932ab1d53bf0c06909c))
+* **gemini-vertex:** native env routing and tool-id safety (2/3) ([#1614](https://github.com/Twigpine/openclaude/issues/1614)) ([c56c68f](https://github.com/Twigpine/openclaude/commit/c56c68f0630a2d8dc346709ab8e1f7eeb2eaa38a))
+* **i18n:** add Traditional Chinese (zh-HK) locale support ([#2193](https://github.com/Twigpine/openclaude/issues/2193)) ([cdb28e0](https://github.com/Twigpine/openclaude/commit/cdb28e0e3e464917880282885bb977c4d79ba0cf))
+* **integrations:** add Runcrate as an OpenAI-compatible gateway ([#2434](https://github.com/Twigpine/openclaude/issues/2434)) ([3a8e12b](https://github.com/Twigpine/openclaude/commit/3a8e12b804ffd9cea0662534c554aa0f38c9f642))
+* **minimax:** default to M3.1 Flash and refresh text suggestions ([#2297](https://github.com/Twigpine/openclaude/issues/2297)) ([8be7274](https://github.com/Twigpine/openclaude/commit/8be7274b901998340932cde2d9fbd769ed934989))
+* **sdk:** let a v2 session carry its own environment ([#2268](https://github.com/Twigpine/openclaude/issues/2268)) ([7ac848c](https://github.com/Twigpine/openclaude/commit/7ac848c8c1c4a8886235de7e2d014800a9d40d9f))
+* **skills:** load skills from ~/.agents/skills and opt-in ~/.claude/skills ([#2258](https://github.com/Twigpine/openclaude/issues/2258)) ([#2283](https://github.com/Twigpine/openclaude/issues/2283)) ([8ee936c](https://github.com/Twigpine/openclaude/commit/8ee936cfa1cb0f73b84ab45636e9a7b2fe7e14c8))
+* **web-fetch:** add opt-in AI/ML API Toolbox scraping with restored test state ([#2468](https://github.com/Twigpine/openclaude/issues/2468)) ([f235c83](https://github.com/Twigpine/openclaude/commit/f235c835d14e1fa9ba200f5b1df3e50a2da7f3c4))
+* **web-search:** add AI/ML API Toolbox with safe error reporting ([#2465](https://github.com/Twigpine/openclaude/issues/2465)) ([649c224](https://github.com/Twigpine/openclaude/commit/649c224f3ca0bd4278aa30e46a20a52827003499))
+
+
+### Bug Fixes
+
+* add missing statement terminators flagged by CodeQL ([#2448](https://github.com/Twigpine/openclaude/issues/2448)) ([099cd50](https://github.com/Twigpine/openclaude/commit/099cd505fe18585180c51e32f8b1c789e8b83b25))
+* address AI code-quality findings in mcp remove, updater, Windows paths, and SDK packaging test ([#2472](https://github.com/Twigpine/openclaude/issues/2472)) ([e0d2bd9](https://github.com/Twigpine/openclaude/commit/e0d2bd9f228a681d385f5f071c55a0be05b1480b))
+* address remaining code-scanning alert sites ([#2461](https://github.com/Twigpine/openclaude/issues/2461)) ([eeff78a](https://github.com/Twigpine/openclaude/commit/eeff78af08a71bc563b5a1a8fc065c7c8575abfd))
+* **agent:** await per-agent output before completion (ORC-1337) ([#2318](https://github.com/Twigpine/openclaude/issues/2318)) ([a4ed687](https://github.com/Twigpine/openclaude/commit/a4ed687b84d8276b2e868a9c9fe6c3cb8430013d))
+* **aimlapi:** derive the by-key identity without hashing the API key ([#2293](https://github.com/Twigpine/openclaude/issues/2293)) ([8c46032](https://github.com/Twigpine/openclaude/commit/8c46032db2e192c1bee0c70d21f5baca01b310bb))
+* **api:** retry explicitly throttled OpenAI-compatible 403s ([#2416](https://github.com/Twigpine/openclaude/issues/2416)) ([8cab4d1](https://github.com/Twigpine/openclaude/commit/8cab4d1174686c5e861cc64c389419eb718956ad))
+* clarify declarations and redundant comparisons ([#2441](https://github.com/Twigpine/openclaude/issues/2441)) ([51f50e9](https://github.com/Twigpine/openclaude/commit/51f50e99b0c3910d94f84fbabbc5e02cc0b870bd))
+* clean up existing ESLint warnings ([#2429](https://github.com/Twigpine/openclaude/issues/2429)) ([3adc887](https://github.com/Twigpine/openclaude/commit/3adc887e85c585687615598f7c46356468777a80))
+* clear resumed chat state and escape tool file paths ([#2466](https://github.com/Twigpine/openclaude/issues/2466)) ([072a921](https://github.com/Twigpine/openclaude/commit/072a921dba12fa3ac0cea07376c234a6970bb61f))
+* **cli:** keep standalone --model over saved provider profile model ([#2471](https://github.com/Twigpine/openclaude/issues/2471)) ([972cb0b](https://github.com/Twigpine/openclaude/commit/972cb0b6967f8aef13e28f94a20e4acb4d7f82fe))
+* complete full checks and repair baseline test failures ([#2286](https://github.com/Twigpine/openclaude/issues/2286)) ([0e9170f](https://github.com/Twigpine/openclaude/commit/0e9170fd37ae7d78e30f30831397bc096fe35d85))
+* encode JSX apostrophes for CodeQL tokenization ([#2455](https://github.com/Twigpine/openclaude/issues/2455)) ([ec6bc3f](https://github.com/Twigpine/openclaude/commit/ec6bc3fd5d75dae8c5657d16125a2f7ffd9c9ac1))
+* fall back to global disabledMcpServers when project has none configured ([#1935](https://github.com/Twigpine/openclaude/issues/1935)) ([66cb795](https://github.com/Twigpine/openclaude/commit/66cb795034a3170ffb6b12f9ae0d0004e671335f))
+* **git:** honor discovery ceilings in worktree fixtures ([#2408](https://github.com/Twigpine/openclaude/issues/2408)) ([6c8d22a](https://github.com/Twigpine/openclaude/commit/6c8d22a20dd2b66e3c7918135ef44328483f5b0e))
+* **hooks:** reject unsupported command hook args ([#2398](https://github.com/Twigpine/openclaude/issues/2398)) ([cb4a72b](https://github.com/Twigpine/openclaude/commit/cb4a72bf1c14cd754e545b985a38a53938dda656))
+* **ide:** propagate VSIX download stream errors ([#2443](https://github.com/Twigpine/openclaude/issues/2443)) ([391c660](https://github.com/Twigpine/openclaude/commit/391c660db6577bf49254f6b0700e8a7e220fa1f0))
+* **launcher:** tolerate missing bin helpers on distro installs ([#2255](https://github.com/Twigpine/openclaude/issues/2255)) ([#2256](https://github.com/Twigpine/openclaude/issues/2256)) ([0e441ba](https://github.com/Twigpine/openclaude/commit/0e441ba09ae039adb3c4049ab92663336ed3cd85))
+* **lsp:** synchronize document versions across restarts ([#2106](https://github.com/Twigpine/openclaude/issues/2106)) ([9bf1040](https://github.com/Twigpine/openclaude/commit/9bf1040e5303f47d1c594115a9c02ba9c9905087))
+* **mcp:** use secure randomness for OAuth callback ports ([#2462](https://github.com/Twigpine/openclaude/issues/2462)) ([70fdbaf](https://github.com/Twigpine/openclaude/commit/70fdbaf36ed2a822568b83d633113be287baa1b5))
+* **model:** enable discovery for remote custom providers ([#1895](https://github.com/Twigpine/openclaude/issues/1895)) ([6e16948](https://github.com/Twigpine/openclaude/commit/6e1694892dc2f9d83b09f3700619241a77fd634d))
+* **ollama:** honor explicit thinking without changing defaults ([3e68b6d](https://github.com/Twigpine/openclaude/commit/3e68b6d397a12f276da358ddc5b803bff49251d4))
+* **ollama:** send think=false by default so hybrid-reasoning models actually stop thinking ([c884a88](https://github.com/Twigpine/openclaude/commit/c884a886fe5ddf0b332e3bb7441122925da6e433))
+* **openai-shim:** recover &lt;tool_call&gt; text tool calls on Ollama streams ([#2476](https://github.com/Twigpine/openclaude/issues/2476)) ([cd66554](https://github.com/Twigpine/openclaude/commit/cd6655470ac45a099d9fd33604178caa4016b1ae))
+* **opencode:** promote bare Codex alias launches to Codex backend ([#2066](https://github.com/Twigpine/openclaude/issues/2066)) ([#2171](https://github.com/Twigpine/openclaude/issues/2171)) ([c860143](https://github.com/Twigpine/openclaude/commit/c86014337bf65474189b688fce6f03cf778f34fe))
+* **plugins:** suppress hooks throughout sparse clones ([#2426](https://github.com/Twigpine/openclaude/issues/2426)) ([2dddbb3](https://github.com/Twigpine/openclaude/commit/2dddbb379a29619be320e399cc74d3a38019a392))
+* **provider:** match MiniMax and Venice base URLs by hostname, not substring ([#2099](https://github.com/Twigpine/openclaude/issues/2099)) ([cdd6af6](https://github.com/Twigpine/openclaude/commit/cdd6af609be906e9bf17c0ca357ca3e977ceea56))
+* **proxy:** pass runtime CA and mTLS options to the target TLS connection behind CONNECT proxies ([#2386](https://github.com/Twigpine/openclaude/issues/2386)) ([df184fb](https://github.com/Twigpine/openclaude/commit/df184fbafcad18d1feada4a4da38fecb9ce25c49))
+* **proxy:** restore direct fetch routing when clearing proxies ([#2406](https://github.com/Twigpine/openclaude/issues/2406)) ([6712d5a](https://github.com/Twigpine/openclaude/commit/6712d5a78cd71c47dedceae938cd106dc4664c0b))
+* **query:** terminate turns after consecutive doom-loop blocks ([#2460](https://github.com/Twigpine/openclaude/issues/2460)) ([870ea13](https://github.com/Twigpine/openclaude/commit/870ea13117d185d7b662a50ccbe5ac3bc96caa4e))
+* remove duplicate regex members and bound SGR parsing ([#2442](https://github.com/Twigpine/openclaude/issues/2442)) ([a883d57](https://github.com/Twigpine/openclaude/commit/a883d57f8245d98d713445a54e3b8675fb62f037))
+* remove next 40 unused local findings ([#2454](https://github.com/Twigpine/openclaude/issues/2454)) ([31274c1](https://github.com/Twigpine/openclaude/commit/31274c145a6278c553e0f5fd451823dbe0990349))
+* remove next 40 unused local findings (batch 4) ([#2456](https://github.com/Twigpine/openclaude/issues/2456)) ([1cead2c](https://github.com/Twigpine/openclaude/commit/1cead2c9067e428bdc496e9327fb3a26f8fb3ca5))
+* remove next 40 unused local findings (batch 5) ([#2457](https://github.com/Twigpine/openclaude/issues/2457)) ([1ce3c30](https://github.com/Twigpine/openclaude/commit/1ce3c30dee8df0c2c94cc8fe044c768e84f55007))
+* remove permanently disabled conditional paths ([#2450](https://github.com/Twigpine/openclaude/issues/2450)) ([d4d1b2b](https://github.com/Twigpine/openclaude/commit/d4d1b2bfa70dbe83e35577a3633eb87a02836535))
+* remove unreachable internal-only branches ([#2440](https://github.com/Twigpine/openclaude/issues/2440)) ([94ebcff](https://github.com/Twigpine/openclaude/commit/94ebcff640a611f7c248a0441fd7523d7da8050e))
+* repair provider arguments, deep search, and chat sessions ([#2459](https://github.com/Twigpine/openclaude/issues/2459)) ([ffa79d9](https://github.com/Twigpine/openclaude/commit/ffa79d9cbb7f3ca9589601f1657803bae6847722))
+* resolve 46 unused local findings in batch 6 ([#2458](https://github.com/Twigpine/openclaude/issues/2458)) ([20a5049](https://github.com/Twigpine/openclaude/commit/20a50493c775f151b61e1fabd5fa678ad1fbdaae))
+* resolve eight reported AI quality findings ([#2463](https://github.com/Twigpine/openclaude/issues/2463)) ([977cb53](https://github.com/Twigpine/openclaude/commit/977cb53282c618e057c910be38c7e01295d312d7))
+* **sdk:** surface the authenticate tool for a needs-auth MCP server ([#2295](https://github.com/Twigpine/openclaude/issues/2295)) ([4533f03](https://github.com/Twigpine/openclaude/commit/4533f036f534a55c3399d30315fb44c255f79c24))
+* **sdk:** wire options.hooks callbacks into the in-process hook executor ([#2244](https://github.com/Twigpine/openclaude/issues/2244)) ([5ef7183](https://github.com/Twigpine/openclaude/commit/5ef7183a758b1386911502f3f78114854ad8c979))
+* **session:** preserve startup metadata while following SDK session switches ([#2464](https://github.com/Twigpine/openclaude/issues/2464)) ([4d003ba](https://github.com/Twigpine/openclaude/commit/4d003ba0c3c0ce43a7e6b92a056f2b587086f6ba))
+* **shell:** honor an abort that lands before the listener is attached ([#2321](https://github.com/Twigpine/openclaude/issues/2321)) ([1c42a10](https://github.com/Twigpine/openclaude/commit/1c42a10628df59cdaaf3a75a89978737f592721a))
+* simplify redundant UI conditions ([#2449](https://github.com/Twigpine/openclaude/issues/2449)) ([9876d04](https://github.com/Twigpine/openclaude/commit/9876d04b3a680d74940633c14b7e52424be3ecdd))
+* simplify redundant utility and tool conditions ([#2452](https://github.com/Twigpine/openclaude/issues/2452)) ([24a90a5](https://github.com/Twigpine/openclaude/commit/24a90a563946e0c89e31d49cdce8353bd4e9f875))
+* **smart-routing:** stop overriding sub-agent models chosen by agentRouting ([#2310](https://github.com/Twigpine/openclaude/issues/2310)) ([ec39d80](https://github.com/Twigpine/openclaude/commit/ec39d807c0acc747eb22121ca087313f3fd45fee))
+* stabilize settings writes and enable fork PR scans ([#2290](https://github.com/Twigpine/openclaude/issues/2290)) ([a0c5c7d](https://github.com/Twigpine/openclaude/commit/a0c5c7d0232b8c71545d5cb3d9d745a9c756e69f))
+* **tests:** isolate skills homes and stabilize reload assertions ([#2307](https://github.com/Twigpine/openclaude/issues/2307)) ([5a1fbe0](https://github.com/Twigpine/openclaude/commit/5a1fbe03e62f354a972871336cbf541f27cf4dd9))
+* **test:** verify isolated child and release suite completion ([#2425](https://github.com/Twigpine/openclaude/issues/2425)) ([ae7eb82](https://github.com/Twigpine/openclaude/commit/ae7eb82187a7c2c57088e156a081e550aeb7217a))
+* **types:** avoid recursive schema comparisons ([#2410](https://github.com/Twigpine/openclaude/issues/2410)) ([d9371e8](https://github.com/Twigpine/openclaude/commit/d9371e802b4a5321f701632a393a02f352378bff))
+* **update:** restore getLatestVersion in published build ([#2430](https://github.com/Twigpine/openclaude/issues/2430)) ([438d4ca](https://github.com/Twigpine/openclaude/commit/438d4ca616ebc46bd86562b769ba8f587ac184b0))
+* **utils:** model Node's NODE_OPTIONS grammar in hasNodeOption ([#2188](https://github.com/Twigpine/openclaude/issues/2188)) ([e3c9a87](https://github.com/Twigpine/openclaude/commit/e3c9a873dcd749068009d2a07a17cb3a4ecc1e96))
+* **vscode:** align session discovery and resume with CLI storage ([#2415](https://github.com/Twigpine/openclaude/issues/2415)) ([da7e663](https://github.com/Twigpine/openclaude/commit/da7e6631ccaf3058b2336c545d5f3fcfa66521da))
+* **vscode:** preserve Windows launcher argument boundaries ([d6e0e86](https://github.com/Twigpine/openclaude/commit/d6e0e86be396f3e4455c8021847e985724e6a803))
+* **web:** reject empty sitemap in build verification ([#2427](https://github.com/Twigpine/openclaude/issues/2427)) ([77739e2](https://github.com/Twigpine/openclaude/commit/77739e2ce5738318d1d53481d19c44dd71bbe099))
+* **windows:** validate Git Bash paths without a shell probe ([#2470](https://github.com/Twigpine/openclaude/issues/2470)) ([5e00ea4](https://github.com/Twigpine/openclaude/commit/5e00ea456ca80727f8ade7cc9e3a4d19deb340f6))
+
+
+### Performance Improvements
+
+* **types:** keep default-heap Node 24 typecheck under the heap limit ([#2414](https://github.com/Twigpine/openclaude/issues/2414)) ([fd59621](https://github.com/Twigpine/openclaude/commit/fd596210f12d1a5fe32c54fc18af1c5b6cf3eb36))
+
 ## [0.33.0](https://github.com/Twigpine/openclaude/compare/v0.32.0...v0.33.0) (2026-10-14)
 
 
