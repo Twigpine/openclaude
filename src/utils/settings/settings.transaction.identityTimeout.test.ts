@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test'
 import * as realChildProcess from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -36,13 +36,18 @@ const spawnSyncMock = mock(
   },
 )
 
-// Repoint node:child_process for the module under test. Kept in a dedicated
-// file so the stub cannot leak into suites that rely on real child processes
-// (bun test isolates test files into separate processes).
+// Repoint node:child_process for the module under test. bun test shares one
+// module registry across files in a process, so restore the real module after
+// this suite to keep the stub away from suites that rely on real child
+// processes.
 mock.module('node:child_process', () => ({
   ...realChildProcess,
   spawnSync: spawnSyncMock,
 }))
+
+afterAll(() => {
+  mock.module('node:child_process', () => realChildProcess)
+})
 
 // The lock identity is memoized per module instance once a lookup succeeds,
 // and the platform dispatch reads process.platform at call time, so each case
@@ -82,7 +87,7 @@ describe('settings lock process identity lookup timeouts', () => {
       expect(windowsLookup).toBeDefined()
       // Reported Windows lookups take 1.3-1.7s in the wild; the historical
       // 1s budget failed them with EIDENTITY before any settings write.
-      expect(windowsLookup?.timeout).toBeGreaterThan(1_000)
+      expect(windowsLookup?.timeout).toBe(10_000)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
