@@ -54,9 +54,8 @@ const XML_TOOL_CALL_OPENERS = [
   HY3_TOOL_CALLS_OPEN,
   HY3_TOOL_CALL_OPEN,
 ]
-// Non-greedy block matcher; the `$` alternative tolerates a truncated final
-// block (stream cut off before the closing tag).
-const XML_TOOL_CALL_BLOCK_RE = /<tool_call>([\s\S]*?)(?:<\/tool_call>|$)/g
+const XML_TOOL_CALL_CLOSE = '</tool_call>'
+const XML_ARG_KEY_OPEN = '<arg_key>'
 const HY3_TOOL_CALLS_BLOCK_RE = /<tool_calls:[^>\s]+>([\s\S]*?)(?:<\/tool_calls(?::[^>\s]+)?>|$)/g
 const HY3_TOOL_CALL_BLOCK_RE = /<tool_call:[^>\s]+>([\s\S]*?)(?:<\/tool_call(?::[^>\s]+)?>|$)/g
 const XML_FUNCTION_NAME_RE = /<function=([^>\s]+)\s*>/
@@ -94,19 +93,122 @@ export function findXmlToolCallOpener(text: string, allowHy3: boolean): number {
   }, -1)
 }
 
+function isJsonText(raw: string): boolean {
+  try {
+    JSON.parse(raw)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Locates the JSON envelope (dialect C) of the body starting at `bodyStart`:
+ * the first `{` before the closing tag, with no dialect A/B markup before it,
+ * starting a valid JSON object. A label or Markdown fence may surround the
+ * object (`json\n{…}`, ```` ```json\n{…}\n``` ````). The body ends at the first
+ * closing tag after the object, or at the end of the text.
+ */
+function findJsonEnvelopeBody(
+  text: string,
+  bodyStart: number,
+): { json: [number, number]; bodyEnd: number; end: number } | null {
+  const firstClose = text.indexOf(XML_TOOL_CALL_CLOSE, bodyStart)
+  const jsonStart = text.indexOf('{', bodyStart)
+  if (jsonStart === -1 || (firstClose !== -1 && jsonStart > firstClose)) return null
+  const lead = text.slice(bodyStart, jsonStart)
+  if (XML_FUNCTION_NAME_RE.test(lead) || lead.includes(XML_ARG_KEY_OPEN)) return null
+  const json = extractBalancedJson(text, jsonStart)
+  if (!json || !isJsonText(json)) return null
+  const jsonEnd = jsonStart + json.length
+  const closeIndex = text.indexOf(XML_TOOL_CALL_CLOSE, jsonEnd)
+  return closeIndex === -1
+    ? { json: [jsonStart, jsonEnd], bodyEnd: text.length, end: text.length }
+    : { json: [jsonStart, jsonEnd], bodyEnd: closeIndex, end: closeIndex + XML_TOOL_CALL_CLOSE.length }
+}
+
+/**
+ * The part of a single tool-call block that can hold markup. For a standard
+ * `<tool_call>` block with a JSON envelope this is the block without its JSON
+ * object, since tag-like text inside the object lies in JSON strings; for any
+ * other block it is the whole block.
+ */
+export function xmlToolCallBlockMarkup(block: string): string {
+  if (!block.startsWith(XML_TOOL_CALL_OPEN)) return block
+  const envelope = findJsonEnvelopeBody(block, XML_TOOL_CALL_OPEN.length)
+  if (envelope?.end !== block.length) return block
+  return block.slice(0, envelope.json[0]) + block.slice(envelope.json[1])
+}
+
+/**
+ * Finds standard `<tool_call>` blocks. A JSON-envelope body (dialect C) is
+ * bounded by its balanced JSON object, so a `</tool_call>` inside a JSON string
+ * is data and cannot end the block early. Other bodies end at the first closing
+ * tag; a missing closing tag runs to the end of the text (stream cut off).
+ */
+function findStandardXmlToolCallBlocks(
+  text: string,
+): Array<{ range: [number, number]; inner: string; json?: string }> {
+  const blocks: Array<{ range: [number, number]; inner: string; json?: string }> = []
+  let start = text.indexOf(XML_TOOL_CALL_OPEN)
+  while (start !== -1) {
+    const bodyStart = start + XML_TOOL_CALL_OPEN.length
+    const envelope = findJsonEnvelopeBody(text, bodyStart)
+    let end: number
+    if (envelope) {
+      end = envelope.end
+      blocks.push({
+        range: [start, end],
+        inner: text.slice(bodyStart, envelope.bodyEnd),
+        json: text.slice(envelope.json[0], envelope.json[1]),
+      })
+    } else {
+      const closeIndex = text.indexOf(XML_TOOL_CALL_CLOSE, bodyStart)
+      const bodyEnd = closeIndex === -1 ? text.length : closeIndex
+      end = closeIndex === -1 ? text.length : closeIndex + XML_TOOL_CALL_CLOSE.length
+      blocks.push({ range: [start, end], inner: text.slice(bodyStart, bodyEnd) })
+    }
+    start = text.indexOf(XML_TOOL_CALL_OPEN, end)
+  }
+  return blocks
+}
+
+/**
+ * Ranges of every tool-call block in `text`, whether or not it parses as a
+ * call, in source order. HY3 wrappers come before the blocks they contain.
+ */
+export function findXmlToolCallBlockRanges(
+  text: string,
+  allowHy3 = false,
+): Array<[number, number]> {
+  const ranges = findStandardXmlToolCallBlocks(text).map(block => block.range)
+  if (allowHy3) {
+    for (const blockRe of [HY3_TOOL_CALLS_BLOCK_RE, HY3_TOOL_CALL_BLOCK_RE]) {
+      for (const block of text.matchAll(blockRe)) {
+        ranges.push([block.index!, block.index! + block[0].length])
+      }
+    }
+  }
+  return ranges.sort((left, right) => left[0] - right[0] || right[1] - left[1])
+}
+
 /**
  * Parse XML / HY3 tool-call markup from assistant text.
  * Callers must inject the session sequencer so XML and raw-text fallbacks
  * share one id space (see openaiShim façade `nextTextToolCallSequence`).
  */
-function parseStandardXmlToolCallInner(inner: string): {
+function parseStandardXmlToolCallInner(inner: string, envelopeJson?: string): {
   name?: string
   args: Record<string, unknown>
 } {
   let name: string | undefined
   const args: Record<string, unknown> = {}
 
-  const fnMatch = inner.match(XML_FUNCTION_NAME_RE)
+  const trimmedInner = inner.trim()
+  // A JSON envelope (dialect C) owns the block: XML-looking text inside its
+  // argument strings is data, not dialect A/B markup.
+  const isJsonEnvelope = envelopeJson !== undefined
+  const fnMatch = isJsonEnvelope ? null : inner.match(XML_FUNCTION_NAME_RE)
   if (fnMatch) {
     // Dialect A: <function=NAME><parameter=KEY>VALUE</parameter>…
     name = fnMatch[1]
@@ -115,9 +217,8 @@ function parseStandardXmlToolCallInner(inner: string): {
       if (key) args[key] = coerceXmlToolValue(p[2] ?? '')
     }
   } else {
-    const trimmedInner = inner.trim()
     const argPairs = [...inner.matchAll(XML_ARG_PAIR_RE)]
-    if (argPairs.length > 0 && !trimmedInner.startsWith('{')) {
+    if (argPairs.length > 0 && !isJsonEnvelope && !trimmedInner.startsWith('{')) {
       // Dialect B: leading token is the function name, then arg_key/arg_value.
       const nameTok = trimmedInner.split(/[\n<]/, 1)[0]?.trim()
       if (nameTok) name = nameTok
@@ -125,26 +226,18 @@ function parseStandardXmlToolCallInner(inner: string): {
         const key = (p[1] ?? '').trim()
         if (key) args[key] = coerceXmlToolValue(p[2] ?? '')
       }
-    } else {
-      // Dialect C: a JSON tool-call object inside the tags.
-      const jsonStart = trimmedInner.indexOf('{')
-      if (jsonStart !== -1) {
-        const jsonRaw = extractBalancedJson(trimmedInner, jsonStart)
-        if (jsonRaw) {
+    } else if (isJsonEnvelope) {
+      // Dialect C: the JSON tool-call object located by findJsonEnvelopeBody.
+      const obj = JSON.parse(envelopeJson) as Record<string, unknown>
+      if (typeof obj['name'] === 'string') {
+        name = obj['name'] as string
+        const rawArgs = obj['arguments']
+        if (typeof rawArgs === 'string') {
           try {
-            const obj = JSON.parse(jsonRaw) as Record<string, unknown>
-            if (typeof obj['name'] === 'string') {
-              name = obj['name'] as string
-              const rawArgs = obj['arguments']
-              if (typeof rawArgs === 'string') {
-                try {
-                  Object.assign(args, JSON.parse(rawArgs))
-                } catch {}
-              } else if (rawArgs && typeof rawArgs === 'object') {
-                Object.assign(args, rawArgs as Record<string, unknown>)
-              }
-            }
+            Object.assign(args, JSON.parse(rawArgs))
           } catch {}
+        } else if (rawArgs && typeof rawArgs === 'object') {
+          Object.assign(args, rawArgs as Record<string, unknown>)
         }
       }
     }
@@ -218,12 +311,8 @@ export function parseXmlToolCalls(
     })
   }
 
-  for (const block of text.matchAll(XML_TOOL_CALL_BLOCK_RE)) {
-    const range: [number, number] = [
-      block.index!,
-      block.index! + block[0].length,
-    ]
-    const { name, args } = parseStandardXmlToolCallInner(block[1] ?? '')
+  for (const { range, inner, json } of findStandardXmlToolCallBlocks(text)) {
+    const { name, args } = parseStandardXmlToolCallInner(inner, json)
     if (!name) continue
     candidates.push({
       range,

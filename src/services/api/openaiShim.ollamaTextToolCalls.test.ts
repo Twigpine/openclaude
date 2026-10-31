@@ -658,3 +658,207 @@ describe('Ollama streaming — non-stop terminal finish reasons flush buffer', (
     expect(delta?.stop_reason).not.toBe('tool_use')
   })
 })
+
+describe('Ollama streaming — <tool_call>-wrapped JSON text fallback (#2040)', () => {
+  let originalFetch: FetchType
+  let restoreEnv: () => void
+  beforeEach(() => {
+    originalFetch = globalThis.fetch
+    restoreEnv = snapshotEnv(ENV_KEYS)
+    process.env.OLLAMA_BASE_URL = 'http://localhost:11434'
+    process.env.OPENAI_API_KEY = 'test-key'
+    process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
+  })
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    restoreEnv()
+  })
+
+  test('Qwen-style <tool_call>{json}</tool_call> text becomes a tool_use block', async () => {
+    // Repro: Ollama returns the model's template-format tool call (prose then
+    // <tool_call>{json}</tool_call>) in message.content, not message.tool_calls.
+    globalThis.fetch = (async () =>
+      makeOllamaNativeStreamingResponse(
+        makeNdjsonChunks([
+          ollamaChunk('I will build the project.\n<tool_call>\n'),
+          ollamaChunk('{"name": "Bash", "arguments": {"command": "npm run build"}}\n'),
+          ollamaChunk('</tool_call>'),
+          ollamaChunk('', 'stop'),
+        ]),
+      )) as unknown as FetchType
+
+    const client = createOpenAIShimClient({}) as OpenAIShimClient
+    const result = await client.beta.messages
+      .create({
+        model: 'qwen2.5-coder:14b',
+        messages: [{ role: 'user', content: 'build the project' }],
+        max_tokens: 64,
+        stream: true,
+      })
+      .withResponse()
+
+    const events: Record<string, unknown>[] = []
+    for await (const event of result.data) events.push(event)
+
+    const allText = events
+      .filter(e => e.type === 'content_block_delta' && (e.delta as Record<string, string>)?.type === 'text_delta')
+      .map(e => (e.delta as Record<string, string>).text)
+      .join('')
+    expect(allText).toBe('I will build the project.')
+
+    const toolStarts = events.filter(
+      e => e.type === 'content_block_start' && (e.content_block as Record<string, string>)?.type === 'tool_use',
+    )
+    expect(toolStarts).toHaveLength(1)
+    expect((toolStarts[0].content_block as Record<string, string>).name).toBe('Bash')
+    const toolInput = events
+      .filter(e => e.type === 'content_block_delta' && (e.delta as Record<string, string>)?.type === 'input_json_delta')
+      .map(e => (e.delta as Record<string, string>).partial_json)
+      .join('')
+    expect(JSON.parse(toolInput)).toEqual({ command: 'npm run build' })
+
+    const messageDelta = events.find(e => e.type === 'message_delta') as Record<string, unknown> | undefined
+    expect((messageDelta?.delta as Record<string, unknown>)?.stop_reason).toBe('tool_use')
+  })
+
+  async function streamOllamaContent(content: string) {
+    globalThis.fetch = (async () =>
+      makeOllamaNativeStreamingResponse(
+        makeNdjsonChunks([ollamaChunk(content), ollamaChunk('', 'stop')]),
+      )) as unknown as FetchType
+
+    const client = createOpenAIShimClient({}) as OpenAIShimClient
+    const result = await client.beta.messages
+      .create({
+        model: 'qwen2.5-coder:14b',
+        messages: [{ role: 'user', content: 'go' }],
+        max_tokens: 64,
+        stream: true,
+      })
+      .withResponse()
+
+    const events: Record<string, unknown>[] = []
+    for await (const event of result.data) events.push(event)
+
+    const deltas = events
+      .filter(e => e.type === 'content_block_delta')
+      .map(e => e.delta as Record<string, string>)
+    const messageDelta = events.find(e => e.type === 'message_delta') as Record<string, unknown> | undefined
+    return {
+      text: deltas.filter(d => d.type === 'text_delta').map(d => d.text).join(''),
+      tools: events
+        .filter(e => e.type === 'content_block_start' && (e.content_block as Record<string, string>)?.type === 'tool_use')
+        .map(e => (e.content_block as Record<string, string>).name),
+      inputs: deltas.filter(d => d.type === 'input_json_delta').map(d => JSON.parse(d.partial_json)),
+      stopReason: (messageDelta?.delta as Record<string, unknown>)?.stop_reason,
+    }
+  }
+
+  const xmlCall = (command: string) =>
+    `<tool_call>{"name":"Bash","arguments":{"command":"${command}"}}</tool_call>`
+
+  test.each([
+    ['closed', `<think>I could call ${xmlCall('echo speculative')} but should ask first.</think>Please confirm the operation.`],
+    ['unterminated', `Please confirm the operation. <think>I could call ${xmlCall('echo speculative')}`],
+  ])('<tool_call> inside %s reasoning is not recovered as a tool call', async (_kind, content) => {
+    const { text, tools, stopReason } = await streamOllamaContent(content)
+    expect(text.trim()).toBe('Please confirm the operation.')
+    expect(tools).toEqual([])
+    expect(stopReason).toBe('end_turn')
+  })
+
+  test('only the visible <tool_call> is recovered when reasoning also contains one', async () => {
+    const { text, tools, inputs, stopReason } = await streamOllamaContent(
+      `<think>${xmlCall('echo private')}</think>${xmlCall('echo public')}`,
+    )
+    expect(text).toBe('')
+    expect(tools).toEqual(['Bash'])
+    expect(inputs).toEqual([{ command: 'echo public' }])
+    expect(stopReason).toBe('tool_use')
+  })
+
+  test('think tags inside a visible call\'s arguments are kept verbatim', async () => {
+    const args = { file_path: 'notes.md', content: 'a <think>keep</think> b' }
+    const { text, tools, inputs, stopReason } = await streamOllamaContent(
+      `<think>plan</think>Saving.\n<tool_call>${JSON.stringify({ name: 'Write', arguments: args })}</tool_call>`,
+    )
+    expect(text).toBe('Saving.')
+    expect(tools).toEqual(['Write'])
+    expect(inputs).toEqual([args])
+    expect(stopReason).toBe('tool_use')
+  })
+
+  test('XML-looking text inside JSON arguments does not change the recovered tool', async () => {
+    const command = "printf '%s' '<function=Read><parameter=file_path>README.md</parameter>'"
+    const { text, tools, inputs, stopReason } = await streamOllamaContent(
+      `Printing markup.\n<tool_call>${JSON.stringify({ name: 'Bash', arguments: { command } })}</tool_call>`,
+    )
+    expect(text).toBe('Printing markup.')
+    expect(tools).toEqual(['Bash'])
+    expect(inputs).toEqual([{ command }])
+    expect(stopReason).toBe('tool_use')
+  })
+
+  test('a closing tag inside a labelled JSON envelope does not change the recovered tool', async () => {
+    const args = {
+      file_path: 'a.md',
+      content: 'x</tool_call><tool_call><function=Bash><parameter=command>echo leaked</parameter></function></tool_call>y',
+    }
+    const { text, tools, inputs, stopReason } = await streamOllamaContent(
+      `Saving.\n<tool_call>json\n${JSON.stringify({ name: 'Write', arguments: args })}</tool_call>`,
+    )
+    expect(text).toBe('Saving.')
+    expect(tools).toEqual(['Write'])
+    expect(inputs).toEqual([args])
+    expect(stopReason).toBe('tool_use')
+  })
+
+  const nestedBash = '<tool_call><function=Bash><parameter=command>echo leaked</parameter></function></tool_call>'
+
+  test.each([
+    [
+      'a hidden call argument contains a reasoning close tag',
+      `<think><tool_call>${JSON.stringify({ name: 'Write', arguments: { file_path: 'a.md', content: `</think>${nestedBash}` } })}</tool_call></think>Please confirm.`,
+    ],
+    [
+      'a visible opener without a body reaches into reasoning',
+      `I'll use a <tool_call> block. <think>Maybe {"name":"Bash","arguments":{"command":"echo leaked"}}</think> Please confirm.`,
+    ],
+    [
+      'an unterminated visible call is followed by reasoning',
+      'Listing.\n<tool_call>\n<function=Bash>\n<parameter=command>\nls\n</parameter>\n</function>\n<think>else <parameter=command>echo leaked</parameter></think>',
+    ],
+    [
+      'an opener mentioned in reasoning runs into a visible call',
+      `<think>I'll emit a <tool_call> now.</think>\n<tool_call>${JSON.stringify({ name: 'Write', arguments: { file_path: 'n.md', content: 'a <think>keep</think> b' } })}</tool_call>`,
+    ],
+    [
+      'a reasoning close tag is split around a hidden call',
+      `<think>plan </<tool_call>${JSON.stringify({ name: 'Write', arguments: { file_path: 'a.md', content: 'x' } })}</tool_call>think>${xmlCall('echo leaked')}</think>Please confirm.`,
+    ],
+    [
+      'a hidden block that is not a named call contains a reasoning close tag',
+      `<think><tool_call>${JSON.stringify({ type: 'function', function: { name: 'Write', arguments: { content: '</think>' } } })}</tool_call>${nestedBash}</think>Please confirm.`,
+    ],
+    [
+      'a reasoning open tag runs into the call opener',
+      `<think${xmlCall('echo leaked')}</think>Please confirm.`,
+    ],
+    [
+      'an unclosed reasoning tag containing `<` runs into the call opener',
+      `Let me check.\n<thinking\nstep 1: if x<0\n${xmlCall('echo leaked')}\ndone`,
+    ],
+    [
+      'removing reasoning splices a call the raw text did not contain',
+      `<think>${xmlCall('echo private')}</think><tool_call>{"name":"Bash","arguments":{"command":"echo </tool_call><think>"x</think>; echo leaked"}}</tool_call>`,
+    ],
+    [
+      'reasoning markup splits a visible call\'s function tag',
+      `Running.\n${xmlCall('ls')}\n<tool_call><function<think>x</think>=Write><parameter=content>a <think>keep</think> b</parameter></function></tool_call>`,
+    ],
+  ])('no tool call is recovered when %s', async (_case, content) => {
+    const { tools, stopReason } = await streamOllamaContent(content)
+    expect(tools).toEqual([])
+    expect(stopReason).toBe('end_turn')
+  })
+})
