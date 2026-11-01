@@ -18,6 +18,41 @@ import {
 import { markInternalWrite } from './internalWrites.js'
 import { resetSettingsCache } from './settingsCache.js'
 
+/** Outcome fields read from the synchronous process-identity lookup. */
+interface IdentityLookupOutcome {
+  error?: Error | null
+  status: number | null
+  stdout: string
+  stderr: string
+}
+
+/** Options passed by readCommandProcessStartId to the identity lookup. */
+interface IdentityLookupOptions {
+  encoding: 'utf8'
+  env?: NodeJS.ProcessEnv
+  timeout?: number
+  windowsHide?: boolean
+}
+
+/**
+ * Synchronous lookup behind the settings-lock process identity. Tests swap
+ * this through `__test` instead of repointing node:child_process
+ * process-wide: bun test shares one module registry across files in one
+ * process, and a stubbed builtin leaked into unrelated suites on CI.
+ */
+let identityLookupSync: (
+  command: string,
+  args: string[],
+  options: IdentityLookupOptions,
+) => IdentityLookupOutcome = spawnSync
+
+/** Test-only seam: replace the synchronous process-identity lookup. */
+export const __test = {
+  setIdentityLookupSync(impl: typeof identityLookupSync): void {
+    identityLookupSync = impl
+  },
+}
+
 const SETTINGS_LOCK_RETRY_MS = 25
 const SETTINGS_LOCK_CONTENTION_LOG_MS = 100
 const SETTINGS_LOCK_WAIT_MS = 2_000
@@ -171,7 +206,7 @@ function readCommandProcessStartId(
   timeoutMs: number,
 ): string | null {
   try {
-    const result = spawnSync(command, args, {
+    const result = identityLookupSync(command, args, {
       encoding: 'utf8',
       env: {
         ...process.env,
