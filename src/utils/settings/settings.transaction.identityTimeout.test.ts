@@ -12,11 +12,15 @@ type CapturedSpawnSyncCall = {
 const spawnSyncCalls: CapturedSpawnSyncCall[] = []
 
 let spawnBehavior: 'timeout' | 'success' = 'timeout'
+let simulatedLookupDurationMs = 0
 
 const spawnSyncMock = mock(
   (command: string, args: string[], options: { timeout?: number }) => {
     spawnSyncCalls.push({ command, args, timeout: options?.timeout })
-    if (spawnBehavior === 'timeout') {
+    if (
+      spawnBehavior === 'timeout' ||
+      (options?.timeout ?? 0) < simulatedLookupDurationMs
+    ) {
       return {
         error: Object.assign(new Error('spawn ETIMEDOUT'), {
           code: 'ETIMEDOUT',
@@ -59,6 +63,7 @@ describe('settings lock process identity lookup timeouts', () => {
   afterEach(() => {
     spawnSyncCalls.length = 0
     spawnBehavior = 'timeout'
+    simulatedLookupDurationMs = 0
     Object.defineProperty(process, 'platform', {
       value: originalPlatform,
     })
@@ -67,12 +72,16 @@ describe('settings lock process identity lookup timeouts', () => {
   test('gives the Windows PowerShell identity lookup more than one second', async () => {
     Object.defineProperty(process, 'platform', { value: 'win32' })
     spawnBehavior = 'success'
+    simulatedLookupDurationMs = 1_500
     const { __test, replaceSettingsFileSync } = await loadTransactionModule()
     __test.setIdentityLookupSync(spawnSyncMock)
     const root = mkdtempSync(join(tmpdir(), 'oc-identity-timeout-'))
     try {
       writeFileSync(join(root, 'settings.json'), '{}\n')
       replaceSettingsFileSync(join(root, 'settings.json'), '{"a":1}\n')
+      expect(readFileSync(join(root, 'settings.json'), 'utf8')).toBe(
+        '{"a":1}\n',
+      )
       expect(spawnSyncCalls.length).toBeGreaterThan(0)
       const windowsLookup = spawnSyncCalls.find(
         call => call.command === 'powershell.exe',
