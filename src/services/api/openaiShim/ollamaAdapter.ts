@@ -233,15 +233,15 @@ export function convertOllamaStreamingResponse(response: Response, fallbackModel
         const lines = buffer.split(/\r?\n/)
         buffer = lines.pop() ?? ''
         let emitted = false
-        for (const line of lines) if (line.trim()) { enqueue(line.trim(), controller); emitted = true }
+        for (const line of lines) if (line.trim() && enqueue(line.trim(), controller)) emitted = true
         if (emitted) return
       }
     },
     cancel(reason) { return reader.cancel(reason) },
   })
-  function enqueue(line: string, controller: ReadableStreamDefaultController<Uint8Array>): void {
+  function enqueue(line: string, controller: ReadableStreamDefaultController<Uint8Array>): boolean {
     let data: OllamaChatResponse
-    try { data = JSON.parse(line) as OllamaChatResponse } catch { return }
+    try { data = JSON.parse(line) as OllamaChatResponse } catch { return false }
     const model = data.model ?? fallbackModel
     const chunks: string[] = []
     const delta: Record<string, unknown> = {}
@@ -258,6 +258,7 @@ export function convertOllamaStreamingResponse(response: Response, fallbackModel
       chunks.push(`data: ${JSON.stringify({ id: streamId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [], usage: buildOpenAIUsageFromOllama(data) })}\n\n`)
     }
     for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+    return chunks.length > 0
   }
   return responseWithPreservedUrl(stream, { status: response.status, statusText: response.statusText, headers: { 'content-type': 'text/event-stream' } }, response.url)
 }
