@@ -227,7 +227,10 @@ function readCommandProcessStartId(
   }
 }
 
-function readProcessStartId(pid: number): string | null {
+function readProcessStartId(
+  pid: number,
+  windowsTimeoutMs = WINDOWS_SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS,
+): string | null {
   if (process.platform === 'linux') return readLinuxProcessStartId(pid)
   if (process.platform === 'win32') {
     return readCommandProcessStartId(
@@ -239,7 +242,7 @@ function readProcessStartId(pid: number): string | null {
         `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
       ],
       'windows',
-      WINDOWS_SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS,
+      windowsTimeoutMs,
     )
   }
   return readCommandProcessStartId(
@@ -293,7 +296,10 @@ function isIdentityOwnerAlive(
   if (processStartIds.has(cacheKey)) {
     currentProcessStartId = processStartIds.get(cacheKey) ?? null
   } else {
-    currentProcessStartId = readProcessStartId(identity.pid)
+    currentProcessStartId = readProcessStartId(
+      identity.pid,
+      SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS,
+    )
     processStartIds.set(cacheKey, currentProcessStartId)
   }
   return (
@@ -505,6 +511,12 @@ function acquireSettingsLock(targetPath: string): () => void {
       }
       const remaining = deadline - now
       if (remaining <= 0) {
+        // The owner may have released during a synchronous identity lookup.
+        // Give the pending lock one final atomic publication before ELOCKED.
+        if (tryPublishPendingLock(pendingPath, lockPath)) {
+          acquired = true
+          return () => releaseOwnedLock(lockPath, owner)
+        }
         throw Object.assign(
           new Error(
             `Timed out after ${SETTINGS_LOCK_WAIT_MS}ms waiting for settings lock ${lockPath}, held by ${describeCurrentOwner(lockPath)}. If that process is known to have exited, remove the lock directory before retrying.`,

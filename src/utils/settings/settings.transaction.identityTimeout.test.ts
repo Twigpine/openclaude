@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 type CapturedSpawnSyncCall = {
@@ -118,6 +118,55 @@ describe('settings lock process identity lookup timeouts', () => {
       // powershell.exe spawn failing with ENOENT on non-Windows hosts.
       expect(spawnSyncCalls.length).toBeGreaterThan(0)
     } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('publishes after the owner releases during a lookup that crosses the lock deadline', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    const { __test, replaceSettingsFileSync } = await loadTransactionModule()
+    const root = mkdtempSync(join(tmpdir(), 'oc-identity-race-'))
+    const settingsPath = join(root, 'settings.json')
+    const lockPath = `${settingsPath}.lock`
+    const originalNow = Object.getOwnPropertyDescriptor(performance, 'now')
+    expect(originalNow).toBeDefined()
+    let ownerLookups = 0
+    let ownerTimeoutMs: number | undefined
+    try {
+      writeFileSync(settingsPath, '{}\n')
+      mkdirSync(lockPath)
+      writeFileSync(
+        join(lockPath, 'owner.json'),
+        JSON.stringify({
+          version: 2,
+          host: hostname(),
+          pid: process.pid,
+          token: '00000000-0000-4000-8000-000000000001',
+          processStartId: 'windows:638663053464013680',
+        }),
+      )
+      __test.setIdentityLookupSync((command, _args, options) => {
+        expect(command).toBe('powershell.exe')
+        if (++ownerLookups === 2) {
+          // The first lookup creates our identity. During the second, the
+          // contended owner releases while a synchronous lookup consumes the
+          // remaining deadline; no wall-clock sleep is needed in this test.
+          ownerTimeoutMs = options.timeout
+          rmSync(lockPath, { recursive: true })
+          const elapsed = performance.now()
+          Object.defineProperty(performance, 'now', {
+            configurable: true,
+            value: () => elapsed + 2_100,
+          })
+        }
+        return { status: 0, stdout: '638663053464013680\n' }
+      })
+      replaceSettingsFileSync(settingsPath, '{"saved":true}\n')
+      expect(ownerLookups).toBe(2)
+      expect(ownerTimeoutMs).toBe(1_000)
+      expect(readFileSync(settingsPath, 'utf8')).toBe('{"saved":true}\n')
+    } finally {
+      if (originalNow) Object.defineProperty(performance, 'now', originalNow)
       rmSync(root, { recursive: true, force: true })
     }
   })
