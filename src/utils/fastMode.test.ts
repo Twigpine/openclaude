@@ -208,7 +208,12 @@ async function importActualProviders(): Promise<ProvidersModule> {
 }
 
 async function prepareFastModeTestState(): Promise<void> {
-  const { setIsInteractive } = await import('../bootstrap/state.js')
+  const { resetModelStringsForTestingOnly, setIsInteractive } = await import(
+    '../bootstrap/state.js'
+  )
+  // Model strings are cached process-wide. An earlier suite may have cached
+  // them for another provider (OpenAI's map turns "opus" into gpt-4o).
+  resetModelStringsForTestingOnly()
   setIsInteractive(true)
   const { DEFAULT_GLOBAL_CONFIG, _setGlobalConfigCacheForTesting } =
     await import('./config.js')
