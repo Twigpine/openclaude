@@ -116,7 +116,12 @@ export type LSPServerManagerDependencies = {
   lifecycleNotificationTimeoutMs: number
 }
 
-const DEFAULT_LSP_LIFECYCLE_NOTIFICATION_TIMEOUT_MS = 2_000
+// A timed-out didOpen/didChange/didClose stops the server so its document
+// versions resynchronize on restart. A healthy server can stop reading stdin
+// for several seconds while indexing, and a full-document write then waits on
+// the pipe, so only treat it as wedged after the same budget as startup
+// (LSPServerInstance's DEFAULT_LSP_STARTUP_TIMEOUT_MS).
+const DEFAULT_LSP_LIFECYCLE_NOTIFICATION_TIMEOUT_MS = 30_000
 
 const DEFAULT_DEPENDENCIES: LSPServerManagerDependencies = {
   loadServerConfigs: getAllLspServers,

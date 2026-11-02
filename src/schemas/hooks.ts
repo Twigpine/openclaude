@@ -26,6 +26,13 @@ const IfConditionSchema = lazySchema(() =>
     ),
 )
 
+/** Explanation shown wherever a command hook's unsupported `args` is reported. */
+export const COMMAND_HOOK_ARGS_UNSUPPORTED_MESSAGE =
+  'Command hooks do not support an "args" field. Put the complete ' +
+  'invocation in "command" (e.g. "command": "sh -c \'printf HANDLER_RAN; cat\'"); ' +
+  'a supplied "args" would otherwise be silently discarded and a ' +
+  'different command would run.'
+
 // Internal factory for individual hook schemas (shared between exported
 // discriminated union members and the HookCommandSchema factory)
 function buildHookSchemas() {
@@ -42,14 +49,11 @@ function buildHookSchemas() {
     // undefined, so `.optional()` only admits a programmatically-constructed
     // explicit `undefined`, which means "not supplied" — every JSON-parsed
     // value (null, array, string, …) is rejected.
+    // Settings files drop just the offending hook before validation
+    // (filterUnsupportedCommandHookArgs), so one bad hook can't discard the
+    // rest of the file, including its permission deny rules.
     args: z
-      .never({
-        error:
-          'Command hooks do not support an "args" field. Put the complete ' +
-          'invocation in "command" (e.g. "command": "sh -c \'printf HANDLER_RAN; cat\'"); ' +
-          'a supplied "args" would otherwise be silently discarded and a ' +
-          'different command would run.',
-      })
+      .never({ error: COMMAND_HOOK_ARGS_UNSUPPORTED_MESSAGE })
       .optional()
       .describe(
         'Not supported: put the complete invocation in "command" instead',

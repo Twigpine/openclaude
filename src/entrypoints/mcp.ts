@@ -6,7 +6,6 @@
 process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= 'true'
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ZodError } from 'zod/v4'
 import {
   CallToolRequestSchema,
@@ -19,6 +18,7 @@ import { getDefaultAppState } from 'src/state/AppStateStore.js'
 import review from '../commands/review.js'
 import type { Command } from '../commands.js'
 import { getMcpToolsCommandsAndResources } from '../services/mcp/client.js'
+import { createMcpStdioServerTransport } from '../services/mcp/stdioTransport.js'
 import type { MCPServerConnection } from '../services/mcp/types.js'
 import {
   findToolByName,
@@ -257,7 +257,7 @@ export async function startMCPServer(
   )
 
   async function runServer() {
-    const transport = new StdioServerTransport()
+    const transport = createMcpStdioServerTransport()
     await server.connect(transport)
   }
 

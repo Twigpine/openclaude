@@ -1,5 +1,6 @@
 import type { ConfigScope } from 'src/services/mcp/types.js'
 import { type ZodError, type ZodIssue, z } from 'zod/v4'
+import { COMMAND_HOOK_ARGS_UNSUPPORTED_MESSAGE } from '../../schemas/hooks.js'
 import { jsonParse } from '../slowOperations.js'
 import { plural } from '../stringUtils.js'
 import { validatePermissionRule } from './permissionValidation.js'
@@ -265,6 +266,68 @@ export function filterInvalidPermissionRules(
       }
       return true
     })
+  }
+  return warnings
+}
+
+/**
+ * Removes command hooks that supply the unsupported `args` field from raw
+ * parsed JSON before schema validation. The hook is skipped (it never runs
+ * with a different command than intended), and the rest of the file, including
+ * its permission rules, still loads. Returns a warning for each removed hook.
+ *
+ * Matchers, events and the `hooks` object that end up empty because of this
+ * filter are removed too. Otherwise a managed source that held nothing but a
+ * skipped hook would still count as non-empty and win first-source-wins
+ * policy selection over a lower-priority source with real rules.
+ */
+export function filterUnsupportedCommandHookArgs(
+  data: unknown,
+  filePath: string,
+): ValidationError[] {
+  if (!data || typeof data !== 'object') return []
+  const root = data as Record<string, unknown>
+  const hooks = root.hooks
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return []
+  const hooksByEvent = hooks as Record<string, unknown>
+
+  const warnings: ValidationError[] = []
+  for (const [event, matchers] of Object.entries(hooksByEvent)) {
+    if (!Array.isArray(matchers)) continue
+    const keptMatchers = matchers.filter((matcher: unknown, matcherIndex) => {
+      if (!matcher || typeof matcher !== 'object') return true
+      const config = matcher as Record<string, unknown>
+      if (!Array.isArray(config.hooks)) return true
+      const hookCount = config.hooks.length
+      const keptHooks = config.hooks.filter((hook: unknown, hookIndex) => {
+        if (
+          !hook ||
+          typeof hook !== 'object' ||
+          (hook as Record<string, unknown>).type !== 'command' ||
+          (hook as Record<string, unknown>).args === undefined
+        ) {
+          return true
+        }
+        warnings.push({
+          file: filePath,
+          path: `hooks.${event}.${matcherIndex}.hooks.${hookIndex}.args`,
+          message: `Command hook was skipped. ${COMMAND_HOOK_ARGS_UNSUPPORTED_MESSAGE}`,
+          invalidValue: (hook as Record<string, unknown>).args,
+        })
+        return false
+      })
+      config.hooks = keptHooks
+      return hookCount === 0 || keptHooks.length > 0
+    })
+    if (keptMatchers.length === matchers.length) continue
+    if (keptMatchers.length > 0) {
+      hooksByEvent[event] = keptMatchers
+    } else {
+      delete hooksByEvent[event]
+    }
+  }
+  if (warnings.length > 0 && Object.keys(hooksByEvent).length === 0) {
+    delete root.hooks
   }
   return warnings
 }
