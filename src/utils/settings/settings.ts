@@ -202,7 +202,10 @@ export function parseSettingsFile(path: string): {
   }
 }
 
-function parseSettingsFileUncached(path: string): {
+function parseSettingsFileUncached(
+  path: string,
+  { keepUnsupportedHooks = false }: { keepUnsupportedHooks?: boolean } = {},
+): {
   settings: SettingsJson | null
   errors: ValidationError[]
 } {
@@ -214,13 +217,19 @@ function parseSettingsFileUncached(path: string): {
       return { settings: {}, errors: [] }
     }
 
-    const data = safeParseJSON(content, false)
+    // safeParseJSON memoizes by content and returns the shared object. The
+    // filters below edit it in place, so work on a copy. Otherwise a later
+    // parse of the same content would see an already filtered object,
+    // losing both the warnings and the write-back copy of a skipped hook.
+    const data = clone(safeParseJSON(content, false))
 
     // Filter invalid permission rules and unsupported hook fields before
     // schema validation so one bad entry doesn't cause the entire settings
     // file to be rejected.
     const ruleWarnings = filterInvalidPermissionRules(data, path)
-    const hookWarnings = filterUnsupportedCommandHookArgs(data, path)
+    const hookWarnings = keepUnsupportedHooks
+      ? []
+      : filterUnsupportedCommandHookArgs(data, path)
     const modelPricingWarnings = filterInvalidModelPricing(data, path)
 
     const result = SettingsSchema().safeParse(data)
@@ -454,7 +463,12 @@ export function updateSettingsForSource(
       targetPath => {
         // The transaction merge base must bypass both process-local settings
         // caches so a peer's completed update cannot be overwritten.
-        let existingSettings = parseSettingsFileUncached(targetPath).settings
+        // Skipping a command hook with `args` is a runtime decision. Keeping
+        // it here sends the file through the raw fallback below, so an
+        // unrelated update writes that hook back unchanged.
+        let existingSettings = parseSettingsFileUncached(targetPath, {
+          keepUnsupportedHooks: true,
+        }).settings
 
         // If validation failed, distinguish syntax errors from schema-invalid
         // objects whose unknown fields still need to survive the merge.

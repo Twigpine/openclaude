@@ -10,8 +10,17 @@ import {
 } from './hooks.js'
 import { PluginHooksSchema } from '../utils/plugins/schemas.js'
 import { SettingsSchema } from '../utils/settings/types.js'
-import { parseCommandOutputAsSettings } from '../utils/settings/mdm/settings.js'
-import { parseSettingsFile } from '../utils/settings/settings.js'
+import {
+  clearMdmSettingsCache,
+  parseCommandOutputAsSettings,
+  setMdmSettingsCache,
+} from '../utils/settings/mdm/settings.js'
+import {
+  getSettingsForSource,
+  loadManagedFileSettings,
+  parseSettingsFile,
+} from '../utils/settings/settings.js'
+import { resetSettingsCache } from '../utils/settings/settingsCache.js'
 import { validateSettingsFileContent } from '../utils/settings/validation.js'
 
 const validCommandHook = {
@@ -129,7 +138,7 @@ describe('settings diagnostics for unsupported command hook args', () => {
         type: 'command', command: 'sh', args: ['-c', 'cat'],
       }))
       const result = parseSettingsFile(settingsPath)
-      expect(result.settings?.hooks?.UserPromptSubmit?.[0]?.hooks).toEqual([])
+      expect(result.settings).toEqual({})
       expect(result.errors).toHaveLength(1)
       expect(result.errors[0]?.path).toBe('hooks.UserPromptSubmit.0.hooks.0.args')
       expect(result.errors[0]?.message).toContain('Command hook was skipped')
@@ -183,11 +192,67 @@ describe('settings diagnostics for unsupported command hook args', () => {
       }),
       'managed-settings',
     )
-    expect(settings.permissions?.deny).toEqual(['WebFetch'])
-    expect(settings.hooks?.UserPromptSubmit?.[0]?.hooks).toEqual([])
+    expect(settings).toEqual({ permissions: { deny: ['WebFetch'] } })
     expect(errors.map(error => error.path)).toEqual([
       'hooks.UserPromptSubmit.0.hooks.0.args',
     ])
+  })
+
+  test('skipping a hook removes only the structures it empties', () => {
+    const kept = { type: 'command' as const, command: 'echo kept' }
+    const skipped = { type: 'command', command: 'sh', args: ['-c', 'cat'] }
+    const { settings } = parseCommandOutputAsSettings(
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: 'Bash', hooks: [skipped] },
+            { matcher: 'Edit', hooks: [skipped, kept] },
+            { matcher: 'Read', hooks: [] },
+          ],
+          Stop: [{ hooks: [skipped] }],
+        },
+      }),
+      'managed-settings',
+    )
+    expect(settings.hooks).toEqual({
+      PreToolUse: [
+        { matcher: 'Edit', hooks: [kept] },
+        { matcher: 'Read', hooks: [] },
+      ],
+    })
+  })
+
+  test('a policy holding only a skipped hook does not outrank a lower-priority policy', () => {
+    const mdm = parseCommandOutputAsSettings(
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [{
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: 'sh', args: ['-c', 'cat'] }],
+          }],
+        },
+      }),
+      'mdm',
+    )
+    expect(mdm.settings).toEqual({})
+
+    const hkcu = parseCommandOutputAsSettings(
+      JSON.stringify({ permissions: { deny: ['WebFetch'] } }),
+      'hkcu',
+    )
+    try {
+      setMdmSettingsCache(mdm, hkcu)
+      resetSettingsCache()
+      // A managed settings file outranks HKCU, so expect it when this machine
+      // has one; either way the MDM source must not win.
+      const managedFile = loadManagedFileSettings().settings
+      expect(getSettingsForSource('policySettings')).toEqual(
+        managedFile ?? hkcu.settings,
+      )
+    } finally {
+      clearMdmSettingsCache()
+      resetSettingsCache()
+    }
   })
 
   test('settings edit validation explains every supplied JSON args value', () => {

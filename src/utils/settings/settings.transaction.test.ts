@@ -344,6 +344,38 @@ test('reads the merge base from disk after ownership, not from warm caches', asy
   })
 })
 
+test('an unrelated update keeps a command hook that runtime loading skips', async () => {
+  await withIsolatedUserSettings((_root, settingsPath) => {
+    const hooks = {
+      PreToolUse: [
+        {
+          matcher: 'Bash',
+          hooks: [
+            { type: 'command', command: 'sh', args: ['-c', 'printf HOOK'] },
+            { type: 'command', command: 'echo kept' },
+          ],
+        },
+      ],
+    }
+    writeFileSync(
+      settingsPath,
+      `${JSON.stringify({ env: { BEFORE: 'yes' }, hooks }, null, 2)}\n`,
+    )
+    expect(
+      getSettingsForSource('userSettings')?.hooks?.PreToolUse?.[0]?.hooks,
+    ).toEqual([{ type: 'command', command: 'echo kept' }])
+
+    expect(
+      updateSettingsForSource('userSettings', { env: { AFTER: 'yes' } }),
+    ).toEqual({ error: null })
+
+    expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual({
+      env: { BEFORE: 'yes', AFTER: 'yes' },
+      hooks,
+    })
+  })
+})
+
 test('creates a missing settings file without weakening the synchronous result', async () => {
   await withIsolatedUserSettings((_root, settingsPath) => {
     expect(existsSync(settingsPath)).toBe(false)

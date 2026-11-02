@@ -24,6 +24,7 @@ import { logForDiagnosticsNoPII } from '../../diagLogs.js'
 import { readFileSync } from '../../fileRead.js'
 import { getFsImplementation } from '../../fsOperations.js'
 import { safeParseJSON } from '../../json.js'
+import { clone } from '../../slowOperations.js'
 import { profileCheckpoint } from '../../startupProfiler.js'
 import {
   getManagedFilePath,
@@ -207,7 +208,9 @@ export function parseCommandOutputAsSettings(
   stdout: string,
   sourcePath: string,
 ): { settings: SettingsJson; errors: ValidationError[] } {
-  const data = safeParseJSON(stdout, false)
+  // Copy the memoized parse result: the filters below edit it in place, and
+  // the 30-minute refresh parses the same output again.
+  const data = clone(safeParseJSON(stdout, false))
   if (!data || typeof data !== 'object') {
     return { settings: {}, errors: [] }
   }
