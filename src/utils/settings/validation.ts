@@ -1,5 +1,6 @@
 import type { ConfigScope } from 'src/services/mcp/types.js'
 import { type ZodError, type ZodIssue, z } from 'zod/v4'
+import { COMMAND_HOOK_ARGS_UNSUPPORTED_MESSAGE } from '../../schemas/hooks.js'
 import { jsonParse } from '../slowOperations.js'
 import { plural } from '../stringUtils.js'
 import { validatePermissionRule } from './permissionValidation.js'
@@ -264,6 +265,49 @@ export function filterInvalidPermissionRules(
         return false
       }
       return true
+    })
+  }
+  return warnings
+}
+
+/**
+ * Removes command hooks that supply the unsupported `args` field from raw
+ * parsed JSON before schema validation. The hook is skipped (it never runs
+ * with a different command than intended), and the rest of the file, including
+ * its permission rules, still loads. Returns a warning for each removed hook.
+ */
+export function filterUnsupportedCommandHookArgs(
+  data: unknown,
+  filePath: string,
+): ValidationError[] {
+  if (!data || typeof data !== 'object') return []
+  const hooks = (data as Record<string, unknown>).hooks
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return []
+
+  const warnings: ValidationError[] = []
+  for (const [event, matchers] of Object.entries(hooks)) {
+    if (!Array.isArray(matchers)) continue
+    matchers.forEach((matcher: unknown, matcherIndex) => {
+      if (!matcher || typeof matcher !== 'object') return
+      const config = matcher as Record<string, unknown>
+      if (!Array.isArray(config.hooks)) return
+      config.hooks = config.hooks.filter((hook: unknown, hookIndex) => {
+        if (
+          !hook ||
+          typeof hook !== 'object' ||
+          (hook as Record<string, unknown>).type !== 'command' ||
+          (hook as Record<string, unknown>).args === undefined
+        ) {
+          return true
+        }
+        warnings.push({
+          file: filePath,
+          path: `hooks.${event}.${matcherIndex}.hooks.${hookIndex}.args`,
+          message: `Command hook was skipped. ${COMMAND_HOOK_ARGS_UNSUPPORTED_MESSAGE}`,
+          invalidValue: (hook as Record<string, unknown>).args,
+        })
+        return false
+      })
     })
   }
   return warnings

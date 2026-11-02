@@ -104,8 +104,11 @@ jobs:
       - name: Build
         run: bun run build
 
+      # Same layout PR Checks validates: eight unit shards plus the dedicated
+      # conversation-arc and context-efficiency passes. A single-process run
+      # here hit cross-file mock leaks that no PR run could surface.
       - name: Run unit tests
-        run: bun run test
+        run: bun run test:full
 
       - name: Smoke test
         run: bun run smoke

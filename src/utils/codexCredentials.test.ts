@@ -2,11 +2,27 @@
  * These tests avoid static imports so Bun can mock secureStorage before
  * codexCredentials is first loaded.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
+
+// mock.restore() does not undo mock.module(), so put the real storage modules
+// back once this file is done. Otherwise a later file in the same process
+// (e.g. src/entrypoints/sdk/mcpNeedsAuth.test.ts) reads the stubs below.
+const nonce = `${Date.now()}-${Math.random()}`
+const realPlainTextStorage = {
+  ...await import(`./secureStorage/plainTextStorage.js?real=${nonce}`),
+}
+const realSecureStorage = {
+  ...await import(`./secureStorage/index.js?real=${nonce}`),
+}
+
+afterAll(() => {
+  mock.module('./secureStorage/plainTextStorage.js', () => realPlainTextStorage)
+  mock.module('./secureStorage/index.js', () => realSecureStorage)
+})
 
 type CodexCredentialsModule = typeof import('./codexCredentials.js')
 

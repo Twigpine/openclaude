@@ -32,6 +32,7 @@ import {
 import { type SettingsJson, SettingsSchema } from '../types.js'
 import {
   filterInvalidPermissionRules,
+  filterUnsupportedCommandHookArgs,
   formatZodError,
   type ValidationError,
 } from '../validation.js'
@@ -211,7 +212,10 @@ export function parseCommandOutputAsSettings(
     return { settings: {}, errors: [] }
   }
 
-  const ruleWarnings = filterInvalidPermissionRules(data, sourcePath)
+  const ruleWarnings = [
+    ...filterInvalidPermissionRules(data, sourcePath),
+    ...filterUnsupportedCommandHookArgs(data, sourcePath),
+  ]
   const parseResult = SettingsSchema().safeParse(data)
   if (!parseResult.success) {
     const errors = formatZodError(parseResult.error, sourcePath)

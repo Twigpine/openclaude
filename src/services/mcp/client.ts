@@ -113,6 +113,7 @@ import {
 import { buildMcpToolName } from './mcpStringUtils.js'
 import { normalizeNameForMCP } from './normalization.js'
 import { listAllMcpResources, paginateMcpList } from './pagination.js'
+import { createMcpStdioClientTransport } from './stdioTransport.js'
 import { getLoggingSafeMcpBaseUrl } from './utils.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -1199,7 +1200,7 @@ export const connectToServer = memoize(
           serverRef.args ?? [],
           process.env.CLAUDE_CODE_SHELL_PREFIX,
         )
-        transport = new StdioClientTransport({
+        transport = createMcpStdioClientTransport({
           command: finalCommand,
           args: finalArgs,
           env: {

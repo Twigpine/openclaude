@@ -5,6 +5,8 @@ WORKDIR /app
 
 # Copy dependency manifests first for better layer caching
 COPY package.json bun.lock .bun-version ./
+# The node-domexception override in package.json resolves to this local shim
+COPY vendor/ vendor/
 
 # Install the Bun version tracked by the repo
 RUN set -eu; \

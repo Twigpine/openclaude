@@ -10,6 +10,7 @@ import {
 } from './hooks.js'
 import { PluginHooksSchema } from '../utils/plugins/schemas.js'
 import { SettingsSchema } from '../utils/settings/types.js'
+import { parseCommandOutputAsSettings } from '../utils/settings/mdm/settings.js'
 import { parseSettingsFile } from '../utils/settings/settings.js'
 import { validateSettingsFileContent } from '../utils/settings/validation.js'
 
@@ -120,7 +121,7 @@ describe('settings diagnostics for unsupported command hook args', () => {
     hooks: { UserPromptSubmit: [{ hooks: [hook] }] },
   })
 
-  test('settings loading preserves the explanation and rejects the file', () => {
+  test('settings loading skips the hook and keeps the explanation', () => {
     const fixtureDir = mkdtempSync(join(tmpdir(), 'hook-args-diagnostic-'))
     const settingsPath = join(fixtureDir, 'settings.json')
     try {
@@ -128,14 +129,65 @@ describe('settings diagnostics for unsupported command hook args', () => {
         type: 'command', command: 'sh', args: ['-c', 'cat'],
       }))
       const result = parseSettingsFile(settingsPath)
-      expect(result.settings).toBeNull()
+      expect(result.settings?.hooks?.UserPromptSubmit?.[0]?.hooks).toEqual([])
       expect(result.errors).toHaveLength(1)
       expect(result.errors[0]?.path).toBe('hooks.UserPromptSubmit.0.hooks.0.args')
+      expect(result.errors[0]?.message).toContain('Command hook was skipped')
       expect(result.errors[0]?.message).toContain('do not support an "args" field')
       expect(result.errors[0]?.message).toContain('complete invocation in "command"')
     } finally {
       rmSync(fixtureDir, { recursive: true, force: true })
     }
+  })
+
+  test('one hook with args does not discard the rest of the settings file', () => {
+    const fixtureDir = mkdtempSync(join(tmpdir(), 'hook-args-isolation-'))
+    const settingsPath = join(fixtureDir, 'settings.json')
+    try {
+      writeFileSync(settingsPath, JSON.stringify({
+        permissions: { deny: ['Bash(rm -rf:*)'] },
+        env: { OPENAI_MODEL: 'gpt-4o' },
+        hooks: {
+          PreToolUse: [{
+            matcher: 'Bash',
+            hooks: [
+              { type: 'command', command: '~/bin/notify.sh', args: [] },
+              validCommandHook,
+            ],
+          }],
+          UserPromptSubmit: [{ hooks: [validCommandHook] }],
+        },
+      }))
+      const result = parseSettingsFile(settingsPath)
+      expect(result.settings?.permissions?.deny).toEqual(['Bash(rm -rf:*)'])
+      expect(result.settings?.env).toEqual({ OPENAI_MODEL: 'gpt-4o' })
+      expect(result.settings?.hooks?.PreToolUse?.[0]?.hooks).toEqual([validCommandHook])
+      expect(result.settings?.hooks?.UserPromptSubmit?.[0]?.hooks).toEqual([validCommandHook])
+      expect(result.errors.map(error => error.path)).toEqual([
+        'hooks.PreToolUse.0.hooks.0.args',
+      ])
+    } finally {
+      rmSync(fixtureDir, { recursive: true, force: true })
+    }
+  })
+
+  test('managed settings from a command skip the hook and keep the rest', () => {
+    const { settings, errors } = parseCommandOutputAsSettings(
+      JSON.stringify({
+        permissions: { deny: ['WebFetch'] },
+        hooks: {
+          UserPromptSubmit: [{
+            hooks: [{ type: 'command', command: 'sh', args: ['-c', 'cat'] }],
+          }],
+        },
+      }),
+      'managed-settings',
+    )
+    expect(settings.permissions?.deny).toEqual(['WebFetch'])
+    expect(settings.hooks?.UserPromptSubmit?.[0]?.hooks).toEqual([])
+    expect(errors.map(error => error.path)).toEqual([
+      'hooks.UserPromptSubmit.0.hooks.0.args',
+    ])
   })
 
   test('settings edit validation explains every supplied JSON args value', () => {

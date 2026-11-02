@@ -19,6 +19,7 @@ import { getDefaultAppState } from 'src/state/AppStateStore.js'
 import review from '../commands/review.js'
 import type { Command } from '../commands.js'
 import { getMcpToolsCommandsAndResources } from '../services/mcp/client.js'
+import { MCP_STDIO_MAX_BUFFER_BYTES } from '../services/mcp/stdioTransport.js'
 import type { MCPServerConnection } from '../services/mcp/types.js'
 import {
   findToolByName,
@@ -257,7 +258,9 @@ export async function startMCPServer(
   )
 
   async function runServer() {
-    const transport = new StdioServerTransport()
+    const transport = new StdioServerTransport(undefined, undefined, {
+      maxBufferSize: MCP_STDIO_MAX_BUFFER_BYTES,
+    })
     await server.connect(transport)
   }
 

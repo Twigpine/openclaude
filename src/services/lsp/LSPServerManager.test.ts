@@ -648,6 +648,28 @@ describe('LSP lifecycle notification failures', () => {
       await open.catch(() => {})
     }
   })
+
+  test('the default timeout keeps a server that is busy for a few seconds', async () => {
+    jest.useFakeTimers()
+    const { manager, controls } = await createManager()
+    const server = controls.get('typescript')!
+    const gate = server.blockNextNotification('textDocument/didOpen')
+    const open = manager.openFile('/repo/src/busy-open.ts', 'contents')
+    await gate.started
+
+    try {
+      jest.advanceTimersByTime(5_000)
+      gate.release()
+      await expect(open).resolves.toBeUndefined()
+      expect(server.stopCalls).not.toHaveBeenCalled()
+      expect(server.server.state).toBe('running')
+    } finally {
+      gate.release()
+      jest.runAllTimers()
+      jest.useRealTimers()
+      await open.catch(() => {})
+    }
+  })
 })
 
 describe('LSP generation resynchronization', () => {

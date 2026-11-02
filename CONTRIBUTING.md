@@ -267,6 +267,14 @@ only. Structured diff rendering in `src/native-ts/color-diff/index.ts` loads
 `highlight.js` separately. Run the highlighting and Markdown regression tests
 when changing this dependency or its ANSI renderer.
 
+Keep `wrap-ansi` pinned to `9.0.2`. Version 10 expands tabs into spaces, and
+`Cursor` (`src/utils/Cursor.ts`) and Ink's style mapping expect the wrapped
+text to keep the original characters; with v10, a tab in a text input throws
+and exits the session. Only the Node runtime loads the npm package: under Bun,
+`src/ink/wrapAnsi.ts` uses `Bun.wrapAnsi`, so tests never exercise it.
+`src/ink/wrapAnsi.test.ts` asserts the npm package keeps tabs. Adapt the tab
+handling before upgrading past 9.x.
+
 Keep all direct dependencies and devDependencies pinned to exact versions in the
 root and web manifests. Regenerate the relevant Bun lockfile
 when changing a pin.
