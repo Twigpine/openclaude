@@ -27,6 +27,61 @@ const dependencies = {
   shouldPreserveGeminiThoughtSignature: () => false,
 }
 
+test.each(['enabled', 'disabled'] as const)(
+  'translates Venice DeepSeek thinking=%s to reasoning.enabled',
+  async thinking => {
+    await ensureIntegrationsLoaded()
+    const model = 'deepseek-v4-1-flash-1017-uncensored?reasoning=high'
+    const processEnv = {
+      OPENAI_BASE_URL: 'https://api.venice.ai/api/v1',
+      OPENAI_API_KEY: 'test-key',
+    }
+    const prepared = prepareOpenAIRequest({
+      request: resolveProviderRequest({ model, processEnv }),
+      requestProcessEnv: processEnv,
+      params: {
+        model,
+        messages: [{ role: 'user', content: 'hello' }],
+        max_tokens: 64,
+        thinking: { type: thinking },
+      },
+      dependencies,
+    })
+
+    expect(prepared.body.model).toBe('deepseek-v4-1-flash-1017-uncensored')
+    expect(prepared.body).not.toHaveProperty('thinking')
+    expect(prepared.body.reasoning).toEqual({ enabled: thinking === 'enabled' })
+    expect(prepared.body.reasoning_effort).toBe(thinking === 'enabled' ? 'high' : undefined)
+    expect(prepared.body.messages).toEqual([{ role: 'user', content: 'hello' }])
+    expect(prepared.body.max_tokens).toBe(64)
+  },
+)
+
+test.each([
+  'https://api.deepseek.com',
+  'https://gateway.example.test/api.venice.ai/v1',
+  'https://api.venice.ai.example.test/v1',
+])('preserves DeepSeek thinking outside the Venice host (%s)', async baseUrl => {
+  await ensureIntegrationsLoaded()
+  const model = 'deepseek-v4-pro?reasoning=high'
+  const processEnv = { OPENAI_BASE_URL: baseUrl, OPENAI_API_KEY: 'test-key' }
+  const prepared = prepareOpenAIRequest({
+    request: resolveProviderRequest({ model, processEnv }),
+    requestProcessEnv: processEnv,
+    params: {
+      model,
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 64,
+      thinking: { type: 'enabled' },
+    },
+    dependencies,
+  })
+
+  expect(prepared.body.thinking).toEqual({ type: 'enabled' })
+  expect(prepared.body.reasoning_effort).toBe('high')
+  expect(prepared.body).not.toHaveProperty('reasoning')
+})
+
 test('keeps store: false by default and removes it only for configured routes', async () => {
   await ensureIntegrationsLoaded()
   const prepare = (model: string, processEnv: NodeJS.ProcessEnv) =>

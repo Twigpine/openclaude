@@ -915,6 +915,12 @@ OpenAI-compatible providers. On the same route, that saved key takes precedence 
 provider-specific value takes precedence over the saved value. This applies to
 both MiMo API and token-plan routes.
 
+For DeepSeek models on Venice, OpenClaude translates the thinking toggle to
+Venice's `reasoning.enabled` field and preserves `reasoning_effort` when thinking
+is enabled. Venice does not accept DeepSeek's top-level `thinking` field. This
+translation applies only to `api.venice.ai`; direct DeepSeek endpoints and other
+gateways retain their own request format.
+
 Launch reconstruction retains these dedicated keys only for their matching
 routes. A shell override to another provider's URL does not carry the saved
 source provider's dedicated key into the new launch.
