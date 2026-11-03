@@ -110,6 +110,12 @@ export function convertNonStreamingResponseToAnthropicMessage(
     ? 'tool_use' : choice?.finish_reason === 'length' ? 'max_tokens' : 'end_turn'
   if (choice?.finish_reason === 'content_filter' || choice?.finish_reason === 'safety') {
     content.push({ type: 'text', text: '\n\n[Content blocked by provider safety filter]' })
+  } else if (choice?.finish_reason === 'length') {
+    // Keep parity with the streaming path: tell the user the reply was cut off.
+    content.push({
+      type: 'text',
+      text: '\n\n[Response truncated — reached length limit or upstream stalled. Ask the model to continue.]',
+    })
   }
   return {
     id: data.id ?? deps.makeMessageId(), type: 'message', role: 'assistant', content,
