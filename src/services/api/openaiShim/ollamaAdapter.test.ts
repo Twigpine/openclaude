@@ -319,3 +319,58 @@ test('the façade sends native tool names and preserves streaming tool finish', 
     delta: { stop_reason: 'tool_use' },
   })
 })
+
+test('native stream pull keeps reading until it enqueues output (thinking-only chunks)', async () => {
+  // A pull() that resolves without enqueuing leaves the pending read unresolved on
+  // Node's WHATWG streams, so the request hangs until the stream idle timeout.
+  // Bun re-pulls and coalesces queued reads, so piping a body would not catch it:
+  // drive the underlying source directly with one NDJSON line per network read.
+  const encoder = new TextEncoder()
+  const reads = [
+    { model: 'llama3', message: { content: 'hi' }, done: false },
+    { model: 'llama3', message: { thinking: 'hmm' }, done: false },
+    { model: 'llama3', message: { content: ' there' }, done: true, done_reason: 'stop' },
+  ].map(line => encoder.encode(`${JSON.stringify(line)}\n`))
+  const body = {
+    getReader: () => ({
+      read: async () => {
+        const value = reads.shift()
+        return value ? { done: false, value } : { done: true, value: undefined }
+      },
+      cancel: async () => {},
+    }),
+  }
+
+  const OriginalReadableStream = globalThis.ReadableStream
+  let source: UnderlyingDefaultSource<Uint8Array> | undefined
+  globalThis.ReadableStream = class extends OriginalReadableStream<Uint8Array> {
+    constructor(underlying?: UnderlyingDefaultSource<Uint8Array>, strategy?: QueuingStrategy<Uint8Array>) {
+      // Capture the adapter's source without letting the real stream pull from it.
+      if (!source && underlying?.pull) source = underlying
+      super((source === underlying ? undefined : underlying) ?? {}, strategy)
+    }
+  } as typeof ReadableStream
+  try {
+    const response = { body, status: 200, statusText: 'OK', url: 'http://localhost:11434/api/chat' }
+    convertOllamaStreamingResponse(response as unknown as Response, 'fallback', () => 'chatcmpl-pull')
+  } finally {
+    globalThis.ReadableStream = OriginalReadableStream
+  }
+  expect(source?.pull).toBeDefined()
+
+  const enqueued: string[] = []
+  const controller = {
+    enqueue: (chunk: Uint8Array) => { enqueued.push(new TextDecoder().decode(chunk)) },
+    close: () => {},
+    error: () => {},
+    desiredSize: 1,
+  } as unknown as ReadableStreamDefaultController<Uint8Array>
+
+  await source!.pull!(controller)
+  expect(enqueued.join('')).toContain('"content":"hi"')
+  const afterFirstPull = enqueued.length
+  // The next read is thinking-only (no OpenAI delta): pull must keep reading.
+  await source!.pull!(controller)
+  expect(enqueued.length).toBeGreaterThan(afterFirstPull)
+  expect(enqueued.join('')).toContain('"content":" there"')
+})
