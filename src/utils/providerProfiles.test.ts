@@ -95,6 +95,7 @@ const RESTORED_KEYS = [
   'API_ROUTE_API_KEY',
   'API_ROUTE_MODEL',
   'LLMTR_API_KEY',
+  'REQUESTY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -349,6 +350,17 @@ function buildLlmtrProfile(overrides: Partial<ProviderProfile> = {}): ProviderPr
     baseUrl: 'https://llmtr.com/v1',
     model: 'deepseek/deepseek-v4-flash',
     apiKey: 'llmtr-test-key',
+    ...overrides,
+  })
+}
+
+function buildRequestyProfile(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
+  return buildProfile({
+    provider: 'requesty',
+    name: 'Requesty',
+    baseUrl: 'https://router.requesty.ai/v1',
+    model: 'openai/gpt-5-mini',
+    apiKey: 'requesty-test-key',
     ...overrides,
   })
 }
@@ -2594,6 +2606,54 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.OPENAI_BASE_URL).toBe('https://proxy.example/v1')
     expect(process.env.OPENAI_API_KEY).toBeUndefined()
     expect(process.env.LLMTR_API_KEY).toBeUndefined()
+  })
+
+  test('retargeted Requesty profile withholds its saved credential', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    applyProviderProfileToProcessEnv(
+      buildRequestyProfile({ baseUrl: 'https://example.test/v1' }),
+    )
+
+    expect(process.env.OPENAI_BASE_URL).toBe('https://example.test/v1')
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    expect(process.env.REQUESTY_API_KEY).toBeUndefined()
+  })
+
+  test('Requesty profile clears an ambient dedicated key so its saved key wins', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    process.env.REQUESTY_API_KEY = 'ambient-old'
+
+    applyProviderProfileToProcessEnv(
+      buildRequestyProfile({ apiKey: 'selected-new' }),
+    )
+
+    expect(process.env.OPENAI_API_KEY).toBe('selected-new')
+    expect(
+      resolveRouteCredentialValue({
+        routeId: 'requesty',
+        baseUrl: process.env.OPENAI_BASE_URL,
+        processEnv: process.env,
+      }),
+    ).toBe('selected-new')
+  })
+
+  test('keyless canonical Requesty profile keeps its ambient dedicated key', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    process.env.REQUESTY_API_KEY = 'ambient-requesty-key'
+
+    applyProviderProfileToProcessEnv(buildRequestyProfile({ apiKey: undefined }))
+
+    expect(
+      resolveRouteCredentialValue({
+        routeId: 'requesty',
+        baseUrl: process.env.OPENAI_BASE_URL,
+        processEnv: process.env,
+      }),
+    ).toBe('ambient-requesty-key')
   })
 
   test('query-bearing LLMTR profiles retain generic proxy capabilities', async () => {
@@ -5221,6 +5281,83 @@ describe('setActiveProviderProfile', () => {
           processEnv: startupEnv,
         }),
       ).toBe('api-route-test-key')
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
+  test('Requesty profiles keep saved-key ownership across restart and withhold it when retargeted', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
+    process.chdir(tempDir)
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+      const canonical = buildRequestyProfile({ id: 'requesty_profile' })
+      const keyless = buildRequestyProfile({
+        id: 'requesty_keyless',
+        apiKey: undefined,
+      })
+      const retargeted = buildRequestyProfile({
+        id: 'requesty_proxy',
+        baseUrl: 'https://example.test/v1',
+      })
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [canonical, keyless, retargeted],
+      }))
+      const readPersisted = () =>
+        JSON.parse(
+          readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
+        )
+      const { buildStartupEnvFromProfile } = await import(
+        `./providerProfile.js?ts=${Date.now()}-${Math.random()}`
+      )
+      const ambient = { REQUESTY_API_KEY: 'ambient-unrelated-key' }
+
+      setActiveProviderProfile('requesty_profile', { configDir })
+      const persisted = readPersisted()
+      expect(persisted.env).toMatchObject({
+        OPENAI_BASE_URL: 'https://router.requesty.ai/v1',
+        OPENAI_API_KEY: 'requesty-test-key',
+        REQUESTY_API_KEY: 'requesty-test-key',
+      })
+      const startupEnv = await buildStartupEnvFromProfile({
+        persisted,
+        processEnv: ambient,
+      })
+      expect(startupEnv.REQUESTY_API_KEY).toBe('requesty-test-key')
+      delete persisted.env.REQUESTY_API_KEY
+      const migratedStartupEnv = await buildStartupEnvFromProfile({
+        persisted,
+        processEnv: ambient,
+      })
+      expect(migratedStartupEnv.REQUESTY_API_KEY).toBe('requesty-test-key')
+
+      setActiveProviderProfile('requesty_keyless', { configDir })
+      const keylessStartupEnv = await buildStartupEnvFromProfile({
+        persisted: readPersisted(),
+        processEnv: ambient,
+      })
+      expect(keylessStartupEnv.REQUESTY_API_KEY).toBe('ambient-unrelated-key')
+
+      setActiveProviderProfile('requesty_proxy', { configDir })
+      expect(process.env.OPENAI_API_KEY).toBeUndefined()
+      expect(process.env.REQUESTY_API_KEY).toBeUndefined()
+      const retargetedPersisted = readPersisted()
+      expect(retargetedPersisted.env.OPENAI_API_KEY).toBeUndefined()
+      expect(retargetedPersisted.env.REQUESTY_API_KEY).toBeUndefined()
+      const retargetedStartupEnv = await buildStartupEnvFromProfile({
+        persisted: retargetedPersisted,
+        processEnv: ambient,
+      })
+      expect(retargetedStartupEnv.OPENAI_BASE_URL).toBe('https://example.test/v1')
+      expect(retargetedStartupEnv.OPENAI_API_KEY).toBeUndefined()
+      expect(retargetedStartupEnv.REQUESTY_API_KEY).toBeUndefined()
     } finally {
       process.chdir(originalCwd)
       rmSync(tempDir, { recursive: true, force: true })

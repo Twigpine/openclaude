@@ -31,6 +31,7 @@ import {
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalConcentrateInferenceBaseUrl,
   isCanonicalLlmtrInferenceBaseUrl,
+  isCanonicalRequestyInferenceBaseUrl,
   isCanonicalMergeGatewayInferenceBaseUrl,
   isGmiCloudBaseUrl,
   isCanonicalCommandcodeInferenceBaseUrl,
@@ -176,6 +177,7 @@ const PROFILE_ENV_KEYS = [
   'FIREWORKS_API_KEY',
   'LONGCAT_API_KEY',
   'LLMTR_API_KEY',
+  'REQUESTY_API_KEY',
   'MERGE_GATEWAY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
@@ -285,6 +287,7 @@ export type ProfileEnv = {
   FIREWORKS_API_KEY?: string
   LONGCAT_API_KEY?: string
   LLMTR_API_KEY?: string
+  REQUESTY_API_KEY?: string
   MERGE_GATEWAY_API_KEY?: string
   CMD_API_KEY?: string
   COMMANDCODE_API_KEY?: string
@@ -2457,6 +2460,7 @@ export async function buildLaunchEnv(options: {
     'APISMART_API_KEY',
     'CONCENTRATE_API_KEY',
     'LLMTR_API_KEY',
+    'REQUESTY_API_KEY',
     'MERGE_GATEWAY_API_KEY',
     'CMD_API_KEY',
     'COMMANDCODE_API_KEY',
@@ -2507,6 +2511,9 @@ export async function buildLaunchEnv(options: {
     if (dedicatedKey === 'LLMTR_API_KEY' && effectiveOpenAIRouteId !== 'llmtr') {
       continue
     }
+    if (dedicatedKey === 'REQUESTY_API_KEY' && effectiveOpenAIRouteId !== 'requesty') {
+      continue
+    }
     if (dedicatedKey === 'MERGE_GATEWAY_API_KEY' && effectiveOpenAIRouteId !== 'merge-gateway') {
       continue
     }
@@ -2547,6 +2554,10 @@ export async function buildLaunchEnv(options: {
       dedicatedKey === 'LLMTR_API_KEY' &&
       !!dedicatedBaseUrl &&
       !isCanonicalLlmtrInferenceBaseUrl(dedicatedBaseUrl)
+    const withholdAmbientRequestyKey =
+      dedicatedKey === 'REQUESTY_API_KEY' &&
+      !!dedicatedBaseUrl &&
+      !isCanonicalRequestyInferenceBaseUrl(dedicatedBaseUrl)
     const withholdAmbientMergeGatewayKey =
       dedicatedKey === 'MERGE_GATEWAY_API_KEY' &&
       !!dedicatedBaseUrl &&
@@ -2560,6 +2571,7 @@ export async function buildLaunchEnv(options: {
       withholdAmbientApismartKey ||
       withholdAmbientConcentrateKey ||
       withholdAmbientLlmtrKey ||
+      withholdAmbientRequestyKey ||
       withholdAmbientMergeGatewayKey ||
       withholdAmbientCommandcodeKey
     // Unlike the generic proxy-compatible routes above, Concentrate's
@@ -2570,6 +2582,7 @@ export async function buildLaunchEnv(options: {
     if (
       withholdAmbientConcentrateKey ||
       withholdAmbientLlmtrKey ||
+      withholdAmbientRequestyKey ||
       withholdAmbientMergeGatewayKey ||
       withholdAmbientCommandcodeKey
     ) {
@@ -2614,6 +2627,18 @@ export async function buildLaunchEnv(options: {
       !!dedicatedBaseUrl &&
       isCanonicalLlmtrInferenceBaseUrl(dedicatedBaseUrl)
         ? sanitizeApiKey(persistedEnv.LLMTR_API_KEY) ||
+          (persistedOpenAICredential?.kind === 'usable'
+            ? sanitizeApiKey(persistedOpenAICredential.value)
+            : undefined)
+        : undefined
+    // Same ownership rule for a selected canonical Requesty profile, including
+    // startup files that only persisted the saved key as OPENAI_API_KEY.
+    const persistedRequestyProfileKey =
+      dedicatedKey === 'REQUESTY_API_KEY' &&
+      effectiveOpenAIRouteId === 'requesty' &&
+      !!dedicatedBaseUrl &&
+      isCanonicalRequestyInferenceBaseUrl(dedicatedBaseUrl)
+        ? sanitizeApiKey(persistedEnv.REQUESTY_API_KEY) ||
           (persistedOpenAICredential?.kind === 'usable'
             ? sanitizeApiKey(persistedOpenAICredential.value)
             : undefined)
@@ -2690,6 +2715,7 @@ export async function buildLaunchEnv(options: {
       ? sanitizeApiKey(persistedEnv[dedicatedKey])
       : backfillDedicatedFromOpenAI ||
         persistedLlmtrProfileKey ||
+        persistedRequestyProfileKey ||
         persistedMergeGatewayProfileKey ||
         persistedCommandcodeProfileKey ||
         persistedOrcarouterProfileKey ||

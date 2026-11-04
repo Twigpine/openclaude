@@ -74,6 +74,7 @@ import {
   isCanonicalLlmtrInferenceBaseUrl,
   isCanonicalMergeGatewayInferenceBaseUrl,
   isCanonicalCommandcodeInferenceBaseUrl,
+  isCanonicalRequestyInferenceBaseUrl,
   isFireworksBaseUrl,
   isGmiCloudBaseUrl,
   isLongcatBaseUrl,
@@ -246,6 +247,17 @@ function isLlmtrProfile(profile: ProviderProfile): boolean {
   }
   const baseUrl = profile.baseUrl?.trim()
   return !baseUrl || isCanonicalLlmtrInferenceBaseUrl(baseUrl)
+}
+
+function isRequestyProfile(profile: ProviderProfile): boolean {
+  const { route } = resolveProfileCompatibility(profile.provider)
+  if (route.routeId !== 'requesty') {
+    return false
+  }
+  const baseUrl = profile.baseUrl?.trim()
+  // A missing base URL resolves to the Requesty default, which is canonical.
+  // Any other URL is a retargeted endpoint and must not receive the saved key.
+  return !baseUrl || isCanonicalRequestyInferenceBaseUrl(baseUrl)
 }
 
 function isMergeGatewayProfile(profile: ProviderProfile): boolean {
@@ -1369,6 +1381,8 @@ export function applyProviderProfileToProcessEnv(
       route.routeId === 'api-route' && !isApiRouteProfile(profile)
     const withholdRetargetedLlmtrCredential =
       route.routeId === 'llmtr' && !isLlmtrProfile(profile)
+    const withholdRetargetedRequestyCredential =
+      route.routeId === 'requesty' && !isRequestyProfile(profile)
     const withholdRetargetedMergeGatewayCredential =
       route.routeId === 'merge-gateway' && !isMergeGatewayProfile(profile)
     const withholdRetargetedCommandcodeCredential =
@@ -1382,6 +1396,7 @@ export function applyProviderProfileToProcessEnv(
       !withholdRetargetedConcentrateCredential &&
       !withholdRetargetedApiRouteCredential &&
       !withholdRetargetedLlmtrCredential &&
+      !withholdRetargetedRequestyCredential &&
       !withholdRetargetedMergeGatewayCredential &&
       !withholdRetargetedCommandcodeCredential &&
       !withholdRetargetedGmiCloudCredential
@@ -1569,6 +1584,15 @@ export function applyProviderProfileToProcessEnv(
             openAIProfileEnv.OPENAI_API_KEY ?? ambientLlmtrKey
           openAIProfileEnv.LLMTR_API_KEY = ambientLlmtrKey
         }
+      }
+    }
+    // REQUESTY_API_KEY is profile-managed: installing this env clears the
+    // ambient value so a keyed profile's saved key wins. A keyless canonical
+    // profile adopts the ambient key here; a retargeted profile gets neither.
+    if (isRequestyProfile(profile) && !profile.apiKey) {
+      const ambientRequestyKey = sanitizeApiKey(process.env.REQUESTY_API_KEY)
+      if (ambientRequestyKey) {
+        openAIProfileEnv.REQUESTY_API_KEY = ambientRequestyKey
       }
     }
     if (isCommandcodeProfile(profile)) {
@@ -1908,6 +1932,8 @@ function buildOpenAICompatibleStartupEnv(
     activeProfileRouteId === 'api-route' && !isApiRouteProfile(activeProfile)
   const withholdRetargetedLlmtrCredential =
     activeProfileRouteId === 'llmtr' && !isLlmtrProfile(activeProfile)
+  const withholdRetargetedRequestyCredential =
+    activeProfileRouteId === 'requesty' && !isRequestyProfile(activeProfile)
   const withholdRetargetedMergeGatewayCredential =
     activeProfileRouteId === 'merge-gateway' && !isMergeGatewayProfile(activeProfile)
   const withholdRetargetedCommandcodeCredential =
@@ -1919,6 +1945,7 @@ function buildOpenAICompatibleStartupEnv(
   const isConcentrateProfileFlag = isConcentrateProfile(activeProfile)
   const isApiRouteProfileFlag = isApiRouteProfile(activeProfile)
   const isLlmtrProfileFlag = isLlmtrProfile(activeProfile)
+  const isRequestyProfileFlag = isRequestyProfile(activeProfile)
   const isMergeGatewayProfileFlag = isMergeGatewayProfile(activeProfile)
   const isCommandcodeProfileFlag = isCommandcodeProfile(activeProfile)
 
@@ -1928,6 +1955,7 @@ function buildOpenAICompatibleStartupEnv(
     !withholdRetargetedConcentrateCredential &&
     !withholdRetargetedApiRouteCredential &&
     !withholdRetargetedLlmtrCredential &&
+    !withholdRetargetedRequestyCredential &&
     !withholdRetargetedMergeGatewayCredential &&
     !withholdRetargetedCommandcodeCredential
   ) {
@@ -1992,6 +2020,9 @@ function buildOpenAICompatibleStartupEnv(
       }
       if (isLlmtrProfileFlag) {
         strictEnv.LLMTR_API_KEY = activeProfile.apiKey
+      }
+      if (isRequestyProfileFlag) {
+        strictEnv.REQUESTY_API_KEY = activeProfile.apiKey
       }
       if (isMergeGatewayProfileFlag) {
         strictEnv.MERGE_GATEWAY_API_KEY = activeProfile.apiKey
@@ -2078,6 +2109,7 @@ function buildOpenAICompatibleStartupEnv(
     !withholdRetargetedConcentrateCredential &&
     !withholdRetargetedApiRouteCredential &&
     !withholdRetargetedLlmtrCredential &&
+    !withholdRetargetedRequestyCredential &&
     !withholdRetargetedMergeGatewayCredential &&
     !withholdRetargetedCommandcodeCredential
   ) {
@@ -2112,6 +2144,9 @@ function buildOpenAICompatibleStartupEnv(
     }
     if (isLlmtrProfileFlag) {
       env.LLMTR_API_KEY = activeProfile.apiKey
+    }
+    if (isRequestyProfileFlag) {
+      env.REQUESTY_API_KEY = activeProfile.apiKey
     }
     if (isMergeGatewayProfileFlag) {
       env.MERGE_GATEWAY_API_KEY = activeProfile.apiKey
