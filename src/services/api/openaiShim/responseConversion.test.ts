@@ -19,6 +19,10 @@ import {
   type NonStreamingOpenAIResponse,
 } from './responseConversion.js'
 
+// Same notice the streaming path appends when the provider stops with finish_reason 'length'.
+const TRUNCATION_NOTICE =
+  '\n\n[Response truncated — reached length limit or upstream stalled. Ask the model to continue.]'
+
 const parseXmlToolCalls = (text: string, allowHy3: boolean) => {
   let sequence = 0
   return parseXmlToolCallsModule(text, allowHy3, () => ++sequence)
@@ -222,7 +226,33 @@ test('normalizes array content and length stop reasons', () => {
     }],
   })
 
-  expect(message.content).toEqual([{ type: 'text', text: 'first\nsecond' }])
+  expect(message.content).toEqual([
+    { type: 'text', text: 'first\nsecond' },
+    { type: 'text', text: TRUNCATION_NOTICE },
+  ])
   expect(message.stop_reason).toBe('max_tokens')
   expect(message.id).toBe('msg-test')
+})
+
+test('marks a length-truncated non-streaming reply like the streaming path does', () => {
+  const message = convert({
+    choices: [{
+      message: { content: 'partial answer' },
+      finish_reason: 'length',
+    }],
+  })
+
+  expect(message.stop_reason).toBe('max_tokens')
+  expect(message.content).toEqual([
+    { type: 'text', text: 'partial answer' },
+    { type: 'text', text: TRUNCATION_NOTICE },
+  ])
+})
+
+test('does not add a truncation notice for a normal stop', () => {
+  const message = convert({
+    choices: [{ message: { content: 'done' }, finish_reason: 'stop' }],
+  })
+
+  expect(message.content).toEqual([{ type: 'text', text: 'done' }])
 })
