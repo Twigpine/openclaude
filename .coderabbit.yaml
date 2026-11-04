@@ -5,7 +5,12 @@ tone_instructions: "Be direct, concise, and maintainer-minded. Separate blocking
 
 reviews:
   profile: "assertive"
-  request_changes_workflow: true
+  # CodeRabbit requests changes for blocking findings and approves the PR once
+  # they are resolved, the latest commit is reviewed, and every pre-merge check
+  # below passes. This is the current key for the deprecated
+  # request_changes_workflow; setting both keys turns approvals off.
+  auto_approvals:
+    enabled: true
   high_level_summary: true
   review_status: true
   review_details: true
@@ -30,9 +35,10 @@ reviews:
     auto_pause_after_reviewed_commits: 0
     base_branches:
       - ".*"
+    # github-actions[bot] is not ignored on purpose: it opens the release-please
+    # PRs, and the "npm release PR validated" check has to run on them.
     ignore_usernames:
       - "dependabot[bot]"
-      - "github-actions[bot]"
 
   path_filters:
     - "!src/entrypoints/sdk/coreTypes.generated.ts"
@@ -103,6 +109,22 @@ reviews:
         mode: "warning"
         instructions: |
           Verify that product, trust-model, routing-default, telemetry/network, and permission-policy changes are not hidden inside unrelated cleanup. Flag the PR if the policy decision needs explicit maintainer alignment.
+      - name: "npm release PR validated"
+        mode: "error"
+        instructions: |
+          Merging a release PR publishes the package to npm, so CodeRabbit approves one only after this check passes.
+
+          Scope: a release PR has a head branch that starts with `release-please--branches--main` and a title of the form `chore(main): release X.Y.Z`. Every other PR passes this check; say "Not a release PR."
+
+          For a release PR, NEW is the version in the title and PREVIOUS is the `"."` value of `.release-please-manifest.json` on the base branch. The check passes only when all of the following hold. When it fails, list each failed item with the file and the value found.
+
+          1. Changed files: the diff touches only `package.json`, `.release-please-manifest.json`, and `CHANGELOG.md`. Any other path fails, whether source, tests, workflows, scripts, dependency manifests, or lockfiles.
+          2. One version everywhere: NEW equals `version` in `package.json` and the `"."` value in `.release-please-manifest.json`.
+          3. Version-only edits: in `package.json` only the `version` line changes, and in `.release-please-manifest.json` only the `"."` value changes. No dependency, `engines`, `files`, `bin`, `exports`, or `scripts` change is allowed.
+          4. Valid increment: NEW is a plain MAJOR.MINOR.PATCH with no prerelease or build suffix, and it is greater than PREVIOUS.
+          5. Bump level: this repo sets `bump-minor-pre-major`. Below 1.0.0, a breaking change or a feat bumps MINOR and resets PATCH, while a fix bumps PATCH. From 1.0.0 on, a breaking change bumps MAJOR, a feat bumps MINOR, and a fix bumps PATCH. Read the change types from the new CHANGELOG section: a "BREAKING CHANGES" heading means a breaking change, "Features" means a feat, and "Bug Fixes" or "Performance Improvements" mean a fix. NEW must be exactly the next version for the highest change type present. A commit in the release whose `Release-As:` footer names NEW overrides this item.
+          6. Changelog: `CHANGELOG.md` gains exactly one new section, at the top, headed `## [NEW](https://github.com/Twigpine/openclaude/compare/vPREVIOUS...vNEW) (YYYY-MM-DD)`, with at least one entry. Everything below it is unchanged, so no earlier section is edited or removed.
+          7. Checks: no GitHub Check on the head commit, other than CodeRabbit's own, concluded as failure, cancelled, or timed out. Name each one that did. Checks that are still pending, or no checks at all, do not fail this item: list them, because the release workflow reruns the build and tests before it publishes.
 
   tools:
     github-checks:
