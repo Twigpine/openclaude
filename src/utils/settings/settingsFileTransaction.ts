@@ -18,9 +18,50 @@ import {
 import { markInternalWrite } from './internalWrites.js'
 import { resetSettingsCache } from './settingsCache.js'
 
+/** Outcome fields read from the synchronous process-identity lookup. */
+interface IdentityLookupOutcome {
+  error?: Error | null
+  status: number | null
+  stdout: string
+  stderr: string
+}
+
+/** Options passed by readCommandProcessStartId to the identity lookup. */
+interface IdentityLookupOptions {
+  encoding: 'utf8'
+  env?: NodeJS.ProcessEnv
+  timeout?: number
+  windowsHide?: boolean
+}
+
+/**
+ * Synchronous lookup behind the settings-lock process identity. Tests swap
+ * this through `__test` instead of repointing node:child_process
+ * process-wide: bun test shares one module registry across files in one
+ * process, and a stubbed builtin leaked into unrelated suites on CI.
+ */
+let identityLookupSync: (
+  command: string,
+  args: string[],
+  options: IdentityLookupOptions,
+) => IdentityLookupOutcome = spawnSync
+
+/** Test-only seam: replace the synchronous process-identity lookup. */
+export const __test = {
+  setIdentityLookupSync(impl: typeof identityLookupSync): void {
+    identityLookupSync = impl
+  },
+}
+
 const SETTINGS_LOCK_RETRY_MS = 25
 const SETTINGS_LOCK_CONTENTION_LOG_MS = 100
 const SETTINGS_LOCK_WAIT_MS = 2_000
+const SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS = 1_000
+// PowerShell startup plus the Get-Process lookup legitimately exceeds one
+// second on real Windows installations (reported 1.3-1.7s under load); a 1s
+// budget turns a slow lookup into EIDENTITY before any settings write runs,
+// so the Windows path gets a wider budget.
+const WINDOWS_SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS = 10_000
 const SETTINGS_LOCK_HOST = hostname()
 const SETTINGS_LOCK_OWNER_FILE = 'owner.json'
 const waitBuffer = new Int32Array(new SharedArrayBuffer(4))
@@ -162,9 +203,10 @@ function readCommandProcessStartId(
   command: string,
   args: string[],
   prefix: string,
+  timeoutMs: number,
 ): string | null {
   try {
-    const result = spawnSync(command, args, {
+    const result = identityLookupSync(command, args, {
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -172,7 +214,7 @@ function readCommandProcessStartId(
         LC_ALL: 'C',
         TZ: 'UTC',
       },
-      timeout: 1_000,
+      timeout: timeoutMs,
       windowsHide: true,
     })
     if (result.error || result.status !== 0) return null
@@ -185,7 +227,10 @@ function readCommandProcessStartId(
   }
 }
 
-function readProcessStartId(pid: number): string | null {
+function readProcessStartId(
+  pid: number,
+  windowsTimeoutMs = WINDOWS_SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS,
+): string | null {
   if (process.platform === 'linux') return readLinuxProcessStartId(pid)
   if (process.platform === 'win32') {
     return readCommandProcessStartId(
@@ -197,12 +242,14 @@ function readProcessStartId(pid: number): string | null {
         `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
       ],
       'windows',
+      windowsTimeoutMs,
     )
   }
   return readCommandProcessStartId(
     'ps',
     ['-p', String(pid), '-o', 'lstart='],
     'posix',
+    SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS,
   )
 }
 
@@ -249,7 +296,10 @@ function isIdentityOwnerAlive(
   if (processStartIds.has(cacheKey)) {
     currentProcessStartId = processStartIds.get(cacheKey) ?? null
   } else {
-    currentProcessStartId = readProcessStartId(identity.pid)
+    currentProcessStartId = readProcessStartId(
+      identity.pid,
+      SETTINGS_LOCK_IDENTITY_LOOKUP_TIMEOUT_MS,
+    )
     processStartIds.set(cacheKey, currentProcessStartId)
   }
   return (
@@ -461,6 +511,12 @@ function acquireSettingsLock(targetPath: string): () => void {
       }
       const remaining = deadline - now
       if (remaining <= 0) {
+        // The owner may have released during a synchronous identity lookup.
+        // Give the pending lock one final atomic publication before ELOCKED.
+        if (tryPublishPendingLock(pendingPath, lockPath)) {
+          acquired = true
+          return () => releaseOwnedLock(lockPath, owner)
+        }
         throw Object.assign(
           new Error(
             `Timed out after ${SETTINGS_LOCK_WAIT_MS}ms waiting for settings lock ${lockPath}, held by ${describeCurrentOwner(lockPath)}. If that process is known to have exited, remove the lock directory before retrying.`,

@@ -805,7 +805,9 @@ test(
           lstatSync(path) {
             if (
               !removedContendedLock &&
-              resolve(path) === resolve(`${settingsPath}.lock`)
+              // The transaction locks the real path; macOS tmpdir may be a
+              // /var -> /private/var alias, so compare against the real lock.
+              resolve(path) === resolve(fs.realpathSync(`${settingsPath}.lock`))
             ) {
               removedContendedLock = true
               holder.process.kill('SIGKILL')
