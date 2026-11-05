@@ -2673,6 +2673,26 @@ describe('applyProviderProfileToProcessEnv', () => {
     ).toBe('selected-new')
   })
 
+  test('keyed Requesty profile apply matches startup so a provider switch drops its key', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    const { applyProviderFlag } = await import('./providerFlag.js')
+
+    for (const provider of ['openai', 'openrouter']) {
+      applyProviderProfileToProcessEnv(
+        buildRequestyProfile({ apiKey: 'requesty-secret' }),
+      )
+
+      expect(process.env.OPENAI_API_KEY).toBe('requesty-secret')
+      expect(process.env.REQUESTY_API_KEY).toBe('requesty-secret')
+      expect(process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('requesty')
+
+      expect(applyProviderFlag(provider, []).error).toBeUndefined()
+      expect(process.env.OPENAI_BASE_URL).not.toContain('requesty')
+      expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    }
+  })
+
   test('keyless canonical Requesty profile keeps its ambient dedicated key', async () => {
     const { applyProviderProfileToProcessEnv } =
       await importFreshProviderProfileModules()

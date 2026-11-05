@@ -1458,6 +1458,11 @@ export function applyProviderProfileToProcessEnv(
       if (isApiRouteProfile(profile)) {
         openAIProfileEnv.API_ROUTE_API_KEY = profile.apiKey
       }
+      // Same mirror as buildOpenAICompatibleStartupEnv: provider-flag
+      // switch-away recognizes a copied Requesty key only by this pair.
+      if (isRequestyProfile(profile)) {
+        openAIProfileEnv.REQUESTY_API_KEY = profile.apiKey
+      }
       if (isCommandcodeProfile(profile)) {
         openAIProfileEnv.CMD_API_KEY = profile.apiKey
       }
@@ -1592,10 +1597,14 @@ export function applyProviderProfileToProcessEnv(
     // REQUESTY_API_KEY is profile-managed: installing this env clears the
     // ambient value so a keyed profile's saved key wins. A keyless canonical
     // profile adopts the ambient key here; a retargeted profile gets neither.
-    if (isRequestyProfile(profile) && !profile.apiKey) {
-      const ambientRequestyKey = sanitizeApiKey(process.env.REQUESTY_API_KEY)
-      if (ambientRequestyKey) {
-        openAIProfileEnv.REQUESTY_API_KEY = ambientRequestyKey
+    // Stamp the route identity the startup env also writes.
+    if (route.routeId === 'requesty') {
+      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'requesty'
+      if (isRequestyProfile(profile) && !profile.apiKey) {
+        const ambientRequestyKey = sanitizeApiKey(process.env.REQUESTY_API_KEY)
+        if (ambientRequestyKey) {
+          openAIProfileEnv.REQUESTY_API_KEY = ambientRequestyKey
+        }
       }
     }
     if (isCommandcodeProfile(profile)) {
