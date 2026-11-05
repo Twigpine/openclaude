@@ -23,8 +23,6 @@ const originalEnv = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_API_KEYS: process.env.OPENAI_API_KEYS,
   LLMTR_API_KEY: process.env.LLMTR_API_KEY,
-  REQUESTY_API_KEY: process.env.REQUESTY_API_KEY,
-  XAI_API_KEY: process.env.XAI_API_KEY,
   API_ROUTE_API_KEY: process.env.API_ROUTE_API_KEY,
   CMD_API_KEY: process.env.CMD_API_KEY,
   COMMANDCODE_API_KEY: process.env.COMMANDCODE_API_KEY,
@@ -187,8 +185,6 @@ beforeEach(async () => {
   process.env.OPENAI_API_KEY = 'test-key'
   delete process.env.OPENAI_API_KEYS
   delete process.env.LLMTR_API_KEY
-  delete process.env.REQUESTY_API_KEY
-  delete process.env.XAI_API_KEY
   delete process.env.API_ROUTE_API_KEY
   delete process.env.CMD_API_KEY
   delete process.env.COMMANDCODE_API_KEY
@@ -243,8 +239,6 @@ afterEach(() => {
     restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
     restoreEnv('OPENAI_API_KEYS', originalEnv.OPENAI_API_KEYS)
     restoreEnv('LLMTR_API_KEY', originalEnv.LLMTR_API_KEY)
-    restoreEnv('REQUESTY_API_KEY', originalEnv.REQUESTY_API_KEY)
-    restoreEnv('XAI_API_KEY', originalEnv.XAI_API_KEY)
     restoreEnv('API_ROUTE_API_KEY', originalEnv.API_ROUTE_API_KEY)
     restoreEnv('CMD_API_KEY', originalEnv.CMD_API_KEY)
     restoreEnv('COMMANDCODE_API_KEY', originalEnv.COMMANDCODE_API_KEY)
@@ -375,36 +369,6 @@ test('selected LLMTR route prefers its dedicated key over a generic OPENAI_API_K
   )
 
   expect(captured.authorization).toBe('Bearer llmtr-key')
-})
-
-test('a Requesty key mirrored into OPENAI_API_KEY wins over an inherited OPENAI_API_KEYS pool', async () => {
-  // A saved Requesty profile and a Requesty teammate override both mirror
-  // their key into OPENAI_API_KEY; a parent's generic pool must not replace it.
-  process.env.CLAUDE_CODE_USE_OPENAI = '1'
-  process.env.OPENAI_BASE_URL = 'https://router.requesty.ai/v1'
-  process.env.OPENAI_MODEL = 'openai/gpt-5-mini'
-  process.env.OPENAI_API_KEYS = 'parent-pool-key-a,parent-pool-key-b'
-  process.env.OPENAI_API_KEY = 'configured-agent-key'
-  process.env.REQUESTY_API_KEY = 'configured-agent-key'
-
-  const captured = await captureChatCompletionRequest('openai/gpt-5-mini')
-
-  expect(captured.url).toBe('https://router.requesty.ai/v1/chat/completions')
-  expect(captured.authorization).toBe('Bearer configured-agent-key')
-})
-
-test('a Requesty key mirrored into OPENAI_API_KEY is not reused on another route', async () => {
-  process.env.CLAUDE_CODE_USE_OPENAI = '1'
-  process.env.OPENAI_BASE_URL = 'https://api.x.ai/v1'
-  process.env.OPENAI_MODEL = 'grok-4'
-  process.env.XAI_API_KEY = 'xai-key'
-  process.env.OPENAI_API_KEY = 'requesty-key'
-  process.env.REQUESTY_API_KEY = 'requesty-key'
-
-  const captured = await captureChatCompletionRequest('grok-4')
-
-  expect(captured.url).toBe('https://api.x.ai/v1/chat/completions')
-  expect(captured.authorization).toBe('Bearer xai-key')
 })
 
 test('selected Command Code route sends CMD_API_KEY through the generic route credential resolver', async () => {

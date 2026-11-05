@@ -245,7 +245,6 @@ function hasUsableEnvCredentialValue(
     envVar === 'APISMART_API_KEY' ||
     envVar === 'CONCENTRATE_API_KEY' ||
     envVar === 'LLMTR_API_KEY' ||
-    envVar === 'REQUESTY_API_KEY' ||
     envVar === 'MERGE_GATEWAY_API_KEY' ||
     envVar === 'CMD_API_KEY' ||
     envVar === 'COMMANDCODE_API_KEY' ||
@@ -1554,12 +1553,6 @@ export function resolveRouteIdFromBaseUrl(
       ) {
         continue
       }
-      if (
-        route.id === 'requesty' &&
-        !isCanonicalRequestyInferenceBaseUrl(baseUrl)
-      ) {
-        continue
-      }
       return route.id
     }
   }
@@ -1584,9 +1577,7 @@ export function resolveRouteIdFromBaseUrl(
           (route.id === 'commandcode' &&
             !isCanonicalCommandcodeInferenceBaseUrl(baseUrl)) ||
           (route.id === 'api-route' &&
-            !isApiRouteBaseUrl(baseUrl)) ||
-          (route.id === 'requesty' &&
-            !isCanonicalRequestyInferenceBaseUrl(baseUrl))
+            !isApiRouteBaseUrl(baseUrl))
         ) {
           continue
         }
@@ -1637,9 +1628,6 @@ function profileRouteHonorsBaseUrlBoundary(
   }
   if (routeId === 'api-route') {
     return isCanonicalApiRouteInferenceBaseUrl(baseUrl)
-  }
-  if (routeId === 'requesty') {
-    return isCanonicalRequestyInferenceBaseUrl(baseUrl)
   }
   if (routeId === 'zai') {
     return !baseUrl || isCanonicalZaiCodingPlanBaseUrl(baseUrl)

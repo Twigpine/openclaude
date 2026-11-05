@@ -333,11 +333,6 @@ export async function executeOpenAIRequest(
       requestProcessEnv.FIREWORKS_API_KEY,
       requestProcessEnv.LONGCAT_API_KEY,
       requestProcessEnv.LLMTR_API_KEY,
-      // Requesty's key counts as copied only on its own route, so a stale
-      // mirror is never reused as another provider's credential.
-      runtimeShimContext.routeId === 'requesty'
-        ? requestProcessEnv.REQUESTY_API_KEY
-        : undefined,
       requestProcessEnv.CMD_API_KEY,
       requestProcessEnv.COMMANDCODE_API_KEY,
       requestProcessEnv.COMMAND_CODE_API_KEY,

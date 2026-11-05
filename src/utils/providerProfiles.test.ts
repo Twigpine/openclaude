@@ -28,7 +28,6 @@ const RESTORED_KEYS = [
   'CLAUDE_CODE_PROVIDER_PROFILE_OPENAI_AUTH_MANAGED',
   'CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256',
   'CLAUDE_CODE_PROVIDER_PROFILE_RUNCRATE_KEY_SHA256',
-  'CLAUDE_CODE_PROVIDER_PROFILE_REQUESTY_KEY_SHA256',
   'CLAUDE_CODE_PROVIDER_ROUTE_ID',
   'CLAUDE_CONFIG_DIR',
   'OPENCLAUDE_CONFIG_DIR',
@@ -96,7 +95,6 @@ const RESTORED_KEYS = [
   'API_ROUTE_API_KEY',
   'API_ROUTE_MODEL',
   'LLMTR_API_KEY',
-  'REQUESTY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -355,17 +353,6 @@ function buildLlmtrProfile(overrides: Partial<ProviderProfile> = {}): ProviderPr
   })
 }
 
-function buildRequestyProfile(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
-  return buildProfile({
-    provider: 'requesty',
-    name: 'Requesty',
-    baseUrl: 'https://router.requesty.ai/v1',
-    model: 'openai/gpt-5-mini',
-    apiKey: 'requesty-test-key',
-    ...overrides,
-  })
-}
-
 function buildCommandcodeProfile(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
   return buildProfile({
     provider: 'commandcode',
@@ -619,39 +606,6 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(startupEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('api-route')
     expect(startupEnv.OPENAI_API_KEY).toBeUndefined()
     expect(startupEnv.API_ROUTE_API_KEY).toBeUndefined()
-  }, 20_000)
-
-  test('retargeted Requesty profile runs generically and skips discovery', async () => {
-    const fetchMock = mock(() => Promise.resolve(new Response('{}')))
-    globalThis.fetch = fetchMock as unknown as typeof fetch
-    const { resolveProfileCapabilityRouteId, setActiveProviderProfile } =
-      await importFreshProviderProfileModules()
-    const profile = buildRequestyProfile({
-      id: 'requesty_proxy',
-      baseUrl: 'https://proxy.example/v1',
-    })
-    saveMockGlobalConfig(current => ({
-      ...current,
-      providerProfiles: [profile],
-    }))
-
-    setActiveProviderProfile(profile.id, { configDir: testConfigDir ?? undefined })
-    await Promise.resolve()
-
-    expect(process.env.OPENAI_API_KEY).toBeUndefined()
-    expect(process.env.REQUESTY_API_KEY).toBeUndefined()
-    expect(fetchMock).not.toHaveBeenCalled()
-
-    for (const baseUrl of [
-      'https://proxy.example/v1',
-      'http://router.requesty.ai/v1',
-      'https://router.requesty.ai/v1/models',
-    ]) {
-      expect(resolveProfileCapabilityRouteId('requesty', baseUrl)).toBe('custom')
-    }
-    expect(
-      resolveProfileCapabilityRouteId('requesty', 'https://router.eu.requesty.ai/v1'),
-    ).toBe('requesty')
   }, 20_000)
 
   test('keyless canonical LLMTR profile adopts its ambient dedicated key', async () => {
@@ -2640,74 +2594,6 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.OPENAI_BASE_URL).toBe('https://proxy.example/v1')
     expect(process.env.OPENAI_API_KEY).toBeUndefined()
     expect(process.env.LLMTR_API_KEY).toBeUndefined()
-  })
-
-  test('retargeted Requesty profile withholds its saved credential', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-
-    applyProviderProfileToProcessEnv(
-      buildRequestyProfile({ baseUrl: 'https://example.test/v1' }),
-    )
-
-    expect(process.env.OPENAI_BASE_URL).toBe('https://example.test/v1')
-    expect(process.env.OPENAI_API_KEY).toBeUndefined()
-    expect(process.env.REQUESTY_API_KEY).toBeUndefined()
-  })
-
-  test('Requesty profile clears an ambient dedicated key so its saved key wins', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-    process.env.REQUESTY_API_KEY = 'ambient-old'
-
-    applyProviderProfileToProcessEnv(
-      buildRequestyProfile({ apiKey: 'selected-new' }),
-    )
-
-    expect(process.env.OPENAI_API_KEY).toBe('selected-new')
-    expect(
-      resolveRouteCredentialValue({
-        routeId: 'requesty',
-        baseUrl: process.env.OPENAI_BASE_URL,
-        processEnv: process.env,
-      }),
-    ).toBe('selected-new')
-  })
-
-  test('keyed Requesty profile apply matches startup so a provider switch drops its key', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-    const { applyProviderFlag } = await import('./providerFlag.js')
-
-    for (const provider of ['openai', 'openrouter']) {
-      applyProviderProfileToProcessEnv(
-        buildRequestyProfile({ apiKey: 'requesty-secret' }),
-      )
-
-      expect(process.env.OPENAI_API_KEY).toBe('requesty-secret')
-      expect(process.env.REQUESTY_API_KEY).toBe('requesty-secret')
-      expect(process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('requesty')
-
-      expect(applyProviderFlag(provider, []).error).toBeUndefined()
-      expect(process.env.OPENAI_BASE_URL).not.toContain('requesty')
-      expect(process.env.OPENAI_API_KEY).toBeUndefined()
-    }
-  })
-
-  test('keyless canonical Requesty profile keeps its ambient dedicated key', async () => {
-    const { applyProviderProfileToProcessEnv } =
-      await importFreshProviderProfileModules()
-    process.env.REQUESTY_API_KEY = 'ambient-requesty-key'
-
-    applyProviderProfileToProcessEnv(buildRequestyProfile({ apiKey: undefined }))
-
-    expect(
-      resolveRouteCredentialValue({
-        routeId: 'requesty',
-        baseUrl: process.env.OPENAI_BASE_URL,
-        processEnv: process.env,
-      }),
-    ).toBe('ambient-requesty-key')
   })
 
   test('query-bearing LLMTR profiles retain generic proxy capabilities', async () => {
@@ -5342,144 +5228,6 @@ describe('setActiveProviderProfile', () => {
     }
   })
 
-  test('Requesty profiles keep saved-key ownership across restart and withhold it when retargeted', async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
-    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
-    process.chdir(tempDir)
-    process.env.CLAUDE_CONFIG_DIR = configDir
-
-    try {
-      const { setActiveProviderProfile } =
-        await importFreshProviderProfileModules()
-      const canonical = buildRequestyProfile({ id: 'requesty_profile' })
-      const keyless = buildRequestyProfile({
-        id: 'requesty_keyless',
-        apiKey: undefined,
-      })
-      const retargeted = buildRequestyProfile({
-        id: 'requesty_proxy',
-        baseUrl: 'https://example.test/v1',
-      })
-      saveMockGlobalConfig(current => ({
-        ...current,
-        providerProfiles: [canonical, keyless, retargeted],
-      }))
-      const readPersisted = () =>
-        JSON.parse(
-          readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
-        )
-      const { buildStartupEnvFromProfile } = await import(
-        `./providerProfile.js?ts=${Date.now()}-${Math.random()}`
-      )
-      const ambient = { REQUESTY_API_KEY: 'ambient-unrelated-key' }
-
-      setActiveProviderProfile('requesty_profile', { configDir })
-      const persisted = readPersisted()
-      expect(persisted.env).toMatchObject({
-        OPENAI_BASE_URL: 'https://router.requesty.ai/v1',
-        OPENAI_API_KEY: 'requesty-test-key',
-        REQUESTY_API_KEY: 'requesty-test-key',
-      })
-      const startupEnv = await buildStartupEnvFromProfile({
-        persisted,
-        processEnv: ambient,
-      })
-      expect(startupEnv.REQUESTY_API_KEY).toBe('requesty-test-key')
-      delete persisted.env.REQUESTY_API_KEY
-      const migratedStartupEnv = await buildStartupEnvFromProfile({
-        persisted,
-        processEnv: ambient,
-      })
-      expect(migratedStartupEnv.REQUESTY_API_KEY).toBe('requesty-test-key')
-
-      setActiveProviderProfile('requesty_keyless', { configDir })
-      const keylessStartupEnv = await buildStartupEnvFromProfile({
-        persisted: readPersisted(),
-        processEnv: ambient,
-      })
-      expect(keylessStartupEnv.REQUESTY_API_KEY).toBe('ambient-unrelated-key')
-
-      setActiveProviderProfile('requesty_proxy', { configDir })
-      expect(process.env.OPENAI_API_KEY).toBeUndefined()
-      expect(process.env.REQUESTY_API_KEY).toBeUndefined()
-      const retargetedPersisted = readPersisted()
-      expect(retargetedPersisted.env.OPENAI_API_KEY).toBeUndefined()
-      expect(retargetedPersisted.env.REQUESTY_API_KEY).toBeUndefined()
-      const retargetedStartupEnv = await buildStartupEnvFromProfile({
-        persisted: retargetedPersisted,
-        processEnv: ambient,
-      })
-      expect(retargetedStartupEnv.OPENAI_BASE_URL).toBe('https://example.test/v1')
-      expect(retargetedStartupEnv.OPENAI_API_KEY).toBeUndefined()
-      expect(retargetedStartupEnv.REQUESTY_API_KEY).toBeUndefined()
-    } finally {
-      process.chdir(originalCwd)
-      rmSync(tempDir, { recursive: true, force: true })
-      rmSync(configDir, { recursive: true, force: true })
-    }
-  })
-
-  test('a saved Requesty proxy profile keeps its auth off a shell retarget onto canonical Requesty', async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
-    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
-    process.chdir(tempDir)
-    process.env.CLAUDE_CONFIG_DIR = configDir
-
-    try {
-      const { setActiveProviderProfile } =
-        await importFreshProviderProfileModules()
-      const proxy = buildRequestyProfile({
-        id: 'requesty_proxy',
-        baseUrl: 'https://requesty-proxy.example/v1',
-        apiKey: 'saved-proxy-key',
-        authHeader: 'X-Proxy-Auth',
-        authScheme: 'raw',
-        authHeaderValue: 'saved-proxy-secret',
-        customHeaders: { 'X-Proxy-Trace': 'saved-proxy-header' },
-      })
-      saveMockGlobalConfig(current => ({
-        ...current,
-        providerProfiles: [proxy],
-      }))
-
-      setActiveProviderProfile('requesty_proxy', { configDir })
-      const persisted = JSON.parse(
-        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
-      )
-      expect(persisted.env).toMatchObject({
-        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'requesty',
-        OPENAI_BASE_URL: 'https://requesty-proxy.example/v1',
-        OPENAI_AUTH_HEADER_VALUE: 'saved-proxy-secret',
-      })
-      expect(persisted.env.OPENAI_API_KEY).toBeUndefined()
-
-      const { buildStartupEnvFromProfile } = await import(
-        `./providerProfile.js?ts=${Date.now()}-${Math.random()}`
-      )
-      const ownUrlEnv = await buildStartupEnvFromProfile({
-        persisted,
-        processEnv: {},
-      })
-      expect(ownUrlEnv.OPENAI_AUTH_HEADER_VALUE).toBe('saved-proxy-secret')
-
-      const retargetedEnv = await buildStartupEnvFromProfile({
-        persisted,
-        processEnv: { OPENAI_BASE_URL: 'https://router.requesty.ai/v1' },
-      })
-      expect(retargetedEnv.OPENAI_BASE_URL).toBe('https://router.requesty.ai/v1')
-      expect(retargetedEnv.OPENAI_API_KEY).toBeUndefined()
-      expect(retargetedEnv.REQUESTY_API_KEY).toBeUndefined()
-      expect(retargetedEnv.OPENAI_AUTH_HEADER).toBeUndefined()
-      expect(retargetedEnv.OPENAI_AUTH_SCHEME).toBeUndefined()
-      expect(retargetedEnv.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
-      expect(retargetedEnv.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
-    } finally {
-      process.chdir(originalCwd)
-      rmSync(tempDir, { recursive: true, force: true })
-      rmSync(configDir, { recursive: true, force: true })
-    }
-  })
-
   test('keyed canonical LLMTR profiles persist their saved dedicated credential across restart', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
     const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
@@ -6878,54 +6626,6 @@ test.each([false, true])('a keyless Runcrate selection rejects another profile k
     .toBeUndefined()
   const persisted = JSON.parse(readFileSync(join(testConfigDir!, '.openclaude-profile.json'), 'utf8'))
   expect(persisted.env.RUNCRATE_API_KEY).toBeUndefined()
-})
-
-// Settings env can overwrite REQUESTY_API_KEY after the profile applied. The
-// request executor prefers that variable on the Requesty route, so reconcile
-// must restore the selected profile's saved key.
-test('a keyed Requesty profile restores its saved key over a drifted settings key', async () => {
-  const { setActiveProviderProfile, applyActiveProviderProfileFromConfig } =
-    await importFreshProviderProfileModules()
-  const saved = buildRequestyProfile({ apiKey: 'selected-requesty-key' })
-  saveMockGlobalConfig(current => ({ ...current, providerProfiles: [saved] }))
-  setActiveProviderProfile(saved.id, { configDir: testConfigDir! })
-  process.env.REQUESTY_API_KEY = 'settings-requesty-key'
-  expect(applyActiveProviderProfileFromConfig()?.id).toBe(saved.id)
-  expect(process.env.REQUESTY_API_KEY).toBe('selected-requesty-key')
-  expect(resolveRouteCredentialValue({ routeId: 'requesty', baseUrl: saved.baseUrl }))
-    .toBe('selected-requesty-key')
-})
-
-// A keyed Requesty profile mirrors its saved key into REQUESTY_API_KEY. A
-// keyless Requesty selection that follows must not adopt that key as shell
-// input, in process or after a relaunch from the keyed startup file.
-test.each([false, true])('a keyless Requesty selection rejects another profile key (relaunched: %s)', async relaunched => {
-  const { setActiveProviderProfile, applyProviderProfileToProcessEnv } =
-    await importFreshProviderProfileModules()
-  const { applyProfileEnvToProcessEnv, buildStartupEnvFromProfile } =
-    await import('./providerProfile.js')
-  const keyed = buildRequestyProfile({ id: 'keyed-requesty', apiKey: 'account-a-key' })
-  const keyless = { ...keyed, id: 'keyless-requesty', apiKey: undefined }
-  saveMockGlobalConfig(current => ({ ...current, providerProfiles: [keyed, keyless] }))
-  setActiveProviderProfile(keyed.id, { configDir: testConfigDir! })
-  expect(process.env.REQUESTY_API_KEY).toBe('account-a-key')
-  if (relaunched) {
-    const persisted = JSON.parse(readFileSync(
-      join(testConfigDir!, '.openclaude-profile.json'), 'utf8',
-    ))
-    const env = await buildStartupEnvFromProfile({ persisted, processEnv: {} })
-    expect(env.REQUESTY_API_KEY).toBe('account-a-key')
-    applyProfileEnvToProcessEnv(process.env, env)
-  }
-  applyProviderProfileToProcessEnv(keyless)
-  expect(process.env.REQUESTY_API_KEY).toBeUndefined()
-  expect(resolveRouteCredentialValue({ routeId: 'requesty', baseUrl: keyless.baseUrl }))
-    .toBeUndefined()
-
-  // Genuine shell input still authenticates the keyless selection.
-  process.env.REQUESTY_API_KEY = 'shell-requesty-key'
-  applyProviderProfileToProcessEnv(keyless)
-  expect(process.env.REQUESTY_API_KEY).toBe('shell-requesty-key')
 })
 
 for (const provider of ['runcrate', 'openai']) {

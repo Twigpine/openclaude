@@ -31,7 +31,6 @@ import {
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalConcentrateInferenceBaseUrl,
   isCanonicalLlmtrInferenceBaseUrl,
-  isCanonicalRequestyInferenceBaseUrl,
   isCanonicalMergeGatewayInferenceBaseUrl,
   isGmiCloudBaseUrl,
   isCanonicalCommandcodeInferenceBaseUrl,
@@ -68,8 +67,6 @@ export const PROFILE_ORCAROUTER_KEY_SHA256 =
   'CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256'
 export const PROFILE_RUNCRATE_KEY_SHA256 =
   'CLAUDE_CODE_PROVIDER_PROFILE_RUNCRATE_KEY_SHA256'
-export const PROFILE_REQUESTY_KEY_SHA256 =
-  'CLAUDE_CODE_PROVIDER_PROFILE_REQUESTY_KEY_SHA256'
 // Provenance marker for the OPENAI_AUTH_* trio. A child inherits this with the
 // trio, so a retarget can tell profile-managed auth from an explicit shell
 // credential without comparing values that may have changed since the profile
@@ -96,10 +93,6 @@ export function runcrateCredentialFingerprint(value: string): string {
   return managedCredentialFingerprint(value)
 }
 
-export function requestyCredentialFingerprint(value: string): string {
-  return managedCredentialFingerprint(value)
-}
-
 export function isManagedOrcarouterCredential(env: NodeJS.ProcessEnv): boolean {
   const key = sanitizeApiKey(env.ORCAROUTER_API_KEY)
   // Credential origin is independent of selection markers: legacy profile
@@ -112,16 +105,10 @@ export function isManagedRuncrateCredential(env: NodeJS.ProcessEnv): boolean {
   return !!key && env[PROFILE_RUNCRATE_KEY_SHA256] === runcrateCredentialFingerprint(key)
 }
 
-export function isManagedRequestyCredential(env: NodeJS.ProcessEnv): boolean {
-  const key = sanitizeApiKey(env.REQUESTY_API_KEY)
-  return !!key && env[PROFILE_REQUESTY_KEY_SHA256] === requestyCredentialFingerprint(key)
-}
-
 const PROFILE_ENV_KEYS = [
   'CLAUDE_CODE_USE_GEMINI_VERTEX',
   PROFILE_ORCAROUTER_KEY_SHA256,
   PROFILE_RUNCRATE_KEY_SHA256,
-  PROFILE_REQUESTY_KEY_SHA256,
   PROFILE_OPENAI_AUTH_MANAGED,
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GITHUB',
@@ -189,7 +176,6 @@ const PROFILE_ENV_KEYS = [
   'FIREWORKS_API_KEY',
   'LONGCAT_API_KEY',
   'LLMTR_API_KEY',
-  'REQUESTY_API_KEY',
   'MERGE_GATEWAY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
@@ -243,7 +229,6 @@ export type ProviderProfile =
 export type ProfileEnv = {
   CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256?: string
   CLAUDE_CODE_PROVIDER_PROFILE_RUNCRATE_KEY_SHA256?: string
-  CLAUDE_CODE_PROVIDER_PROFILE_REQUESTY_KEY_SHA256?: string
   ANTHROPIC_BASE_URL?: string
   ANTHROPIC_MODEL?: string
   ANTHROPIC_API_KEY?: string
@@ -300,7 +285,6 @@ export type ProfileEnv = {
   FIREWORKS_API_KEY?: string
   LONGCAT_API_KEY?: string
   LLMTR_API_KEY?: string
-  REQUESTY_API_KEY?: string
   MERGE_GATEWAY_API_KEY?: string
   CMD_API_KEY?: string
   COMMANDCODE_API_KEY?: string
@@ -2273,19 +2257,6 @@ export async function buildLaunchEnv(options: {
     (persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'merge-gateway' ||
       isCanonicalMergeGatewayInferenceBaseUrl(persistedOpenAIBaseUrl)) &&
     !isCanonicalMergeGatewayInferenceBaseUrl(env.OPENAI_BASE_URL)
-  // Same for a saved Requesty profile: its key is a Requesty key only when the
-  // profile was saved for a canonical Requesty inference URL, and it is valid
-  // only on those URLs. Any other launch drops it, including one that moves a
-  // profile saved for a non-canonical URL onto canonical Requesty.
-  const persistedRequestyProfileIdentity =
-    persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'requesty' ||
-    isCanonicalRequestyInferenceBaseUrl(persistedOpenAIBaseUrl)
-  const retargetedRequestyProfile =
-    persistedRequestyProfileIdentity &&
-    !(
-      isCanonicalRequestyInferenceBaseUrl(persistedOpenAIBaseUrl) &&
-      isCanonicalRequestyInferenceBaseUrl(env.OPENAI_BASE_URL)
-    )
   // A saved Runcrate profile mirrors its dedicated key into the generic
   // OPENAI_API_KEY alias. A shell URL retarget must not hand that saved key to
   // the new endpoint; only an explicit shell credential may follow the URL.
@@ -2293,18 +2264,6 @@ export async function buildLaunchEnv(options: {
     (persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'runcrate' ||
       resolveRouteIdFromBaseUrl(persistedOpenAIBaseUrl) === 'runcrate') &&
     !isSameConfiguredEndpoint(env.OPENAI_BASE_URL, persistedOpenAIBaseUrl)
-  // Requesty supports custom auth headers, so its saved credential can also
-  // ride in the custom-auth trio or custom headers. Those belong to the
-  // endpoint the profile was saved for: a shell retarget away from it drops
-  // them in either direction, while a saved non-canonical profile relaunched
-  // at its own URL keeps them, matching profile apply.
-  const shellRetargetedRequestyProfile =
-    retargetedRequestyProfile &&
-    !isSameConfiguredEndpoint(env.OPENAI_BASE_URL, persistedOpenAIBaseUrl)
-  // Saved profiles whose credentials must not follow a shell URL retarget on
-  // any channel: generic key, custom-auth trio, or custom headers.
-  const retargetedCredentialBoundProfile =
-    retargetedRuncrateProfile || shellRetargetedRequestyProfile
   // A profile-applied Runcrate key also rides in the generic alias, and a pane
   // can inherit it. Only a shell credential without Runcrate's managed marker
   // may follow a retarget.
@@ -2321,11 +2280,7 @@ export async function buildLaunchEnv(options: {
     : processEnv
   const openAICredential = resolveOpenAICredentialEnvOverride(
     shellCredentialSource,
-    retargetedMergeProfile ||
-      retargetedRuncrateProfile ||
-      retargetedRequestyProfile
-      ? {}
-      : persistedEnv,
+    retargetedMergeProfile || retargetedRuncrateProfile ? {} : persistedEnv,
   )
   if (openAICredential) {
     env[openAICredential.envVar] = openAICredential.value
@@ -2386,10 +2341,6 @@ export async function buildLaunchEnv(options: {
     effectiveOpenAIRouteId === 'llmtr' &&
     !!env.OPENAI_BASE_URL?.trim() &&
     !isCanonicalLlmtrInferenceBaseUrl(env.OPENAI_BASE_URL)
-  const isNoncanonicalRequestyLaunch =
-    effectiveOpenAIRouteId === 'requesty' &&
-    !!env.OPENAI_BASE_URL?.trim() &&
-    !isCanonicalRequestyInferenceBaseUrl(env.OPENAI_BASE_URL)
   const isNoncanonicalMergeGatewayLaunch =
     effectiveOpenAIRouteId === 'merge-gateway' &&
     !!env.OPENAI_BASE_URL?.trim() &&
@@ -2407,14 +2358,13 @@ export async function buildLaunchEnv(options: {
     isNoncanonicalApismartLaunch ||
     isNoncanonicalConcentrateLaunch ||
     isNoncanonicalLlmtrLaunch ||
-    isNoncanonicalRequestyLaunch ||
     isNoncanonicalMergeGatewayLaunch ||
     isNoncanonicalCommandcodeLaunch ||
     isNoncanonicalApiRouteLaunch
-  if (isNoncanonicalDedicatedOpenAILaunch || retargetedCredentialBoundProfile) {
+  if (isNoncanonicalDedicatedOpenAILaunch || retargetedRuncrateProfile) {
     delete env.OPENAI_API_KEY
     delete env.OPENAI_API_KEYS
-    if (retargetedCredentialBoundProfile) {
+    if (retargetedRuncrateProfile) {
       // A retargeted launch keeps no identity for the endpoint it now points
       // at, so only the explicit shell credential may follow it.
       const shellCredential = resolveOpenAICredentialEnvSelection(shellCredentialSource)
@@ -2424,7 +2374,6 @@ export async function buildLaunchEnv(options: {
     } else if (
       !isNoncanonicalConcentrateLaunch &&
       !isNoncanonicalLlmtrLaunch &&
-      !isNoncanonicalRequestyLaunch &&
       !isNoncanonicalMergeGatewayLaunch &&
       !isNoncanonicalCommandcodeLaunch
     ) {
@@ -2438,7 +2387,7 @@ export async function buildLaunchEnv(options: {
         env[persistedCredential.envVar] = persistedCredential.value
       }
     }
-    if (retargetedCredentialBoundProfile) {
+    if (retargetedRuncrateProfile) {
       // A retargeted launch keeps no saved custom-auth trio: it belongs to the
       // endpoint the profile was saved for. Provenance comes from the marker a
       // profile application wrote, not from the values themselves: the saved
@@ -2508,7 +2457,6 @@ export async function buildLaunchEnv(options: {
     'APISMART_API_KEY',
     'CONCENTRATE_API_KEY',
     'LLMTR_API_KEY',
-    'REQUESTY_API_KEY',
     'MERGE_GATEWAY_API_KEY',
     'CMD_API_KEY',
     'COMMANDCODE_API_KEY',
@@ -2559,9 +2507,6 @@ export async function buildLaunchEnv(options: {
     if (dedicatedKey === 'LLMTR_API_KEY' && effectiveOpenAIRouteId !== 'llmtr') {
       continue
     }
-    if (dedicatedKey === 'REQUESTY_API_KEY' && effectiveOpenAIRouteId !== 'requesty') {
-      continue
-    }
     if (dedicatedKey === 'MERGE_GATEWAY_API_KEY' && effectiveOpenAIRouteId !== 'merge-gateway') {
       continue
     }
@@ -2602,10 +2547,6 @@ export async function buildLaunchEnv(options: {
       dedicatedKey === 'LLMTR_API_KEY' &&
       !!dedicatedBaseUrl &&
       !isCanonicalLlmtrInferenceBaseUrl(dedicatedBaseUrl)
-    const withholdAmbientRequestyKey =
-      dedicatedKey === 'REQUESTY_API_KEY' &&
-      !!dedicatedBaseUrl &&
-      !isCanonicalRequestyInferenceBaseUrl(dedicatedBaseUrl)
     const withholdAmbientMergeGatewayKey =
       dedicatedKey === 'MERGE_GATEWAY_API_KEY' &&
       !!dedicatedBaseUrl &&
@@ -2619,7 +2560,6 @@ export async function buildLaunchEnv(options: {
       withholdAmbientApismartKey ||
       withholdAmbientConcentrateKey ||
       withholdAmbientLlmtrKey ||
-      withholdAmbientRequestyKey ||
       withholdAmbientMergeGatewayKey ||
       withholdAmbientCommandcodeKey
     // Unlike the generic proxy-compatible routes above, Concentrate's
@@ -2630,7 +2570,6 @@ export async function buildLaunchEnv(options: {
     if (
       withholdAmbientConcentrateKey ||
       withholdAmbientLlmtrKey ||
-      withholdAmbientRequestyKey ||
       withholdAmbientMergeGatewayKey ||
       withholdAmbientCommandcodeKey
     ) {
@@ -2675,22 +2614,6 @@ export async function buildLaunchEnv(options: {
       !!dedicatedBaseUrl &&
       isCanonicalLlmtrInferenceBaseUrl(dedicatedBaseUrl)
         ? sanitizeApiKey(persistedEnv.LLMTR_API_KEY) ||
-          (persistedOpenAICredential?.kind === 'usable'
-            ? sanitizeApiKey(persistedOpenAICredential.value)
-            : undefined)
-        : undefined
-    // Same ownership rule for a selected canonical Requesty profile, including
-    // startup files that only persisted the saved key as OPENAI_API_KEY. Only
-    // a Requesty profile saved for a canonical URL owns that key; another
-    // profile's generic key is not a Requesty credential.
-    const persistedRequestyProfileKey =
-      dedicatedKey === 'REQUESTY_API_KEY' &&
-      effectiveOpenAIRouteId === 'requesty' &&
-      persistedRequestyProfileIdentity &&
-      !retargetedRequestyProfile &&
-      !!dedicatedBaseUrl &&
-      isCanonicalRequestyInferenceBaseUrl(dedicatedBaseUrl)
-        ? sanitizeApiKey(persistedEnv.REQUESTY_API_KEY) ||
           (persistedOpenAICredential?.kind === 'usable'
             ? sanitizeApiKey(persistedOpenAICredential.value)
             : undefined)
@@ -2751,12 +2674,10 @@ export async function buildLaunchEnv(options: {
             ? sanitizeApiKey(persistedOpenAICredential.value)
             : undefined)
         : undefined
-    // A retargeted Runcrate or Requesty launch may only use an explicit shell
-    // credential; the saved profile key belongs to the endpoint it was saved
-    // for.
+    // A retargeted Runcrate launch may only use an explicit shell credential;
+    // the saved profile key belongs to the endpoint it was saved for.
     const persistedDedicatedKey =
-      (retargetedRuncrateProfile && dedicatedKey === 'RUNCRATE_API_KEY') ||
-      (retargetedRequestyProfile && dedicatedKey === 'REQUESTY_API_KEY')
+      retargetedRuncrateProfile && dedicatedKey === 'RUNCRATE_API_KEY'
         ? undefined
         : sanitizeApiKey(persistedEnv[dedicatedKey])
     const shellDedicatedKey =
@@ -2769,7 +2690,6 @@ export async function buildLaunchEnv(options: {
       ? sanitizeApiKey(persistedEnv[dedicatedKey])
       : backfillDedicatedFromOpenAI ||
         persistedLlmtrProfileKey ||
-        persistedRequestyProfileKey ||
         persistedMergeGatewayProfileKey ||
         persistedCommandcodeProfileKey ||
         persistedOrcarouterProfileKey ||
@@ -2790,11 +2710,6 @@ export async function buildLaunchEnv(options: {
           (!sanitizeApiKey(processEnv.RUNCRATE_API_KEY) && persistedEnv.RUNCRATE_API_KEY))) {
         env[PROFILE_RUNCRATE_KEY_SHA256] = runcrateCredentialFingerprint(dedicatedValue)
       }
-      if (dedicatedKey === 'REQUESTY_API_KEY' &&
-        (persistedRequestyProfileKey ||
-          (!sanitizeApiKey(processEnv.REQUESTY_API_KEY) && persistedEnv.REQUESTY_API_KEY))) {
-        env[PROFILE_REQUESTY_KEY_SHA256] = requestyCredentialFingerprint(dedicatedValue)
-      }
     }
   }
   if (effectiveOpenAIRouteId === 'nvidia-nim') {
@@ -2810,10 +2725,9 @@ export async function buildLaunchEnv(options: {
   // and is sent on every request. So an ambient value must be withheld from a
   // non-canonical aimlapi/apismart launch exactly like the API key and the
   // custom-auth trio; only headers the profile itself persisted are restored.
-  // A retargeted Runcrate or Requesty launch keeps no headers either: both
-  // ambient and persisted values belong to the endpoint the profile was saved
-  // for.
-  const customHeaders = retargetedCredentialBoundProfile
+  // A retargeted Runcrate launch keeps no headers either: both ambient and
+  // persisted values belong to the endpoint the profile was saved for.
+  const customHeaders = retargetedRuncrateProfile
     ? undefined
     : isNoncanonicalDedicatedOpenAILaunch
       ? persistedCustomHeaders
@@ -2913,11 +2827,6 @@ export async function buildStartupEnvFromProfile(options?: {
     persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'llmtr' &&
     !!persisted.env.OPENAI_BASE_URL?.trim() &&
     !isCanonicalLlmtrInferenceBaseUrl(persisted.env.OPENAI_BASE_URL)
-  const persistedRequestyProxy =
-    persisted?.profile === 'openai' &&
-    persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'requesty' &&
-    !!persisted.env.OPENAI_BASE_URL?.trim() &&
-    !isCanonicalRequestyInferenceBaseUrl(persisted.env.OPENAI_BASE_URL)
   const persistedMergeGatewayProxy =
     persisted?.profile === 'openai' &&
     persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'merge-gateway' &&
@@ -2938,7 +2847,6 @@ export async function buildStartupEnvFromProfile(options?: {
     !persistedApismartProxy &&
     !persistedConcentrateProxy &&
     !persistedLlmtrProxy &&
-    !persistedRequestyProxy &&
     !persistedMergeGatewayProxy &&
     !persistedCommandcodeProxy &&
     !persistedApiRouteProxy
@@ -3004,11 +2912,6 @@ export function applyProfileEnvToProcessEnv(
     sanitizeApiKey(targetEnv.RUNCRATE_API_KEY) === sanitizeApiKey(nextEnv.RUNCRATE_API_KEY)
       ? targetEnv[PROFILE_RUNCRATE_KEY_SHA256]
       : undefined
-  const retainedRequestyOrigin =
-    isManagedRequestyCredential(targetEnv) &&
-    sanitizeApiKey(targetEnv.REQUESTY_API_KEY) === sanitizeApiKey(nextEnv.REQUESTY_API_KEY)
-      ? targetEnv[PROFILE_REQUESTY_KEY_SHA256]
-      : undefined
   clearManagedProfileEnv(targetEnv)
   Object.assign(targetEnv, nextEnv)
   if (retainedOrcarouterOrigin) {
@@ -3016,9 +2919,6 @@ export function applyProfileEnvToProcessEnv(
   }
   if (retainedRuncrateOrigin) {
     targetEnv[PROFILE_RUNCRATE_KEY_SHA256] = retainedRuncrateOrigin
-  }
-  if (retainedRequestyOrigin) {
-    targetEnv[PROFILE_REQUESTY_KEY_SHA256] = retainedRequestyOrigin
   }
 }
 

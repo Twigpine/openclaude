@@ -40,14 +40,11 @@ import {
   clearManagedProfileEnv,
   isManagedOrcarouterCredential,
   isManagedRuncrateCredential,
-  isManagedRequestyCredential,
   orcarouterCredentialFingerprint,
   PROFILE_ORCAROUTER_KEY_SHA256,
   PROFILE_RUNCRATE_KEY_SHA256,
-  PROFILE_REQUESTY_KEY_SHA256,
   PROFILE_OPENAI_AUTH_MANAGED,
   runcrateCredentialFingerprint,
-  requestyCredentialFingerprint,
   deleteProfileFile,
   type ProfileFileLocation,
   type ProfileEnv,
@@ -77,7 +74,6 @@ import {
   isCanonicalLlmtrInferenceBaseUrl,
   isCanonicalMergeGatewayInferenceBaseUrl,
   isCanonicalCommandcodeInferenceBaseUrl,
-  isCanonicalRequestyInferenceBaseUrl,
   isFireworksBaseUrl,
   isGmiCloudBaseUrl,
   isLongcatBaseUrl,
@@ -153,21 +149,6 @@ function rememberManagedRuncrateCredential(
     trimOrUndefined(processEnv[PROFILE_ENV_APPLIED_ID]) === profile.id &&
     sanitizeApiKey(processEnv.RUNCRATE_API_KEY)?.trim() === value) {
     processEnv[PROFILE_RUNCRATE_KEY_SHA256] = runcrateCredentialFingerprint(value)
-  }
-}
-
-// Requesty: same origin marker as Runcrate, so a later keyless canonical
-// Requesty selection never mistakes this profile's saved key for shell input.
-function rememberManagedRequestyCredential(
-  profile: ProviderProfile,
-  processEnv: NodeJS.ProcessEnv = process.env,
-): void {
-  const value = sanitizeApiKey(profile.apiKey)?.trim()
-  if (value && isRequestyProfile(profile) &&
-    processEnv[PROFILE_ENV_APPLIED_FLAG] === '1' &&
-    trimOrUndefined(processEnv[PROFILE_ENV_APPLIED_ID]) === profile.id &&
-    sanitizeApiKey(processEnv.REQUESTY_API_KEY)?.trim() === value) {
-    processEnv[PROFILE_REQUESTY_KEY_SHA256] = requestyCredentialFingerprint(value)
   }
 }
 
@@ -265,17 +246,6 @@ function isLlmtrProfile(profile: ProviderProfile): boolean {
   }
   const baseUrl = profile.baseUrl?.trim()
   return !baseUrl || isCanonicalLlmtrInferenceBaseUrl(baseUrl)
-}
-
-function isRequestyProfile(profile: ProviderProfile): boolean {
-  const { route } = resolveProfileCompatibility(profile.provider)
-  if (route.routeId !== 'requesty') {
-    return false
-  }
-  const baseUrl = profile.baseUrl?.trim()
-  // A missing base URL resolves to the Requesty default, which is canonical.
-  // Any other URL is a retargeted endpoint and must not receive the saved key.
-  return !baseUrl || isCanonicalRequestyInferenceBaseUrl(baseUrl)
 }
 
 function isMergeGatewayProfile(profile: ProviderProfile): boolean {
@@ -395,8 +365,7 @@ export function resolveProfileCapabilityRouteId(
       providerRouteId === 'api-route' ||
       providerRouteId === 'llmtr' ||
       providerRouteId === 'merge-gateway' ||
-      providerRouteId === 'commandcode' ||
-      providerRouteId === 'requesty') &&
+      providerRouteId === 'commandcode') &&
     baseUrl &&
     !(providerRouteId === 'cloudflare'
       ? isCloudflareBaseUrl(baseUrl)
@@ -410,8 +379,6 @@ export function resolveProfileCapabilityRouteId(
             ? isCanonicalCommandcodeInferenceBaseUrl(baseUrl)
             : providerRouteId === 'merge-gateway'
               ? isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)
-            : providerRouteId === 'requesty'
-              ? isCanonicalRequestyInferenceBaseUrl(baseUrl)
               : isCanonicalLlmtrInferenceBaseUrl(baseUrl))
   ) {
     return 'custom'
@@ -985,11 +952,6 @@ function hostDedicatedCredentialsAligned(
     isManagedRuncrateCredential(processEnv)) {
     return false
   }
-  if (!profile.apiKey &&
-    isRequestyProfile(profile) &&
-    isManagedRequestyCredential(processEnv)) {
-    return false
-  }
   const dedicated = getHostDedicatedCredentialEnv(
     profile.baseUrl,
     profile.apiKey ?? '',
@@ -1177,12 +1139,6 @@ function isProcessEnvAlignedWithProfile(
     (isApiRouteProfile(profile)
       ? !includeApiKey ||
         sameOptionalEnvValue(processEnv.API_ROUTE_API_KEY, profile.apiKey)
-      : true) &&
-    // A keyless Requesty profile uses shell or settings input; a keyed one
-    // owns REQUESTY_API_KEY, which requests prefer over OPENAI_API_KEY.
-    (isRequestyProfile(profile) && profile.apiKey
-      ? !includeApiKey ||
-        sameOptionalEnvValue(processEnv.REQUESTY_API_KEY, profile.apiKey)
       : true) &&
     (isCommandcodeProfile(profile)
       ? !includeApiKey ||
@@ -1413,8 +1369,6 @@ export function applyProviderProfileToProcessEnv(
       route.routeId === 'api-route' && !isApiRouteProfile(profile)
     const withholdRetargetedLlmtrCredential =
       route.routeId === 'llmtr' && !isLlmtrProfile(profile)
-    const withholdRetargetedRequestyCredential =
-      route.routeId === 'requesty' && !isRequestyProfile(profile)
     const withholdRetargetedMergeGatewayCredential =
       route.routeId === 'merge-gateway' && !isMergeGatewayProfile(profile)
     const withholdRetargetedCommandcodeCredential =
@@ -1428,7 +1382,6 @@ export function applyProviderProfileToProcessEnv(
       !withholdRetargetedConcentrateCredential &&
       !withholdRetargetedApiRouteCredential &&
       !withholdRetargetedLlmtrCredential &&
-      !withholdRetargetedRequestyCredential &&
       !withholdRetargetedMergeGatewayCredential &&
       !withholdRetargetedCommandcodeCredential &&
       !withholdRetargetedGmiCloudCredential
@@ -1486,11 +1439,6 @@ export function applyProviderProfileToProcessEnv(
       }
       if (isApiRouteProfile(profile)) {
         openAIProfileEnv.API_ROUTE_API_KEY = profile.apiKey
-      }
-      // Same mirror as buildOpenAICompatibleStartupEnv: provider-flag
-      // switch-away recognizes a copied Requesty key only by this pair.
-      if (isRequestyProfile(profile)) {
-        openAIProfileEnv.REQUESTY_API_KEY = profile.apiKey
       }
       if (isCommandcodeProfile(profile)) {
         openAIProfileEnv.CMD_API_KEY = profile.apiKey
@@ -1623,20 +1571,6 @@ export function applyProviderProfileToProcessEnv(
         }
       }
     }
-    // REQUESTY_API_KEY is profile-managed: installing this env clears the
-    // ambient value so a keyed profile's saved key wins. A keyless canonical
-    // profile adopts only genuine shell input here, never a key a keyed
-    // profile installed; a retargeted profile gets neither. Stamp the route
-    // identity the startup env also writes.
-    if (route.routeId === 'requesty') {
-      openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'requesty'
-      if (isRequestyProfile(profile) && !profile.apiKey) {
-        const ambientRequestyKey = sanitizeApiKey(process.env.REQUESTY_API_KEY)
-        if (ambientRequestyKey && !isManagedRequestyCredential(process.env)) {
-          openAIProfileEnv.REQUESTY_API_KEY = ambientRequestyKey
-        }
-      }
-    }
     if (isCommandcodeProfile(profile)) {
       openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'commandcode'
       if (!profile.apiKey) {
@@ -1689,7 +1623,6 @@ export function applyProviderProfileToProcessEnv(
   }
   rememberManagedOrcarouterCredential(profile)
   rememberManagedRuncrateCredential(profile)
-  rememberManagedRequestyCredential(profile)
 }
 
 export function applyActiveProviderProfileFromConfig(
@@ -1731,7 +1664,6 @@ export function applyActiveProviderProfileFromConfig(
   // record is available; new environments already carry their fingerprint.
   rememberManagedOrcarouterCredential(activeProfile, processEnv)
   rememberManagedRuncrateCredential(activeProfile, processEnv)
-  rememberManagedRequestyCredential(activeProfile, processEnv)
 
   const isCurrentEnvProfileManaged =
     processEnv[PROFILE_ENV_APPLIED_FLAG] === '1' &&
@@ -1851,7 +1783,6 @@ export function updateProviderProfile(
     wasUpdated = true
     rememberManagedOrcarouterCredential(currentProfiles[profileIndex]!)
     rememberManagedRuncrateCredential(currentProfiles[profileIndex]!)
-    rememberManagedRequestyCredential(currentProfiles[profileIndex]!)
 
     const nextProfiles = [...currentProfiles]
     nextProfiles[profileIndex] = updatedProfile
@@ -1977,8 +1908,6 @@ function buildOpenAICompatibleStartupEnv(
     activeProfileRouteId === 'api-route' && !isApiRouteProfile(activeProfile)
   const withholdRetargetedLlmtrCredential =
     activeProfileRouteId === 'llmtr' && !isLlmtrProfile(activeProfile)
-  const withholdRetargetedRequestyCredential =
-    activeProfileRouteId === 'requesty' && !isRequestyProfile(activeProfile)
   const withholdRetargetedMergeGatewayCredential =
     activeProfileRouteId === 'merge-gateway' && !isMergeGatewayProfile(activeProfile)
   const withholdRetargetedCommandcodeCredential =
@@ -1990,7 +1919,6 @@ function buildOpenAICompatibleStartupEnv(
   const isConcentrateProfileFlag = isConcentrateProfile(activeProfile)
   const isApiRouteProfileFlag = isApiRouteProfile(activeProfile)
   const isLlmtrProfileFlag = isLlmtrProfile(activeProfile)
-  const isRequestyProfileFlag = isRequestyProfile(activeProfile)
   const isMergeGatewayProfileFlag = isMergeGatewayProfile(activeProfile)
   const isCommandcodeProfileFlag = isCommandcodeProfile(activeProfile)
 
@@ -2000,7 +1928,6 @@ function buildOpenAICompatibleStartupEnv(
     !withholdRetargetedConcentrateCredential &&
     !withholdRetargetedApiRouteCredential &&
     !withholdRetargetedLlmtrCredential &&
-    !withholdRetargetedRequestyCredential &&
     !withholdRetargetedMergeGatewayCredential &&
     !withholdRetargetedCommandcodeCredential
   ) {
@@ -2065,9 +1992,6 @@ function buildOpenAICompatibleStartupEnv(
       }
       if (isLlmtrProfileFlag) {
         strictEnv.LLMTR_API_KEY = activeProfile.apiKey
-      }
-      if (isRequestyProfileFlag) {
-        strictEnv.REQUESTY_API_KEY = activeProfile.apiKey
       }
       if (isMergeGatewayProfileFlag) {
         strictEnv.MERGE_GATEWAY_API_KEY = activeProfile.apiKey
@@ -2148,18 +2072,12 @@ function buildOpenAICompatibleStartupEnv(
   if (activeProfileRouteId === 'commandcode') {
     env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'commandcode'
   }
-  // Relaunch uses this identity to keep a saved non-canonical Requesty
-  // profile's custom auth and headers off a shell retarget to Requesty.
-  if (activeProfileRouteId === 'requesty') {
-    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'requesty'
-  }
   if (
     activeProfile.apiKey &&
     !withholdRetargetedApismartCredential &&
     !withholdRetargetedConcentrateCredential &&
     !withholdRetargetedApiRouteCredential &&
     !withholdRetargetedLlmtrCredential &&
-    !withholdRetargetedRequestyCredential &&
     !withholdRetargetedMergeGatewayCredential &&
     !withholdRetargetedCommandcodeCredential
   ) {
@@ -2194,9 +2112,6 @@ function buildOpenAICompatibleStartupEnv(
     }
     if (isLlmtrProfileFlag) {
       env.LLMTR_API_KEY = activeProfile.apiKey
-    }
-    if (isRequestyProfileFlag) {
-      env.REQUESTY_API_KEY = activeProfile.apiKey
     }
     if (isMergeGatewayProfileFlag) {
       env.MERGE_GATEWAY_API_KEY = activeProfile.apiKey
@@ -2487,9 +2402,6 @@ function triggerStartupDiscoveryRefreshForProfile(
     return
   }
   if (route.routeId === 'commandcode' && !isCommandcodeProfile(profile)) {
-    return
-  }
-  if (route.routeId === 'requesty' && !isRequestyProfile(profile)) {
     return
   }
 

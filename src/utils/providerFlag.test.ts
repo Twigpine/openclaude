@@ -36,7 +36,6 @@ const ENV_KEYS = [
   'OPENAI_AUTH_SCHEME',
   'OPENAI_AUTH_HEADER_VALUE',
   'LLMTR_API_KEY',
-  'REQUESTY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -639,33 +638,6 @@ describe('applyProviderFlag - descriptor-backed openai-compatible routes', () =>
     process.env.LLMTR_API_KEY = 'llmtr-secret'
     process.env.OPENAI_API_KEY = 'generic-openai-secret'
     process.env.OPENAI_BASE_URL = 'https://llmtr.com/v1'
-
-    const result = applyProviderFlag('openrouter', [])
-
-    expect(result.error).toBeUndefined()
-    expect(process.env.OPENAI_BASE_URL).toBe('https://openrouter.ai/api/v1')
-    expect(process.env.OPENAI_API_KEY).toBe('generic-openai-secret')
-  })
-
-  test('clears a Requesty key copied into OPENAI_API_KEY when switching routes', () => {
-    process.env.REQUESTY_API_KEY = 'requesty-secret'
-    process.env.OPENAI_API_KEY = 'requesty-secret'
-    process.env.OPENAI_BASE_URL = 'https://router.requesty.ai/v1'
-
-    for (const provider of ['openai', 'openrouter']) {
-      process.env.OPENAI_API_KEY = 'requesty-secret'
-      const result = applyProviderFlag(provider, [])
-
-      expect(result.error).toBeUndefined()
-      expect(process.env.OPENAI_API_KEY).toBeUndefined()
-      expect(process.env.REQUESTY_API_KEY).toBe('requesty-secret')
-    }
-  })
-
-  test('preserves an independent generic OPENAI_API_KEY when switching from Requesty', () => {
-    process.env.REQUESTY_API_KEY = 'requesty-secret'
-    process.env.OPENAI_API_KEY = 'generic-openai-secret'
-    process.env.OPENAI_BASE_URL = 'https://router.requesty.ai/v1'
 
     const result = applyProviderFlag('openrouter', [])
 
