@@ -2260,6 +2260,14 @@ export async function buildLaunchEnv(options: {
     (persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'merge-gateway' ||
       isCanonicalMergeGatewayInferenceBaseUrl(persistedOpenAIBaseUrl)) &&
     !isCanonicalMergeGatewayInferenceBaseUrl(env.OPENAI_BASE_URL)
+  // Same for a saved Requesty profile: its key is valid only on the canonical
+  // Requesty inference URLs, so a shell retarget elsewhere drops it.
+  const persistedRequestyProfileIdentity =
+    persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'requesty' ||
+    isCanonicalRequestyInferenceBaseUrl(persistedOpenAIBaseUrl)
+  const retargetedRequestyProfile =
+    persistedRequestyProfileIdentity &&
+    !isCanonicalRequestyInferenceBaseUrl(env.OPENAI_BASE_URL)
   // A saved Runcrate profile mirrors its dedicated key into the generic
   // OPENAI_API_KEY alias. A shell URL retarget must not hand that saved key to
   // the new endpoint; only an explicit shell credential may follow the URL.
@@ -2283,7 +2291,11 @@ export async function buildLaunchEnv(options: {
     : processEnv
   const openAICredential = resolveOpenAICredentialEnvOverride(
     shellCredentialSource,
-    retargetedMergeProfile || retargetedRuncrateProfile ? {} : persistedEnv,
+    retargetedMergeProfile ||
+      retargetedRuncrateProfile ||
+      retargetedRequestyProfile
+      ? {}
+      : persistedEnv,
   )
   if (openAICredential) {
     env[openAICredential.envVar] = openAICredential.value
@@ -2632,10 +2644,13 @@ export async function buildLaunchEnv(options: {
             : undefined)
         : undefined
     // Same ownership rule for a selected canonical Requesty profile, including
-    // startup files that only persisted the saved key as OPENAI_API_KEY.
+    // startup files that only persisted the saved key as OPENAI_API_KEY. Only
+    // a persisted Requesty profile owns that key; another profile's generic
+    // key is not a Requesty credential.
     const persistedRequestyProfileKey =
       dedicatedKey === 'REQUESTY_API_KEY' &&
       effectiveOpenAIRouteId === 'requesty' &&
+      persistedRequestyProfileIdentity &&
       !!dedicatedBaseUrl &&
       isCanonicalRequestyInferenceBaseUrl(dedicatedBaseUrl)
         ? sanitizeApiKey(persistedEnv.REQUESTY_API_KEY) ||

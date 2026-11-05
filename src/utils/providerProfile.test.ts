@@ -3811,3 +3811,63 @@ test('OpenAI profile builder materializes the canonical Orca key only at its rou
   })
   assert.equal(custom?.ORCAROUTER_API_KEY, undefined)
 })
+
+test('a shell URL retarget does not carry a saved Requesty key to the new endpoint', async () => {
+  const persisted = profile('openai', {
+    OPENAI_BASE_URL: 'https://router.requesty.ai/v1',
+    OPENAI_MODEL: 'openai/gpt-5-mini',
+    OPENAI_API_KEY: 'saved-requesty-key',
+    REQUESTY_API_KEY: 'saved-requesty-key',
+  })
+
+  for (const shellBaseUrl of [
+    'https://example.test/v1',
+    'http://router.requesty.ai/v1',
+  ]) {
+    const env = await buildLaunchEnv({
+      profile: 'openai',
+      persisted,
+      goal: 'balanced',
+      processEnv: { OPENAI_BASE_URL: shellBaseUrl },
+    })
+
+    assert.equal(env.OPENAI_BASE_URL, shellBaseUrl)
+    assert.equal(env.OPENAI_API_KEY, undefined)
+    assert.equal(env.REQUESTY_API_KEY, undefined)
+  }
+
+  const regional = await buildLaunchEnv({
+    profile: 'openai',
+    persisted,
+    goal: 'balanced',
+    processEnv: { OPENAI_BASE_URL: 'https://router.eu.requesty.ai/v1' },
+  })
+  assert.equal(regional.OPENAI_API_KEY, 'saved-requesty-key')
+  assert.equal(regional.REQUESTY_API_KEY, 'saved-requesty-key')
+})
+
+test('a shell URL retarget to Requesty does not adopt another profile key as the Requesty key', async () => {
+  const env = await buildLaunchEnv({
+    profile: 'openai',
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_API_KEY: 'sk-saved-openai',
+    }),
+    goal: 'balanced',
+    processEnv: {
+      OPENAI_BASE_URL: 'https://router.requesty.ai/v1',
+      REQUESTY_API_KEY: 'shell-requesty-key',
+    },
+  })
+
+  assert.equal(env.REQUESTY_API_KEY, 'shell-requesty-key')
+  assert.equal(
+    resolveRouteCredentialValue({
+      routeId: 'requesty',
+      baseUrl: env.OPENAI_BASE_URL,
+      processEnv: env,
+    }),
+    'shell-requesty-key',
+  )
+})
