@@ -57,6 +57,7 @@ const PROVIDER_ENV_VARS_TO_CLEAR_FOR_OVERRIDE = [
   'OPENAI_AUTH_SCHEME',
   'OPENAI_AUTH_HEADER_VALUE',
   'MERGE_GATEWAY_API_KEY',
+  'REQUESTY_API_KEY',
   'ORCAROUTER_API_KEY',
   'RUNCRATE_API_KEY',
   'CMD_API_KEY',
@@ -379,5 +380,9 @@ export function applyAgentProviderOverrideToEnv(
   }
   if (resolveRouteIdFromBaseUrl(providerOverride.baseURL) === 'commandcode') {
     env.CMD_API_KEY = providerOverride.apiKey
+  }
+  if (resolveRouteIdFromBaseUrl(providerOverride.baseURL) === 'requesty') {
+    const key = sanitizeApiKey(providerOverride.apiKey)
+    if (key) env.REQUESTY_API_KEY = key
   }
 }

@@ -892,3 +892,20 @@ test.each([undefined, 'parent-orca-key'])(
     expect(env.OPENAI_API_KEY).toBe('custom-key')
   },
 )
+
+test.each([undefined, 'parent-requesty-key'])(
+  'spawned Requesty override owns its key with ambient %s', ambient => {
+    const env: NodeJS.ProcessEnv = { REQUESTY_API_KEY: ambient }
+    applyAgentProviderOverrideToEnv({
+      model: 'openai/gpt-5-mini', baseURL: 'https://router.requesty.ai/v1',
+      apiKey: 'configured-agent-key',
+    }, env)
+    expect(env.REQUESTY_API_KEY).toBe('configured-agent-key')
+    expect(env.OPENAI_API_KEY).toBe('configured-agent-key')
+    applyAgentProviderOverrideToEnv({
+      model: 'custom', baseURL: 'https://custom.example/v1', apiKey: 'custom-key',
+    }, env)
+    expect(env.REQUESTY_API_KEY).toBeUndefined()
+    expect(env.OPENAI_API_KEY).toBe('custom-key')
+  },
+)
