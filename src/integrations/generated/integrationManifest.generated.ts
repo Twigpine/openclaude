@@ -505,6 +505,17 @@ export const PROVIDER_PRESET_MANIFEST = [
     ]
   },
   {
+    "preset": "requesty",
+    "routeKind": "gateway",
+    "routeId": "requesty",
+    "vendorId": "openai",
+    "gatewayId": "requesty",
+    "description": "Requesty OpenAI-compatible gateway",
+    "apiKeyEnvVars": [
+      "REQUESTY_API_KEY"
+    ]
+  },
+  {
     "preset": "runcrate",
     "routeKind": "gateway",
     "routeId": "runcrate",
@@ -689,6 +700,7 @@ export const ORDERED_PROVIDER_PRESETS = [
   "opencode",
   "openrouter",
   "orcarouter",
+  "requesty",
   "runcrate",
   "together",
   "venice",

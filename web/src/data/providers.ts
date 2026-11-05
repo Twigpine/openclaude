@@ -141,6 +141,14 @@ export const providers: Provider[] = [
     notes: 'OpenAI-compatible aggregation across hundreds of hosted models.',
   },
   {
+    id: 'requesty',
+    name: 'Requesty',
+    group: 'gateways',
+    setup: '/provider or OpenAI-compatible env vars',
+    envVars: ['REQUESTY_API_KEY', 'OPENAI_API_KEY'],
+    notes: 'OpenAI-compatible gateway at https://router.requesty.ai/v1 (regional: https://router.eu.requesty.ai/v1, https://router.us.requesty.ai/v1, https://router.ap.requesty.ai/v1); /provider and --provider requesty default to openai/gpt-5-mini, while raw env setup must set CLAUDE_CODE_USE_OPENAI=1, OPENAI_BASE_URL, and OPENAI_MODEL. REQUESTY_API_KEY is sent only to these Requesty URLs; any other OPENAI_BASE_URL uses OPENAI_API_KEY. Uses public discovery of chat models.',
+  },
+  {
     id: 'llmtr',
     name: 'LLMTR',
     group: 'gateways',
