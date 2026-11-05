@@ -119,6 +119,7 @@ afterEach(() => {
     restoreEnvValue('OPENAI_AUTH_SCHEME')
     restoreEnvValue('APISMART_API_KEY')
     restoreEnvValue('MERGE_GATEWAY_API_KEY')
+    restoreEnvValue('REQUESTY_API_KEY')
     restoreEnvValue('ANTHROPIC_CUSTOM_HEADERS')
     restoreEnvValue('CLAUDE_CODE_USE_OPENAI')
     restoreEnvValue('CLAUDE_CODE_USE_GEMINI')
