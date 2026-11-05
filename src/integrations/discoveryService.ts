@@ -17,6 +17,7 @@ import {
   getRouteDescriptor,
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalMergeGatewayInferenceBaseUrl,
+  isCanonicalRequestyInferenceBaseUrl,
   isCanonicalXaiInferenceBaseUrl,
   resolveActiveRouteIdFromEnv,
   resolveRouteCredentialValue,
@@ -228,7 +229,9 @@ function getRouteDiscoveryApiKey(
     (routeId === 'apismart' &&
       !isCanonicalApismartInferenceBaseUrl(baseUrl)) ||
     (routeId === 'merge-gateway' &&
-      !isCanonicalMergeGatewayInferenceBaseUrl(baseUrl))
+      !isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)) ||
+    (routeId === 'requesty' &&
+      !isCanonicalRequestyInferenceBaseUrl(baseUrl))
   ) {
     return undefined
   }

@@ -23,6 +23,7 @@ import {
   isCanonicalConcentrateInferenceBaseUrl,
   isCanonicalCommandcodeInferenceBaseUrl,
   isCanonicalMergeGatewayInferenceBaseUrl,
+  isCanonicalRequestyInferenceBaseUrl,
   isCloudflareBaseUrl,
   isLongcatBaseUrl,
   matchHostnameAgainstRouteHosts,
@@ -326,7 +327,9 @@ function getRuntimeValidationTarget(
         (target.descriptor.id === 'merge-gateway' &&
           !isCanonicalMergeGatewayInferenceBaseUrl(request.baseUrl)) ||
         (target.descriptor.id === 'commandcode' &&
-          !isCanonicalCommandcodeInferenceBaseUrl(request.baseUrl)))
+          !isCanonicalCommandcodeInferenceBaseUrl(request.baseUrl)) ||
+        (target.descriptor.id === 'requesty' &&
+          !isCanonicalRequestyInferenceBaseUrl(request.baseUrl)))
     ) {
       return false
     }

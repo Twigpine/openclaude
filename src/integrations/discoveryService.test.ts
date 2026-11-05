@@ -26,6 +26,7 @@ const originalEnv = {
   OPENAI_AUTH_SCHEME: process.env.OPENAI_AUTH_SCHEME,
   APISMART_API_KEY: process.env.APISMART_API_KEY,
   MERGE_GATEWAY_API_KEY: process.env.MERGE_GATEWAY_API_KEY,
+  REQUESTY_API_KEY: process.env.REQUESTY_API_KEY,
   ANTHROPIC_CUSTOM_HEADERS: process.env.ANTHROPIC_CUSTOM_HEADERS,
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
   CLAUDE_CODE_USE_GEMINI: process.env.CLAUDE_CODE_USE_GEMINI,
@@ -73,6 +74,7 @@ function clearProviderEnv(): void {
   delete process.env.OPENAI_AUTH_SCHEME
   delete process.env.APISMART_API_KEY
   delete process.env.MERGE_GATEWAY_API_KEY
+  delete process.env.REQUESTY_API_KEY
   delete process.env.ANTHROPIC_CUSTOM_HEADERS
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
@@ -235,6 +237,32 @@ describe('discoverModelsForRoute', () => {
       })
     }
     expect(authorizations).toEqual([])
+  })
+
+  test('withholds explicit and ambient Requesty keys from retargeted discovery', async () => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    process.env.REQUESTY_API_KEY = 'requesty-secret'
+    const authorizations: Array<string | null> = []
+    setMockFetch(mock((_input: string | URL | Request, init?: RequestInit) => {
+      authorizations.push(new Headers(init?.headers).get('authorization'))
+      return Promise.resolve(new Response(JSON.stringify({ data: [] })))
+    }) as unknown as typeof globalThis.fetch)
+    for (const baseUrl of [
+      'https://proxy.example/v1',
+      'http://router.requesty.ai/v1',
+    ]) {
+      for (const apiKey of [undefined, 'requesty-secret']) {
+        await discoverModelsForRoute('requesty', {
+          baseUrl, apiKey, forceRefresh: true,
+        })
+      }
+    }
+    expect(authorizations).toEqual([null, null, null, null])
+
+    await discoverModelsForRoute('requesty', {
+      baseUrl: 'https://router.requesty.ai/v1', forceRefresh: true,
+    })
+    expect(authorizations.at(-1)).toBe('Bearer requesty-secret')
   })
 
   test('caches the complete native Merge catalog after cursor continuation', async () => {

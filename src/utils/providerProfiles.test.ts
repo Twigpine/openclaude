@@ -620,6 +620,39 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(startupEnv.API_ROUTE_API_KEY).toBeUndefined()
   }, 20_000)
 
+  test('retargeted Requesty profile runs generically and skips discovery', async () => {
+    const fetchMock = mock(() => Promise.resolve(new Response('{}')))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const { resolveProfileCapabilityRouteId, setActiveProviderProfile } =
+      await importFreshProviderProfileModules()
+    const profile = buildRequestyProfile({
+      id: 'requesty_proxy',
+      baseUrl: 'https://proxy.example/v1',
+    })
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [profile],
+    }))
+
+    setActiveProviderProfile(profile.id, { configDir: testConfigDir ?? undefined })
+    await Promise.resolve()
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    expect(process.env.REQUESTY_API_KEY).toBeUndefined()
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    for (const baseUrl of [
+      'https://proxy.example/v1',
+      'http://router.requesty.ai/v1',
+      'https://router.requesty.ai/v1/models',
+    ]) {
+      expect(resolveProfileCapabilityRouteId('requesty', baseUrl)).toBe('custom')
+    }
+    expect(
+      resolveProfileCapabilityRouteId('requesty', 'https://router.eu.requesty.ai/v1'),
+    ).toBe('requesty')
+  }, 20_000)
+
   test('keyless canonical LLMTR profile adopts its ambient dedicated key', async () => {
     const { applyProviderProfileToProcessEnv } =
       await importFreshProviderProfileModules()
@@ -5358,6 +5391,67 @@ describe('setActiveProviderProfile', () => {
       expect(retargetedStartupEnv.OPENAI_BASE_URL).toBe('https://example.test/v1')
       expect(retargetedStartupEnv.OPENAI_API_KEY).toBeUndefined()
       expect(retargetedStartupEnv.REQUESTY_API_KEY).toBeUndefined()
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a saved Requesty proxy profile keeps its auth off a shell retarget onto canonical Requesty', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
+    process.chdir(tempDir)
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+      const proxy = buildRequestyProfile({
+        id: 'requesty_proxy',
+        baseUrl: 'https://requesty-proxy.example/v1',
+        apiKey: 'saved-proxy-key',
+        authHeader: 'X-Proxy-Auth',
+        authScheme: 'raw',
+        authHeaderValue: 'saved-proxy-secret',
+        customHeaders: { 'X-Proxy-Trace': 'saved-proxy-header' },
+      })
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [proxy],
+      }))
+
+      setActiveProviderProfile('requesty_proxy', { configDir })
+      const persisted = JSON.parse(
+        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
+      )
+      expect(persisted.env).toMatchObject({
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'requesty',
+        OPENAI_BASE_URL: 'https://requesty-proxy.example/v1',
+        OPENAI_AUTH_HEADER_VALUE: 'saved-proxy-secret',
+      })
+      expect(persisted.env.OPENAI_API_KEY).toBeUndefined()
+
+      const { buildStartupEnvFromProfile } = await import(
+        `./providerProfile.js?ts=${Date.now()}-${Math.random()}`
+      )
+      const ownUrlEnv = await buildStartupEnvFromProfile({
+        persisted,
+        processEnv: {},
+      })
+      expect(ownUrlEnv.OPENAI_AUTH_HEADER_VALUE).toBe('saved-proxy-secret')
+
+      const retargetedEnv = await buildStartupEnvFromProfile({
+        persisted,
+        processEnv: { OPENAI_BASE_URL: 'https://router.requesty.ai/v1' },
+      })
+      expect(retargetedEnv.OPENAI_BASE_URL).toBe('https://router.requesty.ai/v1')
+      expect(retargetedEnv.OPENAI_API_KEY).toBeUndefined()
+      expect(retargetedEnv.REQUESTY_API_KEY).toBeUndefined()
+      expect(retargetedEnv.OPENAI_AUTH_HEADER).toBeUndefined()
+      expect(retargetedEnv.OPENAI_AUTH_SCHEME).toBeUndefined()
+      expect(retargetedEnv.OPENAI_AUTH_HEADER_VALUE).toBeUndefined()
+      expect(retargetedEnv.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
     } finally {
       process.chdir(originalCwd)
       rmSync(tempDir, { recursive: true, force: true })

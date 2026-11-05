@@ -377,7 +377,8 @@ export function resolveProfileCapabilityRouteId(
       providerRouteId === 'api-route' ||
       providerRouteId === 'llmtr' ||
       providerRouteId === 'merge-gateway' ||
-      providerRouteId === 'commandcode') &&
+      providerRouteId === 'commandcode' ||
+      providerRouteId === 'requesty') &&
     baseUrl &&
     !(providerRouteId === 'cloudflare'
       ? isCloudflareBaseUrl(baseUrl)
@@ -391,6 +392,8 @@ export function resolveProfileCapabilityRouteId(
             ? isCanonicalCommandcodeInferenceBaseUrl(baseUrl)
             : providerRouteId === 'merge-gateway'
               ? isCanonicalMergeGatewayInferenceBaseUrl(baseUrl)
+            : providerRouteId === 'requesty'
+              ? isCanonicalRequestyInferenceBaseUrl(baseUrl)
               : isCanonicalLlmtrInferenceBaseUrl(baseUrl))
   ) {
     return 'custom'
@@ -2103,6 +2106,11 @@ function buildOpenAICompatibleStartupEnv(
   if (activeProfileRouteId === 'commandcode') {
     env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'commandcode'
   }
+  // Relaunch uses this identity to keep a saved non-canonical Requesty
+  // profile's custom auth and headers off a shell retarget to Requesty.
+  if (activeProfileRouteId === 'requesty') {
+    env.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'requesty'
+  }
   if (
     activeProfile.apiKey &&
     !withholdRetargetedApismartCredential &&
@@ -2437,6 +2445,9 @@ function triggerStartupDiscoveryRefreshForProfile(
     return
   }
   if (route.routeId === 'commandcode' && !isCommandcodeProfile(profile)) {
+    return
+  }
+  if (route.routeId === 'requesty' && !isRequestyProfile(profile)) {
     return
   }
 

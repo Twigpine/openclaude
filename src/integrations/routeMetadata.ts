@@ -1553,6 +1553,12 @@ export function resolveRouteIdFromBaseUrl(
       ) {
         continue
       }
+      if (
+        route.id === 'requesty' &&
+        !isCanonicalRequestyInferenceBaseUrl(baseUrl)
+      ) {
+        continue
+      }
       return route.id
     }
   }
@@ -1577,7 +1583,9 @@ export function resolveRouteIdFromBaseUrl(
           (route.id === 'commandcode' &&
             !isCanonicalCommandcodeInferenceBaseUrl(baseUrl)) ||
           (route.id === 'api-route' &&
-            !isApiRouteBaseUrl(baseUrl))
+            !isApiRouteBaseUrl(baseUrl)) ||
+          (route.id === 'requesty' &&
+            !isCanonicalRequestyInferenceBaseUrl(baseUrl))
         ) {
           continue
         }
@@ -1628,6 +1636,9 @@ function profileRouteHonorsBaseUrlBoundary(
   }
   if (routeId === 'api-route') {
     return isCanonicalApiRouteInferenceBaseUrl(baseUrl)
+  }
+  if (routeId === 'requesty') {
+    return isCanonicalRequestyInferenceBaseUrl(baseUrl)
   }
   if (routeId === 'zai') {
     return !baseUrl || isCanonicalZaiCodingPlanBaseUrl(baseUrl)

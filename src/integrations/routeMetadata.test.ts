@@ -555,6 +555,34 @@ test('Requesty regional hosts resolve to the requesty route', () => {
   expect(
     resolveRouteIdFromBaseUrl('https://router.requesty.ai.evil.example/v1'),
   ).toBe(null)
+  // Requesty route identity follows the same boundary as its credential.
+  for (const baseUrl of [
+    'http://router.requesty.ai/v1',
+    'https://router.requesty.ai:8443/v1',
+    'https://router.requesty.ai/v1?x=1',
+    'https://router.requesty.ai/v1/models',
+    'https://router.eu.requesty.ai/v2',
+  ]) {
+    expect(resolveRouteIdFromBaseUrl(baseUrl)).toBe(null)
+  }
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1' },
+      {
+        activeProfileProvider: 'requesty',
+        activeProfileBaseUrl: 'https://proxy.example/v1',
+      },
+    ),
+  ).not.toBe('requesty')
+  expect(
+    resolveActiveRouteIdFromEnv(
+      { CLAUDE_CODE_USE_OPENAI: '1' },
+      {
+        activeProfileProvider: 'requesty',
+        activeProfileBaseUrl: 'https://router.requesty.ai/v1',
+      },
+    ),
+  ).toBe('requesty')
 })
 
 test('Requesty credential is limited to the canonical inference base URLs', () => {

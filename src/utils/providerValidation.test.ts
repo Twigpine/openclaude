@@ -44,6 +44,7 @@ const ENV_KEYS = [
   'LONGCAT_API_KEY',
   'LLMTR_API_KEY',
   'MERGE_GATEWAY_API_KEY',
+  'REQUESTY_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
@@ -594,6 +595,27 @@ test('noncanonical ApiSmart paths do not validate a dedicated credential', async
   expect(message).toContain(
     'OPENAI_API_KEYS or OPENAI_API_KEY is required when CLAUDE_CODE_USE_OPENAI=1',
   )
+})
+
+test('noncanonical Requesty host paths do not validate a dedicated credential', async () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_MODEL = 'openai/gpt-5-mini'
+  process.env.REQUESTY_API_KEY = 'requesty-key'
+  delete process.env.OPENAI_API_KEY
+  delete process.env.OPENAI_API_KEYS
+
+  process.env.OPENAI_BASE_URL = 'https://router.requesty.ai/v1'
+  await expect(getProviderValidationError(process.env)).resolves.toBeNull()
+
+  // The request withholds REQUESTY_API_KEY here, so validation must not accept it.
+  process.env.OPENAI_BASE_URL = 'https://router.requesty.ai/v1/models'
+  const message = await getProviderValidationError(process.env)
+  expect(message).toContain(
+    'OPENAI_API_KEYS or OPENAI_API_KEY is required when CLAUDE_CODE_USE_OPENAI=1',
+  )
+
+  process.env.OPENAI_API_KEY = 'generic-proxy-key'
+  await expect(getProviderValidationError(process.env)).resolves.toBeNull()
 })
 
 test('noncanonical Concentrate host paths fall back to generic OpenAI validation', async () => {

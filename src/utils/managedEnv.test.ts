@@ -46,6 +46,7 @@ const ENV_KEYS = [
   'COMMAND_CODE_API_KEY',
   'API_ROUTE_API_KEY',
   'API_ROUTE_MODEL',
+  'REQUESTY_API_KEY',
   'OPENAI_API_KEY',
   'OPENAI_AZURE_STYLE',
   'OPENAI_BASE_URL',
@@ -147,6 +148,21 @@ describe('host-managed API Route settings boundary', () => {
 })
 
 describe('applyConfigEnvironmentVariables', () => {
+  it('preserves a host-managed Requesty key against settings env', () => {
+    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://router.requesty.ai/v1'
+    process.env.REQUESTY_API_KEY = 'host-requesty-key'
+    saveGlobalConfig(current => ({
+      ...current,
+      env: { REQUESTY_API_KEY: 'settings-requesty-key' },
+    }))
+
+    applyConfigEnvironmentVariables()
+
+    expect(process.env.REQUESTY_API_KEY).toBe('host-requesty-key')
+  })
+
   it('preserves the complete host-managed Command Code route against settings env', () => {
     process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
     process.env.CLAUDE_CODE_USE_OPENAI = '1'
