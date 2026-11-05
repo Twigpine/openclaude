@@ -3943,3 +3943,50 @@ test('a shell URL retarget drops a saved Requesty profile custom auth and header
   assert.equal(ownProxy.OPENAI_AUTH_HEADER_VALUE, 'saved-auth-secret')
   assert.equal(ownProxy.ANTHROPIC_CUSTOM_HEADERS, 'X-Requesty-Auth: saved-header-secret')
 })
+
+test('a shell URL retarget onto canonical Requesty drops a saved proxy profile credentials', async () => {
+  // Credentials saved for a non-canonical Requesty-route URL belong to that
+  // proxy, so moving the profile onto canonical Requesty is a retarget too.
+  const persisted = profile('openai', {
+    CLAUDE_CODE_PROVIDER_ROUTE_ID: 'requesty',
+    OPENAI_BASE_URL: 'https://requesty-proxy.example/v1',
+    OPENAI_MODEL: 'openai/gpt-5-mini',
+    OPENAI_API_KEY: 'saved-proxy-key',
+    REQUESTY_API_KEY: 'saved-proxy-requesty-key',
+    OPENAI_AUTH_HEADER: 'X-Proxy-Auth',
+    OPENAI_AUTH_SCHEME: 'raw',
+    OPENAI_AUTH_HEADER_VALUE: 'saved-proxy-secret',
+    ANTHROPIC_CUSTOM_HEADERS: 'X-Proxy-Auth: saved-proxy-header',
+  })
+
+  const env = await buildStartupEnvFromProfile({
+    persisted,
+    processEnv: { OPENAI_BASE_URL: 'https://router.requesty.ai/v1' },
+  })
+  assert.equal(env.OPENAI_BASE_URL, 'https://router.requesty.ai/v1')
+  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.REQUESTY_API_KEY, undefined)
+  assert.equal(env.OPENAI_AUTH_HEADER, undefined)
+  assert.equal(env.OPENAI_AUTH_SCHEME, undefined)
+  assert.equal(env.OPENAI_AUTH_HEADER_VALUE, undefined)
+  assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, undefined)
+  assert.equal(
+    resolveRouteCredentialValue({
+      routeId: 'requesty',
+      baseUrl: env.OPENAI_BASE_URL,
+      processEnv: env,
+    }),
+    undefined,
+  )
+
+  // An explicit shell Requesty key still authenticates the canonical launch.
+  const explicit = await buildStartupEnvFromProfile({
+    persisted,
+    processEnv: {
+      OPENAI_BASE_URL: 'https://router.requesty.ai/v1',
+      REQUESTY_API_KEY: 'shell-requesty-key',
+    },
+  })
+  assert.equal(explicit.REQUESTY_API_KEY, 'shell-requesty-key')
+  assert.equal(explicit.OPENAI_API_KEY, undefined)
+})

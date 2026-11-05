@@ -2260,14 +2260,19 @@ export async function buildLaunchEnv(options: {
     (persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'merge-gateway' ||
       isCanonicalMergeGatewayInferenceBaseUrl(persistedOpenAIBaseUrl)) &&
     !isCanonicalMergeGatewayInferenceBaseUrl(env.OPENAI_BASE_URL)
-  // Same for a saved Requesty profile: its key is valid only on the canonical
-  // Requesty inference URLs, so a shell retarget elsewhere drops it.
+  // Same for a saved Requesty profile: its key is a Requesty key only when the
+  // profile was saved for a canonical Requesty inference URL, and it is valid
+  // only on those URLs. Any other launch drops it, including one that moves a
+  // profile saved for a non-canonical URL onto canonical Requesty.
   const persistedRequestyProfileIdentity =
     persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'requesty' ||
     isCanonicalRequestyInferenceBaseUrl(persistedOpenAIBaseUrl)
   const retargetedRequestyProfile =
     persistedRequestyProfileIdentity &&
-    !isCanonicalRequestyInferenceBaseUrl(env.OPENAI_BASE_URL)
+    !(
+      isCanonicalRequestyInferenceBaseUrl(persistedOpenAIBaseUrl) &&
+      isCanonicalRequestyInferenceBaseUrl(env.OPENAI_BASE_URL)
+    )
   // A saved Runcrate profile mirrors its dedicated key into the generic
   // OPENAI_API_KEY alias. A shell URL retarget must not hand that saved key to
   // the new endpoint; only an explicit shell credential may follow the URL.
@@ -2278,8 +2283,8 @@ export async function buildLaunchEnv(options: {
   // Requesty supports custom auth headers, so its saved credential can also
   // ride in the custom-auth trio or custom headers. Those belong to the
   // endpoint the profile was saved for: a shell retarget away from it drops
-  // them, while a saved non-canonical profile relaunched at its own URL keeps
-  // them, matching profile apply.
+  // them in either direction, while a saved non-canonical profile relaunched
+  // at its own URL keeps them, matching profile apply.
   const shellRetargetedRequestyProfile =
     retargetedRequestyProfile &&
     !isSameConfiguredEndpoint(env.OPENAI_BASE_URL, persistedOpenAIBaseUrl)
@@ -2657,12 +2662,13 @@ export async function buildLaunchEnv(options: {
         : undefined
     // Same ownership rule for a selected canonical Requesty profile, including
     // startup files that only persisted the saved key as OPENAI_API_KEY. Only
-    // a persisted Requesty profile owns that key; another profile's generic
-    // key is not a Requesty credential.
+    // a Requesty profile saved for a canonical URL owns that key; another
+    // profile's generic key is not a Requesty credential.
     const persistedRequestyProfileKey =
       dedicatedKey === 'REQUESTY_API_KEY' &&
       effectiveOpenAIRouteId === 'requesty' &&
       persistedRequestyProfileIdentity &&
+      !retargetedRequestyProfile &&
       !!dedicatedBaseUrl &&
       isCanonicalRequestyInferenceBaseUrl(dedicatedBaseUrl)
         ? sanitizeApiKey(persistedEnv.REQUESTY_API_KEY) ||
@@ -2726,10 +2732,12 @@ export async function buildLaunchEnv(options: {
             ? sanitizeApiKey(persistedOpenAICredential.value)
             : undefined)
         : undefined
-    // A retargeted Runcrate launch may only use an explicit shell credential;
-    // the saved profile key belongs to the endpoint it was saved for.
+    // A retargeted Runcrate or Requesty launch may only use an explicit shell
+    // credential; the saved profile key belongs to the endpoint it was saved
+    // for.
     const persistedDedicatedKey =
-      retargetedRuncrateProfile && dedicatedKey === 'RUNCRATE_API_KEY'
+      (retargetedRuncrateProfile && dedicatedKey === 'RUNCRATE_API_KEY') ||
+      (retargetedRequestyProfile && dedicatedKey === 'REQUESTY_API_KEY')
         ? undefined
         : sanitizeApiKey(persistedEnv[dedicatedKey])
     const shellDedicatedKey =
