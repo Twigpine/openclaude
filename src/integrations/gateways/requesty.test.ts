@@ -1,6 +1,8 @@
 import { describe, expect, mock, test } from 'bun:test'
 
 import { createOpenAIShimClient } from '../../services/api/openaiShim.js'
+import { PROVIDER_SELECTION_FLAGS } from '../../utils/providerSelectionFlags.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -105,10 +107,32 @@ describe('requesty gateway live model mapping', () => {
   })
 })
 
+// Every variable that selects the provider or supplies request auth.
+const REQUEST_ENV_KEYS = [
+  ...PROVIDER_SELECTION_FLAGS,
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+  'CLAUDE_CODE_PROVIDER_ROUTE_ID',
+  'OPENAI_BASE_URL',
+  'OPENAI_API_BASE',
+  'OPENAI_MODEL',
+  'OPENAI_API_KEY',
+  'OPENAI_API_KEYS',
+  'OPENAI_API_FORMAT',
+  'OPENAI_AUTH_HEADER',
+  'OPENAI_AUTH_SCHEME',
+  'OPENAI_AUTH_HEADER_VALUE',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'REQUESTY_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GEMINI_ACCESS_TOKEN',
+  'MISTRAL_API_KEY',
+]
+
 describe('requesty request-time credential gate', () => {
   test('sends REQUESTY_API_KEY only to canonical Requesty URLs', async () => {
     await acquireSharedMutationLock('requesty.test.ts')
-    const previousEnv = { ...process.env }
+    const restoreEnv = snapshotEnv(REQUEST_ENV_KEYS)
     const originalFetch = globalThis.fetch
     let authorization: string | null = null
     try {
@@ -131,10 +155,8 @@ describe('requesty request-time credential gate', () => {
         baseUrl: string,
         openAIKey?: string,
       ): Promise<string | null> => {
-        for (const name of Object.keys(process.env)) {
-          if (/^(OPENAI_|ANTHROPIC_|REQUESTY_|CLAUDE_CODE_PROVIDER_)/.test(name)) {
-            delete process.env[name]
-          }
+        for (const name of REQUEST_ENV_KEYS) {
+          delete process.env[name]
         }
         process.env.CLAUDE_CODE_USE_OPENAI = '1'
         process.env.OPENAI_BASE_URL = baseUrl
@@ -172,10 +194,7 @@ describe('requesty request-time credential gate', () => {
     } finally {
       mock.restore()
       globalThis.fetch = originalFetch
-      for (const name of Object.keys(process.env)) {
-        if (!(name in previousEnv)) delete process.env[name]
-      }
-      Object.assign(process.env, previousEnv)
+      restoreEnv()
       releaseSharedMutationLock()
     }
   })
