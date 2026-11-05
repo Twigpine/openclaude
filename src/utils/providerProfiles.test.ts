@@ -6880,6 +6880,22 @@ test.each([false, true])('a keyless Runcrate selection rejects another profile k
   expect(persisted.env.RUNCRATE_API_KEY).toBeUndefined()
 })
 
+// Settings env can overwrite REQUESTY_API_KEY after the profile applied. The
+// request executor prefers that variable on the Requesty route, so reconcile
+// must restore the selected profile's saved key.
+test('a keyed Requesty profile restores its saved key over a drifted settings key', async () => {
+  const { setActiveProviderProfile, applyActiveProviderProfileFromConfig } =
+    await importFreshProviderProfileModules()
+  const saved = buildRequestyProfile({ apiKey: 'selected-requesty-key' })
+  saveMockGlobalConfig(current => ({ ...current, providerProfiles: [saved] }))
+  setActiveProviderProfile(saved.id, { configDir: testConfigDir! })
+  process.env.REQUESTY_API_KEY = 'settings-requesty-key'
+  expect(applyActiveProviderProfileFromConfig()?.id).toBe(saved.id)
+  expect(process.env.REQUESTY_API_KEY).toBe('selected-requesty-key')
+  expect(resolveRouteCredentialValue({ routeId: 'requesty', baseUrl: saved.baseUrl }))
+    .toBe('selected-requesty-key')
+})
+
 // A keyed Requesty profile mirrors its saved key into REQUESTY_API_KEY. A
 // keyless Requesty selection that follows must not adopt that key as shell
 // input, in process or after a relaunch from the keyed startup file.

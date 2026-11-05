@@ -1178,6 +1178,12 @@ function isProcessEnvAlignedWithProfile(
       ? !includeApiKey ||
         sameOptionalEnvValue(processEnv.API_ROUTE_API_KEY, profile.apiKey)
       : true) &&
+    // A keyless Requesty profile uses shell or settings input; a keyed one
+    // owns REQUESTY_API_KEY, which requests prefer over OPENAI_API_KEY.
+    (isRequestyProfile(profile) && profile.apiKey
+      ? !includeApiKey ||
+        sameOptionalEnvValue(processEnv.REQUESTY_API_KEY, profile.apiKey)
+      : true) &&
     (isCommandcodeProfile(profile)
       ? !includeApiKey ||
         sameOptionalEnvValue(
