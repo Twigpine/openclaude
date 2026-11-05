@@ -1,22 +1,11 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { createOpenAIShimClient } from '../../services/api/openaiShim.js'
-import { PROVIDER_SELECTION_FLAGS } from '../../utils/providerSelectionFlags.js'
-import { snapshotEnv } from '../../test/envSnapshot.js'
-import {
-  acquireSharedMutationLock,
-  releaseSharedMutationLock,
-} from '../../test/sharedMutationLock.js'
-import { asMockFetch } from '../../test/typedMocks.js'
+import { describe, expect, test } from 'bun:test'
+
+import { clearManagedProfileEnv } from '../../utils/providerProfile.js'
 import requesty, { mapRequestyModel } from './requesty.js'
-
-type OpenAIShimClient = {
-  beta: {
-    messages: {
-      create: (params: Record<string, unknown>) => Promise<unknown>
-    }
-  }
-}
 
 describe('requesty gateway live model mapping', () => {
   test('uses hybrid discovery against the public models list', () => {
@@ -107,95 +96,89 @@ describe('requesty gateway live model mapping', () => {
   })
 })
 
-// Every variable that selects the provider or supplies request auth.
-const REQUEST_ENV_KEYS = [
-  ...PROVIDER_SELECTION_FLAGS,
-  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
-  'CLAUDE_CODE_PROVIDER_ROUTE_ID',
-  'OPENAI_BASE_URL',
-  'OPENAI_API_BASE',
-  'OPENAI_MODEL',
-  'OPENAI_API_KEY',
-  'OPENAI_API_KEYS',
-  'OPENAI_API_FORMAT',
-  'OPENAI_AUTH_HEADER',
-  'OPENAI_AUTH_SCHEME',
-  'OPENAI_AUTH_HEADER_VALUE',
-  'ANTHROPIC_CUSTOM_HEADERS',
-  'REQUESTY_API_KEY',
-  'GEMINI_API_KEY',
-  'GOOGLE_API_KEY',
-  'GEMINI_ACCESS_TOKEN',
-  'MISTRAL_API_KEY',
-]
-
-describe('requesty request-time credential gate', () => {
-  test('sends REQUESTY_API_KEY only to canonical Requesty URLs', async () => {
-    await acquireSharedMutationLock('requesty.test.ts')
-    const restoreEnv = snapshotEnv(REQUEST_ENV_KEYS)
-    const originalFetch = globalThis.fetch
-    let authorization: string | null = null
-    try {
-      globalThis.fetch = asMockFetch(mock((_input, init) => {
-        authorization = new Headers(init?.headers).get('authorization')
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              id: 'chatcmpl-requesty',
-              model: 'openai/gpt-5-mini',
-              choices: [
-                { message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' },
-              ],
-            }),
-            { headers: { 'Content-Type': 'application/json' } },
-          ),
-        )
-      }))
-      const send = async (
-        baseUrl: string,
-        openAIKey?: string,
-      ): Promise<string | null> => {
-        for (const name of REQUEST_ENV_KEYS) {
-          delete process.env[name]
-        }
-        process.env.CLAUDE_CODE_USE_OPENAI = '1'
-        process.env.OPENAI_BASE_URL = baseUrl
-        process.env.OPENAI_MODEL = 'openai/gpt-5-mini'
-        process.env.REQUESTY_API_KEY = 'requesty-key'
-        if (openAIKey) process.env.OPENAI_API_KEY = openAIKey
-        authorization = null
-        const client = createOpenAIShimClient({}) as OpenAIShimClient
-        await client.beta.messages.create({
+// Run the shim in a fresh process with a clean provider env: inherited
+// provider flags, Azure mode or auth settings cannot reach the request, and
+// the test never mutates this process's env. 30s covers the child's startup.
+test('sends REQUESTY_API_KEY only to canonical Requesty URLs', async () => {
+  const configDir = mkdtempSync(join(tmpdir(), 'requesty-gate-'))
+  const env = { ...process.env }
+  clearManagedProfileEnv(env)
+  delete env.REQUESTY_API_KEY
+  env.CLAUDE_CONFIG_DIR = configDir
+  env.OPENCLAUDE_CONFIG_DIR = configDir
+  const source = `
+    import { enableConfigs } from './src/utils/config.ts';
+    import { createOpenAIShimClient } from './src/services/api/openaiShim.ts';
+    enableConfigs();
+    let authorization = null;
+    globalThis.fetch = async (_url, init) => {
+      authorization = new Headers(init?.headers).get('authorization');
+      return new Response(JSON.stringify({
+        id: 'chatcmpl-requesty', model: 'openai/gpt-5-mini',
+        choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      }), { headers: { 'Content-Type': 'application/json' } });
+    };
+    const results = {};
+    for (const baseUrl of ${JSON.stringify([
+      'https://router.requesty.ai/v1',
+      'https://router.eu.requesty.ai/v1',
+      'https://router.us.requesty.ai/v1',
+      'https://router.ap.requesty.ai/v1',
+      'http://router.requesty.ai/v1',
+      'https://router.requesty.ai:8443/v1',
+      'https://proxy.example/v1',
+    ])}) {
+      for (const openAIKey of [undefined, 'openai-key']) {
+        process.env.CLAUDE_CODE_USE_OPENAI = '1';
+        process.env.OPENAI_BASE_URL = baseUrl;
+        process.env.OPENAI_MODEL = 'openai/gpt-5-mini';
+        process.env.REQUESTY_API_KEY = 'requesty-key';
+        if (openAIKey) process.env.OPENAI_API_KEY = openAIKey;
+        else delete process.env.OPENAI_API_KEY;
+        authorization = null;
+        await createOpenAIShimClient({}).beta.messages.create({
           model: 'openai/gpt-5-mini',
           messages: [{ role: 'user', content: 'hello' }],
           max_tokens: 32,
           stream: false,
-        })
-        return authorization
+        });
+        results[baseUrl + (openAIKey ? ' +openai' : '')] = authorization;
       }
-
-      for (const canonical of [
-        'https://router.requesty.ai/v1',
-        'https://router.eu.requesty.ai/v1',
-        'https://router.us.requesty.ai/v1',
-        'https://router.ap.requesty.ai/v1',
-      ]) {
-        expect(await send(canonical)).toBe('Bearer requesty-key')
-        expect(await send(canonical, 'openai-key')).toBe('Bearer requesty-key')
-      }
-      for (const noncanonical of [
-        'http://router.requesty.ai/v1',
-        'https://router.requesty.ai:8443/v1',
-        'https://proxy.example/v1',
-      ]) {
-        expect(await send(noncanonical)).toBeNull()
-        expect(await send(noncanonical, 'openai-key')).toBe('Bearer openai-key')
-      }
-    } finally {
-      mock.restore()
-      globalThis.fetch = originalFetch
-      restoreEnv()
-      releaseSharedMutationLock()
     }
-  })
-})
+    process.stdout.write(JSON.stringify(results));
+  `
+  try {
+    const child = Bun.spawn([process.execPath, '--eval', source], {
+      cwd: join(import.meta.dir, '../../..'),
+      env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+    expect({ exit, stderr }).toEqual({ exit: 0, stderr: '' })
+    const requesty = 'Bearer requesty-key'
+    const openai = 'Bearer openai-key'
+    expect(JSON.parse(stdout)).toEqual({
+      'https://router.requesty.ai/v1': requesty,
+      'https://router.requesty.ai/v1 +openai': requesty,
+      'https://router.eu.requesty.ai/v1': requesty,
+      'https://router.eu.requesty.ai/v1 +openai': requesty,
+      'https://router.us.requesty.ai/v1': requesty,
+      'https://router.us.requesty.ai/v1 +openai': requesty,
+      'https://router.ap.requesty.ai/v1': requesty,
+      'https://router.ap.requesty.ai/v1 +openai': requesty,
+      'http://router.requesty.ai/v1': null,
+      'http://router.requesty.ai/v1 +openai': openai,
+      'https://router.requesty.ai:8443/v1': null,
+      'https://router.requesty.ai:8443/v1 +openai': openai,
+      'https://proxy.example/v1': null,
+      'https://proxy.example/v1 +openai': openai,
+    })
+  } finally {
+    rmSync(configDir, { recursive: true, force: true })
+  }
+}, 30_000)
