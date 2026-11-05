@@ -3871,3 +3871,75 @@ test('a shell URL retarget to Requesty does not adopt another profile key as the
     'shell-requesty-key',
   )
 })
+
+test('a shell URL retarget drops a saved Requesty profile custom auth and headers', async () => {
+  // Requesty supports custom auth headers, so its saved credential can ride in
+  // the custom-auth trio or custom headers as well as the API key aliases.
+  const persisted = profile('openai', {
+    CLAUDE_CODE_PROVIDER_ROUTE_ID: 'requesty',
+    OPENAI_BASE_URL: 'https://router.requesty.ai/v1',
+    OPENAI_MODEL: 'openai/gpt-5-mini',
+    OPENAI_API_KEY: 'saved-requesty-key',
+    REQUESTY_API_KEY: 'saved-requesty-key',
+    OPENAI_AUTH_HEADER: 'X-Requesty-Auth',
+    OPENAI_AUTH_SCHEME: 'raw',
+    OPENAI_AUTH_HEADER_VALUE: 'saved-auth-secret',
+    ANTHROPIC_CUSTOM_HEADERS: 'X-Requesty-Auth: saved-header-secret',
+  })
+
+  for (const shellBaseUrl of [
+    'https://example.test/v1',
+    'http://router.requesty.ai/v1',
+  ]) {
+    const env = await buildStartupEnvFromProfile({
+      persisted,
+      processEnv: { OPENAI_BASE_URL: shellBaseUrl },
+    })
+    assert.equal(env.OPENAI_BASE_URL, shellBaseUrl)
+    assert.equal(env.OPENAI_API_KEY, undefined)
+    assert.equal(env.REQUESTY_API_KEY, undefined)
+    assert.equal(env.OPENAI_AUTH_HEADER, undefined)
+    assert.equal(env.OPENAI_AUTH_SCHEME, undefined)
+    assert.equal(env.OPENAI_AUTH_HEADER_VALUE, undefined)
+    assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, undefined)
+  }
+
+  // Explicit shell credentials still follow the retargeted endpoint.
+  const explicit = await buildStartupEnvFromProfile({
+    persisted,
+    processEnv: {
+      OPENAI_BASE_URL: 'https://example.test/v1',
+      OPENAI_API_KEY: 'shell-key',
+      OPENAI_AUTH_HEADER: 'X-Shell-Auth',
+      OPENAI_AUTH_SCHEME: 'bearer',
+      OPENAI_AUTH_HEADER_VALUE: 'shell-auth-secret',
+    },
+  })
+  assert.equal(explicit.OPENAI_API_KEY, 'shell-key')
+  assert.equal(explicit.OPENAI_AUTH_HEADER, 'X-Shell-Auth')
+  assert.equal(explicit.OPENAI_AUTH_SCHEME, 'bearer')
+  assert.equal(explicit.OPENAI_AUTH_HEADER_VALUE, 'shell-auth-secret')
+
+  // A canonical regional host is still Requesty: the saved credentials follow.
+  const regional = await buildStartupEnvFromProfile({
+    persisted,
+    processEnv: { OPENAI_BASE_URL: 'https://router.eu.requesty.ai/v1' },
+  })
+  assert.equal(regional.REQUESTY_API_KEY, 'saved-requesty-key')
+  assert.equal(regional.OPENAI_AUTH_HEADER_VALUE, 'saved-auth-secret')
+  assert.equal(regional.ANTHROPIC_CUSTOM_HEADERS, 'X-Requesty-Auth: saved-header-secret')
+
+  // A profile saved for its own non-canonical URL keeps the auth it was saved
+  // with when relaunched there, matching profile apply.
+  const ownProxy = await buildStartupEnvFromProfile({
+    persisted: profile('openai', {
+      ...persisted.env,
+      OPENAI_BASE_URL: 'https://requesty-proxy.example/v1',
+      OPENAI_API_KEY: undefined,
+      REQUESTY_API_KEY: undefined,
+    }),
+    processEnv: {},
+  })
+  assert.equal(ownProxy.OPENAI_AUTH_HEADER_VALUE, 'saved-auth-secret')
+  assert.equal(ownProxy.ANTHROPIC_CUSTOM_HEADERS, 'X-Requesty-Auth: saved-header-secret')
+})

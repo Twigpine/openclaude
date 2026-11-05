@@ -2275,6 +2275,18 @@ export async function buildLaunchEnv(options: {
     (persistedEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'runcrate' ||
       resolveRouteIdFromBaseUrl(persistedOpenAIBaseUrl) === 'runcrate') &&
     !isSameConfiguredEndpoint(env.OPENAI_BASE_URL, persistedOpenAIBaseUrl)
+  // Requesty supports custom auth headers, so its saved credential can also
+  // ride in the custom-auth trio or custom headers. Those belong to the
+  // endpoint the profile was saved for: a shell retarget away from it drops
+  // them, while a saved non-canonical profile relaunched at its own URL keeps
+  // them, matching profile apply.
+  const shellRetargetedRequestyProfile =
+    retargetedRequestyProfile &&
+    !isSameConfiguredEndpoint(env.OPENAI_BASE_URL, persistedOpenAIBaseUrl)
+  // Saved profiles whose credentials must not follow a shell URL retarget on
+  // any channel: generic key, custom-auth trio, or custom headers.
+  const retargetedCredentialBoundProfile =
+    retargetedRuncrateProfile || shellRetargetedRequestyProfile
   // A profile-applied Runcrate key also rides in the generic alias, and a pane
   // can inherit it. Only a shell credential without Runcrate's managed marker
   // may follow a retarget.
@@ -2376,10 +2388,10 @@ export async function buildLaunchEnv(options: {
     isNoncanonicalMergeGatewayLaunch ||
     isNoncanonicalCommandcodeLaunch ||
     isNoncanonicalApiRouteLaunch
-  if (isNoncanonicalDedicatedOpenAILaunch || retargetedRuncrateProfile) {
+  if (isNoncanonicalDedicatedOpenAILaunch || retargetedCredentialBoundProfile) {
     delete env.OPENAI_API_KEY
     delete env.OPENAI_API_KEYS
-    if (retargetedRuncrateProfile) {
+    if (retargetedCredentialBoundProfile) {
       // A retargeted launch keeps no identity for the endpoint it now points
       // at, so only the explicit shell credential may follow it.
       const shellCredential = resolveOpenAICredentialEnvSelection(shellCredentialSource)
@@ -2402,7 +2414,7 @@ export async function buildLaunchEnv(options: {
         env[persistedCredential.envVar] = persistedCredential.value
       }
     }
-    if (retargetedRuncrateProfile) {
+    if (retargetedCredentialBoundProfile) {
       // A retargeted launch keeps no saved custom-auth trio: it belongs to the
       // endpoint the profile was saved for. Provenance comes from the marker a
       // profile application wrote, not from the values themselves: the saved
@@ -2766,9 +2778,10 @@ export async function buildLaunchEnv(options: {
   // and is sent on every request. So an ambient value must be withheld from a
   // non-canonical aimlapi/apismart launch exactly like the API key and the
   // custom-auth trio; only headers the profile itself persisted are restored.
-  // A retargeted Runcrate launch keeps no headers either: both ambient and
-  // persisted values belong to the endpoint the profile was saved for.
-  const customHeaders = retargetedRuncrateProfile
+  // A retargeted Runcrate or Requesty launch keeps no headers either: both
+  // ambient and persisted values belong to the endpoint the profile was saved
+  // for.
+  const customHeaders = retargetedCredentialBoundProfile
     ? undefined
     : isNoncanonicalDedicatedOpenAILaunch
       ? persistedCustomHeaders
