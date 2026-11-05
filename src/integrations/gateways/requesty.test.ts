@@ -1,5 +1,20 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
+
+import { createOpenAIShimClient } from '../../services/api/openaiShim.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
+import { asMockFetch } from '../../test/typedMocks.js'
 import requesty, { mapRequestyModel } from './requesty.js'
+
+type OpenAIShimClient = {
+  beta: {
+    messages: {
+      create: (params: Record<string, unknown>) => Promise<unknown>
+    }
+  }
+}
 
 describe('requesty gateway live model mapping', () => {
   test('uses hybrid discovery against the public models list', () => {
@@ -87,5 +102,81 @@ describe('requesty gateway live model mapping', () => {
     expect(
       mapRequestyModel({ id: 'openai/gpt-5-mini\u009b', api: 'chat' }),
     ).toBeNull()
+  })
+})
+
+describe('requesty request-time credential gate', () => {
+  test('sends REQUESTY_API_KEY only to canonical Requesty URLs', async () => {
+    await acquireSharedMutationLock('requesty.test.ts')
+    const previousEnv = { ...process.env }
+    const originalFetch = globalThis.fetch
+    let authorization: string | null = null
+    try {
+      globalThis.fetch = asMockFetch(mock((_input, init) => {
+        authorization = new Headers(init?.headers).get('authorization')
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'chatcmpl-requesty',
+              model: 'openai/gpt-5-mini',
+              choices: [
+                { message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' },
+              ],
+            }),
+            { headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }))
+      const send = async (
+        baseUrl: string,
+        openAIKey?: string,
+      ): Promise<string | null> => {
+        for (const name of Object.keys(process.env)) {
+          if (/^(OPENAI_|ANTHROPIC_|REQUESTY_|CLAUDE_CODE_PROVIDER_)/.test(name)) {
+            delete process.env[name]
+          }
+        }
+        process.env.CLAUDE_CODE_USE_OPENAI = '1'
+        process.env.OPENAI_BASE_URL = baseUrl
+        process.env.OPENAI_MODEL = 'openai/gpt-5-mini'
+        process.env.REQUESTY_API_KEY = 'requesty-key'
+        if (openAIKey) process.env.OPENAI_API_KEY = openAIKey
+        authorization = null
+        const client = createOpenAIShimClient({}) as OpenAIShimClient
+        await client.beta.messages.create({
+          model: 'openai/gpt-5-mini',
+          messages: [{ role: 'user', content: 'hello' }],
+          max_tokens: 32,
+          stream: false,
+        })
+        return authorization
+      }
+
+      for (const canonical of [
+        'https://router.requesty.ai/v1',
+        'https://router.eu.requesty.ai/v1',
+        'https://router.us.requesty.ai/v1',
+        'https://router.ap.requesty.ai/v1',
+      ]) {
+        expect(await send(canonical)).toBe('Bearer requesty-key')
+        expect(await send(canonical, 'openai-key')).toBe('Bearer requesty-key')
+      }
+      for (const noncanonical of [
+        'http://router.requesty.ai/v1',
+        'https://router.requesty.ai:8443/v1',
+        'https://proxy.example/v1',
+      ]) {
+        expect(await send(noncanonical)).toBeNull()
+        expect(await send(noncanonical, 'openai-key')).toBe('Bearer openai-key')
+      }
+    } finally {
+      mock.restore()
+      globalThis.fetch = originalFetch
+      for (const name of Object.keys(process.env)) {
+        if (!(name in previousEnv)) delete process.env[name]
+      }
+      Object.assign(process.env, previousEnv)
+      releaseSharedMutationLock()
+    }
   })
 })
