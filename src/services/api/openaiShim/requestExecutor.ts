@@ -333,6 +333,7 @@ export async function executeOpenAIRequest(
       requestProcessEnv.FIREWORKS_API_KEY,
       requestProcessEnv.LONGCAT_API_KEY,
       requestProcessEnv.LLMTR_API_KEY,
+      requestProcessEnv.REQUESTY_API_KEY,
       requestProcessEnv.CMD_API_KEY,
       requestProcessEnv.COMMANDCODE_API_KEY,
       requestProcessEnv.COMMAND_CODE_API_KEY,

@@ -7,6 +7,7 @@ import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../../t
 import { asMockFetch } from '../../../test/typedMocks.js'
 import { _clearRegistryForTesting, ensureIntegrationsLoaded } from '../../../integrations/index.ts'
 import { applyProviderFlag } from '../../../utils/providerFlag.ts'
+import { applyAgentProviderOverrideToEnv } from '../agentRouting.ts'
 import {
   categorizeRetryableAPIError,
   getAssistantMessageFromError,
@@ -23,6 +24,7 @@ const originalEnv = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_API_KEYS: process.env.OPENAI_API_KEYS,
   LLMTR_API_KEY: process.env.LLMTR_API_KEY,
+  REQUESTY_API_KEY: process.env.REQUESTY_API_KEY,
   API_ROUTE_API_KEY: process.env.API_ROUTE_API_KEY,
   CMD_API_KEY: process.env.CMD_API_KEY,
   COMMANDCODE_API_KEY: process.env.COMMANDCODE_API_KEY,
@@ -185,6 +187,7 @@ beforeEach(async () => {
   process.env.OPENAI_API_KEY = 'test-key'
   delete process.env.OPENAI_API_KEYS
   delete process.env.LLMTR_API_KEY
+  delete process.env.REQUESTY_API_KEY
   delete process.env.API_ROUTE_API_KEY
   delete process.env.CMD_API_KEY
   delete process.env.COMMANDCODE_API_KEY
@@ -239,6 +242,7 @@ afterEach(() => {
     restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
     restoreEnv('OPENAI_API_KEYS', originalEnv.OPENAI_API_KEYS)
     restoreEnv('LLMTR_API_KEY', originalEnv.LLMTR_API_KEY)
+    restoreEnv('REQUESTY_API_KEY', originalEnv.REQUESTY_API_KEY)
     restoreEnv('API_ROUTE_API_KEY', originalEnv.API_ROUTE_API_KEY)
     restoreEnv('CMD_API_KEY', originalEnv.CMD_API_KEY)
     restoreEnv('COMMANDCODE_API_KEY', originalEnv.COMMANDCODE_API_KEY)
@@ -369,6 +373,23 @@ test('selected LLMTR route prefers its dedicated key over a generic OPENAI_API_K
   )
 
   expect(captured.authorization).toBe('Bearer llmtr-key')
+})
+
+test('a Requesty key mirrored into OPENAI_API_KEY wins over an inherited OPENAI_API_KEYS pool', async () => {
+  // A saved Requesty profile and a Requesty teammate override both mirror
+  // their key into OPENAI_API_KEY; a parent's generic pool must not replace it.
+  process.env.OPENAI_API_KEYS = 'parent-pool-key-a,parent-pool-key-b'
+  process.env.REQUESTY_API_KEY = 'parent-requesty-key'
+  applyAgentProviderOverrideToEnv({
+    model: 'openai/gpt-5-mini',
+    baseURL: 'https://router.requesty.ai/v1',
+    apiKey: 'configured-agent-key',
+  })
+
+  const captured = await captureChatCompletionRequest('openai/gpt-5-mini')
+
+  expect(captured.url).toBe('https://router.requesty.ai/v1/chat/completions')
+  expect(captured.authorization).toBe('Bearer configured-agent-key')
 })
 
 test('selected Command Code route sends CMD_API_KEY through the generic route credential resolver', async () => {
