@@ -68,6 +68,8 @@ export const PROFILE_ORCAROUTER_KEY_SHA256 =
   'CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256'
 export const PROFILE_RUNCRATE_KEY_SHA256 =
   'CLAUDE_CODE_PROVIDER_PROFILE_RUNCRATE_KEY_SHA256'
+export const PROFILE_REQUESTY_KEY_SHA256 =
+  'CLAUDE_CODE_PROVIDER_PROFILE_REQUESTY_KEY_SHA256'
 // Provenance marker for the OPENAI_AUTH_* trio. A child inherits this with the
 // trio, so a retarget can tell profile-managed auth from an explicit shell
 // credential without comparing values that may have changed since the profile
@@ -94,6 +96,10 @@ export function runcrateCredentialFingerprint(value: string): string {
   return managedCredentialFingerprint(value)
 }
 
+export function requestyCredentialFingerprint(value: string): string {
+  return managedCredentialFingerprint(value)
+}
+
 export function isManagedOrcarouterCredential(env: NodeJS.ProcessEnv): boolean {
   const key = sanitizeApiKey(env.ORCAROUTER_API_KEY)
   // Credential origin is independent of selection markers: legacy profile
@@ -106,10 +112,16 @@ export function isManagedRuncrateCredential(env: NodeJS.ProcessEnv): boolean {
   return !!key && env[PROFILE_RUNCRATE_KEY_SHA256] === runcrateCredentialFingerprint(key)
 }
 
+export function isManagedRequestyCredential(env: NodeJS.ProcessEnv): boolean {
+  const key = sanitizeApiKey(env.REQUESTY_API_KEY)
+  return !!key && env[PROFILE_REQUESTY_KEY_SHA256] === requestyCredentialFingerprint(key)
+}
+
 const PROFILE_ENV_KEYS = [
   'CLAUDE_CODE_USE_GEMINI_VERTEX',
   PROFILE_ORCAROUTER_KEY_SHA256,
   PROFILE_RUNCRATE_KEY_SHA256,
+  PROFILE_REQUESTY_KEY_SHA256,
   PROFILE_OPENAI_AUTH_MANAGED,
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GITHUB',
@@ -231,6 +243,7 @@ export type ProviderProfile =
 export type ProfileEnv = {
   CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256?: string
   CLAUDE_CODE_PROVIDER_PROFILE_RUNCRATE_KEY_SHA256?: string
+  CLAUDE_CODE_PROVIDER_PROFILE_REQUESTY_KEY_SHA256?: string
   ANTHROPIC_BASE_URL?: string
   ANTHROPIC_MODEL?: string
   ANTHROPIC_API_KEY?: string
@@ -2777,6 +2790,11 @@ export async function buildLaunchEnv(options: {
           (!sanitizeApiKey(processEnv.RUNCRATE_API_KEY) && persistedEnv.RUNCRATE_API_KEY))) {
         env[PROFILE_RUNCRATE_KEY_SHA256] = runcrateCredentialFingerprint(dedicatedValue)
       }
+      if (dedicatedKey === 'REQUESTY_API_KEY' &&
+        (persistedRequestyProfileKey ||
+          (!sanitizeApiKey(processEnv.REQUESTY_API_KEY) && persistedEnv.REQUESTY_API_KEY))) {
+        env[PROFILE_REQUESTY_KEY_SHA256] = requestyCredentialFingerprint(dedicatedValue)
+      }
     }
   }
   if (effectiveOpenAIRouteId === 'nvidia-nim') {
@@ -2986,6 +3004,11 @@ export function applyProfileEnvToProcessEnv(
     sanitizeApiKey(targetEnv.RUNCRATE_API_KEY) === sanitizeApiKey(nextEnv.RUNCRATE_API_KEY)
       ? targetEnv[PROFILE_RUNCRATE_KEY_SHA256]
       : undefined
+  const retainedRequestyOrigin =
+    isManagedRequestyCredential(targetEnv) &&
+    sanitizeApiKey(targetEnv.REQUESTY_API_KEY) === sanitizeApiKey(nextEnv.REQUESTY_API_KEY)
+      ? targetEnv[PROFILE_REQUESTY_KEY_SHA256]
+      : undefined
   clearManagedProfileEnv(targetEnv)
   Object.assign(targetEnv, nextEnv)
   if (retainedOrcarouterOrigin) {
@@ -2993,6 +3016,9 @@ export function applyProfileEnvToProcessEnv(
   }
   if (retainedRuncrateOrigin) {
     targetEnv[PROFILE_RUNCRATE_KEY_SHA256] = retainedRuncrateOrigin
+  }
+  if (retainedRequestyOrigin) {
+    targetEnv[PROFILE_REQUESTY_KEY_SHA256] = retainedRequestyOrigin
   }
 }
 

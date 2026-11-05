@@ -40,11 +40,14 @@ import {
   clearManagedProfileEnv,
   isManagedOrcarouterCredential,
   isManagedRuncrateCredential,
+  isManagedRequestyCredential,
   orcarouterCredentialFingerprint,
   PROFILE_ORCAROUTER_KEY_SHA256,
   PROFILE_RUNCRATE_KEY_SHA256,
+  PROFILE_REQUESTY_KEY_SHA256,
   PROFILE_OPENAI_AUTH_MANAGED,
   runcrateCredentialFingerprint,
+  requestyCredentialFingerprint,
   deleteProfileFile,
   type ProfileFileLocation,
   type ProfileEnv,
@@ -150,6 +153,21 @@ function rememberManagedRuncrateCredential(
     trimOrUndefined(processEnv[PROFILE_ENV_APPLIED_ID]) === profile.id &&
     sanitizeApiKey(processEnv.RUNCRATE_API_KEY)?.trim() === value) {
     processEnv[PROFILE_RUNCRATE_KEY_SHA256] = runcrateCredentialFingerprint(value)
+  }
+}
+
+// Requesty: same origin marker as Runcrate, so a later keyless canonical
+// Requesty selection never mistakes this profile's saved key for shell input.
+function rememberManagedRequestyCredential(
+  profile: ProviderProfile,
+  processEnv: NodeJS.ProcessEnv = process.env,
+): void {
+  const value = sanitizeApiKey(profile.apiKey)?.trim()
+  if (value && isRequestyProfile(profile) &&
+    processEnv[PROFILE_ENV_APPLIED_FLAG] === '1' &&
+    trimOrUndefined(processEnv[PROFILE_ENV_APPLIED_ID]) === profile.id &&
+    sanitizeApiKey(processEnv.REQUESTY_API_KEY)?.trim() === value) {
+    processEnv[PROFILE_REQUESTY_KEY_SHA256] = requestyCredentialFingerprint(value)
   }
 }
 
@@ -967,6 +985,11 @@ function hostDedicatedCredentialsAligned(
     isManagedRuncrateCredential(processEnv)) {
     return false
   }
+  if (!profile.apiKey &&
+    isRequestyProfile(profile) &&
+    isManagedRequestyCredential(processEnv)) {
+    return false
+  }
   const dedicated = getHostDedicatedCredentialEnv(
     profile.baseUrl,
     profile.apiKey ?? '',
@@ -1596,13 +1619,14 @@ export function applyProviderProfileToProcessEnv(
     }
     // REQUESTY_API_KEY is profile-managed: installing this env clears the
     // ambient value so a keyed profile's saved key wins. A keyless canonical
-    // profile adopts the ambient key here; a retargeted profile gets neither.
-    // Stamp the route identity the startup env also writes.
+    // profile adopts only genuine shell input here, never a key a keyed
+    // profile installed; a retargeted profile gets neither. Stamp the route
+    // identity the startup env also writes.
     if (route.routeId === 'requesty') {
       openAIProfileEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID = 'requesty'
       if (isRequestyProfile(profile) && !profile.apiKey) {
         const ambientRequestyKey = sanitizeApiKey(process.env.REQUESTY_API_KEY)
-        if (ambientRequestyKey) {
+        if (ambientRequestyKey && !isManagedRequestyCredential(process.env)) {
           openAIProfileEnv.REQUESTY_API_KEY = ambientRequestyKey
         }
       }
@@ -1659,6 +1683,7 @@ export function applyProviderProfileToProcessEnv(
   }
   rememberManagedOrcarouterCredential(profile)
   rememberManagedRuncrateCredential(profile)
+  rememberManagedRequestyCredential(profile)
 }
 
 export function applyActiveProviderProfileFromConfig(
@@ -1700,6 +1725,7 @@ export function applyActiveProviderProfileFromConfig(
   // record is available; new environments already carry their fingerprint.
   rememberManagedOrcarouterCredential(activeProfile, processEnv)
   rememberManagedRuncrateCredential(activeProfile, processEnv)
+  rememberManagedRequestyCredential(activeProfile, processEnv)
 
   const isCurrentEnvProfileManaged =
     processEnv[PROFILE_ENV_APPLIED_FLAG] === '1' &&
@@ -1819,6 +1845,7 @@ export function updateProviderProfile(
     wasUpdated = true
     rememberManagedOrcarouterCredential(currentProfiles[profileIndex]!)
     rememberManagedRuncrateCredential(currentProfiles[profileIndex]!)
+    rememberManagedRequestyCredential(currentProfiles[profileIndex]!)
 
     const nextProfiles = [...currentProfiles]
     nextProfiles[profileIndex] = updatedProfile

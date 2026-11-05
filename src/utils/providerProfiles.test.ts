@@ -28,6 +28,7 @@ const RESTORED_KEYS = [
   'CLAUDE_CODE_PROVIDER_PROFILE_OPENAI_AUTH_MANAGED',
   'CLAUDE_CODE_PROVIDER_PROFILE_ORCAROUTER_KEY_SHA256',
   'CLAUDE_CODE_PROVIDER_PROFILE_RUNCRATE_KEY_SHA256',
+  'CLAUDE_CODE_PROVIDER_PROFILE_REQUESTY_KEY_SHA256',
   'CLAUDE_CODE_PROVIDER_ROUTE_ID',
   'CLAUDE_CONFIG_DIR',
   'OPENCLAUDE_CONFIG_DIR',
@@ -6877,6 +6878,38 @@ test.each([false, true])('a keyless Runcrate selection rejects another profile k
     .toBeUndefined()
   const persisted = JSON.parse(readFileSync(join(testConfigDir!, '.openclaude-profile.json'), 'utf8'))
   expect(persisted.env.RUNCRATE_API_KEY).toBeUndefined()
+})
+
+// A keyed Requesty profile mirrors its saved key into REQUESTY_API_KEY. A
+// keyless Requesty selection that follows must not adopt that key as shell
+// input, in process or after a relaunch from the keyed startup file.
+test.each([false, true])('a keyless Requesty selection rejects another profile key (relaunched: %s)', async relaunched => {
+  const { setActiveProviderProfile, applyProviderProfileToProcessEnv } =
+    await importFreshProviderProfileModules()
+  const { applyProfileEnvToProcessEnv, buildStartupEnvFromProfile } =
+    await import('./providerProfile.js')
+  const keyed = buildRequestyProfile({ id: 'keyed-requesty', apiKey: 'account-a-key' })
+  const keyless = { ...keyed, id: 'keyless-requesty', apiKey: undefined }
+  saveMockGlobalConfig(current => ({ ...current, providerProfiles: [keyed, keyless] }))
+  setActiveProviderProfile(keyed.id, { configDir: testConfigDir! })
+  expect(process.env.REQUESTY_API_KEY).toBe('account-a-key')
+  if (relaunched) {
+    const persisted = JSON.parse(readFileSync(
+      join(testConfigDir!, '.openclaude-profile.json'), 'utf8',
+    ))
+    const env = await buildStartupEnvFromProfile({ persisted, processEnv: {} })
+    expect(env.REQUESTY_API_KEY).toBe('account-a-key')
+    applyProfileEnvToProcessEnv(process.env, env)
+  }
+  applyProviderProfileToProcessEnv(keyless)
+  expect(process.env.REQUESTY_API_KEY).toBeUndefined()
+  expect(resolveRouteCredentialValue({ routeId: 'requesty', baseUrl: keyless.baseUrl }))
+    .toBeUndefined()
+
+  // Genuine shell input still authenticates the keyless selection.
+  process.env.REQUESTY_API_KEY = 'shell-requesty-key'
+  applyProviderProfileToProcessEnv(keyless)
+  expect(process.env.REQUESTY_API_KEY).toBe('shell-requesty-key')
 })
 
 for (const provider of ['runcrate', 'openai']) {
