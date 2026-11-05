@@ -2373,6 +2373,10 @@ export async function buildLaunchEnv(options: {
     effectiveOpenAIRouteId === 'llmtr' &&
     !!env.OPENAI_BASE_URL?.trim() &&
     !isCanonicalLlmtrInferenceBaseUrl(env.OPENAI_BASE_URL)
+  const isNoncanonicalRequestyLaunch =
+    effectiveOpenAIRouteId === 'requesty' &&
+    !!env.OPENAI_BASE_URL?.trim() &&
+    !isCanonicalRequestyInferenceBaseUrl(env.OPENAI_BASE_URL)
   const isNoncanonicalMergeGatewayLaunch =
     effectiveOpenAIRouteId === 'merge-gateway' &&
     !!env.OPENAI_BASE_URL?.trim() &&
@@ -2390,6 +2394,7 @@ export async function buildLaunchEnv(options: {
     isNoncanonicalApismartLaunch ||
     isNoncanonicalConcentrateLaunch ||
     isNoncanonicalLlmtrLaunch ||
+    isNoncanonicalRequestyLaunch ||
     isNoncanonicalMergeGatewayLaunch ||
     isNoncanonicalCommandcodeLaunch ||
     isNoncanonicalApiRouteLaunch
@@ -2406,6 +2411,7 @@ export async function buildLaunchEnv(options: {
     } else if (
       !isNoncanonicalConcentrateLaunch &&
       !isNoncanonicalLlmtrLaunch &&
+      !isNoncanonicalRequestyLaunch &&
       !isNoncanonicalMergeGatewayLaunch &&
       !isNoncanonicalCommandcodeLaunch
     ) {
@@ -2889,6 +2895,11 @@ export async function buildStartupEnvFromProfile(options?: {
     persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'llmtr' &&
     !!persisted.env.OPENAI_BASE_URL?.trim() &&
     !isCanonicalLlmtrInferenceBaseUrl(persisted.env.OPENAI_BASE_URL)
+  const persistedRequestyProxy =
+    persisted?.profile === 'openai' &&
+    persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'requesty' &&
+    !!persisted.env.OPENAI_BASE_URL?.trim() &&
+    !isCanonicalRequestyInferenceBaseUrl(persisted.env.OPENAI_BASE_URL)
   const persistedMergeGatewayProxy =
     persisted?.profile === 'openai' &&
     persisted.env.CLAUDE_CODE_PROVIDER_ROUTE_ID === 'merge-gateway' &&
@@ -2909,6 +2920,7 @@ export async function buildStartupEnvFromProfile(options?: {
     !persistedApismartProxy &&
     !persistedConcentrateProxy &&
     !persistedLlmtrProxy &&
+    !persistedRequestyProxy &&
     !persistedMergeGatewayProxy &&
     !persistedCommandcodeProxy &&
     !persistedApiRouteProxy

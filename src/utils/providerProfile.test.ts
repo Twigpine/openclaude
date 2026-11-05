@@ -3990,3 +3990,40 @@ test('a shell URL retarget onto canonical Requesty drops a saved proxy profile c
   assert.equal(explicit.REQUESTY_API_KEY, 'shell-requesty-key')
   assert.equal(explicit.OPENAI_API_KEY, undefined)
 })
+
+test('a saved Requesty proxy profile withholds ambient credentials on restart', async () => {
+  // The startup file a Requesty proxy profile writes: route identity, its own
+  // URL and its own custom auth, but no saved key.
+  const persisted = profile('openai', {
+    CLAUDE_CODE_PROVIDER_ROUTE_ID: 'requesty',
+    OPENAI_BASE_URL: 'https://requesty-proxy.example/v1',
+    OPENAI_MODEL: 'openai/gpt-5-mini',
+    OPENAI_AUTH_HEADER: 'X-Proxy-Auth',
+    OPENAI_AUTH_SCHEME: 'raw',
+    OPENAI_AUTH_HEADER_VALUE: 'saved-proxy-secret',
+  })
+  const ambient = {
+    OPENAI_API_KEY: 'ambient-requesty-key',
+    OPENAI_API_KEYS: 'ambient-requesty-key',
+    REQUESTY_API_KEY: 'ambient-requesty-key',
+  }
+
+  for (const processEnv of [
+    ambient,
+    // A concrete shell selection must not skip the saved profile's boundary.
+    {
+      ...ambient,
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://requesty-proxy.example/v1',
+      OPENAI_MODEL: 'openai/gpt-5-mini',
+    },
+  ]) {
+    const env = await buildStartupEnvFromProfile({ persisted, processEnv })
+    assert.equal(env.OPENAI_BASE_URL, 'https://requesty-proxy.example/v1')
+    assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, 'requesty')
+    assert.equal(env.OPENAI_API_KEY, undefined)
+    assert.equal(env.OPENAI_API_KEYS, undefined)
+    assert.equal(env.REQUESTY_API_KEY, undefined)
+    assert.equal(env.OPENAI_AUTH_HEADER_VALUE, 'saved-proxy-secret')
+  }
+})

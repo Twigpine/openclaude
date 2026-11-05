@@ -245,6 +245,7 @@ function hasUsableEnvCredentialValue(
     envVar === 'APISMART_API_KEY' ||
     envVar === 'CONCENTRATE_API_KEY' ||
     envVar === 'LLMTR_API_KEY' ||
+    envVar === 'REQUESTY_API_KEY' ||
     envVar === 'MERGE_GATEWAY_API_KEY' ||
     envVar === 'CMD_API_KEY' ||
     envVar === 'COMMANDCODE_API_KEY' ||
