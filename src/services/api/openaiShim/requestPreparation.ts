@@ -6,6 +6,7 @@ import {
   resolveModelRuntimeLimits,
   resolveOpenAIShimRuntimeContext,
 } from '../../../integrations/runtimeMetadata.js'
+import { isVeniceBaseUrl } from '../../../integrations/routeMetadata.js'
 import { compressToolHistory } from '../compressToolHistory.js'
 import {
   convertAnthropicMessagesToResponsesInput,
@@ -311,6 +312,14 @@ export function prepareOpenAIRequest({
       request.baseUrl,
       reasoningRequestPlan,
     )
+  }
+  // Venice rejects DeepSeek's top-level thinking field. Its equivalent toggle
+  // is reasoning.enabled; reasoning_effort is already OpenAI-compatible.
+  if (isVeniceBaseUrl(request.baseUrl) && reasoningRequestPlan.thinkingType) {
+    const enabled = reasoningRequestPlan.thinkingType === 'enabled'
+    delete body.thinking
+    body.reasoning = { enabled }
+    if (!enabled) delete body.reasoning_effort
   }
   for (const field of shimConfig.removeBodyFields ?? []) delete body[field]
 
