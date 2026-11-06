@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.35.0](https://github.com/Twigpine/openclaude/compare/v0.34.0...v0.35.0) (2026-11-06)
+
+
+### Features
+
+* **gateways:** add Requesty gateway (supersedes [#2241](https://github.com/Twigpine/openclaude/issues/2241)) ([#2484](https://github.com/Twigpine/openclaude/issues/2484)) ([64d408d](https://github.com/Twigpine/openclaude/commit/64d408d5ba0548fcab12a03a9061cb4691b4c6b7))
+
+
+### Bug Fixes
+
+* **openai-shim:** flag length-truncated non-streaming replies like the stream path ([#2480](https://github.com/Twigpine/openclaude/issues/2480)) ([07e5521](https://github.com/Twigpine/openclaude/commit/07e5521287bd3daf06fb05f6b359a53b2c9cf7e0))
+* **openai-shim:** keep reading native Ollama streams until output is enqueued ([#2478](https://github.com/Twigpine/openclaude/issues/2478)) ([6bd5409](https://github.com/Twigpine/openclaude/commit/6bd5409a014bed44fd7f6be070b28e36a1b8c58c))
+* **settings:** widen the Windows process identity lookup timeout ([#2477](https://github.com/Twigpine/openclaude/issues/2477)) ([4d78943](https://github.com/Twigpine/openclaude/commit/4d789438b4bd6fab39ae099371e509b729c73806))
+* **venice:** translate DeepSeek thinking controls ([#2481](https://github.com/Twigpine/openclaude/issues/2481)) ([f37fb0f](https://github.com/Twigpine/openclaude/commit/f37fb0f9a7a48ad3cac36993b4afd514d8e104f3))
+
 ## [0.34.0](https://github.com/Twigpine/openclaude/compare/v0.33.0...v0.34.0) (2026-11-02)
 
 
