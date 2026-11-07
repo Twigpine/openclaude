@@ -48,6 +48,7 @@ instead.
 | Exa free tier | *(none — zero-config default)* | — | POST |
 | AnySearch (explicit only) | `ANYSEARCH_API_KEY` (optional) | `Authorization: Bearer` when set | POST |
 | Keenable (explicit only) | `KEENABLE_API_KEY` (optional) | `X-API-Key` when set | POST |
+| SpecStream (explicit only) | `SPECSTREAM_API_KEY` | `Authorization: Bearer` | GET |
 | AI/ML API (explicit only, billed) | `AIMLAPI_API_KEY` (from the AI/ML API provider setup) | `Authorization: Bearer` | POST |
 | You.com | `YOU_API_KEY` | `X-API-Key` | GET |
 | Jina | `JINA_API_KEY` | `Authorization: Bearer` | GET |
@@ -88,6 +89,7 @@ export WEB_SEARCH_API=https://search.example.com/search
 | `exa` | Exa only — keyed API when `EXA_API_KEY` is set, otherwise the free tier; throws on failure |
 | `anysearch` | AnySearch only — anonymous without a key, Bearer authentication with one; throws on failure |
 | `keenable` | Keenable only — keyless endpoint without a key, keyed endpoint with one; throws on failure |
+| `specstream` | SpecStream only — Bearer key required; throws on failure |
 | `aimlapi` | AI/ML API Toolbox `web/search` only — billed to your AI/ML API balance; throws on failure. **Not in the auto chain** |
 | `brave` | Brave only — throws on failure |
 | `custom` | Custom API only — throws on failure. **Not in the auto chain** — must be explicitly selected |
@@ -107,7 +109,7 @@ there too.
 
 > **Note:** The `custom` provider is excluded from the `auto` chain. It is only used when `WEB_SEARCH_PROVIDER=custom` is explicitly set. This prevents the generic outbound provider from silently becoming the default backend.
 
-AnySearch and Keenable are also explicit-only: selecting them does not change the existing `auto` chain.
+AnySearch, Keenable and SpecStream are also explicit-only: selecting them does not change the existing `auto` chain.
 
 AI/ML API is explicit-only as well. Every search it runs is billed to your AI/ML API
 balance, so an `AIMLAPI_API_KEY` set up for the model provider never makes `auto`
@@ -749,3 +751,9 @@ export const myProvider: SearchProvider = {
 ```
 
 2. Register in `providers/index.ts` — add import and push to `ALL_PROVIDERS`.
+
+### SpecStream
+
+Run `/search specstream` to select it and `/search key specstream` to add the required key through hidden input. `/search remove-key specstream` removes a key saved by `/search`.
+
+OpenClaude sends `GET https://api.specstream.ai/v1/web-search?q=<query>` with `Authorization: Bearer <key>`. The reply is `{ "data": { "sources": [{ "title", "url", "snippet", "published" }] } }`; each source becomes a hit with its snippet. The API has no result count parameter, so at most 10 hits are kept, and the question is cut at 2000 characters.

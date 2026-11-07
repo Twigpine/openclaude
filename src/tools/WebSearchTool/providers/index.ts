@@ -10,6 +10,7 @@
  *   "tavily"    — use Tavily only (fail loudly)
  *   "anysearch" — use AnySearch only, with an optional API key (fail loudly)
  *   "keenable"  — use Keenable only, with an optional API key (fail loudly)
+ *   "specstream" — use SpecStream only, with SPECSTREAM_API_KEY (fail loudly)
  *   "aimlapi"   — use the AI/ML API Toolbox web/search tool only, billed to the
  *                 AIMLAPI_API_KEY balance (fail loudly)
  *   "exa"       — use Exa only (fail loudly): the keyed API when EXA_API_KEY
@@ -42,6 +43,7 @@ import { firecrawlProvider } from './firecrawl.js'
 import { tavilyProvider } from './tavily.js'
 import { anysearchProvider } from './anysearch.js'
 import { keenableProvider } from './keenable.js'
+import { specstreamProvider } from './specstream.js'
 import { aimlapiProvider } from './aimlapi.js'
 import { exaProvider } from './exa.js'
 import { exaFreeProvider } from './exaFree.js'
@@ -75,6 +77,8 @@ export { extractHits } from './custom.js'
 // NOTE: aimlapiProvider is excluded too. It is configured whenever the AI/ML API
 //       model provider is (AIMLAPI_API_KEY) and every run is billed, so it is
 //       only used when WEB_SEARCH_PROVIDER=aimlapi is explicitly set.
+// NOTE: specstreamProvider is excluded as well: it is only used when
+//       WEB_SEARCH_PROVIDER=specstream is explicitly set.
 
 const ALL_PROVIDERS: SearchProvider[] = [
   exaProvider,
@@ -108,6 +112,7 @@ export type ProviderMode =
   | 'tavily'
   | 'anysearch'
   | 'keenable'
+  | 'specstream'
   | 'aimlapi'
   | 'exa'
   | 'you'
@@ -126,6 +131,7 @@ const PROVIDER_BY_NAME: Record<string, SearchProvider> = {
   tavily: tavilyProvider,
   anysearch: anysearchProvider,
   keenable: keenableProvider,
+  specstream: specstreamProvider,
   aimlapi: aimlapiProvider,
   exa: exaProvider,
   you: youProvider,

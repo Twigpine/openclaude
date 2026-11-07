@@ -78,6 +78,12 @@ export const SEARCH_BACKENDS: readonly SearchBackendOption[] = [
   },
   { mode: 'tavily', label: 'Tavily', keyEnv: 'TAVILY_API_KEY', description: 'Tavily only' },
   {
+    mode: 'specstream',
+    label: 'SpecStream',
+    keyEnv: 'SPECSTREAM_API_KEY',
+    description: 'SpecStream only — results with a source URL for each',
+  },
+  {
     mode: 'brave',
     label: 'Brave',
     keyEnv: 'BRAVE_API_KEY',
@@ -125,6 +131,7 @@ const BACKEND_DISPLAY_NAMES: Record<string, string> = {
   'exa-free': 'Exa free tier',
   anysearch: 'AnySearch',
   keenable: 'Keenable',
+  specstream: 'SpecStream',
   aimlapi: 'AI/ML API',
   ollama: 'Ollama',
   firecrawl: 'Firecrawl',

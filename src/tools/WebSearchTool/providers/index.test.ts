@@ -16,6 +16,7 @@ const WEB_SEARCH_ENV_KEYS = [
   'TAVILY_API_KEY',
   'ANYSEARCH_API_KEY',
   'KEENABLE_API_KEY',
+  'SPECSTREAM_API_KEY',
   'AIMLAPI_API_KEY',
   'OPENAI_API_KEY',
   'EXA_API_KEY',
@@ -130,6 +131,11 @@ describe('getProviderMode', () => {
     expect(getProviderMode()).toBe('anysearch')
   })
 
+  test('returns specstream mode', () => {
+    process.env.WEB_SEARCH_PROVIDER = 'specstream'
+    expect(getProviderMode()).toBe('specstream')
+  })
+
   test('returns keenable mode', () => {
     process.env.WEB_SEARCH_PROVIDER = 'keenable'
     expect(getProviderMode()).toBe('keenable')
@@ -173,6 +179,22 @@ describe('getProviderChain', () => {
     const chain = getProviderChain('anysearch' as ProviderMode)
     expect(chain).toHaveLength(1)
     expect(chain[0].name).toBe('anysearch')
+    expect(chain[0].isConfigured()).toBe(true)
+  })
+
+  test('auto mode does not select SpecStream, even with a key', () => {
+    process.env.SPECSTREAM_API_KEY = 'sk-test-key'
+    const chain = getProviderChain('auto')
+    expect(chain.some(p => p.name === 'specstream')).toBe(false)
+  })
+
+  test('specstream mode selects the provider and needs a key', () => {
+    delete process.env.SPECSTREAM_API_KEY
+    const chain = getProviderChain('specstream' as ProviderMode)
+    expect(chain).toHaveLength(1)
+    expect(chain[0].name).toBe('specstream')
+    expect(chain[0].isConfigured()).toBe(false)
+    process.env.SPECSTREAM_API_KEY = 'sk-test-key'
     expect(chain[0].isConfigured()).toBe(true)
   })
 

@@ -609,6 +609,7 @@ search (`/search test`). `/search` saves its choices to the `env` block of
 | `ANYSEARCH_API_KEY` | No | Optional AnySearch API key. Without one, `/search anysearch` sends anonymous requests without an Authorization header. Add or remove a saved key with `/search key anysearch` or `/search remove-key anysearch`. |
 | `ANYSEARCH_MAX_RESULTS` | No | Requested AnySearch results, integer 1–10 (default `10`; invalid values use the default). |
 | `KEENABLE_API_KEY` | No | Optional Keenable API key for higher rate limits. Without one, `/search keenable` uses the keyless endpoint. Add or remove a saved key with `/search key keenable` or `/search remove-key keenable`. |
+| `SPECSTREAM_API_KEY` | No | SpecStream API key. Required for `/search specstream` (`WEB_SEARCH_PROVIDER=specstream`), which is never part of the `auto` chain. Add or remove a saved key with `/search key specstream` or `/search remove-key specstream`. |
 | `EXA_API_KEY` | No | Exa API key for higher limits than the free tier. Free keys: https://dashboard.exa.ai/api-keys |
 | `EXA_SEARCH_TYPE` | No | Exa search type with a key: `auto` (default), `instant`, `fast`, `deep-lite`, `deep`, or `deep-reasoning`. The deep types can need a higher `WEB_SEARCH_TIMEOUT_SEC`. |
 | `EXA_NUM_RESULTS` | No | Results per Exa search, 1–50 (default `15`). |
