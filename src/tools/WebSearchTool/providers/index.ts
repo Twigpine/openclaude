@@ -10,7 +10,7 @@
  *   "tavily"    — use Tavily only (fail loudly)
  *   "anysearch" — use AnySearch only, with an optional API key (fail loudly)
  *   "keenable"  — use Keenable only, with an optional API key (fail loudly)
- *   "specstream" — use SpecStream only, with SPECSTREAM_API_KEY (fail loudly)
+ *   "specstream" - use SpecStream only, with SPECSTREAM_API_KEY (fail loudly)
  *   "aimlapi"   — use the AI/ML API Toolbox web/search tool only, billed to the
  *                 AIMLAPI_API_KEY balance (fail loudly)
  *   "exa"       — use Exa only (fail loudly): the keyed API when EXA_API_KEY

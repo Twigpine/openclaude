@@ -89,7 +89,7 @@ export WEB_SEARCH_API=https://search.example.com/search
 | `exa` | Exa only — keyed API when `EXA_API_KEY` is set, otherwise the free tier; throws on failure |
 | `anysearch` | AnySearch only — anonymous without a key, Bearer authentication with one; throws on failure |
 | `keenable` | Keenable only — keyless endpoint without a key, keyed endpoint with one; throws on failure |
-| `specstream` | SpecStream only — Bearer key required; throws on failure |
+| `specstream` | SpecStream only, Bearer key required; throws on failure |
 | `aimlapi` | AI/ML API Toolbox `web/search` only — billed to your AI/ML API balance; throws on failure. **Not in the auto chain** |
 | `brave` | Brave only — throws on failure |
 | `custom` | Custom API only — throws on failure. **Not in the auto chain** — must be explicitly selected |

@@ -81,7 +81,7 @@ export const SEARCH_BACKENDS: readonly SearchBackendOption[] = [
     mode: 'specstream',
     label: 'SpecStream',
     keyEnv: 'SPECSTREAM_API_KEY',
-    description: 'SpecStream only — results with a source URL for each',
+    description: 'SpecStream only, with a source URL for each result',
   },
   {
     mode: 'brave',
