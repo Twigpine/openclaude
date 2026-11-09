@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import {
@@ -3233,6 +3233,16 @@ describe('refreshBackgroundSessionStatus targeted refresh', () => {
     })
   }
 
+  function deferred<T = void>() {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise
+      reject = rejectPromise
+    })
+    return { promise, resolve, reject }
+  }
+
   it('returns the recorded terminal fact without consulting the process', async () => {
     const session = await createRunningSession(
       'bg-refresh-terminal',
@@ -3281,6 +3291,74 @@ describe('refreshBackgroundSessionStatus targeted refresh', () => {
     // The targeted refresh is a read-only view: persisting the stale
     // transition stays with the bulk refresh.
     expect((await resolveBackgroundSession(session.id)).status).toBe('running')
+  })
+
+  async function writeUnreadableTerminalFact(id: string): Promise<void> {
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), {
+      recursive: true,
+    })
+    // Corrupt JSON: the fact file exists, but no readable fact establishes
+    // termination. A missing file is a different case (see below).
+    await writeFile(
+      join(configDir, 'bg-sessions', 'terminal', `${id}.natural.json`),
+      'this is not a terminal fact',
+    )
+  }
+
+  it('keeps a dead session unknown when its terminal fact is unreadable', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-unreadable-fact',
+      424242,
+    )
+    await writeUnreadableTerminalFact(session.id)
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+
+    // The process is gone, but the unreadable fact leaves termination
+    // unestablished: the follower must keep retrying the metadata read
+    // instead of completing as stale after the drain.
+    expect(refreshed).toMatchObject({ status: 'unknown' })
+  })
+
+  it('keeps a live session running when its terminal fact is unreadable', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-unreadable-fact-live',
+      4242,
+    )
+    await writeUnreadableTerminalFact(session.id)
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'openclaude --print work',
+    })
+
+    // The live process identity positively establishes the session is
+    // still running, so the unreadable fact does not downgrade it.
+    expect(refreshed).toMatchObject({ status: 'running' })
+  })
+
+  it('reports a dead session stale when its terminal fact is present but invalid', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-invalid-fact',
+      424242,
+    )
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), {
+      recursive: true,
+    })
+    // Valid JSON that is not a fact for this session: there is nothing to
+    // retry reading, so this is a missing fact, not a read error.
+    await writeFile(
+      join(configDir, 'bg-sessions', 'terminal', `${session.id}.natural.json`),
+      JSON.stringify({ version: 1, id: 'some-other-session' }),
+    )
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+
+    expect(refreshed).toMatchObject({ status: 'stale' })
   })
 
   it('keeps a running session running when the live command matches', async () => {
@@ -3346,24 +3424,39 @@ describe('refreshBackgroundSessionStatus targeted refresh', () => {
     const session = await createRunningSession('bg-refresh-stalled', 4242)
 
     const abort = new AbortController()
+    const lookupStarted = deferred()
     const refreshed = refreshBackgroundSessionStatus(session.id, {
       isProcessAlive: () => true,
-      getProcessCommandAsync: async () =>
-        await new Promise<string | null>(() => {}),
+      getProcessCommandAsync: async () => {
+        lookupStarted.resolve()
+        return await new Promise<string | null>(() => {})
+      },
       signal: abort.signal,
     })
-    setTimeout(() => abort.abort(), 10)
-    // Race against a wall clock so a stalled refresh fails this test
-    // instead of hanging the runner on a never-settling await.
-    const outcome = await Promise.race([
-      refreshed.then(value => ({ settled: true, value })),
-      new Promise<{ settled: boolean; value: unknown }>(resolve =>
-        setTimeout(() => resolve({ settled: false, value: null }), 1000),
+    // The lookup must provably start before aborting: aborting earlier
+    // could settle the refresh on the session read without ever entering
+    // the lookup, so the test would pass without exercising cancellation
+    // of a stalled lookup. Bound the wait so a refresh that never reaches
+    // the lookup fails here instead of hanging the runner.
+    const lookupEntered = await Promise.race([
+      lookupStarted.promise.then(() => true),
+      new Promise<boolean>(resolve =>
+        setTimeout(() => resolve(false), 1000),
       ),
     ])
+    expect(lookupEntered).toBe(true)
 
-    expect(outcome.settled).toBe(true)
-    expect(outcome.value).toBeNull()
+    // Drive the abort timing with fake timers (CONTRIBUTING): the abort
+    // fires only after the lookup has started, and real timers are
+    // restored during cleanup.
+    jest.useFakeTimers()
+    try {
+      setTimeout(() => abort.abort(), 10)
+      jest.advanceTimersByTime(10)
+      await expect(refreshed).resolves.toBeNull()
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })
 

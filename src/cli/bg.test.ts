@@ -2049,8 +2049,9 @@ describe('background session log following stops at terminal state', () => {
 
     const abort = new AbortController()
     const { captured, restore } = captureStdout()
+    let following: Promise<void> | undefined
     try {
-      const following = withTimeout(logsHandler(['reuse-me-live', '-f'], { signal: abort.signal }), 5000, () => abort.abort())
+      following = withTimeout(logsHandler(['reuse-me-live', '-f'], { signal: abort.signal }), 5000, () => abort.abort())
       // Wait until the follower has resolved the name to the original
       // session and printed its existing bytes, then reuse the name for a
       // live session before the next probe.
@@ -2075,7 +2076,65 @@ describe('background session log following stops at terminal state', () => {
         (await resolveBackgroundSession(replacement.id)).status,
       ).toBe('running')
     } finally {
+      // If setup failed after the follower started (the wait above, or
+      // creating the replacement session), stop and await it here: a
+      // leaked follower would keep polling after afterEach resets the
+      // registry root. Bounded, so a wedged follower still surfaces the
+      // original failure instead of hanging the suite.
+      abort.abort()
+      if (following) {
+        await Promise.race([
+          following.catch(() => undefined),
+          new Promise(resolve => setTimeout(resolve, 5000)),
+        ])
+      }
       restore()
+    }
+  })
+
+  it('aborting follow mode releases a backpressured initial log dump', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-logs-follow-abort-dump',
+      pid: process.pid,
+      cwd: '/repo',
+      command: ['openclaude', '--print', 'work'],
+      sessionId: 'conversation-logs-follow-abort-dump',
+    })
+    await writeFile(session.stdoutLogPath, 'abcdef')
+
+    const abort = new AbortController()
+    const captured: Buffer[] = []
+    const originalWrite = process.stdout.write
+    // Pretend stdout is full and never drains, so the initial dump blocks
+    // in its drain wait until the abort releases it.
+    process.stdout.write = function (
+      this: unknown,
+      chunk: unknown,
+      ...args: unknown[]
+    ) {
+      void args
+      if (typeof chunk === 'string') captured.push(Buffer.from(chunk))
+      else if (chunk instanceof Uint8Array) captured.push(Buffer.from(chunk))
+      return false
+    } as typeof process.stdout.write
+    try {
+      const following = withTimeout(
+        logsHandler([session.id, '-f'], { signal: abort.signal }),
+        5000,
+        () => abort.abort(),
+      )
+      // Wait until the dump has written its first chunk and is blocked
+      // waiting for the drain.
+      await waitFor(() => captured.length === 1)
+      abort.abort()
+      await following
+
+      // The first chunk went out before the abort; nothing more may print
+      // after cancellation, even though stdout never drained.
+      expect(Buffer.concat(captured).toString()).toBe('abcdef')
+    } finally {
+      abort.abort()
+      process.stdout.write = originalWrite
     }
   })
 
@@ -2291,6 +2350,7 @@ describe('background session log following stops at terminal state', () => {
 
       const scheduler = createManualScheduler()
       let zeroReads = 0
+      let closes = 0
       const following = followLogFile(path, 0, {
         output,
         chunkSize: 4,
@@ -2315,7 +2375,10 @@ describe('background session log following stops at terminal state', () => {
               }
               return await realRead(buffer, offset, length, position)
             },
-            close: () => handle.close(),
+            close: async () => {
+              await handle.close()
+              closes++
+            },
           }
         },
         shouldStop: async () => true,
@@ -2323,8 +2386,13 @@ describe('background session log following stops at terminal state', () => {
 
       // First tick: the snapshot and the final drain both hit the early EOF.
       scheduler.tick()
-      await waitFor(() => zeroReads === 2)
-      await new Promise(resolve => setTimeout(resolve, 0))
+      // Wait for the final drain's file close, not just its last read: the
+      // close is the poll's last asynchronous step, so once it has
+      // completed the poll has finished and `reading` is clear — the retry
+      // tick below cannot run while a poll is still in flight and be
+      // discarded. (A zero-delay timeout is not enough: a slow close can
+      // outlast it, leaving no later tick to retry the drain.)
+      await waitFor(() => closes === 2)
       // Second tick: the restored bytes are read and the follower exits.
       scheduler.tick()
       await following
