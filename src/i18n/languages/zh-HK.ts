@@ -29,7 +29,6 @@ export default {
   "provider.options.console": "Anthropic Console API 帳號",
   "provider.options.third_party": "第三方平台 (OpenAI, Gemini, DeepSeek, Ollama 等)",
   "provider.presets.title": "選擇預設服務商：",
-  "provider.presets.gitlawb": "Gitlawb Opengateway (推薦)",
   "provider.presets.deepseek": "DeepSeek Native API",
   "provider.presets.aimlapi": "AI/ML API",
   "provider.presets.ollama": "Ollama 本地服務",

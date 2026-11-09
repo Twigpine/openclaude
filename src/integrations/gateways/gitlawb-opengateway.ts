@@ -143,7 +143,10 @@ export default defineGateway({
       requiresAuth: false,
       mapModel: mapOpenGatewayModel,
     },
-    discoveryCacheTtl: '1d',
+    // The gateway adds and retires routes within a day, and its list is
+    // public and small, so cache it for an hour: a new launch picks up
+    // lineup changes the same hour instead of the next day.
+    discoveryCacheTtl: '1h',
     discoveryRefreshMode: 'startup',
     allowManualRefresh: true,
     models: [
