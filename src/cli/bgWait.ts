@@ -257,6 +257,9 @@ function baseWaitResult(
 function terminalWaitResult(session: BackgroundSession): WaitResult {
   const result = baseWaitResult(session.id, 'terminal', null)
   if (session.status === 'exited') {
+    // observePinnedSession rejects `exited` records without an exit code
+    // before this point, so a missing code cannot reach here; the
+    // fallback only guards the type's optional field.
     return {
       ...result,
       status: 'exited',
@@ -412,6 +415,29 @@ type WaitObservation =
   | { kind: 'unknown'; session: BackgroundSession }
   | { kind: 'metadata_error'; error: BackgroundSessionWaitError }
 
+/**
+ * Classify a terminal session for the waiter. An `exited` record without
+ * an exit code is not evidence of a successful child: the authoritative
+ * natural terminal fact requires exitCode 0 for `exited`, and terminal
+ * facts are only applied to non-terminal records, so no valid fact can
+ * corroborate this claim. It is a metadata defect (exit 4), not a
+ * success (exit 0) and not a transient unknown (exit 3): no amount of
+ * re-polling can produce a code the record never carried.
+ * (ChatGPT post-build review on #2497.)
+ */
+function terminalObservation(session: BackgroundSession): WaitObservation {
+  if (session.status === 'exited' && session.exitCode === undefined) {
+    return {
+      kind: 'metadata_error',
+      error: new BackgroundSessionWaitError(
+        'metadata_malformed',
+        `Background session ${session.id} metadata claims it exited without recording an exit code`,
+      ),
+    }
+  }
+  return { kind: 'terminal', session }
+}
+
 async function observePinnedSession(
   pinned: { id: string; pid: number },
   signal: AbortSignal,
@@ -428,7 +454,7 @@ async function observePinnedSession(
     throw error
   }
   if (isTerminalBackgroundSession(session) && session.status !== 'stale') {
-    return { kind: 'terminal', session }
+    return terminalObservation(session)
   }
 
   const identity = await verifyBackgroundSessionProcessIdentityAsync(session, {
@@ -449,7 +475,7 @@ async function observePinnedSession(
     throw error
   }
   if (isTerminalBackgroundSession(session) && session.status !== 'stale') {
-    return { kind: 'terminal', session }
+    return terminalObservation(session)
   }
   if (identity.state === 'matches') return { kind: 'running', session }
   if (identity.state === 'unreadable') return { kind: 'unknown', session }
