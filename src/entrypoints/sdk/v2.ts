@@ -21,11 +21,17 @@ import {
 import { AuthenticationCancelledError, performMCPOAuthFlow } from '../../services/mcp/auth.js'
 import {
   clearMcpAuthCache,
+  connectToServer,
+  getServerCacheKey,
   reconnectMcpServerImpl,
 } from '../../services/mcp/client.js'
-import { resumeIn } from '../../services/mcp/credentialScope.js'
+import { resumeIn, type ActiveCredentialScope } from '../../services/mcp/credentialScope.js'
 import { getMcpPrefix } from '../../services/mcp/mcpStringUtils.js'
-import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
+import {
+  createMcpAuthTool,
+  getSdkSignInEntryKeys,
+  registerSdkSignIn,
+} from '../../tools/McpAuthTool/McpAuthTool.js'
 import type {
   McpHTTPServerConfig,
   McpSSEServerConfig,
@@ -159,6 +165,9 @@ export type SDKSessionOptions = {
    * 2. A `canUseTool` CALLBACK IS INSIDE THE TURN. Awaiting an env-carrying
    *    `query()` or session turn from it is the same deadlock, one level
    *    down. Answer the permission from what the callback already has.
+   *    `authenticateMcpServer` is the exception: a turn lends its
+   *    environment to the sign-in the callback starts, so awaiting it
+   *    there does not wait on the turn's own mutex.
    *
    * Neither applies to sessions without `env`: they take no lock.
    */
@@ -324,6 +333,14 @@ class SDKSessionImpl implements SDKSession {
   private mcpTools: Tool[] = []
   /** In-flight OAuth flows, one per server — a newer call supersedes the old. */
   private pendingMcpAuth = new Map<string, AbortController>()
+  /**
+   * The active turn's environment, lent to credential work the turn itself
+   * starts — a canUseTool callback awaiting authenticateMcpServer, or the
+   * authenticate pseudo-tool — so that work runs in the turn's environment
+   * instead of waiting on the mutex the turn holds. Null outside a turn
+   * that holds the mutex (a turn without env takes none).
+   */
+  private turnCredentialScope: ActiveCredentialScope | null = null
   private pendingPermissionPrompts = new Map<string, {
     resolve: (decision: PermissionResolveDecision) => void
   }>()
@@ -481,6 +498,30 @@ class SDKSessionImpl implements SDKSession {
         // abandoned iterator still restores: breaking out of the loop calls
         // the generator's return, which runs this finally with it.
         const envSnapshot = await self.applySessionEnv()
+        // A turn holding the environment lends it to credential work the
+        // turn itself starts — a canUseTool callback awaiting
+        // authenticateMcpServer, or the authenticate pseudo-tool — so that
+        // work runs in the turn's environment instead of waiting on the
+        // mutex the turn holds. Without this the turn cannot finish and the
+        // sign-in cannot start: the same deadlock query() avoids by lending
+        // its environment (query.ts). A turn without env takes no mutex and
+        // lends nothing.
+        let acceptingCredentialWork = true
+        const credentialWork = new Set<Promise<unknown>>()
+        let runInTurnEnv: ActiveCredentialScope | null = null
+        if (envSnapshot) {
+          runInTurnEnv = work => {
+            if (!acceptingCredentialWork) return undefined
+            const pending = Promise.resolve().then(work)
+            credentialWork.add(pending)
+            const release = () => {
+              credentialWork.delete(pending)
+            }
+            void pending.then(release, release)
+            return pending
+          }
+          self.turnCredentialScope = runInTurnEnv
+        }
         try {
           if (self.closed || self._abortController?.signal.aborted) return
           // Load agent definitions once (not on every sendMessage call)
@@ -573,6 +614,13 @@ class SDKSessionImpl implements SDKSession {
             self.agentFailureQueue.length = 0
           }
         } finally {
+          // Stop lending before waiting: later continuations take the mutex
+          // normally. An exchange already using our env must finish first.
+          acceptingCredentialWork = false
+          await Promise.allSettled(credentialWork)
+          if (runInTurnEnv && self.turnCredentialScope === runInTurnEnv) {
+            self.turnCredentialScope = null
+          }
           self.restoreSessionEnv(envSnapshot)
         }
       })(),
@@ -773,9 +821,12 @@ class SDKSessionImpl implements SDKSession {
 
   private async connectMcpServersOnce(): Promise<boolean> {
     try {
+      // The authenticate tool the connect installs borrows the environment
+      // of the turn that calls it, when there is one — read live, so a tool
+      // created before any turn still lends the turn that runs it.
       const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(
         this.mcpServers,
-        undefined,
+        work => this.turnCredentialScope?.(work),
         this._abortController?.signal,
       )
       if (this.closed) return false
@@ -837,8 +888,11 @@ class SDKSessionImpl implements SDKSession {
     // The namespace the flow's credentials belong to is the environment as
     // it is now — before another session's turn can change it while the
     // user is in the browser. The flow's exchange, the cache clear and the
-    // reconnect all run back inside it.
-    const credentialScope = captureCredentialScope()
+    // reconnect all run back inside it. Called from a canUseTool callback
+    // during a turn, this is that turn's environment, lent rather than
+    // re-acquired: the turn holds the mutex the scope would otherwise wait
+    // on.
+    const credentialScope = captureCredentialScope(this.turnCredentialScope ?? undefined)
 
     // A newer call for this server replaces the attempt still pending. Each
     // attempt registers its own client, so one left running would exchange
@@ -847,6 +901,13 @@ class SDKSessionImpl implements SDKSession {
     this.pendingMcpAuth.get(name)?.abort()
     const attempt = new AbortController()
     this.pendingMcpAuth.set(name, attempt)
+    // The same rule across the host-facing method and the authenticate
+    // pseudo-tool: attempts share one credential entry, so a sign-in
+    // started either way replaces an attempt still pending for that entry.
+    const releaseSharedSignIn = registerSdkSignIn(
+      getSdkSignInEntryKeys(name, serverConfig),
+      attempt,
+    )
     const sessionSignal = this._abortController?.signal
     const stopAttempt = () => attempt.abort()
     options?.signal?.addEventListener('abort', stopAttempt, { once: true })
@@ -881,8 +942,13 @@ class SDKSessionImpl implements SDKSession {
       // by now.
       await resumeIn(credentialScope, async () => clearMcpAuthCache())
       // The reconnect reads the tokens the flow just stored; read them
-      // where the flow began, too.
-      const result = await resumeIn(credentialScope, () => reconnectMcpServerImpl(name, config))
+      // where the flow began, too. Its connect carries the attempt's signal,
+      // so a cancel while it is stalled closes the transport instead of
+      // waiting out the connection timeout — the scope above is released
+      // with it, and the attempt rejects rather than hanging.
+      const result = await resumeIn(credentialScope, () =>
+        reconnectMcpServerImpl(name, config, attempt.signal),
+      )
 
       // The attempt may have been cancelled or superseded while the
       // reconnect was pending, or the session closed: a cancelled attempt
@@ -931,10 +997,18 @@ class SDKSessionImpl implements SDKSession {
           // tool keeps it as it is.
           const authTool = createMcpAuthTool(name, config, {
             realToolsInCurrentContext: false,
-            captureCredentialScope: () => captureCredentialScope(),
+            captureCredentialScope: () => captureCredentialScope(this.turnCredentialScope ?? undefined),
             sessionSignal: this._abortController?.signal,
           })
-          if (this.mcpTools.some(tool => tool.name?.startsWith(prefix) && tool.name !== authTool.name)) {
+          // Install the authenticate tool when the pool holds the server's
+          // real tools — they are stale — or when it holds nothing for the
+          // server at all: a first connection that failed, or an earlier
+          // reconnect that failed, leaves no tool to offer the next turn.
+          // A pool that already holds only the authenticate tool keeps it.
+          if (
+            !this.mcpTools.some(tool => tool.name === authTool.name) ||
+            this.mcpTools.some(tool => tool.name?.startsWith(prefix) && tool.name !== authTool.name)
+          ) {
             const nextTools = [
               ...this.mcpTools.filter(tool => !tool.name?.startsWith(prefix)),
               authTool,
@@ -951,7 +1025,18 @@ class SDKSessionImpl implements SDKSession {
         )
       } catch (error) {
         if (result.client.type === 'connected') {
-          await result.client.cleanup().catch(() => {})
+          // The reconnected client is cached by server key, and another
+          // session may have adopted it while the reconnect was in flight.
+          // Closing it here would close its transport and fail its
+          // in-flight MCP calls. Only release a client the cache no longer
+          // holds: one still cached is shared, or adoptable, and the next
+          // connection reuses it instead of dialling again.
+          const key = getServerCacheKey(name, config)
+          const cached = connectToServer.cache.get(key)
+          const shared = cached !== undefined && (await cached) === result.client
+          if (!shared) {
+            await result.client.cleanup().catch(() => {})
+          }
         }
         throw error
       }
@@ -959,6 +1044,7 @@ class SDKSessionImpl implements SDKSession {
     } finally {
       options?.signal?.removeEventListener('abort', stopAttempt)
       sessionSignal?.removeEventListener('abort', stopAttempt)
+      releaseSharedSignIn()
       if (this.pendingMcpAuth.get(name) === attempt) this.pendingMcpAuth.delete(name)
     }
   }

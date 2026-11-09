@@ -37,6 +37,7 @@ import {
   getUsername,
 } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import { acquireEnvMutex, releaseEnvMutex, resetEnvMutexForTesting } from './shared.js'
+import type { CanUseToolCallback } from './shared.js'
 
 // Discovery and client registration write credentials through
 // getSecureStorage, which prefers the OS vault (Keychain, libsecret) under a
@@ -366,6 +367,18 @@ async function waitFor(condition: () => boolean): Promise<void> {
     if (Date.now() > deadline) throw new Error('timed out waiting')
     await Bun.sleep(10)
   }
+}
+
+/**
+ * A promise that rejects if `promise` does not settle within `ms` — so a
+ * test fails promptly (and loudly) instead of hanging on a 30s timeout when
+ * cancellation does not propagate through a stalled operation.
+ */
+function settlesWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
+  const timeout = Bun.sleep(ms).then(() => {
+    throw new Error(`did not settle within ${ms}ms`)
+  })
+  return Promise.race([promise, timeout])
 }
 
 function storedAccessTokens(store?: string): string[] {
@@ -830,9 +843,11 @@ test.each([false, true])('queued invalid-client cleanup honours cancellation: %s
   }, session.signal, {
     skipBrowserOpen: true,
     credentialScope: async work => {
-      // The first entry exchanges the code. Its failure releases the scope;
-      // cleanup must acquire it again and may wait behind another SDK turn.
-      if (++scopeEntries === 2) await gate
+      // The entries run read-and-clear, registration, exchange, cleanup.
+      // The exchange is the third entry; its failure releases the scope,
+      // and cleanup is the fourth entry, which must acquire it again and
+      // may wait behind another SDK turn.
+      if (++scopeEntries === 4) await gate
       return work()
     },
   })
@@ -840,7 +855,7 @@ test.each([false, true])('queued invalid-client cleanup honours cancellation: %s
   try {
     await waitFor(() => loginUrl !== undefined)
     expect((await fetch(callbackFor(loginUrl!))).status).toBe(200)
-    await waitFor(() => scopeEntries === 2)
+    await waitFor(() => scopeEntries === 4)
     if (cancelled) session.abort()
     const key = realAuth.getServerKey('gated', config)
     const entry = {
@@ -1684,7 +1699,12 @@ test('authenticateMcpServer FINISHES IN THE NAMESPACE IT STARTED IN WHEN THE ENV
 /**
  * A caller abort that lands while the reconnect is pending must not install
  * the reconnected client or resolve: the attempt is over, and the session
- * keeps its needs-auth client and pseudo-tool.
+ * keeps its needs-auth client and pseudo-tool. The abort must propagate
+ * through the stalled reconnect: the promise rejects within a bounded
+ * interval while the response is still held — not when the server
+ * eventually answers — and the reconnect must have released the
+ * environment mutex it held, so another environment-scoped operation can
+ * progress while the response is still held.
  */
 test('ABORTING DURING THE RECONNECT REJECTS AND INSTALLS NOTHING', async () => {
   const url = serveNeedingAuth()
@@ -1702,21 +1722,32 @@ test('ABORTING DURING THE RECONNECT REJECTS AND INSTALLS NOTHING', async () => {
   expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
   await waitFor(() => held.arrived)
   caller.abort()
-  held.answer()
-
-  await expect(done).rejects.toBeInstanceOf(realAuth.AuthenticationCancelledError)
-  // Only the initial connect installed; the cancelled reconnect installed
-  // nothing.
-  expect(calls.setMcpClients).toHaveLength(1)
-  expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
-    ['gated', 'needs-auth'],
-  ])
+  try {
+    await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    const acquired = await acquireEnvMutex({ timeoutMs: 5_000 })
+    expect(acquired.acquired).toBe(true)
+    releaseEnvMutex()
+    // Only the initial connect installed; the cancelled reconnect installed
+    // nothing.
+    expect(calls.setMcpClients).toHaveLength(1)
+    expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
+      ['gated', 'needs-auth'],
+    ])
+  } finally {
+    held.answer()
+  }
 }, 30_000)
 
 /**
  * Closing the session while the reconnect is pending must reject, not
  * report a successful status for a connection the closed session will
- * never use.
+ * never use. The close must propagate through the stalled reconnect: the
+ * promise rejects within a bounded interval while the response is still
+ * held, and the reconnect must have released the environment mutex it
+ * held, so another environment-scoped operation can progress while the
+ * response is still held.
  */
 test('CLOSING DURING THE RECONNECT REJECTS INSTEAD OF REPORTING SUCCESS', async () => {
   const url = serveNeedingAuth()
@@ -1732,13 +1763,18 @@ test('CLOSING DURING THE RECONNECT REJECTS INSTEAD OF REPORTING SUCCESS', async 
   expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
   await waitFor(() => held.arrived)
   session.close()
-  held.answer()
-
-  await expect(done).rejects.toThrow('SDK session is closed')
-  expect(calls.setMcpClients).toHaveLength(1)
-  expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
-    ['gated', 'needs-auth'],
-  ])
+  try {
+    await expect(settlesWithin(done, 5_000)).rejects.toThrow('SDK session is closed')
+    const acquired = await acquireEnvMutex({ timeoutMs: 5_000 })
+    expect(acquired.acquired).toBe(true)
+    releaseEnvMutex()
+    expect(calls.setMcpClients).toHaveLength(1)
+    expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
+      ['gated', 'needs-auth'],
+    ])
+  } finally {
+    held.answer()
+  }
 }, 30_000)
 
 /**
@@ -1771,9 +1807,10 @@ test('SUPERSEDING DURING THE RECONNECT INSTALLS ONLY THE NEW ATTEMPT', async () 
   )
   await waitFor(() => secondUrls.length > 0)
   expect((await fetch(callbackFor(secondUrls[0]!))).status).toBe(200)
-  // The first reconnect is stalled holding the credential scope's mutex,
-  // so the second flow's exchange waits behind it. Release the stall: the
-  // first attempt is then fenced off, and the second flow completes.
+  // Superseding cancels the first attempt's reconnect, so the second flow's
+  // exchange no longer waits behind the stalled first reconnect — only the
+  // second reconnect's own initialize is still held. Release it: the first
+  // attempt is then fenced off, and the second flow completes.
   held.answer()
   await waitFor(() => reconnects === 2)
 
@@ -1791,11 +1828,13 @@ test('SUPERSEDING DURING THE RECONNECT INSTALLS ONLY THE NEW ATTEMPT', async () 
 /**
  * If the tool pool rejects the swap — here an agent references the
  * authenticate tool the reconnect drops — the reconnected client was never
- * installed, so close() cannot clean it up. It must be released here, or
- * its transport is left behind. Observed through the connection cache:
- * closing the client evicts its entry.
+ * installed, so close() cannot clean it up. It stays in the connection
+ * cache instead of being closed: another session may have adopted it while
+ * the reconnect was in flight, and closing it would close its transport
+ * and fail its in-flight MCP calls. The next connection reuses it instead
+ * of dialling again.
  */
-test('A REJECTED TOOL SWAP RELEASES THE RECONNECTED CLIENT', async () => {
+test('A REJECTED TOOL SWAP LEAVES THE RECONNECTED CLIENT IN THE SHARED CACHE', async () => {
   const url = serveNeedingAuth()
   const session = openGatedSession(url)
   const calls = recordEngine(session, tools => {
@@ -1823,10 +1862,67 @@ test('A REJECTED TOOL SWAP RELEASES THE RECONNECTED CLIENT', async () => {
     url,
     scope: 'session',
   } as never)
-  const deadline = Date.now() + 3_000
-  while (realClient.connectToServer.cache.get(key) !== undefined) {
-    if (Date.now() > deadline) throw new Error('reconnected client was not released')
-    await Bun.sleep(10)
+  const cached = realClient.connectToServer.cache.get(key) as Promise<MCPServerConnection> | undefined
+  expect(cached).toBeDefined()
+  const kept = (await cached!) as MCPServerConnection
+  expect(kept.type).toBe('connected')
+
+  // The next connection reuses it instead of dialling again.
+  const adopted = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  try {
+    expect(adopted.clients[0]).toBe(kept)
+  } finally {
+    for (const client of adopted.clients) {
+      if (client.type === 'connected') await client.cleanup()
+    }
+  }
+}, 30_000)
+
+/**
+ * While one session's reconnect is in flight, another session can adopt
+ * the cached client it is dialling. If the first session's tool swap then
+ * fails, its cleanup must not close the client the second session is
+ * using — the second session's calls must still work.
+ */
+test('A REJECTED TOOL SWAP DOES NOT CLOSE A CLIENT ANOTHER SESSION ADOPTED', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session, tools => {
+    // The real engine's validation: an agent referencing a tool the new
+    // pool drops rejects the swap before anything is committed.
+    if (!tools.some(tool => tool.name === 'mcp__gated__authenticate')) {
+      throw new TypeError(
+        `updateTools: agent 'auth-agent' references tool 'mcp__gated__authenticate' which is not in the new tool set`,
+      )
+    }
+  })
+  const held = holdInitialize()
+
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  await waitFor(() => held.arrived)
+
+  // A second session adopts the client this reconnect is dialling.
+  const adoptedPromise = connectSdkMcpServers({ gated: { type: 'http', url } })
+  held.answer()
+  const adopted = await adoptedPromise
+  const adoptedClient = adopted.clients[0]!
+  expect(adoptedClient.type).toBe('connected')
+  try {
+    await expect(done).rejects.toThrow('references tool')
+    expect(calls.setMcpClients).toHaveLength(1)
+    // The adopted client is still alive: its calls work.
+    if (adoptedClient.type !== 'connected') throw new Error('expected a connected client')
+    const listed = await adoptedClient.client.listTools()
+    expect(listed.tools.map(tool => tool.name)).toEqual(['hello'])
+  } finally {
+    for (const client of adopted.clients) {
+      if (client.type === 'connected') await client.cleanup()
+    }
   }
 }, 30_000)
 
@@ -1916,4 +2012,335 @@ test('CLOSING WHILE THE FIRST CONNECT IS IN FLIGHT LEAVES THE SHARED CONNECTION 
       if (client.type === 'connected') await client.cleanup()
     }
   }
+}, 30_000)
+
+// ============================================================================
+// Round 2 (#2493): CodeRabbit re-review follow-ups.
+// ============================================================================
+
+/**
+ * If the first connection fails, the pool holds no tools for the server at
+ * all — and a later reconnect that still needs auth must still offer the
+ * model the authenticate tool. The next turn would otherwise report
+ * needs-auth with no way to act on it.
+ */
+test('A RECONNECT THAT STILL NEEDS AUTH INSTALLS THE AUTHENTICATE TOOL WHEN THE SERVER HAS NO TOOLS', async () => {
+  const url = serveNeedingAuth()
+  failMcpRequests = true
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  // The initial connect failed above, so the pool holds nothing for the
+  // server; only now does the server answer again — and refuse the tokens.
+  await waitFor(() => seenUrls.length > 0)
+  failMcpRequests = false
+  rejectTokens = true
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+
+  const status = await done
+  expect(status.status).toBe('needs-auth')
+  const afterReconnect = calls.updateTools.at(-1)!.map(tool => tool.name)
+  expect(afterReconnect).toContain('mcp__gated__authenticate')
+  expect(calls.setMcpClients.at(-1)!.map(client => [client.name, client.type])).toEqual([
+    ['gated', 'needs-auth'],
+  ])
+}, 30_000)
+
+/**
+ * The connected-client half of the late-connection case: a session that
+ * closes while its first connect is still in flight discards a client the
+ * connection cache still owns. The next session reuses that same client
+ * instead of dialling again — and closing the session that adopted it
+ * cleans it up, so the transport is not left behind.
+ */
+test('CLOSING WHILE THE FIRST CONNECT IS IN FLIGHT KEEPS THE CONNECTED CLIENT FOR THE NEXT SESSION, WHICH CLEANS IT UP ON CLOSE', async () => {
+  const url = serveNeedingAuth()
+  const first = openGatedSession(url)
+  const firstUrls: string[] = []
+  const firstDone = first.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => firstUrls.push(seen),
+  })
+  await waitFor(() => firstUrls.length > 0)
+  expect((await fetch(callbackFor(firstUrls[0]!))).status).toBe(200)
+  expect((await firstDone).status).toBe('connected')
+  expect(storedAccessTokens()).toHaveLength(1)
+
+  // The next session dials fresh — drop the connected client the first
+  // session cached — and stalls at an authorized initialize.
+  const key = realClient.getServerCacheKey('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+  realClient.connectToServer.cache.delete(key)
+  const second = openGatedSession(url)
+  const held = holdInitialize()
+  const auth = second.authenticateMcpServer('gated', {
+    onAuthorizationUrl: () => {},
+  })
+  const authCaught = auth.catch(() => 'caught')
+  await waitFor(() => held.arrived)
+  const inFlight = realClient.connectToServer.cache.get(key) as Promise<unknown> | undefined
+  expect(inFlight).toBeDefined()
+
+  second.close()
+  held.answer()
+  await expect(authCaught).resolves.toBe('caught')
+  const late = (await inFlight) as MCPServerConnection
+  expect(late.type).toBe('connected')
+
+  // The next session adopts that same client, not a fresh connection.
+  const next = openGatedSession(url)
+  const calls = recordEngine(next)
+  for await (const _ of next.sendMessage('hi')) {
+  }
+  expect(calls.setMcpClients.at(-1)?.[0]).toBe(late)
+
+  // And closing the session that adopted it cleans it up: the cache entry
+  // is gone, so nothing still owns the transport.
+  next.close()
+  await waitFor(() => realClient.connectToServer.cache.get(key) === undefined)
+}, 30_000)
+
+/** An SDK session holding the gated server, with env and a canUseTool callback. */
+function openGatedSessionWithEnv(url: string, canUseTool: CanUseToolCallback): SDKSession {
+  const session = unstable_v2_createSession({
+    cwd: process.cwd(),
+    mcpServers: { gated: { type: 'http', url } },
+    // Any nonempty env makes the turn hold the environment mutex; the
+    // variable itself is inert and touches no credential namespace.
+    env: { OPENCLAUDE_TEST_TURN: '1' },
+    canUseTool,
+  })
+  sdkSessions.push(session)
+  return session
+}
+
+/**
+ * An engine whose turn asks the host's canUseTool before a tool runs — the
+ * stand-in for the real engine's permission check — and otherwise does
+ * nothing. The turn holds the session's environment for its whole duration,
+ * so the callback runs inside the turn's mutex hold.
+ */
+function recordCanUseToolEngine(session: SDKSession, onPermission: () => Promise<unknown>) {
+  const recorded = recordingEngine()
+  const engine = {
+    ...recorded.engine,
+    submitMessage: async function* (): AsyncGenerator<never> {
+      await onPermission()
+    },
+  }
+  ;(session as unknown as { setEngine: (engine: unknown) => void }).setEngine(engine)
+  return recorded.calls
+}
+
+/**
+ * A canUseTool callback that awaits authenticateMcpServer during a turn
+ * with env: the turn holds the environment mutex, and the sign-in must
+ * borrow that turn's environment instead of waiting on its own turn's
+ * mutex — otherwise neither the turn nor the sign-in can ever finish.
+ */
+test('A canUseTool CALLBACK THAT SIGNS IN DURING AN ENV TURN DOES NOT DEADLOCK', async () => {
+  const url = serveNeedingAuth()
+  let signIn: ReturnType<SDKSession['authenticateMcpServer']> | undefined
+  const seenUrls: string[] = []
+  const canUseTool: CanUseToolCallback = async () => {
+    signIn = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    const status = await signIn
+    expect(status.status).toBe('connected')
+    return { behavior: 'allow' as const }
+  }
+  const session = openGatedSessionWithEnv(url, canUseTool)
+  const calls = recordCanUseToolEngine(session, () => canUseTool('mcp__gated__authenticate', {}))
+
+  const turn = (async () => {
+    for await (const _ of session.sendMessage('hi')) {
+    }
+  })()
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  // The turn — and the sign-in it awaited — finish within a bound instead
+  // of waiting on the mutex forever.
+  await settlesWithin(turn, 10_000)
+  expect(signIn).toBeDefined()
+  await expect(signIn!).resolves.toMatchObject({ status: 'connected' })
+  expect(calls.setMcpClients.at(-1)!.map(client => [client.name, client.type])).toEqual([
+    ['gated', 'connected'],
+  ])
+}, 30_000)
+
+/**
+ * The authenticate pseudo-tool, called during a turn with env, borrows the
+ * turn's environment the same way: its exchange must finish while the turn
+ * holds the mutex, not wait for a turn that cannot finish until the tool
+ * returns. The tool is the session's own, read out of its pool — the one
+ * its connect installed — and the turn is held open in its engine while
+ * the tool runs.
+ */
+test('THE AUTHENTICATE TOOL CALLED DURING AN ENV TURN DOES NOT DEADLOCK', async () => {
+  const url = serveNeedingAuth()
+  const canUseTool: CanUseToolCallback = async () => ({ behavior: 'allow' as const })
+  const session = openGatedSessionWithEnv(url, canUseTool)
+  let releaseTurn!: () => void
+  const turnReleased = new Promise<void>(resolve => {
+    releaseTurn = resolve
+  })
+  recordCanUseToolEngine(session, () => turnReleased)
+
+  const turn = (async () => {
+    for await (const _ of session.sendMessage('hi')) {
+    }
+  })()
+  // The turn's first connect installed the authenticate tool.
+  await waitFor(
+    () =>
+      (session as unknown as { mcpTools: Tool[] }).mcpTools.some(
+        tool => tool.name === 'mcp__gated__authenticate',
+      ),
+  )
+  const tool = (session as unknown as { mcpTools: Tool[] }).mcpTools.find(
+    tool => tool.name === 'mcp__gated__authenticate',
+  )!
+  const toolSession = openSession()
+  const { result } = await startSignIn(tool, toolSession)
+  expect(result.status).toBe('auth_url')
+  expect((await fetch(callbackFor(result.authUrl!))).status).toBe(200)
+  await flowEnded(0)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(result)}`])
+  releaseTurn()
+  await settlesWithin(turn, 10_000)
+}, 30_000)
+
+/**
+ * The flow's first credential operations belong to the namespace it
+ * started in. Another session's turn may apply its own environment while
+ * the initial connection is still running; the flow's read of the stored
+ * entry and its clearing of it must still land where the flow began — a
+ * clear in the other session's namespace would delete that session's saved
+ * credentials.
+ */
+test('authenticateMcpServer KEEPS ITS INITIAL CREDENTIAL OPERATIONS IN THE NAMESPACE IT STARTED IN', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const serverKey = realAuth.getServerKey('gated', { type: 'http', url } as never)
+    // Another session's saved entry for this server, in its own store.
+    const seeded = {
+      serverName: 'gated',
+      serverUrl: url,
+      accessToken: 'ambient-token',
+      refreshToken: 'ambient-refresh',
+      expiresAt: Date.now() + 3_600_000,
+      clientId: 'ambient-client',
+    }
+    stores.set(storeIn(ambient), { mcpOAuth: { [serverKey]: seeded } })
+    let answer!: () => void
+    const answered = new Promise<void>(resolve => {
+      answer = resolve
+    })
+    heldMetadata = { arrived: false, answer, answered }
+    const held = heldMetadata
+
+    const session = openGatedSession(url)
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => held.arrived)
+    // Another session's turn applies its own environment while this flow's
+    // initial connection is still running.
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    held.answer()
+
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The flow's tokens landed where it started...
+    expect(storedAccessTokens(storeIn(origin))).toEqual([
+      `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
+    ])
+    // ...and the other session's saved entry survived the flow's initial
+    // clear. The initial connection, which still runs in the ambient
+    // environment, may add its discovery bookkeeping to the entry — the
+    // credentials themselves must be intact, byte for byte.
+    expect(stored(storeIn(ambient)).mcpOAuth?.[serverKey]).toMatchObject(seeded)
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * Sign-ins for one server share one credential entry, however they start.
+ * A host-facing sign-in replaces a tool-started attempt still pending: the
+ * tool's callback reaches nothing, and only the host attempt's tokens land.
+ */
+test('A HOST SIGN-IN ABORTS THE TOOL STARTED SIGN-IN FOR THE SAME SERVER, AND COMPLETES ITSELF', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  const toolSession = openSession()
+  const { result: toolResult } = await startSignIn(tools[0]!, toolSession)
+  expect(toolResult.status).toBe('auth_url')
+
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect(seenUrls[0]).not.toBe(toolResult.authUrl)
+
+  // The tool's attempt is over: its callback reaches nothing.
+  await expect(fetch(callbackFor(toolResult.authUrl!))).rejects.toThrow()
+  await flowEnded(0)
+
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  expect((await done).status).toBe('connected')
+  expect(refusedExchanges).toBe(0)
+  expect(storedAccessTokens()).toEqual([
+    `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
+  ])
+}, 30_000)
+
+/**
+ * The other direction: a tool-started sign-in replaces a host-facing
+ * attempt still pending. The host attempt rejects as cancelled, its
+ * callback reaches nothing, and only the tool attempt's tokens land.
+ */
+test('A TOOL STARTED SIGN-IN ABORTS THE HOST SIGN-IN FOR THE SAME SERVER, AND COMPLETES ITSELF', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  const doneCaught = done.catch(error => error)
+  await waitFor(() => seenUrls.length > 0)
+
+  const { tools } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  const toolSession = openSession()
+  const { result: toolResult } = await startSignIn(tools[0]!, toolSession)
+  expect(toolResult.status).toBe('auth_url')
+
+  // The host attempt is over: its callback reaches nothing, and its
+  // promise rejects as cancelled.
+  await expect(fetch(callbackFor(seenUrls[0]!))).rejects.toThrow()
+  await expect(doneCaught).resolves.toBeInstanceOf(realAuth.AuthenticationCancelledError)
+
+  expect((await fetch(callbackFor(toolResult.authUrl!))).status).toBe(200)
+  await flowEnded(1)
+  expect(refusedExchanges).toBe(0)
+  expect(storedAccessTokens()).toEqual([`token-for-${clientOf(toolResult)}`])
 }, 30_000)

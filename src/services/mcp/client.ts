@@ -827,11 +827,42 @@ export const connectToServer = memoize(
       sseIdeCount: number
       wsIdeCount: number
     },
+    /**
+     * Aborts this connect attempt: closing the transport rejects a stalled
+     * initialize instead of waiting out the connection timeout. Only the
+     * caller that created this connect passes one — the memoize body runs
+     * once per key, so an adopter of the cached promise attaches nothing
+     * and cannot close a connect it did not start. The listener is removed
+     * once the connect settles, so a later abort cannot close the live,
+     * shared client. Not part of the memo key (getServerCacheKey ignores
+     * it), so sharing is unchanged.
+     */
+    signal?: AbortSignal,
   ): Promise<MCPServerConnection> => {
     const connectStartTime = Date.now()
     let inProcessServer: InProcessMcpServer | undefined
     try {
       let transport
+
+      // Closing the transport rejects the stalled initialize below. The
+      // transport is assigned later, so the handler closes whatever it is
+      // by then; an abort before assignment closes it as soon as it exists.
+      let onConnectAbort: (() => void) | undefined
+      if (signal) {
+        onConnectAbort = () => {
+          transport?.close().catch(() => {})
+        }
+        if (signal.aborted) {
+          onConnectAbort()
+        } else {
+          signal.addEventListener('abort', onConnectAbort, { once: true })
+        }
+      }
+      const stopConnectAbort = () => {
+        if (signal && onConnectAbort) {
+          signal.removeEventListener('abort', onConnectAbort)
+        }
+      }
 
       // If we have the session ingress JWT, we will connect via the session ingress rather than
       // to remote MCP's directly.
@@ -1294,6 +1325,11 @@ export const connectToServer = memoize(
       }
 
       const connectPromise = client.connect(transport)
+      // An abort that landed before the transport existed still cancels
+      // the connect: the listener above could not close what did not exist.
+      if (signal?.aborted) {
+        transport.close().catch(() => {})
+      }
       const timeoutPromise = new Promise<never>((_, reject) => {
         const timeoutId = setTimeout(() => {
           const elapsed = Date.now() - connectStartTime
@@ -1317,9 +1353,11 @@ export const connectToServer = memoize(
         connectPromise.then(
           () => {
             clearTimeout(timeoutId)
+            stopConnectAbort()
           },
           _error => {
             clearTimeout(timeoutId)
+            stopConnectAbort()
           },
         )
       })
@@ -2522,6 +2560,13 @@ export async function callIdeRpc(
 export async function reconnectMcpServerImpl(
   name: string,
   config: ScopedMcpServerConfig,
+  /**
+   * Aborts the reconnect's connect attempt: a caller that is cancelled
+   * while the reconnect is stalled does not wait out the connection
+   * timeout, and the scope it ran in is released with it. Only the
+   * caller that started this reconnect passes one.
+   */
+  signal?: AbortSignal,
 ): Promise<{
   client: MCPServerConnection
   tools: Tool[]
@@ -2537,7 +2582,7 @@ export async function reconnectMcpServerImpl(
     clearKeychainCache()
 
     await clearServerCache(name, config)
-    const client = await connectToServer(name, config)
+    const client = await connectToServer(name, config, undefined, signal)
 
     if (client.type !== 'connected') {
       return {
