@@ -2074,7 +2074,7 @@ test('opencode go messages endpoint keeps its session while rotating raw x-api-k
   }
 })
 
-test('gitlawb opengateway provider flag sends OPENGATEWAY_API_KEY as bearer auth despite stale generic base URL', async () => {
+test('twigpine opengateway provider flag sends OPENGATEWAY_API_KEY as bearer auth despite stale generic base URL', async () => {
   process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
   process.env.OPENAI_MODEL = 'gpt-5.5'
   process.env.OPENGATEWAY_API_KEY = 'fake-ogw-key'
@@ -2089,7 +2089,7 @@ test('gitlawb opengateway provider flag sends OPENGATEWAY_API_KEY as bearer auth
   expect(captured.authorization).toBe('Bearer fake-ogw-key')
 })
 
-test('gitlawb opengateway provider flag accepts OPENAI_API_KEY compatibility fallback', async () => {
+test('twigpine opengateway provider flag accepts OPENAI_API_KEY compatibility fallback', async () => {
   delete process.env.OPENAI_BASE_URL
   delete process.env.OPENGATEWAY_API_KEY
   process.env.OPENAI_API_KEY = 'fake-openai-fallback'
@@ -2102,7 +2102,7 @@ test('gitlawb opengateway provider flag accepts OPENAI_API_KEY compatibility fal
   expect(captured.authorization).toBe('Bearer fake-openai-fallback')
 })
 
-test('gitlawb opengateway provider flag sends OPENAI_API_KEY fallback despite stale generic base URL', async () => {
+test('twigpine opengateway provider flag sends OPENAI_API_KEY fallback despite stale generic base URL', async () => {
   process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
   process.env.OPENAI_API_KEY = 'fake-openai-fallback'
   delete process.env.OPENGATEWAY_API_KEY
@@ -2116,7 +2116,7 @@ test('gitlawb opengateway provider flag sends OPENAI_API_KEY fallback despite st
   expect(captured.authorization).toBe('Bearer fake-openai-fallback')
 })
 
-test('gitlawb opengateway provider flag trims OPENGATEWAY_API_KEY before bearer auth', async () => {
+test('twigpine opengateway provider flag trims OPENGATEWAY_API_KEY before bearer auth', async () => {
   process.env.OPENGATEWAY_API_KEY = ' fake-ogw-key '
   delete process.env.OPENAI_API_KEY
 
@@ -2128,7 +2128,7 @@ test('gitlawb opengateway provider flag trims OPENGATEWAY_API_KEY before bearer 
   expect(captured.authorization).toBe('Bearer fake-ogw-key')
 })
 
-test('gitlawb opengateway provider flag ignores blank OPENGATEWAY_API_KEY and uses OPENAI_API_KEY fallback', async () => {
+test('twigpine opengateway provider flag ignores blank OPENGATEWAY_API_KEY and uses OPENAI_API_KEY fallback', async () => {
   process.env.OPENGATEWAY_API_KEY = '   '
   process.env.OPENAI_API_KEY = 'fake-openai-fallback'
 
@@ -2140,7 +2140,7 @@ test('gitlawb opengateway provider flag ignores blank OPENGATEWAY_API_KEY and us
   expect(captured.authorization).toBe('Bearer fake-openai-fallback')
 })
 
-test('gitlawb opengateway provider flag sends OPENGATEWAY_API_KEY to OPENGATEWAY_BASE_URL override', async () => {
+test('twigpine opengateway provider flag sends OPENGATEWAY_API_KEY to OPENGATEWAY_BASE_URL override', async () => {
   process.env.OPENGATEWAY_BASE_URL = 'http://localhost:8181/v1'
   process.env.OPENGATEWAY_API_KEY = 'fake-ogw-key'
   delete process.env.OPENAI_API_KEY
@@ -2154,7 +2154,7 @@ test('gitlawb opengateway provider flag sends OPENGATEWAY_API_KEY to OPENGATEWAY
   expect(captured.authorization).toBe('Bearer fake-ogw-key')
 })
 
-test('gitlawb opengateway provider flag sends OPENGATEWAY_API_KEY to custom OPENAI_BASE_URL fallback', async () => {
+test('twigpine opengateway provider flag sends OPENGATEWAY_API_KEY to custom OPENAI_BASE_URL fallback', async () => {
   process.env.OPENAI_BASE_URL = 'http://localhost:8181/v1'
   process.env.OPENGATEWAY_API_KEY = 'fake-ogw-key'
   delete process.env.OPENGATEWAY_BASE_URL
@@ -2169,7 +2169,7 @@ test('gitlawb opengateway provider flag sends OPENGATEWAY_API_KEY to custom OPEN
   expect(captured.authorization).toBe('Bearer fake-ogw-key')
 })
 
-test('gitlawb opengateway provider flag prefers OPENGATEWAY_API_KEY over generic OPENAI_API_KEY for custom base URL', async () => {
+test('twigpine opengateway provider flag prefers OPENGATEWAY_API_KEY over generic OPENAI_API_KEY for custom base URL', async () => {
   process.env.OPENGATEWAY_BASE_URL = 'http://localhost:8181/v1'
   process.env.OPENGATEWAY_API_KEY = 'fake-ogw-key'
   process.env.OPENAI_API_KEY = 'fake-generic-openai-key'
@@ -2183,7 +2183,7 @@ test('gitlawb opengateway provider flag prefers OPENGATEWAY_API_KEY over generic
   expect(captured.authorization).toBe('Bearer fake-ogw-key')
 })
 
-test('gitlawb opengateway stored provider profile key becomes bearer auth', async () => {
+test('twigpine opengateway stored provider profile key becomes bearer auth', async () => {
   delete process.env.OPENAI_API_KEY
   delete process.env.OPENGATEWAY_API_KEY
 
