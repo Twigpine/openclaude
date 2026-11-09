@@ -15,6 +15,7 @@ import {
   switchSession,
 } from '../bootstrap/state.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
+import { deleteSession } from '../entrypoints/sdk/sessions.js'
 import type { Message } from '../types/message.js'
 import type { SessionId } from '../types/ids.js'
 import {
@@ -519,4 +520,40 @@ test("a returning session keeps its cached title when the title is outside the t
   const aText = await readFile(getTranscriptPathForSession(SESSION_A), 'utf8')
   // Once from the first re-append, once from the returning turn's write.
   expect(aText.split('A Title').length - 1).toBe(2)
+})
+
+test('a deleted session id reused for a fresh session does not inherit its title or tag', async () => {
+  // CodeRabbit on #2489: if an SDK session is deleted and a later query
+  // reuses its ID and cwd, the new transcript can inherit the deleted
+  // session's cached title or tag. The metadata cache is keyed by the
+  // (session id, project dir, cwd) triple, so the reused triple hits the
+  // same entry — and neither delete path clears it: SDK deleteSession only
+  // unlinks the file, and forgetDeletedSession only drops the path/pending
+  // caches. The fresh file's tail holds no title/tag, so the exit
+  // re-append below would write the stale cache straight into it.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+    await saveTag(SESSION_A as never, 'a-tag')
+    await flushSessionStorage()
+  })
+
+  await deleteSession(SESSION_A)
+  expect(existsSync(getTranscriptPathForSession(SESSION_A))).toBe(false)
+
+  // A later query reuses the id and cwd for a fresh session.
+  await turnStart(SESSION_A, async () => {
+    await recordTranscript([message(randomUUID(), 'A fresh')])
+    await flushSessionStorage()
+    // Exit-time re-append: where the stale cache would land.
+    reAppendSessionMetadata()
+  })
+  await flushSessionStorage()
+
+  const aText = await readFile(getTranscriptPathForSession(SESSION_A), 'utf8')
+  expect(aText).toContain('A fresh')
+  expect(aText).not.toContain('A Title')
+  expect(aText).not.toContain('a-tag')
 })

@@ -2065,6 +2065,22 @@ class Project {
     // and create a metadata-only file despite --no-session-persistence.
     if (this.shouldSkipPersistence()) return
     const sessionFile = resolvePath(this.ensureCurrentSessionFile())
+    // A deleted session's id may be reused by a fresh session at the same
+    // path: the transcript is gone, so the deleted mark no longer protects
+    // anything — it would only drop the new session's writes (the write
+    // layer drops every append to a marked path, and the buffer path never
+    // flushes). A returning session's file exists, so this only fires for a
+    // fresh session at a recycled path. forgetDeletedSession already awaited
+    // every pre-delete write, and materialize only runs for a live session's
+    // first conversation message — late title/summary/metadata writes from
+    // the deleted session go through appendEntry/appendEntryToFile directly
+    // and never reach it.
+    if (
+      this.isDeletedSessionFile(sessionFile) &&
+      !(await this.transcriptExists(sessionFile))
+    ) {
+      this.restoreSessionWrites(sessionFile)
+    }
     // mode/agentSetting are cache-only pre-materialization; write them now.
     this.reAppendSessionMetadata()
     const buffered = this.pendingEntries.get(sessionFile)
@@ -2538,6 +2554,23 @@ class Project {
     )
   }
 
+  /**
+   * Drop the per-context transcript caches belonging to `sessionId` — the
+   * cached file pointer and the cached metadata (title, tag, ...). The
+   * session id is the first component of sessionFileKey, so a prefix scan
+   * drops exactly this session's entries across every project dir/cwd
+   * without touching another session's.
+   */
+  private forgetSessionCaches(sessionId: UUID): void {
+    const prefix = `${sessionId}\0`
+    for (const key of [...this.sessionFiles.keys()]) {
+      if (key.startsWith(prefix)) this.sessionFiles.delete(key)
+    }
+    for (const key of [...this.sessionMetadata.keys()]) {
+      if (key.startsWith(prefix)) this.sessionMetadata.delete(key)
+    }
+  }
+
   async forgetDeletedSession(
     sessionId: UUID,
     transcriptPath: string,
@@ -2559,6 +2592,15 @@ class Project {
       .filter(([path]) => this.isDeletedSessionFile(path))
       .flatMap(([, appends]) => [...appends])
     await Promise.allSettled(inFlight)
+    // The session is gone for good: drop its per-context caches too, or a
+    // later query reusing its id and cwd hits the same sessionFileKey and
+    // the fresh transcript inherits the deleted session's cached title/tag
+    // (the fresh file's tail holds neither, so the stale cache stands on
+    // re-append). The deleter runs in another context, so a
+    // current-context-only clear cannot reach these entries. Only after the
+    // settle above: a flush failure leaves the transcript on disk, and its
+    // caches must survive with it.
+    this.forgetSessionCaches(sessionId)
   }
 
   /** Undo forgetDeletedSession for a transcript that could not be removed. */
