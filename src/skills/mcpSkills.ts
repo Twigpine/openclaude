@@ -31,11 +31,16 @@ export function deriveMcpSkillName(serverName: string, uri: string): string {
 async function readSkillResource(
   client: Extract<MCPServerConnection, { type: 'connected' }>,
   resource: ServerResource,
+  options?: { signal?: AbortSignal },
 ): Promise<Command | null> {
   try {
     const result = (await client.client.request(
       { method: 'resources/read', params: { uri: resource.uri } },
       ReadResourceResultSchema,
+      // A stalled read must end with the caller's cancellation, or an
+      // authentication attempt waits it out while holding the environment
+      // mutex — the tools/list path already passes its signal through.
+      { signal: options?.signal },
     )) as ReadResourceResult
 
     const textContent = result.contents.find(
@@ -104,7 +109,7 @@ export const fetchMcpSkillsForClient = memoizeWithLRU(
       if (skillResources.length === 0) return []
 
       const commands = await Promise.all(
-        skillResources.map(r => readSkillResource(client, r)),
+        skillResources.map(r => readSkillResource(client, r, options)),
       )
       return commands.filter((c): c is Command => c !== null)
     } catch (error) {

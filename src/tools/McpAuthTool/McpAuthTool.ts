@@ -132,9 +132,11 @@ export type McpAuthToolOptions = {
    * sign-in started in one session's store would finish in another's. The
    * scope re-applies the turn's environment under the env mutex the turns
    * hold, so a sign-in finishing during another session's turn waits for it.
-   * The CLI's environment does not change, so it passes none.
+   * The CLI's environment does not change, so it passes none. The signal is
+   * the attempt's: a sign-in superseded or cancelled while its scope waits
+   * on the mutex ends instead of queueing until that turn finishes.
    */
-  captureCredentialScope?: () => CredentialScope
+  captureCredentialScope?: (signal?: AbortSignal) => CredentialScope
   /** SDK root owner, distinct from an executor's per-tool cancellation. */
   sessionSignal?: AbortSignal
 }
@@ -279,8 +281,10 @@ export function createMcpAuthTool(
       const { setAppState } = context
       // Captured now, inside the call: the flow's reads and writes after the
       // user's browser comes back belong here, however the environment has
-      // changed by then.
-      const credentialScope = options.captureCredentialScope?.()
+      // changed by then. The attempt's signal makes the scope's mutex wait
+      // abortable: a superseded or cancelled sign-in ends instead of
+      // queueing behind the turn that holds the mutex.
+      const credentialScope = options.captureCredentialScope?.(signIn.signal)
 
       const oauthPromise = performMCPOAuthFlow(
         serverName,

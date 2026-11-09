@@ -659,6 +659,46 @@ describe('MCP list cursor pagination', () => {
     ])
   })
 
+  test('a cancelled tools/list backoff issues no further request', async () => {
+    vi.useFakeTimers()
+    const requests: ListRequest[] = []
+    const connection = {
+      type: 'connected',
+      name: 'cancelled-tools-backoff',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { tools: {} },
+      client: {
+        request: async (
+          request: ListRequest,
+          resultSchema: { parse: (value: unknown) => unknown },
+          options?: { signal?: AbortSignal },
+        ) => {
+          requests.push(request)
+          // A request with an aborted signal fails at once, as the MCP SDK
+          // does — so a second request after the abort would be visible here.
+          if (options?.signal?.aborted) {
+            throw new DOMException('aborted', 'AbortError')
+          }
+          throw new Error('transient tools/list failure')
+        },
+      },
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    const controller = new AbortController()
+    const toolsPromise = fetchToolsForClient(connection, {
+      signal: controller.signal,
+    })
+    // The first attempt fails and the 1s backoff starts; no timer advances.
+    await flushMicrotasks()
+    controller.abort()
+    await flushMicrotasks()
+    // The abort ends the backoff at once: the fetch settles with no tools,
+    // and no second request is issued.
+    await expect(toolsPromise).resolves.toEqual([])
+    expect(requests).toHaveLength(1)
+  })
+
   test('reconnect cache invalidation starts a complete fresh traversal', async () => {
     let generation = 1
     const requests: ListRequest[] = []

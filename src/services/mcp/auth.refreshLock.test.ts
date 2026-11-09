@@ -2604,6 +2604,70 @@ test.each(['before the flow peeks', 'between the peek and acquisition'] as const
   },
 )
 
+/**
+ * The silent exchange awaits network I/O, during which another session's
+ * turn may apply its own environment — here, the ambient store goes live
+ * when the token endpoint answers. The token save still enters the scope
+ * the flow began in, so the token lands in the originating store and the
+ * ambient store is never read or written: a save that read the ambient
+ * store would write the token there instead.
+ */
+test('a silent XAA exchange stores its token in the originating store when another store goes live mid-exchange', async () => {
+  const { config, initialData } = makeXaaFixture()
+  const origin = createSharedStorage(initialData, [])
+  const ambientData: SecureStorageData = {
+    mcpXaaIdp: {
+      [`${IDP_ISSUER}/`]: { idToken: 'ambient-id-token', expiresAt: Date.now() + 3_600_000 },
+    },
+  }
+  const ambient = createSharedStorage(ambientData, [])
+  activeStorage = origin
+  installSuccessfulXaaFetch()
+  const xaaFetch = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    if (input.toString() === `${AS_ISSUER}/token` && init?.method === 'POST') {
+      // Another session's turn applies its environment while the exchange
+      // is in flight: the ambient store is live when the token arrives.
+      activeStorage = ambient
+    }
+    return xaaFetch(input, init)
+  }) as typeof globalThis.fetch
+  let loginUrls = 0
+  let scopeEntries = 0
+
+  await performMCPOAuthFlow(
+    'enterprise',
+    config,
+    () => {
+      loginUrls++
+    },
+    undefined,
+    {
+      skipBrowserOpen: true,
+      credentialScope: async work => {
+        scopeEntries++
+        const was = activeStorage
+        activeStorage = origin
+        try {
+          return await work()
+        } finally {
+          activeStorage = was
+        }
+      },
+    },
+  )
+
+  expect(loginUrls).toBe(0)
+  // The token save is the only scope entry on the silent path.
+  expect(scopeEntries).toBe(1)
+  expect(ambient.updateCalls).toBe(0)
+  expect(ambient.readCalls).toBe(0)
+  expect(ambient.getData()).toEqual(ambientData)
+  const serverKey = getServerKey('enterprise', config)
+  expect(origin.getData().mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
+  expect(activeStorage).toBe(ambient)
+})
+
 test.each([
   ['idp-cache', false], ['idp-cache', true],
   ['as-tokens', false], ['as-tokens', true],

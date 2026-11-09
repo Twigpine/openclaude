@@ -680,14 +680,31 @@ export async function connectSdkMcpServers(
         // Connect to the server
         // Note: SDK 'session' scope is not part of internal ConfigScope,
         // but connectToServer accepts any object with scope field
-        const client = await connectToServer(name, scopedConfig as unknown as ScopedMcpServerConfig, {
-          totalServers: Object.keys(mcpServers).length,
-          stdioCount: 0,
-          sseCount: 0,
-          httpCount: 0,
-          sseIdeCount: 0,
-          wsIdeCount: 0,
-        })
+        const client = await connectToServer(
+          name,
+          scopedConfig as unknown as ScopedMcpServerConfig,
+          {
+            totalServers: Object.keys(mcpServers).length,
+            stdioCount: 0,
+            sseCount: 0,
+            httpCount: 0,
+            sseIdeCount: 0,
+            wsIdeCount: 0,
+          },
+          // The session's signal is passed only when joining a connect
+          // another caller started: closing the session then releases the
+          // waiter it registered, so a later cancellation can close the
+          // transport instead of waiting out the connection timeout. A
+          // fresh connect is owned by the cache, not the session — passing
+          // the signal would attach the connect's abort listener to it,
+          // and closing the session would close a transport the next
+          // session reuses.
+          connectToServer.cache.get(
+            getServerCacheKey(name, scopedConfig as unknown as ScopedMcpServerConfig),
+          ) !== undefined
+            ? sessionSignal
+            : undefined,
+        )
 
         // If connected, fetch tools
         if (client.type === 'connected') {
@@ -712,7 +729,11 @@ export async function connectSdkMcpServers(
             tools: [
               createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig, {
                 realToolsInCurrentContext: false,
-                captureCredentialScope: () => captureCredentialScope(getOriginScope),
+                captureCredentialScope: signal =>
+                  captureCredentialScope(
+                    getOriginScope,
+                    signal ? { signal } : undefined,
+                  ),
                 sessionSignal,
               }),
             ],

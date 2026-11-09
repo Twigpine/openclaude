@@ -24,6 +24,7 @@ import {
   connectToServer,
   getServerCacheKey,
   reconnectMcpServerImpl,
+  releaseUnownedMcpClient,
 } from '../../services/mcp/client.js'
 import { resumeIn, type ActiveCredentialScope } from '../../services/mcp/credentialScope.js'
 import { getMcpPrefix } from '../../services/mcp/mcpStringUtils.js'
@@ -311,10 +312,12 @@ export interface SdkMcpToolDefinition<Schema = unknown> {
 /**
  * Whether the connection cache still holds this client: another session
  * may have adopted it while a reconnect was in flight, or a later
- * connection may reuse it instead of dialling again. Used by both the
- * tool-swap error path and the cancellation path before releasing a
- * reconnected client, so a shared client's transport is never closed
- * under a session that is using it.
+ * connection may reuse it instead of dialling again. Used by the
+ * tool-swap error path before releasing a reconnected client, so a shared
+ * client's transport is never closed under a session that is using it.
+ * Cache membership alone is not adoption — the cancellation path tracks
+ * adoption instead — but a client the cache still holds is adoptable, and
+ * the next connection reuses it.
  */
 async function isClientCached(
   name: string,
@@ -906,6 +909,25 @@ class SDKSessionImpl implements SDKSession {
     }
     const serverConfig = config as unknown as McpSSEServerConfig | McpHTTPServerConfig
 
+    // A host call whose signal is already aborted — or a session whose
+    // signal already aborted — must not supersede the attempt still
+    // pending: check before aborting it or registering a replacement, and
+    // leave that sign-in to finish. Check before init, too: an aborted
+    // call must not wait out initialization, and an initialization error
+    // must not replace the cancellation error. The check after init stays,
+    // for an abort that lands while it runs.
+    const sessionSignal = this._abortController?.signal
+    if (options?.signal?.aborted || sessionSignal?.aborted) {
+      throw new AuthenticationCancelledError()
+    }
+    // The namespace the flow's credentials belong to is the environment as
+    // it is now — before another session's turn can change it while the
+    // user is in the browser. Snapshot the turn that called this method
+    // before init awaits: by the time the flow starts, another turn may
+    // hold the field, and the exchange would then run in that turn's
+    // namespace instead of this call's.
+    const entryCredentialScope = this.turnCredentialScope
+
     // Process-wide networking (proxy, mTLS client certificate, CA certs) is
     // configured by init() — which sendMessage runs before the first turn —
     // and the OAuth fetch uses the global dispatcher it installs. A settings
@@ -916,11 +938,6 @@ class SDKSessionImpl implements SDKSession {
     if (this.closed) {
       throw new Error('SDK session is closed')
     }
-    // A host call whose signal is already aborted — or a session whose
-    // signal already aborted — must not supersede the attempt still
-    // pending: check before aborting it or registering a replacement, and
-    // leave that sign-in to finish.
-    const sessionSignal = this._abortController?.signal
     if (options?.signal?.aborted || sessionSignal?.aborted) {
       throw new AuthenticationCancelledError()
     }
@@ -952,9 +969,10 @@ class SDKSessionImpl implements SDKSession {
     // re-acquired: the turn holds the mutex the scope would otherwise wait
     // on. The scope's mutex wait is abortable by this attempt, so a cancel
     // or a session close while it waits ends the flow instead of holding
-    // the mutex until another turn releases it.
+    // the mutex until another turn releases it. The turn is the one this
+    // call started in, not whichever holds the field by now.
     const credentialScope = captureCredentialScope(
-      () => this.turnCredentialScope ?? undefined,
+      () => entryCredentialScope ?? undefined,
       { signal: attempt.signal },
     )
 
@@ -998,17 +1016,10 @@ class SDKSessionImpl implements SDKSession {
       // reconnect was pending, or the session closed: a cancelled attempt
       // must not install its result or resolve, and a closed session must
       // not report a successful status for a connection it will never use.
-      // The reconnected client is cached by server key, and another
-      // session may have adopted it while the reconnect was in flight —
-      // the same protection as the tool-swap error path below: only
-      // release a client the cache no longer holds.
+      // The reconnected client is released below unless another session
+      // adopted it while the reconnect was in flight.
       if (this.closed || attempt.signal.aborted || this.pendingMcpAuth.get(name) !== attempt) {
-        if (result.client.type === 'connected') {
-          const shared = await isClientCached(name, config, result.client)
-          if (!shared) {
-            await result.client.cleanup().catch(() => {})
-          }
-        }
+        await this.releaseUnownedClient(name, config, result.client)
         if (this.closed) throw new Error('SDK session is closed')
         throw new AuthenticationCancelledError()
       }
@@ -1048,8 +1059,11 @@ class SDKSessionImpl implements SDKSession {
           // tool keeps it as it is.
           const authTool = createMcpAuthTool(name, config, {
             realToolsInCurrentContext: false,
-            captureCredentialScope: () =>
-              captureCredentialScope(() => this.turnCredentialScope ?? undefined),
+            captureCredentialScope: signal =>
+              captureCredentialScope(
+                () => this.turnCredentialScope ?? undefined,
+                signal ? { signal } : undefined,
+              ),
             sessionSignal: this._abortController?.signal,
           })
           // Install the authenticate tool when the pool holds the server's
@@ -1096,6 +1110,26 @@ class SDKSessionImpl implements SDKSession {
       releaseSharedSignIn()
       if (this.pendingMcpAuth.get(name) === attempt) this.pendingMcpAuth.delete(name)
     }
+  }
+
+  /**
+   * Releases a reconnected client no session adopted. A cancelled attempt
+   * leaves a connected client the cache holds but no session installed,
+   * and its transport stays open until something clears the cache. A
+   * client another caller adopted from the shared connect — or one this
+   * session installed — is shared: closing it would fail that session's
+   * in-flight MCP calls, so it stays cached for the next connection
+   * instead. Cache membership alone is not adoption: the cache holds the
+   * client this reconnect created whether or not anyone adopted it.
+   */
+  private async releaseUnownedClient(
+    name: string,
+    config: ScopedMcpServerConfig,
+    client: MCPServerConnection,
+  ): Promise<void> {
+    if (client.type !== 'connected') return
+    if (this.engine.getMcpClients().some(installed => installed === client)) return
+    await releaseUnownedMcpClient(name, config, client)
   }
 
   /**

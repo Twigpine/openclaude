@@ -14,6 +14,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -101,6 +102,31 @@ mock.module('../../services/mcp/client.js', () => ({
   },
 }))
 
+const realInit = { ...(await import('../init.js')) }
+/** Calls the mocked init has made, counting the wrapper rather than the memoized real one. */
+let initCalls = 0
+/** When set, the mocked init throws instead of initializing. */
+let failInit = false
+/** An init the mocked init keeps waiting until the test lets it answer. */
+let heldInit: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
+// Initialization is memoized in the real module, so a host flow that runs
+// it twice still initializes once — and a test that holds or fails it
+// cannot tell whether the flow called it at all. Wrap it with flags and a
+// counter, passing every call through, so a test can hold initialization
+// while it changes the turn state, or fail it to see which error wins.
+mock.module('../init.js', () => ({
+  ...realInit,
+  init: () => {
+    initCalls++
+    if (failInit) throw new Error('init failed for the test')
+    if (heldInit) {
+      heldInit.arrived = true
+      return heldInit.answered.then(() => realInit.init())
+    }
+    return realInit.init()
+  },
+}))
+
 const { connectSdkMcpServers } = await import('./permissions.js')
 const { unstable_v2_createSession } = await import('./v2.js')
 
@@ -126,6 +152,10 @@ let heldExchange: {
 let heldInitialize: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
 /** A tools/list the stand-in keeps waiting until the test lets it answer. */
 let heldToolsList: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
+/** A skill resources/read the stand-in keeps waiting until the test lets it answer. */
+let heldSkillRead: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
+/** Authorized initialize requests the stand-in has answered, so a test can tell a dial from a cache lookup. */
+let initializes = 0
 /** A turn gate a test opened; teardown releases it, so a failed assertion before the test's own release cannot leave the fake engine holding the environment mutex. */
 let pendingTurnRelease: (() => void) | null = null
 /** When set, the stand-in answers 401 to a bearer token it would accept. */
@@ -252,6 +282,7 @@ function serveNeedingAuth(invalidClient = false): string {
         if (rpc.id === undefined) return new Response(null, { status: 202 })
         // A reconnect's initialize can be held, so a test can act while the
         // reconnect is pending — abort it, supersede it, close the session.
+        if (rpc.method === 'initialize') initializes++
         if (rpc.method === 'initialize' && heldInitialize) {
           heldInitialize.arrived = true
           await heldInitialize.answered
@@ -263,16 +294,44 @@ function serveNeedingAuth(invalidClient = false): string {
           heldToolsList.arrived = true
           await heldToolsList.answered
         }
+        // A reconnect's skill resources/read can be held the same way:
+        // with the resources capability advertised, discovery reads the
+        // skill, and a cancel during that read must reject the attempt
+        // instead of waiting out the request timeout.
+        if (rpc.method === 'resources/read' && heldSkillRead) {
+          heldSkillRead.arrived = true
+          await heldSkillRead.answered
+        }
         const result =
           rpc.method === 'initialize'
             ? {
                 protocolVersion: '2025-03-26',
-                capabilities: { tools: {} },
+                capabilities: heldSkillRead ? { tools: {}, resources: {} } : { tools: {} },
                 serverInfo: { name: 'gated', version: '1' },
               }
             : rpc.method === 'tools/list'
               ? { tools: [{ name: 'hello', description: 'hello', inputSchema: { type: 'object', properties: {} } }] }
-              : {}
+              : rpc.method === 'resources/list'
+                ? {
+                    resources: [
+                      {
+                        uri: 'skill://review',
+                        name: 'review',
+                        mimeType: 'text/markdown',
+                      },
+                    ],
+                  }
+                : rpc.method === 'resources/read'
+                  ? {
+                      contents: [
+                        {
+                          uri: 'skill://review',
+                          mimeType: 'text/markdown',
+                          text: '---\nname: review\ndescription: Review skill\n---\n# Review\n',
+                        },
+                      ],
+                    }
+                  : {}
         return Response.json({ jsonrpc: '2.0', id: rpc.id, result })
       }
       return Response.json(
@@ -339,6 +398,26 @@ function holdToolsList() {
   })
   heldToolsList = { arrived: false, answer, answered }
   return heldToolsList
+}
+
+/** Makes the stand-in hold its answer to a skill resources/read. */
+function holdSkillRead() {
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldSkillRead = { arrived: false, answer, answered }
+  return heldSkillRead
+}
+
+/** Makes the mocked init hold until the test lets it answer. */
+function holdInit() {
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldInit = { arrived: false, answer, answered }
+  return heldInit
 }
 
 /** Calls the authenticate tool the way the engine does, within a session. */
@@ -461,6 +540,9 @@ beforeEach(async () => {
   refusedExchanges = 0
   failMcpRequests = false
   rejectTokens = false
+  initializes = 0
+  initCalls = 0
+  failInit = false
 })
 
 afterEach(async () => {
@@ -477,6 +559,10 @@ afterEach(async () => {
   heldInitialize = null
   heldToolsList?.answer()
   heldToolsList = null
+  heldSkillRead?.answer()
+  heldSkillRead = null
+  heldInit?.answer()
+  heldInit = null
   heldMetadata?.answer()
   heldMetadata = null
   server?.stop(true)
@@ -1986,7 +2072,15 @@ test('ABORTING DURING THE RECONNECT DOES NOT CLOSE A CLIENT ANOTHER SESSION ADOP
     url,
     scope: 'session',
   } as never)
-  const adopted = (await realClient.connectToServer.cache.get(key)) as MCPServerConnection
+  // A second caller dialling the same server adopts the connected client
+  // from the cache — through connectToServer, as a real session would, so
+  // the adoption registers before the abort below. Reading the cache
+  // directly would hold the client without adopting it.
+  const adopted = (await realClient.connectToServer('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)) as MCPServerConnection
   expect(adopted.type).toBe('connected')
   if (adopted.type !== 'connected') throw new Error('expected a connected client')
   // Another session adopted it: count cleanups on the shared object.
@@ -2803,6 +2897,16 @@ test('ABORTING DURING DISCOVERY REJECTS PROMPTLY INSTEAD OF WAITING OUT THE REQU
     expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
       ['gated', 'needs-auth'],
     ])
+    // And the cancelled reconnect's client is gone: it was never installed
+    // and no other session adopted it, so its transport is released and
+    // the cache no longer holds it — a later connection dials fresh
+    // instead of reusing a closed client.
+    const key = realClient.getServerCacheKey('gated', {
+      type: 'http',
+      url,
+      scope: 'session',
+    } as never)
+    expect(realClient.connectToServer.cache.get(key)).toBeUndefined()
   } finally {
     held.answer()
   }
@@ -2861,4 +2965,258 @@ test('clearServerCache WITH AN ABORTED SIGNAL DOES NOT WAIT OUT A PENDING CONNEC
   // clear returns without connecting.
   await realClient.clearServerCache('gated', { type: 'http', url, scope: 'session' } as never)
   expect(realClient.connectToServer.cache.get(key)).toBeUndefined()
+
+  // And a second clear, with the cache already empty, starts no
+  // connection either: the cache still being empty afterwards cannot
+  // detect a connection opened and closed during the call.
+  const initializesBefore = initializes
+  await realClient.clearServerCache('gated', { type: 'http', url, scope: 'session' } as never)
+  expect(realClient.connectToServer.cache.get(key)).toBeUndefined()
+  expect(initializes).toBe(initializesBefore)
+}, 30_000)
+
+// Skill discovery is behind the MCP_SKILLS build flag, off by default
+// under bun test: without it the stand-in never advertises resources and
+// the read never runs, so the test is skipped rather than vacuous.
+const skillReadTest = feature('MCP_SKILLS') ? test : test.skip
+
+/**
+ * A caller abort that lands while skill discovery is pending must reject
+ * promptly, not wait out the request timeout: the attempt signal aborts
+ * the resources/read request itself. The reconnect installs nothing, and
+ * releases the environment mutex it held.
+ */
+skillReadTest('CANCELLING DURING A STALLED SKILL READ REJECTS PROMPTLY AND RELEASES THE ENVIRONMENT MUTEX', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  const held = holdSkillRead()
+
+  const caller = new AbortController()
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+    signal: caller.signal,
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  // The reconnect connected, and its discovery is stalled on the skill read.
+  await waitFor(() => held.arrived)
+  caller.abort()
+  try {
+    await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    const acquired = await acquireEnvMutex({ timeoutMs: 5_000 })
+    expect(acquired.acquired).toBe(true)
+    releaseEnvMutex()
+    // Only the initial connect installed; the cancelled reconnect installed
+    // nothing.
+    expect(calls.setMcpClients).toHaveLength(1)
+    expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
+      ['gated', 'needs-auth'],
+    ])
+  } finally {
+    held.answer()
+  }
+}, 30_000)
+
+/**
+ * A call whose signal is already aborted must not run initialization:
+ * without the check, a failing init would replace the cancellation error
+ * with its own, and a held init would stall a call that is already over.
+ */
+test('AN ALREADY-ABORTED CALL DOES NOT RUN INITIALIZATION', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const callsBefore = initCalls
+  // Initialization fails: without the pre-init check, its error would
+  // replace the cancellation error.
+  failInit = true
+  try {
+    const caller = new AbortController()
+    caller.abort()
+    const done = session.authenticateMcpServer('gated', {
+      signal: caller.signal,
+    })
+    await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    // init never ran: the aborted call returns before it.
+    expect(initCalls).toBe(callsBefore)
+  } finally {
+    failInit = false
+  }
+}, 30_000)
+
+/**
+ * The host flow must keep the credential namespace it started in even
+ * when initialization waits: while init is held, another turn takes the
+ * session's turn scope, and the flow must still sign in — and store its
+ * tokens — in the namespace it started in, not the later turn's.
+ */
+test('THE HOST FLOW KEEPS THE CALL-ENTRY CREDENTIAL NAMESPACE ACROSS INITIALIZATION', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const later = join(configHome, 'later')
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const session = openGatedSession(url)
+    // Two credential scopes, one per namespace: the entry turn lends the
+    // origin store, a later turn the later store. Only the entry scope may
+    // be entered by this flow.
+    const scopeFor =
+      (dir: string) =>
+      async <T>(work: () => Promise<T>): Promise<T> => {
+        const prev = process.env.OPENCLAUDE_CONFIG_DIR
+        process.env.OPENCLAUDE_CONFIG_DIR = dir
+        try {
+          return await work()
+        } finally {
+          if (prev === undefined) delete process.env.OPENCLAUDE_CONFIG_DIR
+          else process.env.OPENCLAUDE_CONFIG_DIR = prev
+        }
+      }
+    const entryScope = scopeFor(origin)
+    const laterScope = scopeFor(later)
+    const turnScope = session as unknown as { turnCredentialScope: unknown }
+    turnScope.turnCredentialScope = entryScope
+
+    // Hold initialization: while it waits, another turn takes the field.
+    const held = holdInit()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => held.arrived)
+    turnScope.turnCredentialScope = laterScope
+    held.answer()
+
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The tokens landed where the flow started, not in the later turn's store.
+    expect(storedAccessTokens(storeIn(later))).toEqual([])
+    expect(storedAccessTokens(storeIn(origin))).toEqual([
+      `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
+    ])
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * A session that joins a shared reconnect and then closes must not keep
+ * that reconnect from closing when its own caller cancels: the joiner's
+ * waiter leaves with it, so the abort can close the stalled transport
+ * instead of holding the environment mutex until the connect times out.
+ */
+test('A JOINER THAT LEAVES DOES NOT KEEP A CANCELLED RECONNECT FROM CLOSING', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  const held = holdInitialize()
+
+  const caller = new AbortController()
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+    signal: caller.signal,
+  })
+  const doneCaught = done.catch(error => error)
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  // The reconnect's connect is stalled on initialize.
+  await waitFor(() => held.arrived)
+
+  // Another session's initialization joins the same pending connect, then
+  // that session closes: its waiter must leave with it, or the abort
+  // below cannot close the stalled transport.
+  const joiner = new AbortController()
+  const joinedPromise = realClient.connectToServer(
+    'gated',
+    { type: 'http', url, scope: 'session' } as never,
+    undefined,
+    joiner.signal,
+  )
+  const joinedCaught = joinedPromise.catch(error => error)
+  joiner.abort()
+  // The joiner's waiter is gone; cancelling the attempt closes the transport.
+  caller.abort()
+  try {
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    const acquired = await acquireEnvMutex({ timeoutMs: 5_000 })
+    expect(acquired.acquired).toBe(true)
+    releaseEnvMutex()
+    // Only the initial connect installed; the cancelled reconnect installed
+    // nothing.
+    expect(calls.setMcpClients).toHaveLength(1)
+    // The joiner's connect ended with the transport: a failed client,
+    // not a connection that outlived the cancel.
+    expect((await joinedPromise).type).toBe('failed')
+  } finally {
+    held.answer()
+    await settlesWithin(joinedCaught, 5_000).catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * Cancelling one caller during discovery must not strip another caller's
+ * tools: discovery is shared by client name, so the other caller's fetch
+ * shares the reconnect's in-flight tools/list. The cancelled attempt
+ * rejects promptly, and the adopter still gets the server's tools once
+ * the list answers.
+ */
+test("ONE CALLER CANCELLING DISCOVERY DOES NOT STRIP ANOTHER CALLER'S TOOLS", async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  const held = holdToolsList()
+
+  const caller = new AbortController()
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+    signal: caller.signal,
+  })
+  const doneCaught = done.catch(error => error)
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  // The reconnect connected, and its discovery is stalled on tools/list.
+  await waitFor(() => held.arrived)
+
+  // Another caller adopts the in-flight discovery: it connects through
+  // the shared client, then fetches the same tools/list the reconnect
+  // started. Awaiting the connect lets the adoption register before the
+  // abort below.
+  const connectedClient = (await realClient.connectToServer('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)) as MCPServerConnection
+  expect(connectedClient.type).toBe('connected')
+  const adopterTools = realClient
+    .fetchToolsForClient(connectedClient)
+    // The names the model sees, as the status projects them.
+    .then(tools => tools.map(tool => tool.mcpInfo?.toolName ?? tool.name))
+
+  caller.abort()
+  try {
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    // The cancelled attempt installed nothing.
+    expect(calls.setMcpClients).toHaveLength(1)
+  } finally {
+    held.answer()
+  }
+  // The adopter still gets the server's tools once the list answers.
+  await expect(settlesWithin(adopterTools, 5_000)).resolves.toEqual(['hello'])
 }, 30_000)
