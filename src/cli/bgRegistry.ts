@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rename,
+  rmdir,
   stat,
   unlink,
   writeFile,
@@ -19,6 +20,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
   type Dirent,
@@ -144,15 +146,36 @@ const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/
 const ABANDONED_SESSION_TEMP_FILE_MIN_AGE_MS = 60 * 60 * 1000
 // Temp files written by writeNewSession/replaceSessionFile are named
 // `<id>.<pid>.<uuid>.tmp`; the id is everything before the numeric pid
-// and the random UUID suffix.
+// and the random UUID suffix, and the pid is the publishing process.
 const SESSION_TEMP_FILE_RE =
-  /^(.*)\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
+  /^(.*)\.(\d+)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
 
 function sessionIdFromTempFileName(name: string): string | undefined {
   const match = SESSION_TEMP_FILE_RE.exec(name)
   if (!match) return undefined
   const id = match[1]
   return SAFE_ID_RE.test(id) ? id : undefined
+}
+
+function publisherPidFromTempFileName(name: string): number | undefined {
+  const match = SESSION_TEMP_FILE_RE.exec(name)
+  if (!match) return undefined
+  const pid = Number(match[2])
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
+}
+
+// Whether the process with this pid is alive. `process.kill(pid, 0)`
+// performs no signal delivery; ESRCH means no such process, while EPERM
+// means a process exists but cannot be signalled, which still proves it
+// is alive. A pid reused by an unrelated process can only make cleanup
+// keep a stale file for a later sweep, never remove a live one.
+function isBackgroundSessionPublisherAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return isErrno(error, 'EPERM')
+  }
 }
 const SAFE_SIGNAL_RE = /^SIG[A-Z0-9]{1,24}$/
 const BACKGROUND_RECOVERY_JOURNAL_ENTRY_LIMIT = 256
@@ -1543,11 +1566,372 @@ function applyTerminalFacts(
   return effective
 }
 
+// How long a terminal-fact installer that loses the publish claim waits
+// for the winning publish to appear before completing the winner's
+// publish itself. The winner publishes within microseconds of claiming,
+// so the budget is only spent when the winner died or stalled;
+// completing the winner's publish is always safe, so the budget is
+// short (CodeRabbit #2497).
+const TERMINAL_FACT_PUBLISH_WAIT_MS = 250
+// Maximum publish attempts (claim, adopt, retry) before giving up with
+// the invalid-fact error.
+const TERMINAL_FACT_PUBLISH_ATTEMPTS = 3
+
 function terminalFactTempPath(id: string): string {
   return join(
     getBackgroundSessionTerminalDir(),
     `${id}.${process.pid}.${randomUUID()}.tmp`,
   )
+}
+
+// The publish claim for one terminal-fact target: a directory, so
+// creating it with mkdir() is atomic and works on filesystems without
+// hard-link support. The claim file inside names the temp file to
+// publish.
+function terminalFactClaimDir(target: string): string {
+  return `${target}.claim`
+}
+
+function terminalFactClaimFile(target: string): string {
+  return join(terminalFactClaimDir(target), 'tmp')
+}
+
+// Removes a publish claim: the claim file first, then the directory.
+// rmdir() refuses a non-empty directory, so removing the directory
+// alone would leave the claim behind.
+async function removeTerminalFactClaim(target: string): Promise<void> {
+  await unlink(terminalFactClaimFile(target)).catch(() => {})
+  await rmdir(terminalFactClaimDir(target)).catch(() => {})
+}
+
+function removeTerminalFactClaimSync(target: string): void {
+  try {
+    unlinkSync(terminalFactClaimFile(target))
+  } catch {}
+  try {
+    rmdirSync(terminalFactClaimDir(target))
+  } catch {}
+}
+
+// Removes a publish claim only when this installer created it: the
+// claim file names the winner's tmp, so a claim naming another tmp
+// belongs to a newer publisher and must be left alone. A claim file
+// that is already gone means the claim was adopted and removed, so
+// there is nothing to do.
+async function removeOwnTerminalFactClaim(
+  target: string,
+  tmp: string,
+): Promise<void> {
+  const claimed = await readFile(terminalFactClaimFile(target), 'utf8').catch(
+    () => undefined,
+  )
+  if (claimed?.trim() !== tmp) return
+  await removeTerminalFactClaim(target)
+}
+
+function removeOwnTerminalFactClaimSync(
+  target: string,
+  tmp: string,
+): void {
+  let claimed: string | undefined
+  try {
+    claimed = readFileSync(terminalFactClaimFile(target), 'utf8')
+  } catch {
+    return
+  }
+  if (claimed?.trim() !== tmp) return
+  removeTerminalFactClaimSync(target)
+}
+
+// Test-only hook invoked by installTerminalFact after it has claimed a
+// terminal-fact publish and before it renames the temp file into place,
+// so a test can pause one installer while a second installer publishes
+// (CodeRabbit #2497). Never set outside tests.
+let terminalFactPublishHookForTesting: (() => Promise<void>) | undefined
+
+export function _setTerminalFactPublishHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  terminalFactPublishHookForTesting = hook
+}
+
+async function waitForTerminalFact(
+  id: string,
+  kind: 'natural' | 'killed',
+  generation?: string,
+): Promise<BackgroundSessionTerminalFact | null> {
+  const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  for (;;) {
+    const existing = await readTerminalFact(id, kind, generation)
+    if (existing) return existing
+    if (Date.now() >= deadline) return null
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+function waitForTerminalFactSync(
+  id: string,
+  kind: 'natural' | 'killed',
+  generation?: string,
+): BackgroundSessionTerminalFact | null {
+  const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  for (;;) {
+    const existing = readTerminalFactSync(id, kind, generation)
+    if (existing) return existing
+    if (Date.now() >= deadline) return null
+  }
+}
+
+async function readTerminalFactClaim(
+  target: string,
+): Promise<string | undefined> {
+  const claimFile = terminalFactClaimFile(target)
+  const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  for (;;) {
+    try {
+      const claimed = (await readFile(claimFile, 'utf8')).trim()
+      const terminalDir = getBackgroundSessionTerminalDir()
+      // The claim must name a temp file in this terminal directory;
+      // anything else is a corrupt claim, never a path to rename.
+      if (
+        claimed &&
+        join(terminalDir, basename(claimed)) === claimed &&
+        SESSION_TEMP_FILE_RE.test(basename(claimed))
+      ) {
+        return claimed
+      }
+      return undefined
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) return undefined
+      if (Date.now() >= deadline) return undefined
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+  }
+}
+
+function readTerminalFactClaimSync(target: string): string | undefined {
+  const claimFile = terminalFactClaimFile(target)
+  const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  for (;;) {
+    try {
+      const claimed = readFileSync(claimFile, 'utf8').trim()
+      const terminalDir = getBackgroundSessionTerminalDir()
+      if (
+        claimed &&
+        join(terminalDir, basename(claimed)) === claimed &&
+        SESSION_TEMP_FILE_RE.test(basename(claimed))
+      ) {
+        return claimed
+      }
+      return undefined
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) return undefined
+      if (Date.now() >= deadline) return undefined
+    }
+  }
+}
+
+/**
+ * Publishes one terminal fact with atomic no-overwrite semantics and
+ * without hard links (CodeRabbit #2497). The target only ever appears
+ * complete, via rename() of a synced temp file, so a concurrent `wait`
+ * never reads a partially-written fact as malformed; and the first
+ * publisher wins: an installer claims the target by creating
+ * `<target>.claim` (mkdir is atomic) and recording its temp path in
+ * `<target>.claim/tmp`, so a second installer that finds the claim —
+ * including the synchronous ELOCKED exit fallback, which publishes
+ * without the per-ID lock — completes the winner's publish instead of
+ * racing it. A loser whose winner died after claiming removes the stale
+ * claim and retries. This preserves the old link() EEXIST duplicate
+ * semantics without link(), which fails on filesystems that reject hard
+ * links (maintainer review 5830922741 on #2497).
+ */
+async function publishTerminalFact(
+  fact: BackgroundSessionTerminalFact,
+  kind: 'natural' | 'killed',
+  target: string,
+  tmp: string,
+): Promise<BackgroundSessionTerminalFact> {
+  const claimDir = terminalFactClaimDir(target)
+  const claimFile = terminalFactClaimFile(target)
+  for (let attempt = 0; attempt < TERMINAL_FACT_PUBLISH_ATTEMPTS; attempt++) {
+    // A fact already published by an earlier installer wins. The target
+    // only ever appears complete (via rename), so one read is enough.
+    let targetExists = false
+    try {
+      await lstat(target)
+      targetExists = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetExists) {
+      const existing = await readTerminalFact(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    // Claim the publish: exactly one installer per target wins the
+    // mkdir, and the claim file names the tmp to publish, so a loser
+    // can complete the winner's publish instead of racing it.
+    try {
+      await mkdir(claimDir)
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+      const adopted = await adoptTerminalFactPublish(fact, kind, target)
+      if (adopted) return adopted
+      continue
+    }
+    try {
+      await writeFile(claimFile, tmp, { flag: 'wx' })
+    } catch (error) {
+      if (isErrno(error, 'ENOENT')) continue
+      throw error
+    }
+    await terminalFactPublishHookForTesting?.()
+    try {
+      await rename(tmp, target)
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+      // Another installer adopted this tmp and published it; the fact
+      // now at the target is this publish, so return it.
+      const existing = await waitForTerminalFact(
+        fact.id,
+        kind,
+        fact.generation,
+      )
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    return fact
+  }
+  throw new Error(`Invalid background session ${kind} terminal fact`)
+}
+
+async function adoptTerminalFactPublish(
+  fact: BackgroundSessionTerminalFact,
+  kind: 'natural' | 'killed',
+  target: string,
+): Promise<BackgroundSessionTerminalFact | null> {
+  // The winner publishes within microseconds of claiming, so wait
+  // briefly for its target to appear before adopting.
+  const existing = await waitForTerminalFact(fact.id, kind, fact.generation)
+  if (existing) return existing
+  // The winner died or stalled after claiming: complete its publish by
+  // renaming its tmp to the target. Its tmp is complete — the claim file
+  // is written only after the tmp is synced — so the target only ever
+  // appears complete, and the first publisher still wins.
+  const claimedTmp = await readTerminalFactClaim(target)
+  if (claimedTmp === undefined) {
+    // No claim file: the winner died between mkdir and the claim-file
+    // write, or stalled there. Remove the stale claim so the next
+    // attempt can claim the publish.
+    await removeTerminalFactClaim(target)
+    return null
+  }
+  try {
+    await rename(claimedTmp, target)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    // The winner published after all, or another adopter did: return
+    // the fact at the target if it appeared, else retry the publish.
+    return await waitForTerminalFact(fact.id, kind, fact.generation)
+  }
+  // This publish is complete, so the winner's claim is stale.
+  await removeTerminalFactClaim(target)
+  const adopted = await readTerminalFact(fact.id, kind, fact.generation)
+  if (!adopted) {
+    throw new Error(`Invalid background session ${kind} terminal fact`)
+  }
+  return adopted
+}
+
+function publishTerminalFactSync(
+  fact: BackgroundSessionTerminalFact,
+  kind: 'natural' | 'killed',
+  target: string,
+  tmp: string,
+): BackgroundSessionTerminalFact {
+  const claimDir = terminalFactClaimDir(target)
+  const claimFile = terminalFactClaimFile(target)
+  for (let attempt = 0; attempt < TERMINAL_FACT_PUBLISH_ATTEMPTS; attempt++) {
+    // Same duplicate-guard as publishTerminalFact: a fact already
+    // published by an earlier installer wins.
+    let targetExists = false
+    try {
+      lstatSync(target)
+      targetExists = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetExists) {
+      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    try {
+      mkdirSync(claimDir)
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+      const adopted = adoptTerminalFactPublishSync(fact, kind, target)
+      if (adopted) return adopted
+      continue
+    }
+    try {
+      writeFileSync(claimFile, tmp, { flag: 'wx' })
+    } catch (error) {
+      if (isErrno(error, 'ENOENT')) continue
+      throw error
+    }
+    try {
+      renameSync(tmp, target)
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+      // Same adoption case as publishTerminalFact: another installer
+      // adopted this tmp and published it.
+      const existing = waitForTerminalFactSync(
+        fact.id,
+        kind,
+        fact.generation,
+      )
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    return fact
+  }
+  throw new Error(`Invalid background session ${kind} terminal fact`)
+}
+
+function adoptTerminalFactPublishSync(
+  fact: BackgroundSessionTerminalFact,
+  kind: 'natural' | 'killed',
+  target: string,
+): BackgroundSessionTerminalFact | null {
+  const existing = waitForTerminalFactSync(fact.id, kind, fact.generation)
+  if (existing) return existing
+  const claimedTmp = readTerminalFactClaimSync(target)
+  if (claimedTmp === undefined) {
+    removeTerminalFactClaimSync(target)
+    return null
+  }
+  try {
+    renameSync(claimedTmp, target)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return waitForTerminalFactSync(fact.id, kind, fact.generation)
+  }
+  removeTerminalFactClaimSync(target)
+  const adopted = readTerminalFactSync(fact.id, kind, fact.generation)
+  if (!adopted) {
+    throw new Error(`Invalid background session ${kind} terminal fact`)
+  }
+  return adopted
 }
 
 async function installTerminalFact(
@@ -1565,34 +1949,18 @@ async function installTerminalFact(
     await handle.sync()
     await handle.close()
     handle = undefined
-    // rename() overwrites an existing target, so guard duplicates with a
-    // pre-check first: every installer of this id holds the per-ID lock
-    // (see writeNewSession), so no other writer can publish between the
-    // check and the rename. A terminal fact is immutable once published,
-    // so a duplicate install returns the existing fact instead of
-    // overwriting it (the old link() EEXIST behaviour). rename() is
-    // atomic within a filesystem and, unlike link(), works on filesystems
-    // that reject hard links (maintainer review 5830922741 on #2497).
-    let targetExists = false
-    try {
-      await lstat(target)
-      targetExists = true
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
-    }
-    if (targetExists) {
-      const existing = await readTerminalFact(fact.id, kind, fact.generation)
-      if (!existing) {
-        throw new Error(`Invalid background session ${kind} terminal fact`)
-      }
-      installed = existing
-    } else {
-      await rename(tmp, target)
-      installed = fact
-    }
+    installed = await publishTerminalFact(fact, kind, target, tmp)
   } finally {
     await handle?.close().catch(() => {})
     await unlink(tmp).catch(() => {})
+    // The claim belongs to this publish attempt: remove it once the
+    // publish is decided, whether this installer published, a loser
+    // adopted its tmp, or the publish failed. Only a claim this
+    // installer created is removed — a claim naming another tmp belongs
+    // to a newer publisher. A loser that already read the claim still
+    // holds the tmp path, so removing the directory cannot break its
+    // adoption; a loser that has not read it yet retries its own publish.
+    await removeOwnTerminalFactClaim(target, tmp)
   }
   await enqueueBackgroundSessionRecovery(installed.id, installed.generation).catch(() => {})
   return installed
@@ -1616,26 +1984,7 @@ function installTerminalFactSync(
     fsyncSync(fd)
     closeSync(fd)
     fd = undefined
-    // Same rename() duplicate-guard as installTerminalFact: rename()
-    // overwrites, so pre-check first (see writeNewSession); a duplicate
-    // install returns the existing fact instead of overwriting it.
-    let targetExists = false
-    try {
-      lstatSync(target)
-      targetExists = true
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
-    }
-    if (targetExists) {
-      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
-      if (!existing) {
-        throw new Error(`Invalid background session ${kind} terminal fact`)
-      }
-      installed = existing
-    } else {
-      renameSync(tmp, target)
-      installed = fact
-    }
+    installed = publishTerminalFactSync(fact, kind, target, tmp)
   } finally {
     if (fd !== undefined) {
       try {
@@ -1645,6 +1994,8 @@ function installTerminalFactSync(
     try {
       unlinkSync(tmp)
     } catch {}
+    // Same claim cleanup as installTerminalFact.
+    removeOwnTerminalFactClaimSync(target, tmp)
   }
   try {
     enqueueBackgroundSessionRecoverySync(installed.id, installed.generation)
@@ -2172,9 +2523,13 @@ async function cleanupOrphanedTerminalFacts(
  * publishing session id — only while that session's per-ID lock is free:
  * writeNewSession and replaceSessionFile hold the lock for the whole
  * write+rename, so a held lock means a publish is in flight even when a
- * wall-clock jump makes the file look older than the grace period. Temp
- * files whose names do not carry a session id keep the age-only behavior.
- * Removed files count as artifacts in the cleanup result.
+ * wall-clock jump makes the file look older than the grace period. The
+ * lock alone cannot prove that: a clock jump can also age the lock past
+ * proper-lockfile's stale threshold, so when the lock is held, a temp
+ * file whose publisher pid is still alive is never removed, whatever the
+ * lock's mtime says. Temp files whose names do not carry a session id
+ * keep the age-only behavior. Removed files count as artifacts in the
+ * cleanup result.
  */
 async function cleanupAbandonedSessionTempFilesInDirectory(
   cutoffMs: number,
@@ -2204,8 +2559,8 @@ async function cleanupAbandonedSessionTempFilesInDirectory(
   // A temp file is abandoned only when it is older than the retention
   // cutoff and older than the publish grace period. The grace period
   // alone cannot prove a file is abandoned: a wall-clock jump forward
-  // during a publish makes a fresh temp file look old, so the per-ID
-  // lock below is the check that decides.
+  // during a publish makes a fresh temp file look old, so the publisher
+  // pid and the per-ID lock below are the checks that decide.
   const oldestActiveMs = Date.now() - ABANDONED_SESSION_TEMP_FILE_MIN_AGE_MS
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.tmp')) continue
@@ -2227,6 +2582,36 @@ async function cleanupAbandonedSessionTempFilesInDirectory(
     // mtime says. A lock that cannot be taken for any other reason also
     // leaves the file for a later sweep; the file is stale, not lost.
     const sessionId = sessionIdFromTempFileName(entry.name)
+    // The pid embedded in the temp file name is the publisher, so when
+    // the per-ID lock is actually held, a live pid means a publish for
+    // this file may still be in flight even when the lock looks stale:
+    // a wall-clock jump can age the lock past proper-lockfile's stale
+    // threshold, and that threshold cannot be disabled (stale: 0/false
+    // clamps to 2000ms), so the lock acquire below cannot prove a live
+    // publisher is gone. With no lock held, no publish can be in flight
+    // for this id — a publisher holds the lock for the whole write+rename
+    // — so a leftover temp is abandoned whatever its pid says. A dead
+    // pid means the publisher is gone; the lock acquire still guards a
+    // live publisher for the same id that owns a different temp file.
+    const publisherPid = publisherPidFromTempFileName(entry.name)
+    if (
+      sessionId !== undefined &&
+      publisherPid !== undefined &&
+      isBackgroundSessionPublisherAlive(publisherPid)
+    ) {
+      try {
+        // proper-lockfile's lockfile path for a locked file is
+        // `<file>.lock` (no custom lockfilePath is used here); existence
+        // alone is the signal — the mtime is what a clock jump corrupts.
+        if (
+          (await lstat(`${metadataPathForId(sessionId)}.lock`)).isDirectory()
+        ) {
+          continue
+        }
+      } catch {
+        // No lock held: fall through to the acquire below.
+      }
+    }
     let releasePublishLock: (() => Promise<void>) | undefined
     if (sessionId !== undefined) {
       try {
