@@ -30,6 +30,7 @@ import { basename, join } from 'node:path'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import {
   getProcessCommand,
+  getProcessCommandAsync,
   isProcessRunning,
 } from '../utils/genericProcessUtils.js'
 import * as lockfile from '../utils/lockfile.js'
@@ -2638,6 +2639,59 @@ export async function refreshBackgroundSessionStatuses(options?: {
   return refreshed
 }
 
+export type BackgroundSessionProcessIdentityAsyncOptions =
+  BackgroundSessionProcessIdentityOptions & {
+    signal?: AbortSignal
+    getProcessCommandAsync?: (
+      pid: number,
+      options: { signal?: AbortSignal },
+    ) => Promise<string | null>
+  }
+
+export type RefreshBackgroundSessionStatusOptions =
+  BackgroundSessionProcessIdentityAsyncOptions & {
+    now?: Date
+  }
+
+/**
+ * Refreshes exactly one background session by exact id, sharing the bulk
+ * refresh's terminal-fact precedence and PID identity rules. The pinned
+ * session's recorded terminal facts win first; otherwise the live process
+ * identity decides between running, unknown, and stale.
+ *
+ * This is a read-only view refresh for a follower that already pinned its
+ * session: it never scans or rewrites other sessions, and it never writes
+ * the pinned session's metadata back (persisting a stale transition stays
+ * with the bulk refresh). A missing or unreadable session returns null,
+ * which callers treat as unknown state rather than terminal success.
+ */
+export async function refreshBackgroundSessionStatus(
+  id: string,
+  options: RefreshBackgroundSessionStatusOptions = {},
+): Promise<BackgroundSession | null> {
+  assertSafeId(id)
+  const session = await readSessionFile(metadataPathForId(id))
+  if (!session) return null
+
+  const effective = await applyAuthoritativeTerminalFacts(session)
+  if (effective.status !== 'running' && effective.status !== 'unknown') {
+    return effective
+  }
+
+  const identity = await verifyBackgroundSessionProcessIdentityAsync(
+    effective,
+    options,
+  )
+  const nextStatus: BackgroundSessionStatus =
+    identity.state === 'matches'
+      ? 'running'
+      : identity.state === 'unreadable'
+        ? 'unknown'
+        : 'stale'
+  if (nextStatus === effective.status) return effective
+  return { ...effective, status: nextStatus, updatedAt: iso(options.now) }
+}
+
 export type BackgroundSessionProcessIdentity = {
   state: 'not-running' | 'matches' | 'mismatch' | 'unreadable'
   backgroundSessionId: string
@@ -2774,6 +2828,55 @@ export function verifyBackgroundSessionProcessIdentity(
     return result(
       latestLiveness === 'alive' ? 'unreadable' : latestLiveness,
     )
+  }
+  const latestLiveness = getLiveness()
+  if (latestLiveness !== 'alive') return result(latestLiveness)
+  if (command == null || command.trim() === '') {
+    return result('unreadable')
+  }
+  if (session.processMarker !== undefined) {
+    return result(
+      markedCommandLineIdentity(command, session, session.processMarker),
+    )
+  }
+  return result(
+    commandLineMatchesBackgroundSession(command, session)
+      ? 'matches'
+      : 'mismatch',
+  )
+}
+
+/**
+ * Async form of {@link verifyBackgroundSessionProcessIdentity} for repeated
+ * polling: the process-command lookup runs through the abortable async
+ * wrapper instead of the synchronous `ps`/PowerShell call, so a slow lookup
+ * cannot block signal handling. Liveness itself stays a synchronous
+ * `kill(pid, 0)` probe, and the command-line matching rules are identical.
+ */
+export async function verifyBackgroundSessionProcessIdentityAsync(
+  session: BackgroundSession,
+  options?: BackgroundSessionProcessIdentityAsyncOptions,
+): Promise<BackgroundSessionProcessIdentity> {
+  const result = (
+    state: BackgroundSessionProcessIdentity['state'],
+  ): BackgroundSessionProcessIdentity => ({
+    state,
+    backgroundSessionId: session.id,
+    pid: session.pid,
+  })
+  const getLiveness = () =>
+    getBackgroundSessionProcessLiveness(session.pid, options)
+  const liveness = getLiveness()
+  if (liveness !== 'alive') return result(liveness)
+
+  const readCommand =
+    options?.getProcessCommandAsync ?? getProcessCommandAsync
+  let command: string | null
+  try {
+    command = await readCommand(session.pid, { signal: options?.signal })
+  } catch {
+    const latestLiveness = getLiveness()
+    return result(latestLiveness === 'alive' ? 'unreadable' : latestLiveness)
   }
   const latestLiveness = getLiveness()
   if (latestLiveness !== 'alive') return result(latestLiveness)
