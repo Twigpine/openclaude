@@ -727,6 +727,32 @@ describe('wait command handler', () => {
     expect(result.error).toBe('metadata_malformed')
   })
 
+  it('returns metadata_malformed for an exited record without an exit code', async () => {
+    // A valid `exited` record that records no exit code must not be
+    // reported as a success: the authoritative natural terminal fact
+    // requires exitCode 0 for `exited`, so nothing corroborates the
+    // claim, and defaulting to 0 would invent a child success
+    // (ChatGPT post-build review on #2497).
+    const session = await createTestSession('bg-aaa1')
+    await writeFile(
+      metadataPath('bg-aaa1'),
+      JSON.stringify({
+        ...session,
+        status: 'exited',
+        finishedAt: new Date().toISOString(),
+        terminalReason: 'exit_code',
+      }),
+    )
+    const { code, stdout, stderr } = await runWait(['bg-aaa1', '--json'])
+
+    expect(code).toBe(4)
+    expect(stderr).toBe('')
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.waitResult).toBe('observation_error')
+    expect(result.error).toBe('metadata_malformed')
+    expect(result.id).toBe('bg-aaa1')
+  })
+
   it('returns metadata_unreadable when a name-resolution entry cannot be read', async () => {
     await createTestSession('bg-aaa1', { name: 'target' })
     // Replace an unrelated session's metadata file with a directory: the
