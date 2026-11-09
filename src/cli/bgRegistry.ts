@@ -1,5 +1,4 @@
 import {
-  link,
   lstat,
   mkdir,
   open,
@@ -15,11 +14,11 @@ import {
   closeSync,
   fstatSync,
   fsyncSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
   type Dirent,
@@ -1566,18 +1565,30 @@ async function installTerminalFact(
     await handle.sync()
     await handle.close()
     handle = undefined
-    await link(tmp, target)
-    installed = fact
-  } catch (error) {
-    if (isErrno(error, 'EEXIST')) {
+    // rename() overwrites an existing target, so guard duplicates with a
+    // pre-check first: every installer of this id holds the per-ID lock
+    // (see writeNewSession), so no other writer can publish between the
+    // check and the rename. A terminal fact is immutable once published,
+    // so a duplicate install returns the existing fact instead of
+    // overwriting it (the old link() EEXIST behaviour). rename() is
+    // atomic within a filesystem and, unlike link(), works on filesystems
+    // that reject hard links (maintainer review 5830922741 on #2497).
+    let targetExists = false
+    try {
+      await lstat(target)
+      targetExists = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetExists) {
       const existing = await readTerminalFact(fact.id, kind, fact.generation)
-      if (existing) {
-        installed = existing
-      } else {
+      if (!existing) {
         throw new Error(`Invalid background session ${kind} terminal fact`)
       }
+      installed = existing
     } else {
-      throw error
+      await rename(tmp, target)
+      installed = fact
     }
   } finally {
     await handle?.close().catch(() => {})
@@ -1605,18 +1616,25 @@ function installTerminalFactSync(
     fsyncSync(fd)
     closeSync(fd)
     fd = undefined
-    linkSync(tmp, target)
-    installed = fact
-  } catch (error) {
-    if (isErrno(error, 'EEXIST')) {
+    // Same rename() duplicate-guard as installTerminalFact: rename()
+    // overwrites, so pre-check first (see writeNewSession); a duplicate
+    // install returns the existing fact instead of overwriting it.
+    let targetExists = false
+    try {
+      lstatSync(target)
+      targetExists = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetExists) {
       const existing = readTerminalFactSync(fact.id, kind, fact.generation)
-      if (existing) {
-        installed = existing
-      } else {
+      if (!existing) {
         throw new Error(`Invalid background session ${kind} terminal fact`)
       }
+      installed = existing
     } else {
-      throw error
+      renameSync(tmp, target)
+      installed = fact
     }
   } finally {
     if (fd !== undefined) {
