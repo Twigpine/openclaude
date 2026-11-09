@@ -663,6 +663,14 @@ async function writeLogBuffer(
   return await waitForDrain(output, signal)
 }
 
+/**
+ * Reads the range [start, endExclusive) from an open log handle to the
+ * output, in chunks. Returns the new position, whether the output is still
+ * open, and whether the range was read in full. A short read before
+ * endExclusive (for example a truncation after stat) reports
+ * complete: false, so a final drain retries instead of declaring
+ * completion on unread bytes.
+ */
 async function streamLogRange(
   handle: LogFileHandle,
   start: number,
@@ -701,9 +709,16 @@ async function streamLogRange(
     position += bytesRead
   }
 
-  return { position, outputOpen: true, complete: true }
+  return { position, outputOpen: true, complete: position >= endExclusive }
 }
 
+/**
+ * Reads the bytes appended since `offset` in one snapshot (from 0 when the
+ * file was truncated below the offset). In follow mode
+ * (`continueOnFileError`) a file error is swallowed and reported as an
+ * incomplete snapshot at the old offset, so the follower retries on the
+ * next tick instead of failing or declaring completion.
+ */
 async function streamLogSnapshot(
   path: string,
   offset: number,
@@ -745,6 +760,10 @@ async function streamLogSnapshot(
   return result
 }
 
+/**
+ * Prints the whole log file from the start and returns the byte offset
+ * reached, so a follower can continue from there.
+ */
 export async function printExistingLog(
   path: string,
   options: StreamLogOptions = {},
@@ -753,6 +772,15 @@ export async function printExistingLog(
   return result.position
 }
 
+/**
+ * Follows a log file, polling for appended bytes. Each tick is serialized
+ * as snapshot -> stop probe -> final drain -> cleanup, so one offset is
+ * never read concurrently. Once `shouldStop` reports terminal state the
+ * result is latched: later ticks retry the final drain without probing
+ * again, even if a later probe would report non-terminal. The follower also
+ * stops when the output closes (observed directly or while a probe is
+ * pending), on SIGINT/SIGTERM, or when the caller's abort signal fires.
+ */
 export async function followLogFile(
   path: string,
   offset: number,
@@ -763,6 +791,7 @@ export async function followLogFile(
   let position = offset
   let reading = false
   let stopped = false
+  let terminalLatched = false
   let timer: LogFollowTimer | undefined
   let activePoll: Promise<void> | undefined
 
@@ -774,6 +803,7 @@ export async function followLogFile(
       cleanupController.abort()
       process.off('SIGINT', cleanup)
       process.off('SIGTERM', cleanup)
+      output.off('close', cleanup)
       options.signal?.removeEventListener('abort', cleanup)
       const pendingPoll = activePoll
       if (pendingPoll) {
@@ -802,22 +832,30 @@ export async function followLogFile(
             cleanup()
             return
           }
-          if (stopped || !options.shouldStop) return
-
-          let terminal = false
-          try {
-            terminal = await options.shouldStop(cleanupController.signal)
-          } catch {
-            // A failed probe is unknown state, never terminal success.
-            if (stopped) return
-            terminal = false
+          if (stopped) return
+          if (isOutputClosed(output)) {
+            cleanup()
+            return
           }
-          if (stopped || !terminal) return
+          if (!options.shouldStop) return
+
+          if (!terminalLatched) {
+            try {
+              terminalLatched = await options.shouldStop(
+                cleanupController.signal,
+              )
+            } catch {
+              // A failed probe is unknown state, never terminal success.
+              if (stopped) return
+              terminalLatched = false
+            }
+          }
+          if (stopped || !terminalLatched) return
 
           // Terminal state latched: drain once more from the current
           // offset. A retryable drain error keeps following so the next
-          // tick retries from the same offset instead of declaring
-          // completion on an unread log.
+          // tick retries the drain from the same offset — without probing
+          // again — instead of declaring completion on an unread log.
           const drain = await streamLogSnapshot(path, position, {
             ...options,
             output,
@@ -842,7 +880,8 @@ export async function followLogFile(
 
     process.once('SIGINT', cleanup)
     process.once('SIGTERM', cleanup)
-    if (options.signal?.aborted) {
+    output.once('close', cleanup)
+    if (options.signal?.aborted || isOutputClosed(output)) {
       cleanup()
       return
     }
@@ -1109,8 +1148,18 @@ export async function psHandler(_args: string[]): Promise<void> {
   printSessionTable(sessions)
 }
 
+/**
+ * Implements `openclaude logs <id-or-name> [-f]`: prints the selected
+ * session's log, and in follow mode keeps following until the pinned
+ * session reaches a terminal state (then drains its final bytes), the
+ * output closes, or the process is interrupted. The session id and log
+ * path are pinned at startup, so a later reuse of the session name cannot
+ * redirect the follower. The optional abort signal stops a follow without
+ * waiting for the next poll tick.
+ */
 export async function logsHandler(
   args: string[] | string | undefined,
+  options?: { signal?: AbortSignal },
 ): Promise<void> {
   const parsed = parseLogsInvocation(normalizeArgs(args))
   if (!parsed.target) fail('Usage: openclaude logs <id-or-name> [-f]')
@@ -1136,6 +1185,7 @@ export async function logsHandler(
     // The session id and log path are pinned here: the stop probe refreshes
     // only this exact session, even if the name is later reused.
     await followLogFile(logPath, offset, {
+      signal: options?.signal,
       shouldStop: async signal => {
         const refreshed = await refreshBackgroundSessionStatus(session.id, {
           signal,
