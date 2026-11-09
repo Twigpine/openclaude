@@ -18,6 +18,7 @@ import * as lockfile from '../utils/lockfile.js'
 import * as backgroundSessionRegistry from './bgRegistry.js'
 import {
   _setBackgroundSessionsRootForTesting,
+  BackgroundSessionWaitError,
   cleanupBackgroundSessionsBefore,
   createBackgroundSession,
   isBackgroundSessionProcessAlive,
@@ -26,8 +27,10 @@ import {
   markBackgroundSessionKilled,
   readBackgroundSessionForOwner,
   refreshBackgroundSessionStatus,
+  readPinnedBackgroundSessionForWait,
   refreshBackgroundSessionStatuses,
   resolveBackgroundSession,
+  resolveBackgroundSessionForWait,
   snapshotBackgroundSessionRecoveryJournal,
   takeBackgroundSessionRecoveryBatch,
   verifyBackgroundSessionProcessIdentity,
@@ -3550,4 +3553,272 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
     expect(command?.length).toBeGreaterThan(0)
     expect(await getProcessCommandAsync(42424242)).toBeNull()
   }, 15_000)
+})
+
+describe('background session wait strict reads', () => {
+  let configDir: string
+
+  function metadataPath(id: string): string {
+    return join(configDir, 'bg-sessions', 'sessions', `${id}.json`)
+  }
+
+  function terminalFactPath(id: string, kind: 'natural' | 'killed'): string {
+    return join(configDir, 'bg-sessions', 'terminal', `${id}.${kind}.json`)
+  }
+
+  async function waitErrorCode(
+    operation: () => Promise<unknown>,
+  ): Promise<string | undefined> {
+    try {
+      await operation()
+      return undefined
+    } catch (error) {
+      if (error instanceof BackgroundSessionWaitError) return error.code
+      throw error
+    }
+  }
+
+  beforeEach(async () => {
+    configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-wait-registry-'))
+    _setBackgroundSessionsRootForTesting(join(configDir, 'bg-sessions'))
+  })
+
+  afterEach(async () => {
+    _setBackgroundSessionsRootForTesting(undefined)
+    await rm(configDir, { force: true, recursive: true })
+  })
+
+  it('resolves an exact ID with authoritative terminal facts applied', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-wait-1',
+      { exitCode: 3 },
+      { ownerPid: session.pid },
+    )
+
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-1')
+
+    expect(resolved.id).toBe('bg-wait-1')
+    expect(resolved.status).toBe('failed')
+    expect(resolved.exitCode).toBe(3)
+    expect(resolved.terminalReason).toBe('exit_code')
+  })
+
+  it('resolves by live name, ID prefix, and terminal name in selection order', async () => {
+    await createBackgroundSession({
+      id: 'bg-waaa1',
+      name: 'nightly',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-waaa1',
+    })
+    const live = await createBackgroundSession({
+      id: 'bg-wbbb2',
+      name: 'worker',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wbbb2',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-waaa1',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+
+    expect((await resolveBackgroundSessionForWait('worker')).id).toBe('bg-wbbb2')
+    expect((await resolveBackgroundSessionForWait('bg-wbbb')).id).toBe(
+      'bg-wbbb2',
+    )
+    expect((await resolveBackgroundSessionForWait('nightly')).id).toBe('bg-waaa1')
+    expect(live.id).toBe('bg-wbbb2')
+  })
+
+  it('reports not_found for an unknown selector', async () => {
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('nope')),
+    ).toBe('not_found')
+  })
+
+  it('reports ambiguous for an ID-prefix collision', async () => {
+    for (const id of ['bg-aaaa1111', 'bg-aaaa2222']) {
+      await createBackgroundSession({
+        id,
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: `sess-${id}`,
+      })
+    }
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-aaaa')),
+    ).toBe('ambiguous')
+  })
+
+  it('reports metadata_malformed for malformed exact-ID metadata', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await writeFile(metadataPath('bg-wait-1'), '{not json')
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-wait-1')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('reports metadata_malformed for a malformed terminal fact', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), { recursive: true })
+    await writeFile(terminalFactPath('bg-wait-1', 'natural'), '{not json')
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-wait-1')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('reports metadata_unreadable for an unreadable name-resolution entry', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await createBackgroundSession({
+      id: 'bg-wait-2',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-2',
+    })
+    await rm(metadataPath('bg-wait-2'))
+    await mkdir(metadataPath('bg-wait-2'))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('target')),
+    ).toBe('metadata_unreadable')
+  })
+
+  it('reads a pinned session strictly and detects replacement', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+
+    const pinned = await readPinnedBackgroundSessionForWait({
+      id: 'bg-wait-1',
+      pid: 424242,
+    })
+    expect(pinned.id).toBe('bg-wait-1')
+    expect(pinned.status).toBe('running')
+
+    await writeFile(
+      metadataPath('bg-wait-1'),
+      JSON.stringify({ ...session, pid: 999999 }),
+    )
+    expect(
+      await waitErrorCode(() =>
+        readPinnedBackgroundSessionForWait({ id: 'bg-wait-1', pid: 424242 }),
+      ),
+    ).toBe('metadata_replaced')
+
+    await rm(metadataPath('bg-wait-1'))
+    expect(
+      await waitErrorCode(() =>
+        readPinnedBackgroundSessionForWait({ id: 'bg-wait-1', pid: 424242 }),
+      ),
+    ).toBe('metadata_missing')
+  })
+
+  it('verifies process identity asynchronously with an abortable lookup', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-identity',
+      pid: 4242,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-01T08:00:00.000Z',
+      updatedAt: '2026-07-01T08:00:00.000Z',
+      sessionId: 'conversation-identity',
+      command: ['node', 'openclaude', '1642'],
+      stdoutLogPath: '/tmp/stdout.log',
+      stderrLogPath: '/tmp/stderr.log',
+    }
+
+    const matches = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'node openclaude 1642 --serve',
+    })
+    expect(matches.state).toBe('matches')
+
+    const mismatch = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'node openclaude 16420 --serve',
+    })
+    expect(mismatch.state).toBe('mismatch')
+
+    const unreadable = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => null,
+    })
+    expect(unreadable.state).toBe('unreadable')
+
+    const notRunning = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => false,
+      getProcessCommandAsync: async () => {
+        throw new Error('lookup must not run for a dead process')
+      },
+    })
+    expect(notRunning.state).toBe('not-running')
+  })
+
+  it('reports unreadable when the async identity lookup aborts', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-identity',
+      pid: 4242,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-01T08:00:00.000Z',
+      updatedAt: '2026-07-01T08:00:00.000Z',
+      sessionId: 'conversation-identity',
+      command: ['node', 'openclaude', '1642'],
+      stdoutLogPath: '/tmp/stdout.log',
+      stderrLogPath: '/tmp/stderr.log',
+    }
+    const controller = new AbortController()
+    controller.abort()
+
+    // Main's verify helper catches a lookup aborted by the client signal
+    // and reports it as unreadable instead of rethrowing, so a lookup
+    // that rejects on abort (like the real async helper) resolves here.
+    const aborted = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => {
+        throw new DOMException('The operation was aborted', 'AbortError')
+      },
+      signal: controller.signal,
+    })
+    expect(aborted.state).toBe('unreadable')
+  })
 })
