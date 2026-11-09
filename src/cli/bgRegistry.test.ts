@@ -3322,6 +3322,49 @@ describe('refreshBackgroundSessionStatus targeted refresh', () => {
     expect(refreshed).toMatchObject({ status: 'unknown' })
   })
 
+  it('keeps a stored stale session unknown when its terminal fact is unreadable', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-stored-stale-unreadable-fact',
+      424242,
+    )
+    await writeUnreadableTerminalFact(session.id)
+
+    // The bulk refresh stores stale while the fact is unreadable: it
+    // persists the stale transition without the read-error flag.
+    const bulk = await refreshBackgroundSessionStatuses({
+      isProcessAlive: () => false,
+    })
+    expect(
+      bulk.find(candidate => candidate.id === session.id),
+    ).toMatchObject({ status: 'stale' })
+    expect((await resolveBackgroundSession(session.id)).status).toBe('stale')
+
+    // The targeted probe must not return the stored stale before checking
+    // the fact read: the unreadable fact leaves termination unestablished,
+    // so the follower keeps retrying instead of exiting after its drain.
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+    expect(refreshed).toMatchObject({ status: 'unknown' })
+  })
+
+  it('still reports a stored stale session stale when its terminal fact is missing', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-stored-stale-missing-fact',
+      424242,
+    )
+
+    await refreshBackgroundSessionStatuses({ isProcessAlive: () => false })
+    expect((await resolveBackgroundSession(session.id)).status).toBe('stale')
+
+    // No fact file exists, so there is nothing to retry reading: the
+    // stored stale stands, unlike the unreadable-fact case above.
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+    expect(refreshed).toMatchObject({ status: 'stale' })
+  })
+
   it('keeps a live session running when its terminal fact is unreadable', async () => {
     const session = await createRunningSession(
       'bg-refresh-unreadable-fact-live',
