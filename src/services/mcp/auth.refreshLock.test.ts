@@ -2556,12 +2556,16 @@ test.each(['stored', 'rejected'] as const)(
 )
 
 test.each(['before the flow peeks', 'between the peek and acquisition'] as const)(
-  'a silent XAA sign-in never enters its credential scope: id_token cached %s',
+  'a silent XAA sign-in stores its tokens through its credential scope without a browser step: id_token cached %s',
   async cached => {
     // No one went to the browser, so the caller is still waiting on the flow —
-    // in the SDK, a tool call inside a turn that may hold the env mutex the
-    // scope takes. Entering it then would wait on that same turn. The peek is
-    // no guide: another sign-in to the IdP can cache an id_token after it.
+    // in the SDK, a tool call inside a turn. The token save still enters the
+    // scope: the exchange awaits network I/O, during which another session's
+    // turn may apply its own environment, and the write must land where the
+    // flow began. Entering is safe here because the scope lends the turn that
+    // started the flow — it does not wait on the mutex that turn holds; the
+    // flow never yields to a browser wait, so that turn is still live at the
+    // write. The scope below lends the origin store the same way.
     const { config, initialData } = makeXaaFixture()
     const idpCache = initialData.mcpXaaIdp
     if (cached === 'between the peek and acquisition') {
@@ -2584,15 +2588,17 @@ test.each(['before the flow peeks', 'between the peek and acquisition'] as const
       undefined,
       {
         skipBrowserOpen: true,
-        credentialScope: async () => {
+        credentialScope: async work => {
           scopeEntries++
-          throw new Error('entered the credential scope of a silent sign-in')
+          return work()
         },
       },
     )
 
     expect(loginUrls).toBe(0)
-    expect(scopeEntries).toBe(0)
+    // The token save is the only scope entry on the silent path: the cached
+    // id_token needs no login, so nothing caches one.
+    expect(scopeEntries).toBe(1)
     const serverKey = getServerKey('enterprise', config)
     expect(activeStorage.getData().mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
   },

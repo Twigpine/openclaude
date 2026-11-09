@@ -778,12 +778,6 @@ async function performMCPXaaAuth(
   // acquireIdpIdToken potentially writes a fresh one.
   const idTokenCacheHit = getCachedIdpIdToken(idp.issuer) !== undefined
 
-  // Whether acquisition handed out its login URL, which it does only when it
-  // sends the user to the IdP. The peek above cannot say: it is a separate
-  // read, and a cached id_token can cross its expiry buffer before
-  // acquisition reads it again.
-  let sentToBrowser = false
-
   let failureStage: XaaFailureStage = 'idp_login'
   try {
     let idToken
@@ -793,10 +787,7 @@ async function performMCPXaaAuth(
         idpClientId: idp.clientId,
         idpClientSecret,
         callbackPort: idp.callbackPort,
-        onAuthorizationUrl: url => {
-          sentToBrowser = true
-          onAuthorizationUrl(url)
-        },
+        onAuthorizationUrl,
         skipBrowserOpen,
         abortSignal,
         credentialScope,
@@ -807,11 +798,14 @@ async function performMCPXaaAuth(
     }
 
     // A login in the browser hands its caller the URL and leaves it, and the
-    // turn that started the flow may have ended while the user was there:
-    // what is written from here on is written where the flow began (see
-    // CredentialScope). A silent acquisition is still awaited by whoever
-    // started it, so it writes as it is.
-    const resumeScope = sentToBrowser ? credentialScope : undefined
+    // turn that started the flow may have ended while the user was there.
+    // What is written from here on is written where the flow began (see
+    // CredentialScope) — including the silent case: a cached id_token still
+    // awaits network I/O, during which another session's turn may apply its
+    // own environment, so its writes belong to the captured scope too, not
+    // to whatever the process has by then. The browser wait itself stays
+    // outside the scope: the mutex is held only for these operations.
+    const resumeScope = credentialScope
 
     // Discover the IdP's token endpoint for the RFC 8693 exchange. Under the
     // flow's signal, like the login's discovery and the exchange: a cancel
@@ -1019,6 +1013,10 @@ export async function performMCPOAuthFlow(
   const { cachedStepUpScope, cachedResourceMetadataUrl } = await resumeIn(
     options?.credentialScope,
     async () => {
+      // Acquiring the credential scope may have waited behind another
+      // turn. A cancel that landed while waiting must not clear the
+      // stored entry — it may be a newer flow's by now.
+      if (abortSignal?.aborted) throw new AuthenticationCancelledError()
       const storage = getSecureStorage()
       const serverKey = getServerKey(serverName, serverConfig)
       const cachedEntry = storage.read()?.mcpOAuth?.[serverKey]

@@ -23,7 +23,7 @@ import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
 import { connectToServer, fetchToolsForClient, getServerCacheKey } from '../../services/mcp/client.js'
-import { ClaudeAuthProvider } from '../../services/mcp/auth.js'
+import { AuthenticationCancelledError, ClaudeAuthProvider } from '../../services/mcp/auth.js'
 import type { ActiveCredentialScope, CredentialScope } from '../../services/mcp/credentialScope.js'
 import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import {
@@ -500,9 +500,18 @@ export function createExternalCanUseTool(
  * namespace, so it is dropped on the way in and out, as a reconnect drops it
  * before reading fresh credentials.
  */
-export function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): CredentialScope {
+export function captureCredentialScope(
+  getOriginScope?: () => ActiveCredentialScope | undefined,
+  options?: { signal?: AbortSignal },
+): CredentialScope {
   // Captured inside the turn's tool call, where its variables are applied.
   const turnEnv = new Map(Object.entries(process.env))
+  // The turn the call starts in lends its environment; freeze that scope
+  // now, instead of reading the live turn at resume time — by the time the
+  // user is back from the browser, another turn may hold the field, and the
+  // exchange would then run in that turn's namespace. A turn that already
+  // ended lends nothing, and the scope falls back to the mutex below.
+  const originScope = getOriginScope?.()
   // Initial discovery/registration writes happen before any continuation.
   clearKeychainCache()
   const set = (key: string, value: string | undefined) => {
@@ -515,13 +524,21 @@ export function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): 
   return async work => {
     // The query keeps this environment until the borrowed work settles.
     // Do not queue behind the same query's still-open input stream.
-    const owned = runInOriginEnv?.(async () => {
+    const owned = originScope?.(async () => {
       clearKeychainCache()
       try { return await work() }
       finally { clearKeychainCache() }
     })
     if (owned) return owned
-    await acquireEnvMutex()
+    const { acquired, reason } = await acquireEnvMutex(
+      options?.signal ? { signal: options.signal } : undefined,
+    )
+    if (!acquired) {
+      if (reason === 'aborted' || options?.signal?.aborted) {
+        throw new AuthenticationCancelledError()
+      }
+      throw new Error('Failed to acquire environment mutex')
+    }
     // What each changed variable was, to put back; recorded before it changes.
     const displaced = new Map<string, string | undefined>()
     try {
@@ -555,7 +572,7 @@ export function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): 
  */
 export async function connectSdkMcpServers(
   mcpServers: Record<string, unknown> | undefined,
-  runInOriginEnv?: ActiveCredentialScope,
+  getOriginScope?: () => ActiveCredentialScope | undefined,
   sessionSignal?: AbortSignal,
 ): Promise<{ clients: MCPServerConnection[]; tools: Tool[] }> {
   if (!mcpServers || Object.keys(mcpServers).length === 0) {
@@ -695,7 +712,7 @@ export async function connectSdkMcpServers(
             tools: [
               createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig, {
                 realToolsInCurrentContext: false,
-                captureCredentialScope: () => captureCredentialScope(runInOriginEnv),
+                captureCredentialScope: () => captureCredentialScope(getOriginScope),
                 sessionSignal,
               }),
             ],

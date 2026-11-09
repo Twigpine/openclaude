@@ -98,12 +98,15 @@ export async function paginateMcpList<
  */
 export async function listAllMcpResources(
   client: Extract<MCPServerConnection, { type: 'connected' }>,
+  options?: { signal?: AbortSignal },
 ): Promise<ServerResource[]> {
   const resources = await paginateMcpList({
     method: 'resources/list',
     resultSchema: ListResourcesResultSchema,
     requestPage: async (request, resultSchema) =>
-      (await client.client.request(request, resultSchema)) as ListResourcesResult,
+      (await client.client.request(request, resultSchema, {
+        signal: options?.signal,
+      })) as ListResourcesResult,
     getItems: result => result.resources,
     getNextCursor: result => result.nextCursor,
   })

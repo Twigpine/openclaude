@@ -55,13 +55,19 @@ export function assertValidSessionId(sessionId: string): void {
 export interface MutexAcquireOptions {
   /** Maximum time to wait for mutex in milliseconds. Default: no timeout (wait forever). */
   timeoutMs?: number
+  /**
+   * Abort waiting for the mutex when this signal aborts. A cancelled waiter
+   * is removed from the queue, so it never acquires the mutex later and a
+   * later caller is not stuck behind it.
+   */
+  signal?: AbortSignal
 }
 
 export interface MutexAcquireResult {
   /** Whether the mutex was acquired successfully. */
   acquired: boolean
   /** Reason for failure if not acquired. */
-  reason?: 'timeout'
+  reason?: 'timeout' | 'aborted'
 }
 
 function createEnvMutexState() {
@@ -76,34 +82,54 @@ function createEnvMutexState() {
       return { acquired: true }
     }
 
-    if (options?.timeoutMs === undefined) {
+    if (options?.signal?.aborted) {
+      return { acquired: false, reason: 'aborted' }
+    }
+
+    if (options?.timeoutMs === undefined && options?.signal === undefined) {
       // No timeout - wait forever (original behavior for backward compatibility)
       return new Promise(resolve => {
         queue.push(() => resolve({ acquired: true }))
       })
     }
 
-    // With timeout - race between queue and timeout
+    // With timeout and/or abort signal - race between queue, timeout and abort
     return new Promise(resolve => {
       let resolved = false
       let callback: () => void
 
-      const timeoutId = setTimeout(() => {
-        if (!resolved) {
-          resolved = true
-          // Remove ourselves from the queue to prevent orphaned callback
-          const index = queue.indexOf(callback)
-          if (index !== -1) {
-            queue.splice(index, 1)
-          }
-          resolve({ acquired: false, reason: 'timeout' })
+      const cleanup = () => {
+        if (timeoutId !== undefined) clearTimeout(timeoutId)
+        options?.signal?.removeEventListener('abort', onAbort)
+      }
+      const settle = (result: MutexAcquireResult) => {
+        if (resolved) return
+        resolved = true
+        cleanup()
+        // Remove ourselves from the queue so a later release does not wake
+        // a waiter that already left.
+        const index = queue.indexOf(callback)
+        if (index !== -1) {
+          queue.splice(index, 1)
         }
-      }, options.timeoutMs)
+        resolve(result)
+      }
+
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
+      if (options?.timeoutMs !== undefined) {
+        timeoutId = setTimeout(
+          () => settle({ acquired: false, reason: 'timeout' }),
+          options.timeoutMs,
+        )
+      }
+
+      const onAbort = () => settle({ acquired: false, reason: 'aborted' })
+      options?.signal?.addEventListener('abort', onAbort, { once: true })
 
       callback = () => {
         if (!resolved) {
           resolved = true
-          clearTimeout(timeoutId)
+          cleanup()
           resolve({ acquired: true })
         }
       }
