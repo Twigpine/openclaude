@@ -48,7 +48,7 @@ describe('clipboard image paste error contract', () => {
     process.env.CLAUDE_CODE_TMPDIR = clipboardDir
     const screenshotPath = join(clipboardDir, 'claude_cli_latest_screenshot.png')
     const error = new originalImageProcessorExports.ImageProcessorUnavailableError()
-    const getImageProcessor = mock(async () => { throw error })
+    const convertBmpToPng = mock(async () => { throw error })
     const execa = mock(async () => ({ exitCode: 0, stdout: 'image/bmp', stderr: '' }))
     execa.mockImplementationOnce(async () => ({ exitCode: 0, stdout: 'image/bmp', stderr: '' }))
     execa.mockImplementationOnce(async () => {
@@ -64,13 +64,13 @@ describe('clipboard image paste error contract', () => {
     mock.module('execa', () => ({ ...originalExecaExports, execa }))
     mock.module('../tools/FileReadTool/imageProcessor.js', () => ({
       ...originalImageProcessorExports,
-      getImageProcessor,
+      convertBmpToPng,
     }))
     const { getImageFromClipboard, formatClipboardImagePasteError } = await importImagePaste()
 
     await expect(getImageFromClipboard()).rejects.toBe(error)
     expect(formatClipboardImagePasteError(error)).toBe(error.message)
-    expect(getImageProcessor).toHaveBeenCalledTimes(1)
+    expect(convertBmpToPng).toHaveBeenCalledTimes(1)
     expect(execa).toHaveBeenCalledTimes(3)
     expect(existsSync(screenshotPath)).toBe(false)
   })

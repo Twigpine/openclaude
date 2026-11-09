@@ -449,14 +449,14 @@ bundled**. They are loaded on demand, and the CLI prints an `npm install <pkg>`
 hint (add `-g` for the global CLI) if you enable a feature whose package is
 missing. Install only what you need:
 
-**Image handling note:** default global installs do **not** ship `sharp`. Clipboard paste, drag-and-drop of a local image path, and FileReadTool paths that decode a local file need `npm i -g sharp`. If BMP clipboard conversion requires the missing package, paste reports installation guidance instead of saying the clipboard has no image. Forwarding an already-encoded image URL/base64 that the API accepts without local decode (passthrough) does not. This opt-in is intentional for published installs; it is not an accidental omission.
+**Image handling note:** default global installs do **not** ship `sharp`. Install it with `npm i -g sharp` when an image needs resizing, compression, or BMP-to-PNG conversion. Clipboard images, dragged image paths, and Read tool results can pass through without it when their format and size already meet the applicable API and token limits. Read may require compression even when the same image fits the clipboard's byte limit. Common uncompressed 24/32-bit BMP screenshots are converted after opting in; missing processing support produces installation guidance rather than an empty-clipboard message. This opt-in is intentional for published installs; it is not an accidental omission.
 
 | Feature | Trigger | Install |
 | --- | --- | --- |
 | AWS Bedrock | `CLAUDE_CODE_USE_BEDROCK=1` | `npm i -g @anthropic-ai/bedrock-sdk`. Profile-based auth (`~/.aws/credentials`) additionally needs `@aws-sdk/credential-providers` and `@aws-sdk/client-sts`; model listing needs `@aws-sdk/client-bedrock`. Proxy and skip-auth setups may also need `@aws-sdk/credential-provider-node`, `@smithy/node-http-handler`, or `@smithy/core`. The CLI prints the exact missing package if you hit one. |
 | Azure Foundry | `CLAUDE_CODE_USE_FOUNDRY=1` | `npm i -g @anthropic-ai/foundry-sdk @azure/identity` |
 | Claude on Vertex AI / Gemini ADC / Gemini on Vertex AI | `CLAUDE_CODE_USE_VERTEX=1` / Gemini ADC auth / `CLAUDE_CODE_USE_GEMINI_VERTEX=1` | `npm i -g google-auth-library` |
-| Reading/processing images (clipboard paste, drag-and-drop paths, FileReadTool local decode) | local image decode — **not** pre-encoded URL/base64 passthrough | `npm i -g sharp` (intentionally opt-in; prebuilt releases load it externally only when processing requires it) |
+| Image resizing, compression, and BMP clipboard conversion | image processing required to meet format, byte or token limits; in-budget supported images can pass through | `npm i -g sharp` (intentionally opt-in; prebuilt releases load it externally only when processing requires it) |
 | Optional error reporting | `SENTRY_DSN` is set | `npm i -g @sentry/node@11.9.0`. Without this package installed, setting `SENTRY_DSN` has no effect and reporting is silently disabled. |
 
 When installing OpenClaude from source (`bun install`), all of these are
