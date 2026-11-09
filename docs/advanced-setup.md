@@ -335,10 +335,11 @@ caches that list for a day and fetches it again at startup once the cache has
 expired; press `r` in `/model` to refresh it on demand. If the startup refresh
 fails, the picker keeps showing the last cached list, so a model the gateway has
 retired since then can stay listed until a refresh succeeds. A manual refresh
-discards the cached list first, so if it fails only the three models below
-remain until the next successful refresh. `auto` (smart routing),
-`mimo-v2.6-pro`, and `mimo-v2.6-flash` are always listed, including when the
-list has never been fetched.
+discards the cached list first, so if it fails only the catalog floor below
+remains until the next successful refresh. `auto` (smart routing),
+`mimo-v2.6-pro`, and `mimo-v2.6-flash` form the route's catalog floor, kept even
+when the list has never been fetched. A saved provider profile's own model list
+or an `availableModels` allowlist can still narrow what the picker shows.
 
 ### Xiaomi MiMo
 
