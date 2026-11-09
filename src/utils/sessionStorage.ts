@@ -890,17 +890,29 @@ function followSessionSwitches(): void {
   if (unsubscribeSessionSwitch) return
   pointerSessionId = getSessionId()
   pointerProjectDir = getSessionProjectDir()
-  unsubscribeSessionSwitch = onSessionSwitch(sessionId => {
-    // Read rather than received: the signal carries the id alone, and
-    // switchSession has already set the directory by the time it emits.
+  unsubscribeSessionSwitch = onSessionSwitch((sessionId, previous) => {
+    // The signal carries the incoming id and the outgoing identity; read
+    // the directory rather than receiving it: switchSession has already
+    // set it by the time it emits.
     const projectDir = getSessionProjectDir()
     if (sessionId === pointerSessionId && projectDir === pointerProjectDir) return
     pointerSessionId = sessionId
     pointerProjectDir = projectDir
+    // The outgoing identity is this context's key before the switch:
+    // the only correct source for the deferred startup selections
+    // migrateStartupMetadata carries across. A global "last written"
+    // key would point at whichever overlapping session wrote last.
+    // The switch does not change originalCwd, so the current value is
+    // the outgoing key's cwd component too.
+    const previousKey = sessionFileKeyFor(
+      previous.sessionId,
+      previous.sessionProjectDir,
+      getOriginalCwd(),
+    )
     // Lazily re-resolved from the new session id on the next write. An
     // existing file is appended to, not replaced — a resume lands back in the
     // conversation it came from.
-    project?.resetSessionFile()
+    project?.resetSessionFile(previousKey)
   })
 }
 
@@ -1102,6 +1114,23 @@ function mergeSessionMetadata(
   return merged
 }
 
+/**
+ * Identity of the transcript `getTranscriptPath()` derives for one
+ * session: the session id, the project directory, and the cwd it falls
+ * back to. All three are context-scoped, so two overlapping SDK
+ * sessions — and the same id resumed in two directories — never share
+ * a cache entry. The same triple always derives the same path, so a
+ * missed reset (e.g. the same-id switch v2 makes before every turn)
+ * can only reuse the correct path.
+ */
+function sessionFileKeyFor(
+  sessionId: SessionId,
+  projectDir: string | null,
+  cwd: string,
+): string {
+  return `${sessionId}\0${projectDir ?? ''}\0${cwd}`
+}
+
 class Project {
   // Minimal cache for current session only (not all sessions) — one entry
   // per context identity (see sessionFileKey), never shared across sessions.
@@ -1129,18 +1158,9 @@ class Project {
       entry = {}
     }
     this.sessionMetadata.set(key, entry)
-    // The most recently written entry is where deferred startup selections
-    // live before any session has started (see migrateStartupMetadata).
-    this.lastMetadataKey = key
     this.boundSessionCaches()
     return entry
   }
-
-  // Identity of the most recently written metadata entry. Before any
-  // session has started, the only writers are the startup paths
-  // (cacheSessionTitle / saveAgentSetting / saveWorktreeState), so this
-  // points at the deferred startup selections.
-  private lastMetadataKey: string | null = null
 
   /**
    * Move deferred startup selections (title, agent setting, worktree)
@@ -1151,15 +1171,24 @@ class Project {
    * under the startup session's identity; the switch (or regenerate)
    * that picks the resumed session changes the key, so without this
    * carry `resetSessionFile`'s startup preservation below would read an
-   * empty entry and drop them. Only before any session has started: once
-   * a session is established its metadata belongs to it and must never
-   * migrate to another session.
+   * empty entry and drop them. `previousKey` is the outgoing identity
+   * the switch itself reports (see onSessionSwitch): under overlap it
+   * is the only correct source — a global "last written" key would
+   * point at whichever overlapping session wrote last, and moving from
+   * it would steal that session's title. Only before this context's
+   * session has started: once a session is established its metadata
+   * belongs to it and must never migrate to another session. The source
+   * must be a key whose session has not started either: without that,
+   * a switch away from a live session would move its title/agent/
+   * worktree into the new one — and delete them from its own entry,
+   * since this is a move. Null when the reset follows no switch
+   * (explicit reset, deletion): there is nothing to carry.
    */
-  private migrateStartupMetadata(): void {
-    if (this.hasStartedSession) return
-    const previousKey = this.lastMetadataKey
+  private migrateStartupMetadata(previousKey: string | null): void {
+    if (this.hasStartedSessionInCurrentContext()) return
     const currentKey = this.sessionFileKey()
     if (previousKey === null || previousKey === currentKey) return
+    if (this.startedSessionKeys.has(previousKey)) return
     const previous = this.sessionMetadata.get(previousKey)
     if (!previous) return
     const current = this.metadataForWrite()
@@ -1365,20 +1394,27 @@ class Project {
     return this.droppedSessionMetadata.size
   }
 
-  /**
-   * Identity of the transcript `getTranscriptPath()` derives in this
-   * context: the session id, the project directory, and the cwd it falls
-   * back to. All three are context-scoped, so two overlapping SDK
-   * sessions — and the same id resumed in two directories — never share
-   * a cache entry. The same triple always derives the same path, so a
-   * missed reset (e.g. the same-id switch v2 makes before every turn)
-   * can only reuse the correct path.
-   */
+  /** Identity of the transcript `getTranscriptPath()` derives in this context (see sessionFileKeyFor). */
   private sessionFileKey(): string {
-    return `${getSessionId()}\0${getSessionProjectDir() ?? ''}\0${getOriginalCwd()}`
+    return sessionFileKeyFor(
+      getSessionId(),
+      getSessionProjectDir(),
+      getOriginalCwd(),
+    )
   }
-  // A conversation can start without a file when persistence is disabled.
-  private hasStartedSession = false
+  // Which context identities have started a session in this process: a
+  // key joins when its session materializes, or when a reset moves away
+  // from its established pointer. Per key, not per process — one
+  // overlapping SDK session materializing must not make a second
+  // context's deferred startup selections look already started (see
+  // migrateStartupMetadata). A conversation can start without a file
+  // when persistence is disabled.
+  private startedSessionKeys = new Set<string>()
+
+  /** True when the session for the current context has started. */
+  private hasStartedSessionInCurrentContext(): boolean {
+    return this.startedSessionKeys.has(this.sessionFileKey())
+  }
   // Entries buffered while sessionFile is null, keyed by their transcript path
   // (session ID and project directory). Flushed on that destination's first
   // user/assistant message — prevents metadata-only session files without
@@ -1713,15 +1749,27 @@ class Project {
     )
   }
 
-  resetSessionFile(): void {
+  /**
+   * Reset the session file pointer after switchSession/regenerateSessionId.
+   * `previousKey` is the outgoing context's cache key, reported by the
+   * switch itself: deferred startup selections cached under it are
+   * carried into the new session (see migrateStartupMetadata). Null
+   * when the reset follows no switch (explicit reset, deletion) — there
+   * is nothing to carry.
+   */
+  resetSessionFile(previousKey: string | null = null): void {
     // Startup selections are cached before --continue/--resume chooses a
     // transcript. Keep only those deferred fields through its switch and
     // explicit reset.
-    if (this.sessionFile !== null) this.hasStartedSession = true
+    if (this.sessionFile !== null) {
+      this.startedSessionKeys.add(this.sessionFileKey())
+    }
     // The selections were cached under the startup session's identity;
     // carry them into this context before preserving them below.
-    if (!this.hasStartedSession) this.migrateStartupMetadata()
-    const startupMetadata = !this.hasStartedSession
+    if (!this.hasStartedSessionInCurrentContext()) {
+      this.migrateStartupMetadata(previousKey)
+    }
+    const startupMetadata = !this.hasStartedSessionInCurrentContext()
       ? {
           title: this.currentSessionTitle,
           agentSetting: this.currentSessionAgentSetting,
@@ -1739,17 +1787,17 @@ class Project {
     // SDK path follow the same rule, since it has no restoreSessionMetadata
     // call to put them back.
     //
-    // Once a session has started, that rule no longer needs the clear: the
+    // Once this context's session has started, that rule no longer needs the clear: the
     // incoming session's own entry belongs to it, and clearing here would
     // drop a returning session's cached title on every turn switch — if the
     // title has fallen outside the transcript tail, the next write cannot
     // re-append it. Another session's metadata lives under its own key and
     // cannot leak into this session's transcript. So the clear (and the
-    // startup restore with it) runs only before any session has started,
+    // startup restore with it) runs only before this context's session has started,
     // where it drops stale pre-startup fields before the deferred selections
     // are restored. CLI resume flows that want a clean cache clear explicitly
     // (see REPL.tsx) and are unaffected.
-    if (!this.hasStartedSession) {
+    if (!this.hasStartedSessionInCurrentContext()) {
       this.clearSessionMetadata()
       if (startupMetadata) {
         this.currentSessionTitle = startupMetadata.title
@@ -2119,7 +2167,7 @@ class Project {
   private async materializeSessionFile(): Promise<void> {
     // Runtime metadata must not become startup selections just because this
     // conversation opted out of writing its transcript.
-    this.hasStartedSession = true
+    this.startedSessionKeys.add(this.sessionFileKey())
     // Guard here too — reAppendSessionMetadata writes via appendEntryToFile
     // (not appendEntry) so it would bypass the per-entry persistence check
     // and create a metadata-only file despite --no-session-persistence.

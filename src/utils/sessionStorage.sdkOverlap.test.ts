@@ -845,14 +845,13 @@ test('a deferred startup title survives a resume switch after another session ma
     await flushSessionStorage()
   })
 
-  // Session B caches its startup title under its provisional identity.
-  await turnContinuation(SESSION_B_STARTUP, async () => {
+  // Session B caches its startup title under its provisional identity,
+  // then the resume switch picks B's resumed id — in the same context,
+  // as the real --continue/--resume flow does (a fresh store per turn
+  // would already hold the resumed id, so the switch must happen here).
+  await runWithSdkContext(sdkContext(SESSION_B_STARTUP), async () => {
     cacheSessionTitle('B Startup Title')
-  })
-
-  // The resume switch picks B's resumed id; the title must survive on
-  // B's resumed key and be written on first materialize.
-  await turnStart(SESSION_B, async () => {
+    switchSession(SESSION_B as never, null)
     expect(getCurrentSessionTitle(SESSION_B as never)).toBe('B Startup Title')
     await recordTranscript([message(randomUUID(), 'B first')])
     await flushSessionStorage()
