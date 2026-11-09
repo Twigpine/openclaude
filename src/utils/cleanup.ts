@@ -2,6 +2,7 @@ import * as fs from 'fs/promises'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import {
+  cleanupAbandonedSessionTempFiles,
   cleanupBackgroundSessionsBefore,
   reconcileBackgroundSessionTerminalFacts,
   snapshotBackgroundSessionRecoveryJournal,
@@ -802,6 +803,12 @@ export async function runBackgroundSessionRetention(
         )
         const retrySessionIds: string[] = []
         const retryTerminalFacts: typeof batch.terminalFacts = []
+        // Abandoned temp files are cleaned once for the whole batch, not
+        // once per recovery ID: each per-ID cleanup would otherwise rescan
+        // the metadata directory, up to 256 times per batch (CodeRabbit
+        // #2497). Zero retention means every ID here is already past its
+        // cutoff, so one cutoff covers the batch.
+        const cutoff = new Date(Date.now() + 1)
         for (const id of batch.sessionIds) {
           // Attribute retryable errors to their ID, so retained entries cannot
           // hold unrelated work at the front of the bounded journal.
@@ -810,26 +817,28 @@ export async function runBackgroundSessionRetention(
               sessionIds: [id],
             })
           logBackgroundReconciliation(reconciliation)
-          const cleanup = await cleanupBackgroundSessionsBefore(
-            new Date(Date.now() + 1),
-            {
-              sessionIds: [id],
-              orphanedTerminalFacts: batch.terminalFacts.filter(
-                target => target.id === id,
-              ),
-              onRetry: target => {
-                if (target) retryTerminalFacts.push(target)
-              },
+          const cleanup = await cleanupBackgroundSessionsBefore(cutoff, {
+            sessionIds: [id],
+            orphanedTerminalFacts: batch.terminalFacts.filter(
+              target => target.id === id,
+            ),
+            skipAbandonedTempFileCleanup: true,
+            onRetry: target => {
+              if (target) retryTerminalFacts.push(target)
             },
-          )
+          })
           logBackgroundCleanup(cleanup)
           if (reconciliation.errors > 0 || cleanup.errors > 0) {
             retrySessionIds.push(id)
           }
         }
+        const tempCleanup = await cleanupAbandonedSessionTempFiles(cutoff)
+        logBackgroundCleanup(tempCleanup)
         // Save retries before publishing the cursor that acknowledges this batch.
         await batch.commit(retrySessionIds, retryTerminalFacts)
-        return retrySessionIds.length > 0 ? 'partial' : 'ran'
+        return retrySessionIds.length > 0 || tempCleanup.errors > 0
+          ? 'partial'
+          : 'ran'
       },
       request._afterThrottleLockForTesting,
     )

@@ -599,10 +599,11 @@ export async function waitHandler(
     const pinned = { id: session.id, pid: session.pid }
     pinnedId = pinned.id
 
+    // No signal check at the top of the loop: the pre-loop check above
+    // covers entry, and each await in the body (observe, sleep) is
+    // followed by a signal check before control reaches here again, so a
+    // check here could never be true (CodeQL #2497).
     while (true) {
-      if (clientSignal) {
-        return finish(interruptedWaitResult(pinned.id, clientSignal))
-      }
       let observation: WaitObservation
       try {
         observation = await observePinnedSession(

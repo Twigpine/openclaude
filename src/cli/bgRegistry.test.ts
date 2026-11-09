@@ -20,6 +20,7 @@ import * as backgroundSessionRegistry from './bgRegistry.js'
 import {
   _setBackgroundSessionsRootForTesting,
   BackgroundSessionWaitError,
+  cleanupAbandonedSessionTempFiles,
   cleanupBackgroundSessionsBefore,
   createBackgroundSession,
   isBackgroundSessionProcessAlive,
@@ -2404,6 +2405,70 @@ describe('background session registry', () => {
       await cleanupBackgroundSessionsBefore(new Date(Date.now() + 1)),
     ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
     expect(await Bun.file(freshTmp).exists()).toBe(true)
+  })
+
+  it('keeps an abandoned session metadata temp file while its session publish lock is held', async () => {
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const staleTmp = join(
+      sessionsDir,
+      'bg-locked-tmp.424242.00000000-0000-4000-8000-000000000002.tmp',
+    )
+    await writeFile(staleTmp, '{"id":"bg-locked-tmp"}')
+    // Age it past the retention cutoff and the publish grace period, so
+    // only the publish lock can still protect it (CodeRabbit #2497).
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
+    // A concurrent writeNewSession holds the per-ID lock for the whole
+    // write+rename; cleanup must not unlink its temp file even when the
+    // clock jumps forward past the grace period.
+    const release = await lockfile.lock(join(sessionsDir, 'bg-locked-tmp.json'), {
+      realpath: false,
+      retries: 0,
+    })
+    try {
+      expect(
+        await cleanupBackgroundSessionsBefore(
+          new Date(Date.now() - 24 * 60 * 60 * 1000),
+        ),
+      ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
+      expect(await Bun.file(staleTmp).exists()).toBe(true)
+    } finally {
+      await release()
+    }
+    expect(
+      await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
+    expect(await Bun.file(staleTmp).exists()).toBe(false)
+  })
+
+  it('defers abandoned session metadata temp file cleanup when asked', async () => {
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const staleTmp = join(
+      sessionsDir,
+      'bg-deferred-tmp.424242.00000000-0000-4000-8000-000000000003.tmp',
+    )
+    await writeFile(staleTmp, '{"id":"bg-deferred-tmp"}')
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
+    // A recovery batch skips the per-ID temp cleanup and runs it once
+    // for the whole batch instead (CodeRabbit #2497).
+    expect(
+      await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+        { skipAbandonedTempFileCleanup: true },
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
+    expect(await Bun.file(staleTmp).exists()).toBe(true)
+    expect(
+      await cleanupAbandonedSessionTempFiles(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
+    expect(await Bun.file(staleTmp).exists()).toBe(false)
   })
 
   it('reconciles stronger terminal facts and retries reservation release', async () => {
