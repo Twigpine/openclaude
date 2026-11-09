@@ -1354,22 +1354,50 @@ function isBackgroundSessionTerminalFact(
   )
 }
 
+type TerminalFactRead =
+  | { status: 'missing' }
+  | { status: 'unreadable' }
+  | { status: 'found'; fact: BackgroundSessionTerminalFact }
+
+/**
+ * Reads one terminal fact, distinguishing a missing fact from a fact
+ * that exists but cannot be read. A missing file — or valid JSON that is
+ * not a fact for this session and generation — is `missing`: there is
+ * nothing to retry. Any other read failure, or JSON that cannot be
+ * parsed, is `unreadable`: termination is unestablished, not absent.
+ */
+async function readTerminalFactResult(
+  id: string,
+  kind: 'natural' | 'killed',
+  generation?: string,
+): Promise<TerminalFactRead> {
+  let raw: string
+  try {
+    raw = await readFile(terminalFactPathForId(id, kind, generation), 'utf8')
+  } catch (error) {
+    return isErrno(error, 'ENOENT')
+      ? { status: 'missing' }
+      : { status: 'unreadable' }
+  }
+  let parsed: unknown
+  try {
+    parsed = jsonParse(raw)
+  } catch {
+    return { status: 'unreadable' }
+  }
+  return isBackgroundSessionTerminalFact(parsed, id, kind) &&
+    parsed.generation === generation
+    ? { status: 'found', fact: parsed }
+    : { status: 'missing' }
+}
+
 async function readTerminalFact(
   id: string,
   kind: 'natural' | 'killed',
   generation?: string,
 ): Promise<BackgroundSessionTerminalFact | null> {
-  try {
-    const parsed = jsonParse(
-      await readFile(terminalFactPathForId(id, kind, generation), 'utf8'),
-    )
-    return isBackgroundSessionTerminalFact(parsed, id, kind) &&
-      parsed.generation === generation
-      ? parsed
-      : null
-  } catch {
-    return null
-  }
+  const result = await readTerminalFactResult(id, kind, generation)
+  return result.status === 'found' ? result.fact : null
 }
 
 function readTerminalFactSync(
@@ -1393,17 +1421,41 @@ function readTerminalFactSync(
 async function applyAuthoritativeTerminalFacts(
   session: BackgroundSession,
 ): Promise<BackgroundSession> {
-  const natural = await readTerminalFact(
+  return (await applyAuthoritativeTerminalFactsDetailed(session)).session
+}
+
+/**
+ * Applies the recorded terminal facts to a session, reporting whether
+ * any fact read failed. Callers that only need the effective session use
+ * {@link applyAuthoritativeTerminalFacts}; the targeted refresh needs the
+ * flag to tell an unreadable fact (retry the metadata read) from a
+ * missing one (the process being gone means stale).
+ */
+async function applyAuthoritativeTerminalFactsDetailed(
+  session: BackgroundSession,
+): Promise<{
+  session: BackgroundSession
+  terminalFactReadError: boolean
+}> {
+  const natural = await readTerminalFactResult(
     session.id,
     'natural',
     session.terminalFactGeneration,
   )
-  const killed = await readTerminalFact(
+  const killed = await readTerminalFactResult(
     session.id,
     'killed',
     session.terminalFactGeneration,
   )
-  return applyTerminalFacts(session, natural, killed)
+  return {
+    session: applyTerminalFacts(
+      session,
+      natural.status === 'found' ? natural.fact : null,
+      killed.status === 'found' ? killed.fact : null,
+    ),
+    terminalFactReadError:
+      natural.status === 'unreadable' || killed.status === 'unreadable',
+  }
 }
 
 function applyTerminalFacts(
@@ -2692,7 +2744,10 @@ async function settleOnAbort<T>(
  * which callers treat as unknown state rather than terminal success. When
  * the caller's signal fires, the registry reads stop being awaited and
  * null is returned instead of leaving the follower waiting on a stalled
- * probe.
+ * probe. A terminal fact that exists but cannot be read is not a missing
+ * fact: when the process is gone and no readable fact establishes
+ * termination, the session is reported unknown so the follower keeps
+ * retrying the metadata read instead of completing as stale.
  */
 export async function refreshBackgroundSessionStatus(
   id: string,
@@ -2705,11 +2760,12 @@ export async function refreshBackgroundSessionStatus(
   )
   if (!session) return null
 
-  const effective = await settleOnAbort(
-    applyAuthoritativeTerminalFacts(session),
+  const factApplication = await settleOnAbort(
+    applyAuthoritativeTerminalFactsDetailed(session),
     options.signal,
   )
-  if (!effective) return null
+  if (!factApplication) return null
+  const effective = factApplication.session
   if (effective.status !== 'running' && effective.status !== 'unknown') {
     return effective
   }
@@ -2725,6 +2781,20 @@ export async function refreshBackgroundSessionStatus(
       : identity.state === 'unreadable'
         ? 'unknown'
         : 'stale'
+  if (
+    nextStatus === 'stale' &&
+    factApplication.terminalFactReadError
+  ) {
+    // The process is gone, but a terminal fact that cannot be read leaves
+    // termination unestablished: the fact may become readable on a later
+    // tick (for example a transient read failure), so report unknown and
+    // let the follower retry the metadata read. A genuinely missing fact
+    // still reports stale, and a live, matching process still reports
+    // running — only the would-be stale outcome is held back.
+    return effective.status === 'unknown'
+      ? effective
+      : { ...effective, status: 'unknown', updatedAt: iso(options.now) }
+  }
   if (nextStatus === effective.status) return effective
   return { ...effective, status: nextStatus, updatedAt: iso(options.now) }
 }

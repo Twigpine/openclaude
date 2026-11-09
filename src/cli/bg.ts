@@ -1177,6 +1177,11 @@ export async function logsHandler(
   try {
     offset = await printExistingLog(logPath, {
       continueOnFileError: parsed.follow,
+      // In follow mode, aborting must also release a drain wait stuck in
+      // the initial dump; otherwise the handler could print more bytes
+      // after cancellation once stdout drains. Non-follow mode has no
+      // abort signal, so its dump is unchanged.
+      signal: parsed.follow ? options?.signal : undefined,
     })
   } catch (error) {
     fail(`Failed to read log file: ${errorMessage(error)}`)
