@@ -8,7 +8,10 @@ import {
   IMAGE_TARGET_RAW_SIZE,
 } from '../constants/apiLimits.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
-import { getImageProcessor } from '../tools/FileReadTool/imageProcessor.js'
+import {
+  convertBmpToPng,
+  ImageProcessorUnavailableError,
+} from '../tools/FileReadTool/imageProcessor.js'
 import { logForDebugging } from './debug.js'
 import { execFileNoThrowWithCwd } from './execFileNoThrow.js'
 import { getFsImplementation } from './fsOperations.js'
@@ -133,10 +136,11 @@ export const CLIPBOARD_IMAGE_PASTE_GENERIC_ERROR =
 /**
  * User-facing text for a clipboard image paste that found bytes but could
  * not attach them. Resize/API-limit failures keep their message so Alt+V
- * does not collapse to "No image found".
+ * does not collapse to "No image found". Missing-processor failures retain
+ * their installation guidance.
  */
 export function formatClipboardImagePasteError(error: unknown): string {
-  return error instanceof ImageResizeError
+  return error instanceof ImageResizeError || error instanceof ImageProcessorUnavailableError
     ? error.message
     : CLIPBOARD_IMAGE_PASTE_GENERIC_ERROR
 }
@@ -151,10 +155,11 @@ export function logClipboardImagePasteRejection(error: unknown): void {
 
 /**
  * Native NSPasteboard path and the osascript/PowerShell path share this:
- * ImageResizeError is an admission failure, not "native reader unavailable".
+ * ImageResizeError and ImageProcessorUnavailableError describe attachment
+ * failures, not an empty clipboard or an unavailable native reader.
  */
 export function rethrowIfClipboardResizeError(error: unknown): void {
-  if (error instanceof ImageResizeError) {
+  if (error instanceof ImageResizeError || error instanceof ImageProcessorUnavailableError) {
     throw error
   }
 }
@@ -280,6 +285,7 @@ export async function getImageFromClipboard(): Promise<ImageWithDimensions | nul
 
   const { commands, screenshotPath } = getClipboardCommands()
   let screenshotSaved = false
+  let imageRead = false
   try {
     // Check if clipboard has image.
     const checkResult = await execa(commands.checkImage, {
@@ -304,6 +310,7 @@ export async function getImageFromClipboard(): Promise<ImageWithDimensions | nul
 
     // Read the image and convert to base64
     let imageBuffer = getFsImplementation().readFileBytesSync(screenshotPath)
+    imageRead = true
 
     // BMP is not supported by the API — convert to PNG via Sharp.
     // This handles WSL2 where Windows copies images as BMP by default.
@@ -312,8 +319,7 @@ export async function getImageFromClipboard(): Promise<ImageWithDimensions | nul
       imageBuffer[0] === 0x42 &&
       imageBuffer[1] === 0x4d
     ) {
-      const sharp = await getImageProcessor()
-      imageBuffer = await sharp(imageBuffer).png().toBuffer()
+      imageBuffer = await convertBmpToPng(imageBuffer)
     }
 
     // Resize if needed to stay under 5MB API limit
@@ -334,6 +340,9 @@ export async function getImageFromClipboard(): Promise<ImageWithDimensions | nul
     }
   } catch (e) {
     rethrowIfClipboardResizeError(e)
+    // Bytes were found: a conversion failure is not an empty clipboard.
+    // The notification formatter redacts unknown processing errors.
+    if (imageRead) throw e
     return null
   } finally {
     if (screenshotSaved) {
@@ -493,8 +502,7 @@ export async function tryReadImageFromPath(
     imageBuffer[0] === 0x42 &&
     imageBuffer[1] === 0x4d
   ) {
-    const sharp = await getImageProcessor()
-    imageBuffer = await sharp(imageBuffer).png().toBuffer()
+    imageBuffer = await convertBmpToPng(imageBuffer)
   }
 
   // Resize if needed to stay under 5MB API limit

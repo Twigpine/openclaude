@@ -1,4 +1,4 @@
-import type { Buffer } from 'buffer'
+import { Buffer } from 'buffer'
 import { isInBundledMode } from '../../utils/bundledMode.js'
 
 export type SharpInstance = {
@@ -18,7 +18,10 @@ export type SharpInstance = {
   toBuffer(): Promise<Buffer>
 }
 
-export type SharpFunction = (input: Buffer) => SharpInstance
+export type SharpFunction = (
+  input: Buffer,
+  options?: { raw: { width: number; height: number; channels: 3 | 4 } },
+) => SharpInstance
 
 type SharpCreatorOptions = {
   create: {
@@ -89,6 +92,74 @@ export async function getImageProcessor(): Promise<SharpFunction> {
     if (e instanceof ImageProcessorUnavailableError) throw e
     throw new ImageProcessorUnavailableError()
   }
+}
+
+/**
+ * Sharp does not decode BMP. Adapt common Windows screenshot layouts to raw
+ * pixels before encoding, keeping the processor an explicit opt-in dependency.
+ * Validate the complete pixel range before allocating or reading any pixels.
+ */
+export async function convertBmpToPng(input: Buffer): Promise<Buffer> {
+  const sharp = await getImageProcessor()
+  if (input.length < 54 || input.toString('ascii', 0, 2) !== 'BM') {
+    throw new Error('Invalid BMP image header')
+  }
+  const offset = input.readUInt32LE(10)
+  const headerSize = input.readUInt32LE(14)
+  const width = input.readInt32LE(18)
+  const signedHeight = input.readInt32LE(22)
+  const height = Math.abs(signedHeight)
+  const bits = input.readUInt16LE(28)
+  const compression = input.readUInt32LE(30)
+  if (
+    ![40, 52, 56, 108, 124].includes(headerSize) ||
+    offset < 14 + headerSize || offset > input.length ||
+    width <= 0 || height === 0 || input.readUInt16LE(26) !== 1 ||
+    (bits !== 24 && bits !== 32) ||
+    (compression !== 0 && !(compression === 3 && bits === 32))
+  ) {
+    throw new Error('Unsupported BMP image layout; use a PNG screenshot')
+  }
+  let channels: 3 | 4 = 3
+  if (compression === 3) {
+    // BI_BITFIELDS uses masks in the extended header, or immediately after
+    // a 40-byte header. Only the canonical BGR(A) byte layout is accepted.
+    if (
+      offset < 66 ||
+      input.readUInt32LE(54) !== 0xff0000 ||
+      input.readUInt32LE(58) !== 0xff00 ||
+      input.readUInt32LE(62) !== 0xff
+    ) {
+      throw new Error('Unsupported BMP color masks; use a PNG screenshot')
+    }
+    if (headerSize >= 56) {
+      const alpha = input.readUInt32LE(66)
+      if (alpha !== 0 && alpha !== 0xff000000) {
+        throw new Error('Unsupported BMP alpha mask; use a PNG screenshot')
+      }
+      if (alpha !== 0) channels = 4
+    }
+  }
+  const stride = Math.ceil(width * bits / 32) * 4
+  const pixelBytes = stride * height
+  if (!Number.isSafeInteger(pixelBytes) || pixelBytes > input.length - offset) {
+    throw new Error('Truncated BMP image pixels')
+  }
+  // For these uncompressed layouts the output is no larger than the encoded
+  // pixel payload, so tiny hostile headers cannot cause an oversized allocation.
+  const pixels = Buffer.alloc(width * height * channels)
+  for (let y = 0; y < height; y++) {
+    const row = offset + (signedHeight < 0 ? y : height - 1 - y) * stride
+    for (let x = 0; x < width; x++) {
+      const src = row + x * (bits / 8)
+      const dst = (y * width + x) * channels
+      pixels[dst] = input[src + 2]!
+      pixels[dst + 1] = input[src + 1]!
+      pixels[dst + 2] = input[src]!
+      if (channels === 4) pixels[dst + 3] = input[src + 3]!
+    }
+  }
+  return sharp(pixels, { raw: { width, height, channels } }).png().toBuffer()
 }
 
 /**
