@@ -994,6 +994,15 @@ export function getSessionTranscriptCacheSizeForTesting(): number {
   return getProject()._sessionTranscriptCacheSize()
 }
 
+/**
+ * Number of dropped-metadata snapshots awaiting restore, for testing.
+ * Proves the bound on the other side: a successful deletion must discard
+ * its snapshot instead of retaining it until the path is recycled.
+ */
+export function getDroppedSessionMetadataSizeForTesting(): number {
+  return getProject()._droppedSessionMetadataSize()
+}
+
 type InternalEventWriter = (
   eventType: string,
   payload: Record<string, unknown>,
@@ -1070,6 +1079,27 @@ type SessionMetadata = {
   prRepository?: string
   goal?: GoalStateEntry['goal']
   branch?: SessionBranchEntry
+}
+
+/**
+ * Merge a saved metadata snapshot with a newer live entry for the same
+ * session. The live entry's defined fields win — a concurrent update is
+ * fresher — and the saved entry fills in the fields the live one lacks
+ * (a title/tag cached before the entry was recreated). `undefined` never
+ * clobbers a saved field: setSessionMetadataField deletes a field instead
+ * of storing undefined. `null` is a real value (worktree: exited) and wins
+ * like any other defined field.
+ */
+function mergeSessionMetadata(
+  saved: SessionMetadata,
+  current: SessionMetadata,
+): SessionMetadata {
+  const merged: SessionMetadata = { ...saved }
+  for (const field of Object.keys(current) as Array<keyof SessionMetadata>) {
+    const value = current[field]
+    if (value !== undefined) merged[field] = value as never
+  }
+  return merged
 }
 
 class Project {
@@ -1328,6 +1358,11 @@ class Project {
   /** @internal Size of the per-context transcript caches, for testing. */
   _sessionTranscriptCacheSize(): number {
     return Math.max(this.sessionFiles.size, this.sessionMetadata.size)
+  }
+
+  /** @internal Number of dropped metadata snapshots awaiting restore, for testing. */
+  _droppedSessionMetadataSize(): number {
+    return this.droppedSessionMetadata.size
   }
 
   /**
@@ -2551,15 +2586,26 @@ class Project {
    * deleted transcript's resolved path. Restored by restoreSessionWrites
    * when the transcript survives its removal; a fresh session at a
    * recycled path consumes (discards) the snapshot instead, so the new
-   * transcript never inherits the deleted session's title/tag. Like
-   * deletedSessionFiles, an entry lingers when a deleted id is never
-   * reused — one small snapshot per deletion, holding at most the
-   * per-session cache bound's worth of entries for that id.
+   * transcript never inherits the deleted session's title/tag. Overlapping
+   * deletions of the same transcript merge into one snapshot — a later
+   * attempt must not overwrite the original with the (possibly empty) set
+   * it dropped — and the snapshot is discarded by finishDeletedSession
+   * once the last overlapping attempt finishes, so a successful removal
+   * leaves nothing behind. Like deletedSessionFiles, an entry lingers
+   * only while its deletion attempts are still running.
    */
   private droppedSessionMetadata = new Map<
     string,
     Array<[string, SessionMetadata]>
   >()
+
+  /**
+   * Deletion attempts still running per resolved transcript path (see
+   * forgetDeletedSession / finishDeletedSession). The snapshot above
+   * survives until this count reaches zero, so an overlapping deletion
+   * whose removal fails can still restore from it.
+   */
+  private pendingDeletionAttempts = new Map<string, number>()
 
   /** True when `filePath` is a transcript deleted earlier in this process. */
   isDeletedSessionFile(filePath: string): boolean {
@@ -2640,10 +2686,33 @@ class Project {
     // cannot reach these entries. Only after the settle above: a flush
     // failure leaves the transcript on disk, and its caches must survive
     // with it. The dropped metadata is kept for restoreSessionWrites, in
-    // case the removal itself fails and the transcript survives.
-    this.droppedSessionMetadata.set(
-      resolvePath(transcriptPath),
-      this.forgetSessionCaches(sessionId, transcriptPath),
+    // case the removal itself fails and the transcript survives. A later
+    // overlapping deletion of the same transcript merges into the snapshot
+    // instead of replacing it: the first attempt may have dropped the only
+    // entry holding the title, and the second would otherwise overwrite it
+    // with an empty set. The snapshot stays until finishDeletedSession runs
+    // for the last overlapping attempt.
+    const dropped = this.forgetSessionCaches(sessionId, transcriptPath)
+    const resolved = resolvePath(transcriptPath)
+    const existing = this.droppedSessionMetadata.get(resolved)
+    if (existing) {
+      for (const [key, entry] of dropped) {
+        const prior = existing.find(([priorKey]) => priorKey === key)
+        if (prior) {
+          // A concurrent update recreated this entry after the first deletion
+          // dropped it: keep both sides' fields, the newer entry winning on
+          // the fields it defines.
+          prior[1] = mergeSessionMetadata(prior[1], entry)
+        } else {
+          existing.push([key, entry])
+        }
+      }
+    } else {
+      this.droppedSessionMetadata.set(resolved, dropped)
+    }
+    this.pendingDeletionAttempts.set(
+      resolved,
+      (this.pendingDeletionAttempts.get(resolved) ?? 0) + 1,
     )
   }
 
@@ -2653,9 +2722,15 @@ class Project {
    * when the transcript is still on disk. A fresh session at a recycled
    * path also calls this (via materializeSessionFile) to un-mark the path,
    * and restoring the deleted session's title/tag there would hand them
-   * to the new transcript. Only entries whose key is still empty are
-   * restored, so a newer entry — e.g. a fresh session that already cached
-   * its own title under the same key — is never clobbered. The file
+   * to the new transcript: when the file is gone the snapshot is consumed
+   * (discarded) instead. When the file survives, a live update may have
+   * recreated an entry under the same key while deletion was pending, so
+   * the saved fields are merged with the live entry instead of skipping
+   * the key (which lost the title/tag) or overwriting it (which lost the
+   * concurrent update). The restored entries count against the cache
+   * bound, like any other write. The snapshot itself stays until
+   * finishDeletedSession runs for the last overlapping deletion attempt,
+   * so a still-running attempt can restore from it too. The file
    * pointer needs no snapshot: it re-derives from the context identity,
    * and the eviction fix restores it when the transcript exists.
    */
@@ -2663,11 +2738,51 @@ class Project {
     const resolved = resolvePath(transcriptPath)
     this.deletedSessionFiles.delete(resolved)
     const dropped = this.droppedSessionMetadata.get(resolved)
-    this.droppedSessionMetadata.delete(resolved)
-    if (!dropped || !existsSync(resolved)) return
-    for (const [key, entry] of dropped) {
-      if (!this.sessionMetadata.has(key)) this.sessionMetadata.set(key, entry)
+    if (!dropped || !existsSync(resolved)) {
+      // No transcript to restore into (recycled path): consume the snapshot
+      // so the new transcript never inherits the deleted session's title/tag.
+      this.droppedSessionMetadata.delete(resolved)
+      return
     }
+    for (const [key, entry] of dropped) {
+      const current = this.sessionMetadata.get(key)
+      if (!current) {
+        // Copy: the snapshot stays until the deletion attempts finish, so
+        // the live cache must not alias its entries.
+        this.sessionMetadata.set(key, { ...entry })
+      } else {
+        // A live update recreated this entry while deletion was pending:
+        // keep its fields and fill the saved ones (title, tag) back in
+        // around it.
+        this.sessionMetadata.set(key, mergeSessionMetadata(entry, current))
+      }
+    }
+    this.boundSessionCaches()
+  }
+
+  /**
+   * Mark one deletion attempt finished for a transcript forgetDeletedSession
+   * dropped the caches for. The snapshot survives while other attempts for
+   * the same transcript are still running, so an overlapping deletion whose
+   * removal fails can still restore from it. Once the last attempt finishes
+   * the snapshot is discarded: the transcript is either gone (nothing can
+   * restore it any more) or it survived and the failure path already
+   * restored the entries — either way keeping it would leak one snapshot
+   * per deletion. Callers must restore on the failure path before this,
+   * as deleteSession and deleteSessionFiles do. The deleted-file marker is
+   * untouched: only restoreSessionWrites (or a fresh session at a recycled
+   * path) clears it.
+   */
+  finishDeletedSession(transcriptPath: string): void {
+    const resolved = resolvePath(transcriptPath)
+    const inFlight = this.pendingDeletionAttempts.get(resolved)
+    if (inFlight === undefined) return
+    if (inFlight > 1) {
+      this.pendingDeletionAttempts.set(resolved, inFlight - 1)
+      return
+    }
+    this.pendingDeletionAttempts.delete(resolved)
+    this.droppedSessionMetadata.delete(resolved)
   }
 
   private async getExistingSessionFile(
@@ -2930,6 +3045,17 @@ export async function forgetDeletedSession(
  */
 export function restoreSessionWrites(transcriptPath: string): void {
   getProject().restoreSessionWrites(transcriptPath)
+}
+
+/**
+ * Mark one deletion attempt finished for a transcript forgetDeletedSession
+ * dropped the caches for; discards its metadata snapshot once the last
+ * overlapping attempt finishes. Call after the removal (or after restoring
+ * on the failure path) in every delete path that called
+ * forgetDeletedSession.
+ */
+export function finishDeletedSession(transcriptPath: string): void {
+  getProject().finishDeletedSession(transcriptPath)
 }
 
 /**

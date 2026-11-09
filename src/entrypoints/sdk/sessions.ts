@@ -15,6 +15,7 @@ import {
   type SessionInfo,
 } from '../../utils/listSessionsImpl.js'
 import {
+  finishDeletedSession,
   forgetDeletedSession,
   restoreSessionWrites,
 } from '../../utils/sessionStorage.js'
@@ -318,6 +319,7 @@ export async function deleteSession(
     // Nothing was removed (a pending write failed while settling): undo the
     // mark so the still-present transcript keeps receiving writes.
     restoreSessionWrites(resolved.filePath)
+    finishDeletedSession(resolved.filePath)
     throw error
   }
 
@@ -329,8 +331,12 @@ export async function deleteSession(
     if (existsSync(resolved.filePath)) {
       restoreSessionWrites(resolved.filePath)
     }
+    finishDeletedSession(resolved.filePath)
     throw error
   }
+  // Removed: drop the metadata snapshot forgetDeletedSession kept for the
+  // failure path, or one snapshot lingers per deletion.
+  finishDeletedSession(resolved.filePath)
 }
 
 // ============================================================================

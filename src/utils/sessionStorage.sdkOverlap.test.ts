@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 import { randomUUID, type UUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import * as fsPromises from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -28,7 +29,9 @@ import {
   flushSessionStorage,
   forgetDeletedSession,
   getCurrentSessionTitle,
+  getDroppedSessionMetadataSizeForTesting,
   getProjectDir,
+  getSessionTranscriptCacheSizeForTesting,
   getTranscriptPathForSession,
   reAppendSessionMetadata,
   recordAttributionSnapshot,
@@ -615,8 +618,10 @@ test('a failed deletion restores the session\u2019s cached metadata', async () =
   // CodeRabbit on #2489: if unlink fails and the transcript survives,
   // restoreSessionWrites leaves the metadata cache empty, so a title
   // outside the tail cannot be recovered during the next re-append.
-  // Simulate the failure path directly: forget (which drops the caches)
-  // then restore with the transcript still on disk.
+  // Drive the failure through deleteSession itself: an injected unlink
+  // failure must make deleteSession reject, and its own recovery must
+  // bring the cached title back. Calling restoreSessionWrites directly
+  // could not detect a missing recovery call in deleteSession.
   await turnStart(SESSION_A, async () => {
     await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
     await recordTranscript([message(randomUUID(), 'A first')])
@@ -631,14 +636,19 @@ test('a failed deletion restores the session\u2019s cached metadata', async () =
   })
 
   const transcriptPath = getTranscriptPathForSession(SESSION_A)
-  await forgetDeletedSession(SESSION_A as never, transcriptPath)
-  await turnStart(SESSION_A, async () => {
-    expect(getCurrentSessionTitle(SESSION_A as never)).toBeUndefined()
+  const realUnlink = fsPromises.unlink
+  spyOn(fsPromises, 'unlink').mockImplementation(async path => {
+    if (path === transcriptPath) {
+      throw Object.assign(new Error('resource busy or locked'), { code: 'EBUSY' })
+    }
+    return realUnlink(path)
   })
 
-  // The transcript survived the failed removal: restore its writes, and
-  // the cached title must come back with them.
-  restoreSessionWrites(transcriptPath)
+  await expect(deleteSession(SESSION_A)).rejects.toThrow('resource busy or locked')
+  mock.restore()
+
+  // The transcript survived the failed removal: deleteSession's own
+  // recovery restores the cached title, and later writes succeed.
   await turnStart(SESSION_A, async () => {
     expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
     await recordTranscript([message(randomUUID(), 'A returns')])
@@ -648,4 +658,131 @@ test('a failed deletion restores the session\u2019s cached metadata', async () =
   const aText = await readFile(transcriptPath, 'utf8')
   // Once from the first re-append, once from the post-restore write.
   expect(aText.split('A Title').length - 1).toBe(2)
+})
+
+test('overlapping deletions of the same transcript keep the original metadata snapshot', async () => {
+  // CodeRabbit on #2489: if two deletions reach forgetSessionCaches before
+  // either removal fails, the second overwrites the first snapshot with an
+  // empty one, and both failures leave the surviving session without its
+  // cached metadata.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+    reAppendSessionMetadata()
+    // Push the title out of the 64KB tail window.
+    for (let i = 0; i < 20; i++) {
+      await recordTranscript([message(randomUUID(), 'x'.repeat(5000))])
+    }
+    await flushSessionStorage()
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await Promise.all([
+    forgetDeletedSession(SESSION_A as never, transcriptPath),
+    forgetDeletedSession(SESSION_A as never, transcriptPath),
+  ])
+
+  // Neither removal ran, so the transcript survived: the surviving
+  // session's cached title must come back with the restore, not be lost
+  // to the second deletion overwriting the first snapshot.
+  restoreSessionWrites(transcriptPath)
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
+  })
+})
+
+test('a successful deletion discards the dropped metadata snapshot', async () => {
+  // CodeRabbit on #2489: droppedSessionMetadata retains a deleted session's
+  // cached metadata indefinitely, and the 100-entry cache limit never
+  // applies to these snapshots. A successful removal must drop its own.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await deleteSession(SESSION_A)
+  expect(existsSync(transcriptPath)).toBe(false)
+  expect(getDroppedSessionMetadataSizeForTesting()).toBe(0)
+})
+
+test('a failed deletion does not restore metadata past the cache bound', async () => {
+  // CodeRabbit on #2489: if other sessions fill the cache while deletion is
+  // pending, a failed deletion can restore entries above the 100-entry
+  // limit, and they stay until a later cache write enforces it.
+  // Seed a started session first: before any session has started,
+  // cacheSessionTitle is treated as a deferred startup selection and
+  // migrated between contexts instead of accumulating per context.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await forgetDeletedSession(SESSION_A as never, transcriptPath)
+
+  // Fill the cache to the bound while deletion is pending.
+  const ids = Array.from({ length: 100 }, () => randomUUID())
+  for (const id of ids) {
+    await turnStart(id, async () => {
+      cacheSessionTitle(`Title ${id}`)
+    })
+  }
+  expect(getSessionTranscriptCacheSizeForTesting()).toBe(100)
+
+  // The transcript survived: the restore must respect the bound, and the
+  // restored title is the newest entry, so it survives the eviction.
+  restoreSessionWrites(transcriptPath)
+  expect(getSessionTranscriptCacheSizeForTesting()).toBeLessThanOrEqual(100)
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
+  })
+})
+
+test('a failed deletion restores saved fields around a concurrent entry', async () => {
+  // CodeRabbit on #2489: a live goal update while deletion is pending
+  // creates a new metadata entry, and the old restore skipped keys that
+  // already existed — discarding the saved title and tag.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+    await saveTag(SESSION_A as never, 'a-tag')
+    reAppendSessionMetadata()
+    // Push the title out of the 64KB tail window.
+    for (let i = 0; i < 20; i++) {
+      await recordTranscript([message(randomUUID(), 'x'.repeat(5000))])
+    }
+    await flushSessionStorage()
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await forgetDeletedSession(SESSION_A as never, transcriptPath)
+
+  // A live goal update recreates the entry while deletion is pending:
+  // same key, only the goal field — no title or tag.
+  await turnStart(SESSION_A, async () => {
+    await recordGoalState(createGoalState('concurrent goal'), SESSION_A as never)
+  })
+
+  // The transcript survived the failed removal: the restore must merge the
+  // saved title/tag with the concurrent goal, not drop either side.
+  restoreSessionWrites(transcriptPath)
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
+    await recordTranscript([message(randomUUID(), 'A returns')])
+    await flushSessionStorage()
+  })
+
+  const aText = await readFile(transcriptPath, 'utf8')
+  expect(aText).toContain('A Title')
+  expect(aText).toContain('a-tag')
+  expect(aText).toContain('concurrent goal')
 })
