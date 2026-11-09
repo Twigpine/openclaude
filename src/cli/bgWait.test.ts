@@ -256,7 +256,12 @@ describe('wait command handler', () => {
 
   afterEach(async () => {
     _setBackgroundSessionsRootForTesting(undefined)
-    process.exitCode = savedExitCode
+    // Bun ignores `process.exitCode = undefined`, so restoring the saved
+    // value directly would leak a test's exit code (e.g. 2) into the test
+    // runner's own exit code — all tests pass, but the shard exits 2 and
+    // the CI `unit-tests` job fails. `undefined` and 0 both mean success,
+    // so restore to 0 instead (same pattern as bgFinalizer.test.ts).
+    process.exitCode = savedExitCode ?? 0
     await rm(configDir, { recursive: true, force: true })
   })
 
