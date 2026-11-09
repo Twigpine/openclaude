@@ -26,7 +26,9 @@ import {
   adoptResumedSessionFile,
   cacheSessionTitle,
   flushSessionStorage,
+  forgetDeletedSession,
   getCurrentSessionTitle,
+  getProjectDir,
   getTranscriptPathForSession,
   reAppendSessionMetadata,
   recordAttributionSnapshot,
@@ -34,6 +36,7 @@ import {
   recordTranscript,
   resetProjectForTesting,
   resetSessionFilePointer,
+  restoreSessionWrites,
   saveTag,
 } from './sessionStorage.js'
 import { createGoalState } from '../services/goal/state.js'
@@ -556,4 +559,93 @@ test('a deleted session id reused for a fresh session does not inherit its title
   expect(aText).toContain('A fresh')
   expect(aText).not.toContain('A Title')
   expect(aText).not.toContain('a-tag')
+})
+
+test('deleting one project directory\u2019s transcript keeps the same session id\u2019s cached metadata in another directory', async () => {
+  // CodeRabbit on #2489: forgetSessionCaches drops every cache entry with
+  // the session id prefix, so deleting one project directory's transcript
+  // also clears another directory's cached title for the same id. If that
+  // title has fallen outside both 64KB windows, its next re-append cannot
+  // restore it to the resume list.
+  const dirA = getProjectDir(join(workspace, 'a'))
+  const dirB = getProjectDir(join(workspace, 'b'))
+  await mkdir(join(workspace, 'a'), { recursive: true })
+  await mkdir(join(workspace, 'b'), { recursive: true })
+
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A in dir B first')])
+    await flushSessionStorage()
+    cacheSessionTitle('B Title')
+    reAppendSessionMetadata()
+    // Push the title out of the 64KB tail window.
+    for (let i = 0; i < 20; i++) {
+      await recordTranscript([message(randomUUID(), 'x'.repeat(5000))])
+    }
+    await flushSessionStorage()
+  }, dirB)
+
+  // Same session id, other directory, its own title.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A in dir A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+  }, dirA)
+
+  // Delete only dir A's transcript.
+  await deleteSession(SESSION_A, { dir: join(workspace, 'a') })
+  expect(existsSync(join(dirA, `${SESSION_A}.jsonl`))).toBe(false)
+  expect(existsSync(join(dirB, `${SESSION_A}.jsonl`))).toBe(true)
+
+  // The surviving directory's cached title must still be there.
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('B Title')
+    await recordTranscript([message(randomUUID(), 'A in dir B returns')])
+    await flushSessionStorage()
+  }, dirB)
+
+  const bText = await readFile(join(dirB, `${SESSION_A}.jsonl`), 'utf8')
+  // Once from the first re-append, once from the post-delete write.
+  expect(bText.split('B Title').length - 1).toBe(2)
+  expect(bText).not.toContain('A Title')
+})
+
+test('a failed deletion restores the session\u2019s cached metadata', async () => {
+  // CodeRabbit on #2489: if unlink fails and the transcript survives,
+  // restoreSessionWrites leaves the metadata cache empty, so a title
+  // outside the tail cannot be recovered during the next re-append.
+  // Simulate the failure path directly: forget (which drops the caches)
+  // then restore with the transcript still on disk.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+    reAppendSessionMetadata()
+    // Push the title out of the 64KB tail window.
+    for (let i = 0; i < 20; i++) {
+      await recordTranscript([message(randomUUID(), 'x'.repeat(5000))])
+    }
+    await flushSessionStorage()
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await forgetDeletedSession(SESSION_A as never, transcriptPath)
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBeUndefined()
+  })
+
+  // The transcript survived the failed removal: restore its writes, and
+  // the cached title must come back with them.
+  restoreSessionWrites(transcriptPath)
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
+    await recordTranscript([message(randomUUID(), 'A returns')])
+    await flushSessionStorage()
+  })
+
+  const aText = await readFile(transcriptPath, 'utf8')
+  // Once from the first re-append, once from the post-restore write.
+  expect(aText.split('A Title').length - 1).toBe(2)
 })

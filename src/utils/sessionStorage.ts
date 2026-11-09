@@ -4,7 +4,7 @@ import type { Dirent } from 'fs'
 // Sync fs primitives for readFileTailSync — separate from fs/promises
 // imports above. Named (not wildcard) per CLAUDE.md style; no collisions
 // with the async-suffixed names.
-import { closeSync, fstatSync, openSync, readSync } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'fs'
 import {
   appendFile as fsAppendFile,
   open as fsOpen,
@@ -2546,6 +2546,21 @@ class Project {
    */
   private deletedSessionFiles = new Set<string>()
 
+  /**
+   * Metadata cache entries dropped by forgetDeletedSession, keyed by the
+   * deleted transcript's resolved path. Restored by restoreSessionWrites
+   * when the transcript survives its removal; a fresh session at a
+   * recycled path consumes (discards) the snapshot instead, so the new
+   * transcript never inherits the deleted session's title/tag. Like
+   * deletedSessionFiles, an entry lingers when a deleted id is never
+   * reused — one small snapshot per deletion, holding at most the
+   * per-session cache bound's worth of entries for that id.
+   */
+  private droppedSessionMetadata = new Map<
+    string,
+    Array<[string, SessionMetadata]>
+  >()
+
   /** True when `filePath` is a transcript deleted earlier in this process. */
   isDeletedSessionFile(filePath: string): boolean {
     return (
@@ -2555,20 +2570,43 @@ class Project {
   }
 
   /**
-   * Drop the per-context transcript caches belonging to `sessionId` — the
-   * cached file pointer and the cached metadata (title, tag, ...). The
-   * session id is the first component of sessionFileKey, so a prefix scan
-   * drops exactly this session's entries across every project dir/cwd
-   * without touching another session's.
+   * Drop the per-context transcript caches belonging to the deleted
+   * transcript — the cached file pointer and the cached metadata (title,
+   * tag, ...). A cache key names its transcript: session id + project dir
+   * + cwd derive the same path getTranscriptPath() would, so only entries
+   * naming the deleted transcript are dropped. The same id in another
+   * project directory keeps its cached pointer and metadata: if its title
+   * has fallen outside both 64KB windows, a later re-append could not
+   * restore it from the tail.
+   *
+   * Returns the metadata entries dropped, so restoreSessionWrites can put
+   * them back when the transcript survives its removal.
    */
-  private forgetSessionCaches(sessionId: UUID): void {
-    const prefix = `${sessionId}\0`
+  private forgetSessionCaches(
+    sessionId: UUID,
+    transcriptPath: string,
+  ): Array<[string, SessionMetadata]> {
+    const deleted = resolvePath(transcriptPath)
+    const namesDeletedTranscript = (key: string): boolean => {
+      if (!key.startsWith(`${sessionId}\0`)) return false
+      const parts = key.split('\0')
+      const projectDir = parts[1] ?? ''
+      const cwd = parts[2] ?? ''
+      const dir = projectDir || getProjectDir(cwd)
+      return resolvePath(join(dir, `${sessionId}.jsonl`)) === deleted
+    }
     for (const key of [...this.sessionFiles.keys()]) {
-      if (key.startsWith(prefix)) this.sessionFiles.delete(key)
+      if (namesDeletedTranscript(key)) this.sessionFiles.delete(key)
     }
+    const droppedMetadata: Array<[string, SessionMetadata]> = []
     for (const key of [...this.sessionMetadata.keys()]) {
-      if (key.startsWith(prefix)) this.sessionMetadata.delete(key)
+      if (namesDeletedTranscript(key)) {
+        const entry = this.sessionMetadata.get(key)
+        if (entry) droppedMetadata.push([key, entry])
+        this.sessionMetadata.delete(key)
+      }
     }
+    return droppedMetadata
   }
 
   async forgetDeletedSession(
@@ -2596,16 +2634,40 @@ class Project {
     // later query reusing its id and cwd hits the same sessionFileKey and
     // the fresh transcript inherits the deleted session's cached title/tag
     // (the fresh file's tail holds neither, so the stale cache stands on
-    // re-append). The deleter runs in another context, so a
-    // current-context-only clear cannot reach these entries. Only after the
-    // settle above: a flush failure leaves the transcript on disk, and its
-    // caches must survive with it.
-    this.forgetSessionCaches(sessionId)
+    // re-append). Only the caches naming the deleted transcript are
+    // dropped: the same id in another project directory keeps its own.
+    // The deleter runs in another context, so a current-context-only clear
+    // cannot reach these entries. Only after the settle above: a flush
+    // failure leaves the transcript on disk, and its caches must survive
+    // with it. The dropped metadata is kept for restoreSessionWrites, in
+    // case the removal itself fails and the transcript survives.
+    this.droppedSessionMetadata.set(
+      resolvePath(transcriptPath),
+      this.forgetSessionCaches(sessionId, transcriptPath),
+    )
   }
 
-  /** Undo forgetDeletedSession for a transcript that could not be removed. */
+  /**
+   * Undo forgetDeletedSession for a transcript that could not be removed.
+   * The metadata cache entries dropped for it are restored — but only
+   * when the transcript is still on disk. A fresh session at a recycled
+   * path also calls this (via materializeSessionFile) to un-mark the path,
+   * and restoring the deleted session's title/tag there would hand them
+   * to the new transcript. Only entries whose key is still empty are
+   * restored, so a newer entry — e.g. a fresh session that already cached
+   * its own title under the same key — is never clobbered. The file
+   * pointer needs no snapshot: it re-derives from the context identity,
+   * and the eviction fix restores it when the transcript exists.
+   */
   restoreSessionWrites(transcriptPath: string): void {
-    this.deletedSessionFiles.delete(resolvePath(transcriptPath))
+    const resolved = resolvePath(transcriptPath)
+    this.deletedSessionFiles.delete(resolved)
+    const dropped = this.droppedSessionMetadata.get(resolved)
+    this.droppedSessionMetadata.delete(resolved)
+    if (!dropped || !existsSync(resolved)) return
+    for (const [key, entry] of dropped) {
+      if (!this.sessionMetadata.has(key)) this.sessionMetadata.set(key, entry)
+    }
   }
 
   private async getExistingSessionFile(
