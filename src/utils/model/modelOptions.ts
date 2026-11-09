@@ -732,8 +732,31 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   // PAYG 3P: Default (Sonnet 4.5) + Sonnet (3P custom) or Sonnet 4.6/1M + Opus (3P custom) or Opus 4.1/Opus 4.6/Opus1M + Haiku + Opus 4.1
   const payg3pOptions = [getDefaultOptionForUser(fastMode)]
 
-  // Add Codex models for openai and codex providers
-  if (getAPIProvider() === 'openai' || getAPIProvider() === 'codex') {
+  // Add Codex models only when the active route is actually OpenAI/Codex
+  // (#1119 Piece 1). Provider profiles for OpenAI-compatible vendors (Kimi,
+  // OpenRouter, Z.AI, ...) share the `openai` vendor, so gating on
+  // getAPIProvider() alone injected GPT/Codex models the configured provider
+  // cannot serve. The resolved routeId above folds the profile preset, its
+  // base URL, and the env together via the manifest, so no URL string
+  // matching is needed here — and a provider-only lookup would not suffice,
+  // since a Kimi profile saved with provider 'openai' still resolves to
+  // routeId 'openai'. The Codex backend has no manifest routeId, so it is
+  // detected the same way getAPIProvider() detects it.
+  // No profile configured — preserve today's env-only behaviour for users
+  // who haven't migrated to provider profiles yet. Key on whether the
+  // profile env is actually applied, not on whether a profile is saved:
+  // getActiveProviderProfile() falls back to profiles[0], so a merely-saved
+  // profile would otherwise suppress the GPT/Codex catalog for an env-only
+  // OpenAI-compatible endpoint (CodeRabbit #2495).
+  // A saved profile's route is authoritative only when its env is applied;
+  // otherwise it must not add Codex options to another provider such as Foundry.
+  const isActualOpenAIOrCodexRoute =
+    (profileEnvApplied && activeRouteId === 'openai') || getAPIProvider() === 'codex'
+  if (
+    isActualOpenAIOrCodexRoute ||
+    (!profileEnvApplied &&
+      (getAPIProvider() === 'openai' || getAPIProvider() === 'codex'))
+  ) {
     payg3pOptions.push(...getCodexModelOptions())
   }
 
