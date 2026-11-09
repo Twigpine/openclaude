@@ -477,6 +477,23 @@ export interface SDKSession {
   close(): void
   /** Respond to a pending permission prompt. */
   respondToPermission(toolUseId: string, decision: PermissionResult): void
+  /**
+   * Start the OAuth flow for one of the session's MCP servers and await it.
+   * The authorization URL is delivered to `options.onAuthorizationUrl` as
+   * soon as it is known; the returned promise resolves once the flow settles
+   * and the server has been reconnected, with the server's new status.
+   * Only `http`/`sse` servers support this. Closing the session aborts an
+   * in-flight flow.
+   */
+  authenticateMcpServer(
+    name: string,
+    options?: {
+      /** Called with the authorization URL as soon as it is known. */
+      onAuthorizationUrl?: (url: string) => void
+      /** Abort this sign-in without closing the session. */
+      signal?: AbortSignal
+    },
+  ): Promise<McpServerStatus>
 }
 
 // ============================================================================

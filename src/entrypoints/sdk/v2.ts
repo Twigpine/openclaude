@@ -15,8 +15,20 @@ import {
 } from '../../state/AppStateStore.js'
 import { createStore, type Store } from '../../state/store.js'
 import {
+  type Tool,
   type ToolPermissionContext,
 } from '../../Tool.js'
+import { performMCPOAuthFlow } from '../../services/mcp/auth.js'
+import {
+  clearMcpAuthCache,
+  reconnectMcpServerImpl,
+} from '../../services/mcp/client.js'
+import { getMcpPrefix } from '../../services/mcp/mcpStringUtils.js'
+import type {
+  McpHTTPServerConfig,
+  McpSSEServerConfig,
+  ScopedMcpServerConfig,
+} from '../../services/mcp/types.js'
 import { assembleToolPool, getTools } from '../../tools.js'
 import { createFileStateCacheWithSizeLimit } from '../../utils/fileStateCache.js'
 import {
@@ -46,6 +58,7 @@ import {
 import type {
   PermissionResult,
   SDKResultMessage as GeneratedSDKResultMessage,
+  McpServerStatus,
 } from './coreTypes.generated.js'
 import type { Message } from '../../types/message.js'
 import type {
@@ -211,6 +224,42 @@ export interface SDKSession {
    * permission-request message and the host resolves it via this method.
    */
   respondToPermission(toolUseId: string, decision: PermissionResult): void
+  /**
+   * Start the OAuth flow for one of the session's MCP servers and await it —
+   * the host-facing half of issue #2294 proposal 2, for a UI with a
+   * "Sign in" button that also needs to know when authorization finished.
+   *
+   * The authorization URL is delivered to `options.onAuthorizationUrl` as
+   * soon as it is known, so the host can open it (or show it) while the
+   * flow runs. The returned promise resolves once the flow settles and the
+   * server has been reconnected, with the server's new status in the same
+   * shape `system:init.mcp_servers` reports — the next turn's `system:init`
+   * carries it too, since it is built from the session's MCP clients. The
+   * flow may complete without a redirect (a cached IdP token signs in
+   * silently); then `onAuthorizationUrl` is never called and the promise
+   * still resolves with the connected status.
+   *
+   * A successful flow whose reconnect still does not connect (the server
+   * still answers 401, or is down) resolves with that status instead of
+   * rejecting — read `status` and `error`. A flow that itself fails, is
+   * cancelled, or is superseded by a newer call for the same server rejects.
+   * Calling this before the first turn connects the session's MCP servers
+   * first, so a settings page can sign in before anyone chats.
+   *
+   * Only `http`/`sse` servers support this. The flow runs in the process
+   * environment, as the CLI's `mcp_authenticate` control does — a session's
+   * `env` overrides are not applied to it. Closing the session aborts an
+   * in-flight flow.
+   */
+  authenticateMcpServer(
+    name: string,
+    options?: {
+      /** Called with the authorization URL as soon as it is known. */
+      onAuthorizationUrl?: (url: string) => void
+      /** Abort this sign-in without closing the session. */
+      signal?: AbortSignal
+    },
+  ): Promise<McpServerStatus>
 }
 
 /**
@@ -266,6 +315,10 @@ class SDKSessionImpl implements SDKSession {
   private agentsLoaded = false
   private mcpServers?: Record<string, unknown>
   private mcpConnected = false
+  /** The session's current MCP tools, for rebuilding the pool after a reconnect. */
+  private mcpTools: Tool[] = []
+  /** In-flight OAuth flows, one per server — a newer call supersedes the old. */
+  private pendingMcpAuth = new Map<string, AbortController>()
   private pendingPermissionPrompts = new Map<string, {
     resolve: (decision: PermissionResolveDecision) => void
   }>()
@@ -492,24 +545,8 @@ class SDKSessionImpl implements SDKSession {
             self.agentsLoaded = true
           }
 
-          // Connect MCP servers once (lazy, on first message)
-          if (!self.mcpConnected && self.mcpServers && Object.keys(self.mcpServers).length > 0) {
-            try {
-              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, undefined, self._abortController?.signal)
-              if (self.closed) return
-              if (mcpClients.length > 0) {
-                self.engine.setMcpClients(mcpClients)
-              }
-              if (mcpTools.length > 0) {
-                const permissionContext = self.appStateStore.getState().toolPermissionContext
-                self.engine.updateTools(assembleToolPool(permissionContext, mcpTools))
-              }
-            } catch (err) {
-              // MCP connection failed — continue without MCP tools
-              console.warn('SDK: MCP server connection failed:', err instanceof Error ? err.message : String(err))
-            }
-            self.mcpConnected = true
-          }
+          // Connect MCP servers once (lazy, on first use)
+          if (!(await self.ensureMcpConnected())) return
 
           // Switch session for transcript writes using session's own resolved dir
           switchSession(self._sessionId as SessionId, self._sessionProjectDir)
@@ -673,6 +710,182 @@ class SDKSessionImpl implements SDKSession {
       })
     }
     this.pendingPermissionPrompts.delete(toolUseId)
+  }
+
+  /**
+   * Connect the session's MCP servers once (lazy, on first use).
+   *
+   * Returns false when the session closed while connecting, so the caller
+   * stops instead of starting work on a closed session. A failed connect
+   * still counts as connected — same as before the extraction — so a later
+   * turn does not re-dial servers that already failed.
+   */
+  private async ensureMcpConnected(): Promise<boolean> {
+    if (this.mcpConnected || !this.mcpServers || Object.keys(this.mcpServers).length === 0) {
+      return !this.closed
+    }
+    try {
+      const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(
+        this.mcpServers,
+        undefined,
+        this._abortController?.signal,
+      )
+      if (this.closed) return false
+      if (mcpClients.length > 0) {
+        this.engine.setMcpClients(mcpClients)
+      }
+      if (mcpTools.length > 0) {
+        const permissionContext = this.appStateStore.getState().toolPermissionContext
+        this.engine.updateTools(assembleToolPool(permissionContext, mcpTools))
+      }
+      this.mcpTools = mcpTools
+    } catch (err) {
+      // MCP connection failed — continue without MCP tools
+      console.warn('SDK: MCP server connection failed:', err instanceof Error ? err.message : String(err))
+    }
+    this.mcpConnected = true
+    return !this.closed
+  }
+
+  async authenticateMcpServer(
+    name: string,
+    options?: {
+      onAuthorizationUrl?: (url: string) => void
+      signal?: AbortSignal
+    },
+  ): Promise<McpServerStatus> {
+    if (this.closed) {
+      throw new Error('SDK session is closed')
+    }
+    // A settings page signs in before the first turn; connect first so the
+    // server list — and the tool pool the reconnect swaps into — exists.
+    if (!(await this.ensureMcpConnected())) {
+      throw new Error('SDK session is closed')
+    }
+    const rawConfig = this.mcpServers?.[name]
+    if (rawConfig === undefined) {
+      throw new Error(`Server not found: ${name}`)
+    }
+    if (rawConfig === null || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+      throw new Error(
+        `Invalid MCP server config for '${name}': expected object, got ${rawConfig === null ? 'null' : Array.isArray(rawConfig) ? 'array' : typeof rawConfig}`,
+      )
+    }
+    // Same scoped config connectSdkMcpServers built for this server.
+    const config = {
+      ...(rawConfig as Record<string, unknown>),
+      scope: 'session',
+    } as unknown as ScopedMcpServerConfig
+    if (config.type !== 'sse' && config.type !== 'http') {
+      throw new Error(`Server type "${config.type}" does not support OAuth authentication`)
+    }
+    const serverConfig = config as unknown as McpSSEServerConfig | McpHTTPServerConfig
+
+    // A newer call for this server replaces the attempt still pending. Each
+    // attempt registers its own client, so one left running would exchange
+    // its code with the newer one's client and fail after the user had
+    // signed in — same rule as cli/print.ts mcp_authenticate.
+    this.pendingMcpAuth.get(name)?.abort()
+    const attempt = new AbortController()
+    this.pendingMcpAuth.set(name, attempt)
+    const sessionSignal = this._abortController?.signal
+    const stopAttempt = () => attempt.abort()
+    options?.signal?.addEventListener('abort', stopAttempt, { once: true })
+    sessionSignal?.addEventListener('abort', stopAttempt, { once: true })
+    if (sessionSignal?.aborted || options?.signal?.aborted) attempt.abort()
+
+    try {
+      // Mirror cli/print.ts mcp_authenticate and the authenticate tool:
+      // start the flow with skipBrowserOpen, capture the URL via
+      // onAuthorizationUrl, let the callback complete in the background.
+      // No race is needed here — the callback IS the URL delivery, and the
+      // awaited promise IS the completion signal; a flow that completes
+      // without a redirect simply never calls the callback.
+      await performMCPOAuthFlow(
+        name,
+        serverConfig,
+        url => options?.onAuthorizationUrl?.(url),
+        attempt.signal,
+        { skipBrowserOpen: true },
+      )
+      // Drop the 15-minute needs-auth memo, or the reconnect below would
+      // hand it back, stored tokens or not — as the authenticate tool does.
+      clearMcpAuthCache()
+      const result = await reconnectMcpServerImpl(name, config)
+
+      if (this.closed) {
+        // The session went away mid-reconnect: nothing here would use the
+        // client, and close() already ran its cleanup over the old list.
+        if (result.client.type === 'connected') {
+          await result.client.cleanup().catch(() => {})
+        }
+        return this.toMcpServerStatus(name, result)
+      }
+
+      // Swap just this server in, as the CLI does (prefix-based replacement):
+      // the reconnected tools replace the server's old ones — including the
+      // authenticate pseudo-tool on success — and the client record is
+      // replaced so the next turn's system:init reports the new status.
+      // updateTools validates (and commits) before setMcpClients runs, so a
+      // validation failure leaves both untouched.
+      const prefix = getMcpPrefix(name)
+      const permissionContext = this.appStateStore.getState().toolPermissionContext
+      if (result.client.type === 'connected') {
+        const nextTools = [
+          ...this.mcpTools.filter(tool => !tool.name?.startsWith(prefix)),
+          ...result.tools,
+        ]
+        this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
+        this.mcpTools = nextTools
+      } else if (result.client.type === 'failed') {
+        // The server's tools are stale — drop them. A server that still
+        // needs auth keeps its authenticate tool (below), so the host or the
+        // model can try again.
+        const nextTools = this.mcpTools.filter(tool => !tool.name?.startsWith(prefix))
+        this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
+        this.mcpTools = nextTools
+      }
+      const clients = this.engine.getMcpClients()
+      this.engine.setMcpClients(
+        clients.some(client => client.name === name)
+          ? clients.map(client => (client.name === name ? result.client : client))
+          : [...clients, result.client],
+      )
+      return this.toMcpServerStatus(name, result)
+    } finally {
+      options?.signal?.removeEventListener('abort', stopAttempt)
+      sessionSignal?.removeEventListener('abort', stopAttempt)
+      if (this.pendingMcpAuth.get(name) === attempt) this.pendingMcpAuth.delete(name)
+    }
+  }
+
+  /**
+   * The reconnected server's status in the shape system:init reports it —
+   * same fields cli/print.ts builds for mcp_status, minus the config, which
+   * stays with the session. Tools are listed only once connected, with the
+   * names the model sees.
+   */
+  private toMcpServerStatus(
+    name: string,
+    result: Awaited<ReturnType<typeof reconnectMcpServerImpl>>,
+  ): McpServerStatus {
+    return {
+      name,
+      status: result.client.type,
+      serverInfo: result.client.type === 'connected' ? result.client.serverInfo : undefined,
+      error: result.client.type === 'failed' ? result.client.error : undefined,
+      tools:
+        result.client.type === 'connected'
+          ? result.tools.map(tool => ({
+              name: tool.mcpInfo?.toolName ?? tool.name,
+              annotations: {
+                readOnly: tool.isReadOnly({}) || undefined,
+                destructive: tool.isDestructive?.({}) || undefined,
+                openWorld: tool.isOpenWorld?.({}) || undefined,
+              },
+            }))
+          : undefined,
+    }
   }
 }
 
