@@ -8,7 +8,10 @@ import {
   IMAGE_TARGET_RAW_SIZE,
 } from '../constants/apiLimits.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
-import { getImageProcessor } from '../tools/FileReadTool/imageProcessor.js'
+import {
+  getImageProcessor,
+  ImageProcessorUnavailableError,
+} from '../tools/FileReadTool/imageProcessor.js'
 import { logForDebugging } from './debug.js'
 import { execFileNoThrowWithCwd } from './execFileNoThrow.js'
 import { getFsImplementation } from './fsOperations.js'
@@ -133,10 +136,11 @@ export const CLIPBOARD_IMAGE_PASTE_GENERIC_ERROR =
 /**
  * User-facing text for a clipboard image paste that found bytes but could
  * not attach them. Resize/API-limit failures keep their message so Alt+V
- * does not collapse to "No image found".
+ * does not collapse to "No image found". Missing-processor failures retain
+ * their installation guidance.
  */
 export function formatClipboardImagePasteError(error: unknown): string {
-  return error instanceof ImageResizeError
+  return error instanceof ImageResizeError || error instanceof ImageProcessorUnavailableError
     ? error.message
     : CLIPBOARD_IMAGE_PASTE_GENERIC_ERROR
 }
@@ -151,10 +155,11 @@ export function logClipboardImagePasteRejection(error: unknown): void {
 
 /**
  * Native NSPasteboard path and the osascript/PowerShell path share this:
- * ImageResizeError is an admission failure, not "native reader unavailable".
+ * ImageResizeError and ImageProcessorUnavailableError describe attachment
+ * failures, not an empty clipboard or an unavailable native reader.
  */
 export function rethrowIfClipboardResizeError(error: unknown): void {
-  if (error instanceof ImageResizeError) {
+  if (error instanceof ImageResizeError || error instanceof ImageProcessorUnavailableError) {
     throw error
   }
 }

@@ -449,7 +449,7 @@ bundled**. They are loaded on demand, and the CLI prints an `npm install <pkg>`
 hint (add `-g` for the global CLI) if you enable a feature whose package is
 missing. Install only what you need:
 
-**Image handling note:** default global installs do **not** ship `sharp`. Clipboard paste, drag-and-drop of a local image path, and FileReadTool paths that decode a local file need `npm i -g sharp`. Forwarding an already-encoded image URL/base64 that the API accepts without local decode (passthrough) does not. This opt-in is intentional for published installs; it is not an accidental omission.
+**Image handling note:** default global installs do **not** ship `sharp`. Clipboard paste, drag-and-drop of a local image path, and FileReadTool paths that decode a local file need `npm i -g sharp`. If BMP clipboard conversion requires the missing package, paste reports installation guidance instead of saying the clipboard has no image. Forwarding an already-encoded image URL/base64 that the API accepts without local decode (passthrough) does not. This opt-in is intentional for published installs; it is not an accidental omission.
 
 | Feature | Trigger | Install |
 | --- | --- | --- |
