@@ -34,6 +34,7 @@ import {
   McpError,
   type PromptMessage,
   type ResourceLink,
+  ResourceListChangedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import memoize from 'lodash-es/memoize.js'
 import zipObject from 'lodash-es/zipObject.js'
@@ -1637,13 +1638,7 @@ export const connectToServer = memoize(
         // Also clear fetch caches (keyed by server name). Reconnection
         // creates a new connection object; without clearing, the next
         // fetch would return stale tools/resources from the old connection.
-        fetchToolsForClient.cache.delete(name)
-        fetchResourcesForClient.cache.delete(name)
-        fetchResourceTemplatesForClient.cache.delete(name)
-        fetchCommandsForClient.cache.delete(name)
-        if (feature('MCP_SKILLS')) {
-          fetchMcpSkillsForClient!.cache.delete(name)
-        }
+        invalidateMcpFetchCaches(name)
 
         connectToServer.cache.delete(key)
         logMCPDebug(name, `Cleared connection cache for reconnection`)
@@ -1844,7 +1839,7 @@ export const connectToServer = memoize(
         wsIdeCount: serverStats?.wsIdeCount,
         ...mcpBaseUrlAnalytics(serverRef),
       })
-      return {
+      const connected = {
         name,
         client,
         type: 'connected' as const,
@@ -1854,6 +1849,15 @@ export const connectToServer = memoize(
         config: serverRef,
         cleanup: wrappedCleanup,
       }
+      // Register the cache-only list_changed handler at the single
+      // connection choke point, so every path that connects a server —
+      // interactive, headless, dynamic (mcp_set_servers), and reconnects —
+      // refreshes its template cache on notifications. Interactive
+      // sessions replace it with the full handler from
+      // registerMcpListChangedHandlers. No-ops when the server does not
+      // declare listChanged support.
+      registerMcpResourceListChangedHandler(connected)
+      return connected
     } catch (error) {
       const connectionDurationMs = Date.now() - connectStartTime
       logEvent('tengu_mcp_server_connection_failed', {
@@ -1916,13 +1920,7 @@ export async function clearServerCache(
   // Clear from cache (both connection and fetch caches so reconnect
   // fetches fresh tools/resources/commands instead of stale ones)
   connectToServer.cache.delete(key)
-  fetchToolsForClient.cache.delete(name)
-  fetchResourcesForClient.cache.delete(name)
-  fetchResourceTemplatesForClient.cache.delete(name)
-  fetchCommandsForClient.cache.delete(name)
-  if (feature('MCP_SKILLS')) {
-    fetchMcpSkillsForClient!.cache.delete(name)
-  }
+  invalidateMcpFetchCaches(name)
 }
 
 /**
@@ -1978,6 +1976,31 @@ export function areMcpConfigsEqual(
 // reconnects), bounded to prevent unbounded growth with many MCP servers.
 const MCP_FETCH_CACHE_SIZE = 20
 export const MCP_TOOLS_LIST_RETRY_BUDGET_MS = 3_000
+
+/**
+ * Helper tools that expose MCP resources and resource templates to the
+ * model. Registered once any connected server supports resources, and
+ * removed when none does — see the lifetime handling in updateSdkMcp and
+ * reconcileMcpServers.
+ */
+export const MCP_RESOURCE_HELPER_TOOLS = [
+  ListMcpResourcesTool,
+  ListMcpResourceTemplatesTool,
+  ReadMcpResourceTool,
+]
+
+/**
+ * Generation counter for the shared discovery caches, bumped on every
+ * invalidation. refreshMcpResourcesAndTemplates captures the generation
+ * before traversing and discards the result if a replacement invalidated
+ * the caches mid-flight, so a stale refresh can never overwrite the
+ * replacement's entries or republish the old client.
+ */
+const mcpFetchCacheGenerations = new Map<string, number>()
+
+export function getMcpFetchCacheGeneration(name: string): number {
+  return mcpFetchCacheGenerations.get(name) ?? 0
+}
 
 /**
  * Encode MCP tool input for the auto-mode security classifier.
@@ -2430,6 +2453,11 @@ export const fetchResourceTemplatesForClient = memoizeWithLRU(
         client.name,
         `Failed to fetch resource templates: ${errorMessage(error)}`,
       )
+      // Never cache a failed traversal as an empty result: a transient
+      // failure at startup would otherwise keep reporting no templates
+      // after the server recovers. The memoized entry was stored when the
+      // call started, so evict it here and the next listing retries.
+      fetchResourceTemplatesForClient.cache.delete(client.name)
       return []
     }
   },
@@ -2445,28 +2473,45 @@ export const fetchResourceTemplatesForClient = memoizeWithLRU(
  * caller (e.g. a list_changed handler) can retain the previous AppState
  * by simply not publishing the failed refresh. A legacy server that
  * answers -32601 to template listing still succeeds with empty templates.
+ *
+ * If the server is replaced while the traversals are in flight, the
+ * refresh is stale: the caches are left alone and `stale` is true, so the
+ * caller must not publish the old client back into AppState.
  */
 export async function refreshMcpResourcesAndTemplates(
   client: MCPServerConnection,
 ): Promise<{
   resources: ServerResource[]
   resourceTemplates: ServerResourceTemplate[]
+  stale: boolean
 }> {
   if (client.type !== 'connected' || !client.capabilities?.resources) {
-    return { resources: [], resourceTemplates: [] }
+    return { resources: [], resourceTemplates: [], stale: false }
   }
 
+  const generation = getMcpFetchCacheGeneration(client.name)
   const [resources, resourceTemplates] = await Promise.all([
     listAllMcpResources(client),
     listAllMcpResourceTemplates(client),
   ])
+
+  if (getMcpFetchCacheGeneration(client.name) !== generation) {
+    // The server was replaced (and the caches invalidated) while this
+    // refresh was in flight. Discard it: writing the old client's data
+    // would overwrite the replacement's cache entries.
+    logMCPDebug(
+      client.name,
+      'Discarding stale resource refresh after server replacement',
+    )
+    return { resources: [], resourceTemplates: [], stale: true }
+  }
 
   fetchResourcesForClient.cache.set(client.name, Promise.resolve(resources))
   fetchResourceTemplatesForClient.cache.set(
     client.name,
     Promise.resolve(resourceTemplates),
   )
-  return { resources, resourceTemplates }
+  return { resources, resourceTemplates, stale: false }
 }
 
 /**
@@ -2477,6 +2522,10 @@ export async function refreshMcpResourcesAndTemplates(
  * templates, or commands.
  */
 export function invalidateMcpFetchCaches(name: string): void {
+  // Bump the generation first so any refresh already in flight for this
+  // server is recognised as stale when it completes (see
+  // refreshMcpResourcesAndTemplates).
+  mcpFetchCacheGenerations.set(name, getMcpFetchCacheGeneration(name) + 1)
   fetchToolsForClient.cache.delete(name)
   fetchResourcesForClient.cache.delete(name)
   fetchResourceTemplatesForClient.cache.delete(name)
@@ -2484,6 +2533,83 @@ export function invalidateMcpFetchCaches(name: string): void {
   if (feature('MCP_SKILLS')) {
     fetchMcpSkillsForClient!.cache.delete(name)
   }
+}
+
+/**
+ * Serialize resource-list refreshes per client. Notifications arrive
+ * concurrently, and a slow older traversal must never overwrite a newer
+ * refresh: each server's refreshes run one at a time, in arrival order.
+ * Notifications that arrive while a refresh is in flight are coalesced:
+ * at most one final refresh runs after the active one, so a burst cannot
+ * queue a traversal per notification. A failed refresh does not break the
+ * chain for later notifications.
+ */
+const resourceRefreshChains = new Map<string, Promise<void>>()
+const resourceRefreshPending = new Set<string>()
+
+export function enqueueResourceRefresh(
+  clientName: string,
+  refresh: () => Promise<void>,
+): Promise<void> {
+  const active = resourceRefreshChains.get(clientName)
+  if (active !== undefined) {
+    // A refresh is already running: remember that one final refresh is
+    // needed after it instead of queueing another traversal per notification.
+    resourceRefreshPending.add(clientName)
+    // Resolve after the coalesced final refresh settles, if one runs.
+    return active.then(
+      () => resourceRefreshChains.get(clientName) ?? Promise.resolve(),
+    )
+  }
+  const run = (async (): Promise<void> => {
+    try {
+      await refresh()
+    } finally {
+      resourceRefreshChains.delete(clientName)
+      if (resourceRefreshPending.delete(clientName)) {
+        // Changes arrived during the refresh: run one final refresh for them.
+        await enqueueResourceRefresh(clientName, refresh)
+      }
+    }
+  })()
+  // Keep the chain alive after a failure so later notifications still run.
+  resourceRefreshChains.set(clientName, run.catch(() => {}))
+  return run
+}
+
+/**
+ * Register the cache-only resources/list_changed handler for one connected
+ * server. Called from connectToServer and setupSdkMcpClients so every
+ * connection path — interactive, headless, dynamic (mcp_set_servers),
+ * reconnects, and SDK-managed servers — refreshes its template cache on
+ * notifications. Interactive sessions replace this handler with the full
+ * one from registerMcpListChangedHandlers (which also publishes the refresh
+ * into AppState); setNotificationHandler replaces rather than stacks, so
+ * the two never run together. Kept as a testable seam.
+ */
+export function registerMcpResourceListChangedHandler(
+  client: Extract<MCPServerConnection, { type: 'connected' }>,
+): void {
+  if (!client.capabilities?.resources?.listChanged) return
+  client.client.setNotificationHandler(
+    ResourceListChangedNotificationSchema,
+    async () => {
+      logMCPDebug(
+        client.name,
+        `Received resources/list_changed notification, refreshing resources`,
+      )
+      try {
+        await enqueueResourceRefresh(client.name, async () => {
+          await refreshMcpResourcesAndTemplates(client)
+        })
+      } catch (error) {
+        logMCPError(
+          client.name,
+          `Failed to refresh resources after list_changed notification: ${errorMessage(error)}`,
+        )
+      }
+    },
+  )
 }
 
 export const fetchCommandsForClient = memoizeWithLRU(
@@ -2647,17 +2773,11 @@ export async function reconnectMcpServerImpl(
     const resourceTools: Tool[] = []
     if (supportsResources) {
       // Only add resource tools if no other server has them
-      const hasResourceTools = [
-        ListMcpResourcesTool,
-        ListMcpResourceTemplatesTool,
-        ReadMcpResourceTool,
-      ].some(tool => tools.some(t => toolMatchesName(t, tool.name)))
+      const hasResourceTools = MCP_RESOURCE_HELPER_TOOLS.some(tool =>
+        tools.some(t => toolMatchesName(t, tool.name)),
+      )
       if (!hasResourceTools) {
-        resourceTools.push(
-          ListMcpResourcesTool,
-          ListMcpResourceTemplatesTool,
-          ReadMcpResourceTool,
-        )
+        resourceTools.push(...MCP_RESOURCE_HELPER_TOOLS)
       }
     }
 
@@ -2836,11 +2956,7 @@ export async function getMcpToolsCommandsAndResources(
       const resourceTools: Tool[] = []
       if (supportsResources && !resourceToolsAdded) {
         resourceToolsAdded = true
-        resourceTools.push(
-          ListMcpResourcesTool,
-          ListMcpResourceTemplatesTool,
-          ReadMcpResourceTool,
-        )
+        resourceTools.push(...MCP_RESOURCE_HELPER_TOOLS)
       }
 
       onConnectionAttempt({
@@ -3888,6 +4004,21 @@ export async function setupSdkMcpClients(
           serverTools.push(...sdkTools)
         }
 
+        // Warm the resource and template caches alongside tools so the
+        // deferred resource helpers read from cache on first use, exactly
+        // like servers connected through getMcpToolsCommandsAndResources.
+        if (capabilities?.resources) {
+          await Promise.all([
+            fetchResourcesForClient(connectedClient),
+            fetchResourceTemplatesForClient(connectedClient),
+          ])
+        }
+
+        // Register the cache-only list_changed handler: SDK clients never
+        // go through connectToServer or the interactive hook, so without
+        // this their template cache would never refresh on notifications.
+        registerMcpResourceListChangedHandler(connectedClient)
+
         return {
           client: connectedClient,
           tools: serverTools,
@@ -3914,6 +4045,22 @@ export async function setupSdkMcpClients(
       tools.push(...result.value.tools)
     }
     // If rejected (unexpected), the error was already logged inside the promise
+  }
+
+  // Register the resource helpers once when any connected SDK server
+  // supports resources, so the model can discover its templates. Without
+  // this, an SDK-managed server was the only resource-capable server and
+  // the helpers were never added anywhere. Lifetime is managed by
+  // updateSdkMcp, which drops them again when no server supports resources.
+  if (
+    clients.some(
+      c => c.type === 'connected' && c.capabilities?.resources,
+    ) &&
+    !MCP_RESOURCE_HELPER_TOOLS.some(tool =>
+      tools.some(t => toolMatchesName(t, tool.name)),
+    )
+  ) {
+    tools.push(...MCP_RESOURCE_HELPER_TOOLS)
   }
 
   return { clients, tools }

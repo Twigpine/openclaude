@@ -7,7 +7,10 @@ import {
   McpError,
   type ResourceTemplate,
 } from '@modelcontextprotocol/sdk/types.js'
-import { recursivelySanitizeUnicode } from '../../utils/sanitization.js'
+import {
+  recursivelySanitizeUnicode,
+  stripDangerousUnicodeChars,
+} from '../../utils/sanitization.js'
 import type {
   MCPServerConnection,
   ServerResource,
@@ -156,6 +159,13 @@ export async function listAllMcpResources(
  * unknown fields (including `x-` extensions) are dropped by construction,
  * and only annotation audience, priority, and lastModified survive.
  * Descriptive fields are capped; the URI template is kept exact.
+ *
+ * Projection happens before sanitization: only the retained fields ever
+ * reach the recursive sanitizer, so a hostile `_meta` can neither overflow
+ * it nor leak into the model-facing shape. The URI template is an
+ * identifier, not prose — it is stripped of hidden characters but never
+ * Unicode-normalized, so the listed value still addresses the same
+ * resource when the model builds a URI from it.
  */
 function projectResourceTemplate(
   template: ResourceTemplate,
@@ -167,12 +177,34 @@ function projectResourceTemplate(
       : value
   const capOptional = (value: string | undefined): string | undefined =>
     value === undefined ? undefined : capField(value)
-  const sanitized = recursivelySanitizeUnicode(template)
+  // Sanitize only the projected fields; uriTemplate is handled separately
+  // below so its exact identifier survives.
+  const sanitized = recursivelySanitizeUnicode({
+    name: template.name,
+    ...(template.title !== undefined && { title: template.title }),
+    ...(template.description !== undefined && {
+      description: template.description,
+    }),
+    ...(template.mimeType !== undefined && { mimeType: template.mimeType }),
+    ...(template.annotations !== undefined && {
+      annotations: {
+        ...(template.annotations.audience !== undefined && {
+          audience: template.annotations.audience,
+        }),
+        ...(template.annotations.priority !== undefined && {
+          priority: template.annotations.priority,
+        }),
+        ...(template.annotations.lastModified !== undefined && {
+          lastModified: template.annotations.lastModified,
+        }),
+      },
+    }),
+  })
   const title = capOptional(sanitized.title)
   const description = capOptional(sanitized.description)
   const mimeType = capOptional(sanitized.mimeType)
   return {
-    uriTemplate: sanitized.uriTemplate,
+    uriTemplate: stripDangerousUnicodeChars(template.uriTemplate),
     name: capField(sanitized.name),
     ...(title !== undefined && { title }),
     ...(description !== undefined && { description }),
@@ -212,16 +244,28 @@ export async function listAllMcpResourceTemplates(
     method: 'resources/templates/list',
     resultSchema: ListResourceTemplatesResultSchema,
     requestPage: async (request, resultSchema) => {
-      if (performance.now() > traversalDeadline) {
+      const remainingMs = traversalDeadline - performance.now()
+      if (remainingMs <= 0) {
         throw new Error(
           `MCP resources/templates/list traversal exceeded time limit (${MCP_RESOURCE_TEMPLATE_TRAVERSAL_TIMEOUT_MS / 1000}s)`,
         )
       }
       try {
-        return (await client.client.request(
-          request,
-          resultSchema,
-        )) as ListResourceTemplatesResult
+        // Bound this request by the remaining traversal budget, not the
+        // SDK's own 60s default: without it, a page that starts with 5s
+        // left could still wait a full minute. The SDK raises RequestTimeout
+        // when the budget runs out mid-request.
+        const result = (await client.client.request(request, resultSchema, {
+          timeout: remainingMs,
+        })) as ListResourceTemplatesResult
+        // A request can still resolve after the deadline (the timeout races
+        // the transport). Never treat or cache a late result as successful.
+        if (performance.now() > traversalDeadline) {
+          throw new Error(
+            `MCP resources/templates/list traversal exceeded time limit (${MCP_RESOURCE_TEMPLATE_TRAVERSAL_TIMEOUT_MS / 1000}s)`,
+          )
+        }
+        return result
       } catch (error) {
         // Legacy servers predate template listing. Only the first page can
         // report Method Not Found for a method the server never implemented;

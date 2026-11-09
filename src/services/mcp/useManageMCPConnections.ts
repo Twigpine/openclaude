@@ -6,6 +6,7 @@ import type { Command } from '../../commands.js'
 import type { Tool } from '../../Tool.js'
 import {
   clearServerCache,
+  enqueueResourceRefresh,
   fetchCommandsForClient,
   fetchToolsForClient,
   getMcpToolsCommandsAndResources,
@@ -99,28 +100,6 @@ type ConnectedListUpdate = ConnectedMCPServer & {
   tools?: Tool[]
   commands?: Command[]
   resources?: ServerResource[]
-}
-
-/**
- * Serialize resource-list refreshes per client. Notifications arrive
- * concurrently, and a slow older traversal must never overwrite a newer
- * refresh: each server's refreshes run one at a time, in arrival order.
- * A failed refresh does not break the chain for later notifications.
- */
-const resourceRefreshChains = new Map<string, Promise<void>>()
-
-function enqueueResourceRefresh(
-  clientName: string,
-  refresh: () => Promise<void>,
-): Promise<void> {
-  const previous = resourceRefreshChains.get(clientName) ?? Promise.resolve()
-  const next = previous.catch(() => {}).then(refresh)
-  // Keep the chain alive after a failure so later notifications still run.
-  resourceRefreshChains.set(
-    clientName,
-    next.catch(() => {}),
-  )
-  return next
 }
 
 /**
@@ -232,6 +211,7 @@ export function registerMcpListChangedHandlers(
           // Refresh resources and templates as one transaction: the caches
           // swap only after both traversals succeed, and updateServer runs
           // only then, so a failed refresh keeps the previous AppState.
+          // A stale refresh (server replaced mid-flight) publishes nothing.
           await enqueueResourceRefresh(client.name, async () => {
             if (feature('MCP_SKILLS')) {
               // Skills are discovered from resources, so refresh them too.
@@ -240,12 +220,16 @@ export function registerMcpListChangedHandlers(
               // its fresh result with our cached stale one.
               fetchMcpSkillsForClient!.cache.delete(client.name)
               fetchCommandsForClient.cache.delete(client.name)
-              const [{ resources: newResources }, mcpPrompts, mcpSkills] =
-                await Promise.all([
-                  refreshMcpResourcesAndTemplates(client),
-                  fetchCommandsForClient(client),
-                  fetchMcpSkillsForClient!(client),
-                ])
+              const [
+                { resources: newResources, stale },
+                mcpPrompts,
+                mcpSkills,
+              ] = await Promise.all([
+                refreshMcpResourcesAndTemplates(client),
+                fetchCommandsForClient(client),
+                fetchMcpSkillsForClient!(client),
+              ])
+              if (stale) return
               updateServer({
                 ...client,
                 resources: newResources,
@@ -255,8 +239,9 @@ export function registerMcpListChangedHandlers(
               // discovery rebuilds with the new set.
               clearSkillIndexCache?.()
             } else {
-              const { resources: newResources } =
+              const { resources: newResources, stale } =
                 await refreshMcpResourcesAndTemplates(client)
+              if (stale) return
               updateServer({ ...client, resources: newResources })
             }
           })

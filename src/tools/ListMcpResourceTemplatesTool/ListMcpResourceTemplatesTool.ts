@@ -121,8 +121,17 @@ export const ListMcpResourceTemplatesTool = buildTool({
       }),
     )
 
+    const data = results.flat()
+    // Reject oversized results instead of returning them: several servers
+    // can each stay under the per-server byte budget while the combined
+    // payload still exceeds what the tool may return or persist.
+    if (jsonStringify(data).length > 100_000) {
+      throw new Error(
+        'Resource template result exceeds 100,000 characters',
+      )
+    }
     return {
-      data: results.flat(),
+      data,
     }
   },
   renderToolUseMessage,

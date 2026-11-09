@@ -229,9 +229,12 @@ import {
   connectToServer,
   clearServerCache,
   fetchToolsForClient,
+  fetchResourcesForClient,
+  fetchResourceTemplatesForClient,
   areMcpConfigsEqual,
   invalidateMcpFetchCaches,
   reconnectMcpServerImpl,
+  MCP_RESOURCE_HELPER_TOOLS,
 } from 'src/services/mcp/client.js'
 import {
   filterMcpServersByPolicy,
@@ -1641,21 +1644,41 @@ function runHeadlessStreaming(
       // Use both old (connectedServerNames) and new (currentServerNames) to remove
       // stale SDK tools when servers are added or removed.
       const allSdkNames = uniq([...connectedServerNames, ...currentServerNames])
-      setAppState(prev => ({
-        ...prev,
-        mcp: {
-          ...prev.mcp,
-          tools: [
-            ...prev.mcp.tools.filter(
-              t =>
-                !allSdkNames.some(name =>
-                  t.name.startsWith(getMcpPrefix(name)),
-                ),
-            ),
-            ...sdkTools,
-          ],
-        },
-      }))
+      const resourceHelperNames = new Set(
+        MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
+      )
+      setAppState(prev => {
+        // The resource helpers have no per-server prefix, so the prefix
+        // filter below never removes them. Drop them when no remaining
+        // server supports resources, or a removed resource-capable server
+        // would leave them behind. SDK clients are merged separately, so
+        // they are covered by sdkSetup.clients; regular and dynamic clients
+        // live in prev.mcp.clients.
+        const anyResourceCapableServer =
+          sdkSetup.clients.some(
+            c => c.type === 'connected' && c.capabilities?.resources,
+          ) ||
+          prev.mcp.clients.some(
+            c => c.type === 'connected' && c.capabilities?.resources,
+          )
+        return {
+          ...prev,
+          mcp: {
+            ...prev.mcp,
+            tools: [
+              ...prev.mcp.tools.filter(
+                t =>
+                  !allSdkNames.some(name =>
+                    t.name.startsWith(getMcpPrefix(name)),
+                  ) &&
+                  (anyResourceCapableServer ||
+                    !resourceHelperNames.has(t.name)),
+              ),
+              ...sdkTools,
+            ],
+          },
+        }
+      })
 
       // Set up the special internal VSCode MCP server if necessary.
       setupVscodeSdkMcp(sdkClients)
@@ -5683,8 +5706,14 @@ export async function handleMcpSetServers(
   for (const name of currentSdkNames) {
     if (!newSdkNames.has(name)) {
       const client = newSdkClients.find(c => c.name === name)
-      if (client && client.type === 'connected') {
-        await client.cleanup()
+      if (client) {
+        // Invalidate the shared discovery caches before cleanup so a
+        // same-name replacement server can never serve the removed
+        // server's tools, resources, templates, or commands.
+        invalidateMcpFetchCaches(name)
+        if (client.type === 'connected') {
+          await client.cleanup()
+        }
       }
       newSdkClients = newSdkClients.filter(c => c.name !== name)
       const prefix = `mcp__${name}__`
@@ -5714,6 +5743,7 @@ export async function handleMcpSetServers(
     processServers,
     dynamicState,
     setAppState,
+    newSdkClients,
   )
 
   return {
@@ -5735,11 +5765,16 @@ export async function handleMcpSetServers(
 /**
  * Reconciles the current set of dynamic MCP servers with a new desired state.
  * Handles additions, removals, and config changes.
+ *
+ * @param sdkClients SDK-managed clients, when known by the caller. They are
+ *   not stored in AppState, so the resource-helper lifetime check below
+ *   needs them passed in to avoid dropping helpers an SDK server provides.
  */
 export async function reconcileMcpServers(
   desiredConfigs: Record<string, McpServerConfigForProcessTransport>,
   currentState: DynamicMcpState,
   setAppState: (f: (prev: AppState) => AppState) => void,
+  sdkClients: MCPServerConnection[] = [],
 ): Promise<{
   response: SDKControlMcpSetServersResponse
   newState: DynamicMcpState
@@ -5816,6 +5851,23 @@ export async function reconcileMcpServers(
       if (client.type === 'connected') {
         const serverTools = await fetchToolsForClient(client)
         newTools.push(...serverTools)
+        if (client.capabilities?.resources) {
+          // Warm the resource and template caches so the deferred resource
+          // helpers read from cache on first use, and register the helpers
+          // — without this, a dynamically added server was the only
+          // resource-capable server and the model could not discover its
+          // templates. Dedup by name: another dynamic server may already
+          // have added them.
+          await Promise.all([
+            fetchResourcesForClient(client),
+            fetchResourceTemplatesForClient(client),
+          ])
+          for (const helper of MCP_RESOURCE_HELPER_TOOLS) {
+            if (!newTools.some(t => t.name === helper.name)) {
+              newTools.push(helper)
+            }
+          }
+        }
       } else if (client.type === 'failed') {
         errors[name] = client.error || 'Connection failed'
       }
@@ -5826,6 +5878,20 @@ export async function reconcileMcpServers(
       errors[name] = err.message
       logError(err)
     }
+  }
+
+  // The dynamic state's own tool list keeps the helpers only while a
+  // dynamic server supports resources; AppState decides the global
+  // lifetime (a regular or SDK server may still provide them).
+  if (
+    !newClients.some(
+      c => c.type === 'connected' && c.capabilities?.resources,
+    )
+  ) {
+    const resourceHelperNames = new Set(
+      MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
+    )
+    newTools = newTools.filter(t => !resourceHelperNames.has(t.name))
   }
 
   // Build new configs
@@ -5866,11 +5932,25 @@ export async function reconcileMcpServers(
       return !allDynamicServerNames.has(c.name)
     })
 
+    // The resource helpers have no per-server prefix, so neither filter
+    // above removes them. Drop them when no remaining server — dynamic,
+    // regular, or SDK-managed — supports resources.
+    const resourceHelperNames = new Set(
+      MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
+    )
+    const anyResourceCapableServer = [
+      ...nonDynamicClients,
+      ...newClients,
+      ...sdkClients,
+    ].some(c => c.type === 'connected' && c.capabilities?.resources)
+
     return {
       ...prev,
       mcp: {
         ...prev.mcp,
-        tools: [...nonDynamicTools, ...newTools],
+        tools: [...nonDynamicTools, ...newTools].filter(
+          t => anyResourceCapableServer || !resourceHelperNames.has(t.name),
+        ),
         clients: [...nonDynamicClients, ...newClients],
       },
     }
