@@ -758,6 +758,124 @@ describe('MCP resource-template discovery', () => {
     ])
   })
 
+  test('a failed fetch does not evict a replacement fetch installed during its first yield', async () => {
+    const { connection, requests } = makeTemplateConnection(
+      'yield-race-templates',
+      {
+        'resources/templates/list': [
+          new Error('500 Internal Server Error'),
+          {
+            resourceTemplates: [
+              { uriTemplate: 'file:///{path}', name: 'templated-file' },
+            ],
+          },
+        ],
+      },
+    )
+
+    // Start the first fetch, then — synchronously, before its first
+    // continuation runs — invalidate and start the replacement fetch.
+    // The first fetch resumes after the replacement is installed, so a
+    // cache-entry check alone would point at the replacement's promise
+    // and its failure would evict the replacement's successful templates.
+    const failing = fetchResourceTemplatesForClient(connection)
+    invalidateMcpFetchCaches(connection.name)
+    const replacement = fetchResourceTemplatesForClient(connection)
+    expect(await failing).toEqual([])
+    expect(await replacement).toEqual([
+      {
+        uriTemplate: 'file:///{path}',
+        name: 'templated-file',
+        server: 'yield-race-templates',
+      },
+    ])
+    // The replacement's templates stay cached: no third traversal runs.
+    expect(
+      (await fetchResourceTemplatesForClient(connection)).map(t => t.name),
+    ).toEqual(['templated-file'])
+    expect(
+      requests.filter(r => r.method === 'resources/templates/list'),
+    ).toHaveLength(2)
+  })
+
+  test('first-page MethodNotFound arriving after the deadline is rejected', async () => {
+    vi.useFakeTimers()
+    const connection = {
+      type: 'connected',
+      name: 'overdue-legacy-templates',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { resources: {} },
+      client: {
+        request: async (
+          _request: ListRequest,
+          _resultSchema: { parse: (value: unknown) => unknown },
+        ) => {
+          // The legacy response arrives 61 seconds in — past the 60s
+          // traversal deadline. It must reject like any other overdue
+          // page, not be converted into a cached empty list.
+          await new Promise(resolve => setTimeout(resolve, 61_000))
+          throw new McpError(ErrorCode.MethodNotFound, 'Method not found')
+        },
+      },
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    const pending = listAllMcpResourceTemplates(connection)
+    vi.advanceTimersByTime(61_000)
+    await flushMicrotasks()
+    await expect(pending).rejects.toThrow('Method not found')
+  })
+
+  test('overdue first-page MethodNotFound is not cached: the next listing retries after recovery', async () => {
+    vi.useFakeTimers()
+    let templatesCalls = 0
+    const connection = {
+      type: 'connected',
+      name: 'overdue-recovery-templates',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { resources: {} },
+      client: {
+        request: async (
+          _request: ListRequest,
+          resultSchema: { parse: (value: unknown) => unknown },
+        ) => {
+          templatesCalls++
+          if (templatesCalls === 1) {
+            await new Promise(resolve => setTimeout(resolve, 61_000))
+            throw new McpError(ErrorCode.MethodNotFound, 'Method not found')
+          }
+          return resultSchema.parse({
+            resourceTemplates: [
+              { uriTemplate: 'file:///{path}', name: 'templated-file' },
+            ],
+          })
+        },
+      },
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    // The first listing reports no templates — the overdue error is a
+    // failure, not a legacy empty result...
+    const first = fetchResourceTemplatesForClient(connection)
+    // Let the traversal issue the first-page request (arming its 61s
+    // timer) before moving the clock: the fetch yields once before
+    // traversing, so the request is not issued synchronously.
+    await flushMicrotasks()
+    vi.advanceTimersByTime(61_000)
+    await flushMicrotasks()
+    expect(await first).toEqual([])
+    // ...but the failure must not be cached: the next listing retries and
+    // sees the recovered server.
+    expect(await fetchResourceTemplatesForClient(connection)).toEqual([
+      {
+        uriTemplate: 'file:///{path}',
+        name: 'templated-file',
+        server: 'overdue-recovery-templates',
+      },
+    ])
+    expect(templatesCalls).toBe(2)
+  })
+
   test('traversal rejects while a later page request is still pending', async () => {
     vi.useFakeTimers()
     let page = 0
@@ -1356,6 +1474,314 @@ describe('MCP resource-template discovery', () => {
     ).toEqual(['template-2'])
   })
 
+  test('late list_changed notification from a retired connection publishes nothing', async () => {
+    const { registerMcpListChangedHandlers } = await import(
+      './useManageMCPConnections.js'
+    )
+    const mcpSkillsEnabled = feature('MCP_SKILLS') ? true : false
+    if (mcpSkillsEnabled) {
+      await import('../../skills/loadSkillsDir.js')
+    }
+    const fetchMcpSkillsForClient = mcpSkillsEnabled
+      ? (await import('../../skills/mcpSkills.js')).fetchMcpSkillsForClient
+      : null
+    const handlers = new Map<string, () => Promise<void>>()
+    let generation = 1
+    let listCalls = 0
+    const client = {
+      request: async (
+        request:
+          | ListRequest
+          | { method: 'resources/read'; params: { uri: string } },
+        resultSchema: { parse: (value: unknown) => unknown },
+      ) => {
+        const observedGeneration = generation
+        if (request.method === 'resources/read') {
+          return resultSchema.parse({
+            contents: [
+              {
+                uri: request.params.uri,
+                mimeType: 'text/markdown',
+                text: [
+                  '---',
+                  `name: skill-${observedGeneration}`,
+                  'description: Late notification skill',
+                  '---',
+                  `# Skill ${observedGeneration}`,
+                ].join('\n'),
+              },
+            ],
+          })
+        }
+        const listRequest = request as ListRequest
+        listCalls++
+        if (listRequest.method === 'resources/list') {
+          return resultSchema.parse({
+            resources: [
+              {
+                uri: `file:///resource-${observedGeneration}`,
+                name: `resource-${observedGeneration}`,
+              },
+            ],
+          })
+        }
+        if (listRequest.method === 'resources/templates/list') {
+          return resultSchema.parse({
+            resourceTemplates: [
+              {
+                uriTemplate: `file:///{template-${observedGeneration}}`,
+                name: `template-${observedGeneration}`,
+              },
+            ],
+          })
+        }
+        if (listRequest.method === 'tools/list') {
+          return resultSchema.parse({
+            tools: [{ name: 'tool', inputSchema: { type: 'object' } }],
+          })
+        }
+        return resultSchema.parse({ prompts: [] })
+      },
+      setNotificationHandler: (
+        schema: unknown,
+        handler: () => Promise<void>,
+      ) => {
+        const method =
+          schema === ToolListChangedNotificationSchema
+            ? 'tools/list'
+            : schema === ResourceListChangedNotificationSchema
+              ? 'resources/list'
+              : schema === PromptListChangedNotificationSchema
+                ? 'prompts/list'
+                : undefined
+        if (method) handlers.set(method, handler)
+      },
+    }
+    const connection = {
+      type: 'connected',
+      name: 'late-notification-refresh',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: {
+        tools: { listChanged: true },
+        resources: { listChanged: true },
+        prompts: { listChanged: true },
+      },
+      client,
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    await Promise.all([
+      fetchResourcesForClient(connection),
+      fetchResourceTemplatesForClient(connection),
+      fetchMcpSkillsForClient?.(connection) ?? Promise.resolve([]),
+    ])
+    type ListChangedUpdate = Parameters<
+      Parameters<typeof registerMcpListChangedHandlers>[1]
+    >[0]
+    const updates: ListChangedUpdate[] = []
+    registerMcpListChangedHandlers(connection, update => updates.push(update))
+    const resourcesHandler = handlers.get('resources/list')
+    expect(resourcesHandler).toBeDefined()
+
+    // The server is replaced — the old connection is retired, but stdio
+    // cleanup left it running, so its notification still arrives. The
+    // retired connection's handler must discard it instead of queueing a
+    // refresh that would republish the old client's data.
+    generation = 2
+    invalidateMcpFetchCaches(connection.name)
+    const callsBefore = listCalls
+    await resourcesHandler!()
+    await flushMicrotasks()
+
+    expect(updates).toEqual([])
+    expect(listCalls).toBe(callsBefore)
+    expect(fetchResourceTemplatesForClient.cache.has(connection.name)).toBe(
+      false,
+    )
+    expect(
+      (await fetchResourceTemplatesForClient(connection)).map(t => t.name),
+    ).toEqual(['template-2'])
+  })
+
+  test('late list_changed notification does not refresh the cache-only handler', async () => {
+    let generation = 1
+    let listCalls = 0
+    const handlers = new Map<string, () => Promise<void>>()
+    const client = {
+      request: async (
+        request: ListRequest,
+        resultSchema: { parse: (value: unknown) => unknown },
+      ) => {
+        const observedGeneration = generation
+        listCalls++
+        if (request.method === 'resources/list') {
+          return resultSchema.parse({
+            resources: [
+              {
+                uri: `file:///resource-${observedGeneration}`,
+                name: `resource-${observedGeneration}`,
+              },
+            ],
+          })
+        }
+        if (request.method === 'resources/templates/list') {
+          return resultSchema.parse({
+            resourceTemplates: [
+              {
+                uriTemplate: `file:///{template-${observedGeneration}}`,
+                name: `template-${observedGeneration}`,
+              },
+            ],
+          })
+        }
+        return resultSchema.parse({ prompts: [] })
+      },
+      setNotificationHandler: (
+        schema: unknown,
+        handler: () => Promise<void>,
+      ) => {
+        if (schema === ResourceListChangedNotificationSchema) {
+          handlers.set('resources/list', handler)
+        }
+      },
+    }
+    const connection = {
+      type: 'connected',
+      name: 'late-cache-only-refresh',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { resources: { listChanged: true } },
+      client,
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    expect(
+      (await fetchResourceTemplatesForClient(connection)).map(t => t.name),
+    ).toEqual(['template-1'])
+    registerMcpResourceListChangedHandler(connection)
+    const resourcesHandler = handlers.get('resources/list')
+    expect(resourcesHandler).toBeDefined()
+
+    // Replace the server, then deliver a late notification on the retired
+    // connection. The cache-only handler must discard it: no traversal
+    // runs and the invalidated cache stays empty.
+    generation = 2
+    invalidateMcpFetchCaches(connection.name)
+    const callsBefore = listCalls
+    await resourcesHandler!()
+    await flushMicrotasks()
+
+    expect(listCalls).toBe(callsBefore)
+    expect(fetchResourceTemplatesForClient.cache.has(connection.name)).toBe(
+      false,
+    )
+    expect(
+      (await fetchResourceTemplatesForClient(connection)).map(t => t.name),
+    ).toEqual(['template-2'])
+  })
+
+  test('a queued refresh recorded for a retired connection does not replay after replacement', async () => {
+    const { enqueueResourceRefresh } = await import('./client.js')
+    let releaseFirstResources: (() => void) | undefined
+    let firstResourcesGate: Promise<void> | undefined
+    let resourcesListCalls = 0
+    let replayedRefreshRan = false
+    const client = {
+      request: async (
+        request: ListRequest,
+        resultSchema: { parse: (value: unknown) => unknown },
+      ) => {
+        if (request.method === 'resources/list') {
+          resourcesListCalls++
+          if (resourcesListCalls === 1 && firstResourcesGate) {
+            await firstResourcesGate
+          }
+          return resultSchema.parse({
+            resources: [{ uri: 'file:///r1', name: 'r1' }],
+          })
+        }
+        if (request.method === 'resources/templates/list') {
+          return resultSchema.parse({
+            resourceTemplates: [
+              { uriTemplate: 'file:///{t1}', name: 't1' },
+            ],
+          })
+        }
+        return resultSchema.parse({ prompts: [] })
+      },
+    }
+    const connection = {
+      type: 'connected',
+      name: 'retired-replay-refresh',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { resources: { listChanged: true } },
+      client,
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    // Gate the active refresh's resources traversal.
+    firstResourcesGate = new Promise<void>(resolve => {
+      releaseFirstResources = resolve
+    })
+    const active = enqueueResourceRefresh(connection.name, async () => {
+      await refreshMcpResourcesAndTemplates(connection)
+    })
+    await flushMicrotasks()
+    expect(resourcesListCalls).toBe(1)
+
+    // The server is replaced while the refresh is in flight. A late
+    // notification from the retired connection now queues a refresh: it
+    // must record the retired connection's generation, not the
+    // replacement's, so the replay fence discards it.
+    invalidateMcpFetchCaches(connection.name)
+    const queued = enqueueResourceRefresh(
+      connection.name,
+      async () => {
+        replayedRefreshRan = true
+        await refreshMcpResourcesAndTemplates(connection)
+      },
+      0,
+    )
+    releaseFirstResources!()
+    await active
+    await queued
+    await flushMicrotasks()
+
+    expect(replayedRefreshRan).toBe(false)
+    expect(resourcesListCalls).toBe(1)
+  })
+
+  test('tool and prompt refresh updates carry the refresh-only guard', async () => {
+    const { registerMcpListChangedHandlers } = await import(
+      './useManageMCPConnections.js'
+    )
+    const { connection, handlers } = makeListChangedConnection(
+      'guard-refresh',
+      [{ uri: 'file:///r1', name: 'r1' }],
+      [{ uriTemplate: 'file:///{t1}', name: 't1' }],
+    )
+    type ListChangedUpdate = Parameters<
+      Parameters<typeof registerMcpListChangedHandlers>[1]
+    >[0]
+    const updates: ListChangedUpdate[] = []
+    registerMcpListChangedHandlers(connection, update => updates.push(update))
+    const toolsHandler = handlers.get('tools/list')
+    const promptsHandler = handlers.get('prompts/list')
+    expect(toolsHandler).toBeDefined()
+    expect(promptsHandler).toBeDefined()
+
+    // A refresh queued before its server is removed must not resurrect
+    // it: both refresh updates carry the guard the resources handler
+    // already had.
+    await toolsHandler!()
+    await promptsHandler!()
+    await flushMicrotasks()
+
+    expect(updates).toHaveLength(2)
+    for (const update of updates) {
+      expect(update.requireExistingClient).toBe(true)
+    }
+  })
+
   test('failed template fetch keeps a newer cache entry installed by a refresh', async () => {
     let templatesCalls = 0
     let releaseFirstTemplates: (() => void) | undefined
@@ -1788,6 +2214,11 @@ describe('MCP resource-template discovery', () => {
           } as unknown as JSONRPCMessage
         }
         if (msg.method === 'resources/templates/list') {
+          // Capture the generation when the request is sent, not when its
+          // response is built: a delayed older request must answer with
+          // the generation it started with, or the test cannot tell a
+          // late warm-up overwrite apart from the newer request.
+          const requestGeneration = generation
           templatesCalls++
           if (templatesCalls === 1) {
             await templatesGate
@@ -1798,8 +2229,8 @@ describe('MCP resource-template discovery', () => {
             result: {
               resourceTemplates: [
                 {
-                  uriTemplate: `file:///{t${generation}}`,
-                  name: `t${generation}`,
+                  uriTemplate: `file:///{t${requestGeneration}}`,
+                  name: `t${requestGeneration}`,
                 },
               ],
             },

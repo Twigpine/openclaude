@@ -281,11 +281,19 @@ export async function listAllMcpResourceTemplates(
         // Legacy servers predate template listing. Only the first page can
         // report Method Not Found for a method the server never implemented;
         // a later -32601 is a real protocol failure and stays one.
+        // A Method Not Found that arrives after the traversal deadline
+        // must not be cached as an empty list: the response is overdue,
+        // the server may have recovered by the next listing, and the
+        // empty result would hide its templates. Reject it so the caller
+        // retries instead of serving the stale empty entry.
         if (
           !('params' in request) &&
           error instanceof McpError &&
           error.code === ErrorCode.MethodNotFound
         ) {
+          if (performance.now() > traversalDeadline) {
+            throw error
+          }
           return { resourceTemplates: [] }
         }
         throw error

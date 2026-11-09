@@ -233,6 +233,7 @@ import {
   fetchResourceTemplatesForClient,
   areMcpConfigsEqual,
   invalidateMcpFetchCaches,
+  isBuiltInMcpResourceHelperTool,
   reconnectMcpServerImpl,
   MCP_RESOURCE_HELPER_TOOLS,
 } from 'src/services/mcp/client.js'
@@ -1589,67 +1590,165 @@ function runHeadlessStreaming(
     }
   }
 
-  async function updateSdkMcp() {
-    // Check if SDK MCP servers need to be updated (new servers added or removed)
-    const currentServerNames = new Set(Object.keys(sdkMcpConfigs))
-    const connectedServerNames = new Set(sdkClients.map(c => c.name))
+  // Serialize SDK setup runs: a second setup starting while one server is
+  // still connecting could otherwise close a client the first setup
+  // already published, and the first setup could then republish the
+  // closed client and its tools. Chaining also makes a query that awaits
+  // updateSdkMcp wait for in-flight discovery, so it never assembles
+  // tools before the SDK clients' tools and resource helpers exist.
+  let sdkMcpSetupChain: Promise<void> = Promise.resolve()
 
-    // Check if there are any differences (additions or removals)
-    const hasNewServers = Array.from(currentServerNames).some(
-      name => !connectedServerNames.has(name),
-    )
-    const hasRemovedServers = Array.from(connectedServerNames).some(
-      name => !currentServerNames.has(name),
-    )
-    // Check if any SDK clients are pending and need to be upgraded
-    const hasPendingSdkClients = sdkClients.some(c => c.type === 'pending')
-    // Check if any SDK clients failed their handshake and need to be retried.
-    // Without this, a client that lands in 'failed' (e.g. handshake timeout on
-    // a WS reconnect race) stays failed forever — its name satisfies the
-    // connectedServerNames diff but it contributes zero tools.
-    const hasFailedSdkClients = sdkClients.some(c => c.type === 'failed')
+  async function updateSdkMcp(): Promise<void> {
+    const runUpdate = async (): Promise<void> => {
+      // Desired SDK servers exclude disabled ones: a server disabled via
+      // mcp_toggle stays disabled until re-enabled and must not be
+      // reconnected here.
+      const desiredConfigs: Record<string, McpSdkServerConfig> = {}
+      for (const [name, config] of Object.entries(sdkMcpConfigs)) {
+        if (!isMcpServerDisabled(name)) {
+          desiredConfigs[name] = config
+        }
+      }
+      const currentServerNames = new Set(Object.keys(desiredConfigs))
+      const connectedServerNames = new Set(sdkClients.map(c => c.name))
 
-    const haveServersChanged =
-      hasNewServers ||
-      hasRemovedServers ||
-      hasPendingSdkClients ||
-      hasFailedSdkClients
-
-    if (haveServersChanged) {
-      // Retire every current SDK client before re-initialization: all of
-      // them are recreated below, so invalidate each one's shared discovery
-      // caches — this bumps the generation, discarding any refresh already
-      // in flight — close retired connections so their handlers cannot
-      // complete a post-invalidation refresh, and drop them from the
-      // discoverable set so the mcp_message loop cannot route a
-      // notification to a retired client while the replacement connects.
-      // A retired client's refresh would otherwise repopulate the cache
-      // and the replacement's warm-up would serve that stale entry.
+      // Retire only clients that are gone, changed, still pending, or
+      // failed. An unchanged connected client keeps serving in-flight
+      // tool calls while a sibling server is added: retiring every
+      // client here closed them mid-call and failed those calls with
+      // `Connection closed`.
+      const preservedClients: MCPServerConnection[] = []
+      const retiredClients: MCPServerConnection[] = []
       for (const client of sdkClients) {
+        const desired = desiredConfigs[client.name]
+        const needsRetirement =
+          desired === undefined ||
+          client.type === 'pending' ||
+          client.type === 'failed' ||
+          !areMcpConfigsEqual(client.config, {
+            ...desired,
+            scope: 'dynamic' as const,
+          })
+        if (needsRetirement) {
+          retiredClients.push(client)
+        } else {
+          preservedClients.push(client)
+        }
+      }
+      const hasNewServers = [...currentServerNames].some(
+        name => !connectedServerNames.has(name),
+      )
+      const haveServersChanged =
+        hasNewServers || retiredClients.length > 0
+
+      if (!haveServersChanged) {
+        return
+      }
+
+      // Retire every client that is gone, changed, pending, or failed:
+      // invalidate each one's shared discovery caches — this bumps the
+      // generation, discarding any refresh already in flight — close
+      // retired connections so their handlers cannot complete a
+      // post-invalidation refresh, and drop them from the discoverable
+      // set so the mcp_message loop cannot route a notification to a
+      // retired client while the replacement connects. A retired
+      // client's refresh would otherwise repopulate the cache and the
+      // replacement's warm-up would serve that stale entry. Preserved
+      // clients are untouched.
+      for (const client of retiredClients) {
         invalidateMcpFetchCaches(client.name)
         if (client.type === 'connected') {
           await client.cleanup()
         }
       }
-      sdkClients = []
+      sdkClients = preservedClients
 
-      // Re-initialize all SDK MCP servers with current config
+      // Only (re)connect servers that are new or changed; preserved
+      // clients stay live with their tools.
+      const setupConfigs: Record<string, McpSdkServerConfig> = {}
+      for (const name of currentServerNames) {
+        if (!preservedClients.some(c => c.name === name)) {
+          setupConfigs[name] = desiredConfigs[name]
+        }
+      }
+      const preservedResourceCapable = preservedClients.some(
+        c => c.type === 'connected' && c.capabilities?.resources,
+      )
+      // Preserved SDK tools: keep a server tool only while its server is
+      // preserved, and the built-in helpers only while a preserved SDK
+      // server can still serve them. A retired server's tools — prefixed
+      // or, in CLAUDE_AGENT_SDK_MCP_NO_PREFIX mode, unprefixed — must
+      // not survive in sdkTools: buildAllTools merges it directly.
+      const preservedTools = sdkTools.filter(t => {
+        const owner = t.mcpInfo?.serverName
+        if (owner !== undefined) {
+          return preservedClients.some(c => c.name === owner)
+        }
+        if (isBuiltInMcpResourceHelperTool(t)) {
+          return preservedResourceCapable
+        }
+        return true
+      })
+
+      // Re-initialize the new or changed SDK MCP servers with current config
       const sdkSetup = await setupSdkMcpClients(
-        sdkMcpConfigs,
+        setupConfigs,
         (serverName, message) =>
           structuredIO.sendMcpMessage(serverName, message),
         // Publish each client as soon as it connects — before its warm-up
         // finishes — so startup notifications arriving during warm-up reach
         // the new client instead of being dropped by the input loop.
+        // Runs are serialized above, so no superseded setup can publish
+        // here; still, skip a client whose server was disabled mid-setup
+        // — the publish below cleans it up instead of republishing it.
         client => {
+          if (isMcpServerDisabled(client.name)) return
           sdkClients = [
             ...sdkClients.filter(c => c.name !== client.name),
             client,
           ]
         },
       )
-      sdkClients = sdkSetup.clients
-      sdkTools = sdkSetup.tools
+      // The desired set may have moved while setup ran (e.g. mcp_toggle
+      // disabled a server): publish only clients still desired and
+      // enabled, and retire the rest instead of republishing them.
+      const publishedSetupClients: MCPServerConnection[] = []
+      for (const setupClient of sdkSetup.clients) {
+        if (
+          desiredConfigs[setupClient.name] === undefined ||
+          isMcpServerDisabled(setupClient.name)
+        ) {
+          if (setupClient.type === 'connected') {
+            try {
+              await setupClient.cleanup()
+            } catch (error) {
+              logError(error)
+            }
+          }
+          continue
+        }
+        publishedSetupClients.push(setupClient)
+      }
+      sdkClients = [...preservedClients, ...publishedSetupClients]
+      const publishedNames = new Set(
+        publishedSetupClients.map(c => c.name),
+      )
+      const anyPublishedResourceCapable = publishedSetupClients.some(
+        c => c.type === 'connected' && c.capabilities?.resources,
+      )
+      sdkTools = [
+        ...preservedTools,
+        ...sdkSetup.tools.filter(t => {
+          const owner = t.mcpInfo?.serverName
+          if (owner !== undefined) {
+            return publishedNames.has(owner)
+          }
+          if (isBuiltInMcpResourceHelperTool(t)) {
+            return preservedResourceCapable || anyPublishedResourceCapable
+          }
+          return true
+        }),
+      ]
 
       // Store SDK MCP tools in appState so subagents can access them via
       // assembleToolPool. Only tools are stored here — SDK clients are already
@@ -1657,18 +1756,19 @@ function runHeadlessStreaming(
       // Use both old (connectedServerNames) and new (currentServerNames) to remove
       // stale SDK tools when servers are added or removed.
       const allSdkNames = uniq([...connectedServerNames, ...currentServerNames])
-      const resourceHelperNames = new Set(
-        MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
-      )
       setAppState(prev => {
         // The resource helpers have no per-server prefix, so the prefix
         // filter below never removes them. Drop them when no remaining
         // server supports resources, or a removed resource-capable server
         // would leave them behind. SDK clients are merged separately, so
-        // they are covered by sdkSetup.clients; regular and dynamic clients
-        // live in prev.mcp.clients.
+        // they are covered by sdkClients; regular and dynamic clients
+        // live in prev.mcp.clients. A retired server's tools are removed
+        // by owner as well as by prefix: in
+        // CLAUDE_AGENT_SDK_MCP_NO_PREFIX mode its tools are unprefixed,
+        // so the prefix filter alone would leave them in AppState and a
+        // synchronous subagent could then call the retired client.
         const anyResourceCapableServer =
-          sdkSetup.clients.some(
+          sdkClients.some(
             c => c.type === 'connected' && c.capabilities?.resources,
           ) ||
           prev.mcp.clients.some(
@@ -1685,8 +1785,12 @@ function runHeadlessStreaming(
                     !allSdkNames.some(name =>
                       t.name.startsWith(getMcpPrefix(name)),
                     ) &&
+                    !(
+                      t.mcpInfo?.serverName !== undefined &&
+                      allSdkNames.includes(t.mcpInfo.serverName)
+                    ) &&
                     (anyResourceCapableServer ||
-                      !resourceHelperNames.has(t.name)),
+                      !isBuiltInMcpResourceHelperTool(t)),
                 ),
                 ...sdkTools,
               ],
@@ -1699,6 +1803,13 @@ function runHeadlessStreaming(
       // Set up the special internal VSCode MCP server if necessary.
       setupVscodeSdkMcp(sdkClients)
     }
+
+    const run = sdkMcpSetupChain.then(runUpdate, runUpdate)
+    sdkMcpSetupChain = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
   }
 
   void updateSdkMcp()
@@ -1727,6 +1838,24 @@ function runHeadlessStreaming(
       ),
       'name',
     )
+    // The captured startup `tools` can reintroduce the resource helpers
+    // after the last resource-capable server is disabled: the toggle
+    // removes them from AppState but not from this closure's `tools`.
+    // Drop the built-in helpers when no connected server can serve them;
+    // server-owned tools that share a helper name stay.
+    const anyResourceCapableServer =
+      sdkClients.some(
+        c => c.type === 'connected' && c.capabilities?.resources,
+      ) ||
+      dynamicMcpState.clients.some(
+        c => c.type === 'connected' && c.capabilities?.resources,
+      ) ||
+      appState.mcp.clients.some(
+        c => c.type === 'connected' && c.capabilities?.resources,
+      )
+    if (!anyResourceCapableServer) {
+      allTools = allTools.filter(t => !isBuiltInMcpResourceHelperTool(t))
+    }
     if (options.permissionPromptToolName) {
       allTools = allTools.filter(
         tool => !toolMatchesName(tool, options.permissionPromptToolName!),
@@ -1829,10 +1958,19 @@ function runHeadlessStreaming(
             ...prev.mcp,
             tools: uniqBy(
               [
+                // Remove a replaced server's tools by owner as well as by
+                // prefix: in CLAUDE_AGENT_SDK_MCP_NO_PREFIX mode its tools
+                // are unprefixed, so the prefix filter alone would leave
+                // them in AppState and a synchronous subagent could then
+                // call the retired client.
                 ...prev.mcp.tools.filter(
                   t =>
                     !allSdkNames.some(name =>
                       t.name.startsWith(getMcpPrefix(name)),
+                    ) &&
+                    !(
+                      t.mcpInfo?.serverName !== undefined &&
+                      allSdkNames.includes(t.mcpInfo.serverName)
                     ),
                 ),
                 ...sdkTools,
@@ -3490,7 +3628,36 @@ function runHeadlessStreaming(
               ...dynamicMcpState.clients,
               ...currentAppState.mcp.clients,
             ].find(c => c.name === serverName)
-            if (client && client.type === 'connected') {
+            // SDK-managed servers live in this closure's state, not
+            // AppState: retire the client here so the disable takes
+            // effect immediately — otherwise it stays connected in
+            // sdkClients and template listing can still query it.
+            // updateSdkMcp also excludes disabled servers from its
+            // desired set, so it will not reconnect this server.
+            const sdkClient = sdkClients.find(c => c.name === serverName)
+            if (sdkClient) {
+              invalidateMcpFetchCaches(serverName)
+              if (sdkClient.type === 'connected') {
+                try {
+                  await sdkClient.cleanup()
+                } catch (error) {
+                  logError(error)
+                }
+              }
+              sdkClients = sdkClients.filter(c => c.name !== serverName)
+              const sdkPrefix = getMcpPrefix(serverName)
+              const anyRemainingSdkResourceCapable = sdkClients.some(
+                c => c.type === 'connected' && c.capabilities?.resources,
+              )
+              sdkTools = sdkTools.filter(
+                t =>
+                  !t.name.startsWith(sdkPrefix) &&
+                  t.mcpInfo?.serverName !== serverName &&
+                  (anyRemainingSdkResourceCapable ||
+                    !isBuiltInMcpResourceHelperTool(t)),
+              )
+            }
+            if (client && client.type === 'connected' && !sdkClient) {
               await clearServerCache(serverName, config)
             }
             // Update appState.mcp to reflect disabled status and remove tools/commands/resources
@@ -3508,9 +3675,6 @@ function runHeadlessStreaming(
               // available with no server behind them. Dynamic clients are
               // mirrored in AppState, so the mapped list above covers
               // them; sdkClients are merged separately and checked here.
-              const resourceHelperNames = new Set(
-                MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
-              )
               const anyResourceCapableServer =
                 clients.some(
                   c => c.type === 'connected' && c.capabilities?.resources,
@@ -3527,8 +3691,9 @@ function runHeadlessStreaming(
                     prev.mcp.tools,
                     t =>
                       t.name?.startsWith(prefix) ||
+                      t.mcpInfo?.serverName === serverName ||
                       (!anyResourceCapableServer &&
-                        resourceHelperNames.has(t.name)),
+                        isBuiltInMcpResourceHelperTool(t)),
                   ),
                   commands: reject(prev.mcp.commands, c =>
                     commandBelongsToServer(c, serverName),
@@ -5771,17 +5936,19 @@ export async function handleMcpSetServers(
   // The resource helpers have no per-server prefix, so the prefix filter
   // above never removes them. Drop them from the SDK tool list when the
   // removal took the last resource-capable SDK server — otherwise the next
-  // query offers helpers with no SDK server behind them.
+  // query offers helpers with no SDK server behind them. Only the
+  // built-in helpers go: a still-connected server's own tool that shares
+  // a helper name (e.g. a no-prefix server supplying ReadMcpResourceTool)
+  // carries its mcpInfo.serverName and must stay.
   if (
     sdkRemoved.length > 0 &&
     !newSdkClients.some(
       c => c.type === 'connected' && c.capabilities?.resources,
     )
   ) {
-    const resourceHelperNames = new Set(
-      MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
+    newSdkTools = newSdkTools.filter(
+      t => !isBuiltInMcpResourceHelperTool(t),
     )
-    newSdkTools = newSdkTools.filter(t => !resourceHelperNames.has(t.name))
   }
 
   // Add new SDK servers as pending - they'll be upgraded to connected
@@ -5995,10 +6162,9 @@ export async function reconcileMcpServers(
 
     // The resource helpers have no per-server prefix, so neither filter
     // above removes them. Drop them when no remaining server — dynamic,
-    // regular, or SDK-managed — supports resources.
-    const resourceHelperNames = new Set(
-      MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
-    )
+    // regular, or SDK-managed — supports resources. Only the built-in
+    // helpers go: a still-connected server's own tool that shares a
+    // helper name carries its mcpInfo.serverName and must stay.
     const anyResourceCapableServer = [
       ...nonDynamicClients,
       ...newClients,
@@ -6010,7 +6176,8 @@ export async function reconcileMcpServers(
       mcp: {
         ...prev.mcp,
         tools: uniqBy([...nonDynamicTools, ...newTools], 'name').filter(
-          t => anyResourceCapableServer || !resourceHelperNames.has(t.name),
+          t =>
+            anyResourceCapableServer || !isBuiltInMcpResourceHelperTool(t),
         ),
         clients: [...nonDynamicClients, ...newClients],
       },

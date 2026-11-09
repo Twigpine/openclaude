@@ -115,4 +115,58 @@ describe('handleMcpSetServers — SDK resource helper removal', () => {
     // The SDK server's own prefixed tool is gone too.
     expect(result.newSdkState.tools).toEqual([])
   })
+
+  test('removing the last resource-capable SDK server keeps a still-connected server-owned tool with a helper name', async () => {
+    const sdkA = makeConnectedClient('sdk-a', true)
+    const sdkB = makeConnectedClient('sdk-b', false)
+    // Server B is not resource-capable, but in no-prefix mode it supplies
+    // its own tool named ReadMcpResourceTool. A name-only helper filter
+    // would drop it together with the built-in helpers.
+    const serverOwnedHelper = {
+      name: 'ReadMcpResourceTool',
+      mcpInfo: { serverName: 'sdk-b', toolName: 'ReadMcpResourceTool' },
+    } as unknown as Tool
+    const sdkState: SdkMcpState = {
+      configs: {
+        'sdk-a': { type: 'sdk', name: 'sdk-a' },
+        'sdk-b': { type: 'sdk', name: 'sdk-b' },
+      },
+      clients: [sdkA, sdkB],
+      tools: [
+        listResourcesTool,
+        listTemplatesTool,
+        readResourceTool,
+        serverOwnedHelper,
+        { name: 'mcp__sdk-a__someTool' } as unknown as Tool,
+      ],
+    }
+    let state = makeAppState(
+      [serverOwnedHelper, listResourcesTool],
+      [sdkB],
+    )
+    const setAppState = (fn: (prev: AppState) => AppState) => {
+      state = fn(state)
+    }
+
+    const result = await handleMcpSetServers(
+      { 'sdk-b': { type: 'sdk', name: 'sdk-b' } },
+      sdkState,
+      { configs: {}, clients: [], tools: [] },
+      setAppState,
+    )
+
+    expect(result.response.removed).toEqual(['sdk-a'])
+    // The built-in helpers are gone from the SDK tool list...
+    for (const helper of MCP_RESOURCE_HELPER_TOOLS) {
+      if (helper.name === 'ReadMcpResourceTool') continue
+      expect(
+        result.newSdkState.tools.map(t => t.name),
+      ).not.toContain(helper.name)
+    }
+    // ...but server B's own tool with the helper name stays, here and in
+    // AppState — while the built-in helper copy in AppState is dropped,
+    // since no remaining server supports resources.
+    expect(result.newSdkState.tools).toContain(serverOwnedHelper)
+    expect(state.mcp.tools).toEqual([serverOwnedHelper])
+  })
 })

@@ -1990,6 +1990,22 @@ export const MCP_RESOURCE_HELPER_TOOLS = [
 ]
 
 /**
+ * True only for the built-in resource helper tools. Server-owned tools
+ * keep their `mcpInfo.serverName`, even when a no-prefix SDK server
+ * supplies a tool with a helper's name — name-only filters would drop a
+ * still-connected server's tool when the last resource-capable server
+ * goes away. Use this wherever helper lifetime is decided by name.
+ */
+export function isBuiltInMcpResourceHelperTool(tool: Tool): boolean {
+  return (
+    tool.mcpInfo?.serverName === undefined &&
+    MCP_RESOURCE_HELPER_TOOLS.some(helper =>
+      toolMatchesName(tool, helper.name),
+    )
+  )
+}
+
+/**
  * Generation counter for the shared discovery caches, bumped on every
  * invalidation. refreshMcpResourcesAndTemplates captures the generation
  * before traversing and discards the result if a replacement invalidated
@@ -2001,6 +2017,14 @@ const mcpFetchCacheGenerations = new Map<string, number>()
 export function getMcpFetchCacheGeneration(name: string): number {
   return mcpFetchCacheGenerations.get(name) ?? 0
 }
+
+/**
+ * Per-server fetch sequence for resource templates, advanced synchronously
+ * each time fetchResourceTemplatesForClient starts a traversal. A fetch's
+ * failure must only evict the cache entry its own traversal installed —
+ * see fetchResourceTemplatesForClient.
+ */
+const templateFetchSequences = new Map<string, number>()
 
 /**
  * Encode MCP tool input for the auto-mode security classifier.
@@ -2442,6 +2466,18 @@ export const fetchResourceTemplatesForClient = memoizeWithLRU(
   async (client: MCPServerConnection): Promise<ServerResourceTemplate[]> => {
     if (client.type !== 'connected') return []
 
+    // Capture the generation and fetch sequence synchronously, before the
+    // first await. The memoized wrapper stores this call's promise
+    // synchronously, but invalidation plus a replacement fetch can run
+    // before this function resumes after its first yield — cache.get()
+    // below would then return the replacement's promise, and a failure
+    // here would evict the replacement's successful templates. The
+    // generation and sequence recorded here identify this fetch's own
+    // traversal, so eviction only happens when nothing replaced it.
+    const startGeneration = getMcpFetchCacheGeneration(client.name)
+    const fetchSequence = (templateFetchSequences.get(client.name) ?? 0) + 1
+    templateFetchSequences.set(client.name, fetchSequence)
+
     // The memoized wrapper stores this call's promise when the function
     // first suspends; yield once so the entry captured below is this
     // fetch's own promise rather than the previous entry.
@@ -2466,7 +2502,12 @@ export const fetchResourceTemplatesForClient = memoizeWithLRU(
       // only if this failed fetch still owns the entry. A notification
       // refresh may have installed a newer entry while the fetch was
       // pending, and evicting it would drop the refreshed templates.
+      // The generation and sequence guards cover the harder case: an
+      // invalidation plus a replacement fetch that ran before this fetch
+      // resumed, which would make ownEntry refer to the replacement.
       if (
+        getMcpFetchCacheGeneration(client.name) === startGeneration &&
+        templateFetchSequences.get(client.name) === fetchSequence &&
         fetchResourceTemplatesForClient.cache.get(client.name) === ownEntry
       ) {
         fetchResourceTemplatesForClient.cache.delete(client.name)
@@ -2589,15 +2630,27 @@ export function invalidateMcpFetchCaches(name: string): void {
 export function enqueueResourceRefresh(
   clientName: string,
   refresh: () => Promise<void>,
+  /**
+   * Cache generation the originating connection was registered at. A
+   * notification from a retired connection must never queue or replay a
+   * refresh: without this, a late notification arriving after a
+   * replacement samples the new generation and its replay overwrites the
+   * replacement's resources and templates. Defaults to the current
+   * generation for callers that already checked currency.
+   */
+  expectedGeneration: number = getMcpFetchCacheGeneration(clientName),
 ): Promise<void> {
   const active = resourceRefreshChains.get(clientName)
   if (active !== undefined) {
     // A refresh is already running: remember the newest callback so the
     // final refresh replays the latest connection's work instead of
-    // queueing another traversal per notification.
+    // queueing another traversal per notification. Record the
+    // originating connection's generation, not the current one: a late
+    // notification from a retired connection would otherwise sample the
+    // replacement's generation and pass the replay fence below.
     resourceRefreshPending.set(clientName, {
       refresh,
-      generation: getMcpFetchCacheGeneration(clientName),
+      generation: expectedGeneration,
     })
     // Resolve after the coalesced final refresh settles, if one runs.
     return active.then(
@@ -2619,7 +2672,11 @@ export function enqueueResourceRefresh(
           getMcpFetchCacheGeneration(clientName) === pending.generation
         ) {
           // Changes arrived during the refresh: run one final refresh for them.
-          await enqueueResourceRefresh(clientName, pending.refresh)
+          await enqueueResourceRefresh(
+            clientName,
+            pending.refresh,
+            pending.generation,
+          )
         }
       }
     }
@@ -2643,17 +2700,36 @@ export function registerMcpResourceListChangedHandler(
   client: Extract<MCPServerConnection, { type: 'connected' }>,
 ): void {
   if (!client.capabilities?.resources?.listChanged) return
+  // Generation this connection was registered at. Invalidation bumps the
+  // generation when the server is replaced, so a notification arriving
+  // on the retired connection — e.g. stdio cleanup left the old server
+  // running — is recognisable as stale even though the replacement
+  // already advanced the generation it would otherwise sample.
+  const connectionGeneration = getMcpFetchCacheGeneration(client.name)
   client.client.setNotificationHandler(
     ResourceListChangedNotificationSchema,
     async () => {
+      if (
+        getMcpFetchCacheGeneration(client.name) !== connectionGeneration
+      ) {
+        logMCPDebug(
+          client.name,
+          `Ignoring resources/list_changed notification from a retired connection`,
+        )
+        return
+      }
       logMCPDebug(
         client.name,
         `Received resources/list_changed notification, refreshing resources`,
       )
       try {
-        await enqueueResourceRefresh(client.name, async () => {
-          await refreshMcpResourcesAndTemplates(client)
-        })
+        await enqueueResourceRefresh(
+          client.name,
+          async () => {
+            await refreshMcpResourcesAndTemplates(client)
+          },
+          connectionGeneration,
+        )
       } catch (error) {
         logMCPError(
           client.name,
