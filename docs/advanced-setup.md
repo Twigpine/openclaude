@@ -331,8 +331,9 @@ and switch models with `/model` or `OPENAI_MODEL`. The older
 
 `/model` shows the gateway's list of active models from the public
 `GET https://api.twigpine.com/v1/models` endpoint (no key needed). OpenClaude
-caches that list for a day and fetches it again at startup once the cache has
-expired; press `r` in `/model` to refresh it on demand. If the startup refresh
+caches that list for an hour and fetches it again at startup once the cache has
+expired, so a model the gateway adds shows up on the next launch an hour or more
+later; press `r` in `/model` to refresh it on demand. If the startup refresh
 fails, the picker keeps showing the last cached list, so a model the gateway has
 retired since then can stay listed until a refresh succeeds. A manual refresh
 discards the cached list first, so if it fails only the catalog floor below

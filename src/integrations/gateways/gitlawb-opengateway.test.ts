@@ -86,6 +86,7 @@ describe('gitlawb-opengateway live model mapping', () => {
     ).toEqual(['auto', 'mimo-v2.6-pro', 'mimo-v2.6-flash'])
     expect(opengateway.catalog?.source).toBe('hybrid')
     expect(opengateway.catalog?.discoveryRefreshMode).toBe('startup')
+    expect(opengateway.catalog?.discoveryCacheTtl).toBe('1h')
   })
 
   test('maps gateway routes including auto and free models', () => {

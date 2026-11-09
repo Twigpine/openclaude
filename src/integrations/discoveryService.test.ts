@@ -820,6 +820,63 @@ describe('discoverModelsForRoute', () => {
     ])
   })
 
+  test('opengateway startup refresh refetches a cached list once it is an hour old', async () => {
+    const { getDiscoveryCacheKey, refreshStartupDiscoveryForRoute } =
+      await loadDiscoveryServiceModule()
+
+    delete process.env.OPENGATEWAY_API_KEY
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_API_KEYS
+    let callCount = 0
+    setMockFetch(mock(() => {
+      callCount++
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: 'qwen/qwen3.8-max', name: 'Qwen 3.8 Max', status: 'active' },
+              { id: 'z-ai/glm-5.3', name: 'GLM 5.3', status: 'active' },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+    }) as unknown as typeof globalThis.fetch)
+    const cacheKey = getDiscoveryCacheKey('gitlawb-opengateway')
+    const cachedLineup = [
+      { id: 'z-ai/glm-5.2', apiName: 'z-ai/glm-5.2', label: 'GLM 5.2' },
+    ]
+    const apiNamesOf = (result: { models: Array<{ apiName: string }> } | null) =>
+      result?.models.map(model => model.apiName)
+
+    // A list cached half an hour ago is still fresh: no request.
+    await setCachedModels(cacheKey, {
+      models: cachedLineup,
+      updatedAt: Date.now() - 30 * 60 * 1000,
+    })
+    const recent = await refreshStartupDiscoveryForRoute('gitlawb-opengateway')
+    expect(recent?.source).toBe('cache')
+    expect(callCount).toBe(0)
+    expect(apiNamesOf(recent)).toContain('z-ai/glm-5.2')
+
+    // Two hours old (well inside a day): the next launch fetches the live
+    // list, so a model the gateway added since then shows up.
+    await setCachedModels(cacheKey, {
+      models: cachedLineup,
+      updatedAt: Date.now() - 2 * 60 * 60 * 1000,
+    })
+    const refreshed = await refreshStartupDiscoveryForRoute('gitlawb-opengateway')
+    expect(refreshed?.source).toBe('network')
+    expect(callCount).toBe(1)
+    expect(apiNamesOf(refreshed)).toEqual([
+      'auto',
+      'mimo-v2.6-pro',
+      'mimo-v2.6-flash',
+      'qwen/qwen3.8-max',
+      'z-ai/glm-5.3',
+    ])
+  })
+
   test('openai-compatible discovery applies descriptor static headers with auth', async () => {
     const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
 
