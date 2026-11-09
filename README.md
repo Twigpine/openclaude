@@ -277,6 +277,12 @@ names on Windows.
 Unobservable force termination, host crashes, and power loss remain `stale` on
 every platform.
 
+`openclaude logs <id-or-name> -f` follows the session selected at startup,
+even if its name is later reused. It drains the final log bytes and stops when
+that session reaches `exited`, `failed`, `killed`, or `stale`. Missing or
+unreadable session metadata keeps the follower running; interrupt it to stop.
+The command remains a log viewer and does not return the child's exit code.
+
 `openclaude attach <id-or-name>` currently reports the matching session and
 points to `openclaude logs <id> -f`; full terminal reattach is not implemented
 for local background sessions yet.
