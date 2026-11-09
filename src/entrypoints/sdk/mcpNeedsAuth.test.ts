@@ -121,6 +121,10 @@ let heldExchange: {
   answer: () => void
   answered: Promise<void>
 } | null = null
+/** An authorized MCP initialize the stand-in keeps waiting until the test lets it answer. */
+let heldInitialize: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
+/** When set, the stand-in answers 401 to a bearer token it would accept. */
+let rejectTokens = false
 /** Authorization-server metadata the stand-in sends headers for, then holds. */
 let heldMetadata: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
 /** Every session a test opens; teardown closes them, whatever the test did. */
@@ -236,11 +240,17 @@ function serveNeedingAuth(invalidClient = false): string {
         }
         return Response.json(tokens)
       }
-      if (path === '/mcp' && request.headers.get('authorization')?.startsWith('Bearer token-for-')) {
+      if (path === '/mcp' && request.headers.get('authorization')?.startsWith('Bearer token-for-') && !rejectTokens) {
         if (request.method !== 'POST') return new Response(null, { status: 405 })
         const rpc = (await request.json()) as { id?: string | number; method: string }
         // A notification gets no body back.
         if (rpc.id === undefined) return new Response(null, { status: 202 })
+        // A reconnect's initialize can be held, so a test can act while the
+        // reconnect is pending — abort it, supersede it, close the session.
+        if (rpc.method === 'initialize' && heldInitialize) {
+          heldInitialize.arrived = true
+          await heldInitialize.answered
+        }
         const result =
           rpc.method === 'initialize'
             ? {
@@ -297,6 +307,16 @@ function holdExchangeFor(clientId: string, refuse: boolean) {
   })
   heldExchange = { clientId, refuse, arrived: false, answer, answered }
   return heldExchange
+}
+
+/** Makes the stand-in hold its answer to an authorized initialize. */
+function holdInitialize() {
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldInitialize = { arrived: false, answer, answered }
+  return heldInitialize
 }
 
 /** Calls the authenticate tool the way the engine does, within a session. */
@@ -406,6 +426,7 @@ beforeEach(async () => {
   registrations = 0
   refusedExchanges = 0
   failMcpRequests = false
+  rejectTokens = false
 })
 
 afterEach(async () => {
@@ -413,6 +434,8 @@ afterEach(async () => {
   for (const sdkSession of sdkSessions.splice(0)) sdkSession.close()
   heldExchange?.answer()
   heldExchange = null
+  heldInitialize?.answer()
+  heldInitialize = null
   heldMetadata?.answer()
   heldMetadata = null
   server?.stop(true)
@@ -1269,7 +1292,7 @@ function openSessionWith(mcpServers: Record<string, unknown>): SDKSession {
 }
 
 /** An engine that records what the session swaps into it, and does nothing else. */
-function recordingEngine() {
+function recordingEngine(onUpdateTools?: (tools: Tool[]) => void) {
   const calls: { setMcpClients: MCPServerConnection[][]; updateTools: Tool[][] } = {
     setMcpClients: [],
     updateTools: [],
@@ -1282,6 +1305,7 @@ function recordingEngine() {
     },
     updateTools: (tools: Tool[]) => {
       calls.updateTools.push([...tools])
+      onUpdateTools?.(tools)
     },
     getMcpClients: () => calls.setMcpClients.at(-1) ?? [],
     getMessages: () => [],
@@ -1292,8 +1316,8 @@ function recordingEngine() {
 }
 
 /** Swap a session's engine for a recording one, as v2.sessionEnvTurn does. */
-function recordEngine(session: SDKSession) {
-  const recorded = recordingEngine()
+function recordEngine(session: SDKSession, onUpdateTools?: (tools: Tool[]) => void) {
+  const recorded = recordingEngine(onUpdateTools)
   ;(session as unknown as { setEngine: (engine: unknown) => void }).setEngine(recorded.engine)
   return recorded.calls
 }
@@ -1359,6 +1383,59 @@ test('authenticateMcpServer SWAPS THE CLIENT AND THE REAL TOOLS INTO THE SESSION
   const clients = calls.setMcpClients.at(-1)!
   expect(clients.map(client => [client.name, client.type])).toEqual([['gated', 'connected']])
 }, 30_000)
+
+/**
+ * The user-visible behaviour the recording engine above cannot show: what
+ * the next turn actually reports. system:init is yielded before the model
+ * is called, so taking it and stopping needs no provider — the turn never
+ * gets that far.
+ */
+async function systemInitOf(session: SDKSession): Promise<{
+  mcp_servers: { name: string; status: string }[]
+  tools: string[]
+}> {
+  for await (const msg of session.sendMessage('hi')) {
+    if (msg.type === 'system' && msg.subtype === 'init') {
+      return msg as unknown as {
+        mcp_servers: { name: string; status: string }[]
+        tools: string[]
+      }
+    }
+  }
+  throw new Error('turn ended without system:init')
+}
+
+test('THE NEXT TURN AFTER AUTHENTICATION REPORTS THE CONNECTED SERVER AND ITS REAL TOOL', async () => {
+  // system:init reports the key's source, so a key must be present to build
+  // it — a placeholder, never sent anywhere: the turn stops at system:init,
+  // before the model is called.
+  const restoreEnv = snapshotEnv(['ANTHROPIC_API_KEY'])
+  process.env.ANTHROPIC_API_KEY = 'test-key-for-system-init'
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+
+  try {
+    const before = await systemInitOf(session)
+    expect(before.mcp_servers).toContainEqual({ name: 'gated', status: 'needs-auth' })
+    expect(before.tools).toContain('mcp__gated__authenticate')
+    expect(before.tools).not.toContain('mcp__gated__hello')
+
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    expect((await done).status).toBe('connected')
+
+    const after = await systemInitOf(session)
+    expect(after.mcp_servers).toContainEqual({ name: 'gated', status: 'connected' })
+    expect(after.tools).toContain('mcp__gated__hello')
+    expect(after.tools).not.toContain('mcp__gated__authenticate')
+  } finally {
+    restoreEnv()
+  }
+}, 60_000)
 
 /** A name the session never configured is a host error, not a connection outcome. */
 test('authenticateMcpServer REJECTS AN UNKNOWN SERVER', async () => {
@@ -1461,4 +1538,382 @@ test('A FAILED EXCHANGE REJECTS, AND NOTHING RECONNECTS', async () => {
   await expect(done).rejects.toThrow()
   expect(storedAccessTokens()).toEqual([])
   expect(reconnects).toBe(0)
+}, 30_000)
+
+// ============================================================================
+// CodeRabbit follow-up on #2493.
+// ============================================================================
+
+/**
+ * The first turn and a pre-turn sign-in share one initialization: if both
+ * start it, the turn's delayed install must not put the needs-auth client
+ * and pseudo-tool back over the reconnected server.
+ *
+ * The turn starts first, so its connect is the one stalled in
+ * authorization-server metadata; the sign-in then joins the same
+ * initialization instead of starting its own. (The stall is released
+ * promptly: the MCP SDK times out a held metadata fetch on its own.)
+ */
+test('A FIRST TURN OVERLAPPING PRE-TURN AUTHENTICATION INSTALLS THE MCP SERVERS ONCE', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldMetadata = { arrived: false, answer, answered }
+  const held = heldMetadata
+
+  // The first turn starts first: its connect stalls in metadata, and its
+  // sendMessage has already run init(), so the sign-in below reaches the
+  // shared initialization within a tick.
+  const turn = (async () => {
+    for await (const _ of session.sendMessage('hi')) {
+      // The recording engine yields nothing; the turn ends after the connect.
+    }
+  })()
+  await waitFor(() => held.arrived)
+
+  const seenUrls: string[] = []
+  const auth = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  // A rejection with no handler yet is an unhandled error; the flow is
+  // abandoned at teardown, when the session closes.
+  const authCaught = auth.catch(() => 'caught')
+  // Let the sign-in reach the shared initialization before releasing the
+  // stall: init is memoized by now, so a tick of microtasks is enough.
+  await Bun.sleep(10)
+  held.answer()
+  await turn
+  await waitFor(() => seenUrls.length > 0)
+
+  // The connect installed once, for both callers.
+  expect(calls.setMcpClients).toHaveLength(1)
+  expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
+    ['gated', 'needs-auth'],
+  ])
+  expect(calls.updateTools).toHaveLength(1)
+  expect(calls.updateTools[0]!.map(tool => tool.name)).toContain('mcp__gated__authenticate')
+
+  session.close()
+  await expect(authCaught).resolves.toBe('caught')
+}, 30_000)
+
+/**
+ * An aborted sign-in must not wait for an unrelated server's connection
+ * timeout: the caller's signal is observed while initialization runs, and
+ * the initialization itself keeps running for the session — a first turn
+ * still gets its servers.
+ */
+test('ABORTING A SIGN-IN DURING MCP INITIALIZATION REJECTS AT ONCE, AND THE CONNECT STILL LANDS', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldMetadata = { arrived: false, answer, answered }
+  const held = heldMetadata
+
+  const caller = new AbortController()
+  const done = session.authenticateMcpServer('gated', { signal: caller.signal })
+  const rejected = done.catch(error => error)
+  await waitFor(() => held.arrived)
+  caller.abort()
+
+  // The sign-in rejects while the metadata is still held — it did not wait
+  // for the connect to finish.
+  const error = await Promise.race([
+    rejected,
+    Bun.sleep(2_000).then(() => {
+      throw new Error('sign-in still pending after the caller aborted')
+    }),
+  ])
+  expect(error).toBeInstanceOf(realAuth.AuthenticationCancelledError)
+
+  // The session's own initialization was not cancelled with it.
+  held.answer()
+  await waitFor(() => calls.setMcpClients.length > 0)
+  expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
+    ['gated', 'needs-auth'],
+  ])
+}, 30_000)
+
+/**
+ * The flow's credentials belong to the namespace it started in. Another
+ * session's turn may apply its own environment while the user is in the
+ * browser; the exchange, the cache clear and the reconnect must still land
+ * where the flow began.
+ */
+test('authenticateMcpServer FINISHES IN THE NAMESPACE IT STARTED IN WHEN THE ENVIRONMENT CHANGES MID-FLOW', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const session = openGatedSession(url)
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => seenUrls.length > 0)
+
+    // Another session's turn applies its own environment while the user is
+    // in the browser.
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+
+    const status = await done
+    expect(status.status).toBe('connected')
+    expect(storedAccessTokens(storeIn(origin))).toEqual([
+      `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
+    ])
+    expect(stores.has(storeIn(ambient))).toBe(false)
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * A caller abort that lands while the reconnect is pending must not install
+ * the reconnected client or resolve: the attempt is over, and the session
+ * keeps its needs-auth client and pseudo-tool.
+ */
+test('ABORTING DURING THE RECONNECT REJECTS AND INSTALLS NOTHING', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  const held = holdInitialize()
+
+  const caller = new AbortController()
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+    signal: caller.signal,
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  await waitFor(() => held.arrived)
+  caller.abort()
+  held.answer()
+
+  await expect(done).rejects.toBeInstanceOf(realAuth.AuthenticationCancelledError)
+  // Only the initial connect installed; the cancelled reconnect installed
+  // nothing.
+  expect(calls.setMcpClients).toHaveLength(1)
+  expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
+    ['gated', 'needs-auth'],
+  ])
+}, 30_000)
+
+/**
+ * Closing the session while the reconnect is pending must reject, not
+ * report a successful status for a connection the closed session will
+ * never use.
+ */
+test('CLOSING DURING THE RECONNECT REJECTS INSTEAD OF REPORTING SUCCESS', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  const held = holdInitialize()
+
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  await waitFor(() => held.arrived)
+  session.close()
+  held.answer()
+
+  await expect(done).rejects.toThrow('SDK session is closed')
+  expect(calls.setMcpClients).toHaveLength(1)
+  expect(calls.setMcpClients[0]!.map(client => [client.name, client.type])).toEqual([
+    ['gated', 'needs-auth'],
+  ])
+}, 30_000)
+
+/**
+ * A newer sign-in that starts while the earlier attempt's reconnect is
+ * pending supersedes it: the earlier attempt must not install its result
+ * or resolve — only the new attempt's client lands.
+ */
+test('SUPERSEDING DURING THE RECONNECT INSTALLS ONLY THE NEW ATTEMPT', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  const held = holdInitialize()
+
+  const firstUrls: string[] = []
+  const first = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => firstUrls.push(seen),
+  })
+  const firstRejected = first.catch(error => error)
+  await waitFor(() => firstUrls.length > 0)
+  expect((await fetch(callbackFor(firstUrls[0]!))).status).toBe(200)
+  await waitFor(() => held.arrived)
+
+  const secondUrls: string[] = []
+  const second = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => secondUrls.push(seen),
+  })
+  const secondOutcome = second.then(
+    status => ({ ok: true as const, status }),
+    error => ({ ok: false as const, error }),
+  )
+  await waitFor(() => secondUrls.length > 0)
+  expect((await fetch(callbackFor(secondUrls[0]!))).status).toBe(200)
+  // The first reconnect is stalled holding the credential scope's mutex,
+  // so the second flow's exchange waits behind it. Release the stall: the
+  // first attempt is then fenced off, and the second flow completes.
+  held.answer()
+  await waitFor(() => reconnects === 2)
+
+  await expect(firstRejected).resolves.toBeInstanceOf(realAuth.AuthenticationCancelledError)
+  const outcome = await secondOutcome
+  expect(outcome.ok).toBe(true)
+  if (outcome.ok) expect(outcome.status.status).toBe('connected')
+  // The initial connect, then only the new attempt's install.
+  expect(calls.setMcpClients).toHaveLength(2)
+  expect(calls.setMcpClients.at(-1)!.map(client => [client.name, client.type])).toEqual([
+    ['gated', 'connected'],
+  ])
+}, 30_000)
+
+/**
+ * If the tool pool rejects the swap — here an agent references the
+ * authenticate tool the reconnect drops — the reconnected client was never
+ * installed, so close() cannot clean it up. It must be released here, or
+ * its transport is left behind. Observed through the connection cache:
+ * closing the client evicts its entry.
+ */
+test('A REJECTED TOOL SWAP RELEASES THE RECONNECTED CLIENT', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session, tools => {
+    // The real engine's validation: an agent referencing a tool the new
+    // pool drops rejects the swap before anything is committed.
+    if (!tools.some(tool => tool.name === 'mcp__gated__authenticate')) {
+      throw new TypeError(
+        `updateTools: agent 'auth-agent' references tool 'mcp__gated__authenticate' which is not in the new tool set`,
+      )
+    }
+  })
+
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+
+  await expect(done).rejects.toThrow('references tool')
+  expect(calls.setMcpClients).toHaveLength(1)
+
+  const key = realClient.getServerCacheKey('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+  const deadline = Date.now() + 3_000
+  while (realClient.connectToServer.cache.get(key) !== undefined) {
+    if (Date.now() > deadline) throw new Error('reconnected client was not released')
+    await Bun.sleep(10)
+  }
+}, 30_000)
+
+/**
+ * A previously connected server can still answer 401 after OAuth — its
+ * tokens are no good any more. The session must not keep the real tools:
+ * calls to them would fail, and nothing offers recovery. The pool gets
+ * the authenticate tool instead, as a server that starts out needs-auth
+ * does.
+ */
+test('A RECONNECT THAT STILL NEEDS AUTH REPLACES THE STALE REAL TOOLS WITH THE AUTHENTICATE TOOL', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+
+  const firstUrls: string[] = []
+  const first = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => firstUrls.push(seen),
+  })
+  await waitFor(() => firstUrls.length > 0)
+  expect((await fetch(callbackFor(firstUrls[0]!))).status).toBe(200)
+  expect((await first).status).toBe('connected')
+  expect(calls.updateTools.at(-1)!.map(tool => tool.name)).toContain('mcp__gated__hello')
+
+  // The server stops accepting the tokens it issued.
+  rejectTokens = true
+  const secondUrls: string[] = []
+  const second = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => secondUrls.push(seen),
+  })
+  await waitFor(() => secondUrls.length > 0)
+  expect((await fetch(callbackFor(secondUrls[0]!))).status).toBe(200)
+  const status = await second
+  expect(status.status).toBe('needs-auth')
+
+  const afterReconnect = calls.updateTools.at(-1)!.map(tool => tool.name)
+  expect(afterReconnect).toContain('mcp__gated__authenticate')
+  expect(afterReconnect).not.toContain('mcp__gated__hello')
+  expect(calls.setMcpClients.at(-1)!.map(client => [client.name, client.type])).toEqual([
+    ['gated', 'needs-auth'],
+  ])
+}, 30_000)
+
+/**
+ * The late-client case, written down: a session that closes while its
+ * first connect is still in flight discards a client the connection cache
+ * still owns. The next session reuses that same client instead of dialling
+ * again, so nothing is orphaned — which is why close-mid-connect releases
+ * nothing here. If that retention ever goes away, this test fails first.
+ */
+test('CLOSING WHILE THE FIRST CONNECT IS IN FLIGHT LEAVES THE SHARED CONNECTION FOR THE NEXT SESSION', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldMetadata = { arrived: false, answer, answered }
+  const held = heldMetadata
+  const key = realClient.getServerCacheKey('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+
+  const seenUrls: string[] = []
+  const auth = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  const authCaught = auth.catch(() => 'caught')
+  await waitFor(() => held.arrived)
+  const inFlight = realClient.connectToServer.cache.get(key) as Promise<unknown> | undefined
+  expect(inFlight).toBeDefined()
+
+  session.close()
+  held.answer()
+  await expect(authCaught).resolves.toBe('caught')
+  const late = (await inFlight) as MCPServerConnection
+  expect(late.type).toBe('needs-auth')
+
+  // The next session gets that same client, not a fresh connection.
+  const next = await connectSdkMcpServers({ gated: { type: 'http', url } })
+  try {
+    expect(next.clients[0]).toBe(late)
+  } finally {
+    for (const client of next.clients) {
+      if (client.type === 'connected') await client.cleanup()
+    }
+  }
 }, 30_000)

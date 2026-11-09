@@ -18,12 +18,14 @@ import {
   type Tool,
   type ToolPermissionContext,
 } from '../../Tool.js'
-import { performMCPOAuthFlow } from '../../services/mcp/auth.js'
+import { AuthenticationCancelledError, performMCPOAuthFlow } from '../../services/mcp/auth.js'
 import {
   clearMcpAuthCache,
   reconnectMcpServerImpl,
 } from '../../services/mcp/client.js'
+import { resumeIn } from '../../services/mcp/credentialScope.js'
 import { getMcpPrefix } from '../../services/mcp/mcpStringUtils.js'
+import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import type {
   McpHTTPServerConfig,
   McpSSEServerConfig,
@@ -78,6 +80,7 @@ import {
 } from './shared.js'
 import {
   buildPermissionContext,
+  captureCredentialScope,
   createExternalCanUseTool,
   connectSdkMcpServers,
   createDefaultCanUseTool,
@@ -315,6 +318,8 @@ class SDKSessionImpl implements SDKSession {
   private agentsLoaded = false
   private mcpServers?: Record<string, unknown>
   private mcpConnected = false
+  /** In-flight MCP connect, shared by the first turn and pre-turn auth. */
+  private mcpConnectPromise: Promise<boolean> | null = null
   /** The session's current MCP tools, for rebuilding the pool after a reconnect. */
   private mcpTools: Tool[] = []
   /** In-flight OAuth flows, one per server — a newer call supersedes the old. */
@@ -719,11 +724,54 @@ class SDKSessionImpl implements SDKSession {
    * stops instead of starting work on a closed session. A failed connect
    * still counts as connected — same as before the extraction — so a later
    * turn does not re-dial servers that already failed.
+   *
+   * The connect itself runs once: a first turn and a pre-turn sign-in that
+   * overlap share the in-flight promise instead of each installing their
+   * own snapshot, which would let the turn's earlier needs-auth install
+   * land after the sign-in's reconnect and put the pseudo-tool back.
    */
   private async ensureMcpConnected(): Promise<boolean> {
     if (this.mcpConnected || !this.mcpServers || Object.keys(this.mcpServers).length === 0) {
       return !this.closed
     }
+    const inFlight = this.mcpConnectPromise
+    if (inFlight) return inFlight
+    const promise = this.connectMcpServersOnce()
+    this.mcpConnectPromise = promise
+    try {
+      return await promise
+    } finally {
+      if (this.mcpConnectPromise === promise) this.mcpConnectPromise = null
+    }
+  }
+
+  /**
+   * Await the shared MCP connect, but stop waiting when this sign-in is
+   * aborted — the connect itself keeps running for a first turn that may
+   * still be awaiting it, so an aborted sign-in does not cancel another
+   * session user's initialization.
+   *
+   * Returns false when the session closed or the sign-in was aborted; the
+   * caller tells those apart.
+   */
+  private async ensureMcpConnectedForAuth(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return false
+    let onAbort: () => void
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new AuthenticationCancelledError())
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([this.ensureMcpConnected(), aborted])
+    } catch (error) {
+      if (error instanceof AuthenticationCancelledError) return false
+      throw error
+    } finally {
+      signal.removeEventListener('abort', onAbort!)
+    }
+  }
+
+  private async connectMcpServersOnce(): Promise<boolean> {
     try {
       const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(
         this.mcpServers,
@@ -757,11 +805,6 @@ class SDKSessionImpl implements SDKSession {
     if (this.closed) {
       throw new Error('SDK session is closed')
     }
-    // A settings page signs in before the first turn; connect first so the
-    // server list — and the tool pool the reconnect swaps into — exists.
-    if (!(await this.ensureMcpConnected())) {
-      throw new Error('SDK session is closed')
-    }
     const rawConfig = this.mcpServers?.[name]
     if (rawConfig === undefined) {
       throw new Error(`Server not found: ${name}`)
@@ -781,6 +824,22 @@ class SDKSessionImpl implements SDKSession {
     }
     const serverConfig = config as unknown as McpSSEServerConfig | McpHTTPServerConfig
 
+    // Process-wide networking (proxy, mTLS client certificate, CA certs) is
+    // configured by init() — which sendMessage runs before the first turn —
+    // and the OAuth fetch uses the global dispatcher it installs. A settings
+    // page signs in before any turn, so run it here too, outside the
+    // session's environment, or a configured client certificate would never
+    // reach the OAuth endpoint.
+    await runOutsideSdkContext(init)
+    if (this.closed) {
+      throw new Error('SDK session is closed')
+    }
+    // The namespace the flow's credentials belong to is the environment as
+    // it is now — before another session's turn can change it while the
+    // user is in the browser. The flow's exchange, the cache clear and the
+    // reconnect all run back inside it.
+    const credentialScope = captureCredentialScope()
+
     // A newer call for this server replaces the attempt still pending. Each
     // attempt registers its own client, so one left running would exchange
     // its code with the newer one's client and fail after the user had
@@ -795,6 +854,14 @@ class SDKSessionImpl implements SDKSession {
     if (sessionSignal?.aborted || options?.signal?.aborted) attempt.abort()
 
     try {
+      // A settings page signs in before the first turn; connect first so the
+      // server list — and the tool pool the reconnect swaps into — exists.
+      // An aborted sign-in stops waiting here, while the shared connect
+      // keeps running for a first turn that may still need it.
+      if (!(await this.ensureMcpConnectedForAuth(attempt.signal))) {
+        if (this.closed) throw new Error('SDK session is closed')
+        throw new AuthenticationCancelledError()
+      }
       // Mirror cli/print.ts mcp_authenticate and the authenticate tool:
       // start the flow with skipBrowserOpen, capture the URL via
       // onAuthorizationUrl, let the callback complete in the background.
@@ -806,20 +873,27 @@ class SDKSessionImpl implements SDKSession {
         serverConfig,
         url => options?.onAuthorizationUrl?.(url),
         attempt.signal,
-        { skipBrowserOpen: true },
+        { skipBrowserOpen: true, credentialScope },
       )
       // Drop the 15-minute needs-auth memo, or the reconnect below would
       // hand it back, stored tokens or not — as the authenticate tool does.
-      clearMcpAuthCache()
-      const result = await reconnectMcpServerImpl(name, config)
+      // In the namespace the flow began in, not whichever the process has
+      // by now.
+      await resumeIn(credentialScope, async () => clearMcpAuthCache())
+      // The reconnect reads the tokens the flow just stored; read them
+      // where the flow began, too.
+      const result = await resumeIn(credentialScope, () => reconnectMcpServerImpl(name, config))
 
-      if (this.closed) {
-        // The session went away mid-reconnect: nothing here would use the
-        // client, and close() already ran its cleanup over the old list.
+      // The attempt may have been cancelled or superseded while the
+      // reconnect was pending, or the session closed: a cancelled attempt
+      // must not install its result or resolve, and a closed session must
+      // not report a successful status for a connection it will never use.
+      if (this.closed || attempt.signal.aborted || this.pendingMcpAuth.get(name) !== attempt) {
         if (result.client.type === 'connected') {
           await result.client.cleanup().catch(() => {})
         }
-        return this.toMcpServerStatus(name, result)
+        if (this.closed) throw new Error('SDK session is closed')
+        throw new AuthenticationCancelledError()
       }
 
       // Swap just this server in, as the CLI does (prefix-based replacement):
@@ -827,30 +901,60 @@ class SDKSessionImpl implements SDKSession {
       // authenticate pseudo-tool on success — and the client record is
       // replaced so the next turn's system:init reports the new status.
       // updateTools validates (and commits) before setMcpClients runs, so a
-      // validation failure leaves both untouched.
+      // validation failure leaves both untouched — but the reconnected client
+      // was never installed either, and close() only cleans up installed
+      // clients, so a failed swap releases it here instead of leaving its
+      // transport or subprocess behind.
       const prefix = getMcpPrefix(name)
       const permissionContext = this.appStateStore.getState().toolPermissionContext
-      if (result.client.type === 'connected') {
-        const nextTools = [
-          ...this.mcpTools.filter(tool => !tool.name?.startsWith(prefix)),
-          ...result.tools,
-        ]
-        this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
-        this.mcpTools = nextTools
-      } else if (result.client.type === 'failed') {
-        // The server's tools are stale — drop them. A server that still
-        // needs auth keeps its authenticate tool (below), so the host or the
-        // model can try again.
-        const nextTools = this.mcpTools.filter(tool => !tool.name?.startsWith(prefix))
-        this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
-        this.mcpTools = nextTools
+      try {
+        if (result.client.type === 'connected') {
+          const nextTools = [
+            ...this.mcpTools.filter(tool => !tool.name?.startsWith(prefix)),
+            ...result.tools,
+          ]
+          this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
+          this.mcpTools = nextTools
+        } else if (result.client.type === 'failed') {
+          // The server's tools are stale — drop them. A server that still
+          // needs auth keeps its authenticate tool (below), so the host or
+          // the model can try again.
+          const nextTools = this.mcpTools.filter(tool => !tool.name?.startsWith(prefix))
+          this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
+          this.mcpTools = nextTools
+        } else if (result.client.type === 'needs-auth') {
+          // The server was connected before, so the pool still holds its
+          // real tools — calls to them would fail, and nothing offers
+          // recovery. Replace them with the session's authenticate tool, as
+          // the initial connect does for a server that starts out
+          // needs-auth. A pool that already holds only the authenticate
+          // tool keeps it as it is.
+          const authTool = createMcpAuthTool(name, config, {
+            realToolsInCurrentContext: false,
+            captureCredentialScope: () => captureCredentialScope(),
+            sessionSignal: this._abortController?.signal,
+          })
+          if (this.mcpTools.some(tool => tool.name?.startsWith(prefix) && tool.name !== authTool.name)) {
+            const nextTools = [
+              ...this.mcpTools.filter(tool => !tool.name?.startsWith(prefix)),
+              authTool,
+            ]
+            this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
+            this.mcpTools = nextTools
+          }
+        }
+        const clients = this.engine.getMcpClients()
+        this.engine.setMcpClients(
+          clients.some(client => client.name === name)
+            ? clients.map(client => (client.name === name ? result.client : client))
+            : [...clients, result.client],
+        )
+      } catch (error) {
+        if (result.client.type === 'connected') {
+          await result.client.cleanup().catch(() => {})
+        }
+        throw error
       }
-      const clients = this.engine.getMcpClients()
-      this.engine.setMcpClients(
-        clients.some(client => client.name === name)
-          ? clients.map(client => (client.name === name ? result.client : client))
-          : [...clients, result.client],
-      )
       return this.toMcpServerStatus(name, result)
     } finally {
       options?.signal?.removeEventListener('abort', stopAttempt)

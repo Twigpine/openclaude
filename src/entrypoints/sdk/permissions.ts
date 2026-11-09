@@ -500,7 +500,7 @@ export function createExternalCanUseTool(
  * namespace, so it is dropped on the way in and out, as a reconnect drops it
  * before reading fresh credentials.
  */
-function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): CredentialScope {
+export function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): CredentialScope {
   // Captured inside the turn's tool call, where its variables are applied.
   const turnEnv = new Map(Object.entries(process.env))
   // Initial discovery/registration writes happen before any continuation.
