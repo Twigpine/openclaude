@@ -1768,6 +1768,30 @@ class Project {
   }
 
   /**
+   * Restore the cached file pointer for the current context when it was
+   * dropped while the transcript still exists on disk — the same rule
+   * appendEntry applies (see there): LRU eviction (boundSessionCaches)
+   * drops long-idle contexts, and a switch drops it too. A deleted mark
+   * or a missing file means there is nothing to re-stamp into; an
+   * existing transcript re-derives its pointer instead. No new file is
+   * created: the pointer is only restored, never resolved for a path
+   * that does not exist yet. Sync, like reAppendSessionMetadata itself:
+   * the async transcriptExists check appendEntry uses is not available
+   * here, and existsSync is the same existence test
+   * restoreSessionWrites already uses.
+   */
+  private restoreEvictedSessionFile(): void {
+    if (this.sessionFile !== null) return
+    const pendingPath = resolvePath(getTranscriptPath())
+    if (
+      !this.isDeletedSessionFile(pendingPath) &&
+      existsSync(pendingPath)
+    ) {
+      this.sessionFile = pendingPath
+    }
+  }
+
+  /**
    * Re-append cached session metadata to the end of the transcript file.
    * This ensures metadata stays within the tail window that readLiteMetadata
    * reads during progressive loading.
@@ -1796,6 +1820,7 @@ class Project {
    * external-writer concern — their caches are authoritative.
    */
   reAppendSessionMetadata(skipTitleRefresh = false): void {
+    if (!this.sessionFile) this.restoreEvictedSessionFile()
     if (!this.sessionFile) return
     const sessionId = getSessionId() as UUID
     if (!sessionId) return

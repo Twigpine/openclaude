@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 import { randomUUID, type UUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, unlink } from 'node:fs/promises'
 import * as fsPromises from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -26,6 +26,7 @@ import {
 import {
   adoptResumedSessionFile,
   cacheSessionTitle,
+  finishDeletedSession,
   flushSessionStorage,
   forgetDeletedSession,
   getCurrentSessionTitle,
@@ -39,6 +40,7 @@ import {
   recordTranscript,
   resetProjectForTesting,
   resetSessionFilePointer,
+  restoreSessionMetadata,
   restoreSessionWrites,
   saveTag,
 } from './sessionStorage.js'
@@ -64,6 +66,9 @@ import { createGoalState } from '../services/goal/state.js'
  */
 const SESSION_A = '31000000-0000-4000-8000-000000000001'
 const SESSION_B = '31000000-0000-4000-8000-000000000002'
+// Provisional identity session B holds before a --continue/--resume switch
+// picks its resumed id: startup selections are cached under this key.
+const SESSION_B_STARTUP = '31000000-0000-4000-8000-000000000003'
 const TIMESTAMP = '2026-09-30T00:00:00.000Z'
 
 let testRoot = ''
@@ -785,4 +790,112 @@ test('a failed deletion restores saved fields around a concurrent entry', async 
   expect(aText).toContain('A Title')
   expect(aText).toContain('a-tag')
   expect(aText).toContain('concurrent goal')
+})
+
+test("an evicted session's metadata is re-stamped by reAppendSessionMetadata alone", async () => {
+  // jatmn on #2489 (P2): after LRU eviction drops a materialized session's
+  // pointer, reAppendSessionMetadata returns early on the null pointer, so
+  // exit cleanup / compaction never re-stamp title/tag into the 64KB tail
+  // even though the metadata cache still holds them.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+
+  const ids = Array.from({ length: 105 }, () => randomUUID())
+  for (const id of ids) {
+    await turnStart(id, async () => {
+      adoptResumedSessionFile()
+    })
+  }
+
+  // Eviction drops the pointer AND the metadata entry, so a rename/tag
+  // after eviction is what repopulates the metadata cache — cache-only
+  // writes (saveTag would write straight to the file). The pointer is
+  // the only thing that must be re-derived from the existing transcript.
+  await turnContinuation(SESSION_A, async () => {
+    cacheSessionTitle('A Evicted Title')
+    restoreSessionMetadata({ tag: 'a-evicted-tag' })
+    // Only the re-append — no recordTranscript / materialize.
+    reAppendSessionMetadata()
+    await flushSessionStorage()
+  })
+
+  const aText = await readFile(getTranscriptPathForSession(SESSION_A), 'utf8')
+  // No new file was created: the transcript still holds the first message.
+  expect(aText).toContain('A first')
+  // Title/tag land at EOF, so the tail read finds them.
+  const lines = aText.split('\n').filter(line => line.trim() !== '')
+  expect(lines.length).toBeGreaterThanOrEqual(3)
+  expect(lines.at(-2)).toContain('"type":"custom-title"')
+  expect(lines.at(-2)).toContain('A Evicted Title')
+  expect(lines.at(-1)).toContain('"type":"tag"')
+  expect(lines.at(-1)).toContain('a-evicted-tag')
+})
+
+test('a deferred startup title survives a resume switch after another session materialized', async () => {
+  // jatmn on #2489 (P2): one overlapping SDK session materializing set
+  // the process-wide hasStartedSession flag, so migrateStartupMetadata
+  // became a no-op and a second context's deferred startup title was
+  // dropped on its resume switch instead of carried to the resumed key.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+
+  // Session B caches its startup title under its provisional identity.
+  await turnContinuation(SESSION_B_STARTUP, async () => {
+    cacheSessionTitle('B Startup Title')
+  })
+
+  // The resume switch picks B's resumed id; the title must survive on
+  // B's resumed key and be written on first materialize.
+  await turnStart(SESSION_B, async () => {
+    expect(getCurrentSessionTitle(SESSION_B as never)).toBe('B Startup Title')
+    await recordTranscript([message(randomUUID(), 'B first')])
+    await flushSessionStorage()
+  })
+
+  const bText = await readFile(getTranscriptPathForSession(SESSION_B), 'utf8')
+  expect(bText).toContain('B Startup Title')
+  expect(bText).toContain('"type":"custom-title"')
+})
+
+test('a new turn reusing a deleted id waits for the deletion instead of dropping its writes', async () => {
+  // jatmn on #2489 (P3): a host may start a turn with a deleted id while
+  // deleteSession is between forgetDeletedSession and unlink. The path
+  // stays marked and the file still exists, so materializeSessionFile
+  // skips the restore and the new turn's writes are dropped. The turn
+  // must wait for the removal to settle, then start clean at the
+  // recycled path. Driven step-by-step (forget → unlink → finish) to
+  // hold deleteSession's window open deterministically.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await forgetDeletedSession(SESSION_A as never, transcriptPath)
+
+  // The replacement turn starts while the deletion is still in flight.
+  const turnPromise = turnContinuation(SESSION_A, async () => {
+    await recordTranscript([message(randomUUID(), 'A returns after delete')])
+    await flushSessionStorage()
+  })
+  // Let the turn reach materialize and park on the in-flight deletion.
+  await new Promise(resolve => setTimeout(resolve, 20))
+  // deleteSession's remaining steps: remove the file, then settle.
+  await unlink(transcriptPath)
+  finishDeletedSession(transcriptPath)
+  await turnPromise
+
+  expect(existsSync(transcriptPath)).toBe(true)
+  const aText = await readFile(transcriptPath, 'utf8')
+  expect(aText).toContain('A returns after delete')
+  // The new turn starts clean: the deleted title is not resurrected.
+  expect(aText).not.toContain('A Title')
 })
