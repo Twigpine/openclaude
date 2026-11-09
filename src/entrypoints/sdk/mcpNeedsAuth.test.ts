@@ -1955,6 +1955,113 @@ test('A REJECTED TOOL SWAP DOES NOT CLOSE A CLIENT ANOTHER SESSION ADOPTED', asy
 }, 30_000)
 
 /**
+ * The fence after the connect has settled: a cancelled attempt must not
+ * close a connection another session adopted while its reconnect was in
+ * flight. The reconnect's connect has settled by the time its tools
+ * fetch runs, so a second caller dialling the same server adopts the
+ * connected client from the cache — and an abort landing in that window
+ * must fence the attempt off without closing the adopted transport.
+ * The shared-reconnect test covers the abort landing while the connect
+ * is still stalled; this one covers the abort landing after it settled.
+ */
+test('ABORTING DURING THE RECONNECT DOES NOT CLOSE A CLIENT ANOTHER SESSION ADOPTED', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+
+  const caller = new AbortController()
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+    signal: caller.signal,
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  // Hold the reconnect's tools fetch: its connect has settled by then, so
+  // the client is live and cached while the fence is still to come.
+  const held = holdToolsList()
+  await waitFor(() => held.arrived)
+  const key = realClient.getServerCacheKey('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+  const adopted = (await realClient.connectToServer.cache.get(key)) as MCPServerConnection
+  expect(adopted.type).toBe('connected')
+  if (adopted.type !== 'connected') throw new Error('expected a connected client')
+  // Another session adopted it: count cleanups on the shared object.
+  let cleanups = 0
+  const originalCleanup = adopted.cleanup
+  adopted.cleanup = async () => {
+    cleanups++
+    return originalCleanup()
+  }
+  try {
+    caller.abort()
+    held.answer()
+    await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    // The fence left the adopted client alone: still cached, still the
+    // same object, never cleaned up — and the session installed nothing.
+    expect(cleanups).toBe(0)
+    expect(await realClient.connectToServer.cache.get(key)).toBe(adopted)
+    expect(calls.setMcpClients).toHaveLength(1)
+    // The adopted client is still alive: its calls work.
+    const listed = await adopted.client.listTools()
+    expect(listed.tools.map(tool => tool.name)).toEqual(['hello'])
+  } finally {
+    adopted.cleanup = originalCleanup
+    held.answer()
+    await adopted.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * A reconnect that fails must report the failure with a reason and drop
+ * the server's stale tools — a host that only sees `failed` with no
+ * error cannot tell a dead server from a refused token, and calls to the
+ * stale tools would fail with nothing offering recovery.
+ */
+test('A RECONNECT THAT FAILS REPORTS FAILED WITH AN ERROR AND DROPS THE STALE TOOLS', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+
+  // First sign-in: the pool holds the server's real tool.
+  const firstUrls: string[] = []
+  const first = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => firstUrls.push(seen),
+  })
+  await waitFor(() => firstUrls.length > 0)
+  expect((await fetch(callbackFor(firstUrls[0]!))).status).toBe(200)
+  expect((await first).status).toBe('connected')
+  expect(calls.updateTools.at(-1)!.map(tool => tool.name)).toContain('mcp__gated__hello')
+
+  // The server is down for the next reconnect: its initialize fails.
+  failMcpRequests = true
+  try {
+    const secondUrls: string[] = []
+    const second = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => secondUrls.push(seen),
+    })
+    await waitFor(() => secondUrls.length > 0)
+    expect((await fetch(callbackFor(secondUrls[0]!))).status).toBe(200)
+
+    const status = await second
+    expect(status.status).toBe('failed')
+    expect(typeof status.error).toBe('string')
+    expect(status.error!.length).toBeGreaterThan(0)
+    expect(calls.updateTools.at(-1)!.map(tool => tool.name)).not.toContain('mcp__gated__hello')
+    expect(calls.setMcpClients.at(-1)!.map(client => [client.name, client.type])).toEqual([
+      ['gated', 'failed'],
+    ])
+  } finally {
+    failMcpRequests = false
+  }
+}, 30_000)
+
+/**
  * A previously connected server can still answer 401 after OAuth — its
  * tokens are no good any more. The session must not keep the real tools:
  * calls to them would fail, and nothing offers recovery. The pool gets

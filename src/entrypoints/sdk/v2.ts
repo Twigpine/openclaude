@@ -870,6 +870,13 @@ class SDKSessionImpl implements SDKSession {
     return !this.closed
   }
 
+  /**
+   * Host-facing OAuth entry point for one MCP server — the implementation
+   * behind the `SDKSession.authenticateMcpServer` contract above: the URL
+   * goes to `options.onAuthorizationUrl` as soon as it is known, and the
+   * returned promise resolves with the server's status once the flow has
+   * settled and the server has been reconnected.
+   */
   async authenticateMcpServer(
     name: string,
     options?: {
