@@ -54,6 +54,9 @@ for (const { file, surfaces, name } of workflows) {
       expect(workflow.on.pull_request?.paths).toBeUndefined()
       expect(workflow.on.pull_request?.['paths-ignore']).toBeUndefined()
       expect(gate.name).toBe(name)
+      if (file === 'install-hygiene.yml') {
+        expect(workflow.jobs['verify-published-install']?.name).toBe('Verify published install')
+      }
       expect(gate.if).toBe('${{ always() }}')
       expect([...dependencies].sort()).toEqual(Object.keys(workflow.jobs).filter(job => job !== 'required').sort())
       expect(script).not.toBe('')
