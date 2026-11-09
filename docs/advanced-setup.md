@@ -332,9 +332,11 @@ and switch models with `/model` or `OPENAI_MODEL`. The older
 `/model` shows the gateway's list of active models from the public
 `GET https://api.twigpine.com/v1/models` endpoint (no key needed). OpenClaude
 caches that list for a day and fetches it again at startup once the cache has
-expired; press `r` in `/model` to refresh it on demand. If a refresh fails, the
-picker keeps showing the last cached list, so a model the gateway has retired
-since then can stay listed until a refresh succeeds. `auto` (smart routing),
+expired; press `r` in `/model` to refresh it on demand. If the startup refresh
+fails, the picker keeps showing the last cached list, so a model the gateway has
+retired since then can stay listed until a refresh succeeds. A manual refresh
+discards the cached list first, so if it fails only the three models below
+remain until the next successful refresh. `auto` (smart routing),
 `mimo-v2.6-pro`, and `mimo-v2.6-flash` are always listed, including when the
 list has never been fetched.
 

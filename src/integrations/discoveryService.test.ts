@@ -764,6 +764,62 @@ describe('discoverModelsForRoute', () => {
     ])
   })
 
+  test('opengateway keeps the offline floor and the last cached live list when a refresh fails', async () => {
+    const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
+    const unavailable = mock(() =>
+      Promise.resolve(new Response('unavailable', { status: 503 })),
+    ) as unknown as typeof globalThis.fetch
+    const apiNamesOf = (result: { models: Array<{ apiName: string }> } | null) =>
+      result?.models.map(model => model.apiName)
+
+    // Never fetched: a failed refresh still leaves the offline floor.
+    setMockFetch(unavailable)
+    const neverFetched = await discoverModelsForRoute('gitlawb-opengateway', {
+      forceRefresh: true,
+    })
+    expect(neverFetched?.error).not.toBeNull()
+    expect(apiNamesOf(neverFetched)).toEqual([
+      'auto',
+      'mimo-v2.6-pro',
+      'mimo-v2.6-flash',
+    ])
+
+    // A successful refresh caches the live list.
+    setMockFetch(mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: 'xiaomi/mimo-v2.6-pro', status: 'active' },
+              { id: 'moonshotai/kimi-k3', name: 'Kimi K3', status: 'active' },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    ) as unknown as typeof globalThis.fetch)
+    const fresh = await discoverModelsForRoute('gitlawb-opengateway', {
+      forceRefresh: true,
+    })
+    expect(fresh?.source).toBe('network')
+
+    // The next (startup-style, cache-preserving) refresh fails, so the last
+    // cached list is kept on top of the floor: a model retired since then
+    // stays listed until a refresh succeeds.
+    setMockFetch(unavailable)
+    const afterFailure = await discoverModelsForRoute('gitlawb-opengateway', {
+      forceRefresh: true,
+    })
+    expect(afterFailure?.source).toBe('stale-cache')
+    expect(afterFailure?.error).not.toBeNull()
+    expect(apiNamesOf(afterFailure)).toEqual([
+      'auto',
+      'mimo-v2.6-pro',
+      'mimo-v2.6-flash',
+      'moonshotai/kimi-k3',
+    ])
+  })
+
   test('openai-compatible discovery applies descriptor static headers with auth', async () => {
     const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
 

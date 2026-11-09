@@ -347,6 +347,8 @@ type DiscoveryModelForTest = {
 
 function mockDescriptorDiscovery(options: {
   cachedModels: DiscoveryModelForTest[] | null
+  /** Error recorded on the cache entry by the last failed refresh. */
+  cachedError?: string
   error?: string
   discoveredModels?: DiscoveryModelForTest[]
   routeId?: string
@@ -356,7 +358,9 @@ function mockDescriptorDiscovery(options: {
     getCachedModels: mock(async () => options.cachedModels === null ? null : ({
       models: options.cachedModels,
       updatedAt: Date.now(),
-      error: null,
+      error: options.cachedError
+        ? { message: options.cachedError, recordedAt: Date.now() }
+        : null,
     })),
     isCacheStale: mock(async () => false),
     parseDurationString: (value: number | string) =>
@@ -1840,6 +1844,64 @@ test('/model merges non-empty OpenGateway discovery cache with the offline floor
     ])
     // Verify mimo-v2.6-pro appears exactly once (floor entry wins, live duplicates are discarded)
     expect(optionValues.filter(val => val === 'mimo-v2.6-pro')).toHaveLength(1)
+  } finally {
+    rendered.instance.unmount()
+    rendered.stdout.end()
+  }
+})
+
+test('/model keeps the cached OpenGateway list and the offline floor after a failed refresh', async () => {
+  const activeProfile = {
+    id: 'opengateway-profile',
+    name: 'Twigpine OpenGateway',
+    provider: 'gitlawb-opengateway',
+    baseUrl: 'https://api.twigpine.com/v1',
+    model: 'mimo-v2.6-pro',
+    apiKey: 'sk-opengateway',
+  }
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = activeProfile.baseUrl
+  process.env.OPENAI_API_KEY = activeProfile.apiKey
+  process.env.OPENAI_MODEL = activeProfile.model
+  process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
+  process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
+  delete process.env.OPENROUTER_API_KEY
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.CLAUDE_CODE_USE_MISTRAL
+  delete process.env.CLAUDE_CODE_USE_BEDROCK
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  delete process.env.CLAUDE_CODE_USE_FOUNDRY
+  delete process.env.OPENAI_API_BASE
+
+  mockProviderProfiles({
+    getActiveProviderProfile: () => activeProfile,
+  })
+  // The startup refresh failed after an earlier success: the cache entry
+  // still holds that live list and records the error.
+  mockDescriptorDiscovery({
+    cachedModels: [
+      { id: 'moonshotai/kimi-k3', apiName: 'moonshotai/kimi-k3', label: 'Kimi K3' },
+    ],
+    cachedError: 'HTTP 503',
+    routeId: 'gitlawb-opengateway',
+  })
+
+  const rendered = await renderModelCommandWithCapturedPicker(
+    'opengateway-picker-cached-after-failed-refresh',
+  )
+  try {
+    const props = rendered.getCapturedProps()
+    expect(
+      (props.optionsOverride as ModelOption[]).map(option => option.value),
+    ).toEqual(['auto', 'mimo-v2.6-pro', 'mimo-v2.6-flash', 'moonshotai/kimi-k3'])
+    expect(props.discoveryState).toEqual({
+      message:
+        'Showing cached Twigpine OpenGateway models. Last refresh failed: HTTP 503',
+      tone: 'warning',
+    })
+    // The documented `r` refresh stays available.
+    expect(props.onRefresh).toEqual(expect.any(Function))
   } finally {
     rendered.instance.unmount()
     rendered.stdout.end()
