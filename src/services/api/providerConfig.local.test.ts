@@ -116,7 +116,7 @@ test('keeps codex alias models on chat completions for local openai-compatible p
   )).toBe(true)
 })
 
-test('normalizes legacy Twigpine Opengateway provider-prefixed base URLs to the smart route', () => {
+test('normalizes legacy Twigpine OpenGateway provider-prefixed base URLs to the smart route', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = 'https://opengateway.gitlawb.com/v1/xiaomi-mimo'
   process.env.OPENAI_MODEL = 'zai-org/GLM-5.1-FP8'
@@ -126,6 +126,19 @@ test('normalizes legacy Twigpine Opengateway provider-prefixed base URLs to the 
     requestedModel: 'zai-org/GLM-5.1-FP8',
     resolvedModel: 'zai-org/GLM-5.1-FP8',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
+  })
+})
+
+test('normalizes provider-prefixed base URLs on api.twigpine.com to the smart route', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.twigpine.com/v1/gmi-cloud'
+  process.env.OPENAI_MODEL = 'mimo-v2.6-pro'
+
+  expect(resolveProviderRequest()).toMatchObject({
+    transport: 'chat_completions',
+    requestedModel: 'mimo-v2.6-pro',
+    resolvedModel: 'mimo-v2.6-pro',
+    baseUrl: 'https://api.twigpine.com/v1',
   })
 })
 

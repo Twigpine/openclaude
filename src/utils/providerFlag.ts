@@ -699,10 +699,10 @@ export function applyProviderFlag(
       } else {
         applyOpenAIBaseUrlDefault(
           provider,
-          defaultBaseUrl ?? 'https://opengateway.gitlawb.com/v1',
+          defaultBaseUrl ?? 'https://api.twigpine.com/v1',
         )
       }
-      process.env.OPENAI_MODEL ??= defaultModel ?? 'mimo-v2.5-pro'
+      process.env.OPENAI_MODEL ??= defaultModel ?? 'mimo-v2.6-pro'
       if (model) process.env.OPENAI_MODEL = model
       if (opengatewayApiKey) {
         process.env.OPENAI_API_KEY = opengatewayApiKey

@@ -67,6 +67,11 @@ describe('loaded registry validation', () => {
       // Virtual model — the gateway's smart router resolves it server-side,
       // so there is no concrete model descriptor to reference.
       'gitlawb-opengateway:opengateway-auto',
+      // OpenGateway's offline floor for its live catalog. No shared MiMo
+      // V2.6 descriptor exists yet, so the entries pin the gateway's
+      // advertised context window themselves.
+      'gitlawb-opengateway:opengateway-mimo-v2.6-pro',
+      'gitlawb-opengateway:opengateway-mimo-v2.6-flash',
       'merge-gateway:merge-gateway-default-routing',
       // Virtual model — OrcaRouter's `orcarouter/auto` router resolves the
       // serving model server-side, so there is no concrete descriptor.

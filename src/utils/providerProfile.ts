@@ -2753,6 +2753,15 @@ export async function buildLaunchEnv(options: {
   })
 }
 
+/**
+ * Build the startup process env from the legacy single-profile file.
+ * Explicit provider selections (env, flags, or an already-applied plural
+ * provider profile) are returned unchanged, except that a saved
+ * dedicated-provider proxy profile is still applied so its credential
+ * boundary holds. With no saved profile and no OpenAI opt-out, the Twigpine
+ * OpenGateway fresh-install default is applied; otherwise the saved profile's
+ * launch env is built.
+ */
 export async function buildStartupEnvFromProfile(options?: {
   persisted?: ProfileFile | null
   goal?: RecommendationGoal
@@ -2868,16 +2877,16 @@ export async function buildStartupEnvFromProfile(options?: {
       return processEnv
     }
 
-    // No saved profile — default to Twigpine Opengateway.
+    // No saved profile — default to Twigpine OpenGateway.
     const env = buildCompatibilityProcessEnv({
       processEnv,
       compatibilityMode: 'openai',
       profileEnv: {
         OPENAI_BASE_URL:
           getRouteDefaultBaseUrl('gitlawb-opengateway') ??
-          'https://opengateway.gitlawb.com/v1',
+          'https://api.twigpine.com/v1',
         OPENAI_MODEL:
-          getRouteDefaultModel('gitlawb-opengateway') ?? 'mimo-v2.5-pro',
+          getRouteDefaultModel('gitlawb-opengateway') ?? 'mimo-v2.6-pro',
       },
     })
     env[DEFAULT_STARTUP_PROVIDER_ENV_VAR] = 'gitlawb-opengateway'

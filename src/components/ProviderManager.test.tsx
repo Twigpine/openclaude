@@ -152,7 +152,7 @@ async function waitForCondition(
 }
 
 // Provider list is sorted from generated preset metadata by description, with
-// Twigpine Opengateway pinned first, aimlapi.com second, Anthropic third, Codex OAuth injected
+// Twigpine OpenGateway pinned first, aimlapi.com second, Anthropic third, Codex OAuth injected
 // after DeepSeek, and Custom always pinned last. Keep the target-by-label
 // indirection here so
 // these tests survive future list edits without hardcoding raw key counts.
@@ -160,7 +160,7 @@ async function waitForCondition(
 // Order matches ProviderManager.renderPresetSelection() when
 // canUseCodexOAuth === true (default in mocked tests).
 const PRESET_ORDER = [
-  'Twigpine Opengateway',
+  'Twigpine OpenGateway',
   'aimlapi.com',
   'Anthropic',
   'Alibaba Coding Plan (China)',
@@ -1125,6 +1125,34 @@ test('ProviderManager keeps full setup flow for presets with placeholder endpoin
       frame.includes('Base URL'),
     )
     expect(baseUrlOutput).toContain('YOUR-RESOURCE-NAME')
+  } finally {
+    await mounted.dispose()
+  }
+})
+
+test('ProviderManager pins Twigpine OpenGateway first with the Recommended badge', async () => {
+  mockProviderManagerDependencies(() => undefined, async () => undefined)
+
+  const nonce = `${Date.now()}-${Math.random()}`
+  const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)
+  const mounted = await mountProviderManager(ProviderManager)
+
+  try {
+    await waitForFrameOutput(mounted.getOutput, frame =>
+      frame.includes('Provider manager'),
+    )
+
+    mounted.stdin.write('\r')
+    const presetOutput = await waitForFrameOutput(mounted.getOutput, frame =>
+      frame.includes('Choose provider preset'),
+    )
+
+    expect(PRESET_ORDER[0]).toBe('Twigpine OpenGateway')
+    expect(presetOutput).toContain('Twigpine OpenGateway ★ Recommended')
+    expect(presetOutput).toContain('https://twigpine.com/console/gateway/keys')
+    expect(presetOutput.indexOf('Twigpine OpenGateway')).toBeLessThan(
+      presetOutput.indexOf('aimlapi.com'),
+    )
   } finally {
     await mounted.dispose()
   }

@@ -315,21 +315,31 @@ MiMo, MiniMax, Qwen). Uses the same `OPENCODE_API_KEY` as OpenCode Zen.
 OpenClaude automatically sends the session and product identity headers that
 OpenCode Go requires for prompt caching and traffic attribution.
 
-### Twigpine Opengateway
+### Twigpine OpenGateway
 
 ```bash
 export CLAUDE_CODE_USE_OPENAI=1
-export OPENAI_BASE_URL=https://opengateway.gitlawb.com/v1
+export OPENAI_BASE_URL=https://api.twigpine.com/v1
 export OPENGATEWAY_API_KEY=ogw_live_...
-export OPENAI_MODEL=mimo-v2.5-pro
+export OPENAI_MODEL=mimo-v2.6-pro
 ```
 
-The Opengateway route is the fresh-install startup default and requires an API
-key from https://gitlawb.com/opengateway/keys. Keep the base URL at `/v1` and
-switch models with `/model` or `OPENAI_MODEL`. Current partner models include:
+The OpenGateway route is the fresh-install startup default and requires an API
+key from https://twigpine.com/console/gateway/keys. Keep the base URL at `/v1`
+and switch models with `/model` or `OPENAI_MODEL`. The older
+`https://opengateway.gitlawb.com/v1` address still works for existing setups.
 
-- `mimo-v2.5-pro`
-- `google/gemini-3.1-flash-lite-preview`
+`/model` shows the gateway's list of active models from the public
+`GET https://api.twigpine.com/v1/models` endpoint (no key needed). OpenClaude
+caches that list for a day and fetches it again at startup once the cache has
+expired; press `r` in `/model` to refresh it on demand. If the startup refresh
+fails, the picker keeps showing the last cached list, so a model the gateway has
+retired since then can stay listed until a refresh succeeds. A manual refresh
+discards the cached list first, so if it fails only the catalog floor below
+remains until the next successful refresh. `auto` (smart routing),
+`mimo-v2.6-pro`, and `mimo-v2.6-flash` form the route's catalog floor, kept even
+when the list has never been fetched. A saved provider profile's own model list
+or an `availableModels` allowlist can still narrow what the picker shows.
 
 ### Xiaomi MiMo
 
