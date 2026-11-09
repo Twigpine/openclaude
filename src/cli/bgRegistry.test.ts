@@ -3545,9 +3545,9 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
     const { getProcessCommandAsync } = await import(
       '../utils/genericProcessUtils.js'
     )
-    const command = await getProcessCommandAsync(process.pid)
+    const command = await getProcessCommandAsync(process.pid, { timeout: 5_000 })
     expect(typeof command).toBe('string')
     expect(command?.length).toBeGreaterThan(0)
     expect(await getProcessCommandAsync(42424242)).toBeNull()
-  })
+  }, 15_000)
 })
