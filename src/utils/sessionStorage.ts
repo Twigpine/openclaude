@@ -860,9 +860,11 @@ let pointerProjectDir: string | null = null
 /**
  * Follow switchSession with the file pointer.
  *
- * `Project.sessionFile` is resolved once and cached for the life of the
- * process. Every CLI path that changes the active session resets it by hand
- * immediately afterwards — sessionRestore.ts, /clear, print.ts all call
+ * `Project.sessionFile` is resolved once and cached per SDK context (see
+ * the accessor on Project: one entry per session id + project directory +
+ * cwd, so overlapping sessions cannot share a pointer). Every CLI path
+ * that changes the active session resets it by hand immediately
+ * afterwards — sessionRestore.ts, /clear, print.ts all call
  * resetSessionFilePointer right after switchSession, and its own docstring
  * says that is when to call it.
  *
@@ -1046,7 +1048,56 @@ class Project {
   currentSessionGoal: GoalStateEntry['goal'] | undefined
   currentSessionBranch: SessionBranchEntry | undefined
 
-  sessionFile: string | null = null
+  /**
+   * Cached transcript path for the session active in the current context.
+   *
+   * `Project` is a process-wide singleton, but the session it appends for
+   * is context-scoped: each SDK session runs its turns inside its own
+   * `AsyncLocalStorage` context (`bootstrap/state.ts`), and two sessions
+   * can overlap in one process. A single cached pointer let one session's
+   * switch resolve the pointer to its own file and the other session's
+   * in-flight append follow it — the `isCurrentSession` check still
+   * passed, because the id really is that session's in its own context —
+   * so records landed in the wrong transcript (#2267).
+   *
+   * The pointer is therefore cached per context identity (see
+   * `sessionFileKey`), not per process: a switch or reset in one context
+   * only ever touches that context's entry, and an in-flight turn keeps
+   * resolving to its own file. Reads and writes go through this accessor
+   * so every existing call site becomes context-scoped with no other
+   * change; the CLI's process-global session is just the context with no
+   * SDK store, so its behavior is unchanged.
+   */
+  get sessionFile(): string | null {
+    return this.sessionFiles.get(this.sessionFileKey()) ?? null
+  }
+
+  set sessionFile(path: string | null) {
+    const key = this.sessionFileKey()
+    if (path === null) {
+      this.sessionFiles.delete(key)
+    } else {
+      this.sessionFiles.set(key, path)
+    }
+  }
+
+  // One cached path per context identity. Paths are small strings; entries
+  // are dropped with their context's reset and with the singleton
+  // (resetProjectForTesting), so the map stays bounded by live sessions.
+  private sessionFiles = new Map<string, string>()
+
+  /**
+   * Identity of the transcript `getTranscriptPath()` derives in this
+   * context: the session id, the project directory, and the cwd it falls
+   * back to. All three are context-scoped, so two overlapping SDK
+   * sessions — and the same id resumed in two directories — never share
+   * a cache entry. The same triple always derives the same path, so a
+   * missed reset (e.g. the same-id switch v2 makes before every turn)
+   * can only reuse the correct path.
+   */
+  private sessionFileKey(): string {
+    return `${getSessionId()}\0${getSessionProjectDir() ?? ''}\0${getOriginalCwd()}`
+  }
   // A conversation can start without a file when persistence is disabled.
   private hasStartedSession = false
   // Entries buffered while sessionFile is null, keyed by their transcript path
