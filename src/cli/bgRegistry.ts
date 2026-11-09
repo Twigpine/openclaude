@@ -2640,7 +2640,7 @@ export async function refreshBackgroundSessionStatuses(options?: {
 }
 
 export type BackgroundSessionProcessIdentityAsyncOptions =
-  BackgroundSessionProcessIdentityOptions & {
+  Omit<BackgroundSessionProcessIdentityOptions, 'getProcessCommand'> & {
     signal?: AbortSignal
     getProcessCommandAsync?: (
       pid: number,
@@ -2654,6 +2654,32 @@ export type RefreshBackgroundSessionStatusOptions =
   }
 
 /**
+ * Awaits `promise` but stops waiting when `signal` fires, resolving null
+ * instead: a stalled session or terminal-fact read cannot wedge a follower
+ * that is already shutting down. The raced promise is left to settle on
+ * its own; callers treat null as unknown state, never as terminal success.
+ */
+async function settleOnAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | null> {
+  if (!signal) return await promise
+  if (signal.aborted) return null
+  let onAbort: (() => void) | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<null>(resolve => {
+        onAbort = () => resolve(null)
+        signal.addEventListener('abort', onAbort, { once: true })
+      }),
+    ])
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+/**
  * Refreshes exactly one background session by exact id, sharing the bulk
  * refresh's terminal-fact precedence and PID identity rules. The pinned
  * session's recorded terminal facts win first; otherwise the live process
@@ -2663,25 +2689,36 @@ export type RefreshBackgroundSessionStatusOptions =
  * session: it never scans or rewrites other sessions, and it never writes
  * the pinned session's metadata back (persisting a stale transition stays
  * with the bulk refresh). A missing or unreadable session returns null,
- * which callers treat as unknown state rather than terminal success.
+ * which callers treat as unknown state rather than terminal success. When
+ * the caller's signal fires, the registry reads stop being awaited and
+ * null is returned instead of leaving the follower waiting on a stalled
+ * probe.
  */
 export async function refreshBackgroundSessionStatus(
   id: string,
   options: RefreshBackgroundSessionStatusOptions = {},
 ): Promise<BackgroundSession | null> {
   assertSafeId(id)
-  const session = await readSessionFile(metadataPathForId(id))
+  const session = await settleOnAbort(
+    readSessionFile(metadataPathForId(id)),
+    options.signal,
+  )
   if (!session) return null
 
-  const effective = await applyAuthoritativeTerminalFacts(session)
+  const effective = await settleOnAbort(
+    applyAuthoritativeTerminalFacts(session),
+    options.signal,
+  )
+  if (!effective) return null
   if (effective.status !== 'running' && effective.status !== 'unknown') {
     return effective
   }
 
-  const identity = await verifyBackgroundSessionProcessIdentityAsync(
-    effective,
-    options,
+  const identity = await settleOnAbort(
+    verifyBackgroundSessionProcessIdentityAsync(effective, options),
+    options.signal,
   )
+  if (!identity) return null
   const nextStatus: BackgroundSessionStatus =
     identity.state === 'matches'
       ? 'running'
@@ -2852,6 +2889,10 @@ export function verifyBackgroundSessionProcessIdentity(
  * wrapper instead of the synchronous `ps`/PowerShell call, so a slow lookup
  * cannot block signal handling. Liveness itself stays a synchronous
  * `kill(pid, 0)` probe, and the command-line matching rules are identical.
+ * Injected lookups come only through `getProcessCommandAsync`: the
+ * synchronous `getProcessCommand` override is excluded from the async
+ * options, so a caller cannot supply an override this verifier would
+ * silently ignore in favour of the real process.
  */
 export async function verifyBackgroundSessionProcessIdentityAsync(
   session: BackgroundSession,

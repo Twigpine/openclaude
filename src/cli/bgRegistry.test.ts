@@ -3341,6 +3341,30 @@ describe('refreshBackgroundSessionStatus targeted refresh', () => {
     expect(await readFile(otherPath, 'utf8')).toBe(otherBefore)
     expect((await resolveBackgroundSession(other.id)).status).toBe('running')
   })
+
+  it('settles on cancellation when the process lookup stalls', async () => {
+    const session = await createRunningSession('bg-refresh-stalled', 4242)
+
+    const abort = new AbortController()
+    const refreshed = refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () =>
+        await new Promise<string | null>(() => {}),
+      signal: abort.signal,
+    })
+    setTimeout(() => abort.abort(), 10)
+    // Race against a wall clock so a stalled refresh fails this test
+    // instead of hanging the runner on a never-settling await.
+    const outcome = await Promise.race([
+      refreshed.then(value => ({ settled: true, value })),
+      new Promise<{ settled: boolean; value: unknown }>(resolve =>
+        setTimeout(() => resolve({ settled: false, value: null }), 1000),
+      ),
+    ])
+
+    expect(outcome.settled).toBe(true)
+    expect(outcome.value).toBeNull()
+  })
 })
 
 describe('verifyBackgroundSessionProcessIdentityAsync', () => {
