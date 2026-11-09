@@ -299,6 +299,13 @@ export async function tagSession(
  * session's per-context caches, so a later query reusing its id and cwd
  * starts clean instead of inheriting its cached title/tag (#2489).
  *
+ * A query that starts while the deletion is still in flight waits for
+ * it to settle (see waitForDeletionToSettle in sessionStorage.ts) instead
+ * of materializing into the marked path and losing its first message to
+ * the removal: once the file is gone it starts clean at the recycled
+ * path, and if the removal fails the surviving transcript keeps
+ * receiving writes.
+ *
  * @param sessionId - UUID of the session to delete
  * @param options - Optional dir to narrow the search
  * @throws If sessionId is invalid or session file is not found

@@ -2173,6 +2173,17 @@ class Project {
     // and create a metadata-only file despite --no-session-persistence.
     if (this.shouldSkipPersistence()) return
     const sessionFile = resolvePath(this.ensureCurrentSessionFile())
+    // A deletion of this transcript may be in flight: forgetDeletedSession
+    // marked the path, but the caller has not removed the file yet. The
+    // restore below only fires once the file is gone, so without this
+    // wait a turn starting in that window would keep the mark, have its
+    // writes dropped, and lose its first message to the removal. Wait
+    // for the deletion to settle first — then the file is either gone
+    // (the restore un-marks and the turn starts clean) or it survived
+    // and the failure path already restored writes.
+    if (this.isDeletedSessionFile(sessionFile)) {
+      await this.waitForDeletionToSettle(sessionFile)
+    }
     // A deleted session's id may be reused by a fresh session at the same
     // path: the transcript is gone, so the deleted mark no longer protects
     // anything — it would only drop the new session's writes (the write
@@ -2676,9 +2687,53 @@ class Project {
    * Deletion attempts still running per resolved transcript path (see
    * forgetDeletedSession / finishDeletedSession). The snapshot above
    * survives until this count reaches zero, so an overlapping deletion
-   * whose removal fails can still restore from it.
+   * whose removal fails can still restore from it. The count is also
+   * the "a deletion is in flight" signal a new turn reusing the id
+   * waits on (see waitForDeletionToSettle): it is raised when
+   * forgetDeletedSession marks the path, so it covers the whole
+   * mark-before-unlink window, not just the removal itself.
    */
   private pendingDeletionAttempts = new Map<string, number>()
+
+  // Turns parked while a deletion of one transcript finishes, keyed by
+  // the same resolved path as pendingDeletionAttempts. Resolved by
+  // finishDeletedSession when the last attempt for the path settles.
+  private deletionSettledWaiters = new Map<string, Array<() => void>>()
+
+  /**
+   * Wait until no deletion attempt is in flight for this transcript.
+   * A new turn reusing a deleted id calls this from
+   * materializeSessionFile before deciding whether the deleted mark
+   * still protects anything: without the wait it would see the mark
+   * with the file still present, skip the restore, and have its writes
+   * dropped — then lose its first message to the removal. Returns at
+   * once when no deletion is in flight. Both deletion callers pair
+   * every forgetDeletedSession with finishDeletedSession on all paths,
+   * so the wait always resolves.
+   */
+  private waitForDeletionToSettle(filePath: string): Promise<void> {
+    const resolved = resolvePath(filePath)
+    if (!this.pendingDeletionAttempts.has(resolved)) {
+      return Promise.resolve()
+    }
+    return new Promise<void>(resolve => {
+      const waiters = this.deletionSettledWaiters.get(resolved)
+      if (waiters) {
+        waiters.push(resolve)
+      } else {
+        this.deletionSettledWaiters.set(resolved, [resolve])
+      }
+    })
+  }
+
+  /** Release the turns waitForDeletionToSettle parked for this transcript. */
+  private notifyDeletionSettled(filePath: string): void {
+    const resolved = resolvePath(filePath)
+    const waiters = this.deletionSettledWaiters.get(resolved)
+    if (!waiters) return
+    this.deletionSettledWaiters.delete(resolved)
+    for (const resolve of waiters) resolve()
+  }
 
   /** True when `filePath` is a transcript deleted earlier in this process. */
   isDeletedSessionFile(filePath: string): boolean {
@@ -2732,10 +2787,21 @@ class Project {
     sessionId: UUID,
     transcriptPath: string,
   ): Promise<void> {
-    this.deletedSessionFiles.add(resolvePath(transcriptPath))
+    const resolved = resolvePath(transcriptPath)
+    this.deletedSessionFiles.add(resolved)
+    // Count the attempt from the mark, not from the settle below: the
+    // count is also the "a deletion is in flight" signal a new turn
+    // reusing this id waits on (see waitForDeletionToSettle), and the
+    // window it must cover starts at the mark — before flush() — not
+    // after it. Both callers pair every forget with finishDeletedSession
+    // on all paths, so the count always returns to zero.
+    this.pendingDeletionAttempts.set(
+      resolved,
+      (this.pendingDeletionAttempts.get(resolved) ?? 0) + 1,
+    )
     this.existingSessionFiles.delete(sessionId)
     // The session is gone; its buffered entries have nowhere to go.
-    this.pendingEntries.delete(resolvePath(transcriptPath))
+    this.pendingEntries.delete(resolved)
     if (this.sessionFile && this.isDeletedSessionFile(this.sessionFile)) {
       this.resetSessionFile()
     }
@@ -2766,7 +2832,6 @@ class Project {
     // with an empty set. The snapshot stays until finishDeletedSession runs
     // for the last overlapping attempt.
     const dropped = this.forgetSessionCaches(sessionId, transcriptPath)
-    const resolved = resolvePath(transcriptPath)
     const existing = this.droppedSessionMetadata.get(resolved)
     if (existing) {
       for (const [key, entry] of dropped) {
@@ -2783,10 +2848,6 @@ class Project {
     } else {
       this.droppedSessionMetadata.set(resolved, dropped)
     }
-    this.pendingDeletionAttempts.set(
-      resolved,
-      (this.pendingDeletionAttempts.get(resolved) ?? 0) + 1,
-    )
   }
 
   /**
@@ -2856,6 +2917,9 @@ class Project {
     }
     this.pendingDeletionAttempts.delete(resolved)
     this.droppedSessionMetadata.delete(resolved)
+    // The last attempt settled: a new turn parked on this transcript
+    // (see materializeSessionFile) may proceed now.
+    this.notifyDeletionSettled(resolved)
   }
 
   private async getExistingSessionFile(
