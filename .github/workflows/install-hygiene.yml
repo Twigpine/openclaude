@@ -51,7 +51,8 @@ jobs:
   verify-published-install:
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.install == 'true' }}
-    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    # Skipped jobs are named before matrix expansion, so keep this name static.
+    name: Verify published install
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
