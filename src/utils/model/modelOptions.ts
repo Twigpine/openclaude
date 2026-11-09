@@ -748,8 +748,10 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   // getActiveProviderProfile() falls back to profiles[0], so a merely-saved
   // profile would otherwise suppress the GPT/Codex catalog for an env-only
   // OpenAI-compatible endpoint (CodeRabbit #2495).
+  // A saved profile's route is authoritative only when its env is applied;
+  // otherwise it must not add Codex options to another provider such as Foundry.
   const isActualOpenAIOrCodexRoute =
-    activeRouteId === 'openai' || getAPIProvider() === 'codex'
+    (profileEnvApplied && activeRouteId === 'openai') || getAPIProvider() === 'codex'
   if (
     isActualOpenAIOrCodexRoute ||
     (!profileEnvApplied &&

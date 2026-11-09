@@ -1090,6 +1090,37 @@ function expectCodexModels(values: readonly unknown[]) {
   }
 }
 
+test('getModelOptionsBase: excludes Codex models for Foundry with an unapplied saved OpenAI profile', async () => {
+  const saved = buildProviderProfileFixture({
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-5.5',
+  })
+  const restoreEnv = snapshotEnv([
+    ...Object.keys(process.env).filter(key => key.startsWith('CLAUDE_CODE_USE_')),
+    'CLAUDE_CODE_USE_FOUNDRY',
+    'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
+    'ANTHROPIC_BASE_URL',
+    'OPENAI_BASE_URL',
+    'OPENAI_API_BASE',
+    'USER_TYPE',
+  ], { clear: true })
+  process.env.CLAUDE_CODE_USE_FOUNDRY = '1'
+  try {
+    // Keep the real runtime's Foundry selection while the existing harness
+    // supplies the saved-but-unapplied profile to the picker.
+    activeApiProviderOverride = realProviders.getAPIProvider()
+    expect(activeApiProviderOverride).toBe('foundry')
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [saved],
+      getActiveProviderProfile: () => saved,
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectNoCodexModels(values)
+  } finally {
+    restoreEnv()
+  }
+})
+
 test('getModelOptionsBase: suppresses hardcoded Codex models for a Kimi profile (issue shape, #1119)', async () => {
   // Repro for #1119 Piece 1: the profile from the issue itself — provider
   // 'openai' with a Kimi base URL. getAPIProvider() reports 'openai' for it,
