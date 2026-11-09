@@ -75,6 +75,63 @@ describe('clipboard image paste error contract', () => {
     expect(existsSync(screenshotPath)).toBe(false)
   })
 
+  test('generic processing failure after clipboard read rejects, redacts details and cleans up', async () => {
+    clipboardDir = mkdtempSync(join(tmpdir(), 'clipboard-processing-error-'))
+    process.env.CLAUDE_CODE_TMPDIR = clipboardDir
+    const screenshotPath = join(clipboardDir, 'claude_cli_latest_screenshot.png')
+    const error = new Error('decoder failed with private clipboard details')
+    const convertBmpToPng = mock(async () => { throw error })
+    const execa = mock(async () => ({ exitCode: 0, stdout: 'image/bmp', stderr: '' }))
+    execa.mockImplementationOnce(async () => ({ exitCode: 0, stdout: 'image/bmp', stderr: '' }))
+    execa.mockImplementationOnce(async () => {
+      writeFileSync(screenshotPath, Buffer.from('BM'))
+      return { exitCode: 0, stdout: '', stderr: '' }
+    })
+    execa.mockImplementationOnce(async () => {
+      rmSync(screenshotPath)
+      return { exitCode: 0, stdout: '', stderr: '' }
+    })
+    mock.module('execa', () => ({ ...originalExecaExports, execa }))
+    mock.module('../tools/FileReadTool/imageProcessor.js', () => ({
+      ...originalImageProcessorExports,
+      convertBmpToPng,
+    }))
+    const { getImageFromClipboard, formatClipboardImagePasteError,
+      CLIPBOARD_IMAGE_PASTE_GENERIC_ERROR } = await importImagePaste()
+
+    await expect(getImageFromClipboard()).rejects.toBe(error)
+    expect(formatClipboardImagePasteError(error)).toBe(CLIPBOARD_IMAGE_PASTE_GENERIC_ERROR)
+    expect(formatClipboardImagePasteError(error)).not.toContain(error.message)
+    expect(convertBmpToPng).toHaveBeenCalledTimes(1)
+    expect(execa).toHaveBeenCalledTimes(3)
+    expect(existsSync(screenshotPath)).toBe(false)
+  })
+
+  test('clipboard save failure returns null before reading or processing image bytes', async () => {
+    clipboardDir = mkdtempSync(join(tmpdir(), 'clipboard-save-error-'))
+    process.env.CLAUDE_CODE_TMPDIR = clipboardDir
+    const execa = mock(async () => ({ exitCode: 0, stdout: 'image/bmp', stderr: '' }))
+    execa.mockImplementationOnce(async () => ({ exitCode: 0, stdout: 'image/bmp', stderr: '' }))
+    execa.mockImplementationOnce(async () => ({ exitCode: 1, stdout: '', stderr: 'save failed' }))
+    const convertBmpToPng = mock(originalImageProcessorExports.convertBmpToPng)
+    const maybeResizeAndDownsampleImageBuffer = mock(originalImageResizerExports.maybeResizeAndDownsampleImageBuffer)
+    mock.module('execa', () => ({ ...originalExecaExports, execa }))
+    mock.module('../tools/FileReadTool/imageProcessor.js', () => ({
+      ...originalImageProcessorExports,
+      convertBmpToPng,
+    }))
+    mock.module('./imageResizer.js', () => ({
+      ...originalImageResizerExports,
+      maybeResizeAndDownsampleImageBuffer,
+    }))
+    const { getImageFromClipboard } = await importImagePaste()
+
+    await expect(getImageFromClipboard()).resolves.toBeNull()
+    expect(execa).toHaveBeenCalledTimes(2)
+    expect(convertBmpToPng).not.toHaveBeenCalled()
+    expect(maybeResizeAndDownsampleImageBuffer).not.toHaveBeenCalled()
+  })
+
   test('formatClipboardImagePasteError keeps ImageResizeError messages', async () => {
     const { formatClipboardImagePasteError, CLIPBOARD_IMAGE_PASTE_GENERIC_ERROR } =
       await importImagePaste()
