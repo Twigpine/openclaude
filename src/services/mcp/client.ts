@@ -2442,6 +2442,12 @@ export const fetchResourceTemplatesForClient = memoizeWithLRU(
   async (client: MCPServerConnection): Promise<ServerResourceTemplate[]> => {
     if (client.type !== 'connected') return []
 
+    // The memoized wrapper stores this call's promise when the function
+    // first suspends; yield once so the entry captured below is this
+    // fetch's own promise rather than the previous entry.
+    await Promise.resolve()
+    const ownEntry = fetchResourceTemplatesForClient.cache.get(client.name)
+
     try {
       if (!client.capabilities?.resources) {
         return []
@@ -2456,8 +2462,15 @@ export const fetchResourceTemplatesForClient = memoizeWithLRU(
       // Never cache a failed traversal as an empty result: a transient
       // failure at startup would otherwise keep reporting no templates
       // after the server recovers. The memoized entry was stored when the
-      // call started, so evict it here and the next listing retries.
-      fetchResourceTemplatesForClient.cache.delete(client.name)
+      // call started, so evict it here and the next listing retries — but
+      // only if this failed fetch still owns the entry. A notification
+      // refresh may have installed a newer entry while the fetch was
+      // pending, and evicting it would drop the refreshed templates.
+      if (
+        fetchResourceTemplatesForClient.cache.get(client.name) === ownEntry
+      ) {
+        fetchResourceTemplatesForClient.cache.delete(client.name)
+      }
       return []
     }
   },
@@ -2473,6 +2486,10 @@ export const fetchResourceTemplatesForClient = memoizeWithLRU(
  * caller (e.g. a list_changed handler) can retain the previous AppState
  * by simply not publishing the failed refresh. A legacy server that
  * answers -32601 to template listing still succeeds with empty templates.
+ * Both traversals are awaited to settle before a failure propagates, so
+ * the refresh queue stays held until the slower traversal finishes and a
+ * follow-up refresh cannot start a duplicate traversal while the first
+ * one's resources/list request is still in flight.
  *
  * If the server is replaced while the traversals are in flight, the
  * refresh is stale: the caches are left alone and `stale` is true, so the
@@ -2490,10 +2507,20 @@ export async function refreshMcpResourcesAndTemplates(
   }
 
   const generation = getMcpFetchCacheGeneration(client.name)
-  const [resources, resourceTemplates] = await Promise.all([
+  const [resourcesResult, templatesResult] = await Promise.allSettled([
     listAllMcpResources(client),
     listAllMcpResourceTemplates(client),
   ])
+  // Propagate the first failure (resources first, then templates) only
+  // after both traversals have settled.
+  if (resourcesResult.status === 'rejected') {
+    throw resourcesResult.reason
+  }
+  if (templatesResult.status === 'rejected') {
+    throw templatesResult.reason
+  }
+  const resources = resourcesResult.value
+  const resourceTemplates = templatesResult.value
 
   if (getMcpFetchCacheGeneration(client.name) !== generation) {
     // The server was replaced (and the caches invalidated) while this
@@ -2515,6 +2542,27 @@ export async function refreshMcpResourcesAndTemplates(
 }
 
 /**
+ * Serialize resource-list refreshes per client. Notifications arrive
+ * concurrently, and a slow older traversal must never overwrite a newer
+ * refresh: each server's refreshes run one at a time, in arrival order.
+ * Notifications that arrive while a refresh is in flight are coalesced:
+ * at most one final refresh runs after the active one, so a burst cannot
+ * queue a traversal per notification. A failed refresh does not break the
+ * chain for later notifications.
+ *
+ * The coalesced refresh keeps the newest callback together with the cache
+ * generation it was recorded at. A replacement notification must replay
+ * the replacement connection's callback, not the callback that started
+ * the active traversal — and a callback recorded before the server was
+ * replaced must never replay the retired connection's work.
+ */
+const resourceRefreshChains = new Map<string, Promise<void>>()
+const resourceRefreshPending = new Map<
+  string,
+  { refresh: () => Promise<void>; generation: number }
+>()
+
+/**
  * Drop every memoized discovery entry for one server name. Same-name
  * removal and replacement (e.g. an SDK server re-initialized under the
  * same name) must invalidate the shared caches before cleanup so the
@@ -2526,6 +2574,9 @@ export function invalidateMcpFetchCaches(name: string): void {
   // server is recognised as stale when it completes (see
   // refreshMcpResourcesAndTemplates).
   mcpFetchCacheGenerations.set(name, getMcpFetchCacheGeneration(name) + 1)
+  // A coalesced refresh queued under the old generation must not replay
+  // the retired connection's callback after replacement.
+  resourceRefreshPending.delete(name)
   fetchToolsForClient.cache.delete(name)
   fetchResourcesForClient.cache.delete(name)
   fetchResourceTemplatesForClient.cache.delete(name)
@@ -2535,27 +2586,19 @@ export function invalidateMcpFetchCaches(name: string): void {
   }
 }
 
-/**
- * Serialize resource-list refreshes per client. Notifications arrive
- * concurrently, and a slow older traversal must never overwrite a newer
- * refresh: each server's refreshes run one at a time, in arrival order.
- * Notifications that arrive while a refresh is in flight are coalesced:
- * at most one final refresh runs after the active one, so a burst cannot
- * queue a traversal per notification. A failed refresh does not break the
- * chain for later notifications.
- */
-const resourceRefreshChains = new Map<string, Promise<void>>()
-const resourceRefreshPending = new Set<string>()
-
 export function enqueueResourceRefresh(
   clientName: string,
   refresh: () => Promise<void>,
 ): Promise<void> {
   const active = resourceRefreshChains.get(clientName)
   if (active !== undefined) {
-    // A refresh is already running: remember that one final refresh is
-    // needed after it instead of queueing another traversal per notification.
-    resourceRefreshPending.add(clientName)
+    // A refresh is already running: remember the newest callback so the
+    // final refresh replays the latest connection's work instead of
+    // queueing another traversal per notification.
+    resourceRefreshPending.set(clientName, {
+      refresh,
+      generation: getMcpFetchCacheGeneration(clientName),
+    })
     // Resolve after the coalesced final refresh settles, if one runs.
     return active.then(
       () => resourceRefreshChains.get(clientName) ?? Promise.resolve(),
@@ -2566,9 +2609,18 @@ export function enqueueResourceRefresh(
       await refresh()
     } finally {
       resourceRefreshChains.delete(clientName)
-      if (resourceRefreshPending.delete(clientName)) {
-        // Changes arrived during the refresh: run one final refresh for them.
-        await enqueueResourceRefresh(clientName, refresh)
+      const pending = resourceRefreshPending.get(clientName)
+      if (pending !== undefined) {
+        resourceRefreshPending.delete(clientName)
+        // The server may have been replaced while the active refresh ran:
+        // a pending callback recorded under an older generation must not
+        // replay the retired connection's work.
+        if (
+          getMcpFetchCacheGeneration(clientName) === pending.generation
+        ) {
+          // Changes arrived during the refresh: run one final refresh for them.
+          await enqueueResourceRefresh(clientName, pending.refresh)
+        }
       }
     }
   })()
@@ -3943,6 +3995,10 @@ export function buildMcpStdioCommand(
  *
  * @param sdkMcpConfigs - The SDK MCP server configurations
  * @param sendMcpMessage - Callback to send MCP messages through the control channel
+ * @param onClientConnected - Called for each client as soon as it connects,
+ *   before its tools and resource caches warm up, so the caller can make
+ *   the client discoverable to the notification input loop while warm-up
+ *   is still in flight
  * @returns Connected clients, their tools, and transport map for message routing
  */
 export async function setupSdkMcpClients(
@@ -3951,6 +4007,7 @@ export async function setupSdkMcpClients(
     serverName: string,
     message: JSONRPCMessage,
   ) => Promise<JSONRPCMessage>,
+  onClientConnected?: (client: ConnectedMCPServer) => void,
 ): Promise<{
   clients: MCPServerConnection[]
   tools: Tool[]
@@ -3986,7 +4043,7 @@ export async function setupSdkMcpClients(
         const capabilities = client.getServerCapabilities()
 
         // Create the connected client object
-        const connectedClient: MCPServerConnection = {
+        const connectedClient: ConnectedMCPServer = {
           type: 'connected',
           name,
           capabilities: capabilities || {},
@@ -3996,6 +4053,15 @@ export async function setupSdkMcpClients(
             await client.close()
           },
         }
+
+        // Register the cache-only list_changed handler before warming the
+        // caches, and publish the client to the caller: SDK clients never
+        // go through connectToServer or the interactive hook, so without
+        // this a notification arriving during warm-up would be dropped by
+        // the input loop (the client is not discoverable yet) and the
+        // template cache would never refresh on it.
+        registerMcpResourceListChangedHandler(connectedClient)
+        onClientConnected?.(connectedClient)
 
         // Fetch tools if the server has them
         const serverTools: Tool[] = []
@@ -4013,11 +4079,6 @@ export async function setupSdkMcpClients(
             fetchResourceTemplatesForClient(connectedClient),
           ])
         }
-
-        // Register the cache-only list_changed handler: SDK clients never
-        // go through connectToServer or the interactive hook, so without
-        // this their template cache would never refresh on notifications.
-        registerMcpResourceListChangedHandler(connectedClient)
 
         return {
           client: connectedClient,
@@ -4052,15 +4113,20 @@ export async function setupSdkMcpClients(
   // this, an SDK-managed server was the only resource-capable server and
   // the helpers were never added anywhere. Lifetime is managed by
   // updateSdkMcp, which drops them again when no server supports resources.
+  // Check each helper separately: a server in no-prefix mode may supply
+  // one helper itself (e.g. ListMcpResourcesTool) while the template and
+  // read helpers are still missing — an any-helper check would suppress
+  // all three and leave template discovery unavailable.
   if (
     clients.some(
       c => c.type === 'connected' && c.capabilities?.resources,
-    ) &&
-    !MCP_RESOURCE_HELPER_TOOLS.some(tool =>
-      tools.some(t => toolMatchesName(t, tool.name)),
     )
   ) {
-    tools.push(...MCP_RESOURCE_HELPER_TOOLS)
+    for (const helper of MCP_RESOURCE_HELPER_TOOLS) {
+      if (!tools.some(t => toolMatchesName(t, helper.name))) {
+        tools.push(helper)
+      }
+    }
   }
 
   return { clients, tools }

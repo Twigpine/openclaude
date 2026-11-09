@@ -163,9 +163,11 @@ export async function listAllMcpResources(
  * Projection happens before sanitization: only the retained fields ever
  * reach the recursive sanitizer, so a hostile `_meta` can neither overflow
  * it nor leak into the model-facing shape. The URI template is an
- * identifier, not prose — it is stripped of hidden characters but never
- * Unicode-normalized, so the listed value still addresses the same
- * resource when the model builds a URI from it.
+ * identifier, not prose — it is never Unicode-normalized, and sanitization
+ * must not silently rewrite it: a listed template that differs from the
+ * server's advertised value would build URIs for a different resource.
+ * A template whose identifier carries hidden characters fails the
+ * traversal instead of advertising a rewritten identifier.
  */
 function projectResourceTemplate(
   template: ResourceTemplate,
@@ -203,8 +205,17 @@ function projectResourceTemplate(
   const title = capOptional(sanitized.title)
   const description = capOptional(sanitized.description)
   const mimeType = capOptional(sanitized.mimeType)
+  // The URI template is the server's advertised identifier: stripping a
+  // hidden character would silently change what the model addresses, so
+  // reject the traversal when sanitization would alter it.
+  const uriTemplate = stripDangerousUnicodeChars(template.uriTemplate)
+  if (uriTemplate !== template.uriTemplate) {
+    throw new Error(
+      'MCP resources/templates/list returned a resource template whose uriTemplate contains hidden characters',
+    )
+  }
   return {
-    uriTemplate: stripDangerousUnicodeChars(template.uriTemplate),
+    uriTemplate,
     name: capField(sanitized.name),
     ...(title !== undefined && { title }),
     ...(description !== undefined && { description }),

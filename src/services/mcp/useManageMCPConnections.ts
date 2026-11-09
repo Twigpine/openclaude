@@ -95,11 +95,24 @@ type PendingUpdate = MCPServerConnection & {
   tools?: Tool[]
   commands?: Command[]
   resources?: ServerResource[]
+  /**
+   * Refresh-only update: apply only if the server still exists in AppState
+   * when the queued update flushes. A list_changed refresh is queued via
+   * setTimeout and flushed later; if the plugin server was removed in
+   * between, applying the update would resurrect the removed client with
+   * its resources, commands, and skills.
+   */
+  requireExistingClient?: boolean
 }
 type ConnectedListUpdate = ConnectedMCPServer & {
   tools?: Tool[]
   commands?: Command[]
   resources?: ServerResource[]
+  /**
+   * Refresh-only update: apply only if the server still exists in AppState
+   * when the queued update flushes (see PendingUpdate).
+   */
+  requireExistingClient?: boolean
 }
 
 /**
@@ -234,6 +247,7 @@ export function registerMcpListChangedHandlers(
                 ...client,
                 resources: newResources,
                 commands: [...mcpPrompts, ...mcpSkills],
+                requireExistingClient: true,
               })
               // MCP skills changed — invalidate skill-search index so next
               // discovery rebuilds with the new set.
@@ -242,7 +256,11 @@ export function registerMcpListChangedHandlers(
               const { resources: newResources, stale } =
                 await refreshMcpResourcesAndTemplates(client)
               if (stale) return
-              updateServer({ ...client, resources: newResources })
+              updateServer({
+                ...client,
+                resources: newResources,
+                requireExistingClient: true,
+              })
             }
           })
         } catch (error) {
@@ -389,6 +407,7 @@ export function useManageMCPConnections(
           tools: rawTools,
           commands: rawCmds,
           resources: rawRes,
+          requireExistingClient,
           ...client
         } = update
         const tools =
@@ -408,6 +427,14 @@ export function useManageMCPConnections(
         const existingClientIndex = mcp.clients.findIndex(
           c => c.name === client.name,
         )
+
+        // A refresh queued before its server was removed must not resurrect
+        // it: the flush runs later, and by then the client is gone from
+        // AppState. Connection attempts may still create a client; only
+        // refreshes carry this guard.
+        if (requireExistingClient && existingClientIndex === -1) {
+          continue
+        }
 
         const updatedClients =
           existingClientIndex === -1

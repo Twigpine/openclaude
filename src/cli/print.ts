@@ -1616,24 +1616,37 @@ function runHeadlessStreaming(
       hasFailedSdkClients
 
     if (haveServersChanged) {
-      // Clean up removed servers
+      // Retire every current SDK client before re-initialization: all of
+      // them are recreated below, so invalidate each one's shared discovery
+      // caches — this bumps the generation, discarding any refresh already
+      // in flight — close retired connections so their handlers cannot
+      // complete a post-invalidation refresh, and drop them from the
+      // discoverable set so the mcp_message loop cannot route a
+      // notification to a retired client while the replacement connects.
+      // A retired client's refresh would otherwise repopulate the cache
+      // and the replacement's warm-up would serve that stale entry.
       for (const client of sdkClients) {
-        if (!currentServerNames.has(client.name)) {
-          // Invalidate the shared discovery caches before cleanup so a
-          // same-name replacement server can never serve the removed
-          // server's tools, resources, templates, or commands.
-          invalidateMcpFetchCaches(client.name)
-          if (client.type === 'connected') {
-            await client.cleanup()
-          }
+        invalidateMcpFetchCaches(client.name)
+        if (client.type === 'connected') {
+          await client.cleanup()
         }
       }
+      sdkClients = []
 
       // Re-initialize all SDK MCP servers with current config
       const sdkSetup = await setupSdkMcpClients(
         sdkMcpConfigs,
         (serverName, message) =>
           structuredIO.sendMcpMessage(serverName, message),
+        // Publish each client as soon as it connects — before its warm-up
+        // finishes — so startup notifications arriving during warm-up reach
+        // the new client instead of being dropped by the input loop.
+        client => {
+          sdkClients = [
+            ...sdkClients.filter(c => c.name !== client.name),
+            client,
+          ]
+        },
       )
       sdkClients = sdkSetup.clients
       sdkTools = sdkSetup.tools
@@ -1665,17 +1678,20 @@ function runHeadlessStreaming(
           ...prev,
           mcp: {
             ...prev.mcp,
-            tools: [
-              ...prev.mcp.tools.filter(
-                t =>
-                  !allSdkNames.some(name =>
-                    t.name.startsWith(getMcpPrefix(name)),
-                  ) &&
-                  (anyResourceCapableServer ||
-                    !resourceHelperNames.has(t.name)),
-              ),
-              ...sdkTools,
-            ],
+            tools: uniqBy(
+              [
+                ...prev.mcp.tools.filter(
+                  t =>
+                    !allSdkNames.some(name =>
+                      t.name.startsWith(getMcpPrefix(name)),
+                    ) &&
+                    (anyResourceCapableServer ||
+                      !resourceHelperNames.has(t.name)),
+                ),
+                ...sdkTools,
+              ],
+              'name',
+            ),
           },
         }
       })
@@ -1811,15 +1827,18 @@ function runHeadlessStreaming(
           ...prev,
           mcp: {
             ...prev.mcp,
-            tools: [
-              ...prev.mcp.tools.filter(
-                t =>
-                  !allSdkNames.some(name =>
-                    t.name.startsWith(getMcpPrefix(name)),
-                  ),
-              ),
-              ...sdkTools,
-            ],
+            tools: uniqBy(
+              [
+                ...prev.mcp.tools.filter(
+                  t =>
+                    !allSdkNames.some(name =>
+                      t.name.startsWith(getMcpPrefix(name)),
+                    ),
+                ),
+                ...sdkTools,
+              ],
+              'name',
+            ),
           },
         }))
       }
@@ -3476,22 +3495,48 @@ function runHeadlessStreaming(
             }
             // Update appState.mcp to reflect disabled status and remove tools/commands/resources
             const prefix = getMcpPrefix(serverName)
-            setAppState(prev => ({
-              ...prev,
-              mcp: {
-                ...prev.mcp,
-                clients: prev.mcp.clients.map(c =>
-                  c.name === serverName
-                    ? { name: serverName, type: 'disabled' as const, config }
-                    : c,
-                ),
-                tools: reject(prev.mcp.tools, t => t.name?.startsWith(prefix)),
-                commands: reject(prev.mcp.commands, c =>
-                  commandBelongsToServer(c, serverName),
-                ),
-                resources: omit(prev.mcp.resources, serverName),
-              },
-            }))
+            setAppState(prev => {
+              const clients = prev.mcp.clients.map(c =>
+                c.name === serverName
+                  ? { name: serverName, type: 'disabled' as const, config }
+                  : c,
+              )
+              // The resource helpers have no per-server prefix, so the
+              // prefix filter below never removes them. Drop them when this
+              // was the last resource-capable server across the regular,
+              // dynamic, and SDK sources — otherwise the helpers stay
+              // available with no server behind them. Dynamic clients are
+              // mirrored in AppState, so the mapped list above covers
+              // them; sdkClients are merged separately and checked here.
+              const resourceHelperNames = new Set(
+                MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
+              )
+              const anyResourceCapableServer =
+                clients.some(
+                  c => c.type === 'connected' && c.capabilities?.resources,
+                ) ||
+                sdkClients.some(
+                  c => c.type === 'connected' && c.capabilities?.resources,
+                )
+              return {
+                ...prev,
+                mcp: {
+                  ...prev.mcp,
+                  clients,
+                  tools: reject(
+                    prev.mcp.tools,
+                    t =>
+                      t.name?.startsWith(prefix) ||
+                      (!anyResourceCapableServer &&
+                        resourceHelperNames.has(t.name)),
+                  ),
+                  commands: reject(prev.mcp.commands, c =>
+                    commandBelongsToServer(c, serverName),
+                  ),
+                  resources: omit(prev.mcp.resources, serverName),
+                },
+              }
+            })
             sendControlResponseSuccess(message)
           } else {
             // Enabling: persist + reconnect
@@ -5723,6 +5768,22 @@ export async function handleMcpSetServers(
     }
   }
 
+  // The resource helpers have no per-server prefix, so the prefix filter
+  // above never removes them. Drop them from the SDK tool list when the
+  // removal took the last resource-capable SDK server — otherwise the next
+  // query offers helpers with no SDK server behind them.
+  if (
+    sdkRemoved.length > 0 &&
+    !newSdkClients.some(
+      c => c.type === 'connected' && c.capabilities?.resources,
+    )
+  ) {
+    const resourceHelperNames = new Set(
+      MCP_RESOURCE_HELPER_TOOLS.map(t => t.name),
+    )
+    newSdkTools = newSdkTools.filter(t => !resourceHelperNames.has(t.name))
+  }
+
   // Add new SDK servers as pending - they'll be upgraded to connected
   // when updateSdkMcp() runs on the next query
   for (const [name, config] of Object.entries(sdkServers)) {
@@ -5948,7 +6009,7 @@ export async function reconcileMcpServers(
       ...prev,
       mcp: {
         ...prev.mcp,
-        tools: [...nonDynamicTools, ...newTools].filter(
+        tools: uniqBy([...nonDynamicTools, ...newTools], 'name').filter(
           t => anyResourceCapableServer || !resourceHelperNames.has(t.name),
         ),
         clients: [...nonDynamicClients, ...newClients],
