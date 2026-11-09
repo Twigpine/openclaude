@@ -138,11 +138,23 @@ const COMPLETED_STATUSES = new Set<BackgroundSessionStatus>([
 ])
 const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/
 // A publish writes its temp file and renames it within milliseconds, so a
-// temp file older than this cannot belong to an in-flight publish.
-// Cleanup only removes temp files older than both the retention cutoff
-// and this grace period, so it can never unlink a file another process
-// is actively publishing (CodeRabbit #2497).
+// temp file older than this is almost never an in-flight publish. The grace
+// period is only a cheap pre-filter: the per-ID lock is what protects an
+// active publish, because a wall-clock jump can make a fresh temp file
+// look older than the grace period (CodeRabbit #2497).
 const ABANDONED_SESSION_TEMP_FILE_MIN_AGE_MS = 60 * 60 * 1000
+// Temp files written by writeNewSession/replaceSessionFile are named
+// `<id>.<pid>.<uuid>.tmp`; the id is everything before the numeric pid
+// and the random UUID suffix.
+const SESSION_TEMP_FILE_RE =
+  /^(.*)\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
+
+function sessionIdFromTempFileName(name: string): string | undefined {
+  const match = SESSION_TEMP_FILE_RE.exec(name)
+  if (!match) return undefined
+  const id = match[1]
+  return SAFE_ID_RE.test(id) ? id : undefined
+}
 const SAFE_SIGNAL_RE = /^SIG[A-Z0-9]{1,24}$/
 const BACKGROUND_RECOVERY_JOURNAL_ENTRY_LIMIT = 256
 const BACKGROUND_RECOVERY_JOURNAL_RECORD_MAX_BYTES = 512
@@ -2138,11 +2150,15 @@ async function cleanupOrphanedTerminalFacts(
  * Removes session metadata temp files left behind when a publish was
  * interrupted (for example, SIGKILL between writeFile and rename).
  * A temp file is removed only when it is older than both the retention
- * cutoff and the publish grace period, so a file another process is
- * actively publishing is never unlinked. Removed files count as
- * artifacts in the cleanup result.
+ * cutoff and the publish grace period, and — when its name carries the
+ * publishing session id — only while that session's per-ID lock is free:
+ * writeNewSession and replaceSessionFile hold the lock for the whole
+ * write+rename, so a held lock means a publish is in flight even when a
+ * wall-clock jump makes the file look older than the grace period. Temp
+ * files whose names do not carry a session id keep the age-only behavior.
+ * Removed files count as artifacts in the cleanup result.
  */
-async function cleanupAbandonedSessionTempFiles(
+async function cleanupAbandonedSessionTempFilesInDirectory(
   cutoffMs: number,
   metadataDirectory: CleanupDirectorySnapshot,
   fileSystem: BackgroundCleanupFileSystem,
@@ -2168,9 +2184,10 @@ async function cleanupAbandonedSessionTempFiles(
     return
   }
   // A temp file is abandoned only when it is older than the retention
-  // cutoff and older than the publish grace period: a concurrent
-  // writeNewSession holds its temp file for milliseconds, so a file that
-  // old cannot be an in-flight publish.
+  // cutoff and older than the publish grace period. The grace period
+  // alone cannot prove a file is abandoned: a wall-clock jump forward
+  // during a publish makes a fresh temp file look old, so the per-ID
+  // lock below is the check that decides.
   const oldestActiveMs = Date.now() - ABANDONED_SESSION_TEMP_FILE_MIN_AGE_MS
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.tmp')) continue
@@ -2186,13 +2203,79 @@ async function cleanupAbandonedSessionTempFiles(
     if (stats.mtimeMs >= cutoffMs || stats.mtimeMs >= oldestActiveMs) {
       continue
     }
+    // A publisher holds the per-ID lock for the whole write+rename, so
+    // try to take it without waiting: if it is held, a publish for this
+    // session is in flight and the temp file must stay, whatever its
+    // mtime says. A lock that cannot be taken for any other reason also
+    // leaves the file for a later sweep; the file is stale, not lost.
+    const sessionId = sessionIdFromTempFileName(entry.name)
+    let releasePublishLock: (() => Promise<void>) | undefined
+    if (sessionId !== undefined) {
+      try {
+        releasePublishLock = await lockfile.lock(
+          metadataPathForId(sessionId),
+          {
+            ...NAME_RESERVATION_LOCK_OPTIONS,
+            retries: 0,
+          },
+        )
+      } catch {
+        continue
+      }
+    }
     try {
       await fileSystem.unlinkFile(path)
       result.artifactsRemoved++
     } catch (error) {
       if (!isErrno(error, 'ENOENT')) result.errors++
+    } finally {
+      await releasePublishLock?.().catch(() => {})
     }
   }
+}
+
+/**
+ * Removes abandoned session metadata temp files once, for a whole
+ * retention sweep or recovery batch. Use this instead of running the
+ * per-call temp cleanup inside every cleanupBackgroundSessionsBefore call
+ * when a batch processes many session ids: one directory scan covers the
+ * batch, rather than one scan per id (CodeRabbit #2497).
+ */
+export async function cleanupAbandonedSessionTempFiles(
+  cutoff: Date,
+  options: { maxDirectoryEntries?: number } = {},
+): Promise<BackgroundCleanupResult> {
+  const result: BackgroundCleanupResult = {
+    sessionsRemoved: 0,
+    artifactsRemoved: 0,
+    errors: 0,
+  }
+  const cutoffMs = cutoff.getTime()
+  if (!Number.isFinite(cutoffMs)) {
+    result.errors++
+    return result
+  }
+  const fileSystem: BackgroundCleanupFileSystem = {
+    lstatFile: lstat,
+    readTextFile: async path => await readFile(path, 'utf8'),
+    unlinkFile: async path => await unlink(path),
+  }
+  const metadataRead = await snapshotCleanupDirectory(
+    getBackgroundSessionMetadataDir(),
+    fileSystem.lstatFile,
+  )
+  if (metadataRead.state !== 'valid') {
+    result.errors++
+    return result
+  }
+  await cleanupAbandonedSessionTempFilesInDirectory(
+    cutoffMs,
+    metadataRead.value,
+    fileSystem,
+    result,
+    options.maxDirectoryEntries,
+  )
+  return result
 }
 
 export async function cleanupBackgroundSessionsBefore(
@@ -2205,6 +2288,10 @@ export async function cleanupBackgroundSessionsBefore(
     _beforeArtifactRemovalForTesting?: (id: string) => Promise<void>
     _beforeReservationRemovalForTesting?: (path: string) => Promise<void>
     sessionIds?: readonly string[]
+    // Skip the trailing abandoned-temp-file cleanup: a caller processing
+    // a batch of ids runs cleanupAbandonedSessionTempFiles once for the
+    // whole batch instead of once per id (CodeRabbit #2497).
+    skipAbandonedTempFileCleanup?: boolean
     onRetry?: (target?: BackgroundSessionRecoveryTarget) => void
     orphanedTerminalFacts?: readonly BackgroundSessionRecoveryTarget[]
     maxDirectoryEntries?: number
@@ -2588,13 +2675,15 @@ export async function cleanupBackgroundSessionsBefore(
     )
   }
 
-  await cleanupAbandonedSessionTempFiles(
-    cutoffMs,
-    metadataDirectory,
-    fileSystem,
-    result,
-    options.maxDirectoryEntries,
-  )
+  if (!options.skipAbandonedTempFileCleanup) {
+    await cleanupAbandonedSessionTempFilesInDirectory(
+      cutoffMs,
+      metadataDirectory,
+      fileSystem,
+      result,
+      options.maxDirectoryEntries,
+    )
+  }
 
   return result
 }
