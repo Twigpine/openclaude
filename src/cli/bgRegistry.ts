@@ -137,6 +137,12 @@ const COMPLETED_STATUSES = new Set<BackgroundSessionStatus>([
   'killed',
 ])
 const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/
+// A publish writes its temp file and renames it within milliseconds, so a
+// temp file older than this cannot belong to an in-flight publish.
+// Cleanup only removes temp files older than both the retention cutoff
+// and this grace period, so it can never unlink a file another process
+// is actively publishing (CodeRabbit #2497).
+const ABANDONED_SESSION_TEMP_FILE_MIN_AGE_MS = 60 * 60 * 1000
 const SAFE_SIGNAL_RE = /^SIG[A-Z0-9]{1,24}$/
 const BACKGROUND_RECOVERY_JOURNAL_ENTRY_LIMIT = 256
 const BACKGROUND_RECOVERY_JOURNAL_RECORD_MAX_BYTES = 512
@@ -1000,8 +1006,18 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
       getBackgroundSessionMetadataDir(),
       `${session.id}.${process.pid}.${randomUUID()}.tmp`,
     )
+    // Sync the completed temp file to storage before renaming it into
+    // place, matching installTerminalFact: without a sync, a crash or
+    // power loss after rename can leave a zero-length or partial session
+    // metadata file on filesystems with delayed allocation
+    // (CodeRabbit #2497).
+    let handle: Awaited<ReturnType<typeof open>> | undefined
     try {
-      await writeFile(tmp, jsonStringify(session), { flag: 'wx' })
+      handle = await open(tmp, 'wx')
+      await handle.writeFile(jsonStringify(session))
+      await handle.sync()
+      await handle.close()
+      handle = undefined
       try {
         await lstat(target)
       } catch (error) {
@@ -1011,6 +1027,7 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
       }
       throw new Error(`Background session id "${session.id}" already exists`)
     } finally {
+      await handle?.close().catch(() => {})
       await unlink(tmp).catch(() => {})
     }
   })
@@ -2117,6 +2134,67 @@ async function cleanupOrphanedTerminalFacts(
   }
 }
 
+/**
+ * Removes session metadata temp files left behind when a publish was
+ * interrupted (for example, SIGKILL between writeFile and rename).
+ * A temp file is removed only when it is older than both the retention
+ * cutoff and the publish grace period, so a file another process is
+ * actively publishing is never unlinked. Removed files count as
+ * artifacts in the cleanup result.
+ */
+async function cleanupAbandonedSessionTempFiles(
+  cutoffMs: number,
+  metadataDirectory: CleanupDirectorySnapshot,
+  fileSystem: BackgroundCleanupFileSystem,
+  result: BackgroundCleanupResult,
+  maxDirectoryEntries?: number,
+): Promise<void> {
+  const directoryState = await inspectCleanupDirectory(
+    metadataDirectory,
+    fileSystem.lstatFile,
+  )
+  if (directoryState !== 'same') {
+    if (directoryState !== 'missing') result.errors++
+    return
+  }
+  let entries: Dirent<string>[]
+  try {
+    entries = await readDirectoryEntries(
+      getBackgroundSessionMetadataDir(),
+      maxDirectoryEntries,
+    )
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) result.errors++
+    return
+  }
+  // A temp file is abandoned only when it is older than the retention
+  // cutoff and older than the publish grace period: a concurrent
+  // writeNewSession holds its temp file for milliseconds, so a file that
+  // old cannot be an in-flight publish.
+  const oldestActiveMs = Date.now() - ABANDONED_SESSION_TEMP_FILE_MIN_AGE_MS
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.tmp')) continue
+    const path = join(getBackgroundSessionMetadataDir(), entry.name)
+    let stats: Stats
+    try {
+      stats = await fileSystem.lstatFile(path)
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) result.errors++
+      continue
+    }
+    if (!stats.isFile() || stats.isSymbolicLink()) continue
+    if (stats.mtimeMs >= cutoffMs || stats.mtimeMs >= oldestActiveMs) {
+      continue
+    }
+    try {
+      await fileSystem.unlinkFile(path)
+      result.artifactsRemoved++
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) result.errors++
+    }
+  }
+}
+
 export async function cleanupBackgroundSessionsBefore(
   cutoff: Date,
   options: {
@@ -2509,6 +2587,14 @@ export async function cleanupBackgroundSessionsBefore(
       options.onRetry,
     )
   }
+
+  await cleanupAbandonedSessionTempFiles(
+    cutoffMs,
+    metadataDirectory,
+    fileSystem,
+    result,
+    options.maxDirectoryEntries,
+  )
 
   return result
 }

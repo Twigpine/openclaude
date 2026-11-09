@@ -10,6 +10,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -2366,6 +2367,43 @@ describe('background session registry', () => {
       errors: 0,
     })
     expect(await Bun.file(metadataPath).exists()).toBe(false)
+  })
+
+  it('removes abandoned session metadata temp files during cleanup', async () => {
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const staleTmp = join(
+      sessionsDir,
+      'bg-stale-tmp.424242.00000000-0000-4000-8000-000000000000.tmp',
+    )
+    await writeFile(staleTmp, '{"id":"bg-stale-tmp"}')
+    // A SIGKILL between writeFile and rename leaves the temp file behind;
+    // age it past the retention cutoff so cleanup can tell it is abandoned
+    // (CodeRabbit #2497).
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
+    expect(
+      await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
+    expect(await Bun.file(staleTmp).exists()).toBe(false)
+  })
+
+  it('keeps a freshly written session metadata temp file during cleanup', async () => {
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const freshTmp = join(
+      sessionsDir,
+      'bg-fresh-tmp.424243.00000000-0000-4000-8000-000000000001.tmp',
+    )
+    await writeFile(freshTmp, '{"id":"bg-fresh-tmp"}')
+    // A temp file written moments ago may belong to a concurrent publish
+    // that has not renamed yet, even when the cutoff is already past it.
+    expect(
+      await cleanupBackgroundSessionsBefore(new Date(Date.now() + 1)),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
+    expect(await Bun.file(freshTmp).exists()).toBe(true)
   })
 
   it('reconciles stronger terminal facts and retries reservation release', async () => {
