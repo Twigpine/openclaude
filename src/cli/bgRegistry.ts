@@ -985,12 +985,16 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
         if (!isErrno(error, 'ENOENT')) throw error
       }
     }
-    // Publish atomically: write the document to a temp file and link it
-    // into place, so a concurrent name/prefix scan in
-    // resolveBackgroundSessionForWait never reads a partially-written
-    // metadata document as malformed (CodeRabbit #2497). link() fails
-    // with EEXIST if the id appeared meanwhile, preserving the
-    // existing-ID check; temp files end in .tmp so the scan skips them.
+    // Publish atomically: write the document to a temp file in the same
+    // directory and rename it into place, so a concurrent name/prefix scan
+    // in resolveBackgroundSessionForWait never reads a partially-written
+    // metadata document as malformed (CodeRabbit #2497). rename() is
+    // atomic within a filesystem and, unlike link(), works on filesystems
+    // that reject hard links. rename() would overwrite an existing target,
+    // so the duplicate check is an lstat pre-check: every writer of this
+    // id holds the per-ID lock (withBackgroundSessionIdLock), so no other
+    // writer can publish the id between the check and the rename. Temp
+    // files end in .tmp so the scan skips them.
     const target = metadataPathForId(session.id)
     const tmp = join(
       getBackgroundSessionMetadataDir(),
@@ -999,13 +1003,13 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
     try {
       await writeFile(tmp, jsonStringify(session), { flag: 'wx' })
       try {
-        await link(tmp, target)
+        await lstat(target)
       } catch (error) {
-        if (isErrno(error, 'EEXIST')) {
-          throw new Error(`Background session id "${session.id}" already exists`)
-        }
-        throw error
+        if (!isErrno(error, 'ENOENT')) throw error
+        await rename(tmp, target)
+        return
       }
+      throw new Error(`Background session id "${session.id}" already exists`)
     } finally {
       await unlink(tmp).catch(() => {})
     }
