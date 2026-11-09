@@ -135,7 +135,7 @@ describe('MCP resource-template discovery', () => {
   })
 
   test('legacy server returning -32601 syncs with empty templates', async () => {
-    const { connection } = makeTemplateConnection('legacy-templates', {
+    const { connection, requests } = makeTemplateConnection('legacy-templates', {
       'resources/list': [
         { resources: [{ uri: 'file:///concrete', name: 'concrete' }] },
       ],
@@ -150,6 +150,12 @@ describe('MCP resource-template discovery', () => {
     expect(resources.map(r => r.name)).toEqual(['concrete'])
     expect(resourceTemplates).toEqual([])
     expect(await fetchResourceTemplatesForClient(connection)).toEqual([])
+    // The legitimate -32601 empty result stays cached: the next listing
+    // serves it without re-requesting, unlike a transient failure.
+    expect(await fetchResourceTemplatesForClient(connection)).toEqual([])
+    expect(
+      requests.filter(r => r.method === 'resources/templates/list'),
+    ).toHaveLength(1)
   })
 
   test('non-32601 template failure is a discovery failure, not an empty list', async () => {
@@ -699,6 +705,43 @@ describe('MCP resource-template discovery', () => {
     await flushMicrotasks()
     // The second request starts with 5s of budget left; its timeout fires.
     vi.advanceTimersByTime(5_000)
+    await flushMicrotasks()
+    await expect(pending).rejects.toThrow('timed out')
+  })
+
+  test('first page that never resolves is cut off by the traversal deadline', async () => {
+    vi.useFakeTimers()
+    const connection = {
+      type: 'connected',
+      name: 'hanging-first-page',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { resources: {} },
+      client: {
+        request: async (
+          _request: ListRequest,
+          _resultSchema: { parse: (value: unknown) => unknown },
+          options?: { timeout?: number },
+        ) => {
+          // The first page never resolves on its own: only the per-request
+          // timeout (the full 60s budget on page one) can fail it. Without
+          // the remaining budget applied to each request, this would hang
+          // past the traversal deadline instead of rejecting.
+          if (options?.timeout === undefined) {
+            await new Promise(() => {})
+          }
+          await new Promise((_resolve, reject) => {
+            setTimeout(
+              () => reject(new Error('Request timed out')),
+              options?.timeout,
+            )
+          })
+        },
+      },
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    const pending = listAllMcpResourceTemplates(connection)
+    vi.advanceTimersByTime(60_000)
     await flushMicrotasks()
     await expect(pending).rejects.toThrow('timed out')
   })
