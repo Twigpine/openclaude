@@ -257,6 +257,14 @@ function relaunchWithLongSessionHeapIfNeeded() {
     replaceProcessArgvWithStrippedLauncherArgs()
     return
   }
+  // `openclaude wait` must stay in the process the user launched: the heap
+  // relaunch is a synchronous spawnSync, so a SIGINT/SIGTERM sent to the
+  // launcher PID would kill the launcher while the inner waiter kept
+  // running. This bounded local command never needs the long-session heap.
+  if (stripLauncherHeapArgs(process.argv.slice(2))[0] === 'wait') {
+    replaceProcessArgvWithStrippedLauncherArgs()
+    return
+  }
   const nodeArgs = currentNodeOptionArgs()
   const hasHeapLimit = hasHeapLimitFlag(nodeArgs)
   const hasExplicitGc = hasNodeFlag(nodeArgs, '--expose-gc')

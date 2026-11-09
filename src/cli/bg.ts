@@ -40,6 +40,9 @@ import {
   stripBackgroundProcessMarkerArgs,
 } from './bgRouting.js'
 
+export { waitHandler } from './bgWait.js'
+export type { ParsedWaitInvocation, WaitHandlerOptions, WaitResult } from './bgWait.js'
+
 export type ParsedBackgroundInvocation = {
   name?: string
   prompt?: string

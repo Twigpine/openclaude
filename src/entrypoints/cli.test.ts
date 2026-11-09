@@ -54,6 +54,12 @@ const mockKillHandler = mock(
     _options?: { retentionSettingsReady?: boolean },
   ) => {},
 )
+const mockWaitHandler = mock(
+  async (
+    _args: string[],
+    _options?: { featureEnabled?: boolean },
+  ): Promise<number> => 0,
+)
 const mockHandleBgFlag = mock(async (_args: string[]) => {})
 const mockPrepareBackgroundSessionFinalizer = mock(async () => 'installed')
 const mockRunBackgroundSessionCleanupWorker = mock(async () => {})
@@ -102,6 +108,7 @@ const runtimeMocks = [
   mockLogsHandler,
   mockAttachHandler,
   mockKillHandler,
+  mockWaitHandler,
   mockHandleBgFlag,
   mockPrepareBackgroundSessionFinalizer,
   mockRunBackgroundSessionCleanupWorker,
@@ -397,6 +404,7 @@ const mockImporters = {
     logsHandler: mockLogsHandler,
     attachHandler: mockAttachHandler,
     killHandler: mockKillHandler,
+    waitHandler: mockWaitHandler,
     handleBgFlag: mockHandleBgFlag,
   }),
   bgFinalizer: async () => ({
@@ -527,6 +535,47 @@ describe('cli.tsx — background routing behavior', () => {
       expect(mockValidateProviderEnvForStartupOrExit).not.toHaveBeenCalled()
       expect(mockCliMain).not.toHaveBeenCalled()
     }
+  })
+
+  it('dispatches wait through the local background fast path instead of startup', async () => {
+    // Regression for #2162: `wait` must not fall through to ordinary startup.
+    await runCliEntrypoint(['wait', 'session-1', '--timeout', '30s'], bgOptions)
+
+    expect(mockWaitHandler.mock.calls).toEqual([
+      [['session-1', '--timeout', '30s'], { featureEnabled: true }],
+    ])
+    expect(mockParseProviderEnvFileArgs).not.toHaveBeenCalled()
+    expect(mockHandleBgFlag).not.toHaveBeenCalled()
+    expect(mockValidateProviderEnvForStartupOrExit).not.toHaveBeenCalled()
+    expect(mockCliMain).not.toHaveBeenCalled()
+  })
+
+  it('keeps wait on the fast path before provider validation', async () => {
+    const src = await Bun.file(`${import.meta.dir}/cli.tsx`).text()
+    const waitIndex = src.indexOf("args[0] === 'wait'")
+    const providerValidationIndex = src.indexOf(
+      'await validateProviderEnvForStartupOrExit()',
+    )
+
+    expect(waitIndex).toBeGreaterThanOrEqual(0)
+    expect(providerValidationIndex).toBeGreaterThanOrEqual(0)
+    expect(waitIndex).toBeLessThan(providerValidationIndex)
+  })
+
+  it('recognizes wait when background sessions are disabled instead of starting up', async () => {
+    const disabledOptions = {
+      bgSessionsEnabled: false,
+      importers: mockImporters,
+    } as unknown as Parameters<CliMain>[1]
+
+    await runCliEntrypoint(['wait', 'session-1'], disabledOptions)
+
+    expect(mockWaitHandler.mock.calls).toEqual([
+      [['session-1'], { featureEnabled: false }],
+    ])
+    expect(mockPsHandler).not.toHaveBeenCalled()
+    expect(mockCliMain).not.toHaveBeenCalled()
+    expect(mockValidateProviderEnvForStartupOrExit).not.toHaveBeenCalled()
   })
 
   it('keeps kill reachable when retention settings cannot be loaded', async () => {

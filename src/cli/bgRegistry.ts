@@ -2635,6 +2635,317 @@ export const __test = {
   resolveBackgroundSessionWithList,
 }
 
+// ---------------------------------------------------------------------------
+// `wait`-only strict read path (issue #2162).
+//
+// The display commands (ps/logs/attach/kill) intentionally collapse missing,
+// unreadable, malformed, and invalid registry documents to null. That
+// tolerance cannot support `wait`'s exit-code contract, so `wait` reads the
+// pinned session and its terminal facts strictly instead. Nothing below is
+// used by the display commands; do not widen it into a shared reader.
+// ---------------------------------------------------------------------------
+
+export type BackgroundSessionWaitErrorCode =
+  | 'metadata_missing'
+  | 'metadata_unreadable'
+  | 'metadata_malformed'
+  | 'metadata_replaced'
+  | 'invalid_arguments'
+  | 'not_found'
+  | 'ambiguous'
+  | 'unsupported'
+
+export class BackgroundSessionWaitError extends Error {
+  readonly code: BackgroundSessionWaitErrorCode
+  readonly pinnedId: string | null
+
+  constructor(
+    code: BackgroundSessionWaitErrorCode,
+    message: string,
+    pinnedId: string | null = null,
+  ) {
+    super(message)
+    this.name = 'BackgroundSessionWaitError'
+    this.code = code
+    this.pinnedId = pinnedId
+  }
+}
+
+type StrictSessionRead =
+  | { state: 'missing' }
+  | { state: 'valid'; value: BackgroundSession }
+  | { state: 'unreadable' }
+  | { state: 'malformed' }
+
+async function readSessionFileStrict(
+  path: string,
+  id: string,
+): Promise<StrictSessionRead> {
+  let content: string
+  try {
+    content = await readFile(path, 'utf8')
+  } catch (error) {
+    return isErrno(error, 'ENOENT')
+      ? { state: 'missing' }
+      : { state: 'unreadable' }
+  }
+  let parsed: unknown
+  try {
+    parsed = jsonParse(content)
+  } catch {
+    return { state: 'malformed' }
+  }
+  return isBackgroundSession(parsed, id)
+    ? { state: 'valid', value: parsed }
+    : { state: 'malformed' }
+}
+
+type StrictTerminalFactRead =
+  | { state: 'missing' }
+  | { state: 'valid'; value: BackgroundSessionTerminalFact }
+  | { state: 'unreadable' }
+  | { state: 'malformed' }
+
+async function readTerminalFactStrict(
+  id: string,
+  kind: 'natural' | 'killed',
+  generation?: string,
+): Promise<StrictTerminalFactRead> {
+  let content: string
+  try {
+    content = await readFile(
+      terminalFactPathForId(id, kind, generation),
+      'utf8',
+    )
+  } catch (error) {
+    return isErrno(error, 'ENOENT')
+      ? { state: 'missing' }
+      : { state: 'unreadable' }
+  }
+  let parsed: unknown
+  try {
+    parsed = jsonParse(content)
+  } catch {
+    return { state: 'malformed' }
+  }
+  return isBackgroundSessionTerminalFact(parsed, id, kind) &&
+    parsed.generation === generation
+    ? { state: 'valid', value: parsed }
+    : { state: 'malformed' }
+}
+
+function throwWaitMetadataError(
+  state: 'unreadable' | 'malformed',
+  what: string,
+  pinnedId: string | null,
+): never {
+  if (state === 'unreadable') {
+    throw new BackgroundSessionWaitError(
+      'metadata_unreadable',
+      `${what} could not be read`,
+      pinnedId,
+    )
+  }
+  throw new BackgroundSessionWaitError(
+    'metadata_malformed',
+    `${what} is malformed`,
+    pinnedId,
+  )
+}
+
+async function readEffectiveSessionStrict(
+  session: BackgroundSession,
+  pinnedId: string | null,
+): Promise<BackgroundSession> {
+  const natural = await readTerminalFactStrict(
+    session.id,
+    'natural',
+    session.terminalFactGeneration,
+  )
+  if (natural.state === 'unreadable' || natural.state === 'malformed') {
+    throwWaitMetadataError(
+      natural.state,
+      `Terminal fact for background session ${session.id}`,
+      pinnedId,
+    )
+  }
+  const killed = await readTerminalFactStrict(
+    session.id,
+    'killed',
+    session.terminalFactGeneration,
+  )
+  if (killed.state === 'unreadable' || killed.state === 'malformed') {
+    throwWaitMetadataError(
+      killed.state,
+      `Terminal fact for background session ${session.id}`,
+      pinnedId,
+    )
+  }
+  const naturalFact = natural.state === 'valid' ? natural.value : null
+  const killedFact = killed.state === 'valid' ? killed.value : null
+  if (
+    (naturalFact && naturalFact.pid !== session.pid) ||
+    (killedFact && killedFact.pid !== session.pid)
+  ) {
+    throw new BackgroundSessionWaitError(
+      'metadata_replaced',
+      `Background session ${session.id} metadata was replaced`,
+      pinnedId,
+    )
+  }
+  return applyTerminalFacts(session, naturalFact, killedFact)
+}
+
+/**
+ * Strict `wait`-only selector resolution. Preserves the display commands'
+ * selection order (exact ID, one live session with the exact name, one
+ * unambiguous ID prefix, one terminal session with the exact name) but
+ * distinguishes the failure modes `wait` must report: a missing exact-ID
+ * file still allows name or prefix matching, while an unreadable or
+ * malformed entry that could change matching fails with exit code 4.
+ */
+export async function resolveBackgroundSessionForWait(
+  target: string,
+): Promise<BackgroundSession> {
+  if (SAFE_ID_RE.test(target)) {
+    const exact = await readSessionFileStrict(
+      metadataPathForId(target),
+      target,
+    )
+    if (exact.state === 'unreadable' || exact.state === 'malformed') {
+      throwWaitMetadataError(
+        exact.state,
+        `Background session ${target} metadata`,
+        null,
+      )
+    }
+    if (exact.state === 'valid') {
+      return await readEffectiveSessionStrict(exact.value, null)
+    }
+    // A missing exact-ID file can still allow name or prefix matching.
+  }
+
+  let entries: string[]
+  try {
+    entries = await readdir(getBackgroundSessionMetadataDir())
+  } catch (error) {
+    if (isErrno(error, 'ENOENT')) {
+      throw new BackgroundSessionWaitError(
+        'not_found',
+        `No background session found for "${target}"`,
+      )
+    }
+    throw new BackgroundSessionWaitError(
+      'metadata_unreadable',
+      'Background session metadata could not be read',
+    )
+  }
+
+  const candidates: BackgroundSession[] = []
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) continue
+    const id = entry.slice(0, -'.json'.length)
+    if (!SAFE_ID_RE.test(id)) continue
+    const read = await readSessionFileStrict(metadataPathForId(id), id)
+    if (read.state === 'missing') continue
+    if (read.state === 'unreadable' || read.state === 'malformed') {
+      // The name lives inside the file, so any entry could be the named or
+      // prefix-matched session; it cannot be skipped safely.
+      throwWaitMetadataError(
+        read.state,
+        `Background session ${id} metadata`,
+        null,
+      )
+    }
+    candidates.push(read.value)
+  }
+
+  const exactId = candidates.filter(s => s.id === target)
+  if (exactId.length === 1) {
+    return await readEffectiveSessionStrict(exactId[0], null)
+  }
+
+  // Liveness is an effective-status property, so name candidates need their
+  // terminal facts applied strictly before the live/terminal split.
+  const byName = candidates.filter(s => s.name === target)
+  const effectiveByName: BackgroundSession[] = []
+  for (const session of byName) {
+    effectiveByName.push(await readEffectiveSessionStrict(session, null))
+  }
+  const liveByName = effectiveByName.filter(
+    s => !isTerminalBackgroundSession(s),
+  )
+  if (liveByName.length === 1) return liveByName[0]
+  if (liveByName.length > 1) {
+    throw new BackgroundSessionWaitError(
+      'ambiguous',
+      `Background session name "${target}" is ambiguous`,
+    )
+  }
+
+  const idPrefix = candidates.filter(s => s.id.startsWith(target))
+  if (idPrefix.length === 1) {
+    return await readEffectiveSessionStrict(idPrefix[0], null)
+  }
+  if (idPrefix.length > 1) {
+    throw new BackgroundSessionWaitError(
+      'ambiguous',
+      `Background session id "${target}" is ambiguous`,
+    )
+  }
+
+  if (effectiveByName.length === 1) return effectiveByName[0]
+  if (effectiveByName.length > 1) {
+    throw new BackgroundSessionWaitError(
+      'ambiguous',
+      `Background session name "${target}" is ambiguous`,
+    )
+  }
+
+  throw new BackgroundSessionWaitError(
+    'not_found',
+    `No background session found for "${target}"`,
+  )
+}
+
+/**
+ * Strict `wait`-only re-read of an already-pinned session. A missing file, a
+ * changed PID, or an unreadable/malformed document fails with exit code 4
+ * instead of being treated as absent, so a reused name or a replaced
+ * metadata file can never retarget an active waiter.
+ */
+export async function readPinnedBackgroundSessionForWait(pinned: {
+  id: string
+  pid: number
+}): Promise<BackgroundSession> {
+  const read = await readSessionFileStrict(
+    metadataPathForId(pinned.id),
+    pinned.id,
+  )
+  if (read.state === 'missing') {
+    throw new BackgroundSessionWaitError(
+      'metadata_missing',
+      `Background session ${pinned.id} metadata is missing`,
+      pinned.id,
+    )
+  }
+  if (read.state === 'unreadable' || read.state === 'malformed') {
+    throwWaitMetadataError(
+      read.state,
+      `Background session ${pinned.id} metadata`,
+      pinned.id,
+    )
+  }
+  if (read.value.pid !== pinned.pid) {
+    throw new BackgroundSessionWaitError(
+      'metadata_replaced',
+      `Background session ${pinned.id} metadata was replaced`,
+      pinned.id,
+    )
+  }
+  return await readEffectiveSessionStrict(read.value, pinned.id)
+}
+
 export async function refreshBackgroundSessionStatuses(options?: {
   isProcessAlive?: (pid: number) => boolean
   getProcessCommand?: (pid: number) => string | null
