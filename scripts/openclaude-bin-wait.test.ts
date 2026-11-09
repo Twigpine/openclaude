@@ -153,6 +153,40 @@ describe('openclaude wait command (bin)', () => {
     })
   })
 
+  // Wait until the waiter has installed its SIGINT listener before
+  // signalling it. A fixed sleep races slow startup: a SIGINT delivered
+  // before the listener exists kills the process by default instead of
+  // producing the interrupted JSON. On Linux the caught-signal mask in
+  // /proc/<pid>/status shows the installed handler (SIGINT is signal 2,
+  // mask bit 0x2); one poll interval of grace after that lets session
+  // resolution finish so the waiter is in its poll loop. Without /proc
+  // (non-Linux) fall back to the previous fixed delay.
+  async function waitForWaiterReady(
+    proc: ReturnType<typeof Bun.spawn>,
+  ): Promise<void> {
+    const deadline = Date.now() + 15_000
+    let procUnavailable = false
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) return
+      let status: string
+      try {
+        status = readFileSync(`/proc/${proc.pid}/status`, 'utf8')
+      } catch {
+        procUnavailable = true
+        break
+      }
+      const match = /^SigCgt:\s*([0-9a-f]+)$/m.exec(status)
+      if (match && (BigInt(`0x${match[1]}`) & 0x2n) !== 0n) {
+        await new Promise(resolve => setTimeout(resolve, 600))
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    if (procUnavailable) {
+      await new Promise(resolve => setTimeout(resolve, 3000))
+    }
+  }
+
   test('SIGINT to the launcher PID interrupts the waiter with 130 and leaves no inner waiter', async () => {
     expect(existsSync(DIST_PATH)).toBe(true)
     const pid = await startSleeper()
@@ -167,10 +201,9 @@ describe('openclaude wait command (bin)', () => {
         stdin: 'ignore',
       },
     )
-    // Let the waiter reach its poll loop: CLI startup (launcher + dist
-    // import) takes ~650 ms, and a signal delivered before the waiter
-    // installs its SIGINT listener would kill the process by default.
-    await new Promise(resolve => setTimeout(resolve, 3000))
+    // Wait for the waiter to be ready (listener installed + session
+    // resolved) before signalling it; a fixed sleep races slow startup.
+    await waitForWaiterReady(proc)
     process.kill(proc.pid, 'SIGINT')
     const exitCode = await proc.exited
     const stdout = await new Response(proc.stdout).text()

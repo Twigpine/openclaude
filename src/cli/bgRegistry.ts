@@ -985,15 +985,29 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
         if (!isErrno(error, 'ENOENT')) throw error
       }
     }
+    // Publish atomically: write the document to a temp file and link it
+    // into place, so a concurrent name/prefix scan in
+    // resolveBackgroundSessionForWait never reads a partially-written
+    // metadata document as malformed (CodeRabbit #2497). link() fails
+    // with EEXIST if the id appeared meanwhile, preserving the
+    // existing-ID check; temp files end in .tmp so the scan skips them.
+    const target = metadataPathForId(session.id)
+    const tmp = join(
+      getBackgroundSessionMetadataDir(),
+      `${session.id}.${process.pid}.${randomUUID()}.tmp`,
+    )
     try {
-      await writeFile(metadataPathForId(session.id), jsonStringify(session), {
-        flag: 'wx',
-      })
-    } catch (error) {
-      if (isErrno(error, 'EEXIST')) {
-        throw new Error(`Background session id "${session.id}" already exists`)
+      await writeFile(tmp, jsonStringify(session), { flag: 'wx' })
+      try {
+        await link(tmp, target)
+      } catch (error) {
+        if (isErrno(error, 'EEXIST')) {
+          throw new Error(`Background session id "${session.id}" already exists`)
+        }
+        throw error
       }
-      throw error
+    } finally {
+      await unlink(tmp).catch(() => {})
     }
   })
 }
@@ -2783,16 +2797,12 @@ async function readEffectiveSessionStrict(
   }
   const naturalFact = natural.state === 'valid' ? natural.value : null
   const killedFact = killed.state === 'valid' ? killed.value : null
-  if (
-    (naturalFact && naturalFact.pid !== session.pid) ||
-    (killedFact && killedFact.pid !== session.pid)
-  ) {
-    throw new BackgroundSessionWaitError(
-      'metadata_replaced',
-      `Background session ${session.id} metadata was replaced`,
-      pinnedId,
-    )
-  }
+  // A fact published by another PID is not this session's outcome:
+  // applyTerminalFacts ignores pid-mismatched facts, matching the
+  // non-strict registry reader, so name resolution can still select the
+  // session. Actual metadata replacement is reported by the separate
+  // pinned-PID check in readPinnedBackgroundSessionForWait, which stays
+  // (CodeRabbit #2497).
   return applyTerminalFacts(session, naturalFact, killedFact)
 }
 
