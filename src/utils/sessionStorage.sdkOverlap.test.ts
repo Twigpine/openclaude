@@ -22,12 +22,17 @@ import {
   setClaudeConfigHomeDirForTesting,
 } from './envUtils.js'
 import {
+  adoptResumedSessionFile,
+  cacheSessionTitle,
   flushSessionStorage,
+  getCurrentSessionTitle,
   getTranscriptPathForSession,
+  reAppendSessionMetadata,
   recordAttributionSnapshot,
   recordTranscript,
   resetProjectForTesting,
   resetSessionFilePointer,
+  saveTag,
 } from './sessionStorage.js'
 
 /**
@@ -315,4 +320,104 @@ test('switching before every turn with the same id keeps the same file', async (
 
   const ids = await sessionIds(SESSION_A)
   expect(ids.filter(id => id === SESSION_A).length).toBeGreaterThanOrEqual(2)
+})
+
+test("B's tag does not leak into A's transcript when A re-appends metadata", async () => {
+  // CodeRabbit on #2489: the metadata caches (title/tag/...) stayed
+  // process-wide while sessionFile went per-context. B's switch clears
+  // A's cached title, B loads a tag, and A's reAppendSessionMetadata —
+  // finding no tag in A's transcript tail — writes B's tag into A's file.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message('41000000-0000-4000-8000-00000000000e', 'A first')])
+    await flushSessionStorage()
+  })
+
+  await turnStart(SESSION_B, async () => {
+    await saveTag(SESSION_B as never, 'b-tag')
+    await flushSessionStorage()
+  })
+
+  // A's compaction/exit re-append, still in flight in A's context.
+  await turnContinuation(SESSION_A, async () => {
+    reAppendSessionMetadata()
+  })
+
+  const aText = await readFile(getTranscriptPathForSession(SESSION_A), 'utf8')
+  expect(aText).not.toContain('"tag":"b-tag"')
+  const bText = await readFile(getTranscriptPathForSession(SESSION_B), 'utf8')
+  expect(bText).toContain('"tag":"b-tag"')
+})
+
+test("B's switch does not clear A's cached title", async () => {
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message('41000000-0000-4000-8000-00000000000f', 'A first')])
+    await flushSessionStorage()
+    // Cache-only title: never written to disk yet, so the tail cannot
+    // refresh it back — only the in-memory cache can carry it.
+    cacheSessionTitle('A Title')
+  })
+
+  // B's turn switches, which used to wipe the process-wide title cache.
+  await turnStart(SESSION_B, async () => {
+    await recordTranscript([message('41000000-0000-4000-8000-000000000010', 'B first')])
+    await flushSessionStorage()
+  })
+
+  await turnContinuation(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
+    reAppendSessionMetadata()
+  })
+
+  const aText = await readFile(getTranscriptPathForSession(SESSION_A), 'utf8')
+  expect(aText).toContain('A Title')
+  const bText = await readFile(getTranscriptPathForSession(SESSION_B), 'utf8')
+  expect(bText).not.toContain('A Title')
+})
+
+test('the per-context transcript cache stays bounded across many sessions', async () => {
+  // CodeRabbit on #2489: sessionFiles retains one entry per materialized
+  // session and nothing ever releases them — a long-running SDK host
+  // grows the map with every session it creates and closes.
+  const sessionStorage = await import('./sessionStorage.js')
+  const getCacheSize = (
+    sessionStorage as unknown as {
+      getSessionTranscriptCacheSizeForTesting?: () => number
+    }
+  ).getSessionTranscriptCacheSizeForTesting
+  expect(getCacheSize).toBeDefined()
+
+  const ids = Array.from({ length: 105 }, () => randomUUID())
+  for (const id of ids) {
+    await turnStart(id, async () => {
+      // Adopting the (not yet existing) transcript path materializes the
+      // session's cache entry without creating a file.
+      adoptResumedSessionFile()
+    })
+  }
+  expect(getCacheSize!()).toBeLessThanOrEqual(100)
+})
+
+test('a session evicted from the bounded cache still appends to its own file', async () => {
+  // Eviction must be safe: the path is re-derived from the context
+  // identity, so an evicted session's next record still lands in its own
+  // transcript instead of being lost or misdirected.
+  const ids = Array.from({ length: 105 }, () => randomUUID())
+  const first = ids[0]!
+  for (const id of ids) {
+    await turnStart(id, async () => {
+      adoptResumedSessionFile()
+    })
+  }
+
+  await turnContinuation(first, async () => {
+    await recordTranscript([message(randomUUID(), 'first session still here')])
+    await flushSessionStorage()
+  })
+
+  const firstText = await readFile(getTranscriptPathForSession(first), 'utf8')
+  expect(firstText).toContain('first session still here')
+  const firstIds = await sessionIds(first)
+  expect(firstIds.every(id => id === first)).toBe(true)
 })

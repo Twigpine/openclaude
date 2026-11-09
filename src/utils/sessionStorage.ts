@@ -985,6 +985,15 @@ export function setSessionFileForTesting(path: string): void {
   getProject().sessionFile = path
 }
 
+/**
+ * Size of the per-context transcript caches (paths + metadata) for testing.
+ * Proves the bound: creating more sessions than MAX_SESSION_CACHE_ENTRIES
+ * must not grow the caches past it.
+ */
+export function getSessionTranscriptCacheSizeForTesting(): number {
+  return getProject()._sessionTranscriptCacheSize()
+}
+
 type InternalEventWriter = (
   eventType: string,
   payload: Record<string, unknown>,
@@ -1029,24 +1038,219 @@ const REMOTE_FLUSH_INTERVAL_MS = 10
 
 type SidechainDestination = { path: string; sessionId: UUID }
 
-class Project {
-  // Minimal cache for current session only (not all sessions)
-  currentSessionTag: string | undefined
-  currentSessionTitle: string | undefined
-  currentSessionAgentName: string | undefined
-  currentSessionAgentColor: string | undefined
-  currentSessionLastPrompt: string | undefined
-  currentSessionAgentSetting: string | undefined
-  currentSessionMode: 'coordinator' | 'normal' | undefined
-  // Tri-state: undefined = never touched (don't write), null = exited worktree,
+/**
+ * Session metadata cached for the session active in the current context
+ * only — title, tag, agent, mode, worktree, PR link, goal, branch.
+ *
+ * `Project` is a process-wide singleton, but the session it appends for
+ * is context-scoped (`bootstrap/state.ts`), so these caches must be
+ * scoped to the same identity as `sessionFile` (see `sessionFileKey`).
+ * They were plain process-wide fields: one session's switch cleared
+ * another session's cached title (via `resetSessionFile` →
+ * `clearSessionMetadata`), and the other session's
+ * `reAppendSessionMetadata` then wrote the first session's tag into its
+ * own transcript whenever its own tail held no tag — the same bug class
+ * as #2267, one layer up. Scoping them per context keeps a switch or
+ * reset in one context from touching another's metadata.
+ */
+type SessionMetadata = {
+  tag?: string
+  title?: string
+  agentName?: string
+  agentColor?: string
+  lastPrompt?: string
+  agentSetting?: string
+  mode?: 'coordinator' | 'normal'
+  // Tri-state: absent = never touched (don't write), null = exited worktree,
   // object = currently in worktree. reAppendSessionMetadata writes null so
   // --resume knows the session exited (vs. crashed while inside).
-  currentSessionWorktree: PersistedWorktreeSession | null | undefined
-  currentSessionPrNumber: number | undefined
-  currentSessionPrUrl: string | undefined
-  currentSessionPrRepository: string | undefined
-  currentSessionGoal: GoalStateEntry['goal'] | undefined
-  currentSessionBranch: SessionBranchEntry | undefined
+  worktree?: PersistedWorktreeSession | null
+  prNumber?: number
+  prUrl?: string
+  prRepository?: string
+  goal?: GoalStateEntry['goal']
+  branch?: SessionBranchEntry
+}
+
+class Project {
+  // Minimal cache for current session only (not all sessions) — one entry
+  // per context identity (see sessionFileKey), never shared across sessions.
+  private sessionMetadata = new Map<string, SessionMetadata>()
+
+  /** Metadata for the session active in the current context, if any. */
+  private metadataForRead(): SessionMetadata | undefined {
+    const key = this.sessionFileKey()
+    const entry = this.sessionMetadata.get(key)
+    if (entry) {
+      // Touch so the bounded cache evicts least-recently-used entries first.
+      this.sessionMetadata.delete(key)
+      this.sessionMetadata.set(key, entry)
+    }
+    return entry
+  }
+
+  /** Metadata for the session active in the current context, creating it. */
+  private metadataForWrite(): SessionMetadata {
+    const key = this.sessionFileKey()
+    let entry = this.sessionMetadata.get(key)
+    if (entry) {
+      this.sessionMetadata.delete(key)
+    } else {
+      entry = {}
+    }
+    this.sessionMetadata.set(key, entry)
+    // The most recently written entry is where deferred startup selections
+    // live before any session has started (see migrateStartupMetadata).
+    this.lastMetadataKey = key
+    this.boundSessionCaches()
+    return entry
+  }
+
+  // Identity of the most recently written metadata entry. Before any
+  // session has started, the only writers are the startup paths
+  // (cacheSessionTitle / saveAgentSetting / saveWorktreeState), so this
+  // points at the deferred startup selections.
+  private lastMetadataKey: string | null = null
+
+  /**
+   * Move deferred startup selections (title, agent setting, worktree)
+   * cached under a previous session identity into the current context's
+   * entry.
+   *
+   * They are cached before --continue/--resume chooses a transcript,
+   * under the startup session's identity; the switch (or regenerate)
+   * that picks the resumed session changes the key, so without this
+   * carry `resetSessionFile`'s startup preservation below would read an
+   * empty entry and drop them. Only before any session has started: once
+   * a session is established its metadata belongs to it and must never
+   * migrate to another session.
+   */
+  private migrateStartupMetadata(): void {
+    if (this.hasStartedSession) return
+    const previousKey = this.lastMetadataKey
+    const currentKey = this.sessionFileKey()
+    if (previousKey === null || previousKey === currentKey) return
+    const previous = this.sessionMetadata.get(previousKey)
+    if (!previous) return
+    const current = this.metadataForWrite()
+    // Fill only fields this context does not already have; a value cached
+    // under this identity already is the newer word for it.
+    if (current.title === undefined && previous.title !== undefined) {
+      current.title = previous.title
+    }
+    if (
+      current.agentSetting === undefined &&
+      previous.agentSetting !== undefined
+    ) {
+      current.agentSetting = previous.agentSetting
+    }
+    if (current.worktree === undefined && previous.worktree !== undefined) {
+      current.worktree = previous.worktree
+    }
+    // Move, don't copy: the selections now belong to the resumed session.
+    delete previous.title
+    delete previous.agentSetting
+    delete previous.worktree
+    if (Object.keys(previous).length === 0) {
+      this.sessionMetadata.delete(previousKey)
+    }
+  }
+
+  private setSessionMetadataField<K extends keyof SessionMetadata>(
+    field: K,
+    value: SessionMetadata[K] | undefined,
+  ): void {
+    if (value === undefined) {
+      const key = this.sessionFileKey()
+      const entry = this.sessionMetadata.get(key)
+      if (!entry) return
+      delete entry[field]
+      if (Object.keys(entry).length === 0) this.sessionMetadata.delete(key)
+      return
+    }
+    this.metadataForWrite()[field] = value
+  }
+
+  get currentSessionTag(): string | undefined {
+    return this.metadataForRead()?.tag
+  }
+  set currentSessionTag(tag: string | undefined) {
+    this.setSessionMetadataField('tag', tag)
+  }
+  get currentSessionTitle(): string | undefined {
+    return this.metadataForRead()?.title
+  }
+  set currentSessionTitle(title: string | undefined) {
+    this.setSessionMetadataField('title', title)
+  }
+  get currentSessionAgentName(): string | undefined {
+    return this.metadataForRead()?.agentName
+  }
+  set currentSessionAgentName(agentName: string | undefined) {
+    this.setSessionMetadataField('agentName', agentName)
+  }
+  get currentSessionAgentColor(): string | undefined {
+    return this.metadataForRead()?.agentColor
+  }
+  set currentSessionAgentColor(agentColor: string | undefined) {
+    this.setSessionMetadataField('agentColor', agentColor)
+  }
+  get currentSessionLastPrompt(): string | undefined {
+    return this.metadataForRead()?.lastPrompt
+  }
+  set currentSessionLastPrompt(lastPrompt: string | undefined) {
+    this.setSessionMetadataField('lastPrompt', lastPrompt)
+  }
+  get currentSessionAgentSetting(): string | undefined {
+    return this.metadataForRead()?.agentSetting
+  }
+  set currentSessionAgentSetting(agentSetting: string | undefined) {
+    this.setSessionMetadataField('agentSetting', agentSetting)
+  }
+  get currentSessionMode(): 'coordinator' | 'normal' | undefined {
+    return this.metadataForRead()?.mode
+  }
+  set currentSessionMode(mode: 'coordinator' | 'normal' | undefined) {
+    this.setSessionMetadataField('mode', mode)
+  }
+  get currentSessionWorktree(): PersistedWorktreeSession | null | undefined {
+    return this.metadataForRead()?.worktree
+  }
+  set currentSessionWorktree(
+    worktree: PersistedWorktreeSession | null | undefined,
+  ) {
+    this.setSessionMetadataField('worktree', worktree)
+  }
+  get currentSessionPrNumber(): number | undefined {
+    return this.metadataForRead()?.prNumber
+  }
+  set currentSessionPrNumber(prNumber: number | undefined) {
+    this.setSessionMetadataField('prNumber', prNumber)
+  }
+  get currentSessionPrUrl(): string | undefined {
+    return this.metadataForRead()?.prUrl
+  }
+  set currentSessionPrUrl(prUrl: string | undefined) {
+    this.setSessionMetadataField('prUrl', prUrl)
+  }
+  get currentSessionPrRepository(): string | undefined {
+    return this.metadataForRead()?.prRepository
+  }
+  set currentSessionPrRepository(prRepository: string | undefined) {
+    this.setSessionMetadataField('prRepository', prRepository)
+  }
+  get currentSessionGoal(): GoalStateEntry['goal'] | undefined {
+    return this.metadataForRead()?.goal
+  }
+  set currentSessionGoal(goal: GoalStateEntry['goal'] | undefined) {
+    this.setSessionMetadataField('goal', goal)
+  }
+  get currentSessionBranch(): SessionBranchEntry | undefined {
+    return this.metadataForRead()?.branch
+  }
+  set currentSessionBranch(branch: SessionBranchEntry | undefined) {
+    this.setSessionMetadataField('branch', branch)
+  }
 
   /**
    * Cached transcript path for the session active in the current context.
@@ -1069,7 +1273,13 @@ class Project {
    * SDK store, so its behavior is unchanged.
    */
   get sessionFile(): string | null {
-    return this.sessionFiles.get(this.sessionFileKey()) ?? null
+    const key = this.sessionFileKey()
+    const path = this.sessionFiles.get(key)
+    if (path === undefined) return null
+    // Touch so the bounded cache evicts least-recently-used entries first.
+    this.sessionFiles.delete(key)
+    this.sessionFiles.set(key, path)
+    return path
   }
 
   set sessionFile(path: string | null) {
@@ -1077,14 +1287,48 @@ class Project {
     if (path === null) {
       this.sessionFiles.delete(key)
     } else {
+      this.sessionFiles.delete(key)
       this.sessionFiles.set(key, path)
+      this.boundSessionCaches()
     }
   }
 
-  // One cached path per context identity. Paths are small strings; entries
-  // are dropped with their context's reset and with the singleton
-  // (resetProjectForTesting), so the map stays bounded by live sessions.
+  // One cached path per context identity. Entries are dropped with their
+  // context's reset and with the singleton (resetProjectForTesting) — but
+  // a closed SDK session gets neither: neither v2 nor query close() touches
+  // sessionStorage, so without a bound the map would keep one entry per
+  // session a long-running host ever materialized. Cap both per-context
+  // caches (paths + metadata, same identity) and evict least-recently-used
+  // entries; eviction is safe because a path is always re-derived from
+  // its context identity (getTranscriptPath) and title/tag refresh from
+  // the transcript tail on re-append.
   private sessionFiles = new Map<string, string>()
+
+  // Bound for the per-context transcript caches, matching the LRU default
+  // in conversationCache. Far above any realistic count of overlapping
+  // live sessions; eviction only ever drops long-idle contexts.
+  private readonly MAX_SESSION_CACHE_ENTRIES = 100
+
+  /** Evict least-recently-used entries past the bound, from both caches. */
+  private boundSessionCaches(): void {
+    while (this.sessionFiles.size > this.MAX_SESSION_CACHE_ENTRIES) {
+      const oldest = this.sessionFiles.keys().next().value
+      if (oldest === undefined) return
+      this.sessionFiles.delete(oldest)
+      this.sessionMetadata.delete(oldest)
+    }
+    while (this.sessionMetadata.size > this.MAX_SESSION_CACHE_ENTRIES) {
+      const oldest = this.sessionMetadata.keys().next().value
+      if (oldest === undefined) return
+      this.sessionMetadata.delete(oldest)
+      this.sessionFiles.delete(oldest)
+    }
+  }
+
+  /** @internal Size of the per-context transcript caches, for testing. */
+  _sessionTranscriptCacheSize(): number {
+    return Math.max(this.sessionFiles.size, this.sessionMetadata.size)
+  }
 
   /**
    * Identity of the transcript `getTranscriptPath()` derives in this
@@ -1439,6 +1683,9 @@ class Project {
     // transcript. Keep only those deferred fields through its switch and
     // explicit reset; metadata from an established session must be cleared.
     if (this.sessionFile !== null) this.hasStartedSession = true
+    // The selections were cached under the startup session's identity;
+    // carry them into this context before preserving them below.
+    if (!this.hasStartedSession) this.migrateStartupMetadata()
     const startupMetadata = !this.hasStartedSession
       ? {
           title: this.currentSessionTitle,
@@ -1449,10 +1696,13 @@ class Project {
     this.sessionFile = null
     // The "current session only" metadata caches must not survive the move to
     // another session: reAppendSessionMetadata would otherwise write them into
-    // the next session's transcript. The CLI already paired
-    // resetSessionFilePointer with clearSessionMetadata() by hand (see
-    // REPL.tsx); doing it here makes the SDK path follow the same rule, since
-    // it has no restoreSessionMetadata call to put them back.
+    // the next session's transcript. They are scoped per context (see the
+    // accessors on Project), so clearing here drops only this context's
+    // entry — another overlapping session's cached title/tag is untouched.
+    // The CLI already paired resetSessionFilePointer with
+    // clearSessionMetadata() by hand (see REPL.tsx); doing it here makes the
+    // SDK path follow the same rule, since it has no restoreSessionMetadata
+    // call to put them back.
     this.clearSessionMetadata()
     if (startupMetadata) {
       this.currentSessionTitle = startupMetadata.title
@@ -1464,21 +1714,9 @@ class Project {
     // materializes. A switch away and back must keep them.
   }
 
-  /** Drops the "current session only" metadata caches. */
+  /** Drops the "current session only" metadata caches for this context. */
   clearSessionMetadata(): void {
-    this.currentSessionTitle = undefined
-    this.currentSessionTag = undefined
-    this.currentSessionAgentName = undefined
-    this.currentSessionAgentColor = undefined
-    this.currentSessionLastPrompt = undefined
-    this.currentSessionAgentSetting = undefined
-    this.currentSessionMode = undefined
-    this.currentSessionWorktree = undefined
-    this.currentSessionPrNumber = undefined
-    this.currentSessionPrUrl = undefined
-    this.currentSessionPrRepository = undefined
-    this.currentSessionGoal = undefined
-    this.currentSessionBranch = undefined
+    this.sessionMetadata.delete(this.sessionFileKey())
   }
 
   /**
