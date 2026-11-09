@@ -1058,3 +1058,192 @@ test('getModelOptions: allowlist checks a non-switch custom id verbatim, not dec
     expect(values).toContain(literal)
   })
 })
+
+// #1119 Piece 1: the hardcoded GPT/Codex catalog must not leak into /model
+// when the active profile is an OpenAI-compatible vendor route, not
+// OpenAI/Codex itself. Mirrors getCodexModelOptions() in modelOptions.ts.
+const CODEX_MODEL_VALUES = [
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+  'gpt-5.5',
+  'gpt-5.4',
+  'gpt-5.3-codex',
+  'gpt-5.3-codex-spark',
+  'codexspark',
+  'gpt-5.2-codex',
+  'gpt-5.1-codex-max',
+  'gpt-5.1-codex-mini',
+  'gpt-5.5-mini',
+  'gpt-5.4-mini',
+]
+
+function expectNoCodexModels(values: readonly unknown[]) {
+  for (const model of CODEX_MODEL_VALUES) {
+    expect(values).not.toContain(model)
+  }
+}
+
+function expectCodexModels(values: readonly unknown[]) {
+  for (const model of CODEX_MODEL_VALUES) {
+    expect(values).toContain(model)
+  }
+}
+
+test('getModelOptionsBase: suppresses hardcoded Codex models for a Kimi profile (issue shape, #1119)', async () => {
+  // Repro for #1119 Piece 1: the profile from the issue itself — provider
+  // 'openai' with a Kimi base URL. getAPIProvider() reports 'openai' for it,
+  // so the old unconditional check injected the whole GPT/Codex catalog.
+  const active = buildProviderProfileFixture({
+    id: 'profile_kimi_k26',
+    name: 'Kimi',
+    provider: 'openai',
+    baseUrl: 'https://api.kimi.com/coding/',
+    model: 'kimi-k2.6',
+  })
+  await withProfileEnvApplied(async () => {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [active],
+      getActiveProviderProfile: () => active,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectNoCodexModels(values)
+    // The profile's own model still surfaces.
+    expect(values).toContain('kimi-k2.6')
+  })
+})
+
+test('getModelOptionsBase: suppresses hardcoded Codex models for an OpenRouter profile (#1119)', async () => {
+  const active = buildProviderProfileFixture({
+    id: 'profile_openrouter',
+    name: 'OpenRouter',
+    provider: 'openai',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'deepseek/deepseek-v4-flash',
+  })
+  await withProfileEnvApplied(async () => {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [active],
+      getActiveProviderProfile: () => active,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectNoCodexModels(values)
+    expect(values).toContain('deepseek/deepseek-v4-flash')
+  })
+})
+
+test('getModelOptionsBase: suppresses hardcoded Codex models for a Kimi preset profile (#1119)', async () => {
+  // Same vendor reached via the preset id instead of provider 'openai'.
+  const active = buildProviderProfileFixture({
+    id: 'profile_kimi_code',
+    name: 'Kimi Code',
+    provider: 'kimi-code',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    model: 'kimi-k2.6',
+  })
+  await withProfileEnvApplied(async () => {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [active],
+      getActiveProviderProfile: () => active,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectNoCodexModels(values)
+    expect(values).toContain('kimi-k2.6')
+  })
+})
+
+test('getModelOptionsBase: suppresses hardcoded Codex models for a Z.AI profile (issue shape, #1119)', async () => {
+  const active = buildProviderProfileFixture({
+    id: 'profile_glm',
+    name: 'GLM-5.1 (Z.AI)',
+    provider: 'openai',
+    baseUrl: 'https://api.z.ai/api/anthropic',
+    model: 'glm-5.1',
+  })
+  await withProfileEnvApplied(async () => {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [active],
+      getActiveProviderProfile: () => active,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectNoCodexModels(values)
+    expect(values).toContain('glm-5.1')
+  })
+})
+
+test('getModelOptionsBase: keeps hardcoded Codex models for a standard OpenAI profile (#1119)', async () => {
+  const active = buildProviderProfileFixture({
+    id: 'profile_openai',
+    name: 'OpenAI',
+    provider: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-5.5',
+  })
+  await withProfileEnvApplied(async () => {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [active],
+      getActiveProviderProfile: () => active,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectCodexModels(values)
+  })
+})
+
+test('getModelOptionsBase: keeps hardcoded Codex models for the Codex backend (#1119)', async () => {
+  // The Codex backend (ChatGPT OAuth) has no manifest routeId, so it must
+  // not lose its catalog to the suppression — getAPIProvider() === 'codex'
+  // is the runtime's own Codex-backend detector.
+  const active = buildProviderProfileFixture({
+    id: 'profile_codex',
+    name: 'Codex',
+    provider: 'openai',
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+    model: 'gpt-5.6-sol',
+  })
+  activeApiProviderOverride = 'codex'
+  await withProfileEnvApplied(async () => {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [active],
+      getActiveProviderProfile: () => active,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectCodexModels(values)
+  })
+})
+
+test('getModelOptionsBase: keeps hardcoded Codex models with no profile configured (env-only fallback, #1119)', async () => {
+  // No provider profile: preserve today's env-only behaviour for users who
+  // haven't migrated to provider profiles yet.
+  const previousFlag = process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+  delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+  try {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [],
+      getActiveProviderProfile: () => undefined,
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectCodexModels(values)
+  } finally {
+    if (previousFlag !== undefined) {
+      process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = previousFlag
+    }
+  }
+})
