@@ -743,12 +743,16 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   // routeId 'openai'. The Codex backend has no manifest routeId, so it is
   // detected the same way getAPIProvider() detects it.
   // No profile configured — preserve today's env-only behaviour for users
-  // who haven't migrated to provider profiles yet.
+  // who haven't migrated to provider profiles yet. Key on whether the
+  // profile env is actually applied, not on whether a profile is saved:
+  // getActiveProviderProfile() falls back to profiles[0], so a merely-saved
+  // profile would otherwise suppress the GPT/Codex catalog for an env-only
+  // OpenAI-compatible endpoint (CodeRabbit #2495).
   const isActualOpenAIOrCodexRoute =
     activeRouteId === 'openai' || getAPIProvider() === 'codex'
   if (
     isActualOpenAIOrCodexRoute ||
-    (!activeProfile &&
+    (!profileEnvApplied &&
       (getAPIProvider() === 'openai' || getAPIProvider() === 'codex'))
   ) {
     payg3pOptions.push(...getCodexModelOptions())

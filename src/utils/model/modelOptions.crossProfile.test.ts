@@ -1247,3 +1247,54 @@ test('getModelOptionsBase: keeps hardcoded Codex models with no profile configur
     }
   }
 })
+
+test('getModelOptionsBase: keeps hardcoded Codex models for an env-only endpoint when a saved profile env is NOT applied (#1119)', async () => {
+  // CodeRabbit #2495: a saved profile disabled the env-only fallback even
+  // though its env was inactive — getActiveProviderProfile() falls back to
+  // profiles[0], so `!activeProfile` was false and the hardcoded GPT/Codex
+  // alternatives vanished for an env-only OpenAI-compatible endpoint with an
+  // unrecognized remote URL. The fallback must key on whether the profile env
+  // is actually applied, not on whether a profile is saved.
+  const saved = buildProviderProfileFixture({
+    id: 'profile_saved',
+    name: 'Saved',
+    provider: 'openai',
+    baseUrl: 'https://api.example.com/v1',
+    model: 'example-model',
+  })
+  const previousFlag = process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+  const previousUseOpenAI = process.env.CLAUDE_CODE_USE_OPENAI
+  const previousBaseUrl = process.env.OPENAI_BASE_URL
+  delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.example.com/v1'
+  try {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [saved],
+      // Real getActiveProviderProfile() falls back to profiles[0] when no
+      // active id is configured, even though the profile env is not applied.
+      getActiveProviderProfile: () => saved,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectCodexModels(values)
+  } finally {
+    if (previousFlag === undefined) {
+      delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+    } else {
+      process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = previousFlag
+    }
+    if (previousUseOpenAI === undefined) {
+      delete process.env.CLAUDE_CODE_USE_OPENAI
+    } else {
+      process.env.CLAUDE_CODE_USE_OPENAI = previousUseOpenAI
+    }
+    if (previousBaseUrl === undefined) {
+      delete process.env.OPENAI_BASE_URL
+    } else {
+      process.env.OPENAI_BASE_URL = previousBaseUrl
+    }
+  }
+})
