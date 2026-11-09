@@ -322,6 +322,12 @@ const OPENGATEWAY_HOSTS = new Set([
   'opengateway.fly.dev',
 ])
 
+/**
+ * Collapse a legacy per-vendor OpenGateway path (`/v1/xiaomi-mimo`,
+ * `/v1/gmi-cloud`) to the shared `/v1` base when the URL points at one of
+ * OPENGATEWAY_HOSTS. Other hosts, other paths, and unparseable URLs are
+ * returned unchanged.
+ */
 function normalizeOpengatewayBaseUrl(baseUrl: string): string {
   try {
     const parsed = new URL(baseUrl)
@@ -367,6 +373,13 @@ function defaultOpengatewayProvider(env: EnvLike): DetectedProvider | null {
   }
 }
 
+/**
+ * Pick the provider to use when none was chosen explicitly. Checks, in order:
+ * provider env vars and Codex auth, then reachable local services (unless
+ * `skipLocal`), then the Twigpine OpenGateway fallback (unless
+ * `skipOpengatewayFallback`), which only applies when OPENGATEWAY_API_KEY or
+ * OPENAI_API_KEY is set. Returns null when nothing matches.
+ */
 export async function detectBestProvider(options?: {
   env?: EnvLike
   fetchImpl?: typeof fetch

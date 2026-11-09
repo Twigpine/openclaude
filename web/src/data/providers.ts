@@ -120,7 +120,7 @@ export const providers: Provider[] = [
     group: 'gateways',
     setup: 'startup default, /provider, or env vars',
     envVars: ['OPENGATEWAY_API_KEY'],
-    notes: 'Smart gateway at https://api.twigpine.com/v1 with auto smart-routing, MiMo, MiniMax, Qwen, GLM, Gemini — plus free models (Nemotron 3 Ultra, Ling 3.0 Flash, Tencent HY3). Keys at twigpine.com/console/gateway/keys.',
+    notes: 'Smart gateway at https://api.twigpine.com/v1 with auto smart-routing, MiMo, MiniMax, Qwen, GLM, Gemini. Current models and pricing: api.twigpine.com/v1/models. Keys at twigpine.com/console/gateway/keys.',
     badge: 'recommended',
   },
   {

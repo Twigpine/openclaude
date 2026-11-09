@@ -60,6 +60,12 @@ function asGithubEnterpriseEnvUrl(value: string | undefined): string | undefined
   return trimmed
 }
 
+/**
+ * Collapse a legacy per-vendor OpenGateway path (`/v1/xiaomi-mimo`,
+ * `/v1/gmi-cloud`) to the shared `/v1` base on any gateway host (the public
+ * api.twigpine.com address and the legacy opengateway.gitlawb.com /
+ * opengateway.fly.dev hosts). Other hosts and paths are returned unchanged.
+ */
 function normalizeGitlawbOpengatewayBaseUrl(baseUrl: string | undefined): string | undefined {
   if (!baseUrl) return undefined
   try {

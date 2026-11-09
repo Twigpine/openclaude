@@ -329,11 +329,14 @@ key from https://twigpine.com/console/gateway/keys. Keep the base URL at `/v1`
 and switch models with `/model` or `OPENAI_MODEL`. The older
 `https://opengateway.gitlawb.com/v1` address still works for existing setups.
 
-`/model` shows the gateway's live list of active models from the public
-`GET https://api.twigpine.com/v1/models` endpoint (no key needed), refreshed at
-startup. Retired models drop out of the picker on their own; if the list cannot
-be fetched, the picker falls back to `auto` (smart routing), `mimo-v2.6-pro`,
-and `mimo-v2.6-flash`.
+`/model` shows the gateway's list of active models from the public
+`GET https://api.twigpine.com/v1/models` endpoint (no key needed). OpenClaude
+caches that list for a day and fetches it again at startup once the cache has
+expired; press `r` in `/model` to refresh it on demand. If a refresh fails, the
+picker keeps showing the last cached list, so a model the gateway has retired
+since then can stay listed until a refresh succeeds. `auto` (smart routing),
+`mimo-v2.6-pro`, and `mimo-v2.6-flash` are always listed, including when the
+list has never been fetched.
 
 ### Xiaomi MiMo
 

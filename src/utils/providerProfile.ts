@@ -2753,6 +2753,15 @@ export async function buildLaunchEnv(options: {
   })
 }
 
+/**
+ * Build the startup process env from the legacy single-profile file.
+ * Explicit provider selections (env, flags, or an already-applied plural
+ * provider profile) are returned unchanged, except that a saved
+ * dedicated-provider proxy profile is still applied so its credential
+ * boundary holds. With no saved profile and no OpenAI opt-out, the Twigpine
+ * OpenGateway fresh-install default is applied; otherwise the saved profile's
+ * launch env is built.
+ */
 export async function buildStartupEnvFromProfile(options?: {
   persisted?: ProfileFile | null
   goal?: RecommendationGoal
