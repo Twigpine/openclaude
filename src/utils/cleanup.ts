@@ -806,9 +806,13 @@ export async function runBackgroundSessionRetention(
         // Abandoned temp files are cleaned once for the whole batch, not
         // once per recovery ID: each per-ID cleanup would otherwise rescan
         // the metadata directory, up to 256 times per batch (CodeRabbit
-        // #2497). Zero retention means every ID here is already past its
-        // cutoff, so one cutoff covers the batch.
-        const cutoff = new Date(Date.now() + 1)
+        // #2497). The cutoff is still computed fresh immediately before
+        // each session cleanup: with zero retention a session can finish
+        // after the batch started but before its cleanup, and a batch
+        // cutoff would leave its metadata and logs until a full sweep
+        // when its journal append and finalization cleanup also fail
+        // (CodeRabbit #2497). Only the cutoff value moves per ID; the
+        // single temp-file scan below is unchanged.
         for (const id of batch.sessionIds) {
           // Attribute retryable errors to their ID, so retained entries cannot
           // hold unrelated work at the front of the bounded journal.
@@ -817,22 +821,27 @@ export async function runBackgroundSessionRetention(
               sessionIds: [id],
             })
           logBackgroundReconciliation(reconciliation)
-          const cleanup = await cleanupBackgroundSessionsBefore(cutoff, {
-            sessionIds: [id],
-            orphanedTerminalFacts: batch.terminalFacts.filter(
-              target => target.id === id,
-            ),
-            skipAbandonedTempFileCleanup: true,
-            onRetry: target => {
-              if (target) retryTerminalFacts.push(target)
+          const cleanup = await cleanupBackgroundSessionsBefore(
+            new Date(Date.now() + 1),
+            {
+              sessionIds: [id],
+              orphanedTerminalFacts: batch.terminalFacts.filter(
+                target => target.id === id,
+              ),
+              skipAbandonedTempFileCleanup: true,
+              onRetry: target => {
+                if (target) retryTerminalFacts.push(target)
+              },
             },
-          })
+          )
           logBackgroundCleanup(cleanup)
           if (reconciliation.errors > 0 || cleanup.errors > 0) {
             retrySessionIds.push(id)
           }
         }
-        const tempCleanup = await cleanupAbandonedSessionTempFiles(cutoff)
+        const tempCleanup = await cleanupAbandonedSessionTempFiles(
+          new Date(Date.now() + 1),
+        )
         logBackgroundCleanup(tempCleanup)
         // Save retries before publishing the cursor that acknowledges this batch.
         await batch.commit(retrySessionIds, retryTerminalFacts)

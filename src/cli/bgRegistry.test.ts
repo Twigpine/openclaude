@@ -2410,9 +2410,12 @@ describe('background session registry', () => {
   it('keeps an abandoned session metadata temp file while its session publish lock is held', async () => {
     const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
     await mkdir(sessionsDir, { recursive: true })
+    // The temp file carries its publisher's pid, exactly like a real
+    // writeNewSession temp file, so cleanup can tell the publisher is
+    // still alive even when the lock looks stale (CodeRabbit #2497).
     const staleTmp = join(
       sessionsDir,
-      'bg-locked-tmp.424242.00000000-0000-4000-8000-000000000002.tmp',
+      `bg-locked-tmp.${process.pid}.00000000-0000-4000-8000-000000000002.tmp`,
     )
     await writeFile(staleTmp, '{"id":"bg-locked-tmp"}')
     // Age it past the retention cutoff and the publish grace period, so
@@ -2427,6 +2430,15 @@ describe('background session registry', () => {
       retries: 0,
     })
     try {
+      // Age the lock itself past the stale threshold too: after a clock
+      // jump the lock can also look stale, so proper-lockfile would let
+      // cleanup steal it and remove the active temp file (CodeRabbit
+      // #2497). The live publisher pid above is what must protect it.
+      await utimes(
+        join(sessionsDir, 'bg-locked-tmp.json.lock'),
+        twoDaysAgo,
+        twoDaysAgo,
+      )
       expect(
         await cleanupBackgroundSessionsBefore(
           new Date(Date.now() - 24 * 60 * 60 * 1000),
@@ -2442,6 +2454,83 @@ describe('background session registry', () => {
       ),
     ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
     expect(await Bun.file(staleTmp).exists()).toBe(false)
+  })
+
+  it('keeps the first-published terminal fact when the sync exit fallback races async finalization', async () => {
+    // Regression test for CodeRabbit #2497: if exit occurs while
+    // asynchronous finalization is pending, the synchronous ELOCKED
+    // fallback publishes without the per-ID lock. Both installers could
+    // observe a missing fact and one rename could replace the other, so
+    // a waiter could observe a result that later changes. The first
+    // publisher must win: the fallback completes the pending publish
+    // instead of replacing it.
+    const session = await createBackgroundSession({
+      id: 'bg-terminal-fact-race',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-terminal-fact-race',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let releaseHook: (() => void) | undefined
+    let hookReachedResolve: (() => void) | undefined
+    const hookReached = new Promise<void>(resolve => {
+      hookReachedResolve = resolve
+    })
+    const hookGate = new Promise<void>(resolve => {
+      releaseHook = resolve
+    })
+    backgroundSessionRegistry._setTerminalFactPublishHookForTesting(
+      async () => {
+        hookReachedResolve?.()
+        await hookGate
+      },
+    )
+    // Start async finalization and pause it after it has claimed the
+    // publish but before it renames: it holds the per-ID lock, so the
+    // sync call below takes the ELOCKED fallback.
+    const asyncTermination = recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      { ownerPid: session.pid, expectedSession: session },
+    )
+    // Mark the rejection handled so a failure mid-test cannot surface
+    // as an unhandled rejection; awaiting the promise still throws.
+    asyncTermination.catch(() => {})
+    try {
+      await hookReached
+      // The exit fallback cannot wait for the lock, so it publishes
+      // without it — but it must not replace the pending publish.
+      recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      // The fallback completed the first publisher's fact, so the
+      // waiter already sees the first exit code — not the fallback's.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'exited', exitCode: 0 })
+      releaseHook?.()
+      const terminated = await asyncTermination
+      expect(terminated).toMatchObject({ status: 'exited', exitCode: 0 })
+      // The resumed installer must not replace the published fact.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'exited', exitCode: 0 })
+      const stored = JSON.parse(
+        await readFile(
+          terminalFactPath(session.id, 'natural', TEST_PROCESS_MARKER),
+          'utf8',
+        ),
+      ) as { exitCode?: number }
+      expect(stored.exitCode).toBe(0)
+    } finally {
+      backgroundSessionRegistry._setTerminalFactPublishHookForTesting(
+        undefined,
+      )
+      releaseHook?.()
+    }
   })
 
   it('defers abandoned session metadata temp file cleanup when asked', async () => {
