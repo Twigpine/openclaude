@@ -144,3 +144,26 @@ test('rejects an already-aborted Gemini stream without yielding events', async (
   await expect(stream.next()).rejects.toMatchObject({ name: 'AbortError' })
   expect(cancelReasons).toHaveLength(1)
 })
+
+test('reports Gemini cachedContentTokenCount as cache_read_input_tokens', async () => {
+  const events = await collectEvents(responseFor({
+    candidates: [{
+      content: { parts: [{ text: 'hi' }] },
+      finishReason: 'STOP',
+    }],
+    usageMetadata: {
+      promptTokenCount: 100,
+      cachedContentTokenCount: 80,
+      candidatesTokenCount: 2,
+    },
+  }))
+
+  expect(events.at(-2)).toMatchObject({
+    type: 'message_delta',
+    usage: {
+      input_tokens: 20,
+      output_tokens: 2,
+      cache_read_input_tokens: 80,
+    },
+  })
+})

@@ -209,6 +209,7 @@ export function convertGeminiToAnthropicResponse(
       output_tokens:
         (usageMetadata?.candidatesTokenCount ?? 0) +
         (usageMetadata?.thoughtsTokenCount ?? 0),
+      cached_content_token_count: usageMetadata?.cachedContentTokenCount ?? 0,
     } as unknown as Record<string, unknown>),
   }
 }
