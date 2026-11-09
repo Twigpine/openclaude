@@ -29,11 +29,13 @@ import {
   getTranscriptPathForSession,
   reAppendSessionMetadata,
   recordAttributionSnapshot,
+  recordGoalState,
   recordTranscript,
   resetProjectForTesting,
   resetSessionFilePointer,
   saveTag,
 } from './sessionStorage.js'
+import { createGoalState } from '../services/goal/state.js'
 
 /**
  * Two overlapping SDK sessions in one process must not share a transcript
@@ -420,4 +422,101 @@ test('a session evicted from the bounded cache still appends to its own file', a
   expect(firstText).toContain('first session still here')
   const firstIds = await sessionIds(first)
   expect(firstIds.every(id => id === first)).toBe(true)
+})
+
+test('the metadata cache stays bounded across many title-only contexts', async () => {
+  // CodeRabbit on #2489: the path-bound test above adopts paths but never
+  // creates metadata entries, so it would pass without the metadata
+  // eviction loop. Title-only contexts exercise that loop alone.
+  const sessionStorage = await import('./sessionStorage.js')
+  const getCacheSize = (
+    sessionStorage as unknown as {
+      getSessionTranscriptCacheSizeForTesting?: () => number
+    }
+  ).getSessionTranscriptCacheSizeForTesting
+  expect(getCacheSize).toBeDefined()
+
+  // Seed a started session first: before any session has started,
+  // cacheSessionTitle is treated as a deferred startup selection and
+  // migrated between contexts instead of accumulating per context.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+
+  const ids = Array.from({ length: 105 }, () => randomUUID())
+  for (const id of ids) {
+    await turnStart(id, async () => {
+      cacheSessionTitle(`Title ${id}`)
+    })
+  }
+  // 105 distinct title-only contexts, no paths adopted: without the
+  // metadata eviction loop this would be 106 (105 titles plus the seed
+  // turn's cached last-prompt).
+  expect(getCacheSize!()).toBe(100)
+})
+
+test("an evicted session's goal-state write still reaches its existing transcript", async () => {
+  // CodeRabbit on #2489: if 100 other contexts evict a live session's
+  // pointer, its next non-conversation entry is buffered even though its
+  // transcript already exists — and flush() never writes that buffer, so a
+  // turn that ends after recording a goal state loses it.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+
+  const ids = Array.from({ length: 105 }, () => randomUUID())
+  for (const id of ids) {
+    await turnStart(id, async () => {
+      adoptResumedSessionFile()
+    })
+  }
+
+  // No further user/assistant message: the turn ends after the goal record.
+  await turnContinuation(SESSION_A, async () => {
+    await recordGoalState(createGoalState('evicted session goal'), SESSION_A as never)
+    await flushSessionStorage()
+  })
+
+  const aText = await readFile(getTranscriptPathForSession(SESSION_A), 'utf8')
+  expect(aText).toContain('"type":"goal-state"')
+  expect(aText).toContain('evicted session goal')
+})
+
+test("a returning session keeps its cached title when the title is outside the transcript tail", async () => {
+  // CodeRabbit on #2489: when SDK sessions alternate turns, the returning
+  // switch clears the incoming session's own cached metadata. If its title
+  // has fallen outside the 64KB tail readLiteMetadata scans, the next write
+  // cannot re-append it.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+    reAppendSessionMetadata()
+    // Push the title out of the 64KB tail window.
+    for (let i = 0; i < 20; i++) {
+      await recordTranscript([message(randomUUID(), 'x'.repeat(5000))])
+    }
+    await flushSessionStorage()
+  })
+
+  await turnStart(SESSION_B, async () => {
+    await recordTranscript([message(randomUUID(), 'B first')])
+    await flushSessionStorage()
+  })
+
+  // Return switch to A, then A's next write.
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
+    await recordTranscript([message(randomUUID(), 'A returns')])
+    await flushSessionStorage()
+  })
+
+  const aText = await readFile(getTranscriptPathForSession(SESSION_A), 'utf8')
+  // Once from the first re-append, once from the returning turn's write.
+  expect(aText.split('A Title').length - 1).toBe(2)
 })

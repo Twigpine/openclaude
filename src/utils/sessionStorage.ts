@@ -1681,7 +1681,7 @@ class Project {
   resetSessionFile(): void {
     // Startup selections are cached before --continue/--resume chooses a
     // transcript. Keep only those deferred fields through its switch and
-    // explicit reset; metadata from an established session must be cleared.
+    // explicit reset.
     if (this.sessionFile !== null) this.hasStartedSession = true
     // The selections were cached under the startup session's identity;
     // carry them into this context before preserving them below.
@@ -1703,11 +1703,24 @@ class Project {
     // clearSessionMetadata() by hand (see REPL.tsx); doing it here makes the
     // SDK path follow the same rule, since it has no restoreSessionMetadata
     // call to put them back.
-    this.clearSessionMetadata()
-    if (startupMetadata) {
-      this.currentSessionTitle = startupMetadata.title
-      this.currentSessionAgentSetting = startupMetadata.agentSetting
-      this.currentSessionWorktree = startupMetadata.worktree
+    //
+    // Once a session has started, that rule no longer needs the clear: the
+    // incoming session's own entry belongs to it, and clearing here would
+    // drop a returning session's cached title on every turn switch — if the
+    // title has fallen outside the transcript tail, the next write cannot
+    // re-append it. Another session's metadata lives under its own key and
+    // cannot leak into this session's transcript. So the clear (and the
+    // startup restore with it) runs only before any session has started,
+    // where it drops stale pre-startup fields before the deferred selections
+    // are restored. CLI resume flows that want a clean cache clear explicitly
+    // (see REPL.tsx) and are unaffected.
+    if (!this.hasStartedSession) {
+      this.clearSessionMetadata()
+      if (startupMetadata) {
+        this.currentSessionTitle = startupMetadata.title
+        this.currentSessionAgentSetting = startupMetadata.agentSetting
+        this.currentSessionWorktree = startupMetadata.worktree
+      }
     }
     // Buffered entries are deliberately NOT dropped: they belong to the
     // session that recorded them and are flushed when THAT session
@@ -2325,13 +2338,30 @@ class Project {
       // Buffer until materializeSessionFile runs (first user/assistant message).
       if (this.sessionFile === null) {
         const pendingPath = resolvePath(getTranscriptPath())
-        let buffered = this.pendingEntries.get(pendingPath)
-        if (!buffered) {
-          buffered = []
-          this.pendingEntries.set(pendingPath, buffered)
+        // The cached pointer can be dropped while the transcript already
+        // exists on disk — LRU eviction (boundSessionCaches) drops
+        // long-idle contexts, and a switch drops it too. Buffering here
+        // would strand the entry: only materializeSessionFile flushes the
+        // buffer, on the first user/assistant message, and a turn that ends
+        // after a non-conversation record (e.g. goal-state) never reaches
+        // it. The file already exists, so restoring the pointer cannot
+        // create a metadata-only file; write through instead. Deleted
+        // transcripts stay buffered: the write layer drops them either way,
+        // and the pointer must not be resurrected for one.
+        if (
+          !this.isDeletedSessionFile(pendingPath) &&
+          (await this.transcriptExists(pendingPath))
+        ) {
+          this.sessionFile = pendingPath
+        } else {
+          let buffered = this.pendingEntries.get(pendingPath)
+          if (!buffered) {
+            buffered = []
+            this.pendingEntries.set(pendingPath, buffered)
+          }
+          buffered.push(entry)
+          return
         }
-        buffered.push(entry)
-        return
       }
       sessionFile = this.sessionFile
     } else {
@@ -2549,6 +2579,22 @@ class Project {
       return targetFile
     } catch (e) {
       if (isFsInaccessible(e)) return null
+      throw e
+    }
+  }
+
+  /**
+   * True when a transcript already exists at exactly this path. Unlike
+   * getExistingSessionFile, this stats the caller's path directly instead of
+   * the sessionId-keyed cache, so a session that moved project directories
+   * cannot mistake another directory's file for this one.
+   */
+  private async transcriptExists(filePath: string): Promise<boolean> {
+    try {
+      await stat(filePath)
+      return true
+    } catch (e) {
+      if (isFsInaccessible(e)) return false
       throw e
     }
   }
