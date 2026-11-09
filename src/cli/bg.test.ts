@@ -2275,6 +2275,64 @@ describe('background session log following stops at terminal state', () => {
     })
   })
 
+  it('initial log dump settles on abort while close waits for a stalled read', async () => {
+    await withTempFile('stdout.log', async path => {
+      await writeFile(path, Buffer.from('seed'))
+      const output = new TestOutput()
+      const abort = new AbortController()
+      const readStarted = deferred()
+      const releaseRead = deferred<{ bytesRead: number }>()
+      let closeCalled = false
+      let closeResolved = false
+      const dump = printExistingLog(path, {
+        output,
+        signal: abort.signal,
+        openFile: async () => {
+          const handle = await open(path, 'r')
+          return {
+            stat: () => handle.stat(),
+            read: async () => {
+              readStarted.resolve()
+              return await releaseRead.promise
+            },
+            // Model Node's FileHandle.close() while a read is pending: the
+            // close only resolves once the stalled read is released.
+            // (Verified against Node 24.22.1 and Bun 1.4.4 with a FIFO:
+            // close stays pending until the read settles.)
+            close: async () => {
+              closeCalled = true
+              await releaseRead.promise
+              closeResolved = true
+              await handle.close()
+            },
+          }
+        },
+      })
+      await readStarted.promise
+      abort.abort()
+      const offset = await Promise.race([
+        dump,
+        new Promise<number>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('dump did not settle on abort')),
+            1000,
+          ),
+        ),
+      ])
+      expect(offset).toBe(0)
+      // Cancellation settled while the read — and therefore the close — is
+      // still pending: the dump did not wait for either.
+      expect(closeCalled).toBe(true)
+      expect(closeResolved).toBe(false)
+
+      // Releasing the read lets the deferred close finish, so no
+      // descriptor leaks.
+      releaseRead.resolve({ bytesRead: 0 })
+      await waitFor(() => closeResolved)
+      expect(closeResolved).toBe(true)
+    })
+  })
+
   it('follow mode stops after the final drain when the stop probe reports terminal', async () => {
     await withTempFile('stdout.log', async path => {
       const output = new TestOutput()

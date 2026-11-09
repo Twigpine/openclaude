@@ -724,9 +724,10 @@ async function streamLogRange(
         options.signal,
       )
       if (!readResult) {
-        // Aborted while reading: the caller closes the handle (a close
-        // issued while a read is pending resolves promptly and fails the
-        // read, verified against Node 24 and Bun 1.4).
+        // Aborted while reading: the caller closes the handle without
+        // awaiting it on abort, since FileHandle.close() waits for the
+        // pending read (verified against Node 24 and Bun 1.4 with a FIFO)
+        // and awaiting it would leave the dump pending after cancellation.
         return { position, outputOpen: false, complete: false }
       }
       bytesRead = readResult.bytesRead
@@ -802,7 +803,15 @@ async function streamLogSnapshot(
     if (!options.continueOnFileError) throw error
     result = { ...result, complete: false }
   } finally {
-    if (options.continueOnFileError) {
+    if (options.signal?.aborted) {
+      // Aborted while a read is pending: FileHandle.close() waits for the
+      // pending read (verified against Node 24 and Bun 1.4 with a FIFO),
+      // so awaiting it here would leave the dump pending after
+      // cancellation. Let the close finish in the background once the
+      // read settles; the dump already reports no output and incomplete,
+      // so a late close failure changes nothing.
+      void handle.close().catch(() => {})
+    } else if (options.continueOnFileError) {
       await handle.close().catch(() => {
         result = { ...result, complete: false }
       })
