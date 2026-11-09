@@ -230,6 +230,7 @@ import {
   clearServerCache,
   fetchToolsForClient,
   areMcpConfigsEqual,
+  invalidateMcpFetchCaches,
   reconnectMcpServerImpl,
 } from 'src/services/mcp/client.js'
 import {
@@ -1615,6 +1616,10 @@ function runHeadlessStreaming(
       // Clean up removed servers
       for (const client of sdkClients) {
         if (!currentServerNames.has(client.name)) {
+          // Invalidate the shared discovery caches before cleanup so a
+          // same-name replacement server can never serve the removed
+          // server's tools, resources, templates, or commands.
+          invalidateMcpFetchCaches(client.name)
           if (client.type === 'connected') {
             await client.cleanup()
           }

@@ -16,6 +16,7 @@ import { FILE_WRITE_TOOL_NAME } from 'src/tools/FileWriteTool/prompt.js'
 import { GLOB_TOOL_NAME } from 'src/tools/GlobTool/prompt.js'
 import { GREP_TOOL_NAME } from 'src/tools/GrepTool/prompt.js'
 import { LIST_MCP_RESOURCES_TOOL_NAME } from 'src/tools/ListMcpResourcesTool/prompt.js'
+import { LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME } from 'src/tools/ListMcpResourceTemplatesTool/prompt.js'
 import { LSP_TOOL_NAME } from 'src/tools/LSPTool/prompt.js'
 import { NOTEBOOK_EDIT_TOOL_NAME } from 'src/tools/NotebookEditTool/constants.js'
 import { TASK_STOP_TOOL_NAME } from 'src/tools/TaskStopTool/prompt.js'
@@ -41,7 +42,11 @@ const SEARCH_TOOLS = [
   WEB_SEARCH_TOOL_NAME,
   LSP_TOOL_NAME,
 ]
-const READ_TOOLS = [FILE_READ_TOOL_NAME, LIST_MCP_RESOURCES_TOOL_NAME]
+const READ_TOOLS = [
+  FILE_READ_TOOL_NAME,
+  LIST_MCP_RESOURCES_TOOL_NAME,
+  LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME,
+]
 const WRITE_TOOLS = [
   FILE_WRITE_TOOL_NAME,
   FILE_EDIT_TOOL_NAME,

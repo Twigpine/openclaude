@@ -8,11 +8,16 @@ import {
 import type { ConnectedMCPServer } from './types.js'
 import {
   fetchCommandsForClient,
+  fetchResourceTemplatesForClient,
   fetchResourcesForClient,
   fetchToolsForClient,
 } from './client.js'
 
-type ListMethod = 'tools/list' | 'resources/list' | 'prompts/list'
+type ListMethod =
+  | 'tools/list'
+  | 'resources/list'
+  | 'resources/templates/list'
+  | 'prompts/list'
 type ListRequest = {
   method: ListMethod
   params?: { cursor?: string }
@@ -35,7 +40,7 @@ async function advanceRetryTimers(...delays: number[]): Promise<void> {
 
 function makePaginatedConnection(
   name: string,
-  pages: Record<ListMethod, PageStep[]>,
+  pages: Partial<Record<ListMethod, PageStep[]>>,
 ): { connection: ConnectedMCPServer; requests: ListRequest[] } {
   const requests: ListRequest[] = []
   const offsets = new Map<ListMethod, number>()
@@ -45,9 +50,13 @@ function makePaginatedConnection(
       resultSchema: { parse: (value: unknown) => unknown },
     ) => {
       requests.push(request)
+      const steps = pages[request.method]
+      if (!steps) {
+        throw new Error(`unexpected ${request.method}`)
+      }
       const offset = offsets.get(request.method) ?? 0
       offsets.set(request.method, offset + 1)
-      const page = pages[request.method][offset]
+      const page = steps[offset]
       if (page === undefined) {
         throw new Error(`unexpected ${request.method} page ${offset + 1}`)
       }
@@ -813,10 +822,20 @@ describe('MCP list cursor pagination', () => {
                   ],
                   nextCursor,
                 }
-              : {
-                  prompts: [{ name: `prompt-${generation}-${suffix}` }],
-                  nextCursor,
-                }
+              : request.method === 'resources/templates/list'
+                ? {
+                    resourceTemplates: [
+                      {
+                        uriTemplate: `file:///template-${generation}-${suffix}`,
+                        name: `template-${generation}-${suffix}`,
+                      },
+                    ],
+                    nextCursor,
+                  }
+                : {
+                    prompts: [{ name: `prompt-${generation}-${suffix}` }],
+                    nextCursor,
+                  }
         return resultSchema.parse(page)
       },
       setNotificationHandler: (
@@ -850,6 +869,7 @@ describe('MCP list cursor pagination', () => {
     await Promise.all([
       fetchToolsForClient(connection),
       fetchResourcesForClient(connection),
+      fetchResourceTemplatesForClient(connection),
       fetchCommandsForClient(connection),
       fetchMcpSkillsForClient?.(connection) ?? Promise.resolve([]),
     ])
@@ -893,6 +913,14 @@ describe('MCP list cursor pagination', () => {
           { method: 'resources/list', params: { cursor: 'next' } },
         ])
         expect(
+          requests.filter(
+            request => request.method === 'resources/templates/list',
+          ),
+        ).toEqual([
+          { method: 'resources/templates/list' },
+          { method: 'resources/templates/list', params: { cursor: 'next' } },
+        ])
+        expect(
           requests.filter(request => request.method === 'prompts/list'),
         ).toEqual([
           { method: 'prompts/list' },
@@ -900,6 +928,28 @@ describe('MCP list cursor pagination', () => {
         ])
         expect(
           requests.filter(request => request.method === 'tools/list'),
+        ).toEqual([])
+      } else if (method === 'resources/list') {
+        // The resources handler refreshes concrete resources and templates
+        // together; the two traversals interleave, so assert each method's
+        // pages separately.
+        expect(
+          requests.filter(request => request.method === 'resources/list'),
+        ).toEqual(expectedTraversal)
+        expect(
+          requests.filter(
+            request => request.method === 'resources/templates/list',
+          ),
+        ).toEqual([
+          { method: 'resources/templates/list' },
+          { method: 'resources/templates/list', params: { cursor: 'next' } },
+        ])
+        expect(
+          requests.filter(
+            request =>
+              request.method !== 'resources/list' &&
+              request.method !== 'resources/templates/list',
+          ),
         ).toEqual([])
       } else {
         expect(requests).toEqual(expectedTraversal)
@@ -915,6 +965,15 @@ describe('MCP list cursor pagination', () => {
           `resource-${generation}-first`,
           `resource-${generation}-second`,
           `skill-${generation}`,
+        ])
+        // The same refresh swaps the template cache to the new generation.
+        expect(
+          (await fetchResourceTemplatesForClient(connection)).map(
+            template => template.name,
+          ),
+        ).toEqual([
+          `template-${generation}-first`,
+          `template-${generation}-second`,
         ])
         if (mcpSkillsEnabled) {
           expect(resourceReads).toEqual([`skill://skill-${generation}`])

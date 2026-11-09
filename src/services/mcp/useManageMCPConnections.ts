@@ -7,10 +7,10 @@ import type { Tool } from '../../Tool.js'
 import {
   clearServerCache,
   fetchCommandsForClient,
-  fetchResourcesForClient,
   fetchToolsForClient,
   getMcpToolsCommandsAndResources,
   reconnectMcpServerImpl,
+  refreshMcpResourcesAndTemplates,
 } from './client.js'
 import type {
   ConnectedMCPServer,
@@ -99,6 +99,28 @@ type ConnectedListUpdate = ConnectedMCPServer & {
   tools?: Tool[]
   commands?: Command[]
   resources?: ServerResource[]
+}
+
+/**
+ * Serialize resource-list refreshes per client. Notifications arrive
+ * concurrently, and a slow older traversal must never overwrite a newer
+ * refresh: each server's refreshes run one at a time, in arrival order.
+ * A failed refresh does not break the chain for later notifications.
+ */
+const resourceRefreshChains = new Map<string, Promise<void>>()
+
+function enqueueResourceRefresh(
+  clientName: string,
+  refresh: () => Promise<void>,
+): Promise<void> {
+  const previous = resourceRefreshChains.get(clientName) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(refresh)
+  // Keep the chain alive after a failure so later notifications still run.
+  resourceRefreshChains.set(
+    clientName,
+    next.catch(() => {}),
+  )
+  return next
 }
 
 /**
@@ -207,31 +229,37 @@ export function registerMcpListChangedHandlers(
           type: 'resources' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         })
         try {
-          fetchResourcesForClient.cache.delete(client.name)
-          if (feature('MCP_SKILLS')) {
-            // Skills are discovered from resources, so refresh them too.
-            // Invalidate prompts cache as well: we write commands here, and a
-            // concurrent prompts/list_changed could otherwise have us stomp
-            // its fresh result with our cached stale one.
-            fetchMcpSkillsForClient!.cache.delete(client.name)
-            fetchCommandsForClient.cache.delete(client.name)
-            const [newResources, mcpPrompts, mcpSkills] = await Promise.all([
-              fetchResourcesForClient(client),
-              fetchCommandsForClient(client),
-              fetchMcpSkillsForClient!(client),
-            ])
-            updateServer({
-              ...client,
-              resources: newResources,
-              commands: [...mcpPrompts, ...mcpSkills],
-            })
-            // MCP skills changed — invalidate skill-search index so next
-            // discovery rebuilds with the new set.
-            clearSkillIndexCache?.()
-          } else {
-            const newResources = await fetchResourcesForClient(client)
-            updateServer({ ...client, resources: newResources })
-          }
+          // Refresh resources and templates as one transaction: the caches
+          // swap only after both traversals succeed, and updateServer runs
+          // only then, so a failed refresh keeps the previous AppState.
+          await enqueueResourceRefresh(client.name, async () => {
+            if (feature('MCP_SKILLS')) {
+              // Skills are discovered from resources, so refresh them too.
+              // Invalidate prompts cache as well: we write commands here, and a
+              // concurrent prompts/list_changed could otherwise have us stomp
+              // its fresh result with our cached stale one.
+              fetchMcpSkillsForClient!.cache.delete(client.name)
+              fetchCommandsForClient.cache.delete(client.name)
+              const [{ resources: newResources }, mcpPrompts, mcpSkills] =
+                await Promise.all([
+                  refreshMcpResourcesAndTemplates(client),
+                  fetchCommandsForClient(client),
+                  fetchMcpSkillsForClient!(client),
+                ])
+              updateServer({
+                ...client,
+                resources: newResources,
+                commands: [...mcpPrompts, ...mcpSkills],
+              })
+              // MCP skills changed — invalidate skill-search index so next
+              // discovery rebuilds with the new set.
+              clearSkillIndexCache?.()
+            } else {
+              const { resources: newResources } =
+                await refreshMcpResourcesAndTemplates(client)
+              updateServer({ ...client, resources: newResources })
+            }
+          })
         } catch (error) {
           logMCPError(
             client.name,

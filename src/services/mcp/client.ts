@@ -49,6 +49,7 @@ import {
   toolMatchesName,
 } from '../../Tool.js'
 import { ListMcpResourcesTool } from '../../tools/ListMcpResourcesTool/ListMcpResourcesTool.js'
+import { ListMcpResourceTemplatesTool } from '../../tools/ListMcpResourceTemplatesTool/ListMcpResourceTemplatesTool.js'
 import { type MCPProgress, MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import { ReadMcpResourceTool } from '../../tools/ReadMcpResourceTool/ReadMcpResourceTool.js'
@@ -112,7 +113,7 @@ import {
 } from './elicitationHandler.js'
 import { buildMcpToolName } from './mcpStringUtils.js'
 import { normalizeNameForMCP } from './normalization.js'
-import { listAllMcpResources, paginateMcpList } from './pagination.js'
+import { listAllMcpResources, listAllMcpResourceTemplates, paginateMcpList } from './pagination.js'
 import { createMcpStdioClientTransport } from './stdioTransport.js'
 import { getLoggingSafeMcpBaseUrl } from './utils.js'
 
@@ -144,6 +145,7 @@ import type {
   McpSdkServerConfig,
   ScopedMcpServerConfig,
   ServerResource,
+  ServerResourceTemplate,
 } from './types.js'
 
 /**
@@ -1637,6 +1639,7 @@ export const connectToServer = memoize(
         // fetch would return stale tools/resources from the old connection.
         fetchToolsForClient.cache.delete(name)
         fetchResourcesForClient.cache.delete(name)
+        fetchResourceTemplatesForClient.cache.delete(name)
         fetchCommandsForClient.cache.delete(name)
         if (feature('MCP_SKILLS')) {
           fetchMcpSkillsForClient!.cache.delete(name)
@@ -1915,6 +1918,7 @@ export async function clearServerCache(
   connectToServer.cache.delete(key)
   fetchToolsForClient.cache.delete(name)
   fetchResourcesForClient.cache.delete(name)
+  fetchResourceTemplatesForClient.cache.delete(name)
   fetchCommandsForClient.cache.delete(name)
   if (feature('MCP_SKILLS')) {
     fetchMcpSkillsForClient!.cache.delete(name)
@@ -2411,6 +2415,77 @@ export const fetchResourcesForClient = memoizeWithLRU(
   MCP_FETCH_CACHE_SIZE,
 )
 
+export const fetchResourceTemplatesForClient = memoizeWithLRU(
+  async (client: MCPServerConnection): Promise<ServerResourceTemplate[]> => {
+    if (client.type !== 'connected') return []
+
+    try {
+      if (!client.capabilities?.resources) {
+        return []
+      }
+
+      return await listAllMcpResourceTemplates(client)
+    } catch (error) {
+      logMCPError(
+        client.name,
+        `Failed to fetch resource templates: ${errorMessage(error)}`,
+      )
+      return []
+    }
+  },
+  (client: MCPServerConnection) => client.name,
+  MCP_FETCH_CACHE_SIZE,
+)
+
+/**
+ * Refresh concrete resources and resource templates as one transaction.
+ * Both traversals run fresh first; the fetch caches are swapped in only
+ * after both succeed. If either fails, the previous cache entries are left
+ * untouched, so callers keep serving the last complete state and the
+ * caller (e.g. a list_changed handler) can retain the previous AppState
+ * by simply not publishing the failed refresh. A legacy server that
+ * answers -32601 to template listing still succeeds with empty templates.
+ */
+export async function refreshMcpResourcesAndTemplates(
+  client: MCPServerConnection,
+): Promise<{
+  resources: ServerResource[]
+  resourceTemplates: ServerResourceTemplate[]
+}> {
+  if (client.type !== 'connected' || !client.capabilities?.resources) {
+    return { resources: [], resourceTemplates: [] }
+  }
+
+  const [resources, resourceTemplates] = await Promise.all([
+    listAllMcpResources(client),
+    listAllMcpResourceTemplates(client),
+  ])
+
+  fetchResourcesForClient.cache.set(client.name, Promise.resolve(resources))
+  fetchResourceTemplatesForClient.cache.set(
+    client.name,
+    Promise.resolve(resourceTemplates),
+  )
+  return { resources, resourceTemplates }
+}
+
+/**
+ * Drop every memoized discovery entry for one server name. Same-name
+ * removal and replacement (e.g. an SDK server re-initialized under the
+ * same name) must invalidate the shared caches before cleanup so the
+ * replacement can never serve the removed server's tools, resources,
+ * templates, or commands.
+ */
+export function invalidateMcpFetchCaches(name: string): void {
+  fetchToolsForClient.cache.delete(name)
+  fetchResourcesForClient.cache.delete(name)
+  fetchResourceTemplatesForClient.cache.delete(name)
+  fetchCommandsForClient.cache.delete(name)
+  if (feature('MCP_SKILLS')) {
+    fetchMcpSkillsForClient!.cache.delete(name)
+  }
+}
+
 export const fetchCommandsForClient = memoizeWithLRU(
   async (client: MCPServerConnection): Promise<Command[]> => {
     if (client.type !== 'connected') return []
@@ -2560,6 +2635,11 @@ export async function reconnectMcpServerImpl(
         ? fetchMcpSkillsForClient!(client)
         : Promise.resolve([]),
       supportsResources ? fetchResourcesForClient(client) : Promise.resolve([]),
+      // Warm the template cache alongside resources so the deferred
+      // ListMcpResourceTemplatesTool reads from cache on first use.
+      supportsResources
+        ? fetchResourceTemplatesForClient(client)
+        : Promise.resolve([]),
     ])
     const commands = [...mcpCommands, ...mcpSkills]
 
@@ -2567,11 +2647,17 @@ export async function reconnectMcpServerImpl(
     const resourceTools: Tool[] = []
     if (supportsResources) {
       // Only add resource tools if no other server has them
-      const hasResourceTools = [ListMcpResourcesTool, ReadMcpResourceTool].some(
-        tool => tools.some(t => toolMatchesName(t, tool.name)),
-      )
+      const hasResourceTools = [
+        ListMcpResourcesTool,
+        ListMcpResourceTemplatesTool,
+        ReadMcpResourceTool,
+      ].some(tool => tools.some(t => toolMatchesName(t, tool.name)))
       if (!hasResourceTools) {
-        resourceTools.push(ListMcpResourcesTool, ReadMcpResourceTool)
+        resourceTools.push(
+          ListMcpResourcesTool,
+          ListMcpResourceTemplatesTool,
+          ReadMcpResourceTool,
+        )
       }
     }
 
@@ -2737,6 +2823,11 @@ export async function getMcpToolsCommandsAndResources(
         supportsResources
           ? fetchResourcesForClient(client)
           : Promise.resolve([]),
+        // Warm the template cache alongside resources so the deferred
+        // ListMcpResourceTemplatesTool reads from cache on first use.
+        supportsResources
+          ? fetchResourceTemplatesForClient(client)
+          : Promise.resolve([]),
       ])
       const commands = [...mcpCommands, ...mcpSkills]
 
@@ -2745,7 +2836,11 @@ export async function getMcpToolsCommandsAndResources(
       const resourceTools: Tool[] = []
       if (supportsResources && !resourceToolsAdded) {
         resourceToolsAdded = true
-        resourceTools.push(ListMcpResourcesTool, ReadMcpResourceTool)
+        resourceTools.push(
+          ListMcpResourcesTool,
+          ListMcpResourceTemplatesTool,
+          ReadMcpResourceTool,
+        )
       }
 
       onConnectionAttempt({
