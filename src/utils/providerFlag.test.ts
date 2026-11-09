@@ -827,7 +827,8 @@ describe('applyProviderFlag - descriptor-backed openai-compatible routes', () =>
 
     expect(result.error).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
-    expect(process.env.OPENAI_BASE_URL).toBe('https://opengateway.gitlawb.com/v1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.twigpine.com/v1')
+    expect(process.env.OPENAI_MODEL).toBe('mimo-v2.6-pro')
     expect(process.env.OPENAI_API_BASE).toBe('undefined')
   })
 
@@ -840,7 +841,7 @@ describe('applyProviderFlag - descriptor-backed openai-compatible routes', () =>
 
     expect(result.error).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
-    expect(process.env.OPENAI_BASE_URL).toBe('https://opengateway.gitlawb.com/v1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.twigpine.com/v1')
     expect(process.env.OPENGATEWAY_API_KEY).toBe('fake-ogw-key')
     expect(process.env.OPENAI_API_KEY).toBe('fake-ogw-key')
   })
@@ -1567,7 +1568,7 @@ describe('applyProviderFlagFromArgs', () => {
     })
     expect(earlyResult?.error).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBe(
-      'https://opengateway.gitlawb.com/v1',
+      'https://api.twigpine.com/v1',
     )
     expect(process.env.OPENAI_API_KEY).toBeUndefined()
 
@@ -1578,7 +1579,7 @@ describe('applyProviderFlagFromArgs', () => {
 
     expect(lateResult?.error).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBe(
-      'https://opengateway.gitlawb.com/v1',
+      'https://api.twigpine.com/v1',
     )
     expect(process.env.OPENAI_API_KEY as string | undefined).toBe(
       'settings-ogw-key',
@@ -1606,7 +1607,7 @@ describe('applyProviderFlagFromArgs', () => {
 
     expect(lateResult?.error).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBe(
-      'https://opengateway.gitlawb.com/v1',
+      'https://api.twigpine.com/v1',
     )
     expect(process.env.OPENAI_MODEL).toBe('custom-ogw-model')
   })

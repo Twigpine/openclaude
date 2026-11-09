@@ -390,7 +390,7 @@ Advanced and source-build guides:
 | GitHub Models | `/onboard-github` | Interactive onboarding with saved credentials |
 | Codex OAuth | `/provider` | Opens ChatGPT sign-in in your browser and stores Codex credentials securely |
 | Codex | `/provider` | Uses existing Codex CLI auth, OpenClaude secure storage, or env credentials |
-| Twigpine Opengateway | Startup default, `/provider`, or env vars | Smart gateway at `https://opengateway.gitlawb.com/v1`; requires an API key from https://gitlawb.com/opengateway/keys and routes Xiaomi MiMo and other partner models by `OPENAI_MODEL` |
+| Twigpine OpenGateway | Startup default, `/provider`, or env vars | Smart gateway at `https://api.twigpine.com/v1`; requires an API key from https://twigpine.com/console/gateway/keys and routes Xiaomi MiMo and other partner models by `OPENAI_MODEL` |
 | OpenCode Zen | `/provider` or env vars | Pay-as-you-go AI gateway; uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/v1`; shared key with OpenCode Go |
 | OpenCode Go | `/provider` or env vars | $10/mo subscription for open models (13 models); uses `OPENCODE_API_KEY` via `https://opencode.ai/zen/go/v1`; shared key with OpenCode Zen |
 | Xiaomi MiMo | `/provider` or env vars | OpenAI-compatible API at `https://mimo.mi.com`; uses `MIMO_API_KEY` and defaults to `mimo-v2.5-pro` |
@@ -443,7 +443,7 @@ OpenClaude supports multiple providers, but behavior is not identical across all
 - Smaller local models can struggle with long multi-step tool flows
 - Some providers impose lower output caps than the CLI defaults, and OpenClaude adapts where possible
 - AI/ML API uses the OpenAI-compatible route, defaults to `gpt-4o`, and only surfaces chat-capable models from its public catalog
-- Twigpine Opengateway is the fresh-install startup default and requires an API key from https://gitlawb.com/opengateway/keys. It uses one OpenAI-compatible base URL; switch between `mimo-*` and `google/gemini-3.1-flash-lite-preview` with `/model`, and do not pin the base URL to `/v1/xiaomi-mimo`.
+- Twigpine OpenGateway is the fresh-install startup default and requires an API key from https://twigpine.com/console/gateway/keys. It uses one OpenAI-compatible base URL (`https://api.twigpine.com/v1`; the older `opengateway.gitlawb.com` address still works). `/model` lists the gateway's live active models. Do not pin the base URL to `/v1/xiaomi-mimo`.
 - Z.AI GLM Coding Plan uses `https://api.z.ai/api/coding/paas/v4` with `glm-5.2` by default. On that direct route, GLM-5.3-Flash is selectable as `glm-5.3-flash` and accepts image input. Its OpenClaude effort choices are `low`, `high`, and `xhigh`, with `xhigh` requesting Z.AI `max`; GLM-5.3 and the existing GLM-5.2 query controls remain supported. These capabilities are not claimed for gateways that happen to carry the same model name.
 - Xiaomi MiMo uses `api-key` header auth on the direct OpenAI-compatible route and currently does not support `/usage` reporting in OpenClaude
 - GitHub Copilot serializes sub-agent execution by default to reduce Premium Request consumption — see [Agent Routing and Step Limits](docs/agent-routing.md#github-copilot-sub-agent-optimization) for tuning

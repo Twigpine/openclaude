@@ -710,7 +710,7 @@ describe('discoverModelsForRoute', () => {
     expect(result?.models.some(m => m.apiName === 'custom-og/mimo-v3')).toBe(true)
   })
 
-  test('opengateway hybrid discovery filters expired static models and live duplicates after availableUntil cutoff', async () => {
+  test('opengateway hybrid discovery shows active live models and drops retired ones', async () => {
     const { discoverModelsForRoute } = await loadDiscoveryServiceModule()
 
     setMockFetch(mock((input, init) => {
@@ -718,7 +718,24 @@ describe('discoverModelsForRoute', () => {
         new Response(
           JSON.stringify({
             data: [
-              { id: 'inclusionai/ling-3.0-tiny:free', name: 'Ling 3.0 Tiny Live' },
+              { id: 'auto', name: 'Auto (smart routing)', status: 'active' },
+              {
+                id: 'xiaomi/mimo-v2.6-pro',
+                name: 'MiMo V2.6-Pro',
+                status: 'active',
+              },
+              {
+                id: 'xiaomi/mimo-v2.5-pro',
+                name: 'MiMo V2.5-Pro',
+                status: 'retired',
+                successor: 'xiaomi/mimo-v2.6-pro',
+              },
+              {
+                id: 'nvidia/nemotron-3-ultra-550b-a55b',
+                name: 'Nemotron 3 Ultra',
+                status: 'retired',
+              },
+              { id: 'z-ai/glm-5.2', name: 'GLM 5.2' },
               { id: 'moonshotai/kimi-k3', name: 'Kimi K3' },
             ],
           }),
@@ -732,12 +749,19 @@ describe('discoverModelsForRoute', () => {
     })
 
     expect(result?.source).toBe('network')
+    expect(result?.discoveredModelCount).toBe(4)
     const apiNames = result?.models.map(
       (model: { apiName: string }) => model.apiName,
     )
-    expect(apiNames).toContain('mimo-v2.5-pro')
-    expect(apiNames).toContain('moonshotai/kimi-k3')
-    expect(apiNames).not.toContain('inclusionai/ling-3.0-tiny:free')
+    // Offline floor first (live duplicates dedupe onto it), then every other
+    // active live route; retired rows never reach the picker.
+    expect(apiNames).toEqual([
+      'auto',
+      'mimo-v2.6-pro',
+      'mimo-v2.6-flash',
+      'z-ai/glm-5.2',
+      'moonshotai/kimi-k3',
+    ])
   })
 
   test('openai-compatible discovery applies descriptor static headers with auth', async () => {

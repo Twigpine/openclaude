@@ -339,6 +339,7 @@ type CapturedModelPickerPropsForTest = {
 
 type DiscoveryModelForTest = {
   apiName: string
+  availableUntil?: string
   default?: boolean
   id: string
   label?: string
@@ -1142,7 +1143,7 @@ test('auto profile model picker mode uses explicit multi-model profiles as the p
 test('provider profile model picker surface keeps static route catalogs for single-default profiles', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Twigpine Opengateway',
+    name: 'Twigpine OpenGateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'mimo-v2.5-pro',
@@ -1168,12 +1169,12 @@ test('provider profile model picker surface keeps static route catalogs for sing
         {
           value: 'mimo-v2.5-pro',
           label: 'MiMo v2.5 Pro',
-          description: 'Recommended · Provider: Twigpine Opengateway',
+          description: 'Recommended · Provider: Twigpine OpenGateway',
         },
         {
           value: 'mimo-v2-pro',
           label: 'MiMo v2 Pro',
-          description: 'Provider: Twigpine Opengateway',
+          description: 'Provider: Twigpine OpenGateway',
         },
       ],
       { profileModelSurface: 'provider' },
@@ -1182,12 +1183,12 @@ test('provider profile model picker surface keeps static route catalogs for sing
     {
       value: 'mimo-v2.5-pro',
       label: 'MiMo v2.5 Pro',
-      description: 'Recommended · Provider: Twigpine Opengateway',
+      description: 'Recommended · Provider: Twigpine OpenGateway',
     },
     {
       value: 'mimo-v2-pro',
       label: 'MiMo v2 Pro',
-      description: 'Provider: Twigpine Opengateway',
+      description: 'Provider: Twigpine OpenGateway',
     },
   ])
 })
@@ -1674,10 +1675,10 @@ test('/model discovery override still surfaces inactive-profile switch options (
 test('/model applies auto provider surface for single-model static descriptor profiles', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Twigpine Opengateway',
+    name: 'Twigpine OpenGateway',
     provider: 'gitlawb-opengateway',
-    baseUrl: 'https://opengateway.gitlawb.com/v1',
-    model: 'mimo-v2.5-pro',
+    baseUrl: 'https://api.twigpine.com/v1',
+    model: 'mimo-v2.6-pro',
     apiKey: 'sk-opengateway',
   }
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
@@ -1703,101 +1704,27 @@ test('/model applies auto provider surface for single-model static descriptor pr
     routeId: 'gitlawb-opengateway',
   })
 
-  // Pin the clock inside the Ling Tiny availability window (its catalog
-  // entry expires via availableUntil on 2026-08-13T10:00Z) so this expected
-  // list stays deterministic after that date passes in real time.
-  setSystemTime(new Date('2026-08-12T00:00:00Z'))
+  const rendered = await renderModelCommandWithCapturedPicker(
+    'descriptor-picker-auto-provider-static-mode',
+  )
   try {
-    const rendered = await renderModelCommandWithCapturedPicker(
-      'descriptor-picker-auto-provider-static-mode',
-    )
-    try {
-      expect(
-        (rendered.getCapturedProps().optionsOverride as ModelOption[]).map(
-          option => option.value,
-        ),
-      ).toEqual([
-        'auto',
-        'mimo-v2.5-pro',
-        'mimo-v2.5',
-        'mimo-v2-flash',
-        'google/gemini-3.1-flash-lite',
-        'minimax/minimax-m3',
-        'qwen/qwen3.7-max',
-        'z-ai/glm-5.2',
-        'nvidia/nemotron-3-ultra-550b-a55b:free',
-        'nvidia/nemotron-3-ultra-550b-a55b',
-        'inclusionai/ling-3.0-flash',
-        'inclusionai/ling-3.0-tiny:free',
-        'mindai/macaron-v1-tall',
-        'mindai/macaron-v1-venti',
-        'tencent/hy3',
-      ])
-    } finally {
-      rendered.instance.unmount()
-      rendered.stdout.end()
-    }
+    // With no live list cached, only the offline floor is offered: the
+    // gateway's live /v1/models list is the source of truth otherwise.
+    expect(
+      (rendered.getCapturedProps().optionsOverride as ModelOption[]).map(
+        option => option.value,
+      ),
+    ).toEqual(['auto', 'mimo-v2.6-pro', 'mimo-v2.6-flash'])
   } finally {
-    setSystemTime()
+    rendered.instance.unmount()
+    rendered.stdout.end()
   }
 })
 
-test('/model drops expired availableUntil entries from the static picker after the cutoff', async () => {
+test('/model drops expired availableUntil entries carried by cached live rows', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Twigpine Opengateway',
-    provider: 'gitlawb-opengateway',
-    baseUrl: 'https://opengateway.gitlawb.com/v1',
-    model: 'mimo-v2.5-pro',
-    apiKey: 'sk-opengateway',
-  }
-  process.env.CLAUDE_CODE_USE_OPENAI = '1'
-  process.env.OPENAI_BASE_URL = activeProfile.baseUrl
-  process.env.OPENAI_API_KEY = activeProfile.apiKey
-  process.env.OPENAI_MODEL = activeProfile.model
-  process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
-  process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
-  delete process.env.OPENROUTER_API_KEY
-  delete process.env.CLAUDE_CODE_USE_GEMINI
-  delete process.env.CLAUDE_CODE_USE_GITHUB
-  delete process.env.CLAUDE_CODE_USE_MISTRAL
-  delete process.env.CLAUDE_CODE_USE_BEDROCK
-  delete process.env.CLAUDE_CODE_USE_VERTEX
-  delete process.env.CLAUDE_CODE_USE_FOUNDRY
-  delete process.env.OPENAI_API_BASE
-
-  mockProviderProfiles({
-    getActiveProviderProfile: () => activeProfile,
-  })
-
-  // Just past the Ling Tiny window (availableUntil 2026-08-13T10:00Z): the
-  // picker must not offer the id the gateway now rejects with a 400.
-  setSystemTime(new Date('2026-08-13T10:00:01Z'))
-  try {
-    const rendered = await renderModelCommandWithCapturedPicker(
-      'descriptor-picker-expired-entry-hidden',
-    )
-    try {
-      const values = (
-        rendered.getCapturedProps().optionsOverride as ModelOption[]
-      ).map(option => option.value)
-      expect(values).not.toContain('inclusionai/ling-3.0-tiny:free')
-      // The rest of the static catalog is untouched by the expiry.
-      expect(values).toContain('inclusionai/ling-3.0-flash')
-      expect(values).toContain('nvidia/nemotron-3-ultra-550b-a55b:free')
-    } finally {
-      rendered.instance.unmount()
-      rendered.stdout.end()
-    }
-  } finally {
-    setSystemTime()
-  }
-})
-
-test('/model merges non-empty OpenGateway discovery cache with curated entries without duplicate MiMo rows', async () => {
-  const activeProfile = {
-    id: 'opengateway-profile',
-    name: 'Twigpine Opengateway',
+    name: 'Twigpine OpenGateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'mimo-v2.5-pro',
@@ -1823,9 +1750,77 @@ test('/model merges non-empty OpenGateway discovery cache with curated entries w
   })
   mockDescriptorDiscovery({
     cachedModels: [
-      { id: 'mimo-v2.5-pro', apiName: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro' },
-      { id: 'xiaomi/mimo-v2.5-pro', apiName: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro Raw' },
-      { id: 'moonshotai/kimi-k3', apiName: 'moonshotai/kimi-k3', label: 'Kimi K3 (via Opengateway)' },
+      {
+        id: 'inclusionai/ling-3.0-tiny:free',
+        apiName: 'inclusionai/ling-3.0-tiny:free',
+        label: 'Ling 3.0 Tiny Free',
+        availableUntil: '2026-08-13T10:00:00Z',
+      },
+      {
+        id: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+        apiName: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+        label: 'Nemotron 3 Ultra (free)',
+      },
+    ],
+    routeId: 'gitlawb-opengateway',
+  })
+
+  // Just past the row's availableUntil: the picker must not offer an id the
+  // gateway now rejects with a 400.
+  setSystemTime(new Date('2026-08-13T10:00:01Z'))
+  try {
+    const rendered = await renderModelCommandWithCapturedPicker(
+      'descriptor-picker-expired-entry-hidden',
+    )
+    try {
+      const values = (
+        rendered.getCapturedProps().optionsOverride as ModelOption[]
+      ).map(option => option.value)
+      expect(values).not.toContain('inclusionai/ling-3.0-tiny:free')
+      // Rows without an expiry and the offline floor are untouched.
+      expect(values).toContain('nvidia/nemotron-3-ultra-550b-a55b:free')
+      expect(values).toContain('mimo-v2.6-pro')
+    } finally {
+      rendered.instance.unmount()
+      rendered.stdout.end()
+    }
+  } finally {
+    setSystemTime()
+  }
+})
+
+test('/model merges non-empty OpenGateway discovery cache with the offline floor without duplicate MiMo rows', async () => {
+  const activeProfile = {
+    id: 'opengateway-profile',
+    name: 'Twigpine OpenGateway',
+    provider: 'gitlawb-opengateway',
+    baseUrl: 'https://api.twigpine.com/v1',
+    model: 'mimo-v2.6-pro',
+    apiKey: 'sk-opengateway',
+  }
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = activeProfile.baseUrl
+  process.env.OPENAI_API_KEY = activeProfile.apiKey
+  process.env.OPENAI_MODEL = activeProfile.model
+  process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
+  process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
+  delete process.env.OPENROUTER_API_KEY
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.CLAUDE_CODE_USE_MISTRAL
+  delete process.env.CLAUDE_CODE_USE_BEDROCK
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  delete process.env.CLAUDE_CODE_USE_FOUNDRY
+  delete process.env.OPENAI_API_BASE
+
+  mockProviderProfiles({
+    getActiveProviderProfile: () => activeProfile,
+  })
+  mockDescriptorDiscovery({
+    cachedModels: [
+      { id: 'mimo-v2.6-pro', apiName: 'mimo-v2.6-pro', label: 'MiMo V2.6 Pro' },
+      { id: 'xiaomi/mimo-v2.6-pro', apiName: 'mimo-v2.6-pro', label: 'MiMo V2.6 Pro Raw' },
+      { id: 'moonshotai/kimi-k3', apiName: 'moonshotai/kimi-k3', label: 'Kimi K3' },
     ],
     routeId: 'gitlawb-opengateway',
   })
@@ -1839,23 +1834,12 @@ test('/model merges non-empty OpenGateway discovery cache with curated entries w
     ).map(option => option.value)
     expect(optionValues).toEqual([
       'auto',
-      'mimo-v2.5-pro',
-      'mimo-v2.5',
-      'mimo-v2-flash',
-      'google/gemini-3.1-flash-lite',
-      'minimax/minimax-m3',
-      'qwen/qwen3.7-max',
-      'z-ai/glm-5.2',
-      'nvidia/nemotron-3-ultra-550b-a55b:free',
-      'nvidia/nemotron-3-ultra-550b-a55b',
-      'inclusionai/ling-3.0-flash',
-      'mindai/macaron-v1-tall',
-      'mindai/macaron-v1-venti',
-      'tencent/hy3',
+      'mimo-v2.6-pro',
+      'mimo-v2.6-flash',
       'moonshotai/kimi-k3',
     ])
-    // Verify mimo-v2.5-pro appears exactly once (curated entry wins, duplicate is discarded)
-    expect(optionValues.filter(val => val === 'mimo-v2.5-pro')).toHaveLength(1)
+    // Verify mimo-v2.6-pro appears exactly once (floor entry wins, live duplicates are discarded)
+    expect(optionValues.filter(val => val === 'mimo-v2.6-pro')).toHaveLength(1)
   } finally {
     rendered.instance.unmount()
     rendered.stdout.end()
@@ -1865,7 +1849,7 @@ test('/model merges non-empty OpenGateway discovery cache with curated entries w
 test('/model OpenGateway interactive refresh preserves availability filter and hides expired models', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Twigpine Opengateway',
+    name: 'Twigpine OpenGateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'auto',
@@ -1889,15 +1873,21 @@ test('/model OpenGateway interactive refresh preserves availability filter and h
   mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
+  const expiredLiveRow = {
+    id: 'inclusionai/ling-3.0-tiny:free',
+    apiName: 'inclusionai/ling-3.0-tiny:free',
+    label: 'Ling 3.0 Tiny Live',
+    availableUntil: '2026-08-13T10:00:00Z',
+  }
   mockDescriptorDiscovery({
     cachedModels: [
-      { id: 'mimo-v2.5-pro', apiName: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro' },
-      { id: 'inclusionai/ling-3.0-tiny:free', apiName: 'inclusionai/ling-3.0-tiny:free', label: 'Ling 3.0 Tiny Live' },
+      { id: 'mimo-v2.6-pro', apiName: 'mimo-v2.6-pro', label: 'MiMo V2.6 Pro' },
+      expiredLiveRow,
       { id: 'moonshotai/kimi-k3', apiName: 'moonshotai/kimi-k3', label: 'Kimi K3' },
     ],
     discoveredModels: [
-      { id: 'mimo-v2.5-pro', apiName: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro' },
-      { id: 'inclusionai/ling-3.0-tiny:free', apiName: 'inclusionai/ling-3.0-tiny:free', label: 'Ling 3.0 Tiny Live' },
+      { id: 'mimo-v2.6-pro', apiName: 'mimo-v2.6-pro', label: 'MiMo V2.6 Pro' },
+      expiredLiveRow,
       { id: 'moonshotai/kimi-k3', apiName: 'moonshotai/kimi-k3', label: 'Kimi K3' },
       {
         id: 'refresh-only/live-model',
@@ -3170,7 +3160,7 @@ test('/model refresh reports discovered model changes for dynamic active profile
 test('/model refresh on OpenGateway does not restore or mention expired models', async () => {
   const activeProfile = {
     id: 'opengateway-profile',
-    name: 'Twigpine Opengateway',
+    name: 'Twigpine OpenGateway',
     provider: 'gitlawb-opengateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'auto',
@@ -3194,7 +3184,7 @@ test('/model refresh on OpenGateway does not restore or mention expired models',
   mock.module('../../integrations/discoveryCache.js', () => ({
     clearDiscoveryCache: mock(async () => {}),
     getCachedModels: mock(async () => ({
-      models: [{ id: 'mimo-v2.5-pro', apiName: 'mimo-v2.5-pro' }],
+      models: [{ id: 'mimo-v2.6-pro', apiName: 'mimo-v2.6-pro' }],
       updatedAt: Date.now(),
       error: null,
     })),
@@ -3211,9 +3201,13 @@ test('/model refresh on OpenGateway does not restore or mention expired models',
     discoverModelsForRoute: mock(async () => {
       const rawStatic = getRouteDescriptor('gitlawb-opengateway')?.catalog?.models ?? []
       const discovered = [
-        { id: 'mimo-v2.5-pro', apiName: 'mimo-v2.5-pro' },
+        { id: 'mimo-v2.6-pro', apiName: 'mimo-v2.6-pro' },
         { id: 'moonshotai/kimi-k3', apiName: 'moonshotai/kimi-k3' },
-        { id: 'inclusionai/ling-3.0-tiny:free', apiName: 'inclusionai/ling-3.0-tiny:free' },
+        {
+          id: 'inclusionai/ling-3.0-tiny:free',
+          apiName: 'inclusionai/ling-3.0-tiny:free',
+          availableUntil: '2026-08-13T10:00:00Z',
+        },
       ] as ModelCatalogEntry[]
       const merged = filterAvailableCatalogEntries(
         mergeRouteCatalogEntries(rawStatic, discovered),
@@ -3248,7 +3242,7 @@ test('/model refresh on OpenGateway does not restore or mention expired models',
     'refresh',
   )
 
-  expect(messages).toContain('Updated Twigpine Opengateway models.')
+  expect(messages).toContain('Updated Twigpine OpenGateway models.')
   expect(messages.join(' ')).not.toContain('inclusionai/ling-3.0-tiny:free')
 })
 

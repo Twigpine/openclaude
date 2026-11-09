@@ -62,7 +62,13 @@ export default [
     contextWindow: 202_752,
     maxOutputTokens: 131_072,
   }),
-  glmModel('glm-5.2', 'GLM 5.2', 1_000_000, 131_072),
+  {
+    ...glmModel('glm-5.2', 'GLM 5.2', 1_000_000, 131_072),
+    // OpenGateway serves GLM 5.2 from its live model list as `z-ai/glm-5.2`
+    // (no curated catalog entry), so map the id here to keep descriptor
+    // lookups — e.g. the text-only vision gate — on this model.
+    providerModelMap: { 'gitlawb-opengateway': 'z-ai/glm-5.2' },
+  },
   glmModel('GLM-5.1', 'GLM-5.1', 202_752, 131_072),
   glmModel('GLM-5-Turbo', 'GLM-5-Turbo', 202_752, 131_072),
   glmModel('GLM-5', 'GLM-5', 202_752, 131_072),

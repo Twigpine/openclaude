@@ -315,21 +315,25 @@ MiMo, MiniMax, Qwen). Uses the same `OPENCODE_API_KEY` as OpenCode Zen.
 OpenClaude automatically sends the session and product identity headers that
 OpenCode Go requires for prompt caching and traffic attribution.
 
-### Twigpine Opengateway
+### Twigpine OpenGateway
 
 ```bash
 export CLAUDE_CODE_USE_OPENAI=1
-export OPENAI_BASE_URL=https://opengateway.gitlawb.com/v1
+export OPENAI_BASE_URL=https://api.twigpine.com/v1
 export OPENGATEWAY_API_KEY=ogw_live_...
-export OPENAI_MODEL=mimo-v2.5-pro
+export OPENAI_MODEL=mimo-v2.6-pro
 ```
 
-The Opengateway route is the fresh-install startup default and requires an API
-key from https://gitlawb.com/opengateway/keys. Keep the base URL at `/v1` and
-switch models with `/model` or `OPENAI_MODEL`. Current partner models include:
+The OpenGateway route is the fresh-install startup default and requires an API
+key from https://twigpine.com/console/gateway/keys. Keep the base URL at `/v1`
+and switch models with `/model` or `OPENAI_MODEL`. The older
+`https://opengateway.gitlawb.com/v1` address still works for existing setups.
 
-- `mimo-v2.5-pro`
-- `google/gemini-3.1-flash-lite-preview`
+`/model` shows the gateway's live list of active models from the public
+`GET https://api.twigpine.com/v1/models` endpoint (no key needed), refreshed at
+startup. Retired models drop out of the picker on their own; if the list cannot
+be fetched, the picker falls back to `auto` (smart routing), `mimo-v2.6-pro`,
+and `mimo-v2.6-flash`.
 
 ### Xiaomi MiMo
 

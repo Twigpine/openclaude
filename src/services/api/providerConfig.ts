@@ -65,7 +65,11 @@ function normalizeGitlawbOpengatewayBaseUrl(baseUrl: string | undefined): string
   try {
     const parsed = new URL(baseUrl)
     const hostname = parsed.hostname.toLowerCase()
-    if (hostname !== 'opengateway.gitlawb.com' && hostname !== 'opengateway.fly.dev') {
+    if (
+      hostname !== 'api.twigpine.com' &&
+      hostname !== 'opengateway.gitlawb.com' &&
+      hostname !== 'opengateway.fly.dev'
+    ) {
       return baseUrl
     }
     const path = parsed.pathname.replace(/\/+$/, '').toLowerCase()

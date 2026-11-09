@@ -322,7 +322,8 @@ describe('detectBestProvider — orchestrator', () => {
       hasCodexAuth: () => false,
     })
     expect(result?.kind).toBe('gitlawb-opengateway')
-    expect(result?.model).toBe('mimo-v2.5-pro')
+    expect(result?.baseUrl).toBe('https://api.twigpine.com/v1')
+    expect(result?.model).toBe('mimo-v2.6-pro')
     expect(probeCalled).toBe(false)
   })
 
@@ -376,6 +377,24 @@ describe('detectBestProvider — orchestrator', () => {
     })
     expect(result?.kind).toBe('gitlawb-opengateway')
     expect(result?.baseUrl).toBe('https://opengateway.gitlawb.com/v1')
+  })
+
+  test('OPENGATEWAY_BASE_URL normalizes the legacy Xiaomi route on api.twigpine.com too', async () => {
+    const fetchImpl = asFetch(async (): Promise<Response> => {
+      throw new Error('nothing reachable')
+    })
+
+    const result = await detectBestProvider({
+      env: {
+        OPENGATEWAY_API_KEY: 'ogw_live_test_0000000000000000',
+        OPENGATEWAY_BASE_URL: 'https://api.twigpine.com/v1/xiaomi-mimo',
+      },
+      fetchImpl,
+      timeoutMs: 100,
+      hasCodexAuth: () => false,
+    })
+    expect(result?.kind).toBe('gitlawb-opengateway')
+    expect(result?.baseUrl).toBe('https://api.twigpine.com/v1')
   })
 
   test('skipOpengatewayFallback returns null when nothing else is detected', async () => {

@@ -29,8 +29,11 @@ describe('findModelDescriptorForApiName', () => {
   })
 
   test('returns the registered descriptor for a case-insensitive match', () => {
+    // Without a route, case-insensitive names resolve through the first route
+    // catalog that carries them, so any MiMo V2.5 Pro descriptor is correct.
     const descriptor = findModelDescriptorForApiName('MIMO-V2.5-PRO')
-    expect(descriptor?.id).toBe('mimo-v2.5-pro')
+    expect(descriptor?.defaultModel).toBe('mimo-v2.5-pro')
+    expect(descriptor?.capabilities?.supportsVision).toBeFalsy()
   })
 
   test('returns the registered descriptor for a prefix match', () => {

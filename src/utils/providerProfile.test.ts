@@ -1139,15 +1139,15 @@ test('openai launch ignores codex persisted transport hints', async () => {
   assert.equal(env.OPENAI_API_KEY, 'sk-live')
 })
 
-test('buildStartupEnvFromProfile defaults fresh installs to Twigpine Opengateway', async () => {
+test('buildStartupEnvFromProfile defaults fresh installs to Twigpine OpenGateway', async () => {
   const env = await buildStartupEnvFromProfile({
     persisted: null,
     processEnv: {},
   })
 
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, '1')
-  assert.equal(env.OPENAI_BASE_URL, 'https://opengateway.gitlawb.com/v1')
-  assert.equal(env.OPENAI_MODEL, 'mimo-v2.5-pro')
+  assert.equal(env.OPENAI_BASE_URL, 'https://api.twigpine.com/v1')
+  assert.equal(env.OPENAI_MODEL, 'mimo-v2.6-pro')
   assert.equal(isDefaultStartupProviderEnv(env), true)
 })
 
@@ -1248,8 +1248,8 @@ test('applyStartupEnvFromProfile applies valid startup env (issue #1651)', async
   assert.equal(error, null)
   assert.deepEqual(warnings, [])
   assert.equal(processEnv.CLAUDE_CODE_USE_OPENAI, '1')
-  assert.equal(processEnv.OPENAI_BASE_URL, 'https://opengateway.gitlawb.com/v1')
-  assert.equal(processEnv.OPENAI_MODEL, 'mimo-v2.5-pro')
+  assert.equal(processEnv.OPENAI_BASE_URL, 'https://api.twigpine.com/v1')
+  assert.equal(processEnv.OPENAI_MODEL, 'mimo-v2.6-pro')
   assert.equal(processEnv.OPENGATEWAY_API_KEY, 'test-key')
 })
 
@@ -1377,8 +1377,8 @@ test('buildStartupEnvFromProfile does not activate non-NIM env-only OpenAI-compa
 
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, '1')
   assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, undefined)
-  assert.equal(env.OPENAI_BASE_URL, 'https://opengateway.gitlawb.com/v1')
-  assert.equal(env.OPENAI_MODEL, 'mimo-v2.5-pro')
+  assert.equal(env.OPENAI_BASE_URL, 'https://api.twigpine.com/v1')
+  assert.equal(env.OPENAI_MODEL, 'mimo-v2.6-pro')
   assert.equal(env.OPENAI_API_KEY, undefined)
   assert.equal(resolveActiveRouteIdFromEnv(env), 'gitlawb-opengateway')
   assert.equal(isDefaultStartupProviderEnv(env), true)
@@ -1480,13 +1480,13 @@ test('buildStartupEnvFromProfile preserves env-only Fireworks setup without a sa
     },
   })
 
-  // Must NOT fall through to Twigpine Opengateway default
+  // Must NOT fall through to Twigpine OpenGateway default
   assert.equal(env.FIREWORKS_API_KEY, 'fw-key')
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, undefined)
   assert.equal(
     env.OPENAI_BASE_URL,
     undefined,
-    'should not inject Twigpine Opengateway base URL',
+    'should not inject Twigpine OpenGateway base URL',
   )
   assert.equal(isDefaultStartupProviderEnv(env), false)
 })
@@ -1503,7 +1503,7 @@ test('buildStartupEnvFromProfile preserves env-only NEAR AI setup without a save
   assert.equal(
     env.OPENAI_BASE_URL,
     undefined,
-    'should not inject Twigpine Opengateway base URL',
+    'should not inject Twigpine OpenGateway base URL',
   )
   assert.equal(isDefaultStartupProviderEnv(env), false)
 })
@@ -1520,7 +1520,7 @@ test('buildStartupEnvFromProfile preserves env-only LongCat setup without a save
   assert.equal(
     env.OPENAI_BASE_URL,
     undefined,
-    'should not inject Twigpine Opengateway base URL',
+    'should not inject Twigpine OpenGateway base URL',
   )
   assert.equal(isDefaultStartupProviderEnv(env), false)
 })

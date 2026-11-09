@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { mapOpenGatewayModel } from './gateways/gitlawb-opengateway.js'
 import {
-  getCatalogEntriesForRoute,
   getModel,
   getModelsForBrand,
   getRouteDefaultBaseUrl,
@@ -12,14 +12,13 @@ import { resolveModelRuntimeLimits } from './runtimeMetadata.js'
 describe('Macaron V1 Tall descriptor', () => {
   test('links gateway wire models to descriptors and resolves limits by base URL', () => {
     const routeId = 'gitlawb-opengateway'
-    const baseUrl = 'https://opengateway.gitlawb.com/v1'
+    const baseUrl = 'https://api.twigpine.com/v1'
     expect(resolveRouteIdFromBaseUrl(baseUrl)).toBe(routeId)
     expect(getRouteDefaultBaseUrl(routeId)).toBe(baseUrl)
 
-    for (const { id, catalogId, limits, classification, capabilities } of [
+    for (const { id, limits, classification, capabilities } of [
       {
         id: 'mindai/macaron-v1-tall',
-        catalogId: 'opengateway-macaron-v1-tall',
         limits: { contextWindow: 262_144, maxOutputTokens: 32_768 },
         classification: ['chat', 'reasoning', 'coding'],
         capabilities: {
@@ -41,8 +40,10 @@ describe('Macaron V1 Tall descriptor', () => {
         capabilities,
       })
       expect(getModelsForBrand('macaron').map(m => m.id)).toContain(id)
-      const entry = getCatalogEntriesForRoute(routeId).find(e => e.id === catalogId)
-      expect(entry).toMatchObject({ apiName: id, modelDescriptorId: model?.id })
+      // The gateway no longer curates this route: its live /v1/models row
+      // maps straight onto the descriptor id, and runtime limits resolve
+      // from the descriptor without a catalog entry.
+      expect(mapOpenGatewayModel({ id })?.apiName).toBe(model?.id)
       expect(
         resolveModelRuntimeLimits({ model: id, baseUrl, processEnv: {} }),
       ).toEqual(limits)

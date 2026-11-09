@@ -904,7 +904,7 @@ test('opengateway sends Accept-Encoding: identity header on chat requests', asyn
 
   registerGateway({
     id: 'gitlawb-opengateway-test',
-    label: 'Twigpine Opengateway',
+    label: 'Twigpine OpenGateway',
     category: 'aggregating',
     defaultBaseUrl: 'https://opengateway.gitlawb.com/v1/xiaomi-mimo',
     defaultModel: 'mimo-v2.5-pro',
@@ -2085,7 +2085,7 @@ test('gitlawb opengateway provider flag sends OPENGATEWAY_API_KEY as bearer auth
 
   const captured = await captureChatCompletionRequest()
 
-  expect(captured.url).toBe('https://opengateway.gitlawb.com/v1/chat/completions')
+  expect(captured.url).toBe('https://api.twigpine.com/v1/chat/completions')
   expect(captured.authorization).toBe('Bearer fake-ogw-key')
 })
 
@@ -2112,7 +2112,7 @@ test('gitlawb opengateway provider flag sends OPENAI_API_KEY fallback despite st
 
   const captured = await captureChatCompletionRequest()
 
-  expect(captured.url).toBe('https://opengateway.gitlawb.com/v1/chat/completions')
+  expect(captured.url).toBe('https://api.twigpine.com/v1/chat/completions')
   expect(captured.authorization).toBe('Bearer fake-openai-fallback')
 })
 
@@ -2190,7 +2190,7 @@ test('gitlawb opengateway stored provider profile key becomes bearer auth', asyn
   applyProviderProfileToProcessEnv({
     id: 'stored-opengateway',
     provider: 'gitlawb-opengateway',
-    name: 'Twigpine Opengateway',
+    name: 'Twigpine OpenGateway',
     baseUrl: 'https://opengateway.gitlawb.com/v1',
     model: 'mimo-v2.5-pro',
     apiKey: 'fake-profile-key',

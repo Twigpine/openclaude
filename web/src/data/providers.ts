@@ -116,11 +116,11 @@ export const providers: Provider[] = [
   // ── gateways ─────────────────────────────────────────────────────────
   {
     id: 'opengateway',
-    name: 'Twigpine Opengateway',
+    name: 'Twigpine OpenGateway',
     group: 'gateways',
     setup: 'startup default, /provider, or env vars',
     envVars: ['OPENGATEWAY_API_KEY'],
-    notes: 'Smart gateway at https://api.twigpine.com/v1 with auto smart-routing, MiMo, MiniMax, Qwen, GLM, Gemini — plus free models (Nemotron 3 Ultra, Ling 3.0 Flash, Tencent HY3). Keys at gitlawb.com/opengateway/keys.',
+    notes: 'Smart gateway at https://api.twigpine.com/v1 with auto smart-routing, MiMo, MiniMax, Qwen, GLM, Gemini — plus free models (Nemotron 3 Ultra, Ling 3.0 Flash, Tencent HY3). Keys at twigpine.com/console/gateway/keys.',
     badge: 'recommended',
   },
   {
