@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import {
@@ -25,11 +25,13 @@ import {
   listBackgroundSessions,
   markBackgroundSessionKilled,
   readBackgroundSessionForOwner,
+  refreshBackgroundSessionStatus,
   refreshBackgroundSessionStatuses,
   resolveBackgroundSession,
   snapshotBackgroundSessionRecoveryJournal,
   takeBackgroundSessionRecoveryBatch,
   verifyBackgroundSessionProcessIdentity,
+  verifyBackgroundSessionProcessIdentityAsync,
   type BackgroundSession,
 } from './bgRegistry.js'
 
@@ -3206,4 +3208,346 @@ describe('isBackgroundSessionProcessAlive process identity', () => {
       expect(result.state).toBe('unreadable')
     }
   })
+})
+
+describe('refreshBackgroundSessionStatus targeted refresh', () => {
+  let configDir: string
+
+  beforeEach(async () => {
+    configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-refresh-one-'))
+    _setBackgroundSessionsRootForTesting(join(configDir, 'bg-sessions'))
+  })
+
+  afterEach(async () => {
+    _setBackgroundSessionsRootForTesting(undefined)
+    await rm(configDir, { force: true, recursive: true })
+  })
+
+  async function createRunningSession(id: string, pid: number) {
+    return await createBackgroundSession({
+      id,
+      pid,
+      cwd: '/repo',
+      command: ['openclaude', '--print', 'work'],
+      sessionId: `conversation-${id}`,
+    })
+  }
+
+  function deferred<T = void>() {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise
+      reject = rejectPromise
+    })
+    return { promise, resolve, reject }
+  }
+
+  it('returns the recorded terminal fact without consulting the process', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-terminal',
+      process.pid,
+    )
+    await recordBackgroundSessionNaturalTermination(session.id, {
+      exitCode: 0,
+    })
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => {
+        throw new Error('must not consult liveness for a terminal fact')
+      },
+      getProcessCommandAsync: async () => {
+        throw new Error('must not consult the process for a terminal fact')
+      },
+    })
+
+    expect(refreshed).toMatchObject({ status: 'exited', exitCode: 0 })
+  })
+
+  it('returns failed for a nonzero exit and killed for an explicit kill', async () => {
+    const failed = await createRunningSession('bg-refresh-failed', process.pid)
+    await recordBackgroundSessionNaturalTermination(failed.id, {
+      exitCode: 3,
+    })
+    expect(
+      await refreshBackgroundSessionStatus(failed.id),
+    ).toMatchObject({ status: 'failed', exitCode: 3 })
+
+    const killed = await createRunningSession('bg-refresh-killed', process.pid)
+    await markBackgroundSessionKilled(killed.id)
+    expect(
+      await refreshBackgroundSessionStatus(killed.id),
+    ).toMatchObject({ status: 'killed' })
+  })
+
+  it('reports a running session stale when its process is gone, without persisting it', async () => {
+    const session = await createRunningSession('bg-refresh-stale', 424242)
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+
+    expect(refreshed).toMatchObject({ status: 'stale' })
+    // The targeted refresh is a read-only view: persisting the stale
+    // transition stays with the bulk refresh.
+    expect((await resolveBackgroundSession(session.id)).status).toBe('running')
+  })
+
+  async function writeUnreadableTerminalFact(id: string): Promise<void> {
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), {
+      recursive: true,
+    })
+    // Corrupt JSON: the fact file exists, but no readable fact establishes
+    // termination. A missing file is a different case (see below).
+    await writeFile(
+      join(configDir, 'bg-sessions', 'terminal', `${id}.natural.json`),
+      'this is not a terminal fact',
+    )
+  }
+
+  it('keeps a dead session unknown when its terminal fact is unreadable', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-unreadable-fact',
+      424242,
+    )
+    await writeUnreadableTerminalFact(session.id)
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+
+    // The process is gone, but the unreadable fact leaves termination
+    // unestablished: the follower must keep retrying the metadata read
+    // instead of completing as stale after the drain.
+    expect(refreshed).toMatchObject({ status: 'unknown' })
+  })
+
+  it('keeps a stored stale session unknown when its terminal fact is unreadable', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-stored-stale-unreadable-fact',
+      424242,
+    )
+    await writeUnreadableTerminalFact(session.id)
+
+    // The bulk refresh stores stale while the fact is unreadable: it
+    // persists the stale transition without the read-error flag.
+    const bulk = await refreshBackgroundSessionStatuses({
+      isProcessAlive: () => false,
+    })
+    expect(
+      bulk.find(candidate => candidate.id === session.id),
+    ).toMatchObject({ status: 'stale' })
+    expect((await resolveBackgroundSession(session.id)).status).toBe('stale')
+
+    // The targeted probe must not return the stored stale before checking
+    // the fact read: the unreadable fact leaves termination unestablished,
+    // so the follower keeps retrying instead of exiting after its drain.
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+    expect(refreshed).toMatchObject({ status: 'unknown' })
+  })
+
+  it('still reports a stored stale session stale when its terminal fact is missing', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-stored-stale-missing-fact',
+      424242,
+    )
+
+    await refreshBackgroundSessionStatuses({ isProcessAlive: () => false })
+    expect((await resolveBackgroundSession(session.id)).status).toBe('stale')
+
+    // No fact file exists, so there is nothing to retry reading: the
+    // stored stale stands, unlike the unreadable-fact case above.
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+    expect(refreshed).toMatchObject({ status: 'stale' })
+  })
+
+  it('keeps a live session running when its terminal fact is unreadable', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-unreadable-fact-live',
+      4242,
+    )
+    await writeUnreadableTerminalFact(session.id)
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'openclaude --print work',
+    })
+
+    // The live process identity positively establishes the session is
+    // still running, so the unreadable fact does not downgrade it.
+    expect(refreshed).toMatchObject({ status: 'running' })
+  })
+
+  it('reports a dead session stale when its terminal fact is present but invalid', async () => {
+    const session = await createRunningSession(
+      'bg-refresh-invalid-fact',
+      424242,
+    )
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), {
+      recursive: true,
+    })
+    // Valid JSON that is not a fact for this session: there is nothing to
+    // retry reading, so this is a missing fact, not a read error.
+    await writeFile(
+      join(configDir, 'bg-sessions', 'terminal', `${session.id}.natural.json`),
+      JSON.stringify({ version: 1, id: 'some-other-session' }),
+    )
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => false,
+    })
+
+    expect(refreshed).toMatchObject({ status: 'stale' })
+  })
+
+  it('keeps a running session running when the live command matches', async () => {
+    const session = await createRunningSession('bg-refresh-running', 4242)
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'openclaude --print work',
+    })
+
+    expect(refreshed).toMatchObject({ status: 'running' })
+  })
+
+  it('reports a running session stale when the PID belongs to another process', async () => {
+    const session = await createRunningSession('bg-refresh-mismatch', 4242)
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'some-other-process --serve',
+    })
+
+    expect(refreshed).toMatchObject({ status: 'stale' })
+  })
+
+  it('keeps a running session unknown when liveness is unreadable', async () => {
+    const session = await createRunningSession('bg-refresh-unknown', 4242)
+
+    const refreshed = await refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => {
+        throw new Error('liveness unreadable')
+      },
+    })
+
+    expect(refreshed).toMatchObject({ status: 'unknown' })
+  })
+
+  it('returns null for a missing session instead of guessing', async () => {
+    expect(
+      await refreshBackgroundSessionStatus('bg-refresh-missing'),
+    ).toBeNull()
+  })
+
+  it('inspects only the pinned session', async () => {
+    const pinned = await createRunningSession('bg-refresh-pinned', 424242)
+    const other = await createRunningSession('bg-refresh-other', 424243)
+    const otherPath = join(
+      configDir,
+      'bg-sessions',
+      'sessions',
+      'bg-refresh-other.json',
+    )
+    const otherBefore = await readFile(otherPath, 'utf8')
+
+    await refreshBackgroundSessionStatus(pinned.id, {
+      isProcessAlive: () => false,
+    })
+
+    expect(await readFile(otherPath, 'utf8')).toBe(otherBefore)
+    expect((await resolveBackgroundSession(other.id)).status).toBe('running')
+  })
+
+  it('settles on cancellation when the process lookup stalls', async () => {
+    const session = await createRunningSession('bg-refresh-stalled', 4242)
+
+    const abort = new AbortController()
+    const lookupStarted = deferred()
+    const refreshed = refreshBackgroundSessionStatus(session.id, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => {
+        lookupStarted.resolve()
+        return await new Promise<string | null>(() => {})
+      },
+      signal: abort.signal,
+    })
+    // The lookup must provably start before aborting: aborting earlier
+    // could settle the refresh on the session read without ever entering
+    // the lookup, so the test would pass without exercising cancellation
+    // of a stalled lookup. Bound the wait so a refresh that never reaches
+    // the lookup fails here instead of hanging the runner.
+    const lookupEntered = await Promise.race([
+      lookupStarted.promise.then(() => true),
+      new Promise<boolean>(resolve =>
+        setTimeout(() => resolve(false), 1000),
+      ),
+    ])
+    expect(lookupEntered).toBe(true)
+
+    // Drive the abort timing with fake timers (CONTRIBUTING): the abort
+    // fires only after the lookup has started, and real timers are
+    // restored during cleanup.
+    jest.useFakeTimers()
+    try {
+      setTimeout(() => abort.abort(), 10)
+      jest.advanceTimersByTime(10)
+      await expect(refreshed).resolves.toBeNull()
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+})
+
+describe('verifyBackgroundSessionProcessIdentityAsync', () => {
+  const session: BackgroundSession = {
+    id: 'bg-identity-async',
+    pid: 4242,
+    cwd: '/repo',
+    status: 'running',
+    startedAt: '2026-07-01T08:00:00.000Z',
+    updatedAt: '2026-07-01T08:00:00.000Z',
+    sessionId: 'conversation-identity-async',
+    command: ['node', 'openclaude', '1642'],
+    stdoutLogPath: '/tmp/stdout.log',
+    stderrLogPath: '/tmp/stderr.log',
+  }
+
+  it('settles promptly as unreadable when the command lookup is aborted', async () => {
+    const abort = new AbortController()
+    const verifying = verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async (_pid, { signal }) => {
+        await new Promise<void>(resolve => {
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return null
+      },
+      signal: abort.signal,
+    })
+
+    let settled = false
+    void verifying.then(() => {
+      settled = true
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(settled).toBe(false)
+
+    abort.abort()
+    await expect(verifying).resolves.toMatchObject({ state: 'unreadable' })
+  })
+
+  it('reads the live command through the real async lookup', async () => {
+    const { getProcessCommandAsync } = await import(
+      '../utils/genericProcessUtils.js'
+    )
+    const command = await getProcessCommandAsync(process.pid, { timeout: 5_000 })
+    expect(typeof command).toBe('string')
+    expect(command?.length).toBeGreaterThan(0)
+    expect(await getProcessCommandAsync(42424242)).toBeNull()
+  }, 15_000)
 })

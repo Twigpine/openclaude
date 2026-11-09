@@ -30,6 +30,7 @@ import { basename, join } from 'node:path'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import {
   getProcessCommand,
+  getProcessCommandAsync,
   isProcessRunning,
 } from '../utils/genericProcessUtils.js'
 import * as lockfile from '../utils/lockfile.js'
@@ -1353,22 +1354,50 @@ function isBackgroundSessionTerminalFact(
   )
 }
 
+type TerminalFactRead =
+  | { status: 'missing' }
+  | { status: 'unreadable' }
+  | { status: 'found'; fact: BackgroundSessionTerminalFact }
+
+/**
+ * Reads one terminal fact, distinguishing a missing fact from a fact
+ * that exists but cannot be read. A missing file — or valid JSON that is
+ * not a fact for this session and generation — is `missing`: there is
+ * nothing to retry. Any other read failure, or JSON that cannot be
+ * parsed, is `unreadable`: termination is unestablished, not absent.
+ */
+async function readTerminalFactResult(
+  id: string,
+  kind: 'natural' | 'killed',
+  generation?: string,
+): Promise<TerminalFactRead> {
+  let raw: string
+  try {
+    raw = await readFile(terminalFactPathForId(id, kind, generation), 'utf8')
+  } catch (error) {
+    return isErrno(error, 'ENOENT')
+      ? { status: 'missing' }
+      : { status: 'unreadable' }
+  }
+  let parsed: unknown
+  try {
+    parsed = jsonParse(raw)
+  } catch {
+    return { status: 'unreadable' }
+  }
+  return isBackgroundSessionTerminalFact(parsed, id, kind) &&
+    parsed.generation === generation
+    ? { status: 'found', fact: parsed }
+    : { status: 'missing' }
+}
+
 async function readTerminalFact(
   id: string,
   kind: 'natural' | 'killed',
   generation?: string,
 ): Promise<BackgroundSessionTerminalFact | null> {
-  try {
-    const parsed = jsonParse(
-      await readFile(terminalFactPathForId(id, kind, generation), 'utf8'),
-    )
-    return isBackgroundSessionTerminalFact(parsed, id, kind) &&
-      parsed.generation === generation
-      ? parsed
-      : null
-  } catch {
-    return null
-  }
+  const result = await readTerminalFactResult(id, kind, generation)
+  return result.status === 'found' ? result.fact : null
 }
 
 function readTerminalFactSync(
@@ -1392,17 +1421,41 @@ function readTerminalFactSync(
 async function applyAuthoritativeTerminalFacts(
   session: BackgroundSession,
 ): Promise<BackgroundSession> {
-  const natural = await readTerminalFact(
+  return (await applyAuthoritativeTerminalFactsDetailed(session)).session
+}
+
+/**
+ * Applies the recorded terminal facts to a session, reporting whether
+ * any fact read failed. Callers that only need the effective session use
+ * {@link applyAuthoritativeTerminalFacts}; the targeted refresh needs the
+ * flag to tell an unreadable fact (retry the metadata read) from a
+ * missing one (the process being gone means stale).
+ */
+async function applyAuthoritativeTerminalFactsDetailed(
+  session: BackgroundSession,
+): Promise<{
+  session: BackgroundSession
+  terminalFactReadError: boolean
+}> {
+  const natural = await readTerminalFactResult(
     session.id,
     'natural',
     session.terminalFactGeneration,
   )
-  const killed = await readTerminalFact(
+  const killed = await readTerminalFactResult(
     session.id,
     'killed',
     session.terminalFactGeneration,
   )
-  return applyTerminalFacts(session, natural, killed)
+  return {
+    session: applyTerminalFacts(
+      session,
+      natural.status === 'found' ? natural.fact : null,
+      killed.status === 'found' ? killed.fact : null,
+    ),
+    terminalFactReadError:
+      natural.status === 'unreadable' || killed.status === 'unreadable',
+  }
 }
 
 function applyTerminalFacts(
@@ -2638,6 +2691,127 @@ export async function refreshBackgroundSessionStatuses(options?: {
   return refreshed
 }
 
+export type BackgroundSessionProcessIdentityAsyncOptions =
+  Omit<BackgroundSessionProcessIdentityOptions, 'getProcessCommand'> & {
+    signal?: AbortSignal
+    getProcessCommandAsync?: (
+      pid: number,
+      options: { signal?: AbortSignal },
+    ) => Promise<string | null>
+  }
+
+export type RefreshBackgroundSessionStatusOptions =
+  BackgroundSessionProcessIdentityAsyncOptions & {
+    now?: Date
+  }
+
+/**
+ * Awaits `promise` but stops waiting when `signal` fires, resolving null
+ * instead: a stalled session or terminal-fact read cannot wedge a follower
+ * that is already shutting down. The raced promise is left to settle on
+ * its own; callers treat null as unknown state, never as terminal success.
+ */
+async function settleOnAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | null> {
+  if (!signal) return await promise
+  if (signal.aborted) return null
+  let onAbort: (() => void) | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<null>(resolve => {
+        onAbort = () => resolve(null)
+        signal.addEventListener('abort', onAbort, { once: true })
+      }),
+    ])
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+/**
+ * Refreshes exactly one background session by exact id, sharing the bulk
+ * refresh's terminal-fact precedence and PID identity rules. The pinned
+ * session's recorded terminal facts win first; otherwise the live process
+ * identity decides between running, unknown, and stale.
+ *
+ * This is a read-only view refresh for a follower that already pinned its
+ * session: it never scans or rewrites other sessions, and it never writes
+ * the pinned session's metadata back (persisting a stale transition stays
+ * with the bulk refresh). A missing or unreadable session returns null,
+ * which callers treat as unknown state rather than terminal success. When
+ * the caller's signal fires, the registry reads stop being awaited and
+ * null is returned instead of leaving the follower waiting on a stalled
+ * probe. A terminal fact that exists but cannot be read is not a missing
+ * fact: when the process is gone and no readable fact establishes
+ * termination, the session is reported unknown so the follower keeps
+ * retrying the metadata read instead of completing as stale.
+ */
+export async function refreshBackgroundSessionStatus(
+  id: string,
+  options: RefreshBackgroundSessionStatusOptions = {},
+): Promise<BackgroundSession | null> {
+  assertSafeId(id)
+  const session = await settleOnAbort(
+    readSessionFile(metadataPathForId(id)),
+    options.signal,
+  )
+  if (!session) return null
+
+  const factApplication = await settleOnAbort(
+    applyAuthoritativeTerminalFactsDetailed(session),
+    options.signal,
+  )
+  if (!factApplication) return null
+  const effective = factApplication.session
+  if (effective.status !== 'running' && effective.status !== 'unknown') {
+    if (
+      effective.status === 'stale' &&
+      factApplication.terminalFactReadError
+    ) {
+      // A stored stale status can mean the bulk refresh found the process
+      // gone while a terminal fact was unreadable: the bulk refresh stores
+      // stale without the read-error flag, so the stored status alone does
+      // not establish termination. If the fact is still unreadable now,
+      // report unknown so the follower keeps retrying the fact read
+      // instead of exiting after its final drain. A genuinely missing fact
+      // takes the plain stale return below instead.
+      return { ...effective, status: 'unknown', updatedAt: iso(options.now) }
+    }
+    return effective
+  }
+
+  const identity = await settleOnAbort(
+    verifyBackgroundSessionProcessIdentityAsync(effective, options),
+    options.signal,
+  )
+  if (!identity) return null
+  const nextStatus: BackgroundSessionStatus =
+    identity.state === 'matches'
+      ? 'running'
+      : identity.state === 'unreadable'
+        ? 'unknown'
+        : 'stale'
+  if (
+    nextStatus === 'stale' &&
+    factApplication.terminalFactReadError
+  ) {
+    // The process is gone, but a terminal fact that cannot be read leaves
+    // termination unestablished: the fact may become readable on a later
+    // tick (for example a transient read failure), so report unknown and
+    // let the follower retry the metadata read. A genuinely missing fact
+    // still reports stale, and a live, matching process still reports
+    // running — only the would-be stale outcome is held back.
+    return effective.status === 'unknown'
+      ? effective
+      : { ...effective, status: 'unknown', updatedAt: iso(options.now) }
+  }
+  if (nextStatus === effective.status) return effective
+  return { ...effective, status: nextStatus, updatedAt: iso(options.now) }
+}
+
 export type BackgroundSessionProcessIdentity = {
   state: 'not-running' | 'matches' | 'mismatch' | 'unreadable'
   backgroundSessionId: string
@@ -2774,6 +2948,59 @@ export function verifyBackgroundSessionProcessIdentity(
     return result(
       latestLiveness === 'alive' ? 'unreadable' : latestLiveness,
     )
+  }
+  const latestLiveness = getLiveness()
+  if (latestLiveness !== 'alive') return result(latestLiveness)
+  if (command == null || command.trim() === '') {
+    return result('unreadable')
+  }
+  if (session.processMarker !== undefined) {
+    return result(
+      markedCommandLineIdentity(command, session, session.processMarker),
+    )
+  }
+  return result(
+    commandLineMatchesBackgroundSession(command, session)
+      ? 'matches'
+      : 'mismatch',
+  )
+}
+
+/**
+ * Async form of {@link verifyBackgroundSessionProcessIdentity} for repeated
+ * polling: the process-command lookup runs through the abortable async
+ * wrapper instead of the synchronous `ps`/PowerShell call, so a slow lookup
+ * cannot block signal handling. Liveness itself stays a synchronous
+ * `kill(pid, 0)` probe, and the command-line matching rules are identical.
+ * Injected lookups come only through `getProcessCommandAsync`: the
+ * synchronous `getProcessCommand` override is excluded from the async
+ * options, so a caller cannot supply an override this verifier would
+ * silently ignore in favour of the real process.
+ */
+export async function verifyBackgroundSessionProcessIdentityAsync(
+  session: BackgroundSession,
+  options?: BackgroundSessionProcessIdentityAsyncOptions,
+): Promise<BackgroundSessionProcessIdentity> {
+  const result = (
+    state: BackgroundSessionProcessIdentity['state'],
+  ): BackgroundSessionProcessIdentity => ({
+    state,
+    backgroundSessionId: session.id,
+    pid: session.pid,
+  })
+  const getLiveness = () =>
+    getBackgroundSessionProcessLiveness(session.pid, options)
+  const liveness = getLiveness()
+  if (liveness !== 'alive') return result(liveness)
+
+  const readCommand =
+    options?.getProcessCommandAsync ?? getProcessCommandAsync
+  let command: string | null
+  try {
+    command = await readCommand(session.pid, { signal: options?.signal })
+  } catch {
+    const latestLiveness = getLiveness()
+    return result(latestLiveness === 'alive' ? 'unreadable' : latestLiveness)
   }
   const latestLiveness = getLiveness()
   if (latestLiveness !== 'alive') return result(latestLiveness)
