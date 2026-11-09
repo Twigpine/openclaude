@@ -367,6 +367,19 @@ export async function main(
     return;
   }
 
+  // Fast-path for `openclaude wait`: recognized even when BG_SESSIONS is
+  // disabled, so the CLI returns `unsupported` instead of interpreting
+  // `wait` as prompt text.
+  if (args[0] === 'wait') {
+    const {
+      profileCheckpoint
+    } = await importers.startupProfiler();
+    profileCheckpoint('cli_bg_path');
+    const bg = await importers.bg();
+    await bg.waitHandler(args.slice(1), { featureEnabled: bgSessionsEnabled });
+    return;
+  }
+
   // Fast-path for `openclaude ps|logs|attach|kill`.
   // Session management is entirely local, so it should not require config,
   // profile, credential, provider-validation, or startup-screen work.
