@@ -685,3 +685,36 @@ test('direct native client rejects a host-changing location before resolving a b
   })).toThrow('GEMINI_VERTEX_LOCATION')
   expect(credentials).toBe(0)
 })
+
+test('Gemini Vertex client reports cachedContentTokenCount as cache_read_input_tokens', async () => {
+  const client = createGeminiVertexClient({
+    project: 'project-123',
+    location: 'us-central1',
+    model: 'gemini-3.5-flash',
+    getAccessToken: async () => 'access-token-123',
+    fetch: (async (_input, _init) =>
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'hi' }] } }],
+          usageMetadata: {
+            promptTokenCount: 100,
+            cachedContentTokenCount: 80,
+            candidatesTokenCount: 2,
+          },
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch,
+  })
+
+  const response = await client.messages.create({
+    model: 'gemini-3.5-flash',
+    max_tokens: 100,
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+
+  expect(response.usage).toMatchObject({
+    input_tokens: 20,
+    output_tokens: 2,
+    cache_read_input_tokens: 80,
+  })
+})

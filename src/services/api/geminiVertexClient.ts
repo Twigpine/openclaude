@@ -84,6 +84,7 @@ type GeminiVertexResponse = {
     candidatesTokenCount?: number
     totalTokenCount?: number
     thoughtsTokenCount?: number
+    cachedContentTokenCount?: number
   }
 }
 
@@ -179,7 +180,11 @@ type GeminiVertexMessage = {
   model: string
   stop_reason: GeminiVertexStopReason
   stop_sequence: null
-  usage: { input_tokens: number; output_tokens: number }
+  usage: {
+    input_tokens: number
+    output_tokens: number
+    cache_read_input_tokens: number
+  }
   content: GeminiVertexContentBlock[]
 }
 
@@ -737,6 +742,7 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
       const candidate = json.candidates?.[0]
       const finishReason = candidate?.finishReason
       const thoughtsTokenCount = json.usageMetadata?.thoughtsTokenCount ?? 0
+      const cachedTokens = json.usageMetadata?.cachedContentTokenCount ?? 0
       const hasToolCall = contentBlocks.some(b => b.type === 'tool_use')
 
       // Surface every silent-empty-response path explicitly. We treat the
@@ -825,7 +831,13 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
         stop_reason: hasToolCall ? 'tool_use' : candidate?.finishReason === 'MAX_TOKENS' ? 'max_tokens' : 'end_turn',
         stop_sequence: null,
         usage: {
-          input_tokens: json.usageMetadata?.promptTokenCount ?? 0,
+          // promptTokenCount includes cached tokens; report them as cache
+          // reads and keep input_tokens to the uncached remainder.
+          input_tokens: Math.max(
+            0,
+            (json.usageMetadata?.promptTokenCount ?? 0) - cachedTokens,
+          ),
+          cache_read_input_tokens: cachedTokens,
           output_tokens: (json.usageMetadata?.candidatesTokenCount ?? 0) +
             (json.usageMetadata?.thoughtsTokenCount ?? 0),
         },
