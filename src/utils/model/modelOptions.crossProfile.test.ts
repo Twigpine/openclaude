@@ -1298,3 +1298,54 @@ test('getModelOptionsBase: keeps hardcoded Codex models for an env-only endpoint
     }
   }
 })
+
+test('getModelOptionsBase: suppresses hardcoded Codex models for a custom endpoint when the saved profile env IS applied (#1119)', async () => {
+  // ChatGPT #2495 follow-up: the test above covers the same custom endpoint
+  // with the profile env NOT applied (fallback keeps the catalog). With the
+  // env applied, the profile is genuinely active, its routeId resolves to
+  // 'custom' (unrecognized remote URL), and the fallback no longer applies —
+  // so the hardcoded GPT/Codex catalog must be suppressed, matching the
+  // Kimi/OpenRouter/Z.AI suppression above. The profile's own model still
+  // surfaces via profileModelOptions.
+  const saved = buildProviderProfileFixture({
+    id: 'profile_saved',
+    name: 'Saved',
+    provider: 'openai',
+    baseUrl: 'https://api.example.com/v1',
+    model: 'example-model',
+  })
+  const previousFlag = process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+  const previousUseOpenAI = process.env.CLAUDE_CODE_USE_OPENAI
+  const previousBaseUrl = process.env.OPENAI_BASE_URL
+  process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.example.com/v1'
+  try {
+    const { getModelOptions } = await importFreshModelOptionsModule({
+      getProviderProfiles: () => [saved],
+      getActiveProviderProfile: () => saved,
+      getProfileModelOptions: profile => [
+        { value: profile.model, label: profile.model, description: profile.name },
+      ],
+    })
+    const values = getModelOptions(false).map(option => option.value)
+    expectNoCodexModels(values)
+    expect(values).toContain('example-model')
+  } finally {
+    if (previousFlag === undefined) {
+      delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+    } else {
+      process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = previousFlag
+    }
+    if (previousUseOpenAI === undefined) {
+      delete process.env.CLAUDE_CODE_USE_OPENAI
+    } else {
+      process.env.CLAUDE_CODE_USE_OPENAI = previousUseOpenAI
+    }
+    if (previousBaseUrl === undefined) {
+      delete process.env.OPENAI_BASE_URL
+    } else {
+      process.env.OPENAI_BASE_URL = previousBaseUrl
+    }
+  }
+})
