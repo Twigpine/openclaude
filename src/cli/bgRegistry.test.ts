@@ -3651,7 +3651,7 @@ describe('background session wait strict reads', () => {
   })
 
   it('never reports metadata_malformed for sessions created during name resolution', async () => {
-    // writeNewSession publishes atomically (temp file + link), so a
+    // writeNewSession publishes atomically (temp file + rename), so a
     // name/prefix scan racing a creation must never read a partially-written
     // metadata document as malformed (CodeRabbit #2497).
     await createBackgroundSession({
