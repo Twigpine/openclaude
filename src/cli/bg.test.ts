@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, open, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import {
   buildBackgroundSessionLaunch,
   buildBackgroundChildProcessConfig,
@@ -10,6 +10,7 @@ import {
   confirmBackgroundSessionLaunch,
   followLogFile,
   killBackgroundSession,
+  logsHandler,
   printExistingLog,
   terminateBackgroundSessionProcessTree,
   terminateBackgroundProcessTree,
@@ -19,6 +20,12 @@ import {
   resolveBackgroundSessionModel,
   resolveBackgroundSessionProvider,
 } from './bg.js'
+import {
+  _setBackgroundSessionsRootForTesting,
+  createBackgroundSession,
+  recordBackgroundSessionNaturalTermination,
+  resolveBackgroundSession,
+} from './bgRegistry.js'
 import {
   BACKGROUND_SESSION_ID_ENV,
   BACKGROUND_SESSION_LAUNCHER_PID_ENV,
@@ -1840,6 +1847,405 @@ describe('background session log streaming', () => {
         printExistingLog(path, { output: destroyedOutput, chunkSize: 4 }),
       ).resolves.toBe(0)
       expect(destroyedOutput.bytes().length).toBe(0)
+    })
+  })
+})
+
+describe('background session log following stops at terminal state', () => {
+  let configDir: string
+
+  beforeEach(async () => {
+    configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-logs-follow-'))
+    _setBackgroundSessionsRootForTesting(join(configDir, 'bg-sessions'))
+  })
+
+  afterEach(async () => {
+    _setBackgroundSessionsRootForTesting(undefined)
+    await rm(configDir, { force: true, recursive: true })
+  })
+
+  function captureStdout(): { captured: Buffer[]; restore: () => void } {
+    const originalWrite = process.stdout.write
+    const captured: Buffer[] = []
+    process.stdout.write = function (
+      this: unknown,
+      chunk: unknown,
+      ...args: unknown[]
+    ) {
+      if (typeof chunk === 'string') captured.push(Buffer.from(chunk))
+      else if (chunk instanceof Uint8Array) captured.push(Buffer.from(chunk))
+      return (originalWrite as (...args: unknown[]) => boolean).call(
+        this,
+        chunk,
+        ...args,
+      )
+    } as typeof process.stdout.write
+    return {
+      captured,
+      restore: () => {
+        process.stdout.write = originalWrite
+      },
+    }
+  }
+
+  async function withTimeout<T>(
+    promise: Promise<T>,
+    ms: number,
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`timed out after ${ms}ms`)),
+            ms,
+          )
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  it('logs -f returns after a terminal session drains its final bytes', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-logs-follow-1',
+      pid: process.pid,
+      cwd: '/repo',
+      command: ['openclaude', '--print', 'do work'],
+      sessionId: 'conversation-logs-follow-1',
+    })
+    await writeFile(session.stdoutLogPath, 'final bytes\n')
+    await recordBackgroundSessionNaturalTermination(session.id, {
+      exitCode: 0,
+    })
+    expect((await resolveBackgroundSession(session.id)).status).toBe('exited')
+
+    const { captured, restore } = captureStdout()
+    try {
+      await withTimeout(logsHandler([session.id, '-f']), 5000)
+    } finally {
+      restore()
+    }
+
+    expect(Buffer.concat(captured).toString()).toContain('final bytes\n')
+  })
+
+  it('logs -f follows only the selected stderr stream for a terminal session', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-logs-follow-stderr',
+      pid: process.pid,
+      cwd: '/repo',
+      command: ['openclaude', '--print', 'do work'],
+      sessionId: 'conversation-logs-follow-stderr',
+    })
+    await writeFile(session.stdoutLogPath, 'out-bytes\n')
+    await writeFile(session.stderrLogPath, 'err-bytes\n')
+    await recordBackgroundSessionNaturalTermination(session.id, {
+      exitCode: 0,
+    })
+
+    const { captured, restore } = captureStdout()
+    try {
+      await withTimeout(logsHandler([session.id, '-f', '--stderr']), 5000)
+    } finally {
+      restore()
+    }
+
+    const printed = Buffer.concat(captured).toString()
+    expect(printed).toContain('err-bytes\n')
+    expect(printed).not.toContain('out-bytes')
+  })
+
+  it('logs -f resolves a terminal session by name and returns', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-logs-follow-name',
+      name: 'follow-me',
+      pid: process.pid,
+      cwd: '/repo',
+      command: ['openclaude', '--print', 'do work'],
+      sessionId: 'conversation-logs-follow-name',
+    })
+    await writeFile(session.stdoutLogPath, 'final bytes\n')
+    await recordBackgroundSessionNaturalTermination(session.id, {
+      exitCode: 0,
+    })
+
+    const { captured, restore } = captureStdout()
+    try {
+      await withTimeout(logsHandler(['follow-me', '-f']), 5000)
+    } finally {
+      restore()
+    }
+
+    expect(Buffer.concat(captured).toString()).toContain('final bytes\n')
+  })
+
+  it('logs -f stays pinned to the exact id when the terminal name is reused', async () => {
+    const terminal = await createBackgroundSession({
+      id: 'bg-logs-follow-reuse',
+      name: 'reuse-me',
+      pid: process.pid,
+      cwd: '/repo',
+      command: ['openclaude', '--print', 'old work'],
+      sessionId: 'conversation-logs-follow-reuse',
+    })
+    await writeFile(terminal.stdoutLogPath, 'old final bytes\n')
+    await recordBackgroundSessionNaturalTermination(terminal.id, {
+      exitCode: 0,
+    })
+    await createBackgroundSession({
+      id: 'bg-logs-follow-reuse-live',
+      name: 'reuse-me',
+      pid: process.pid,
+      cwd: '/repo',
+      command: ['openclaude', '--print', 'new work'],
+      sessionId: 'conversation-logs-follow-reuse-live',
+    })
+
+    const { captured, restore } = captureStdout()
+    try {
+      await withTimeout(logsHandler([terminal.id, '-f']), 5000)
+    } finally {
+      restore()
+    }
+
+    expect(Buffer.concat(captured).toString()).toContain('old final bytes\n')
+  })
+
+  it('follow mode stops after the final drain when the stop probe reports terminal', async () => {
+    await withTempFile('stdout.log', async path => {
+      const output = new TestOutput()
+      await writeFile(path, Buffer.from('existing-'))
+
+      const offset = await printExistingLog(path, { output, chunkSize: 4 })
+      const scheduler = createManualScheduler()
+      let probeCalls = 0
+      const following = followLogFile(path, offset, {
+        output,
+        chunkSize: 4,
+        setInterval: scheduler.setInterval,
+        clearInterval: scheduler.clearInterval,
+        shouldStop: async () => {
+          probeCalls++
+          return true
+        },
+      })
+
+      await writeFile(path, Buffer.from('existing-appended'))
+      scheduler.tick()
+      await following
+
+      expect(probeCalls).toBeGreaterThanOrEqual(1)
+      expect(output.bytes().toString()).toBe('existing-appended')
+      expect(scheduler.cleared).toBe(true)
+    })
+  })
+
+  it('follow mode drains bytes that appear between terminal observation and the final drain', async () => {
+    await withTempFile('stdout.log', async path => {
+      const output = new TestOutput()
+      await writeFile(path, Buffer.from('seed'))
+
+      const scheduler = createManualScheduler()
+      const following = followLogFile(path, 0, {
+        output,
+        chunkSize: 4,
+        setInterval: scheduler.setInterval,
+        clearInterval: scheduler.clearInterval,
+        shouldStop: async () => {
+          await writeFile(path, Buffer.from('seed-late'))
+          return true
+        },
+      })
+
+      scheduler.tick()
+      await following
+
+      expect(output.bytes().toString()).toBe('seed-late')
+      expect(scheduler.cleared).toBe(true)
+    })
+  })
+
+  it('follow mode stops when the stop probe turns terminal mid-follow', async () => {
+    await withTempFile('stdout.log', async path => {
+      const output = new TestOutput()
+      await writeFile(path, Buffer.from('seed'))
+
+      const scheduler = createManualScheduler()
+      let probeCalls = 0
+      const following = followLogFile(path, 0, {
+        output,
+        chunkSize: 4,
+        setInterval: scheduler.setInterval,
+        clearInterval: scheduler.clearInterval,
+        shouldStop: async () => {
+          probeCalls++
+          return probeCalls >= 2
+        },
+      })
+
+      scheduler.tick()
+      await waitFor(() => probeCalls >= 1)
+      await writeFile(path, Buffer.from('seed-more'))
+      scheduler.tick()
+      await following
+
+      expect(probeCalls).toBe(2)
+      expect(output.bytes().toString()).toBe('seed-more')
+      expect(scheduler.cleared).toBe(true)
+    })
+  })
+
+  it('follow mode keeps following while the stop probe reports non-terminal', async () => {
+    await withTempFile('stdout.log', async path => {
+      const output = new TestOutput()
+      await writeFile(path, Buffer.from('seed'))
+
+      const scheduler = createManualScheduler()
+      const abort = new AbortController()
+      let probeCalls = 0
+      let resolved = false
+      const following = followLogFile(path, 4, {
+        output,
+        chunkSize: 4,
+        signal: abort.signal,
+        setInterval: scheduler.setInterval,
+        clearInterval: scheduler.clearInterval,
+        shouldStop: async () => {
+          probeCalls++
+          return false
+        },
+      }).then(() => {
+        resolved = true
+      })
+
+      scheduler.tick()
+      await waitFor(() => probeCalls >= 1)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(resolved).toBe(false)
+
+      abort.abort()
+      await following
+
+      expect(resolved).toBe(true)
+      expect(scheduler.cleared).toBe(true)
+    })
+  })
+
+  it('follow mode retries the final drain after a transient file error', async () => {
+    await withTempFile('stdout.log', async path => {
+      const output = new TestOutput()
+      await writeFile(path, Buffer.from('seed'))
+
+      const offset = await printExistingLog(path, { output, chunkSize: 4 })
+      const scheduler = createManualScheduler()
+      let opens = 0
+      const following = followLogFile(path, offset, {
+        output,
+        chunkSize: 4,
+        setInterval: scheduler.setInterval,
+        clearInterval: scheduler.clearInterval,
+        openFile: async (filePath, flags) => {
+          opens++
+          if (opens === 2) {
+            throw Object.assign(new Error('transient open failure'), {
+              code: 'EIO',
+            })
+          }
+          return await open(filePath, flags)
+        },
+        shouldStop: async () => true,
+      })
+
+      // First tick: snapshot opens cleanly, the final drain fails to open.
+      scheduler.tick()
+      await waitFor(() => opens === 2)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      // Second tick: the drain is retried from the same offset and succeeds.
+      scheduler.tick()
+      await following
+
+      expect(opens).toBe(4)
+      expect(output.bytes().toString()).toBe('seed')
+      expect(scheduler.cleared).toBe(true)
+    })
+  })
+
+  it('follow mode keeps following when the stop probe throws', async () => {
+    await withTempFile('stdout.log', async path => {
+      const output = new TestOutput()
+      await writeFile(path, Buffer.from('seed'))
+
+      const scheduler = createManualScheduler()
+      const abort = new AbortController()
+      let probeCalls = 0
+      let resolved = false
+      const following = followLogFile(path, 4, {
+        output,
+        chunkSize: 4,
+        signal: abort.signal,
+        setInterval: scheduler.setInterval,
+        clearInterval: scheduler.clearInterval,
+        shouldStop: async () => {
+          probeCalls++
+          throw new Error('metadata unavailable')
+        },
+      }).then(() => {
+        resolved = true
+      })
+
+      scheduler.tick()
+      await waitFor(() => probeCalls >= 1)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(resolved).toBe(false)
+
+      abort.abort()
+      await following
+
+      expect(resolved).toBe(true)
+      expect(scheduler.cleared).toBe(true)
+    })
+  })
+
+  it('follow mode stays responsive to abort while the stop probe is pending', async () => {
+    await withTempFile('stdout.log', async path => {
+      const output = new TestOutput()
+      await writeFile(path, Buffer.from('seed'))
+
+      const scheduler = createManualScheduler()
+      const abort = new AbortController()
+      const probeStarted = deferred()
+      let resolved = false
+      const following = followLogFile(path, 4, {
+        output,
+        chunkSize: 4,
+        signal: abort.signal,
+        setInterval: scheduler.setInterval,
+        clearInterval: scheduler.clearInterval,
+        shouldStop: async signal => {
+          probeStarted.resolve()
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => reject(new Error('probe aborted')),
+              { once: true },
+            )
+          })
+          return true
+        },
+      }).then(() => {
+        resolved = true
+      })
+
+      scheduler.tick()
+      await probeStarted.promise
+      abort.abort()
+      await following
+
+      expect(resolved).toBe(true)
+      expect(scheduler.cleared).toBe(true)
     })
   })
 })
