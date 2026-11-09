@@ -38,7 +38,8 @@ Options:
 Exit codes:
   0    Child exited with code 0.
   1    Child failed, was killed, or became stale.
-  2    Invalid arguments, unknown or ambiguous selector, or unsupported build.
+  2    Invalid arguments, unknown or ambiguous selector, unsupported build,
+       or an internal wait error.
   3    Process state could not be observed at the timeout boundary.
   4    Session metadata is missing, unreadable, malformed, or replaced.
   124  Timeout while the session was still running.
@@ -70,6 +71,7 @@ export type WaitResult = {
     | 'observation_error'
     | 'selector_error'
     | 'interrupted'
+    | 'internal_error'
   error: string | null
   waitSignal: 'SIGINT' | 'SIGTERM' | null
 }
@@ -161,6 +163,12 @@ export function parseWaitInvocation(args: string[]): ParsedWaitInvocation {
   let json = false
 
   const takeSelector = (value: string) => {
+    if (value === '') {
+      // An empty variable must not resolve: '' is a prefix of every session
+      // id, so with one session present it would pin that unrelated
+      // session instead of failing (CodeRabbit #2497).
+      throw invalidArguments('Selector must not be empty')
+    }
     if (selector !== undefined) {
       throw invalidArguments('Usage: openclaude wait <id-or-name> [--timeout <duration>] [--json]')
     }
@@ -258,15 +266,22 @@ function terminalWaitResult(session: BackgroundSession): WaitResult {
     }
   }
   if (session.status === 'failed') {
+    // Preserve whatever outcome the record carries. A valid failed record
+    // can hold exitCode without terminalReason (terminalReason is optional
+    // on BackgroundSession), so gate each field on its own presence rather
+    // than on the reason: dropping the code would make JSON lose the
+    // outcome and human output invent exit code 1 (CodeRabbit #2497).
     return {
       ...result,
       status: 'failed',
       exitCode:
-        session.terminalReason === 'exit_code'
+        session.terminalReason === 'exit_code' ||
+        session.terminalReason === undefined
           ? (session.exitCode ?? null)
           : null,
       signal:
-        session.terminalReason === 'signal'
+        session.terminalReason === 'signal' ||
+        session.terminalReason === undefined
           ? (session.signal ?? null)
           : null,
       terminalReason: session.terminalReason ?? null,
@@ -306,6 +321,12 @@ export function waitExitCode(result: WaitResult): number {
   if (result.waitResult === 'observation_error') {
     return result.error === 'process_unreadable' ? 3 : 4
   }
+  if (result.waitResult === 'internal_error') {
+    // Unexpected wait failures (e.g. a home-directory lookup failing
+    // during selector resolution) are the waiter's own failure, not the
+    // child's: exit 2, distinct from a child failure (1).
+    return 2
+  }
   return 2
 }
 
@@ -318,7 +339,12 @@ function humanTerminalLine(result: WaitResult): string {
     if (result.signal) {
       return `Background session ${id} failed after ${result.signal}.`
     }
-    return `Background session ${id} failed with exit code ${result.exitCode ?? 1}.`
+    if (result.exitCode !== null) {
+      return `Background session ${id} failed with exit code ${result.exitCode}.`
+    }
+    // No recorded outcome: report it as unknown rather than inventing an
+    // exit code (CodeRabbit #2497).
+    return `Background session ${id} failed with an unknown outcome.`
   }
   if (result.status === 'killed') {
     return `Background session ${id} was killed.`
@@ -355,6 +381,9 @@ function humanErrorLine(result: WaitResult): string {
   }
   if (result.error === 'unsupported') {
     return 'Background sessions are disabled in this build.'
+  }
+  if (result.waitResult === 'internal_error') {
+    return 'Waiting for a background session failed with an internal error.'
   }
   return 'Usage: openclaude wait <id-or-name> [--timeout <duration>] [--json]'
 }
@@ -510,6 +539,11 @@ export async function waitHandler(
   process.on('SIGINT', onSigint)
   process.on('SIGTERM', onSigterm)
 
+  // The pinned id is hoisted so an unexpected failure after pinning can
+  // still name the session in its structured error result; null when the
+  // failure happened during selector resolution.
+  let pinnedId: string | null = null
+
   try {
     // The deadline starts from a monotonic clock after argument validation.
     const deadline =
@@ -537,6 +571,7 @@ export async function waitHandler(
       return finish(interruptedWaitResult(null, clientSignal))
     }
     const pinned = { id: session.id, pid: session.pid }
+    pinnedId = pinned.id
 
     while (true) {
       if (clientSignal) {
@@ -593,10 +628,13 @@ export async function waitHandler(
       }
     }
   } catch (error) {
-    // Unexpected internal failures stay outside the JSON schema.
-    stderr.write(`Error: ${errorMessage(error)}\n`)
-    process.exitCode = 1
-    return 1
+    // Unexpected internal failures (e.g. a home-directory lookup failing
+    // during selector resolution) are reported as a structured error
+    // result, not as a bare stderr line: scripts must not mistake them
+    // for a child failure (exit 1), and JSON consumers must still get a
+    // parseable object. The human message keeps today's `Error: ...` line.
+    const result = baseWaitResult(pinnedId, 'internal_error', 'internal_error')
+    return finish(result, `Error: ${errorMessage(error)}`)
   } finally {
     process.off('SIGINT', onSigint)
     process.off('SIGTERM', onSigterm)

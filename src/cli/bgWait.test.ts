@@ -88,6 +88,15 @@ describe('wait command argument parsing', () => {
     expect(parseErrorCode(['--timeout', '30s'])).toBe('invalid_arguments')
   })
 
+  it('rejects an empty selector with and without --', () => {
+    // An empty variable passed as the selector must not resolve: an empty
+    // string is a prefix of every session id, so with one session present
+    // it would pin that unrelated session (CodeRabbit #2497).
+    expect(parseErrorCode([''])).toBe('invalid_arguments')
+    expect(parseErrorCode(['--', ''])).toBe('invalid_arguments')
+    expect(parseErrorCode(['--json', ''])).toBe('invalid_arguments')
+  })
+
   it('rejects extra arguments', () => {
     expect(parseErrorCode(['bg-1', 'bg-2'])).toBe('invalid_arguments')
     expect(parseErrorCode(['bg-1', '--', 'bg-2'])).toBe('invalid_arguments')
@@ -273,6 +282,47 @@ describe('wait command handler', () => {
     })
   })
 
+  it('returns exit 2 with an internal_error JSON object when selector resolution throws unexpectedly', async () => {
+    // An unexpected failure (e.g. a home-directory lookup failing during
+    // selector resolution) must not look like a child failure (exit 1) and
+    // must still emit parseable JSON (CodeRabbit #2497).
+    const { code, stdout, stderr } = await runWait(['bg-aaa1', '--json'], {
+      resolveSession: async () => {
+        throw new Error('home directory lookup failed')
+      },
+    })
+
+    expect(code).toBe(2)
+    expect(process.exitCode).toBe(2)
+    expect(stderr).toBe('')
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result).toEqual({
+      version: 1,
+      id: null,
+      status: null,
+      exitCode: null,
+      signal: null,
+      terminalReason: null,
+      finishedAt: null,
+      waitResult: 'internal_error',
+      error: 'internal_error',
+      waitSignal: null,
+    })
+  })
+
+  it('returns exit 2 with the raw error on stderr in human mode when selector resolution throws unexpectedly', async () => {
+    const { code, stdout, stderr } = await runWait(['bg-aaa1'], {
+      resolveSession: async () => {
+        throw new Error('home directory lookup failed')
+      },
+    })
+
+    expect(code).toBe(2)
+    expect(process.exitCode).toBe(2)
+    expect(stdout).toBe('')
+    expect(stderr).toBe('Error: home directory lookup failed\n')
+  })
+
   it('returns exit 2 with invalid_arguments for a missing selector', async () => {
     const { code, stdout, stderr } = await runWait(['--json'])
 
@@ -342,6 +392,60 @@ describe('wait command handler', () => {
     const human = await runWait(['bg-aaa1'])
     expect(human.code).toBe(1)
     expect(human.stdout).toBe('Background session bg-aaa1 failed with exit code 300.\n')
+  })
+
+  it('preserves a recorded exit code for a failed session without terminalReason', async () => {
+    // A valid failed record can carry exitCode without terminalReason
+    // (terminalReason is optional on BackgroundSession); the JSON must keep
+    // the recorded code instead of dropping it, and human output must not
+    // invent exit code 1 (CodeRabbit #2497).
+    const session = await createTestSession('bg-aaa1')
+    await writeFile(
+      metadataPath('bg-aaa1'),
+      JSON.stringify({
+        ...session,
+        status: 'failed',
+        exitCode: 300,
+        finishedAt: new Date().toISOString(),
+      }),
+    )
+    const { code, stdout, stderr } = await runWait(['bg-aaa1', '--json'])
+
+    expect(code).toBe(1)
+    expect(stderr).toBe('')
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.status).toBe('failed')
+    expect(result.exitCode).toBe(300)
+    expect(result.terminalReason).toBeNull()
+
+    const human = await runWait(['bg-aaa1'])
+    expect(human.code).toBe(1)
+    expect(human.stdout).toBe('Background session bg-aaa1 failed with exit code 300.\n')
+  })
+
+  it('reports an unknown outcome without inventing an exit code for a failed session without terminalReason or exitCode', async () => {
+    const session = await createTestSession('bg-aaa1')
+    await writeFile(
+      metadataPath('bg-aaa1'),
+      JSON.stringify({
+        ...session,
+        status: 'failed',
+        finishedAt: new Date().toISOString(),
+      }),
+    )
+    const { code, stdout } = await runWait(['bg-aaa1', '--json'])
+
+    expect(code).toBe(1)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.status).toBe('failed')
+    expect(result.exitCode).toBeNull()
+    expect(result.terminalReason).toBeNull()
+
+    const human = await runWait(['bg-aaa1'])
+    expect(human.code).toBe(1)
+    expect(human.stdout).toBe(
+      'Background session bg-aaa1 failed with an unknown outcome.\n',
+    )
   })
 
   it('reports a child signal with shell 1', async () => {
@@ -485,7 +589,11 @@ describe('wait command handler', () => {
           finishedAt: new Date().toISOString(),
           terminalReason: 'explicit_kill',
         })
-        return 'sleep 30'
+        // Deliberately mismatching the stored ['sleep', '30'] command: the
+        // waiter must let the killed fact published during the lookup win
+        // over the stale classification, so this test only passes if the
+        // re-read before stale classification runs (CodeRabbit #2497).
+        return 'sleep 999'
       },
     })
 

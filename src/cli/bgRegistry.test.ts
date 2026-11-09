@@ -3610,6 +3610,78 @@ describe('background session wait strict reads', () => {
     expect(resolved.terminalReason).toBe('exit_code')
   })
 
+  it('ignores a terminal fact published by another PID during name resolution', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    // A valid fact from another PID (e.g. a previous incarnation of the
+    // id): the non-strict registry reader ignores it via applyTerminalFacts,
+    // so name resolution must select the live session instead of failing
+    // with metadata_replaced (CodeRabbit #2497).
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), { recursive: true })
+    await writeFile(
+      terminalFactPath('bg-wait-1', 'natural'),
+      JSON.stringify({
+        version: 1,
+        id: 'bg-wait-1',
+        pid: 999999,
+        status: 'failed',
+        finishedAt: '2026-07-01T08:00:00.000Z',
+        terminalReason: 'exit_code',
+        exitCode: 3,
+      }),
+    )
+
+    const resolved = await resolveBackgroundSessionForWait('target')
+    expect(resolved.id).toBe('bg-wait-1')
+    expect(resolved.status).toBe('running')
+
+    // The pinned read still succeeds with the foreign fact ignored; only a
+    // changed metadata PID reports replacement.
+    const pinned = await readPinnedBackgroundSessionForWait({
+      id: 'bg-wait-1',
+      pid: 424242,
+    })
+    expect(pinned.status).toBe('running')
+  })
+
+  it('never reports metadata_malformed for sessions created during name resolution', async () => {
+    // writeNewSession publishes atomically (temp file + link), so a
+    // name/prefix scan racing a creation must never read a partially-written
+    // metadata document as malformed (CodeRabbit #2497).
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    const creations = Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        createBackgroundSession({
+          id: `bg-wait-new-${index}`,
+          pid: 424250 + index,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: `sess-wait-new-${index}`,
+        }),
+      ),
+    )
+    const codes = await Promise.all(
+      Array.from({ length: 40 }, () =>
+        waitErrorCode(() => resolveBackgroundSessionForWait('target')),
+      ),
+    )
+    await creations
+    expect(codes.every(code => code === undefined)).toBe(true)
+  })
+
   it('resolves by live name, ID prefix, and terminal name in selection order', async () => {
     await createBackgroundSession({
       id: 'bg-waaa1',
