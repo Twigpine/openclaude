@@ -1756,11 +1756,12 @@ describe('background session log streaming', () => {
     scheduler.tick()
     await readStarted.promise
     abort.abort()
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(resolved).toBe(false)
-    releaseRead.resolve()
+    // The in-flight read is abandoned on abort, so the follower settles
+    // promptly instead of waiting for the read to be released; the bytes
+    // the read later produces are discarded and never written.
     await following
-    scheduler.tick()
+    expect(resolved).toBe(true)
+    releaseRead.resolve()
     await new Promise(resolve => setTimeout(resolve, 0))
 
     expect(scheduler.cleared).toBe(true)
@@ -2117,12 +2118,11 @@ describe('background session log following stops at terminal state', () => {
       else if (chunk instanceof Uint8Array) captured.push(Buffer.from(chunk))
       return false
     } as typeof process.stdout.write
+    let handler: Promise<void> | undefined
+    let following: Promise<void> | undefined
     try {
-      const following = withTimeout(
-        logsHandler([session.id, '-f'], { signal: abort.signal }),
-        5000,
-        () => abort.abort(),
-      )
+      handler = logsHandler([session.id, '-f'], { signal: abort.signal })
+      following = withTimeout(handler, 5000, () => abort.abort())
       // Wait until the dump has written its first chunk and is blocked
       // waiting for the drain.
       await waitFor(() => captured.length === 1)
@@ -2133,9 +2133,146 @@ describe('background session log following stops at terminal state', () => {
       // after cancellation, even though stdout never drained.
       expect(Buffer.concat(captured).toString()).toBe('abcdef')
     } finally {
+      // If setup failed after the follower started (the wait above), stop
+      // and await it here: observe both the timeout wrapper and the raw
+      // handler (bounded) before restoring stdout, so a timed-out run
+      // cannot keep polling after afterEach resets the registry root, and
+      // the wrapper's later rejection is never unobserved.
       abort.abort()
+      if (following) {
+        await Promise.race([
+          following.catch(() => undefined),
+          new Promise(resolve => setTimeout(resolve, 5000)),
+        ])
+      }
+      if (handler) {
+        await Promise.race([
+          handler.catch(() => undefined),
+          new Promise(resolve => setTimeout(resolve, 5000)),
+        ])
+      }
       process.stdout.write = originalWrite
     }
+  })
+
+  it('initial log dump settles on abort while the file open stalls', async () => {
+    await withTempFile('stdout.log', async path => {
+      await writeFile(path, 'seed')
+      const output = new TestOutput()
+      const abort = new AbortController()
+      const openStarted = deferred()
+      let lateClosed = false
+      const lateHandle = {
+        stat: async () => ({ size: 4 }),
+        read: async () => ({ bytesRead: 0 }),
+        close: async () => {
+          lateClosed = true
+        },
+      }
+      const releaseOpen = deferred<typeof lateHandle>()
+      const dump = printExistingLog(path, {
+        output,
+        signal: abort.signal,
+        openFile: async () => {
+          openStarted.resolve()
+          return await releaseOpen.promise
+        },
+      })
+      // The open must provably be in flight before aborting: aborting
+      // earlier could settle the dump without ever entering the open, so
+      // the test would pass without exercising cancellation of a stalled
+      // filesystem operation.
+      await openStarted.promise
+      abort.abort()
+      const offset = await Promise.race([
+        dump,
+        new Promise<number>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('dump did not settle on abort')),
+            1000,
+          ),
+        ),
+      ])
+      expect(offset).toBe(0)
+
+      // The in-flight open completes after the abort: its handle must
+      // still be closed, so no descriptor leaks.
+      releaseOpen.resolve(lateHandle)
+      await waitFor(() => lateClosed)
+      expect(lateClosed).toBe(true)
+    })
+  })
+
+  it('initial log dump settles on abort while a file stat stalls', async () => {
+    await withTempFile('stdout.log', async path => {
+      await writeFile(path, Buffer.from('seed'))
+      const output = new TestOutput()
+      const abort = new AbortController()
+      const statStarted = deferred()
+      const dump = printExistingLog(path, {
+        output,
+        signal: abort.signal,
+        openFile: async () => {
+          const handle = await open(path, 'r')
+          return {
+            stat: async () => {
+              statStarted.resolve()
+              return await new Promise<{ size: number }>(() => {})
+            },
+            read: async (...args) => await handle.read(...args),
+            close: () => handle.close(),
+          }
+        },
+      })
+      await statStarted.promise
+      abort.abort()
+      const offset = await Promise.race([
+        dump,
+        new Promise<number>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('dump did not settle on abort')),
+            1000,
+          ),
+        ),
+      ])
+      expect(offset).toBe(0)
+    })
+  })
+
+  it('initial log dump settles on abort while a file read stalls', async () => {
+    await withTempFile('stdout.log', async path => {
+      await writeFile(path, Buffer.from('seed'))
+      const output = new TestOutput()
+      const abort = new AbortController()
+      const readStarted = deferred()
+      const dump = printExistingLog(path, {
+        output,
+        signal: abort.signal,
+        openFile: async () => {
+          const handle = await open(path, 'r')
+          return {
+            stat: () => handle.stat(),
+            read: async () => {
+              readStarted.resolve()
+              return await new Promise<{ bytesRead: number }>(() => {})
+            },
+            close: () => handle.close(),
+          }
+        },
+      })
+      await readStarted.promise
+      abort.abort()
+      const offset = await Promise.race([
+        dump,
+        new Promise<number>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('dump did not settle on abort')),
+            1000,
+          ),
+        ),
+      ])
+      expect(offset).toBe(0)
+    })
   })
 
   it('follow mode stops after the final drain when the stop probe reports terminal', async () => {

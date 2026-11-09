@@ -612,6 +612,33 @@ function normalizeChunkSize(chunkSize: number | undefined): number {
   return Math.floor(chunkSize)
 }
 
+/**
+ * Awaits `promise` but stops waiting when `signal` fires, resolving null
+ * instead: a stalled filesystem operation cannot wedge a log dump that is
+ * already shutting down. The raced promise keeps its handlers attached
+ * (via Promise.race), so a late rejection is observed; callers must close
+ * any handle the promise eventually yields.
+ */
+async function settleOnAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | null> {
+  if (!signal) return await promise
+  if (signal.aborted) return null
+  let onAbort: (() => void) | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<null>(resolve => {
+        onAbort = () => resolve(null)
+        signal.addEventListener('abort', onAbort, { once: true })
+      }),
+    ])
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
+
 async function waitForDrain(
   output: LogOutput,
   signal: AbortSignal | undefined,
@@ -692,7 +719,16 @@ async function streamLogRange(
 
     let bytesRead: number
     try {
-      const readResult = await handle.read(buffer, 0, bytesToRead, position)
+      const readResult = await settleOnAbort(
+        handle.read(buffer, 0, bytesToRead, position),
+        options.signal,
+      )
+      if (!readResult) {
+        // Aborted while reading: the caller closes the handle (a close
+        // issued while a read is pending resolves promptly and fails the
+        // read, verified against Node 24 and Bun 1.4).
+        return { position, outputOpen: false, complete: false }
+      }
       bytesRead = readResult.bytesRead
     } catch (error) {
       if (!options.continueOnFileError) throw error
@@ -726,7 +762,19 @@ async function streamLogSnapshot(
 ): Promise<StreamLogResult> {
   let handle: LogFileHandle
   try {
-    handle = await (options.openFile ?? open)(path, 'r')
+    const openPromise = (options.openFile ?? open)(path, 'r')
+    const opened = await settleOnAbort(openPromise, options.signal)
+    if (!opened) {
+      // Aborted while opening: the open may still complete later, so
+      // close the handle then instead of leaking the descriptor. A late
+      // failure is swallowed; the dump reports no output and incomplete.
+      void openPromise.then(
+        lateHandle => lateHandle.close().catch(() => {}),
+        () => {},
+      )
+      return { position: offset, outputOpen: false, complete: false }
+    }
+    handle = opened
   } catch (error) {
     if (!options.continueOnFileError) throw error
     // Keep following; the child may create or rotate the file later.
@@ -739,7 +787,12 @@ async function streamLogSnapshot(
     complete: false,
   }
   try {
-    const { size } = await handle.stat()
+    const stat = await settleOnAbort(handle.stat(), options.signal)
+    if (!stat) {
+      // Aborted while stating: the finally below closes the handle.
+      return { position: offset, outputOpen: false, complete: false }
+    }
+    const { size } = stat
     const start = size < offset ? 0 : offset
     result =
       size <= start

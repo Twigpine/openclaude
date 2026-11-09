@@ -2767,6 +2767,19 @@ export async function refreshBackgroundSessionStatus(
   if (!factApplication) return null
   const effective = factApplication.session
   if (effective.status !== 'running' && effective.status !== 'unknown') {
+    if (
+      effective.status === 'stale' &&
+      factApplication.terminalFactReadError
+    ) {
+      // A stored stale status can mean the bulk refresh found the process
+      // gone while a terminal fact was unreadable: the bulk refresh stores
+      // stale without the read-error flag, so the stored status alone does
+      // not establish termination. If the fact is still unreadable now,
+      // report unknown so the follower keeps retrying the fact read
+      // instead of exiting after its final drain. A genuinely missing fact
+      // takes the plain stale return below instead.
+      return { ...effective, status: 'unknown', updatedAt: iso(options.now) }
+    }
     return effective
   }
 
