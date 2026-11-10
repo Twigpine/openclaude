@@ -4085,4 +4085,110 @@ describe('background session wait strict reads', () => {
     })
     expect(aborted.state).toBe('unreadable')
   })
+
+  it('sleeps between polls while synchronously waiting for a terminal fact (CodeRabbit #2497)', async () => {
+    // A stale publish claim whose tmp holds a complete fact, as if another
+    // installer claimed the publish and died before renaming it: the sync
+    // installer adopts the winner's publish, but only after
+    // waitForTerminalFactSync polls for the target. That loop must sleep
+    // 10 ms between reads like its async sibling instead of spinning
+    // readFileSync at 100% CPU until the 250 ms deadline.
+    await createBackgroundSession({
+      id: 'bg-wait-sync-sleep',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-sync-sleep',
+    })
+    const terminalDir = join(configDir, 'bg-sessions', 'terminal')
+    await mkdir(terminalDir, { recursive: true })
+    const claimedTmp = join(
+      terminalDir,
+      'bg-wait-sync-sleep.424242.00000000-0000-4000-8000-000000000000.tmp',
+    )
+    await writeFile(
+      claimedTmp,
+      JSON.stringify({
+        version: 1,
+        id: 'bg-wait-sync-sleep',
+        pid: 424242,
+        status: 'exited',
+        finishedAt: '2026-07-01T08:00:00.000Z',
+        terminalReason: 'exit_code',
+        exitCode: 0,
+      }),
+    )
+    const target = terminalFactPath('bg-wait-sync-sleep', 'natural')
+    await mkdir(`${target}.claim`, { recursive: true })
+    await writeFile(join(`${target}.claim`, 'tmp'), claimedTmp)
+
+    const originalWait = Atomics.wait
+    const sleepDurations: number[] = []
+    Atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
+      sleepDurations.push(args[3] ?? 0)
+      return originalWait(...args)
+    }) as typeof Atomics.wait
+    try {
+      recordBackgroundSessionNaturalTerminationSync(
+        'bg-wait-sync-sleep',
+        { exitCode: 0 },
+        { ownerPid: 424242 },
+      )
+    } finally {
+      Atomics.wait = originalWait
+    }
+
+    // One 250 ms wait burns ~25 polls at the async interval when the
+    // timer granularity is exact, fewer when a sleep overshoots; either
+    // way it must sleep rather than spin.
+    expect(
+      sleepDurations.filter(duration => duration === 10).length,
+    ).toBeGreaterThanOrEqual(5)
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-sync-sleep')
+    expect(resolved.status).toBe('exited')
+    expect(resolved.exitCode).toBe(0)
+  })
+
+  it('sleeps between polls while synchronously waiting for a missing claim file (CodeRabbit #2497)', async () => {
+    // A claim directory with no claim file, as if the winner died between
+    // mkdir and the claim-file write: adoption waits for the target in
+    // waitForTerminalFactSync and then for the claim file in
+    // readTerminalFactClaimSync. Both loops must sleep 10 ms between
+    // reads; the stale claim is then removed and this installer publishes
+    // its own fact on the next attempt.
+    await createBackgroundSession({
+      id: 'bg-wait-sync-claim',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-sync-claim',
+    })
+    const target = terminalFactPath('bg-wait-sync-claim', 'natural')
+    await mkdir(`${target}.claim`, { recursive: true })
+
+    const originalWait = Atomics.wait
+    const sleepDurations: number[] = []
+    Atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
+      sleepDurations.push(args[3] ?? 0)
+      return originalWait(...args)
+    }) as typeof Atomics.wait
+    try {
+      recordBackgroundSessionNaturalTerminationSync(
+        'bg-wait-sync-claim',
+        { exitCode: 0 },
+        { ownerPid: 424242 },
+      )
+    } finally {
+      Atomics.wait = originalWait
+    }
+
+    // Two full 250 ms waits: ~50 polls at exact granularity, fewer with
+    // overshoot.
+    expect(
+      sleepDurations.filter(duration => duration === 10).length,
+    ).toBeGreaterThanOrEqual(20)
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-sync-claim')
+    expect(resolved.status).toBe('exited')
+    expect(resolved.exitCode).toBe(0)
+  })
 })
