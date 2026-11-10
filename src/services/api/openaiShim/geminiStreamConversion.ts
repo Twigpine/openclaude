@@ -184,6 +184,7 @@ export async function* geminiSseToAnthropic(
             output_tokens:
               (metadata.candidatesTokenCount ?? 0) +
               (metadata.thoughtsTokenCount ?? 0),
+            cached_content_token_count: metadata.cachedContentTokenCount ?? 0,
           })
         }
 
