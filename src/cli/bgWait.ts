@@ -147,6 +147,11 @@ function hasJsonFlag(args: readonly string[]): boolean {
   return false
 }
 
+/**
+ * Parses `wait` command arguments into a selector, an optional timeout,
+ * and output flags. Throws on a missing, empty, or duplicate selector, an
+ * unknown flag, or a malformed `--timeout` duration.
+ */
 export function parseWaitInvocation(args: string[]): ParsedWaitInvocation {
   const delimiterIndex = args.indexOf('--')
   const head = delimiterIndex === -1 ? args : args.slice(0, delimiterIndex)
@@ -313,6 +318,12 @@ function interruptedWaitResult(
   }
 }
 
+/**
+ * Maps a wait outcome to its process exit code: 0 for a clean child exit,
+ * 1 for any other terminal outcome, 124 on timeout, 130/143 when the
+ * waiter is interrupted by SIGINT/SIGTERM, 3 for an unreadable process,
+ * 4 for other observation errors, and 2 for internal failures.
+ */
 export function waitExitCode(result: WaitResult): number {
   if (result.waitResult === 'terminal') {
     return result.status === 'exited' && result.exitCode === 0 ? 0 : 1
@@ -495,6 +506,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * Runs `openclaude wait`: pins one background session, then polls its
+ * registry state until it reaches a terminal outcome, the timeout elapses,
+ * or the waiter is interrupted. Returns the process exit code for the
+ * outcome and sets `process.exitCode` to match.
+ */
 export async function waitHandler(
   args: string[] | string | undefined,
   options: WaitHandlerOptions = {},
