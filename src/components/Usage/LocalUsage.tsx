@@ -54,6 +54,7 @@ export function LocalUsage({
     let cancelled = false
     load(range).then(
       summary => {
+        // Cache even when cancelled: the result is still valid for later.
         cache.current.set(range, summary)
         if (!cancelled) setLoaded({ range, summary, error: null })
       },
