@@ -117,18 +117,22 @@ async function readRollupText(
 }
 
 /**
- * Parse rollup file text. Text that is not a JSON object reads as empty: its
- * contents are lost either way. A file of another version reads as empty, or
- * throws when `strict`, so a writer never replaces a file it cannot read.
+ * Parse rollup file text, or null when it cannot be used. Text that is not a
+ * JSON object is null: its contents are lost either way. A file of another
+ * version is null, or throws when `strict`, so a writer never replaces a file
+ * it cannot read.
  */
-function parseRollupFile(text: string, strict: boolean): UsageRollupFile {
+function parseRollupFile(
+  text: string,
+  strict: boolean,
+): UsageRollupFile | null {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
-    return emptyRollupFile()
+    return null
   }
-  if (!parsed || typeof parsed !== 'object') return emptyRollupFile()
+  if (!parsed || typeof parsed !== 'object') return null
   const file = parsed as Partial<UsageRollupFile>
   if (file.version !== USAGE_ROLLUP_VERSION) {
     if (strict) {
@@ -136,7 +140,7 @@ function parseRollupFile(text: string, strict: boolean): UsageRollupFile {
         `Unsupported usage rollup version: ${String(file.version)}`,
       )
     }
-    return emptyRollupFile()
+    return null
   }
   const days: Record<string, UsageDayRollup> = {}
   if (file.days && typeof file.days === 'object') {
@@ -147,19 +151,34 @@ function parseRollupFile(text: string, strict: boolean): UsageRollupFile {
   return { version: USAGE_ROLLUP_VERSION, days }
 }
 
-/** Read one month's rollups; a missing or unreadable file reads as empty. */
-export async function readUsageRollupFile(
+/**
+ * One month's rollups. A missing file reads as empty; a file that exists but
+ * cannot be read or parsed also reads as empty, with `unreadable` set.
+ */
+async function readRollupFileChecked(
   monthKey: string,
-  usageDir: string = getUsageDir(),
-): Promise<UsageRollupFile> {
+  usageDir: string,
+): Promise<{ file: UsageRollupFile; unreadable: boolean }> {
   let text: string | null
   try {
     text = await readRollupText(monthKey, usageDir)
   } catch (error) {
     logForDebugging(`Failed to read usage rollups: ${String(error)}`)
-    return emptyRollupFile()
+    return { file: emptyRollupFile(), unreadable: true }
   }
-  return text === null ? emptyRollupFile() : parseRollupFile(text, false)
+  if (text === null) return { file: emptyRollupFile(), unreadable: false }
+  const file = parseRollupFile(text, false)
+  return file
+    ? { file, unreadable: false }
+    : { file: emptyRollupFile(), unreadable: true }
+}
+
+/** Read one month's rollups; a missing or unreadable file reads as empty. */
+export async function readUsageRollupFile(
+  monthKey: string,
+  usageDir: string = getUsageDir(),
+): Promise<UsageRollupFile> {
+  return (await readRollupFileChecked(monthKey, usageDir)).file
 }
 
 async function writeUsageRollupFile(
@@ -197,10 +216,19 @@ async function eventFileSize(
  *
  * Rebuilt days are saved only while session persistence is allowed (or when
  * `persist` says so); otherwise they are computed in memory only.
+ *
+ * `onUnreadableMonth` is called for a month whose rollup file exists but
+ * cannot be read while some requested day of it has no event file to rebuild
+ * from, so that day's usage may be missing from the result.
  */
 export async function getUsageDayRollups(
   dateKeys: readonly string[],
-  options: { today: string; usageDir?: string; persist?: boolean },
+  options: {
+    today: string
+    usageDir?: string
+    persist?: boolean
+    onUnreadableMonth?: (monthKey: string) => void
+  },
 ): Promise<Map<string, UsageDayRollup>> {
   const usageDir = options.usageDir ?? getUsageDir()
   const persist = options.persist ?? !shouldSkipSessionPersistence()
@@ -215,12 +243,12 @@ export async function getUsageDayRollups(
 
   const result = new Map<string, UsageDayRollup>()
   for (const [month, keys] of byMonth) {
-    const file = await readUsageRollupFile(month, usageDir)
+    const read = await readRollupFileChecked(month, usageDir)
     const rebuilt: Record<string, UsageDayRollup> = {}
     let pruned = false
     for (const key of keys) {
       const size = await eventFileSize(key, usageDir)
-      const existing = file.days[key]
+      const existing = read.file.days[key]
       if (size !== null && (!existing || existing.sourceBytes !== size)) {
         const day = await readUsageEventsForDay(key, usageDir)
         if (day.exists) {
@@ -235,10 +263,13 @@ export async function getUsageDayRollups(
         }
       }
     }
-    const saved = pruned ? await readUsageRollupFile(month, usageDir) : file
+    const saved = pruned ? await readRollupFileChecked(month, usageDir) : read
     for (const key of keys) {
-      const day = rebuilt[key] ?? saved.days[key]
+      const day = rebuilt[key] ?? saved.file.days[key]
       if (day) result.set(key, day)
+    }
+    if (saved.unreadable && keys.some(key => !rebuilt[key])) {
+      options.onUnreadableMonth?.(month)
     }
     if (persist && Object.keys(rebuilt).length > 0) {
       try {
@@ -269,7 +300,7 @@ async function saveUsageDayRollups(
     // whose event files are already gone, so the save fails instead.
     const text = await readRollupText(month, usageDir)
     const current =
-      text === null ? emptyRollupFile() : parseRollupFile(text, true)
+      (text === null ? null : parseRollupFile(text, true)) ?? emptyRollupFile()
     for (const [key, day] of Object.entries(days)) {
       // Event files only grow, so a day built from fewer bytes is older than
       // the saved one and must not replace it.

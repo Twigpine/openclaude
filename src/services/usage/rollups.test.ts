@@ -154,6 +154,64 @@ describe('getUsageDayRollups', () => {
     expect(rollups.get(yesterday)?.rows[0]?.requests).toBe(1)
   })
 
+  test.each([
+    ['corrupt JSON', '{not json'],
+    ['a newer version', JSON.stringify({ version: 999, days: {} })],
+  ])(
+    'reports an unreadable rollup (%s) only when a requested day has no event file',
+    async (_label, contents) => {
+      const old = '2026-11-01'
+      const unreadable: string[] = []
+      const read = (keys: string[]) =>
+        getUsageDayRollups(keys, {
+          today,
+          usageDir,
+          persist: false,
+          onUnreadableMonth: month => unreadable.push(month),
+        })
+
+      // A month with no rollup file has nothing to lose.
+      await read([old])
+      expect(unreadable).toEqual([])
+
+      await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
+      await mkdir(getUsageRollupsDir(usageDir), { recursive: true })
+      await writeFile(getUsageRollupFile('2026-11', usageDir), contents)
+      // Every requested day can be rebuilt from its event file.
+      await read([yesterday])
+      expect(unreadable).toEqual([])
+      // Only the rollup could hold the usage for `old`.
+      const rollups = await read([old, yesterday])
+      expect(unreadable).toEqual(['2026-11'])
+      expect(rollups.get(yesterday)?.rows[0]?.requests).toBe(1)
+    },
+  )
+
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports a rollup file it has no permission to read',
+    async () => {
+      const old = '2026-11-01'
+      await writeDay(old, [makeUsageEvent({ ts: at(old) })])
+      await getUsageDayRollups([old], { today, usageDir })
+      rmSync(getUsageEventsFile(old, usageDir))
+
+      const unreadable: string[] = []
+      const file = getUsageRollupFile('2026-11', usageDir)
+      chmodSync(file, 0o000)
+      try {
+        const rollups = await getUsageDayRollups([old], {
+          today,
+          usageDir,
+          onUnreadableMonth: month => unreadable.push(month),
+        })
+        expect(rollups.has(old)).toBe(false)
+      } finally {
+        chmodSync(file, 0o600)
+      }
+      expect(unreadable).toEqual(['2026-11'])
+    },
+  )
+
   test('keeps the saved day when cleanup deletes the file between stat and read', async () => {
     await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
     await getUsageDayRollups([yesterday], { today, usageDir })

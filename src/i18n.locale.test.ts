@@ -167,7 +167,7 @@ describe('detectLocale – environment variables', () => {
 
 describe('zh-HK command descriptions', () => {
   test.each([
-    [usage.name, usage, '顯示計劃用量上限'],
+    [usage.name, usage, '顯示本機的 token 用量及計劃用量上限'],
     [onboardGithub.name, onboardGithub, '設定 GitHub Copilot 認證資訊'],
   ] as const)('preserves the purpose of /%s', (_name, command, expected) => {
     setSessionSettingsCache({ settings: { language: 'zh-HK' }, errors: [] })

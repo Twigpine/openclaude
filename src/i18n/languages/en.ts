@@ -86,7 +86,7 @@ export const en = {
   'commands.terminal-setup.description':
     'Install Shift+Enter key binding for newlines',
   'commands.theme.description': 'Change the theme',
-  'commands.usage.description': 'Show plan usage limits',
+  'commands.usage.description': 'Show token usage on this machine and plan usage limits',
   'commands.vim.description': 'Toggle between Vim and Normal editing modes',
   'commands.wiki.description':
     'Initialize and inspect the OpenClaude project wiki',

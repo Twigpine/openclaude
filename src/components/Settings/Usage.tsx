@@ -3,12 +3,11 @@ import * as React from 'react';
 import { useEffect, useState } from 'react';
 import { extraUsage as extraUsageCommand } from 'src/commands/extra-usage/index.js';
 import {
-  getUsageDescriptor,
-  resolveActiveUsageId,
-} from 'src/commands/usage/index.js';
+  getActiveUsageDescriptor,
+  resolveProviderUsageScreen,
+} from 'src/commands/usage/providerScreen.js';
 import { formatCost } from 'src/cost-tracker.js';
 import { getSubscriptionType } from 'src/utils/auth.js';
-import { getActiveProviderProfile } from 'src/utils/providerProfiles.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { Box, Text } from '../../ink.js';
 import { useKeybinding } from '../../keybindings/useKeybinding.js';
@@ -274,26 +273,19 @@ function AnthropicUsage(): React.ReactNode {
     </Box>;
 }
 export function Usage(): React.ReactNode {
-  const provider = getAPIProvider();
-  const activeProfile = getActiveProviderProfile();
-  const usageDescriptor = getUsageDescriptor(resolveActiveUsageId(process.env, {
-    activeProfileProvider: activeProfile?.provider,
-    activeProfileBaseUrl: activeProfile?.baseUrl,
-    providerCategory: provider,
-  }));
-  if (provider === 'codex') {
-    return <CodexUsage />;
+  const usageDescriptor = getActiveUsageDescriptor();
+  switch (resolveProviderUsageScreen(getAPIProvider(), usageDescriptor)) {
+    case 'codex':
+      return <CodexUsage />;
+    case 'minimax':
+      return <MiniMaxUsage />;
+    case 'clinepass':
+      return <ClinePassUsage />;
+    case 'anthropic':
+      return <AnthropicUsage />;
+    default:
+      return <UnsupportedUsage providerLabel={usageDescriptor.activeLabel} />;
   }
-  if (usageDescriptor.resolvedId === 'minimax' && usageDescriptor.supported) {
-    return <MiniMaxUsage />;
-  }
-  if (usageDescriptor.resolvedId === 'clinepass' && usageDescriptor.supported) {
-    return <ClinePassUsage />;
-  }
-  if (usageDescriptor.resolvedId === 'anthropic' && usageDescriptor.supported) {
-    return <AnthropicUsage />;
-  }
-  return <UnsupportedUsage providerLabel={usageDescriptor.activeLabel} />;
 }
 type ExtraUsageSectionProps = {
   extraUsage: ExtraUsage;

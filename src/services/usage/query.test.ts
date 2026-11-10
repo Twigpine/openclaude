@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import { mkdtempSync, rmSync } from 'fs'
-import { appendFile, mkdir } from 'fs/promises'
+import { appendFile, mkdir, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -16,6 +16,7 @@ import {
   getUsageDir,
   getUsageEventsDir,
   getUsageEventsFile,
+  getUsageRollupFile,
   shiftDateKey,
   startOfLocalDay,
 } from './paths.js'
@@ -219,6 +220,23 @@ describe('windows', () => {
     expect(summary.fromDate).toBe(old)
     expect(summary.daily).toHaveLength(91)
     expect(summary.totals.tokens).toBe(42)
+    expect(summary.unreadableMonths).toEqual([])
+  })
+
+  test('names a month whose saved totals cannot be read once its events are pruned', async () => {
+    const old = shiftDateKey(TODAY, -10)
+    await writeDay(old, [event({ ts: at(old), input: 40, output: 0 })])
+    await getUsageDayRollups([old], { today: TODAY, usageDir, persist: true })
+    rmSync(getUsageEventsFile(old, usageDir))
+    await writeFile(getUsageRollupFile('2026-10', usageDir), '{not json')
+    await writeDay(TODAY, [event({ input: 2, output: 0 })])
+
+    const summary = await queryLocalUsage('30d', { now: NOW, usageDir })
+    expect(summary.totals.tokens).toBe(2)
+    expect(summary.unreadableMonths).toEqual(['2026-10'])
+
+    const today = await queryLocalUsage('today', { now: NOW, usageDir })
+    expect(today.unreadableMonths).toEqual([])
   })
 
   test('an empty ledger returns zeros', async () => {

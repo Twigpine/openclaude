@@ -4,6 +4,30 @@ OpenClaude keeps a small local record of token usage so it can show usage for
 any provider, including ones that do not offer a usage API. The record lives
 on your machine only. Nothing is sent anywhere.
 
+## Viewing your usage
+
+Run `/usage`. The **Local** tab shows usage from this record for every
+provider:
+
+- total tokens, requests, sessions and the share served from prompt cache
+- a chart by hour (today) or by day (7d, 30d, all)
+- usage per model and provider, with an estimated cost
+- how usage splits across your conversation, subagents, compaction and
+  background helpers, and across projects
+
+Press `r` to switch between this session, today, the last 7 days, the last 30
+days and all time. Today is compared with your average day over the previous
+week, and 7d and 30d with the period before them, once that much history
+exists.
+
+Cost is shown only for models with a known price: built-in Claude prices or
+your `modelPricing` setting. Other models show `—`, and models served from
+your own machine show `local`.
+
+When your provider reports plan limits (Claude.ai subscriptions, Codex,
+MiniMax, ClinePass), `/usage` opens on the **Plan** tab instead. Use `←`/`→`
+to switch tabs, or run `/usage local` to open the Local tab directly.
+
 ## What is recorded
 
 One line per billed model request, written when the request finishes:
@@ -51,7 +75,10 @@ deleted, its totals are saved to the monthly rollup file, so long-range totals
 survive while the per-request lines expire.
 
 Rollup files are not deleted automatically. They hold daily totals per model,
-provider, source and project directory, and no per-request detail.
+provider, source and project directory, and no per-request detail. If a rollup
+file cannot be read (for example it is corrupt or was written by a newer
+OpenClaude) and its days' event files are already gone, `/usage` names the
+months whose totals may be incomplete.
 
 ## Turning it off
 

@@ -20,7 +20,7 @@ export default {
   "commands.buddy.description": "喚醒或設定 Terminal Pixel Buddy",
   "commands.repomap.description": "檢視專案結構地圖與權重排名",
   "commands.btw.description": "傳送旁白提問而不中斷主對話 Context",
-  "commands.usage.description": "顯示計劃用量上限",
+  "commands.usage.description": "顯示本機的 token 用量及計劃用量上限",
   "commands.help.description": "顯示 OpenClaude 指令與快捷鍵指南",
 
   "provider.title": "設定服務商設定檔",
