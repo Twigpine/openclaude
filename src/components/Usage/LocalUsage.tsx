@@ -24,11 +24,20 @@ type LoadedRange = {
   error: string | null
 }
 
-/** Loads local usage for the selected range; `r` cycles the range. */
+/**
+ * Loads local usage for the selected range; `r` cycles the range.
+ *
+ * The range and the per-range cache live in this component, so they reset
+ * when it remounts (for example after switching to the Plan tab and back).
+ * That is intended: reopening the tab re-reads the ledger.
+ */
 export function LocalUsage({
   initialRange = 'today',
+  load = queryLocalUsage,
 }: {
   initialRange?: LocalUsageRange
+  /** Reads one range from the ledger. Tests pass a stub. */
+  load?: (range: LocalUsageRange) => Promise<LocalUsageSummary>
 }): React.ReactNode {
   const [range, setRange] = useState<LocalUsageRange>(initialRange)
   const [loaded, setLoaded] = useState<LoadedRange | null>(null)
@@ -43,7 +52,7 @@ export function LocalUsage({
       return
     }
     let cancelled = false
-    queryLocalUsage(range).then(
+    load(range).then(
       summary => {
         cache.current.set(range, summary)
         if (!cancelled) setLoaded({ range, summary, error: null })
@@ -62,7 +71,7 @@ export function LocalUsage({
     return () => {
       cancelled = true
     }
-  }, [range])
+  }, [range, load])
 
   useInput((input, key) => {
     if (key.ctrl || key.meta || !/^r+$/.test(input)) return
