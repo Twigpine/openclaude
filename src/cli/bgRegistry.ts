@@ -1669,6 +1669,27 @@ async function waitForTerminalFact(
   }
 }
 
+// Shared buffer for sleepSync: Atomics.wait is the only synchronous sleep
+// available in Bun/Node, and it needs a shared-memory view. Same idiom as
+// src/utils/transcriptFileLock.ts. The buffer is never written, so waits
+// always time out after `ms` instead of waking early.
+const terminalFactSyncWaitBuffer = new Int32Array(new SharedArrayBuffer(4))
+
+/**
+ * Blocks the current thread for `ms` milliseconds without yielding to the
+ * event loop. Only for the synchronous terminal-fact wait loops below,
+ * which cannot await: a plain loop would spin readFileSync at 100% CPU
+ * until the deadline.
+ */
+function sleepSync(ms: number): void {
+  Atomics.wait(terminalFactSyncWaitBuffer, 0, 0, ms)
+}
+
+/**
+ * Polls for a published terminal fact, sleeping 10 ms between reads like
+ * the async waitForTerminalFact, and returns null when the 250 ms deadline
+ * passes without the fact appearing.
+ */
 function waitForTerminalFactSync(
   id: string,
   kind: 'natural' | 'killed',
@@ -1679,6 +1700,7 @@ function waitForTerminalFactSync(
     const existing = readTerminalFactSync(id, kind, generation)
     if (existing) return existing
     if (Date.now() >= deadline) return null
+    sleepSync(10)
   }
 }
 
@@ -1709,6 +1731,12 @@ async function readTerminalFactClaim(
   }
 }
 
+/**
+ * Polls for the claim file naming the winning installer's temp file,
+ * sleeping 10 ms between reads like the async readTerminalFactClaim, and
+ * returns undefined when no valid claim appears before the 250 ms
+ * deadline (or the claim names a path outside the terminal directory).
+ */
 function readTerminalFactClaimSync(target: string): string | undefined {
   const claimFile = terminalFactClaimFile(target)
   const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
@@ -1727,6 +1755,7 @@ function readTerminalFactClaimSync(target: string): string | undefined {
     } catch (error) {
       if (!isErrno(error, 'ENOENT')) return undefined
       if (Date.now() >= deadline) return undefined
+      sleepSync(10)
     }
   }
 }
