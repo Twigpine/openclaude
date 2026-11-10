@@ -238,7 +238,6 @@ export function convertMessages(
     if (options.preserveReasoningContent) {
       const thinking = thinkingBlock?.type === 'redacted_thinking' ? thinkingBlock.data : thinkingBlock?.thinking
       if (typeof thinking === 'string' && thinking.trim()) assistantMsg.reasoning_content = thinking
-      else if (toolUses.length && options.reasoningContentFallback === '') assistantMsg.reasoning_content = ''
     }
     const mappedToolCalls: NonNullable<ConvertedOpenAIMessage['tool_calls']> = []
     for (const toolUse of toolUses) {
@@ -288,6 +287,18 @@ export function convertMessages(
       last.content = [...asParts(previous), ...asParts(current)]
     }
     if (msg.tool_calls?.length) last.tool_calls = [...(last.tool_calls ?? []), ...msg.tool_calls]
+    if (msg.reasoning_content) {
+      last.reasoning_content = last.reasoning_content
+        ? `${last.reasoning_content}\n${msg.reasoning_content}`
+        : msg.reasoning_content
+    }
+  }
+  // Apply the provider's fallback to every emitted assistant message, including
+  // plain text and interrupted-turn history, after preserving real reasoning.
+  if (options.preserveReasoningContent && options.reasoningContentFallback === '') {
+    for (const message of coalesced) {
+      if (message.role === 'assistant') message.reasoning_content ??= ''
+    }
   }
   return coalesced
 }
