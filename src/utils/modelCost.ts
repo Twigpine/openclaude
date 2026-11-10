@@ -213,6 +213,20 @@ export function calculateUSDCost(resolvedModel: string, usage: Usage): number {
 }
 
 /**
+ * Price usage only when the model has a configured (`modelPricing`) or
+ * built-in price. Unknown models return undefined instead of borrowing the
+ * unknown-model estimate, and the session is not flagged as having
+ * unknown-model cost.
+ */
+export function calculateKnownUSDCost(
+  model: string,
+  usage: Usage,
+): number | undefined {
+  const modelCosts = getKnownModelCosts(model, usage)
+  return modelCosts ? tokensToUSDCost(modelCosts, usage) : undefined
+}
+
+/**
  * Calculate cost from raw token counts without requiring a full BetaUsage object.
  * Useful for side queries (e.g. classifier) that track token counts independently.
  */

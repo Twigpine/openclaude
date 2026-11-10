@@ -9,6 +9,7 @@ import {
   type BackgroundSessionRecoveryTarget,
 } from '../cli/bgRegistry.js'
 import { logEvent } from '../services/analytics/index.js'
+import { rollUpAndPruneUsageEvents } from '../services/usage/rollups.js'
 import { CACHE_PATHS } from './cachePaths.js'
 import { logForDebugging } from './debug.js'
 import { getClaudeConfigHomeDir, getProjectsDir } from './envUtils.js'
@@ -66,11 +67,13 @@ type BackgroundSessionRetentionRequest =
       _afterJournalSnapshotForTesting?: () => Promise<void>
     }
 
-function getCutoffDate(): Date {
+function getCleanupPeriodDays(): number {
   const settings = getSettings_DEPRECATED() || {}
-  const cleanupPeriodDays =
-    settings.cleanupPeriodDays ?? DEFAULT_CLEANUP_PERIOD_DAYS
-  const cleanupPeriodMs = cleanupPeriodDays * 24 * 60 * 60 * 1000
+  return settings.cleanupPeriodDays ?? DEFAULT_CLEANUP_PERIOD_DAYS
+}
+
+function getCutoffDate(): Date {
+  const cleanupPeriodMs = getCleanupPeriodDays() * 24 * 60 * 60 * 1000
   return new Date(Date.now() - cleanupPeriodMs)
 }
 
@@ -648,6 +651,15 @@ export async function cleanupOldMessageFilesInBackground(): Promise<void> {
   await cleanupOldDebugLogs()
   await cleanupOldImageCaches()
   await cleanupOldPastes(getCutoffDate())
+  try {
+    // Daily totals are kept in rollups; only the per-request lines expire.
+    // A period of 0 keeps no history, so no totals are saved either.
+    await rollUpAndPruneUsageEvents(getCutoffDate(), {
+      keepTotals: getCleanupPeriodDays() > 0,
+    })
+  } catch (error) {
+    logForDebugging(`Usage ledger cleanup failed: ${String(error)}`)
+  }
   const removedWorktrees = await cleanupStaleAgentWorktrees(getCutoffDate())
   if (removedWorktrees > 0) {
     logEvent('tengu_worktree_cleanup', { removed: removedWorktrees })
