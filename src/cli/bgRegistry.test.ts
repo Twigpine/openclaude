@@ -3770,6 +3770,23 @@ describe('background session wait strict reads', () => {
     }
   }
 
+  // Records the durations of every Atomics.wait sleep while `run` executes,
+  // restoring the original implementation afterward.
+  function recordSyncSleepDurations(run: () => void): number[] {
+    const originalWait = Atomics.wait
+    const sleepDurations: number[] = []
+    Atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
+      sleepDurations.push(args[3] ?? 0)
+      return originalWait(...args)
+    }) as typeof Atomics.wait
+    try {
+      run()
+    } finally {
+      Atomics.wait = originalWait
+    }
+    return sleepDurations
+  }
+
   beforeEach(async () => {
     configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-wait-registry-'))
     _setBackgroundSessionsRootForTesting(join(configDir, 'bg-sessions'))
@@ -4122,21 +4139,13 @@ describe('background session wait strict reads', () => {
     await mkdir(`${target}.claim`, { recursive: true })
     await writeFile(join(`${target}.claim`, 'tmp'), claimedTmp)
 
-    const originalWait = Atomics.wait
-    const sleepDurations: number[] = []
-    Atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
-      sleepDurations.push(args[3] ?? 0)
-      return originalWait(...args)
-    }) as typeof Atomics.wait
-    try {
+    const sleepDurations = recordSyncSleepDurations(() =>
       recordBackgroundSessionNaturalTerminationSync(
         'bg-wait-sync-sleep',
         { exitCode: 0 },
         { ownerPid: 424242 },
-      )
-    } finally {
-      Atomics.wait = originalWait
-    }
+      ),
+    )
 
     // One 250 ms wait burns ~25 polls at the async interval when the
     // timer granularity is exact, fewer when a sleep overshoots; either
@@ -4166,21 +4175,13 @@ describe('background session wait strict reads', () => {
     const target = terminalFactPath('bg-wait-sync-claim', 'natural')
     await mkdir(`${target}.claim`, { recursive: true })
 
-    const originalWait = Atomics.wait
-    const sleepDurations: number[] = []
-    Atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
-      sleepDurations.push(args[3] ?? 0)
-      return originalWait(...args)
-    }) as typeof Atomics.wait
-    try {
+    const sleepDurations = recordSyncSleepDurations(() =>
       recordBackgroundSessionNaturalTerminationSync(
         'bg-wait-sync-claim',
         { exitCode: 0 },
         { ownerPid: 424242 },
-      )
-    } finally {
-      Atomics.wait = originalWait
-    }
+      ),
+    )
 
     // Two full 250 ms waits: ~50 polls at exact granularity, fewer with
     // overshoot.
