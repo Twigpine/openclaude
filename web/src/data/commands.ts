@@ -103,7 +103,7 @@ export const commands: SlashCommand[] = [
   { name: 'login', description: 'Sign in with your Anthropic account', category: 'models' },
   { name: 'logout', description: 'Sign out from your Anthropic account', category: 'models' },
   { name: 'onboard-github', description: 'Interactive setup for GitHub Copilot: OAuth device login stored in secure storage', category: 'models' },
-  { name: 'usage', description: 'Show plan usage limits', category: 'models' },
+  { name: 'usage', description: 'Show token usage on this machine and plan usage limits', category: 'models' },
   { name: 'extra-usage', description: 'Configure extra usage to keep working when limits are hit', category: 'models' },
 
   // ── code review & git ────────────────────────────────────────────────
