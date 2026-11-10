@@ -207,7 +207,7 @@ export type GeminiVertexStreamEvent =
   | {
       type: 'message_delta'
       delta: { stop_reason: GeminiVertexStopReason; stop_sequence: null }
-      usage: { output_tokens: number }
+      usage: GeminiVertexMessage['usage']
     }
   | { type: 'message_stop' }
 
@@ -635,7 +635,7 @@ async function* toAnthropicStream(
   yield {
     type: 'message_delta',
     delta: { stop_reason: message.stop_reason, stop_sequence: null },
-    usage: { output_tokens: message.usage.output_tokens },
+    usage: { ...message.usage },
   }
   yield { type: 'message_stop' }
 }
