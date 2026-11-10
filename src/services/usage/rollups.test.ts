@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
 import { appendFile, mkdir, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
+import { setSessionPersistenceDisabled } from '../../bootstrap/state.js'
+import * as settingsModule from '../../utils/settings/settings.js'
 import * as ledger from './ledger.js'
 import {
   getUsageEventsDir,
@@ -60,11 +62,20 @@ function at(dateKey: string, hour = 12): number {
   return date.getTime()
 }
 
+const savedPersistenceEnv = process.env.TEST_ENABLE_SESSION_PERSISTENCE
+
 beforeEach(() => {
   usageDir = mkdtempSync(join(tmpdir(), 'usage-rollups-'))
+  // Rollups are only saved while session persistence is allowed.
+  process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
 })
 
 afterEach(() => {
+  if (savedPersistenceEnv === undefined) {
+    delete process.env.TEST_ENABLE_SESSION_PERSISTENCE
+  } else {
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = savedPersistenceEnv
+  }
   rmSync(usageDir, { recursive: true, force: true })
 })
 
@@ -206,6 +217,40 @@ describe('getUsageDayRollups', () => {
     expect(grown.get(yesterday)?.rows[0]?.requests).toBe(1)
   })
 
+  test('never overwrites a rollup file written by another version', async () => {
+    await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
+    await mkdir(getUsageRollupsDir(usageDir), { recursive: true })
+    const future = JSON.stringify({ version: 99, days: { '2026-11-01': {} } })
+    await writeFile(getUsageRollupFile('2026-11', usageDir), future)
+
+    const rollups = await getUsageDayRollups([yesterday], { today, usageDir })
+    expect(rollups.get(yesterday)?.rows[0]?.requests).toBe(1)
+    expect(readFileSync(getUsageRollupFile('2026-11', usageDir), 'utf8')).toBe(
+      future,
+    )
+  })
+
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'never rewrites a month whose rollup file cannot be read',
+    async () => {
+      const old = '2026-11-01'
+      await writeDay(old, [makeUsageEvent({ ts: at(old) })])
+      await getUsageDayRollups([old], { today, usageDir })
+      rmSync(getUsageEventsFile(old, usageDir))
+      await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
+
+      const file = getUsageRollupFile('2026-11', usageDir)
+      chmodSync(file, 0o000)
+      try {
+        await getUsageDayRollups([yesterday], { today, usageDir })
+      } finally {
+        chmodSync(file, 0o600)
+      }
+      const persisted = await readUsageRollupFile('2026-11', usageDir)
+      expect(persisted.days[old]?.rows[0]?.requests).toBe(1)
+    },
+  )
+
   test('builds the same rollup every time', async () => {
     await writeDay(yesterday, [
       makeUsageEvent({ ts: at(yesterday) }),
@@ -271,6 +316,54 @@ describe('rollUpAndPruneUsageEvents', () => {
     expect(removed).toBe(0)
     expect(existsSync(getUsageEventsFile(today, usageDir))).toBe(true)
   })
+})
+
+describe('session persistence opt-outs', () => {
+  const today = '2026-11-09'
+  const yesterday = '2026-11-08'
+  type SettingsSpy = { mockReturnValue(value: never): unknown }
+  const optOuts: Array<[string, (settings: SettingsSpy) => () => void]> = [
+    ['cleanupPeriodDays is 0', settings => {
+      settings.mockReturnValue({ cleanupPeriodDays: 0 } as never)
+      return () => {}
+    }],
+    ['--no-session-persistence', () => {
+      setSessionPersistenceDisabled(true)
+      return () => setSessionPersistenceDisabled(false)
+    }],
+    ['CLAUDE_CODE_SKIP_PROMPT_HISTORY', () => {
+      process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY = '1'
+      return () => delete process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY
+    }],
+  ]
+
+  for (const [name, apply] of optOuts) {
+    test(`${name}: rollups are computed but nothing is written or deleted`, async () => {
+      await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
+      const savedNodeEnv = process.env.NODE_ENV
+      delete process.env.TEST_ENABLE_SESSION_PERSISTENCE
+      // Outside the test environment, so only the opt-out under test applies.
+      process.env.NODE_ENV = 'production'
+      const settingsSpy = spyOn(settingsModule, 'getSettings_DEPRECATED')
+      settingsSpy.mockReturnValue({} as never)
+      const undo = apply(settingsSpy)
+      try {
+        const rollups = await getUsageDayRollups([yesterday], { today, usageDir })
+        expect(rollups.get(yesterday)?.rows[0]?.requests).toBe(1)
+        const { removed } = await rollUpAndPruneUsageEvents(
+          startOfLocalDay(today),
+          { now: startOfLocalDay(today), usageDir },
+        )
+        expect(removed).toBe(0)
+      } finally {
+        undo()
+        settingsSpy.mockRestore()
+        process.env.NODE_ENV = savedNodeEnv
+      }
+      expect(existsSync(getUsageRollupsDir(usageDir))).toBe(false)
+      expect(existsSync(getUsageEventsFile(yesterday, usageDir))).toBe(true)
+    })
+  }
 })
 
 describe('local date keys', () => {

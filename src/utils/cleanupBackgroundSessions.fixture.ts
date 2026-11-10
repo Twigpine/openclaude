@@ -299,6 +299,43 @@ try {
         planPresent: await Bun.file(planPath).exists(),
       })}\n`,
     )
+  } else if (mode === 'usage-retention') {
+    enableConfigs()
+    const configDir = process.env.OPENCLAUDE_CONFIG_DIR!
+    const settingsResult = eagerLoadSettingsFromArgs([
+      '--settings',
+      join(configDir, 'settings.json'),
+    ])
+    if (!settingsResult.ok) throw new Error(settingsResult.message)
+    const eventsFile = join(configDir, 'usage', 'events', '2000-01-01.jsonl')
+    const rollupFile = join(configDir, 'usage', 'rollups', '2000-01.json')
+    await mkdir(dirname(eventsFile), { recursive: true })
+    await Bun.write(
+      eventsFile,
+      `${JSON.stringify({
+        v: 1,
+        id: 'fixture-old',
+        ts: new Date(2000, 0, 1, 12).getTime(),
+        session: 'fixture-session',
+        project: configDir,
+        model: 'fixture-model',
+        route: 'fixture-route',
+        source: 'repl_main_thread',
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        webSearch: 0,
+      })}\n`,
+    )
+    await cleanupOldMessageFilesInBackground()
+    process.stdout.write(
+      `${JSON.stringify({
+        completed: true,
+        eventsPresent: await Bun.file(eventsFile).exists(),
+        rollupPresent: await Bun.file(rollupFile).exists(),
+      })}\n`,
+    )
   } else if (mode === 'post-finalization-policy-recheck') {
     const session = await createBackgroundSession({
       id: 'bg-post-finalization-policy-recheck',

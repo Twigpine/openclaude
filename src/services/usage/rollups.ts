@@ -11,6 +11,7 @@ import {
 
 import { logForDebugging } from '../../utils/debug.js'
 import { lock } from '../../utils/lockfile.js'
+import { shouldSkipSessionPersistence } from '../../utils/sessionPersistencePolicy.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
 import { readUsageEventsForDay } from './ledger.js'
 import {
@@ -102,33 +103,63 @@ function isDayRollup(value: unknown): value is UsageDayRollup {
   )
 }
 
+/** Rollup file text, or null when the month has no file. */
+async function readRollupText(
+  monthKey: string,
+  usageDir: string,
+): Promise<string | null> {
+  try {
+    return await readFile(getUsageRollupFile(monthKey, usageDir), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+/**
+ * Parse rollup file text. Text that is not a JSON object reads as empty: its
+ * contents are lost either way. A file of another version reads as empty, or
+ * throws when `strict`, so a writer never replaces a file it cannot read.
+ */
+function parseRollupFile(text: string, strict: boolean): UsageRollupFile {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return emptyRollupFile()
+  }
+  if (!parsed || typeof parsed !== 'object') return emptyRollupFile()
+  const file = parsed as Partial<UsageRollupFile>
+  if (file.version !== USAGE_ROLLUP_VERSION) {
+    if (strict) {
+      throw new Error(
+        `Unsupported usage rollup version: ${String(file.version)}`,
+      )
+    }
+    return emptyRollupFile()
+  }
+  const days: Record<string, UsageDayRollup> = {}
+  if (file.days && typeof file.days === 'object') {
+    for (const [key, day] of Object.entries(file.days)) {
+      if (isDateKey(key) && isDayRollup(day)) days[key] = day
+    }
+  }
+  return { version: USAGE_ROLLUP_VERSION, days }
+}
+
 /** Read one month's rollups; a missing or unreadable file reads as empty. */
 export async function readUsageRollupFile(
   monthKey: string,
   usageDir: string = getUsageDir(),
 ): Promise<UsageRollupFile> {
-  let text: string
+  let text: string | null
   try {
-    text = await readFile(getUsageRollupFile(monthKey, usageDir), 'utf8')
+    text = await readRollupText(monthKey, usageDir)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      logForDebugging(`Failed to read usage rollups: ${String(error)}`)
-    }
+    logForDebugging(`Failed to read usage rollups: ${String(error)}`)
     return emptyRollupFile()
   }
-  try {
-    const parsed = JSON.parse(text) as Partial<UsageRollupFile>
-    if (parsed.version !== USAGE_ROLLUP_VERSION || !parsed.days) {
-      return emptyRollupFile()
-    }
-    const days: Record<string, UsageDayRollup> = {}
-    for (const [key, day] of Object.entries(parsed.days)) {
-      if (isDateKey(key) && isDayRollup(day)) days[key] = day
-    }
-    return { version: USAGE_ROLLUP_VERSION, days }
-  } catch {
-    return emptyRollupFile()
-  }
+  return text === null ? emptyRollupFile() : parseRollupFile(text, false)
 }
 
 async function writeUsageRollupFile(
@@ -163,12 +194,16 @@ async function eventFileSize(
  * Rollups for finished days, rebuilding any day whose event file is new or
  * has grown since its rollup was built. Days on or after `today` are never
  * rolled up. Days with neither an event file nor a rollup are omitted.
+ *
+ * Rebuilt days are saved only while session persistence is allowed (or when
+ * `persist` says so); otherwise they are computed in memory only.
  */
 export async function getUsageDayRollups(
   dateKeys: readonly string[],
-  options: { today: string; usageDir?: string },
+  options: { today: string; usageDir?: string; persist?: boolean },
 ): Promise<Map<string, UsageDayRollup>> {
   const usageDir = options.usageDir ?? getUsageDir()
+  const persist = options.persist ?? !shouldSkipSessionPersistence()
   const closedKeys = dateKeys.filter(key => key < options.today)
   const byMonth = new Map<string, string[]>()
   for (const key of closedKeys) {
@@ -205,7 +240,7 @@ export async function getUsageDayRollups(
       const day = rebuilt[key] ?? saved.days[key]
       if (day) result.set(key, day)
     }
-    if (Object.keys(rebuilt).length > 0) {
+    if (persist && Object.keys(rebuilt).length > 0) {
       try {
         await saveUsageDayRollups(month, rebuilt, usageDir)
       } catch (error) {
@@ -229,8 +264,12 @@ async function saveUsageDayRollups(
     retries: { retries: 5, minTimeout: 25 },
   })
   try {
-    // Re-read under the lock so a concurrent writer's days are kept.
-    const current = await readUsageRollupFile(month, usageDir)
+    // Re-read under the lock so a concurrent writer's days are kept. The read
+    // is strict: if the file cannot be read, rewriting it would drop days
+    // whose event files are already gone, so the save fails instead.
+    const text = await readRollupText(month, usageDir)
+    const current =
+      text === null ? emptyRollupFile() : parseRollupFile(text, true)
     for (const [key, day] of Object.entries(days)) {
       // Event files only grow, so a day built from fewer bytes is older than
       // the saved one and must not replace it.
@@ -296,6 +335,8 @@ async function deleteEventFile(
  *
  * Each day is rolled up first so its totals survive, unless `keepTotals` is
  * false (a cleanup period of 0 keeps no history, so no rollup is written).
+ * A file is only deleted once its rollup is saved, so while session
+ * persistence is off nothing is deleted except with `keepTotals: false`.
  */
 export async function rollUpAndPruneUsageEvents(
   cutoff: Date,

@@ -64,6 +64,7 @@ to disk when any of these apply:
 
 With `cleanupPeriodDays` set to `0`, cleanup also deletes event files left from
 earlier days without saving their totals. Rollup files written before the
-setting changed are kept.
+setting changed are kept. Under the other two switches, cleanup leaves expired
+event files in place until a later run can save their totals.
 
 To remove all usage history, including rollups, delete `~/.openclaude/usage/`.

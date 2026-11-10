@@ -209,7 +209,8 @@ describe('windows', () => {
   test('all time starts at the first tracked day and survives pruned events', async () => {
     const old = shiftDateKey(TODAY, -90)
     await writeDay(old, [event({ ts: at(old), input: 40, output: 0 })])
-    await getUsageDayRollups([old], { today: TODAY, usageDir })
+    // An earlier run, with persistence on, saved the day before pruning it.
+    await getUsageDayRollups([old], { today: TODAY, usageDir, persist: true })
     rmSync(getUsageEventsFile(old, usageDir))
     await writeDay(TODAY, [event({ input: 2, output: 0 })])
 

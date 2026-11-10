@@ -69,6 +69,7 @@ async function runCleanupFixture(
     | 'pass-outcome'
     | 'policy-outcome'
     | 'marker-failure'
+    | 'usage-retention'
     | 'periodic-policy-recheck'
     | 'periodic-recovery'
     | 'periodic-recovery-bounded'
@@ -978,6 +979,36 @@ describe('cleanupOldMessageFilesInBackground', () => {
     },
     30_000,
   )
+
+  for (const [period, env, expected] of [
+    [0, {}, { completed: true, eventsPresent: false, rollupPresent: false }],
+    [
+      30,
+      { TEST_ENABLE_SESSION_PERSISTENCE: '1' },
+      { completed: true, eventsPresent: false, rollupPresent: true },
+    ],
+  ] as const) {
+    test(
+      `usage cleanup with cleanupPeriodDays ${period} ${expected.rollupPresent ? 'keeps' : 'saves no'} daily totals`,
+      async () => {
+        const configDir = join(
+          tmpdir(),
+          `openclaude-cleanup-usage-${period}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        )
+        tempDirs.push(configDir)
+        await mkdir(configDir, { recursive: true })
+        await writeFile(
+          join(configDir, 'settings.json'),
+          JSON.stringify({ cleanupPeriodDays: period }),
+        )
+
+        expect(
+          await runCleanupFixture(configDir, 'usage-retention', { ...env }),
+        ).toEqual(expected)
+      },
+      30_000,
+    )
+  }
 
   test(
     'removes old completed background-session artifacts through the scheduler',
