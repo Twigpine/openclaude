@@ -272,7 +272,8 @@ accepts positive integer durations with `ms`, `s`, `m`, or `h` suffixes
 (maximum 2147483647ms); without it, `wait` blocks until the session ends.
 Exit codes are command-owned: 0 for a child exit code of 0; 1 for a failed,
 signalled, killed, or stale child; 2 for invalid arguments, an unknown or
-ambiguous selector, or a build with background sessions disabled; 3 when
+ambiguous selector, a build with background sessions disabled, or an internal
+wait error (`waitResult`/`error` `internal_error` in JSON); 3 when
 the process state is unreadable at the timeout boundary; 4 for missing,
 unreadable, malformed, or replaced session metadata; 124 on timeout while
 the session is still running; 130 on SIGINT and 143 on SIGTERM to the
