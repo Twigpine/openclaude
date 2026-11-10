@@ -6,6 +6,7 @@ import {
   describeUsageComparison,
   formatUsageCost,
   formatUsageDate,
+  formatUsageMonth,
   formatUsageProjectLabel,
   formatUsageRouteLabel,
   formatUsageShare,
@@ -115,6 +116,11 @@ describe('labels and numbers', () => {
     const now = new Date(2026, 10, 10)
     expect(formatUsageDate('2026-11-10', now)).toBe('Nov 10')
     expect(formatUsageDate('2025-12-31', now)).toBe('Dec 31, 2025')
+  })
+
+  test('months show the short month and year', () => {
+    expect(formatUsageMonth('2026-10')).toBe('Oct 2026')
+    expect(formatUsageMonth('2025-01')).toBe('Jan 2025')
   })
 
   test('long text is cut with an ellipsis', () => {

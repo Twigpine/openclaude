@@ -75,7 +75,10 @@ deleted, its totals are saved to the monthly rollup file, so long-range totals
 survive while the per-request lines expire.
 
 Rollup files are not deleted automatically. They hold daily totals per model,
-provider, source and project directory, and no per-request detail.
+provider, source and project directory, and no per-request detail. If a rollup
+file cannot be read (for example it is corrupt or was written by a newer
+OpenClaude) and its days' event files are already gone, `/usage` names the
+months whose totals may be incomplete.
 
 ## Turning it off
 

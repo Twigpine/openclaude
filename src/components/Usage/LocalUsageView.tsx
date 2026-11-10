@@ -6,6 +6,7 @@ import {
   describeUsageComparison,
   formatUsageCost,
   formatUsageDate,
+  formatUsageMonth,
   formatUsageRouteLabel,
   formatUsageShare,
   LOCAL_USAGE_RANGE_ORDER,
@@ -407,6 +408,12 @@ function Footnotes({
   if (summary.invalidLines > 0) {
     notes.push(
       `Skipped ${plural(summary.invalidLines, 'unreadable ledger line')}.`,
+    )
+  }
+  if (summary.unreadableMonths.length > 0) {
+    const months = summary.unreadableMonths.map(formatUsageMonth).join(', ')
+    notes.push(
+      `Could not read saved usage for ${months}, so these totals may be incomplete.`,
     )
   }
   if (summary.firstTrackedDate) {

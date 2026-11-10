@@ -222,6 +222,15 @@ export function formatUsageDate(dateKey: string, now: Date = new Date()): string
   })
 }
 
+/** A YYYY-MM month key as "Oct 2026". */
+export function formatUsageMonth(monthKey: string): string {
+  const [year, month] = monthKey.split('-').map(Number)
+  return new Date(year!, month! - 1, 1).toLocaleDateString('en-US', {
+    month: 'short',
+    year: 'numeric',
+  })
+}
+
 /** Fit `text` into `width` columns, ending in "…" when cut. */
 export function truncateUsageText(text: string, width: number): string {
   if (width <= 0) return ''

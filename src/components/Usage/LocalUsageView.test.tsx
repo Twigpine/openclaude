@@ -91,6 +91,7 @@ function summary(overrides: Partial<LocalUsageSummary> = {}): LocalUsageSummary 
     comparisonTokens: 1_050_000,
     firstTrackedDate: '2026-11-01',
     invalidLines: 0,
+    unreadableMonths: [],
     ...overrides,
   }
 }
@@ -207,6 +208,16 @@ describe('LocalUsageView', () => {
     expect(out).toContain('No usage recorded yet.')
     expect(out).toContain('Usage history is off')
     expect(out).not.toContain('Tracking since')
+  })
+
+  test('says when saved history could not be read', async () => {
+    expect(await render()).not.toContain('Could not read saved usage')
+    const out = await render({
+      summary: summary({ unreadableMonths: ['2026-09', '2026-10'] }),
+    })
+    expect(out).toContain(
+      'Could not read saved usage for Sep 2026, Oct 2026, so these totals may',
+    )
   })
 
   test('loading and error states', async () => {

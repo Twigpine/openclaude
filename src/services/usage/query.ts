@@ -90,6 +90,11 @@ export type LocalUsageSummary = {
   firstTrackedDate: string | null
   /** Ledger lines that could not be parsed (for example a torn write). */
   invalidLines: number
+  /**
+   * Months (YYYY-MM) whose saved totals could not be read for days in this
+   * range that have no event file left, so the totals may be missing usage.
+   */
+  unreadableMonths: string[]
 }
 
 export type QueryLocalUsageOptions = {
@@ -261,6 +266,7 @@ function buildSummary(input: {
   comparisonTokens: number | null
   firstTrackedDate: string | null
   invalidLines: number
+  unreadableMonths: string[]
 }): LocalUsageSummary {
   const totals: LocalUsageTotals = {
     tokens: 0,
@@ -301,6 +307,7 @@ function buildSummary(input: {
     comparisonTokens: input.comparisonTokens,
     firstTrackedDate: input.firstTrackedDate,
     invalidLines: input.invalidLines,
+    unreadableMonths: input.unreadableMonths,
   }
 }
 
@@ -343,6 +350,7 @@ export async function queryLocalUsage(
       comparisonTokens: null,
       firstTrackedDate: firstTrackedDate ?? (day.rows.length ? today : null),
       invalidLines: 0,
+      unreadableMonths: [],
     })
   }
 
@@ -363,10 +371,12 @@ export async function queryLocalUsage(
         ? listDateKeys(shiftDateKey(fromDate, -span), shiftDateKey(fromDate, -1))
         : []
 
+  const unreadableMonths = new Set<string>()
   const [closed, todayData] = await Promise.all([
     getUsageDayRollups([...comparisonKeys, ...windowKeys], {
       today,
       usageDir,
+      onUnreadableMonth: month => unreadableMonths.add(month),
     }),
     readTodayEvents(today, usageDir),
   ])
@@ -420,5 +430,6 @@ export async function queryLocalUsage(
     firstTrackedDate:
       firstTrackedDate ?? (todayRollup.rows.length ? today : null),
     invalidLines: todayData.invalidLines,
+    unreadableMonths: [...unreadableMonths].sort(),
   })
 }

@@ -93,6 +93,7 @@ function usage(range: LocalUsageRange, tokens: number): LocalUsageSummary {
     comparisonTokens: null,
     firstTrackedDate: '2026-11-10',
     invalidLines: 0,
+    unreadableMonths: [],
   }
 }
 
