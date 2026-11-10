@@ -4829,3 +4829,84 @@ test('JSON fallback: empty tool_calls does not block raw-text recovery on array 
     name: 'Bash',
   })
 })
+
+for (const contentShape of ['string', 'array'] as const) {
+  test.each([
+    ['https://api.deepseek.com/v1', 'deepseek-v4-flash', '', 'Tool-call reasoning.'],
+    ['https://api.moonshot.cn/v1', 'kimi-k2.5', '', 'Tool-call reasoning.'],
+    ['https://api.xiaomimimo.com/v1', 'mimo-v2.5-pro', undefined, 'Tool-call reasoning.'],
+    ['https://api.openai.com/v1', 'gpt-4o', undefined, undefined],
+  ] as const)(`replays ${contentShape} assistant history with provider reasoning policy (%s)`, async (
+    baseUrl, model, fallback, reasoning,
+  ) => {
+    process.env.OPENAI_BASE_URL = baseUrl
+    process.env.OPENAI_MODEL = model
+    const bodies: Array<Record<string, unknown>> = []
+    globalThis.fetch = (async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return new Response(JSON.stringify({
+        id: 'chatcmpl-reasoning-history',
+        model,
+        choices: [{ message: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }],
+      }), { headers: { 'Content-Type': 'application/json' } })
+    }) as FetchType
+    const text = (value: string) => contentShape === 'string'
+      ? value
+      : [{ type: 'text', text: value }]
+    const client = createOpenAIShimClient({}) as OpenAIShimClient
+    const history = [
+      { role: 'user', content: 'Start' },
+      { role: 'assistant', content: text('Earlier reply') },
+      { role: 'user', content: 'Inspect the file' },
+      { role: 'assistant', content: text('Checking now') },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Tool-call reasoning.' },
+          { type: 'tool_use', id: 'call_history', name: 'Read', input: { file_path: 'README.md' } },
+        ],
+      },
+      { role: 'assistant', content: text('Still checking') },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Additional reasoning.' },
+          { type: 'text', text: 'Ready' },
+        ],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'call_history', content: 'File contents' }],
+      },
+      { role: 'user', content: 'Stop and continue with a different question' },
+      { role: 'assistant', content: text('[Tool execution interrupted by user]') },
+      { role: 'user', content: 'Continue' },
+    ]
+    await client.beta.messages.create({ model, messages: history, max_tokens: 32, stream: false })
+
+    expect(bodies).toHaveLength(1)
+    const messages = bodies[0]?.messages as Array<Record<string, unknown>>
+    const assistants = messages.filter(message => message.role === 'assistant')
+    expect(assistants).toHaveLength(3)
+    expect(assistants.map(message => message.content)).toEqual([
+      'Earlier reply',
+      'Checking now\nStill checking\nReady',
+      '[Tool execution interrupted by user]',
+    ])
+    expect(assistants.map(message => message.reasoning_content)).toEqual([
+      fallback, reasoning === undefined ? undefined : `${reasoning}\nAdditional reasoning.`, fallback,
+    ])
+    expect(assistants[1]?.tool_calls).toEqual([{
+      id: 'call_history', type: 'function',
+      function: { name: 'Read', arguments: '{"file_path":"README.md"}' },
+    }])
+    expect(messages.find(message => message.role === 'tool')).toMatchObject({
+      tool_call_id: 'call_history', content: 'File contents',
+    })
+    if (fallback === undefined) {
+      expect(assistants[0]).not.toHaveProperty('reasoning_content')
+      expect(assistants[2]).not.toHaveProperty('reasoning_content')
+    }
+    if (reasoning === undefined) expect(assistants[1]).not.toHaveProperty('reasoning_content')
+  })
+}
