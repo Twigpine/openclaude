@@ -202,6 +202,7 @@ const PRESET_ORDER = [
   'Requesty',
   'Runcrate',
   'Together AI',
+  'UberLLM',
   'Venice',
   'xAI',
   'Xiaomi MiMo',

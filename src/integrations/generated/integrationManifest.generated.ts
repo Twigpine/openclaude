@@ -538,6 +538,17 @@ export const PROVIDER_PRESET_MANIFEST = [
     ]
   },
   {
+    "preset": "uberllm",
+    "routeKind": "gateway",
+    "routeId": "uberllm",
+    "vendorId": "openai",
+    "gatewayId": "uberllm",
+    "description": "UberLLM OpenAI-compatible gateway",
+    "apiKeyEnvVars": [
+      "UBERLLM_API_KEY"
+    ]
+  },
+  {
     "preset": "venice",
     "routeKind": "vendor",
     "routeId": "venice",
@@ -703,6 +714,7 @@ export const ORDERED_PROVIDER_PRESETS = [
   "requesty",
   "runcrate",
   "together",
+  "uberllm",
   "venice",
   "xai",
   "xiaomi-mimo",

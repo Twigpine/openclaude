@@ -9,6 +9,7 @@ import {
   isApismartBaseUrl,
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalRequestyInferenceBaseUrl,
+  isCanonicalUberllmInferenceBaseUrl,
   isCloudflareBaseUrl,
   isConcentrateBaseUrl,
   isLongcatBaseUrl,
@@ -588,6 +589,79 @@ test('Requesty credential is limited to the canonical inference base URLs', () =
     resolveRouteCredentialValue({
       routeId: 'requesty',
       baseUrl: 'https://router.requesty.ai/v1/models',
+      processEnv,
+    }),
+  ).toBeUndefined()
+})
+
+test('isCanonicalUberllmInferenceBaseUrl accepts only the https /v1 host', () => {
+  for (const baseUrl of [
+    'https://api.uberllm.dev/v1',
+    'https://api.uberllm.dev/v1/',
+    'https://API.uberllm.dev/v1',
+  ]) {
+    expect(isCanonicalUberllmInferenceBaseUrl(baseUrl)).toBe(true)
+  }
+
+  for (const baseUrl of [
+    undefined,
+    '',
+    'not a url',
+    'http://api.uberllm.dev/v1',
+    'https://api.uberllm.dev:8443/v1',
+    'https://user:pass@api.uberllm.dev/v1',
+    'https://api.uberllm.dev/v1?x=1',
+    'https://api.uberllm.dev/v1#fragment',
+    'https://api.uberllm.dev',
+    'https://api.uberllm.dev/v1/models',
+    'https://api.uberllm.dev.evil.example/v1',
+    'https://evil-api.uberllm.dev/v1',
+    'https://uberllm.dev/v1',
+  ]) {
+    expect(isCanonicalUberllmInferenceBaseUrl(baseUrl)).toBe(false)
+  }
+})
+
+test('UberLLM host resolves to the uberllm route', () => {
+  expect(resolveRouteIdFromBaseUrl('https://api.uberllm.dev/v1')).toBe(
+    'uberllm',
+  )
+  expect(
+    resolveRouteIdFromBaseUrl('https://api.uberllm.dev.evil.example/v1'),
+  ).toBe(null)
+})
+
+test('UberLLM credential is limited to the canonical inference base URL', () => {
+  const processEnv = {
+    UBERLLM_API_KEY: 'uberllm-secret',
+    OPENAI_API_KEY: 'sk-openai-fallback',
+  }
+
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'uberllm',
+      baseUrl: 'https://api.uberllm.dev/v1',
+      processEnv,
+    }),
+  ).toBe('uberllm-secret')
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'uberllm',
+      baseUrl: 'https://api.uberllm.dev/v1',
+      processEnv: { OPENAI_API_KEY: 'sk-openai-fallback' },
+    }),
+  ).toBe('sk-openai-fallback')
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'uberllm',
+      baseUrl: 'http://api.uberllm.dev/v1',
+      processEnv,
+    }),
+  ).toBeUndefined()
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'uberllm',
+      baseUrl: 'https://api.uberllm.dev/v1/models',
       processEnv,
     }),
   ).toBeUndefined()

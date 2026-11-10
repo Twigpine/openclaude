@@ -597,6 +597,37 @@ export function isCanonicalRequestyInferenceBaseUrl(
   }
 }
 
+const UBERLLM_INFERENCE_HOST = 'api.uberllm.dev'
+
+/**
+ * UberLLM serves its OpenAI-compatible API at https://api.uberllm.dev/v1.
+ * Only that exact https origin with the /v1 path may receive UBERLLM_API_KEY.
+ */
+export function isCanonicalUberllmInferenceBaseUrl(
+  value: string | undefined,
+): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const candidate = new URL(trimmed)
+    return (
+      candidate.protocol === 'https:' &&
+      !candidate.port &&
+      !candidate.username &&
+      !candidate.password &&
+      !candidate.search &&
+      !candidate.hash &&
+      candidate.hostname.toLowerCase() === UBERLLM_INFERENCE_HOST &&
+      candidate.pathname.replace(/\/+$/, '') === '/v1'
+    )
+  } catch {
+    return false
+  }
+}
+
 const MERGE_GATEWAY_CANONICAL_INFERENCE_BASE_URL = 'https://api-gateway.merge.dev/v1/openai'
 
 export function isCanonicalMergeGatewayInferenceBaseUrl(
@@ -1414,6 +1445,13 @@ export function resolveRouteCredentialValue(
     routeId === 'requesty' &&
     options?.baseUrl !== undefined &&
     !isCanonicalRequestyInferenceBaseUrl(options.baseUrl)
+  ) {
+    return undefined
+  }
+  if (
+    routeId === 'uberllm' &&
+    options?.baseUrl !== undefined &&
+    !isCanonicalUberllmInferenceBaseUrl(options.baseUrl)
   ) {
     return undefined
   }

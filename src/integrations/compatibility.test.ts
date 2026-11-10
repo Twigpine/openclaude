@@ -60,6 +60,7 @@ const EXPECTED_PRESETS = [
   'llmtr',
   'commandcode',
   'requesty',
+  'uberllm',
   'opencode',
   'opencode-go',
   'clinepass',
