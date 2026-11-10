@@ -1,0 +1,294 @@
+import { randomBytes } from 'crypto'
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from 'fs/promises'
+
+import { logForDebugging } from '../../utils/debug.js'
+import { lock } from '../../utils/lockfile.js'
+import { jsonStringify } from '../../utils/slowOperations.js'
+import { readUsageEventsForDay } from './ledger.js'
+import {
+  getUsageDir,
+  getUsageEventsDir,
+  getUsageEventsFile,
+  getUsageRollupFile,
+  getUsageRollupsDir,
+  isDateKey,
+  monthKeyOf,
+  toLocalDateKey,
+} from './paths.js'
+import {
+  USAGE_ROLLUP_VERSION,
+  type UsageDayRollup,
+  type UsageEvent,
+  type UsageRollupFile,
+  type UsageRollupRow,
+} from './types.js'
+
+function rowKey(event: UsageEvent): string {
+  return [
+    event.model,
+    event.route,
+    event.local ? '1' : '0',
+    event.source,
+    event.project,
+    event.fast ? '1' : '0',
+  ].join('\u0000')
+}
+
+/** Sum events into one row per model/route/source/project/fast combination. */
+export function aggregateUsageEvents(
+  events: readonly UsageEvent[],
+): Omit<UsageDayRollup, 'sourceBytes'> {
+  const rows = new Map<string, UsageRollupRow>()
+  const sessions = new Set<string>()
+  for (const event of events) {
+    sessions.add(event.session)
+    const key = rowKey(event)
+    let row = rows.get(key)
+    if (!row) {
+      row = {
+        model: event.model,
+        route: event.route,
+        source: event.source,
+        project: event.project,
+        requests: 0,
+        unreported: 0,
+        noCacheRequests: 0,
+        noCacheInputTokens: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        webSearch: 0,
+      }
+      if (event.local) row.local = true
+      if (event.fast) row.fast = true
+      rows.set(key, row)
+    }
+    row.requests++
+    if (event.unreported) row.unreported++
+    if (event.noCache) {
+      row.noCacheRequests++
+      row.noCacheInputTokens +=
+        event.input + event.cacheRead + event.cacheWrite
+    }
+    row.input += event.input
+    row.output += event.output
+    row.cacheRead += event.cacheRead
+    row.cacheWrite += event.cacheWrite
+    row.webSearch += event.webSearch
+  }
+  return { rows: [...rows.values()], sessions: [...sessions].sort() }
+}
+
+function emptyRollupFile(): UsageRollupFile {
+  return { version: USAGE_ROLLUP_VERSION, days: {} }
+}
+
+function isDayRollup(value: unknown): value is UsageDayRollup {
+  if (!value || typeof value !== 'object') return false
+  const day = value as Partial<UsageDayRollup>
+  return (
+    Array.isArray(day.rows) &&
+    Array.isArray(day.sessions) &&
+    typeof day.sourceBytes === 'number'
+  )
+}
+
+export async function readUsageRollupFile(
+  monthKey: string,
+  usageDir: string = getUsageDir(),
+): Promise<UsageRollupFile> {
+  let text: string
+  try {
+    text = await readFile(getUsageRollupFile(monthKey, usageDir), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      logForDebugging(`Failed to read usage rollups: ${String(error)}`)
+    }
+    return emptyRollupFile()
+  }
+  try {
+    const parsed = JSON.parse(text) as Partial<UsageRollupFile>
+    if (parsed.version !== USAGE_ROLLUP_VERSION || !parsed.days) {
+      return emptyRollupFile()
+    }
+    const days: Record<string, UsageDayRollup> = {}
+    for (const [key, day] of Object.entries(parsed.days)) {
+      if (isDateKey(key) && isDayRollup(day)) days[key] = day
+    }
+    return { version: USAGE_ROLLUP_VERSION, days }
+  } catch {
+    return emptyRollupFile()
+  }
+}
+
+async function writeUsageRollupFile(
+  monthKey: string,
+  file: UsageRollupFile,
+  usageDir: string,
+): Promise<void> {
+  const target = getUsageRollupFile(monthKey, usageDir)
+  const temp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+  await writeFile(temp, jsonStringify(file), { encoding: 'utf8', mode: 0o600 })
+  try {
+    await rename(temp, target)
+  } catch (error) {
+    await unlink(temp).catch(() => {})
+    throw error
+  }
+}
+
+async function eventFileSize(
+  dateKey: string,
+  usageDir: string,
+): Promise<number | null> {
+  try {
+    return (await stat(getUsageEventsFile(dateKey, usageDir))).size
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+/**
+ * Rollups for finished days, rebuilding any day whose event file is new or
+ * has grown since its rollup was built. Days on or after `today` are never
+ * rolled up. Days with neither an event file nor a rollup are omitted.
+ */
+export async function getUsageDayRollups(
+  dateKeys: readonly string[],
+  options: { today: string; usageDir?: string },
+): Promise<Map<string, UsageDayRollup>> {
+  const usageDir = options.usageDir ?? getUsageDir()
+  const closedKeys = dateKeys.filter(key => key < options.today)
+  const byMonth = new Map<string, string[]>()
+  for (const key of closedKeys) {
+    const month = monthKeyOf(key)
+    const keys = byMonth.get(month)
+    if (keys) keys.push(key)
+    else byMonth.set(month, [key])
+  }
+
+  const result = new Map<string, UsageDayRollup>()
+  for (const [month, keys] of byMonth) {
+    const file = await readUsageRollupFile(month, usageDir)
+    const rebuilt: Record<string, UsageDayRollup> = {}
+    for (const key of keys) {
+      const size = await eventFileSize(key, usageDir)
+      const existing = file.days[key]
+      if (size !== null && (!existing || existing.sourceBytes !== size)) {
+        const { events, bytes } = await readUsageEventsForDay(key, usageDir)
+        rebuilt[key] = { ...aggregateUsageEvents(events), sourceBytes: bytes }
+      }
+      const day = rebuilt[key] ?? existing
+      if (day) result.set(key, day)
+    }
+    if (Object.keys(rebuilt).length > 0) {
+      try {
+        await saveUsageDayRollups(month, rebuilt, usageDir)
+      } catch (error) {
+        // The numbers above are still correct; the next read rebuilds them.
+        logForDebugging(`Failed to save usage rollups: ${String(error)}`)
+      }
+    }
+  }
+  return result
+}
+
+async function saveUsageDayRollups(
+  month: string,
+  days: Record<string, UsageDayRollup>,
+  usageDir: string,
+): Promise<void> {
+  const rollupsDir = getUsageRollupsDir(usageDir)
+  await mkdir(rollupsDir, { recursive: true, mode: 0o700 })
+  const release = await lock(rollupsDir, {
+    stale: 10_000,
+    retries: { retries: 5, minTimeout: 25 },
+  })
+  try {
+    // Re-read under the lock so a concurrent writer's days are kept.
+    const current = await readUsageRollupFile(month, usageDir)
+    Object.assign(current.days, days)
+    await writeUsageRollupFile(month, current, usageDir)
+  } finally {
+    await release()
+  }
+}
+
+/** Date keys of every day that has an event file. */
+export async function listUsageEventDays(
+  usageDir: string = getUsageDir(),
+): Promise<string[]> {
+  try {
+    const names = await readdir(getUsageEventsDir(usageDir))
+    return names
+      .filter(name => name.endsWith('.jsonl'))
+      .map(name => name.slice(0, -'.jsonl'.length))
+      .filter(isDateKey)
+      .sort()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+}
+
+/** Month keys of every rollup file. */
+export async function listUsageRollupMonths(
+  usageDir: string = getUsageDir(),
+): Promise<string[]> {
+  try {
+    const names = await readdir(getUsageRollupsDir(usageDir))
+    return names
+      .filter(name => /^\d{4}-\d{2}\.json$/.test(name))
+      .map(name => name.slice(0, -'.json'.length))
+      .sort()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+}
+
+/**
+ * Delete event files older than `cutoff`, rolling each day up first so its
+ * totals survive. Today's file is never deleted.
+ */
+export async function rollUpAndPruneUsageEvents(
+  cutoff: Date,
+  options: { now?: Date; usageDir?: string } = {},
+): Promise<{ removed: number }> {
+  const usageDir = options.usageDir ?? getUsageDir()
+  const today = toLocalDateKey(options.now ?? new Date())
+  const cutoffKey = toLocalDateKey(cutoff)
+  const expired = (await listUsageEventDays(usageDir)).filter(
+    key => key < cutoffKey && key < today,
+  )
+  if (expired.length === 0) return { removed: 0 }
+
+  const rollups = await getUsageDayRollups(expired, { today, usageDir })
+  let removed = 0
+  for (const key of expired) {
+    const size = await eventFileSize(key, usageDir)
+    const rollup = rollups.get(key)
+    // Only delete a file whose current contents are captured in a rollup.
+    if (size === null || !rollup || rollup.sourceBytes !== size) continue
+    const persisted = (await readUsageRollupFile(monthKeyOf(key), usageDir))
+      .days[key]
+    if (!persisted || persisted.sourceBytes !== size) continue
+    try {
+      await unlink(getUsageEventsFile(key, usageDir))
+      removed++
+    } catch (error) {
+      logForDebugging(`Failed to delete usage events: ${String(error)}`)
+    }
+  }
+  return { removed }
+}

@@ -16,6 +16,7 @@ import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from 
 import { getAPIMetadata } from '../services/api/claude.js'
 import { resolveCurrentAnthropicAttributionPolicy } from '../services/api/authRouting.js'
 import { getAnthropicClient } from '../services/api/client.js'
+import { recordUsageEvent } from '../services/usage/ledger.js'
 import { applyAnthropicAttributionPolicy } from './anthropicAttribution.js'
 import { getModelBetas, modelSupportsStructuredOutputs } from './betas.js'
 import { computeFingerprint } from './fingerprint.js'
@@ -230,6 +231,12 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
       lastCompletion !== null ? now - lastCompletion : undefined,
   })
   setLastApiCompletionTimestamp(now)
+  // Side queries bypass the session cost tracker; still count them locally.
+  recordUsageEvent({
+    usage: response.usage,
+    model,
+    querySource: opts.querySource,
+  })
 
   return response
 }

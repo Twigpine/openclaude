@@ -9,6 +9,7 @@ import {
   type BackgroundSessionRecoveryTarget,
 } from '../cli/bgRegistry.js'
 import { logEvent } from '../services/analytics/index.js'
+import { rollUpAndPruneUsageEvents } from '../services/usage/rollups.js'
 import { CACHE_PATHS } from './cachePaths.js'
 import { logForDebugging } from './debug.js'
 import { getClaudeConfigHomeDir, getProjectsDir } from './envUtils.js'
@@ -648,6 +649,12 @@ export async function cleanupOldMessageFilesInBackground(): Promise<void> {
   await cleanupOldDebugLogs()
   await cleanupOldImageCaches()
   await cleanupOldPastes(getCutoffDate())
+  try {
+    // Daily totals are kept in rollups; only the per-request lines expire.
+    await rollUpAndPruneUsageEvents(getCutoffDate())
+  } catch (error) {
+    logForDebugging(`Usage ledger cleanup failed: ${String(error)}`)
+  }
   const removedWorktrees = await cleanupStaleAgentWorktrees(getCutoffDate())
   if (removedWorktrees > 0) {
     logEvent('tengu_worktree_cleanup', { removed: removedWorktrees })

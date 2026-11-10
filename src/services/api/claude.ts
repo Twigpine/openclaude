@@ -1975,6 +1975,9 @@ async function* queryModel(
   let partialMessage: BetaMessage | undefined = undefined
   const contentBlocks: (BetaContentBlock | ConnectorTextBlock)[] = []
   let usage: NonNullableUsage = EMPTY_USAGE
+  // One key per stream attempt: a stream can report usage in several
+  // message_delta events, which the local usage ledger merges into one.
+  let usageLedgerKey = randomUUID()
   let costUSD = 0
   let stopReason: BetaStopReason | null = null
   let didFallBackToNonStreaming = false
@@ -2139,6 +2142,7 @@ async function* queryModel(
     partialMessage = undefined
     contentBlocks.length = 0
     usage = EMPTY_USAGE
+    usageLedgerKey = randomUUID()
     stopReason = null
     isAdvisorInProgress = false
 
@@ -2681,6 +2685,12 @@ async function* queryModel(
               costUSDForPart,
               usage,
               options.model,
+              {
+                querySource: options.querySource,
+                agentId: options.agentId,
+                providerOverride: options.providerOverride,
+                requestKey: usageLedgerKey,
+              },
             )
 
             const refusalMessage = getErrorMessageIfRefusal(
@@ -3388,6 +3398,11 @@ async function* queryModel(
         fallbackCost,
         fallbackUsage,
         options.model,
+        {
+          querySource: options.querySource,
+          agentId: options.agentId,
+          providerOverride: options.providerOverride,
+        },
       )
     }
   }
