@@ -102,6 +102,7 @@ function isDayRollup(value: unknown): value is UsageDayRollup {
   )
 }
 
+/** Read one month's rollups; a missing or unreadable file reads as empty. */
 export async function readUsageRollupFile(
   monthKey: string,
   usageDir: string = getUsageDir(),
@@ -181,14 +182,27 @@ export async function getUsageDayRollups(
   for (const [month, keys] of byMonth) {
     const file = await readUsageRollupFile(month, usageDir)
     const rebuilt: Record<string, UsageDayRollup> = {}
+    let pruned = false
     for (const key of keys) {
       const size = await eventFileSize(key, usageDir)
       const existing = file.days[key]
       if (size !== null && (!existing || existing.sourceBytes !== size)) {
-        const { events, bytes } = await readUsageEventsForDay(key, usageDir)
-        rebuilt[key] = { ...aggregateUsageEvents(events), sourceBytes: bytes }
+        const day = await readUsageEventsForDay(key, usageDir)
+        if (day.exists) {
+          rebuilt[key] = {
+            ...aggregateUsageEvents(day.events),
+            sourceBytes: day.bytes,
+          }
+        } else {
+          // Deleted after the stat by another process's cleanup, which saves
+          // the day's totals before deleting its file.
+          pruned = true
+        }
       }
-      const day = rebuilt[key] ?? existing
+    }
+    const saved = pruned ? await readUsageRollupFile(month, usageDir) : file
+    for (const key of keys) {
+      const day = rebuilt[key] ?? saved.days[key]
       if (day) result.set(key, day)
     }
     if (Object.keys(rebuilt).length > 0) {
@@ -217,7 +231,12 @@ async function saveUsageDayRollups(
   try {
     // Re-read under the lock so a concurrent writer's days are kept.
     const current = await readUsageRollupFile(month, usageDir)
-    Object.assign(current.days, days)
+    for (const [key, day] of Object.entries(days)) {
+      // Event files only grow, so a day built from fewer bytes is older than
+      // the saved one and must not replace it.
+      const saved = current.days[key]
+      if (!saved || saved.sourceBytes <= day.sourceBytes) current.days[key] = day
+    }
     await writeUsageRollupFile(month, current, usageDir)
   } finally {
     await release()
@@ -257,13 +276,30 @@ export async function listUsageRollupMonths(
   }
 }
 
+async function deleteEventFile(
+  dateKey: string,
+  usageDir: string,
+): Promise<boolean> {
+  try {
+    await unlink(getUsageEventsFile(dateKey, usageDir))
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      logForDebugging(`Failed to delete usage events: ${String(error)}`)
+    }
+    return false
+  }
+}
+
 /**
- * Delete event files older than `cutoff`, rolling each day up first so its
- * totals survive. Today's file is never deleted.
+ * Delete event files older than `cutoff`. Today's file is never deleted.
+ *
+ * Each day is rolled up first so its totals survive, unless `keepTotals` is
+ * false (a cleanup period of 0 keeps no history, so no rollup is written).
  */
 export async function rollUpAndPruneUsageEvents(
   cutoff: Date,
-  options: { now?: Date; usageDir?: string } = {},
+  options: { now?: Date; usageDir?: string; keepTotals?: boolean } = {},
 ): Promise<{ removed: number }> {
   const usageDir = options.usageDir ?? getUsageDir()
   const today = toLocalDateKey(options.now ?? new Date())
@@ -273,8 +309,15 @@ export async function rollUpAndPruneUsageEvents(
   )
   if (expired.length === 0) return { removed: 0 }
 
-  const rollups = await getUsageDayRollups(expired, { today, usageDir })
   let removed = 0
+  if (options.keepTotals === false) {
+    for (const key of expired) {
+      if (await deleteEventFile(key, usageDir)) removed++
+    }
+    return { removed }
+  }
+
+  const rollups = await getUsageDayRollups(expired, { today, usageDir })
   for (const key of expired) {
     const size = await eventFileSize(key, usageDir)
     const rollup = rollups.get(key)
@@ -283,12 +326,7 @@ export async function rollUpAndPruneUsageEvents(
     const persisted = (await readUsageRollupFile(monthKeyOf(key), usageDir))
       .days[key]
     if (!persisted || persisted.sourceBytes !== size) continue
-    try {
-      await unlink(getUsageEventsFile(key, usageDir))
-      removed++
-    } catch (error) {
-      logForDebugging(`Failed to delete usage events: ${String(error)}`)
-    }
+    if (await deleteEventFile(key, usageDir)) removed++
   }
   return { removed }
 }

@@ -1,12 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { appendFile, mkdir } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { getSessionId } from '../../bootstrap/state.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
+import * as lockfile from '../../utils/lockfile.js'
 import {
   buildUsageEvent,
   flushUsageEvents,
@@ -229,9 +230,35 @@ describe('recordUsageEvent', () => {
     const today = toLocalDateKey(Date.now())
     expect((await readUsageEventsForDay(today)).events).toHaveLength(0)
 
-    await Bun.sleep(3_400)
-    expect((await readUsageEventsForDay(today)).events).toHaveLength(1)
-  }, 10_000)
+    // Poll instead of sleeping for the settle delay, so a slow runner's
+    // disk write does not fail the test.
+    const deadline = Date.now() + 10_000
+    let written = 0
+    while (Date.now() < deadline) {
+      written = (await readUsageEventsForDay(today)).events.length
+      if (written > 0) break
+      await Bun.sleep(100)
+    }
+    expect(written).toBe(1)
+  }, 15_000)
+
+  test('a failed lock release does not append the same events again', async () => {
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
+    const lockSpy = spyOn(lockfile, 'lock').mockResolvedValue(async () => {
+      throw new Error('lock compromised')
+    })
+    try {
+      recordUsageEvent({ usage: usage(), model: 'a' })
+      await flushUsageEvents()
+      await flushUsageEvents()
+    } finally {
+      lockSpy.mockRestore()
+    }
+
+    const file = getUsageEventsFile(toLocalDateKey(Date.now()))
+    const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean)
+    expect(lines).toHaveLength(1)
+  })
 
   test('never throws into the request path', () => {
     expect(() =>
@@ -298,9 +325,21 @@ describe('reading the ledger', () => {
     expect(invalidLines).toBe(2)
   })
 
+  test('counts a line appended twice only once', async () => {
+    const today = toLocalDateKey(Date.now())
+    const event = JSON.stringify(buildUsageEvent({ usage: usage(), model: 'a' }))
+    await mkdir(getUsageEventsDir(), { recursive: true })
+    await appendFile(getUsageEventsFile(today), `${event}\n${event}\n`)
+
+    const { events, invalidLines } = await readUsageEventsForDay(today)
+    expect(events).toHaveLength(1)
+    expect(invalidLines).toBe(0)
+  })
+
   test('returns an empty day when there is no file', async () => {
     expect(await readUsageEventsForDay('2001-01-01')).toEqual({
       events: [],
+      exists: false,
       bytes: 0,
       invalidLines: 0,
     })

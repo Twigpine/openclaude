@@ -69,6 +69,7 @@ function pushBounded(target: UsageEvent[], event: UsageEvent, max: number): void
   }
 }
 
+/** Build the ledger event for one request report (no disk access). */
 export function buildUsageEvent(
   input: RecordUsageInput,
   now: number = Date.now(),
@@ -222,7 +223,13 @@ async function appendEventsToDay(
       { encoding: 'utf8', mode: 0o600 },
     )
   } finally {
-    await release()
+    // The append already happened; failing here would re-queue and re-append
+    // the same events.
+    try {
+      await release()
+    } catch (error) {
+      logForDebugging(`Failed to release usage lock: ${String(error)}`)
+    }
   }
 }
 
@@ -320,11 +327,17 @@ export function parseUsageEventLine(line: string): UsageEvent | null {
 
 export type UsageDayEvents = {
   events: UsageEvent[]
+  /** False when the day has no event file (never written, or pruned). */
+  exists: boolean
   /** File size in bytes, or 0 when the day has no event file. */
   bytes: number
   invalidLines: number
 }
 
+/**
+ * Read one local day's events. Lines with an id already seen are skipped, so
+ * a batch that was appended twice (a retried flush) still counts once.
+ */
 export async function readUsageEventsForDay(
   dateKey: string,
   usageDir: string = getUsageDir(),
@@ -334,7 +347,7 @@ export async function readUsageEventsForDay(
     raw = await readFile(getUsageEventsFile(dateKey, usageDir))
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { events: [], bytes: 0, invalidLines: 0 }
+      return { events: [], exists: false, bytes: 0, invalidLines: 0 }
     }
     throw error
   }
@@ -343,16 +356,21 @@ export async function readUsageEventsForDay(
   const bytes = raw.byteLength
 
   const events: UsageEvent[] = []
+  const seen = new Set<string>()
   let invalidLines = 0
   for (const line of raw.toString('utf8').split('\n')) {
     if (!line.trim()) continue
     const event = parseUsageEventLine(line)
-    if (event) events.push(event)
-    else invalidLines++
+    if (!event) invalidLines++
+    else if (!seen.has(event.id)) {
+      seen.add(event.id)
+      events.push(event)
+    }
   }
-  return { events, bytes, invalidLines }
+  return { events, exists: true, bytes, invalidLines }
 }
 
+/** Clear all in-memory ledger state (tests only). */
 export function resetUsageLedgerForTesting(): void {
   for (const open of openRequests.values()) clearTimeout(open.timer)
   openRequests.clear()

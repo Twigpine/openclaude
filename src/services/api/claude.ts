@@ -1975,9 +1975,10 @@ async function* queryModel(
   let partialMessage: BetaMessage | undefined = undefined
   const contentBlocks: (BetaContentBlock | ConnectorTextBlock)[] = []
   let usage: NonNullableUsage = EMPTY_USAGE
-  // One key per stream attempt: a stream can report usage in several
-  // message_delta events, which the local usage ledger merges into one.
-  let usageLedgerKey = randomUUID()
+  // One key per stream attempt, set when the attempt starts: a stream can
+  // report usage in several message_delta events, which the local usage
+  // ledger merges into one.
+  let usageLedgerKey: string | undefined
   let costUSD = 0
   let stopReason: BetaStopReason | null = null
   let didFallBackToNonStreaming = false

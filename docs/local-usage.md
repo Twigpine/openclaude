@@ -50,6 +50,9 @@ Event files follow `cleanupPeriodDays` (default 30). Before a day's file is
 deleted, its totals are saved to the monthly rollup file, so long-range totals
 survive while the per-request lines expire.
 
+Rollup files are not deleted automatically. They hold daily totals per model,
+provider, source and project directory, and no per-request detail.
+
 ## Turning it off
 
 The ledger follows the same switch as session transcripts. Nothing is written
@@ -59,4 +62,8 @@ to disk when any of these apply:
 - `--no-session-persistence` (print mode)
 - `CLAUDE_CODE_SKIP_PROMPT_HISTORY` is set
 
-To remove the history, delete `~/.openclaude/usage/`.
+With `cleanupPeriodDays` set to `0`, cleanup also deletes event files left from
+earlier days without saving their totals. Rollup files written before the
+setting changed are kept.
+
+To remove all usage history, including rollups, delete `~/.openclaude/usage/`.

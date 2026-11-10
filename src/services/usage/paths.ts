@@ -4,18 +4,22 @@ import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 
+/** Root of the local usage ledger: `<config home>/usage`. */
 export function getUsageDir(): string {
   return join(getClaudeConfigHomeDir(), 'usage')
 }
 
+/** Directory of per-day event files (`events/<YYYY-MM-DD>.jsonl`). */
 export function getUsageEventsDir(usageDir: string = getUsageDir()): string {
   return join(usageDir, 'events')
 }
 
+/** Directory of monthly rollup files (`rollups/<YYYY-MM>.json`). */
 export function getUsageRollupsDir(usageDir: string = getUsageDir()): string {
   return join(usageDir, 'rollups')
 }
 
+/** Event file for one local day. */
 export function getUsageEventsFile(
   dateKey: string,
   usageDir: string = getUsageDir(),
@@ -23,6 +27,7 @@ export function getUsageEventsFile(
   return join(getUsageEventsDir(usageDir), `${dateKey}.jsonl`)
 }
 
+/** Rollup file for one month (`YYYY-MM`). */
 export function getUsageRollupFile(
   monthKey: string,
   usageDir: string = getUsageDir(),
@@ -40,10 +45,12 @@ export function toLocalDateKey(value: number | Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
+/** The `YYYY-MM` month of a `YYYY-MM-DD` date key. */
 export function monthKeyOf(dateKey: string): string {
   return dateKey.slice(0, 7)
 }
 
+/** True for a well-formed `YYYY-MM-DD` key. */
 export function isDateKey(value: string): boolean {
   return DATE_KEY_PATTERN.test(value)
 }

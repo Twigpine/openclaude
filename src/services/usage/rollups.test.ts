@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'fs'
 import { appendFile, mkdir, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
+import * as ledger from './ledger.js'
 import {
   getUsageEventsDir,
   getUsageEventsFile,
@@ -142,6 +143,69 @@ describe('getUsageDayRollups', () => {
     expect(rollups.get(yesterday)?.rows[0]?.requests).toBe(1)
   })
 
+  test('keeps the saved day when cleanup deletes the file between stat and read', async () => {
+    await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
+    await getUsageDayRollups([yesterday], { today, usageDir })
+    // The file grows, so the next read has to rebuild the day.
+    await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday, 23) })])
+
+    const realRead = ledger.readUsageEventsForDay
+    const readSpy = spyOn(ledger, 'readUsageEventsForDay')
+    readSpy.mockImplementationOnce(async (dateKey, dir) => {
+      readSpy.mockRestore()
+      // Another process's cleanup rolls the whole file up and deletes it.
+      const { removed } = await rollUpAndPruneUsageEvents(
+        startOfLocalDay(today),
+        { now: startOfLocalDay(today), usageDir },
+      )
+      expect(removed).toBe(1)
+      return realRead(dateKey, dir)
+    })
+    try {
+      const rollups = await getUsageDayRollups([yesterday], { today, usageDir })
+      expect(rollups.get(yesterday)?.rows[0]?.requests).toBe(2)
+    } finally {
+      readSpy.mockRestore()
+    }
+    const persisted = await readUsageRollupFile('2026-11', usageDir)
+    expect(persisted.days[yesterday]?.rows[0]?.requests).toBe(2)
+  })
+
+  test('never replaces a saved day with one built from fewer bytes', async () => {
+    await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
+
+    const realRead = ledger.readUsageEventsForDay
+    const readSpy = spyOn(ledger, 'readUsageEventsForDay')
+    readSpy.mockImplementationOnce(async (dateKey, dir) => {
+      readSpy.mockRestore()
+      const stale = await realRead(dateKey, dir)
+      // Before this read is saved, more events land and another process
+      // saves a rollup of the longer file.
+      await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday, 23) })])
+      await getUsageDayRollups([yesterday], { today, usageDir })
+      return stale
+    })
+    try {
+      await getUsageDayRollups([yesterday], { today, usageDir })
+    } finally {
+      readSpy.mockRestore()
+    }
+    const persisted = await readUsageRollupFile('2026-11', usageDir)
+    expect(persisted.days[yesterday]?.rows[0]?.requests).toBe(2)
+  })
+
+  test('rolls up an empty event file and rebuilds it once it grows', async () => {
+    await mkdir(getUsageEventsDir(usageDir), { recursive: true })
+    await writeFile(getUsageEventsFile(yesterday, usageDir), '')
+
+    const empty = await getUsageDayRollups([yesterday], { today, usageDir })
+    expect(empty.get(yesterday)).toEqual({ rows: [], sessions: [], sourceBytes: 0 })
+
+    await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
+    const grown = await getUsageDayRollups([yesterday], { today, usageDir })
+    expect(grown.get(yesterday)?.rows[0]?.requests).toBe(1)
+  })
+
   test('builds the same rollup every time', async () => {
     await writeDay(yesterday, [
       makeUsageEvent({ ts: at(yesterday) }),
@@ -176,6 +240,24 @@ describe('rollUpAndPruneUsageEvents', () => {
 
     const october = await readUsageRollupFile('2026-10', usageDir)
     expect(october.days[old]?.rows[0]?.requests).toBe(1)
+  })
+
+  test('without keepTotals deletes expired files and writes no rollup', async () => {
+    const now = startOfLocalDay('2026-11-09')
+    now.setHours(10)
+    const old = '2026-11-01'
+    await writeDay(old, [makeUsageEvent({ ts: at(old) })])
+    await writeDay('2026-11-09', [makeUsageEvent({ ts: now.getTime() })])
+
+    const { removed } = await rollUpAndPruneUsageEvents(now, {
+      now,
+      usageDir,
+      keepTotals: false,
+    })
+    expect(removed).toBe(1)
+    expect(existsSync(getUsageEventsFile(old, usageDir))).toBe(false)
+    expect(existsSync(getUsageEventsFile('2026-11-09', usageDir))).toBe(true)
+    expect(existsSync(getUsageRollupsDir(usageDir))).toBe(false)
   })
 
   test('never deletes today even with a cutoff in the future', async () => {
