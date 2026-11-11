@@ -69,8 +69,8 @@ export default defineGateway({
   label: 'Twigpine OpenGateway',
   category: 'aggregating',
   defaultBaseUrl: 'https://api.twigpine.com/v1',
-  // Smart routing is the default: a key with no credits is routed to a free
-  // model instead of failing with 402 on a paid one.
+  // Smart routing may select an eligible free model for a key with no credits.
+  // Free-usage quotas and rate limits still apply.
   defaultModel: 'auto',
   supportsModelRouting: true,
   vendorId: 'openai',

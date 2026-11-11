@@ -329,11 +329,13 @@ key from https://twigpine.com/console/gateway/keys. Keep the base URL at `/v1`
 and switch models with `/model` or `OPENAI_MODEL`. The older
 `https://opengateway.gitlawb.com/v1` address still works for existing setups.
 
-New setups default to `auto`, the gateway's smart routing: it serves a key with
-no credits from a free model and a funded key from the cheapest model expected
-to handle the request (the `x-gateway-served-model` response header names the
-model that answered). A saved profile or an `OPENAI_MODEL` you already set keeps
-its model.
+New setups default to `auto`, the gateway's smart routing: it may select an
+eligible free model for a key with no credits, subject to free-usage quotas and
+rate limits. For funded keys, routing starts with the cheapest model expected
+to handle the request. The `x-gateway-served-model` response header names the
+model that answered. OpenGateway setups keep a saved profile's model or an
+`OPENAI_MODEL` you already set; settings tied to another provider's endpoint
+are not adopted by the fresh-install default.
 
 `/model` shows the gateway's list of active models from the public
 `GET https://api.twigpine.com/v1/models` endpoint (no key needed). OpenClaude

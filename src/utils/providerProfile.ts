@@ -2877,7 +2877,17 @@ export async function buildStartupEnvFromProfile(options?: {
       return processEnv
     }
 
-    // No saved profile — default to Twigpine OpenGateway.
+    // No saved profile — default to Twigpine OpenGateway. Keep a configured
+    // model only when it is not tied to a different provider's endpoint.
+    const shellBaseUrl =
+      sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL) ??
+      sanitizeProviderConfigValue(processEnv.OPENAI_API_BASE)
+    const shellModel =
+      !shellBaseUrl || resolveRouteIdFromBaseUrl(shellBaseUrl) === 'gitlawb-opengateway'
+        ? normalizeProfileModel(
+            sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, processEnv),
+          )
+        : undefined
     const env = buildCompatibilityProcessEnv({
       processEnv,
       compatibilityMode: 'openai',
@@ -2886,6 +2896,7 @@ export async function buildStartupEnvFromProfile(options?: {
           getRouteDefaultBaseUrl('gitlawb-opengateway') ??
           'https://api.twigpine.com/v1',
         OPENAI_MODEL:
+          shellModel ??
           getRouteDefaultModel('gitlawb-opengateway') ?? 'auto',
       },
     })

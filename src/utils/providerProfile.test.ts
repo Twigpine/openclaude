@@ -1268,6 +1268,44 @@ test('applyStartupEnvFromProfile applies valid startup env (issue #1651)', async
   assert.equal(processEnv.OPENGATEWAY_API_KEY, 'test-key')
 })
 
+test('fresh OpenGateway startup preserves the configured model through validation and application', async () => {
+  for (const baseUrl of [
+    undefined,
+    'https://api.twigpine.com/v1',
+    'https://opengateway.gitlawb.com/v1',
+  ]) {
+    const processEnv: NodeJS.ProcessEnv = {
+      OPENGATEWAY_API_KEY: 'ogw_live_test',
+      OPENAI_MODEL: ' mimo-v2.6-pro ',
+      ...(baseUrl ? { OPENAI_BASE_URL: baseUrl } : {}),
+    }
+
+    const error = await applyStartupEnvFromProfile({ persisted: null, processEnv })
+
+    assert.equal(error, null)
+    assert.equal(processEnv.OPENAI_MODEL, 'mimo-v2.6-pro')
+    assert.equal(resolveActiveRouteIdFromEnv(processEnv), 'gitlawb-opengateway')
+    assert.equal(processEnv.OPENGATEWAY_API_KEY, 'ogw_live_test')
+  }
+})
+
+test('fresh OpenGateway startup defaults unusable models to auto', async () => {
+  for (const model of ['   ', 'ogw_live_test']) {
+    const processEnv: NodeJS.ProcessEnv = {
+      OPENGATEWAY_API_KEY: 'ogw_live_test',
+      OPENAI_MODEL: model,
+    }
+
+    const error = await applyStartupEnvFromProfile({
+      persisted: null,
+      processEnv,
+    })
+
+    assert.equal(error, null)
+    assert.equal(processEnv.OPENAI_MODEL, 'auto')
+  }
+})
+
 test('applyStartupEnvFromProfile overlays a root model before validating a saved Command Code profile', async () => {
   const processEnv: NodeJS.ProcessEnv = {}
 
