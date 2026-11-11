@@ -24,8 +24,11 @@ import {
 } from './managedEnv.js'
 import {
   applyModelFlagFromArgs,
+  applyProviderFlagFromArgs,
   clearRememberedModelFlagForTests,
+  clearRememberedProviderFlagForTests,
 } from './providerFlag.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import {
   applyProviderProfileToProcessEnv,
   clearProviderProfileEnvFromProcessEnv,
@@ -142,6 +145,50 @@ describe('host-managed API Route settings boundary', () => {
       expect(process.env.OPENAI_MODEL).toBe('host-model')
       expect(process.env.OPENAI_API_KEY).toBe('host-key')
       expect(process.env.GEMINI_ACCESS_TOKEN).toBe('host-google-token')
+    })
+  }
+})
+
+describe('remembered custom Anthropic validation', () => {
+  for (const [name, applySettings] of [
+    ['pre-trust', applySafeConfigEnvironmentVariables],
+    ['post-trust', applyConfigEnvironmentVariables],
+  ] as const) {
+    it(`propagates invalid explicit selection during ${name} settings merge`, () => {
+      const restoreEnv = snapshotEnv([
+        ...PROVIDER_SELECTION_FLAGS, ...ENV_KEYS,
+        'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+        'ANTHROPIC_MODEL', 'NVIDIA_NIM', 'OPENAI_API_BASE', 'OPENAI_API_FORMAT',
+        'OPENAI_AUTH_HEADER', 'OPENAI_AUTH_SCHEME', 'OPENAI_AUTH_HEADER_VALUE',
+        'CONCENTRATE_API_KEY', 'CONCENTRATE_BASE_URL', 'CONCENTRATE_MODEL',
+        'APISMART_API_KEY', 'APISMART_MODEL',
+      ])
+      clearRememberedProviderFlagForTests()
+      try {
+        process.env.ANTHROPIC_BASE_URL = 'https://proxy.example/v1'
+        process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
+        expect(applyProviderFlagFromArgs(['--provider', 'custom-anthropic'], {
+          rememberForSettingsEnv: true,
+        })?.error).toBeUndefined()
+        saveGlobalConfig(current => ({
+          ...current,
+          env: { ANTHROPIC_BASE_URL: ' ', CLAUDE_CODE_USE_FOUNDRY: '1' },
+        }))
+
+        expect(() => applySettings()).toThrow('ANTHROPIC_BASE_URL')
+
+        // Correcting settings allows the remembered native route to win again.
+        saveGlobalConfig(current => ({
+          ...current,
+          env: { ANTHROPIC_BASE_URL: 'https://proxy.example/v1' },
+        }))
+        expect(() => applySettings()).not.toThrow()
+        expect(process.env.CLAUDE_CODE_USE_FOUNDRY).toBeUndefined()
+        expect(process.env.ANTHROPIC_BASE_URL).toBe('https://proxy.example/v1')
+      } finally {
+        clearRememberedProviderFlagForTests()
+        restoreEnv()
+      }
     })
   }
 })

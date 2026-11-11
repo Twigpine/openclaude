@@ -36,6 +36,7 @@
 import { existsSync } from 'fs'
 import { homedir } from 'os'
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
+import { resolveRuntimeCodexCredentials } from '../services/api/providerConfig.js'
 import { join } from 'path'
 
 export type DetectedProviderKind =
@@ -93,10 +94,17 @@ function firstOpenAICredentialSet(
   return undefined
 }
 
-function defaultHasCodexAuthFile(): boolean {
+function defaultHasCodexAuthFile(env: EnvLike): boolean {
+  if (env.CODEX_AUTH_JSON_PATH?.trim()) {
+    // An explicit path must be usable by dispatch, without falling back to
+    // ambient credentials or secure storage when the file is invalid.
+    return Boolean(resolveRuntimeCodexCredentials({
+      env,
+      storedCredentials: undefined,
+    }).apiKey)
+  }
   const paths = [
-    process.env.CODEX_AUTH_JSON_PATH,
-    process.env.CODEX_AUTH_PATH,
+    env.CODEX_AUTH_PATH,
     join(homedir(), '.codex', 'auth.json'),
   ]
   return paths.some(p => p && existsSync(p))
@@ -106,8 +114,9 @@ export type DetectProviderFromEnvOptions = {
   env?: EnvLike
   /**
    * Override Codex auth-file detection. Primarily for tests — the default
-   * implementation checks CODEX_AUTH_JSON_PATH (and legacy CODEX_AUTH_PATH)
-   * plus ~/.codex/auth.json on disk.
+   * implementation validates CODEX_AUTH_JSON_PATH using runtime credential
+   * rules, then checks legacy CODEX_AUTH_PATH and ~/.codex/auth.json when no
+   * explicit JSON path is configured. Paths come from the supplied env.
    */
   hasCodexAuth?: () => boolean
 }
@@ -138,7 +147,7 @@ export function detectProviderFromEnv(
     ? envOrOptions
     : { env: envOrOptions as EnvLike }
   const env = options.env ?? process.env
-  const hasCodexAuth = options.hasCodexAuth ?? defaultHasCodexAuthFile
+  const hasCodexAuth = options.hasCodexAuth ?? (() => defaultHasCodexAuthFile(env))
   if (envHasNonEmpty(env, 'ANTHROPIC_API_KEY')) {
     return { kind: 'anthropic', source: 'ANTHROPIC_API_KEY set' }
   }
