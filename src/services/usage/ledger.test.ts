@@ -261,6 +261,50 @@ describe('recordUsageEvent', () => {
     expect(readFileSync(file, 'utf8')).toBe(contents)
   })
 
+  test.each(['EIO', 'invalid JSON', 'future version'])('an archived flush retries a transient %s without recreating raw history', async failure => {
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
+    const old = toLocalDateKey(Date.now() - 2 * 86_400_000)
+    const now = new Date()
+    const recordOldRequest = () => {
+      const clock = spyOn(Date, 'now').mockReturnValue(startOfLocalDay(old).getTime())
+      try {
+        recordUsageEvent({ usage: usage(), model: 'a', requestKey: `request-${getRecordedUsageEvents().length}` })
+      } finally {
+        clock.mockRestore()
+      }
+    }
+    recordOldRequest()
+    await flushUsageEvents()
+    expect(await rollUpAndPruneUsageEvents(now, { now })).toEqual({ removed: 1 })
+    const month = old.slice(0, 7)
+    const rollupFile = getUsageRollupFile(month)
+    const realRead = fsPromises.readFile
+    let unreadable = true
+    const readSpy = spyOn(fsPromises, 'readFile').mockImplementation((async (
+      path: Parameters<typeof realRead>[0],
+      options?: Parameters<typeof realRead>[1],
+    ) => {
+      if (path === rollupFile && unreadable) {
+        unreadable = false
+        if (failure === 'EIO') throw Object.assign(new Error('transient read failure'), { code: 'EIO' })
+        return failure === 'invalid JSON' ? '{broken' : '{"version":999,"days":{}}'
+      }
+      return realRead(path, options ?? null)
+    }) as typeof realRead)
+    try {
+      recordOldRequest()
+      await flushUsageEvents()
+      expect(unreadable).toBe(false)
+      expect((await readUsageEventsForDay(old)).exists).toBe(false)
+      expect((await readUsageRollupFile(month)).days[old]?.rows[0]).toMatchObject({
+        requests: 2, input: 2400, output: 600,
+      })
+      expect((await getUsageDayRollups([old], { today: toLocalDateKey(now) })).get(old)?.rows[0]?.requests).toBe(2)
+    } finally {
+      readSpy.mockRestore()
+    }
+  })
+
   test('a completed raw append reported as failed is acknowledged before it can be archived', async () => {
     process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
     const today = toLocalDateKey(Date.now())

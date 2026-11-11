@@ -327,9 +327,15 @@ export async function appendToPrunedUsageDay(
   events: readonly UsageEvent[],
   usageDir: string,
 ): Promise<boolean> {
+  // Today and future days are never archived. Their first raw write must
+  // remain independent of unrelated historical rollup failures.
+  if (dateKey >= toLocalDateKey(new Date())) return false
   const month = monthKeyOf(dateKey)
-  // An unrelated unreadable month must not block a new day's raw appends.
-  if (!(await readRollupFileChecked(month, usageDir)).file.days[dateKey]) return false
+  const read = await readRollupFileChecked(month, usageDir)
+  // Missing history and unreadable history are different: recreating a raw
+  // suffix here would let sourceBytes hide it or replace archived totals.
+  if (read.unreadable) throw new Error('Cannot append to unreadable usage rollups')
+  if (!read.file.days[dateKey]) return false
   const release = await lock(getUsageRollupsDir(usageDir), {
     stale: 10_000,
     retries: { retries: 5, minTimeout: 25 },
