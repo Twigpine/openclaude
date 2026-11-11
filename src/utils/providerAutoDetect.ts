@@ -95,6 +95,7 @@ function firstOpenAICredentialSet(
 
 function defaultHasCodexAuthFile(): boolean {
   const paths = [
+    process.env.CODEX_AUTH_JSON_PATH,
     process.env.CODEX_AUTH_PATH,
     join(homedir(), '.codex', 'auth.json'),
   ]
@@ -105,7 +106,8 @@ export type DetectProviderFromEnvOptions = {
   env?: EnvLike
   /**
    * Override Codex auth-file detection. Primarily for tests — the default
-   * implementation checks ~/.codex/auth.json and CODEX_AUTH_PATH on disk.
+   * implementation checks CODEX_AUTH_JSON_PATH (and legacy CODEX_AUTH_PATH)
+   * plus ~/.codex/auth.json on disk.
    */
   hasCodexAuth?: () => boolean
 }
@@ -357,8 +359,8 @@ function normalizeOpengatewayBaseUrl(baseUrl: string): string {
  */
 function defaultOpengatewayProvider(env: EnvLike): DetectedProvider | null {
   const hasKey =
-    (typeof env.OPENGATEWAY_API_KEY === 'string' && env.OPENGATEWAY_API_KEY.trim().length > 0) ||
-    (typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.trim().length > 0)
+    hasUsableOpenAICredential(env.OPENGATEWAY_API_KEY) ||
+    hasUsableOpenAICredential(env.OPENAI_API_KEY)
   if (!hasKey) return null
 
   const baseUrl =

@@ -114,18 +114,17 @@ export async function* geminiSseToAnthropic(
           },
         },
       )
-      if (done) {
-        streamComplete = true
-        streamTrace.recordEof()
-        break
-      }
       if (value) lastDataTime = performance.now()
       streamTrace.recordRaw(value)
 
       throwIfStreamAborted(signal)
-      buffer += decoder.decode(value, { stream: true })
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true })
       const chunks = buffer.split(/\r?\n\r?\n/)
       buffer = chunks.pop() ?? ''
+      if (done && buffer.length > 0) {
+        chunks.push(buffer)
+        buffer = ''
+      }
 
       for (const chunk of chunks) {
         throwIfStreamAborted(signal)
@@ -166,9 +165,9 @@ export async function* geminiSseToAnthropic(
           const value: unknown = JSON.parse(rawData)
           if (!value || typeof value !== 'object' || Array.isArray(value)) {
             streamTrace.recordIgnored()
-          } else {
-            streamTrace.recordParsed()
+            continue
           }
+          streamTrace.recordParsed()
           parsed = value as Record<string, unknown>
         } catch {
           streamTrace.recordIgnored()
@@ -272,6 +271,11 @@ export async function* geminiSseToAnthropic(
             }
           }
         }
+      }
+      if (done) {
+        streamComplete = true
+        streamTrace.recordEof()
+        break
       }
     }
 

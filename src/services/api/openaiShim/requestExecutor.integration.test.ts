@@ -1,6 +1,7 @@
 import { APIError } from '@anthropic-ai/sdk'
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../../test/sharedMutationLock.js'
+import { snapshotEnv } from '../../../test/envSnapshot.js'
 import { asMockFetch } from '../../../test/typedMocks.js'
 import { _clearRegistryForTesting, ensureIntegrationsLoaded, registerGateway } from '../../../integrations/index.ts'
 import { applyProviderFlag } from '../../../utils/providerFlag.ts'
@@ -15,59 +16,52 @@ import { createOpenAIShimClient } from '../openaiShim.ts'
 
 type FetchType = typeof globalThis.fetch
 
-const originalEnv = {
-  OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
-  OPENAI_API_BASE: process.env.OPENAI_API_BASE,
-  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  OPENAI_API_KEYS: process.env.OPENAI_API_KEYS,
-  OPENAI_MODEL: process.env.OPENAI_MODEL,
-  OPENAI_API_FORMAT: process.env.OPENAI_API_FORMAT,
-  OPENAI_AZURE_STYLE: process.env.OPENAI_AZURE_STYLE,
-  OPENAI_AUTH_HEADER: process.env.OPENAI_AUTH_HEADER,
-  OPENAI_AUTH_SCHEME: process.env.OPENAI_AUTH_SCHEME,
-  OPENAI_AUTH_HEADER_VALUE: process.env.OPENAI_AUTH_HEADER_VALUE,
-  CLAUDE_CODE_USE_GITHUB: process.env.CLAUDE_CODE_USE_GITHUB,
-  GITHUB_COPILOT_KEY: process.env.GITHUB_COPILOT_KEY,
-  GITHUB_ENTERPRISE_URL: process.env.GITHUB_ENTERPRISE_URL,
-  GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-  GH_TOKEN: process.env.GH_TOKEN,
-  CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
-  CLAUDE_CODE_USE_GEMINI: process.env.CLAUDE_CODE_USE_GEMINI,
-  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-  GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
-  GEMINI_ACCESS_TOKEN: process.env.GEMINI_ACCESS_TOKEN,
-  GEMINI_AUTH_MODE: process.env.GEMINI_AUTH_MODE,
-  GEMINI_BASE_URL: process.env.GEMINI_BASE_URL,
-  GEMINI_MODEL: process.env.GEMINI_MODEL,
-  GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
-  ANTHROPIC_CUSTOM_HEADERS: process.env.ANTHROPIC_CUSTOM_HEADERS,
-  NVIDIA_API_KEY: process.env.NVIDIA_API_KEY,
-  NVIDIA_NIM: process.env.NVIDIA_NIM,
-  MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
-  BNKR_API_KEY: process.env.BNKR_API_KEY,
-  BANKR_BASE_URL: process.env.BANKR_BASE_URL,
-  BANKR_MODEL: process.env.BANKR_MODEL,
-  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
-  DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
-  MIMO_API_KEY: process.env.MIMO_API_KEY,
-  OPENGATEWAY_API_KEY: process.env.OPENGATEWAY_API_KEY,
-  OPENGATEWAY_BASE_URL: process.env.OPENGATEWAY_BASE_URL,
-  OPENCODE_API_KEY: process.env.OPENCODE_API_KEY,
-  CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED: process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED,
-  CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID: process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID,
-  CLAUDE_STREAM_IDLE_TIMEOUT_MS: process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS,
-  HICAP_API_KEY: process.env.HICAP_API_KEY,
-}
+const ENV_KEYS = [
+  'OPENAI_BASE_URL',
+  'OPENAI_API_BASE',
+  'OPENAI_API_KEY',
+  'OPENAI_API_KEYS',
+  'OPENAI_MODEL',
+  'OPENAI_API_FORMAT',
+  'OPENAI_AZURE_STYLE',
+  'OPENAI_AUTH_HEADER',
+  'OPENAI_AUTH_SCHEME',
+  'OPENAI_AUTH_HEADER_VALUE',
+  'CLAUDE_CODE_USE_GITHUB',
+  'GITHUB_COPILOT_KEY',
+  'GITHUB_ENTERPRISE_URL',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'CLAUDE_CODE_USE_OPENAI',
+  'CLAUDE_CODE_USE_GEMINI',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GEMINI_ACCESS_TOKEN',
+  'GEMINI_AUTH_MODE',
+  'GEMINI_BASE_URL',
+  'GEMINI_MODEL',
+  'GOOGLE_CLOUD_PROJECT',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'NVIDIA_API_KEY',
+  'NVIDIA_NIM',
+  'MINIMAX_API_KEY',
+  'BNKR_API_KEY',
+  'BANKR_BASE_URL',
+  'BANKR_MODEL',
+  'OPENROUTER_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'MIMO_API_KEY',
+  'OPENGATEWAY_API_KEY',
+  'OPENGATEWAY_BASE_URL',
+  'OPENCODE_API_KEY',
+  'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
+  'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
+  'CLAUDE_STREAM_IDLE_TIMEOUT_MS',
+  'HICAP_API_KEY',
+] as const
 
-const originalFetch = globalThis.fetch
-
-function restoreEnv(key: string, value: string | undefined): void {
-  if (value === undefined) {
-    delete process.env[key]
-  } else {
-    process.env[key] = value
-  }
-}
+let restoreEnv: () => void
+let originalFetch: FetchType
 
 type OpenAIShimClient = {
   beta: {
@@ -260,6 +254,8 @@ async function captureChatCompletionRequest(
 
 beforeEach(async () => {
   await acquireSharedMutationLock('openaiShim.test.ts')
+  restoreEnv = snapshotEnv(ENV_KEYS)
+  originalFetch = globalThis.fetch
   process.env.OPENAI_BASE_URL = 'http://example.test/v1'
   delete process.env.OPENAI_API_BASE
   process.env.OPENAI_API_KEY = 'test-key'
@@ -304,47 +300,7 @@ beforeEach(async () => {
 })
 afterEach(() => {
   try {
-    restoreEnv('OPENAI_BASE_URL', originalEnv.OPENAI_BASE_URL)
-    restoreEnv('OPENAI_API_BASE', originalEnv.OPENAI_API_BASE)
-    restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
-    restoreEnv('OPENAI_API_KEYS', originalEnv.OPENAI_API_KEYS)
-    restoreEnv('OPENAI_MODEL', originalEnv.OPENAI_MODEL)
-    restoreEnv('OPENAI_API_FORMAT', originalEnv.OPENAI_API_FORMAT)
-    restoreEnv('OPENAI_AZURE_STYLE', originalEnv.OPENAI_AZURE_STYLE)
-    restoreEnv('OPENAI_AUTH_HEADER', originalEnv.OPENAI_AUTH_HEADER)
-    restoreEnv('OPENAI_AUTH_SCHEME', originalEnv.OPENAI_AUTH_SCHEME)
-    restoreEnv('OPENAI_AUTH_HEADER_VALUE', originalEnv.OPENAI_AUTH_HEADER_VALUE)
-    restoreEnv('CLAUDE_CODE_USE_GITHUB', originalEnv.CLAUDE_CODE_USE_GITHUB)
-    restoreEnv('GITHUB_COPILOT_KEY', originalEnv.GITHUB_COPILOT_KEY)
-    restoreEnv('GITHUB_ENTERPRISE_URL', originalEnv.GITHUB_ENTERPRISE_URL)
-    restoreEnv('GITHUB_TOKEN', originalEnv.GITHUB_TOKEN)
-    restoreEnv('GH_TOKEN', originalEnv.GH_TOKEN)
-    restoreEnv('CLAUDE_CODE_USE_OPENAI', originalEnv.CLAUDE_CODE_USE_OPENAI)
-    restoreEnv('CLAUDE_CODE_USE_GEMINI', originalEnv.CLAUDE_CODE_USE_GEMINI)
-    restoreEnv('GEMINI_API_KEY', originalEnv.GEMINI_API_KEY)
-    restoreEnv('GOOGLE_API_KEY', originalEnv.GOOGLE_API_KEY)
-    restoreEnv('GEMINI_ACCESS_TOKEN', originalEnv.GEMINI_ACCESS_TOKEN)
-    restoreEnv('GEMINI_AUTH_MODE', originalEnv.GEMINI_AUTH_MODE)
-    restoreEnv('GEMINI_BASE_URL', originalEnv.GEMINI_BASE_URL)
-    restoreEnv('GEMINI_MODEL', originalEnv.GEMINI_MODEL)
-    restoreEnv('GOOGLE_CLOUD_PROJECT', originalEnv.GOOGLE_CLOUD_PROJECT)
-    restoreEnv('ANTHROPIC_CUSTOM_HEADERS', originalEnv.ANTHROPIC_CUSTOM_HEADERS)
-    restoreEnv('NVIDIA_API_KEY', originalEnv.NVIDIA_API_KEY)
-    restoreEnv('NVIDIA_NIM', originalEnv.NVIDIA_NIM)
-    restoreEnv('MINIMAX_API_KEY', originalEnv.MINIMAX_API_KEY)
-    restoreEnv('BNKR_API_KEY', originalEnv.BNKR_API_KEY)
-    restoreEnv('BANKR_BASE_URL', originalEnv.BANKR_BASE_URL)
-    restoreEnv('BANKR_MODEL', originalEnv.BANKR_MODEL)
-    restoreEnv('OPENROUTER_API_KEY', originalEnv.OPENROUTER_API_KEY)
-    restoreEnv('DEEPSEEK_API_KEY', originalEnv.DEEPSEEK_API_KEY)
-    restoreEnv('MIMO_API_KEY', originalEnv.MIMO_API_KEY)
-    restoreEnv('OPENGATEWAY_API_KEY', originalEnv.OPENGATEWAY_API_KEY)
-    restoreEnv('OPENGATEWAY_BASE_URL', originalEnv.OPENGATEWAY_BASE_URL)
-    restoreEnv('OPENCODE_API_KEY', originalEnv.OPENCODE_API_KEY)
-    restoreEnv('CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED', originalEnv.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED)
-    restoreEnv('CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID', originalEnv.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID)
-    restoreEnv('CLAUDE_STREAM_IDLE_TIMEOUT_MS', originalEnv.CLAUDE_STREAM_IDLE_TIMEOUT_MS)
-    restoreEnv('HICAP_API_KEY', originalEnv.HICAP_API_KEY)
+    restoreEnv()
     globalThis.fetch = originalFetch
     _clearRegistryForTesting()
     ensureIntegrationsLoaded()
@@ -2392,7 +2348,7 @@ test.each([
   ['null', null],
   ['[]', []],
 ])(
-  'preserves malformed Bash JSON literals as parsed values in non-streaming responses: %s',
+  'preserves non-object Bash JSON literals as parsed values in non-streaming responses: %s',
   async (argumentsValue, expectedInput) => {
     globalThis.fetch = (async (_input, _init) => {
       return new Response(
@@ -2518,7 +2474,7 @@ test('keeps terminal empty Bash tool arguments invalid in non-streaming response
 
 // Extraction seam: streamed tool normalization | schema and tool conversion.
 
-test('preserves raw input for unknown plain string tool arguments', async () => {
+test('normalizes unknown plain string tool arguments to empty object input', async () => {
   globalThis.fetch = (async (_input, _init) => {
     return new Response(
       JSON.stringify({

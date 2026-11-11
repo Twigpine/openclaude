@@ -1,4 +1,9 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
+import * as fs from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { snapshotEnv } from '../test/envSnapshot.js'
+import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
 
 import {
   detectBestProvider,
@@ -18,6 +23,28 @@ function scan(env: Record<string, string | undefined>) {
 }
 
 describe('detectProviderFromEnv — priority order', () => {
+  test('checks the documented Codex auth JSON override on disk', async () => {
+    await acquireSharedMutationLock('providerAutoDetect Codex auth override')
+    const restoreEnv = snapshotEnv(['CODEX_AUTH_JSON_PATH', 'CODEX_AUTH_PATH'])
+    const dir = fs.mkdtempSync(join(tmpdir(), 'detect-codex-auth-'))
+    const authPath = join(dir, 'auth.json')
+    fs.writeFileSync(authPath, '{}')
+    process.env.CODEX_AUTH_JSON_PATH = authPath
+    delete process.env.CODEX_AUTH_PATH
+    const realExists = fs.existsSync
+    const exists = spyOn(fs, 'existsSync').mockImplementation(
+      path => path === authPath && realExists(path),
+    )
+    try {
+      expect(detectProviderFromEnv({ env: {} })?.kind).toBe('codex')
+    } finally {
+      exists.mockRestore()
+      fs.rmSync(dir, { recursive: true, force: true })
+      restoreEnv()
+      releaseSharedMutationLock()
+    }
+  })
+
   test('ANTHROPIC_API_KEY wins over all others', () => {
     expect(
       scan({
@@ -326,6 +353,17 @@ describe('detectBestProvider — orchestrator', () => {
     expect(result?.model).toBe('auto')
     expect(probeCalled).toBe(false)
   })
+
+  test.each(['OPENGATEWAY_API_KEY', 'OPENAI_API_KEY'])(
+    'rejects a placeholder %s in the OpenGateway fallback',
+    async key => {
+      expect(await detectBestProvider({
+        env: { [key]: 'SUA_CHAVE' },
+        skipLocal: true,
+        hasCodexAuth: () => false,
+      })).toBeNull()
+    },
+  )
 
   test('completely empty environment returns null (opengateway needs an API key)', async () => {
     const fetchImpl = asFetch(async (): Promise<Response> => {
