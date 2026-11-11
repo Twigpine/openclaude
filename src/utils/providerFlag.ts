@@ -142,6 +142,10 @@ export function applyProviderFlagFromArgs(
   return result
 }
 
+/**
+ * Reapply the explicit provider after settings merge. Throw on validation
+ * failure so callers cannot silently continue with a different provider.
+ */
 export function reapplyRememberedProviderFlag():
   | { error?: string }
   | undefined {
@@ -152,7 +156,9 @@ export function reapplyRememberedProviderFlag():
     args.push('--model', rememberedProviderFlag.model)
   }
 
-  return applyProviderFlag(rememberedProviderFlag.provider, args)
+  const result = applyProviderFlag(rememberedProviderFlag.provider, args)
+  if (result.error) throw new Error(result.error)
+  return result
 }
 
 export function clearRememberedProviderFlagForTests(): void {
