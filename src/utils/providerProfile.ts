@@ -2886,7 +2886,7 @@ export async function buildStartupEnvFromProfile(options?: {
           getRouteDefaultBaseUrl('gitlawb-opengateway') ??
           'https://api.twigpine.com/v1',
         OPENAI_MODEL:
-          getRouteDefaultModel('gitlawb-opengateway') ?? 'mimo-v2.6-pro',
+          getRouteDefaultModel('gitlawb-opengateway') ?? 'auto',
       },
     })
     env[DEFAULT_STARTUP_PROVIDER_ENV_VAR] = 'gitlawb-opengateway'

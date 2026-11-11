@@ -323,7 +323,7 @@ describe('detectBestProvider — orchestrator', () => {
     })
     expect(result?.kind).toBe('gitlawb-opengateway')
     expect(result?.baseUrl).toBe('https://api.twigpine.com/v1')
-    expect(result?.model).toBe('mimo-v2.6-pro')
+    expect(result?.model).toBe('auto')
     expect(probeCalled).toBe(false)
   })
 

@@ -1147,8 +1147,23 @@ test('buildStartupEnvFromProfile defaults fresh installs to Twigpine OpenGateway
 
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, '1')
   assert.equal(env.OPENAI_BASE_URL, 'https://api.twigpine.com/v1')
-  assert.equal(env.OPENAI_MODEL, 'mimo-v2.6-pro')
+  assert.equal(env.OPENAI_MODEL, 'auto')
   assert.equal(isDefaultStartupProviderEnv(env), true)
+})
+
+test('buildStartupEnvFromProfile keeps the model of a saved OpenGateway profile', async () => {
+  const env = await buildStartupEnvFromProfile({
+    persisted: profile('openai', {
+      OPENAI_BASE_URL: 'https://api.twigpine.com/v1',
+      OPENAI_MODEL: 'mimo-v2.6-pro',
+      OPENAI_API_KEY: 'ogw_live_saved',
+    }),
+    processEnv: {},
+  })
+
+  assert.equal(env.OPENAI_BASE_URL, 'https://api.twigpine.com/v1')
+  assert.equal(env.OPENAI_MODEL, 'mimo-v2.6-pro')
+  assert.equal(isDefaultStartupProviderEnv(env), false)
 })
 
 test('buildStartupEnvFromProfile fresh-install OpenGateway env is invalid without an API key (issue #1651)', async () => {
@@ -1249,7 +1264,7 @@ test('applyStartupEnvFromProfile applies valid startup env (issue #1651)', async
   assert.deepEqual(warnings, [])
   assert.equal(processEnv.CLAUDE_CODE_USE_OPENAI, '1')
   assert.equal(processEnv.OPENAI_BASE_URL, 'https://api.twigpine.com/v1')
-  assert.equal(processEnv.OPENAI_MODEL, 'mimo-v2.6-pro')
+  assert.equal(processEnv.OPENAI_MODEL, 'auto')
   assert.equal(processEnv.OPENGATEWAY_API_KEY, 'test-key')
 })
 
@@ -1378,7 +1393,7 @@ test('buildStartupEnvFromProfile does not activate non-NIM env-only OpenAI-compa
   assert.equal(env.CLAUDE_CODE_USE_OPENAI, '1')
   assert.equal(env.CLAUDE_CODE_PROVIDER_ROUTE_ID, undefined)
   assert.equal(env.OPENAI_BASE_URL, 'https://api.twigpine.com/v1')
-  assert.equal(env.OPENAI_MODEL, 'mimo-v2.6-pro')
+  assert.equal(env.OPENAI_MODEL, 'auto')
   assert.equal(env.OPENAI_API_KEY, undefined)
   assert.equal(resolveActiveRouteIdFromEnv(env), 'gitlawb-opengateway')
   assert.equal(isDefaultStartupProviderEnv(env), true)

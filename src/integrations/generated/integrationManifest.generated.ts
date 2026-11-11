@@ -28,7 +28,7 @@ export const PROVIDER_PRESET_MANIFEST = [
       "OPENAI_MODEL"
     ],
     "fallbackBaseUrl": "https://api.twigpine.com/v1",
-    "fallbackModel": "mimo-v2.6-pro",
+    "fallbackModel": "auto",
     "badge": {
       "text": "Recommended",
       "color": "success"

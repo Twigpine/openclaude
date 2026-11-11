@@ -315,7 +315,7 @@ export async function detectLocalService(options?: {
  * (async, ~1-2s worst case) only if nothing was found in env.
  */
 const OPENGATEWAY_DEFAULT_BASE_URL = 'https://api.twigpine.com/v1'
-const OPENGATEWAY_DEFAULT_MODEL = 'mimo-v2.6-pro'
+const OPENGATEWAY_DEFAULT_MODEL = 'auto'
 const OPENGATEWAY_HOSTS = new Set([
   'api.twigpine.com',
   'opengateway.gitlawb.com',

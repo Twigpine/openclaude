@@ -321,13 +321,19 @@ OpenCode Go requires for prompt caching and traffic attribution.
 export CLAUDE_CODE_USE_OPENAI=1
 export OPENAI_BASE_URL=https://api.twigpine.com/v1
 export OPENGATEWAY_API_KEY=ogw_live_...
-export OPENAI_MODEL=mimo-v2.6-pro
+export OPENAI_MODEL=auto
 ```
 
 The OpenGateway route is the fresh-install startup default and requires an API
 key from https://twigpine.com/console/gateway/keys. Keep the base URL at `/v1`
 and switch models with `/model` or `OPENAI_MODEL`. The older
 `https://opengateway.gitlawb.com/v1` address still works for existing setups.
+
+New setups default to `auto`, the gateway's smart routing: it serves a key with
+no credits from a free model and a funded key from the cheapest model expected
+to handle the request (the `x-gateway-served-model` response header names the
+model that answered). A saved profile or an `OPENAI_MODEL` you already set keeps
+its model.
 
 `/model` shows the gateway's list of active models from the public
 `GET https://api.twigpine.com/v1/models` endpoint (no key needed). OpenClaude

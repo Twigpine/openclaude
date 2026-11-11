@@ -5,7 +5,10 @@ import {
   getRouteDefaultBaseUrl,
   resolveRouteIdFromBaseUrl,
 } from '../index.js'
-import { resolveOpenAIShimRuntimeContext } from '../runtimeMetadata.js'
+import {
+  resolveModelRuntimeLimitsWithSource,
+  resolveOpenAIShimRuntimeContext,
+} from '../runtimeMetadata.js'
 import { isVisionSupported } from '../../utils/visionUtils.js'
 import {
   expectGatewayCatalog,
@@ -18,14 +21,14 @@ describe('gitlawb-opengateway live model mapping', () => {
       routeId: 'gitlawb-opengateway',
       expected: {
         baseUrl: 'https://api.twigpine.com/v1',
-        defaultModel: 'mimo-v2.6-pro',
+        defaultModel: 'auto',
         preset: {
           label: 'Twigpine OpenGateway',
           name: 'Twigpine OpenGateway',
           description:
             'Twigpine OpenGateway - (API key required, signup at https://twigpine.com/console/gateway/keys)',
           fallbackBaseUrl: 'https://api.twigpine.com/v1',
-          fallbackModel: 'mimo-v2.6-pro',
+          fallbackModel: 'auto',
           badge: { text: 'Recommended', color: 'success' },
         },
         validation: {
@@ -87,6 +90,24 @@ describe('gitlawb-opengateway live model mapping', () => {
     expect(opengateway.catalog?.source).toBe('hybrid')
     expect(opengateway.catalog?.discoveryRefreshMode).toBe('startup')
     expect(opengateway.catalog?.discoveryCacheTtl).toBe('1h')
+  })
+
+  test('defaults to smart routing with a pinned context window', () => {
+    // The gateway lists `auto` without a context window, so the floor entry
+    // supplies the one compaction uses instead of the unknown-model fallback.
+    expect(opengateway.defaultModel).toBe('auto')
+    expect(
+      resolveModelRuntimeLimitsWithSource({
+        model: 'auto',
+        processEnv: {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: 'https://api.twigpine.com/v1',
+        },
+      }),
+    ).toMatchObject({
+      contextWindow: 200_000,
+      contextWindowSource: 'route-catalog',
+    })
   })
 
   test('maps gateway routes including auto and free models', () => {

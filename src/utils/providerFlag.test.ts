@@ -828,8 +828,17 @@ describe('applyProviderFlag - descriptor-backed openai-compatible routes', () =>
     expect(result.error).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
     expect(process.env.OPENAI_BASE_URL).toBe('https://api.twigpine.com/v1')
-    expect(process.env.OPENAI_MODEL).toBe('mimo-v2.6-pro')
+    expect(process.env.OPENAI_MODEL).toBe('auto')
     expect(process.env.OPENAI_API_BASE).toBe('undefined')
+  })
+
+  test('gitlawb-opengateway explicit provider keeps an already selected model', () => {
+    process.env.OPENAI_MODEL = 'mimo-v2.6-pro'
+
+    const result = applyProviderFlag('gitlawb-opengateway', [])
+
+    expect(result.error).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBe('mimo-v2.6-pro')
   })
 
   test('gitlawb-opengateway explicit provider overrides stale generic base URL', () => {
