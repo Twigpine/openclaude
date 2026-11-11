@@ -2879,11 +2879,15 @@ export async function buildStartupEnvFromProfile(options?: {
 
     // No saved profile — default to Twigpine OpenGateway. Keep a configured
     // model only when it is not tied to a different provider's endpoint.
+    // OPENGATEWAY_BASE_URL is the gateway's own endpoint setting and, as with
+    // explicit provider selection, takes precedence over the generic ones.
     const shellBaseUrl =
       sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL) ??
       sanitizeProviderConfigValue(processEnv.OPENAI_API_BASE)
     const shellModel =
-      !shellBaseUrl || resolveRouteIdFromBaseUrl(shellBaseUrl) === 'gitlawb-opengateway'
+      sanitizeProviderConfigValue(processEnv.OPENGATEWAY_BASE_URL) !== undefined ||
+      !shellBaseUrl ||
+      resolveRouteIdFromBaseUrl(shellBaseUrl) === 'gitlawb-opengateway'
         ? sanitizeProviderConfigValue(
             normalizeProfileModel(processEnv.OPENAI_MODEL),
             processEnv,

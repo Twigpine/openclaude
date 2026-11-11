@@ -1269,15 +1269,25 @@ test('applyStartupEnvFromProfile applies valid startup env (issue #1651)', async
 })
 
 test('fresh OpenGateway startup preserves the configured model through validation and application', async () => {
-  for (const baseUrl of [
-    undefined,
-    'https://api.twigpine.com/v1',
-    'https://opengateway.gitlawb.com/v1',
+  for (const endpointEnv of [
+    {},
+    { OPENAI_BASE_URL: 'https://api.twigpine.com/v1' },
+    { OPENAI_BASE_URL: 'https://opengateway.gitlawb.com/v1' },
+    // OPENGATEWAY_BASE_URL is the gateway's own endpoint setting and takes
+    // precedence over a generic base URL left over from another provider.
+    {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENGATEWAY_BASE_URL: 'https://api.twigpine.com/v1',
+    },
+    {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENGATEWAY_BASE_URL: 'http://localhost:8787/v1',
+    },
   ]) {
     const processEnv: NodeJS.ProcessEnv = {
       OPENGATEWAY_API_KEY: 'ogw_live_test',
       OPENAI_MODEL: ' mimo-v2.6-pro ',
-      ...(baseUrl ? { OPENAI_BASE_URL: baseUrl } : {}),
+      ...endpointEnv,
     }
 
     const error = await applyStartupEnvFromProfile({ persisted: null, processEnv })
