@@ -2877,7 +2877,22 @@ export async function buildStartupEnvFromProfile(options?: {
       return processEnv
     }
 
-    // No saved profile — default to Twigpine OpenGateway.
+    // No saved profile — default to Twigpine OpenGateway. Keep a configured
+    // model only when it is not tied to a different provider's endpoint.
+    // OPENGATEWAY_BASE_URL is the gateway's own endpoint setting and, as with
+    // explicit provider selection, takes precedence over the generic ones.
+    const shellBaseUrl =
+      sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL) ??
+      sanitizeProviderConfigValue(processEnv.OPENAI_API_BASE)
+    const shellModel =
+      sanitizeProviderConfigValue(processEnv.OPENGATEWAY_BASE_URL) !== undefined ||
+      !shellBaseUrl ||
+      resolveRouteIdFromBaseUrl(shellBaseUrl) === 'gitlawb-opengateway'
+        ? sanitizeProviderConfigValue(
+            normalizeProfileModel(processEnv.OPENAI_MODEL),
+            processEnv,
+          )
+        : undefined
     const env = buildCompatibilityProcessEnv({
       processEnv,
       compatibilityMode: 'openai',
@@ -2886,7 +2901,8 @@ export async function buildStartupEnvFromProfile(options?: {
           getRouteDefaultBaseUrl('gitlawb-opengateway') ??
           'https://api.twigpine.com/v1',
         OPENAI_MODEL:
-          getRouteDefaultModel('gitlawb-opengateway') ?? 'mimo-v2.6-pro',
+          shellModel ??
+          getRouteDefaultModel('gitlawb-opengateway') ?? 'auto',
       },
     })
     env[DEFAULT_STARTUP_PROVIDER_ENV_VAR] = 'gitlawb-opengateway'

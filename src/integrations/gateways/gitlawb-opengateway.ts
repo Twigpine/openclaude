@@ -69,7 +69,9 @@ export default defineGateway({
   label: 'Twigpine OpenGateway',
   category: 'aggregating',
   defaultBaseUrl: 'https://api.twigpine.com/v1',
-  defaultModel: 'mimo-v2.6-pro',
+  // Smart routing may select an eligible free model for a key with no credits.
+  // Free-usage quotas and rate limits still apply.
+  defaultModel: 'auto',
   supportsModelRouting: true,
   vendorId: 'openai',
   setup: {
@@ -124,7 +126,7 @@ export default defineGateway({
     modelEnvVars: ['OPENAI_MODEL'],
     baseUrlEnvVars: ['OPENGATEWAY_BASE_URL', 'OPENAI_BASE_URL'],
     fallbackBaseUrl: 'https://api.twigpine.com/v1',
-    fallbackModel: 'mimo-v2.6-pro',
+    fallbackModel: 'auto',
   },
   catalog: {
     // The live GET /v1/models list (active models only) is the source of
@@ -154,10 +156,14 @@ export default defineGateway({
       // expected to handle the request and escalates on upstream failure
       // (see opengateway/src/routing/). Billed at the serving model's rate;
       // the x-gateway-served-model response header names who answered.
+      // The gateway lists `auto` with `context_window: null`, so pin a window
+      // here: 200k sits under the smallest model the router can pick
+      // (204,800), and the gateway skips models a request does not fit.
       {
         id: 'opengateway-auto',
         apiName: 'auto',
         label: 'Auto — Smart Routing (via OpenGateway)',
+        contextWindow: 200_000,
         notes: 'Gateway picks the cheapest capable model and escalates on failure',
       },
       // The gateway accepts bare MiMo ids and lists them as `xiaomi/mimo-*`;
