@@ -110,6 +110,54 @@ test('maps STOP to end_turn when no tool call is present', async () => {
   expect(events.at(-1)).toEqual({ type: 'message_stop' })
 })
 
+test.each(['', '\n', '\r\n', '\n\ndata: [DONE]'])(
+  'preserves the final Gemini payload with EOF suffix %j',
+  async suffix => {
+    const bytes = new TextEncoder().encode(`data: ${JSON.stringify({
+      candidates: [{
+        content: { parts: [{ text: 'Finished café.' }] },
+        finishReason: 'MAX_TOKENS',
+      }],
+      usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 3 },
+    })}${suffix}`)
+    const split = bytes.indexOf(0xc3) + 1
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, split))
+        controller.enqueue(bytes.slice(split))
+        controller.close()
+      },
+    }))
+    const events = await collectEvents(response)
+
+    expect(events.find(event => event.type === 'content_block_delta')).toMatchObject({
+      delta: { type: 'text_delta', text: 'Finished café.' },
+    })
+    expect(events.at(-2)).toMatchObject({
+      type: 'message_delta',
+      delta: { stop_reason: 'max_tokens' },
+      usage: { input_tokens: 7, output_tokens: 3 },
+    })
+    expect(events.filter(event => event.type === 'message_stop')).toHaveLength(1)
+  },
+)
+
+test.each([null, false, 42, 'text', []])(
+  'ignores non-object Gemini JSON %j and continues to the next payload',
+  async value => {
+    const response = responseFor({
+      candidates: [{ content: { parts: [{ text: 'Still valid.' }] }, finishReason: 'STOP' }],
+    })
+    const body = `data: ${JSON.stringify(value)}\n\n${await response.text()}`
+    const events = await collectEvents(new Response(body))
+
+    expect(events.find(event => event.type === 'content_block_delta')).toMatchObject({
+      delta: { type: 'text_delta', text: 'Still valid.' },
+    })
+    expect(events.at(-1)).toEqual({ type: 'message_stop' })
+  },
+)
+
 test('maps MAX_TOKENS to max_tokens when no tool call is present', async () => {
   const events = await collectEvents(responseFor({
     candidates: [{

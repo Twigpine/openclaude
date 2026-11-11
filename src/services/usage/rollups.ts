@@ -391,14 +391,32 @@ export async function rollUpAndPruneUsageEvents(
 
   const rollups = await getUsageDayRollups(expired, { today, usageDir })
   for (const key of expired) {
-    const size = await eventFileSize(key, usageDir)
     const rollup = rollups.get(key)
-    // Only delete a file whose current contents are captured in a rollup.
-    if (size === null || !rollup || rollup.sourceBytes !== size) continue
-    const persisted = (await readUsageRollupFile(monthKeyOf(key), usageDir))
-      .days[key]
-    if (!persisted || persisted.sourceBytes !== size) continue
-    if (await deleteEventFile(key, usageDir)) removed++
+    if (!rollup) continue
+    const file = getUsageEventsFile(key, usageDir)
+    let release: () => Promise<void>
+    try {
+      release = await lock(file, {
+        stale: 10_000,
+        retries: { retries: 5, minTimeout: 25 },
+      })
+    } catch (error) {
+      // Another cleanup may have removed the file before lock acquisition.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+    try {
+      // Appenders use this same lock. Validate the current file and saved
+      // totals while holding it, so an unrolled append cannot be deleted.
+      const size = await eventFileSize(key, usageDir)
+      if (size === null || rollup.sourceBytes !== size) continue
+      const persisted = (await readUsageRollupFile(monthKeyOf(key), usageDir))
+        .days[key]
+      if (!persisted || persisted.sourceBytes !== size) continue
+      if (await deleteEventFile(key, usageDir)) removed++
+    } finally {
+      await release()
+    }
   }
   return { removed }
 }
