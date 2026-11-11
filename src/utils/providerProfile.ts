@@ -2884,8 +2884,9 @@ export async function buildStartupEnvFromProfile(options?: {
       sanitizeProviderConfigValue(processEnv.OPENAI_API_BASE)
     const shellModel =
       !shellBaseUrl || resolveRouteIdFromBaseUrl(shellBaseUrl) === 'gitlawb-opengateway'
-        ? normalizeProfileModel(
-            sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, processEnv),
+        ? sanitizeProviderConfigValue(
+            normalizeProfileModel(processEnv.OPENAI_MODEL),
+            processEnv,
           )
         : undefined
     const env = buildCompatibilityProcessEnv({

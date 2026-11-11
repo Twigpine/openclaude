@@ -1289,8 +1289,14 @@ test('fresh OpenGateway startup preserves the configured model through validatio
   }
 })
 
-test('fresh OpenGateway startup defaults unusable models to auto', async () => {
-  for (const model of ['   ', 'ogw_live_test']) {
+test('fresh OpenGateway startup sanitizes the primary model before adopting it', async () => {
+  for (const [model, expected] of [
+    ['   ', 'auto'],
+    ['ogw_live_test', 'auto'],
+    ['ogw_live_test, mimo-v2.6-pro', 'auto'],
+    [' ogw_live_test ; mimo-v2.6-pro ', 'auto'],
+    [' mimo-v2.6-pro ; ogw_live_test ', 'mimo-v2.6-pro'],
+  ]) {
     const processEnv: NodeJS.ProcessEnv = {
       OPENGATEWAY_API_KEY: 'ogw_live_test',
       OPENAI_MODEL: model,
@@ -1302,7 +1308,7 @@ test('fresh OpenGateway startup defaults unusable models to auto', async () => {
     })
 
     assert.equal(error, null)
-    assert.equal(processEnv.OPENAI_MODEL, 'auto')
+    assert.equal(processEnv.OPENAI_MODEL, expected)
   }
 })
 
