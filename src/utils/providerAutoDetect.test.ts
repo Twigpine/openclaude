@@ -28,7 +28,9 @@ describe('detectProviderFromEnv — priority order', () => {
     const restoreEnv = snapshotEnv(['CODEX_AUTH_JSON_PATH', 'CODEX_AUTH_PATH'])
     const dir = fs.mkdtempSync(join(tmpdir(), 'detect-codex-auth-'))
     const authPath = join(dir, 'auth.json')
-    fs.writeFileSync(authPath, JSON.stringify({ tokens: { access_token: 'test-codex-token' } }))
+    fs.writeFileSync(authPath, JSON.stringify({
+      tokens: { access_token: 'test-codex-token', account_id: 'acct-test' },
+    }))
     if (source === 'ambient') process.env.CODEX_AUTH_JSON_PATH = authPath
     else delete process.env.CODEX_AUTH_JSON_PATH
     delete process.env.CODEX_AUTH_PATH
@@ -52,6 +54,7 @@ describe('detectProviderFromEnv — priority order', () => {
   test.each([
     ['empty', ''],
     ['no credential', '{}'],
+    ['no account ID', '{"tokens":{"access_token":"test-codex-token"}}'],
     ['malformed', '{not json'],
     ['ID token only', '{"tokens":{"id_token":"identity-only"}}'],
     ['missing', undefined],

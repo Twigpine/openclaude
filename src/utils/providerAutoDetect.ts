@@ -98,10 +98,11 @@ function defaultHasCodexAuthFile(env: EnvLike): boolean {
   if (env.CODEX_AUTH_JSON_PATH?.trim()) {
     // An explicit path must be usable by dispatch, without falling back to
     // ambient credentials or secure storage when the file is invalid.
-    return Boolean(resolveRuntimeCodexCredentials({
+    const credentials = resolveRuntimeCodexCredentials({
       env,
       storedCredentials: undefined,
-    }).apiKey)
+    })
+    return Boolean(credentials.apiKey && credentials.accountId)
   }
   const paths = [
     env.CODEX_AUTH_PATH,

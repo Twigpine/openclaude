@@ -41,6 +41,8 @@ bun run dev
 An explicit `--provider` selection is reapplied after settings environment
 variables are loaded. If the selection becomes invalid, reapplication raises a
 validation error instead of continuing with another provider enabled by settings.
+A rejected runtime settings update keeps the previously active provider and
+transport configuration.
 For `--provider custom-anthropic`, keep `ANTHROPIC_BASE_URL` set to a non-Anthropic
 endpoint and provide `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`.
 
@@ -66,9 +68,11 @@ If you use the in-app provider wizard, choose `Codex OAuth` to open ChatGPT sign
 
 If you already use the Codex CLI, OpenClaude reads `~/.codex/auth.json` automatically. You can also point it elsewhere with `CODEX_AUTH_JSON_PATH` or override the token directly with `CODEX_API_KEY`.
 
-Automatic provider detection checks an explicit `CODEX_AUTH_JSON_PATH` using the
-runtime's credential rules. A missing, malformed, or credential-free file does
-not select Codex ahead of another usable provider credential.
+For file-based automatic detection, an explicit `CODEX_AUTH_JSON_PATH` must
+resolve both an access token and an account ID under the runtime's credential
+rules. A missing, malformed, or incomplete file does not select Codex ahead of
+another usable provider credential. The `CODEX_API_KEY`, `CHATGPT_ACCOUNT_ID`,
+and `CODEX_ACCOUNT_ID` environment overrides take priority over file detection.
 
 If you set `CODEX_API_KEY` manually and are not relying on `auth.json` or stored
 Codex OAuth credentials, also set `CHATGPT_ACCOUNT_ID` (or

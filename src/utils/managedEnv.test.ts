@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import axios from 'axios'
+import { getGlobalDispatcher } from 'undici'
+import { getDefaultAppState } from '../state/AppStateStore.js'
+import { onChangeAppState } from '../state/onChangeAppState.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -36,6 +40,9 @@ import {
 } from './providerProfiles.js'
 import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
 import { getSmallFastModel } from './model/model.js'
+import { clearCACertsCache } from './caCerts.js'
+import { clearMTLSCache } from './mtls.js'
+import { clearProxyCache, configureGlobalAgents, getProxyUrl } from './proxy.js'
 import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
 
 const ENV_KEYS = [
@@ -150,21 +157,24 @@ describe('host-managed API Route settings boundary', () => {
 })
 
 describe('remembered custom Anthropic validation', () => {
+  const envKeys = [
+    ...PROVIDER_SELECTION_FLAGS, ...ENV_KEYS,
+    'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+    'ANTHROPIC_MODEL', 'NVIDIA_NIM', 'OPENAI_API_BASE', 'OPENAI_API_FORMAT',
+    'OPENAI_AUTH_HEADER', 'OPENAI_AUTH_SCHEME', 'OPENAI_AUTH_HEADER_VALUE',
+    'CONCENTRATE_API_KEY', 'CONCENTRATE_BASE_URL', 'CONCENTRATE_MODEL',
+    'APISMART_API_KEY', 'APISMART_MODEL',
+    'ANTHROPIC_UNIX_SOCKET',
+  ]
   for (const [name, applySettings] of [
     ['pre-trust', applySafeConfigEnvironmentVariables],
     ['post-trust', applyConfigEnvironmentVariables],
   ] as const) {
     it(`propagates invalid explicit selection during ${name} settings merge`, () => {
-      const restoreEnv = snapshotEnv([
-        ...PROVIDER_SELECTION_FLAGS, ...ENV_KEYS,
-        'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
-        'ANTHROPIC_MODEL', 'NVIDIA_NIM', 'OPENAI_API_BASE', 'OPENAI_API_FORMAT',
-        'OPENAI_AUTH_HEADER', 'OPENAI_AUTH_SCHEME', 'OPENAI_AUTH_HEADER_VALUE',
-        'CONCENTRATE_API_KEY', 'CONCENTRATE_BASE_URL', 'CONCENTRATE_MODEL',
-        'APISMART_API_KEY', 'APISMART_MODEL',
-      ])
+      const restoreEnv = snapshotEnv(envKeys)
       clearRememberedProviderFlagForTests()
       try {
+        delete process.env.ANTHROPIC_UNIX_SOCKET
         process.env.ANTHROPIC_BASE_URL = 'https://proxy.example/v1'
         process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
         expect(applyProviderFlagFromArgs(['--provider', 'custom-anthropic'], {
@@ -191,6 +201,78 @@ describe('remembered custom Anthropic validation', () => {
       }
     })
   }
+
+  it('keeps routing and proxy coherent when the runtime handler catches a rejected merge', async () => {
+    const restoreEnv = snapshotEnv([
+      ...envKeys,
+      'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy',
+      'NODE_EXTRA_CA_CERTS', 'NODE_OPTIONS', 'CLAUDE_CODE_CLIENT_CERT',
+      'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
+    ], { clear: true })
+    const dispatchers = new Set<ReturnType<typeof getGlobalDispatcher>>()
+    const previousDispatcher = getGlobalDispatcher()
+    const requestProxy = async () => (await axios.get<string>('https://provider.example.test', {
+      // Exercise the real global request interceptor without network I/O.
+      adapter: async config => ({
+        data: (config.httpsAgent as { proxy?: URL } | undefined)?.proxy?.href,
+        status: 200, statusText: 'OK', headers: {}, config,
+      }),
+    })).data
+    clearRememberedProviderFlagForTests()
+    try {
+      process.env.ANTHROPIC_BASE_URL = 'https://proxy.example/v1'
+      process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
+      expect(applyProviderFlagFromArgs(['--provider', 'custom-anthropic'], {
+        rememberForSettingsEnv: true,
+      })?.error).toBeUndefined()
+      const oldProxy = 'http://old-proxy.example.test:8080/'
+      const newProxy = 'http://new-proxy.example.test:8080/'
+      process.env.HTTPS_PROXY = oldProxy
+      clearCACertsCache()
+      clearMTLSCache()
+      clearProxyCache()
+      configureGlobalAgents()
+      dispatchers.add(getGlobalDispatcher())
+      expect(await requestProxy()).toBe(oldProxy)
+      // These flags are introduced by replay, not by the settings object.
+      rememberLoadedEnvFileValues({ CLAUDE_CODE_USE_OPENAI: '1', OPENAI_API_KEY: 'file-key' })
+      const invalidEnv = { ANTHROPIC_BASE_URL: ' ', HTTPS_PROXY: newProxy }
+      saveGlobalConfig(current => ({ ...current, env: invalidEnv }))
+      const oldState = getDefaultAppState()
+
+      onChangeAppState({ oldState, newState: {
+        ...oldState,
+        settings: { ...oldState.settings, env: invalidEnv },
+      } })
+
+      expect(process.env.ANTHROPIC_BASE_URL).toBe('https://proxy.example/v1')
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+      expect(process.env.OPENAI_API_KEY).toBeUndefined()
+      expect(getProxyUrl()).toBe(oldProxy)
+      expect(await requestProxy()).toBe(oldProxy)
+      saveGlobalConfig(current => ({ ...current, env: {
+        ANTHROPIC_BASE_URL: 'https://proxy.example/v1', HTTPS_PROXY: newProxy,
+      } }))
+      applyConfigEnvironmentVariables()
+      dispatchers.add(getGlobalDispatcher())
+      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+      expect(getProxyUrl()).toBe(newProxy)
+      expect(await requestProxy()).toBe(newProxy)
+    } finally {
+      clearRememberedProviderFlagForTests()
+      clearRememberedEnvFileValuesForTests()
+      restoreEnv()
+      clearCACertsCache()
+      clearMTLSCache()
+      clearProxyCache()
+      configureGlobalAgents()
+      for (const dispatcher of dispatchers) {
+        if (dispatcher !== previousDispatcher && dispatcher !== getGlobalDispatcher()) {
+          await dispatcher.destroy?.()
+        }
+      }
+    }
+  })
 })
 
 describe('applyConfigEnvironmentVariables', () => {
