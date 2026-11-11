@@ -142,6 +142,10 @@ export function applyProviderFlagFromArgs(
   return result
 }
 
+/**
+ * Reapply the explicit provider after settings merge. Throw on validation
+ * failure so callers cannot silently continue with a different provider.
+ */
 export function reapplyRememberedProviderFlag():
   | { error?: string }
   | undefined {
@@ -152,7 +156,9 @@ export function reapplyRememberedProviderFlag():
     args.push('--model', rememberedProviderFlag.model)
   }
 
-  return applyProviderFlag(rememberedProviderFlag.provider, args)
+  const result = applyProviderFlag(rememberedProviderFlag.provider, args)
+  if (result.error) throw new Error(result.error)
+  return result
 }
 
 export function clearRememberedProviderFlagForTests(): void {
@@ -440,6 +446,27 @@ export function applyProviderFlag(
     if (error) return { error }
   }
 
+  // Validate before provider-state cleanup so invalid requests do not mutate env.
+  if (provider === 'custom-anthropic') {
+    if (!process.env.ANTHROPIC_BASE_URL?.trim()) {
+      return {
+        error: 'Custom Anthropic-compatible provider requires ANTHROPIC_BASE_URL.',
+      }
+    }
+    if (isFirstPartyAnthropicBaseUrlForEnv(process.env)) {
+      return {
+        error: 'Custom Anthropic-compatible provider requires a non-Anthropic ANTHROPIC_BASE_URL.',
+      }
+    }
+    const hasAuthToken = Boolean(process.env.ANTHROPIC_AUTH_TOKEN?.trim())
+    const hasApiKey = Boolean(process.env.ANTHROPIC_API_KEY?.trim())
+    if (!hasAuthToken && !hasApiKey) {
+      return {
+        error: 'Custom Anthropic-compatible provider requires ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY.',
+      }
+    }
+  }
+
   const opengatewayApiKey = process.env.OPENGATEWAY_API_KEY?.trim()
   const copiedOpenAIKeyProvider =
     process.env.OPENAI_API_KEY !== undefined &&
@@ -558,23 +585,7 @@ export function applyProviderFlag(
     }
 
     case 'custom-anthropic':
-      if (!process.env.ANTHROPIC_BASE_URL?.trim()) {
-        return {
-          error: 'Custom Anthropic-compatible provider requires ANTHROPIC_BASE_URL.',
-        }
-      }
-      if (isFirstPartyAnthropicBaseUrlForEnv(process.env)) {
-        return {
-          error: 'Custom Anthropic-compatible provider requires a non-Anthropic ANTHROPIC_BASE_URL.',
-        }
-      }
       const hasAuthToken = Boolean(process.env.ANTHROPIC_AUTH_TOKEN?.trim())
-      const hasApiKey = Boolean(process.env.ANTHROPIC_API_KEY?.trim())
-      if (!hasAuthToken && !hasApiKey) {
-        return {
-          error: 'Custom Anthropic-compatible provider requires ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY.',
-        }
-      }
       if (hasAuthToken) {
         delete process.env.ANTHROPIC_API_KEY
       } else {

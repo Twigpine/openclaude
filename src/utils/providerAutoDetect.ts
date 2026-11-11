@@ -36,6 +36,7 @@
 import { existsSync } from 'fs'
 import { homedir } from 'os'
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
+import { resolveRuntimeCodexCredentials } from '../services/api/providerConfig.js'
 import { join } from 'path'
 
 export type DetectedProviderKind =
@@ -93,9 +94,18 @@ function firstOpenAICredentialSet(
   return undefined
 }
 
-function defaultHasCodexAuthFile(): boolean {
+function defaultHasCodexAuthFile(env: EnvLike): boolean {
+  if (env.CODEX_AUTH_JSON_PATH?.trim()) {
+    // An explicit path must be usable by dispatch, without falling back to
+    // ambient credentials or secure storage when the file is invalid.
+    const credentials = resolveRuntimeCodexCredentials({
+      env,
+      storedCredentials: undefined,
+    })
+    return Boolean(credentials.apiKey && credentials.accountId)
+  }
   const paths = [
-    process.env.CODEX_AUTH_PATH,
+    env.CODEX_AUTH_PATH,
     join(homedir(), '.codex', 'auth.json'),
   ]
   return paths.some(p => p && existsSync(p))
@@ -105,7 +115,9 @@ export type DetectProviderFromEnvOptions = {
   env?: EnvLike
   /**
    * Override Codex auth-file detection. Primarily for tests — the default
-   * implementation checks ~/.codex/auth.json and CODEX_AUTH_PATH on disk.
+   * implementation validates CODEX_AUTH_JSON_PATH using runtime credential
+   * rules, then checks legacy CODEX_AUTH_PATH and ~/.codex/auth.json when no
+   * explicit JSON path is configured. Paths come from the supplied env.
    */
   hasCodexAuth?: () => boolean
 }
@@ -136,7 +148,7 @@ export function detectProviderFromEnv(
     ? envOrOptions
     : { env: envOrOptions as EnvLike }
   const env = options.env ?? process.env
-  const hasCodexAuth = options.hasCodexAuth ?? defaultHasCodexAuthFile
+  const hasCodexAuth = options.hasCodexAuth ?? (() => defaultHasCodexAuthFile(env))
   if (envHasNonEmpty(env, 'ANTHROPIC_API_KEY')) {
     return { kind: 'anthropic', source: 'ANTHROPIC_API_KEY set' }
   }
@@ -357,8 +369,8 @@ function normalizeOpengatewayBaseUrl(baseUrl: string): string {
  */
 function defaultOpengatewayProvider(env: EnvLike): DetectedProvider | null {
   const hasKey =
-    (typeof env.OPENGATEWAY_API_KEY === 'string' && env.OPENGATEWAY_API_KEY.trim().length > 0) ||
-    (typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.trim().length > 0)
+    hasUsableOpenAICredential(env.OPENGATEWAY_API_KEY) ||
+    hasUsableOpenAICredential(env.OPENAI_API_KEY)
   if (!hasKey) return null
 
   const baseUrl =

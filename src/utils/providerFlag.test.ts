@@ -206,6 +206,25 @@ describe('applyProviderFlag - anthropic', () => {
 })
 
 describe('applyProviderFlag - custom Anthropic-compatible', () => {
+  test.each([
+    ['missing endpoint', undefined, 'proxy-token'],
+    ['first-party endpoint', 'https://api.anthropic.com', 'proxy-token'],
+    ['missing credentials', 'https://proxy.example/v1', undefined],
+  ])('preserves the active provider on %s', (_label, baseUrl, token) => {
+    if (baseUrl) process.env.ANTHROPIC_BASE_URL = baseUrl
+    if (token) process.env.ANTHROPIC_AUTH_TOKEN = token
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.NVIDIA_NIM = '1'
+    process.env.NVIDIA_API_KEY = 'nv-key'
+    process.env.OPENAI_API_KEY = 'nv-key'
+    process.env.OPENAI_AZURE_STYLE = '1'
+    process.env.OPENAI_BASE_URL = 'https://old.example/v1'
+    const before = ENV_KEYS.map(key => [key, process.env[key]])
+
+    expect(applyProviderFlag('custom-anthropic', ['--model', 'new-model']).error).toBeDefined()
+    expect(ENV_KEYS.map(key => [key, process.env[key]])).toEqual(before)
+  })
+
   test('requires a custom endpoint instead of sending its credential to Anthropic', () => {
     process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
 

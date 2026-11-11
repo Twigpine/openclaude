@@ -1,4 +1,9 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
+import * as fs from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { snapshotEnv } from '../test/envSnapshot.js'
+import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
 
 import {
   detectBestProvider,
@@ -18,6 +23,67 @@ function scan(env: Record<string, string | undefined>) {
 }
 
 describe('detectProviderFromEnv — priority order', () => {
+  test.each(['supplied', 'ambient'] as const)('uses only the supplied environment for the %s Codex auth override', async source => {
+    await acquireSharedMutationLock('providerAutoDetect Codex auth override')
+    const restoreEnv = snapshotEnv(['CODEX_AUTH_JSON_PATH', 'CODEX_AUTH_PATH'])
+    const dir = fs.mkdtempSync(join(tmpdir(), 'detect-codex-auth-'))
+    const authPath = join(dir, 'auth.json')
+    fs.writeFileSync(authPath, JSON.stringify({
+      tokens: { access_token: 'test-codex-token', account_id: 'acct-test' },
+    }))
+    if (source === 'ambient') process.env.CODEX_AUTH_JSON_PATH = authPath
+    else delete process.env.CODEX_AUTH_JSON_PATH
+    delete process.env.CODEX_AUTH_PATH
+    const realExists = fs.existsSync
+    const exists = spyOn(fs, 'existsSync').mockImplementation(
+      path => path === authPath && realExists(path),
+    )
+    try {
+      const result = detectProviderFromEnv({
+        env: source === 'supplied' ? { CODEX_AUTH_JSON_PATH: authPath } : {},
+      })
+      expect(result?.kind ?? null).toBe(source === 'supplied' ? 'codex' : null)
+    } finally {
+      exists.mockRestore()
+      fs.rmSync(dir, { recursive: true, force: true })
+      restoreEnv()
+      releaseSharedMutationLock()
+    }
+  })
+
+  test.each([
+    ['empty', ''],
+    ['no credential', '{}'],
+    ['no account ID', '{"tokens":{"access_token":"test-codex-token"}}'],
+    ['malformed', '{not json'],
+    ['ID token only', '{"tokens":{"id_token":"identity-only"}}'],
+    ['missing', undefined],
+  ])('does not select Codex from an %s explicit auth file', async (_label, contents) => {
+    await acquireSharedMutationLock('providerAutoDetect invalid Codex auth override')
+    const restoreEnv = snapshotEnv(['CODEX_AUTH_JSON_PATH', 'CODEX_AUTH_PATH'])
+    const dir = fs.mkdtempSync(join(tmpdir(), 'detect-invalid-codex-auth-'))
+    const authPath = join(dir, 'auth.json')
+    if (contents !== undefined) fs.writeFileSync(authPath, contents)
+    // Set both to expose the existence-only behavior on the starting PR head.
+    process.env.CODEX_AUTH_JSON_PATH = authPath
+    delete process.env.CODEX_AUTH_PATH
+    const realExists = fs.existsSync
+    const exists = spyOn(fs, 'existsSync').mockImplementation(
+      path => path === authPath && realExists(path),
+    )
+    try {
+      expect(detectProviderFromEnv({ env: {
+        CODEX_AUTH_JSON_PATH: authPath,
+        OPENAI_API_KEY: 'sk-usable',
+      } })?.kind).toBe('openai')
+    } finally {
+      exists.mockRestore()
+      fs.rmSync(dir, { recursive: true, force: true })
+      restoreEnv()
+      releaseSharedMutationLock()
+    }
+  })
+
   test('ANTHROPIC_API_KEY wins over all others', () => {
     expect(
       scan({
@@ -326,6 +392,17 @@ describe('detectBestProvider — orchestrator', () => {
     expect(result?.model).toBe('auto')
     expect(probeCalled).toBe(false)
   })
+
+  test.each(['OPENGATEWAY_API_KEY', 'OPENAI_API_KEY'])(
+    'rejects a placeholder %s in the OpenGateway fallback',
+    async key => {
+      expect(await detectBestProvider({
+        env: { [key]: 'SUA_CHAVE' },
+        skipLocal: true,
+        hasCodexAuth: () => false,
+      })).toBeNull()
+    },
+  )
 
   test('completely empty environment returns null (opengateway needs an API key)', async () => {
     const fetchImpl = asFetch(async (): Promise<Response> => {

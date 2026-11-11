@@ -32,7 +32,7 @@ import {
   type UsageRollupRow,
 } from './types.js'
 
-function rowKey(event: UsageEvent): string {
+function rowKey(event: Pick<UsageEvent, 'model' | 'route' | 'local' | 'source' | 'project' | 'fast'>): string {
   return [
     event.model,
     event.route,
@@ -302,6 +302,10 @@ async function saveUsageDayRollups(
     const current =
       (text === null ? null : parseRollupFile(text, true)) ?? emptyRollupFile()
     for (const [key, day] of Object.entries(days)) {
+      // A reader may have captured raw events before pruning, then waited
+      // here while a late writer added to the archived totals. Once the raw
+      // file is gone its snapshot must never replace the saved day.
+      if (await eventFileSize(key, usageDir) === null) continue
       // Event files only grow, so a day built from fewer bytes is older than
       // the saved one and must not replace it.
       const saved = current.days[key]
@@ -310,6 +314,60 @@ async function saveUsageDayRollups(
     await writeUsageRollupFile(month, current, usageDir)
   } finally {
     await release()
+  }
+}
+
+/**
+ * Add a delayed flush to a day whose raw file was already pruned. The caller
+ * holds the event-path lock and has checked that the raw file is absent.
+ * Return false for a new day, which should still get a raw event file.
+ */
+export async function appendToPrunedUsageDay(
+  dateKey: string,
+  events: readonly UsageEvent[],
+  usageDir: string,
+): Promise<boolean> {
+  // Today and future days are never archived. Their first raw write must
+  // remain independent of unrelated historical rollup failures.
+  if (dateKey >= toLocalDateKey(new Date())) return false
+  const month = monthKeyOf(dateKey)
+  const read = await readRollupFileChecked(month, usageDir)
+  // Missing history and unreadable history are different: recreating a raw
+  // suffix here would let sourceBytes hide it or replace archived totals.
+  if (read.unreadable) throw new Error('Cannot append to unreadable usage rollups')
+  if (!read.file.days[dateKey]) return false
+  const release = await lock(getUsageRollupsDir(usageDir), {
+    stale: 10_000,
+    retries: { retries: 5, minTimeout: 25 },
+  })
+  try {
+    const text = await readRollupText(month, usageDir)
+    const file = text === null ? null : parseRollupFile(text, true)
+    if (!file) throw new Error('Cannot append to unreadable usage rollups')
+    const saved = file.days[dateKey]
+    if (!saved) return false
+    const added = aggregateUsageEvents(events)
+    const rows = new Map(saved.rows.map(row => [rowKey(row), row]))
+    for (const row of added.rows) {
+      const key = rowKey(row)
+      const existing = rows.get(key)
+      if (!existing) rows.set(key, row)
+      else {
+        for (const field of [
+          'requests', 'unreported', 'noCacheRequests', 'noCacheInputTokens',
+          'input', 'output', 'cacheRead', 'cacheWrite', 'webSearch',
+        ] as const) existing[field] += row[field]
+      }
+    }
+    saved.rows = [...rows.values()]
+    saved.sessions = [...new Set([...saved.sessions, ...added.sessions])].sort()
+    await writeUsageRollupFile(month, file, usageDir)
+    return true
+  } finally {
+    // The write committed; an unlock error must not cause a duplicate flush.
+    await release().catch(error => {
+      logForDebugging(`Failed to release usage rollup lock: ${String(error)}`)
+    })
   }
 }
 
@@ -391,14 +449,34 @@ export async function rollUpAndPruneUsageEvents(
 
   const rollups = await getUsageDayRollups(expired, { today, usageDir })
   for (const key of expired) {
-    const size = await eventFileSize(key, usageDir)
     const rollup = rollups.get(key)
-    // Only delete a file whose current contents are captured in a rollup.
-    if (size === null || !rollup || rollup.sourceBytes !== size) continue
-    const persisted = (await readUsageRollupFile(monthKeyOf(key), usageDir))
-      .days[key]
-    if (!persisted || persisted.sourceBytes !== size) continue
-    if (await deleteEventFile(key, usageDir)) removed++
+    if (!rollup) continue
+    const file = getUsageEventsFile(key, usageDir)
+    let release: () => Promise<void>
+    try {
+      release = await lock(file, {
+        realpath: false,
+        stale: 10_000,
+        retries: { retries: 5, minTimeout: 25 },
+      })
+    } catch (error) {
+      // A busy day can wait for a later sweep; continue pruning other days.
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ELOCKED') continue
+      throw error
+    }
+    try {
+      // Appenders use this same lock. Validate the current file and saved
+      // totals while holding it, so an unrolled append cannot be deleted.
+      const size = await eventFileSize(key, usageDir)
+      if (size === null || rollup.sourceBytes !== size) continue
+      const persisted = (await readUsageRollupFile(monthKeyOf(key), usageDir))
+        .days[key]
+      if (!persisted || persisted.sourceBytes !== size) continue
+      if (await deleteEventFile(key, usageDir)) removed++
+    } finally {
+      await release()
+    }
   }
   return { removed }
 }

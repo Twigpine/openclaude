@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
 import { appendFile, mkdir, writeFile } from 'fs/promises'
+import * as fsPromises from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { setSessionPersistenceDisabled } from '../../bootstrap/state.js'
 import * as settingsModule from '../../utils/settings/settings.js'
+import * as lockfile from '../../utils/lockfile.js'
 import * as ledger from './ledger.js'
 import {
   getUsageEventsDir,
@@ -322,6 +324,97 @@ describe('getUsageDayRollups', () => {
 })
 
 describe('rollUpAndPruneUsageEvents', () => {
+  test('skips a locked day and prunes later days, then retries it next sweep', async () => {
+    const now = startOfLocalDay('2026-11-09')
+    const busy = '2026-10-01'
+    const later = '2026-10-02'
+    await writeDay(busy, [makeUsageEvent({ ts: at(busy) })])
+    await writeDay(later, [makeUsageEvent({ ts: at(later) })])
+    const file = getUsageEventsFile(busy, usageDir)
+    const realLock = lockfile.lock
+    const releaseWriter = await realLock(file)
+    // Exercise proper-lockfile's real contention error without its backoff.
+    const lockSpy = spyOn(lockfile, 'lock').mockImplementation((target, options) =>
+      realLock(target, target === file ? { ...options, retries: 0 } : options),
+    )
+    try {
+      expect(await rollUpAndPruneUsageEvents(now, { now, usageDir })).toEqual({ removed: 1 })
+      expect(existsSync(file)).toBe(true)
+      expect(existsSync(getUsageEventsFile(later, usageDir))).toBe(false)
+      expect((await readUsageRollupFile('2026-10', usageDir)).days[later]?.rows[0]?.requests).toBe(1)
+    } finally {
+      lockSpy.mockRestore()
+      await releaseWriter()
+    }
+    expect(await rollUpAndPruneUsageEvents(now, { now, usageDir })).toEqual({ removed: 1 })
+  })
+
+  test('propagates unexpected event-lock failures', async () => {
+    const now = startOfLocalDay('2026-11-09')
+    const old = '2026-10-01'
+    await writeDay(old, [makeUsageEvent({ ts: at(old) })])
+    const file = getUsageEventsFile(old, usageDir)
+    const realLock = lockfile.lock
+    const failure = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    const lockSpy = spyOn(lockfile, 'lock').mockImplementation((target, options) =>
+      target === file ? Promise.reject(failure) : realLock(target, options),
+    )
+    try {
+      await expect(rollUpAndPruneUsageEvents(now, { now, usageDir })).rejects.toBe(failure)
+      expect(existsSync(file)).toBe(true)
+    } finally {
+      lockSpy.mockRestore()
+    }
+  })
+
+  test('keeps a writer append that arrives before pruning can acquire the event lock', async () => {
+    const old = '2026-10-01'
+    const now = startOfLocalDay('2026-11-09')
+    await writeDay(old, [makeUsageEvent({ ts: at(old) })])
+    await getUsageDayRollups([old], { today: '2026-11-09', usageDir })
+    const file = getUsageEventsFile(old, usageDir)
+    const realLock = lockfile.lock
+    const realUnlink = fsPromises.unlink
+    const releaseWriter = await realLock(file)
+    const reachedPrune = Promise.withResolvers<void>()
+    const writerDone = Promise.withResolvers<void>()
+    const lockSpy = spyOn(lockfile, 'lock').mockImplementation((target, options) => {
+      if (target === file) reachedPrune.resolve()
+      return realLock(target, options)
+    })
+    // The old implementation skips the event lock and reaches unlink instead.
+    // Pause either path until the writer finishes, without racing real timers.
+    const unlinkSpy = spyOn(fsPromises, 'unlink').mockImplementation(async target => {
+      if (target === file) {
+        reachedPrune.resolve()
+        await writerDone.promise
+      }
+      return realUnlink(target)
+    })
+    const pruning = rollUpAndPruneUsageEvents(now, { now, usageDir })
+    try {
+      try {
+        await Promise.race([
+          reachedPrune.promise,
+          pruning.then(() => { throw new Error('Pruning completed before the writer barrier') }),
+        ])
+        await writeDay(old, [makeUsageEvent({ ts: at(old, 23) })])
+      } finally {
+        await releaseWriter()
+        writerDone.resolve()
+      }
+      expect(await pruning).toEqual({ removed: 0 })
+      expect((await ledger.readUsageEventsForDay(old, usageDir)).events).toHaveLength(2)
+    } finally {
+      await pruning.catch(() => {})
+      lockSpy.mockRestore()
+      unlinkSpy.mockRestore()
+    }
+    // The next pass saves both requests before deleting their raw event file.
+    expect(await rollUpAndPruneUsageEvents(now, { now, usageDir })).toEqual({ removed: 1 })
+    expect((await readUsageRollupFile('2026-10', usageDir)).days[old]?.rows[0]?.requests).toBe(2)
+  })
+
   test('deletes expired event files only after their totals are saved', async () => {
     const now = startOfLocalDay('2026-11-09')
     now.setHours(10)
