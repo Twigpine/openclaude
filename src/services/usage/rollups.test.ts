@@ -324,6 +324,49 @@ describe('getUsageDayRollups', () => {
 })
 
 describe('rollUpAndPruneUsageEvents', () => {
+  test('skips a locked day and prunes later days, then retries it next sweep', async () => {
+    const now = startOfLocalDay('2026-11-09')
+    const busy = '2026-10-01'
+    const later = '2026-10-02'
+    await writeDay(busy, [makeUsageEvent({ ts: at(busy) })])
+    await writeDay(later, [makeUsageEvent({ ts: at(later) })])
+    const file = getUsageEventsFile(busy, usageDir)
+    const realLock = lockfile.lock
+    const releaseWriter = await realLock(file)
+    // Exercise proper-lockfile's real contention error without its backoff.
+    const lockSpy = spyOn(lockfile, 'lock').mockImplementation((target, options) =>
+      realLock(target, target === file ? { ...options, retries: 0 } : options),
+    )
+    try {
+      expect(await rollUpAndPruneUsageEvents(now, { now, usageDir })).toEqual({ removed: 1 })
+      expect(existsSync(file)).toBe(true)
+      expect(existsSync(getUsageEventsFile(later, usageDir))).toBe(false)
+      expect((await readUsageRollupFile('2026-10', usageDir)).days[later]?.rows[0]?.requests).toBe(1)
+    } finally {
+      lockSpy.mockRestore()
+      await releaseWriter()
+    }
+    expect(await rollUpAndPruneUsageEvents(now, { now, usageDir })).toEqual({ removed: 1 })
+  })
+
+  test('propagates unexpected event-lock failures', async () => {
+    const now = startOfLocalDay('2026-11-09')
+    const old = '2026-10-01'
+    await writeDay(old, [makeUsageEvent({ ts: at(old) })])
+    const file = getUsageEventsFile(old, usageDir)
+    const realLock = lockfile.lock
+    const failure = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    const lockSpy = spyOn(lockfile, 'lock').mockImplementation((target, options) =>
+      target === file ? Promise.reject(failure) : realLock(target, options),
+    )
+    try {
+      await expect(rollUpAndPruneUsageEvents(now, { now, usageDir })).rejects.toBe(failure)
+      expect(existsSync(file)).toBe(true)
+    } finally {
+      lockSpy.mockRestore()
+    }
+  })
+
   test('keeps a writer append that arrives before pruning can acquire the event lock', async () => {
     const old = '2026-10-01'
     const now = startOfLocalDay('2026-11-09')

@@ -2,12 +2,14 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { appendFile, mkdir } from 'fs/promises'
+import * as fsPromises from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { getSessionId } from '../../bootstrap/state.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import * as lockfile from '../../utils/lockfile.js'
+import * as ledger from './ledger.js'
 import {
   buildUsageEvent,
   flushUsageEvents,
@@ -17,7 +19,8 @@ import {
   recordUsageEvent,
   resetUsageLedgerForTesting,
 } from './ledger.js'
-import { getUsageEventsDir, getUsageEventsFile, toLocalDateKey } from './paths.js'
+import { getUsageDir, getUsageEventsDir, getUsageEventsFile, getUsageRollupFile, getUsageRollupsDir, startOfLocalDay, toLocalDateKey } from './paths.js'
+import { getUsageDayRollups, readUsageRollupFile, rollUpAndPruneUsageEvents } from './rollups.js'
 
 // Provider-selection variables that route detection reads.
 const PROVIDER_ENV_KEYS = [
@@ -169,6 +172,120 @@ describe('buildUsageEvent', () => {
 })
 
 describe('recordUsageEvent', () => {
+  test.each(['a', 'b'])('a flush of model %s waiting on pruning adds to archived totals and survives a stale rollup save', async lateModel => {
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
+    const old = '2026-10-01'
+    const today = '2026-11-09'
+    const now = startOfLocalDay(today)
+    const recordOldRequest = () => {
+      const clock = spyOn(Date, 'now').mockReturnValue(startOfLocalDay(old).getTime())
+      try {
+        recordUsageEvent({ usage: usage(), model: getRecordedUsageEvents().length ? lateModel : 'a', requestKey: `request-${getRecordedUsageEvents().length}` })
+      } finally {
+        clock.mockRestore()
+      }
+    }
+    recordOldRequest()
+    await flushUsageEvents()
+    const file = getUsageEventsFile(old)
+    const originalBytes = statSync(file).size
+    const readSnapshot = Promise.withResolvers<void>()
+    const resumeReader = Promise.withResolvers<void>()
+    const writerWaiting = Promise.withResolvers<void>()
+    const realRead = ledger.readUsageEventsForDay
+    let pauseRead = true
+    const readSpy = spyOn(ledger, 'readUsageEventsForDay').mockImplementation(async (key, dir) => {
+      const result = await realRead(key, dir)
+      if (pauseRead && key === old) {
+        pauseRead = false
+        readSnapshot.resolve()
+        await resumeReader.promise
+      }
+      return result
+    })
+    const realLock = lockfile.lock
+    let eventLockCalls = 0
+    const lockSpy = spyOn(lockfile, 'lock').mockImplementation((target, options) => {
+      if (target === file && ++eventLockCalls === 2) writerWaiting.resolve()
+      return realLock(target, options)
+    })
+    const realUnlink = fsPromises.unlink
+    let writer: Promise<void> | undefined
+    const unlinkSpy = spyOn(fsPromises, 'unlink').mockImplementation(async target => {
+      if (target === file) {
+        recordOldRequest()
+        // Both events serialize to the same size: size alone cannot identify
+        // a recreated file. Start the real flush while pruning owns its lock.
+        const events = getRecordedUsageEvents()
+        expect(Buffer.byteLength(JSON.stringify(events[1]) + '\n')).toBe(originalBytes)
+        writer = flushUsageEvents()
+        await writerWaiting.promise
+      }
+      return realUnlink(target)
+    })
+    const staleRead = getUsageDayRollups([old], { today, usageDir: getUsageDir() })
+    try {
+      await readSnapshot.promise
+      expect(await rollUpAndPruneUsageEvents(now, { now })).toEqual({ removed: 1 })
+      await writer
+      const saved = (await readUsageRollupFile('2026-10')).days[old]
+      expect(saved?.rows).toHaveLength(lateModel === 'a' ? 1 : 2)
+      expect(saved?.rows.reduce((sum, row) => sum + row.requests, 0)).toBe(2)
+      expect(saved?.rows.reduce((sum, row) => sum + row.input, 0)).toBe(2400)
+      expect(saved?.rows.reduce((sum, row) => sum + row.cacheRead, 0)).toBe(10000)
+      expect(saved?.rows.reduce((sum, row) => sum + row.cacheWrite, 0)).toBe(80)
+      expect((await readUsageEventsForDay(old)).exists).toBe(false)
+      resumeReader.resolve()
+      await staleRead
+      expect((await getUsageDayRollups([old], { today })).get(old)).toEqual(saved!)
+      expect(await rollUpAndPruneUsageEvents(now, { now })).toEqual({ removed: 0 })
+    } finally {
+      resumeReader.resolve()
+      await staleRead.catch(() => {})
+      await writer?.catch(() => {})
+      readSpy.mockRestore()
+      lockSpy.mockRestore()
+      unlinkSpy.mockRestore()
+    }
+  })
+
+  test.each(['{broken', '{"version":999,"days":{}}'])('a new raw day is writable beside an unreadable month: %s', async contents => {
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
+    const today = toLocalDateKey(Date.now())
+    await mkdir(getUsageRollupsDir(), { recursive: true })
+    const file = getUsageRollupFile(today.slice(0, 7))
+    writeFileSync(file, contents)
+    recordUsageEvent({ usage: usage(), model: 'a' })
+    await flushUsageEvents()
+    expect((await readUsageEventsForDay(today)).events).toHaveLength(1)
+    expect(readFileSync(file, 'utf8')).toBe(contents)
+  })
+
+  test('a completed raw append reported as failed is acknowledged before it can be archived', async () => {
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
+    const today = toLocalDateKey(Date.now())
+    const realAppend = fsPromises.appendFile
+    const appendSpy = spyOn(fsPromises, 'appendFile').mockImplementation(async (...args) => {
+      await realAppend(...args)
+      throw Object.assign(new Error('write failed after a complete line'), { code: 'EIO' })
+    })
+    try {
+      recordUsageEvent({ usage: usage(), model: 'a' })
+      await flushUsageEvents()
+      // The writer acknowledges the durable ID while holding the lock,
+      // rather than requeueing it after pruning has removed the raw IDs.
+      expect(appendSpy).toHaveBeenCalledTimes(1)
+      const tomorrow = startOfLocalDay(today)
+      tomorrow.setDate(tomorrow.getDate() + 1)
+      expect(await rollUpAndPruneUsageEvents(tomorrow, { now: tomorrow })).toEqual({ removed: 1 })
+      await flushUsageEvents()
+      expect((await readUsageRollupFile(today.slice(0, 7))).days[today]?.rows[0]?.requests).toBe(1)
+      expect((await readUsageEventsForDay(today)).exists).toBe(false)
+    } finally {
+      appendSpy.mockRestore()
+    }
+  })
+
   test('writes one line per request to the local day file', async () => {
     process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
     recordUsageEvent({ usage: usage(), model: 'a', querySource: 'compact' })

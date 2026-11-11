@@ -1,6 +1,6 @@
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import { randomBytes } from 'crypto'
-import { appendFile, mkdir, readFile, writeFile } from 'fs/promises'
+import { appendFile, mkdir, readFile, stat } from 'fs/promises'
 
 import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
 import { registerCleanup } from '../../utils/cleanupRegistry.js'
@@ -210,18 +210,40 @@ async function appendEventsToDay(
   usageDir: string,
 ): Promise<void> {
   const file = getUsageEventsFile(dateKey, usageDir)
-  // proper-lockfile needs the target to exist before it can lock it.
-  await writeFile(file, '', { encoding: 'utf8', mode: 0o600, flag: 'a' })
+  // Lock the path even after pruning removes the file. Do not recreate it
+  // before acquiring the lock: its absence identifies an archived day.
   const release = await lock(file, {
+    realpath: false,
     stale: 10_000,
     retries: { retries: 5, minTimeout: 25 },
   })
   try {
-    await appendFile(
-      file,
-      events.map(event => jsonStringify(event) + '\n').join(''),
-      { encoding: 'utf8', mode: 0o600 },
-    )
+    try {
+      await stat(file)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const { appendToPrunedUsageDay } = await import('./rollups.js')
+      if (await appendToPrunedUsageDay(dateKey, events, usageDir)) return
+    }
+    try {
+      await appendFile(
+        file,
+        events.map(event => jsonStringify(event) + '\n').join(''),
+        { encoding: 'utf8', mode: 0o600 },
+      )
+    } catch (error) {
+      // A failed append may still have written complete lines. Acknowledge
+      // them under the day lock before cleanup can archive their IDs away;
+      // only unwritten events may be retried into the saved totals.
+      const written = await readUsageEventsForDay(dateKey, usageDir).catch(() => null)
+      if (written) {
+        const ids = new Set(written.events.map(event => event.id))
+        const remaining = events.filter(event => !ids.has(event.id))
+        events.splice(0, events.length, ...remaining)
+        if (events.length === 0) return
+      }
+      throw error
+    }
   } finally {
     // The append already happened; failing here would re-queue and re-append
     // the same events.
