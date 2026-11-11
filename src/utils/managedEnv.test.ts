@@ -1,11 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import axios from 'axios'
-import { getGlobalDispatcher, setGlobalDispatcher } from 'undici'
-import { getDefaultAppState } from '../state/AppStateStore.js'
-import { onChangeAppState } from '../state/onChangeAppState.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -40,9 +36,6 @@ import {
 } from './providerProfiles.js'
 import { PROVIDER_SELECTION_FLAGS } from './providerSelectionFlags.js'
 import { getSmallFastModel } from './model/model.js'
-import { clearCACertsCache } from './caCerts.js'
-import { clearMTLSCache } from './mtls.js'
-import { clearProxyCache, configureGlobalAgents, getProxyUrl } from './proxy.js'
 import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
 
 const ENV_KEYS = [
@@ -202,87 +195,30 @@ describe('remembered custom Anthropic validation', () => {
     })
   }
 
-  it('keeps routing and proxy coherent when the runtime handler catches a rejected merge', async () => {
-    const restoreEnv = snapshotEnv([
+  it('keeps routing and proxy coherent when the runtime handler catches a rejected merge', () => {
+    // Proxy ownership, caches and global clients are process-wide. Exercise the
+    // real callback in a child instead of reconstructing private transport state.
+    const childEnv = { ...process.env }
+    for (const key of [
       ...envKeys,
       'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy',
       'NODE_EXTRA_CA_CERTS', 'NODE_OPTIONS', 'CLAUDE_CODE_CLIENT_CERT',
       'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
-    ], { clear: true })
-    const dispatchers = new Set<ReturnType<typeof getGlobalDispatcher>>()
-    const previousDispatcher = getGlobalDispatcher()
-    // Transport setup may retire its previously installed direct dispatcher.
-    // It belongs to the surrounding test process, so keep it open for restore.
-    const preservePreviousClose = typeof previousDispatcher.close === 'function'
-      ? spyOn(previousDispatcher, 'close').mockResolvedValue(undefined)
-      : undefined
-    const requestProxy = async () => (await axios.get<string>('https://provider.example.test', {
-      // Exercise the real global request interceptor without network I/O.
-      adapter: async config => ({
-        data: (config.httpsAgent as { proxy?: URL } | undefined)?.proxy?.href,
-        status: 200, statusText: 'OK', headers: {}, config,
-      }),
-    })).data
-    clearRememberedProviderFlagForTests()
-    try {
-      process.env.ANTHROPIC_BASE_URL = 'https://proxy.example/v1'
-      process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
-      expect(applyProviderFlagFromArgs(['--provider', 'custom-anthropic'], {
-        rememberForSettingsEnv: true,
-      })?.error).toBeUndefined()
-      const oldProxy = 'http://old-proxy.example.test:8080/'
-      const newProxy = 'http://new-proxy.example.test:8080/'
-      process.env.HTTPS_PROXY = oldProxy
-      clearCACertsCache()
-      clearMTLSCache()
-      clearProxyCache()
-      configureGlobalAgents()
-      dispatchers.add(getGlobalDispatcher())
-      expect(await requestProxy()).toBe(oldProxy)
-      // These flags are introduced by replay, not by the settings object.
-      rememberLoadedEnvFileValues({ CLAUDE_CODE_USE_OPENAI: '1', OPENAI_API_KEY: 'file-key' })
-      const invalidEnv = { ANTHROPIC_BASE_URL: ' ', HTTPS_PROXY: newProxy }
-      saveGlobalConfig(current => ({ ...current, env: invalidEnv }))
-      const oldState = getDefaultAppState()
-
-      onChangeAppState({ oldState, newState: {
-        ...oldState,
-        settings: { ...oldState.settings, env: invalidEnv },
-      } })
-
-      expect(process.env.ANTHROPIC_BASE_URL).toBe('https://proxy.example/v1')
-      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
-      expect(process.env.OPENAI_API_KEY).toBeUndefined()
-      expect(getProxyUrl()).toBe(oldProxy)
-      expect(await requestProxy()).toBe(oldProxy)
-      saveGlobalConfig(current => ({ ...current, env: {
-        ANTHROPIC_BASE_URL: 'https://proxy.example/v1', HTTPS_PROXY: newProxy,
-      } }))
-      applyConfigEnvironmentVariables()
-      dispatchers.add(getGlobalDispatcher())
-      expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
-      expect(getProxyUrl()).toBe(newProxy)
-      expect(await requestProxy()).toBe(newProxy)
-    } finally {
-      clearRememberedProviderFlagForTests()
-      clearRememberedEnvFileValuesForTests()
-      restoreEnv()
-      try {
-        clearCACertsCache()
-        clearMTLSCache()
-        clearProxyCache()
-        configureGlobalAgents()
-        dispatchers.add(getGlobalDispatcher())
-      } finally {
-        setGlobalDispatcher(previousDispatcher)
-        preservePreviousClose?.mockRestore()
-        await Promise.all([...dispatchers]
-          .filter(dispatcher => dispatcher !== previousDispatcher)
-          .map(dispatcher => dispatcher.destroy?.()))
-      }
-    }
-    expect(getGlobalDispatcher()).toBe(previousDispatcher)
-  })
+    ]) delete childEnv[key]
+    const child = Bun.spawnSync([
+      process.execPath, 'run',
+      join(import.meta.dir, '../test/fixtures/managedEnvTransport.fixture.ts'),
+    ], {
+      cwd: tempDir,
+      env: { ...childEnv, OPENCLAUDE_CONFIG_DIR: join(tempDir, 'config') },
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 15_000,
+    })
+    expect(child.exitCode, child.stderr.toString()).toBe(0)
+    expect(child.stdout.toString()).toContain('MANAGED_ENV_TRANSPORT_OK')
+    // Allow the child's 15-second deadline plus startup and result assertions.
+  }, 20_000)
 })
 
 describe('applyConfigEnvironmentVariables', () => {
