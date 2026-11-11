@@ -41,8 +41,8 @@ bun run dev
 An explicit `--provider` selection is reapplied after settings environment
 variables are loaded. If the selection becomes invalid, reapplication raises a
 validation error instead of continuing with another provider enabled by settings.
-A rejected runtime settings update keeps the previously active provider and
-transport configuration.
+A runtime settings update rejected during provider validation keeps the
+previously active provider and transport configuration.
 For `--provider custom-anthropic`, keep `ANTHROPIC_BASE_URL` set to a non-Anthropic
 endpoint and provide `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`.
 

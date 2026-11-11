@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import axios from 'axios'
-import { getGlobalDispatcher } from 'undici'
+import { getGlobalDispatcher, setGlobalDispatcher } from 'undici'
 import { getDefaultAppState } from '../state/AppStateStore.js'
 import { onChangeAppState } from '../state/onChangeAppState.js'
 import {
@@ -211,6 +211,11 @@ describe('remembered custom Anthropic validation', () => {
     ], { clear: true })
     const dispatchers = new Set<ReturnType<typeof getGlobalDispatcher>>()
     const previousDispatcher = getGlobalDispatcher()
+    // Transport setup may retire its previously installed direct dispatcher.
+    // It belongs to the surrounding test process, so keep it open for restore.
+    const preservePreviousClose = typeof previousDispatcher.close === 'function'
+      ? spyOn(previousDispatcher, 'close').mockResolvedValue(undefined)
+      : undefined
     const requestProxy = async () => (await axios.get<string>('https://provider.example.test', {
       // Exercise the real global request interceptor without network I/O.
       adapter: async config => ({
@@ -262,16 +267,21 @@ describe('remembered custom Anthropic validation', () => {
       clearRememberedProviderFlagForTests()
       clearRememberedEnvFileValuesForTests()
       restoreEnv()
-      clearCACertsCache()
-      clearMTLSCache()
-      clearProxyCache()
-      configureGlobalAgents()
-      for (const dispatcher of dispatchers) {
-        if (dispatcher !== previousDispatcher && dispatcher !== getGlobalDispatcher()) {
-          await dispatcher.destroy?.()
-        }
+      try {
+        clearCACertsCache()
+        clearMTLSCache()
+        clearProxyCache()
+        configureGlobalAgents()
+        dispatchers.add(getGlobalDispatcher())
+      } finally {
+        setGlobalDispatcher(previousDispatcher)
+        preservePreviousClose?.mockRestore()
+        await Promise.all([...dispatchers]
+          .filter(dispatcher => dispatcher !== previousDispatcher)
+          .map(dispatcher => dispatcher.destroy?.()))
       }
     }
+    expect(getGlobalDispatcher()).toBe(previousDispatcher)
   })
 })
 
