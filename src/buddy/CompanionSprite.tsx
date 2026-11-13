@@ -24,8 +24,6 @@ import {
 } from './heroArt.js'
 import {
   actionPoseTime,
-  advanceMoodClock,
-  type CompanionActivity,
   type MoodClock,
   moodFrameMs,
   resolveMood,
@@ -61,6 +59,14 @@ const BUBBLE_SHOW = 20 // ticks → ~10s at 500ms
 const FADE_WINDOW = 6 // last ~3s the bubble dims so you know it's about to go
 const PET_BURST_MS = 2500 // how long hearts float after /buddy pet
 const DANCE_MS = 6000 // how long /buddy dance lasts
+
+// Notes bob above the line-art sprite while it dances (hero art draws its own).
+const DANCE_NOTES = [
+  '  ♪      ♫  ',
+  '    ♫  ♪    ',
+  ' ♫    ♪   ♪ ',
+  '   ♪   ♫    ',
+]
 
 // Idle sequence: mostly rest (frame 0), occasional fidget (frames 1-2), rare blink.
 // Sequence indices map to sprite frames; -1 means "blink on frame 0".
@@ -205,24 +211,19 @@ function PixelRows({ rows }: { rows: PixelRun[][] }): React.ReactNode {
   )
 }
 
-// The sprite unmounts while dialogs cover the prompt; greet only on the first
-// mount of the session, not after every dialog.
-let greetedThisSession = false
-
 // React.memo: this file ships as plain source (not committed react-compiler
-// output), and REPL re-renders it per keystroke with the same primitive
-// props. memo skips those re-renders; animation re-renders come from the
-// component's own clock subscriptions and are unaffected.
-export type CompanionSpriteProps = {
-  /** What the agent is doing; drives the hero's mood. */
-  activity?: CompanionActivity
-  /** The last turn ended in an API error (shown when it finishes). */
-  turnFailed?: boolean
+// output), and REPL re-renders it per keystroke. The mood clock prop only
+// changes identity when the agent's activity changes, so memo still skips
+// those re-renders; animation re-renders come from the component's own clock
+// subscriptions and are unaffected.
+type CompanionSpriteProps = {
+  /** The agent's activity over time, from useCompanionMoodClock in the REPL.
+   *  Owned there because this sprite unmounts while dialogs cover the prompt. */
+  moodClock?: MoodClock
 }
 
 export const CompanionSprite = React.memo(function CompanionSprite({
-  activity = 'idle',
-  turnFailed = false,
+  moodClock: sessionMoodClock,
 }: CompanionSpriteProps): React.ReactNode {
   const reaction = useAppState(s => s.companionReaction)
   const petAt = useAppState(s => s.companionPetAt)
@@ -255,18 +256,9 @@ export const CompanionSprite = React.memo(function CompanionSprite({
   const [, time] = useAnimationFrame(hidden || reducedMotion ? null : frameMs)
   const tick = Math.floor(time / TICK_MS)
 
-  // Mood clock: tracks busy stretches, the short mood after a turn ends, and
-  // idle time for sleeping. Updated during render on activity changes, the
-  // same sync-during-render pattern as the pet and bubble anchors below.
-  const [moodClock, setMoodClock] = useState<MoodClock>(() => {
-    const clock = startMoodClock(activity, time, !greetedThisSession)
-    greetedThisSession = true
-    return clock
-  })
-  const nextMoodClock = advanceMoodClock(moodClock, activity, turnFailed, time)
-  if (nextMoodClock !== moodClock) {
-    setMoodClock(nextMoodClock)
-  }
+  // Without a session clock (rendered outside the REPL), stay idle.
+  const [idleMoodClock] = useState<MoodClock>(() => startMoodClock('idle', time))
+  const moodClock = sessionMoodClock ?? idleMoodClock
 
   // A token seen at mount is from before this mount: it never starts a dance.
   const [{ danceStartTime, forDanceAt }, setDanceStart] = useState({
@@ -344,13 +336,15 @@ export const CompanionSprite = React.memo(function CompanionSprite({
   const petAgeMs = petAt !== undefined ? time - petStartTime : Infinity
   const petting = !reducedMotion && petAgeMs < PET_BURST_MS
   const shooting = shotElapsed !== null
+  // Frozen under reduced motion, so a dance would never end; /buddy dance
+  // says so instead.
+  const dancing = !reducedMotion && time - danceStartTime < DANCE_MS
   const fullSprite = columns >= MIN_COLS_FOR_FULL_SPRITE
   const mood = resolveMood(moodClock, {
     now: time,
     shooting: shooting && actionFx !== undefined,
     petting,
-    // Frozen under reduced motion, so a dance would never end.
-    dancing: !reducedMotion && time - danceStartTime < DANCE_MS,
+    dancing,
     speaking: reaction !== undefined,
     reducedMotion,
   })
@@ -377,6 +371,7 @@ export const CompanionSprite = React.memo(function CompanionSprite({
       <Box paddingX={1} alignSelf="flex-end">
         <Text>
           {petting && <Text color="autoAccept">{figures.heart} </Text>}
+          {dancing && !petting && <Text color={color}>♪ </Text>}
           <Text bold color={color}>
             {renderFace(companion)}
           </Text>{' '}
@@ -403,17 +398,22 @@ export const CompanionSprite = React.memo(function CompanionSprite({
   }
 
   const frameCount = spriteFrameCount(companion.species)
-  // Hero art draws its own hearts in the happy mood.
+  // Hearts or notes float above the line-art sprite; hero art draws its own.
   const heartFrame =
     petting && !pixelMode
       ? PET_HEARTS[Math.floor(petAgeMs / TICK_MS) % PET_HEARTS.length]
       : null
+  const noteFrame =
+    dancing && !petting && !pixelMode
+      ? DANCE_NOTES[tick % DANCE_NOTES.length]
+      : null
+  const overlayFrame = heartFrame ?? noteFrame
 
   // Shared frame selection for both render modes.
   let idleStep = 0
   let blink = false
   if (!reducedMotion && !shooting) {
-    if (reaction || petting) {
+    if (reaction || petting || dancing) {
       // Excited: cycle all fidget frames fast
       idleStep = tick % frameCount
     } else {
@@ -451,7 +451,7 @@ export const CompanionSprite = React.memo(function CompanionSprite({
         blink ? line.replaceAll(companion.eye, '-') : line,
       )
     }
-    sprite = heartFrame ? [heartFrame, ...body] : body
+    sprite = overlayFrame ? [overlayFrame, ...body] : body
   }
 
   // Name row doubles as hint row — unfocused shows dim name + ↓ discovery,
@@ -467,10 +467,7 @@ export const CompanionSprite = React.memo(function CompanionSprite({
       width={colWidth}
     >
       {pixelRows !== null ? (
-        <>
-          {heartFrame && <Text color="autoAccept">{heartFrame}</Text>}
-          <PixelRows rows={pixelRows} />
-        </>
+        <PixelRows rows={pixelRows} />
       ) : (
         sprite.map((line, i) => (
           <Text key={i} color={i === 0 && heartFrame ? 'autoAccept' : color}>

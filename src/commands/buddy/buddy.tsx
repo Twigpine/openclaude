@@ -225,6 +225,15 @@ export async function call(
       )
       return null
     }
+    // The sprite's clock is frozen under reduced motion, so it skips the
+    // dance; say so rather than leave the command looking broken.
+    if (context.getAppState().settings?.prefersReducedMotion === true) {
+      onDone(
+        `${companion.name} sits this one out: dancing is off while reduced motion is on.`,
+        { display: 'system' },
+      )
+      return null
+    }
     context.setAppState(prev => ({ ...prev, companionDanceAt: Date.now() }))
     onDone(undefined, { display: 'skip' })
     return null

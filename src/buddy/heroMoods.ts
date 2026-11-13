@@ -356,7 +356,7 @@ const AFTERGLOW_MS: Record<'happy' | 'sad' | 'celebrate', number> = {
 
 export type MoodClock = {
   activity: CompanionActivity
-  /** The greeting wave plays until this time (once per session). */
+  /** The greeting wave plays until this time. */
   helloUntil: number
   /** When the current busy stretch began, or null while idle. */
   busySince: number | null
@@ -366,14 +366,10 @@ export type MoodClock = {
   afterglow: { mood: HeroMood; until: number } | null
 }
 
-export function startMoodClock(
-  activity: CompanionActivity,
-  now: number,
-  greet = true,
-): MoodClock {
+export function startMoodClock(activity: CompanionActivity, now: number): MoodClock {
   return {
     activity,
-    helloUntil: greet ? now + HELLO_MS : now,
+    helloUntil: now + HELLO_MS,
     busySince: activity === 'idle' ? null : now,
     lastActiveAt: now,
     afterglow: null,

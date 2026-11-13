@@ -14,6 +14,7 @@ function harness(): {
 } {
   let state = getDefaultAppState()
   const context = {
+    getAppState: () => state,
     setAppState: (update: (prev: AppState) => AppState) => {
       state = update(state)
     },
@@ -69,4 +70,19 @@ test('set accepts display names and old ids', async () => {
   expect(getGlobalConfig().companion?.speciesOverride).toBe('kaio')
   await call(onDone, h.context, 'set strawhat')
   expect(getGlobalConfig().companion?.speciesOverride).toBe('strawhat')
+})
+
+test('dance under reduced motion says why instead of doing nothing', async () => {
+  const h = harness()
+  await call(onDone, h.context, '')
+  h.context.setAppState(prev => ({
+    ...prev,
+    settings: { ...prev.settings, prefersReducedMotion: true },
+  }))
+  let said: string | undefined
+  await call(((text?: string) => {
+    said = text
+  }) as LocalJSXCommandOnDone, h.context, 'dance')
+  expect(said).toContain('reduced motion')
+  expect(h.state().companionDanceAt).toBeUndefined()
 })

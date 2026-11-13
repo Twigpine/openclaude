@@ -72,9 +72,6 @@ describe('resolveMood', () => {
     expect(resolveMood(idle, cues(HELLO_MS + 1))).toBe('idle')
   })
 
-  test('a remount after the first greeting skips the wave', () => {
-    expect(resolveMood(startMoodClock('idle', 5_000, false), cues(5_000))).toBe('idle')
-  })
 
   test('falls asleep after five quiet minutes', () => {
     expect(resolveMood(idle, cues(SLEEP_AFTER_MS - 1))).toBe('idle')
