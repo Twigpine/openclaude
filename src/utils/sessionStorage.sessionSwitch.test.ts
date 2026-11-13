@@ -5,17 +5,20 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
+  getCwdState,
   getOriginalCwd,
   getSessionId,
   getSessionProjectDir,
   isSessionPersistenceDisabled,
   onSessionSwitch,
   runWithSdkContext,
+  setCwdState,
   setOriginalCwd,
   setSessionPersistenceDisabled,
   resetStateForTests,
   switchSession,
 } from '../bootstrap/state.js'
+import { restoreWorktreeSession } from './worktree.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
 import type { Message } from '../types/message.js'
 import { getDefaultAppState } from '../state/AppStateStore.js'
@@ -26,6 +29,7 @@ import {
 } from './envUtils.js'
 import {
   flushSessionStorage,
+  getProjectDir,
   getTranscriptPathForSession,
   adoptResumedSessionFile,
   recordAttributionSnapshot,
@@ -614,4 +618,103 @@ test('a nonpersisted session does not pass runtime worktree metadata to the next
   await recordTranscript([message(randomUUID(), 'persisted turn')])
   await flushSessionStorage()
   expect(await readFile(getTranscriptPathForSession(SECOND), 'utf8')).not.toContain('private-worktree')
+})
+
+test('an established transcript survives entering and exiting a worktree', async () => {
+  // jatmn on #2489 (P2): entering a worktree calls setOriginalCwd without
+  // changing the session id. The established transcript pointer and its
+  // metadata must survive that cwd change — otherwise the next message
+  // materializes a second JSONL under the worktree project and one
+  // conversation's history splits across two files.
+  const worktree = join(testRoot, 'worktree')
+  await mkdir(worktree, { recursive: true })
+
+  switchSession(FIRST as never, null)
+  await recordTranscript([message('40000000-0000-4000-8000-0000000000e1', 'before worktree')])
+  await flushSessionStorage()
+  cacheSessionTitle('Worktree Title')
+  reAppendSessionMetadata()
+
+  const transcriptPath = getTranscriptPathForSession(FIRST)
+  expect(await readFile(transcriptPath, 'utf8')).toContain('before worktree')
+
+  // EnterWorktreeTool's cwd change: same session, different working directory.
+  setOriginalCwd(worktree)
+  await recordTranscript([message('40000000-0000-4000-8000-0000000000e2', 'inside worktree')])
+  await flushSessionStorage()
+
+  // The established pointer and its metadata survive the cwd change.
+  expect(getCurrentSessionTitle(getSessionId())).toBe('Worktree Title')
+  expect(await readFile(transcriptPath, 'utf8')).toContain('inside worktree')
+  // No second transcript started under the worktree's project directory.
+  expect(existsSync(join(getProjectDir(worktree), `${FIRST}.jsonl`))).toBe(false)
+
+  // ExitWorktreeTool restores the cwd; the conversation continues in one file.
+  setOriginalCwd(join(testRoot, 'workspace'))
+  await recordTranscript([message('40000000-0000-4000-8000-0000000000e3', 'after worktree')])
+  await flushSessionStorage()
+  const text = await readFile(transcriptPath, 'utf8')
+  expect(text).toContain('after worktree')
+  expect(text).toContain('Worktree Title')
+})
+
+test('a resumed session keeps its startup name across a worktree restore', async () => {
+  // jatmn on #2489 (P2): restoreSessionMetadata caches the requested title
+  // before restoreWorktreeForResume changes the cwd, and adoption reads it
+  // after. The cwd change must not hide the restored record, or the startup
+  // --name is undefined at adoption and never written to the transcript.
+  process.env.NODE_ENV = 'test'
+  const path = getTranscriptPathForSession(FIRST)
+  await mkdir(dirname(path), { recursive: true })
+  const worktree = join(testRoot, 'resume-worktree')
+  await mkdir(worktree, { recursive: true })
+  const previous = message(randomUUID(), 'previous turn')
+  await writeFile(path, JSON.stringify({ ...previous, sessionId: FIRST }) + '\n')
+  cacheSessionTitle('requested title')
+
+  const savedProcessCwd = process.cwd()
+  const savedCwdState = getCwdState()
+  try {
+    await processResumedConversation(
+      {
+        messages: [previous],
+        sessionId: FIRST as UUID,
+        customTitle: undefined,
+        worktreeSession: {
+          originalCwd: getOriginalCwd(),
+          worktreePath: worktree,
+          worktreeName: 'resume-worktree',
+          sessionId: FIRST,
+        },
+      },
+      { forkSession: false, transcriptPath: path },
+      {
+        modeApi: null,
+        mainThreadAgentDefinition: undefined,
+        agentDefinitions: { activeAgents: [], allAgents: [] },
+        currentCwd: getOriginalCwd(),
+        cliAgents: [],
+        initialState: getDefaultAppState(),
+      },
+    )
+    await flushSessionStorage()
+
+    expect(getCurrentSessionTitle(getSessionId())).toBe('requested title')
+    const entries = (await readFile(path, 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line))
+    expect(entries.filter(entry => entry.type === 'custom-title').at(-1)?.customTitle).toBe(
+      'requested title',
+    )
+    // Adoption must persist the name even when no new message is sent.
+    expect(entries.filter(entry => entry.type === 'user')).toHaveLength(1)
+    // The resumed transcript stays the one file; no second transcript under
+    // the worktree's project directory.
+    expect(existsSync(join(getProjectDir(worktree), `${FIRST}.jsonl`))).toBe(false)
+  } finally {
+    process.chdir(savedProcessCwd)
+    setCwdState(savedCwdState)
+    restoreWorktreeSession(null)
+  }
 })

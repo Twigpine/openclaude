@@ -477,7 +477,8 @@ export function bindSdkContextToAsyncGenerator<
   return bound as AsyncGenerator<TYield, TReturn, TNext>
 }
 
-function getSdkContext(): SdkContext | undefined {
+/** The SDK context the current code runs in, if any — undefined for the CLI's global context. */
+export function getSdkContext(): SdkContext | undefined {
   return sdkContextStorage.getStore()
 }
 

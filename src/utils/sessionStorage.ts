@@ -27,6 +27,7 @@ import {
   getPlanSlugCache,
   getPromptId,
   getReplayIndexBuilder,
+  getSdkContext,
   getSessionId,
   getSessionProjectDir,
   onSessionSwitch,
@@ -861,8 +862,9 @@ let pointerProjectDir: string | null = null
  * Follow switchSession with the file pointer.
  *
  * `Project.sessionFile` is resolved once and cached per SDK context (see
- * the accessor on Project: one entry per session id + project directory +
- * cwd, so overlapping sessions cannot share a pointer). Every CLI path
+ * the accessor on Project: one entry per session id + project directory
+ * (+ cwd in SDK contexts), so overlapping sessions cannot share a
+ * pointer). Every CLI path
  * that changes the active session resets it by hand immediately
  * afterwards — sessionRestore.ts, /clear, print.ts all call
  * resetSessionFilePointer right after switchSession, and its own docstring
@@ -926,12 +928,12 @@ function followSessionSwitches(): void {
     // the only correct source for the deferred startup selections
     // migrateStartupMetadata carries across. A global "last written"
     // key would point at whichever overlapping session wrote last.
-    // The switch does not change originalCwd, so the current value is
-    // the outgoing key's cwd component too.
-    const previousKey = sessionFileKeyFor(
+    // The key is the context-aware one (see sessionFileKeyForIdentity):
+    // the CLI's global context omits the cwd, so a switch made while
+    // inside a worktree still reports the established identity.
+    const previousKey = getProject().sessionFileKeyForIdentity(
       previous.sessionId,
       previous.sessionProjectDir,
-      getOriginalCwd(),
     )
     // Lazily re-resolved from the new session id on the next write. An
     // existing file is appended to, not replaced — a resume lands back in the
@@ -1155,6 +1157,11 @@ function mergeSessionMetadata(
  * a cache entry. The same triple always derives the same path, so a
  * missed reset (e.g. the same-id switch v2 makes before every turn)
  * can only reuse the correct path.
+ *
+ * This is the SDK form of the key. The CLI's global context omits the
+ * cwd (see `Project.sessionFileKeyForIdentity`): its cwd is mutable
+ * within one conversation, so keying on it would hide an established
+ * pointer and its metadata behind a worktree cwd change (#2489).
  */
 function sessionFileKeyFor(
   sessionId: SessionId,
@@ -1427,12 +1434,40 @@ class Project {
     return this.droppedSessionMetadata.size
   }
 
-  /** Identity of the transcript `getTranscriptPath()` derives in this context (see sessionFileKeyFor). */
+  /**
+   * Cache key for a session identity as the current context sees it.
+   *
+   * In the CLI's global context the key is the session id + project
+   * directory only: the CLI is one conversation at a time, and its cwd
+   * moves — EnterWorktreeTool, resume's worktree restore — without
+   * changing the session, so keying on the cwd hides an established
+   * pointer and its metadata behind the new cwd and splits the
+   * conversation across two transcripts (#2489). A fresh session still
+   * derives its path from the current cwd at materialization; only an
+   * established identity is pinned to its session + project directory.
+   *
+   * In an SDK context the key keeps the cwd: two sessions may share an
+   * id with no project directory in different working directories, and
+   * those are genuinely separate destinations. An SDK session's cwd is
+   * stable for its life (a fresh context per turn, from the session's
+   * own cwd), so it never hides an established pointer the way the
+   * CLI's does.
+   */
+  sessionFileKeyForIdentity(
+    sessionId: SessionId,
+    projectDir: string | null,
+  ): string {
+    if (getSdkContext() === undefined) {
+      return `${sessionId}\0${projectDir ?? ''}`
+    }
+    return sessionFileKeyFor(sessionId, projectDir, getOriginalCwd())
+  }
+
+  /** Identity of the transcript `getTranscriptPath()` derives in this context (see sessionFileKeyForIdentity). */
   private sessionFileKey(): string {
-    return sessionFileKeyFor(
+    return this.sessionFileKeyForIdentity(
       getSessionId(),
       getSessionProjectDir(),
-      getOriginalCwd(),
     )
   }
   // Which context identities have started a session in this process: a
@@ -2845,12 +2880,10 @@ class Project {
   /**
    * Drop the per-context transcript caches belonging to the deleted
    * transcript — the cached file pointer and the cached metadata (title,
-   * tag, ...). A cache key names its transcript: session id + project dir
-   * + cwd derive the same path getTranscriptPath() would, so only entries
-   * naming the deleted transcript are dropped. The same id in another
-   * project directory keeps its cached pointer and metadata: if its title
-   * has fallen outside both 64KB windows, a later re-append could not
-   * restore it from the tail.
+   * tag, ...). A cache key names its transcript: session id + project
+   * directory. The same id in another project directory keeps its cached
+   * pointer and metadata: if its title has fallen outside both 64KB
+   * windows, a later re-append could not restore it from the tail.
    *
    * Returns the metadata entries dropped, so restoreSessionWrites can put
    * them back when the transcript survives its removal.
@@ -2864,13 +2897,21 @@ class Project {
       if (!key.startsWith(`${sessionId}\0`)) return false
       const parts = key.split('\0')
       const projectDir = parts[1] ?? ''
-      const cwd = parts[2] ?? ''
-      const dir = projectDir || getProjectDir(cwd)
-      return resolvePath(join(dir, `${sessionId}.jsonl`)) === deleted
+      if (projectDir) {
+        return (
+          resolvePath(join(projectDir, `${sessionId}.jsonl`)) === deleted
+        )
+      }
+      // No explicit project directory: the key's transcript is the one
+      // its cached pointer already resolves to. A metadata-only entry
+      // (never materialized, so no pointer) has no established transcript
+      // to distinguish, and the id alone names the deletion's transcript.
+      const pointer = this.sessionFiles.get(key)
+      if (pointer) return resolvePath(pointer) === deleted
+      return true
     }
-    for (const key of [...this.sessionFiles.keys()]) {
-      if (namesDeletedTranscript(key)) this.sessionFiles.delete(key)
-    }
+    // Read the sibling pointers before dropping them below: a metadata
+    // entry's transcript is the one its own cached pointer resolves to.
     const droppedMetadata: Array<[string, SessionMetadata]> = []
     for (const key of [...this.sessionMetadata.keys()]) {
       if (namesDeletedTranscript(key)) {
@@ -2878,6 +2919,9 @@ class Project {
         if (entry) droppedMetadata.push([key, entry])
         this.sessionMetadata.delete(key)
       }
+    }
+    for (const key of [...this.sessionFiles.keys()]) {
+      if (namesDeletedTranscript(key)) this.sessionFiles.delete(key)
     }
     return droppedMetadata
   }
