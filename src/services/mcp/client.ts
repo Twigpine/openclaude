@@ -127,9 +127,11 @@ import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { AssistantMessage } from 'src/types/message.js'
 /* eslint-enable @typescript-eslint/no-require-imports */
 import { classifyMcpToolForCollapse } from '../../tools/MCPTool/classifyForCollapse.js'
+import { raceAbort } from '../../utils/boundedAsync.js'
 import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import { sleep } from '../../utils/sleep.js'
 import {
+  AuthenticationCancelledError,
   ClaudeAuthProvider,
   hasMcpDiscoveryButNoToken,
   wrapFetchWithStepUpDetection,
@@ -809,13 +811,109 @@ export function getServerCacheKey(
 }
 
 /**
+ * Callers currently awaiting one memoized connect, by cache key and the
+ * promise they share. The memoize body runs once per key, so an adopter
+ * of the cached promise attaches nothing — but the creator's abort
+ * listener still fires. The body consults this before closing the
+ * transport, so cancelling the creator does not fail the other session's
+ * in-flight MCP calls. Entries are per promise, not per key: a cache
+ * clear and a fresh connect for the same key starts a new generation,
+ * replacing the entry — so the count always belongs to the latest
+ * generation, and a cleared cache entry must not hide a waiter that is
+ * still awaiting the old promise.
+ */
+const connectWaiters = new Map<
+  string,
+  { promise: Promise<MCPServerConnection>; count: number }
+>()
+
+/**
+ * Clients another caller adopted from the shared connect cache: a
+ * reconnect that created one must not close it on cancellation, or it
+ * would fail the session that adopted it. A client is adopted when a
+ * caller reuses a connect it did not start — joining one in flight, or a
+ * settled cached one. Adoption is sticky for the client object: once a
+ * session holds it, only that session's own cleanup releases it.
+ */
+const adoptedMcpClients = new WeakSet<MCPServerConnection>()
+
+/** Whether another caller adopted this client from the shared connect. */
+export function isMcpClientAdopted(client: MCPServerConnection): boolean {
+  return adoptedMcpClients.has(client)
+}
+
+/**
+ * Releases a connected client no session adopted, and evicts it from the
+ * connect cache so a later connection dials fresh instead of reusing a
+ * closed client. A client another caller adopted from the shared connect
+ * stays cached: closing it would fail that session's in-flight MCP calls.
+ * Cache membership alone is not adoption — the cache holds a client its
+ * creator made whether or not anyone adopted it.
+ */
+export async function releaseUnownedMcpClient(
+  name: string,
+  serverRef: ScopedMcpServerConfig,
+  client: MCPServerConnection,
+): Promise<void> {
+  if (client.type !== 'connected') return
+  if (isMcpClientAdopted(client)) return
+  await client.cleanup().catch(() => {})
+  // Evict the cache entry only when it still holds this client. A newer
+  // connection for the same key replaces the entry while this one is being
+  // released, and awaiting that entry would hang on its pending initialize
+  // — so only a value that has already settled is compared.
+  const key = getServerCacheKey(name, serverRef)
+  const cached = connectToServerMemoized.cache.get(key) as
+    | Promise<MCPServerConnection>
+    | undefined
+  if (cached !== undefined) {
+    const settled = await Promise.race([
+      cached.then(value => ({ settled: true, value })),
+      Promise.resolve({
+        settled: false,
+        value: undefined as MCPServerConnection | undefined,
+      }),
+    ])
+    if (settled.settled && settled.value === client) {
+      connectToServerMemoized.cache.delete(key)
+    }
+  }
+}
+
+/**
+ * Closes a stalled connect's transport once its last waiter cancels. The
+ * memoize body's abort listener watches only the creator's signal, so a
+ * waiter that is not the creator cannot close it; the wrapper closes it
+ * through here instead, keyed by the connect's promise so a newer
+ * generation for the same key cannot close this one. Dropped when the
+ * connect settles or the transport is closed.
+ */
+const connectTransportClosers = new Map<
+  Promise<MCPServerConnection>,
+  () => void
+>()
+
+/**
+ * Whether another caller is still awaiting the connect this cache entry
+ * belongs to. Tracked by the originating promise, not the current cache
+ * entry: a cache clear removes the mapping but not the waiter, and
+ * cancelling the creator must not close a transport another waiter
+ * still needs.
+ */
+function hasOtherConnectWaiters(key: string): boolean {
+  const entry = connectWaiters.get(key)
+  if (!entry) return false
+  return entry.count > 1
+}
+
+/**
  * TODO (ollie): The memoization here increases complexity by a lot, and im not sure it really improves performance
  * Attempts to connect to a single MCP server
  * @param name Server name
  * @param serverRef Scoped server configuration
  * @returns A wrapped client (either connected or failed)
  */
-export const connectToServer = memoize(
+const connectToServerMemoized = memoize(
   async (
     name: string,
     serverRef: ScopedMcpServerConfig,
@@ -827,11 +925,52 @@ export const connectToServer = memoize(
       sseIdeCount: number
       wsIdeCount: number
     },
+    /**
+     * Aborts this connect attempt: closing the transport rejects a stalled
+     * initialize instead of waiting out the connection timeout. Only the
+     * caller that created this connect passes one — the memoize body runs
+     * once per key, so an adopter of the cached promise attaches nothing
+     * and cannot close a connect it did not start. The listener is removed
+     * once the connect settles, so a later abort cannot close the live,
+     * shared client. Not part of the memo key (getServerCacheKey ignores
+     * it), so sharing is unchanged.
+     */
+    signal?: AbortSignal,
   ): Promise<MCPServerConnection> => {
     const connectStartTime = Date.now()
     let inProcessServer: InProcessMcpServer | undefined
+    // Set once the connect settles, so a waiter that cancels in the same
+    // window cannot close a transport that just connected.
+    let connectSettled = false
     try {
       let transport
+
+      // Closing the transport rejects the stalled initialize below. The
+      // transport is assigned later, so the handler closes whatever it is
+      // by then; an abort before assignment closes it as soon as it exists.
+      let onConnectAbort: (() => void) | undefined
+      if (signal) {
+        onConnectAbort = () => {
+          // Cancelling the creator of a shared reconnect must not close
+          // the transport while other waiters remain: they would keep
+          // the failed result and skip MCP setup on later turns. Only
+          // the last waiter closes it — the creator still cancels, once
+          // the shared connect settles and the attempt check runs.
+          if (!hasOtherConnectWaiters(getServerCacheKey(name, serverRef))) {
+            transport?.close().catch(() => {})
+          }
+        }
+        if (signal.aborted) {
+          onConnectAbort()
+        } else {
+          signal.addEventListener('abort', onConnectAbort, { once: true })
+        }
+      }
+      const stopConnectAbort = () => {
+        if (signal && onConnectAbort) {
+          signal.removeEventListener('abort', onConnectAbort)
+        }
+      }
 
       // If we have the session ingress JWT, we will connect via the session ingress rather than
       // to remote MCP's directly.
@@ -1294,6 +1433,38 @@ export const connectToServer = memoize(
       }
 
       const connectPromise = client.connect(transport)
+      // A waiter that is not the creator cannot close a stalled transport
+      // through the abort listener above — it watches only the creator's
+      // signal. Register a closer the wrapper invokes when the last waiter
+      // cancels, so a connect stalled on initialize still rejects instead
+      // of holding its callers until the connection timeout. Keyed by this
+      // connect's own promise, read back from the memoize cache (which
+      // holds it while pending), so a newer generation for the same key
+      // cannot close this one. The closer is inert once the connect
+      // settles; the wrapper drops it then.
+      const ownPromise = connectToServerMemoized.cache.get(
+        getServerCacheKey(name, serverRef),
+      ) as Promise<MCPServerConnection> | undefined
+      if (ownPromise) {
+        connectTransportClosers.set(ownPromise, () => {
+          if (!connectSettled) {
+            transport?.close().catch(() => {})
+          }
+        })
+        const dropCloser = () => {
+          connectTransportClosers.delete(ownPromise)
+        }
+        void ownPromise.then(dropCloser, dropCloser)
+      }
+      // An abort that landed before the transport existed still cancels
+      // the connect: the listener above could not close what did not exist.
+      // Shared like the listener: another waiter keeps the transport.
+      if (
+        signal?.aborted &&
+        !hasOtherConnectWaiters(getServerCacheKey(name, serverRef))
+      ) {
+        transport.close().catch(() => {})
+      }
       const timeoutPromise = new Promise<never>((_, reject) => {
         const timeoutId = setTimeout(() => {
           const elapsed = Date.now() - connectStartTime
@@ -1316,10 +1487,14 @@ export const connectToServer = memoize(
         // Clean up timeout if connect resolves or rejects
         connectPromise.then(
           () => {
+            connectSettled = true
             clearTimeout(timeoutId)
+            stopConnectAbort()
           },
           _error => {
+            connectSettled = true
             clearTimeout(timeoutId)
+            stopConnectAbort()
           },
         )
       })
@@ -1890,35 +2065,150 @@ export const connectToServer = memoize(
 )
 
 /**
- * Clears the memoize cache for a specific server
- * @param name Server name
- * @param serverRef Server configuration
+ * Attempts to connect to a single MCP server, sharing one memoized
+ * connect per server key. Counts the callers awaiting each connect so
+ * the creator's abort can tell a solo connect from a shared one, and
+ * releases a caller's waiter when its signal aborts — a session that
+ * closed while joining a reconnect must not keep the creator's abort
+ * from closing the stalled transport. When the last waiter cancels, the
+ * transport closes through the closer the connect registered, so the
+ * connect rejects instead of holding its callers until the timeout. The
+ * memoize cache is shared with the inner function, so existing
+ * `connectToServer.cache.get/delete` uses keep working. A caller that
+ * reuses a connect it did not start adopts its client: a later
+ * cancellation must not close a client another session holds.
  */
-export async function clearServerCache(
-  name: string,
-  serverRef: ScopedMcpServerConfig,
-): Promise<void> {
-  const key = getServerCacheKey(name, serverRef)
-
-  try {
-    const wrappedClient = await connectToServer(name, serverRef)
-
-    if (wrappedClient.type === 'connected') {
-      await wrappedClient.cleanup()
+export const connectToServer = Object.assign(
+  (
+    name: string,
+    serverRef: ScopedMcpServerConfig,
+    serverStats?: {
+      totalServers: number
+      stdioCount: number
+      sseCount: number
+      httpCount: number
+      sseIdeCount: number
+      wsIdeCount: number
+    },
+    signal?: AbortSignal,
+  ): Promise<MCPServerConnection> => {
+    const key = getServerCacheKey(name, serverRef)
+    // A cache hit reuses a connect another caller started; that caller
+    // adopts the client it resolves to.
+    const hadCached = connectToServerMemoized.cache.get(key) !== undefined
+    const promise = connectToServerMemoized(name, serverRef, serverStats, signal)
+    if (hadCached) {
+      void promise.then(
+        client => {
+          if (client.type === 'connected') adoptedMcpClients.add(client)
+        },
+        () => {},
+      )
     }
-  } catch {
-    // Ignore errors - server might have failed to connect
-  }
+    const entry = connectWaiters.get(key)
+    if (entry && entry.promise === promise) {
+      entry.count++
+    } else {
+      connectWaiters.set(key, { promise, count: 1 })
+    }
+    let released = false
+    let releaseOnAbort: (() => void) | undefined
+    const release = (onAbort: boolean) => {
+      if (released) return
+      released = true
+      if (signal && releaseOnAbort) {
+        signal.removeEventListener('abort', releaseOnAbort)
+      }
+      const current = connectWaiters.get(key)
+      if (current && current.promise === promise) {
+        if (current.count <= 1) {
+          connectWaiters.delete(key)
+          // Only an abort leaves the transport stalled: on settle the
+          // client is live and its callers hold it.
+          if (onAbort) {
+            connectTransportClosers.get(promise)?.()
+            connectTransportClosers.delete(promise)
+          }
+        } else {
+          current.count--
+        }
+      }
+    }
+    releaseOnAbort = () => release(true)
+    void promise.then(
+      () => release(false),
+      () => release(false),
+    )
+    if (signal) {
+      // A caller whose signal is already aborted never waits: it leaves
+      // at once instead of holding the creator's abort off.
+      if (signal.aborted) releaseOnAbort()
+      else signal.addEventListener('abort', releaseOnAbort, { once: true })
+    }
+    return promise
+  },
+  { cache: connectToServerMemoized.cache },
+)
 
-  // Clear from cache (both connection and fetch caches so reconnect
-  // fetches fresh tools/resources/commands instead of stale ones)
-  connectToServer.cache.delete(key)
+/**
+ * Drops the per-server discovery caches so a reconnect fetches fresh
+ * tools/resources/commands instead of stale ones.
+ */
+function clearFetchCaches(name: string): void {
   fetchToolsForClient.cache.delete(name)
   fetchResourcesForClient.cache.delete(name)
   fetchCommandsForClient.cache.delete(name)
   if (feature('MCP_SKILLS')) {
     fetchMcpSkillsForClient!.cache.delete(name)
   }
+}
+
+/**
+ * Clears the memoize cache for a specific server
+ * @param name Server name
+ * @param serverRef Server configuration
+ * @param signal Aborts the wait for a pending connect: a caller that is
+ * cancelled while another connect is in flight does not wait it out.
+ * Only the reconnect path passes one.
+ */
+export async function clearServerCache(
+  name: string,
+  serverRef: ScopedMcpServerConfig,
+  signal?: AbortSignal,
+): Promise<void> {
+  const key = getServerCacheKey(name, serverRef)
+
+  // A cached connect is the only thing to clean up. Calling
+  // connectToServer here used to dial a fresh connection just to clear
+  // it, so clearing an idle server opened one.
+  const cached = connectToServer.cache.get(key) as
+    | Promise<MCPServerConnection>
+    | undefined
+  if (cached === undefined) {
+    clearFetchCaches(name)
+    return
+  }
+
+  try {
+    const wrappedClient = await raceAbort(cached, signal)
+
+    if (wrappedClient.type === 'connected') {
+      await wrappedClient.cleanup()
+    }
+  } catch {
+    // A cancelled wait is not a failed connect: the caller is gone, so
+    // the clear is abandoned rather than reported as a connect failure.
+    // Any other error means the connect itself failed, which the old
+    // code also ignored — there is nothing to clean up either way.
+    if (signal?.aborted) {
+      throw new AuthenticationCancelledError()
+    }
+  }
+
+  // Clear from cache (both connection and fetch caches so reconnect
+  // fetches fresh tools/resources/commands instead of stale ones)
+  connectToServer.cache.delete(key)
+  clearFetchCaches(name)
 }
 
 /**
@@ -1991,7 +2281,10 @@ export function mcpToolInputToAutoClassifierInput(
 }
 
 export const fetchToolsForClient = memoizeWithLRU(
-  async (client: MCPServerConnection): Promise<Tool[]> => {
+  async (
+    client: MCPServerConnection,
+    options?: { signal?: AbortSignal },
+  ): Promise<Tool[]> => {
     if (client.type !== 'connected') return []
 
     try {
@@ -2015,10 +2308,17 @@ export const fetchToolsForClient = memoizeWithLRU(
               result = (await client.client.request(
                 request,
                 resultSchema,
+                { signal: options?.signal },
               )) as ListToolsResult
               break
             } catch (err) {
               lastError = err
+              // A cancelled request is not a failure to retry: the
+              // attempt is over, and the next request would abort again
+              // at once after waiting out the backoff.
+              if (options?.signal?.aborted || isAbortError(err)) {
+                break
+              }
               if (attempt < 2) {
                 const remainingRetryBudget =
                   retryDeadline - performance.now()
@@ -2031,7 +2331,14 @@ export const fetchToolsForClient = memoizeWithLRU(
                 )
                 await sleep(
                   Math.min(1000 * (attempt + 1), remainingRetryBudget),
+                  options?.signal,
                 )
+                // A cancelled backoff must not issue another request: the
+                // attempt is over, and a request with an aborted signal
+                // would fail at once after waiting out the timer.
+                if (options?.signal?.aborted) {
+                  break
+                }
                 // A timer can wake after its scheduled deadline when the event
                 // loop is busy. Do not turn that overdue wake-up into another
                 // request; a wake exactly at the deadline preserves the legacy
@@ -2381,16 +2688,29 @@ export const fetchToolsForClient = memoizeWithLRU(
         })
         .filter(isIncludedMcpTool)
     } catch (error) {
+      // A cancelled fetch must not poison the cache: the next fetch for
+      // this server re-lists instead of reusing the aborted empty result.
+      if (options?.signal?.aborted || isAbortError(error)) {
+        fetchToolsForClient.cache.delete(client.name)
+        return []
+      }
       logMCPError(client.name, `Failed to fetch tools: ${errorMessage(error)}`)
       return []
     }
   },
-  (client: MCPServerConnection) => client.name,
+  // The cache key ignores the options: a fetch for one server is one
+  // entry, whatever signal it carries. The second parameter only keeps
+  // the memoized function's arity honest.
+  (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
+    client.name,
   MCP_FETCH_CACHE_SIZE,
 )
 
 export const fetchResourcesForClient = memoizeWithLRU(
-  async (client: MCPServerConnection): Promise<ServerResource[]> => {
+  async (
+    client: MCPServerConnection,
+    options?: { signal?: AbortSignal },
+  ): Promise<ServerResource[]> => {
     if (client.type !== 'connected') return []
 
     try {
@@ -2398,8 +2718,13 @@ export const fetchResourcesForClient = memoizeWithLRU(
         return []
       }
 
-      return await listAllMcpResources(client)
+      return await listAllMcpResources(client, options)
     } catch (error) {
+      // Same cache-poisoning guard as fetchToolsForClient above.
+      if (options?.signal?.aborted || isAbortError(error)) {
+        fetchResourcesForClient.cache.delete(client.name)
+        return []
+      }
       logMCPError(
         client.name,
         `Failed to fetch resources: ${errorMessage(error)}`,
@@ -2407,12 +2732,16 @@ export const fetchResourcesForClient = memoizeWithLRU(
       return []
     }
   },
-  (client: MCPServerConnection) => client.name,
+  (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
+    client.name,
   MCP_FETCH_CACHE_SIZE,
 )
 
 export const fetchCommandsForClient = memoizeWithLRU(
-  async (client: MCPServerConnection): Promise<Command[]> => {
+  async (
+    client: MCPServerConnection,
+    options?: { signal?: AbortSignal },
+  ): Promise<Command[]> => {
     if (client.type !== 'connected') return []
 
     try {
@@ -2424,10 +2753,9 @@ export const fetchCommandsForClient = memoizeWithLRU(
         method: 'prompts/list',
         resultSchema: ListPromptsResultSchema,
         requestPage: async (request, resultSchema) =>
-          (await client.client.request(
-            request,
-            resultSchema,
-          )) as ListPromptsResult,
+          (await client.client.request(request, resultSchema, {
+            signal: options?.signal,
+          })) as ListPromptsResult,
         getItems: result => result.prompts,
         getNextCursor: result => result.nextCursor,
       })
@@ -2480,6 +2808,11 @@ export const fetchCommandsForClient = memoizeWithLRU(
         }
       })
     } catch (error) {
+      // Same cache-poisoning guard as fetchToolsForClient above.
+      if (options?.signal?.aborted || isAbortError(error)) {
+        fetchCommandsForClient.cache.delete(client.name)
+        return []
+      }
       logMCPError(
         client.name,
         `Failed to fetch commands: ${errorMessage(error)}`,
@@ -2487,7 +2820,8 @@ export const fetchCommandsForClient = memoizeWithLRU(
       return []
     }
   },
-  (client: MCPServerConnection) => client.name,
+  (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
+    client.name,
   MCP_FETCH_CACHE_SIZE,
 )
 
@@ -2522,12 +2856,23 @@ export async function callIdeRpc(
 export async function reconnectMcpServerImpl(
   name: string,
   config: ScopedMcpServerConfig,
+  /**
+   * Aborts the reconnect's connect attempt: a caller that is cancelled
+   * while the reconnect is stalled does not wait out the connection
+   * timeout, and the scope it ran in is released with it. Only the
+   * caller that started this reconnect passes one.
+   */
+  signal?: AbortSignal,
 ): Promise<{
   client: MCPServerConnection
   tools: Tool[]
   commands: Command[]
   resources?: ServerResource[]
 }> {
+  // The connected client, for the catch: a cancelled discovery leaves one
+  // no session adopted, and only the catch sees it — the race below turns
+  // the cancellation into a failed result before the caller does.
+  let connected: MCPServerConnection | undefined
   try {
     // Invalidate the keychain cache so we read fresh credentials from disk.
     // This is necessary when another process (e.g. the VS Code extension host)
@@ -2536,8 +2881,9 @@ export async function reconnectMcpServerImpl(
     // use stale cached data and never notice the tokens were removed.
     clearKeychainCache()
 
-    await clearServerCache(name, config)
-    const client = await connectToServer(name, config)
+    await clearServerCache(name, config, signal)
+    const client = await connectToServer(name, config, undefined, signal)
+    connected = client
 
     if (client.type !== 'connected') {
       return {
@@ -2553,14 +2899,27 @@ export async function reconnectMcpServerImpl(
 
     const supportsResources = !!client.capabilities?.resources
 
-    const [tools, mcpCommands, mcpSkills, resources] = await Promise.all([
+    // Discovery is shared by client name across callers, so the attempt
+    // signal must not drive the shared fetch: one caller's abort would
+    // cancel another caller's result and leave it with a connected server
+    // but no tools. The fetchers run without a signal and their results
+    // stay cached for the other waiter; the race below rejects this caller
+    // promptly on abort instead, and the attempt check in
+    // authenticateMcpServer turns that into the cancellation error.
+    const discovery = Promise.all([
       fetchToolsForClient(client),
       fetchCommandsForClient(client),
       feature('MCP_SKILLS') && supportsResources
         ? fetchMcpSkillsForClient!(client)
         : Promise.resolve([]),
-      supportsResources ? fetchResourcesForClient(client) : Promise.resolve([]),
+      supportsResources
+        ? fetchResourcesForClient(client)
+        : Promise.resolve([]),
     ])
+    const [tools, mcpCommands, mcpSkills, resources] = await raceAbort(
+      discovery,
+      signal,
+    )
     const commands = [...mcpCommands, ...mcpSkills]
 
     // Check if we need to add resource tools
@@ -2582,8 +2941,23 @@ export async function reconnectMcpServerImpl(
       resources: resources.length > 0 ? resources : undefined,
     }
   } catch (error) {
-    // Handle errors gracefully - connection might have closed during fetch
-    logMCPError(name, `Error during reconnection: ${errorMessage(error)}`)
+    // Handle errors gracefully - connection might have closed during fetch.
+    // A cancelled reconnect is not an error to report: the caller already
+    // knows it aborted.
+    if (!signal?.aborted && !isAbortError(error)) {
+      logMCPError(name, `Error during reconnection: ${errorMessage(error)}`)
+    }
+
+    // A cancelled discovery leaves a connected client no session adopted:
+    // release it, or its transport stays open in the cache until the next
+    // reconnect clears it. A failure that is not a cancellation keeps the
+    // client cached for the next connection.
+    if (
+      (signal?.aborted || isAbortError(error)) &&
+      connected !== undefined
+    ) {
+      await releaseUnownedMcpClient(name, config, connected)
+    }
 
     // Return with failed status
     return {

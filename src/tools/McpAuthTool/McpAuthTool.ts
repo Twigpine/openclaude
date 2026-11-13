@@ -52,6 +52,45 @@ function getConfigUrl(config: ScopedMcpServerConfig): string | undefined {
 }
 
 /**
+ * The credential entries one sign-in attempt owns, for coordination across
+ * the host-facing method and the authenticate pseudo-tool.
+ *
+ * Default storage can read/write either the native entry or its plaintext
+ * fallback. USER and OAuth namespace partition only the native entry;
+ * even a working vault may fall back on a later write. Own both aliases,
+ * so attempts for the same entry replace each other and attempts for
+ * distinct entries stay independent.
+ */
+export function getSdkSignInEntryKeys(
+  serverName: string,
+  serverConfig: McpSSEServerConfig | McpHTTPServerConfig,
+): string[] {
+  const serverKey = getServerKey(serverName, serverConfig)
+  return [
+    JSON.stringify(['native', getSecureStorageServiceName(CREDENTIALS_SERVICE_SUFFIX), getUsername(), serverKey]),
+    JSON.stringify(['plaintext', resolve(getClaudeConfigHomeDir()), serverKey]),
+  ]
+}
+
+/**
+ * Coordinate sign-ins for one credential entry: a new attempt aborts any
+ * earlier attempt still pending for the same entry — each attempt registers
+ * its own dynamic client, so one left running would exchange its code with
+ * the newer one's client and fail after the user had signed in — and
+ * registers itself so a later attempt aborts it in turn. Returns a release
+ * that unregisters it.
+ */
+export function registerSdkSignIn(entryKeys: string[], attempt: AbortController): () => void {
+  for (const key of entryKeys) pendingSdkSignIns.get(key)?.abort()
+  for (const key of entryKeys) pendingSdkSignIns.set(key, attempt)
+  return () => {
+    for (const key of entryKeys) {
+      if (pendingSdkSignIns.get(key) === attempt) pendingSdkSignIns.delete(key)
+    }
+  }
+}
+
+/**
  * Creates a pseudo-tool for an MCP server that is installed but not
  * authenticated. Surfaced in place of the server's real tools so the model
  * knows the server exists and can start the OAuth flow on the user's behalf.
@@ -93,9 +132,11 @@ export type McpAuthToolOptions = {
    * sign-in started in one session's store would finish in another's. The
    * scope re-applies the turn's environment under the env mutex the turns
    * hold, so a sign-in finishing during another session's turn waits for it.
-   * The CLI's environment does not change, so it passes none.
+   * The CLI's environment does not change, so it passes none. The signal is
+   * the attempt's: a sign-in superseded or cancelled while its scope waits
+   * on the mutex ends instead of queueing until that turn finishes.
    */
-  captureCredentialScope?: () => CredentialScope
+  captureCredentialScope?: (signal?: AbortSignal) => CredentialScope
   /** SDK root owner, distinct from an executor's per-tool cancellation. */
   sessionSignal?: AbortSignal
 }
@@ -142,19 +183,11 @@ export function createMcpAuthTool(
         release: () => {}, returnedUrl: () => {},
       }
     }
-    const serverKey = getServerKey(serverName, serverConfig)
-    // Default storage can read/write either the native entry or its plaintext
-    // fallback. USER and OAuth namespace partition only the native entry;
-    // even a working vault may fall back on a later write. Own both aliases.
-    const entryKeys = [
-      JSON.stringify(['native', getSecureStorageServiceName(CREDENTIALS_SERVICE_SUFFIX), getUsername(), serverKey]),
-      JSON.stringify(['plaintext', resolve(getClaudeConfigHomeDir()), serverKey]),
-    ]
+    const entryKeys = getSdkSignInEntryKeys(serverName, serverConfig)
     pendingSignIn?.abort()
-    for (const key of entryKeys) pendingSdkSignIns.get(key)?.abort()
     const attempt = new AbortController()
     pendingSignIn = attempt
-    for (const key of entryKeys) pendingSdkSignIns.set(key, attempt)
+    const releaseSharedSignIn = registerSdkSignIn(entryKeys, attempt)
     const stop = () => attempt.abort()
     const separateToolSignal = toolSignal !== sessionSignal && toolSignal !== resultSignal
     // A completed tool hands background ownership to the session/result.
@@ -167,9 +200,7 @@ export function createMcpAuthTool(
       returnedUrl()
       attempt.signal.removeEventListener('abort', release)
       if (pendingSignIn === attempt) pendingSignIn = undefined
-      for (const key of entryKeys) {
-        if (pendingSdkSignIns.get(key) === attempt) pendingSdkSignIns.delete(key)
-      }
+      releaseSharedSignIn()
     }
     attempt.signal.addEventListener('abort', release, { once: true })
     sessionSignal.addEventListener('abort', stop, { once: true })
@@ -250,8 +281,10 @@ export function createMcpAuthTool(
       const { setAppState } = context
       // Captured now, inside the call: the flow's reads and writes after the
       // user's browser comes back belong here, however the environment has
-      // changed by then.
-      const credentialScope = options.captureCredentialScope?.()
+      // changed by then. The attempt's signal makes the scope's mutex wait
+      // abortable: a superseded or cancelled sign-in ends instead of
+      // queueing behind the turn that holds the mutex.
+      const credentialScope = options.captureCredentialScope?.(signIn.signal)
 
       const oauthPromise = performMCPOAuthFlow(
         serverName,

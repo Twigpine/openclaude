@@ -1,4 +1,5 @@
 import type { Command } from '../types/command.js'
+import { isAbortError } from '../utils/errors.js'
 import { parseFrontmatter } from '../utils/frontmatterParser.js'
 import { memoizeWithLRU } from '../utils/memoize.js'
 import { recursivelySanitizeUnicode } from '../utils/sanitization.js'
@@ -30,11 +31,16 @@ export function deriveMcpSkillName(serverName: string, uri: string): string {
 async function readSkillResource(
   client: Extract<MCPServerConnection, { type: 'connected' }>,
   resource: ServerResource,
+  options?: { signal?: AbortSignal },
 ): Promise<Command | null> {
   try {
     const result = (await client.client.request(
       { method: 'resources/read', params: { uri: resource.uri } },
       ReadResourceResultSchema,
+      // A stalled read must end with the caller's cancellation, or an
+      // authentication attempt waits it out while holding the environment
+      // mutex — the tools/list path already passes its signal through.
+      { signal: options?.signal },
     )) as ReadResourceResult
 
     const textContent = result.contents.find(
@@ -89,21 +95,29 @@ async function readSkillResource(
 }
 
 export const fetchMcpSkillsForClient = memoizeWithLRU(
-  async (client: MCPServerConnection): Promise<Command[]> => {
+  async (
+    client: MCPServerConnection,
+    options?: { signal?: AbortSignal },
+  ): Promise<Command[]> => {
     if (client.type !== 'connected') return []
     if (!client.capabilities?.resources) return []
 
     try {
-      const resources = await listAllMcpResources(client)
+      const resources = await listAllMcpResources(client, options)
 
       const skillResources = resources.filter(isSkillResource)
       if (skillResources.length === 0) return []
 
       const commands = await Promise.all(
-        skillResources.map(r => readSkillResource(client, r)),
+        skillResources.map(r => readSkillResource(client, r, options)),
       )
       return commands.filter((c): c is Command => c !== null)
     } catch (error) {
+      // A cancelled fetch must not poison the cache: the next fetch for
+      // this server re-lists instead of reusing the aborted empty result.
+      if (options?.signal?.aborted || isAbortError(error)) {
+        fetchMcpSkillsForClient.cache.delete(client.name)
+      }
       logForDebugging(
         `[mcp-skills] failed to list skills for ${client.name}: ${String(error)}`,
         { level: 'warn' },
@@ -111,6 +125,10 @@ export const fetchMcpSkillsForClient = memoizeWithLRU(
       return []
     }
   },
-  (client: MCPServerConnection) => client.name,
+  // The cache key ignores the options: a fetch for one server is one
+  // entry, whatever signal it carries. The second parameter only keeps
+  // the memoized function's arity honest.
+  (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
+    client.name,
   MCP_SKILL_CACHE_SIZE,
 )

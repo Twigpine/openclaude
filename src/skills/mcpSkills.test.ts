@@ -112,6 +112,57 @@ describe('fetchMcpSkillsForClient privilege stripping', () => {
     expect(command.allowedTools).toEqual([])
   })
 
+  test('a stalled skill read ends when the caller aborts', async () => {
+    // The read only ends because the signal reaches the request: a server
+    // that stalls on resources/read must not hold the caller until its own
+    // timeout. Without the signal, the read never answers and this test
+    // times out instead of settling.
+    const controller = new AbortController()
+    let readStarted = false
+    const client = {
+      type: 'connected',
+      name: 'aborted-skill-read-server',
+      capabilities: { resources: {} },
+      client: {
+        request: async (
+          request: { method: string },
+          _resultSchema: { parse: (value: unknown) => unknown },
+          options?: { signal?: AbortSignal },
+        ) => {
+          if (request.method === 'resources/list') {
+            return { resources: [{ uri: 'skill://held', name: 'held' }] }
+          }
+          if (request.method === 'resources/read') {
+            if (options?.signal?.aborted) {
+              throw new DOMException('aborted', 'AbortError')
+            }
+            readStarted = true
+            await new Promise<void>((_, reject) => {
+              options?.signal?.addEventListener(
+                'abort',
+                () => reject(new DOMException('aborted', 'AbortError')),
+                { once: true },
+              )
+            })
+            throw new Error('unreachable: the held read only ends on abort')
+          }
+          throw new Error(`unexpected method ${request.method}`)
+        },
+      },
+    } as unknown as MCPServerConnection
+
+    const commands = fetchMcpSkillsForClient(client, {
+      signal: controller.signal,
+    })
+    const deadline = Date.now() + 5_000
+    while (!readStarted) {
+      if (Date.now() > deadline) throw new Error('skill read never started')
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    controller.abort()
+    await expect(commands).resolves.toEqual([])
+  }, 10_000)
+
   test('discovers and reads a skill resource that appears only on page two', async () => {
     const listRequests: Array<{
       method: string

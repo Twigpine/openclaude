@@ -778,12 +778,6 @@ async function performMCPXaaAuth(
   // acquireIdpIdToken potentially writes a fresh one.
   const idTokenCacheHit = getCachedIdpIdToken(idp.issuer) !== undefined
 
-  // Whether acquisition handed out its login URL, which it does only when it
-  // sends the user to the IdP. The peek above cannot say: it is a separate
-  // read, and a cached id_token can cross its expiry buffer before
-  // acquisition reads it again.
-  let sentToBrowser = false
-
   let failureStage: XaaFailureStage = 'idp_login'
   try {
     let idToken
@@ -793,10 +787,7 @@ async function performMCPXaaAuth(
         idpClientId: idp.clientId,
         idpClientSecret,
         callbackPort: idp.callbackPort,
-        onAuthorizationUrl: url => {
-          sentToBrowser = true
-          onAuthorizationUrl(url)
-        },
+        onAuthorizationUrl,
         skipBrowserOpen,
         abortSignal,
         credentialScope,
@@ -807,11 +798,14 @@ async function performMCPXaaAuth(
     }
 
     // A login in the browser hands its caller the URL and leaves it, and the
-    // turn that started the flow may have ended while the user was there:
-    // what is written from here on is written where the flow began (see
-    // CredentialScope). A silent acquisition is still awaited by whoever
-    // started it, so it writes as it is.
-    const resumeScope = sentToBrowser ? credentialScope : undefined
+    // turn that started the flow may have ended while the user was there.
+    // What is written from here on is written where the flow began (see
+    // CredentialScope) — including the silent case: a cached id_token still
+    // awaits network I/O, during which another session's turn may apply its
+    // own environment, so its writes belong to the captured scope too, not
+    // to whatever the process has by then. The browser wait itself stays
+    // outside the scope: the mutex is held only for these operations.
+    const resumeScope = credentialScope
 
     // Discover the IdP's token endpoint for the RFC 8693 exchange. Under the
     // flow's signal, like the login's discovery and the exchange: a cancel
@@ -1001,25 +995,42 @@ export async function performMCPOAuthFlow(
     return
   }
 
-  // Check for cached step-up scope and resource metadata URL before clearing
-  // tokens. The transport-attached auth provider persists scope when it receives
-  // a step-up 401, so we can use it here instead of making an extra probe request.
-  const storage = getSecureStorage()
-  const serverKey = getServerKey(serverName, serverConfig)
-  const cachedEntry = storage.read()?.mcpOAuth?.[serverKey]
-  const cachedStepUpScope = cachedEntry?.stepUpScope
-  const cachedResourceMetadataUrl =
-    cachedEntry?.discoveryState?.resourceMetadataUrl
-
   // A flow cancelled before it starts writes nothing, like one cancelled
   // later (see ClaudeAuthProvider): clearing below would discard a sign-in
   // that is still good for an attempt that will never replace it.
   if (abortSignal?.aborted) throw new AuthenticationCancelledError()
 
-  // Clear any existing stored credentials to ensure fresh client registration.
-  // Note: this deletes the entire entry (including discoveryState/stepUpScope),
-  // but we already read the cached values above.
-  clearServerTokensFromSecureStorage(serverName, serverConfig)
+  // Check for cached step-up scope and resource metadata URL before clearing
+  // tokens. The transport-attached auth provider persists scope when it receives
+  // a step-up 401, so we can use it here instead of making an extra probe request.
+  //
+  // Read and clear in the namespace the flow began in: the caller may have
+  // started this flow in one session's environment and another session's
+  // turn may have applied its own by now — a clear in that namespace would
+  // delete that session's saved credentials for this server, and the
+  // registration below would land there too. The browser wait is outside
+  // this scope: the mutex is held only for these operations.
+  const { cachedStepUpScope, cachedResourceMetadataUrl } = await resumeIn(
+    options?.credentialScope,
+    async () => {
+      // Acquiring the credential scope may have waited behind another
+      // turn. A cancel that landed while waiting must not clear the
+      // stored entry — it may be a newer flow's by now.
+      if (abortSignal?.aborted) throw new AuthenticationCancelledError()
+      const storage = getSecureStorage()
+      const serverKey = getServerKey(serverName, serverConfig)
+      const cachedEntry = storage.read()?.mcpOAuth?.[serverKey]
+      // Clear any existing stored credentials to ensure fresh client
+      // registration. Note: this deletes the entire entry (including
+      // discoveryState/stepUpScope), but we already read the cached values
+      // above.
+      clearServerTokensFromSecureStorage(serverName, serverConfig)
+      return {
+        cachedStepUpScope: cachedEntry?.stepUpScope,
+        cachedResourceMetadataUrl: cachedEntry?.discoveryState?.resourceMetadataUrl,
+      }
+    },
+  )
 
   // Use cached step-up scope and resource metadata URL if available.
   // The transport-attached auth provider caches these when it receives a
@@ -1283,12 +1294,17 @@ export async function performMCPOAuthFlow(
 
           // First call to start the auth flow - should redirect
           // Pass the scope and resource_metadata from WWW-Authenticate header if available
-          const result = await sdkAuth(provider, {
-            serverUrl: serverConfig.url,
-            scope: wwwAuthParams.scope,
-            resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
-            fetchFn: authFetch,
-          })
+          // Discovery and dynamic client registration read and write the
+          // stored client in the namespace the flow began in, as the clear
+          // above does; the browser wait that follows is outside the scope.
+          const result = await resumeIn(options?.credentialScope, async () =>
+            sdkAuth(provider, {
+              serverUrl: serverConfig.url,
+              scope: wwwAuthParams.scope,
+              resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
+              fetchFn: authFetch,
+            }),
+          )
           logMCPDebug(serverName, `Initial auth result: ${result}`)
 
           if (result !== 'REDIRECT') {
