@@ -23,6 +23,7 @@ type LRUMemoizedFunction<Args extends unknown[], Result> = {
     delete: (key: string) => boolean
     get: (key: string) => Result | undefined
     has: (key: string) => boolean
+    set: (key: string, value: Result) => void
   }
 }
 
@@ -263,6 +264,10 @@ export function memoizeWithLRU<
     // peek() avoids updating recency — we only want to observe, not promote
     get: (key: string) => cache.peek(key),
     has: (key: string) => cache.has(key),
+    // Seed or replace one entry without invoking f. Atomic refresh paths
+    // fetch fresh values first, then swap them in only on complete success,
+    // so a failed refresh leaves the previous entries untouched.
+    set: (key: string, value: Result) => cache.set(key, value),
   }
 
   return memoized

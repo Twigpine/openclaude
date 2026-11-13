@@ -96,6 +96,7 @@ export const IN_PROCESS_TEAMMATE_ALLOWED_TOOLS = new Set([
  * ENABLE LATER (NEED WORK):
  * - MCPTool: TBD
  * - ListMcpResourcesTool: TBD
+ * - ListMcpResourceTemplatesTool: TBD
  * - ReadMcpResourceTool: TBD
  */
 

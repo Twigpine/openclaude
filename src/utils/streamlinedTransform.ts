@@ -42,6 +42,9 @@ const SEARCH_TOOLS = [
   LSP_TOOL_NAME,
 ]
 const READ_TOOLS = [FILE_READ_TOOL_NAME, LIST_MCP_RESOURCES_TOOL_NAME]
+// ListMcpResourceTemplatesTool lists template metadata, it reads no files
+// (and no resources), so it is deliberately not a read: it falls through
+// to the generic tool category below.
 const WRITE_TOOLS = [
   FILE_WRITE_TOOL_NAME,
   FILE_EDIT_TOOL_NAME,

@@ -2346,7 +2346,8 @@ async function run(): Promise<CommanderCommand> {
       commands: []
     });
     // Merge with dedup by name: each prefetchAllMcpResources call independently
-    // adds helper tools (ListMcpResourcesTool, ReadMcpResourceTool) via
+    // adds helper tools (ListMcpResourcesTool, ListMcpResourceTemplatesTool,
+    // ReadMcpResourceTool) via
     // local dedup flags, so merging two calls can yield duplicates. print.ts
     // already uniqBy's the final tool pool, but dedup here keeps appState clean.
     const mcpPromise = Promise.all([localMcpPromise, claudeaiMcpPromise]).then(([local, claudeai]) => ({

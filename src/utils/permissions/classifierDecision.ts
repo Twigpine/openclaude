@@ -6,6 +6,7 @@ import { FILE_READ_TOOL_NAME } from '../../tools/FileReadTool/prompt.js'
 import { GLOB_TOOL_NAME } from '../../tools/GlobTool/prompt.js'
 import { GREP_TOOL_NAME } from '../../tools/GrepTool/prompt.js'
 import { LIST_MCP_RESOURCES_TOOL_NAME } from '../../tools/ListMcpResourcesTool/prompt.js'
+import { LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME } from '../../tools/ListMcpResourceTemplatesTool/prompt.js'
 import { LSP_TOOL_NAME } from '../../tools/LSPTool/prompt.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../../tools/SendMessageTool/constants.js'
 import { SLEEP_TOOL_NAME } from '../../tools/SleepTool/prompt.js'
@@ -62,6 +63,7 @@ const SAFE_YOLO_ALLOWLISTED_TOOLS = new Set([
   LSP_TOOL_NAME,
   TOOL_SEARCH_TOOL_NAME,
   LIST_MCP_RESOURCES_TOOL_NAME,
+  LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME,
   'ReadMcpResourceTool', // no exported constant
   // Task management (metadata only)
   TODO_WRITE_TOOL_NAME,
