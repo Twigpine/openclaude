@@ -1143,3 +1143,54 @@ test('a late write from a deleted session does not enter a fresh transcript reus
   expect(aText).toContain('A fresh')
   expect(aText).not.toContain(staleSnapshotId)
 })
+
+test('a new turn with a cached pointer waits for an in-flight deletion, and its message survives a failed unlink', async () => {
+  // jatmn on #2489 (P2): the deletion wait lives in materializeSessionFile,
+  // which a turn with an already-cached pointer skips — so its message is
+  // drained into the marked path and discarded. If the removal then fails
+  // with EBUSY the transcript survives but the new turn's message is absent.
+  // Unlike the parked-turn test above, the pointer is deliberately RETAINED
+  // here: that is the gap. Drive it step-by-step (forget → failed unlink →
+  // finish) to hold deleteSession's window open deterministically.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  // A queued (undrained) write: forget's drain has work to do before its
+  // pending-write check, so the replacement turn below can park while forget
+  // is still settling instead of racing a synchronous return.
+  await turnContinuation(SESSION_A, async () => {
+    void recordAttributionSnapshot({
+      type: 'attribution-snapshot',
+      messageId: randomUUID(),
+      surface: 'sdk',
+      fileStates: {},
+    })
+  })
+
+  const forgetPromise = forgetDeletedSession(SESSION_A as never, transcriptPath)
+  // The replacement turn starts while the deletion is still in flight, with
+  // its transcript pointer still cached — no reset, no eviction.
+  const turnPromise = turnContinuation(SESSION_A, async () => {
+    await recordTranscript([message(randomUUID(), 'A returns after failed delete')])
+    await flushSessionStorage()
+  })
+  // Let the turn reach the deletion barrier and park on it.
+  await new Promise(resolve => setTimeout(resolve, 50))
+  // deleteSession's EBUSY failure path: the removal failed, so writes are
+  // restored and the deletion settles. The transcript survives.
+  restoreSessionWrites(transcriptPath)
+  finishDeletedSession(transcriptPath)
+  await turnPromise
+  await forgetPromise
+
+  expect(existsSync(transcriptPath)).toBe(true)
+  const aText = await readFile(transcriptPath, 'utf8')
+  expect(aText).toContain('A first')
+  expect(aText).toContain('A returns after failed delete')
+})
+

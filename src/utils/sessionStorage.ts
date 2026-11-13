@@ -2387,6 +2387,33 @@ class Project {
     return this.trackWrite(async () => {
       let parentUuid: UUID | null = startingParentUuid ?? null
 
+      // A deletion of this session's transcript may be in flight while
+      // its pointer is already cached: the gate below only materializes —
+      // and waits for the deletion to settle — when the pointer is null,
+      // so a turn starting in that window would append into the marked
+      // path and have its message discarded by the write layer. If the
+      // removal then fails, the surviving transcript is missing the
+      // turn's first message (#2489). Wait for the deletion to settle
+      // first; the gate below then re-reads the pointer — dropped by the
+      // deletion's cache cleanup — and materializes it afresh, from the
+      // surviving transcript when the removal failed or clean at the
+      // recycled path when it succeeded. Scoped to this
+      // session's own transcript: a sidechain insert for another session
+      // writes to its own file, not this pointer. The wait cannot
+      // deadlock the deletion: forgetDeletedSession only drains the
+      // write queues, it never waits for a parked turn's write count.
+      const insertsIntoCurrentSession =
+        !sidechainDestination ||
+        sidechainDestination.sessionId === getSessionId()
+      const cachedSessionFile = this.sessionFile
+      if (
+        insertsIntoCurrentSession &&
+        cachedSessionFile !== null &&
+        this.isDeletedSessionFile(cachedSessionFile)
+      ) {
+        await this.waitForDeletionToSettle(cachedSessionFile)
+      }
+
       // First conversation message materializes the session file.
       // Hook progress/attachment messages and local-command bookkeeping
       // alone stay buffered.
