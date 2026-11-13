@@ -251,7 +251,15 @@ function raceWithClientSignal<T>(
   promise: Promise<T>,
   signal: AbortSignal,
 ): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason)
+  if (signal.aborted) {
+    // The caller never awaits the supplied promise in this branch, so
+    // handle it here: a later rejection (e.g. metadata going missing
+    // mid-read) must not surface as an unhandled rejection and kill the
+    // client with exit 1 instead of the signal's 130/143 (CodeRabbit
+    // #2497).
+    void promise.catch(() => {})
+    return Promise.reject(signal.reason)
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason)
     signal.addEventListener('abort', onAbort, { once: true })
