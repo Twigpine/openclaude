@@ -2530,6 +2530,82 @@ describe('background session registry', () => {
         undefined,
       )
       releaseHook?.()
+      await asyncTermination.catch(() => {})
+    }
+  })
+
+  it('keeps the first-published terminal fact when a publisher claims after the target check', async () => {
+    // Regression test for CodeRabbit #2497: publishTerminalFact checked
+    // the target before claiming the publish, but not after. A sync
+    // fallback publishing (and removing its claim) in that gap let the
+    // paused installer rename over the completed fact. The first
+    // publisher must win.
+    const session = await createBackgroundSession({
+      id: 'bg-terminal-fact-recheck',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-terminal-fact-recheck',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let releaseHook: (() => void) | undefined
+    let hookReachedResolve: (() => void) | undefined
+    const hookReached = new Promise<void>(resolve => {
+      hookReachedResolve = resolve
+    })
+    const hookGate = new Promise<void>(resolve => {
+      releaseHook = resolve
+    })
+    backgroundSessionRegistry._setTerminalFactPublishClaimHookForTesting(
+      async () => {
+        hookReachedResolve?.()
+        await hookGate
+      },
+    )
+    // Start async finalization and pause it after the target check but
+    // before it claims the publish: it holds the per-ID lock, so the
+    // sync call below takes the ELOCKED fallback.
+    const asyncTermination = recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      { ownerPid: session.pid, expectedSession: session },
+    )
+    // Mark the rejection handled so a failure mid-test cannot surface
+    // as an unhandled rejection; awaiting the promise still throws.
+    asyncTermination.catch(() => {})
+    try {
+      await hookReached
+      // The fallback publishes exit code 3 while the first installer is
+      // paused between the target check and the claim.
+      recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      // The fallback already published, so the waiter sees its exit code.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      releaseHook?.()
+      const terminated = await asyncTermination
+      // The resumed installer must not replace the published fact.
+      expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      const stored = JSON.parse(
+        await readFile(
+          terminalFactPath(session.id, 'natural', TEST_PROCESS_MARKER),
+          'utf8',
+        ),
+      ) as { exitCode?: number }
+      expect(stored.exitCode).toBe(3)
+    } finally {
+      backgroundSessionRegistry._setTerminalFactPublishClaimHookForTesting(
+        undefined,
+      )
+      releaseHook?.()
+      await asyncTermination.catch(() => {})
     }
   })
 
