@@ -21,6 +21,7 @@ import {
 } from './paths.js'
 import {
   aggregateUsageEvents,
+  appendToPrunedUsageDay,
   getUsageDayRollups,
   readUsageRollupFile,
   rollUpAndPruneUsageEvents,
@@ -48,6 +49,32 @@ function makeUsageEvent(overrides: Partial<UsageEvent> = {}): UsageEvent {
     webSearch: 0,
     ...overrides,
   }
+}
+
+const savedRow = {
+  model: 'qwen/qwen3.8-max',
+  route: 'gitlawb-opengateway',
+  source: 'repl_main_thread',
+  project: '/work/app',
+  requests: 1,
+  unreported: 0,
+  noCacheRequests: 0,
+  noCacheInputTokens: 0,
+  input: 100,
+  output: 10,
+  cacheRead: 0,
+  cacheWrite: 0,
+  webSearch: 0,
+}
+
+/** Rollup file text whose only day, 2026-11-01, has `overrides` applied. */
+function rollupWithDay(overrides: Record<string, unknown>): string {
+  return JSON.stringify({
+    version: 1,
+    days: {
+      '2026-11-01': { rows: [savedRow], sessions: ['s1'], sourceBytes: 10, ...overrides },
+    },
+  })
 }
 
 async function writeDay(dateKey: string, events: UsageEvent[]): Promise<void> {
@@ -281,6 +308,17 @@ describe('getUsageDayRollups', () => {
     ['written by another version', JSON.stringify({ version: 99, days: { '2026-11-01': {} } })],
     ['holding corrupt JSON', '{"version":1,"days":{"2026-11-01":'],
     ['holding JSON that is not an object', '42'],
+    ['without a days object', JSON.stringify({ version: 1 })],
+    ['holding a day key that is not a date', JSON.stringify({
+      version: 1,
+      days: { latest: { rows: [], sessions: [], sourceBytes: 0 } },
+    })],
+    ['holding a row that is not an object', rollupWithDay({ rows: [null] })],
+    ['holding a non-numeric counter', rollupWithDay({ rows: [{ ...savedRow, input: '100' }] })],
+    ['holding a negative counter', rollupWithDay({ rows: [{ ...savedRow, output: -1 }] })],
+    ['holding duplicate rows', rollupWithDay({ rows: [savedRow, savedRow] })],
+    ['holding a session that is not a string', rollupWithDay({ sessions: [42] })],
+    ['holding an invalid sourceBytes', rollupWithDay({ sourceBytes: -1 })],
   ])('never overwrites or prunes against a rollup file %s', async (_label, contents) => {
     await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
     await mkdir(getUsageRollupsDir(usageDir), { recursive: true })
@@ -320,6 +358,19 @@ describe('getUsageDayRollups', () => {
       expect(persisted.days[old]?.rows[0]?.requests).toBe(1)
     },
   )
+
+  test('reads back every row shape it saves', async () => {
+    await writeDay(yesterday, [
+      makeUsageEvent({ ts: at(yesterday), local: true }),
+      makeUsageEvent({ ts: at(yesterday), fast: true }),
+      makeUsageEvent({ ts: at(yesterday), noCache: true }),
+      makeUsageEvent({ ts: at(yesterday), unreported: true, input: 0, output: 0 }),
+    ])
+    const built = await getUsageDayRollups([yesterday], { today, usageDir })
+    rmSync(getUsageEventsFile(yesterday, usageDir))
+    const saved = await getUsageDayRollups([yesterday], { today, usageDir })
+    expect(saved.get(yesterday)).toEqual(built.get(yesterday)!)
+  })
 
   test('builds the same rollup every time', async () => {
     await writeDay(yesterday, [
@@ -466,6 +517,32 @@ describe('rollUpAndPruneUsageEvents', () => {
     expect(existsSync(getUsageRollupsDir(usageDir))).toBe(false)
   })
 
+  test('without keepTotals skips a day an appender holds locked, then deletes it next sweep', async () => {
+    const now = startOfLocalDay('2026-11-09')
+    const old = '2026-11-01'
+    await writeDay(old, [makeUsageEvent({ ts: at(old) })])
+    const file = getUsageEventsFile(old, usageDir)
+    const realLock = lockfile.lock
+    const releaseWriter = await realLock(file)
+    // Exercise proper-lockfile's real contention error without its backoff.
+    const lockSpy = spyOn(lockfile, 'lock').mockImplementation((target, options) =>
+      realLock(target, target === file ? { ...options, retries: 0 } : options),
+    )
+    try {
+      expect(
+        await rollUpAndPruneUsageEvents(now, { now, usageDir, keepTotals: false }),
+      ).toEqual({ removed: 0 })
+      expect(existsSync(file)).toBe(true)
+    } finally {
+      lockSpy.mockRestore()
+      await releaseWriter()
+    }
+    expect(
+      await rollUpAndPruneUsageEvents(now, { now, usageDir, keepTotals: false }),
+    ).toEqual({ removed: 1 })
+    expect(existsSync(file)).toBe(false)
+  })
+
   test('never deletes today even with a cutoff in the future', async () => {
     const now = new Date()
     const today = toLocalDateKey(now)
@@ -476,6 +553,22 @@ describe('rollUpAndPruneUsageEvents', () => {
     )
     expect(removed).toBe(0)
     expect(existsSync(getUsageEventsFile(today, usageDir))).toBe(true)
+  })
+})
+
+describe('appendToPrunedUsageDay', () => {
+  test('never merges into a saved day with an invalid row', async () => {
+    const old = '2026-11-01'
+    const contents = rollupWithDay({ rows: [{ ...savedRow, input: '100' }] })
+    await mkdir(getUsageRollupsDir(usageDir), { recursive: true })
+    await writeFile(getUsageRollupFile('2026-11', usageDir), contents)
+
+    await expect(
+      appendToPrunedUsageDay(old, [makeUsageEvent({ ts: at(old) })], usageDir),
+    ).rejects.toThrow()
+    expect(readFileSync(getUsageRollupFile('2026-11', usageDir), 'utf8')).toBe(
+      contents,
+    )
   })
 })
 
