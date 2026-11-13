@@ -117,30 +117,19 @@ async function readRollupText(
 }
 
 /**
- * Parse rollup file text, or null when it cannot be used. Text that is not a
- * JSON object is null: its contents are lost either way. A file of another
- * version is null, or throws when `strict`, so a writer never replaces a file
- * it cannot read.
+ * Parse rollup file text. Throws when the text is not a rollup file of this
+ * version (malformed JSON, not an object, or another version), so a writer
+ * never replaces a file it cannot read: it may hold the only copy of days
+ * whose event files were pruned.
  */
-function parseRollupFile(
-  text: string,
-  strict: boolean,
-): UsageRollupFile | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return null
+function parseRollupFile(text: string): UsageRollupFile {
+  const parsed: unknown = JSON.parse(text)
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Usage rollup file is not a JSON object')
   }
-  if (!parsed || typeof parsed !== 'object') return null
   const file = parsed as Partial<UsageRollupFile>
   if (file.version !== USAGE_ROLLUP_VERSION) {
-    if (strict) {
-      throw new Error(
-        `Unsupported usage rollup version: ${String(file.version)}`,
-      )
-    }
-    return null
+    throw new Error(`Unsupported usage rollup version: ${String(file.version)}`)
   }
   const days: Record<string, UsageDayRollup> = {}
   if (file.days && typeof file.days === 'object') {
@@ -159,18 +148,14 @@ async function readRollupFileChecked(
   monthKey: string,
   usageDir: string,
 ): Promise<{ file: UsageRollupFile; unreadable: boolean }> {
-  let text: string | null
   try {
-    text = await readRollupText(monthKey, usageDir)
+    const text = await readRollupText(monthKey, usageDir)
+    if (text === null) return { file: emptyRollupFile(), unreadable: false }
+    return { file: parseRollupFile(text), unreadable: false }
   } catch (error) {
     logForDebugging(`Failed to read usage rollups: ${String(error)}`)
     return { file: emptyRollupFile(), unreadable: true }
   }
-  if (text === null) return { file: emptyRollupFile(), unreadable: false }
-  const file = parseRollupFile(text, false)
-  return file
-    ? { file, unreadable: false }
-    : { file: emptyRollupFile(), unreadable: true }
 }
 
 /** Read one month's rollups; a missing or unreadable file reads as empty. */
@@ -299,8 +284,7 @@ async function saveUsageDayRollups(
     // is strict: if the file cannot be read, rewriting it would drop days
     // whose event files are already gone, so the save fails instead.
     const text = await readRollupText(month, usageDir)
-    const current =
-      (text === null ? null : parseRollupFile(text, true)) ?? emptyRollupFile()
+    const current = text === null ? emptyRollupFile() : parseRollupFile(text)
     for (const [key, day] of Object.entries(days)) {
       // A reader may have captured raw events before pruning, then waited
       // here while a late writer added to the archived totals. Once the raw
@@ -342,8 +326,8 @@ export async function appendToPrunedUsageDay(
   })
   try {
     const text = await readRollupText(month, usageDir)
-    const file = text === null ? null : parseRollupFile(text, true)
-    if (!file) throw new Error('Cannot append to unreadable usage rollups')
+    if (text === null) throw new Error('Cannot append to unreadable usage rollups')
+    const file = parseRollupFile(text)
     const saved = file.days[dateKey]
     if (!saved) return false
     const added = aggregateUsageEvents(events)
