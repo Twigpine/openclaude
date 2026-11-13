@@ -1022,6 +1022,15 @@ export function setSessionFileForTesting(path: string): void {
 }
 
 /**
+ * The cached transcript file pointer for the current session context,
+ * for testing. Proves a deletion marked while the existence check was in
+ * flight does not resurrect the pointer for the deleted transcript.
+ */
+export function getSessionFileForTesting(): string | null {
+  return getProject().sessionFile
+}
+
+/**
  * Size of the per-context transcript caches (paths + metadata) for testing.
  * Proves the bound: creating more sessions than MAX_SESSION_CACHE_ENTRIES
  * must not grow the caches past it.
@@ -2565,7 +2574,8 @@ class Project {
         // either way, and the pointer must not be resurrected for one.
         if (
           !this.isDeletedSessionFile(pendingPath) &&
-          (await this.transcriptExists(pendingPath))
+          (await this.transcriptExists(pendingPath)) &&
+          !this.isDeletedSessionFile(pendingPath)
         ) {
           this.sessionFile = pendingPath
         } else {
