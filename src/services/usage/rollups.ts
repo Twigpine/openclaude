@@ -32,6 +32,12 @@ import {
   type UsageRollupRow,
 } from './types.js'
 
+/** Summed fields of a rollup row. */
+const ROW_COUNTERS = [
+  'requests', 'unreported', 'noCacheRequests', 'noCacheInputTokens',
+  'input', 'output', 'cacheRead', 'cacheWrite', 'webSearch',
+] as const
+
 function rowKey(event: Pick<UsageEvent, 'model' | 'route' | 'local' | 'source' | 'project' | 'fast'>): string {
   return [
     event.model,
@@ -93,13 +99,36 @@ function emptyRollupFile(): UsageRollupFile {
   return { version: USAGE_ROLLUP_VERSION, days: {} }
 }
 
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function isRollupRow(value: unknown): value is UsageRollupRow {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Record<string, unknown>
+  return (
+    typeof row.model === 'string' &&
+    typeof row.route === 'string' &&
+    typeof row.source === 'string' &&
+    typeof row.project === 'string' &&
+    (row.local === undefined || row.local === true) &&
+    (row.fast === undefined || row.fast === true) &&
+    ROW_COUNTERS.every(field => isCount(row[field]))
+  )
+}
+
+/** A day exactly as `aggregateUsageEvents` builds it. */
 function isDayRollup(value: unknown): value is UsageDayRollup {
   if (!value || typeof value !== 'object') return false
   const day = value as Partial<UsageDayRollup>
   return (
     Array.isArray(day.rows) &&
+    day.rows.every(isRollupRow) &&
+    // A merge keyed by row would silently drop a duplicate's totals.
+    new Set(day.rows.map(rowKey)).size === day.rows.length &&
     Array.isArray(day.sessions) &&
-    typeof day.sourceBytes === 'number'
+    day.sessions.every(session => typeof session === 'string') &&
+    isCount(day.sourceBytes)
   )
 }
 
@@ -118,9 +147,10 @@ async function readRollupText(
 
 /**
  * Parse rollup file text. Throws when the text is not a rollup file of this
- * version (malformed JSON, not an object, or another version), so a writer
- * never replaces a file it cannot read: it may hold the only copy of days
- * whose event files were pruned.
+ * version (malformed JSON, not an object, another version, or any day that
+ * is not a valid rollup), so a writer never replaces a file it cannot read:
+ * it may hold the only copy of days whose event files were pruned. Skipping
+ * just the bad days would let the next write delete them.
  */
 function parseRollupFile(text: string): UsageRollupFile {
   const parsed: unknown = JSON.parse(text)
@@ -131,11 +161,15 @@ function parseRollupFile(text: string): UsageRollupFile {
   if (file.version !== USAGE_ROLLUP_VERSION) {
     throw new Error(`Unsupported usage rollup version: ${String(file.version)}`)
   }
+  if (!file.days || typeof file.days !== 'object' || Array.isArray(file.days)) {
+    throw new Error('Usage rollup file has no days object')
+  }
   const days: Record<string, UsageDayRollup> = {}
-  if (file.days && typeof file.days === 'object') {
-    for (const [key, day] of Object.entries(file.days)) {
-      if (isDateKey(key) && isDayRollup(day)) days[key] = day
+  for (const [key, day] of Object.entries(file.days)) {
+    if (!isDateKey(key) || !isDayRollup(day)) {
+      throw new Error(`Invalid usage rollup day: ${key}`)
     }
+    days[key] = day
   }
   return { version: USAGE_ROLLUP_VERSION, days }
 }
@@ -337,10 +371,7 @@ export async function appendToPrunedUsageDay(
       const existing = rows.get(key)
       if (!existing) rows.set(key, row)
       else {
-        for (const field of [
-          'requests', 'unreported', 'noCacheRequests', 'noCacheInputTokens',
-          'input', 'output', 'cacheRead', 'cacheWrite', 'webSearch',
-        ] as const) existing[field] += row[field]
+        for (const field of ROW_COUNTERS) existing[field] += row[field]
       }
     }
     saved.rows = [...rows.values()]
@@ -388,18 +419,43 @@ export async function listUsageRollupMonths(
   }
 }
 
+/**
+ * Delete a day's event file while holding the event-path lock that appenders
+ * use, so no append can land in the file as it is removed. `shouldDelete`
+ * runs under the same lock. A busy or already-removed day is skipped and
+ * left for a later sweep.
+ */
 async function deleteEventFile(
   dateKey: string,
   usageDir: string,
+  shouldDelete: () => Promise<boolean> = async () => true,
 ): Promise<boolean> {
+  const file = getUsageEventsFile(dateKey, usageDir)
+  let release: () => Promise<void>
   try {
-    await unlink(getUsageEventsFile(dateKey, usageDir))
-    return true
+    release = await lock(file, {
+      realpath: false,
+      stale: 10_000,
+      retries: { retries: 5, minTimeout: 25 },
+    })
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      logForDebugging(`Failed to delete usage events: ${String(error)}`)
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ELOCKED') return false
+    throw error
+  }
+  try {
+    if (!(await shouldDelete())) return false
+    try {
+      await unlink(file)
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logForDebugging(`Failed to delete usage events: ${String(error)}`)
+      }
+      return false
     }
-    return false
+  } finally {
+    await release()
   }
 }
 
@@ -435,32 +491,16 @@ export async function rollUpAndPruneUsageEvents(
   for (const key of expired) {
     const rollup = rollups.get(key)
     if (!rollup) continue
-    const file = getUsageEventsFile(key, usageDir)
-    let release: () => Promise<void>
-    try {
-      release = await lock(file, {
-        realpath: false,
-        stale: 10_000,
-        retries: { retries: 5, minTimeout: 25 },
-      })
-    } catch (error) {
-      // A busy day can wait for a later sweep; continue pruning other days.
-      const code = (error as NodeJS.ErrnoException).code
-      if (code === 'ENOENT' || code === 'ELOCKED') continue
-      throw error
-    }
-    try {
-      // Appenders use this same lock. Validate the current file and saved
-      // totals while holding it, so an unrolled append cannot be deleted.
+    // Validate the current file and saved totals under the appenders' lock,
+    // so an unrolled append cannot be deleted.
+    const deleted = await deleteEventFile(key, usageDir, async () => {
       const size = await eventFileSize(key, usageDir)
-      if (size === null || rollup.sourceBytes !== size) continue
+      if (size === null || rollup.sourceBytes !== size) return false
       const persisted = (await readUsageRollupFile(monthKeyOf(key), usageDir))
         .days[key]
-      if (!persisted || persisted.sourceBytes !== size) continue
-      if (await deleteEventFile(key, usageDir)) removed++
-    } finally {
-      await release()
-    }
+      return persisted?.sourceBytes === size
+    })
+    if (deleted) removed++
   }
   return { removed }
 }
