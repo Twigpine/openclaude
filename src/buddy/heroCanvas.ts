@@ -46,6 +46,11 @@ export const HERO_PALETTE = {
   U: '#3f78e0', // suit blue
   T: '#3ba99a', // octopus teal
   t: '#7fd6c2', // octopus highlight
+  L: '#1c1e23', // leather jacket
+  l: '#565d6b', // leather sheen
+  h: '#c3c6cc', // salt-and-pepper hair
+  a: '#7c8089', // hair shadow
+  c: '#5fe3ff', // chip glow
 } as const
 
 export type PaletteKey = keyof typeof HERO_PALETTE
@@ -77,8 +82,12 @@ export type HeroRaster = {
   height: number
   /** Mirror the pixels drawn so far left-to-right. */
   flip(): void
-  /** Outline every shape and return the rows as palette strings. */
-  finish(): string[]
+  /** Outline every shape (`outline` pixels thick, default 1) and return
+   *  the rows as palette strings. */
+  finish(outline?: number): string[]
+  /** Like finish, plus, for each outline pixel, the index of the nearest
+   *  drawn pixel (-1 elsewhere), so an outline can take that pixel's colour. */
+  finishWithSources(outline?: number): { rows: string[]; source: Int32Array }
 }
 
 const MIN_RADIUS = 0.55
@@ -88,6 +97,12 @@ export function createHeroRaster(scale: number): HeroRaster {
   const height = Math.round(HERO_DESIGN_HEIGHT * scale)
   const buf: Pixel[] = new Array<Pixel>(width * height).fill('.')
   const compact = scale < 1
+  // From scale 2 up there are enough pixels to draw faces as smooth curves
+  // instead of pixel-art dots.
+  const smooth = scale >= 2
+  // Above scale 1 a design pixel covers several device pixels, so single
+  // dots (glints, mouths, sparks) become blocks instead of specks.
+  const block = Math.max(1, Math.round(scale))
 
   const put = (x: number, y: number, c: PaletteKey): void => {
     const px = Math.floor(x)
@@ -157,9 +172,15 @@ export function createHeroRaster(scale: number): HeroRaster {
     cap: (x1, y1, x2, y2, r, c) =>
       fillCapsule(x1 * scale, y1 * scale, x2 * scale, y2 * scale, Math.max(MIN_RADIUS, r * scale), c),
     poly: (points, c) => fillPolygon(points.map(([x, y]) => [x * scale, y * scale] as const), c),
-    dot: (x, y, c) => put(x * scale, y * scale, c),
+    dot: (x, y, c) => {
+      const px = Math.floor(x * scale)
+      const py = Math.floor(y * scale)
+      for (let dy = 0; dy < block; dy++) for (let dx = 0; dx < block; dx++) put(px + dx, py + dy, c)
+    },
     row: (x, y, n, c) => {
-      for (let i = 0; i < n; i++) put(x * scale + i, y * scale, c)
+      const px = Math.floor(x * scale)
+      const py = Math.floor(y * scale)
+      for (let dy = 0; dy < block; dy++) for (let i = 0; i < n * block; i++) put(px + i, py + dy, c)
     },
     stamp: (x, y, pattern) => stampAt(Math.floor(x * scale), Math.floor(y * scale), pattern),
     eye(x, y, style) {
@@ -176,6 +197,30 @@ export function createHeroRaster(scale: number): HeroRaster {
             return stampAt(ex, ey - 1, ['WE', 'EE'])
           default:
             return stampAt(ex, ey, ['WE', 'EE'])
+        }
+      }
+      if (smooth) {
+        switch (style) {
+          case 'shut':
+            // A soft downward curve, like a closed, relaxed eye.
+            canvas.cap(x - 1.9, y + 0.5, x, y + 1.3, 0.45, 'E')
+            canvas.cap(x, y + 1.3, x + 1.9, y + 0.5, 0.45, 'E')
+            return
+          case 'happy':
+            canvas.cap(x - 1.9, y + 1.2, x, y - 0.3, 0.5, 'E')
+            canvas.cap(x, y - 0.3, x + 1.9, y + 1.2, 0.5, 'E')
+            return
+          case 'down':
+            canvas.ell(x, y + 1, 1.9, 1.6, 'E')
+            canvas.ell(x - 0.8, y + 0.4, 0.6, 0.5, 'W')
+            return
+          default: {
+            const dy = style === 'up' ? -1 : 0
+            canvas.ell(x, y + dy, 1.9, 2.5, 'E')
+            canvas.ell(x - 0.75, y + dy - 1.1, 0.75, 0.85, 'W')
+            canvas.ell(x + 0.8, y + dy + 1.1, 0.35, 0.35, 'W')
+            return
+          }
         }
       }
       if (style === 'shut') return canvas.row(x - 2, y + 1, 4, 'E')
@@ -201,6 +246,24 @@ export function createHeroRaster(scale: number): HeroRaster {
         const mx = Math.round(x * scale)
         const my = Math.round(y * scale)
         return stampAt(mx, my, style === 'smile' ? ['NN'] : ['N'])
+      }
+      if (smooth) {
+        switch (style) {
+          case 'smile':
+            canvas.cap(x - 1, y + 0.1, x + 0.5, y + 1, 0.4, 'N')
+            canvas.cap(x + 0.5, y + 1, x + 2, y + 0.1, 0.4, 'N')
+            return
+          case 'frown':
+            canvas.cap(x - 1, y + 1, x + 0.5, y + 0.2, 0.4, 'N')
+            canvas.cap(x + 0.5, y + 0.2, x + 2, y + 1, 0.4, 'N')
+            return
+          case 'o':
+            canvas.ell(x + 0.5, y + 0.7, 0.85, 0.95, 'N')
+            return
+          default:
+            canvas.cap(x - 0.2, y + 0.4, x + 1.3, y + 0.4, 0.35, 'N')
+            return
+        }
       }
       switch (style) {
         case 'smile':
@@ -239,26 +302,69 @@ export function createHeroRaster(scale: number): HeroRaster {
         for (let x = 0; x < width; x++) buf[y * width + x] = line[x]!
       }
     },
-    finish() {
-      const rows: string[] = []
+    finish(outline = 1) {
+      return this.finishWithSources(outline).rows
+    },
+    finishWithSources(outline = 1) {
+      // Outline = every empty pixel within `outline` of a drawn one. A
+      // two-pass chamfer distance transform (3 per straight step, 4 per
+      // diagonal) finds them in linear time and keeps thick outlines round;
+      // it also carries along which drawn pixel is nearest.
+      const far = 1 << 30
+      const dist = new Int32Array(width * height)
+      const near = new Int32Array(width * height).fill(-1)
+      for (let i = 0; i < dist.length; i++) {
+        if (buf[i] === '.') dist[i] = far
+        else near[i] = i
+      }
+      const relax = (i: number, j: number, step: number): void => {
+        const d = dist[j]! + step
+        if (d < dist[i]!) {
+          dist[i] = d
+          near[i] = near[j]!
+        }
+      }
       for (let y = 0; y < height; y++) {
-        let line = ''
         for (let x = 0; x < width; x++) {
           const i = y * width + x
-          if (buf[i] !== '.') {
-            line += buf[i]
-            continue
+          if (dist[i] === 0) continue
+          if (x > 0) relax(i, i - 1, 3)
+          if (y > 0) {
+            relax(i, i - width, 3)
+            if (x > 0) relax(i, i - width - 1, 4)
+            if (x < width - 1) relax(i, i - width + 1, 4)
           }
-          const touches =
-            (x > 0 && buf[i - 1] !== '.') ||
-            (x < width - 1 && buf[i + 1] !== '.') ||
-            (y > 0 && buf[i - width] !== '.') ||
-            (y < height - 1 && buf[i + width] !== '.')
-          line += touches ? 'K' : '.'
         }
-        rows.push(line)
       }
-      return rows
+      for (let y = height - 1; y >= 0; y--) {
+        for (let x = width - 1; x >= 0; x--) {
+          const i = y * width + x
+          if (dist[i] === 0) continue
+          if (x < width - 1) relax(i, i + 1, 3)
+          if (y < height - 1) {
+            relax(i, i + width, 3)
+            if (x < width - 1) relax(i, i + width + 1, 4)
+            if (x > 0) relax(i, i + width - 1, 4)
+          }
+        }
+      }
+      const limit = outline * 3
+      const source = new Int32Array(width * height).fill(-1)
+      const rows: string[] = []
+      for (let y = 0; y < height; y++) {
+        const chars: string[] = new Array(width)
+        for (let x = 0; x < width; x++) {
+          const i = y * width + x
+          const d = dist[i]!
+          if (d === 0) chars[x] = buf[i]!
+          else if (d <= limit) {
+            chars[x] = 'K'
+            source[i] = near[i]!
+          } else chars[x] = '.'
+        }
+        rows.push(chars.join(''))
+      }
+      return { rows, source }
     },
   }
 }

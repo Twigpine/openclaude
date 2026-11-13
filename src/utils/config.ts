@@ -350,6 +350,8 @@ export type GlobalConfig = {
   // /buddy companion soul — bones regenerated from userId on read. See src/buddy/.
   companion?: import('../buddy/types.js').StoredCompanion
   companionMuted?: boolean
+  /** false = never draw the companion as a terminal image (/buddy images off) */
+  companionImages?: boolean
 
   // Feedback survey tracking
   feedbackSurveyState?: {

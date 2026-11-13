@@ -15,6 +15,7 @@ import {
   kaio,
   merlin,
   robinhood,
+  keynote,
   strawhat,
   twig,
 } from './types.js'
@@ -316,7 +317,27 @@ const acornFx: ActionEffect = {
   },
 }
 
+// ── Keynote: a glowing chip tossed at the prompt ────────────────────────
+const chipFx: ActionEffect = {
+  drawMs: 300,
+  travelMs: 650,
+  impactMs: 300,
+  render(elapsed, width) {
+    if (width < 6) return null
+    if (elapsed >= this.travelMs) {
+      return impactBurst(elapsed - this.travelMs, this.impactMs, width, 'rgb(95,227,255)', '✧✦✧', '· ·')
+    }
+    const x = leftPos(elapsed / this.travelMs, width, 1)
+    const runs: FxRun[] = [pad(x), { text: '▣', color: 'rgb(95,227,255)' }]
+    const trailLen = Math.min(4, width - x - 1)
+    if (trailLen > 0) runs.push({ text: '∙·· '.slice(0, trailLen), color: C.beamEdge })
+    runs.push(pad(width - x - 1 - trailLen))
+    return runs
+  },
+}
+
 export const ACTION_EFFECTS: Partial<Record<Form, ActionEffect>> = {
+  [keynote]: chipFx,
   [twig]: acornFx,
   [robinhood]: arrowFx,
   [kaio]: kaioFx,

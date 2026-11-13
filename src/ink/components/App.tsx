@@ -11,9 +11,12 @@ import { TerminalFocusEvent } from '../events/terminal-focus-event.js';
 import { INITIAL_STATE, type ParsedInput, type ParsedKey, type ParsedMouse, parseMultipleKeypresses } from '../parse-keypress.js';
 import reconciler from '../reconciler.js';
 import { finishSelection, hasSelection, type SelectionState, startSelection } from '../selection.js';
-import { isXtermJs, setXtversionName, supportsExtendedKeys } from '../terminal.js';
+import { isXtermJs, setTerminalGraphics, setXtversionName, shouldProbeKittyGraphics, supportsExtendedKeys } from '../terminal.js';
 import { getTerminalFocused, setTerminalFocused } from '../terminal-focus-state.js';
-import { TerminalQuerier, xtversion } from '../terminal-querier.js';
+import { cellPixelSize, kittyGraphics, TerminalQuerier, xtversion } from '../terminal-querier.js';
+
+// Image id used only for the startup kitty graphics query (never displayed).
+const KITTY_GRAPHICS_PROBE_ID = 7_171_701;
 import { DISABLE_KITTY_KEYBOARD, DISABLE_MODIFY_OTHER_KEYS, ENABLE_KITTY_KEYBOARD, ENABLE_MODIFY_OTHER_KEYS, FOCUS_IN, FOCUS_OUT } from '../termio/csi.js';
 import { DBP, DFE, DISABLE_MOUSE_TRACKING, EBP, EFE, HIDE_CURSOR, SHOW_CURSOR } from '../termio/dec.js';
 import AppContext from './AppContext.js';
@@ -281,6 +284,21 @@ export default class App extends PureComponent<Props, State> {
               logForDebugging('XTVERSION: no reply (terminal ignored query)');
             }
           });
+          // Image support for the companion sprite: a kitty graphics query
+          // plus the cell size in pixels. Same DA1-sentinel pattern, so a
+          // terminal that ignores either query just leaves it undefined.
+          if (shouldProbeKittyGraphics()) {
+            void Promise.all([this.querier.send(kittyGraphics(KITTY_GRAPHICS_PROBE_ID)), this.querier.send(cellPixelSize()), this.querier.flush()]).then(([graphics, cell]) => {
+              setTerminalGraphics({
+                kitty: graphics?.message === 'OK',
+                cell: cell && cell.width > 0 && cell.height > 0 ? {
+                  width: cell.width,
+                  height: cell.height
+                } : undefined
+              });
+              logForDebugging(`Kitty graphics: ${graphics ? graphics.message : 'no reply'}; cell ${cell ? `${cell.width}x${cell.height}px` : 'unknown'}`);
+            });
+          }
         });
       }
       this.rawModeEnabledCount++;

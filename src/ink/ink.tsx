@@ -14,8 +14,10 @@ import { format } from 'util';
 import { colorize } from './colorize.js';
 import App from './components/App.js';
 import type { CursorDeclaration, CursorDeclarationSetter } from './components/CursorDeclarationContext.js';
+import ImageOverlayContext, { type ImageOverlay, type ImageOverlaySetter } from './components/ImageOverlayContext.js';
 import { FRAME_INTERVAL_MS } from './constants.js';
 import * as dom from './dom.js';
+import { LayoutEdge } from './layout/node.js';
 import { KeyboardEvent } from './events/keyboard-event.js';
 import { FocusManager } from './focus.js';
 import { emptyFrame, type Frame, type FrameEvent } from './frame.js';
@@ -58,6 +60,38 @@ const ERASE_THEN_HOME_PATCH = Object.freeze({
 
 // Cached per-Ink-instance, invalidated on resize. frame.cursor.y for
 // alt-screen is always terminalRows - 1 (renderer.ts).
+/**
+ * The screen rect of an image overlay's box, or undefined when it should not
+ * be drawn: not rendered this frame, or cut by an ancestor that hides or
+ * scrolls its overflow. Terminal images cannot be drawn partly hidden, so a
+ * box that does not fit whole inside every clipping ancestor is skipped
+ * (the text renderer clips separately; nodeCache holds the unclipped rect).
+ */
+function unclippedOverlayRect(node: dom.DOMElement): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} | undefined {
+  const rect = nodeCache.get(node);
+  if (!rect) return undefined;
+  for (let parent = node.parentNode; parent; parent = parent.parentNode) {
+    const clipsY = (parent.style.overflowY ?? parent.style.overflow ?? 'visible') !== 'visible';
+    const clipsX = (parent.style.overflowX ?? parent.style.overflow ?? 'visible') !== 'visible';
+    if (!clipsX && !clipsY) continue;
+    const clip = nodeCache.get(parent);
+    if (!clip) return undefined;
+    // Same clip rectangle as render-node-to-output: the box minus its borders.
+    const yoga = parent.yogaNode;
+    const top = yoga?.getComputedBorder(LayoutEdge.Top) ?? 0;
+    const bottom = yoga?.getComputedBorder(LayoutEdge.Bottom) ?? 0;
+    const left = yoga?.getComputedBorder(LayoutEdge.Left) ?? 0;
+    const right = yoga?.getComputedBorder(LayoutEdge.Right) ?? 0;
+    if (clipsY && (rect.y < clip.y + top || rect.y + rect.height > clip.y + clip.height - bottom)) return undefined;
+    if (clipsX && (rect.x < clip.x + left || rect.x + rect.width > clip.x + clip.width - right)) return undefined;
+  }
+  return rect;
+}
 function makeAltScreenParkPatch(terminalRows: number) {
   return Object.freeze({
     type: 'stdout' as const,
@@ -169,6 +203,16 @@ export default class Ink {
   // screen readers / screen magnifiers track it — so parking at the text
   // input's caret makes CJK input appear inline and lets a11y tools follow.
   private cursorDeclaration: CursorDeclaration | null = null;
+  // Terminal images drawn over boxes (useImageOverlay), by id, and what was
+  // last drawn for each so an unchanged image at an unchanged position is
+  // not re-sent. `clear` is kept so a removed overlay can still be erased.
+  private imageOverlays = new Map<number, ImageOverlay>();
+  private placedImages = new Map<number, {
+    key: string;
+    x: number;
+    y: number;
+    clear: string;
+  }>();
   // Main-screen: physical cursor position after the declared-cursor move,
   // tracked separately from frame.cursor (which must stay at content-bottom
   // for log-update's relative-move invariants). Alt-screen doesn't need
@@ -757,6 +801,16 @@ export default class Ink {
         this.displayCursor = null;
       }
     }
+    // Terminal images go last, inside the same synchronized write, so the
+    // frame and its images land together. Redrawn whenever the frame
+    // changed (text writes or scrolling may have disturbed them).
+    const overlayPatch = this.imageOverlayPatch(frame, hasDiff, terminalRows);
+    if (overlayPatch) {
+      optimized.push({
+        type: 'stdout',
+        content: overlayPatch
+      });
+    }
     const tWrite = performance.now();
     const skipSyncMarkers = this.altScreenActive ? !SYNC_OUTPUT_SUPPORTED : rewriteMainScreen || shouldSkipMainScreenSyncMarkers();
     writeDiffToTerminal(this.terminal, optimized, skipSyncMarkers);
@@ -955,6 +1009,8 @@ export default class Ink {
    * as restoring the saved cursor position — clobbering the resume hint.
    */
   detachForShutdown(): void {
+    // unmount() is skipped on this path, so its image cleanup never runs.
+    this.clearPlacedImagesSync();
     this.isUnmounted = true;
     // Cancel any pending throttled render so it doesn't fire between
     // cleanupTerminalModes() and process.exit() and write to main screen.
@@ -1460,6 +1516,70 @@ export default class Ink {
   private writeRaw(data: string): void {
     this.options.stdout.write(data);
   }
+  /**
+   * Erase every terminal image drawn by useImageOverlay. Synchronous, for
+   * exit paths where an async write would be dropped; shared by unmount()
+   * and detachForShutdown() (graceful shutdown skips unmount()).
+   */
+  private clearPlacedImagesSync(): void {
+    if (this.options.stdout.isTTY) {
+      /* eslint-disable custom-rules/no-sync-fs -- process exiting; async writes would be dropped */
+      for (const placed of this.placedImages.values()) writeSync(1, placed.clear);
+      /* eslint-enable custom-rules/no-sync-fs */
+    }
+    this.placedImages.clear();
+  }
+  private setImageOverlay: ImageOverlaySetter = (id, overlay) => {
+    if (overlay) this.imageOverlays.set(id, overlay);else this.imageOverlays.delete(id);
+  };
+
+  /**
+   * Escape sequences that draw, move or clear the declared images for this
+   * frame. Each draw saves the cursor (DECSC), moves to the box's top-left
+   * cell, writes the image, and restores the cursor (DECRC), so cursor
+   * parking above is unaffected. In the main screen only the bottom
+   * `terminalRows` rows of the frame are visible, so a box scrolled above
+   * them is cleared rather than drawn at a clamped position.
+   */
+  private imageOverlayPatch(frame: Frame, frameChanged: boolean, terminalRows: number): string {
+    let out = '';
+    for (const [id, placed] of this.placedImages) {
+      if (!this.imageOverlays.has(id)) {
+        out += placed.clear;
+        this.placedImages.delete(id);
+      }
+    }
+    if (this.imageOverlays.size === 0) return out;
+    // Where the cursor is after this frame's diff and cursor parking.
+    const cursor = this.altScreenActive ? null : this.displayCursor ?? frame.cursor;
+    const frameHeight = frame.screen.height;
+    // Main screen: the terminal shows the `terminalRows` rows ending at the
+    // lower of the frame's last row and the cursor's row (the cursor sits
+    // on the line after the frame, pushing one more row into scrollback).
+    const visibleTop = Math.max(frameHeight - 1, frame.cursor.y) - terminalRows + 1;
+    for (const [id, overlay] of this.imageOverlays) {
+      const rect = unclippedOverlayRect(overlay.node);
+      const placed = this.placedImages.get(id);
+      const visible = rect !== undefined && rect.width > 0 && rect.height > 0 && rect.x >= 0 && rect.y >= 0 && rect.y + rect.height <= frameHeight && (this.altScreenActive ? rect.y + rect.height <= terminalRows : rect.y >= visibleTop);
+      if (!visible) {
+        if (placed) {
+          out += placed.clear;
+          this.placedImages.delete(id);
+        }
+        continue;
+      }
+      if (placed && !frameChanged && placed.key === overlay.key && placed.x === rect.x && placed.y === rect.y) continue;
+      const move = cursor === null ? cursorPosition(rect.y + 1, rect.x + 1) : cursorMove(rect.x - cursor.x, rect.y - cursor.y);
+      out += '\x1b7' + move + overlay.draw() + '\x1b8';
+      this.placedImages.set(id, {
+        key: overlay.key,
+        x: rect.x,
+        y: rect.y,
+        clear: overlay.clear
+      });
+    }
+    return out;
+  }
   private setCursorDeclaration: CursorDeclarationSetter = (decl, clearIfNode) => {
     if (decl === null && clearIfNode !== undefined && this.cursorDeclaration?.node !== clearIfNode) {
       return;
@@ -1471,7 +1591,9 @@ export default class Ink {
     this.currentNode = node;
     const tree = <App stdin={this.options.stdin} stdout={this.options.stdout} stderr={this.options.stderr} exitOnCtrlC={this.options.exitOnCtrlC} onExit={this.unmount} terminalColumns={this.terminalColumns} terminalRows={this.terminalRows} selection={this.selection} onSelectionChange={this.notifySelectionChange} onClickAt={this.dispatchClick} onHoverAt={this.dispatchHover} getHyperlinkAt={this.getHyperlinkAt} onOpenHyperlink={this.openHyperlink} onMultiClick={this.handleMultiClick} onSelectionDrag={this.handleSelectionDrag} onStdinResume={this.reassertTerminalModes} onCursorDeclaration={this.setCursorDeclaration} dispatchKeyboardEvent={this.dispatchKeyboardEvent}>
         <TerminalWriteProvider value={this.writeRaw}>
-          {node}
+          <ImageOverlayContext.Provider value={this.setImageOverlay}>
+            {node}
+          </ImageOverlayContext.Provider>
         </TerminalWriteProvider>
       </App>;
 
@@ -1516,6 +1638,8 @@ export default class Ink {
       writeSync(1, DISABLE_MOUSE_TRACKING);
       // Drain stdin so in-flight mouse events don't leak to the shell
       this.drainStdin();
+      // Remove terminal images (useImageOverlay) so none outlive the app.
+      this.clearPlacedImagesSync();
       // Disable extended key reporting (both kitty and modifyOtherKeys)
       writeSync(1, DISABLE_MODIFY_OTHER_KEYS);
       writeSync(1, DISABLE_KITTY_KEYBOARD);

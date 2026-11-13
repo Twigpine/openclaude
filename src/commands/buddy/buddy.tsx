@@ -1,4 +1,4 @@
-import { stripVTControlCharacters } from 'node:util'
+import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util'
 import type { LocalJSXCommandContext, LocalJSXCommandOnDone } from '../../types/command.js'
 import { stringWidth } from '../../ink/stringWidth.js'
 import {
@@ -19,10 +19,12 @@ import {
   merlin,
   parseForm,
   robinhood,
+  keynote,
   strawhat,
   twig,
 } from '../../buddy/types.js'
 import { COMMON_HELP_ARGS, COMMON_INFO_ARGS } from '../../constants/xml.js'
+import { getTerminalGraphics } from '../../ink/terminal.js'
 
 // Flavor for /buddy set confirmations. A full Record so adding a hero
 // without flavor text is a compile error.
@@ -58,6 +60,10 @@ const FORM_FLAVOR: Record<Form, { don: string; hint: string }> = {
   [twig]: {
     don: 'curls up its tail and grins',
     hint: 'Submit any message to lob an acorn.',
+  },
+  [keynote]: {
+    don: 'zips up the leather jacket and takes the stage',
+    hint: 'Submit any message to toss the glowing chip.',
   },
 }
 
@@ -141,20 +147,24 @@ function setCompanionReaction(
 // The sprite reads the companion config non-reactively, and its clock is
 // paused under reduced motion. Every config change therefore also bumps an
 // AppState version the sprite subscribes to, so it redraws (or hides) at once.
+// Returns whether the change took effect: saveGlobalConfig skips the write
+// in some error cases (an unwritable config file, for one) without throwing.
 function saveCompanionConfig(
   context: LocalJSXCommandContext,
   update: (current: GlobalConfig) => GlobalConfig,
-): void {
+): boolean {
   saveGlobalConfig(update)
   context.setAppState(prev => ({
     ...prev,
     companionConfigVersion: (prev.companionConfigVersion ?? 0) + 1,
   }))
+  const saved = getGlobalConfig()
+  return isDeepStrictEqual(update(saved), saved)
 }
 
 function showHelp(onDone: LocalJSXCommandOnDone): void {
   onDone(
-    `Usage: /buddy [status|mute|unmute|dance|set <form|random>|name <new name>]\n\nForms: ${FORM_LIST}\n\nRun /buddy with no args to hatch your companion the first time, then pet it on later runs. /buddy set picks a hero form with its own Enter animation; /buddy set random restores the rolled one; /buddy dance starts a short dance; /buddy name renames your companion.`,
+    `Usage: /buddy [status|mute|unmute|dance|images <on|off>|set <form|random>|name <new name>]\n\nForms: ${FORM_LIST}\n\nRun /buddy with no args to hatch your companion the first time, then pet it on later runs. /buddy set picks a hero form with its own Enter animation; /buddy set random restores the rolled one; /buddy dance starts a short dance; /buddy images off keeps the pixel sprite even where the terminal can draw images; /buddy name renames your companion.`,
     { display: 'system' },
   )
 }
@@ -209,6 +219,31 @@ export async function call(
   }
 
   const [sub, ...rest] = arg.split(/\s+/)
+
+  if (sub === 'images' && (rest[0] === 'on' || rest[0] === 'off') && rest.length === 1) {
+    const on = rest[0] === 'on'
+    const saved = saveCompanionConfig(context, current => ({
+      ...current,
+      companionImages: on ? undefined : false,
+    }))
+    if (!saved) {
+      onDone(
+        "Couldn't save the buddy images setting: the OpenClaude config file could not be written.",
+        { display: 'system' },
+      )
+      return null
+    }
+    const supported = getTerminalGraphics().kitty
+    onDone(
+      on
+        ? supported
+          ? 'Buddy images on: your buddy is drawn as a sharp image in this terminal.'
+          : "Buddy images on. This terminal didn't report image support (kitty graphics), so your buddy stays a pixel sprite here."
+        : 'Buddy images off: your buddy is drawn as a pixel sprite.',
+      { display: 'system' },
+    )
+    return null
+  }
 
   if (sub === 'dance' && rest.length === 0) {
     const companion = getCompanion()

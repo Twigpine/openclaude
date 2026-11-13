@@ -49,6 +49,11 @@ const KITTY_FLAGS_RE = /^\x1b\[\?(\d+)u$/
 // Ctrl+F3 = CSI 1;5 R, etc.) — plain CSI row;col R is genuinely ambiguous.
 // eslint-disable-next-line no-control-regex
 const CURSOR_POSITION_RE = /^\x1b\[\?(\d+);(\d+)R$/
+// XTWINOPS cell size report: CSI 6 ; height ; width t (answer to CSI 16 t).
+// No key produces CSI … t, so it is safe to claim.
+const CELL_SIZE_RE = /^\x1b\[6;(\d+);(\d+)t$/
+// Kitty graphics protocol reply: APC G <keys> ; <message> ST
+const KITTY_GRAPHICS_RE = /^\x1b_G([^;]*);(.*?)(?:\x1b\\|\x07)$/s
 // OSC response: OSC code ; data (BEL|ST)
 // eslint-disable-next-line no-control-regex
 const OSC_RESPONSE_RE = /^\x1b\](\d+);(.*?)(?:\x07|\x1b\\)$/s
@@ -109,6 +114,10 @@ export type TerminalResponse =
   /** XTVERSION: terminal name/version string (answer to CSI > 0 q).
    *  Example values: "xterm.js(5.5.0)", "ghostty 1.2.0", "iTerm2 3.6". */
   | { type: 'xtversion'; name: string }
+  /** Cell size in pixels (answer to CSI 16 t) */
+  | { type: 'cellSize'; height: number; width: number }
+  /** Kitty graphics protocol reply; `message` is "OK" or an error code */
+  | { type: 'kittyGraphics'; id: number; message: string }
 
 /**
  * Try to recognize a sequence token as a terminal response.
@@ -152,7 +161,28 @@ function parseTerminalResponse(s: string): TerminalResponse | null {
       }
     }
 
+    if ((m = CELL_SIZE_RE.exec(s))) {
+      return {
+        type: 'cellSize',
+        height: parseInt(m[1]!, 10),
+        width: parseInt(m[2]!, 10),
+      }
+    }
+
     return null
+  }
+
+  // APC responses (kitty graphics protocol)
+  if (s.startsWith('\x1b_G')) {
+    const m = KITTY_GRAPHICS_RE.exec(s)
+    if (m) {
+      const id = /(?:^|,)i=(\d+)/.exec(m[1]!)
+      return {
+        type: 'kittyGraphics',
+        id: id ? parseInt(id[1]!, 10) : 0,
+        message: m[2]!,
+      }
+    }
   }
 
   // OSC responses (e.g. OSC 11 ; rgb:... for bg color query)

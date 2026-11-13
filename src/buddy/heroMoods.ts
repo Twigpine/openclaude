@@ -290,9 +290,10 @@ function fullBadge(g: HeroCanvas, mood: HeroMood, t: number): void {
     case 'sleeping': {
       const k = (t * 1.2) % 1
       const zee = (x: number, y: number, size: number): void => {
-        g.row(x, y, size, 'w')
-        for (let i = 0; i < size; i++) g.dot(x + size - 1 - i, y + i, 'w')
-        g.row(x, y + size - 1, size, 'w')
+        const w = 0.45
+        g.cap(x, y, x + size - 1, y, w, 'w')
+        g.cap(x + size - 1, y, x, y + size - 1, w, 'w')
+        g.cap(x, y + size - 1, x + size - 1, y + size - 1, w, 'w')
       }
       zee(37, 9 - k * 3, 3)
       zee(41, 5 - k * 3, 4)
@@ -310,7 +311,8 @@ function particles(g: HeroCanvas, mood: HeroMood, t: number): void {
     for (let i = 0; i < 16; i++) {
       const x = noise(i) * 47 + Math.sin(t * 3 + i) * 1.5
       const y = (noise(i + 40) * 40 + t * (14 + noise(i + 80) * 12)) % 40
-      g.dot(x, y, colours[i % colours.length]!)
+      // Tiny round flakes: one pixel on the small sprite, discs at full size.
+      g.ell(x, y, 0.6, 0.45 + 0.25 * Math.abs(Math.sin(t * 6 + i)), colours[i % colours.length]!)
     }
   } else if (mood === 'working') {
     for (let i = 0; i < 4; i++) {
