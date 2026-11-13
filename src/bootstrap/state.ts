@@ -543,9 +543,13 @@ export function switchSession(
   const currentSessionId = ctx?.sessionId ?? STATE.sessionId
   // Capture the outgoing identity before mutating: listeners carry state
   // across the switch from this key (see PreviousSessionIdentity).
+  // A null project directory is meaningful (the session lives in the
+  // current project) and must not fall back to the global directory: an
+  // SDK context with sessionProjectDir: null is not the global session.
+  // Same rule as getSessionProjectDir().
   const previousSession: PreviousSessionIdentity = {
     sessionId: currentSessionId,
-    sessionProjectDir: ctx?.sessionProjectDir ?? STATE.sessionProjectDir,
+    sessionProjectDir: ctx ? ctx.sessionProjectDir : STATE.sessionProjectDir,
   }
   // Drop the outgoing session's plan-slug entry so the Map stays bounded
   // across repeated /resume. Only the current session's slug is ever read

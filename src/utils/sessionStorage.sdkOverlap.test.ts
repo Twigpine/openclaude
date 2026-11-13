@@ -42,6 +42,7 @@ import {
   resetSessionFilePointer,
   restoreSessionMetadata,
   restoreSessionWrites,
+  saveAiGeneratedTitle,
   saveTag,
 } from './sessionStorage.js'
 import { createGoalState } from '../services/goal/state.js'
@@ -689,13 +690,56 @@ test('overlapping deletions of the same transcript keep the original metadata sn
     forgetDeletedSession(SESSION_A as never, transcriptPath),
   ])
 
-  // Neither removal ran, so the transcript survived: the surviving
-  // session's cached title must come back with the restore, not be lost
-  // to the second deletion overwriting the first snapshot.
+  // Neither removal ran, so the transcript survived — but the restore is
+  // deferred while the second attempt is still in flight: un-marking (and
+  // restoring) on the first failure would let a replacement turn write to
+  // the file the second attempt may yet remove. Each failure restores in
+  // turn, as the delete callers do; the last one brings the title back.
   restoreSessionWrites(transcriptPath)
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBeUndefined()
+  })
+  finishDeletedSession(transcriptPath)
+  restoreSessionWrites(transcriptPath)
+  finishDeletedSession(transcriptPath)
   await turnStart(SESSION_A, async () => {
     expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
   })
+})
+
+test('a failed deletion does not unblock writes while another deletion attempt is still running', async () => {
+  // CodeRabbit on #2489: with two overlapping deletions, the first
+  // attempt's failure path removed the deleted marker while the second
+  // unlink was still pending — so a replacement turn could write to the
+  // surviving file, the second unlink removed its data, and the path was
+  // left unmarked for later metadata appends to recreate.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await Promise.all([
+    forgetDeletedSession(SESSION_A as never, transcriptPath),
+    forgetDeletedSession(SESSION_A as never, transcriptPath),
+  ])
+
+  // The first attempt's removal fails: its restore must wait for the
+  // second attempt, not unblock writes while it is still pending.
+  restoreSessionWrites(transcriptPath)
+  finishDeletedSession(transcriptPath)
+
+  // A late metadata write while the second attempt is still running.
+  saveAiGeneratedTitle(SESSION_A as never, 'late ai title')
+  await flushSessionStorage()
+  const aText = await readFile(transcriptPath, 'utf8')
+  expect(aText).not.toContain('late ai title')
+
+  // The second attempt settles: the transcript is gone.
+  await unlink(transcriptPath)
+  finishDeletedSession(transcriptPath)
+  expect(existsSync(transcriptPath)).toBe(false)
 })
 
 test('a successful deletion discards the dropped metadata snapshot', async () => {
@@ -792,6 +836,46 @@ test('a failed deletion restores saved fields around a concurrent entry', async 
   expect(aText).toContain('concurrent goal')
 })
 
+test('a failed deletion does not restore a goal that was explicitly cleared', async () => {
+  // CodeRabbit on #2489: after deletion saved an active goal,
+  // recordGoalState(null) deleted the goal field from the cache instead
+  // of recording the clear — so a failed deletion's restore brought the
+  // saved active goal back, and the next re-append wrote it again.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    await recordGoalState(createGoalState('active goal'), SESSION_A as never)
+    await flushSessionStorage()
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await forgetDeletedSession(SESSION_A as never, transcriptPath)
+
+  // A concurrent clear while deletion is pending: the goal is gone, and
+  // the cache must remember that it was cleared on purpose.
+  await turnStart(SESSION_A, async () => {
+    await recordGoalState(null, SESSION_A as never)
+  })
+
+  // The transcript survived the failed removal: the restore must keep the
+  // explicit clear, not bring the saved active goal back.
+  restoreSessionWrites(transcriptPath)
+  await turnStart(SESSION_A, async () => {
+    reAppendSessionMetadata()
+    await flushSessionStorage()
+  })
+
+  const aText = await readFile(transcriptPath, 'utf8')
+  const goalEntries = aText
+    .split('\n')
+    .filter(line => line.includes('"type":"goal-state"'))
+  // Only the original record: the clear must not be followed by a
+  // resurrected re-append of the active goal.
+  expect(goalEntries).toHaveLength(1)
+  expect(goalEntries[0]).toContain('active goal')
+})
+
 test("an evicted session's metadata is re-stamped by reAppendSessionMetadata alone", async () => {
   // jatmn on #2489 (P2): after LRU eviction drops a materialized session's
   // pointer, reAppendSessionMetadata returns early on the null pointer, so
@@ -862,6 +946,58 @@ test('a deferred startup title survives a resume switch after another session ma
   expect(bText).toContain('"type":"custom-title"')
 })
 
+test('a second context switching to the same id still migrates its startup selections', async () => {
+  // CodeRabbit on #2489: the switch guard compared the incoming identity
+  // with the last switch from ANY context, so when a second context
+  // switched to the same id (from its own provisional identity), the
+  // guard returned early and its deferred startup title never migrated.
+  const workspaceA = join(testRoot, 'workspace-a')
+  const workspaceC = join(testRoot, 'workspace-c')
+  await mkdir(workspaceA, { recursive: true })
+  await mkdir(workspaceC, { recursive: true })
+
+  // One context switches to B with a null project directory first.
+  await runWithSdkContext(
+    {
+      sessionId: SESSION_B as SessionId,
+      sessionProjectDir: null,
+      cwd: workspaceA,
+      originalCwd: workspaceA,
+    },
+    async () => {
+      switchSession(SESSION_B as never, null)
+      await recordTranscript([message(randomUUID(), 'B in workspace A')])
+      await flushSessionStorage()
+    },
+  )
+
+  // Another context, with a different originalCwd, caches startup
+  // selections under its provisional identity and switches to the same B.
+  await runWithSdkContext(
+    {
+      sessionId: SESSION_B_STARTUP as SessionId,
+      sessionProjectDir: null,
+      cwd: workspaceC,
+      originalCwd: workspaceC,
+    },
+    async () => {
+      cacheSessionTitle('C Startup Title')
+      switchSession(SESSION_B as never, null)
+      expect(getCurrentSessionTitle(SESSION_B as never)).toBe('C Startup Title')
+      await recordTranscript([message(randomUUID(), 'B in workspace C')])
+      await flushSessionStorage()
+    },
+  )
+
+  const bText = await readFile(
+    join(getProjectDir(workspaceC), `${SESSION_B}.jsonl`),
+    'utf8',
+  )
+  expect(bText).toContain('C Startup Title')
+  expect(bText).toContain('B in workspace C')
+  expect(bText).not.toContain('B in workspace A')
+})
+
 test('a new turn reusing a deleted id waits for the deletion instead of dropping its writes', async () => {
   // jatmn on #2489 (P3): a host may start a turn with a deleted id while
   // deleteSession is between forgetDeletedSession and unlink. The path
@@ -897,4 +1033,113 @@ test('a new turn reusing a deleted id waits for the deletion instead of dropping
   expect(aText).toContain('A returns after delete')
   // The new turn starts clean: the deleted title is not resurrected.
   expect(aText).not.toContain('A Title')
+})
+
+test('a turn parked on an in-flight deletion does not deadlock it, and its first message survives', async () => {
+  // CodeRabbit on #2489 (two findings, one interleaving):
+  // insertMessageChain calls materializeSessionFile inside trackWrite, so
+  // the turn holds its pending-write count while it waits for the deletion
+  // to settle — and forgetDeletedSession awaited flush() for that same
+  // count, so neither side could proceed. And the pointer materialize
+  // published before the wait was dropped by the deletion's cache cleanup
+  // while the turn was parked, so the resumed turn had no file to write
+  // to. Drive it step-by-step: a queued write makes forget's drain yield,
+  // opening the window for the replacement turn to park while forget is
+  // still settling; forget must return on its own (it only drains, it
+  // does not wait for the parked turn), and the turn's message must land
+  // in the fresh file.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  // A queued (undrained) write: forget's drain has work to do before its
+  // pending-write check, so the replacement turn below can park while
+  // forget is still settling instead of racing a synchronous return.
+  // Queued while the pointer is still set — a write after the reset below
+  // would restore it (the file exists) instead of queueing.
+  await turnContinuation(SESSION_A, async () => {
+    void recordAttributionSnapshot({
+      type: 'attribution-snapshot',
+      messageId: randomUUID(),
+      surface: 'sdk',
+      fileStates: {},
+    })
+  })
+  // Drop the pointer (as LRU eviction or a switch would): the replacement
+  // turn must enter materializeSessionFile and park on the deletion. With
+  // the pointer still set it would skip materialize, queue its message,
+  // and have it dropped by the drain's deleted-path check instead.
+  await turnContinuation(SESSION_A, async () => {
+    await resetSessionFilePointer()
+  })
+
+  const forgetPromise = forgetDeletedSession(SESSION_A as never, transcriptPath)
+  // The replacement turn starts while the deletion is still in flight.
+  const turnPromise = turnContinuation(SESSION_A, async () => {
+    await recordTranscript([message(randomUUID(), 'A returns after delete')])
+    await flushSessionStorage()
+  })
+  // Let the turn reach materialize and park on the in-flight deletion.
+  await new Promise(resolve => setTimeout(resolve, 50))
+  // forgetDeletedSession must return on its own: on the old code it waits
+  // behind the parked turn's held write count and never returns. Record
+  // the outcome instead of throwing here, so the deletion below still
+  // settles and the parked turn is not left behind to hang the suite.
+  const forgetSettledInTime = await Promise.race([
+    forgetPromise.then(() => true),
+    new Promise(resolve => setTimeout(() => resolve(false), 2000)),
+  ])
+  // deleteSession's remaining steps: remove the file, then settle.
+  await unlink(transcriptPath)
+  finishDeletedSession(transcriptPath)
+  await turnPromise
+  expect(forgetSettledInTime).toBe(true)
+
+  expect(existsSync(transcriptPath)).toBe(true)
+  const aText = await readFile(transcriptPath, 'utf8')
+  expect(aText).toContain('A returns after delete')
+  // The new turn starts clean: the deleted title is not resurrected.
+  expect(aText).not.toContain('A Title')
+})
+
+test('a late write from a deleted session does not enter a fresh transcript reusing its id', async () => {
+  // CodeRabbit on #2489: after deletion, a late recordAttributionSnapshot
+  // from the old context still entered pendingEntries — appendEntry
+  // buffered entries for marked paths — and materialization flushed that
+  // buffer into the replacement transcript when the id was reused.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  await forgetDeletedSession(SESSION_A as never, transcriptPath)
+
+  // A late write from the deleted session's context, after the delete.
+  const staleSnapshotId = randomUUID()
+  await turnContinuation(SESSION_A, async () => {
+    await recordAttributionSnapshot({
+      type: 'attribution-snapshot',
+      messageId: staleSnapshotId,
+      surface: 'sdk',
+      fileStates: {},
+    })
+  })
+
+  // The deletion settles and the id is reused by a fresh session.
+  await unlink(transcriptPath)
+  finishDeletedSession(transcriptPath)
+  await turnStart(SESSION_A, async () => {
+    await recordTranscript([message(randomUUID(), 'A fresh')])
+    await flushSessionStorage()
+  })
+
+  const aText = await readFile(transcriptPath, 'utf8')
+  expect(aText).toContain('A fresh')
+  expect(aText).not.toContain(staleSnapshotId)
 })

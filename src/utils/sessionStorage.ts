@@ -843,10 +843,9 @@ let project: Project | null = null
 let cleanupRegistered = false
 /** Held so the subscription can be given up again — see resetProjectForTesting. */
 let unsubscribeSessionSwitch: (() => void) | null = null
-/** The session the cached file pointer belongs to. */
-let pointerSessionId: string | null = null
 /**
- * And the project directory it was resolved under.
+ * The session the last switch anywhere in this process moved to, and the
+ * project directory it was resolved under.
  *
  * Raised in review. `switchSession(id, projectDir)` sets BOTH, and emits only
  * the id — so a switch that keeps the id and changes the directory would slip
@@ -855,6 +854,7 @@ let pointerSessionId: string | null = null
  * the session's own `_sessionProjectDir`, and `query.ts` with the resolved
  * transcript dir.
  */
+let pointerSessionId: string | null = null
 let pointerProjectDir: string | null = null
 
 /**
@@ -884,7 +884,18 @@ let pointerProjectDir: string | null = null
  * Only on a real change: v2 calls switchSession before EVERY turn with the id
  * it already has, and resetting the pointer each time would drop buffered
  * entries and re-resolve the same path for nothing. "The same" means both the
- * id and the project directory, because both decide the path.
+ * id and the project directory, because both decide the path — and it must
+ * hold for this context AND for the process: the switch is a no-op only when
+ * the switching context's own outgoing identity matches the incoming one
+ * (its deferred startup selections have nowhere to migrate from) and the
+ * last switch anywhere already moved to the same identity. Either
+ * comparison alone is wrong: a process-wide last-switch check suppresses a
+ * second context's real switch to the same id (two overlapping sessions can
+ * share an id in different directories, and the second one's deferred
+ * startup selections still need carrying), while a per-context check alone
+ * misses a fresh context constructed with the target identity already in
+ * place — its outgoing identity then reads as the incoming one even though
+ * the session really moved (e.g. the same id in another directory).
  */
 function followSessionSwitches(): void {
   if (unsubscribeSessionSwitch) return
@@ -895,7 +906,20 @@ function followSessionSwitches(): void {
     // the directory rather than receiving it: switchSession has already
     // set it by the time it emits.
     const projectDir = getSessionProjectDir()
-    if (sessionId === pointerSessionId && projectDir === pointerProjectDir) return
+    // A no-op switch for this context: the id and directory are the ones
+    // it already had, so there is nothing to carry across — and the last
+    // switch anywhere already moved here. `switchSession` sets BOTH, so a
+    // switch that keeps the id and changes the directory is a real change:
+    // the SDK does exactly that (v2.ts switches before every turn with
+    // the session's own `_sessionProjectDir`, query.ts with the resolved
+    // transcript dir) and the pointer must follow it.
+    if (
+      sessionId === previous.sessionId &&
+      projectDir === previous.sessionProjectDir &&
+      sessionId === pointerSessionId &&
+      projectDir === pointerProjectDir
+    )
+      return
     pointerSessionId = sessionId
     pointerProjectDir = projectDir
     // The outgoing identity is this context's key before the switch:
@@ -1415,6 +1439,20 @@ class Project {
   private hasStartedSessionInCurrentContext(): boolean {
     return this.startedSessionKeys.has(this.sessionFileKey())
   }
+
+  /**
+   * Mark the session for the current context as started.
+   *
+   * Adopting a resumed transcript binds its pointer without recording a
+   * conversation message, so without this the session still looks
+   * unstarted: a later switch would treat it as a provisional identity
+   * and migrateStartupMetadata would move its title, agent setting, and
+   * worktree into the new session. An adopted session is established —
+   * its file already exists on disk — so it counts as started.
+   */
+  markCurrentSessionStarted(): void {
+    this.startedSessionKeys.add(this.sessionFileKey())
+  }
   // Entries buffered while sessionFile is null, keyed by their transcript path
   // (session ID and project directory). Flushed on that destination's first
   // user/assistant message — prevents metadata-only session files without
@@ -1868,6 +1906,15 @@ class Project {
    * external-writer concern — their caches are authoritative.
    */
   reAppendSessionMetadata(skipTitleRefresh = false): void {
+    // Persistence disabled means no transcript writes at all. Without
+    // this, restoreEvictedSessionFile below would resurrect the pointer
+    // for an existing transcript and the appends would write last-prompt
+    // and the rest into it despite --no-session-persistence — bypassing
+    // the per-entry guard appendEntry applies, because this writes
+    // through appendEntryToFile directly. materializeSessionFile already
+    // returns early under the same policy; the exit-cleanup and
+    // compaction callers reach here without that guard.
+    if (this.shouldSkipPersistence()) return
     if (!this.sessionFile) this.restoreEvictedSessionFile()
     if (!this.sessionFile) return
     const sessionId = getSessionId() as UUID
@@ -2005,7 +2052,22 @@ class Project {
     }
   }
 
-  async flush(): Promise<void> {
+  /**
+   * Drain the queued-write loop (and clear a pending drain timer)
+   * without waiting for tracked writes to finish.
+   *
+   * forgetDeletedSession uses this instead of flush(): a turn parked in
+   * waitForDeletionToSettle holds its tracked-write count while it waits
+   * for the deletion to settle, so flush()'s count wait would deadlock —
+   * the deletion waits for the turn, the turn waits for the deletion,
+   * and nothing bounds the wait. The count wait is not needed here:
+   * queued appends are drained (and dropped for the marked path at write
+   * time, see appendDirectlyToFile), direct appends that already passed
+   * the mark check are awaited separately below via
+   * pendingDirectAppends, and every other write path checks the mark
+   * when it actually writes.
+   */
+  private async drainWriteQueues(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer)
       this.flushTimer = null
@@ -2022,6 +2084,10 @@ class Project {
       }
       await this.startDrain()
     }
+  }
+
+  async flush(): Promise<void> {
+    await this.drainWriteQueues()
 
     // Wait for non-queue tracked operations (e.g. removeMessageByUuid)
     if (this.pendingWriteCount === 0) {
@@ -2172,7 +2238,12 @@ class Project {
     // (not appendEntry) so it would bypass the per-entry persistence check
     // and create a metadata-only file despite --no-session-persistence.
     if (this.shouldSkipPersistence()) return
-    const sessionFile = resolvePath(this.ensureCurrentSessionFile())
+    // Derive the path without publishing the pointer yet: a deletion
+    // settling during the wait below drops a pointer published here
+    // (forgetSessionCaches), and materialization would not restore it —
+    // the transcript is gone, so nothing can re-derive it, and the first
+    // message would stay buffered and unwritten.
+    const pendingPath = resolvePath(getTranscriptPath())
     // A deletion of this transcript may be in flight: forgetDeletedSession
     // marked the path, but the caller has not removed the file yet. The
     // restore below only fires once the file is gone, so without this
@@ -2181,9 +2252,13 @@ class Project {
     // for the deletion to settle first — then the file is either gone
     // (the restore un-marks and the turn starts clean) or it survived
     // and the failure path already restored writes.
-    if (this.isDeletedSessionFile(sessionFile)) {
-      await this.waitForDeletionToSettle(sessionFile)
+    if (this.isDeletedSessionFile(pendingPath)) {
+      await this.waitForDeletionToSettle(pendingPath)
     }
+    // Publish the pointer only now that the deletion has settled: any
+    // pointer published before the wait may have been dropped by the
+    // deletion's cache cleanup while this turn was parked on it.
+    const sessionFile = resolvePath(this.ensureCurrentSessionFile())
     // A deleted session's id may be reused by a fresh session at the same
     // path: the transcript is gone, so the deleted mark no longer protects
     // anything — it would only drop the new session's writes (the write
@@ -2443,7 +2518,12 @@ class Project {
         goal,
       }
       if (sessionId === getSessionId()) {
-        this.currentSessionGoal = goal ?? undefined
+        // Keep an explicit clear as null, not undefined: undefined deletes
+        // the field from the cache, erasing the evidence that the goal was
+        // cleared — and a failed-deletion merge would then restore the saved
+        // active goal over it. Null is a real value (see
+        // mergeSessionMetadata) and wins like any other defined field.
+        this.currentSessionGoal = goal
       }
       await this.appendEntry(entry, sessionId)
     })
@@ -2481,14 +2561,23 @@ class Project {
         // after a non-conversation record (e.g. goal-state) never reaches
         // it. The file already exists, so restoring the pointer cannot
         // create a metadata-only file; write through instead. Deleted
-        // transcripts stay buffered: the write layer drops them either way,
-        // and the pointer must not be resurrected for one.
+        // transcripts are never buffered: the write layer drops them
+        // either way, and the pointer must not be resurrected for one.
         if (
           !this.isDeletedSessionFile(pendingPath) &&
           (await this.transcriptExists(pendingPath))
         ) {
           this.sessionFile = pendingPath
         } else {
+          // Re-check after the await above: a deletion may have marked
+          // the path while the existence check was in flight. Deferred
+          // writes for a deleted transcript are dropped, not buffered —
+          // a late write from the deleted session (an attribution
+          // snapshot, a goal update) would otherwise sit in the buffer
+          // until a fresh session reusing the id materializes, and flush
+          // into its transcript. A live session's own writes reach the
+          // file through the write layer, which drops marked paths.
+          if (this.isDeletedSessionFile(pendingPath)) return
           let buffered = this.pendingEntries.get(pendingPath)
           if (!buffered) {
             buffered = []
@@ -2806,8 +2895,11 @@ class Project {
       this.resetSessionFile()
     }
     // Let an in-flight drain finish so no write lands after the caller
-    // removes the file; queued appends for it are now skipped.
-    await this.flush()
+    // removes the file; queued appends for it are now skipped. Drain only
+    // — flush() would also wait for tracked writes to finish, and a turn
+    // parked on this deletion (see waitForDeletionToSettle) holds its
+    // count until it settles, which is this call: that wait never ends.
+    await this.drainWriteQueues()
     // flush() does not wait for direct appends. One that passed the deleted
     // check before the path was marked can still be waiting on mkdir or the
     // file lock, and would recreate the file after the caller removes it.
@@ -2870,6 +2962,18 @@ class Project {
    */
   restoreSessionWrites(transcriptPath: string): void {
     const resolved = resolvePath(transcriptPath)
+    // Another deletion attempt for this transcript is still in flight:
+    // its unlink may yet remove the file, so the write block must stay
+    // until the last attempt settles. Un-marking here would let a
+    // replacement turn write to the surviving file, only for the other
+    // attempt's unlink to remove its data — and leave the path unmarked,
+    // so later metadata appends could recreate the deleted transcript.
+    // The snapshot stays too: the remaining attempt restores from it if
+    // its own removal fails, or discards it via finishDeletedSession if
+    // it succeeds. The caller's own attempt is counted, so "another" is
+    // a count above one; a fresh session at a recycled path restores with
+    // no attempt in flight and is unaffected.
+    if ((this.pendingDeletionAttempts.get(resolved) ?? 0) > 1) return
     this.deletedSessionFiles.delete(resolved)
     const dropped = this.droppedSessionMetadata.get(resolved)
     if (!dropped || !existsSync(resolved)) {
@@ -3227,6 +3331,9 @@ export async function resetSessionFilePointer() {
 export function adoptResumedSessionFile(): void {
   const project = getProject()
   project.sessionFile = getTranscriptPath()
+  // The resumed session is established, not provisional: mark it started
+  // so a later switch does not migrate its title/agent/worktree away.
+  project.markCurrentSessionStarted()
   project.reAppendSessionMetadata(true)
 }
 
@@ -4777,7 +4884,10 @@ export function restoreSessionMetadata(meta: {
   // Unlike display-only metadata, absence of a goal-state entry means this
   // resumed session has no goal. Clear any cached goal so adopt/re-append
   // cannot persist a previous session's active goal into this transcript.
-  project.currentSessionGoal = meta.goal ?? undefined
+  // Keep an explicit null (the transcript's latest goal-state cleared it)
+  // as null rather than deleting the field: the clear is evidence, and a
+  // later snapshot merge must not resurrect the saved active goal over it.
+  project.currentSessionGoal = meta.goal
   // Branch lineage is structural metadata. Absence means this session is not
   // a branch, so clear stale branch cache before it can be re-appended.
   project.currentSessionBranch = meta.sessionBranch ?? undefined
