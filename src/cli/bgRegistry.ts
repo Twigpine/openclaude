@@ -2779,10 +2779,17 @@ async function cleanupAbandonedSessionTempFilesInDirectory(
       }
     }
     try {
-      await fileSystem.unlinkFile(path)
-      result.artifactsRemoved++
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) result.errors++
+      // Recheck the captured metadata-directory identity and the
+      // inspected temp identity immediately before unlinking: the
+      // directory may have been replaced since the scan inspected the
+      // file, and the unlink must not follow the replacement.
+      await removeCleanupArtifact(
+        path,
+        result,
+        metadataDirectory,
+        fileSystem,
+        { dev: stats.dev, ino: stats.ino },
+      )
     } finally {
       await releasePublishLock?.().catch(() => {})
     }

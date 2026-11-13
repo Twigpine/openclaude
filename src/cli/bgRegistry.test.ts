@@ -3,10 +3,12 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -2389,6 +2391,51 @@ describe('background session registry', () => {
       ),
     ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
     expect(await Bun.file(staleTmp).exists()).toBe(false)
+  })
+
+  it('keeps unrelated data when the metadata directory is replaced during abandoned temp cleanup', async () => {
+    // Regression test for jatmn review #2497 (P2): the abandoned-temp
+    // scan lstat'ed the temp file and then unlinked it directly, so a
+    // directory replaced between inspection and removal let cleanup
+    // delete a same-named file outside the registry. The removal must
+    // go through the guarded helper, which rechecks the captured
+    // directory identity immediately before unlinking.
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const tempName =
+      'bg-swap-tmp.424242.00000000-0000-4000-8000-000000000000.tmp'
+    const staleTmp = join(sessionsDir, tempName)
+    await writeFile(staleTmp, '{"id":"bg-swap-tmp"}')
+    // Age it past the retention cutoff and the publish grace period, so
+    // only the directory guard can still protect the replacement.
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
+    // Unrelated data outside the registry that happens to share the
+    // temp file's name once the directory is swapped.
+    const victimDir = join(configDir, 'victim-sessions')
+    await mkdir(victimDir, { recursive: true })
+    const victim = join(victimDir, tempName)
+    await writeFile(victim, 'unrelated data')
+    let swapped = false
+    const lstatFile = async (path: string) => {
+      const stats = await lstat(path)
+      if (!swapped && path === staleTmp) {
+        swapped = true
+        // Replace the metadata directory immediately after the temp
+        // file inspection, before cleanup deletes it.
+        await rename(sessionsDir, join(configDir, 'swapped-away-sessions'))
+        await symlink(victimDir, sessionsDir, 'dir')
+      }
+      return stats
+    }
+    expect(
+      await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+        { lstatFile },
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 1 })
+    expect(swapped).toBe(true)
+    expect(await Bun.file(victim).text()).toBe('unrelated data')
   })
 
   it('keeps a freshly written session metadata temp file during cleanup', async () => {
