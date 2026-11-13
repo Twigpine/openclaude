@@ -3,6 +3,7 @@ import {
   type Companion,
   type CompanionBones,
   EYES,
+  FORMS,
   HATS,
   RARITIES,
   RARITY_WEIGHTS,
@@ -141,10 +142,10 @@ export function getCompanion(): Companion | undefined {
   // bones last so stale bones fields in old-format configs get overridden.
   // speciesOverride (a validated /buddy set choice) wins over the rolled
   // species only — rarity/stats/eye stay rolled. Validate against
-  // SPECIES because config files can contain arbitrary values.
+  // FORMS because config files can contain arbitrary values.
   const override =
     stored.speciesOverride !== undefined &&
-    (SPECIES as readonly string[]).includes(stored.speciesOverride)
+    (FORMS as readonly string[]).includes(stored.speciesOverride)
       ? stored.speciesOverride
       : undefined
   const value: Companion = {

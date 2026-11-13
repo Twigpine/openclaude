@@ -3,11 +3,15 @@ import type { Attachment } from '../utils/attachments.js'
 import { getGlobalConfig } from '../utils/config.js'
 import { getCompanion } from './companion.js'
 import { isBuddyEnabled } from './feature.js'
+import { FORM_NAMES, type Form } from './types.js'
 
 export function companionIntroText(name: string, species: string): string {
+  // Attachments store the form id (kaio, strawhat); the model hears the name
+  // users see (Nova, Inky).
+  const form = FORM_NAMES[species as Form] ?? species
   return `# Companion
 
-A tiny ${species} companion named ${name} sits beside the user's input box and occasionally comments in a speech bubble. You're not ${name} — it's a separate watcher.
+A tiny ${form} companion named ${name} sits beside the user's input box and occasionally comments in a speech bubble. You're not ${name} — it's a separate watcher.
 
 When the user addresses ${name} directly (by name), its bubble will answer. Your job in that moment is to stay out of the way: respond in ONE line or less, or just answer any part of the message meant for you. Don't explain that you're not ${name} — they know. Don't narrate what ${name} might say — the bubble handles that.`
 }

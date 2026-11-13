@@ -2,12 +2,16 @@ import { describe, expect, test } from 'bun:test'
 import {
   corsair,
   ember,
+  FORM_NAMES,
+  FORMS,
   kage,
   kaio,
   merlin,
+  parseForm,
   robinhood,
   SPECIES,
   strawhat,
+  twig,
 } from './types.js'
 
 describe('species constants', () => {
@@ -24,10 +28,25 @@ describe('species constants', () => {
     expect(kage).toBe('kage')
     expect(ember).toBe('ember')
     expect(corsair).toBe('corsair')
+    expect(twig).toBe('twig')
   })
 
   test('the pool contains each hero exactly once', () => {
     expect(new Set(SPECIES).size).toBe(SPECIES.length)
     expect(SPECIES.length).toBe(7)
+  })
+
+  test('twig is a chosen form only, so the hatch roll never changes', () => {
+    expect(SPECIES as readonly string[]).not.toContain(twig)
+    expect(FORMS).toEqual([...SPECIES, twig])
+  })
+
+  test('forms parse from their id or display name, any case', () => {
+    expect(parseForm('kaio')).toBe(kaio)
+    expect(parseForm('Nova')).toBe(kaio)
+    expect(parseForm('INKY')).toBe(strawhat)
+    expect(parseForm(' twig ')).toBe(twig)
+    expect(parseForm('random')).toBeUndefined()
+    for (const form of FORMS) expect(parseForm(FORM_NAMES[form])).toBe(form)
   })
 })

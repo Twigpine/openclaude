@@ -1,6 +1,8 @@
 // Hero companion facts, kept in sync with src/buddy/ (types.ts, buddy.tsx,
-// actionEffects.ts). Sprites in /public/buddy/*.svg are generated from
-// src/buddy/pixelSprites.ts — regenerate them rather than editing by hand.
+// actionEffects.ts). Sprites in /public/buddy/*.svg are rendered from the
+// hero art in src/buddy/heroArt.ts at full scale — regenerate them rather
+// than editing by hand. `id` is the form id (the SVG file name); `name` is
+// what /buddy set accepts and what users see.
 
 export interface BuddyHero {
   id: string
@@ -15,8 +17,17 @@ export interface BuddyHero {
 
 export const heroes: BuddyHero[] = [
   {
+    id: 'twig',
+    name: 'twig',
+    accent: '#a8744c',
+    attack: 'acorn lob',
+    attackDetail:
+      'the pine marten flagship winds up and lobs an acorn across the footer at your prompt.',
+    flavor: 'curls up its tail and grins',
+  },
+  {
     id: 'robinhood',
-    name: 'robin hood',
+    name: 'robin',
     accent: '#489e4a',
     attack: 'arrow shot',
     attackDetail:
@@ -25,21 +36,21 @@ export const heroes: BuddyHero[] = [
   },
   {
     id: 'kaio',
-    name: 'kaio',
-    accent: '#ffdc50',
+    name: 'nova',
+    accent: '#a5dcff',
     attack: 'energy wave',
     attackDetail:
-      'charges an orb, then releases a full-width energy beam — white-hot core, blue edge.',
-    flavor: 'powers up — hair blazing gold',
+      'the little astronaut charges an orb, then releases a full-width energy beam — white-hot core, blue edge.',
+    flavor: 'seals the helmet and powers up the visor',
   },
   {
     id: 'strawhat',
-    name: 'strawhat',
-    accent: '#e6c85a',
-    attack: 'stretchy punch',
+    name: 'inky',
+    accent: '#7fd6c2',
+    attack: 'long-reach punch',
     attackDetail:
-      'a rubber arm stretches all the way out, lands the hit mid-flight, and snaps back.',
-    flavor: 'puts on the straw hat with a grin',
+      'the octopus stretches one tentacle all the way out, lands the hit mid-flight, and snaps back.',
+    flavor: 'wiggles all five tentacles',
   },
   {
     id: 'merlin',
@@ -82,9 +93,10 @@ export const heroes: BuddyHero[] = [
 export const buddyCommands = [
   { cmd: '/buddy', desc: 'hatch your companion on first run; pet them after that' },
   { cmd: '/buddy status', desc: 'who they are — name, rarity, form, personality' },
-  { cmd: '/buddy set <hero>', desc: 'choose a form: robinhood, kaio, strawhat, merlin, kage, ember, corsair' },
+  { cmd: '/buddy set <hero>', desc: 'choose a form: twig, robin, merlin, kage, corsair, ember, nova, inky' },
   { cmd: '/buddy set random', desc: 'back to the form you originally rolled' },
   { cmd: '/buddy name <name>', desc: 'rename your companion (up to 20 characters)' },
+  { cmd: '/buddy dance', desc: 'a few seconds of dancing, just because' },
   { cmd: '/buddy mute', desc: 'hide the buddy and silence all animations' },
   { cmd: '/buddy unmute', desc: 'bring them back' },
 ]

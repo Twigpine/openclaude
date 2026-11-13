@@ -6,7 +6,7 @@ import { heroes, buddyCommands, rarities, statNames } from '../data/buddy'
 
 const title = 'buddy — pixel-art hero companions for your terminal | openclaude'
 const description =
-  'Hatch a truecolor pixel-art hero who lives in your openclaude prompt and fires an arrow, energy wave, or fireball every time you press Enter. Seven heroes, rarity rolls, and zero effect on your tokens.'
+  'Hatch a truecolor pixel-art hero who lives in your openclaude prompt and fires an arrow, energy wave, or fireball every time you press Enter. Eight heroes with moods that follow your agent, rarity rolls, and zero effect on your tokens.'
 
 const jsonLd = [
   {
@@ -37,8 +37,8 @@ const jsonLd = [
         a truecolor pixel-art hero who stands guard beside your prompt — and fires an
         arrow, an energy wave, or a fireball every time you press enter. really.
       </p>
-      <div class="showcase" role="img" aria-label="Robin Hood buddy firing an arrow toward the prompt">
-        <img src="/buddy/robinhood-action.svg" alt="" width="460" height="160" loading="eager" />
+      <div class="showcase" role="img" aria-label="Robin buddy firing an arrow toward the prompt">
+        <img src="/buddy/robinhood-action.svg" alt="" width="460" height="115" loading="eager" />
       </div>
       <p class="hero-foot">type <code>/buddy</code> in any openclaude session to hatch yours.</p>
     </div>
@@ -48,7 +48,7 @@ const jsonLd = [
     <div class="container">
       <div class="section-head">
         <p class="eyebrow">// the heroes</p>
-        <h2 id="heroes-heading">seven forms. seven signature attacks.</h2>
+        <h2 id="heroes-heading">eight forms. eight signature attacks.</h2>
         <p class="lede">
           every buddy can take any form with <code>/buddy set</code>. each one has its own
           enter animation, drawn frame-by-frame in the footer while your message goes out.
@@ -58,12 +58,12 @@ const jsonLd = [
         {heroes.map(h => (
           <article class="hero-card" style={`--hero-accent: ${h.accent}`}>
             <div class="sprite">
-              <img src={`/buddy/${h.id}.svg`} alt={`${h.name} pixel-art sprite`} width="110" height="80" loading="lazy" />
+              <img src={`/buddy/${h.id}.svg`} alt={`${h.name} pixel-art sprite`} width="94" height="80" loading="lazy" />
             </div>
             <h3>{h.name}</h3>
             <p class="attack"><span class="attack-name">{h.attack}</span> — {h.attackDetail}</p>
             <p class="flavor">“{h.flavor}.”</p>
-            <code class="set-cmd">/buddy set {h.id}</code>
+            <code class="set-cmd">/buddy set {h.name}</code>
           </article>
         ))}
         <article class="hero-card hero-card-mystery">

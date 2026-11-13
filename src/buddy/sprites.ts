@@ -1,4 +1,4 @@
-import type { CompanionBones, Eye, Species } from './types.js'
+import type { CompanionBones, Eye, Form } from './types.js'
 import {
   corsair,
   ember,
@@ -7,17 +7,41 @@ import {
   merlin,
   robinhood,
   strawhat,
+  twig,
 } from './types.js'
 
 // Line-art fallback sprites for low-color terminals (the primary rendering
-// is the truecolor pixel art in pixelSprites.ts). Each sprite is 5 lines
+// is the procedural hero art in heroArt.ts). Each sprite is 5 lines
 // tall, 12 wide (after {E}→1char substitution), with multiple frames for
 // idle fidget animation. Row 0 is the signature headwear/hair and is
 // non-blank in every frame, so heights never oscillate.
 //
 // All heroes face LEFT: the sprite sits on the right edge of the screen
 // and signature effects travel toward the prompt.
-const BODIES: Record<Species, string[][]> = {
+const BODIES: Record<Form, string[][]> = {
+  [twig]: [
+    [
+      '  /\\_/\\   _ ',
+      ' ( {E}.{E} ) ( )',
+      '  > w < _/  ',
+      ' (  ""  )/  ',
+      '  ^^  ^^    ',
+    ],
+    [
+      '  /\\_/\\  __ ',
+      ' ( {E}.{E} ) (_)',
+      '  > w < _/  ',
+      ' (  ""  )/  ',
+      '  ^^  ^^    ',
+    ],
+    [
+      '  /\\_/|   _ ',
+      ' ( {E}.{E} ) ( )',
+      '  > w < _/  ',
+      ' (  ""  )/  ',
+      '  ^^  ^^    ',
+    ],
+  ],
   [robinhood]: [
     [
       '    <,___   ',
@@ -186,7 +210,33 @@ const BODIES: Record<Species, string[][]> = {
 // never leak action poses into idle animation. EVERY hero needs an entry:
 // without one, low-color terminals show a projectile flying out of a
 // motionless sprite.
-const SHOOT_FRAMES: Record<Species, string[][]> = {
+const SHOOT_FRAMES: Record<Form, string[][]> = {
+  [twig]: [
+    [
+      // wind up, acorn in paw
+      '  /\\_/\\   _ ',
+      ' ( {E}.{E} ) ( )',
+      ' o> w < _/  ',
+      ' (  ""  )/  ',
+      '  ^^  ^^    ',
+    ],
+    [
+      // throw
+      '  /\\_/\\   _ ',
+      ' ( {E}.{E} ) ( )',
+      'o-> w < _/  ',
+      ' (  ""  )/  ',
+      '  ^^  ^^    ',
+    ],
+    [
+      // follow through — the acorn hands off to CompanionActionFX
+      '  /\\_/\\   _ ',
+      ' ( {E}.{E} ) ( )',
+      ' -> w < _/  ',
+      ' (  ""  )/  ',
+      '  ^^  ^^    ',
+    ],
+  ],
   [robinhood]: [
     [
       // nock
@@ -369,11 +419,11 @@ export function renderShootSprite(
   return frames[clamped]!.map(line => line.replaceAll('{E}', bones.eye))
 }
 
-export function shootFrameCount(species: Species): number {
+export function shootFrameCount(species: Form): number {
   return SHOOT_FRAMES[species].length
 }
 
-export function spriteFrameCount(species: Species): number {
+export function spriteFrameCount(species: Form): number {
   return BODIES[species].length
 }
 
@@ -394,5 +444,7 @@ export function renderFace(bones: CompanionBones): string {
       return `<${eye}${eye}>`
     case corsair:
       return `(${eye}x)`
+    case twig:
+      return `=(${eye})~`
   }
 }

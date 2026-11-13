@@ -136,7 +136,7 @@ OpenClaude is also mirrored to Twigpine:
 - Guided provider setup and saved profiles with `/provider`
 - Coding-agent workflows in one place: bash, file tools, grep, glob, agents, tasks, MCP, and web tools
 - A bundled VS Code extension for launch integration and theme support
-- A pixel-art hero companion who fires an arrow every time you press Enter (really — see [Meet your buddy](#meet-your-buddy))
+- A pixel-art hero companion who reacts to what the agent is doing and plays its own signature move when you press Enter, from an arrow to an acorn (see [Meet your buddy](#meet-your-buddy))
 
 ## Quick Start
 
@@ -420,25 +420,33 @@ Advanced and source-build guides:
 ## Meet Your Buddy
 
 Run `/buddy` to hatch a companion — a truecolor pixel-art hero who stands
-beside your prompt, idles, blinks, and fires their signature move every time
-you submit a message:
+beside your prompt and plays their signature move when you submit a message
+(each form has its own move). In the full color sprite, its mood follows the
+agent: it thinks while the model streams, gets busy while tools run, hops
+when a turn finishes, celebrates after a long task, flinches when a request
+fails, and dozes off after five quiet minutes. The line-art and one-line
+fallbacks don't show moods.
 
 ```
 /buddy                  hatch (first run) or pet your companion
-/buddy set robinhood    the green archer — arrow shot on every Enter
-/buddy set kaio         gold-haired warrior — charges a full-width energy wave
-/buddy set strawhat     stretchy punch that snaps back
+/buddy set twig         the pine marten, OpenClaude's flagship — acorn lob
+/buddy set robin        the green archer — arrow shot on every Enter
+/buddy set nova         little astronaut — charges a full-width energy wave
+/buddy set inky         octopus — long-reach punch that snaps back
 /buddy set merlin       twinkling sparkle stream
 /buddy set kage         spinning shuriken
 /buddy set ember        dragon fire with a real heat gradient
 /buddy set corsair      cannonball with smoke trail
-/buddy name Robin       rename your companion
+/buddy dance            a few seconds of dancing
+/buddy name Pip         rename your companion
 /buddy set random       back to your rolled hero
 ```
 
-Companions respect `prefersReducedMotion`, degrade gracefully to line art in
-low-color terminals, and can be silenced with `/buddy mute`. Requires a
-terminal at least 100 columns wide for the full sprite.
+Forms also accept their old ids (`robinhood`, `kaio`, `strawhat`). Companions
+respect `prefersReducedMotion` (no animation or Enter move), degrade gracefully
+to line art in low-color terminals, and can be silenced with `/buddy mute`.
+The full sprite (24 columns × 10 rows) and the Enter move need a terminal at
+least 100 columns wide; narrower terminals show a one-line face.
 
 ## Provider Notes
 

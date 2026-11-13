@@ -294,6 +294,9 @@ import { CompanionSprite, CompanionFloatingBubble, MIN_COLS_FOR_FULL_SPRITE } fr
 import { CompanionActionFX } from '../buddy/CompanionActionFX.js';
 import { isBuddyEnabled } from '../buddy/feature.js';
 import { fireCompanionObserver } from '../buddy/observer.js';
+import type { CompanionActivity } from '../buddy/heroMoods.js';
+import { lastTurnFailed } from '../buddy/turnOutcome.js';
+import { useCompanionMoodClock } from '../buddy/useCompanionMoodClock.js';
 // Session manager removed - using AppState now
 import type { RemoteSessionConfig } from '../remote/RemoteSessionManager.js';
 import { REMOTE_SAFE_COMMANDS } from '../commands.js';
@@ -1540,6 +1543,13 @@ export function REPL({
     setLocalCommands(prev => prev.filter(cmd => remoteCommandSet.has(cmd.name) || REMOTE_SAFE_COMMANDS.has(cmd)));
   }, [setLocalCommands]);
   const [inProgressToolUseIDs, setInProgressToolUseIDs] = useState<Set<string>>(new Set());
+  // What the agent is doing, for the companion's mood. isWaitingForApproval
+  // is scoped to this session's permission queue and prompts. lastTurnFailed
+  // scans back only to the last assistant message, so it stays cheap. The
+  // mood clock lives here, not in the sprite, because the sprite unmounts
+  // while dialogs cover the prompt.
+  const companionActivity: CompanionActivity = isWaitingForApproval ? 'waiting' : isLoading ? inProgressToolUseIDs.size > 0 ? 'working' : 'thinking' : 'idle';
+  const companionMoodClock = useCompanionMoodClock(companionActivity, lastTurnFailed(messages));
   const hasInterruptibleToolInProgressRef = useRef(false);
   const queryLifecycleTrackerRef = useRef(new QueryLifecycleOperationTracker());
 
@@ -5221,7 +5231,7 @@ export function REPL({
         {!showSpinner && !isLoading && !userInputOnProcessing && !hasRunningTeammates && isBriefOnly && !viewedAgentTask && <BriefIdleStatus />}
         {isFullscreenEnvEnabled() && <PromptInputQueuedCommands />}
       </>} bottom={<Box flexDirection={isBuddyEnabled() && companionNarrow ? 'column' : 'row'} width="100%" alignItems={isBuddyEnabled() && companionNarrow ? undefined : 'flex-end'}>
-        {isBuddyEnabled() && companionNarrow && isFullscreenEnvEnabled() && companionVisible ? <CompanionSprite /> : null}
+        {isBuddyEnabled() && companionNarrow && isFullscreenEnvEnabled() && companionVisible ? <CompanionSprite moodClock={companionMoodClock} /> : null}
         <Box flexDirection="column" flexGrow={1}>
           {permissionStickyFooter}
           {/* Immediate local-jsx commands (/btw, /sandbox, /assistant,
@@ -5629,7 +5639,7 @@ export function REPL({
             setMessageSelectorPreselect(undefined);
           }} />}
         </Box>
-        {isBuddyEnabled() && !(companionNarrow && isFullscreenEnvEnabled()) && companionVisible ? <CompanionSprite /> : null}
+        {isBuddyEnabled() && !(companionNarrow && isFullscreenEnvEnabled()) && companionVisible ? <CompanionSprite moodClock={companionMoodClock} /> : null}
       </Box>} />
     </MCPConnectionManager>
   </KeybindingSetup>;
