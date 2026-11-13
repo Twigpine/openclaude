@@ -399,6 +399,33 @@ describe('wait command handler', () => {
     expect(human.stdout).toBe('Background session bg-aaa1 failed with exit code 300.\n')
   })
 
+  it('reports the recorded exit code for an exited session instead of code 0', async () => {
+    // An `exited` record may carry a nonzero exit code (isBackgroundSession
+    // permits it); the human line must render the recorded code, not 0,
+    // or the waiter claims success while exiting 1 (CodeRabbit #2497).
+    const session = await createTestSession('bg-aaa1')
+    await writeFile(
+      metadataPath('bg-aaa1'),
+      JSON.stringify({
+        ...session,
+        status: 'exited',
+        exitCode: 7,
+        finishedAt: new Date().toISOString(),
+      }),
+    )
+    const { code, stdout, stderr } = await runWait(['bg-aaa1', '--json'])
+
+    expect(code).toBe(1)
+    expect(stderr).toBe('')
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.status).toBe('exited')
+    expect(result.exitCode).toBe(7)
+
+    const human = await runWait(['bg-aaa1'])
+    expect(human.code).toBe(1)
+    expect(human.stdout).toBe('Background session bg-aaa1 exited with code 7.\n')
+  })
+
   it('preserves a recorded exit code for a failed session without terminalReason', async () => {
     // A valid failed record can carry exitCode without terminalReason
     // (terminalReason is optional on BackgroundSession); the JSON must keep
@@ -921,6 +948,134 @@ describe('wait command handler', () => {
     const result = expectWaitJsonShape(JSON.parse(stdout))
     expect(result.id).toBe('bg-aaa1')
     expect(result.waitResult).toBe('interrupted')
+  })
+
+  it('returns 130 when SIGINT arrives while selector resolution is still pending', async () => {
+    // Selector resolution must race the client signal: a SIGINT while it
+    // is still pending must interrupt the wait instead of hanging until
+    // the read settles (CodeRabbit #2497).
+    await createTestSession('bg-aaa1')
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      resolveSession: () => new Promise<BackgroundSession>(() => {}),
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    process.emit('SIGINT')
+    const { code, stdout } = await waiting
+
+    expect(code).toBe(130)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.id).toBeNull()
+    expect(result.waitResult).toBe('interrupted')
+    expect(result.waitSignal).toBe('SIGINT')
+  })
+
+  it('returns 143 when SIGTERM arrives while selector resolution is still pending', async () => {
+    await createTestSession('bg-aaa1')
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      resolveSession: () => new Promise<BackgroundSession>(() => {}),
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    process.emit('SIGTERM')
+    const { code, stdout } = await waiting
+
+    expect(code).toBe(143)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.id).toBeNull()
+    expect(result.waitResult).toBe('interrupted')
+    expect(result.waitSignal).toBe('SIGTERM')
+  })
+
+  it('returns 130 when SIGINT arrives while the first metadata read is still pending', async () => {
+    // The first pinned read must race the client signal the same way:
+    // a SIGINT while it is still pending must interrupt the wait instead
+    // of hanging until the read settles (CodeRabbit #2497).
+    await createTestSession('bg-aaa1')
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      readPinnedSession: () => new Promise<BackgroundSession>(() => {}),
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    process.emit('SIGINT')
+    const { code, stdout } = await waiting
+
+    expect(code).toBe(130)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.id).toBe('bg-aaa1')
+    expect(result.waitResult).toBe('interrupted')
+    expect(result.waitSignal).toBe('SIGINT')
+  })
+
+  it('returns 143 when SIGTERM arrives while the first metadata read is still pending', async () => {
+    await createTestSession('bg-aaa1')
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      readPinnedSession: () => new Promise<BackgroundSession>(() => {}),
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    process.emit('SIGTERM')
+    const { code, stdout } = await waiting
+
+    expect(code).toBe(143)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.id).toBe('bg-aaa1')
+    expect(result.waitResult).toBe('interrupted')
+    expect(result.waitSignal).toBe('SIGTERM')
+  })
+
+  it('returns 130 when SIGINT arrives while the second metadata read is still pending', async () => {
+    // After the identity check the waiter re-reads the pinned session;
+    // that read must race the client signal too (CodeRabbit #2497).
+    const session = await createTestSession('bg-aaa1')
+    let secondReadStartedResolve!: () => void
+    const secondReadStarted = new Promise<void>(resolve => {
+      secondReadStartedResolve = resolve
+    })
+    let reads = 0
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'sleep 30',
+      readPinnedSession: () => {
+        reads += 1
+        if (reads === 1) return Promise.resolve(session)
+        secondReadStartedResolve()
+        return new Promise<BackgroundSession>(() => {})
+      },
+    })
+    await secondReadStarted
+    process.emit('SIGINT')
+    const { code, stdout } = await waiting
+
+    expect(code).toBe(130)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.id).toBe('bg-aaa1')
+    expect(result.waitResult).toBe('interrupted')
+    expect(result.waitSignal).toBe('SIGINT')
+  })
+
+  it('returns 143 when SIGTERM arrives while the second metadata read is still pending', async () => {
+    const session = await createTestSession('bg-aaa1')
+    let secondReadStartedResolve!: () => void
+    const secondReadStarted = new Promise<void>(resolve => {
+      secondReadStartedResolve = resolve
+    })
+    let reads = 0
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'sleep 30',
+      readPinnedSession: () => {
+        reads += 1
+        if (reads === 1) return Promise.resolve(session)
+        secondReadStartedResolve()
+        return new Promise<BackgroundSession>(() => {})
+      },
+    })
+    await secondReadStarted
+    process.emit('SIGTERM')
+    const { code, stdout } = await waiting
+
+    expect(code).toBe(143)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.id).toBe('bg-aaa1')
+    expect(result.waitResult).toBe('interrupted')
+    expect(result.waitSignal).toBe('SIGTERM')
   })
 
   it('does not write to the registry while waiting', async () => {

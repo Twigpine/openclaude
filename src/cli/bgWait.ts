@@ -240,6 +240,34 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
+/**
+ * Races a registry read against the waiting-client abort signal: a SIGINT
+ * or SIGTERM must interrupt the waiter even when the read never settles
+ * (CodeRabbit #2497). Rejects with the signal's reason when the signal
+ * fires first; the callers' existing signal checks turn that rejection
+ * into the interrupted result.
+ */
+function raceWithClientSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      value => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
+
 function baseWaitResult(
   id: string | null,
   waitResult: WaitResult['waitResult'],
@@ -347,7 +375,12 @@ export function waitExitCode(result: WaitResult): number {
 function humanTerminalLine(result: WaitResult): string {
   const id = result.id
   if (result.status === 'exited') {
-    return `Background session ${id} exited with code 0.`
+    // terminalWaitResult only builds an `exited` result from a record
+    // carrying an exit code (records without one are rejected before a
+    // terminal result is built), so this is the child's real code — an
+    // `exited` record with a nonzero code must not read as code 0
+    // (CodeRabbit #2497).
+    return `Background session ${id} exited with code ${result.exitCode}.`
   }
   if (result.status === 'failed') {
     if (result.signal) {
@@ -457,7 +490,7 @@ async function observePinnedSession(
   const readPinned = deps.readPinnedSession ?? readPinnedBackgroundSessionForWait
   let session: BackgroundSession
   try {
-    session = await readPinned(pinned)
+    session = await raceWithClientSignal(readPinned(pinned), signal)
   } catch (error) {
     if (error instanceof BackgroundSessionWaitError) {
       return { kind: 'metadata_error', error }
@@ -478,7 +511,7 @@ async function observePinnedSession(
   // A natural or killed fact published during the lookup wins over derived
   // stale, unknown, or running state, so re-read before classifying.
   try {
-    session = await readPinned(pinned)
+    session = await raceWithClientSignal(readPinned(pinned), signal)
   } catch (error) {
     if (error instanceof BackgroundSessionWaitError) {
       return { kind: 'metadata_error', error }
@@ -594,7 +627,10 @@ export async function waitHandler(
 
     let session: BackgroundSession
     try {
-      session = await resolveSession(parsed.selector!)
+      session = await raceWithClientSignal(
+        resolveSession(parsed.selector!),
+        abortController.signal,
+      )
     } catch (error) {
       if (clientSignal) {
         return finish(interruptedWaitResult(null, clientSignal))
