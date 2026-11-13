@@ -1655,6 +1655,18 @@ export function _setTerminalFactPublishHookForTesting(
   terminalFactPublishHookForTesting = hook
 }
 
+// Test-only hook invoked by publishTerminalFact after it has checked the
+// target and before it claims the publish, so a test can let a second
+// installer publish while the first is between the check and the claim
+// (CodeRabbit #2497). Never set outside tests.
+let terminalFactPublishClaimHookForTesting: (() => Promise<void>) | undefined
+
+export function _setTerminalFactPublishClaimHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  terminalFactPublishClaimHookForTesting = hook
+}
+
 async function waitForTerminalFact(
   id: string,
   kind: 'natural' | 'killed',
@@ -1800,6 +1812,10 @@ async function publishTerminalFact(
       }
       return existing
     }
+    // Test-only pause point between the target check and the claim, so a
+    // test can publish from a second installer inside that gap
+    // (CodeRabbit #2497).
+    await terminalFactPublishClaimHookForTesting?.()
     // Claim the publish: exactly one installer per target wins the
     // mkdir, and the claim file names the tmp to publish, so a loser
     // can complete the winner's publish instead of racing it.
@@ -1810,6 +1826,20 @@ async function publishTerminalFact(
       const adopted = await adoptTerminalFactPublish(fact, kind, target)
       if (adopted) return adopted
       continue
+    }
+    // Recheck the target now that this installer holds the claim: a
+    // publisher may have completed and removed its claim after the
+    // lstat above.
+    try {
+      await lstat(target)
+      await removeTerminalFactClaim(target)
+      const existing = await readTerminalFact(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
     }
     try {
       await writeFile(claimFile, tmp, { flag: 'wx' })
@@ -1909,6 +1939,19 @@ function publishTerminalFactSync(
       const adopted = adoptTerminalFactPublishSync(fact, kind, target)
       if (adopted) return adopted
       continue
+    }
+    // Same post-claim recheck as publishTerminalFact: a publisher may
+    // have completed and removed its claim after the lstat above.
+    try {
+      lstatSync(target)
+      removeTerminalFactClaimSync(target)
+      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
     }
     try {
       writeFileSync(claimFile, tmp, { flag: 'wx' })
