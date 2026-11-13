@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.37.0](https://github.com/Twigpine/openclaude/compare/v0.36.0...v0.37.0) (2026-11-13)
+
+
+### Features
+
+* **buddy:** procedural hero art with moods that follow the agent ([#2515](https://github.com/Twigpine/openclaude/issues/2515)) ([b932e2b](https://github.com/Twigpine/openclaude/commit/b932e2b933e4a7ecddc4ef0ef950aa72f1c33302))
+* **buddy:** sharp image tier for terminals with kitty graphics, and Keynote ([#2516](https://github.com/Twigpine/openclaude/issues/2516)) ([0c6b6f9](https://github.com/Twigpine/openclaude/commit/0c6b6f9ed4863a3bb8cea8c0233527da89d1937a))
+
+
+### Bug Fixes
+
+* **usage:** never overwrite a corrupt usage rollup file ([#2512](https://github.com/Twigpine/openclaude/issues/2512)) ([520c6fa](https://github.com/Twigpine/openclaude/commit/520c6faa931a29ebbf59e3704dd6ea5f4a1efd7d))
+* **usage:** validate saved rollup rows and lock every event-file delete ([#2514](https://github.com/Twigpine/openclaude/issues/2514)) ([3311b68](https://github.com/Twigpine/openclaude/commit/3311b68f879ef005d4123bc8a15ff47e91a3ee55))
+
 ## [0.36.0](https://github.com/Twigpine/openclaude/compare/v0.35.1...v0.36.0) (2026-11-11)
 
 
