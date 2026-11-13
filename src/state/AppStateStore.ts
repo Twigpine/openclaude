@@ -176,6 +176,13 @@ export type AppState = DeepImmutable<{
   // Drives the companion arrow-shot animation. The value is Date.now() but
   // is only compared for change, never to clock time.
   companionShotAt?: number
+  // Change token set by /buddy dance. Like companionShotAt, compared only
+  // for change; CompanionSprite dances for a few seconds after it moves.
+  companionDanceAt?: number
+  // Bumped by /buddy on every companion config change (mute, set, name,
+  // hatch). CompanionSprite reads that config non-reactively, so it
+  // subscribes to this to redraw even when its animation clock is paused.
+  companionConfigVersion?: number
   // TODO (ashwin): see if we can use utility-types DeepReadonly for this
   mcp: {
     clients: MCPServerConnection[]

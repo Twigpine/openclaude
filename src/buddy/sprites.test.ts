@@ -8,14 +8,14 @@ import {
 } from './sprites.js'
 import {
   type CompanionBones,
+  FORMS,
+  type Form,
   robinhood,
-  SPECIES,
-  type Species,
 } from './types.js'
 
 const SPRITE_WIDTH = 12
 
-function bones(species: Species): CompanionBones {
+function bones(species: Form): CompanionBones {
   return {
     rarity: 'common',
     species,
@@ -27,8 +27,8 @@ function bones(species: Species): CompanionBones {
 }
 
 describe('sprites', () => {
-  test('every species renders frames of uniform 12-col width', () => {
-    for (const species of SPECIES) {
+  test('every form renders frames of uniform 12-col width', () => {
+    for (const species of FORMS) {
       const frameCount = spriteFrameCount(species)
       expect(frameCount).toBeGreaterThanOrEqual(1)
       for (let frame = 0; frame < frameCount; frame++) {
@@ -77,7 +77,7 @@ describe('sprites', () => {
   test('every hero has line-art shoot frames of uniform width', () => {
     // Without these, low-color terminals would show a projectile flying out
     // of a motionless sprite.
-    for (const species of SPECIES) {
+    for (const species of FORMS) {
       expect(shootFrameCount(species)).toBeGreaterThanOrEqual(3)
       for (let frame = 0; frame < shootFrameCount(species); frame++) {
         const lines = renderShootSprite(bones(species), frame)
@@ -91,7 +91,7 @@ describe('sprites', () => {
   })
 
   test('renderFace maps every species to its exact face', () => {
-    const EXPECTED_FACES: Record<Species, string> = {
+    const EXPECTED_FACES: Record<Form, string> = {
       robinhood: '«(·)',
       kaio: '\\(·)/',
       strawhat: '∩(·)',
@@ -99,8 +99,9 @@ describe('sprites', () => {
       kage: '|··|',
       ember: '<··>',
       corsair: '(·x)',
+      twig: '=(·)~',
     }
-    for (const species of SPECIES) {
+    for (const species of FORMS) {
       expect(renderFace(bones(species))).toBe(EXPECTED_FACES[species])
     }
     void robinhood

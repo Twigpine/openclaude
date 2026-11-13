@@ -7,7 +7,7 @@
 // Pure and React-free so every effect is unit-testable frame by frame.
 
 import { clamp } from '../ink/layout/geometry.js'
-import type { Species } from './types.js'
+import type { Form } from './types.js'
 import {
   corsair,
   ember,
@@ -16,6 +16,7 @@ import {
   merlin,
   robinhood,
   strawhat,
+  twig,
 } from './types.js'
 
 export type FxRun = {
@@ -296,7 +297,27 @@ const corsairFx: ActionEffect = {
   },
 }
 
-export const ACTION_EFFECTS: Partial<Record<Species, ActionEffect>> = {
+// ── Twig: an acorn lobbed at the prompt ─────────────────────────────────
+const acornFx: ActionEffect = {
+  drawMs: 300,
+  travelMs: 700,
+  impactMs: 250,
+  render(elapsed, width) {
+    if (width < 4) return null
+    if (elapsed >= this.travelMs) {
+      return impactBurst(elapsed - this.travelMs, this.impactMs, width, C.wood, '✺·', '· ')
+    }
+    const x = leftPos(elapsed / this.travelMs, width, 1)
+    const runs: FxRun[] = [pad(x), { text: '●', color: C.wood }]
+    const trailLen = Math.min(3, width - x - 1)
+    if (trailLen > 0) runs.push({ text: '˙ ·'.slice(0, trailLen), color: C.green })
+    runs.push(pad(width - x - 1 - trailLen))
+    return runs
+  },
+}
+
+export const ACTION_EFFECTS: Partial<Record<Form, ActionEffect>> = {
+  [twig]: acornFx,
   [robinhood]: arrowFx,
   [kaio]: kaioFx,
   [strawhat]: strawhatFx,
@@ -306,6 +327,6 @@ export const ACTION_EFFECTS: Partial<Record<Species, ActionEffect>> = {
   [corsair]: corsairFx,
 }
 
-export function getActionEffect(species: Species): ActionEffect | undefined {
+export function getActionEffect(species: Form): ActionEffect | undefined {
   return ACTION_EFFECTS[species]
 }

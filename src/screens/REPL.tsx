@@ -294,6 +294,8 @@ import { CompanionSprite, CompanionFloatingBubble, MIN_COLS_FOR_FULL_SPRITE } fr
 import { CompanionActionFX } from '../buddy/CompanionActionFX.js';
 import { isBuddyEnabled } from '../buddy/feature.js';
 import { fireCompanionObserver } from '../buddy/observer.js';
+import type { CompanionActivity } from '../buddy/heroMoods.js';
+import { lastTurnFailed } from '../buddy/turnOutcome.js';
 // Session manager removed - using AppState now
 import type { RemoteSessionConfig } from '../remote/RemoteSessionManager.js';
 import { REMOTE_SAFE_COMMANDS } from '../commands.js';
@@ -5158,6 +5160,11 @@ export function REPL({
   // check footerSelection: pill FOCUS (arrow-down to tasks pill) must keep
   // the sprite visible so arrow-right can navigate to it.
   const companionVisible = !toolJSX?.shouldHidePromptInput && !focusedInputDialog && !showBashesDialog;
+  // What the agent is doing, for the companion's mood. isWaitingForApproval
+  // is scoped to this session's permission queue and prompts.
+  const companionActivity: CompanionActivity = isWaitingForApproval ? 'waiting' : isLoading ? inProgressToolUseIDs.size > 0 ? 'working' : 'thinking' : 'idle';
+  // Scans back only to the last assistant message, so it stays cheap per render.
+  const companionTurnFailed = lastTurnFailed(messages);
 
   // In fullscreen, ALL local-jsx slash commands float in the modal slot —
   // FullscreenLayout wraps them in an absolute-positioned bottom-anchored
@@ -5221,7 +5228,7 @@ export function REPL({
         {!showSpinner && !isLoading && !userInputOnProcessing && !hasRunningTeammates && isBriefOnly && !viewedAgentTask && <BriefIdleStatus />}
         {isFullscreenEnvEnabled() && <PromptInputQueuedCommands />}
       </>} bottom={<Box flexDirection={isBuddyEnabled() && companionNarrow ? 'column' : 'row'} width="100%" alignItems={isBuddyEnabled() && companionNarrow ? undefined : 'flex-end'}>
-        {isBuddyEnabled() && companionNarrow && isFullscreenEnvEnabled() && companionVisible ? <CompanionSprite /> : null}
+        {isBuddyEnabled() && companionNarrow && isFullscreenEnvEnabled() && companionVisible ? <CompanionSprite activity={companionActivity} turnFailed={companionTurnFailed} /> : null}
         <Box flexDirection="column" flexGrow={1}>
           {permissionStickyFooter}
           {/* Immediate local-jsx commands (/btw, /sandbox, /assistant,
@@ -5629,7 +5636,7 @@ export function REPL({
             setMessageSelectorPreselect(undefined);
           }} />}
         </Box>
-        {isBuddyEnabled() && !(companionNarrow && isFullscreenEnvEnabled()) && companionVisible ? <CompanionSprite /> : null}
+        {isBuddyEnabled() && !(companionNarrow && isFullscreenEnvEnabled()) && companionVisible ? <CompanionSprite activity={companionActivity} turnFailed={companionTurnFailed} /> : null}
       </Box>} />
     </MCPConnectionManager>
   </KeybindingSetup>;
