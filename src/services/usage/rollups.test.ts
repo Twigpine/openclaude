@@ -277,16 +277,26 @@ describe('getUsageDayRollups', () => {
     expect(grown.get(yesterday)?.rows[0]?.requests).toBe(1)
   })
 
-  test('never overwrites a rollup file written by another version', async () => {
+  test.each([
+    ['written by another version', JSON.stringify({ version: 99, days: { '2026-11-01': {} } })],
+    ['holding corrupt JSON', '{"version":1,"days":{"2026-11-01":'],
+    ['holding JSON that is not an object', '42'],
+  ])('never overwrites or prunes against a rollup file %s', async (_label, contents) => {
     await writeDay(yesterday, [makeUsageEvent({ ts: at(yesterday) })])
     await mkdir(getUsageRollupsDir(usageDir), { recursive: true })
-    const future = JSON.stringify({ version: 99, days: { '2026-11-01': {} } })
-    await writeFile(getUsageRollupFile('2026-11', usageDir), future)
+    await writeFile(getUsageRollupFile('2026-11', usageDir), contents)
 
     const rollups = await getUsageDayRollups([yesterday], { today, usageDir })
     expect(rollups.get(yesterday)?.rows[0]?.requests).toBe(1)
+    // With no saved totals for the day, its event file must survive cleanup.
+    const { removed } = await rollUpAndPruneUsageEvents(
+      startOfLocalDay(today),
+      { now: startOfLocalDay(today), usageDir },
+    )
+    expect(removed).toBe(0)
+    expect(existsSync(getUsageEventsFile(yesterday, usageDir))).toBe(true)
     expect(readFileSync(getUsageRollupFile('2026-11', usageDir), 'utf8')).toBe(
-      future,
+      contents,
     )
   })
 
