@@ -936,10 +936,19 @@ describe('wait command handler', () => {
       releaseReader = resolve
     })
     const session = await createTestSession('bg-aaa1')
-    const waiting = runWait(['bg-aaa1', '--json'], {
-      readPinnedSession: () => deferred,
+    // Wait for the first read to start so the signal cannot land before
+    // pinning on a slow filesystem (CodeRabbit #2497).
+    let firstReadStartedResolve!: () => void
+    const firstReadStarted = new Promise<void>(resolve => {
+      firstReadStartedResolve = resolve
     })
-    await new Promise(resolve => setTimeout(resolve, 20))
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      readPinnedSession: () => {
+        firstReadStartedResolve()
+        return deferred
+      },
+    })
+    await firstReadStarted
     process.emit('SIGINT')
     releaseReader({ ...session, status: 'exited', exitCode: 0 })
     const { code, stdout } = await waiting
@@ -988,12 +997,21 @@ describe('wait command handler', () => {
   it('returns 130 when SIGINT arrives while the first metadata read is still pending', async () => {
     // The first pinned read must race the client signal the same way:
     // a SIGINT while it is still pending must interrupt the wait instead
-    // of hanging until the read settles (CodeRabbit #2497).
+    // of hanging until the read settles (CodeRabbit #2497). Wait for the
+    // read to start so the signal cannot land before pinning on a slow
+    // filesystem.
     await createTestSession('bg-aaa1')
-    const waiting = runWait(['bg-aaa1', '--json'], {
-      readPinnedSession: () => new Promise<BackgroundSession>(() => {}),
+    let firstReadStartedResolve!: () => void
+    const firstReadStarted = new Promise<void>(resolve => {
+      firstReadStartedResolve = resolve
     })
-    await new Promise(resolve => setTimeout(resolve, 20))
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      readPinnedSession: () => {
+        firstReadStartedResolve()
+        return new Promise<BackgroundSession>(() => {})
+      },
+    })
+    await firstReadStarted
     process.emit('SIGINT')
     const { code, stdout } = await waiting
 
@@ -1006,10 +1024,19 @@ describe('wait command handler', () => {
 
   it('returns 143 when SIGTERM arrives while the first metadata read is still pending', async () => {
     await createTestSession('bg-aaa1')
-    const waiting = runWait(['bg-aaa1', '--json'], {
-      readPinnedSession: () => new Promise<BackgroundSession>(() => {}),
+    // Wait for the read to start so the signal cannot land before
+    // pinning on a slow filesystem (CodeRabbit #2497).
+    let firstReadStartedResolve!: () => void
+    const firstReadStarted = new Promise<void>(resolve => {
+      firstReadStartedResolve = resolve
     })
-    await new Promise(resolve => setTimeout(resolve, 20))
+    const waiting = runWait(['bg-aaa1', '--json'], {
+      readPinnedSession: () => {
+        firstReadStartedResolve()
+        return new Promise<BackgroundSession>(() => {})
+      },
+    })
+    await firstReadStarted
     process.emit('SIGTERM')
     const { code, stdout } = await waiting
 
@@ -1076,6 +1103,59 @@ describe('wait command handler', () => {
     expect(result.id).toBe('bg-aaa1')
     expect(result.waitResult).toBe('interrupted')
     expect(result.waitSignal).toBe('SIGTERM')
+  })
+
+  it('does not leak an unhandled rejection when SIGINT arrives during the process lookup and the second metadata read rejects', async () => {
+    // A SIGINT during the process lookup aborts the client signal before
+    // the second metadata read starts; that read's rejection must still
+    // be handled even though the waiter reports the interruption instead
+    // of the read result (CodeRabbit #2497).
+    const session = await createTestSession('bg-aaa1')
+    const unhandled: unknown[] = []
+    const onUnhandledRejection = (error: unknown) => {
+      unhandled.push(error)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      let releaseLookup!: (command: string) => void
+      const lookup = new Promise<string>(resolve => {
+        releaseLookup = resolve
+      })
+      let lookupStartedResolve!: () => void
+      const lookupStarted = new Promise<void>(resolve => {
+        lookupStartedResolve = resolve
+      })
+      let reads = 0
+      const waiting = runWait(['bg-aaa1', '--json'], {
+        isProcessAlive: () => true,
+        getProcessCommandAsync: () => {
+          lookupStartedResolve()
+          return lookup
+        },
+        readPinnedSession: () => {
+          reads += 1
+          if (reads === 1) return Promise.resolve(session)
+          return Promise.reject(
+            new BackgroundSessionWaitError('metadata_missing', 'metadata missing', 'bg-aaa1'),
+          )
+        },
+      })
+      await lookupStarted
+      process.emit('SIGINT')
+      releaseLookup('sleep 30')
+      const { code, stdout } = await waiting
+
+      expect(code).toBe(130)
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.id).toBe('bg-aaa1')
+      expect(result.waitResult).toBe('interrupted')
+      expect(result.waitSignal).toBe('SIGINT')
+      // Let a rejected second read surface before asserting no leak.
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
   })
 
   it('does not write to the registry while waiting', async () => {
