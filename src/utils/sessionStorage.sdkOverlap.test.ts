@@ -32,7 +32,9 @@ import {
   getCurrentSessionTitle,
   getDroppedSessionMetadataSizeForTesting,
   getProjectDir,
+  getSessionFileForTesting,
   getSessionTranscriptCacheSizeForTesting,
+  getStartedSessionKeysSizeForTesting,
   getTranscriptPathForSession,
   reAppendSessionMetadata,
   recordAttributionSnapshot,
@@ -1194,3 +1196,165 @@ test('a new turn with a cached pointer waits for an in-flight deletion, and its 
   expect(aText).toContain('A returns after failed delete')
 })
 
+test('the started-session state stays bounded across many sessions', async () => {
+  // jatmn on #2489 (P3): startedSessionKeys only grows — closing sessions,
+  // deleting transcripts, and evicting caches never release keys. Adopting
+  // (marking started) more sessions than the cache bound must not grow it
+  // past the bound.
+  const ids = Array.from({ length: 105 }, () => randomUUID())
+  for (const id of ids) {
+    await turnStart(id, async () => {
+      adoptResumedSessionFile()
+    })
+  }
+  expect(getStartedSessionKeysSizeForTesting()).toBeLessThanOrEqual(100)
+})
+
+test('deleting a transcript releases its started-session identity', async () => {
+  // jatmn on #2489 (P3): deleting a transcript must release the started
+  // identity it added, or a long-running host keeps one key per session it
+  // has ever deleted.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+  expect(getStartedSessionKeysSizeForTesting()).toBe(1)
+
+  await deleteSession(SESSION_A)
+  expect(existsSync(getTranscriptPathForSession(SESSION_A))).toBe(false)
+  expect(getStartedSessionKeysSizeForTesting()).toBe(0)
+})
+
+test('persistence-disabled sessions do not grow the started-session state without bound', async () => {
+  // jatmn on #2489 (P3): materializeSessionFile adds a started key before
+  // the persistence guard, so conversations that never persist still retain
+  // an identity each. Many of them must stay bounded like the rest.
+  // TEST_ENABLE_SESSION_PERSISTENCE overrides the disabled flag (see
+  // shouldSkipSessionPersistence), so it must be off here for the sessions
+  // to really skip persistence — otherwise they materialize files.
+  const wasDisabled = isSessionPersistenceDisabled()
+  const testPersistence = process.env.TEST_ENABLE_SESSION_PERSISTENCE
+  setSessionPersistenceDisabled(true)
+  process.env.TEST_ENABLE_SESSION_PERSISTENCE = 'false'
+  try {
+    const ids = Array.from({ length: 105 }, () => randomUUID())
+    for (const id of ids) {
+      await turnStart(id, async () => {
+        await recordTranscript([message(randomUUID(), 'never persisted')])
+        await flushSessionStorage()
+      })
+    }
+    expect(getStartedSessionKeysSizeForTesting()).toBeLessThanOrEqual(100)
+    // The sessions really did skip persistence: no transcript was created.
+    expect(existsSync(getTranscriptPathForSession(ids[0]!))).toBe(false)
+  } finally {
+    setSessionPersistenceDisabled(wasDisabled)
+    if (testPersistence === undefined) delete process.env.TEST_ENABLE_SESSION_PERSISTENCE
+    else process.env.TEST_ENABLE_SESSION_PERSISTENCE = testPersistence
+  }
+})
+
+test('a failed deletion restores the session\u2019s started identity', async () => {
+  // jatmn on #2489 (P3): forgetDeletedSession drops the started identity
+  // with the deleted transcript's caches, so a failed removal must restore
+  // it with the metadata — otherwise the surviving session looks
+  // provisional and a later switch migrates its title into the next
+  // session. Drive the failure through deleteSession itself, like the
+  // metadata-restore test above.
+  await turnStart(SESSION_A, async () => {
+    await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    cacheSessionTitle('A Title')
+    reAppendSessionMetadata()
+    // Push the title out of the 64KB tail window.
+    for (let i = 0; i < 20; i++) {
+      await recordTranscript([message(randomUUID(), 'x'.repeat(5000))])
+    }
+    await flushSessionStorage()
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  const realUnlink = fsPromises.unlink
+  spyOn(fsPromises, 'unlink').mockImplementation(async path => {
+    if (path === transcriptPath) {
+      throw Object.assign(new Error('resource busy or locked'), { code: 'EBUSY' })
+    }
+    return realUnlink(path)
+  })
+
+  await expect(deleteSession(SESSION_A)).rejects.toThrow('resource busy or locked')
+  mock.restore()
+
+  // The transcript survived: its started identity comes back with it.
+  expect(getStartedSessionKeysSizeForTesting()).toBe(1)
+
+  // Switching away must not migrate the surviving session's title into B.
+  await turnStart(SESSION_B, async () => {
+    expect(getCurrentSessionTitle(SESSION_B as never)).toBeUndefined()
+    await recordTranscript([message(randomUUID(), 'B first')])
+    await flushSessionStorage()
+  })
+  await turnStart(SESSION_A, async () => {
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
+    await recordTranscript([message(randomUUID(), 'A returns')])
+    await flushSessionStorage()
+  })
+
+  const aText = await readFile(transcriptPath, 'utf8')
+  expect(aText).toContain('A returns')
+  expect(aText).not.toContain('B first')
+})
+
+test('a re-cached title is not migrated after its started identity was evicted', async () => {
+  // jatmn on #2489 (P3): evicting a started identity also evicts its
+  // metadata, but the file pointer can survive — and a title re-cached
+  // afterwards would leave the session looking provisional, so a switch
+  // to another session in the same context would migrate it there. The
+  // re-cache must re-establish the session. Drive the eviction with
+  // persistence-disabled sessions: they add started identities with no
+  // file or metadata, so the oldest started identity (A's) is evicted
+  // while A's pointer lives. A runs in the global context so the switch
+  // to B is a real switch inside one context (a turn's pre-set SDK
+  // context would report the switch as a no-op).
+  switchSession(SESSION_A as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+  await recordTranscript([message(randomUUID(), 'A first')])
+  await flushSessionStorage()
+  cacheSessionTitle('A Title')
+
+  const wasDisabled = isSessionPersistenceDisabled()
+  const testPersistence = process.env.TEST_ENABLE_SESSION_PERSISTENCE
+  setSessionPersistenceDisabled(true)
+  // TEST_ENABLE_SESSION_PERSISTENCE overrides the disabled flag (see
+  // shouldSkipSessionPersistence), so it must be off here for the sessions
+  // to really skip persistence — otherwise they materialize files and
+  // evict A's pointer too, and the premise below would not hold.
+  process.env.TEST_ENABLE_SESSION_PERSISTENCE = 'false'
+  try {
+    const ids = Array.from({ length: 105 }, () => randomUUID())
+    for (const id of ids) {
+      await turnStart(id, async () => {
+        await recordTranscript([message(randomUUID(), 'never persisted')])
+        await flushSessionStorage()
+      })
+    }
+  } finally {
+    setSessionPersistenceDisabled(wasDisabled)
+    if (testPersistence === undefined) delete process.env.TEST_ENABLE_SESSION_PERSISTENCE
+    else process.env.TEST_ENABLE_SESSION_PERSISTENCE = testPersistence
+  }
+  expect(getStartedSessionKeysSizeForTesting()).toBeLessThanOrEqual(100)
+  // The churn added started identities only: A's pointer survives.
+  expect(getSessionFileForTesting()).not.toBeNull()
+
+  // A re-caches its title after the eviction; its pointer is still there.
+  cacheSessionTitle('A Title Again')
+
+  // Switching away in the same context must not migrate it into B.
+  switchSession(SESSION_B as never, null)
+  expect(getCurrentSessionTitle(getSessionId())).toBeUndefined()
+  switchSession(SESSION_A as never, null)
+  expect(getCurrentSessionTitle(getSessionId())).toBe('A Title Again')
+})

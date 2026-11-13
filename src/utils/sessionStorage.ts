@@ -1050,6 +1050,16 @@ export function getDroppedSessionMetadataSizeForTesting(): number {
   return getProject()._droppedSessionMetadataSize()
 }
 
+/**
+ * Number of started-session identities retained, for testing. Proves the
+ * bound on the third retained state (see startedSessionKeys): creating
+ * more sessions than MAX_SESSION_CACHE_ENTRIES must not grow it past the
+ * bound, and deleting a transcript must release its identity.
+ */
+export function getStartedSessionKeysSizeForTesting(): number {
+  return getProject()._startedSessionKeysSize()
+}
+
 type InternalEventWriter = (
   eventType: string,
   payload: Record<string, unknown>,
@@ -1198,6 +1208,15 @@ class Project {
       entry = {}
     }
     this.sessionMetadata.set(key, entry)
+    // A metadata write for an identity with an established pointer is a
+    // live session re-caching after eviction: boundSessionCaches evicted
+    // its started identity with the metadata, so re-mark it — otherwise
+    // a later switch would treat it as provisional and migrate these
+    // fields into the next session. A provisional identity has no pointer,
+    // so deferred startup selections still migrate.
+    if (this.sessionFiles.has(key)) {
+      this.markSessionStarted(key)
+    }
     this.boundSessionCaches()
     return entry
   }
@@ -1408,7 +1427,7 @@ class Project {
   // live sessions; eviction only ever drops long-idle contexts.
   private readonly MAX_SESSION_CACHE_ENTRIES = 100
 
-  /** Evict least-recently-used entries past the bound, from both caches. */
+  /** Evict least-recently-used entries past the bound, from all three caches. */
   private boundSessionCaches(): void {
     while (this.sessionFiles.size > this.MAX_SESSION_CACHE_ENTRIES) {
       const oldest = this.sessionFiles.keys().next().value
@@ -1421,17 +1440,39 @@ class Project {
       if (oldest === undefined) return
       this.sessionMetadata.delete(oldest)
       this.sessionFiles.delete(oldest)
+      // The started guard protects this entry's metadata from migrating;
+      // dropping the guard without the metadata would let a later switch
+      // move it into another session, so they are evicted together.
+      this.startedSessionKeys.delete(oldest)
+    }
+    while (this.startedSessionKeys.size > this.MAX_SESSION_CACHE_ENTRIES) {
+      const oldest = this.startedSessionKeys.keys().next().value
+      if (oldest === undefined) return
+      this.startedSessionKeys.delete(oldest)
+      // Same pairing in the other direction: the guard and the metadata
+      // it protects are evicted together, so an evicted identity can
+      // never migrate fields it still has cached.
+      this.sessionMetadata.delete(oldest)
     }
   }
 
   /** @internal Size of the per-context transcript caches, for testing. */
   _sessionTranscriptCacheSize(): number {
-    return Math.max(this.sessionFiles.size, this.sessionMetadata.size)
+    return Math.max(
+      this.sessionFiles.size,
+      this.sessionMetadata.size,
+      this.startedSessionKeys.size,
+    )
   }
 
   /** @internal Number of dropped metadata snapshots awaiting restore, for testing. */
   _droppedSessionMetadataSize(): number {
     return this.droppedSessionMetadata.size
+  }
+
+  /** @internal Number of started-session identities retained, for testing. */
+  _startedSessionKeysSize(): number {
+    return this.startedSessionKeys.size
   }
 
   /**
@@ -1477,11 +1518,31 @@ class Project {
   // context's deferred startup selections look already started (see
   // migrateStartupMetadata). A conversation can start without a file
   // when persistence is disabled.
-  private startedSessionKeys = new Set<string>()
+  //
+  // A Map, not a Set, so the started state shares the caches' LRU bound
+  // (see boundSessionCaches): closing sessions, deleting transcripts,
+  // and evicting caches release keys instead of retaining one per
+  // session a long-running host ever materialized (#2489).
+  private startedSessionKeys = new Map<string, true>()
 
   /** True when the session for the current context has started. */
   private hasStartedSessionInCurrentContext(): boolean {
-    return this.startedSessionKeys.has(this.sessionFileKey())
+    const key = this.sessionFileKey()
+    if (!this.startedSessionKeys.has(key)) return false
+    // Touch so the bounded cache evicts least-recently-used entries first.
+    this.startedSessionKeys.delete(key)
+    this.startedSessionKeys.set(key, true)
+    return true
+  }
+
+  /**
+   * Mark one session identity started, refreshing its recency in the
+   * bounded started-state cache (see boundSessionCaches).
+   */
+  private markSessionStarted(key: string): void {
+    this.startedSessionKeys.delete(key)
+    this.startedSessionKeys.set(key, true)
+    this.boundSessionCaches()
   }
 
   /**
@@ -1495,7 +1556,7 @@ class Project {
    * its file already exists on disk — so it counts as started.
    */
   markCurrentSessionStarted(): void {
-    this.startedSessionKeys.add(this.sessionFileKey())
+    this.markSessionStarted(this.sessionFileKey())
   }
   // Entries buffered while sessionFile is null, keyed by their transcript path
   // (session ID and project directory). Flushed on that destination's first
@@ -1844,7 +1905,7 @@ class Project {
     // transcript. Keep only those deferred fields through its switch and
     // explicit reset.
     if (this.sessionFile !== null) {
-      this.startedSessionKeys.add(this.sessionFileKey())
+      this.markSessionStarted(this.sessionFileKey())
     }
     // The selections were cached under the startup session's identity;
     // carry them into this context before preserving them below.
@@ -2277,7 +2338,7 @@ class Project {
   private async materializeSessionFile(): Promise<void> {
     // Runtime metadata must not become startup selections just because this
     // conversation opted out of writing its transcript.
-    this.startedSessionKeys.add(this.sessionFileKey())
+    this.markSessionStarted(this.sessionFileKey())
     // Guard here too — reAppendSessionMetadata writes via appendEntryToFile
     // (not appendEntry) so it would bypass the per-entry persistence check
     // and create a metadata-only file despite --no-session-persistence.
@@ -2827,21 +2888,30 @@ class Project {
   private deletedSessionFiles = new Set<string>()
 
   /**
-   * Metadata cache entries dropped by forgetDeletedSession, keyed by the
-   * deleted transcript's resolved path. Restored by restoreSessionWrites
-   * when the transcript survives its removal; a fresh session at a
-   * recycled path consumes (discards) the snapshot instead, so the new
-   * transcript never inherits the deleted session's title/tag. Overlapping
-   * deletions of the same transcript merge into one snapshot — a later
-   * attempt must not overwrite the original with the (possibly empty) set
-   * it dropped — and the snapshot is discarded by finishDeletedSession
-   * once the last overlapping attempt finishes, so a successful removal
-   * leaves nothing behind. Like deletedSessionFiles, an entry lingers
-   * only while its deletion attempts are still running.
+   * Metadata cache entries and started identities dropped by
+   * forgetDeletedSession, keyed by the deleted transcript's resolved
+   * path. Restored by restoreSessionWrites when the transcript survives
+   * its removal; a fresh session at a recycled path consumes (discards)
+   * the snapshot instead, so the new transcript never inherits the
+   * deleted session's title/tag. Overlapping deletions of the same
+   * transcript merge into one snapshot — a later attempt must not
+   * overwrite the original with the (possibly empty) set it dropped —
+   * and the snapshot is discarded by finishDeletedSession once the last
+   * overlapping attempt finishes, so a successful removal leaves
+   * nothing behind. Like deletedSessionFiles, an entry lingers only
+   * while its deletion attempts are still running.
+   *
+   * The started identities ride in the same snapshot as the metadata
+   * they guard: a failed removal restores both together, so the
+   * surviving session keeps its established status and a later switch
+   * cannot migrate its title into another session.
    */
   private droppedSessionMetadata = new Map<
     string,
-    Array<[string, SessionMetadata]>
+    {
+      metadata: Array<[string, SessionMetadata]>
+      startedKeys: Set<string>
+    }
   >()
 
   /**
@@ -2912,13 +2982,17 @@ class Project {
    * pointer and metadata: if its title has fallen outside both 64KB
    * windows, a later re-append could not restore it from the tail.
    *
-   * Returns the metadata entries dropped, so restoreSessionWrites can put
-   * them back when the transcript survives its removal.
+   * Returns the metadata entries and started identities dropped, so
+   * restoreSessionWrites can put them back when the transcript survives
+   * its removal.
    */
   private forgetSessionCaches(
     sessionId: UUID,
     transcriptPath: string,
-  ): Array<[string, SessionMetadata]> {
+  ): {
+    metadata: Array<[string, SessionMetadata]>
+    startedKeys: string[]
+  } {
     const deleted = resolvePath(transcriptPath)
     const namesDeletedTranscript = (key: string): boolean => {
       if (!key.startsWith(`${sessionId}\0`)) return false
@@ -2947,10 +3021,21 @@ class Project {
         this.sessionMetadata.delete(key)
       }
     }
+    // The started identities for the deleted transcript are released
+    // with its caches: a deleted session must not keep retaining its
+    // identity in a long-running host (#2489). They ride in the snapshot
+    // with the metadata, so a failed removal restores them together.
+    const droppedStartedKeys: string[] = []
+    for (const key of [...this.startedSessionKeys.keys()]) {
+      if (namesDeletedTranscript(key)) {
+        droppedStartedKeys.push(key)
+        this.startedSessionKeys.delete(key)
+      }
+    }
     for (const key of [...this.sessionFiles.keys()]) {
       if (namesDeletedTranscript(key)) this.sessionFiles.delete(key)
     }
-    return droppedMetadata
+    return { metadata: droppedMetadata, startedKeys: droppedStartedKeys }
   }
 
   async forgetDeletedSession(
@@ -3007,39 +3092,43 @@ class Project {
     const dropped = this.forgetSessionCaches(sessionId, transcriptPath)
     const existing = this.droppedSessionMetadata.get(resolved)
     if (existing) {
-      for (const [key, entry] of dropped) {
-        const prior = existing.find(([priorKey]) => priorKey === key)
+      for (const [key, entry] of dropped.metadata) {
+        const prior = existing.metadata.find(([priorKey]) => priorKey === key)
         if (prior) {
           // A concurrent update recreated this entry after the first deletion
           // dropped it: keep both sides' fields, the newer entry winning on
           // the fields it defines.
           prior[1] = mergeSessionMetadata(prior[1], entry)
         } else {
-          existing.push([key, entry])
+          existing.metadata.push([key, entry])
         }
       }
+      for (const key of dropped.startedKeys) existing.startedKeys.add(key)
     } else {
-      this.droppedSessionMetadata.set(resolved, dropped)
+      this.droppedSessionMetadata.set(resolved, {
+        metadata: dropped.metadata,
+        startedKeys: new Set(dropped.startedKeys),
+      })
     }
   }
 
   /**
    * Undo forgetDeletedSession for a transcript that could not be removed.
-   * The metadata cache entries dropped for it are restored — but only
-   * when the transcript is still on disk. A fresh session at a recycled
-   * path also calls this (via materializeSessionFile) to un-mark the path,
-   * and restoring the deleted session's title/tag there would hand them
-   * to the new transcript: when the file is gone the snapshot is consumed
-   * (discarded) instead. When the file survives, a live update may have
-   * recreated an entry under the same key while deletion was pending, so
-   * the saved fields are merged with the live entry instead of skipping
-   * the key (which lost the title/tag) or overwriting it (which lost the
-   * concurrent update). The restored entries count against the cache
-   * bound, like any other write. The snapshot itself stays until
-   * finishDeletedSession runs for the last overlapping deletion attempt,
-   * so a still-running attempt can restore from it too. The file
-   * pointer needs no snapshot: it re-derives from the context identity,
-   * and the eviction fix restores it when the transcript exists.
+   * The metadata cache entries and started identities dropped for it are
+   * restored — but only when the transcript is still on disk. A fresh
+   * session at a recycled path also calls this (via materializeSessionFile)
+   * to un-mark the path, and restoring the deleted session's title/tag
+   * there would hand them to the new transcript: when the file is gone the
+   * snapshot is consumed (discarded) instead. When the file survives, a
+   * live update may have recreated an entry under the same key while
+   * deletion was pending, so the saved fields are merged with the live
+   * entry instead of skipping the key (which lost the title/tag) or
+   * overwriting it (which lost the concurrent update). The restored entries
+   * count against the cache bound, like any other write. The snapshot
+   * itself stays until finishDeletedSession runs for the last overlapping
+   * deletion attempt, so a still-running attempt can restore from it too.
+   * The file pointer needs no snapshot: it re-derives from the context
+   * identity, and the eviction fix restores it when the transcript exists.
    */
   restoreSessionWrites(transcriptPath: string): void {
     const resolved = resolvePath(transcriptPath)
@@ -3063,7 +3152,7 @@ class Project {
       this.droppedSessionMetadata.delete(resolved)
       return
     }
-    for (const [key, entry] of dropped) {
+    for (const [key, entry] of dropped.metadata) {
       const current = this.sessionMetadata.get(key)
       if (!current) {
         // Copy: the snapshot stays until the deletion attempts finish, so
@@ -3075,6 +3164,13 @@ class Project {
         // around it.
         this.sessionMetadata.set(key, mergeSessionMetadata(entry, current))
       }
+    }
+    // The surviving session is established again: its started identities
+    // were dropped with its caches above, so restore them with the
+    // metadata — otherwise a later switch would treat it as provisional
+    // and migrate its title into the next session.
+    for (const key of dropped.startedKeys) {
+      this.startedSessionKeys.set(key, true)
     }
     this.boundSessionCaches()
   }
