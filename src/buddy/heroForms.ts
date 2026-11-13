@@ -72,16 +72,16 @@ function human(g: HeroCanvas, p: HeroPose, t: number, o: Outfit): void {
   g.cap(25, 33 + J, 25, 35 + J, 1.8, o.legs)
   g.ell(21.5, 29.5 + J + s * 2, 7 + s * 1.5, 6 - s * 1.5, o.cloth)
   o.chest?.(g, J + s * 2, t)
+  const hand = nearHand(p, t, J)
   if (p.point) {
     g.cap(14, 27 + J, 7, 26 + J, 1.7, o.sleeve)
-    g.ell(5.5, 26 + J, 1.6, 1.6, o.hand)
+    g.ell(hand.x, hand.y, 1.6, 1.6, o.hand)
   } else if (p.wave) {
-    const wy = Math.sin(t * 10) * 2
-    g.cap(14, 27 + J, 9, 21 + J + wy, 1.7, o.sleeve)
-    g.ell(8.5, 20 + J + wy, 1.6, 1.6, o.hand)
+    g.cap(14, 27 + J, 9, hand.y + 1, 1.7, o.sleeve)
+    g.ell(hand.x, hand.y, 1.6, 1.6, o.hand)
   } else {
-    g.cap(14, 27 + J, 12.5, 31 + J + p.arm, 1.7, o.sleeve)
-    g.ell(12.5, 32.5 + J + p.arm, 1.5, 1.5, o.hand)
+    g.cap(14, 27 + J, 12.5, hand.y - 1.5, 1.7, o.sleeve)
+    g.ell(hand.x, hand.y, 1.5, 1.5, o.hand)
   }
   g.cap(29, 27 + J, 30.5, 31 + J - p.arm, 1.7, o.sleeve)
   g.ell(30.5, 32.5 + J - p.arm, 1.5, 1.5, o.hand)
@@ -95,6 +95,13 @@ function human(g: HeroCanvas, p: HeroPose, t: number, o: Outfit): void {
   if (!o.patch) g.eye(hx - 6 + p.ex, hy + 0.5, p.eye)
   g.eye(hx + 3 + p.ex, hy + 0.5, p.eye)
   o.front?.(g, J, t, p)
+}
+
+/** Where human() draws the near hand (the one toward the prompt). */
+export function nearHand(p: HeroPose, t: number, J: number): { x: number; y: number } {
+  if (p.point) return { x: 5.5, y: 26 + J }
+  if (p.wave) return { x: 8.5, y: 20 + J + Math.sin(t * 10) * 2 }
+  return { x: 12.5, y: 32.5 + J + p.arm }
 }
 
 /** Paw or claw on the near side: points, waves or rests. */
@@ -464,8 +471,10 @@ const drawKeynote: DrawHero = (g, p, t) =>
       // from the hand while it is thrown (the Enter effect carries it).
       if (p.point) return
       const pulse = 0.35 + 0.25 * Math.abs(Math.sin(t * 3))
-      const cx = 11.8
-      const cy = 34.4 + J + p.arm
+      // Follow the near hand, which human() raises while waving.
+      const hand = nearHand(p, t, J)
+      const cx = hand.x - 0.7
+      const cy = hand.y + 1.9
       g.ell(cx, cy, 2.5 + pulse, 2.1 + pulse, 'c')
       for (const dx of [-1.1, 0, 1.1]) {
         g.cap(cx + dx, cy - 1.9, cx + dx, cy + 1.9, 0.22, 'X')

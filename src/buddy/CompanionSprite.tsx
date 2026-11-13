@@ -42,6 +42,7 @@ import {
   type CellSize,
   CLEAR_COMPANION_IMAGE,
   COMPANION_IMAGE_ID,
+  heroImageCell,
   heroImageColumns,
   heroImageFrame,
 } from './heroImageFrames.js'
@@ -195,10 +196,8 @@ function companionColumnWidth(companion: { name: string }): number {
 // its cell size, and the user has not turned images off. Returns the cell
 // size to draw at, or undefined for half-block pixels.
 function imageModeCell(): CellSize | undefined {
-  const graphics = getTerminalGraphics()
-  if (!graphics.kitty || !graphics.cell || !pixelModeActive()) return undefined
   if (getGlobalConfig().companionImages === false) return undefined
-  return graphics.cell
+  return heroImageCell()
 }
 
 // The hero drawn as a real terminal image over an empty box of the same

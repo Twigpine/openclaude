@@ -174,3 +174,39 @@ test('clipping excludes a clipping parent’s border, as the text renderer does'
   expect(await renderOnce(20, <BorderedImage height={4} />)).toContain('<draw b4>')
   expect(await renderOnce(20, <BorderedImage height={5} />)).not.toContain('<draw b5>')
 })
+
+function SlidingImage({ left }: { left: number }): React.ReactNode {
+  const ref = useImageOverlay(81, { key: 'slide', draw: () => '<draw slide>', clear: '<clear slide>' })
+  return (
+    <Box flexDirection="column">
+      <Box marginLeft={left} flexShrink={0}>
+        <Box ref={ref} width={6} height={2} flexShrink={0} />
+      </Box>
+      <Text>below</Text>
+    </Box>
+  )
+}
+
+test('an image moved past the right edge is cleared and not drawn again', async () => {
+  const stdout = new PassThrough()
+  const tty = stdout as unknown as NodeJS.WriteStream & { columns: number; rows: number }
+  tty.columns = 40
+  tty.rows = 20
+  tty.isTTY = true
+  let output = ''
+  stdout.on('data', chunk => {
+    output += chunk.toString()
+  })
+  const root = await createRoot({ stdout: tty, patchConsole: false })
+  try {
+    await show(root, tty, <SlidingImage left={30} />)
+    expect(output).toContain('<draw slide>')
+    output = ''
+    // 38 + 6 > 40 columns: the box now runs off the right edge.
+    await show(root, tty, <SlidingImage left={38} />)
+    expect(output).toContain('<clear slide>')
+    expect(output).not.toContain('<draw slide>')
+  } finally {
+    root.unmount()
+  }
+})

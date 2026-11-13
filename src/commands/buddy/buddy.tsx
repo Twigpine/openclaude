@@ -7,6 +7,7 @@ import {
   saveGlobalConfig,
 } from '../../utils/config.js'
 import { companionUserId, getCompanion } from '../../buddy/companion.js'
+import { heroImageCell } from '../../buddy/heroImageFrames.js'
 import { pickDeterministic } from '../../buddy/deterministic.js'
 import type { Form, StoredCompanion } from '../../buddy/types.js'
 import {
@@ -24,7 +25,6 @@ import {
   twig,
 } from '../../buddy/types.js'
 import { COMMON_HELP_ARGS, COMMON_INFO_ARGS } from '../../constants/xml.js'
-import { getTerminalGraphics } from '../../ink/terminal.js'
 
 // Flavor for /buddy set confirmations. A full Record so adding a hero
 // without flavor text is a compile error.
@@ -233,12 +233,13 @@ export async function call(
       )
       return null
     }
-    const supported = getTerminalGraphics().kitty
+    // Same check the sprite uses, so the message matches what is drawn.
+    const supported = heroImageCell() !== undefined
     onDone(
       on
         ? supported
           ? 'Buddy images on: your buddy is drawn as a sharp image in this terminal.'
-          : "Buddy images on. This terminal didn't report image support (kitty graphics), so your buddy stays a pixel sprite here."
+          : "Buddy images on. This terminal didn't report image support (kitty graphics and its cell size), so your buddy stays a pixel sprite here."
         : 'Buddy images off: your buddy is drawn as a pixel sprite.',
       { display: 'system' },
     )

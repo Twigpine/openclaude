@@ -1,4 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
+import chalk from 'chalk'
+import { setTerminalGraphics } from '../../ink/terminal.js'
 import { type AppState, getDefaultAppState } from '../../state/AppState.js'
 import type {
   LocalJSXCommandContext,
@@ -120,5 +122,32 @@ test('images off reports a failed save instead of claiming success', async () =>
     expect(getGlobalConfig().companionImages).toBeUndefined()
   } finally {
     skip.mockRestore()
+  }
+})
+
+test('images on describes what the sprite will actually draw', async () => {
+  const h = harness()
+  await call(onDone, h.context, '')
+  const level = chalk.level
+  let said: string | undefined
+  const capture = ((text?: string) => {
+    said = text
+  }) as LocalJSXCommandOnDone
+  try {
+    chalk.level = 3
+    // Graphics answered but no cell size: the sprite stays half-block.
+    setTerminalGraphics({ kitty: true })
+    await call(capture, h.context, 'images on')
+    expect(said).toContain('stays a pixel sprite')
+    setTerminalGraphics({ kitty: true, cell: { width: 8, height: 16 } })
+    await call(capture, h.context, 'images on')
+    expect(said).toContain('sharp image')
+    // No colour: also the pixel sprite.
+    chalk.level = 1
+    await call(capture, h.context, 'images on')
+    expect(said).toContain('stays a pixel sprite')
+  } finally {
+    chalk.level = level
+    setTerminalGraphics({ kitty: false })
   }
 })

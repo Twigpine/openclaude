@@ -804,7 +804,7 @@ export default class Ink {
     // Terminal images go last, inside the same synchronized write, so the
     // frame and its images land together. Redrawn whenever the frame
     // changed (text writes or scrolling may have disturbed them).
-    const overlayPatch = this.imageOverlayPatch(frame, hasDiff, terminalRows);
+    const overlayPatch = this.imageOverlayPatch(frame, hasDiff, terminalWidth, terminalRows);
     if (overlayPatch) {
       optimized.push({
         type: 'stdout',
@@ -1541,7 +1541,7 @@ export default class Ink {
    * `terminalRows` rows of the frame are visible, so a box scrolled above
    * them is cleared rather than drawn at a clamped position.
    */
-  private imageOverlayPatch(frame: Frame, frameChanged: boolean, terminalRows: number): string {
+  private imageOverlayPatch(frame: Frame, frameChanged: boolean, terminalWidth: number, terminalRows: number): string {
     let out = '';
     for (const [id, placed] of this.placedImages) {
       if (!this.imageOverlays.has(id)) {
@@ -1560,7 +1560,7 @@ export default class Ink {
     for (const [id, overlay] of this.imageOverlays) {
       const rect = unclippedOverlayRect(overlay.node);
       const placed = this.placedImages.get(id);
-      const visible = rect !== undefined && rect.width > 0 && rect.height > 0 && rect.x >= 0 && rect.y >= 0 && rect.y + rect.height <= frameHeight && (this.altScreenActive ? rect.y + rect.height <= terminalRows : rect.y >= visibleTop);
+      const visible = rect !== undefined && rect.width > 0 && rect.height > 0 && rect.x >= 0 && rect.x + rect.width <= terminalWidth && rect.y >= 0 && rect.y + rect.height <= frameHeight && (this.altScreenActive ? rect.y + rect.height <= terminalRows : rect.y >= visibleTop);
       if (!visible) {
         if (placed) {
           out += placed.clear;

@@ -1,3 +1,5 @@
+import { getTerminalGraphics } from '../ink/terminal.js'
+import { isPixelColorCapable } from './heroArt.js'
 import { renderHeroImage } from './heroImage.js'
 import type { HeroMood } from './heroMoods.js'
 import { kittyDelete, kittyShowPng } from './kittyGraphics.js'
@@ -23,6 +25,18 @@ const STEP_S = 0.1
 const MAX_FRAMES = 600
 
 export type CellSize = { width: number; height: number }
+
+/**
+ * The cell size to draw hero images at when this terminal can show them:
+ * it answered the kitty graphics probe, reported its cell size, and has
+ * colour. Undefined means the half-block sprite. Ignores the user's
+ * /buddy images setting, which callers apply on top.
+ */
+export function heroImageCell(): CellSize | undefined {
+  const graphics = getTerminalGraphics()
+  if (!graphics.kitty || !graphics.cell || !isPixelColorCapable()) return undefined
+  return graphics.cell
+}
 
 /** Columns the image needs for its 48:40 shape at HERO_IMAGE_ROWS rows. */
 export function heroImageColumns(cell: CellSize): number {
