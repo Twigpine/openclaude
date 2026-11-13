@@ -1613,6 +1613,32 @@ function removeTerminalFactClaimSync(target: string): void {
   } catch {}
 }
 
+// Whether the claim file still names this installer's temp file: the
+// claim is withdrawn when the file is gone or names another tmp. A
+// publisher checks this immediately before committing, so a delayed
+// owner whose claim was withdrawn cannot rename over a fact another
+// installer published in the meantime (maintainer review 5896325929
+// on #2497).
+async function ownsTerminalFactClaim(
+  target: string,
+  tmp: string,
+): Promise<boolean> {
+  const claimed = await readFile(terminalFactClaimFile(target), 'utf8').catch(
+    () => undefined,
+  )
+  return claimed?.trim() === tmp
+}
+
+function ownsTerminalFactClaimSync(target: string, tmp: string): boolean {
+  let claimed: string | undefined
+  try {
+    claimed = readFileSync(terminalFactClaimFile(target), 'utf8')
+  } catch {
+    return false
+  }
+  return claimed?.trim() === tmp
+}
+
 // Removes a publish claim only when this installer created it: the
 // claim file names the winner's tmp, so a claim naming another tmp
 // belongs to a newer publisher and must be left alone. A claim file
@@ -1622,10 +1648,7 @@ async function removeOwnTerminalFactClaim(
   target: string,
   tmp: string,
 ): Promise<void> {
-  const claimed = await readFile(terminalFactClaimFile(target), 'utf8').catch(
-    () => undefined,
-  )
-  if (claimed?.trim() !== tmp) return
+  if (!(await ownsTerminalFactClaim(target, tmp))) return
   await removeTerminalFactClaim(target)
 }
 
@@ -1633,13 +1656,7 @@ function removeOwnTerminalFactClaimSync(
   target: string,
   tmp: string,
 ): void {
-  let claimed: string | undefined
-  try {
-    claimed = readFileSync(terminalFactClaimFile(target), 'utf8')
-  } catch {
-    return
-  }
-  if (claimed?.trim() !== tmp) return
+  if (!ownsTerminalFactClaimSync(target, tmp)) return
   removeTerminalFactClaimSync(target)
 }
 
@@ -1722,8 +1739,14 @@ async function readTerminalFactClaim(
   const claimFile = terminalFactClaimFile(target)
   const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
   for (;;) {
+    let claimed: string | undefined
     try {
-      const claimed = (await readFile(claimFile, 'utf8')).trim()
+      claimed = (await readFile(claimFile, 'utf8')).trim()
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) return undefined
+      claimed = undefined
+    }
+    if (claimed !== undefined) {
       const terminalDir = getBackgroundSessionTerminalDir()
       // The claim must name a temp file in this terminal directory;
       // anything else is a corrupt claim, never a path to rename.
@@ -1734,12 +1757,16 @@ async function readTerminalFactClaim(
       ) {
         return claimed
       }
-      return undefined
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) return undefined
-      if (Date.now() >= deadline) return undefined
-      await new Promise(resolve => setTimeout(resolve, 10))
+      // A non-empty claim that names an invalid path is corrupt: no
+      // publisher will fix it, so stop polling. An empty claim means
+      // the winner opened the claim file but has not finished writing
+      // its pointer yet — keep polling until the deadline, so a live
+      // publisher is not treated as dead while its write is in flight
+      // (maintainer review 5896325929 on #2497).
+      if (claimed) return undefined
     }
+    if (Date.now() >= deadline) return undefined
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
 
@@ -1753,8 +1780,14 @@ function readTerminalFactClaimSync(target: string): string | undefined {
   const claimFile = terminalFactClaimFile(target)
   const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
   for (;;) {
+    let claimed: string | undefined
     try {
-      const claimed = readFileSync(claimFile, 'utf8').trim()
+      claimed = readFileSync(claimFile, 'utf8').trim()
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) return undefined
+      claimed = undefined
+    }
+    if (claimed !== undefined) {
       const terminalDir = getBackgroundSessionTerminalDir()
       if (
         claimed &&
@@ -1763,12 +1796,13 @@ function readTerminalFactClaimSync(target: string): string | undefined {
       ) {
         return claimed
       }
-      return undefined
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) return undefined
-      if (Date.now() >= deadline) return undefined
-      sleepSync(10)
+      // Same empty-claim rule as readTerminalFactClaim: a non-empty
+      // invalid claim is corrupt, but an empty claim is a pointer
+      // write still in flight, so keep polling until the deadline.
+      if (claimed) return undefined
     }
+    if (Date.now() >= deadline) return undefined
+    sleepSync(10)
   }
 }
 
@@ -1783,9 +1817,14 @@ function readTerminalFactClaimSync(target: string): string | undefined {
  * including the synchronous ELOCKED exit fallback, which publishes
  * without the per-ID lock — completes the winner's publish instead of
  * racing it. A loser whose winner died after claiming removes the stale
- * claim and retries. This preserves the old link() EEXIST duplicate
- * semantics without link(), which fails on filesystems that reject hard
- * links (maintainer review 5830922741 on #2497).
+ * claim and retries. A claim whose pointer write is still in flight
+ * reads as empty, so an adopter polls for it instead of removing it;
+ * and a publisher rechecks the target and its claim immediately before
+ * renaming, so a delayed owner whose claim was withdrawn never replaces
+ * a fact another installer published (maintainer review 5896325929 on
+ * #2497). This preserves the old link() EEXIST duplicate semantics
+ * without link(), which fails on filesystems that reject hard links
+ * (maintainer review 5830922741 on #2497).
  */
 async function publishTerminalFact(
   fact: BackgroundSessionTerminalFact,
@@ -1848,6 +1887,29 @@ async function publishTerminalFact(
       throw error
     }
     await terminalFactPublishHookForTesting?.()
+    // Commit only while this installer still owns the claim and the
+    // target is still unpublished: the claim may have been withdrawn
+    // while this installer was stalled — e.g. between opening the
+    // claim file and finishing its pointer write — and a successor may
+    // have adopted the publish or published its own fact in the
+    // meantime. Renaming over that fact would replace the
+    // first-published fact, so return it instead (or retry the publish
+    // if nothing was published yet).
+    let targetPublished = false
+    try {
+      await lstat(target)
+      targetPublished = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetPublished) {
+      const existing = await readTerminalFact(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    if (!(await ownsTerminalFactClaim(target, tmp))) continue
     try {
       await rename(tmp, target)
     } catch (error) {
@@ -1959,6 +2021,24 @@ function publishTerminalFactSync(
       if (isErrno(error, 'ENOENT')) continue
       throw error
     }
+    // Same pre-commit ownership check as publishTerminalFact: only
+    // commit while this installer still owns the claim and the target
+    // is still unpublished.
+    let targetPublished = false
+    try {
+      lstatSync(target)
+      targetPublished = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetPublished) {
+      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    if (!ownsTerminalFactClaimSync(target, tmp)) continue
     try {
       renameSync(tmp, target)
     } catch (error) {
