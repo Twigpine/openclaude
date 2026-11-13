@@ -21,11 +21,27 @@ function binEnv(configDir: string): NodeJS.ProcessEnv {
   return env
 }
 
-function runBin(args: string[], configDir: string, timeout = 15_000) {
+function runBin(
+  args: string[],
+  configDir: string,
+  timeout = 15_000,
+  extraEnv: NodeJS.ProcessEnv = {},
+) {
   return captureSync(process.execPath, [BIN_PATH, ...args], {
     timeout,
-    env: binEnv(configDir),
+    env: { ...binEnv(configDir), ...extraEnv },
   })
+}
+
+function runWaitJson(
+  args: string[],
+  configDir: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+) {
+  const result = runBin(args, configDir, 15_000, extraEnv)
+  expect(result.error).toBeUndefined()
+  expect(result.stderr).toBe('')
+  return { result, parsed: JSON.parse(result.stdout) }
 }
 
 describe('openclaude wait command (bin)', () => {
@@ -55,10 +71,11 @@ describe('openclaude wait command (bin)', () => {
 
   async function createSession(
     id: string,
-    options: { pid?: number; command?: string[] } = {},
+    options: { pid?: number; command?: string[]; name?: string } = {},
   ) {
     return await createBackgroundSession({
       id,
+      ...(options.name !== undefined ? { name: options.name } : {}),
       pid: options.pid ?? 424242,
       cwd: configDir,
       command: options.command ?? ['sleep', '30'],
@@ -130,6 +147,102 @@ describe('openclaude wait command (bin)', () => {
       id: 'bg-bin-1',
       status: 'exited',
       exitCode: 0,
+      waitResult: 'terminal',
+    })
+  })
+
+  // A session name that looks like a launcher heap flag is only a
+  // selector when placed after `--`; the launcher must not strip it.
+  // Each heap-flag family is covered in every launcher environment
+  // branch (wait bypass, relaunch disabled, already relaunched).
+  const DELIMITER_SELECTOR_CASES = [
+    { id: 'bg-delim-mem', name: '--max-memory=512' },
+    { id: 'bg-delim-pct', name: '--max-old-space-size-percentage=50' },
+  ] as const
+  const LAUNCHER_ENV_VARIANTS = [
+    { label: 'wait bypass', env: {} },
+    {
+      label: 'heap relaunch disabled',
+      env: { OPENCLAUDE_DISABLE_HEAP_RELAUNCH: '1' },
+    },
+    {
+      label: 'already relaunched',
+      env: { OPENCLAUDE_HEAP_RELAUNCHED: '1' },
+    },
+  ] as const
+
+  for (const selectorCase of DELIMITER_SELECTOR_CASES) {
+    for (const variant of LAUNCHER_ENV_VARIANTS) {
+      test(`preserves dash-leading selector ${selectorCase.name} after -- (${variant.label})`, async () => {
+        expect(existsSync(DIST_PATH)).toBe(true)
+        await createSession(selectorCase.id, { name: selectorCase.name })
+        await recordBackgroundSessionNaturalTermination(
+          selectorCase.id,
+          { exitCode: 0 },
+          { ownerPid: 424242 },
+        )
+
+        const { result, parsed } = runWaitJson(
+          ['wait', '--json', '--', selectorCase.name],
+          configDir,
+          variant.env,
+        )
+
+        expect(result.status).toBe(0)
+        expect(parsed).toMatchObject({
+          version: 1,
+          id: selectorCase.id,
+          status: 'exited',
+          exitCode: 0,
+          waitResult: 'terminal',
+        })
+      })
+    }
+  }
+
+  test('still consumes a real launcher heap option before the delimiter', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    await createSession('bg-delim-mem', { name: '--max-memory=512' })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-delim-mem',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+
+    const { result, parsed } = runWaitJson(
+      ['wait', '--max-memory=1024', '--json', '--', '--max-memory=512'],
+      configDir,
+    )
+
+    expect(result.status).toBe(0)
+    expect(parsed).toMatchObject({
+      id: 'bg-delim-mem',
+      status: 'exited',
+      exitCode: 0,
+      waitResult: 'terminal',
+    })
+  })
+
+  test('still resolves an ordinary terminal session by name and by id', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    await createSession('bg-delim-plain', { name: 'plain-name' })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-delim-plain',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+
+    const byName = runWaitJson(['wait', '--json', 'plain-name'], configDir)
+    expect(byName.result.status).toBe(0)
+    expect(byName.parsed).toMatchObject({
+      id: 'bg-delim-plain',
+      waitResult: 'terminal',
+    })
+
+    const byId = runWaitJson(['wait', '--json', 'bg-delim-plain'], configDir)
+    expect(byId.result.status).toBe(0)
+    expect(byId.parsed).toMatchObject({
+      id: 'bg-delim-plain',
       waitResult: 'terminal',
     })
   })
