@@ -14,7 +14,7 @@ import {
   mock,
 } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { copyFile, mkdtemp, rm, symlink } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readdir, rename, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -25,6 +25,11 @@ import {
   BACKGROUND_SESSION_ID_ENV,
   BACKGROUND_SESSION_LAUNCHER_PID_ENV,
 } from '../cli/bgRouting.js'
+import {
+  _setBackgroundSessionsRootForTesting,
+  createBackgroundSession,
+  recordBackgroundSessionNaturalTermination,
+} from '../cli/bgRegistry.js'
 import type { ProviderOverride } from '../services/api/agentRouting.js'
 import {
   applyLoadedEnvFileValues,
@@ -1189,6 +1194,12 @@ describe('built Node CLI startup regressions', () => {
     for (const file of ['package.json', 'tsconfig.json']) {
       await copyFile(join(repoRoot, file), join(buildDir, file))
     }
+    // Stage the real launcher next to the private build so `bin/openclaude`
+    // resolves dist/cli.mjs from this buildDir, not the repo's dist bundle.
+    await mkdir(join(buildDir, 'bin'), { recursive: true })
+    for (const entry of await readdir(join(repoRoot, 'bin'))) {
+      await copyFile(join(repoRoot, 'bin', entry), join(buildDir, 'bin', entry))
+    }
     const build = Bun.spawn([process.execPath, 'run', 'scripts/build.ts'], {
       cwd: buildDir,
       stdin: 'ignore',
@@ -1375,6 +1386,243 @@ describe('built Node CLI startup regressions', () => {
     const src = await Bun.file(`${import.meta.dir}/cli.tsx`).text()
     expect(src).toMatch(/await main\(\)/)
     expect(src).not.toMatch(/^\s*void main\(\)/m)
+  })
+
+  describe('built CLI wait interruption with stalled registry reads (#2497)', () => {
+    // A FIFO at a metadata or terminal-fact path stalls that read
+    // indefinitely: `open` on a FIFO blocks until a writer appears. The
+    // waiter must still terminate on SIGINT/SIGTERM instead of staying
+    // alive behind the pending read. These tests spawn the real launcher
+    // and assert the child process itself exits — the in-process wait
+    // tests inject unresolved promises, which have no filesystem request
+    // retaining the event loop and cannot prove the executable stops.
+    // mkfifo is Unix-only.
+    if (process.platform === 'win32') return
+
+    const WAIT_SESSION_ID = 'bg-wait-fifo1'
+
+    type WaitFixture = {
+      root: string
+      configDir: string
+      registryRoot: string
+      sleeper: ReturnType<typeof Bun.spawn>
+    }
+
+    async function setupWaitFixture(): Promise<WaitFixture> {
+      const root = await mkdtemp(join(tmpdir(), 'openclaude-wait-fifo-'))
+      const configDir = join(root, 'config')
+      const registryRoot = join(configDir, 'bg-sessions')
+      await mkdir(join(registryRoot, 'terminal'), { recursive: true })
+      _setBackgroundSessionsRootForTesting(registryRoot)
+      const sleeper = Bun.spawn(['sleep', '300'], {
+        stdin: 'ignore',
+        stdout: 'ignore',
+        stderr: 'ignore',
+      })
+      await createBackgroundSession({
+        id: WAIT_SESSION_ID,
+        pid: sleeper.pid,
+        cwd: root,
+        command: ['sleep', '300'],
+        sessionId: `sess-${WAIT_SESSION_ID}`,
+      })
+      return { root, configDir, registryRoot, sleeper }
+    }
+
+    async function teardownWaitFixture(fixture: WaitFixture): Promise<void> {
+      _setBackgroundSessionsRootForTesting(undefined)
+      fixture.sleeper.kill('SIGKILL')
+      await fixture.sleeper.exited
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+
+    // Atomic FIFO placement: build the FIFO beside the target, then rename
+    // over it, so no poll can observe the path as missing mid-swap.
+    async function replaceWithFifo(path: string): Promise<void> {
+      const tmp = `${path}.fifo-tmp`
+      const made = Bun.spawnSync(['mkfifo', tmp])
+      if (made.exitCode !== 0) {
+        throw new Error(
+          `mkfifo ${tmp} failed: ${made.stderr.toString()}`,
+        )
+      }
+      await rename(tmp, path)
+    }
+
+    function spawnWaiter(fixture: WaitFixture) {
+      return Bun.spawn(
+        [
+          'node',
+          join(buildDir, 'bin', 'openclaude'),
+          'wait',
+          WAIT_SESSION_ID,
+          '--json',
+        ],
+        {
+          env: {
+            PATH: process.env.PATH ?? '',
+            HOME: fixture.root,
+            TMPDIR: fixture.root,
+            TMP: fixture.root,
+            TEMP: fixture.root,
+            OPENCLAUDE_CONFIG_DIR: fixture.configDir,
+            OPENCLAUDE_DISABLE_TELEMETRY: '1',
+            // Share one compile cache across the wait children so only the
+            // first pays the cold-cache startup cost.
+            NODE_COMPILE_CACHE: join(buildDir, 'node-compile-cache'),
+          },
+          stdin: 'ignore',
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      )
+    }
+
+    type WaiterProc = ReturnType<typeof spawnWaiter>
+
+    async function readChildOutput(proc: WaiterProc) {
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      return { stdout, stderr }
+    }
+
+    // Asserts the child process itself exits with the expected code within
+    // the timeout — not just that waitHandler returns or sets exitCode.
+    // Bun reports a signal death as 128 + the signal number, so a waiter
+    // killed by SIGINT/SIGTERM resolves 130/143, the same values as
+    // process.exit(130/143).
+    async function expectWaiterExit(
+      proc: WaiterProc,
+      expectedCode: number,
+      timeoutMs = 15_000,
+    ): Promise<{ stdout: string; stderr: string }> {
+      const outcome = await Promise.race([
+        proc.exited.then(code => ({ code, timedOut: false as const })),
+        new Promise<{ code: null; timedOut: true }>(resolve =>
+          setTimeout(() => resolve({ code: null, timedOut: true }), timeoutMs),
+        ),
+      ])
+      if (outcome.timedOut) {
+        proc.kill('SIGKILL')
+        await proc.exited
+        const output = await readChildOutput(proc)
+        throw new Error(
+          `waiter did not exit within ${timeoutMs}ms ` +
+            `(stdout: ${JSON.stringify(output.stdout)}, ` +
+            `stderr: ${JSON.stringify(output.stderr)})`,
+        )
+      }
+      expect(outcome.code).toBe(expectedCode)
+      return await readChildOutput(proc)
+    }
+
+    function expectSingleInterruptedJson(
+      output: { stdout: string; stderr: string },
+      waitSignal: 'SIGINT' | 'SIGTERM',
+      id: string | null,
+    ): void {
+      // One output only: a single JSON line on stdout, nothing on stderr.
+      // The JSON also proves the signal reached the waiter after its own
+      // listeners were installed — a signal landing before startup would
+      // kill the process with no output at all.
+      expect(output.stderr).toBe('')
+      const lines = output.stdout.trim().split('\n')
+      expect(lines).toHaveLength(1)
+      const result = JSON.parse(lines[0]!) as Record<string, unknown>
+      expect(result.waitResult).toBe('interrupted')
+      expect(result.waitSignal).toBe(waitSignal)
+      expect(result.error).toBe('interrupted')
+      expect(result.id).toBe(id)
+    }
+
+    const sleep = (ms: number) =>
+      new Promise<void>(resolve => setTimeout(resolve, ms))
+
+    it('terminates with 130 when SIGINT arrives while the metadata read is stalled', async () => {
+      const fixture = await setupWaitFixture()
+      try {
+        await replaceWithFifo(
+          join(fixture.registryRoot, 'sessions', `${WAIT_SESSION_ID}.json`),
+        )
+        const proc = spawnWaiter(fixture)
+        // Child startup to the stalled selector-resolution read takes a
+        // few seconds (cold compile cache on the first child); the read
+        // then never settles, so the signal lands during it.
+        await sleep(10_000)
+        proc.kill('SIGINT')
+        const output = await expectWaiterExit(proc, 130)
+        expectSingleInterruptedJson(output, 'SIGINT', null)
+      } finally {
+        await teardownWaitFixture(fixture)
+      }
+    }, 90_000)
+
+    it('terminates with 143 when SIGTERM arrives while a terminal-fact read is stalled', async () => {
+      const fixture = await setupWaitFixture()
+      try {
+        await replaceWithFifo(
+          join(
+            fixture.registryRoot,
+            'terminal',
+            `${WAIT_SESSION_ID}.natural.json`,
+          ),
+        )
+        const proc = spawnWaiter(fixture)
+        await sleep(10_000)
+        proc.kill('SIGTERM')
+        const output = await expectWaiterExit(proc, 143)
+        expectSingleInterruptedJson(output, 'SIGTERM', null)
+      } finally {
+        await teardownWaitFixture(fixture)
+      }
+    }, 90_000)
+
+    it('terminates with 130 when SIGINT arrives while a pinned metadata read is stalled', async () => {
+      const fixture = await setupWaitFixture()
+      try {
+        const proc = spawnWaiter(fixture)
+        // Let the waiter start, pin, and finish its first polls before
+        // stalling the next one: polls run every 500 ms, so a signal 2 s
+        // after the swap lands during a stalled pinned read. The
+        // interrupted JSON names the pinned id, proving the stall happened
+        // after pinning rather than during selector resolution.
+        await sleep(12_000)
+        await replaceWithFifo(
+          join(fixture.registryRoot, 'sessions', `${WAIT_SESSION_ID}.json`),
+        )
+        await sleep(2_000)
+        proc.kill('SIGINT')
+        const output = await expectWaiterExit(proc, 130)
+        expectSingleInterruptedJson(output, 'SIGINT', WAIT_SESSION_ID)
+      } finally {
+        await teardownWaitFixture(fixture)
+      }
+    }, 90_000)
+
+    it('exits 0 for a terminal session with regular files', async () => {
+      const fixture = await setupWaitFixture()
+      try {
+        await recordBackgroundSessionNaturalTermination(
+          WAIT_SESSION_ID,
+          { exitCode: 0 },
+          { ownerPid: fixture.sleeper.pid },
+        )
+        const proc = spawnWaiter(fixture)
+        const output = await expectWaiterExit(proc, 0, 25_000)
+        expect(output.stderr).toBe('')
+        const lines = output.stdout.trim().split('\n')
+        expect(lines).toHaveLength(1)
+        const result = JSON.parse(lines[0]!) as Record<string, unknown>
+        expect(result.waitResult).toBe('terminal')
+        expect(result.status).toBe('exited')
+        expect(result.exitCode).toBe(0)
+        expect(result.id).toBe(WAIT_SESSION_ID)
+      } finally {
+        await teardownWaitFixture(fixture)
+      }
+    }, 90_000)
   })
 })
 

@@ -376,7 +376,28 @@ export async function main(
     } = await importers.startupProfiler();
     profileCheckpoint('cli_bg_path');
     const bg = await importers.bg();
-    await bg.waitHandler(args.slice(1), { featureEnabled: bgSessionsEnabled });
+    const waitExitCode = await bg.waitHandler(args.slice(1), { featureEnabled: bgSessionsEnabled });
+    // An interrupted waiter can return while a registry read is still
+    // pending on a stalled file (e.g. a FIFO at a metadata or terminal-fact
+    // path): the pending read keeps the event loop alive, and process.exit()
+    // is deferred until the read settles, so the waiter would never
+    // terminate. Re-raise the interrupting signal with its default
+    // disposition instead, so the process actually dies with 130/143.
+    // waitHandler already removed its own listeners, so drop any others
+    // before re-raising; the process is exiting either way. Only the
+    // interrupted outcome (130/143, which only arise from a genuine
+    // SIGINT/SIGTERM to this waiter) takes this path — every other outcome
+    // returns normally and exits on its own.
+    if (waitExitCode === 130 || waitExitCode === 143) {
+      const signal = waitExitCode === 143 ? 'SIGTERM' : 'SIGINT'
+      process.removeAllListeners(signal)
+      process.kill(process.pid, signal)
+      // Fall back to exiting with the signal's code if the signal is
+      // somehow swallowed (e.g. blocked): the exit is deferred while a
+      // read is pending, but it still records the right code.
+      // eslint-disable-next-line custom-rules/no-process-exit
+      process.exit(waitExitCode)
+    }
     return;
   }
 
