@@ -1,5 +1,5 @@
 import figures from 'figures'
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useSyncExternalStore } from 'react'
 import { useSettings } from '../hooks/useSettings.js'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 // Raw ink Text (not the themed wrapper): pixel art needs arbitrary rgb()
@@ -8,6 +8,8 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import RawText from '../ink/components/Text.js'
 import { stringWidth } from '../ink/stringWidth.js'
 import { Box, Text, useAnimationFrame } from '../ink.js'
+import { useImageOverlay } from '../ink/hooks/use-image-overlay.js'
+import { getTerminalGraphics, subscribeTerminalGraphics } from '../ink/terminal.js'
 import { useAppState, useSetAppState } from '../state/AppState.js'
 import type { AppState } from '../state/AppStateStore.js'
 import { getGlobalConfig } from '../utils/config.js'
@@ -36,7 +38,16 @@ import {
   shootFrameCount,
   spriteFrameCount,
 } from './sprites.js'
-import { companionColor } from './types.js'
+import {
+  type CellSize,
+  CLEAR_COMPANION_IMAGE,
+  COMPANION_IMAGE_ID,
+  heroImageCell,
+  heroImageColumns,
+  heroImageFrame,
+} from './heroImageFrames.js'
+import type { HeroMood } from './heroMoods.js'
+import { companionColor, type Form } from './types.js'
 import { useShotClock } from './useShotClock.js'
 
 /** Sprite pose index during the effect's draw phase; clamps to the release
@@ -176,7 +187,39 @@ function pixelModeActive(): boolean {
 // reservation math and the renderer so they cannot drift.
 function companionColumnWidth(companion: { name: string }): number {
   const base = spriteColWidth(stringWidth(companion.name))
+  const imageCell = imageModeCell()
+  if (imageCell) return Math.max(base, heroImageColumns(imageCell))
   return pixelModeActive() ? Math.max(base, HERO_SPRITE_COLS) : base
+}
+
+// Image mode: the terminal answered the kitty graphics probe and reported
+// its cell size, and the user has not turned images off. Returns the cell
+// size to draw at, or undefined for half-block pixels.
+function imageModeCell(): CellSize | undefined {
+  if (getGlobalConfig().companionImages === false) return undefined
+  return heroImageCell()
+}
+
+// The hero drawn as a real terminal image over an empty box of the same
+// size. The renderer places it after each frame (useImageOverlay).
+function HeroImage({
+  form,
+  mood,
+  t,
+  cell,
+}: {
+  form: Form
+  mood: HeroMood
+  t: number
+  cell: CellSize
+}): React.ReactNode {
+  const frame = heroImageFrame(form, mood, t, cell)
+  const ref = useImageOverlay(COMPANION_IMAGE_ID, {
+    key: frame.key,
+    draw: () => frame.draw,
+    clear: CLEAR_COMPANION_IMAGE,
+  })
+  return <Box ref={ref} width={frame.columns} height={frame.rows} flexShrink={0} />
 }
 
 export function companionReservedColumns(
@@ -226,6 +269,8 @@ export const CompanionSprite = React.memo(function CompanionSprite({
   moodClock: sessionMoodClock,
 }: CompanionSpriteProps): React.ReactNode {
   const reaction = useAppState(s => s.companionReaction)
+  // Re-render when the startup probe learns the terminal can draw images.
+  useSyncExternalStore(subscribeTerminalGraphics, getTerminalGraphics)
   const petAt = useAppState(s => s.companionPetAt)
   const danceAt = useAppState(s => s.companionDanceAt)
   // Subscribed only so a /buddy config change (mute, set, name) redraws the
@@ -427,13 +472,19 @@ export const CompanionSprite = React.memo(function CompanionSprite({
   }
 
   let pixelRows: PixelRun[][] | null = null
+  let heroImage: React.ReactNode = null
   let sprite: string[] = []
   if (pixelMode) {
     const t =
       shooting && actionFx !== undefined
         ? actionPoseTime(shotElapsed, actionFx)
         : time / 1000
-    pixelRows = heroSpriteRows(companion.species, mood, t)
+    const imageCell = imageModeCell()
+    if (imageCell) {
+      heroImage = <HeroImage form={companion.species} mood={mood} t={t} cell={imageCell} />
+    } else {
+      pixelRows = heroSpriteRows(companion.species, mood, t)
+    }
   } else {
     let body: string[]
     if (shooting && actionFx !== undefined) {
@@ -466,7 +517,9 @@ export const CompanionSprite = React.memo(function CompanionSprite({
       alignItems="center"
       width={colWidth}
     >
-      {pixelRows !== null ? (
+      {heroImage !== null ? (
+        heroImage
+      ) : pixelRows !== null ? (
         <PixelRows rows={pixelRows} />
       ) : (
         sprite.map((line, i) => (

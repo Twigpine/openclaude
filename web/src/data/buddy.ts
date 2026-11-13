@@ -26,6 +26,15 @@ export const heroes: BuddyHero[] = [
     flavor: 'curls up its tail and grins',
   },
   {
+    id: 'keynote',
+    name: 'keynote',
+    accent: '#5fe3ff',
+    attack: 'chip toss',
+    attackDetail:
+      'the leather-jacket stage presenter tosses a glowing chip at your prompt and it lands in a sparkle.',
+    flavor: 'zips up the leather jacket and takes the stage',
+  },
+  {
     id: 'robinhood',
     name: 'robin',
     accent: '#489e4a',
@@ -93,10 +102,11 @@ export const heroes: BuddyHero[] = [
 export const buddyCommands = [
   { cmd: '/buddy', desc: 'hatch your companion on first run; pet them after that' },
   { cmd: '/buddy status', desc: 'who they are — name, rarity, form, personality' },
-  { cmd: '/buddy set <hero>', desc: 'choose a form: twig, robin, merlin, kage, corsair, ember, nova, inky' },
+  { cmd: '/buddy set <hero>', desc: 'choose a form: twig, keynote, robin, merlin, kage, corsair, ember, nova, inky' },
   { cmd: '/buddy set random', desc: 'back to the form you originally rolled' },
   { cmd: '/buddy name <name>', desc: 'rename your companion (up to 20 characters)' },
   { cmd: '/buddy dance', desc: 'a few seconds of dancing, just because' },
+  { cmd: '/buddy images off', desc: 'keep the pixel sprite in terminals that can draw images (on to undo)' },
   { cmd: '/buddy mute', desc: 'hide the buddy and silence all animations' },
   { cmd: '/buddy unmute', desc: 'bring them back' },
 ]

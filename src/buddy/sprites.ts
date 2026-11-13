@@ -6,6 +6,7 @@ import {
   kaio,
   merlin,
   robinhood,
+  keynote,
   strawhat,
   twig,
 } from './types.js'
@@ -19,6 +20,29 @@ import {
 // All heroes face LEFT: the sprite sits on the right edge of the screen
 // and signature effects travel toward the prompt.
 const BODIES: Record<Form, string[][]> = {
+  [keynote]: [
+    [
+      '    ,~~~.   ',
+      '   ({E}.{E})    ',
+      '  /|\\#/|\\   ',
+      '  #|   |    ',
+      '   |_|_|    ',
+    ],
+    [
+      '    ,~~~.   ',
+      '   ({E}.{E})    ',
+      '  /|\\#/|\\   ',
+      '   |   |#   ',
+      '   |_|_|    ',
+    ],
+    [
+      '    ,~~~~.  ',
+      '   ({E}.{E})    ',
+      '  /|\\#/|\\   ',
+      '  #|   |    ',
+      '   |_|_|    ',
+    ],
+  ],
   [twig]: [
     [
       '  /\\_/\\   _ ',
@@ -211,6 +235,32 @@ const BODIES: Record<Form, string[][]> = {
 // without one, low-color terminals show a projectile flying out of a
 // motionless sprite.
 const SHOOT_FRAMES: Record<Form, string[][]> = {
+  [keynote]: [
+    [
+      // chip up
+      '    ,~~~.   ',
+      '   ({E}.{E})    ',
+      ' #/|\\#/|\\   ',
+      '   |   |    ',
+      '   |_|_|    ',
+    ],
+    [
+      // toss
+      '    ,~~~.   ',
+      '   ({E}o{E})    ',
+      '#-/|\\#/|\\   ',
+      '   |   |    ',
+      '   |_|_|    ',
+    ],
+    [
+      // follow through — the chip hands off to CompanionActionFX
+      '    ,~~~.   ',
+      '   ({E}.{E})    ',
+      ' -/|\\#/|\\   ',
+      '   |   |    ',
+      '   |_|_|    ',
+    ],
+  ],
   [twig]: [
     [
       // wind up, acorn in paw
@@ -446,5 +496,7 @@ export function renderFace(bones: CompanionBones): string {
       return `(${eye}x)`
     case twig:
       return `=(${eye})~`
+    case keynote:
+      return `/(${eye})\\`
   }
 }

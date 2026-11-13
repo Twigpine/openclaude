@@ -11,6 +11,7 @@ import {
   robinhood,
   SPECIES,
   strawhat,
+  keynote,
   twig,
 } from './types.js'
 
@@ -29,6 +30,7 @@ describe('species constants', () => {
     expect(ember).toBe('ember')
     expect(corsair).toBe('corsair')
     expect(twig).toBe('twig')
+    expect(keynote).toBe('keynote')
   })
 
   test('the pool contains each hero exactly once', () => {
@@ -36,9 +38,10 @@ describe('species constants', () => {
     expect(SPECIES.length).toBe(7)
   })
 
-  test('twig is a chosen form only, so the hatch roll never changes', () => {
+  test('twig and keynote are chosen forms only, so the hatch roll never changes', () => {
     expect(SPECIES as readonly string[]).not.toContain(twig)
-    expect(FORMS).toEqual([...SPECIES, twig])
+    expect(SPECIES as readonly string[]).not.toContain(keynote)
+    expect(FORMS).toEqual([...SPECIES, twig, keynote])
   })
 
   test('forms parse from their id or display name, any case', () => {

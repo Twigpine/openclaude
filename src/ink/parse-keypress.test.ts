@@ -149,3 +149,15 @@ test('InputEvent names astral sequences that reach it without a name', () => {
   expect(event.input).toBe('😀')
   expect(event.keypress.name).toBe('😀')
 })
+
+test('cell-size and kitty graphics replies are terminal responses, not keys', () => {
+  const [items] = parseMultipleKeypresses(
+    INITIAL_STATE,
+    '\x1b[6;34;16t\x1b_Gi=7171701;OK\x1b\\\x1b_Gi=9;ENOENT:no such image\x1b\\',
+  )
+  expect(items.map(i => i.kind)).toEqual(['response', 'response', 'response'])
+  const responses = items.map(i => (i.kind === 'response' ? i.response : null))
+  expect(responses[0]).toEqual({ type: 'cellSize', height: 34, width: 16 })
+  expect(responses[1]).toEqual({ type: 'kittyGraphics', id: 7171701, message: 'OK' })
+  expect(responses[2]).toEqual({ type: 'kittyGraphics', id: 9, message: 'ENOENT:no such image' })
+})

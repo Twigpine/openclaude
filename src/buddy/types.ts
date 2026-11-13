@@ -61,8 +61,11 @@ export type Species = (typeof SPECIES)[number] // biome-ignore format: keep comp
 // pool would re-roll every existing user's species.
 export const twig = c(0x74, 0x77, 0x69, 0x67) as 'twig'
 
+// Keynote, the leather-jacket stage presenter, is also chosen-only.
+export const keynote = c(0x6b, 0x65, 0x79, 0x6e, 0x6f, 0x74, 0x65) as 'keynote'
+
 // Every form a companion can take: the hatch pool plus chosen-only forms.
-export const FORMS = [...SPECIES, twig] as const
+export const FORMS = [...SPECIES, twig, keynote] as const
 export type Form = (typeof FORMS)[number]
 
 // What users see. kaio and strawhat keep their ids (stored configs and the
@@ -77,6 +80,7 @@ export const FORM_NAMES: Record<Form, string> = {
   [ember]: 'Ember',
   [corsair]: 'Corsair',
   [twig]: 'Twig',
+  [keynote]: 'Keynote',
 }
 
 /** Resolve a form from its id or its display name, case-insensitively. */
@@ -165,6 +169,7 @@ export const SPECIES_COLORS: Record<
   [ember]: 'error',
   [corsair]: 'permission',
   [twig]: 'warning',
+  [keynote]: 'inactive',
 }
 
 export function companionColor(

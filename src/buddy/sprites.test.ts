@@ -100,6 +100,7 @@ describe('sprites', () => {
       ember: '<··>',
       corsair: '(·x)',
       twig: '=(·)~',
+      keynote: '/(·)\\',
     }
     for (const species of FORMS) {
       expect(renderFace(bones(species))).toBe(EXPECTED_FACES[species])

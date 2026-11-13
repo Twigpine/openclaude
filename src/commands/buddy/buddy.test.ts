@@ -1,9 +1,12 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
+import chalk from 'chalk'
+import { setTerminalGraphics } from '../../ink/terminal.js'
 import { type AppState, getDefaultAppState } from '../../state/AppState.js'
 import type {
   LocalJSXCommandContext,
   LocalJSXCommandOnDone,
 } from '../../types/command.js'
+import * as configModule from '../../utils/config.js'
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 import { call } from './buddy.js'
 
@@ -33,6 +36,7 @@ afterEach(() => {
     ...current,
     companion: undefined,
     companionMuted: false,
+    companionImages: undefined,
   }))
 })
 
@@ -85,4 +89,65 @@ test('dance under reduced motion says why instead of doing nothing', async () =>
   }) as LocalJSXCommandOnDone, h.context, 'dance')
   expect(said).toContain('reduced motion')
   expect(h.state().companionDanceAt).toBeUndefined()
+})
+
+test('images off and on save the choice and redraw the sprite', async () => {
+  const h = harness()
+  await call(onDone, h.context, '')
+  const before = h.version()
+  let said: string | undefined
+  const capture = ((text?: string) => {
+    said = text
+  }) as LocalJSXCommandOnDone
+  await call(capture, h.context, 'images off')
+  expect(getGlobalConfig().companionImages).toBe(false)
+  expect(h.version()).toBe(before + 1)
+  expect(said).toContain('pixel sprite')
+  await call(capture, h.context, 'images on')
+  expect(getGlobalConfig().companionImages).toBeUndefined()
+  expect(h.version()).toBe(before + 2)
+})
+
+test('images off reports a failed save instead of claiming success', async () => {
+  const h = harness()
+  await call(onDone, h.context, '')
+  // saveGlobalConfig skips the write in some error cases without throwing.
+  const skip = spyOn(configModule, 'saveGlobalConfig').mockImplementation(() => {})
+  try {
+    let said: string | undefined
+    await call(((text?: string) => {
+      said = text
+    }) as LocalJSXCommandOnDone, h.context, 'images off')
+    expect(said).toContain("Couldn't save")
+    expect(getGlobalConfig().companionImages).toBeUndefined()
+  } finally {
+    skip.mockRestore()
+  }
+})
+
+test('images on describes what the sprite will actually draw', async () => {
+  const h = harness()
+  await call(onDone, h.context, '')
+  const level = chalk.level
+  let said: string | undefined
+  const capture = ((text?: string) => {
+    said = text
+  }) as LocalJSXCommandOnDone
+  try {
+    chalk.level = 3
+    // Graphics answered but no cell size: the sprite stays half-block.
+    setTerminalGraphics({ kitty: true })
+    await call(capture, h.context, 'images on')
+    expect(said).toContain('stays a pixel sprite')
+    setTerminalGraphics({ kitty: true, cell: { width: 8, height: 16 } })
+    await call(capture, h.context, 'images on')
+    expect(said).toContain('sharp image')
+    // No colour: also the pixel sprite.
+    chalk.level = 1
+    await call(capture, h.context, 'images on')
+    expect(said).toContain('stays a pixel sprite')
+  } finally {
+    chalk.level = level
+    setTerminalGraphics({ kitty: false })
+  }
 })

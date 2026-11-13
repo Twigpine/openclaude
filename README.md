@@ -427,6 +427,11 @@ when a turn finishes, celebrates after a long task, flinches when a request
 fails, and dozes off after five quiet minutes. The line-art and one-line
 fallbacks don't show moods.
 
+In terminals that support the kitty graphics protocol (iTerm2 3.6+, kitty,
+Ghostty, WezTerm; not inside tmux or screen) the buddy is drawn as a smooth,
+anti-aliased image about 4 rows tall instead of the pixel sprite. The CLI
+asks the terminal at startup; `/buddy images off` keeps the pixel sprite.
+
 ```
 /buddy                  hatch (first run) or pet your companion
 /buddy set twig         the pine marten, OpenClaude's flagship — acorn lob
@@ -437,7 +442,9 @@ fallbacks don't show moods.
 /buddy set kage         spinning shuriken
 /buddy set ember        dragon fire with a real heat gradient
 /buddy set corsair      cannonball with smoke trail
+/buddy set keynote      leather-jacket stage presenter — tosses a glowing chip
 /buddy dance            a few seconds of dancing
+/buddy images off       always use the pixel sprite (on to undo)
 /buddy name Pip         rename your companion
 /buddy set random       back to your rolled hero
 ```

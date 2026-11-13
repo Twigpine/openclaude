@@ -1,6 +1,6 @@
 import chalk from 'chalk'
 import type { FxRun } from './actionEffects.js'
-import { createHeroRaster, HERO_PALETTE, type PaletteKey } from './heroCanvas.js'
+import { createHeroRaster, HERO_PALETTE, type HeroRaster, type PaletteKey } from './heroCanvas.js'
 import { HERO_ART } from './heroForms.js'
 import { drawMoodExtras, type HeroMood, heroPose } from './heroMoods.js'
 import type { Form } from './types.js'
@@ -21,12 +21,18 @@ export function renderHero(
   t: number,
   scale: number = HERO_SPRITE_SCALE,
 ): string[] {
+  // Keep the outline about one design pixel thick at any size.
+  return drawHero(form, mood, t, scale).finish(Math.max(1, Math.round(scale)))
+}
+
+/** Draw a hero onto a raster without finishing it (no outline yet). */
+export function drawHero(form: Form, mood: HeroMood, t: number, scale: number): HeroRaster {
   const raster = createHeroRaster(scale)
   const { pose, flip } = heroPose(mood, t)
   HERO_ART[form](raster.canvas, pose, t)
   if (flip) raster.flip()
   drawMoodExtras(raster.canvas, mood, t)
-  return raster.finish()
+  return raster
 }
 
 export type PixelRun = FxRun & { backgroundColor?: string }

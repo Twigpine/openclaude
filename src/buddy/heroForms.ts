@@ -11,6 +11,7 @@ import {
   kaio,
   merlin,
   robinhood,
+  keynote,
   strawhat,
   twig,
 } from './types.js'
@@ -55,7 +56,7 @@ type Outfit = {
   back?: (g: HeroCanvas, J: number, p: HeroPose, t: number) => void
   hat?: (g: HeroCanvas, hx: number, hy: number, t: number) => void
   chest?: (g: HeroCanvas, J: number, t: number) => void
-  front?: (g: HeroCanvas, J: number, t: number) => void
+  front?: (g: HeroCanvas, J: number, t: number, p: HeroPose) => void
 }
 
 /** Shared body for the four human-shaped heroes and Nova. */
@@ -71,16 +72,16 @@ function human(g: HeroCanvas, p: HeroPose, t: number, o: Outfit): void {
   g.cap(25, 33 + J, 25, 35 + J, 1.8, o.legs)
   g.ell(21.5, 29.5 + J + s * 2, 7 + s * 1.5, 6 - s * 1.5, o.cloth)
   o.chest?.(g, J + s * 2, t)
+  const hand = nearHand(p, t, J)
   if (p.point) {
     g.cap(14, 27 + J, 7, 26 + J, 1.7, o.sleeve)
-    g.ell(5.5, 26 + J, 1.6, 1.6, o.hand)
+    g.ell(hand.x, hand.y, 1.6, 1.6, o.hand)
   } else if (p.wave) {
-    const wy = Math.sin(t * 10) * 2
-    g.cap(14, 27 + J, 9, 21 + J + wy, 1.7, o.sleeve)
-    g.ell(8.5, 20 + J + wy, 1.6, 1.6, o.hand)
+    g.cap(14, 27 + J, 9, hand.y + 1, 1.7, o.sleeve)
+    g.ell(hand.x, hand.y, 1.6, 1.6, o.hand)
   } else {
-    g.cap(14, 27 + J, 12.5, 31 + J + p.arm, 1.7, o.sleeve)
-    g.ell(12.5, 32.5 + J + p.arm, 1.5, 1.5, o.hand)
+    g.cap(14, 27 + J, 12.5, hand.y - 1.5, 1.7, o.sleeve)
+    g.ell(hand.x, hand.y, 1.5, 1.5, o.hand)
   }
   g.cap(29, 27 + J, 30.5, 31 + J - p.arm, 1.7, o.sleeve)
   g.ell(30.5, 32.5 + J - p.arm, 1.5, 1.5, o.hand)
@@ -93,7 +94,14 @@ function human(g: HeroCanvas, p: HeroPose, t: number, o: Outfit): void {
   }
   if (!o.patch) g.eye(hx - 6 + p.ex, hy + 0.5, p.eye)
   g.eye(hx + 3 + p.ex, hy + 0.5, p.eye)
-  o.front?.(g, J, t)
+  o.front?.(g, J, t, p)
+}
+
+/** Where human() draws the near hand (the one toward the prompt). */
+export function nearHand(p: HeroPose, t: number, J: number): { x: number; y: number } {
+  if (p.point) return { x: 5.5, y: 26 + J }
+  if (p.wave) return { x: 8.5, y: 20 + J + Math.sin(t * 10) * 2 }
+  return { x: 12.5, y: 32.5 + J + p.arm }
 }
 
 /** Paw or claw on the near side: points, waves or rests. */
@@ -345,8 +353,8 @@ const drawEmber: DrawHero = (g, p, t) => {
   g.ell(hx, hy, 11, 9.5, 'd')
   g.ell(hx - 3, hy - 5, 6, 2.6, 'o')
   g.ell(hx - 4, hy + 4.8, 6.5, 3.8, 'o')
-  g.dot(hx - 7, hy + 3.5, 'F')
-  g.dot(hx - 3, hy + 3.5, 'F')
+  g.ell(hx - 6.5, hy + 3.8, 0.6, 0.5, 'F')
+  g.ell(hx - 2.5, hy + 3.8, 0.6, 0.5, 'F')
   g.mouth(hx - 5.5, hy + 6, p.mouth)
   g.eye(hx - 7 + p.ex, hy - 0.5, p.eye)
   g.eye(hx + 2.5 + p.ex, hy - 0.5, p.eye)
@@ -402,6 +410,88 @@ const drawInky: DrawHero = (g, p, t) => {
   g.eye(hx + 3 + p.ex, ey, p.eye)
 }
 
+// The stage presenter: salt-and-pepper hair, a shiny black leather jacket
+// over a dark tee, and a glowing chip in hand.
+const drawKeynote: DrawHero = (g, p, t) =>
+  human(g, p, t, {
+    skin: 'S',
+    cloth: 'L',
+    sleeve: 'L',
+    hand: 'S',
+    legs: 'n',
+    boots: 'L',
+    hat(g, hx, hy) {
+      // Short salt-and-pepper hair, swept back, hairline above the brows.
+      g.ell(hx + 1, hy - 6.6, 10.4, 4.4, 'h')
+      g.ell(hx + 5.5, hy - 5.8, 6.4, 4.4, 'h')
+      g.ell(hx + 9.4, hy - 2, 1.5, 3, 'a')
+      g.cap(hx - 7.5, hy - 4.6, hx - 1, hy - 7.2, 0.9, 'h')
+      // Tufts along the hairline so it reads as hair, not a cap.
+      g.ell(hx - 8.2, hy - 3.6, 1.9, 1.6, 'h')
+      g.ell(hx - 5.2, hy - 4.3, 2.1, 1.7, 'h')
+      g.ell(hx - 2, hy - 4.7, 1.9, 1.5, 'h')
+      g.cap(hx - 2, hy - 9, hx + 7, hy - 8.6, 0.4, 'w')
+      g.cap(hx + 2, hy - 6.4, hx + 9, hy - 5.4, 0.35, 'a')
+    },
+    chest(g, J, t) {
+      // Collar, dark tee in the open jacket, lapels, a drifting sheen.
+      g.poly(
+        [
+          [16.5, 23.5 + J],
+          [19.5, 24.5 + J],
+          [18.5, 27 + J],
+        ],
+        'L',
+      )
+      g.poly(
+        [
+          [26.5, 23.5 + J],
+          [23.5, 24.5 + J],
+          [24.5, 27 + J],
+        ],
+        'L',
+      )
+      g.poly(
+        [
+          [18.5, 24.5 + J],
+          [24.5, 24.5 + J],
+          [22.6, 33 + J],
+          [20.4, 33 + J],
+        ],
+        'n',
+      )
+      g.cap(18.4, 24.8 + J, 20.2, 31.5 + J, 0.5, 'l')
+      g.cap(24.6, 24.8 + J, 22.8, 31.5 + J, 0.5, 'l')
+      const glint = Math.sin(t * 1.3) * 1.2
+      g.cap(15.6, 26.5 + J + glint, 16.6, 30.5 + J + glint, 0.45, 'l')
+      g.cap(27.4, 26.5 + J - glint, 26.6, 30 + J - glint, 0.4, 'l')
+    },
+    front(g, J, t, p) {
+      // The chip in the near hand, with pins and a soft pulsing glow. Gone
+      // from the hand while it is thrown (the Enter effect carries it).
+      if (p.point) return
+      const pulse = 0.35 + 0.25 * Math.abs(Math.sin(t * 3))
+      // Follow the near hand, which human() raises while waving.
+      const hand = nearHand(p, t, J)
+      const cx = hand.x - 0.7
+      const cy = hand.y + 1.9
+      g.ell(cx, cy, 2.5 + pulse, 2.1 + pulse, 'c')
+      for (const dx of [-1.1, 0, 1.1]) {
+        g.cap(cx + dx, cy - 1.9, cx + dx, cy + 1.9, 0.22, 'X')
+      }
+      g.poly(
+        [
+          [cx - 1.7, cy - 1.3],
+          [cx + 1.7, cy - 1.3],
+          [cx + 1.7, cy + 1.3],
+          [cx - 1.7, cy + 1.3],
+        ],
+        'n',
+      )
+      g.ell(cx, cy, 0.8, 0.55, 'c')
+    },
+  })
+
 // A full Record so adding a form without art is a compile error.
 export const HERO_ART: Record<Form, DrawHero> = {
   [twig]: drawTwig,
@@ -412,4 +502,5 @@ export const HERO_ART: Record<Form, DrawHero> = {
   [ember]: drawEmber,
   [kaio]: drawNova,
   [strawhat]: drawInky,
+  [keynote]: drawKeynote,
 }
