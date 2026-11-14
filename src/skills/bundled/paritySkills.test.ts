@@ -67,6 +67,7 @@ test(
       // The user-level destination must resolve the active config home,
       // not assume ~/.openclaude, and shared project settings stay banned.
       expect(autoModePrompt).toContain('active config home')
+      expect(autoModePrompt).toContain('cowork_settings.json')
       expect(autoModePrompt).toContain(
         'Never write it to `.openclaude/settings.json`',
       )
