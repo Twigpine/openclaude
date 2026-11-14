@@ -108,6 +108,8 @@ export const en = {
     'Scan recent sessions for frequently prompted read-only commands and propose a project allowlist.',
   'skills.dataviz.description':
     'Chart and dashboard design guidance, with a palette contrast validator.',
+  'skills.autoModeSetup.description':
+    'Inspect this project and recent sessions, then write autoMode classifier configuration.',
   'skills.simplify.description':
     'Review changed code for reuse, quality, and efficiency, then fix any issues found.',
   'skills.update-config.description':
