@@ -381,5 +381,16 @@ describe('convertToSandboxRuntimeConfig', () => {
 
     const config = convertToSandboxRuntimeConfig({} as SettingsJson)
     expect(config.filesystem.allowWrite).toContain(repository)
+
+    // /cd into a child directory of the worktree must keep the allowance:
+    // .git only exists at the worktree root, so detection has to ascend
+    // rather than clearing the cached main-repo path.
+    const childDir = join(linkedWorktree, 'src')
+    await mkdir(childDir, { recursive: true })
+    setCwdState(childDir)
+    await SandboxManager.refreshWorktreeMainRepoPath(childDir)
+
+    const childConfig = convertToSandboxRuntimeConfig({} as SettingsJson)
+    expect(childConfig.filesystem.allowWrite).toContain(repository)
   })
 })
