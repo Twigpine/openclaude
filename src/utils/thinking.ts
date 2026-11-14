@@ -33,10 +33,16 @@ export function isUltrathinkEnabled(): boolean {
   if (!feature('ULTRATHINK')) {
     return false
   }
-  if (isUltrathinkDisabledByEnv()) {
-    return false
-  }
   return getFeatureValue_CACHED_MAY_BE_STALE('tengu_turtle_carbon', true)
+}
+
+/**
+ * Whether the "ultrathink" keyword escalates effort this turn. The env
+ * opt-out lives here rather than in isUltrathinkEnabled, which also feeds
+ * the default-effort resolver in effort.ts.
+ */
+export function isUltrathinkKeywordArmed(): boolean {
+  return isUltrathinkEnabled() && !isUltrathinkDisabledByEnv()
 }
 
 /**

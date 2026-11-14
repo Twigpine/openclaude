@@ -1,7 +1,8 @@
 import chalk from 'chalk'
-import { resolve } from 'path'
+import { relative, resolve } from 'path'
 import {
   getAdditionalDirectoriesForClaudeMd,
+  getOriginalCwd,
   setAdditionalDirectoriesForClaudeMd,
   setOriginalCwd,
 } from '../../bootstrap/state.js'
@@ -40,26 +41,41 @@ export const call: LocalCommandCall = async (args, context) => {
       }
   }
 
-  if (result.resultType === 'success') {
+  // Keep the previous root authorized when the move leaves it; a move inside
+  // it stays covered by that root.
+  const previousRoot = getOriginalCwd()
+  const directoriesToAdd =
+    result.resultType === 'success' ? [absolutePath] : []
+  if (
+    previousRoot !== absolutePath &&
+    relative(absolutePath, previousRoot).startsWith('..')
+  ) {
+    directoriesToAdd.push(previousRoot)
+  }
+
+  if (directoriesToAdd.length > 0) {
     const updatedContext = applyPermissionUpdate(permissionContext, {
       type: 'addDirectories',
-      directories: [absolutePath],
+      directories: directoriesToAdd,
       destination: 'session',
     })
     context.setAppState(prev => ({
       ...prev,
       toolPermissionContext: updatedContext,
     }))
+  }
+
+  if (result.resultType === 'success') {
     const currentDirs = getAdditionalDirectoriesForClaudeMd()
     if (!currentDirs.includes(absolutePath)) {
       setAdditionalDirectoriesForClaudeMd([...currentDirs, absolutePath])
     }
-    SandboxManager.refreshConfig()
   }
 
   process.chdir(absolutePath)
   setCwd(absolutePath)
   setOriginalCwd(getCwd())
+  SandboxManager.refreshConfig()
   clearSystemPromptSections()
   clearMemoryFileCaches()
   getPlansDirectory.cache.clear?.()
