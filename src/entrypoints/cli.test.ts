@@ -1388,14 +1388,19 @@ describe('built Node CLI startup regressions', () => {
     expect(src).not.toMatch(/^\s*void main\(\)/m)
   })
 
-  describe('built CLI wait interruption with stalled registry reads (#2497)', () => {
-    // A FIFO at a metadata or terminal-fact path stalls that read
-    // indefinitely: `open` on a FIFO blocks until a writer appears. The
-    // waiter must still terminate on SIGINT/SIGTERM instead of staying
-    // alive behind the pending read. These tests spawn the real launcher
-    // and assert the child process itself exits — the in-process wait
-    // tests inject unresolved promises, which have no filesystem request
-    // retaining the event loop and cannot prove the executable stops.
+  describe('built CLI wait with FIFO registry paths (#2497)', () => {
+    // A FIFO at a metadata or terminal-fact path must not stall the read:
+    // `open` on a FIFO blocks until a writer appears. The wait-path
+    // readers open registry files with O_NONBLOCK and refuse non-regular
+    // files, so the FIFO reports as unreadable metadata (exit 4) instead
+    // of leaving the waiter behind a pending read — under Node the old
+    // stall also hung the timeout exit itself, because process.exit()
+    // waits for the blocked libuv threadpool worker. These tests spawn
+    // the real launcher under Node and assert the child process itself
+    // exits promptly. The in-process wait tests inject unresolved
+    // promises for the signal-during-a-pending-read cases, which have no
+    // filesystem request retaining the event loop and cannot prove the
+    // executable stops.
     // mkfifo is Unix-only.
     if (process.platform === 'win32') return
 
@@ -1518,48 +1523,38 @@ describe('built Node CLI startup regressions', () => {
       return await readChildOutput(proc)
     }
 
-    function expectSingleInterruptedJson(
+    function expectObservationErrorJson(
       output: { stdout: string; stderr: string },
-      waitSignal: 'SIGINT' | 'SIGTERM',
       id: string | null,
     ): void {
       // One output only: a single JSON line on stdout, nothing on stderr.
-      // The JSON also proves the signal reached the waiter after its own
-      // listeners were installed — a signal landing before startup would
-      // kill the process with no output at all.
       expect(output.stderr).toBe('')
       const lines = output.stdout.trim().split('\n')
       expect(lines).toHaveLength(1)
       const result = JSON.parse(lines[0]!) as Record<string, unknown>
-      expect(result.waitResult).toBe('interrupted')
-      expect(result.waitSignal).toBe(waitSignal)
-      expect(result.error).toBe('interrupted')
+      expect(result.waitResult).toBe('observation_error')
+      expect(result.error).toBe('metadata_unreadable')
       expect(result.id).toBe(id)
     }
 
     const sleep = (ms: number) =>
       new Promise<void>(resolve => setTimeout(resolve, ms))
 
-    it('terminates with 130 when SIGINT arrives while the metadata read is stalled', async () => {
+    it('exits 4 promptly under Node when the metadata path is a FIFO', async () => {
       const fixture = await setupWaitFixture()
       try {
         await replaceWithFifo(
           join(fixture.registryRoot, 'sessions', `${WAIT_SESSION_ID}.json`),
         )
         const proc = spawnWaiter(fixture)
-        // Child startup to the stalled selector-resolution read takes a
-        // few seconds (cold compile cache on the first child); the read
-        // then never settles, so the signal lands during it.
-        await sleep(10_000)
-        proc.kill('SIGINT')
-        const output = await expectWaiterExit(proc, 130)
-        expectSingleInterruptedJson(output, 'SIGINT', null)
+        const output = await expectWaiterExit(proc, 4)
+        expectObservationErrorJson(output, null)
       } finally {
         await teardownWaitFixture(fixture)
       }
     }, 90_000)
 
-    it('terminates with 143 when SIGTERM arrives while a terminal-fact read is stalled', async () => {
+    it('exits 4 promptly under Node when a terminal-fact path is a FIFO', async () => {
       const fixture = await setupWaitFixture()
       try {
         await replaceWithFifo(
@@ -1570,32 +1565,28 @@ describe('built Node CLI startup regressions', () => {
           ),
         )
         const proc = spawnWaiter(fixture)
-        await sleep(10_000)
-        proc.kill('SIGTERM')
-        const output = await expectWaiterExit(proc, 143)
-        expectSingleInterruptedJson(output, 'SIGTERM', null)
+        const output = await expectWaiterExit(proc, 4)
+        expectObservationErrorJson(output, null)
       } finally {
         await teardownWaitFixture(fixture)
       }
     }, 90_000)
 
-    it('terminates with 130 when SIGINT arrives while a pinned metadata read is stalled', async () => {
+    it('exits 4 promptly under Node when the pinned metadata path becomes a FIFO', async () => {
       const fixture = await setupWaitFixture()
       try {
         const proc = spawnWaiter(fixture)
         // Let the waiter start, pin, and finish its first polls before
-        // stalling the next one: polls run every 500 ms, so a signal 2 s
-        // after the swap lands during a stalled pinned read. The
-        // interrupted JSON names the pinned id, proving the stall happened
-        // after pinning rather than during selector resolution.
+        // swapping the metadata for a FIFO: polls run every 500 ms, so a
+        // swap 12 s after spawn lands during a pinned read. The
+        // observation-error JSON names the pinned id, proving the FIFO
+        // was hit after pinning rather than during selector resolution.
         await sleep(12_000)
         await replaceWithFifo(
           join(fixture.registryRoot, 'sessions', `${WAIT_SESSION_ID}.json`),
         )
-        await sleep(2_000)
-        proc.kill('SIGINT')
-        const output = await expectWaiterExit(proc, 130)
-        expectSingleInterruptedJson(output, 'SIGINT', WAIT_SESSION_ID)
+        const output = await expectWaiterExit(proc, 4)
+        expectObservationErrorJson(output, WAIT_SESSION_ID)
       } finally {
         await teardownWaitFixture(fixture)
       }
