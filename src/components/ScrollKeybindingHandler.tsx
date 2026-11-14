@@ -9,6 +9,7 @@ import { getClipboardPath } from '../ink/termio/osc.js';
 // eslint-disable-next-line custom-rules/prefer-use-keybindings -- Esc needs conditional propagation based on selection state
 import { type Key, useInput } from '../ink.js';
 import { useKeybindings } from '../keybindings/useKeybinding.js';
+import { getGlobalConfig } from '../utils/config.js';
 import { logForDebugging } from '../utils/debug.js';
 type Props = {
   scrollRef: RefObject<ScrollBoxHandle | null>;
@@ -304,9 +305,15 @@ export function computeWheelStep(state: WheelAccelState, dir: 1 | -1, now: numbe
  *  from initAndLogWheelAccel so globalSettings.env has loaded. */
 export function readScrollSpeedBase(): number {
   const raw = process.env.CLAUDE_CODE_SCROLL_SPEED;
-  if (!raw) return 1;
-  const n = parseFloat(raw);
-  return Number.isNaN(n) || n <= 0 ? 1 : Math.min(n, 20);
+  if (raw) {
+    const n = parseFloat(raw);
+    return Number.isNaN(n) || n <= 0 ? 1 : Math.min(n, 20);
+  }
+  const configured = getGlobalConfig().scrollSpeed;
+  if (configured === undefined) return 1;
+  return Number.isNaN(configured) || configured <= 0
+    ? 1
+    : Math.min(configured, 20);
 }
 
 /** Initial wheel accel state. xtermJs=true selects the decay curve.
@@ -336,6 +343,17 @@ function initAndLogWheelAccel(): WheelAccelState {
   const base = readScrollSpeedBase();
   logForDebugging(`wheel accel: ${xtermJs ? 'decay (xterm.js)' : 'window (native)'} · base=${base} · TERM_PROGRAM=${process.env.TERM_PROGRAM ?? 'unset'}`);
   return initWheelAccel(xtermJs, base);
+}
+
+// /scroll-speed changes take effect on the next wheel event: the persisted
+// base is re-read per event and the accel baseline follows it. getGlobalConfig
+// is a cached memory read, so the per-event cost is trivial.
+function refreshWheelBase(state: WheelAccelState): void {
+  const base = readScrollSpeedBase();
+  if (state.base !== base) {
+    state.base = base;
+    state.mult = base;
+  }
 }
 
 // Drag-to-scroll: when dragging past the viewport edge, scroll by this many
@@ -473,6 +491,7 @@ export function ScrollKeybindingHandler({
       // inside the centered Modal, where the paginated slice always fits).
       if (!s_2 || s_2.getScrollHeight() <= s_2.getViewportHeight()) return false;
       wheelAccel.current ??= initAndLogWheelAccel();
+      refreshWheelBase(wheelAccel.current);
       scrollUp(s_2, computeWheelStep(wheelAccel.current, -1, performance.now()));
       onScroll?.(false, s_2);
     },
@@ -481,6 +500,7 @@ export function ScrollKeybindingHandler({
       const s_3 = scrollRef.current;
       if (!s_3 || s_3.getScrollHeight() <= s_3.getViewportHeight()) return false;
       wheelAccel.current ??= initAndLogWheelAccel();
+      refreshWheelBase(wheelAccel.current);
       const step = computeWheelStep(wheelAccel.current, 1, performance.now());
       const reachedBottom = scrollDown(s_3, step);
       onScroll?.(reachedBottom, s_3);

@@ -560,6 +560,10 @@ export type GlobalConfig = {
   // Env var still takes precedence: =0 always off, =1 always on.
   flickerFreeMode?: boolean
 
+  // Mouse wheel scroll speed multiplier (rows per wheel event, baseline 1).
+  // Set via /scroll-speed. CLAUDE_CODE_SCROLL_SPEED env var takes precedence.
+  scrollSpeed?: number
+
   // GitHub repo path mapping for teleport directory switching
   // Key: "owner/repo" (lowercase), Value: array of absolute paths where repo is cloned
   githubRepoPaths?: Record<string, string[]>
@@ -815,6 +819,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'copyFullResponse',
   'copyOnSelect',
   'flickerFreeMode',
+  'scrollSpeed',
   'permissionExplainerEnabled',
   'prStatusFooterEnabled',
   'defaultStatusLineEnabled',
