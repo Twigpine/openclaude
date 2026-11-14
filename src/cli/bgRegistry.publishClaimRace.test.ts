@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, stat, utimes } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * Regression tests for maintainer review 5896325929 (P2) on #2497:
@@ -80,13 +81,43 @@ describe('terminal-fact publish across withdrawn claims', () => {
 
   // Stealing the per-ID lock orphans the first installer's
   // proper-lockfile update timer: it fires 5 s after acquisition and
-  // throws unless the lockfile still exists with the first installer's
-  // recorded mtime. Record it here so afterEach can re-create the
-  // lockfile (an empty directory under the temp root) and keep that
-  // timer harmless for the rest of the suite run.
-  let orphanedLockNeutralization:
-    | { lockfilePath: string; mtime: Date }
-    | undefined
+  // throws inside an fs callback once the stolen lock is released — the
+  // heartbeat's updateLock re-entry reads locks[file] after the release
+  // deleted it (TypeError), or the compromised-lock path throws when the
+  // lockfile is gone. Re-creating the lock directory and restoring its
+  // mtime does NOT prevent this: it only lets the heartbeat pass its
+  // filesystem checks and reach the throw. The timer is unref'd, so it
+  // cannot keep a process alive on its own; it can only fail a run that
+  // is still alive when it fires. The stale-lock scenarios below
+  // therefore run in an isolated child process (ISOLATED_CHILD=1): the
+  // child exits right after its scenario, well before the timer fires,
+  // and its termination contains the timer (CodeRabbit #2497).
+  const ISOLATED_CHILD =
+    process.env.OPENCLAUDE_BG_CLAIM_RACE_ISOLATED === '1'
+
+  // Runs one stale-lock scenario in an isolated `bun test` child process
+  // (this file, filtered to the scenario, ISOLATED_CHILD=1) and fails
+  // with the child's output when it does not exit 0.
+  async function runStaleLockScenarioInChild(name: string): Promise<void> {
+    const child = Bun.spawn(
+      [process.execPath, 'test', fileURLToPath(import.meta.url), '-t', name],
+      {
+        env: { ...process.env, OPENCLAUDE_BG_CLAIM_RACE_ISOLATED: '1' },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    if (exitCode !== 0) {
+      throw new Error(
+        `isolated stale-lock scenario "${name}" failed (exit ${exitCode}):\n${stdout}\n${stderr}`,
+      )
+    }
+  }
 
   function terminalFactPath(id: string, kind: 'natural' | 'killed'): string {
     return join(
@@ -104,13 +135,9 @@ describe('terminal-fact publish across withdrawn claims', () => {
   // Ages the per-ID lock past proper-lockfile's 10 s stale threshold
   // (a wall-clock jump), so a second async finalizer can proceed while
   // the first is paused mid-publish — the async stale-lock probe from
-  // maintainer review 5896325929 on #2497. Records the lockfile's
-  // pre-age mtime first: that is the first installer's lock mtime, and
-  // afterEach restores it so the orphaned update timer keeps matching.
+  // maintainer review 5896325929 on #2497.
   async function ageSessionLock(id: string): Promise<void> {
     const lockfile = sessionLockfilePath(id)
-    const { mtime } = await stat(lockfile)
-    orphanedLockNeutralization = { lockfilePath: lockfile, mtime }
     const stale = new Date(Date.now() - 11_000)
     await utimes(lockfile, stale, stale)
   }
@@ -188,18 +215,6 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }))
     registry?._setBackgroundSessionsRootForTesting(undefined)
     await rm(configDir, { force: true, recursive: true })
-    if (orphanedLockNeutralization) {
-      const { lockfilePath, mtime } = orphanedLockNeutralization
-      orphanedLockNeutralization = undefined
-      // The stolen lock orphaned the first installer's update timer; it
-      // fires 5 s after acquisition and throws unless the lockfile still
-      // exists with its recorded mtime. Re-create just that empty
-      // directory (under the removed temp root) so the timer refreshes
-      // it and reschedules instead of failing the suite run.
-      await mkdir(dirname(lockfilePath), { recursive: true })
-      await mkdir(lockfilePath, { recursive: true })
-      await utimes(lockfilePath, mtime, mtime)
-    }
   })
 
   it('the claim-write mock pauses a claim file between open and write', async () => {
@@ -229,7 +244,17 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
   })
 
-  it('keeps the first-published terminal fact when a claim is withdrawn during its pointer write', async () => {
+  // The stale-lock scenarios steal the per-ID lock (see the note at the
+  // top of this describe): each runs in an isolated `bun test` child
+  // process, and the parent only asserts the child exits 0. In the child
+  // the same scenario runs in-process with its assertions intact.
+  const staleLockScenarios: Array<{
+    name: string
+    run: () => Promise<void>
+  }> = [
+    {
+      name: 'keeps the first-published terminal fact when a claim is withdrawn during its pointer write',
+      run: async () => {
     // Regression test for maintainer review 5896325929 (P2) on #2497:
     // the first installer opens its claim file but has not finished
     // writing its pointer when a second async installer adopts. The
@@ -289,9 +314,11 @@ describe('terminal-fact publish across withdrawn claims', () => {
       release()
       await firstTermination.catch(() => {})
     }
-  })
-
-  it('completes the first-published fact when its pointer write finishes during adoption', async () => {
+    },
+    },
+    {
+      name: 'completes the first-published fact when its pointer write finishes during adoption',
+      run: async () => {
     // The adopter must not treat an empty claim as invalid while the
     // winner's pointer write is still in flight: it polls until the
     // claim names a temp file, then completes the winner's publish
@@ -341,9 +368,11 @@ describe('terminal-fact publish across withdrawn claims', () => {
       release()
       await firstTermination.catch(() => {})
     }
-  })
-
-  it('keeps the first-published terminal fact when the sync exit fallback adopts during a pointer write', async () => {
+    },
+    },
+    {
+      name: 'keeps the first-published terminal fact when the sync exit fallback adopts during a pointer write',
+      run: async () => {
     // Same withdrawn-claim race through the synchronous reader/adopter:
     // the exit fallback cannot wait for the per-ID lock, so it
     // publishes without it — but it must not replace the pending
@@ -390,5 +419,23 @@ describe('terminal-fact publish across withdrawn claims', () => {
       release()
       await firstTermination.catch(() => {})
     }
-  })
+    },
+    },
+  ]
+
+  for (const scenario of staleLockScenarios) {
+    // A child `bun test` run takes ~1 s; allow 30 s so a slow runner
+    // cannot flake the wrapper on spawn or startup time.
+    it(
+      scenario.name,
+      async () => {
+        if (!ISOLATED_CHILD) {
+          await runStaleLockScenarioInChild(scenario.name)
+          return
+        }
+        await scenario.run()
+      },
+      30_000,
+    )
+  }
 })
