@@ -213,7 +213,7 @@ const sessionTranscriptModule = feature('KAIROS')
   ? (require('../services/sessionTranscript/sessionTranscript.js') as typeof import('../services/sessionTranscript/sessionTranscript.js'))
   : null
 /* eslint-enable @typescript-eslint/no-require-imports */
-import { hasUltrathinkKeyword, isUltrathinkEnabled } from './thinking.js'
+import { hasUltrathinkKeyword, isUltrathinkKeywordArmed } from './thinking.js'
 import {
   tokenCountFromLastAPIResponse,
   tokenCountWithEstimation,
@@ -1537,7 +1537,7 @@ export function getUltrathinkEffortAttachment(
   // Without this, the hidden `ultrathink_effort` attachment would still raise
   // the turn to high effort even when the ULTRATHINK build flag / GrowthBook
   // rollout is disabled.
-  if (!input || !isUltrathinkEnabled() || !hasUltrathinkKeyword(input)) {
+  if (!input || !isUltrathinkKeywordArmed() || !hasUltrathinkKeyword(input)) {
     return []
   }
   if (logActivation) {
@@ -2135,6 +2135,10 @@ async function processAtMentionedFiles(
   )
 }
 
+export function isFileMentionsDisabledByEnv(): boolean {
+  return isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_FILE_MENTIONS)
+}
+
 async function processAtMentionedFilesWithDependencies(
   input: string,
   toolUseContext: AttachmentFileContext,
@@ -2142,6 +2146,12 @@ async function processAtMentionedFilesWithDependencies(
 ): Promise<Attachment[]> {
   const files = extractAtMentionedFiles(input)
   if (files.length === 0) return []
+
+  // The @-mention text stays in the prompt so the model can Read the path
+  // itself when file mentions are disabled.
+  if (isFileMentionsDisabledByEnv()) {
+    return []
+  }
 
   const appState = toolUseContext.getAppState()
   const results = await mapWithConcurrency(

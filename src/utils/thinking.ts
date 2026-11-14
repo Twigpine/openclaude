@@ -21,6 +21,10 @@ export type ThinkingConfig =
   | { type: 'enabled'; budgetTokens: number }
   | { type: 'disabled' }
 
+export function isUltrathinkDisabledByEnv(): boolean {
+  return isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ULTRATHINK)
+}
+
 /**
  * Build-time gate (feature) + runtime gate (GrowthBook). The build flag
  * controls code inclusion in external builds; the GB flag controls rollout.
@@ -30,6 +34,15 @@ export function isUltrathinkEnabled(): boolean {
     return false
   }
   return getFeatureValue_CACHED_MAY_BE_STALE('tengu_turtle_carbon', true)
+}
+
+/**
+ * Whether the "ultrathink" keyword escalates effort this turn. The env
+ * opt-out lives here rather than in isUltrathinkEnabled, which also feeds
+ * the default-effort resolver in effort.ts.
+ */
+export function isUltrathinkKeywordArmed(): boolean {
+  return isUltrathinkEnabled() && !isUltrathinkDisabledByEnv()
 }
 
 /**

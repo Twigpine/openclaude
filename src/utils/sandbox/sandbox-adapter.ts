@@ -21,10 +21,10 @@ import {
   SandboxViolationStore,
 } from '@anthropic-ai/sandbox-runtime'
 import { rmSync, statSync } from 'fs'
-import { readFile } from 'fs/promises'
+import { lstat, readFile } from 'fs/promises'
 import { memoize } from 'lodash-es'
 import { homedir } from 'os'
-import { join, resolve, sep } from 'path'
+import { dirname, join, resolve, sep } from 'path'
 import {
   getAdditionalDirectoriesForClaudeMd,
   getCwdState,
@@ -434,33 +434,57 @@ function scrubBareGitRepoFiles(): void {
 }
 
 /**
- * Detect if cwd is a git worktree and resolve the main repo path.
- * Called once during initialize() and cached for the session.
- * In a worktree, .git is a file (not a directory) containing "gitdir: ...".
- * If .git is a directory, readFile throws EISDIR and we return null.
+ * Detect if cwd is inside a git worktree and resolve the main repo path.
+ * Called once during initialize() and cached for the session, then refreshed
+ * by flows that change cwd (e.g. /cd). .git lives at the worktree root, so a
+ * cwd inside a child directory must ascend to find it: the nearest ancestor
+ * containing .git defines the repository. In a worktree, .git is a file
+ * containing "gitdir: ..."; a .git directory means a normal repo root and a
+ * failed lookup means no enclosing repository, so both return null.
  */
 async function detectWorktreeMainRepoPath(cwd: string): Promise<string | null> {
-  const gitPath = join(cwd, '.git')
-  try {
-    const gitContent = await readFile(gitPath, { encoding: 'utf8' })
-    const gitdirMatch = gitContent.match(/^gitdir:\s*(.+)$/m)
-    if (!gitdirMatch?.[1]) {
+  let dir = cwd
+  while (true) {
+    const gitPath = join(dir, '.git')
+    let stat
+    try {
+      stat = await lstat(gitPath)
+    } catch {
+      stat = null
+    }
+    if (stat === null) {
+      // No .git at this level; keep ascending toward the filesystem root
+      const parent = dirname(dir)
+      if (parent === dir) {
+        return null
+      }
+      dir = parent
+      continue
+    }
+    if (stat.isDirectory()) {
       return null
     }
-    // gitdir may be relative (rare, but git accepts it) — resolve against cwd
-    const gitdir = resolve(cwd, gitdirMatch[1].trim())
-    // gitdir format: /path/to/main/repo/.git/worktrees/worktree-name
-    // Match the /.git/worktrees/ segment specifically — indexOf('.git') alone
-    // would false-match paths like /home/user/.github-projects/...
-    const marker = `${sep}.git${sep}worktrees${sep}`
-    const markerIndex = gitdir.lastIndexOf(marker)
-    if (markerIndex > 0) {
-      return gitdir.substring(0, markerIndex)
+    try {
+      const gitContent = await readFile(gitPath, { encoding: 'utf8' })
+      const gitdirMatch = gitContent.match(/^gitdir:\s*(.+)$/m)
+      if (!gitdirMatch?.[1]) {
+        return null
+      }
+      // gitdir may be relative (rare, but git accepts it); resolve against dir
+      const gitdir = resolve(dir, gitdirMatch[1].trim())
+      // gitdir format: /path/to/main/repo/.git/worktrees/worktree-name
+      // Match the /.git/worktrees/ segment specifically — indexOf('.git') alone
+      // would false-match paths like /home/user/.github-projects/...
+      const marker = `${sep}.git${sep}worktrees${sep}`
+      const markerIndex = gitdir.lastIndexOf(marker)
+      if (markerIndex > 0) {
+        return gitdir.substring(0, markerIndex)
+      }
+      return null
+    } catch {
+      // Can't read the .git file
+      return null
     }
-    return null
-  } catch {
-    // Not in a worktree, .git is a directory (EISDIR), or can't read .git file
-    return null
   }
 }
 
@@ -832,6 +856,17 @@ function refreshConfig(): void {
 }
 
 /**
+ * Re-resolve the worktree main repo path for a new cwd. The initial detect
+ * runs once during initialize(), and refreshConfig() must stay synchronous,
+ * so flows that change the working directory (e.g. /cd) await this first;
+ * otherwise a stale cache would omit the worktree's main-repo write
+ * allowance (or keep granting one for a worktree the session left).
+ */
+async function refreshWorktreeMainRepoPath(cwd: string): Promise<void> {
+  worktreeMainRepoPath = await detectWorktreeMainRepoPath(cwd)
+}
+
+/**
  * Reset sandbox state and clear memoized values
  */
 async function reset(): Promise<void> {
@@ -947,6 +982,7 @@ export interface ISandboxManager {
   annotateStderrWithSandboxFailures(command: string, stderr: string): string
   getLinuxGlobPatternWarnings(): string[]
   refreshConfig(): void
+  refreshWorktreeMainRepoPath(cwd: string): Promise<void>
   reset(): Promise<void>
 }
 
@@ -968,6 +1004,7 @@ export const SandboxManager: ISandboxManager = {
   getExcludedCommands,
   wrapWithSandbox,
   refreshConfig,
+  refreshWorktreeMainRepoPath,
   reset,
   checkDependencies,
 

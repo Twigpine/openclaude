@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { execFileSync } from 'child_process'
 import { SandboxManager as BaseSandboxManager } from '@anthropic-ai/sandbox-runtime'
 import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -339,5 +340,57 @@ describe('convertToSandboxRuntimeConfig', () => {
       unsubscribe()
       store.clear()
     }
+  })
+
+  test('refreshWorktreeMainRepoPath adds the main-repo write allowance for a linked worktree', async () => {
+    const repository = join(tempRoot, 'main-repo')
+    const linkedWorktree = join(tempRoot, 'linked-worktree')
+    execFileSync('git', ['init', repository])
+    execFileSync('git', [
+      '-C',
+      repository,
+      'config',
+      'user.email',
+      'test@example.com',
+    ])
+    execFileSync('git', [
+      '-C',
+      repository,
+      'config',
+      'user.name',
+      'OpenClaude Test',
+    ])
+    await writeFile(join(repository, 'seed.txt'), 'seed\n')
+    execFileSync('git', ['-C', repository, 'add', 'seed.txt'])
+    execFileSync('git', ['-C', repository, 'commit', '-m', 'seed'])
+    execFileSync('git', [
+      '-C',
+      repository,
+      'worktree',
+      'add',
+      '-b',
+      'feature-branch',
+      linkedWorktree,
+    ])
+
+    // Mirrors the /cd flow: the session cwd moves into a linked worktree
+    // after initialize(), so the once-at-init cache must be re-detected
+    // before refreshConfig() runs.
+    setCwdState(linkedWorktree)
+    await SandboxManager.refreshWorktreeMainRepoPath(linkedWorktree)
+
+    const config = convertToSandboxRuntimeConfig({} as SettingsJson)
+    expect(config.filesystem.allowWrite).toContain(repository)
+
+    // /cd into a child directory of the worktree must keep the allowance:
+    // .git only exists at the worktree root, so detection has to ascend
+    // rather than clearing the cached main-repo path.
+    const childDir = join(linkedWorktree, 'src')
+    await mkdir(childDir, { recursive: true })
+    setCwdState(childDir)
+    await SandboxManager.refreshWorktreeMainRepoPath(childDir)
+
+    const childConfig = convertToSandboxRuntimeConfig({} as SettingsJson)
+    expect(childConfig.filesystem.allowWrite).toContain(repository)
   })
 })
