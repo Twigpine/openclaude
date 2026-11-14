@@ -185,6 +185,12 @@ export const PermissionsSchema = lazySchema(() =>
         .describe(
           'Deny any tool call that would otherwise wait on a permission prompt',
         ),
+      blockWritesOutsideWorkingDirectories: z
+        .boolean()
+        .optional()
+        .describe(
+          'Refuse Write, Edit, and NotebookEdit calls targeting paths outside the working directories, in every permission mode',
+        ),
       additionalDirectories: z
         .array(z.string())
         .optional()

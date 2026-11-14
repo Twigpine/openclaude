@@ -48,6 +48,7 @@ import { getPlatform } from '../platform.js'
 import { getProjectDir } from '../sessionStorage.js'
 import { SETTING_SOURCES } from '../settings/constants.js'
 import {
+  getInitialSettings,
   getSettingsFilePathForSource,
   getSettingsRootPathForSource,
 } from '../settings/settings.js'
@@ -1445,6 +1446,25 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
   )
   if (internalEditResult.behavior !== 'passthrough') {
     return internalEditResult
+  }
+
+  // permissions.blockWritesOutsideWorkingDirectories: hard boundary applied in
+  // every permission mode, including bypassPermissions. Placed after the
+  // internal editable-path carveout (plan files, scratchpad) so those still
+  // work, and before allow-rule checks so no rule can widen the boundary.
+  if (
+    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+    !pathInAllowedWorkingPath(path, toolPermissionContext, pathsToCheck)
+  ) {
+    return {
+      behavior: 'deny',
+      message: `Writing to ${path} is blocked because it is outside the working directories (permissions.blockWritesOutsideWorkingDirectories is enabled).`,
+      decisionReason: {
+        type: 'other',
+        reason:
+          'permissions.blockWritesOutsideWorkingDirectories is enabled',
+      },
+    }
   }
 
   // 1.6. Check for .claude/** allow rules BEFORE safety checks
