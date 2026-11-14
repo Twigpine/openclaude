@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto'
 import ignore from 'ignore'
 import memoize from 'lodash-es/memoize.js'
 import { homedir, tmpdir } from 'os'
-import { join, normalize, posix, sep } from 'path'
+import { basename, dirname, join, normalize, parse, posix, sep } from 'path'
 import { hasAutoMemPathOverride, isAutoMemPath } from 'src/memdir/paths.js'
 import { isAgentMemoryPath } from 'src/tools/AgentTool/agentMemory.js'
 import {
@@ -48,6 +48,7 @@ import { getPlatform } from '../platform.js'
 import { getProjectDir } from '../sessionStorage.js'
 import { SETTING_SOURCES } from '../settings/constants.js'
 import {
+  getInitialSettings,
   getSettingsFilePathForSource,
   getSettingsRootPathForSource,
 } from '../settings/settings.js'
@@ -56,6 +57,7 @@ import { getToolResultsDir } from '../toolResultStorage.js'
 import { windowsPathToPosixPath } from '../windowsPaths.js'
 import type {
   PermissionDecision,
+  PermissionDenyDecision,
   PermissionResult,
 } from './PermissionResult.js'
 import type { PermissionRule, PermissionRuleSource } from './PermissionRule.js'
@@ -1447,6 +1449,20 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
     return internalEditResult
   }
 
+  // permissions.blockWritesOutsideWorkingDirectories: hard boundary applied in
+  // every permission mode, including bypassPermissions. Placed after the
+  // internal editable-path carveout (plan files, scratchpad) so those still
+  // work, and before allow-rule checks so no rule can widen the boundary.
+  if (
+    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+    !writePathsInsideWorkingDirectories(
+      pathsToCheck,
+      allWorkingDirectories(toolPermissionContext),
+    )
+  ) {
+    return writeBoundaryDenial(path)
+  }
+
   // 1.6. Check for .claude/** allow rules BEFORE safety checks
   // This allows session-level permissions to bypass the safety blocks for .claude/
   // We only allow this for session-level rules to prevent users from accidentally
@@ -1671,6 +1687,101 @@ export function generateSuggestions(
     : []
 }
 
+function writeBoundaryDenial(path: string): PermissionDenyDecision {
+  return {
+    behavior: 'deny',
+    message: `Writing to ${path} is blocked because it is outside the working directories (permissions.blockWritesOutsideWorkingDirectories is enabled).`,
+    decisionReason: {
+      type: 'other',
+      reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled',
+    },
+  }
+}
+
+// Canonical containment for the hard write boundary. pathInWorkingPath
+// lowercases both sides so case-insensitive filesystems cannot be bypassed
+// with mixed-case paths; here that is wrong, because a case-variant target
+// on a case-sensitive filesystem is a different directory. Realpath
+// canonicalizes to the stored casing, so an exact comparison is correct on
+// both. The nearest existing ancestor is resolved so writes to files that
+// do not exist yet still compare correctly.
+function canonicalPathForContainment(path: string): string {
+  // UNC paths are compared lexically: realpathSync on \\server\share can
+  // issue network requests during validation, matching the policy in
+  // getPathsForPermissionCheck.
+  if (path.startsWith('//') || path.startsWith('\\\\')) {
+    return normalize(path)
+  }
+  let current = path
+  const tail: string[] = []
+  while (true) {
+    try {
+      const resolved = getFsImplementation().realpathSync(current)
+      return tail.length > 0 ? join(resolved, ...tail) : resolved
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return current
+      tail.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+function writePathsInsideWorkingDirectories(
+  pathsToCheck: readonly string[],
+  workingPaths: Iterable<string>,
+): boolean {
+  const canonicalWorking = [...workingPaths].map(canonicalPathForContainment)
+  return pathsToCheck.every(pathToCheck => {
+    const canonical = canonicalPathForContainment(pathToCheck)
+    return canonicalWorking.some(dir => {
+      // A filesystem root keeps its trailing separator: '/' on POSIX still
+      // contains everything (single volume), but 'C:\' on Windows must not
+      // contain 'D:\' paths, so root compares against the dir itself and
+      // non-root against the separator-bounded form.
+      const prefix = dir === parse(dir).root ? dir : dir + sep
+      return canonical === dir || canonical.startsWith(prefix)
+    })
+  })
+}
+
+/**
+ * The hard write boundary for permission paths that return before
+ * tool.checkPermissions runs (the whole-tool ask-rule early return in
+ * permissions.ts). Runs the same steps checkWritePermissionForTool applies:
+ * the internal editable-path carveout first, then the outside-dirs denial.
+ */
+export function checkWriteBoundaryForTool(
+  tool: Tool<AnyObject>,
+  input: { [key: string]: unknown },
+  toolPermissionContext: ToolPermissionContext,
+): PermissionDenyDecision | null {
+  if (
+    !getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories ||
+    typeof tool.getPath !== 'function'
+  ) {
+    return null
+  }
+  const path = expandPath(tool.getPath(input))
+  const internalEditResult = checkEditableInternalPath(
+    path,
+    input,
+    toolPermissionContext,
+  )
+  if (internalEditResult.behavior !== 'passthrough') {
+    return null
+  }
+  if (
+    writePathsInsideWorkingDirectories(
+      getPathsForPermissionCheck(path),
+      allWorkingDirectories(toolPermissionContext),
+    )
+  ) {
+    return null
+  }
+  return writeBoundaryDenial(path)
+}
+
 /**
  * Check if a path is an internal path that can be edited without permission.
  * Returns a PermissionResult - either 'allow' if matched, or 'passthrough' to continue checking.
@@ -1801,6 +1912,19 @@ export function checkEditableInternalPath(
     normalizeCaseForComparison(normalizedPath) ===
     normalizeCaseForComparison(join(getOriginalCwd(), '.openclaude', 'launch.json'))
   ) {
+    // The carve-out intends a file inside the project. When the write
+    // boundary is on, a symlinked launch.json must still resolve inside the
+    // working directories, or the allow becomes an outside-dir write.
+    if (
+      toolPermissionContext &&
+      getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+      !writePathsInsideWorkingDirectories(
+        getPathsForPermissionCheck(absolutePath),
+        allWorkingDirectories(toolPermissionContext),
+      )
+    ) {
+      return { behavior: 'passthrough', message: '' }
+    }
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1819,6 +1943,19 @@ export function checkEditableInternalPath(
       toolPermissionContext?.mode === 'fullAccess') &&
     isOpenClaudeCommitMessagePath(normalizedPath)
   ) {
+    // Same containment guard as launch.json: the commit message file lives
+    // inside the project, so a symlinked target outside the working
+    // directories must not ride this carve-out past the boundary.
+    if (
+      toolPermissionContext &&
+      getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+      !writePathsInsideWorkingDirectories(
+        getPathsForPermissionCheck(absolutePath),
+        allWorkingDirectories(toolPermissionContext),
+      )
+    ) {
+      return { behavior: 'passthrough', message: '' }
+    }
     return {
       behavior: 'allow',
       updatedInput: input,

@@ -7,6 +7,10 @@ import { registerKeybindingsSkill } from './keybindings.js'
 import { registerLoopSkill } from './loop.js'
 import { registerPdfSkill } from './pdf.js'
 import { registerSimplifySkill } from './simplify.js'
+import { registerSkillDoctorSkill } from './skillDoctor.js'
+import { registerLessPermissionPromptsSkill } from './lessPermissionPrompts.js'
+import { registerDatavizSkill } from './dataviz.js'
+import { registerAutoModeSetupSkill } from './autoModeSetup.js'
 import { registerUpdateConfigSkill } from './updateConfig.js'
 
 /**
@@ -25,6 +29,10 @@ export function initBundledSkills(): void {
   registerSimplifySkill()
   registerPdfSkill()
   registerBatchSkill()
+  registerSkillDoctorSkill()
+  registerLessPermissionPromptsSkill()
+  registerDatavizSkill()
+  registerAutoModeSetupSkill()
   if (feature('KAIROS') || feature('KAIROS_DREAM')) {
     /* eslint-disable @typescript-eslint/no-require-imports */
     const { registerDreamSkill } = require('./dream.js')

@@ -74,6 +74,8 @@ import { gitExe } from '../git.js'
 import { lazySchema } from '../lazySchema.js'
 import { logError } from '../log.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
+import { satisfies } from '../semver.js'
+import { getPublicBuildVersion } from '../version.js'
 import {
   clearPluginSettingsBase,
   getPluginSettingsBase,
@@ -915,74 +917,12 @@ export function generateTemporaryCacheNameForPlugin(
 /**
  * Cache a plugin from an external source
  */
-export async function cachePlugin(
+async function readCachedManifest(
+  tempPath: string,
+  tempName: string,
   source: PluginSource,
-  options?: {
-    manifest?: PluginManifest
-  },
-): Promise<{ path: string; manifest: PluginManifest; gitCommitSha?: string }> {
-  const cachePath = getPluginCachePath()
-
-  await getFsImplementation().mkdir(cachePath)
-
-  const tempName = generateTemporaryCacheNameForPlugin(source)
-  const tempPath = join(cachePath, tempName)
-
-  let shouldCleanup = false
-  let gitCommitSha: string | undefined
-
-  try {
-    logForDebugging(
-      `Caching plugin from source: ${jsonStringify(source)} to temporary path ${tempPath}`,
-    )
-
-    shouldCleanup = true
-
-    if (typeof source === 'string') {
-      await installFromLocal(source, tempPath)
-    } else {
-      switch (source.source) {
-        case 'npm':
-          await installFromNpm(source.package, tempPath, {
-            registry: source.registry,
-            version: source.version,
-          })
-          break
-        case 'github':
-          await installFromGitHub(source.repo, tempPath, source.ref, source.sha)
-          break
-        case 'url':
-          await installFromGit(source.url, tempPath, source.ref, source.sha)
-          break
-        case 'git-subdir':
-          gitCommitSha = await installFromGitSubdir(
-            source.url,
-            tempPath,
-            source.path,
-            source.ref,
-            source.sha,
-          )
-          break
-        case 'pip':
-          throw new Error('Python package plugins are not yet supported')
-        default:
-          throw new Error(`Unsupported plugin source type`)
-      }
-    }
-  } catch (error) {
-    if (shouldCleanup && (await pathExists(tempPath))) {
-      logForDebugging(`Cleaning up failed installation at ${tempPath}`)
-      try {
-        await rm(tempPath, { recursive: true, force: true })
-      } catch (cleanupError) {
-        logForDebugging(`Failed to clean up installation: ${cleanupError}`, {
-          level: 'error',
-        })
-      }
-    }
-    throw error
-  }
-
+  manifestOption: PluginManifest | undefined,
+): Promise<PluginManifest> {
   const manifestPath = join(tempPath, '.claude-plugin', 'plugin.json')
   const legacyManifestPath = join(tempPath, 'plugin.json')
   let manifest: PluginManifest
@@ -1079,10 +1019,102 @@ export async function cachePlugin(
       )
     }
   } else {
-    manifest = options?.manifest || {
+    manifest = manifestOption || {
       name: tempName,
       description: `Plugin cached from ${typeof source === 'string' ? source : source.source}`,
     }
+  }
+  return manifest
+}
+
+export async function cachePlugin(
+  source: PluginSource,
+  options?: {
+    manifest?: PluginManifest
+  },
+): Promise<{ path: string; manifest: PluginManifest; gitCommitSha?: string }> {
+  const cachePath = getPluginCachePath()
+
+  await getFsImplementation().mkdir(cachePath)
+
+  const tempName = generateTemporaryCacheNameForPlugin(source)
+  const tempPath = join(cachePath, tempName)
+
+  let shouldCleanup = false
+  let gitCommitSha: string | undefined
+
+  const cleanupTempInstall = async () => {
+    if (shouldCleanup && (await pathExists(tempPath))) {
+      logForDebugging(`Cleaning up failed installation at ${tempPath}`)
+      try {
+        await rm(tempPath, { recursive: true, force: true })
+      } catch (cleanupError) {
+        logForDebugging(`Failed to clean up installation: ${cleanupError}`, {
+          level: 'error',
+        })
+      }
+    }
+  }
+
+  try {
+    logForDebugging(
+      `Caching plugin from source: ${jsonStringify(source)} to temporary path ${tempPath}`,
+    )
+
+    shouldCleanup = true
+
+    if (typeof source === 'string') {
+      await installFromLocal(source, tempPath)
+    } else {
+      switch (source.source) {
+        case 'npm':
+          await installFromNpm(source.package, tempPath, {
+            registry: source.registry,
+            version: source.version,
+          })
+          break
+        case 'github':
+          await installFromGitHub(source.repo, tempPath, source.ref, source.sha)
+          break
+        case 'url':
+          await installFromGit(source.url, tempPath, source.ref, source.sha)
+          break
+        case 'git-subdir':
+          gitCommitSha = await installFromGitSubdir(
+            source.url,
+            tempPath,
+            source.path,
+            source.ref,
+            source.sha,
+          )
+          break
+        case 'pip':
+          throw new Error('Python package plugins are not yet supported')
+        default:
+          throw new Error(`Unsupported plugin source type`)
+      }
+    }
+  } catch (error) {
+    await cleanupTempInstall()
+    throw error
+  }
+
+  let manifest: PluginManifest
+  try {
+    manifest = await readCachedManifest(
+      tempPath,
+      tempName,
+      source,
+      options?.manifest,
+    )
+    const enginesError = pluginEnginesIncompatibility(manifest)
+    if (enginesError) {
+      logForDebugging(enginesError, { level: 'error' })
+      throw new Error(enginesError)
+    }
+  } catch (error) {
+    await cleanupTempInstall()
+    throw error
   }
 
   const finalName = manifest.name.replace(/[^a-zA-Z0-9-_]/g, '-')
@@ -1128,6 +1160,73 @@ export async function cachePlugin(
  * }
  * ```
  */
+
+// Explicit grammar for engines ranges. Bun.semver.satisfies treats
+// unparseable input as a wildcard and returns true, so the range is
+// validated before comparing: `1.x`-style wildcards, plain versions,
+// `>=`-style comparator sets, `^`/`~` ranges, `a - b` hyphen ranges, and
+// `||` alternation of those. Anything else is an invalid range.
+const ENGINE_VERSION_SRC =
+  '(?:\\d+|x|X|\\*)(?:\\.(?:\\d+|x|X|\\*)){0,2}(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?'
+const ENGINE_VERSION_RE = new RegExp(`^${ENGINE_VERSION_SRC}$`)
+const ENGINE_COMPARATOR_RE = new RegExp(`^[<>=~^]*${ENGINE_VERSION_SRC}$`)
+
+// A comparator may be separated from its version by whitespace
+// (`>= 0.30.0`, `^ 0.36.0`). npm semver accepts that, but
+// Bun.semver.satisfies mis-parses it after `^`, so operator/version pairs
+// are merged once and the normalized form feeds both validation and
+// comparison. Hyphen ranges and `||` alternatives are unaffected: `-` and
+// `|` are not operator characters.
+const normalizeEngineRange = (range: string): string =>
+  range.replace(/([<>=~^]+)\s+(?=[\dxX*])/g, '$1')
+
+function isValidEngineRange(range: string): boolean {
+  return range.split('||').every(alternative => {
+    const trimmed = alternative.trim()
+    if (trimmed === '') {
+      return false
+    }
+    const hyphen = trimmed.split(/\s+-\s+/)
+    if (hyphen.length > 1) {
+      return (
+        hyphen.length === 2 &&
+        hyphen.every(end => ENGINE_VERSION_RE.test(end.trim()))
+      )
+    }
+    return normalizeEngineRange(trimmed)
+      .split(/\s+/)
+      .every(token => ENGINE_COMPARATOR_RE.test(token))
+  })
+}
+
+/**
+ * Returns a human-readable reason a plugin's manifest `engines` field
+ * excludes the running host version, or null when the plugin is compatible
+ * (including manifests with no engines or only unknown engine names).
+ * The upstream parity key is "claude-code"; its range is compared against
+ * the OpenClaude build version.
+ */
+export function pluginEnginesIncompatibility(
+  manifest: PluginManifest,
+  appVersion: string = getPublicBuildVersion(),
+): string | null {
+  const range = manifest.engines?.['claude-code']?.trim()
+  if (!range || range === '*' || range.toLowerCase() === 'x') {
+    return null
+  }
+  const invalidRangeError = `Plugin ${manifest.name} declares an invalid claude-code engine range "${range}"`
+  if (!isValidEngineRange(range)) {
+    return invalidRangeError
+  }
+  try {
+    if (satisfies(appVersion, normalizeEngineRange(range))) {
+      return null
+    }
+  } catch {
+    return invalidRangeError
+  }
+  return `Plugin ${manifest.name} requires claude-code ${range} but the running version is ${appVersion}`
+}
 
 /**
  * Loads and validates a plugin manifest from a JSON file.
@@ -3156,6 +3255,20 @@ async function finishLoadingPluginFromPath(
     }
   }
 
+  // Engines compatibility is checked on the effective manifest: when the
+  // plugin ships no plugin.json, the marketplace entry stands in for the
+  // manifest above, and its engines field must apply too.
+  const enginesError = pluginEnginesIncompatibility(plugin.manifest)
+  if (enginesError) {
+    logForDebugging(enginesError, { level: 'error' })
+    errorsOut.push({
+      type: 'generic-error',
+      source: pluginId,
+      error: enginesError,
+    })
+    return null
+  }
+
   errorsOut.push(...errors)
   return plugin
 }
@@ -3208,6 +3321,16 @@ async function loadSessionOnlyPlugins(
       // Update source to use the actual plugin name from manifest
       plugin.source = `${plugin.name}@inline`
       plugin.repository = `${plugin.name}@inline`
+
+      const enginesError = pluginEnginesIncompatibility(plugin.manifest)
+      if (enginesError) {
+        errors.push({
+          type: 'generic-error',
+          source: plugin.source,
+          error: enginesError,
+        })
+        continue
+      }
 
       plugins.push(plugin)
       errors.push(...pluginErrors)

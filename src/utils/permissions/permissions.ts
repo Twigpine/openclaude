@@ -16,6 +16,7 @@ import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../../tools/ExitPlanModeTool/constants.js'
 import { FILE_EDIT_TOOL_NAME } from '../../tools/FileEditTool/constants.js'
 import { FILE_WRITE_TOOL_NAME } from '../../tools/FileWriteTool/constants.js'
+import { NOTEBOOK_EDIT_TOOL_NAME } from '../../tools/NotebookEditTool/constants.js'
 import { isPowerShellCommandReadOnly } from '../../tools/PowerShellTool/readOnlyValidation.js'
 import { POWERSHELL_TOOL_NAME } from '../../tools/PowerShellTool/toolName.js'
 import { REPL_TOOL_NAME } from '../../tools/REPLTool/constants.js'
@@ -95,6 +96,52 @@ function isActivePlanFileForContext(
   return isActiveSessionPlanFile(path, agentId)
 }
 
+// Whole-tool ask rules return before tool.checkPermissions, so the
+// blockWritesOutsideWorkingDirectories boundary inside
+// checkWritePermissionForTool would never run for Write/Edit/NotebookEdit.
+// Check it here, ahead of the ask-rule early returns.
+function checkWriteBoundaryForAskRule(
+  tool: Tool,
+  input: { [key: string]: unknown },
+  toolPermissionContext: ToolPermissionContext,
+): PermissionDenyDecision | null {
+  if (
+    tool.name !== FILE_WRITE_TOOL_NAME &&
+    tool.name !== FILE_EDIT_TOOL_NAME &&
+    tool.name !== NOTEBOOK_EDIT_TOOL_NAME
+  ) {
+    return null
+  }
+  const parsed = tool.inputSchema.safeParse(input)
+  if (!parsed.success) {
+    return null
+  }
+  const { checkWriteBoundaryForTool } =
+    require('./filesystem.js') as typeof import('./filesystem.js')
+  return checkWriteBoundaryForTool(tool, parsed.data, toolPermissionContext)
+}
+
+// permissions.denyInsteadOfPrompting: a decision that survives to a user
+// prompt becomes a deny. Shared by the tail check in
+// hasPermissionsToUseToolWithModeHandling and by early returns (whole-tool
+// ask rules, auto-mode fallbacks to manual approval) that would otherwise
+// bypass it.
+function suppressPromptIfConfigured<T extends PermissionDecision>(
+  tool: Tool,
+  res: T,
+): PermissionDenyDecision | T {
+  return getInitialSettings().permissions?.denyInsteadOfPrompting
+    ? {
+        behavior: 'deny',
+        decisionReason: {
+          type: 'other',
+          reason: 'permissions.denyInsteadOfPrompting is enabled',
+        },
+        message: `${tool.name} requires permission, but permissions.denyInsteadOfPrompting is enabled`,
+      }
+    : res
+}
+
 import {
   addToTurnClassifierDuration,
   getTotalCacheCreationInputTokens,
@@ -114,6 +161,7 @@ import {
 } from '../classifierApprovals.js'
 import { isInProtectedNamespace } from '../envUtils.js'
 import { executePermissionRequestHooks } from '../hooks.js'
+import { getInitialSettings } from '../settings/settings.js'
 import {
   AUTO_REJECT_MESSAGE,
   buildClassifierUnavailableMessage,
@@ -459,6 +507,17 @@ async function runPermissionRequestHooksForHeadlessAgent(
       const decision = hookResult.permissionRequestResult
       if (decision.behavior === 'allow') {
         const finalInput = decision.updatedInput ?? input
+        // A hook can allow with an updatedInput pointing outside the working
+        // directories. Recheck the hard write boundary on the input actually
+        // being allowed; tool.checkPermissions never sees finalInput here.
+        const writeBoundary = checkWriteBoundaryForAskRule(
+          tool,
+          finalInput,
+          context.getAppState().toolPermissionContext,
+        )
+        if (writeBoundary) {
+          return writeBoundary
+        }
         const finalPlanMode =
           enforcePlanMode ||
           context.getAppState().toolPermissionContext.mode === 'plan'
@@ -624,10 +683,10 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
             },
           }
         }
-        return result
+        return suppressPromptIfConfigured(tool, result)
       }
       if (tool.requiresUserInteraction?.() && result.behavior === 'ask') {
-        return result
+        return suppressPromptIfConfigured(tool, result)
       }
 
       // Use local denial tracking for async subagents (whose setAppState
@@ -667,7 +726,7 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
         logForDebugging(
           `Skipping auto mode classifier for ${tool.name}: tool requires explicit user permission`,
         )
-        return result
+        return suppressPromptIfConfigured(tool, result)
       }
 
       // Before running the auto mode classifier, check if acceptEdits mode would
@@ -911,14 +970,14 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
             'Auto mode classifier transcript too long, falling back to normal permission handling',
             { level: 'warn' },
           )
-          return {
+          return suppressPromptIfConfigured(tool, {
             ...result,
             decisionReason: {
               type: 'other',
               reason:
-                'Auto mode classifier transcript exceeded context window — falling back to manual approval',
+                'Auto mode classifier transcript exceeded context window, falling back to manual approval',
             },
-          }
+          })
         }
         // When classifier is unavailable (API error), behavior depends on
         // the tengu_iron_gate_closed gate.
@@ -949,7 +1008,7 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
             'Auto mode classifier unavailable, falling back to normal permission handling (fail open)',
             { level: 'warn' },
           )
-          return result
+          return suppressPromptIfConfigured(tool, result)
         }
 
         // Update denial tracking and check limits
@@ -974,7 +1033,7 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
           context,
         )
         if (denialLimitResult) {
-          return denialLimitResult
+          return suppressPromptIfConfigured(tool, denialLimitResult)
         }
 
         return {
@@ -1027,6 +1086,12 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
         message: AUTO_REJECT_MESSAGE(tool.name),
       }
     }
+
+    // permissions.denyInsteadOfPrompting: any decision that survived to this
+    // point would wait on a user prompt, so deny it instead. Runs last in the
+    // ask block so dontAsk mode, auto-mode classification, and headless deny
+    // keep their existing precedence.
+    return suppressPromptIfConfigured(tool, result)
   }
 
   return result
@@ -1208,14 +1273,22 @@ export async function checkRuleBasedPermissions(
       shouldUseSandbox(input)
 
     if (!canSandboxAutoAllow && !isFullAccessMode) {
-      return {
+      const writeBoundary = checkWriteBoundaryForAskRule(
+        tool,
+        input,
+        appState.toolPermissionContext,
+      )
+      if (writeBoundary) {
+        return writeBoundary
+      }
+      return suppressPromptIfConfigured(tool, {
         behavior: 'ask',
         decisionReason: {
           type: 'rule',
           rule: askRule,
         },
         message: createPermissionRequestMessage(tool.name),
-      }
+      })
     }
     // Fall through to let tool.checkPermissions handle command-specific rules
   }
@@ -1566,6 +1639,14 @@ async function hasPermissionsToUseToolInner(
       !isFullAccessMode &&
       appState.toolPermissionContext.mode !== 'plan'
     ) {
+      const writeBoundary = checkWriteBoundaryForAskRule(
+        tool,
+        input,
+        appState.toolPermissionContext,
+      )
+      if (writeBoundary) {
+        return writeBoundary
+      }
       return {
         behavior: 'ask',
         decisionReason: {
