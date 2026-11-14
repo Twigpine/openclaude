@@ -30,6 +30,7 @@ import {
 import {
   flushSessionStorage,
   getProjectDir,
+  getTranscriptPath,
   getTranscriptPathForSession,
   adoptResumedSessionFile,
   recordAttributionSnapshot,
@@ -640,6 +641,11 @@ test('an established transcript survives entering and exiting a worktree', async
 
   // EnterWorktreeTool's cwd change: same session, different working directory.
   setOriginalCwd(worktree)
+  // The exported accessors must keep resolving to the transcript receiving
+  // writes: re-deriving from the new cwd would point at a path no file was
+  // ever written to, so consumers opening it get ENOENT.
+  expect(getTranscriptPath()).toBe(transcriptPath)
+  expect(getTranscriptPathForSession(getSessionId())).toBe(transcriptPath)
   await recordTranscript([message('40000000-0000-4000-8000-0000000000e2', 'inside worktree')])
   await flushSessionStorage()
 
@@ -651,6 +657,8 @@ test('an established transcript survives entering and exiting a worktree', async
 
   // ExitWorktreeTool restores the cwd; the conversation continues in one file.
   setOriginalCwd(join(testRoot, 'workspace'))
+  expect(getTranscriptPath()).toBe(transcriptPath)
+  expect(getTranscriptPathForSession(getSessionId())).toBe(transcriptPath)
   await recordTranscript([message('40000000-0000-4000-8000-0000000000e3', 'after worktree')])
   await flushSessionStorage()
   const text = await readFile(transcriptPath, 'utf8')

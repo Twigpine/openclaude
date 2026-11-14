@@ -567,6 +567,16 @@ export function isEphemeralToolProgress(dataType: unknown): boolean {
 }
 
 export function getTranscriptPath(): string {
+  // An established session keeps writing to its pinned transcript even
+  // when the working directory moves — entering or exiting a worktree
+  // changes originalCwd without changing the session — so the cached
+  // pointer is the transcript actually receiving writes. Export it
+  // instead of re-deriving a path under the new cwd that no file was
+  // ever written to (consumers opening that path get ENOENT). No pointer
+  // yet (fresh session) keeps the cwd-derived path. The pointer is
+  // per-context-identity, so overlapping SDK sessions keep their own.
+  const pinned = project?.sessionFile ?? null
+  if (pinned !== null) return pinned
   const projectDir = getSessionProjectDir() ?? getProjectDir(getOriginalCwd())
   return join(projectDir, `${getSessionId()}.jsonl`)
 }
