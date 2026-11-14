@@ -1,9 +1,11 @@
 import { useEffect, useRef } from 'react'
 import {
   IDLE_COMPACT_DELAY_MS,
+  isIdleCompactionEnabled,
   shouldArmIdleCompaction,
 } from '../services/compact/idleCompaction.js'
 import type { Message } from '../types/message.js'
+import { logError } from '../utils/log.js'
 import { tokenCountWithEstimation } from '../utils/tokens.js'
 
 /**
@@ -23,7 +25,7 @@ export function useIdleCompaction(
   onIdleCompact: (messages: readonly Message[]) => Promise<void>,
 ): void {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const skipTokensRef = useRef<number | null>(null)
+  const compactedAtEstimateRef = useRef<number | null>(null)
   const messagesRef = useRef(messages)
   const isLoadingRef = useRef(isLoading)
   const onIdleCompactRef = useRef(onIdleCompact)
@@ -40,11 +42,13 @@ export function useIdleCompaction(
     }
     clearTimer()
     if (isLoading) return clearTimer
+    // Check the cheap gates before paying for a token estimate.
+    if (!isIdleCompactionEnabled()) return clearTimer
     const tokenEstimate = tokenCountWithEstimation(messagesRef.current)
     if (
       !shouldArmIdleCompaction({
         tokenEstimate,
-        skipTokenEstimate: skipTokensRef.current,
+        compactedAtTokenEstimate: compactedAtEstimateRef.current,
       })
     ) {
       return clearTimer
@@ -52,10 +56,13 @@ export function useIdleCompaction(
     timerRef.current = setTimeout(() => {
       timerRef.current = null
       if (isLoadingRef.current) return
-      // Remember the size we fired at so an unchanged session does not
-      // compact on every subsequent idle window.
-      skipTokensRef.current = tokenCountWithEstimation(messagesRef.current)
-      void onIdleCompactRef.current(messagesRef.current)
+      const firedAtEstimate = tokenCountWithEstimation(messagesRef.current)
+      void onIdleCompactRef
+        .current(messagesRef.current)
+        .then(() => {
+          compactedAtEstimateRef.current = firedAtEstimate
+        })
+        .catch(logError)
     }, IDLE_COMPACT_DELAY_MS)
     return clearTimer
   }, [isLoading])

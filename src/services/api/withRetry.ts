@@ -120,19 +120,24 @@ const PERSISTENT_MAX_ATTEMPTS = 100
 const RECHECK_MS_MIN = 60_000
 const RECHECK_MS_MAX = 3 * 60 * 60 * 1000
 
-function readWatchdogRecheckMs(): number | null {
-  const raw = process.env.CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS
-  if (!raw) return null
-  const n = Number(raw)
-  if (!Number.isFinite(n) || n <= 0) return null
-  return Math.min(Math.max(n, RECHECK_MS_MIN), RECHECK_MS_MAX)
-}
-
-function readWatchdogMaxWaitMs(): number | null {
-  const raw = process.env.CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS
+function readPositiveEnvMs(name: string): number | null {
+  const raw = process.env[name]
   if (!raw) return null
   const n = Number(raw)
   return Number.isFinite(n) && n > 0 ? n : null
+}
+
+function readWatchdogRecheckMs(): number | null {
+  const n = readPositiveEnvMs(
+    'CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS',
+  )
+  return n === null
+    ? null
+    : Math.min(Math.max(n, RECHECK_MS_MIN), RECHECK_MS_MAX)
+}
+
+function readWatchdogMaxWaitMs(): number | null {
+  return readPositiveEnvMs('CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS')
 }
 // Exposed for unit-test assertion only. The persistent retry cap itself is
 // driven by isPersistentRetryEnabled() — there is no runtime override seam
@@ -588,8 +593,6 @@ export async function* withRetry<T>(
         // Window-based limits (e.g. 5hr Max/Pro) include a reset timestamp.
         // Wait until reset rather than polling every 5 min uselessly.
         const resetDelay = getRateLimitResetDelayMs(error)
-        // A limit that resets past the configured max wait ends the request
-        // instead of waiting it out.
         const maxWaitMs = readWatchdogMaxWaitMs()
         if (
           maxWaitMs !== null &&

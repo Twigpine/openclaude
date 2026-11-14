@@ -1,5 +1,4 @@
 import { getUserContext } from '../../context.js'
-import { markPostCompaction } from 'src/bootstrap/state.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
 import { getGlobalConfig } from '../../utils/config.js'
@@ -10,7 +9,7 @@ import {
   compactConversation,
 } from './compact.js'
 import { suppressCompactWarning } from './compactWarningState.js'
-import { getCacheSharingParams } from './getCacheSharingParams.js'
+import { getCacheSafeParams } from './getCacheSafeParams.js'
 import { runPostCompactCleanup } from './postCompactCleanup.js'
 import { setLastSummarizedMessageId } from '../SessionMemory/sessionMemoryUtils.js'
 
@@ -20,9 +19,8 @@ export const DEFAULT_IDLE_COMPACT_MIN_TOKENS = 200_000
 export const IDLE_COMPACT_MIN_TOKENS_ENV =
   'CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS'
 
-export function getIdleCompactionMinTokens(
-  raw: string | undefined = process.env[IDLE_COMPACT_MIN_TOKENS_ENV],
-): number {
+export function getIdleCompactionMinTokens(): number {
+  const raw = process.env[IDLE_COMPACT_MIN_TOKENS_ENV]
   if (raw === undefined) return DEFAULT_IDLE_COMPACT_MIN_TOKENS
   const parsed = Number(raw)
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -38,41 +36,24 @@ export function isIdleCompactionEnabled(): boolean {
 
 export function shouldArmIdleCompaction(args: {
   tokenEstimate: number
-  skipTokenEstimate: number | null
-  minTokens?: number
-  enabled?: boolean
+  compactedAtTokenEstimate: number | null
 }): boolean {
-  const enabled = args.enabled ?? isIdleCompactionEnabled()
-  if (!enabled) return false
-  const minTokens = args.minTokens ?? getIdleCompactionMinTokens()
-  if (args.tokenEstimate < minTokens) return false
-  // A session that was already compacted at this size has no new content to
-  // summarize; arming again would compact on every idle window.
-  if (
-    args.skipTokenEstimate !== null &&
-    args.tokenEstimate === args.skipTokenEstimate
-  ) {
-    return false
-  }
-  return true
+  if (!isIdleCompactionEnabled()) return false
+  if (args.tokenEstimate < getIdleCompactionMinTokens()) return false
+  return args.tokenEstimate !== args.compactedAtTokenEstimate
 }
 
-/**
- * Runs the standard compaction path for a session that sat idle past
- * IDLE_COMPACT_DELAY_MS. Returns the post-compact message list, or null when
- * compaction is disabled or there is nothing to compact.
- */
 export async function runIdleCompaction(
   messages: readonly Message[],
   context: ToolUseContext,
-): Promise<{ postCompact: Message[]; preCompactTokenCount?: number } | null> {
+): Promise<Message[] | null> {
   if (!isIdleCompactionEnabled()) return null
   const compactMessages = getMessagesAfterCompactBoundary([...messages])
   if (compactMessages.length === 0) return null
   const result = await compactConversation(
     compactMessages,
     context,
-    await getCacheSharingParams(context, compactMessages),
+    await getCacheSafeParams(context, compactMessages),
     false,
     undefined,
     true,
@@ -80,10 +61,6 @@ export async function runIdleCompaction(
   setLastSummarizedMessageId(undefined)
   suppressCompactWarning()
   getUserContext.cache.clear?.()
-  markPostCompaction()
   runPostCompactCleanup()
-  return {
-    postCompact: buildPostCompactMessages(result),
-    preCompactTokenCount: result.preCompactTokenCount,
-  }
+  return buildPostCompactMessages(result)
 }

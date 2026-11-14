@@ -14,6 +14,7 @@ import { useInput } from '../ink.js';
 import { useSearchInput } from '../hooks/useSearchInput.js';
 import { useIdleCompaction } from '../hooks/useIdleCompaction.js';
 import { runIdleCompaction } from '../services/compact/idleCompaction.js';
+import { getCacheSafeParams } from '../services/compact/getCacheSafeParams.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useSearchHighlight } from '../ink/hooks/use-search-highlight.js';
 import type { JumpHandle } from '../components/VirtualMessageList.js';
@@ -3091,9 +3092,9 @@ export function REPL({
   useIdleCompaction(messages, isLoading, async currentMessages => {
     const idleAbortController = createAbortController();
     const context = getToolUseContext([...currentMessages], [], idleAbortController, mainLoopModel);
-    const compacted = await runIdleCompaction(currentMessages, context);
-    if (!compacted) return;
-    setMessages(compacted.postCompact);
+    const postCompact = await runIdleCompaction(currentMessages, context);
+    if (!postCompact) return;
+    setMessages(postCompact);
     setAutoCompactTrackingForSession(getSessionId(), undefined);
     if (feature('PROACTIVE') || feature('KAIROS')) {
       proactiveModule?.setContextBlocked(false);
@@ -5597,23 +5598,8 @@ export function REPL({
             }
             const newAbortController = createAbortController();
             const context = getToolUseContext(compactMessages, [], newAbortController, mainLoopModel);
-            const appState = context.getAppState();
-            const defaultSysPrompt = await getSystemPrompt(context.options.tools, context.options.mainLoopModel, Array.from(appState.toolPermissionContext.additionalWorkingDirectories.keys()), context.options.mcpClients);
-            const systemPrompt = buildEffectiveSystemPrompt({
-              mainThreadAgentDefinition: undefined,
-              toolUseContext: context,
-              customSystemPrompt: context.options.customSystemPrompt,
-              defaultSystemPrompt: defaultSysPrompt,
-              appendSystemPrompt: context.options.appendSystemPrompt
-            });
-            const [userContext, systemContext] = await Promise.all([getUserContext(), getSystemContext()]);
-            const result = await partialCompactConversation(compactMessages, messageIndex, context, {
-              systemPrompt,
-              userContext,
-              systemContext,
-              toolUseContext: context,
-              forkContextMessages: compactMessages
-            }, feedback, direction);
+            const cacheSafeParams = await getCacheSafeParams(context, compactMessages);
+            const result = await partialCompactConversation(compactMessages, messageIndex, context, cacheSafeParams, feedback, direction);
             const kept = result.messagesToKeep ?? [];
             const ordered = direction === 'up_to' ? [...result.summaryMessages, ...kept] : [...kept, ...result.summaryMessages];
             const postCompact = [result.boundaryMarker, ...ordered, ...result.attachments, ...result.hookResults];

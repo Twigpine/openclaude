@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { saveGlobalConfig } from '../../utils/config.js'
 import {
-  DEFAULT_IDLE_COMPACT_MIN_TOKENS,
   getIdleCompactionMinTokens,
   isIdleCompactionEnabled,
   shouldArmIdleCompaction,
@@ -15,9 +14,7 @@ describe('idle compaction gating', () => {
   })
 
   test('min tokens defaults to 200k and honors a valid env override', () => {
-    expect(getIdleCompactionMinTokens()).toBe(
-      DEFAULT_IDLE_COMPACT_MIN_TOKENS,
-    )
+    expect(getIdleCompactionMinTokens()).toBe(200_000)
     process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS = '50000'
     expect(getIdleCompactionMinTokens()).toBe(50_000)
   })
@@ -25,9 +22,7 @@ describe('idle compaction gating', () => {
   test('invalid, zero, and negative env values fall back to the default', () => {
     for (const bad of ['abc', '0', '-5', '']) {
       process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS = bad
-      expect(getIdleCompactionMinTokens()).toBe(
-        DEFAULT_IDLE_COMPACT_MIN_TOKENS,
-      )
+      expect(getIdleCompactionMinTokens()).toBe(200_000)
     }
   })
 
@@ -44,13 +39,13 @@ describe('idle compaction gating', () => {
     expect(
       shouldArmIdleCompaction({
         tokenEstimate: 199_999,
-        skipTokenEstimate: null,
+        compactedAtTokenEstimate: null,
       }),
     ).toBe(false)
     expect(
       shouldArmIdleCompaction({
         tokenEstimate: 200_000,
-        skipTokenEstimate: null,
+        compactedAtTokenEstimate: null,
       }),
     ).toBe(true)
   })
@@ -60,14 +55,7 @@ describe('idle compaction gating', () => {
     expect(
       shouldArmIdleCompaction({
         tokenEstimate: 500_000,
-        skipTokenEstimate: null,
-      }),
-    ).toBe(false)
-    expect(
-      shouldArmIdleCompaction({
-        tokenEstimate: 500_000,
-        skipTokenEstimate: null,
-        enabled: false,
+        compactedAtTokenEstimate: null,
       }),
     ).toBe(false)
   })
@@ -77,7 +65,7 @@ describe('idle compaction gating', () => {
     expect(
       shouldArmIdleCompaction({
         tokenEstimate: 1_500,
-        skipTokenEstimate: null,
+        compactedAtTokenEstimate: null,
       }),
     ).toBe(true)
   })
@@ -86,13 +74,13 @@ describe('idle compaction gating', () => {
     expect(
       shouldArmIdleCompaction({
         tokenEstimate: 250_000,
-        skipTokenEstimate: 250_000,
+        compactedAtTokenEstimate: 250_000,
       }),
     ).toBe(false)
     expect(
       shouldArmIdleCompaction({
         tokenEstimate: 260_000,
-        skipTokenEstimate: 250_000,
+        compactedAtTokenEstimate: 250_000,
       }),
     ).toBe(true)
   })

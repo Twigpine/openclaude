@@ -2,7 +2,7 @@ import { feature } from 'bun:bundle'
 import chalk from 'chalk'
 import { markPostCompaction } from 'src/bootstrap/state.js'
 import { getUserContext } from '../../context.js'
-import { getCacheSharingParams } from '../../services/compact/getCacheSharingParams.js'
+import { getCacheSafeParams } from '../../services/compact/getCacheSafeParams.js'
 import { getShortcutDisplay } from '../../keybindings/shortcutFormat.js'
 import { notifyCompaction } from '../../services/api/promptCacheBreakDetection.js'
 import {
@@ -111,7 +111,7 @@ export const call: LocalCommandCall = async (args, context) => {
     const result = await compactConversation(
       messagesForCompact,
       context,
-      await getCacheSharingParams(context, messagesForCompact),
+      await getCacheSafeParams(context, messagesForCompact),
       false,
       customInstructions,
       false,
@@ -164,14 +164,14 @@ async function compactViaReactive(
 
   try {
     // Hooks and cache-param build are independent — run concurrently.
-    // getCacheSharingParams walks all tools to build the system prompt;
+    // getCacheSafeParams walks all tools to build the system prompt;
     // pre-compact hooks spawn subprocesses. Neither depends on the other.
     const [hookResult, cacheSafeParams] = await Promise.all([
       executePreCompactHooks(
         { trigger: 'manual', customInstructions: customInstructions || null },
         context.abortController.signal,
       ),
-      getCacheSharingParams(context, messages),
+      getCacheSafeParams(context, messages),
     ])
     const mergedInstructions = mergeHookInstructions(
       customInstructions,
@@ -215,7 +215,7 @@ async function compactViaReactive(
     // reactiveCompactOnPromptTooLong runs PostCompact hooks but not PreCompact
     // — both callers (here and tryReactiveCompact) run PreCompact outside so
     // they can merge its userDisplayMessage with PostCompact's here. This
-    // caller additionally runs it concurrently with getCacheSharingParams.
+    // caller additionally runs it concurrently with getCacheSafeParams.
     const combinedMessage =
       [hookResult.userDisplayMessage, outcome.result.userDisplayMessage]
         .filter(Boolean)

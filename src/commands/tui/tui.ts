@@ -1,6 +1,7 @@
 import chalk from 'chalk'
 import type { LocalCommandCall } from '../../types/command.js'
-import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
+import { saveGlobalConfig } from '../../utils/config.js'
+import { isFullscreenEnvEnabled } from '../../utils/fullscreen.js'
 
 const USAGE = 'Usage: /tui <fullscreen|inline>'
 
@@ -23,7 +24,7 @@ export const call: LocalCommandCall = async args => {
     return { type: 'text', value: `Switched to inline display mode.${envNote}` }
   }
 
-  const current = getGlobalConfig().flickerFreeMode ? 'fullscreen' : 'inline'
+  const current = isFullscreenEnvEnabled() ? 'fullscreen' : 'inline'
   return {
     type: 'text',
     value: `Current display mode: ${chalk.bold(current)}. ${USAGE}`,

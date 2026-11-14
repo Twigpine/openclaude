@@ -297,23 +297,23 @@ export function computeWheelStep(state: WheelAccelState, dir: 1 | -1, now: numbe
   return rows;
 }
 
-/** Read CLAUDE_CODE_SCROLL_SPEED, default 1, clamp (0, 20].
- *  Some terminals pre-multiply wheel events (ghostty discrete=3, iTerm2
- *  "faster scroll") — base=1 is correct there. Others send 1 event/notch —
- *  set CLAUDE_CODE_SCROLL_SPEED=3 to match vim/nvim/opencode. We can't
- *  detect which kind of terminal we're in, hence the knob. Called lazily
- *  from initAndLogWheelAccel so globalSettings.env has loaded. */
+export const MAX_SCROLL_SPEED = 20;
+
+function normalizeScrollSpeed(n: number): number {
+  return Number.isNaN(n) || n <= 0 ? 1 : Math.min(n, MAX_SCROLL_SPEED);
+}
+
+/** Read CLAUDE_CODE_SCROLL_SPEED then the persisted scrollSpeed config,
+ *  default 1, clamp (0, MAX_SCROLL_SPEED]. Some terminals pre-multiply
+ *  wheel events (ghostty discrete=3, iTerm2 "faster scroll") — base=1 is
+ *  correct there. Others send 1 event/notch — set the speed to 3 to match
+ *  vim/nvim/opencode. We can't detect which kind of terminal we're in,
+ *  hence the knob. Called lazily from initAndLogWheelAccel so
+ *  globalSettings.env has loaded. */
 export function readScrollSpeedBase(): number {
   const raw = process.env.CLAUDE_CODE_SCROLL_SPEED;
-  if (raw) {
-    const n = parseFloat(raw);
-    return Number.isNaN(n) || n <= 0 ? 1 : Math.min(n, 20);
-  }
-  const configured = getGlobalConfig().scrollSpeed;
-  if (configured === undefined) return 1;
-  return Number.isNaN(configured) || configured <= 0
-    ? 1
-    : Math.min(configured, 20);
+  if (raw) return normalizeScrollSpeed(parseFloat(raw));
+  return normalizeScrollSpeed(getGlobalConfig().scrollSpeed ?? 1);
 }
 
 /** Initial wheel accel state. xtermJs=true selects the decay curve.
@@ -345,10 +345,7 @@ function initAndLogWheelAccel(): WheelAccelState {
   return initWheelAccel(xtermJs, base);
 }
 
-// /scroll-speed changes take effect on the next wheel event: the persisted
-// base is re-read per event and the accel baseline follows it. getGlobalConfig
-// is a cached memory read, so the per-event cost is trivial.
-function refreshWheelBase(state: WheelAccelState): void {
+function syncWheelBaseFromConfig(state: WheelAccelState): void {
   const base = readScrollSpeedBase();
   if (state.base !== base) {
     state.base = base;
@@ -491,7 +488,7 @@ export function ScrollKeybindingHandler({
       // inside the centered Modal, where the paginated slice always fits).
       if (!s_2 || s_2.getScrollHeight() <= s_2.getViewportHeight()) return false;
       wheelAccel.current ??= initAndLogWheelAccel();
-      refreshWheelBase(wheelAccel.current);
+      syncWheelBaseFromConfig(wheelAccel.current);
       scrollUp(s_2, computeWheelStep(wheelAccel.current, -1, performance.now()));
       onScroll?.(false, s_2);
     },
@@ -500,7 +497,7 @@ export function ScrollKeybindingHandler({
       const s_3 = scrollRef.current;
       if (!s_3 || s_3.getScrollHeight() <= s_3.getViewportHeight()) return false;
       wheelAccel.current ??= initAndLogWheelAccel();
-      refreshWheelBase(wheelAccel.current);
+      syncWheelBaseFromConfig(wheelAccel.current);
       const step = computeWheelStep(wheelAccel.current, 1, performance.now());
       const reachedBottom = scrollDown(s_3, step);
       onScroll?.(reachedBottom, s_3);

@@ -1,4 +1,5 @@
 import chalk from 'chalk'
+import { MAX_SCROLL_SPEED } from '../../components/ScrollKeybindingHandler.js'
 import type { LocalCommandCall } from '../../types/command.js'
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 
@@ -19,7 +20,7 @@ export const call: LocalCommandCall = async args => {
   }
 
   const speed = parseFloat(input)
-  if (Number.isNaN(speed) || speed <= 0 || speed > 20) {
+  if (Number.isNaN(speed) || speed <= 0 || speed > MAX_SCROLL_SPEED) {
     return { type: 'text', value: USAGE }
   }
 
