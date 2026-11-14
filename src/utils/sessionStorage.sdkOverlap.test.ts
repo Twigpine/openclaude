@@ -1291,12 +1291,16 @@ test('a failed deletion restores the session\u2019s started identity', async () 
   expect(getStartedSessionKeysSizeForTesting()).toBe(1)
 
   // Switching away must not migrate the surviving session's title into B.
-  await turnStart(SESSION_B, async () => {
+  // The switch runs inside A's own continuation: turnStart(SESSION_B)
+  // would switch inside a context that already holds B, so the switch
+  // reports B as its own outgoing identity and nothing of A's could
+  // migrate — the test would pass even with the restoration missing.
+  await turnContinuation(SESSION_A, async () => {
+    switchSession(SESSION_B as never, null)
     expect(getCurrentSessionTitle(SESSION_B as never)).toBeUndefined()
     await recordTranscript([message(randomUUID(), 'B first')])
     await flushSessionStorage()
-  })
-  await turnStart(SESSION_A, async () => {
+    switchSession(SESSION_A as never, null)
     expect(getCurrentSessionTitle(SESSION_A as never)).toBe('A Title')
     await recordTranscript([message(randomUUID(), 'A returns')])
     await flushSessionStorage()
