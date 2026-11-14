@@ -626,6 +626,15 @@ for that profile. Query options such as `?reasoning=high` or `?thinking=disabled
 remain in the selected model, but context-limit keys use the model name before
 `?`. For example, `gpt-5.4?reasoning=high` uses the `gpt-5.4` context limit.
 
+### Session behavior
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CLAUDE_CODE_DISABLE_ULTRATHINK` | No | Set truthy to stop the `ultrathink` keyword from raising the turn to high effort |
+| `CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES` | No | Set truthy to stop periodic forked-agent progress-summary requests for running agents |
+| `CLAUDE_CODE_DISABLE_FILE_MENTIONS` | No | Set truthy so `@`-mentioned files pass their path only; contents are not read into context |
+| `CLAUDE_CODE_RESUME_HINT_COMMAND` | No | Override the program name printed in the exit-time resume hint (default: `openclaude`) |
+
 ### Web search
 
 [Exa](https://exa.ai) is the default web search backend. With no setup, searches

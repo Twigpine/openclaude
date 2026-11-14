@@ -2135,6 +2135,10 @@ async function processAtMentionedFiles(
   )
 }
 
+export function isFileMentionsDisabledByEnv(): boolean {
+  return isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_FILE_MENTIONS)
+}
+
 async function processAtMentionedFilesWithDependencies(
   input: string,
   toolUseContext: AttachmentFileContext,
@@ -2142,6 +2146,12 @@ async function processAtMentionedFilesWithDependencies(
 ): Promise<Attachment[]> {
   const files = extractAtMentionedFiles(input)
   if (files.length === 0) return []
+
+  // The @-mention text stays in the prompt so the model can Read the path
+  // itself when file mentions are disabled.
+  if (isFileMentionsDisabledByEnv()) {
+    return []
+  }
 
   const appState = toolUseContext.getAppState()
   const results = await mapWithConcurrency(
