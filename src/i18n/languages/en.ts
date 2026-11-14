@@ -106,6 +106,8 @@ export const en = {
     'Audit loaded skills: which went unused this session and what they cost in context.',
   'skills.lessPermissionPrompts.description':
     'Scan recent sessions for frequently prompted read-only commands and propose a project allowlist.',
+  'skills.dataviz.description':
+    'Chart and dashboard design guidance, with a palette contrast validator.',
   'skills.simplify.description':
     'Review changed code for reuse, quality, and efficiency, then fix any issues found.',
   'skills.update-config.description':
