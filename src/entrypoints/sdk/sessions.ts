@@ -5,7 +5,8 @@
  * rename, tag, delete, and fork.
  */
 
-import { randomUUID } from 'crypto'
+import { randomUUID, type UUID } from 'crypto'
+import { existsSync } from 'fs'
 import { appendFile, mkdir, unlink, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import {
@@ -13,6 +14,11 @@ import {
   parseSessionInfoFromLite,
   type SessionInfo,
 } from '../../utils/listSessionsImpl.js'
+import {
+  finishDeletedSession,
+  forgetDeletedSession,
+  restoreSessionWrites,
+} from '../../utils/sessionStorage.js'
 import {
   readSessionLite,
   resolveSessionFilePath,
@@ -287,6 +293,19 @@ export async function tagSession(
 /**
  * Delete a session by removing its JSONL file from disk.
  *
+ * Blocks later writes to it first (see forgetDeletedSession): a pending AI
+ * title, task summary, or metadata append would otherwise recreate the
+ * file and the session would come back. That also drops the deleted
+ * session's per-context caches, so a later query reusing its id and cwd
+ * starts clean instead of inheriting its cached title/tag (#2489).
+ *
+ * A query that starts while the deletion is still in flight waits for
+ * it to settle (see waitForDeletionToSettle in sessionStorage.ts) instead
+ * of materializing into the marked path and losing its first message to
+ * the removal: once the file is gone it starts clean at the recycled
+ * path, and if the removal fails the surviving transcript keeps
+ * receiving writes.
+ *
  * @param sessionId - UUID of the session to delete
  * @param options - Optional dir to narrow the search
  * @throws If sessionId is invalid or session file is not found
@@ -301,7 +320,30 @@ export async function deleteSession(
     throw new Error(`Session not found: ${sessionId}`)
   }
 
-  await unlink(resolved.filePath)
+  try {
+    await forgetDeletedSession(sessionId as UUID, resolved.filePath)
+  } catch (error) {
+    // Nothing was removed (a pending write failed while settling): undo the
+    // mark so the still-present transcript keeps receiving writes.
+    restoreSessionWrites(resolved.filePath)
+    finishDeletedSession(resolved.filePath)
+    throw error
+  }
+
+  try {
+    await unlink(resolved.filePath)
+  } catch (error) {
+    // The transcript survived (e.g. EBUSY on Windows): stop dropping writes
+    // to it, or disk and this process disagree until restart.
+    if (existsSync(resolved.filePath)) {
+      restoreSessionWrites(resolved.filePath)
+    }
+    finishDeletedSession(resolved.filePath)
+    throw error
+  }
+  // Removed: drop the metadata snapshot forgetDeletedSession kept for the
+  // failure path, or one snapshot lingers per deletion.
+  finishDeletedSession(resolved.filePath)
 }
 
 // ============================================================================

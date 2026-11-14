@@ -4,7 +4,7 @@ import type { Dirent } from 'fs'
 // Sync fs primitives for readFileTailSync — separate from fs/promises
 // imports above. Named (not wildcard) per CLAUDE.md style; no collisions
 // with the async-suffixed names.
-import { closeSync, fstatSync, openSync, readSync } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'fs'
 import {
   appendFile as fsAppendFile,
   open as fsOpen,
@@ -27,6 +27,7 @@ import {
   getPlanSlugCache,
   getPromptId,
   getReplayIndexBuilder,
+  getSdkContext,
   getSessionId,
   getSessionProjectDir,
   onSessionSwitch,
@@ -566,6 +567,16 @@ export function isEphemeralToolProgress(dataType: unknown): boolean {
 }
 
 export function getTranscriptPath(): string {
+  // An established session keeps writing to its pinned transcript even
+  // when the working directory moves — entering or exiting a worktree
+  // changes originalCwd without changing the session — so the cached
+  // pointer is the transcript actually receiving writes. Export it
+  // instead of re-deriving a path under the new cwd that no file was
+  // ever written to (consumers opening that path get ENOENT). No pointer
+  // yet (fresh session) keeps the cwd-derived path. The pointer is
+  // per-context-identity, so overlapping SDK sessions keep their own.
+  const pinned = project?.sessionFile ?? null
+  if (pinned !== null) return pinned
   const projectDir = getSessionProjectDir() ?? getProjectDir(getOriginalCwd())
   return join(projectDir, `${getSessionId()}.jsonl`)
 }
@@ -843,10 +854,9 @@ let project: Project | null = null
 let cleanupRegistered = false
 /** Held so the subscription can be given up again — see resetProjectForTesting. */
 let unsubscribeSessionSwitch: (() => void) | null = null
-/** The session the cached file pointer belongs to. */
-let pointerSessionId: string | null = null
 /**
- * And the project directory it was resolved under.
+ * The session the last switch anywhere in this process moved to, and the
+ * project directory it was resolved under.
  *
  * Raised in review. `switchSession(id, projectDir)` sets BOTH, and emits only
  * the id — so a switch that keeps the id and changes the directory would slip
@@ -855,14 +865,18 @@ let pointerSessionId: string | null = null
  * the session's own `_sessionProjectDir`, and `query.ts` with the resolved
  * transcript dir.
  */
+let pointerSessionId: string | null = null
 let pointerProjectDir: string | null = null
 
 /**
  * Follow switchSession with the file pointer.
  *
- * `Project.sessionFile` is resolved once and cached for the life of the
- * process. Every CLI path that changes the active session resets it by hand
- * immediately afterwards — sessionRestore.ts, /clear, print.ts all call
+ * `Project.sessionFile` is resolved once and cached per SDK context (see
+ * the accessor on Project: one entry per session id + project directory
+ * (+ cwd in SDK contexts), so overlapping sessions cannot share a
+ * pointer). Every CLI path
+ * that changes the active session resets it by hand immediately
+ * afterwards — sessionRestore.ts, /clear, print.ts all call
  * resetSessionFilePointer right after switchSession, and its own docstring
  * says that is when to call it.
  *
@@ -882,23 +896,59 @@ let pointerProjectDir: string | null = null
  * Only on a real change: v2 calls switchSession before EVERY turn with the id
  * it already has, and resetting the pointer each time would drop buffered
  * entries and re-resolve the same path for nothing. "The same" means both the
- * id and the project directory, because both decide the path.
+ * id and the project directory, because both decide the path — and it must
+ * hold for this context AND for the process: the switch is a no-op only when
+ * the switching context's own outgoing identity matches the incoming one
+ * (its deferred startup selections have nowhere to migrate from) and the
+ * last switch anywhere already moved to the same identity. Either
+ * comparison alone is wrong: a process-wide last-switch check suppresses a
+ * second context's real switch to the same id (two overlapping sessions can
+ * share an id in different directories, and the second one's deferred
+ * startup selections still need carrying), while a per-context check alone
+ * misses a fresh context constructed with the target identity already in
+ * place — its outgoing identity then reads as the incoming one even though
+ * the session really moved (e.g. the same id in another directory).
  */
 function followSessionSwitches(): void {
   if (unsubscribeSessionSwitch) return
   pointerSessionId = getSessionId()
   pointerProjectDir = getSessionProjectDir()
-  unsubscribeSessionSwitch = onSessionSwitch(sessionId => {
-    // Read rather than received: the signal carries the id alone, and
-    // switchSession has already set the directory by the time it emits.
+  unsubscribeSessionSwitch = onSessionSwitch((sessionId, previous) => {
+    // The signal carries the incoming id and the outgoing identity; read
+    // the directory rather than receiving it: switchSession has already
+    // set it by the time it emits.
     const projectDir = getSessionProjectDir()
-    if (sessionId === pointerSessionId && projectDir === pointerProjectDir) return
+    // A no-op switch for this context: the id and directory are the ones
+    // it already had, so there is nothing to carry across — and the last
+    // switch anywhere already moved here. `switchSession` sets BOTH, so a
+    // switch that keeps the id and changes the directory is a real change:
+    // the SDK does exactly that (v2.ts switches before every turn with
+    // the session's own `_sessionProjectDir`, query.ts with the resolved
+    // transcript dir) and the pointer must follow it.
+    if (
+      sessionId === previous.sessionId &&
+      projectDir === previous.sessionProjectDir &&
+      sessionId === pointerSessionId &&
+      projectDir === pointerProjectDir
+    )
+      return
     pointerSessionId = sessionId
     pointerProjectDir = projectDir
+    // The outgoing identity is this context's key before the switch:
+    // the only correct source for the deferred startup selections
+    // migrateStartupMetadata carries across. A global "last written"
+    // key would point at whichever overlapping session wrote last.
+    // The key is the context-aware one (see sessionFileKeyForIdentity):
+    // the CLI's global context omits the cwd, so a switch made while
+    // inside a worktree still reports the established identity.
+    const previousKey = getProject().sessionFileKeyForIdentity(
+      previous.sessionId,
+      previous.sessionProjectDir,
+    )
     // Lazily re-resolved from the new session id on the next write. An
     // existing file is appended to, not replaced — a resume lands back in the
     // conversation it came from.
-    project?.resetSessionFile()
+    project?.resetSessionFile(previousKey)
   })
 }
 
@@ -918,7 +968,7 @@ function getProject(): Project {
         // shows the auto-generated firstPrompt instead.
         await project?.flush()
         try {
-          project?.reAppendSessionMetadata()
+          project?.reAppendSessionMetadataOnShutdown()
         } catch {
           // Best-effort — don't let metadata re-append crash the cleanup
         }
@@ -983,6 +1033,43 @@ export function setSessionFileForTesting(path: string): void {
   getProject().sessionFile = path
 }
 
+/**
+ * The cached transcript file pointer for the current session context,
+ * for testing. Proves a deletion marked while the existence check was in
+ * flight does not resurrect the pointer for the deleted transcript.
+ */
+export function getSessionFileForTesting(): string | null {
+  return getProject().sessionFile
+}
+
+/**
+ * Size of the per-context transcript caches (paths + metadata) for testing.
+ * Proves the bound: creating more sessions than MAX_SESSION_CACHE_ENTRIES
+ * must not grow the caches past it.
+ */
+export function getSessionTranscriptCacheSizeForTesting(): number {
+  return getProject()._sessionTranscriptCacheSize()
+}
+
+/**
+ * Number of dropped-metadata snapshots awaiting restore, for testing.
+ * Proves the bound on the other side: a successful deletion must discard
+ * its snapshot instead of retaining it until the path is recycled.
+ */
+export function getDroppedSessionMetadataSizeForTesting(): number {
+  return getProject()._droppedSessionMetadataSize()
+}
+
+/**
+ * Number of started-session identities retained, for testing. Proves the
+ * bound on the third retained state (see startedSessionKeys): creating
+ * more sessions than MAX_SESSION_CACHE_ENTRIES must not grow it past the
+ * bound, and deleting a transcript must release its identity.
+ */
+export function getStartedSessionKeysSizeForTesting(): number {
+  return getProject()._startedSessionKeysSize()
+}
+
 type InternalEventWriter = (
   eventType: string,
   payload: Record<string, unknown>,
@@ -1027,28 +1114,650 @@ const REMOTE_FLUSH_INTERVAL_MS = 10
 
 type SidechainDestination = { path: string; sessionId: UUID }
 
-class Project {
-  // Minimal cache for current session only (not all sessions)
-  currentSessionTag: string | undefined
-  currentSessionTitle: string | undefined
-  currentSessionAgentName: string | undefined
-  currentSessionAgentColor: string | undefined
-  currentSessionLastPrompt: string | undefined
-  currentSessionAgentSetting: string | undefined
-  currentSessionMode: 'coordinator' | 'normal' | undefined
-  // Tri-state: undefined = never touched (don't write), null = exited worktree,
+/**
+ * Session metadata cached for the session active in the current context
+ * only — title, tag, agent, mode, worktree, PR link, goal, branch.
+ *
+ * `Project` is a process-wide singleton, but the session it appends for
+ * is context-scoped (`bootstrap/state.ts`), so these caches must be
+ * scoped to the same identity as `sessionFile` (see `sessionFileKey`).
+ * They were plain process-wide fields: one session's switch cleared
+ * another session's cached title (via `resetSessionFile` →
+ * `clearSessionMetadata`), and the other session's
+ * `reAppendSessionMetadata` then wrote the first session's tag into its
+ * own transcript whenever its own tail held no tag — the same bug class
+ * as #2267, one layer up. Scoping them per context keeps a switch or
+ * reset in one context from touching another's metadata.
+ */
+type SessionMetadata = {
+  tag?: string
+  title?: string
+  agentName?: string
+  agentColor?: string
+  lastPrompt?: string
+  agentSetting?: string
+  mode?: 'coordinator' | 'normal'
+  // Tri-state: absent = never touched (don't write), null = exited worktree,
   // object = currently in worktree. reAppendSessionMetadata writes null so
   // --resume knows the session exited (vs. crashed while inside).
-  currentSessionWorktree: PersistedWorktreeSession | null | undefined
-  currentSessionPrNumber: number | undefined
-  currentSessionPrUrl: string | undefined
-  currentSessionPrRepository: string | undefined
-  currentSessionGoal: GoalStateEntry['goal'] | undefined
-  currentSessionBranch: SessionBranchEntry | undefined
+  worktree?: PersistedWorktreeSession | null
+  prNumber?: number
+  prUrl?: string
+  prRepository?: string
+  goal?: GoalStateEntry['goal']
+  /**
+   * Monotonic sequence of the last goal write cached under this key.
+   * Set alongside `goal` (see currentSessionGoal) and cleared with it, so
+   * the two always travel as a pair — including through
+   * mergeSessionMetadata. Lets shutdown reconcile alias entries for one
+   * transcript last-writer-wins (see reconcileAliasMetadata): the caches
+   * carry no timestamps, so without it a stale active goal from an
+   * earlier alias cannot be told apart from a later clear.
+   */
+  goalSeq?: number
+  /**
+   * Monotonic sequence of the last worktree write cached under this key.
+   * Set alongside `worktree` (see currentSessionWorktree) and cleared
+   * with it, so the two always travel as a pair — including through
+   * mergeSessionMetadata. Lets shutdown reconcile alias entries for one
+   * transcript last-writer-wins (see reconcileAliasMetadata): the caches
+   * carry no timestamps, so without it a stale worktree object from an
+   * earlier alias cannot be told apart from a later exit (null) — and
+   * the merge would follow sessionFiles order instead of write order,
+   * resurrecting the worktree after the exit.
+   */
+  worktreeSeq?: number
+  branch?: SessionBranchEntry
+}
 
-  sessionFile: string | null = null
-  // A conversation can start without a file when persistence is disabled.
-  private hasStartedSession = false
+/**
+ * Merge a saved metadata snapshot with a newer live entry for the same
+ * session. The live entry's defined fields win — a concurrent update is
+ * fresher — and the saved entry fills in the fields the live one lacks
+ * (a title/tag cached before the entry was recreated). `undefined` never
+ * clobbers a saved field: setSessionMetadataField deletes a field instead
+ * of storing undefined. `null` is a real value (worktree: exited) and wins
+ * like any other defined field.
+ */
+function mergeSessionMetadata(
+  saved: SessionMetadata,
+  current: SessionMetadata,
+): SessionMetadata {
+  const merged: SessionMetadata = { ...saved }
+  for (const field of Object.keys(current) as Array<keyof SessionMetadata>) {
+    const value = current[field]
+    if (value !== undefined) merged[field] = value as never
+  }
+  return merged
+}
+
+/**
+ * Identity of the transcript `getTranscriptPath()` derives for one
+ * session: the session id, the project directory, and the cwd it falls
+ * back to. All three are context-scoped, so two overlapping SDK
+ * sessions — and the same id resumed in two directories — never share
+ * a cache entry. The same triple always derives the same path, so a
+ * missed reset (e.g. the same-id switch v2 makes before every turn)
+ * can only reuse the correct path.
+ *
+ * This is the SDK form of the key. The CLI's global context omits the
+ * cwd (see `Project.sessionFileKeyForIdentity`): its cwd is mutable
+ * within one conversation, so keying on it would hide an established
+ * pointer and its metadata behind a worktree cwd change (#2489).
+ */
+function sessionFileKeyFor(
+  sessionId: SessionId,
+  projectDir: string | null,
+  cwd: string,
+): string {
+  return `${sessionId}\0${projectDir ?? ''}\0${cwd}`
+}
+
+/**
+ * Split a cache key back into its identity components: session id,
+ * project directory (null when the key carries none), and — for SDK
+ * keys — the destination cwd (null for global keys, which carry none).
+ */
+function splitSessionFileKey(key: string): {
+  sessionId: string
+  projectDir: string | null
+  cwd: string | null
+} {
+  const parts = key.split('\0')
+  return {
+    sessionId: parts[0] ?? '',
+    projectDir: parts[1] ? parts[1] : null,
+    cwd: parts[2] ?? null,
+  }
+}
+
+class Project {
+  // Minimal cache for current session only (not all sessions) — one entry
+  // per context identity (see sessionFileKey), never shared across sessions.
+  private sessionMetadata = new Map<string, SessionMetadata>()
+
+  /** Metadata for the session active in the current context, if any. */
+  private metadataForRead(): SessionMetadata | undefined {
+    const key = this.sessionFileKey()
+    const entry = this.sessionMetadata.get(key)
+    if (entry) {
+      // Touch so the bounded cache evicts least-recently-used entries first.
+      this.sessionMetadata.delete(key)
+      this.sessionMetadata.set(key, entry)
+    }
+    return entry
+  }
+
+  /**
+   * True when the current context's session has an established transcript
+   * on disk even though its cached pointer was evicted (see
+   * restoreEvictedSessionFile): the file's existence is the same
+   * established-start evidence the pointer is. A deleted mark means the
+   * transcript is being removed, so it does not count.
+   */
+  private hasEstablishedTranscript(): boolean {
+    const transcriptPath = resolvePath(getTranscriptPath())
+    return (
+      !this.isDeletedSessionFile(transcriptPath) &&
+      existsSync(transcriptPath)
+    )
+  }
+
+  /** Metadata for the session active in the current context, creating it. */
+  private metadataForWrite(): SessionMetadata {
+    const key = this.sessionFileKey()
+    let entry = this.sessionMetadata.get(key)
+    if (entry) {
+      this.sessionMetadata.delete(key)
+    } else {
+      entry = {}
+    }
+    this.sessionMetadata.set(key, entry)
+    // A metadata write for an identity with an established pointer is a
+    // live session re-caching after eviction: boundSessionCaches evicted
+    // its started identity with the metadata, so re-mark it — otherwise
+    // a later switch would treat it as provisional and migrate these
+    // fields into the next session. The pointer itself may have been
+    // evicted too; an existing transcript on disk is the same evidence
+    // of an established session, so re-mark then as well. A provisional
+    // identity has neither a pointer nor a transcript, so deferred
+    // startup selections still migrate. The disk check runs only when
+    // the pointer is gone, so the common path pays no extra stat.
+    if (this.sessionFiles.has(key) || this.hasEstablishedTranscript()) {
+      this.markSessionStarted(key)
+    }
+    this.boundSessionCaches()
+    return entry
+  }
+
+  /**
+   * Move deferred startup selections (title, agent setting, worktree)
+   * cached under a previous session identity into the current context's
+   * entry.
+   *
+   * They are cached before --continue/--resume chooses a transcript,
+   * under the startup session's identity; the switch (or regenerate)
+   * that picks the resumed session changes the key, so without this
+   * carry `resetSessionFile`'s startup preservation below would read an
+   * empty entry and drop them. `previousKey` is the outgoing identity
+   * the switch itself reports (see onSessionSwitch): under overlap it
+   * is the only correct source — a global "last written" key would
+   * point at whichever overlapping session wrote last, and moving from
+   * it would steal that session's title. Only before this context's
+   * session has started: once a session is established its metadata
+   * belongs to it and must never migrate to another session. The source
+   * must be a key whose session has not started either: without that,
+   * a switch away from a live session would move its title/agent/
+   * worktree into the new one — and delete them from its own entry,
+   * since this is a move. Null when the reset follows no switch
+   * (explicit reset, deletion): there is nothing to carry.
+   */
+  private migrateStartupMetadata(previousKey: string | null): void {
+    if (this.hasStartedSessionInCurrentContext()) return
+    const currentKey = this.sessionFileKey()
+    if (previousKey === null || previousKey === currentKey) return
+    if (this.startedSessionKeys.has(previousKey)) return
+    const previous = this.sessionMetadata.get(previousKey)
+    if (!previous) return
+    const current = this.metadataForWrite()
+    // Fill only fields this context does not already have; a value cached
+    // under this identity already is the newer word for it.
+    if (current.title === undefined && previous.title !== undefined) {
+      current.title = previous.title
+    }
+    if (
+      current.agentSetting === undefined &&
+      previous.agentSetting !== undefined
+    ) {
+      current.agentSetting = previous.agentSetting
+    }
+    if (current.worktree === undefined && previous.worktree !== undefined) {
+      current.worktree = previous.worktree
+      if (previous.worktreeSeq !== undefined) {
+        current.worktreeSeq = previous.worktreeSeq
+      }
+    }
+    // Move, don't copy: the selections now belong to the resumed session.
+    delete previous.title
+    delete previous.agentSetting
+    delete previous.worktree
+    delete previous.worktreeSeq
+    if (Object.keys(previous).length === 0) {
+      this.sessionMetadata.delete(previousKey)
+    }
+  }
+
+  private setSessionMetadataField<K extends keyof SessionMetadata>(
+    field: K,
+    value: SessionMetadata[K] | undefined,
+  ): void {
+    if (value === undefined) {
+      const key = this.sessionFileKey()
+      const entry = this.sessionMetadata.get(key)
+      if (!entry) return
+      delete entry[field]
+      if (Object.keys(entry).length === 0) this.sessionMetadata.delete(key)
+      return
+    }
+    this.metadataForWrite()[field] = value
+  }
+
+  /** Metadata entry for an explicit cache key, without creating it. */
+  private metadataEntryForKey(key: string): SessionMetadata | undefined {
+    const entry = this.sessionMetadata.get(key)
+    if (entry) {
+      // Touch so the bounded cache evicts least-recently-used entries first.
+      this.sessionMetadata.delete(key)
+      this.sessionMetadata.set(key, entry)
+    }
+    return entry
+  }
+
+  /**
+   * Metadata entry for an explicit cache key, creating it. Mirrors
+   * metadataForWrite: an identity with an established pointer or an
+   * existing transcript is a live session re-caching after eviction, so
+   * it is re-marked started.
+   */
+  private metadataForWriteForKey(key: string): SessionMetadata {
+    let entry = this.sessionMetadata.get(key)
+    if (entry) {
+      this.sessionMetadata.delete(key)
+    } else {
+      entry = {}
+    }
+    this.sessionMetadata.set(key, entry)
+    const transcriptPath = this.transcriptPathForKey(key)
+    if (
+      this.sessionFiles.has(key) ||
+      (!this.isDeletedSessionFile(transcriptPath) &&
+        existsSync(transcriptPath))
+    ) {
+      this.markSessionStarted(key)
+    }
+    this.boundSessionCaches()
+    return entry
+  }
+
+  /** Set one metadata field under an explicit cache key. */
+  private setSessionMetadataFieldForKey<K extends keyof SessionMetadata>(
+    key: string,
+    field: K,
+    value: SessionMetadata[K] | undefined,
+  ): void {
+    if (value === undefined) {
+      const entry = this.sessionMetadata.get(key)
+      if (!entry) return
+      delete entry[field]
+      if (Object.keys(entry).length === 0) this.sessionMetadata.delete(key)
+      return
+    }
+    this.metadataForWriteForKey(key)[field] = value
+  }
+
+  get currentSessionTag(): string | undefined {
+    return this.metadataForRead()?.tag
+  }
+  set currentSessionTag(tag: string | undefined) {
+    this.setSessionMetadataField('tag', tag)
+  }
+  get currentSessionTitle(): string | undefined {
+    return this.metadataForRead()?.title
+  }
+  set currentSessionTitle(title: string | undefined) {
+    this.setSessionMetadataField('title', title)
+  }
+  get currentSessionAgentName(): string | undefined {
+    return this.metadataForRead()?.agentName
+  }
+  set currentSessionAgentName(agentName: string | undefined) {
+    this.setSessionMetadataField('agentName', agentName)
+  }
+  get currentSessionAgentColor(): string | undefined {
+    return this.metadataForRead()?.agentColor
+  }
+  set currentSessionAgentColor(agentColor: string | undefined) {
+    this.setSessionMetadataField('agentColor', agentColor)
+  }
+  get currentSessionLastPrompt(): string | undefined {
+    return this.metadataForRead()?.lastPrompt
+  }
+  set currentSessionLastPrompt(lastPrompt: string | undefined) {
+    this.setSessionMetadataField('lastPrompt', lastPrompt)
+  }
+  get currentSessionAgentSetting(): string | undefined {
+    return this.metadataForRead()?.agentSetting
+  }
+  set currentSessionAgentSetting(agentSetting: string | undefined) {
+    this.setSessionMetadataField('agentSetting', agentSetting)
+  }
+  get currentSessionMode(): 'coordinator' | 'normal' | undefined {
+    return this.metadataForRead()?.mode
+  }
+  set currentSessionMode(mode: 'coordinator' | 'normal' | undefined) {
+    this.setSessionMetadataField('mode', mode)
+  }
+  get currentSessionWorktree(): PersistedWorktreeSession | null | undefined {
+    return this.metadataForRead()?.worktree
+  }
+  set currentSessionWorktree(
+    worktree: PersistedWorktreeSession | null | undefined,
+  ) {
+    this.setSessionMetadataField('worktree', worktree)
+    // Order stamp for the worktree write (see `worktreeSeq`): an exit
+    // (null) is a real value and gets a stamp like any other write;
+    // deleting the field (undefined) drops its stamp with it, so a stale
+    // sequence can never outrank a live worktree state in
+    // reconcileAliasMetadata.
+    const entry = this.sessionMetadata.get(this.sessionFileKey())
+    if (!entry) return
+    if (worktree === undefined) delete entry.worktreeSeq
+    else entry.worktreeSeq = ++this.worktreeWriteSeq
+  }
+  get currentSessionPrNumber(): number | undefined {
+    return this.metadataForRead()?.prNumber
+  }
+  set currentSessionPrNumber(prNumber: number | undefined) {
+    this.setSessionMetadataField('prNumber', prNumber)
+  }
+  get currentSessionPrUrl(): string | undefined {
+    return this.metadataForRead()?.prUrl
+  }
+  set currentSessionPrUrl(prUrl: string | undefined) {
+    this.setSessionMetadataField('prUrl', prUrl)
+  }
+  get currentSessionPrRepository(): string | undefined {
+    return this.metadataForRead()?.prRepository
+  }
+  set currentSessionPrRepository(prRepository: string | undefined) {
+    this.setSessionMetadataField('prRepository', prRepository)
+  }
+  get currentSessionGoal(): GoalStateEntry['goal'] | undefined {
+    return this.metadataForRead()?.goal
+  }
+  set currentSessionGoal(goal: GoalStateEntry['goal'] | undefined) {
+    this.setSessionMetadataField('goal', goal)
+    // Order stamp for the goal write (see `goalSeq`): a clear (null) is a
+    // real value and gets a stamp like any other write; deleting the field
+    // (undefined) drops its stamp with it, so a stale sequence can never
+    // outrank a live goal in reconcileAliasMetadata.
+    const entry = this.sessionMetadata.get(this.sessionFileKey())
+    if (!entry) return
+    if (goal === undefined) delete entry.goalSeq
+    else entry.goalSeq = ++this.goalWriteSeq
+  }
+  get currentSessionBranch(): SessionBranchEntry | undefined {
+    return this.metadataForRead()?.branch
+  }
+  set currentSessionBranch(branch: SessionBranchEntry | undefined) {
+    this.setSessionMetadataField('branch', branch)
+  }
+
+  /**
+   * Cached transcript path for the session active in the current context.
+   *
+   * `Project` is a process-wide singleton, but the session it appends for
+   * is context-scoped: each SDK session runs its turns inside its own
+   * `AsyncLocalStorage` context (`bootstrap/state.ts`), and two sessions
+   * can overlap in one process. A single cached pointer let one session's
+   * switch resolve the pointer to its own file and the other session's
+   * in-flight append follow it — the `isCurrentSession` check still
+   * passed, because the id really is that session's in its own context —
+   * so records landed in the wrong transcript (#2267).
+   *
+   * The pointer is therefore cached per context identity (see
+   * `sessionFileKey`), not per process: a switch or reset in one context
+   * only ever touches that context's entry, and an in-flight turn keeps
+   * resolving to its own file. Reads and writes go through this accessor
+   * so every existing call site becomes context-scoped with no other
+   * change; the CLI's process-global session is just the context with no
+   * SDK store, so its behavior is unchanged.
+   */
+  get sessionFile(): string | null {
+    const key = this.sessionFileKey()
+    const path = this.sessionFiles.get(key)
+    if (path === undefined) return null
+    // Touch so the bounded cache evicts least-recently-used entries first.
+    this.sessionFiles.delete(key)
+    this.sessionFiles.set(key, path)
+    return path
+  }
+
+  set sessionFile(path: string | null) {
+    this.setSessionFileForKey(this.sessionFileKey(), path)
+  }
+
+  /**
+   * Set the cached transcript path under an explicit cache key, for
+   * callers that captured the identity before an await (see appendEntry):
+   * the ambient key after the await may name a different session.
+   */
+  private setSessionFileForKey(key: string, path: string | null): void {
+    if (path === null) {
+      this.sessionFiles.delete(key)
+    } else {
+      this.sessionFiles.delete(key)
+      this.sessionFiles.set(key, path)
+      this.boundSessionCaches()
+    }
+  }
+
+  // One cached path per context identity. Entries are dropped with their
+  // context's reset and with the singleton (resetProjectForTesting) — but
+  // a closed SDK session gets neither: neither v2 nor query close() touches
+  // sessionStorage, so without a bound the map would keep one entry per
+  // session a long-running host ever materialized. Cap both per-context
+  // caches (paths + metadata, same identity) and evict least-recently-used
+  // entries; eviction is safe because a path is always re-derived from
+  // its context identity (getTranscriptPath) and title/tag refresh from
+  // the transcript tail on re-append.
+  private sessionFiles = new Map<string, string>()
+
+  // First key computed per SDK context object, per base identity
+  // (session id + project directory). Pins an established SDK
+  // destination across the Enter/ExitWorktree cwd changes of its own
+  // turn (see sessionFileKeyForIdentity); the WeakMap releases the memo
+  // with the context, so it retains nothing past the turn (#2489).
+  private sdkSessionFileKeyMemo = new WeakMap<object, Map<string, string>>()
+
+  // Monotonic counter stamping goal writes (see `goalSeq` on
+  // SessionMetadata). Process-wide: only the relative order of writes
+  // in this process matters for alias reconciliation at shutdown.
+  private goalWriteSeq = 0
+
+  // Monotonic counter stamping worktree writes (see `worktreeSeq` on
+  // SessionMetadata). Same rule as goalWriteSeq: only the relative
+  // order of writes in this process matters.
+  private worktreeWriteSeq = 0
+
+  // Bound for the per-context transcript caches, matching the LRU default
+  // in conversationCache. Far above any realistic count of overlapping
+  // live sessions; eviction only ever drops long-idle contexts.
+  private readonly MAX_SESSION_CACHE_ENTRIES = 100
+
+  /** Evict least-recently-used entries past the bound, from all three caches. */
+  private boundSessionCaches(): void {
+    while (this.sessionFiles.size > this.MAX_SESSION_CACHE_ENTRIES) {
+      const oldest = this.sessionFiles.keys().next().value
+      if (oldest === undefined) return
+      this.sessionFiles.delete(oldest)
+      this.sessionMetadata.delete(oldest)
+    }
+    while (this.sessionMetadata.size > this.MAX_SESSION_CACHE_ENTRIES) {
+      const oldest = this.sessionMetadata.keys().next().value
+      if (oldest === undefined) return
+      this.sessionMetadata.delete(oldest)
+      this.sessionFiles.delete(oldest)
+      // The started guard protects this entry's metadata from migrating;
+      // dropping the guard without the metadata would let a later switch
+      // move it into another session, so they are evicted together.
+      this.startedSessionKeys.delete(oldest)
+    }
+    while (this.startedSessionKeys.size > this.MAX_SESSION_CACHE_ENTRIES) {
+      const oldest = this.startedSessionKeys.keys().next().value
+      if (oldest === undefined) return
+      this.startedSessionKeys.delete(oldest)
+      // Same pairing in the other direction: the guard and the metadata
+      // it protects are evicted together, so an evicted identity can
+      // never migrate fields it still has cached.
+      this.sessionMetadata.delete(oldest)
+    }
+  }
+
+  /** @internal Size of the per-context transcript caches, for testing. */
+  _sessionTranscriptCacheSize(): number {
+    return Math.max(
+      this.sessionFiles.size,
+      this.sessionMetadata.size,
+      this.startedSessionKeys.size,
+    )
+  }
+
+  /** @internal Number of dropped metadata snapshots awaiting restore, for testing. */
+  _droppedSessionMetadataSize(): number {
+    return this.droppedSessionMetadata.size
+  }
+
+  /** @internal Number of started-session identities retained, for testing. */
+  _startedSessionKeysSize(): number {
+    return this.startedSessionKeys.size
+  }
+
+  /**
+   * Cache key for a session identity as the current context sees it.
+   *
+   * In the CLI's global context the key is the session id + project
+   * directory only: the CLI is one conversation at a time, and its cwd
+   * moves — EnterWorktreeTool, resume's worktree restore — without
+   * changing the session, so keying on the cwd hides an established
+   * pointer and its metadata behind the new cwd and splits the
+   * conversation across two transcripts (#2489). A fresh session still
+   * derives its path from the current cwd at materialization; only an
+   * established identity is pinned to its session + project directory.
+   *
+   * In an SDK context the key keeps the cwd: two sessions may share an
+   * id with no project directory in different working directories, and
+   * those are genuinely separate destinations. An SDK session's cwd is
+   * stable for its life (a fresh context per turn, from the session's
+   * own cwd), so it never hides an established pointer the way the
+   * CLI's does.
+   */
+  sessionFileKeyForIdentity(
+    sessionId: SessionId,
+    projectDir: string | null,
+  ): string {
+    const ctx = getSdkContext()
+    if (ctx === undefined) {
+      return `${sessionId}\0${projectDir ?? ''}`
+    }
+    // The SDK context object identifies one turn of one session, and its
+    // originalCwd is mutable within that turn: EnterWorktreeTool changes
+    // it without changing the session. The first key computed in the turn
+    // pins the destination; later computations in the same turn keep it,
+    // so an established pointer and its metadata stay reachable across
+    // Enter/ExitWorktree. A fresh context (a new turn, or a different
+    // session) derives afresh, so genuinely different same-id SDK
+    // destinations in different cwds keep their own keys (#2489).
+    const base = `${sessionId}\0${projectDir ?? ''}`
+    let memo = this.sdkSessionFileKeyMemo.get(ctx)
+    if (!memo) {
+      memo = new Map()
+      this.sdkSessionFileKeyMemo.set(ctx, memo)
+    }
+    const pinned = memo.get(base)
+    if (pinned !== undefined) return pinned
+    const key = sessionFileKeyFor(sessionId, projectDir, getOriginalCwd())
+    memo.set(base, key)
+    return key
+  }
+
+  /**
+   * Transcript path a cache key names: the same derivation
+   * getTranscriptPath() uses, with the key's own cwd instead of the live
+   * one, so a key still names its transcript after the cwd moved.
+   */
+  private transcriptPathForKey(key: string): string {
+    const { sessionId, projectDir, cwd } = splitSessionFileKey(key)
+    return join(
+      projectDir ?? getProjectDir(cwd ?? getOriginalCwd()),
+      `${sessionId}.jsonl`,
+    )
+  }
+
+  /** Identity of the transcript `getTranscriptPath()` derives in this context (see sessionFileKeyForIdentity). */
+  private sessionFileKey(): string {
+    return this.sessionFileKeyForIdentity(
+      getSessionId(),
+      getSessionProjectDir(),
+    )
+  }
+  // Which context identities have started a session in this process: a
+  // key joins when its session materializes, or when a reset moves away
+  // from its established pointer. Per key, not per process — one
+  // overlapping SDK session materializing must not make a second
+  // context's deferred startup selections look already started (see
+  // migrateStartupMetadata). A conversation can start without a file
+  // when persistence is disabled.
+  //
+  // A Map, not a Set, so the started state shares the caches' LRU bound
+  // (see boundSessionCaches): closing sessions, deleting transcripts,
+  // and evicting caches release keys instead of retaining one per
+  // session a long-running host ever materialized (#2489).
+  private startedSessionKeys = new Map<string, true>()
+
+  /** True when the session for the current context has started. */
+  private hasStartedSessionInCurrentContext(): boolean {
+    const key = this.sessionFileKey()
+    if (!this.startedSessionKeys.has(key)) return false
+    // Touch so the bounded cache evicts least-recently-used entries first.
+    this.startedSessionKeys.delete(key)
+    this.startedSessionKeys.set(key, true)
+    return true
+  }
+
+  /**
+   * Mark one session identity started, refreshing its recency in the
+   * bounded started-state cache (see boundSessionCaches).
+   */
+  private markSessionStarted(key: string): void {
+    this.startedSessionKeys.delete(key)
+    this.startedSessionKeys.set(key, true)
+    this.boundSessionCaches()
+  }
+
+  /**
+   * Mark the session for the current context as started.
+   *
+   * Adopting a resumed transcript binds its pointer without recording a
+   * conversation message, so without this the session still looks
+   * unstarted: a later switch would treat it as a provisional identity
+   * and migrateStartupMetadata would move its title, agent setting, and
+   * worktree into the new session. An adopted session is established —
+   * its file already exists on disk — so it counts as started.
+   */
+  markCurrentSessionStarted(): void {
+    this.markSessionStarted(this.sessionFileKey())
+  }
   // Entries buffered while sessionFile is null, keyed by their transcript path
   // (session ID and project directory). Flushed on that destination's first
   // user/assistant message — prevents metadata-only session files without
@@ -1383,51 +2092,108 @@ class Project {
     )
   }
 
-  resetSessionFile(): void {
+  /**
+   * Reset the session file pointer after switchSession/regenerateSessionId.
+   * `previousKey` is the outgoing context's cache key, reported by the
+   * switch itself: deferred startup selections cached under it are
+   * carried into the new session (see migrateStartupMetadata). Null
+   * when the reset follows no switch (explicit reset, deletion) — there
+   * is nothing to carry.
+   */
+  resetSessionFile(previousKey: string | null = null): void {
     // Startup selections are cached before --continue/--resume chooses a
     // transcript. Keep only those deferred fields through its switch and
-    // explicit reset; metadata from an established session must be cleared.
-    if (this.sessionFile !== null) this.hasStartedSession = true
-    const startupMetadata = !this.hasStartedSession
+    // explicit reset.
+    if (this.sessionFile !== null) {
+      this.markSessionStarted(this.sessionFileKey())
+    }
+    // The selections were cached under the startup session's identity;
+    // carry them into this context before preserving them below.
+    if (!this.hasStartedSessionInCurrentContext()) {
+      this.migrateStartupMetadata(previousKey)
+    }
+    const startupMetadata = !this.hasStartedSessionInCurrentContext()
       ? {
           title: this.currentSessionTitle,
           agentSetting: this.currentSessionAgentSetting,
           worktree: this.currentSessionWorktree,
+          worktreeSeq: this.sessionMetadata.get(this.sessionFileKey())
+            ?.worktreeSeq,
         }
       : undefined
     this.sessionFile = null
     // The "current session only" metadata caches must not survive the move to
     // another session: reAppendSessionMetadata would otherwise write them into
-    // the next session's transcript. The CLI already paired
-    // resetSessionFilePointer with clearSessionMetadata() by hand (see
-    // REPL.tsx); doing it here makes the SDK path follow the same rule, since
-    // it has no restoreSessionMetadata call to put them back.
-    this.clearSessionMetadata()
-    if (startupMetadata) {
-      this.currentSessionTitle = startupMetadata.title
-      this.currentSessionAgentSetting = startupMetadata.agentSetting
-      this.currentSessionWorktree = startupMetadata.worktree
+    // the next session's transcript. They are scoped per context (see the
+    // accessors on Project), so clearing here drops only this context's
+    // entry — another overlapping session's cached title/tag is untouched.
+    // The CLI already paired resetSessionFilePointer with
+    // clearSessionMetadata() by hand (see REPL.tsx); doing it here makes the
+    // SDK path follow the same rule, since it has no restoreSessionMetadata
+    // call to put them back.
+    //
+    // Once this context's session has started, that rule no longer needs the clear: the
+    // incoming session's own entry belongs to it, and clearing here would
+    // drop a returning session's cached title on every turn switch — if the
+    // title has fallen outside the transcript tail, the next write cannot
+    // re-append it. Another session's metadata lives under its own key and
+    // cannot leak into this session's transcript. So the clear (and the
+    // startup restore with it) runs only before this context's session has started,
+    // where it drops stale pre-startup fields before the deferred selections
+    // are restored. CLI resume flows that want a clean cache clear explicitly
+    // (see REPL.tsx) and are unaffected.
+    if (!this.hasStartedSessionInCurrentContext()) {
+      this.clearSessionMetadata()
+      if (startupMetadata) {
+        this.currentSessionTitle = startupMetadata.title
+        this.currentSessionAgentSetting = startupMetadata.agentSetting
+        this.currentSessionWorktree = startupMetadata.worktree
+        // The restore re-asserts a value cached before the switch: keep
+        // its original write order instead of the setter's fresh stamp,
+        // so a stale startup worktree cannot outrank a later exit from
+        // another alias (see `worktreeSeq`).
+        const restored = this.sessionMetadata.get(this.sessionFileKey())
+        if (
+          restored &&
+          startupMetadata.worktree !== undefined &&
+          startupMetadata.worktreeSeq !== undefined
+        ) {
+          restored.worktreeSeq = startupMetadata.worktreeSeq
+        }
+      }
     }
     // Buffered entries are deliberately NOT dropped: they belong to the
     // session that recorded them and are flushed when THAT session
     // materializes. A switch away and back must keep them.
   }
 
-  /** Drops the "current session only" metadata caches. */
+  /** Drops the "current session only" metadata caches for this context. */
   clearSessionMetadata(): void {
-    this.currentSessionTitle = undefined
-    this.currentSessionTag = undefined
-    this.currentSessionAgentName = undefined
-    this.currentSessionAgentColor = undefined
-    this.currentSessionLastPrompt = undefined
-    this.currentSessionAgentSetting = undefined
-    this.currentSessionMode = undefined
-    this.currentSessionWorktree = undefined
-    this.currentSessionPrNumber = undefined
-    this.currentSessionPrUrl = undefined
-    this.currentSessionPrRepository = undefined
-    this.currentSessionGoal = undefined
-    this.currentSessionBranch = undefined
+    this.sessionMetadata.delete(this.sessionFileKey())
+  }
+
+  /**
+   * Restore the cached file pointer for the current context when it was
+   * dropped while the transcript still exists on disk — the same rule
+   * appendEntry applies (see there): LRU eviction (boundSessionCaches)
+   * drops long-idle contexts, and a switch drops it too. A deleted mark
+   * or a missing file means there is nothing to re-stamp into; an
+   * existing transcript re-derives its pointer instead. No new file is
+   * created: the pointer is only restored, never resolved for a path
+   * that does not exist yet. Sync, like reAppendSessionMetadata itself:
+   * the async transcriptExists check appendEntry uses is not available
+   * here, and existsSync is the same existence test
+   * restoreSessionWrites already uses.
+   */
+  private restoreEvictedSessionFile(): void {
+    if (this.sessionFile !== null) return
+    const pendingPath = resolvePath(getTranscriptPath())
+    if (
+      !this.isDeletedSessionFile(pendingPath) &&
+      existsSync(pendingPath)
+    ) {
+      this.sessionFile = pendingPath
+    }
   }
 
   /**
@@ -1459,14 +2225,53 @@ class Project {
    * external-writer concern — their caches are authoritative.
    */
   reAppendSessionMetadata(skipTitleRefresh = false): void {
-    if (!this.sessionFile) return
+    // Persistence disabled means no transcript writes at all. Without
+    // this, restoreEvictedSessionFile below would resurrect the pointer
+    // for an existing transcript and the appends would write last-prompt
+    // and the rest into it despite --no-session-persistence — bypassing
+    // the per-entry guard appendEntry applies, because this writes
+    // through appendEntryToFile directly. materializeSessionFile already
+    // returns early under the same policy; the exit-cleanup and
+    // compaction callers reach here without that guard.
+    if (this.shouldSkipPersistence()) return
+    if (!this.sessionFile) this.restoreEvictedSessionFile()
+    const sessionFile = this.sessionFile
+    if (!sessionFile) return
     const sessionId = getSessionId() as UUID
     if (!sessionId) return
+    this.reAppendSessionMetadataForKey(
+      this.sessionFileKey(),
+      sessionFile,
+      sessionId,
+      skipTitleRefresh,
+    )
+  }
 
+  /**
+   * Re-append cached session metadata for one explicit cache key, with
+   * that key's own session id. The ambient reAppendSessionMetadata
+   * delegates to this for the current context; the shutdown cleanup
+   * calls it once per retained transcript after its async context has
+   * ended (#2489). Same serializer and field rules in both cases.
+   *
+   * `entryOverride` is the shutdown-reconciled metadata for several
+   * alias keys of one transcript (see reconcileAliasMetadata): the stamp
+   * uses it instead of the single key's entry. The title/tag tail
+   * refresh below still runs against it, and still writes back into
+   * that key's cache — the merged values are the file's authoritative
+   * ones for this transcript.
+   */
+  private reAppendSessionMetadataForKey(
+    key: string,
+    sessionFile: string,
+    sessionId: UUID,
+    skipTitleRefresh = false,
+    entryOverride?: SessionMetadata,
+  ): void {
     // One sync tail read to refresh SDK-mutable fields. Same
     // LITE_READ_BUF_SIZE window readLiteMetadata uses. Empty string on
     // failure → extract returns null → cache is the only source of truth.
-    const tail = readFileTailSync(this.sessionFile)
+    const tail = readFileTailSync(sessionFile)
 
     // Absorb any fresher SDK-written title/tag into our cache. If the SDK
     // wrote while we had the session open, our cache is stale — the tail
@@ -1476,6 +2281,9 @@ class Project {
     // Filter with startsWith to match only top-level JSONL entries (col 0)
     // and not "type":"tag" appearing inside a nested tool_use input that
     // happens to be JSON-serialized into a message.
+    const entry = entryOverride ?? this.metadataEntryForKey(key)
+    let title = entry?.title
+    let tag = entry?.tag
     const tailLines = tail.split('\n')
     if (!skipTitleRefresh) {
       const titleLine = tailLines.findLast(l =>
@@ -1488,7 +2296,8 @@ class Project {
         // external writer with customTitle:"" should clear the cache so the
         // re-append below skips it (instead of resurrecting a stale title).
         if (tailTitle !== undefined) {
-          this.currentSessionTitle = tailTitle || undefined
+          title = tailTitle || undefined
+          this.setSessionMetadataFieldForKey(key, 'title', title)
         }
       }
     }
@@ -1497,105 +2306,259 @@ class Project {
       const tailTag = extractLastJsonStringField(tagLine, 'tag')
       // Same: tagSession(id, null) writes `tag:""` to clear.
       if (tailTag !== undefined) {
-        this.currentSessionTag = tailTag || undefined
+        tag = tailTag || undefined
+        this.setSessionMetadataFieldForKey(key, 'tag', tag)
       }
     }
 
     // lastPrompt is re-appended so readLiteMetadata can show what the
     // user was most recently doing. Written first so customTitle/tag/etc
     // land closer to EOF (they're the more critical fields for tail reads).
-    if (this.currentSessionLastPrompt) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.lastPrompt) {
+      appendEntryToFile(sessionFile, {
         type: 'last-prompt',
-        lastPrompt: this.currentSessionLastPrompt,
+        lastPrompt: entry.lastPrompt,
         sessionId,
       })
     }
     // Unconditional: cache was refreshed from tail above; re-append keeps
     // the entry at EOF so compaction-pushed content doesn't evict it.
-    if (this.currentSessionTitle) {
-      appendEntryToFile(this.sessionFile, {
+    if (title) {
+      appendEntryToFile(sessionFile, {
         type: 'custom-title',
-        customTitle: this.currentSessionTitle,
+        customTitle: title,
         sessionId,
       })
     }
-    if (this.currentSessionTag) {
-      appendEntryToFile(this.sessionFile, {
+    if (tag) {
+      appendEntryToFile(sessionFile, {
         type: 'tag',
-        tag: this.currentSessionTag,
+        tag,
         sessionId,
       })
     }
-    if (this.currentSessionAgentName) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.agentName) {
+      appendEntryToFile(sessionFile, {
         type: 'agent-name',
-        agentName: this.currentSessionAgentName,
+        agentName: entry.agentName,
         sessionId,
       })
     }
-    if (this.currentSessionAgentColor) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.agentColor) {
+      appendEntryToFile(sessionFile, {
         type: 'agent-color',
-        agentColor: this.currentSessionAgentColor,
+        agentColor: entry.agentColor,
         sessionId,
       })
     }
-    if (this.currentSessionAgentSetting) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.agentSetting) {
+      appendEntryToFile(sessionFile, {
         type: 'agent-setting',
-        agentSetting: this.currentSessionAgentSetting,
+        agentSetting: entry.agentSetting,
         sessionId,
       })
     }
-    if (this.currentSessionMode) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.mode) {
+      appendEntryToFile(sessionFile, {
         type: 'mode',
-        mode: this.currentSessionMode,
+        mode: entry.mode,
         sessionId,
       })
     }
-    if (this.currentSessionWorktree !== undefined) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.worktree !== undefined) {
+      appendEntryToFile(sessionFile, {
         type: 'worktree-state',
-        worktreeSession: this.currentSessionWorktree,
+        worktreeSession: entry.worktree,
         sessionId,
       })
     }
     if (
-      this.currentSessionPrNumber !== undefined &&
-      this.currentSessionPrUrl &&
-      this.currentSessionPrRepository
+      entry?.prNumber !== undefined &&
+      entry.prUrl &&
+      entry.prRepository
     ) {
-      appendEntryToFile(this.sessionFile, {
+      appendEntryToFile(sessionFile, {
         type: 'pr-link',
         sessionId,
-        prNumber: this.currentSessionPrNumber,
-        prUrl: this.currentSessionPrUrl,
-        prRepository: this.currentSessionPrRepository,
+        prNumber: entry.prNumber,
+        prUrl: entry.prUrl,
+        prRepository: entry.prRepository,
         timestamp: new Date().toISOString(),
       })
     }
     if (
-      this.currentSessionGoal &&
-      (this.currentSessionGoal.status === 'active' ||
-        this.currentSessionGoal.status === 'paused')
+      entry?.goal &&
+      (entry.goal.status === 'active' || entry.goal.status === 'paused')
     ) {
-      appendEntryToFile(this.sessionFile, {
+      appendEntryToFile(sessionFile, {
         type: 'goal-state',
         sessionId,
-        goal: this.currentSessionGoal,
+        goal: entry.goal,
       })
     }
-    if (this.currentSessionBranch) {
-      appendEntryToFile(this.sessionFile, {
-        ...this.currentSessionBranch,
+    if (entry?.branch) {
+      appendEntryToFile(sessionFile, {
+        ...entry.branch,
         sessionId,
       })
     }
   }
 
-  async flush(): Promise<void> {
+  /**
+   * One authoritative metadata state for several cache keys naming the
+   * same transcript. Two SDK contexts with the same session id and an
+   * explicit project directory but different cwds keep separate keys
+   * (see sessionFileKeyForIdentity) — deliberately, so genuinely
+   * separate SDK destinations stay isolated — but with an explicit
+   * project directory those keys are aliases of ONE transcript, and
+   * stamping each in turn replays stale state over fresher state.
+   * The keys themselves are left alone; only the shutdown stamp is
+   * reconciled, so per-context isolation during the turns is untouched.
+   *
+   * Other fields fold defined-wins in cache order, matching the old
+   * per-key stamping where the last alias stamped won for tail-read
+   * fields. The goal and the worktree state are the exceptions: each
+   * resolves last-writer-wins by its sequence (`goalSeq`,
+   * `worktreeSeq`), and an explicit clear (goal: null) or exit
+   * (worktree: null) with the highest sequence is authoritative —
+   * reAppendSessionMetadataForKey writes nothing for a null goal, so
+   * the merged entry's null lets the clear already in the file stand
+   * as the last goal-state entry instead of resurrecting the cleared
+   * goal, and it writes null for a worktree exit so the merged entry's
+   * null lets the exit already in the file stand as the last
+   * worktree-state entry instead of resurrecting the exited worktree.
+   */
+  private reconcileAliasMetadata(keys: string[]): SessionMetadata {
+    let merged: SessionMetadata = {}
+    for (const key of keys) {
+      const entry = this.metadataEntryForKey(key)
+      if (!entry) continue
+      merged = mergeSessionMetadata(merged, entry)
+    }
+    let bestSeq = -1
+    let bestGoal: SessionMetadata['goal'] = undefined
+    let hasGoal = false
+    for (const key of keys) {
+      const entry = this.metadataEntryForKey(key)
+      if (!entry || entry.goal === undefined) continue
+      const seq = entry.goalSeq ?? 0
+      if (seq >= bestSeq) {
+        bestSeq = seq
+        bestGoal = entry.goal
+        hasGoal = true
+      }
+    }
+    if (hasGoal) {
+      merged.goal = bestGoal
+      merged.goalSeq = bestSeq
+    } else {
+      delete merged.goal
+      delete merged.goalSeq
+    }
+    let bestWorktreeSeq = -1
+    let bestWorktree: SessionMetadata['worktree'] = undefined
+    let hasWorktree = false
+    for (const key of keys) {
+      const entry = this.metadataEntryForKey(key)
+      if (!entry || entry.worktree === undefined) continue
+      const seq = entry.worktreeSeq ?? 0
+      if (seq >= bestWorktreeSeq) {
+        bestWorktreeSeq = seq
+        bestWorktree = entry.worktree
+        hasWorktree = true
+      }
+    }
+    if (hasWorktree) {
+      merged.worktree = bestWorktree
+      merged.worktreeSeq = bestWorktreeSeq
+    } else {
+      delete merged.worktree
+      delete merged.worktreeSeq
+    }
+    return merged
+  }
+
+  /**
+   * Shutdown re-append: one stamp per retained transcript, not per
+   * cache key. The shutdown cleanup runs in the host/global context,
+   * after the SDK turns it serves have left their async contexts — the
+   * ambient getters cannot reach those sessions' pointers or metadata,
+   * so without this their titles/tags fall outside the listing windows
+   * (#2489). Only sessions with a retained pointer are covered;
+   * evicted sessions stay out of scope. Called by the process-global
+   * cleanup handler, not by compaction or materialization — those serve
+   * one live session only.
+   *
+   * The ambient pointer is restored first (an evicted session
+   * re-derives it from its existing transcript, as
+   * reAppendSessionMetadata does) so it joins the grouping like any
+   * other retained pointer: a transcript the global context also names
+   * is stamped once, with the same reconciled state, instead of once
+   * per alias. Bounded by the per-context cache bound (see
+   * boundSessionCaches).
+   */
+  reAppendSessionMetadataOnShutdown(): void {
+    if (this.shouldSkipPersistence()) return
+    if (!this.sessionFile) this.restoreEvictedSessionFile()
+    const keysByPath = new Map<string, string[]>()
+    for (const [key, path] of [...this.sessionFiles]) {
+      const resolved = resolvePath(path)
+      const keys = keysByPath.get(resolved) ?? []
+      keys.push(key)
+      keysByPath.set(resolved, keys)
+    }
+    for (const [resolved, keys] of keysByPath) {
+      if (this.isDeletedSessionFile(resolved)) continue
+      // A transcript removed by another process leaves no deletion
+      // marker: isDeletedSessionFile only covers this instance's
+      // forgetDeletedSession, and readFileTailSync returns '' for a
+      // missing file — so without this check the stamp below recreates
+      // the transcript from cached metadata, and the deleted session
+      // reappears in listings (#2489). The check lives here, not in
+      // reAppendSessionMetadataForKey: materializeSessionFile re-appends
+      // before the file exists on purpose, to create it with the cached
+      // startup metadata. (A deletion racing this check is the same
+      // residual micro-race as materializeSessionFile's — see the
+      // deliberate non-fixes on #2489.)
+      if (!existsSync(resolved)) continue
+      const { sessionId } = splitSessionFileKey(keys[0])
+      if (!sessionId) continue
+      // One key: the existing per-key behavior, unchanged. Several keys
+      // for one transcript: stamp once with the reconciled state.
+      if (keys.length === 1) {
+        this.reAppendSessionMetadataForKey(
+          keys[0],
+          resolved,
+          sessionId as UUID,
+        )
+      } else {
+        this.reAppendSessionMetadataForKey(
+          keys[0],
+          resolved,
+          sessionId as UUID,
+          false,
+          this.reconcileAliasMetadata(keys),
+        )
+      }
+    }
+  }
+
+  /**
+   * Drain the queued-write loop (and clear a pending drain timer)
+   * without waiting for tracked writes to finish.
+   *
+   * forgetDeletedSession uses this instead of flush(): a turn parked in
+   * waitForDeletionToSettle holds its tracked-write count while it waits
+   * for the deletion to settle, so flush()'s count wait would deadlock —
+   * the deletion waits for the turn, the turn waits for the deletion,
+   * and nothing bounds the wait. The count wait is not needed here:
+   * queued appends are drained (and dropped for the marked path at write
+   * time, see appendDirectlyToFile), direct appends that already passed
+   * the mark check are awaited separately below via
+   * pendingDirectAppends, and every other write path checks the mark
+   * when it actually writes.
+   */
+  private async drainWriteQueues(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer)
       this.flushTimer = null
@@ -1612,6 +2575,10 @@ class Project {
       }
       await this.startDrain()
     }
+  }
+
+  async flush(): Promise<void> {
+    await this.drainWriteQueues()
 
     // Wait for non-queue tracked operations (e.g. removeMessageByUuid)
     if (this.pendingWriteCount === 0) {
@@ -1757,12 +2724,48 @@ class Project {
   private async materializeSessionFile(): Promise<void> {
     // Runtime metadata must not become startup selections just because this
     // conversation opted out of writing its transcript.
-    this.hasStartedSession = true
+    this.markSessionStarted(this.sessionFileKey())
     // Guard here too — reAppendSessionMetadata writes via appendEntryToFile
     // (not appendEntry) so it would bypass the per-entry persistence check
     // and create a metadata-only file despite --no-session-persistence.
     if (this.shouldSkipPersistence()) return
+    // Derive the path without publishing the pointer yet: a deletion
+    // settling during the wait below drops a pointer published here
+    // (forgetSessionCaches), and materialization would not restore it —
+    // the transcript is gone, so nothing can re-derive it, and the first
+    // message would stay buffered and unwritten.
+    const pendingPath = resolvePath(getTranscriptPath())
+    // A deletion of this transcript may be in flight: forgetDeletedSession
+    // marked the path, but the caller has not removed the file yet. The
+    // restore below only fires once the file is gone, so without this
+    // wait a turn starting in that window would keep the mark, have its
+    // writes dropped, and lose its first message to the removal. Wait
+    // for the deletion to settle first — then the file is either gone
+    // (the restore un-marks and the turn starts clean) or it survived
+    // and the failure path already restored writes.
+    if (this.isDeletedSessionFile(pendingPath)) {
+      await this.waitForDeletionToSettle(pendingPath)
+    }
+    // Publish the pointer only now that the deletion has settled: any
+    // pointer published before the wait may have been dropped by the
+    // deletion's cache cleanup while this turn was parked on it.
     const sessionFile = resolvePath(this.ensureCurrentSessionFile())
+    // A deleted session's id may be reused by a fresh session at the same
+    // path: the transcript is gone, so the deleted mark no longer protects
+    // anything — it would only drop the new session's writes (the write
+    // layer drops every append to a marked path, and the buffer path never
+    // flushes). A returning session's file exists, so this only fires for a
+    // fresh session at a recycled path. forgetDeletedSession already awaited
+    // every pre-delete write, and materialize only runs for a live session's
+    // first conversation message — late title/summary/metadata writes from
+    // the deleted session go through appendEntry/appendEntryToFile directly
+    // and never reach it.
+    if (
+      this.isDeletedSessionFile(sessionFile) &&
+      !(await this.transcriptExists(sessionFile))
+    ) {
+      this.restoreSessionWrites(sessionFile)
+    }
     // mode/agentSetting are cache-only pre-materialization; write them now.
     this.reAppendSessionMetadata()
     const buffered = this.pendingEntries.get(sessionFile)
@@ -1830,6 +2833,33 @@ class Project {
   ) {
     return this.trackWrite(async () => {
       let parentUuid: UUID | null = startingParentUuid ?? null
+
+      // A deletion of this session's transcript may be in flight while
+      // its pointer is already cached: the gate below only materializes —
+      // and waits for the deletion to settle — when the pointer is null,
+      // so a turn starting in that window would append into the marked
+      // path and have its message discarded by the write layer. If the
+      // removal then fails, the surviving transcript is missing the
+      // turn's first message (#2489). Wait for the deletion to settle
+      // first; the gate below then re-reads the pointer — dropped by the
+      // deletion's cache cleanup — and materializes it afresh, from the
+      // surviving transcript when the removal failed or clean at the
+      // recycled path when it succeeded. Scoped to this
+      // session's own transcript: a sidechain insert for another session
+      // writes to its own file, not this pointer. The wait cannot
+      // deadlock the deletion: forgetDeletedSession only drains the
+      // write queues, it never waits for a parked turn's write count.
+      const insertsIntoCurrentSession =
+        !sidechainDestination ||
+        sidechainDestination.sessionId === getSessionId()
+      const cachedSessionFile = this.sessionFile
+      if (
+        insertsIntoCurrentSession &&
+        cachedSessionFile !== null &&
+        this.isDeletedSessionFile(cachedSessionFile)
+      ) {
+        await this.waitForDeletionToSettle(cachedSessionFile)
+      }
 
       // First conversation message materializes the session file.
       // Hook progress/attachment messages and local-command bookkeeping
@@ -2006,7 +3036,12 @@ class Project {
         goal,
       }
       if (sessionId === getSessionId()) {
-        this.currentSessionGoal = goal ?? undefined
+        // Keep an explicit clear as null, not undefined: undefined deletes
+        // the field from the cache, erasing the evidence that the goal was
+        // cleared — and a failed-deletion merge would then restore the saved
+        // active goal over it. Null is a real value (see
+        // mergeSessionMetadata) and wins like any other defined field.
+        this.currentSessionGoal = goal
       }
       await this.appendEntry(entry, sessionId)
     })
@@ -2036,15 +3071,52 @@ class Project {
       // Buffer until materializeSessionFile runs (first user/assistant message).
       if (this.sessionFile === null) {
         const pendingPath = resolvePath(getTranscriptPath())
-        let buffered = this.pendingEntries.get(pendingPath)
-        if (!buffered) {
-          buffered = []
-          this.pendingEntries.set(pendingPath, buffered)
+        // Capture the originating identity before the existence check
+        // below: a switch while it is in flight changes the ambient
+        // identity, and publishing through the ambient setter would
+        // install this path under the new session's key (#2489).
+        const originKey = this.sessionFileKey()
+        // The cached pointer can be dropped while the transcript already
+        // exists on disk — LRU eviction (boundSessionCaches) drops
+        // long-idle contexts, and a switch drops it too. Buffering here
+        // would strand the entry: only materializeSessionFile flushes the
+        // buffer, on the first user/assistant message, and a turn that ends
+        // after a non-conversation record (e.g. goal-state) never reaches
+        // it. The file already exists, so restoring the pointer cannot
+        // create a metadata-only file; write through instead. Deleted
+        // transcripts are never buffered: the write layer drops them
+        // either way, and the pointer must not be resurrected for one.
+        if (
+          !this.isDeletedSessionFile(pendingPath) &&
+          (await this.transcriptExists(pendingPath)) &&
+          !this.isDeletedSessionFile(pendingPath)
+        ) {
+          // Publish under the identity that initiated the lookup, and
+          // write to the captured destination — not to whatever the
+          // ambient key resolves to now.
+          this.setSessionFileForKey(originKey, pendingPath)
+          sessionFile = pendingPath
+        } else {
+          // Re-check after the await above: a deletion may have marked
+          // the path while the existence check was in flight. Deferred
+          // writes for a deleted transcript are dropped, not buffered —
+          // a late write from the deleted session (an attribution
+          // snapshot, a goal update) would otherwise sit in the buffer
+          // until a fresh session reusing the id materializes, and flush
+          // into its transcript. A live session's own writes reach the
+          // file through the write layer, which drops marked paths.
+          if (this.isDeletedSessionFile(pendingPath)) return
+          let buffered = this.pendingEntries.get(pendingPath)
+          if (!buffered) {
+            buffered = []
+            this.pendingEntries.set(pendingPath, buffered)
+          }
+          buffered.push(entry)
+          return
         }
-        buffered.push(entry)
-        return
+      } else {
+        sessionFile = this.sessionFile
       }
-      sessionFile = this.sessionFile
     } else {
       const existing = await this.getExistingSessionFile(sessionId)
       if (!existing) {
@@ -2211,6 +3283,85 @@ class Project {
    */
   private deletedSessionFiles = new Set<string>()
 
+  /**
+   * Metadata cache entries and started identities dropped by
+   * forgetDeletedSession, keyed by the deleted transcript's resolved
+   * path. Restored by restoreSessionWrites when the transcript survives
+   * its removal; a fresh session at a recycled path consumes (discards)
+   * the snapshot instead, so the new transcript never inherits the
+   * deleted session's title/tag. Overlapping deletions of the same
+   * transcript merge into one snapshot — a later attempt must not
+   * overwrite the original with the (possibly empty) set it dropped —
+   * and the snapshot is discarded by finishDeletedSession once the last
+   * overlapping attempt finishes, so a successful removal leaves
+   * nothing behind. Like deletedSessionFiles, an entry lingers only
+   * while its deletion attempts are still running.
+   *
+   * The started identities ride in the same snapshot as the metadata
+   * they guard: a failed removal restores both together, so the
+   * surviving session keeps its established status and a later switch
+   * cannot migrate its title into another session.
+   */
+  private droppedSessionMetadata = new Map<
+    string,
+    {
+      metadata: Array<[string, SessionMetadata]>
+      startedKeys: Set<string>
+    }
+  >()
+
+  /**
+   * Deletion attempts still running per resolved transcript path (see
+   * forgetDeletedSession / finishDeletedSession). The snapshot above
+   * survives until this count reaches zero, so an overlapping deletion
+   * whose removal fails can still restore from it. The count is also
+   * the "a deletion is in flight" signal a new turn reusing the id
+   * waits on (see waitForDeletionToSettle): it is raised when
+   * forgetDeletedSession marks the path, so it covers the whole
+   * mark-before-unlink window, not just the removal itself.
+   */
+  private pendingDeletionAttempts = new Map<string, number>()
+
+  // Turns parked while a deletion of one transcript finishes, keyed by
+  // the same resolved path as pendingDeletionAttempts. Resolved by
+  // finishDeletedSession when the last attempt for the path settles.
+  private deletionSettledWaiters = new Map<string, Array<() => void>>()
+
+  /**
+   * Wait until no deletion attempt is in flight for this transcript.
+   * A new turn reusing a deleted id calls this from
+   * materializeSessionFile before deciding whether the deleted mark
+   * still protects anything: without the wait it would see the mark
+   * with the file still present, skip the restore, and have its writes
+   * dropped — then lose its first message to the removal. Returns at
+   * once when no deletion is in flight. Both deletion callers pair
+   * every forgetDeletedSession with finishDeletedSession on all paths,
+   * so the wait always resolves.
+   */
+  private waitForDeletionToSettle(filePath: string): Promise<void> {
+    const resolved = resolvePath(filePath)
+    if (!this.pendingDeletionAttempts.has(resolved)) {
+      return Promise.resolve()
+    }
+    return new Promise<void>(resolve => {
+      const waiters = this.deletionSettledWaiters.get(resolved)
+      if (waiters) {
+        waiters.push(resolve)
+      } else {
+        this.deletionSettledWaiters.set(resolved, [resolve])
+      }
+    })
+  }
+
+  /** Release the turns waitForDeletionToSettle parked for this transcript. */
+  private notifyDeletionSettled(filePath: string): void {
+    const resolved = resolvePath(filePath)
+    const waiters = this.deletionSettledWaiters.get(resolved)
+    if (!waiters) return
+    this.deletionSettledWaiters.delete(resolved)
+    for (const resolve of waiters) resolve()
+  }
+
   /** True when `filePath` is a transcript deleted earlier in this process. */
   isDeletedSessionFile(filePath: string): boolean {
     return (
@@ -2219,20 +3370,104 @@ class Project {
     )
   }
 
+  /**
+   * Drop the per-context transcript caches belonging to the deleted
+   * transcript — the cached file pointer and the cached metadata (title,
+   * tag, ...). A cache key names its transcript: session id + project
+   * directory. The same id in another project directory keeps its cached
+   * pointer and metadata: if its title has fallen outside both 64KB
+   * windows, a later re-append could not restore it from the tail.
+   *
+   * Returns the metadata entries and started identities dropped, so
+   * restoreSessionWrites can put them back when the transcript survives
+   * its removal.
+   */
+  private forgetSessionCaches(
+    sessionId: UUID,
+    transcriptPath: string,
+  ): {
+    metadata: Array<[string, SessionMetadata]>
+    startedKeys: string[]
+  } {
+    const deleted = resolvePath(transcriptPath)
+    const namesDeletedTranscript = (key: string): boolean => {
+      if (!key.startsWith(`${sessionId}\0`)) return false
+      const parts = key.split('\0')
+      const projectDir = parts[1] ?? ''
+      if (projectDir) {
+        return (
+          resolvePath(join(projectDir, `${sessionId}.jsonl`)) === deleted
+        )
+      }
+      // No explicit project directory: the key's transcript is the one
+      // its cached pointer already resolves to. A pointerless SDK entry
+      // still names its destination cwd in the key's third component —
+      // compare the transcript that key derives, so a same-id session in
+      // another cwd keeps its cached metadata. A pointerless global entry
+      // names no destination of its own, and the id alone names the
+      // deletion's transcript.
+      const pointer = this.sessionFiles.get(key)
+      if (pointer) return resolvePath(pointer) === deleted
+      if (splitSessionFileKey(key).cwd !== null) {
+        return resolvePath(this.transcriptPathForKey(key)) === deleted
+      }
+      return true
+    }
+    // Read the sibling pointers before dropping them below: a metadata
+    // entry's transcript is the one its own cached pointer resolves to.
+    const droppedMetadata: Array<[string, SessionMetadata]> = []
+    for (const key of [...this.sessionMetadata.keys()]) {
+      if (namesDeletedTranscript(key)) {
+        const entry = this.sessionMetadata.get(key)
+        if (entry) droppedMetadata.push([key, entry])
+        this.sessionMetadata.delete(key)
+      }
+    }
+    // The started identities for the deleted transcript are released
+    // with its caches: a deleted session must not keep retaining its
+    // identity in a long-running host (#2489). They ride in the snapshot
+    // with the metadata, so a failed removal restores them together.
+    const droppedStartedKeys: string[] = []
+    for (const key of [...this.startedSessionKeys.keys()]) {
+      if (namesDeletedTranscript(key)) {
+        droppedStartedKeys.push(key)
+        this.startedSessionKeys.delete(key)
+      }
+    }
+    for (const key of [...this.sessionFiles.keys()]) {
+      if (namesDeletedTranscript(key)) this.sessionFiles.delete(key)
+    }
+    return { metadata: droppedMetadata, startedKeys: droppedStartedKeys }
+  }
+
   async forgetDeletedSession(
     sessionId: UUID,
     transcriptPath: string,
   ): Promise<void> {
-    this.deletedSessionFiles.add(resolvePath(transcriptPath))
+    const resolved = resolvePath(transcriptPath)
+    this.deletedSessionFiles.add(resolved)
+    // Count the attempt from the mark, not from the settle below: the
+    // count is also the "a deletion is in flight" signal a new turn
+    // reusing this id waits on (see waitForDeletionToSettle), and the
+    // window it must cover starts at the mark — before flush() — not
+    // after it. Both callers pair every forget with finishDeletedSession
+    // on all paths, so the count always returns to zero.
+    this.pendingDeletionAttempts.set(
+      resolved,
+      (this.pendingDeletionAttempts.get(resolved) ?? 0) + 1,
+    )
     this.existingSessionFiles.delete(sessionId)
     // The session is gone; its buffered entries have nowhere to go.
-    this.pendingEntries.delete(resolvePath(transcriptPath))
+    this.pendingEntries.delete(resolved)
     if (this.sessionFile && this.isDeletedSessionFile(this.sessionFile)) {
       this.resetSessionFile()
     }
     // Let an in-flight drain finish so no write lands after the caller
-    // removes the file; queued appends for it are now skipped.
-    await this.flush()
+    // removes the file; queued appends for it are now skipped. Drain only
+    // — flush() would also wait for tracked writes to finish, and a turn
+    // parked on this deletion (see waitForDeletionToSettle) holds its
+    // count until it settles, which is this call: that wait never ends.
+    await this.drainWriteQueues()
     // flush() does not wait for direct appends. One that passed the deleted
     // check before the path was marked can still be waiting on mkdir or the
     // file lock, and would recreate the file after the caller removes it.
@@ -2240,11 +3475,134 @@ class Project {
       .filter(([path]) => this.isDeletedSessionFile(path))
       .flatMap(([, appends]) => [...appends])
     await Promise.allSettled(inFlight)
+    // The session is gone for good: drop its per-context caches too, or a
+    // later query reusing its id and cwd hits the same sessionFileKey and
+    // the fresh transcript inherits the deleted session's cached title/tag
+    // (the fresh file's tail holds neither, so the stale cache stands on
+    // re-append). Only the caches naming the deleted transcript are
+    // dropped: the same id in another project directory keeps its own.
+    // The deleter runs in another context, so a current-context-only clear
+    // cannot reach these entries. Only after the settle above: a flush
+    // failure leaves the transcript on disk, and its caches must survive
+    // with it. The dropped metadata is kept for restoreSessionWrites, in
+    // case the removal itself fails and the transcript survives. A later
+    // overlapping deletion of the same transcript merges into the snapshot
+    // instead of replacing it: the first attempt may have dropped the only
+    // entry holding the title, and the second would otherwise overwrite it
+    // with an empty set. The snapshot stays until finishDeletedSession runs
+    // for the last overlapping attempt.
+    const dropped = this.forgetSessionCaches(sessionId, transcriptPath)
+    const existing = this.droppedSessionMetadata.get(resolved)
+    if (existing) {
+      for (const [key, entry] of dropped.metadata) {
+        const prior = existing.metadata.find(([priorKey]) => priorKey === key)
+        if (prior) {
+          // A concurrent update recreated this entry after the first deletion
+          // dropped it: keep both sides' fields, the newer entry winning on
+          // the fields it defines.
+          prior[1] = mergeSessionMetadata(prior[1], entry)
+        } else {
+          existing.metadata.push([key, entry])
+        }
+      }
+      for (const key of dropped.startedKeys) existing.startedKeys.add(key)
+    } else {
+      this.droppedSessionMetadata.set(resolved, {
+        metadata: dropped.metadata,
+        startedKeys: new Set(dropped.startedKeys),
+      })
+    }
   }
 
-  /** Undo forgetDeletedSession for a transcript that could not be removed. */
+  /**
+   * Undo forgetDeletedSession for a transcript that could not be removed.
+   * The metadata cache entries and started identities dropped for it are
+   * restored — but only when the transcript is still on disk. A fresh
+   * session at a recycled path also calls this (via materializeSessionFile)
+   * to un-mark the path, and restoring the deleted session's title/tag
+   * there would hand them to the new transcript: when the file is gone the
+   * snapshot is consumed (discarded) instead. When the file survives, a
+   * live update may have recreated an entry under the same key while
+   * deletion was pending, so the saved fields are merged with the live
+   * entry instead of skipping the key (which lost the title/tag) or
+   * overwriting it (which lost the concurrent update). The restored entries
+   * count against the cache bound, like any other write. The snapshot
+   * itself stays until finishDeletedSession runs for the last overlapping
+   * deletion attempt, so a still-running attempt can restore from it too.
+   * The file pointer needs no snapshot: it re-derives from the context
+   * identity, and the eviction fix restores it when the transcript exists.
+   */
   restoreSessionWrites(transcriptPath: string): void {
-    this.deletedSessionFiles.delete(resolvePath(transcriptPath))
+    const resolved = resolvePath(transcriptPath)
+    // Another deletion attempt for this transcript is still in flight:
+    // its unlink may yet remove the file, so the write block must stay
+    // until the last attempt settles. Un-marking here would let a
+    // replacement turn write to the surviving file, only for the other
+    // attempt's unlink to remove its data — and leave the path unmarked,
+    // so later metadata appends could recreate the deleted transcript.
+    // The snapshot stays too: the remaining attempt restores from it if
+    // its own removal fails, or discards it via finishDeletedSession if
+    // it succeeds. The caller's own attempt is counted, so "another" is
+    // a count above one; a fresh session at a recycled path restores with
+    // no attempt in flight and is unaffected.
+    if ((this.pendingDeletionAttempts.get(resolved) ?? 0) > 1) return
+    this.deletedSessionFiles.delete(resolved)
+    const dropped = this.droppedSessionMetadata.get(resolved)
+    if (!dropped || !existsSync(resolved)) {
+      // No transcript to restore into (recycled path): consume the snapshot
+      // so the new transcript never inherits the deleted session's title/tag.
+      this.droppedSessionMetadata.delete(resolved)
+      return
+    }
+    for (const [key, entry] of dropped.metadata) {
+      const current = this.sessionMetadata.get(key)
+      if (!current) {
+        // Copy: the snapshot stays until the deletion attempts finish, so
+        // the live cache must not alias its entries.
+        this.sessionMetadata.set(key, { ...entry })
+      } else {
+        // A live update recreated this entry while deletion was pending:
+        // keep its fields and fill the saved ones (title, tag) back in
+        // around it.
+        this.sessionMetadata.set(key, mergeSessionMetadata(entry, current))
+      }
+    }
+    // The surviving session is established again: its started identities
+    // were dropped with its caches above, so restore them with the
+    // metadata — otherwise a later switch would treat it as provisional
+    // and migrate its title into the next session.
+    for (const key of dropped.startedKeys) {
+      this.startedSessionKeys.set(key, true)
+    }
+    this.boundSessionCaches()
+  }
+
+  /**
+   * Mark one deletion attempt finished for a transcript forgetDeletedSession
+   * dropped the caches for. The snapshot survives while other attempts for
+   * the same transcript are still running, so an overlapping deletion whose
+   * removal fails can still restore from it. Once the last attempt finishes
+   * the snapshot is discarded: the transcript is either gone (nothing can
+   * restore it any more) or it survived and the failure path already
+   * restored the entries — either way keeping it would leak one snapshot
+   * per deletion. Callers must restore on the failure path before this,
+   * as deleteSession and deleteSessionFiles do. The deleted-file marker is
+   * untouched: only restoreSessionWrites (or a fresh session at a recycled
+   * path) clears it.
+   */
+  finishDeletedSession(transcriptPath: string): void {
+    const resolved = resolvePath(transcriptPath)
+    const inFlight = this.pendingDeletionAttempts.get(resolved)
+    if (inFlight === undefined) return
+    if (inFlight > 1) {
+      this.pendingDeletionAttempts.set(resolved, inFlight - 1)
+      return
+    }
+    this.pendingDeletionAttempts.delete(resolved)
+    this.droppedSessionMetadata.delete(resolved)
+    // The last attempt settled: a new turn parked on this transcript
+    // (see materializeSessionFile) may proceed now.
+    this.notifyDeletionSettled(resolved)
   }
 
   private async getExistingSessionFile(
@@ -2260,6 +3618,22 @@ class Project {
       return targetFile
     } catch (e) {
       if (isFsInaccessible(e)) return null
+      throw e
+    }
+  }
+
+  /**
+   * True when a transcript already exists at exactly this path. Unlike
+   * getExistingSessionFile, this stats the caller's path directly instead of
+   * the sessionId-keyed cache, so a session that moved project directories
+   * cannot mistake another directory's file for this one.
+   */
+  private async transcriptExists(filePath: string): Promise<boolean> {
+    try {
+      await stat(filePath)
+      return true
+    } catch (e) {
+      if (isFsInaccessible(e)) return false
       throw e
     }
   }
@@ -2494,6 +3868,17 @@ export function restoreSessionWrites(transcriptPath: string): void {
 }
 
 /**
+ * Mark one deletion attempt finished for a transcript forgetDeletedSession
+ * dropped the caches for; discards its metadata snapshot once the last
+ * overlapping attempt finishes. Call after the removal (or after restoring
+ * on the failure path) in every delete path that called
+ * forgetDeletedSession.
+ */
+export function finishDeletedSession(transcriptPath: string): void {
+  getProject().finishDeletedSession(transcriptPath)
+}
+
+/**
  * Reset the session file pointer after switchSession/regenerateSessionId.
  * The new file is created lazily on the first user/assistant message.
  */
@@ -2525,6 +3910,9 @@ export async function resetSessionFilePointer() {
 export function adoptResumedSessionFile(): void {
   const project = getProject()
   project.sessionFile = getTranscriptPath()
+  // The resumed session is established, not provisional: mark it started
+  // so a later switch does not migrate its title/agent/worktree away.
+  project.markCurrentSessionStarted()
   project.reAppendSessionMetadata(true)
 }
 
@@ -4075,7 +5463,10 @@ export function restoreSessionMetadata(meta: {
   // Unlike display-only metadata, absence of a goal-state entry means this
   // resumed session has no goal. Clear any cached goal so adopt/re-append
   // cannot persist a previous session's active goal into this transcript.
-  project.currentSessionGoal = meta.goal ?? undefined
+  // Keep an explicit null (the transcript's latest goal-state cleared it)
+  // as null rather than deleting the field: the clear is evidence, and a
+  // later snapshot merge must not resurrect the saved active goal over it.
+  project.currentSessionGoal = meta.goal
   // Branch lineage is structural metadata. Absence means this session is not
   // a branch, so clear stale branch cache before it can be re-appended.
   project.currentSessionBranch = meta.sessionBranch ?? undefined

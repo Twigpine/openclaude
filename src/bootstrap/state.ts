@@ -477,7 +477,8 @@ export function bindSdkContextToAsyncGenerator<
   return bound as AsyncGenerator<TYield, TReturn, TNext>
 }
 
-function getSdkContext(): SdkContext | undefined {
+/** The SDK context the current code runs in, if any — undefined for the CLI's global context. */
+export function getSdkContext(): SdkContext | undefined {
   return sdkContextStorage.getStore()
 }
 
@@ -541,6 +542,16 @@ export function switchSession(
 ): void {
   const ctx = getSdkContext()
   const currentSessionId = ctx?.sessionId ?? STATE.sessionId
+  // Capture the outgoing identity before mutating: listeners carry state
+  // across the switch from this key (see PreviousSessionIdentity).
+  // A null project directory is meaningful (the session lives in the
+  // current project) and must not fall back to the global directory: an
+  // SDK context with sessionProjectDir: null is not the global session.
+  // Same rule as getSessionProjectDir().
+  const previousSession: PreviousSessionIdentity = {
+    sessionId: currentSessionId,
+    sessionProjectDir: ctx ? ctx.sessionProjectDir : STATE.sessionProjectDir,
+  }
   // Drop the outgoing session's plan-slug entry so the Map stays bounded
   // across repeated /resume. Only the current session's slug is ever read
   // (plans.ts getPlanSlug defaults to getSessionId()).
@@ -552,16 +563,32 @@ export function switchSession(
     STATE.sessionId = sessionId
     STATE.sessionProjectDir = projectDir
   }
-  sessionSwitched.emit(sessionId)
+  sessionSwitched.emit(sessionId, previousSession)
 }
 
-const sessionSwitched = createSignal<[id: SessionId]>()
+/**
+ * The session switchSession is switching away from: the id and project
+ * directory in force before the switch. Listeners that carry state
+ * across the switch need the outgoing identity, not just the incoming
+ * one — under overlapping SDK sessions the outgoing key is the only
+ * correct migration source; a global "last switched" identity would
+ * point at whichever session switched last.
+ */
+export type PreviousSessionIdentity = {
+  sessionId: SessionId
+  sessionProjectDir: string | null
+}
+
+const sessionSwitched = createSignal<
+  [id: SessionId, previous: PreviousSessionIdentity]
+>()
 
 /**
  * Register a callback that fires when switchSession changes the active
- * sessionId. bootstrap can't import listeners directly (DAG leaf), so
- * callers register themselves. concurrentSessions.ts uses this to keep the
- * PID file's sessionId in sync with --resume.
+ * sessionId. The second argument is the outgoing session identity (see
+ * PreviousSessionIdentity). bootstrap can't import listeners directly
+ * (DAG leaf), so callers register themselves. concurrentSessions.ts uses
+ * this to keep the PID file's sessionId in sync with --resume.
  */
 export const onSessionSwitch = sessionSwitched.subscribe
 

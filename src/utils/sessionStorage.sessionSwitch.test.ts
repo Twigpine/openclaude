@@ -1,19 +1,26 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 import { randomUUID, type UUID } from 'node:crypto'
+import type { PathLike, StatOptions } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import * as fsPromises from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
+  getCwdState,
   getOriginalCwd,
   getSessionId,
   getSessionProjectDir,
   isSessionPersistenceDisabled,
+  onSessionSwitch,
+  runWithSdkContext,
+  setCwdState,
   setOriginalCwd,
   setSessionPersistenceDisabled,
   resetStateForTests,
   switchSession,
 } from '../bootstrap/state.js'
+import { restoreWorktreeSession } from './worktree.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
 import type { Message } from '../types/message.js'
 import { getDefaultAppState } from '../state/AppStateStore.js'
@@ -24,9 +31,14 @@ import {
 } from './envUtils.js'
 import {
   flushSessionStorage,
+  getProjectDir,
+  getSessionFileForTesting,
+  getTranscriptPath,
   getTranscriptPathForSession,
+  adoptResumedSessionFile,
   recordAttributionSnapshot,
   recordTranscript,
+  reAppendSessionMetadata,
   resetProjectForTesting,
   cacheSessionTitle,
   clearSessionMetadata,
@@ -308,6 +320,108 @@ test('a same-id switch to another project directory moves the pointer', async ()
   expect(await readFile(first, 'utf8')).not.toContain('written there')
 })
 
+test('switchSession reports a null SDK project directory instead of the global one', async () => {
+  // CodeRabbit on #2489: `??` in switchSession fell back to the global
+  // STATE.sessionProjectDir when the SDK context's own directory was null,
+  // so the outgoing identity pointed at the wrong directory and the
+  // migration listener derived the wrong outgoing key.
+  const globalDir = join(testRoot, 'global-project')
+  await mkdir(globalDir, { recursive: true })
+  switchSession(FIRST as never, globalDir)
+  expect(getSessionProjectDir()).toBe(globalDir)
+
+  let captured: { sessionId: string; sessionProjectDir: string | null } | undefined
+  const unsubscribe = onSessionSwitch((_id, previous) => {
+    captured = previous
+  })
+  try {
+    await runWithSdkContext(
+      {
+        sessionId: SECOND as never,
+        sessionProjectDir: null,
+        cwd: join(testRoot, 'workspace'),
+        originalCwd: join(testRoot, 'workspace'),
+      },
+      async () => {
+        // The SDK context's own directory is null (current project).
+        expect(getSessionProjectDir()).toBeNull()
+        switchSession(SECOND as never, null)
+      },
+    )
+  } finally {
+    unsubscribe()
+  }
+  expect(captured?.sessionProjectDir).toBeNull()
+})
+
+test('an adopted resumed session keeps its title when switching away before a message', async () => {
+  // CodeRabbit on #2489: adoptResumedSessionFile bound the pointer
+  // without marking the session started, so a switch away before any new
+  // message treated it as unstarted and migrateStartupMetadata moved its
+  // title, agent setting, and worktree into the new session.
+  const path = getTranscriptPathForSession(FIRST)
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(
+    path,
+    JSON.stringify({ ...message(randomUUID(), 'previous turn'), sessionId: FIRST }) + '\n',
+  )
+  switchSession(FIRST as never, null)
+  await resetSessionFilePointer()
+  restoreSessionMetadata({ customTitle: 'Resumed Title' })
+  adoptResumedSessionFile()
+
+  // Switch away without recording a message in the resumed session.
+  switchSession(SECOND as never, null)
+  await recordTranscript([message(randomUUID(), 'second session')])
+  await flushSessionStorage()
+
+  const secondText = await readFile(getTranscriptPathForSession(SECOND), 'utf8')
+  expect(secondText).toContain('second session')
+  expect(secondText).not.toContain('Resumed Title')
+
+  // The resumed session kept its own title.
+  switchSession(FIRST as never, null)
+  expect(getCurrentSessionTitle(FIRST as never)).toBe('Resumed Title')
+})
+
+test('re-appending metadata with persistence disabled writes nothing', async () => {
+  // CodeRabbit on #2489: with persistence disabled, materializeSessionFile
+  // deliberately leaves the pointer null — but reAppendSessionMetadata
+  // restored it for an existing transcript and wrote last-prompt and the
+  // rest through appendEntryToFile, bypassing the persistence guard.
+  switchSession(FIRST as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(FIRST)), { recursive: true, mode: 0o700 })
+  await recordTranscript([message(randomUUID(), 'first session prompt')])
+  await flushSessionStorage()
+  cacheSessionTitle('A Title')
+  expect(getCurrentSessionTitle(FIRST as never)).toBe('A Title')
+
+  const before = await readFile(getTranscriptPathForSession(FIRST), 'utf8')
+  const savedTestPersistence = process.env.TEST_ENABLE_SESSION_PERSISTENCE
+  const savedSkipHistory = process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY
+  const savedDisabled = isSessionPersistenceDisabled()
+  try {
+    // Same switches the existing nonpersisted-session test uses: the
+    // test-env override must be off for the policy to apply at all.
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = 'false'
+    process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY = '1'
+    setSessionPersistenceDisabled(true)
+    // Drop the pointer, as LRU eviction or a switch would: the re-append
+    // must not restore it for an existing transcript while persistence
+    // is disabled.
+    await resetSessionFilePointer()
+    reAppendSessionMetadata()
+    await flushSessionStorage()
+  } finally {
+    if (savedTestPersistence === undefined) delete process.env.TEST_ENABLE_SESSION_PERSISTENCE
+    else process.env.TEST_ENABLE_SESSION_PERSISTENCE = savedTestPersistence
+    if (savedSkipHistory === undefined) delete process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY
+    else process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY = savedSkipHistory
+    setSessionPersistenceDisabled(savedDisabled)
+  }
+  expect(await readFile(getTranscriptPathForSession(FIRST), 'utf8')).toBe(before)
+})
+
 test('buffered entries stay with their directory across a same-id round trip', async () => {
   const here = join(testRoot, 'here')
   const there = join(testRoot, 'there')
@@ -508,4 +622,169 @@ test('a nonpersisted session does not pass runtime worktree metadata to the next
   await recordTranscript([message(randomUUID(), 'persisted turn')])
   await flushSessionStorage()
   expect(await readFile(getTranscriptPathForSession(SECOND), 'utf8')).not.toContain('private-worktree')
+})
+
+test('an established transcript survives entering and exiting a worktree', async () => {
+  // jatmn on #2489 (P2): entering a worktree calls setOriginalCwd without
+  // changing the session id. The established transcript pointer and its
+  // metadata must survive that cwd change — otherwise the next message
+  // materializes a second JSONL under the worktree project and one
+  // conversation's history splits across two files.
+  const worktree = join(testRoot, 'worktree')
+  await mkdir(worktree, { recursive: true })
+
+  switchSession(FIRST as never, null)
+  await recordTranscript([message('40000000-0000-4000-8000-0000000000e1', 'before worktree')])
+  await flushSessionStorage()
+  cacheSessionTitle('Worktree Title')
+  reAppendSessionMetadata()
+
+  const transcriptPath = getTranscriptPathForSession(FIRST)
+  expect(await readFile(transcriptPath, 'utf8')).toContain('before worktree')
+
+  // EnterWorktreeTool's cwd change: same session, different working directory.
+  setOriginalCwd(worktree)
+  // The exported accessors must keep resolving to the transcript receiving
+  // writes: re-deriving from the new cwd would point at a path no file was
+  // ever written to, so consumers opening it get ENOENT.
+  expect(getTranscriptPath()).toBe(transcriptPath)
+  expect(getTranscriptPathForSession(getSessionId())).toBe(transcriptPath)
+  await recordTranscript([message('40000000-0000-4000-8000-0000000000e2', 'inside worktree')])
+  await flushSessionStorage()
+
+  // The established pointer and its metadata survive the cwd change.
+  expect(getCurrentSessionTitle(getSessionId())).toBe('Worktree Title')
+  expect(await readFile(transcriptPath, 'utf8')).toContain('inside worktree')
+  // No second transcript started under the worktree's project directory.
+  expect(existsSync(join(getProjectDir(worktree), `${FIRST}.jsonl`))).toBe(false)
+
+  // ExitWorktreeTool restores the cwd; the conversation continues in one file.
+  setOriginalCwd(join(testRoot, 'workspace'))
+  expect(getTranscriptPath()).toBe(transcriptPath)
+  expect(getTranscriptPathForSession(getSessionId())).toBe(transcriptPath)
+  await recordTranscript([message('40000000-0000-4000-8000-0000000000e3', 'after worktree')])
+  await flushSessionStorage()
+  const text = await readFile(transcriptPath, 'utf8')
+  expect(text).toContain('after worktree')
+  expect(text).toContain('Worktree Title')
+})
+
+test('a resumed session keeps its startup name across a worktree restore', async () => {
+  // jatmn on #2489 (P2): restoreSessionMetadata caches the requested title
+  // before restoreWorktreeForResume changes the cwd, and adoption reads it
+  // after. The cwd change must not hide the restored record, or the startup
+  // --name is undefined at adoption and never written to the transcript.
+  process.env.NODE_ENV = 'test'
+  const path = getTranscriptPathForSession(FIRST)
+  await mkdir(dirname(path), { recursive: true })
+  const worktree = join(testRoot, 'resume-worktree')
+  await mkdir(worktree, { recursive: true })
+  const previous = message(randomUUID(), 'previous turn')
+  await writeFile(path, JSON.stringify({ ...previous, sessionId: FIRST }) + '\n')
+  cacheSessionTitle('requested title')
+
+  const savedProcessCwd = process.cwd()
+  const savedCwdState = getCwdState()
+  try {
+    await processResumedConversation(
+      {
+        messages: [previous],
+        sessionId: FIRST as UUID,
+        customTitle: undefined,
+        worktreeSession: {
+          originalCwd: getOriginalCwd(),
+          worktreePath: worktree,
+          worktreeName: 'resume-worktree',
+          sessionId: FIRST,
+        },
+      },
+      { forkSession: false, transcriptPath: path },
+      {
+        modeApi: null,
+        mainThreadAgentDefinition: undefined,
+        agentDefinitions: { activeAgents: [], allAgents: [] },
+        currentCwd: getOriginalCwd(),
+        cliAgents: [],
+        initialState: getDefaultAppState(),
+      },
+    )
+    await flushSessionStorage()
+
+    expect(getCurrentSessionTitle(getSessionId())).toBe('requested title')
+    const entries = (await readFile(path, 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line))
+    expect(entries.filter(entry => entry.type === 'custom-title').at(-1)?.customTitle).toBe(
+      'requested title',
+    )
+    // Adoption must persist the name even when no new message is sent.
+    expect(entries.filter(entry => entry.type === 'user')).toHaveLength(1)
+    // The resumed transcript stays the one file; no second transcript under
+    // the worktree's project directory.
+    expect(existsSync(join(getProjectDir(worktree), `${FIRST}.jsonl`))).toBe(false)
+  } finally {
+    process.chdir(savedProcessCwd)
+    setCwdState(savedCwdState)
+    restoreWorktreeSession(null)
+  }
+})
+
+test('a metadata append parked on its existence check keeps its pointer under its own session', async () => {
+  // jatmn on #2489 (P2): appendEntry recovers a dropped pointer by
+  // stat-ing the transcript and publishing the path through the ambient
+  // setter. If another session switches while that stat is in flight, the
+  // recovered path is installed under the new session's key, and the new
+  // session's next message lands in the first session's file.
+  switchSession(FIRST as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(FIRST)), { recursive: true, mode: 0o700 })
+  await recordTranscript([message(randomUUID(), 'first session')])
+  await flushSessionStorage()
+
+  // Drop the pointer, as a switch or LRU eviction would: the next
+  // metadata write re-derives it through the existence check.
+  await resetSessionFilePointer()
+  expect(getSessionFileForTesting()).toBeNull()
+
+  const firstPath = getTranscriptPathForSession(FIRST)
+  const secondPath = getTranscriptPathForSession(SECOND)
+  const realStat = fsPromises.stat
+  let switched = false
+  spyOn(fsPromises, 'stat').mockImplementation(
+    (async (path: PathLike, options?: StatOptions) => {
+      if (!switched && path === firstPath) {
+        switched = true
+        // The switch happens while the first session's existence check is
+        // still in flight: the second session materializes its own file.
+        // No flush here: flush waits on the tracked-write count the parked
+        // append holds, so it would deadlock the check it is inside.
+        // Materialization sets the second session's pointer synchronously,
+        // which is the state the bug corrupts.
+        switchSession(SECOND as never, null)
+        await recordTranscript([message(randomUUID(), 'second session')])
+      }
+      return realStat(path, options)
+    }) as unknown as typeof fsPromises.stat,
+  )
+
+  const snapshotId = randomUUID()
+  await recordAttributionSnapshot({
+    type: 'attribution-snapshot',
+    messageId: snapshotId,
+    surface: 'sdk',
+    fileStates: {},
+  })
+  await flushSessionStorage()
+  mock.restore()
+
+  // The parked write landed in the first session's own transcript...
+  expect(await readFile(firstPath, 'utf8')).toContain(snapshotId)
+  // ...and the second session's next message lands in its own file, not
+  // the first session's: the recovered path must not have been installed
+  // under the second session's key.
+  switchSession(SECOND as never, null)
+  await recordTranscript([message(randomUUID(), 'second session again')])
+  await flushSessionStorage()
+  expect(await readFile(secondPath, 'utf8')).toContain('second session again')
+  expect(await readFile(firstPath, 'utf8')).not.toContain('second session again')
 })
