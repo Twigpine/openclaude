@@ -20,6 +20,7 @@ import {
   runForkedAgent,
 } from '../../utils/forkedAgent.js'
 import { logError } from '../../utils/log.js'
+import { isEnvTruthy } from '../../utils/envUtils.js'
 import { createUserMessage } from '../../utils/messages.js'
 import { getAgentTranscript } from '../../utils/sessionStorage.js'
 
@@ -50,6 +51,11 @@ export function startAgentSummarization(
   cacheSafeParams: CacheSafeParams,
   setAppState: TaskContext['setAppState'],
 ): { stop: () => void } {
+  // CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES opts out of the periodic
+  // forked-agent summary requests entirely (upstream parity).
+  if (isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES)) {
+    return { stop: () => {} }
+  }
   // Drop forkContextMessages from the closure — runSummary rebuilds it each
   // tick from getAgentTranscript(). Without this, the original fork messages
   // (passed from AgentTool.tsx) are pinned for the lifetime of the timer.

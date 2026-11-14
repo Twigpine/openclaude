@@ -22,11 +22,22 @@ export type ThinkingConfig =
   | { type: 'disabled' }
 
 /**
+ * CLAUDE_CODE_DISABLE_ULTRATHINK opts out of the keyword -> high-effort bump
+ * (upstream parity).
+ */
+export function isUltrathinkDisabledByEnv(): boolean {
+  return isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ULTRATHINK)
+}
+
+/**
  * Build-time gate (feature) + runtime gate (GrowthBook). The build flag
  * controls code inclusion in external builds; the GB flag controls rollout.
  */
 export function isUltrathinkEnabled(): boolean {
   if (!feature('ULTRATHINK')) {
+    return false
+  }
+  if (isUltrathinkDisabledByEnv()) {
     return false
   }
   return getFeatureValue_CACHED_MAY_BE_STALE('tengu_turtle_carbon', true)

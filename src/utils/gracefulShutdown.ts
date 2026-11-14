@@ -154,6 +154,14 @@ function cleanupTerminalModes(skipUnmount: boolean = false): void {
 let resumeHintPrinted = false
 
 /**
+ * Program name the exit-time resume hint prints. CLAUDE_CODE_RESUME_HINT_COMMAND
+ * overrides it for wrapped or renamed installs (upstream parity).
+ */
+export function getResumeHintCommand(): string {
+  return process.env.CLAUDE_CODE_RESUME_HINT_COMMAND || 'openclaude'
+}
+
+/**
  * Print a hint about how to resume the session.
  * Only shown for interactive sessions with persistence enabled.
  */
@@ -189,7 +197,7 @@ function printResumeHint(): void {
       writeSync(
         1,
         chalk.dim(
-          `\nResume this session with:\nopenclaude --resume ${resumeArg}\n`,
+          `\nResume this session with:\n${getResumeHintCommand()} --resume ${resumeArg}\n`,
         ),
       )
       resumeHintPrinted = true
