@@ -75,7 +75,7 @@ describe('/cd', () => {
     })
   })
 
-  it('switches into a subdirectory without touching the working set', async () => {
+  it('switches into a subdirectory and keeps the previous root authorized', async () => {
     const sub = join(sandbox, 'sub')
     mkdirSync(sub)
     const result = await call('sub', context())
@@ -85,6 +85,9 @@ describe('/cd', () => {
     expect(process.cwd()).toBe(sub)
     expect(getOriginalCwd()).toBe(sub)
     expect(getAdditionalDirectoriesForClaudeMd()).toEqual([])
+    const workingDirs = allWorkingDirectories(latestPermissionContext)
+    expect(workingDirs).toContain(sub)
+    expect(workingDirs).toContain(sandbox)
   })
 
   it('adds an outside directory to the working set, then switches', async () => {
@@ -97,9 +100,9 @@ describe('/cd', () => {
       }
       expect(getCwd()).toBe(resolve(outside))
       expect(getAdditionalDirectoriesForClaudeMd()).toContain(resolve(outside))
-      expect(allWorkingDirectories(latestPermissionContext)).toContain(
-        resolve(outside),
-      )
+      const workingDirs = allWorkingDirectories(latestPermissionContext)
+      expect(workingDirs).toContain(resolve(outside))
+      expect(workingDirs).toContain(sandbox)
     } finally {
       rmSync(outside, { recursive: true, force: true })
     }

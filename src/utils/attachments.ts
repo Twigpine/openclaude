@@ -213,7 +213,7 @@ const sessionTranscriptModule = feature('KAIROS')
   ? (require('../services/sessionTranscript/sessionTranscript.js') as typeof import('../services/sessionTranscript/sessionTranscript.js'))
   : null
 /* eslint-enable @typescript-eslint/no-require-imports */
-import { hasUltrathinkKeyword, isUltrathinkEnabled } from './thinking.js'
+import { hasUltrathinkKeyword, isUltrathinkKeywordArmed } from './thinking.js'
 import {
   tokenCountFromLastAPIResponse,
   tokenCountWithEstimation,
@@ -1537,7 +1537,7 @@ export function getUltrathinkEffortAttachment(
   // Without this, the hidden `ultrathink_effort` attachment would still raise
   // the turn to high effort even when the ULTRATHINK build flag / GrowthBook
   // rollout is disabled.
-  if (!input || !isUltrathinkEnabled() || !hasUltrathinkKeyword(input)) {
+  if (!input || !isUltrathinkKeywordArmed() || !hasUltrathinkKeyword(input)) {
     return []
   }
   if (logActivation) {

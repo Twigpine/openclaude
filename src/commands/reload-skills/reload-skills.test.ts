@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { clearSkillCaches } from '../../skills/loadSkillsDir.js'
 import type { LocalJSXCommandContext } from '../../types/command.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import {
@@ -30,6 +31,7 @@ describe('/reload-skills', () => {
     configDir = mkdtempSync(join(tmpdir(), 'oc-reload-skills-'))
     process.env.CLAUDE_CONFIG_DIR = configDir
     setClaudeConfigHomeDirForTesting(configDir)
+    clearSkillCaches()
   })
 
   afterEach(() => {
@@ -40,6 +42,7 @@ describe('/reload-skills', () => {
         process.env.CLAUDE_CONFIG_DIR = originalConfigDir
       }
       setClaudeConfigHomeDirForTesting(undefined)
+      clearSkillCaches()
     } finally {
       const dir = configDir
       try {
