@@ -1198,6 +1198,21 @@ class Project {
     return entry
   }
 
+  /**
+   * True when the current context's session has an established transcript
+   * on disk even though its cached pointer was evicted (see
+   * restoreEvictedSessionFile): the file's existence is the same
+   * established-start evidence the pointer is. A deleted mark means the
+   * transcript is being removed, so it does not count.
+   */
+  private hasEstablishedTranscript(): boolean {
+    const transcriptPath = resolvePath(getTranscriptPath())
+    return (
+      !this.isDeletedSessionFile(transcriptPath) &&
+      existsSync(transcriptPath)
+    )
+  }
+
   /** Metadata for the session active in the current context, creating it. */
   private metadataForWrite(): SessionMetadata {
     const key = this.sessionFileKey()
@@ -1212,9 +1227,13 @@ class Project {
     // live session re-caching after eviction: boundSessionCaches evicted
     // its started identity with the metadata, so re-mark it — otherwise
     // a later switch would treat it as provisional and migrate these
-    // fields into the next session. A provisional identity has no pointer,
-    // so deferred startup selections still migrate.
-    if (this.sessionFiles.has(key)) {
+    // fields into the next session. The pointer itself may have been
+    // evicted too; an existing transcript on disk is the same evidence
+    // of an established session, so re-mark then as well. A provisional
+    // identity has neither a pointer nor a transcript, so deferred
+    // startup selections still migrate. The disk check runs only when
+    // the pointer is gone, so the common path pays no extra stat.
+    if (this.sessionFiles.has(key) || this.hasEstablishedTranscript()) {
       this.markSessionStarted(key)
     }
     this.boundSessionCaches()

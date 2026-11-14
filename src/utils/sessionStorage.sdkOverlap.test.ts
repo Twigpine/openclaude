@@ -1362,3 +1362,47 @@ test('a re-cached title is not migrated after its started identity was evicted',
   switchSession(SESSION_A as never, null)
   expect(getCurrentSessionTitle(getSessionId())).toBe('A Title Again')
 })
+
+test('a re-cached title is not migrated after its pointer and started identity were evicted', async () => {
+  // CodeRabbit on #2489: the re-cache test above covers only the case
+  // where A's file pointer survives eviction. When 105 other sessions
+  // materialize transcripts of their own, the bound caches evict A's
+  // pointer, metadata, AND started identity together — and a title
+  // re-cached afterwards would leave the session looking provisional,
+  // so a switch to another session in the same context would migrate it
+  // there. An existing transcript on disk is established-start evidence
+  // even with the pointer gone, so the re-cache must re-establish it.
+  // A runs in the global context so the switch to B is a real switch
+  // inside one context (a turn's pre-set SDK context would report the
+  // switch as a no-op).
+  switchSession(SESSION_A as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(SESSION_A)), { recursive: true, mode: 0o700 })
+  await recordTranscript([message(randomUUID(), 'A first')])
+  await flushSessionStorage()
+  cacheSessionTitle('A Title')
+
+  // Churn with persisted sessions: each materializes a file, metadata,
+  // and a started identity, so the oldest entries — A's pointer,
+  // metadata, and started identity — are all evicted.
+  const ids = Array.from({ length: 105 }, () => randomUUID())
+  for (const id of ids) {
+    await turnStart(id, async () => {
+      await recordTranscript([message(randomUUID(), 'churn')])
+      await flushSessionStorage()
+    })
+  }
+  expect(getStartedSessionKeysSizeForTesting()).toBeLessThanOrEqual(100)
+
+  // Switch back to A: its pointer is gone, not just its started identity.
+  switchSession(SESSION_A as never, null)
+  expect(getSessionFileForTesting()).toBeNull()
+
+  // A re-caches its title after the eviction; its transcript still exists.
+  cacheSessionTitle('A Title Again')
+
+  // Switching away in the same context must not migrate it into B.
+  switchSession(SESSION_B as never, null)
+  expect(getCurrentSessionTitle(getSessionId())).toBeUndefined()
+  switchSession(SESSION_A as never, null)
+  expect(getCurrentSessionTitle(getSessionId())).toBe('A Title Again')
+})
