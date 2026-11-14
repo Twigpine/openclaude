@@ -832,6 +832,17 @@ function refreshConfig(): void {
 }
 
 /**
+ * Re-resolve the worktree main repo path for a new cwd. The initial detect
+ * runs once during initialize(), and refreshConfig() must stay synchronous,
+ * so flows that change the working directory (e.g. /cd) await this first;
+ * otherwise a stale cache would omit the worktree's main-repo write
+ * allowance (or keep granting one for a worktree the session left).
+ */
+async function refreshWorktreeMainRepoPath(cwd: string): Promise<void> {
+  worktreeMainRepoPath = await detectWorktreeMainRepoPath(cwd)
+}
+
+/**
  * Reset sandbox state and clear memoized values
  */
 async function reset(): Promise<void> {
@@ -947,6 +958,7 @@ export interface ISandboxManager {
   annotateStderrWithSandboxFailures(command: string, stderr: string): string
   getLinuxGlobPatternWarnings(): string[]
   refreshConfig(): void
+  refreshWorktreeMainRepoPath(cwd: string): Promise<void>
   reset(): Promise<void>
 }
 
@@ -968,6 +980,7 @@ export const SandboxManager: ISandboxManager = {
   getExcludedCommands,
   wrapWithSandbox,
   refreshConfig,
+  refreshWorktreeMainRepoPath,
   reset,
   checkDependencies,
 
