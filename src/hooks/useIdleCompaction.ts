@@ -17,12 +17,14 @@ import { tokenCountWithEstimation } from '../utils/tokens.js'
  * current size is not compacted again until new content arrives.
  *
  * onIdleCompact receives the messages current at fire time and performs the
- * compaction; the caller owns message replacement and the user notice.
+ * compaction; the caller owns message replacement and the user notice, and
+ * returns whether a compaction was applied so the dedup estimate is only
+ * recorded on success.
  */
 export function useIdleCompaction(
   messages: readonly Message[],
   isLoading: boolean,
-  onIdleCompact: (messages: readonly Message[]) => Promise<void>,
+  onIdleCompact: (messages: readonly Message[]) => Promise<boolean>,
 ): void {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const compactedAtEstimateRef = useRef<number | null>(null)
@@ -59,8 +61,8 @@ export function useIdleCompaction(
       const firedAtEstimate = tokenCountWithEstimation(messagesRef.current)
       void onIdleCompactRef
         .current(messagesRef.current)
-        .then(() => {
-          compactedAtEstimateRef.current = firedAtEstimate
+        .then(applied => {
+          if (applied) compactedAtEstimateRef.current = firedAtEstimate
         })
         .catch(logError)
     }, IDLE_COMPACT_DELAY_MS)

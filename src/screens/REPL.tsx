@@ -3089,24 +3089,48 @@ export function REPL({
     setAbortController,
     onBackgroundQuery: handleBackgroundQuery
   });
+  const idleCompactionAbortRef = useRef<AbortController | null>(null);
   useIdleCompaction(messages, isLoading, async currentMessages => {
     const idleAbortController = createAbortController();
-    const context = getToolUseContext([...currentMessages], [], idleAbortController, mainLoopModel);
-    const postCompact = await runIdleCompaction(currentMessages, context);
-    if (!postCompact) return;
-    setMessages(postCompact);
-    setAutoCompactTrackingForSession(getSessionId(), undefined);
-    if (feature('PROACTIVE') || feature('KAIROS')) {
-      proactiveModule?.setContextBlocked(false);
+    idleCompactionAbortRef.current = idleAbortController;
+    try {
+      const context = getToolUseContext([...currentMessages], [], idleAbortController, mainLoopModel);
+      const postCompact = await runIdleCompaction(currentMessages, context);
+      if (!postCompact || idleAbortController.signal.aborted) return false;
+      // A turn submitted while compaction was in flight replaced the
+      // messages array; drop the stale result instead of clobbering it.
+      if (messagesRef.current !== currentMessages) return false;
+      setMessages(prev => {
+        if (prev !== currentMessages) return prev;
+        // Match the compact-boundary path in onQueryEvent: fullscreen
+        // keeps one compact-interval of pre-boundary scrollback.
+        return isFullscreenEnvEnabled() ? [...getMessagesAfterCompactBoundary(prev, {
+          includeSnipped: true
+        }), ...postCompact] : postCompact;
+      });
+      setAutoCompactTrackingForSession(getSessionId(), undefined);
+      if (feature('PROACTIVE') || feature('KAIROS')) {
+        proactiveModule?.setContextBlocked(false);
+      }
+      setConversationId(randomUUID());
+      addNotification({
+        key: 'idle-compact-notice',
+        text: 'Conversation compacted after a long idle. Turn it off with the "Idle compact" option in /config or by setting "idleCompaction" to false.',
+        priority: 'medium',
+        timeoutMs: 10000
+      });
+      return true;
+    } finally {
+      if (idleCompactionAbortRef.current === idleAbortController) {
+        idleCompactionAbortRef.current = null;
+      }
     }
-    setConversationId(randomUUID());
-    addNotification({
-      key: 'idle-compact-notice',
-      text: 'Conversation compacted after a long idle. Turn it off with the "Idle compact" option in /config or by setting "idleCompaction" to false.',
-      priority: 'medium',
-      timeoutMs: 10000
-    });
   });
+  // Cancel in-flight idle compaction when a turn starts or the REPL unmounts.
+  useEffect(() => {
+    if (isLoading) idleCompactionAbortRef.current?.abort();
+    return () => idleCompactionAbortRef.current?.abort();
+  }, [isLoading]);
   const onQueryEvent = useCallback((event: Parameters<typeof handleMessageFromStream>[0]) => {
     handleMessageFromStream(event, newMessage => {
       if (isCompactBoundaryMessage(newMessage)) {
