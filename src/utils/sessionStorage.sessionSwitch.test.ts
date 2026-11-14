@@ -1,6 +1,8 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 import { randomUUID, type UUID } from 'node:crypto'
+import type { PathLike, StatOptions } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import * as fsPromises from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -30,6 +32,7 @@ import {
 import {
   flushSessionStorage,
   getProjectDir,
+  getSessionFileForTesting,
   getTranscriptPath,
   getTranscriptPathForSession,
   adoptResumedSessionFile,
@@ -725,4 +728,63 @@ test('a resumed session keeps its startup name across a worktree restore', async
     setCwdState(savedCwdState)
     restoreWorktreeSession(null)
   }
+})
+
+test('a metadata append parked on its existence check keeps its pointer under its own session', async () => {
+  // jatmn on #2489 (P2): appendEntry recovers a dropped pointer by
+  // stat-ing the transcript and publishing the path through the ambient
+  // setter. If another session switches while that stat is in flight, the
+  // recovered path is installed under the new session's key, and the new
+  // session's next message lands in the first session's file.
+  switchSession(FIRST as never, null)
+  await mkdir(dirname(getTranscriptPathForSession(FIRST)), { recursive: true, mode: 0o700 })
+  await recordTranscript([message(randomUUID(), 'first session')])
+  await flushSessionStorage()
+
+  // Drop the pointer, as a switch or LRU eviction would: the next
+  // metadata write re-derives it through the existence check.
+  await resetSessionFilePointer()
+  expect(getSessionFileForTesting()).toBeNull()
+
+  const firstPath = getTranscriptPathForSession(FIRST)
+  const secondPath = getTranscriptPathForSession(SECOND)
+  const realStat = fsPromises.stat
+  let switched = false
+  spyOn(fsPromises, 'stat').mockImplementation(
+    (async (path: PathLike, options?: StatOptions) => {
+      if (!switched && path === firstPath) {
+        switched = true
+        // The switch happens while the first session's existence check is
+        // still in flight: the second session materializes its own file.
+        // No flush here: flush waits on the tracked-write count the parked
+        // append holds, so it would deadlock the check it is inside.
+        // Materialization sets the second session's pointer synchronously,
+        // which is the state the bug corrupts.
+        switchSession(SECOND as never, null)
+        await recordTranscript([message(randomUUID(), 'second session')])
+      }
+      return realStat(path, options)
+    }) as unknown as typeof fsPromises.stat,
+  )
+
+  const snapshotId = randomUUID()
+  await recordAttributionSnapshot({
+    type: 'attribution-snapshot',
+    messageId: snapshotId,
+    surface: 'sdk',
+    fileStates: {},
+  })
+  await flushSessionStorage()
+  mock.restore()
+
+  // The parked write landed in the first session's own transcript...
+  expect(await readFile(firstPath, 'utf8')).toContain(snapshotId)
+  // ...and the second session's next message lands in its own file, not
+  // the first session's: the recovered path must not have been installed
+  // under the second session's key.
+  switchSession(SECOND as never, null)
+  await recordTranscript([message(randomUUID(), 'second session again')])
+  await flushSessionStorage()
+  expect(await readFile(secondPath, 'utf8')).toContain('second session again')
+  expect(await readFile(firstPath, 'utf8')).not.toContain('second session again')
 })

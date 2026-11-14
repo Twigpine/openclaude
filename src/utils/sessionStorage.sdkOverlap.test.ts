@@ -16,7 +16,8 @@ import {
   switchSession,
 } from '../bootstrap/state.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
-import { deleteSession } from '../entrypoints/sdk/sessions.js'
+import { deleteSession, getSessionInfo } from '../entrypoints/sdk/sessions.js'
+import { runCleanupFunctions } from '../utils/cleanupRegistry.js'
 import type { Message } from '../types/message.js'
 import type { SessionId } from '../types/ids.js'
 import {
@@ -35,6 +36,7 @@ import {
   getSessionFileForTesting,
   getSessionTranscriptCacheSizeForTesting,
   getStartedSessionKeysSizeForTesting,
+  getTranscriptPath,
   getTranscriptPathForSession,
   reAppendSessionMetadata,
   recordAttributionSnapshot,
@@ -101,6 +103,20 @@ function sdkContext(sessionId: string, projectDir: string | null = null) {
     sessionProjectDir: projectDir,
     cwd: projectDir ?? workspace,
     originalCwd: projectDir ?? workspace,
+  }
+}
+
+/**
+ * An SDK context for one session in an explicit cwd, with no project
+ * directory: the transcript is derived from the cwd, so two contexts in
+ * different cwds are genuinely different destinations for the same id.
+ */
+function sdkContextInCwd(sessionId: string, cwd: string) {
+  return {
+    sessionId: sessionId as SessionId,
+    sessionProjectDir: null,
+    cwd,
+    originalCwd: cwd,
   }
 }
 
@@ -1405,4 +1421,167 @@ test('a re-cached title is not migrated after its pointer and started identity w
   expect(getCurrentSessionTitle(getSessionId())).toBeUndefined()
   switchSession(SESSION_A as never, null)
   expect(getCurrentSessionTitle(getSessionId())).toBe('A Title Again')
+})
+
+test('an established SDK transcript survives entering and exiting a worktree', async () => {
+  // jatmn on #2489 (P2): the SDK key includes the mutable originalCwd,
+  // so EnterWorktreeTool's setOriginalCwd hides the established pointer
+  // and metadata behind a new key and the next message materializes a
+  // second same-id JSONL under the worktree project. The CLI/global case
+  // is covered by sessionStorage.sessionSwitch.test.ts; this is the SDK
+  // path, one context for the whole enter → record → exit lifecycle.
+  const worktree = join(testRoot, 'worktree')
+  await mkdir(worktree, { recursive: true })
+
+  await runWithSdkContext(sdkContext(SESSION_A), async () => {
+    switchSession(SESSION_A as never, null)
+    await recordTranscript([message(randomUUID(), 'before worktree')])
+    await flushSessionStorage()
+    cacheSessionTitle('Worktree Title')
+    reAppendSessionMetadata()
+
+    const transcriptPath = getTranscriptPathForSession(SESSION_A)
+    expect(await readFile(transcriptPath, 'utf8')).toContain('before worktree')
+
+    // EnterWorktreeTool's cwd change, inside the same turn.
+    setOriginalCwd(worktree)
+    expect(getTranscriptPath()).toBe(transcriptPath)
+    expect(getTranscriptPathForSession(SESSION_A)).toBe(transcriptPath)
+    await recordTranscript([message(randomUUID(), 'inside worktree')])
+    await flushSessionStorage()
+
+    // The established pointer and its metadata survive the cwd change.
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('Worktree Title')
+    expect(await readFile(transcriptPath, 'utf8')).toContain('inside worktree')
+    // No second transcript started under the worktree's project directory.
+    expect(existsSync(join(getProjectDir(worktree), `${SESSION_A}.jsonl`))).toBe(false)
+
+    // ExitWorktreeTool restores the cwd; the conversation continues in one file.
+    setOriginalCwd(workspace)
+    expect(getTranscriptPath()).toBe(transcriptPath)
+    expect(getTranscriptPathForSession(SESSION_A)).toBe(transcriptPath)
+    await recordTranscript([message(randomUUID(), 'after worktree')])
+    await flushSessionStorage()
+    const text = await readFile(transcriptPath, 'utf8')
+    expect(text).toContain('after worktree')
+    expect(text).toContain('Worktree Title')
+  })
+})
+
+test('deleting one default-cwd SDK transcript keeps another cwd\u2019s provisional title for the same id', async () => {
+  // jatmn on #2489 (P3): with sessionProjectDir null, forgetSessionCaches
+  // matched pointerless entries by id alone, so deleting A removed B's
+  // cached title even though B's distinct transcript survives. The SDK
+  // key still carries B's destination cwd in its third component. The
+  // explicit-directory control is the test above; this is the
+  // default-cwd sibling it omits.
+  const cwdA = join(testRoot, 'cwd-a')
+  const cwdB = join(testRoot, 'cwd-b')
+  await mkdir(cwdA, { recursive: true })
+  await mkdir(cwdB, { recursive: true })
+
+  // B is provisional: a cached title, no pointer yet.
+  await runWithSdkContext(sdkContextInCwd(SESSION_A, cwdB), async () => {
+    switchSession(SESSION_A as never, null)
+    cacheSessionTitle('B Title')
+  })
+
+  // A is established in its own cwd.
+  await runWithSdkContext(sdkContextInCwd(SESSION_A, cwdA), async () => {
+    switchSession(SESSION_A as never, null)
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+
+  await deleteSession(SESSION_A, { dir: cwdA })
+  expect(existsSync(join(getProjectDir(cwdA), `${SESSION_A}.jsonl`))).toBe(false)
+
+  // B's cached title survives, and its first transcript carries it.
+  await runWithSdkContext(sdkContextInCwd(SESSION_A, cwdB), async () => {
+    switchSession(SESSION_A as never, null)
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('B Title')
+    await recordTranscript([message(randomUUID(), 'B first')])
+    await flushSessionStorage()
+  })
+  expect(await readFile(join(getProjectDir(cwdB), `${SESSION_A}.jsonl`), 'utf8'))
+    .toContain('B Title')
+})
+
+test('deleting one default-cwd SDK transcript keeps another cwd\u2019s established-but-pointerless title', async () => {
+  // jatmn on #2489 (P3): same destination rule as the provisional case,
+  // for an entry that materialized and then lost its pointer to a reset
+  // (or eviction) instead of never having one.
+  const cwdA = join(testRoot, 'cwd-a')
+  const cwdB = join(testRoot, 'cwd-b')
+  await mkdir(cwdA, { recursive: true })
+  await mkdir(cwdB, { recursive: true })
+
+  // B is established, then its pointer is reset: title cached, no pointer.
+  await runWithSdkContext(sdkContextInCwd(SESSION_A, cwdB), async () => {
+    switchSession(SESSION_A as never, null)
+    await recordTranscript([message(randomUUID(), 'B first')])
+    await flushSessionStorage()
+    cacheSessionTitle('B Title')
+    await resetSessionFilePointer()
+  })
+
+  // A is established in its own cwd.
+  await runWithSdkContext(sdkContextInCwd(SESSION_A, cwdA), async () => {
+    switchSession(SESSION_A as never, null)
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+  })
+
+  await deleteSession(SESSION_A, { dir: cwdA })
+  expect(existsSync(join(getProjectDir(cwdA), `${SESSION_A}.jsonl`))).toBe(false)
+
+  // B's cached title survives, and its next message re-stamps it.
+  await runWithSdkContext(sdkContextInCwd(SESSION_A, cwdB), async () => {
+    switchSession(SESSION_A as never, null)
+    expect(getCurrentSessionTitle(SESSION_A as never)).toBe('B Title')
+    await recordTranscript([message(randomUUID(), 'B second')])
+    await flushSessionStorage()
+  })
+  expect(await readFile(join(getProjectDir(cwdB), `${SESSION_A}.jsonl`), 'utf8'))
+    .toContain('B Title')
+})
+
+test('shutdown cleanup re-stamps an SDK session\u2019s title and tag after its context ends', async () => {
+  // jatmn on #2489 (P3): the exit-time cleanup runs in the host/global
+  // context, where the ambient getters cannot reach the retained SDK
+  // pointer/metadata — so a title/tag pushed outside the 64KB tail window
+  // is lost from the listing. The oracle is the public getSessionInfo
+  // listing result, read after the cleanup runs outside the SDK context.
+  await runWithSdkContext(sdkContext(SESSION_A), async () => {
+    switchSession(SESSION_A as never, null)
+    await recordTranscript([message(randomUUID(), 'SDK first')])
+    await flushSessionStorage()
+    // More than 64KB of transcript first: the listing reads a head window
+    // as well as a tail window, so a title placed here is outside both
+    // once another 64KB follows it.
+    for (let i = 0; i < 20; i++) {
+      await recordTranscript([message(randomUUID(), 'x'.repeat(5000))])
+    }
+    await flushSessionStorage()
+    cacheSessionTitle('Cleanup Title')
+    await saveTag(SESSION_A as never, 'cleanup-tag')
+    reAppendSessionMetadata()
+    // Push the title/tag out of the 64KB tail window.
+    for (let i = 0; i < 20; i++) {
+      await recordTranscript([message(randomUUID(), 'y'.repeat(5000))])
+    }
+    await flushSessionStorage()
+  })
+
+  // The SDK context has ended; the listing must not see the title/tag yet.
+  const before = await getSessionInfo(SESSION_A, { dir: workspace })
+  expect(before?.customTitle).toBeUndefined()
+  expect(before?.tag).toBeUndefined()
+
+  // The shutdown cleanup, run from the host/global context.
+  await runCleanupFunctions()
+
+  const after = await getSessionInfo(SESSION_A, { dir: workspace })
+  expect(after?.customTitle).toBe('Cleanup Title')
+  expect(after?.tag).toBe('cleanup-tag')
 })
