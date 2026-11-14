@@ -33,6 +33,22 @@ function runBin(
   })
 }
 
+function runBinNode(
+  args: string[],
+  configDir: string,
+  timeout = 15_000,
+  extraEnv: NodeJS.ProcessEnv = {},
+) {
+  // The launcher under Node, not the Bun test runner's process.execPath:
+  // under Bun process.exit() returns at once even with a blocked
+  // threadpool worker, so only a Node run proves the waiter cannot hang
+  // on a blocked registry read (CodeRabbit #2497).
+  return captureSync('node', [BIN_PATH, ...args], {
+    timeout,
+    env: { ...binEnv(configDir), ...extraEnv },
+  })
+}
+
 function runWaitJson(
   args: string[],
   configDir: string,
@@ -266,20 +282,22 @@ describe('openclaude wait command (bin)', () => {
     })
   })
 
-  // A FIFO at the session metadata path stalls the registry read forever:
+  // A FIFO at the session metadata path must not stall the registry read:
   // opening it for reading blocks until a writer appears, and no writer
-  // ever opens it. The --timeout deadline still settles the waiter, and
-  // the launcher must exit 124 explicitly afterwards — a plain return
-  // leaves the pending read holding the event loop open, so the waiter
-  // never terminates (CodeRabbit #2497). No signal is sent here.
+  // ever opens it. The wait-path readers open registry files with
+  // O_NONBLOCK and refuse non-regular files, so the FIFO reports as
+  // unreadable metadata (exit 4) instead of hanging the waiter — under
+  // Node the old stall also hung the timeout exit itself, because
+  // process.exit() waits for the blocked libuv threadpool worker
+  // (CodeRabbit #2497). No signal is sent here.
   // FIFOs do not exist on Windows, and `mkfifo` is unavailable there.
-  test.skipIf(process.platform === 'win32')('exits 124 on timeout when the metadata read is stalled on a FIFO', async () => {
+  test.skipIf(process.platform === 'win32')('exits 4 promptly when the metadata path is a FIFO', async () => {
     expect(existsSync(DIST_PATH)).toBe(true)
     const pid = await startSleeper()
     await createSession('bg-bin-4', { pid, command: ['sleep', '120'] })
 
-    // Replace the metadata file with a FIFO so the registry read never
-    // settles.
+    // Replace the metadata file with a FIFO so the registry read would
+    // never settle if it opened the file.
     const metadataPath = join(registryRoot, 'sessions', 'bg-bin-4.json')
     await unlink(metadataPath)
     const mkfifo = Bun.spawnSync(['mkfifo', metadataPath], {
@@ -291,14 +309,49 @@ describe('openclaude wait command (bin)', () => {
     const result = runBin(['wait', 'bg-bin-4', '--timeout', '1s', '--json'], configDir)
 
     expect(result.error).toBeUndefined()
-    expect(result.status).toBe(124)
+    expect(result.status).toBe(4)
     expect(result.stderr).toBe('')
     const parsed = JSON.parse(result.stdout)
     expect(parsed).toMatchObject({
       id: null,
       status: null,
-      waitResult: 'timeout',
-      error: 'timeout',
+      waitResult: 'observation_error',
+      error: 'metadata_unreadable',
+    })
+  }, 30_000)
+
+  // Same FIFO scenario, but with the launcher actually running under Node
+  // rather than the Bun test runner's process.execPath: the Bun run above
+  // cannot prove the Node timeout-exit path, since Bun's process.exit()
+  // does not wait for a blocked threadpool worker. On the pre-fix code
+  // this hangs until the capture timeout kills it (CodeRabbit #2497).
+  test.skipIf(process.platform === 'win32')('exits 4 promptly under Node when the metadata path is a FIFO', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    const pid = await startSleeper()
+    await createSession('bg-bin-5', { pid, command: ['sleep', '120'] })
+
+    const metadataPath = join(registryRoot, 'sessions', 'bg-bin-5.json')
+    await unlink(metadataPath)
+    const mkfifo = Bun.spawnSync(['mkfifo', metadataPath], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(mkfifo.exitCode).toBe(0)
+
+    const result = runBinNode(
+      ['wait', 'bg-bin-5', '--timeout', '1s', '--json'],
+      configDir,
+    )
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(4)
+    expect(result.stderr).toBe('')
+    const parsed = JSON.parse(result.stdout)
+    expect(parsed).toMatchObject({
+      id: null,
+      status: null,
+      waitResult: 'observation_error',
+      error: 'metadata_unreadable',
     })
   }, 30_000)
 

@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises'
 import {
   closeSync,
+  constants as fsConstants,
   fstatSync,
   fsyncSync,
   lstatSync,
@@ -3432,21 +3433,58 @@ type StrictSessionRead =
   | { state: 'unreadable' }
   | { state: 'malformed' }
 
-async function readSessionFileStrict(
+/**
+ * Reads a `wait`-path registry file without ever blocking on a
+ * non-regular file. `open()` on a FIFO blocks until a writer appears, so
+ * a plain `readFile` on a FIFO at a metadata or terminal-fact path stalls
+ * the waiter forever; under Node the timeout exit then cannot run either,
+ * because `process.exit()` waits for the blocked libuv threadpool worker
+ * (CodeRabbit #2497). Open with O_NONBLOCK so the open itself cannot
+ * block, then stat the opened handle — the type check applies to the file
+ * actually read, so a swap between the check and the open cannot retarget
+ * it — and refuse anything that is not a regular file. A non-regular file
+ * reports as unreadable metadata, the same outcome a directory already
+ * produced via EISDIR. The same guard covers the 130/143 signal path,
+ * which reads through these same strict readers.
+ */
+async function readWaitRegistryFile(
   path: string,
-  id: string,
-): Promise<StrictSessionRead> {
-  let content: string
+): Promise<
+  | { state: 'missing' }
+  | { state: 'unreadable' }
+  | { state: 'ok'; content: string }
+> {
+  let handle: Awaited<ReturnType<typeof open>>
   try {
-    content = await readFile(path, 'utf8')
+    handle = await open(
+      path,
+      fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+    )
   } catch (error) {
     return isErrno(error, 'ENOENT')
       ? { state: 'missing' }
       : { state: 'unreadable' }
   }
+  try {
+    if (!(await handle.stat()).isFile()) return { state: 'unreadable' }
+    return { state: 'ok', content: await handle.readFile('utf8') }
+  } catch {
+    return { state: 'unreadable' }
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+async function readSessionFileStrict(
+  path: string,
+  id: string,
+): Promise<StrictSessionRead> {
+  const read = await readWaitRegistryFile(path)
+  if (read.state === 'missing') return { state: 'missing' }
+  if (read.state === 'unreadable') return { state: 'unreadable' }
   let parsed: unknown
   try {
-    parsed = jsonParse(content)
+    parsed = jsonParse(read.content)
   } catch {
     return { state: 'malformed' }
   }
@@ -3466,20 +3504,14 @@ async function readTerminalFactStrict(
   kind: 'natural' | 'killed',
   generation?: string,
 ): Promise<StrictTerminalFactRead> {
-  let content: string
-  try {
-    content = await readFile(
-      terminalFactPathForId(id, kind, generation),
-      'utf8',
-    )
-  } catch (error) {
-    return isErrno(error, 'ENOENT')
-      ? { state: 'missing' }
-      : { state: 'unreadable' }
-  }
+  const read = await readWaitRegistryFile(
+    terminalFactPathForId(id, kind, generation),
+  )
+  if (read.state === 'missing') return { state: 'missing' }
+  if (read.state === 'unreadable') return { state: 'unreadable' }
   let parsed: unknown
   try {
-    parsed = jsonParse(content)
+    parsed = jsonParse(read.content)
   } catch {
     return { state: 'malformed' }
   }
