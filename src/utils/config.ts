@@ -291,6 +291,7 @@ export type GlobalConfig = {
   bypassPermissionsModeAccepted?: boolean
   hasUsedBackslashReturn?: boolean
   autoCompactEnabled: boolean // Controls whether auto-compact is enabled
+  idleCompaction: boolean // Compact the session automatically after a long idle period (default: on)
   contextCollapseEnabled: boolean // Opt-in: collapse old transcript spans into summaries (lossy; off by default)
   toolHistoryCompressionEnabled: boolean // Compress old tool_result content (shim providers; Anthropic-native only while prompt caching is inactive)
   compactTailTurns?: number // Recent messages preserved verbatim by auto-compact's relevance pruning (default: 3)
@@ -732,6 +733,7 @@ function createDefaultGlobalConfig(): GlobalConfig {
     verbose: false,
     editorMode: 'normal',
     autoCompactEnabled: true,
+    idleCompaction: true,
     contextCollapseEnabled: false,
     toolHistoryCompressionEnabled: true,
     showTurnDuration: true,
@@ -788,6 +790,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'editorMode',
   'hasUsedBackslashReturn',
   'autoCompactEnabled',
+  'idleCompaction',
   'compactTailTurns',
   'replMaxTurns',
   'queryIdleTimeoutMs',

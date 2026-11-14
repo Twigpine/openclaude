@@ -12,6 +12,8 @@ import chalk from 'chalk';
 // eslint-disable-next-line custom-rules/prefer-use-keybindings -- / n N Esc [ v are bare letters in transcript modal context, same class as g/G/j/k in ScrollKeybindingHandler
 import { useInput } from '../ink.js';
 import { useSearchInput } from '../hooks/useSearchInput.js';
+import { useIdleCompaction } from '../hooks/useIdleCompaction.js';
+import { runIdleCompaction } from '../services/compact/idleCompaction.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useSearchHighlight } from '../ink/hooks/use-search-highlight.js';
 import type { JumpHandle } from '../components/VirtualMessageList.js';
@@ -3085,6 +3087,24 @@ export function REPL({
     resetLoadingState,
     setAbortController,
     onBackgroundQuery: handleBackgroundQuery
+  });
+  useIdleCompaction(messages, isLoading, async currentMessages => {
+    const idleAbortController = createAbortController();
+    const context = getToolUseContext([...currentMessages], [], idleAbortController, mainLoopModel);
+    const compacted = await runIdleCompaction(currentMessages, context);
+    if (!compacted) return;
+    setMessages(compacted.postCompact);
+    setAutoCompactTrackingForSession(getSessionId(), undefined);
+    if (feature('PROACTIVE') || feature('KAIROS')) {
+      proactiveModule?.setContextBlocked(false);
+    }
+    setConversationId(randomUUID());
+    addNotification({
+      key: 'idle-compact-notice',
+      text: 'Conversation compacted after a long idle. Turn it off with the "Idle compact" option in /config or by setting "idleCompaction" to false.',
+      priority: 'medium',
+      timeoutMs: 10000
+    });
   });
   const onQueryEvent = useCallback((event: Parameters<typeof handleMessageFromStream>[0]) => {
     handleMessageFromStream(event, newMessage => {
