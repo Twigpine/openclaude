@@ -1706,6 +1706,12 @@ function writeBoundaryDenial(path: string): PermissionDenyDecision {
 // both. The nearest existing ancestor is resolved so writes to files that
 // do not exist yet still compare correctly.
 function canonicalPathForContainment(path: string): string {
+  // UNC paths are compared lexically: realpathSync on \\server\share can
+  // issue network requests during validation, matching the policy in
+  // getPathsForPermissionCheck.
+  if (path.startsWith('//') || path.startsWith('\\\\')) {
+    return normalize(path)
+  }
   let current = path
   const tail: string[] = []
   while (true) {
@@ -1728,12 +1734,14 @@ function writePathsInsideWorkingDirectories(
   const canonicalWorking = [...workingPaths].map(canonicalPathForContainment)
   return pathsToCheck.every(pathToCheck => {
     const canonical = canonicalPathForContainment(pathToCheck)
-    return canonicalWorking.some(
-      dir =>
-        dir === parse(dir).root ||
-        canonical === dir ||
-        canonical.startsWith(dir + sep),
-    )
+    return canonicalWorking.some(dir => {
+      // A filesystem root keeps its trailing separator: '/' on POSIX still
+      // contains everything (single volume), but 'C:\' on Windows must not
+      // contain 'D:\' paths, so root compares against the dir itself and
+      // non-root against the separator-bounded form.
+      const prefix = dir === parse(dir).root ? dir : dir + sep
+      return canonical === dir || canonical.startsWith(prefix)
+    })
   })
 }
 
@@ -1904,6 +1912,19 @@ export function checkEditableInternalPath(
     normalizeCaseForComparison(normalizedPath) ===
     normalizeCaseForComparison(join(getOriginalCwd(), '.openclaude', 'launch.json'))
   ) {
+    // The carve-out intends a file inside the project. When the write
+    // boundary is on, a symlinked launch.json must still resolve inside the
+    // working directories, or the allow becomes an outside-dir write.
+    if (
+      toolPermissionContext &&
+      getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+      !writePathsInsideWorkingDirectories(
+        getPathsForPermissionCheck(absolutePath),
+        allWorkingDirectories(toolPermissionContext),
+      )
+    ) {
+      return { behavior: 'passthrough', message: '' }
+    }
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1922,6 +1943,19 @@ export function checkEditableInternalPath(
       toolPermissionContext?.mode === 'fullAccess') &&
     isOpenClaudeCommitMessagePath(normalizedPath)
   ) {
+    // Same containment guard as launch.json: the commit message file lives
+    // inside the project, so a symlinked target outside the working
+    // directories must not ride this carve-out past the boundary.
+    if (
+      toolPermissionContext &&
+      getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+      !writePathsInsideWorkingDirectories(
+        getPathsForPermissionCheck(absolutePath),
+        allWorkingDirectories(toolPermissionContext),
+      )
+    ) {
+      return { behavior: 'passthrough', message: '' }
+    }
     return {
       behavior: 'allow',
       updatedInput: input,

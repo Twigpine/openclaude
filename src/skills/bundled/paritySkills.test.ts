@@ -64,6 +64,12 @@ test(
       expect(autoModePrompt).toContain('explicit confirmation')
       expect(autoModePrompt).toContain('settings.local.json')
       expect(autoModePrompt).toContain('OPENCLAUDE_CONFIG_DIR')
+      // The user-level destination must resolve the active config home,
+      // not assume ~/.openclaude, and shared project settings stay banned.
+      expect(autoModePrompt).toContain('active config home')
+      expect(autoModePrompt).toContain(
+        'Never write it to `.openclaude/settings.json`',
+      )
 
       expect(result.skills['less-permission-prompts'].prompt).toContain(
         'OPENCLAUDE_CONFIG_DIR',

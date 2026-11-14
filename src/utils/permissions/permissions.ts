@@ -507,6 +507,17 @@ async function runPermissionRequestHooksForHeadlessAgent(
       const decision = hookResult.permissionRequestResult
       if (decision.behavior === 'allow') {
         const finalInput = decision.updatedInput ?? input
+        // A hook can allow with an updatedInput pointing outside the working
+        // directories. Recheck the hard write boundary on the input actually
+        // being allowed; tool.checkPermissions never sees finalInput here.
+        const writeBoundary = checkWriteBoundaryForAskRule(
+          tool,
+          finalInput,
+          context.getAppState().toolPermissionContext,
+        )
+        if (writeBoundary) {
+          return writeBoundary
+        }
         const finalPlanMode =
           enforcePlanMode ||
           context.getAppState().toolPermissionContext.mode === 'plan'

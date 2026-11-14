@@ -91,6 +91,26 @@ describe('plugin engines compatibility', () => {
     }
   })
 
+  test('whitespace between comparator and version is accepted', () => {
+    // npm semver accepts `>= 0.30.0` and `^ 0.36.0`; the range grammar and
+    // the satisfies check must handle them rather than rejecting or
+    // silently treating the input as a wildcard.
+    for (const range of ['>= 0.30.0', '^ 0.36.0', '~ 0.36.0']) {
+      expect(
+        pluginEnginesIncompatibility(
+          manifest({ 'claude-code': range }),
+          APP_VERSION,
+        ),
+      ).toBeNull()
+    }
+    const error = pluginEnginesIncompatibility(
+      manifest({ 'claude-code': '^ 1.0.0' }),
+      APP_VERSION,
+    )
+    expect(error).not.toBeNull()
+    expect(error).not.toContain('invalid')
+  })
+
   test('malformed text around a valid range is invalid, not compatible', () => {
     for (const range of [
       '>=0.30.0 definitely-invalid',
