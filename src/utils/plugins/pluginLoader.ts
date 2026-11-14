@@ -1171,6 +1171,15 @@ const ENGINE_VERSION_SRC =
 const ENGINE_VERSION_RE = new RegExp(`^${ENGINE_VERSION_SRC}$`)
 const ENGINE_COMPARATOR_RE = new RegExp(`^[<>=~^]*${ENGINE_VERSION_SRC}$`)
 
+// A comparator may be separated from its version by whitespace
+// (`>= 0.30.0`, `^ 0.36.0`). npm semver accepts that, but
+// Bun.semver.satisfies mis-parses it after `^`, so operator/version pairs
+// are merged once and the normalized form feeds both validation and
+// comparison. Hyphen ranges and `||` alternatives are unaffected: `-` and
+// `|` are not operator characters.
+const normalizeEngineRange = (range: string): string =>
+  range.replace(/([<>=~^]+)\s+(?=[\dxX*])/g, '$1')
+
 function isValidEngineRange(range: string): boolean {
   return range.split('||').every(alternative => {
     const trimmed = alternative.trim()
@@ -1184,7 +1193,7 @@ function isValidEngineRange(range: string): boolean {
         hyphen.every(end => ENGINE_VERSION_RE.test(end.trim()))
       )
     }
-    return trimmed
+    return normalizeEngineRange(trimmed)
       .split(/\s+/)
       .every(token => ENGINE_COMPARATOR_RE.test(token))
   })
@@ -1210,7 +1219,7 @@ export function pluginEnginesIncompatibility(
     return invalidRangeError
   }
   try {
-    if (satisfies(appVersion, range)) {
+    if (satisfies(appVersion, normalizeEngineRange(range))) {
       return null
     }
   } catch {

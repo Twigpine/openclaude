@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test'
-import { mkdir, mkdtemp, rm } from 'fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { z } from 'zod/v4'
@@ -24,6 +24,21 @@ mock.module('../settings/settings.js', () => ({
   getInitialSettings: (): SettingsJson => ({
     permissions: { blockWritesOutsideWorkingDirectories },
   }),
+}))
+
+let hookPermissionResult:
+  | { behavior: 'allow'; updatedInput?: { [key: string]: unknown } }
+  | undefined
+const realHooks = await import(
+  `../hooks.js?blockWritesHooksActual=${Date.now()}-${Math.random()}`
+)
+mock.module('../hooks.js', () => ({
+  ...realHooks,
+  executePermissionRequestHooks: async function* () {
+    if (hookPermissionResult) {
+      yield { permissionRequestResult: hookPermissionResult }
+    }
+  },
 }))
 
 const { checkWritePermissionForTool } = await import('./filesystem.js')
@@ -226,5 +241,153 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
       throw new Error(`expected deny, got ${result?.behavior}`)
     }
     expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+  })
+
+  test('a symlinked launch config cannot escape the boundary', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const openclaudeDir = join(projectDir, '.openclaude')
+    await mkdir(openclaudeDir, { recursive: true })
+    const linkPath = join(openclaudeDir, 'launch.json')
+    const targetPath = join(outsideDir, 'launch.json')
+    await writeFile(targetPath, '{}')
+    await symlink(targetPath, linkPath)
+    const result = checkWritePermissionForTool(
+      writeTool,
+      { file_path: linkPath },
+      permissionContext('bypassPermissions'),
+    )
+    if (result.behavior !== 'deny') {
+      throw new Error(`expected deny, got ${result.behavior}`)
+    }
+    expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+  })
+
+  test('a real launch config inside the project stays allowed', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const openclaudeDir = join(projectDir, '.openclaude')
+    await mkdir(openclaudeDir, { recursive: true })
+    const configPath = join(openclaudeDir, 'launch.json')
+    await rm(configPath, { force: true })
+    await writeFile(configPath, '{}')
+    const result = checkWritePermissionForTool(
+      writeTool,
+      { file_path: configPath },
+      permissionContext('bypassPermissions'),
+    )
+    expect(result.behavior).not.toBe('deny')
+  })
+
+  test('a symlinked launch config is denied through the ask-rule path', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const openclaudeDir = join(projectDir, '.openclaude')
+    await mkdir(openclaudeDir, { recursive: true })
+    const linkPath = join(openclaudeDir, 'launch.json')
+    const targetPath = join(outsideDir, 'launch-ask.json')
+    await writeFile(targetPath, '{}')
+    await rm(linkPath, { force: true })
+    await symlink(targetPath, linkPath)
+    const context = useContext(
+      permissionContext('default', new Map(), { localSettings: ['Write'] }),
+    )
+    const result = await hasPermissionsToUseTool(
+      writeTool,
+      { file_path: linkPath },
+      context,
+      {} as Parameters<typeof hasPermissionsToUseTool>[3],
+      'tool-use-boundary-askrule',
+    )
+    if (result.behavior !== 'deny') {
+      throw new Error(`expected deny, got ${result.behavior}`)
+    }
+    expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+  })
+
+  test('a filesystem-root working directory still contains POSIX paths', () => {
+    if (process.platform === 'win32') {
+      return
+    }
+    blockWritesOutsideWorkingDirectories = true
+    setOriginalCwd('/')
+    try {
+      const result = checkWritePermissionForTool(
+        writeTool,
+        { file_path: join(outsideDir, 'out.txt') },
+        permissionContext('bypassPermissions'),
+      )
+      expect(result.behavior).not.toBe('deny')
+    } finally {
+      setOriginalCwd(projectDir)
+    }
+  })
+
+  test('a drive-root working directory does not span volumes', () => {
+    if (process.platform !== 'win32') {
+      return
+    }
+    blockWritesOutsideWorkingDirectories = true
+    setOriginalCwd('C:\\')
+    try {
+      const result = checkWritePermissionForTool(
+        writeTool,
+        { file_path: 'D:\\outside\\out.txt' },
+        permissionContext('bypassPermissions'),
+      )
+      expect(result.behavior).toBe('deny')
+    } finally {
+      setOriginalCwd(projectDir)
+    }
+  })
+
+  test('a UNC-prefixed target is denied without path resolution', () => {
+    blockWritesOutsideWorkingDirectories = true
+    const result = checkWritePermissionForTool(
+      writeTool,
+      { file_path: '//nonexistent-server/share/out.txt' },
+      permissionContext('bypassPermissions'),
+    )
+    expect(result.behavior).toBe('deny')
+  })
+
+  test('a hook-rewritten input still hits the boundary', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(outsideDir, 'hooked.txt') },
+    }
+    try {
+      const askWriteTool = createToolFixture(
+        z.object({ file_path: z.string() }),
+        {
+          name: 'Write',
+          getPath(input: { file_path: string }) {
+            return input.file_path
+          },
+          async checkPermissions(input) {
+            return {
+              behavior: 'ask' as const,
+              message: 'Write requires approval',
+              updatedInput: input,
+            }
+          },
+        },
+      )
+      const toolPermissionContext: ToolPermissionContext = {
+        ...permissionContext('default'),
+        shouldAvoidPermissionPrompts: true,
+      }
+      const result = await hasPermissionsToUseTool(
+        askWriteTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(toolPermissionContext),
+        {} as Parameters<typeof hasPermissionsToUseTool>[3],
+        'tool-use-boundary-hook',
+      )
+      if (result.behavior !== 'deny') {
+        throw new Error(`expected deny, got ${result.behavior}`)
+      }
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    } finally {
+      hookPermissionResult = undefined
+    }
   })
 })
