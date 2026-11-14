@@ -182,6 +182,12 @@ export const PermissionsSchema = lazySchema(() =>
               .describe('Disable auto mode'),
           }
         : {}),
+      denyInsteadOfPrompting: z
+        .boolean()
+        .optional()
+        .describe(
+          'Deny any tool call that would otherwise wait on a permission prompt',
+        ),
       additionalDirectories: z
         .array(z.string())
         .optional()
