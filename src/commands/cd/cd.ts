@@ -75,6 +75,7 @@ export const call: LocalCommandCall = async (args, context) => {
   process.chdir(absolutePath)
   setCwd(absolutePath)
   setOriginalCwd(getCwd())
+  await SandboxManager.refreshWorktreeMainRepoPath(absolutePath)
   SandboxManager.refreshConfig()
   clearSystemPromptSections()
   clearMemoryFileCaches()
