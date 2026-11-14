@@ -968,7 +968,7 @@ function getProject(): Project {
         // shows the auto-generated firstPrompt instead.
         await project?.flush()
         try {
-          project?.reAppendSessionMetadata()
+          project?.reAppendSessionMetadataOnShutdown()
         } catch {
           // Best-effort — don't let metadata re-append crash the cleanup
         }
@@ -1191,6 +1191,24 @@ function sessionFileKeyFor(
   return `${sessionId}\0${projectDir ?? ''}\0${cwd}`
 }
 
+/**
+ * Split a cache key back into its identity components: session id,
+ * project directory (null when the key carries none), and — for SDK
+ * keys — the destination cwd (null for global keys, which carry none).
+ */
+function splitSessionFileKey(key: string): {
+  sessionId: string
+  projectDir: string | null
+  cwd: string | null
+} {
+  const parts = key.split('\0')
+  return {
+    sessionId: parts[0] ?? '',
+    projectDir: parts[1] ? parts[1] : null,
+    cwd: parts[2] ?? null,
+  }
+}
+
 class Project {
   // Minimal cache for current session only (not all sessions) — one entry
   // per context identity (see sessionFileKey), never shared across sessions.
@@ -1318,6 +1336,59 @@ class Project {
     this.metadataForWrite()[field] = value
   }
 
+  /** Metadata entry for an explicit cache key, without creating it. */
+  private metadataEntryForKey(key: string): SessionMetadata | undefined {
+    const entry = this.sessionMetadata.get(key)
+    if (entry) {
+      // Touch so the bounded cache evicts least-recently-used entries first.
+      this.sessionMetadata.delete(key)
+      this.sessionMetadata.set(key, entry)
+    }
+    return entry
+  }
+
+  /**
+   * Metadata entry for an explicit cache key, creating it. Mirrors
+   * metadataForWrite: an identity with an established pointer or an
+   * existing transcript is a live session re-caching after eviction, so
+   * it is re-marked started.
+   */
+  private metadataForWriteForKey(key: string): SessionMetadata {
+    let entry = this.sessionMetadata.get(key)
+    if (entry) {
+      this.sessionMetadata.delete(key)
+    } else {
+      entry = {}
+    }
+    this.sessionMetadata.set(key, entry)
+    const transcriptPath = this.transcriptPathForKey(key)
+    if (
+      this.sessionFiles.has(key) ||
+      (!this.isDeletedSessionFile(transcriptPath) &&
+        existsSync(transcriptPath))
+    ) {
+      this.markSessionStarted(key)
+    }
+    this.boundSessionCaches()
+    return entry
+  }
+
+  /** Set one metadata field under an explicit cache key. */
+  private setSessionMetadataFieldForKey<K extends keyof SessionMetadata>(
+    key: string,
+    field: K,
+    value: SessionMetadata[K] | undefined,
+  ): void {
+    if (value === undefined) {
+      const entry = this.sessionMetadata.get(key)
+      if (!entry) return
+      delete entry[field]
+      if (Object.keys(entry).length === 0) this.sessionMetadata.delete(key)
+      return
+    }
+    this.metadataForWriteForKey(key)[field] = value
+  }
+
   get currentSessionTag(): string | undefined {
     return this.metadataForRead()?.tag
   }
@@ -1430,7 +1501,15 @@ class Project {
   }
 
   set sessionFile(path: string | null) {
-    const key = this.sessionFileKey()
+    this.setSessionFileForKey(this.sessionFileKey(), path)
+  }
+
+  /**
+   * Set the cached transcript path under an explicit cache key, for
+   * callers that captured the identity before an await (see appendEntry):
+   * the ambient key after the await may name a different session.
+   */
+  private setSessionFileForKey(key: string, path: string | null): void {
     if (path === null) {
       this.sessionFiles.delete(key)
     } else {
@@ -1450,6 +1529,13 @@ class Project {
   // its context identity (getTranscriptPath) and title/tag refresh from
   // the transcript tail on re-append.
   private sessionFiles = new Map<string, string>()
+
+  // First key computed per SDK context object, per base identity
+  // (session id + project directory). Pins an established SDK
+  // destination across the Enter/ExitWorktree cwd changes of its own
+  // turn (see sessionFileKeyForIdentity); the WeakMap releases the memo
+  // with the context, so it retains nothing past the turn (#2489).
+  private sdkSessionFileKeyMemo = new WeakMap<object, Map<string, string>>()
 
   // Bound for the per-context transcript caches, matching the LRU default
   // in conversationCache. Far above any realistic count of overlapping
@@ -1527,10 +1613,42 @@ class Project {
     sessionId: SessionId,
     projectDir: string | null,
   ): string {
-    if (getSdkContext() === undefined) {
+    const ctx = getSdkContext()
+    if (ctx === undefined) {
       return `${sessionId}\0${projectDir ?? ''}`
     }
-    return sessionFileKeyFor(sessionId, projectDir, getOriginalCwd())
+    // The SDK context object identifies one turn of one session, and its
+    // originalCwd is mutable within that turn: EnterWorktreeTool changes
+    // it without changing the session. The first key computed in the turn
+    // pins the destination; later computations in the same turn keep it,
+    // so an established pointer and its metadata stay reachable across
+    // Enter/ExitWorktree. A fresh context (a new turn, or a different
+    // session) derives afresh, so genuinely different same-id SDK
+    // destinations in different cwds keep their own keys (#2489).
+    const base = `${sessionId}\0${projectDir ?? ''}`
+    let memo = this.sdkSessionFileKeyMemo.get(ctx)
+    if (!memo) {
+      memo = new Map()
+      this.sdkSessionFileKeyMemo.set(ctx, memo)
+    }
+    const pinned = memo.get(base)
+    if (pinned !== undefined) return pinned
+    const key = sessionFileKeyFor(sessionId, projectDir, getOriginalCwd())
+    memo.set(base, key)
+    return key
+  }
+
+  /**
+   * Transcript path a cache key names: the same derivation
+   * getTranscriptPath() uses, with the key's own cwd instead of the live
+   * one, so a key still names its transcript after the cwd moved.
+   */
+  private transcriptPathForKey(key: string): string {
+    const { sessionId, projectDir, cwd } = splitSessionFileKey(key)
+    return join(
+      projectDir ?? getProjectDir(cwd ?? getOriginalCwd()),
+      `${sessionId}.jsonl`,
+    )
   }
 
   /** Identity of the transcript `getTranscriptPath()` derives in this context (see sessionFileKeyForIdentity). */
@@ -2050,14 +2168,35 @@ class Project {
     // compaction callers reach here without that guard.
     if (this.shouldSkipPersistence()) return
     if (!this.sessionFile) this.restoreEvictedSessionFile()
-    if (!this.sessionFile) return
+    const sessionFile = this.sessionFile
+    if (!sessionFile) return
     const sessionId = getSessionId() as UUID
     if (!sessionId) return
+    this.reAppendSessionMetadataForKey(
+      this.sessionFileKey(),
+      sessionFile,
+      sessionId,
+      skipTitleRefresh,
+    )
+  }
 
+  /**
+   * Re-append cached session metadata for one explicit cache key, with
+   * that key's own session id. The ambient reAppendSessionMetadata
+   * delegates to this for the current context; the shutdown cleanup
+   * calls it for every retained SDK session after its async context has
+   * ended (#2489). Same serializer and field rules in both cases.
+   */
+  private reAppendSessionMetadataForKey(
+    key: string,
+    sessionFile: string,
+    sessionId: UUID,
+    skipTitleRefresh = false,
+  ): void {
     // One sync tail read to refresh SDK-mutable fields. Same
     // LITE_READ_BUF_SIZE window readLiteMetadata uses. Empty string on
     // failure → extract returns null → cache is the only source of truth.
-    const tail = readFileTailSync(this.sessionFile)
+    const tail = readFileTailSync(sessionFile)
 
     // Absorb any fresher SDK-written title/tag into our cache. If the SDK
     // wrote while we had the session open, our cache is stale — the tail
@@ -2067,6 +2206,9 @@ class Project {
     // Filter with startsWith to match only top-level JSONL entries (col 0)
     // and not "type":"tag" appearing inside a nested tool_use input that
     // happens to be JSON-serialized into a message.
+    const entry = this.metadataEntryForKey(key)
+    let title = entry?.title
+    let tag = entry?.tag
     const tailLines = tail.split('\n')
     if (!skipTitleRefresh) {
       const titleLine = tailLines.findLast(l =>
@@ -2079,7 +2221,8 @@ class Project {
         // external writer with customTitle:"" should clear the cache so the
         // re-append below skips it (instead of resurrecting a stale title).
         if (tailTitle !== undefined) {
-          this.currentSessionTitle = tailTitle || undefined
+          title = tailTitle || undefined
+          this.setSessionMetadataFieldForKey(key, 'title', title)
         }
       }
     }
@@ -2088,102 +2231,145 @@ class Project {
       const tailTag = extractLastJsonStringField(tagLine, 'tag')
       // Same: tagSession(id, null) writes `tag:""` to clear.
       if (tailTag !== undefined) {
-        this.currentSessionTag = tailTag || undefined
+        tag = tailTag || undefined
+        this.setSessionMetadataFieldForKey(key, 'tag', tag)
       }
     }
 
     // lastPrompt is re-appended so readLiteMetadata can show what the
     // user was most recently doing. Written first so customTitle/tag/etc
     // land closer to EOF (they're the more critical fields for tail reads).
-    if (this.currentSessionLastPrompt) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.lastPrompt) {
+      appendEntryToFile(sessionFile, {
         type: 'last-prompt',
-        lastPrompt: this.currentSessionLastPrompt,
+        lastPrompt: entry.lastPrompt,
         sessionId,
       })
     }
     // Unconditional: cache was refreshed from tail above; re-append keeps
     // the entry at EOF so compaction-pushed content doesn't evict it.
-    if (this.currentSessionTitle) {
-      appendEntryToFile(this.sessionFile, {
+    if (title) {
+      appendEntryToFile(sessionFile, {
         type: 'custom-title',
-        customTitle: this.currentSessionTitle,
+        customTitle: title,
         sessionId,
       })
     }
-    if (this.currentSessionTag) {
-      appendEntryToFile(this.sessionFile, {
+    if (tag) {
+      appendEntryToFile(sessionFile, {
         type: 'tag',
-        tag: this.currentSessionTag,
+        tag,
         sessionId,
       })
     }
-    if (this.currentSessionAgentName) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.agentName) {
+      appendEntryToFile(sessionFile, {
         type: 'agent-name',
-        agentName: this.currentSessionAgentName,
+        agentName: entry.agentName,
         sessionId,
       })
     }
-    if (this.currentSessionAgentColor) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.agentColor) {
+      appendEntryToFile(sessionFile, {
         type: 'agent-color',
-        agentColor: this.currentSessionAgentColor,
+        agentColor: entry.agentColor,
         sessionId,
       })
     }
-    if (this.currentSessionAgentSetting) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.agentSetting) {
+      appendEntryToFile(sessionFile, {
         type: 'agent-setting',
-        agentSetting: this.currentSessionAgentSetting,
+        agentSetting: entry.agentSetting,
         sessionId,
       })
     }
-    if (this.currentSessionMode) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.mode) {
+      appendEntryToFile(sessionFile, {
         type: 'mode',
-        mode: this.currentSessionMode,
+        mode: entry.mode,
         sessionId,
       })
     }
-    if (this.currentSessionWorktree !== undefined) {
-      appendEntryToFile(this.sessionFile, {
+    if (entry?.worktree !== undefined) {
+      appendEntryToFile(sessionFile, {
         type: 'worktree-state',
-        worktreeSession: this.currentSessionWorktree,
+        worktreeSession: entry.worktree,
         sessionId,
       })
     }
     if (
-      this.currentSessionPrNumber !== undefined &&
-      this.currentSessionPrUrl &&
-      this.currentSessionPrRepository
+      entry?.prNumber !== undefined &&
+      entry.prUrl &&
+      entry.prRepository
     ) {
-      appendEntryToFile(this.sessionFile, {
+      appendEntryToFile(sessionFile, {
         type: 'pr-link',
         sessionId,
-        prNumber: this.currentSessionPrNumber,
-        prUrl: this.currentSessionPrUrl,
-        prRepository: this.currentSessionPrRepository,
+        prNumber: entry.prNumber,
+        prUrl: entry.prUrl,
+        prRepository: entry.prRepository,
         timestamp: new Date().toISOString(),
       })
     }
     if (
-      this.currentSessionGoal &&
-      (this.currentSessionGoal.status === 'active' ||
-        this.currentSessionGoal.status === 'paused')
+      entry?.goal &&
+      (entry.goal.status === 'active' || entry.goal.status === 'paused')
     ) {
-      appendEntryToFile(this.sessionFile, {
+      appendEntryToFile(sessionFile, {
         type: 'goal-state',
         sessionId,
-        goal: this.currentSessionGoal,
+        goal: entry.goal,
       })
     }
-    if (this.currentSessionBranch) {
-      appendEntryToFile(this.sessionFile, {
-        ...this.currentSessionBranch,
+    if (entry?.branch) {
+      appendEntryToFile(sessionFile, {
+        ...entry.branch,
         sessionId,
       })
     }
+  }
+
+  /**
+   * Re-append cached metadata for every retained SDK session. The
+   * shutdown cleanup runs in the host/global context, after the SDK
+   * turns it serves have left their async contexts — the ambient
+   * getters cannot reach those sessions' pointers or metadata, so
+   * without this their titles/tags fall outside the listing windows
+   * (#2489). Only sessions with a retained pointer are covered;
+   * evicted sessions stay out of scope. `alreadyHandled` holds the
+   * resolved paths the ambient re-append just wrote, so a session the
+   * global context also names is not stamped twice. Bounded by the
+   * per-context cache bound (see boundSessionCaches).
+   */
+  private reAppendRetainedSdkSessionMetadata(
+    alreadyHandled: Set<string>,
+  ): void {
+    for (const [key, path] of [...this.sessionFiles]) {
+      const { sessionId, cwd } = splitSessionFileKey(key)
+      // Global keys carry no cwd component; the ambient re-append above
+      // covers the CLI session they name.
+      if (cwd === null) continue
+      if (!sessionId) continue
+      const resolved = resolvePath(path)
+      if (alreadyHandled.has(resolved)) continue
+      if (this.isDeletedSessionFile(resolved)) continue
+      this.reAppendSessionMetadataForKey(key, path, sessionId as UUID)
+    }
+  }
+
+  /**
+   * Shutdown re-append: the current context's session, then every
+   * retained SDK session (see reAppendRetainedSdkSessionMetadata). Called
+   * by the process-global cleanup handler, not by compaction or
+   * materialization — those serve one live session only.
+   */
+  reAppendSessionMetadataOnShutdown(): void {
+    if (this.shouldSkipPersistence()) return
+    this.reAppendSessionMetadata()
+    const handled = new Set<string>()
+    const ambient = this.sessionFile
+    if (ambient !== null) handled.add(resolvePath(ambient))
+    this.reAppendRetainedSdkSessionMetadata(handled)
   }
 
   /**
@@ -2714,6 +2900,11 @@ class Project {
       // Buffer until materializeSessionFile runs (first user/assistant message).
       if (this.sessionFile === null) {
         const pendingPath = resolvePath(getTranscriptPath())
+        // Capture the originating identity before the existence check
+        // below: a switch while it is in flight changes the ambient
+        // identity, and publishing through the ambient setter would
+        // install this path under the new session's key (#2489).
+        const originKey = this.sessionFileKey()
         // The cached pointer can be dropped while the transcript already
         // exists on disk — LRU eviction (boundSessionCaches) drops
         // long-idle contexts, and a switch drops it too. Buffering here
@@ -2729,7 +2920,11 @@ class Project {
           (await this.transcriptExists(pendingPath)) &&
           !this.isDeletedSessionFile(pendingPath)
         ) {
-          this.sessionFile = pendingPath
+          // Publish under the identity that initiated the lookup, and
+          // write to the captured destination — not to whatever the
+          // ambient key resolves to now.
+          this.setSessionFileForKey(originKey, pendingPath)
+          sessionFile = pendingPath
         } else {
           // Re-check after the await above: a deletion may have marked
           // the path while the existence check was in flight. Deferred
@@ -2748,8 +2943,9 @@ class Project {
           buffered.push(entry)
           return
         }
+      } else {
+        sessionFile = this.sessionFile
       }
-      sessionFile = this.sessionFile
     } else {
       const existing = await this.getExistingSessionFile(sessionId)
       if (!existing) {
@@ -3033,11 +3229,17 @@ class Project {
         )
       }
       // No explicit project directory: the key's transcript is the one
-      // its cached pointer already resolves to. A metadata-only entry
-      // (never materialized, so no pointer) has no established transcript
-      // to distinguish, and the id alone names the deletion's transcript.
+      // its cached pointer already resolves to. A pointerless SDK entry
+      // still names its destination cwd in the key's third component —
+      // compare the transcript that key derives, so a same-id session in
+      // another cwd keeps its cached metadata. A pointerless global entry
+      // names no destination of its own, and the id alone names the
+      // deletion's transcript.
       const pointer = this.sessionFiles.get(key)
       if (pointer) return resolvePath(pointer) === deleted
+      if (splitSessionFileKey(key).cwd !== null) {
+        return resolvePath(this.transcriptPathForKey(key)) === deleted
+      }
       return true
     }
     // Read the sibling pointers before dropping them below: a metadata
