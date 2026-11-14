@@ -104,6 +104,8 @@ export const en = {
     'When the user wants to poll for status, babysit a workflow, run recurring maintenance, or keep re-running a prompt within the current session.',
   'skills.skillDoctor.description':
     'Audit loaded skills: which went unused this session and what they cost in context.',
+  'skills.lessPermissionPrompts.description':
+    'Scan recent sessions for frequently prompted read-only commands and propose a project allowlist.',
   'skills.simplify.description':
     'Review changed code for reuse, quality, and efficiency, then fix any issues found.',
   'skills.update-config.description':

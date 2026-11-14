@@ -8,6 +8,7 @@ import { registerLoopSkill } from './loop.js'
 import { registerPdfSkill } from './pdf.js'
 import { registerSimplifySkill } from './simplify.js'
 import { registerSkillDoctorSkill } from './skillDoctor.js'
+import { registerLessPermissionPromptsSkill } from './lessPermissionPrompts.js'
 import { registerUpdateConfigSkill } from './updateConfig.js'
 
 /**
@@ -27,6 +28,7 @@ export function initBundledSkills(): void {
   registerPdfSkill()
   registerBatchSkill()
   registerSkillDoctorSkill()
+  registerLessPermissionPromptsSkill()
   if (feature('KAIROS') || feature('KAIROS_DREAM')) {
     /* eslint-disable @typescript-eslint/no-require-imports */
     const { registerDreamSkill } = require('./dream.js')
