@@ -255,7 +255,30 @@ openclaude ps
 openclaude logs auth-refactor
 openclaude logs auth-refactor -f
 openclaude kill auth-refactor
+openclaude wait auth-refactor --timeout 30m --json
 ```
+
+Wait for one local background session to reach a terminal state, for shell
+scripts and CI jobs. `wait` prints nothing while waiting. Without `--json`
+it prints one line for the terminal outcome (`exited with code 0`,
+`failed with exit code <code>`, `failed after <signal>`, `was killed`, or
+`became stale without an observable child outcome`); with `--json` it prints
+exactly one newline-terminated JSON object (schema version 1) with the
+keys `version`, `id`, `status`, `exitCode`, `signal`, `terminalReason`,
+`finishedAt`, `waitResult`, `error`, and `waitSignal`. The selector is a
+session ID, session name, or unambiguous ID prefix, resolved once and then
+pinned, so a reused name cannot retarget an active waiter. `--timeout`
+accepts positive integer durations with `ms`, `s`, `m`, or `h` suffixes
+(maximum 2147483647ms); without it, `wait` blocks until the session ends.
+Exit codes are command-owned: 0 for a child exit code of 0; 1 for a failed,
+signalled, killed, or stale child; 2 for invalid arguments, an unknown or
+ambiguous selector, a build with background sessions disabled, or an internal
+wait error (`waitResult`/`error` `internal_error` in JSON); 3 when
+the process state is unreadable at the timeout boundary; 4 for missing,
+unreadable, malformed, or replaced session metadata; 124 on timeout while
+the session is still running; 130 on SIGINT and 143 on SIGTERM to the
+waiting client. There is no `--follow` flag; `openclaude logs <id-or-name>
+-f` remains the log command.
 
 Background sessions are local child processes. OpenClaude does not start a daemon
 or network service, and permission/provider/model/settings flags are passed to
@@ -273,7 +296,12 @@ recorded as `killed`, and `killed` takes precedence over a natural `exited` or
 `failed` outcome for the same process. Terminal outcomes are stored separately
 under `bg-sessions/terminal/`; deleting that directory makes finished sessions
 fall back to liveness-derived status. OpenClaude does not infer POSIX signal
-names on Windows.
+names on Windows. Retention also removes abandoned session metadata temp files
+(`*.tmp` left behind by an interrupted publish): only files older than both
+the retention cutoff and one hour are removed, and a file is kept when its
+publisher process (named in the temp file) is still alive with its publish
+lock held, or when the per-session publish lock cannot be taken — so a live
+or in-flight publish is never deleted.
 Unobservable force termination, host crashes, and power loss remain `stale` on
 every platform.
 

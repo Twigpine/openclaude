@@ -244,8 +244,22 @@ function replaceProcessArgvWithStrippedLauncherArgs() {
   process.argv = [
     process.argv[0],
     process.argv[1],
-    ...stripLauncherHeapArgs(process.argv.slice(2)),
+    ...stripLauncherHeapArgsPreservingWaitSelector(process.argv.slice(2)),
   ]
+}
+
+// `wait` accepts a literal selector after `--` (see src/cli/bgWait.ts), so
+// heap-like tokens there are session names, not launcher options. Strip
+// launcher heap args only before the delimiter and pass the tail through
+// verbatim, so `wait --json -- --max-memory=512` keeps its selector. Other
+// commands keep the pre-existing whole-argv stripping.
+function stripLauncherHeapArgsPreservingWaitSelector(args) {
+  const delimiterIndex = args.indexOf('--')
+  const head = delimiterIndex === -1 ? args : args.slice(0, delimiterIndex)
+  const strippedHead = stripLauncherHeapArgs(head)
+  if (strippedHead[0] !== 'wait') return stripLauncherHeapArgs(args)
+  if (delimiterIndex === -1) return strippedHead
+  return [...strippedHead, ...args.slice(delimiterIndex)]
 }
 
 function relaunchWithLongSessionHeapIfNeeded() {
@@ -254,6 +268,14 @@ function relaunchWithLongSessionHeapIfNeeded() {
     return
   }
   if (process.env[HEAP_RELAUNCHED_ENV] === '1') {
+    replaceProcessArgvWithStrippedLauncherArgs()
+    return
+  }
+  // `openclaude wait` must stay in the process the user launched: the heap
+  // relaunch is a synchronous spawnSync, so a SIGINT/SIGTERM sent to the
+  // launcher PID would kill the launcher while the inner waiter kept
+  // running. This bounded local command never needs the long-session heap.
+  if (stripLauncherHeapArgsPreservingWaitSelector(process.argv.slice(2))[0] === 'wait') {
     replaceProcessArgvWithStrippedLauncherArgs()
     return
   }

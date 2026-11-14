@@ -14,7 +14,7 @@ import {
   mock,
 } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { copyFile, mkdtemp, rm, symlink } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readdir, rename, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -25,6 +25,11 @@ import {
   BACKGROUND_SESSION_ID_ENV,
   BACKGROUND_SESSION_LAUNCHER_PID_ENV,
 } from '../cli/bgRouting.js'
+import {
+  _setBackgroundSessionsRootForTesting,
+  createBackgroundSession,
+  recordBackgroundSessionNaturalTermination,
+} from '../cli/bgRegistry.js'
 import type { ProviderOverride } from '../services/api/agentRouting.js'
 import {
   applyLoadedEnvFileValues,
@@ -53,6 +58,12 @@ const mockKillHandler = mock(
     _args: string[],
     _options?: { retentionSettingsReady?: boolean },
   ) => {},
+)
+const mockWaitHandler = mock(
+  async (
+    _args: string[],
+    _options?: { featureEnabled?: boolean },
+  ): Promise<number> => 0,
 )
 const mockHandleBgFlag = mock(async (_args: string[]) => {})
 const mockPrepareBackgroundSessionFinalizer = mock(async () => 'installed')
@@ -102,6 +113,7 @@ const runtimeMocks = [
   mockLogsHandler,
   mockAttachHandler,
   mockKillHandler,
+  mockWaitHandler,
   mockHandleBgFlag,
   mockPrepareBackgroundSessionFinalizer,
   mockRunBackgroundSessionCleanupWorker,
@@ -397,6 +409,7 @@ const mockImporters = {
     logsHandler: mockLogsHandler,
     attachHandler: mockAttachHandler,
     killHandler: mockKillHandler,
+    waitHandler: mockWaitHandler,
     handleBgFlag: mockHandleBgFlag,
   }),
   bgFinalizer: async () => ({
@@ -527,6 +540,47 @@ describe('cli.tsx — background routing behavior', () => {
       expect(mockValidateProviderEnvForStartupOrExit).not.toHaveBeenCalled()
       expect(mockCliMain).not.toHaveBeenCalled()
     }
+  })
+
+  it('dispatches wait through the local background fast path instead of startup', async () => {
+    // Regression for #2162: `wait` must not fall through to ordinary startup.
+    await runCliEntrypoint(['wait', 'session-1', '--timeout', '30s'], bgOptions)
+
+    expect(mockWaitHandler.mock.calls).toEqual([
+      [['session-1', '--timeout', '30s'], { featureEnabled: true }],
+    ])
+    expect(mockParseProviderEnvFileArgs).not.toHaveBeenCalled()
+    expect(mockHandleBgFlag).not.toHaveBeenCalled()
+    expect(mockValidateProviderEnvForStartupOrExit).not.toHaveBeenCalled()
+    expect(mockCliMain).not.toHaveBeenCalled()
+  })
+
+  it('keeps wait on the fast path before provider validation', async () => {
+    const src = await Bun.file(`${import.meta.dir}/cli.tsx`).text()
+    const waitIndex = src.indexOf("args[0] === 'wait'")
+    const providerValidationIndex = src.indexOf(
+      'await validateProviderEnvForStartupOrExit()',
+    )
+
+    expect(waitIndex).toBeGreaterThanOrEqual(0)
+    expect(providerValidationIndex).toBeGreaterThanOrEqual(0)
+    expect(waitIndex).toBeLessThan(providerValidationIndex)
+  })
+
+  it('recognizes wait when background sessions are disabled instead of starting up', async () => {
+    const disabledOptions = {
+      bgSessionsEnabled: false,
+      importers: mockImporters,
+    } as unknown as Parameters<CliMain>[1]
+
+    await runCliEntrypoint(['wait', 'session-1'], disabledOptions)
+
+    expect(mockWaitHandler.mock.calls).toEqual([
+      [['session-1'], { featureEnabled: false }],
+    ])
+    expect(mockPsHandler).not.toHaveBeenCalled()
+    expect(mockCliMain).not.toHaveBeenCalled()
+    expect(mockValidateProviderEnvForStartupOrExit).not.toHaveBeenCalled()
   })
 
   it('keeps kill reachable when retention settings cannot be loaded', async () => {
@@ -1140,6 +1194,12 @@ describe('built Node CLI startup regressions', () => {
     for (const file of ['package.json', 'tsconfig.json']) {
       await copyFile(join(repoRoot, file), join(buildDir, file))
     }
+    // Stage the real launcher next to the private build so `bin/openclaude`
+    // resolves dist/cli.mjs from this buildDir, not the repo's dist bundle.
+    await mkdir(join(buildDir, 'bin'), { recursive: true })
+    for (const entry of await readdir(join(repoRoot, 'bin'))) {
+      await copyFile(join(repoRoot, 'bin', entry), join(buildDir, 'bin', entry))
+    }
     const build = Bun.spawn([process.execPath, 'run', 'scripts/build.ts'], {
       cwd: buildDir,
       stdin: 'ignore',
@@ -1326,6 +1386,234 @@ describe('built Node CLI startup regressions', () => {
     const src = await Bun.file(`${import.meta.dir}/cli.tsx`).text()
     expect(src).toMatch(/await main\(\)/)
     expect(src).not.toMatch(/^\s*void main\(\)/m)
+  })
+
+  describe('built CLI wait with FIFO registry paths (#2497)', () => {
+    // A FIFO at a metadata or terminal-fact path must not stall the read:
+    // `open` on a FIFO blocks until a writer appears. The wait-path
+    // readers open registry files with O_NONBLOCK and refuse non-regular
+    // files, so the FIFO reports as unreadable metadata (exit 4) instead
+    // of leaving the waiter behind a pending read — under Node the old
+    // stall also hung the timeout exit itself, because process.exit()
+    // waits for the blocked libuv threadpool worker. These tests spawn
+    // the real launcher under Node and assert the child process itself
+    // exits promptly. The in-process wait tests inject unresolved
+    // promises for the signal-during-a-pending-read cases, which have no
+    // filesystem request retaining the event loop and cannot prove the
+    // executable stops.
+    // mkfifo is Unix-only.
+    if (process.platform === 'win32') return
+
+    const WAIT_SESSION_ID = 'bg-wait-fifo1'
+
+    type WaitFixture = {
+      root: string
+      configDir: string
+      registryRoot: string
+      sleeper: ReturnType<typeof Bun.spawn>
+    }
+
+    async function setupWaitFixture(): Promise<WaitFixture> {
+      const root = await mkdtemp(join(tmpdir(), 'openclaude-wait-fifo-'))
+      const configDir = join(root, 'config')
+      const registryRoot = join(configDir, 'bg-sessions')
+      await mkdir(join(registryRoot, 'terminal'), { recursive: true })
+      _setBackgroundSessionsRootForTesting(registryRoot)
+      const sleeper = Bun.spawn(['sleep', '300'], {
+        stdin: 'ignore',
+        stdout: 'ignore',
+        stderr: 'ignore',
+      })
+      await createBackgroundSession({
+        id: WAIT_SESSION_ID,
+        pid: sleeper.pid,
+        cwd: root,
+        command: ['sleep', '300'],
+        sessionId: `sess-${WAIT_SESSION_ID}`,
+      })
+      return { root, configDir, registryRoot, sleeper }
+    }
+
+    async function teardownWaitFixture(fixture: WaitFixture): Promise<void> {
+      _setBackgroundSessionsRootForTesting(undefined)
+      fixture.sleeper.kill('SIGKILL')
+      await fixture.sleeper.exited
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+
+    // Atomic FIFO placement: build the FIFO beside the target, then rename
+    // over it, so no poll can observe the path as missing mid-swap.
+    async function replaceWithFifo(path: string): Promise<void> {
+      const tmp = `${path}.fifo-tmp`
+      const made = Bun.spawnSync(['mkfifo', tmp])
+      if (made.exitCode !== 0) {
+        throw new Error(
+          `mkfifo ${tmp} failed: ${made.stderr.toString()}`,
+        )
+      }
+      await rename(tmp, path)
+    }
+
+    function spawnWaiter(fixture: WaitFixture) {
+      return Bun.spawn(
+        [
+          'node',
+          join(buildDir, 'bin', 'openclaude'),
+          'wait',
+          WAIT_SESSION_ID,
+          '--json',
+        ],
+        {
+          env: {
+            PATH: process.env.PATH ?? '',
+            HOME: fixture.root,
+            TMPDIR: fixture.root,
+            TMP: fixture.root,
+            TEMP: fixture.root,
+            OPENCLAUDE_CONFIG_DIR: fixture.configDir,
+            OPENCLAUDE_DISABLE_TELEMETRY: '1',
+            // Share one compile cache across the wait children so only the
+            // first pays the cold-cache startup cost.
+            NODE_COMPILE_CACHE: join(buildDir, 'node-compile-cache'),
+          },
+          stdin: 'ignore',
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      )
+    }
+
+    type WaiterProc = ReturnType<typeof spawnWaiter>
+
+    async function readChildOutput(proc: WaiterProc) {
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      return { stdout, stderr }
+    }
+
+    // Asserts the child process itself exits with the expected code within
+    // the timeout — not just that waitHandler returns or sets exitCode.
+    // Bun reports a signal death as 128 + the signal number, so a waiter
+    // killed by SIGINT/SIGTERM resolves 130/143, the same values as
+    // process.exit(130/143).
+    async function expectWaiterExit(
+      proc: WaiterProc,
+      expectedCode: number,
+      timeoutMs = 15_000,
+    ): Promise<{ stdout: string; stderr: string }> {
+      const outcome = await Promise.race([
+        proc.exited.then(code => ({ code, timedOut: false as const })),
+        new Promise<{ code: null; timedOut: true }>(resolve =>
+          setTimeout(() => resolve({ code: null, timedOut: true }), timeoutMs),
+        ),
+      ])
+      if (outcome.timedOut) {
+        proc.kill('SIGKILL')
+        await proc.exited
+        const output = await readChildOutput(proc)
+        throw new Error(
+          `waiter did not exit within ${timeoutMs}ms ` +
+            `(stdout: ${JSON.stringify(output.stdout)}, ` +
+            `stderr: ${JSON.stringify(output.stderr)})`,
+        )
+      }
+      expect(outcome.code).toBe(expectedCode)
+      return await readChildOutput(proc)
+    }
+
+    function expectObservationErrorJson(
+      output: { stdout: string; stderr: string },
+      id: string | null,
+    ): void {
+      // One output only: a single JSON line on stdout, nothing on stderr.
+      expect(output.stderr).toBe('')
+      const lines = output.stdout.trim().split('\n')
+      expect(lines).toHaveLength(1)
+      const result = JSON.parse(lines[0]!) as Record<string, unknown>
+      expect(result.waitResult).toBe('observation_error')
+      expect(result.error).toBe('metadata_unreadable')
+      expect(result.id).toBe(id)
+    }
+
+    const sleep = (ms: number) =>
+      new Promise<void>(resolve => setTimeout(resolve, ms))
+
+    it('exits 4 promptly under Node when the metadata path is a FIFO', async () => {
+      const fixture = await setupWaitFixture()
+      try {
+        await replaceWithFifo(
+          join(fixture.registryRoot, 'sessions', `${WAIT_SESSION_ID}.json`),
+        )
+        const proc = spawnWaiter(fixture)
+        const output = await expectWaiterExit(proc, 4)
+        expectObservationErrorJson(output, null)
+      } finally {
+        await teardownWaitFixture(fixture)
+      }
+    }, 90_000)
+
+    it('exits 4 promptly under Node when a terminal-fact path is a FIFO', async () => {
+      const fixture = await setupWaitFixture()
+      try {
+        await replaceWithFifo(
+          join(
+            fixture.registryRoot,
+            'terminal',
+            `${WAIT_SESSION_ID}.natural.json`,
+          ),
+        )
+        const proc = spawnWaiter(fixture)
+        const output = await expectWaiterExit(proc, 4)
+        expectObservationErrorJson(output, null)
+      } finally {
+        await teardownWaitFixture(fixture)
+      }
+    }, 90_000)
+
+    it('exits 4 promptly under Node when the pinned metadata path becomes a FIFO', async () => {
+      const fixture = await setupWaitFixture()
+      try {
+        const proc = spawnWaiter(fixture)
+        // Let the waiter start, pin, and finish its first polls before
+        // swapping the metadata for a FIFO: polls run every 500 ms, so a
+        // swap 12 s after spawn lands during a pinned read. The
+        // observation-error JSON names the pinned id, proving the FIFO
+        // was hit after pinning rather than during selector resolution.
+        await sleep(12_000)
+        await replaceWithFifo(
+          join(fixture.registryRoot, 'sessions', `${WAIT_SESSION_ID}.json`),
+        )
+        const output = await expectWaiterExit(proc, 4)
+        expectObservationErrorJson(output, WAIT_SESSION_ID)
+      } finally {
+        await teardownWaitFixture(fixture)
+      }
+    }, 90_000)
+
+    it('exits 0 for a terminal session with regular files', async () => {
+      const fixture = await setupWaitFixture()
+      try {
+        await recordBackgroundSessionNaturalTermination(
+          WAIT_SESSION_ID,
+          { exitCode: 0 },
+          { ownerPid: fixture.sleeper.pid },
+        )
+        const proc = spawnWaiter(fixture)
+        const output = await expectWaiterExit(proc, 0, 25_000)
+        expect(output.stderr).toBe('')
+        const lines = output.stdout.trim().split('\n')
+        expect(lines).toHaveLength(1)
+        const result = JSON.parse(lines[0]!) as Record<string, unknown>
+        expect(result.waitResult).toBe('terminal')
+        expect(result.status).toBe('exited')
+        expect(result.exitCode).toBe(0)
+        expect(result.id).toBe(WAIT_SESSION_ID)
+      } finally {
+        await teardownWaitFixture(fixture)
+      }
+    }, 90_000)
   })
 })
 

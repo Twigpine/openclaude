@@ -3,13 +3,16 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -18,6 +21,8 @@ import * as lockfile from '../utils/lockfile.js'
 import * as backgroundSessionRegistry from './bgRegistry.js'
 import {
   _setBackgroundSessionsRootForTesting,
+  BackgroundSessionWaitError,
+  cleanupAbandonedSessionTempFiles,
   cleanupBackgroundSessionsBefore,
   createBackgroundSession,
   isBackgroundSessionProcessAlive,
@@ -26,8 +31,10 @@ import {
   markBackgroundSessionKilled,
   readBackgroundSessionForOwner,
   refreshBackgroundSessionStatus,
+  readPinnedBackgroundSessionForWait,
   refreshBackgroundSessionStatuses,
   resolveBackgroundSession,
+  resolveBackgroundSessionForWait,
   snapshotBackgroundSessionRecoveryJournal,
   takeBackgroundSessionRecoveryBatch,
   verifyBackgroundSessionProcessIdentity,
@@ -2365,6 +2372,317 @@ describe('background session registry', () => {
     expect(await Bun.file(metadataPath).exists()).toBe(false)
   })
 
+  it('removes abandoned session metadata temp files during cleanup', async () => {
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const staleTmp = join(
+      sessionsDir,
+      'bg-stale-tmp.424242.00000000-0000-4000-8000-000000000000.tmp',
+    )
+    await writeFile(staleTmp, '{"id":"bg-stale-tmp"}')
+    // A SIGKILL between writeFile and rename leaves the temp file behind;
+    // age it past the retention cutoff so cleanup can tell it is abandoned
+    // (CodeRabbit #2497).
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
+    expect(
+      await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
+    expect(await Bun.file(staleTmp).exists()).toBe(false)
+  })
+
+  it('keeps unrelated data when the metadata directory is replaced during abandoned temp cleanup', async () => {
+    // Regression test for jatmn review #2497 (P2): the abandoned-temp
+    // scan lstat'ed the temp file and then unlinked it directly, so a
+    // directory replaced between inspection and removal let cleanup
+    // delete a same-named file outside the registry. The removal must
+    // go through the guarded helper, which rechecks the captured
+    // directory identity immediately before unlinking.
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const tempName =
+      'bg-swap-tmp.424242.00000000-0000-4000-8000-000000000000.tmp'
+    const staleTmp = join(sessionsDir, tempName)
+    await writeFile(staleTmp, '{"id":"bg-swap-tmp"}')
+    // Age it past the retention cutoff and the publish grace period, so
+    // only the directory guard can still protect the replacement.
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
+    // Unrelated data outside the registry that happens to share the
+    // temp file's name once the directory is swapped.
+    const victimDir = join(configDir, 'victim-sessions')
+    await mkdir(victimDir, { recursive: true })
+    const victim = join(victimDir, tempName)
+    await writeFile(victim, 'unrelated data')
+    let swapped = false
+    const lstatFile = async (path: string) => {
+      const stats = await lstat(path)
+      if (!swapped && path === staleTmp) {
+        swapped = true
+        // Replace the metadata directory immediately after the temp
+        // file inspection, before cleanup deletes it.
+        await rename(sessionsDir, join(configDir, 'swapped-away-sessions'))
+        await symlink(victimDir, sessionsDir, 'dir')
+      }
+      return stats
+    }
+    expect(
+      await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+        { lstatFile },
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 1 })
+    expect(swapped).toBe(true)
+    expect(await Bun.file(victim).text()).toBe('unrelated data')
+  })
+
+  it('keeps a freshly written session metadata temp file during cleanup', async () => {
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const freshTmp = join(
+      sessionsDir,
+      'bg-fresh-tmp.424243.00000000-0000-4000-8000-000000000001.tmp',
+    )
+    await writeFile(freshTmp, '{"id":"bg-fresh-tmp"}')
+    // A temp file written moments ago may belong to a concurrent publish
+    // that has not renamed yet, even when the cutoff is already past it.
+    expect(
+      await cleanupBackgroundSessionsBefore(new Date(Date.now() + 1)),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
+    expect(await Bun.file(freshTmp).exists()).toBe(true)
+  })
+
+  it('keeps an abandoned session metadata temp file while its session publish lock is held', async () => {
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    // The temp file carries its publisher's pid, exactly like a real
+    // writeNewSession temp file, so cleanup can tell the publisher is
+    // still alive even when the lock looks stale (CodeRabbit #2497).
+    const staleTmp = join(
+      sessionsDir,
+      `bg-locked-tmp.${process.pid}.00000000-0000-4000-8000-000000000002.tmp`,
+    )
+    await writeFile(staleTmp, '{"id":"bg-locked-tmp"}')
+    // Age it past the retention cutoff and the publish grace period, so
+    // only the publish lock can still protect it (CodeRabbit #2497).
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
+    // A concurrent writeNewSession holds the per-ID lock for the whole
+    // write+rename; cleanup must not unlink its temp file even when the
+    // clock jumps forward past the grace period.
+    const release = await lockfile.lock(join(sessionsDir, 'bg-locked-tmp.json'), {
+      realpath: false,
+      retries: 0,
+    })
+    try {
+      // Age the lock itself past the stale threshold too: after a clock
+      // jump the lock can also look stale, so proper-lockfile would let
+      // cleanup steal it and remove the active temp file (CodeRabbit
+      // #2497). The live publisher pid above is what must protect it.
+      await utimes(
+        join(sessionsDir, 'bg-locked-tmp.json.lock'),
+        twoDaysAgo,
+        twoDaysAgo,
+      )
+      expect(
+        await cleanupBackgroundSessionsBefore(
+          new Date(Date.now() - 24 * 60 * 60 * 1000),
+        ),
+      ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
+      expect(await Bun.file(staleTmp).exists()).toBe(true)
+    } finally {
+      await release()
+    }
+    expect(
+      await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
+    expect(await Bun.file(staleTmp).exists()).toBe(false)
+  })
+
+  it('keeps the first-published terminal fact when the sync exit fallback races async finalization', async () => {
+    // Regression test for CodeRabbit #2497: if exit occurs while
+    // asynchronous finalization is pending, the synchronous ELOCKED
+    // fallback publishes without the per-ID lock. Both installers could
+    // observe a missing fact and one rename could replace the other, so
+    // a waiter could observe a result that later changes. The first
+    // publisher must win: the fallback completes the pending publish
+    // instead of replacing it.
+    const session = await createBackgroundSession({
+      id: 'bg-terminal-fact-race',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-terminal-fact-race',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let releaseHook: (() => void) | undefined
+    let hookReachedResolve: (() => void) | undefined
+    const hookReached = new Promise<void>(resolve => {
+      hookReachedResolve = resolve
+    })
+    const hookGate = new Promise<void>(resolve => {
+      releaseHook = resolve
+    })
+    backgroundSessionRegistry._setTerminalFactPublishHookForTesting(
+      async () => {
+        hookReachedResolve?.()
+        await hookGate
+      },
+    )
+    // Start async finalization and pause it after it has claimed the
+    // publish but before it renames: it holds the per-ID lock, so the
+    // sync call below takes the ELOCKED fallback.
+    const asyncTermination = recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      { ownerPid: session.pid, expectedSession: session },
+    )
+    // Mark the rejection handled so a failure mid-test cannot surface
+    // as an unhandled rejection; awaiting the promise still throws.
+    asyncTermination.catch(() => {})
+    try {
+      await hookReached
+      // The exit fallback cannot wait for the lock, so it publishes
+      // without it — but it must not replace the pending publish.
+      recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      // The fallback completed the first publisher's fact, so the
+      // waiter already sees the first exit code — not the fallback's.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'exited', exitCode: 0 })
+      releaseHook?.()
+      const terminated = await asyncTermination
+      expect(terminated).toMatchObject({ status: 'exited', exitCode: 0 })
+      // The resumed installer must not replace the published fact.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'exited', exitCode: 0 })
+      const stored = JSON.parse(
+        await readFile(
+          terminalFactPath(session.id, 'natural', TEST_PROCESS_MARKER),
+          'utf8',
+        ),
+      ) as { exitCode?: number }
+      expect(stored.exitCode).toBe(0)
+    } finally {
+      backgroundSessionRegistry._setTerminalFactPublishHookForTesting(
+        undefined,
+      )
+      releaseHook?.()
+      await asyncTermination.catch(() => {})
+    }
+  })
+
+  it('keeps the first-published terminal fact when a publisher claims after the target check', async () => {
+    // Regression test for CodeRabbit #2497: publishTerminalFact checked
+    // the target before claiming the publish, but not after. A sync
+    // fallback publishing (and removing its claim) in that gap let the
+    // paused installer rename over the completed fact. The first
+    // publisher must win.
+    const session = await createBackgroundSession({
+      id: 'bg-terminal-fact-recheck',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-terminal-fact-recheck',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let releaseHook: (() => void) | undefined
+    let hookReachedResolve: (() => void) | undefined
+    const hookReached = new Promise<void>(resolve => {
+      hookReachedResolve = resolve
+    })
+    const hookGate = new Promise<void>(resolve => {
+      releaseHook = resolve
+    })
+    backgroundSessionRegistry._setTerminalFactPublishClaimHookForTesting(
+      async () => {
+        hookReachedResolve?.()
+        await hookGate
+      },
+    )
+    // Start async finalization and pause it after the target check but
+    // before it claims the publish: it holds the per-ID lock, so the
+    // sync call below takes the ELOCKED fallback.
+    const asyncTermination = recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      { ownerPid: session.pid, expectedSession: session },
+    )
+    // Mark the rejection handled so a failure mid-test cannot surface
+    // as an unhandled rejection; awaiting the promise still throws.
+    asyncTermination.catch(() => {})
+    try {
+      await hookReached
+      // The fallback publishes exit code 3 while the first installer is
+      // paused between the target check and the claim.
+      recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      // The fallback already published, so the waiter sees its exit code.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      releaseHook?.()
+      const terminated = await asyncTermination
+      // The resumed installer must not replace the published fact.
+      expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      const stored = JSON.parse(
+        await readFile(
+          terminalFactPath(session.id, 'natural', TEST_PROCESS_MARKER),
+          'utf8',
+        ),
+      ) as { exitCode?: number }
+      expect(stored.exitCode).toBe(3)
+    } finally {
+      backgroundSessionRegistry._setTerminalFactPublishClaimHookForTesting(
+        undefined,
+      )
+      releaseHook?.()
+      await asyncTermination.catch(() => {})
+    }
+  })
+
+  it('defers abandoned session metadata temp file cleanup when asked', async () => {
+    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const staleTmp = join(
+      sessionsDir,
+      'bg-deferred-tmp.424242.00000000-0000-4000-8000-000000000003.tmp',
+    )
+    await writeFile(staleTmp, '{"id":"bg-deferred-tmp"}')
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
+    // A recovery batch skips the per-ID temp cleanup and runs it once
+    // for the whole batch instead (CodeRabbit #2497).
+    expect(
+      await cleanupBackgroundSessionsBefore(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+        { skipAbandonedTempFileCleanup: true },
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
+    expect(await Bun.file(staleTmp).exists()).toBe(true)
+    expect(
+      await cleanupAbandonedSessionTempFiles(
+        new Date(Date.now() - 24 * 60 * 60 * 1000),
+      ),
+    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
+    expect(await Bun.file(staleTmp).exists()).toBe(false)
+  })
+
   it('reconciles stronger terminal facts and retries reservation release', async () => {
     const id = 'bg-terminal-reconciliation-retry'
     const name = 'terminal-reconciliation-retry'
@@ -3550,4 +3868,451 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
     expect(command?.length).toBeGreaterThan(0)
     expect(await getProcessCommandAsync(42424242)).toBeNull()
   }, 15_000)
+})
+
+describe('background session wait strict reads', () => {
+  let configDir: string
+
+  function metadataPath(id: string): string {
+    return join(configDir, 'bg-sessions', 'sessions', `${id}.json`)
+  }
+
+  function terminalFactPath(id: string, kind: 'natural' | 'killed'): string {
+    return join(configDir, 'bg-sessions', 'terminal', `${id}.${kind}.json`)
+  }
+
+  async function waitErrorCode(
+    operation: () => Promise<unknown>,
+  ): Promise<string | undefined> {
+    try {
+      await operation()
+      return undefined
+    } catch (error) {
+      if (error instanceof BackgroundSessionWaitError) return error.code
+      throw error
+    }
+  }
+
+  // Records the durations of every Atomics.wait sleep while `run` executes,
+  // restoring the original implementation afterward.
+  function recordSyncSleepDurations(run: () => void): number[] {
+    const originalWait = Atomics.wait
+    const sleepDurations: number[] = []
+    Atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
+      sleepDurations.push(args[3] ?? 0)
+      return originalWait(...args)
+    }) as typeof Atomics.wait
+    try {
+      run()
+    } finally {
+      Atomics.wait = originalWait
+    }
+    return sleepDurations
+  }
+
+  beforeEach(async () => {
+    configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-wait-registry-'))
+    _setBackgroundSessionsRootForTesting(join(configDir, 'bg-sessions'))
+  })
+
+  afterEach(async () => {
+    _setBackgroundSessionsRootForTesting(undefined)
+    await rm(configDir, { force: true, recursive: true })
+  })
+
+  it('resolves an exact ID with authoritative terminal facts applied', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-wait-1',
+      { exitCode: 3 },
+      { ownerPid: session.pid },
+    )
+
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-1')
+
+    expect(resolved.id).toBe('bg-wait-1')
+    expect(resolved.status).toBe('failed')
+    expect(resolved.exitCode).toBe(3)
+    expect(resolved.terminalReason).toBe('exit_code')
+  })
+
+  it('ignores a terminal fact published by another PID during name resolution', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    // A valid fact from another PID (e.g. a previous incarnation of the
+    // id): the non-strict registry reader ignores it via applyTerminalFacts,
+    // so name resolution must select the live session instead of failing
+    // with metadata_replaced (CodeRabbit #2497).
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), { recursive: true })
+    await writeFile(
+      terminalFactPath('bg-wait-1', 'natural'),
+      JSON.stringify({
+        version: 1,
+        id: 'bg-wait-1',
+        pid: 999999,
+        status: 'failed',
+        finishedAt: '2026-07-01T08:00:00.000Z',
+        terminalReason: 'exit_code',
+        exitCode: 3,
+      }),
+    )
+
+    const resolved = await resolveBackgroundSessionForWait('target')
+    expect(resolved.id).toBe('bg-wait-1')
+    expect(resolved.status).toBe('running')
+
+    // The pinned read still succeeds with the foreign fact ignored; only a
+    // changed metadata PID reports replacement.
+    const pinned = await readPinnedBackgroundSessionForWait({
+      id: 'bg-wait-1',
+      pid: 424242,
+    })
+    expect(pinned.status).toBe('running')
+  })
+
+  it('never reports metadata_malformed for sessions created during name resolution', async () => {
+    // writeNewSession publishes atomically (temp file + rename), so a
+    // name/prefix scan racing a creation must never read a partially-written
+    // metadata document as malformed (CodeRabbit #2497).
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    const creations = Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        createBackgroundSession({
+          id: `bg-wait-new-${index}`,
+          pid: 424250 + index,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: `sess-wait-new-${index}`,
+        }),
+      ),
+    )
+    const codes = await Promise.all(
+      Array.from({ length: 40 }, () =>
+        waitErrorCode(() => resolveBackgroundSessionForWait('target')),
+      ),
+    )
+    await creations
+    expect(codes.every(code => code === undefined)).toBe(true)
+  })
+
+  it('resolves by live name, ID prefix, and terminal name in selection order', async () => {
+    await createBackgroundSession({
+      id: 'bg-waaa1',
+      name: 'nightly',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-waaa1',
+    })
+    const live = await createBackgroundSession({
+      id: 'bg-wbbb2',
+      name: 'worker',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wbbb2',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-waaa1',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+
+    expect((await resolveBackgroundSessionForWait('worker')).id).toBe('bg-wbbb2')
+    expect((await resolveBackgroundSessionForWait('bg-wbbb')).id).toBe(
+      'bg-wbbb2',
+    )
+    expect((await resolveBackgroundSessionForWait('nightly')).id).toBe('bg-waaa1')
+    expect(live.id).toBe('bg-wbbb2')
+  })
+
+  it('reports not_found for an unknown selector', async () => {
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('nope')),
+    ).toBe('not_found')
+  })
+
+  it('reports ambiguous for an ID-prefix collision', async () => {
+    for (const id of ['bg-aaaa1111', 'bg-aaaa2222']) {
+      await createBackgroundSession({
+        id,
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: `sess-${id}`,
+      })
+    }
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-aaaa')),
+    ).toBe('ambiguous')
+  })
+
+  it('reports metadata_malformed for malformed exact-ID metadata', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await writeFile(metadataPath('bg-wait-1'), '{not json')
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-wait-1')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('reports metadata_malformed for a malformed terminal fact', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), { recursive: true })
+    await writeFile(terminalFactPath('bg-wait-1', 'natural'), '{not json')
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-wait-1')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('reports metadata_unreadable for an unreadable name-resolution entry', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await createBackgroundSession({
+      id: 'bg-wait-2',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-2',
+    })
+    await rm(metadataPath('bg-wait-2'))
+    await mkdir(metadataPath('bg-wait-2'))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('target')),
+    ).toBe('metadata_unreadable')
+  })
+
+  it('reads a pinned session strictly and detects replacement', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+
+    const pinned = await readPinnedBackgroundSessionForWait({
+      id: 'bg-wait-1',
+      pid: 424242,
+    })
+    expect(pinned.id).toBe('bg-wait-1')
+    expect(pinned.status).toBe('running')
+
+    await writeFile(
+      metadataPath('bg-wait-1'),
+      JSON.stringify({ ...session, pid: 999999 }),
+    )
+    expect(
+      await waitErrorCode(() =>
+        readPinnedBackgroundSessionForWait({ id: 'bg-wait-1', pid: 424242 }),
+      ),
+    ).toBe('metadata_replaced')
+
+    await rm(metadataPath('bg-wait-1'))
+    expect(
+      await waitErrorCode(() =>
+        readPinnedBackgroundSessionForWait({ id: 'bg-wait-1', pid: 424242 }),
+      ),
+    ).toBe('metadata_missing')
+  })
+
+  it('verifies process identity asynchronously with an abortable lookup', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-identity',
+      pid: 4242,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-01T08:00:00.000Z',
+      updatedAt: '2026-07-01T08:00:00.000Z',
+      sessionId: 'conversation-identity',
+      command: ['node', 'openclaude', '1642'],
+      stdoutLogPath: '/tmp/stdout.log',
+      stderrLogPath: '/tmp/stderr.log',
+    }
+
+    const matches = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'node openclaude 1642 --serve',
+    })
+    expect(matches.state).toBe('matches')
+
+    const mismatch = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'node openclaude 16420 --serve',
+    })
+    expect(mismatch.state).toBe('mismatch')
+
+    const unreadable = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => null,
+    })
+    expect(unreadable.state).toBe('unreadable')
+
+    const notRunning = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => false,
+      getProcessCommandAsync: async () => {
+        throw new Error('lookup must not run for a dead process')
+      },
+    })
+    expect(notRunning.state).toBe('not-running')
+  })
+
+  it('reports unreadable when the async identity lookup aborts', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-identity',
+      pid: 4242,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-01T08:00:00.000Z',
+      updatedAt: '2026-07-01T08:00:00.000Z',
+      sessionId: 'conversation-identity',
+      command: ['node', 'openclaude', '1642'],
+      stdoutLogPath: '/tmp/stdout.log',
+      stderrLogPath: '/tmp/stderr.log',
+    }
+    const controller = new AbortController()
+    controller.abort()
+
+    // Main's verify helper catches a lookup aborted by the client signal
+    // and reports it as unreadable instead of rethrowing, so a lookup
+    // that rejects on abort (like the real async helper) resolves here.
+    const aborted = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => {
+        throw new DOMException('The operation was aborted', 'AbortError')
+      },
+      signal: controller.signal,
+    })
+    expect(aborted.state).toBe('unreadable')
+  })
+
+  it('sleeps between polls while synchronously waiting for a terminal fact (CodeRabbit #2497)', async () => {
+    // A stale publish claim whose tmp holds a complete fact, as if another
+    // installer claimed the publish and died before renaming it: the sync
+    // installer adopts the winner's publish, but only after
+    // waitForTerminalFactSync polls for the target. That loop must sleep
+    // 10 ms between reads like its async sibling instead of spinning
+    // readFileSync at 100% CPU until the 250 ms deadline.
+    await createBackgroundSession({
+      id: 'bg-wait-sync-sleep',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-sync-sleep',
+    })
+    const terminalDir = join(configDir, 'bg-sessions', 'terminal')
+    await mkdir(terminalDir, { recursive: true })
+    const claimedTmp = join(
+      terminalDir,
+      'bg-wait-sync-sleep.424242.00000000-0000-4000-8000-000000000000.tmp',
+    )
+    await writeFile(
+      claimedTmp,
+      JSON.stringify({
+        version: 1,
+        id: 'bg-wait-sync-sleep',
+        pid: 424242,
+        status: 'exited',
+        finishedAt: '2026-07-01T08:00:00.000Z',
+        terminalReason: 'exit_code',
+        exitCode: 0,
+      }),
+    )
+    const target = terminalFactPath('bg-wait-sync-sleep', 'natural')
+    await mkdir(`${target}.claim`, { recursive: true })
+    await writeFile(join(`${target}.claim`, 'tmp'), claimedTmp)
+
+    const sleepDurations = recordSyncSleepDurations(() =>
+      recordBackgroundSessionNaturalTerminationSync(
+        'bg-wait-sync-sleep',
+        { exitCode: 0 },
+        { ownerPid: 424242 },
+      ),
+    )
+
+    // One 250 ms wait burns ~25 polls at the async interval when the
+    // timer granularity is exact, fewer when a sleep overshoots; either
+    // way it must sleep rather than spin.
+    expect(
+      sleepDurations.filter(duration => duration === 10).length,
+    ).toBeGreaterThanOrEqual(5)
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-sync-sleep')
+    expect(resolved.status).toBe('exited')
+    expect(resolved.exitCode).toBe(0)
+  })
+
+  it('sleeps between polls while synchronously waiting for a missing claim file (CodeRabbit #2497)', async () => {
+    // A claim directory with no claim file, as if the winner died between
+    // mkdir and the claim-file write: adoption waits for the target in
+    // waitForTerminalFactSync and then for the claim file in
+    // readTerminalFactClaimSync. Both loops must sleep 10 ms between
+    // reads; the stale claim is then removed and this installer publishes
+    // its own fact on the next attempt.
+    await createBackgroundSession({
+      id: 'bg-wait-sync-claim',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-sync-claim',
+    })
+    const target = terminalFactPath('bg-wait-sync-claim', 'natural')
+    await mkdir(`${target}.claim`, { recursive: true })
+
+    const sleepDurations = recordSyncSleepDurations(() =>
+      recordBackgroundSessionNaturalTerminationSync(
+        'bg-wait-sync-claim',
+        { exitCode: 0 },
+        { ownerPid: 424242 },
+      ),
+    )
+
+    // Two full 250 ms waits: ~50 polls at exact granularity, fewer with
+    // overshoot.
+    expect(
+      sleepDurations.filter(duration => duration === 10).length,
+    ).toBeGreaterThanOrEqual(20)
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-sync-claim')
+    expect(resolved.status).toBe('exited')
+    expect(resolved.exitCode).toBe(0)
+  })
 })

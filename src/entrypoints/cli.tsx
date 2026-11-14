@@ -367,6 +367,51 @@ export async function main(
     return;
   }
 
+  // Fast-path for `openclaude wait`: recognized even when BG_SESSIONS is
+  // disabled, so the CLI returns `unsupported` instead of interpreting
+  // `wait` as prompt text.
+  if (args[0] === 'wait') {
+    const {
+      profileCheckpoint
+    } = await importers.startupProfiler();
+    profileCheckpoint('cli_bg_path');
+    const bg = await importers.bg();
+    const waitExitCode = await bg.waitHandler(args.slice(1), { featureEnabled: bgSessionsEnabled });
+    // An interrupted or timed-out waiter can return while a registry read
+    // is still pending on a slow file: the pending read keeps the event
+    // loop alive, and process.exit() is deferred until the read settles,
+    // so the waiter would never terminate. (The wait-path readers refuse
+    // non-regular files, so a FIFO at a metadata or terminal-fact path
+    // can no longer stall the read — CodeRabbit #2497.) Re-raise the interrupting signal with its
+    // default disposition instead, so the process actually dies with
+    // 130/143. waitHandler already removed its own listeners, so drop any
+    // others before re-raising; the process is exiting either way. Only
+    // the interrupted outcome (130/143, which only arise from a genuine
+    // SIGINT/SIGTERM to this waiter) takes the signal path, and only the
+    // timeout outcome (124) takes the explicit-exit path below — every
+    // other outcome returns normally and exits on its own.
+    if (waitExitCode === 130 || waitExitCode === 143) {
+      const signal = waitExitCode === 143 ? 'SIGTERM' : 'SIGINT'
+      process.removeAllListeners(signal)
+      process.kill(process.pid, signal)
+      // Fall back to exiting with the signal's code if the signal is
+      // somehow swallowed (e.g. blocked): the exit is deferred while a
+      // read is pending, but it still records the right code.
+      // eslint-disable-next-line custom-rules/no-process-exit
+      process.exit(waitExitCode)
+    }
+    if (waitExitCode === 124) {
+      // A timed-out waiter can leave a registry read pending on a slow
+      // file, so exit explicitly after the timeout result is printed.
+      // The wait-path readers refuse non-regular files, so the read can
+      // no longer stall on a FIFO and the exit cannot wait on a blocked
+      // worker (CodeRabbit #2497).
+      // eslint-disable-next-line custom-rules/no-process-exit
+      process.exit(124)
+    }
+    return;
+  }
+
   // Fast-path for `openclaude ps|logs|attach|kill`.
   // Session management is entirely local, so it should not require config,
   // profile, credential, provider-validation, or startup-screen work.

@@ -1,0 +1,434 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
+import { mkdtemp, rm, unlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { captureSync } from './subprocess.ts'
+import {
+  _setBackgroundSessionsRootForTesting,
+  createBackgroundSession,
+  recordBackgroundSessionNaturalTermination,
+} from '../src/cli/bgRegistry.js'
+
+const BIN_PATH = join(import.meta.dir, '..', 'bin', 'openclaude')
+const DIST_PATH = join(import.meta.dir, '..', 'dist', 'cli.mjs')
+
+function binEnv(configDir: string): NodeJS.ProcessEnv {
+  const env = { ...process.env, OPENCLAUDE_CONFIG_DIR: configDir }
+  delete env.OPENCLAUDE_HEAP_RELAUNCHED
+  delete env.OPENCLAUDE_DISABLE_HEAP_RELAUNCH
+  return env
+}
+
+function runBin(
+  args: string[],
+  configDir: string,
+  timeout = 15_000,
+  extraEnv: NodeJS.ProcessEnv = {},
+) {
+  return captureSync(process.execPath, [BIN_PATH, ...args], {
+    timeout,
+    env: { ...binEnv(configDir), ...extraEnv },
+  })
+}
+
+function runBinNode(
+  args: string[],
+  configDir: string,
+  timeout = 15_000,
+  extraEnv: NodeJS.ProcessEnv = {},
+) {
+  // The launcher under Node, not the Bun test runner's process.execPath:
+  // under Bun process.exit() returns at once even with a blocked
+  // threadpool worker, so only a Node run proves the waiter cannot hang
+  // on a blocked registry read (CodeRabbit #2497).
+  return captureSync('node', [BIN_PATH, ...args], {
+    timeout,
+    env: { ...binEnv(configDir), ...extraEnv },
+  })
+}
+
+function runWaitJson(
+  args: string[],
+  configDir: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+) {
+  const result = runBin(args, configDir, 15_000, extraEnv)
+  expect(result.error).toBeUndefined()
+  expect(result.stderr).toBe('')
+  return { result, parsed: JSON.parse(result.stdout) }
+}
+
+describe('openclaude wait command (bin)', () => {
+  let configDir: string
+  let registryRoot: string
+  let sleepers: Array<ReturnType<typeof Bun.spawn>>
+
+  beforeEach(async () => {
+    configDir = await mkdtemp(join(tmpdir(), 'openclaude-bin-wait-'))
+    registryRoot = join(configDir, 'bg-sessions')
+    _setBackgroundSessionsRootForTesting(registryRoot)
+    sleepers = []
+  })
+
+  afterEach(async () => {
+    _setBackgroundSessionsRootForTesting(undefined)
+    for (const sleeper of sleepers) {
+      try {
+        sleeper.kill('SIGKILL')
+      } catch {}
+      try {
+        await sleeper.exited
+      } catch {}
+    }
+    await rm(configDir, { recursive: true, force: true })
+  })
+
+  async function createSession(
+    id: string,
+    options: { pid?: number; command?: string[]; name?: string } = {},
+  ) {
+    return await createBackgroundSession({
+      id,
+      ...(options.name !== undefined ? { name: options.name } : {}),
+      pid: options.pid ?? 424242,
+      cwd: configDir,
+      command: options.command ?? ['sleep', '30'],
+      sessionId: `sess-${id}`,
+    })
+  }
+
+  async function startSleeper(seconds = 120) {
+    const sleeper = Bun.spawn(['sleep', String(seconds)], {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+    sleepers.push(sleeper)
+    // Give the process a moment to appear in `ps`.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    return sleeper.pid
+  }
+
+  test('launcher skips the heap relaunch for wait', () => {
+    const source = readFileSync(BIN_PATH, 'utf-8')
+    const relaunchIndex = source.indexOf('spawnSync(process.execPath')
+    const waitBypassIndex = source.indexOf("'wait'")
+    expect(waitBypassIndex).toBeGreaterThanOrEqual(0)
+    expect(relaunchIndex).toBeGreaterThanOrEqual(0)
+    expect(waitBypassIndex).toBeLessThan(relaunchIndex)
+  })
+
+  test('returns exit 2 for an unknown selector instead of starting up', () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    const result = runBin(['wait', 'no-such-session'], configDir)
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(2)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toContain('No background session found')
+  })
+
+  test('returns exit 0 with exact JSON for an already-terminal session', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    await createSession('bg-bin-1')
+    await recordBackgroundSessionNaturalTermination(
+      'bg-bin-1',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+
+    const result = runBin(['wait', 'bg-bin-1', '--json'], configDir)
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+    const parsed = JSON.parse(result.stdout)
+    expect(Object.keys(parsed).sort()).toEqual(
+      [
+        'error',
+        'exitCode',
+        'finishedAt',
+        'id',
+        'signal',
+        'status',
+        'terminalReason',
+        'version',
+        'waitResult',
+        'waitSignal',
+      ].sort(),
+    )
+    expect(parsed).toMatchObject({
+      version: 1,
+      id: 'bg-bin-1',
+      status: 'exited',
+      exitCode: 0,
+      waitResult: 'terminal',
+    })
+  })
+
+  // A session name that looks like a launcher heap flag is only a
+  // selector when placed after `--`; the launcher must not strip it.
+  // Each heap-flag family is covered in every launcher environment
+  // branch (wait bypass, relaunch disabled, already relaunched).
+  const DELIMITER_SELECTOR_CASES = [
+    { id: 'bg-delim-mem', name: '--max-memory=512' },
+    { id: 'bg-delim-pct', name: '--max-old-space-size-percentage=50' },
+  ] as const
+  const LAUNCHER_ENV_VARIANTS = [
+    { label: 'wait bypass', env: {} },
+    {
+      label: 'heap relaunch disabled',
+      env: { OPENCLAUDE_DISABLE_HEAP_RELAUNCH: '1' },
+    },
+    {
+      label: 'already relaunched',
+      env: { OPENCLAUDE_HEAP_RELAUNCHED: '1' },
+    },
+  ] as const
+
+  for (const selectorCase of DELIMITER_SELECTOR_CASES) {
+    for (const variant of LAUNCHER_ENV_VARIANTS) {
+      test(`preserves dash-leading selector ${selectorCase.name} after -- (${variant.label})`, async () => {
+        expect(existsSync(DIST_PATH)).toBe(true)
+        await createSession(selectorCase.id, { name: selectorCase.name })
+        await recordBackgroundSessionNaturalTermination(
+          selectorCase.id,
+          { exitCode: 0 },
+          { ownerPid: 424242 },
+        )
+
+        const { result, parsed } = runWaitJson(
+          ['wait', '--json', '--', selectorCase.name],
+          configDir,
+          variant.env,
+        )
+
+        expect(result.status).toBe(0)
+        expect(parsed).toMatchObject({
+          version: 1,
+          id: selectorCase.id,
+          status: 'exited',
+          exitCode: 0,
+          waitResult: 'terminal',
+        })
+      })
+    }
+  }
+
+  test('still consumes a real launcher heap option before the delimiter', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    await createSession('bg-delim-mem', { name: '--max-memory=512' })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-delim-mem',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+
+    const { result, parsed } = runWaitJson(
+      ['wait', '--max-memory=1024', '--json', '--', '--max-memory=512'],
+      configDir,
+    )
+
+    expect(result.status).toBe(0)
+    expect(parsed).toMatchObject({
+      id: 'bg-delim-mem',
+      status: 'exited',
+      exitCode: 0,
+      waitResult: 'terminal',
+    })
+  })
+
+  test('still resolves an ordinary terminal session by name and by id', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    await createSession('bg-delim-plain', { name: 'plain-name' })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-delim-plain',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+
+    const byName = runWaitJson(['wait', '--json', 'plain-name'], configDir)
+    expect(byName.result.status).toBe(0)
+    expect(byName.parsed).toMatchObject({
+      id: 'bg-delim-plain',
+      waitResult: 'terminal',
+    })
+
+    const byId = runWaitJson(['wait', '--json', 'bg-delim-plain'], configDir)
+    expect(byId.result.status).toBe(0)
+    expect(byId.parsed).toMatchObject({
+      id: 'bg-delim-plain',
+      waitResult: 'terminal',
+    })
+  })
+
+  test('returns 124 with running JSON on timeout', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    const pid = await startSleeper()
+    await createSession('bg-bin-2', { pid, command: ['sleep', '120'] })
+
+    const result = runBin(['wait', 'bg-bin-2', '--timeout', '1s', '--json'], configDir)
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(124)
+    expect(result.stderr).toBe('')
+    const parsed = JSON.parse(result.stdout)
+    expect(parsed).toMatchObject({
+      id: 'bg-bin-2',
+      status: 'running',
+      waitResult: 'timeout',
+      error: 'timeout',
+    })
+  })
+
+  // A FIFO at the session metadata path must not stall the registry read:
+  // opening it for reading blocks until a writer appears, and no writer
+  // ever opens it. The wait-path readers open registry files with
+  // O_NONBLOCK and refuse non-regular files, so the FIFO reports as
+  // unreadable metadata (exit 4) instead of hanging the waiter — under
+  // Node the old stall also hung the timeout exit itself, because
+  // process.exit() waits for the blocked libuv threadpool worker
+  // (CodeRabbit #2497). No signal is sent here.
+  // FIFOs do not exist on Windows, and `mkfifo` is unavailable there.
+  test.skipIf(process.platform === 'win32')('exits 4 promptly when the metadata path is a FIFO', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    const pid = await startSleeper()
+    await createSession('bg-bin-4', { pid, command: ['sleep', '120'] })
+
+    // Replace the metadata file with a FIFO so the registry read would
+    // never settle if it opened the file.
+    const metadataPath = join(registryRoot, 'sessions', 'bg-bin-4.json')
+    await unlink(metadataPath)
+    const mkfifo = Bun.spawnSync(['mkfifo', metadataPath], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(mkfifo.exitCode).toBe(0)
+
+    const result = runBin(['wait', 'bg-bin-4', '--timeout', '1s', '--json'], configDir)
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(4)
+    expect(result.stderr).toBe('')
+    const parsed = JSON.parse(result.stdout)
+    expect(parsed).toMatchObject({
+      id: null,
+      status: null,
+      waitResult: 'observation_error',
+      error: 'metadata_unreadable',
+    })
+  }, 30_000)
+
+  // Same FIFO scenario, but with the launcher actually running under Node
+  // rather than the Bun test runner's process.execPath: the Bun run above
+  // cannot prove the Node timeout-exit path, since Bun's process.exit()
+  // does not wait for a blocked threadpool worker. On the pre-fix code
+  // this hangs until the capture timeout kills it (CodeRabbit #2497).
+  test.skipIf(process.platform === 'win32')('exits 4 promptly under Node when the metadata path is a FIFO', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    const pid = await startSleeper()
+    await createSession('bg-bin-5', { pid, command: ['sleep', '120'] })
+
+    const metadataPath = join(registryRoot, 'sessions', 'bg-bin-5.json')
+    await unlink(metadataPath)
+    const mkfifo = Bun.spawnSync(['mkfifo', metadataPath], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(mkfifo.exitCode).toBe(0)
+
+    const result = runBinNode(
+      ['wait', 'bg-bin-5', '--timeout', '1s', '--json'],
+      configDir,
+    )
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(4)
+    expect(result.stderr).toBe('')
+    const parsed = JSON.parse(result.stdout)
+    expect(parsed).toMatchObject({
+      id: null,
+      status: null,
+      waitResult: 'observation_error',
+      error: 'metadata_unreadable',
+    })
+  }, 30_000)
+
+  // Wait until the waiter has installed its SIGINT listener before
+  // signalling it. A fixed sleep races slow startup: a SIGINT delivered
+  // before the listener exists kills the process by default instead of
+  // producing the interrupted JSON. On Linux the caught-signal mask in
+  // /proc/<pid>/status shows the installed handler (SIGINT is signal 2,
+  // mask bit 0x2); one poll interval of grace after that lets session
+  // resolution finish so the waiter is in its poll loop. Without /proc
+  // (non-Linux) fall back to the previous fixed delay.
+  async function waitForWaiterReady(
+    proc: ReturnType<typeof Bun.spawn>,
+  ): Promise<void> {
+    const deadline = Date.now() + 15_000
+    let procUnavailable = false
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) return
+      let status: string
+      try {
+        status = readFileSync(`/proc/${proc.pid}/status`, 'utf8')
+      } catch {
+        procUnavailable = true
+        break
+      }
+      const match = /^SigCgt:\s*([0-9a-f]+)$/m.exec(status)
+      if (match && (BigInt(`0x${match[1]}`) & 0x2n) !== 0n) {
+        await new Promise(resolve => setTimeout(resolve, 600))
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    if (procUnavailable) {
+      await new Promise(resolve => setTimeout(resolve, 3000))
+    }
+  }
+
+  test('SIGINT to the launcher PID interrupts the waiter with 130 and leaves no inner waiter', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    const pid = await startSleeper()
+    await createSession('bg-bin-3', { pid, command: ['sleep', '120'] })
+
+    const proc = Bun.spawn(
+      [process.execPath, BIN_PATH, 'wait', 'bg-bin-3', '--json'],
+      {
+        env: binEnv(configDir),
+        stdout: 'pipe',
+        stderr: 'pipe',
+        stdin: 'ignore',
+      },
+    )
+    // Wait for the waiter to be ready (listener installed + session
+    // resolved) before signalling it; a fixed sleep races slow startup.
+    await waitForWaiterReady(proc)
+    process.kill(proc.pid, 'SIGINT')
+    const exitCode = await proc.exited
+    const stdout = await new Response(proc.stdout).text()
+    const stderr = await new Response(proc.stderr).text()
+
+    expect(exitCode).toBe(130)
+    expect(stderr).toBe('')
+    const parsed = JSON.parse(stdout)
+    expect(parsed).toMatchObject({
+      id: 'bg-bin-3',
+      status: null,
+      waitResult: 'interrupted',
+      error: 'interrupted',
+      waitSignal: 'SIGINT',
+    })
+
+    // No inner waiter may survive the launcher: the heap relaunch must have
+    // been bypassed for `wait`, so the signalled process was the waiter.
+    const ps = Bun.spawnSync(['ps', '-eo', 'args'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const processes = ps.stdout.toString()
+    expect(processes).not.toMatch(/cli\.mjs.*\bwait\b/)
+  }, 20_000)
+})
