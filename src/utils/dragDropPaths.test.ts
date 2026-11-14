@@ -81,6 +81,21 @@ describe('extractDraggedFilePaths', () => {
         `${thisFile} ${packageJson}`,
         [thisFile, packageJson],
       ],
+      [
+        'double-quoted and space-separated',
+        `"${spacedFile}" "${packageJson}"`,
+        [spacedFile, packageJson],
+      ],
+      [
+        'single-quoted and space-separated',
+        `'${spacedFile}' '${packageJson}'`,
+        [spacedFile, packageJson],
+      ],
+      [
+        'mixed quoted and unquoted',
+        `${thisFile} "${spacedFile}"`,
+        [thisFile, spacedFile],
+      ],
     ]
     test.each(multiCases)('when input is %s', (_label, input, expected) => {
       expect(extractDraggedFilePaths(input)).toEqual(expected)
