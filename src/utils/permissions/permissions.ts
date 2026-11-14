@@ -114,6 +114,7 @@ import {
 } from '../classifierApprovals.js'
 import { isInProtectedNamespace } from '../envUtils.js'
 import { executePermissionRequestHooks } from '../hooks.js'
+import { getInitialSettings } from '../settings/settings.js'
 import {
   AUTO_REJECT_MESSAGE,
   buildClassifierUnavailableMessage,
@@ -1025,6 +1026,21 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
           reason: 'Permission prompts are not available in this context',
         },
         message: AUTO_REJECT_MESSAGE(tool.name),
+      }
+    }
+
+    // permissions.denyInsteadOfPrompting: any decision that survived to this
+    // point would wait on a user prompt, so deny it instead. Runs last in the
+    // ask block so dontAsk mode, auto-mode classification, and headless deny
+    // keep their existing precedence.
+    if (getInitialSettings().permissions?.denyInsteadOfPrompting) {
+      return {
+        behavior: 'deny',
+        decisionReason: {
+          type: 'other',
+          reason: 'permissions.denyInsteadOfPrompting is enabled',
+        },
+        message: `${tool.name} requires permission, but permissions.denyInsteadOfPrompting is enabled`,
       }
     }
   }
