@@ -1585,3 +1585,139 @@ test('shutdown cleanup re-stamps an SDK session\u2019s title and tag after its c
   expect(after?.customTitle).toBe('Cleanup Title')
   expect(after?.tag).toBe('cleanup-tag')
 })
+
+test('shutdown does not recreate a transcript deleted by another process', async () => {
+  // CodeRabbit on #2489: if another process deletes a retained SDK
+  // transcript before shutdown, the deletion-marker check does not detect
+  // the removal — readFileTailSync returns '' and the shutdown re-append
+  // recreates the transcript with cached metadata, so the deleted session
+  // reappears in listings. forgetDeletedSession is never called here: the
+  // deletion happens outside this instance.
+  await runWithSdkContext(sdkContext(SESSION_A), async () => {
+    switchSession(SESSION_A as never, null)
+    await recordTranscript([message(randomUUID(), 'SDK first')])
+    await flushSessionStorage()
+    cacheSessionTitle('Deleted Title')
+    reAppendSessionMetadata()
+  })
+
+  const transcriptPath = getTranscriptPathForSession(SESSION_A)
+  expect(existsSync(transcriptPath)).toBe(true)
+  await unlink(transcriptPath)
+
+  // The shutdown cleanup, run from the host/global context.
+  await runCleanupFunctions()
+
+  expect(existsSync(transcriptPath)).toBe(false)
+})
+
+test('shutdown does not replay a stale goal from an alias of one transcript', async () => {
+  // CodeRabbit on #2489: two SDK contexts with the same session id and
+  // project directory but different cwds retain separate metadata entries
+  // for the same transcript. If the first holds an active goal and the
+  // second later clears it, shutdown re-appends the first entry's active
+  // goal after the clear, and the cleared goal is active again.
+  const projectDir = getProjectDir(workspace)
+  const cwdA = join(testRoot, 'cwd-a')
+  const cwdB = join(testRoot, 'cwd-b')
+  await mkdir(cwdA, { recursive: true })
+  await mkdir(cwdB, { recursive: true })
+  await mkdir(projectDir, { recursive: true })
+  const contextA = {
+    sessionId: SESSION_A as SessionId,
+    sessionProjectDir: projectDir,
+    cwd: cwdA,
+    originalCwd: cwdA,
+  }
+  const contextB = {
+    sessionId: SESSION_A as SessionId,
+    sessionProjectDir: projectDir,
+    cwd: cwdB,
+    originalCwd: cwdB,
+  }
+
+  await runWithSdkContext(contextA, async () => {
+    switchSession(SESSION_A as never, projectDir)
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    await recordGoalState(createGoalState('stale active goal'), SESSION_A as never)
+    await flushSessionStorage()
+  })
+
+  await runWithSdkContext(contextB, async () => {
+    switchSession(SESSION_A as never, projectDir)
+    adoptResumedSessionFile()
+    await recordGoalState(null, SESSION_A as never)
+    await flushSessionStorage()
+  })
+
+  await runCleanupFunctions()
+
+  const transcriptPath = join(projectDir, `${SESSION_A}.jsonl`)
+  const text = await readFile(transcriptPath, 'utf8')
+  const goalEntries = text
+    .split('\n')
+    .filter(line => line.includes('"type":"goal-state"'))
+  expect(goalEntries.length).toBeGreaterThanOrEqual(2)
+  const last = JSON.parse(goalEntries.at(-1)!) as { goal: unknown }
+  expect(last.goal).toBeNull()
+})
+
+test('shutdown replays a goal set after a clear from an alias of one transcript', async () => {
+  // Companion to the clear case above: last-writer-wins cuts both ways —
+  // an active goal recorded after the clear must still be re-appended.
+  const projectDir = getProjectDir(workspace)
+  const cwdA = join(testRoot, 'cwd-a')
+  const cwdB = join(testRoot, 'cwd-b')
+  await mkdir(cwdA, { recursive: true })
+  await mkdir(cwdB, { recursive: true })
+  await mkdir(projectDir, { recursive: true })
+  const contextA = {
+    sessionId: SESSION_A as SessionId,
+    sessionProjectDir: projectDir,
+    cwd: cwdA,
+    originalCwd: cwdA,
+  }
+  const contextB = {
+    sessionId: SESSION_A as SessionId,
+    sessionProjectDir: projectDir,
+    cwd: cwdB,
+    originalCwd: cwdB,
+  }
+
+  await runWithSdkContext(contextA, async () => {
+    switchSession(SESSION_A as never, projectDir)
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    await recordGoalState(createGoalState('old goal'), SESSION_A as never)
+    await flushSessionStorage()
+  })
+
+  await runWithSdkContext(contextB, async () => {
+    switchSession(SESSION_A as never, projectDir)
+    adoptResumedSessionFile()
+    await recordGoalState(null, SESSION_A as never)
+    await flushSessionStorage()
+  })
+
+  // A later turn in the first cwd sets a new goal after the clear.
+  await runWithSdkContext(contextA, async () => {
+    switchSession(SESSION_A as never, projectDir)
+    adoptResumedSessionFile()
+    await recordGoalState(createGoalState('new goal'), SESSION_A as never)
+    await flushSessionStorage()
+  })
+
+  await runCleanupFunctions()
+
+  const transcriptPath = join(projectDir, `${SESSION_A}.jsonl`)
+  const text = await readFile(transcriptPath, 'utf8')
+  const goalEntries = text
+    .split('\n')
+    .filter(line => line.includes('"type":"goal-state"'))
+  expect(goalEntries.length).toBeGreaterThanOrEqual(3)
+  const last = JSON.parse(goalEntries.at(-1)!) as {
+    goal: { condition?: string } | null
+  }
+  expect(last.goal?.condition).toBe('new goal')
+})
