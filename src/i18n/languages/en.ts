@@ -102,6 +102,8 @@ export const en = {
     'Run a prompt on a fixed interval or dynamically reschedule it, including bare maintenance-mode loops.',
   'skills.loop.whenToUse':
     'When the user wants to poll for status, babysit a workflow, run recurring maintenance, or keep re-running a prompt within the current session.',
+  'skills.skillDoctor.description':
+    'Audit loaded skills: which went unused this session and what they cost in context.',
   'skills.simplify.description':
     'Review changed code for reuse, quality, and efficiency, then fix any issues found.',
   'skills.update-config.description':
