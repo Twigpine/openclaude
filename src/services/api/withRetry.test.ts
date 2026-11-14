@@ -30,6 +30,9 @@ let originalFastModeModule: FastModeModule | undefined
 const envKeys = [
   ...PROVIDER_SELECTION_FLAGS,
   'CLAUDE_CODE_UNATTENDED_RETRY',
+  'CLAUDE_CODE_RETRY_WATCHDOG',
+  'CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS',
+  'CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS',
   'CLAUDE_CODE_REMOTE',
   'CLAUDE_CODE_MAX_RETRIES',
   'OPENCLAUDE_MAX_RETRIES',
@@ -88,12 +91,15 @@ async function importFreshWithRetryModule(
   options: {
     logForDebugging?: ReturnType<typeof mock>
     forceFastMode?: boolean
+    captureSleep?: number[]
   } = {},
 ) {
   mock.restore()
   originalProvidersModule ??= await importActualProviders()
   mock.module('src/utils/sleep.js', () => ({
-    sleep: async () => undefined,
+    sleep: async (ms: number) => {
+      options.captureSleep?.push(ms)
+    },
   }))
   if (options?.logForDebugging) {
     mock.module('src/utils/debug.js', () => ({
@@ -941,5 +947,104 @@ describe('persistent retry cap', () => {
     // With the flag and CLAUDE_CODE_UNATTENDED_RETRY=1, the cap triggers after 101 calls.
     const expectedCalls = isPersistentRetryEnabled() ? 101 : 1
     expect(operation).toHaveBeenCalledTimes(expectedCalls)
+  })
+})
+
+describe('watchdog env tuning', () => {
+  const RETRY_OPTS = {
+    maxRetries: 0,
+    model: 'claude-sonnet-4-6',
+    thinkingConfig: { type: 'disabled' },
+  } as const
+
+  function makeResetError(resetUnixSec: number): APIError {
+    return makeError({
+      'anthropic-ratelimit-unified-reset': String(resetUnixSec),
+    })
+  }
+
+  test('CLAUDE_CODE_RETRY_WATCHDOG enables persistent retry', async () => {
+    process.env.CLAUDE_CODE_RETRY_WATCHDOG = '1'
+    const m = await importFreshWithRetryModule('firstParty')
+    // When the build flag is off the env cannot reach the path.
+    if (!m.isPersistentRetryEnabled()) return
+    expect(m.isPersistentRetryEnabled()).toBe(true)
+  })
+
+  test('MAX_USAGE_LIMIT_WAIT_MS ends a limit that resets too far out', async () => {
+    process.env.CLAUDE_CODE_UNATTENDED_RETRY = '1'
+    process.env.CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS = '60000'
+    const m = await importFreshWithRetryModule('firstParty')
+    if (!m.isPersistentRetryEnabled()) return
+
+    const resetSec = Math.floor(Date.now() / 1000) + 3600
+    const operation = mock(async () => {
+      throw makeResetError(resetSec)
+    })
+    const runRetries = async () => {
+      for await (const _ of m.withRetry(
+        async () => ({} as never),
+        operation,
+        RETRY_OPTS,
+      )) {
+        void _
+      }
+    }
+    await expect(runRetries()).rejects.toBeInstanceOf(m.CannotRetryError)
+    expect(operation).toHaveBeenCalledTimes(1)
+  })
+
+  test('USAGE_LIMIT_RECHECK_MS caps the wait before retrying', async () => {
+    process.env.CLAUDE_CODE_UNATTENDED_RETRY = '1'
+    process.env.CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS = '60000'
+    const sleepCalls: number[] = []
+    const m = await importFreshWithRetryModule('firstParty', {
+      captureSleep: sleepCalls,
+    })
+    if (!m.isPersistentRetryEnabled()) return
+
+    const resetSec = Math.floor(Date.now() / 1000) + 3600
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      if (calls === 1) throw makeResetError(resetSec)
+      return { ok: true }
+    })
+    for await (const _ of m.withRetry(
+      async () => ({} as never),
+      operation,
+      RETRY_OPTS,
+    )) {
+      void _
+    }
+    // 60s recheck wait chunked at the 30s heartbeat interval.
+    expect(sleepCalls.reduce((a, b) => a + b, 0)).toBe(60_000)
+    expect(operation).toHaveBeenCalledTimes(2)
+  })
+
+  test('a below-minimum recheck interval clamps to 60s', async () => {
+    process.env.CLAUDE_CODE_UNATTENDED_RETRY = '1'
+    process.env.CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS = '5000'
+    const sleepCalls: number[] = []
+    const m = await importFreshWithRetryModule('firstParty', {
+      captureSleep: sleepCalls,
+    })
+    if (!m.isPersistentRetryEnabled()) return
+
+    const resetSec = Math.floor(Date.now() / 1000) + 3600
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      if (calls === 1) throw makeResetError(resetSec)
+      return { ok: true }
+    })
+    for await (const _ of m.withRetry(
+      async () => ({} as never),
+      operation,
+      RETRY_OPTS,
+    )) {
+      void _
+    }
+    expect(sleepCalls.reduce((a, b) => a + b, 0)).toBe(60_000)
   })
 })

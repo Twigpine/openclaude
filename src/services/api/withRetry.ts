@@ -101,15 +101,39 @@ function shouldRetry529(querySource: QuerySource | undefined): boolean {
   )
 }
 
-// CLAUDE_CODE_UNATTENDED_RETRY: for unattended sessions (internal-only). Retries 429/529
-// indefinitely with higher backoff and periodic keep-alive yields so the host
-// environment does not mark the session idle mid-wait.
+// CLAUDE_CODE_UNATTENDED_RETRY / CLAUDE_CODE_RETRY_WATCHDOG: for unattended
+// sessions. Retries 429/529 indefinitely with higher backoff and periodic
+// keep-alive yields so the host environment does not mark the session idle
+// mid-wait.
 // TODO(ANT-344): the keep-alive via SystemAPIErrorMessage yields is a stopgap
 // until there's a dedicated keep-alive channel.
 const PERSISTENT_MAX_BACKOFF_MS = 5 * 60 * 1000
 const PERSISTENT_RESET_CAP_MS = 6 * 60 * 60 * 1000
 const HEARTBEAT_INTERVAL_MS = 30_000
 const PERSISTENT_MAX_ATTEMPTS = 100
+
+// Watchdog tuning envs: CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS
+// retries a lifted-early usage limit sooner than the advertised reset, and
+// CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS ends the request when a
+// limit resets too far out. The recheck interval is clamped to the documented
+// 60s-3h range.
+const RECHECK_MS_MIN = 60_000
+const RECHECK_MS_MAX = 3 * 60 * 60 * 1000
+
+function readWatchdogRecheckMs(): number | null {
+  const raw = process.env.CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS
+  if (!raw) return null
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Math.min(Math.max(n, RECHECK_MS_MIN), RECHECK_MS_MAX)
+}
+
+function readWatchdogMaxWaitMs(): number | null {
+  const raw = process.env.CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS
+  if (!raw) return null
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
 // Exposed for unit-test assertion only. The persistent retry cap itself is
 // driven by isPersistentRetryEnabled() — there is no runtime override seam
 // (tests must enable UNATTENDED_RETRY via `bun test --feature=UNATTENDED_RETRY`
@@ -118,7 +142,8 @@ export { PERSISTENT_MAX_ATTEMPTS as _PERSISTENT_MAX_ATTEMPTS_FOR_TEST, isPersist
 
 function isPersistentRetryEnabled(): boolean {
   return feature('UNATTENDED_RETRY')
-    ? isEnvTruthy(process.env.CLAUDE_CODE_UNATTENDED_RETRY)
+    ? isEnvTruthy(process.env.CLAUDE_CODE_UNATTENDED_RETRY) ||
+        isEnvTruthy(process.env.CLAUDE_CODE_RETRY_WATCHDOG)
     : false
 }
 
@@ -563,16 +588,31 @@ export async function* withRetry<T>(
         // Window-based limits (e.g. 5hr Max/Pro) include a reset timestamp.
         // Wait until reset rather than polling every 5 min uselessly.
         const resetDelay = getRateLimitResetDelayMs(error)
+        // A limit that resets past the configured max wait ends the request
+        // instead of waiting it out.
+        const maxWaitMs = readWatchdogMaxWaitMs()
+        if (
+          maxWaitMs !== null &&
+          resetDelay !== null &&
+          resetDelay > maxWaitMs
+        ) {
+          throw new CannotRetryError(error, retryContext)
+        }
+        // The recheck interval caps the wait so the next attempt acts as the
+        // check for a limit lifted before its advertised reset.
+        const recheckMs = readWatchdogRecheckMs()
         delayMs =
-          resetDelay ??
-          Math.min(
-            getRetryDelay(
-              persistentAttempt,
-              retryAfter,
-              PERSISTENT_MAX_BACKOFF_MS,
-            ),
-            PERSISTENT_RESET_CAP_MS,
-          )
+          resetDelay !== null && recheckMs !== null
+            ? Math.min(resetDelay, recheckMs)
+            : (resetDelay ??
+              Math.min(
+                getRetryDelay(
+                  persistentAttempt,
+                  retryAfter,
+                  PERSISTENT_MAX_BACKOFF_MS,
+                ),
+                PERSISTENT_RESET_CAP_MS,
+              ))
       } else if (persistent) {
         persistentAttempt++
         // Retry-After is a server directive and bypasses maxDelayMs inside
