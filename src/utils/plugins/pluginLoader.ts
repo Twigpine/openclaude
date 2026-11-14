@@ -74,6 +74,8 @@ import { gitExe } from '../git.js'
 import { lazySchema } from '../lazySchema.js'
 import { logError } from '../log.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
+import { satisfies } from '../semver.js'
+import { getPublicBuildVersion } from '../version.js'
 import {
   clearPluginSettingsBase,
   getPluginSettingsBase,
@@ -1085,6 +1087,12 @@ export async function cachePlugin(
     }
   }
 
+  const enginesError = pluginEnginesIncompatibility(manifest)
+  if (enginesError) {
+    logForDebugging(enginesError, { level: 'error' })
+    throw new Error(enginesError)
+  }
+
   const finalName = manifest.name.replace(/[^a-zA-Z0-9-_]/g, '-')
   const finalPath = join(cachePath, finalName)
 
@@ -1128,6 +1136,37 @@ export async function cachePlugin(
  * }
  * ```
  */
+
+/**
+ * Returns a human-readable reason a plugin's manifest `engines` field
+ * excludes the running host version, or null when the plugin is compatible
+ * (including manifests with no engines or only unknown engine names).
+ * The upstream parity key is "claude-code"; its range is compared against
+ * the OpenClaude build version.
+ */
+export function pluginEnginesIncompatibility(
+  manifest: PluginManifest,
+  appVersion: string = getPublicBuildVersion(),
+): string | null {
+  const range = manifest.engines?.['claude-code']?.trim()
+  if (!range || range === '*' || range.toLowerCase() === 'x') {
+    return null
+  }
+  const invalidRangeError = `Plugin ${manifest.name} declares an invalid claude-code engine range "${range}"`
+  // Bun.semver.satisfies treats unparseable input as a wildcard and returns
+  // true, so reject ranges with no version content before comparing.
+  if (!/\d/.test(range)) {
+    return invalidRangeError
+  }
+  try {
+    if (satisfies(appVersion, range)) {
+      return null
+    }
+  } catch {
+    return invalidRangeError
+  }
+  return `Plugin ${manifest.name} requires claude-code ${range} but the running version is ${appVersion}`
+}
 
 /**
  * Loads and validates a plugin manifest from a JSON file.
@@ -2615,6 +2654,17 @@ async function finishLoadingPluginFromPath(
   )
   errors.push(...pluginErrors)
 
+  const enginesError = pluginEnginesIncompatibility(plugin.manifest)
+  if (enginesError) {
+    logForDebugging(enginesError, { level: 'error' })
+    errorsOut.push({
+      type: 'generic-error',
+      source: pluginId,
+      error: enginesError,
+    })
+    return null
+  }
+
   // Set sha from source if available (for github and url source types)
   if (
     typeof entry.source === 'object' &&
@@ -3208,6 +3258,16 @@ async function loadSessionOnlyPlugins(
       // Update source to use the actual plugin name from manifest
       plugin.source = `${plugin.name}@inline`
       plugin.repository = `${plugin.name}@inline`
+
+      const enginesError = pluginEnginesIncompatibility(plugin.manifest)
+      if (enginesError) {
+        errors.push({
+          type: 'generic-error',
+          source: plugin.source,
+          error: enginesError,
+        })
+        continue
+      }
 
       plugins.push(plugin)
       errors.push(...pluginErrors)
