@@ -6,7 +6,7 @@ Scan recent session transcripts for read-only tool calls that repeatedly needed 
 
 ## Step 1: Find transcripts
 
-Recent session transcripts live under the per-project directory in the config home: \`~/.openclaude/projects/<sanitized-project-path>/\` (JSONL files, one per session). Use Glob/ls to find the newest handful for the current project. If none exist, fall back to reasoning from this session only.
+Resolve the config home first: \`OPENCLAUDE_CONFIG_DIR\` when set, otherwise \`~/.openclaude\`. Recent session transcripts live under the per-project directory inside it: \`<config-home>/projects/<sanitized-project-path>/\` (JSONL files, one per session). Use Glob/ls to find the newest handful for the current project. If none exist, fall back to reasoning from this session only.
 
 ## Step 2: Extract prompted commands
 

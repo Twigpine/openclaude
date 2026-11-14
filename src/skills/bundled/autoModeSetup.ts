@@ -15,11 +15,11 @@ Inspect what makes this project tick:
 
 ## Step 2: Read recent sessions
 
-Skim a few recent transcripts under the per-project directory in the config home (\`~/.openclaude/projects/<sanitized-project-path>/\`). Note the commands and tools that came up repeatedly; those are the ones worth making frictionless.
+Resolve the config home first: \`OPENCLAUDE_CONFIG_DIR\` when set, otherwise \`~/.openclaude\`. Then skim a few recent transcripts under the per-project directory inside it (\`<config-home>/projects/<sanitized-project-path>/\`). Note the commands and tools that came up repeatedly; those are the ones worth making frictionless.
 
-## Step 3: Write configuration
+## Step 3: Draft configuration
 
-Merge into the project settings file (\`.openclaude/settings.json\` or \`settings.local.json\`, whichever already carries permissions) under \`permissions.autoMode\`:
+Draft a top-level \`autoMode\` block:
 
 - \`environment\`: short factual lines describing the project for the classifier, e.g. "tests run via bun test", "build writes to dist/", "this repo vendors generated protobufs".
 - \`allow\`: classifier allow rules for routine safe operations in this project.
@@ -27,11 +27,19 @@ Merge into the project settings file (\`.openclaude/settings.json\` or \`setting
 
 Rules:
 
-- Merge with existing entries; never clobber or reorder what is already there.
-- Do not enable auto mode, do not change defaultMode, do not touch allow/deny/ask rule lists. This skill only writes autoMode classifier hints.
+- The \`autoMode\` block is a top-level settings key. Do not write it under \`permissions\`; \`permissions.autoMode\` is a separate boolean and is not the classifier configuration.
 - Ground every entry in something observed in step 1 or 2; do not invent rules.
+- Do not enable auto mode, do not change defaultMode, do not touch allow/deny/ask rule lists.
 
-## Step 4: Report
+## Step 4: Confirm, then write
+
+Present the drafted \`autoMode\` block to the user and ask for explicit confirmation before writing anything.
+
+Only after confirmation, merge it into a local settings file: \`.openclaude/settings.local.json\` for this project, or \`~/.openclaude/settings.json\` to apply it to every project. Never write it to \`.openclaude/settings.json\`: shared project settings are not a trusted source for classifier configuration and are ignored when autoMode is loaded.
+
+Merge with existing entries; never clobber or reorder what is already there.
+
+## Step 5: Report
 
 Show the final merged autoMode block and a one-line justification per entry.
 `

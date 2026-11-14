@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto'
 import ignore from 'ignore'
 import memoize from 'lodash-es/memoize.js'
 import { homedir, tmpdir } from 'os'
-import { join, normalize, posix, sep } from 'path'
+import { basename, dirname, join, normalize, parse, posix, sep } from 'path'
 import { hasAutoMemPathOverride, isAutoMemPath } from 'src/memdir/paths.js'
 import { isAgentMemoryPath } from 'src/tools/AgentTool/agentMemory.js'
 import {
@@ -57,6 +57,7 @@ import { getToolResultsDir } from '../toolResultStorage.js'
 import { windowsPathToPosixPath } from '../windowsPaths.js'
 import type {
   PermissionDecision,
+  PermissionDenyDecision,
   PermissionResult,
 } from './PermissionResult.js'
 import type { PermissionRule, PermissionRuleSource } from './PermissionRule.js'
@@ -1454,17 +1455,12 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
   // work, and before allow-rule checks so no rule can widen the boundary.
   if (
     getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
-    !pathInAllowedWorkingPath(path, toolPermissionContext, pathsToCheck)
+    !writePathsInsideWorkingDirectories(
+      pathsToCheck,
+      allWorkingDirectories(toolPermissionContext),
+    )
   ) {
-    return {
-      behavior: 'deny',
-      message: `Writing to ${path} is blocked because it is outside the working directories (permissions.blockWritesOutsideWorkingDirectories is enabled).`,
-      decisionReason: {
-        type: 'other',
-        reason:
-          'permissions.blockWritesOutsideWorkingDirectories is enabled',
-      },
-    }
+    return writeBoundaryDenial(path)
   }
 
   // 1.6. Check for .claude/** allow rules BEFORE safety checks
@@ -1689,6 +1685,93 @@ export function generateSuggestions(
   return shouldSuggestAcceptEdits
     ? [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]
     : []
+}
+
+function writeBoundaryDenial(path: string): PermissionDenyDecision {
+  return {
+    behavior: 'deny',
+    message: `Writing to ${path} is blocked because it is outside the working directories (permissions.blockWritesOutsideWorkingDirectories is enabled).`,
+    decisionReason: {
+      type: 'other',
+      reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled',
+    },
+  }
+}
+
+// Canonical containment for the hard write boundary. pathInWorkingPath
+// lowercases both sides so case-insensitive filesystems cannot be bypassed
+// with mixed-case paths; here that is wrong, because a case-variant target
+// on a case-sensitive filesystem is a different directory. Realpath
+// canonicalizes to the stored casing, so an exact comparison is correct on
+// both. The nearest existing ancestor is resolved so writes to files that
+// do not exist yet still compare correctly.
+function canonicalPathForContainment(path: string): string {
+  let current = path
+  const tail: string[] = []
+  while (true) {
+    try {
+      const resolved = getFsImplementation().realpathSync(current)
+      return tail.length > 0 ? join(resolved, ...tail) : resolved
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return current
+      tail.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+function writePathsInsideWorkingDirectories(
+  pathsToCheck: readonly string[],
+  workingPaths: Iterable<string>,
+): boolean {
+  const canonicalWorking = [...workingPaths].map(canonicalPathForContainment)
+  return pathsToCheck.every(pathToCheck => {
+    const canonical = canonicalPathForContainment(pathToCheck)
+    return canonicalWorking.some(
+      dir =>
+        dir === parse(dir).root ||
+        canonical === dir ||
+        canonical.startsWith(dir + sep),
+    )
+  })
+}
+
+/**
+ * The hard write boundary for permission paths that return before
+ * tool.checkPermissions runs (the whole-tool ask-rule early return in
+ * permissions.ts). Runs the same steps checkWritePermissionForTool applies:
+ * the internal editable-path carveout first, then the outside-dirs denial.
+ */
+export function checkWriteBoundaryForTool(
+  tool: Tool<AnyObject>,
+  input: { [key: string]: unknown },
+  toolPermissionContext: ToolPermissionContext,
+): PermissionDenyDecision | null {
+  if (
+    !getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories ||
+    typeof tool.getPath !== 'function'
+  ) {
+    return null
+  }
+  const path = expandPath(tool.getPath(input))
+  const internalEditResult = checkEditableInternalPath(
+    path,
+    input,
+    toolPermissionContext,
+  )
+  if (internalEditResult.behavior !== 'passthrough') {
+    return null
+  }
+  if (
+    writePathsInsideWorkingDirectories(
+      getPathsForPermissionCheck(path),
+      allWorkingDirectories(toolPermissionContext),
+    )
+  ) {
+    return null
+  }
+  return writeBoundaryDenial(path)
 }
 
 /**

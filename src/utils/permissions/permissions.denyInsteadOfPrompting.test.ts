@@ -150,6 +150,20 @@ describe('permissions.denyInsteadOfPrompting', () => {
     expect(result.success).toBe(true)
   })
 
+  test('converts a whole-tool ask rule into a deny', async () => {
+    denyInsteadOfPrompting = true
+    const result = await hasPermissionsToUseTool(
+      askTool,
+      {},
+      contextFor('default', {
+        alwaysAskRules: { localSettings: ['PromptingTool'] },
+      }),
+      assistantMessage,
+      'tool-use-6',
+    )
+    expect(result.behavior).toBe('deny')
+  })
+
   test('prompts as usual when the setting is off', async () => {
     denyInsteadOfPrompting = false
     const result = await hasPermissionsToUseTool(
