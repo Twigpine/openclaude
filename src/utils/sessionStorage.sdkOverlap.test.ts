@@ -48,6 +48,7 @@ import {
   restoreSessionWrites,
   saveAiGeneratedTitle,
   saveTag,
+  saveWorktreeState,
 } from './sessionStorage.js'
 import { createGoalState } from '../services/goal/state.js'
 
@@ -1708,16 +1709,100 @@ test('shutdown replays a goal set after a clear from an alias of one transcript'
     await flushSessionStorage()
   })
 
+  // Three goal records already exist before cleanup (old goal, clear,
+  // new goal), so a bare `>= 3` would pass even if shutdown wrote
+  // nothing. Capture the count first: shutdown must append exactly one
+  // record, and it must be the new goal.
+  const transcriptPath = join(projectDir, `${SESSION_A}.jsonl`)
+  const countGoalEntries = async () =>
+    (await readFile(transcriptPath, 'utf8'))
+      .split('\n')
+      .filter(line => line.includes('"type":"goal-state"')).length
+  const goalEntriesBefore = await countGoalEntries()
+
   await runCleanupFunctions()
 
-  const transcriptPath = join(projectDir, `${SESSION_A}.jsonl`)
   const text = await readFile(transcriptPath, 'utf8')
   const goalEntries = text
     .split('\n')
     .filter(line => line.includes('"type":"goal-state"'))
-  expect(goalEntries.length).toBeGreaterThanOrEqual(3)
+  expect(goalEntries.length).toBe(goalEntriesBefore + 1)
   const last = JSON.parse(goalEntries.at(-1)!) as {
     goal: { condition?: string } | null
   }
   expect(last.goal?.condition).toBe('new goal')
+})
+
+test('shutdown keeps a worktree exit recorded by one alias over a stale enter from another', async () => {
+  // CodeRabbit on #2489: worktree state followed sessionFiles order, not
+  // write order — alias A caches a worktree object, alias B later records
+  // worktree:null (an exit), and A then accesses its transcript pointer,
+  // moving A after B in sessionFiles order. The merge then selects A's
+  // stale worktree object and shutdown appends it after the exit record,
+  // so the persisted state wrongly says the session remains inside the
+  // worktree. The exit (null) must win: SessionMetadata.worktree requires
+  // null to preserve an exit for --resume.
+  const projectDir = getProjectDir(workspace)
+  const cwdA = join(testRoot, 'cwd-a')
+  const cwdB = join(testRoot, 'cwd-b')
+  await mkdir(cwdA, { recursive: true })
+  await mkdir(cwdB, { recursive: true })
+  await mkdir(projectDir, { recursive: true })
+  const contextA = {
+    sessionId: SESSION_A as SessionId,
+    sessionProjectDir: projectDir,
+    cwd: cwdA,
+    originalCwd: cwdA,
+  }
+  const contextB = {
+    sessionId: SESSION_A as SessionId,
+    sessionProjectDir: projectDir,
+    cwd: cwdB,
+    originalCwd: cwdB,
+  }
+  const worktree = {
+    originalCwd: cwdA,
+    worktreePath: join(testRoot, 'worktree'),
+    worktreeName: 'stale-worktree',
+    sessionId: SESSION_A,
+  }
+
+  // Alias A enters the worktree.
+  await runWithSdkContext(contextA, async () => {
+    switchSession(SESSION_A as never, projectDir)
+    await recordTranscript([message(randomUUID(), 'A first')])
+    await flushSessionStorage()
+    saveWorktreeState(worktree)
+    await flushSessionStorage()
+  })
+
+  // Alias B exits the worktree — the later write.
+  await runWithSdkContext(contextB, async () => {
+    switchSession(SESSION_A as never, projectDir)
+    adoptResumedSessionFile()
+    saveWorktreeState(null)
+    await flushSessionStorage()
+  })
+
+  // Alias A touches its transcript pointer again: reading it moves A's
+  // key after B's in sessionFiles order, so a cache-order merge would
+  // pick A's stale worktree object over B's exit.
+  await runWithSdkContext(contextA, async () => {
+    switchSession(SESSION_A as never, projectDir)
+    adoptResumedSessionFile()
+    expect(getTranscriptPath()).toBe(join(projectDir, `${SESSION_A}.jsonl`))
+  })
+
+  await runCleanupFunctions()
+
+  const transcriptPath = join(projectDir, `${SESSION_A}.jsonl`)
+  const text = await readFile(transcriptPath, 'utf8')
+  const worktreeEntries = text
+    .split('\n')
+    .filter(line => line.includes('"type":"worktree-state"'))
+  expect(worktreeEntries.length).toBeGreaterThanOrEqual(1)
+  const last = JSON.parse(worktreeEntries.at(-1)!) as {
+    worktreeSession: unknown
+  }
+  expect(last.worktreeSession).toBeNull()
 })

@@ -1155,6 +1155,18 @@ type SessionMetadata = {
    * earlier alias cannot be told apart from a later clear.
    */
   goalSeq?: number
+  /**
+   * Monotonic sequence of the last worktree write cached under this key.
+   * Set alongside `worktree` (see currentSessionWorktree) and cleared
+   * with it, so the two always travel as a pair — including through
+   * mergeSessionMetadata. Lets shutdown reconcile alias entries for one
+   * transcript last-writer-wins (see reconcileAliasMetadata): the caches
+   * carry no timestamps, so without it a stale worktree object from an
+   * earlier alias cannot be told apart from a later exit (null) — and
+   * the merge would follow sessionFiles order instead of write order,
+   * resurrecting the worktree after the exit.
+   */
+  worktreeSeq?: number
   branch?: SessionBranchEntry
 }
 
@@ -1321,11 +1333,15 @@ class Project {
     }
     if (current.worktree === undefined && previous.worktree !== undefined) {
       current.worktree = previous.worktree
+      if (previous.worktreeSeq !== undefined) {
+        current.worktreeSeq = previous.worktreeSeq
+      }
     }
     // Move, don't copy: the selections now belong to the resumed session.
     delete previous.title
     delete previous.agentSetting
     delete previous.worktree
+    delete previous.worktreeSeq
     if (Object.keys(previous).length === 0) {
       this.sessionMetadata.delete(previousKey)
     }
@@ -1448,6 +1464,15 @@ class Project {
     worktree: PersistedWorktreeSession | null | undefined,
   ) {
     this.setSessionMetadataField('worktree', worktree)
+    // Order stamp for the worktree write (see `worktreeSeq`): an exit
+    // (null) is a real value and gets a stamp like any other write;
+    // deleting the field (undefined) drops its stamp with it, so a stale
+    // sequence can never outrank a live worktree state in
+    // reconcileAliasMetadata.
+    const entry = this.sessionMetadata.get(this.sessionFileKey())
+    if (!entry) return
+    if (worktree === undefined) delete entry.worktreeSeq
+    else entry.worktreeSeq = ++this.worktreeWriteSeq
   }
   get currentSessionPrNumber(): number | undefined {
     return this.metadataForRead()?.prNumber
@@ -1559,6 +1584,11 @@ class Project {
   // SessionMetadata). Process-wide: only the relative order of writes
   // in this process matters for alias reconciliation at shutdown.
   private goalWriteSeq = 0
+
+  // Monotonic counter stamping worktree writes (see `worktreeSeq` on
+  // SessionMetadata). Same rule as goalWriteSeq: only the relative
+  // order of writes in this process matters.
+  private worktreeWriteSeq = 0
 
   // Bound for the per-context transcript caches, matching the LRU default
   // in conversationCache. Far above any realistic count of overlapping
@@ -2087,6 +2117,8 @@ class Project {
           title: this.currentSessionTitle,
           agentSetting: this.currentSessionAgentSetting,
           worktree: this.currentSessionWorktree,
+          worktreeSeq: this.sessionMetadata.get(this.sessionFileKey())
+            ?.worktreeSeq,
         }
       : undefined
     this.sessionFile = null
@@ -2116,6 +2148,18 @@ class Project {
         this.currentSessionTitle = startupMetadata.title
         this.currentSessionAgentSetting = startupMetadata.agentSetting
         this.currentSessionWorktree = startupMetadata.worktree
+        // The restore re-asserts a value cached before the switch: keep
+        // its original write order instead of the setter's fresh stamp,
+        // so a stale startup worktree cannot outrank a later exit from
+        // another alias (see `worktreeSeq`).
+        const restored = this.sessionMetadata.get(this.sessionFileKey())
+        if (
+          restored &&
+          startupMetadata.worktree !== undefined &&
+          startupMetadata.worktreeSeq !== undefined
+        ) {
+          restored.worktreeSeq = startupMetadata.worktreeSeq
+        }
       }
     }
     // Buffered entries are deliberately NOT dropped: they belong to the
@@ -2373,12 +2417,16 @@ class Project {
    *
    * Other fields fold defined-wins in cache order, matching the old
    * per-key stamping where the last alias stamped won for tail-read
-   * fields. The goal is the exception: it resolves last-writer-wins
-   * by `goalSeq`, and an explicit clear (goal: null) with the highest
-   * sequence is authoritative — reAppendSessionMetadataForKey writes
-   * nothing for a null goal, so the merged entry's null lets the clear
-   * already in the file stand as the last goal-state entry instead of
-   * resurrecting the cleared goal.
+   * fields. The goal and the worktree state are the exceptions: each
+   * resolves last-writer-wins by its sequence (`goalSeq`,
+   * `worktreeSeq`), and an explicit clear (goal: null) or exit
+   * (worktree: null) with the highest sequence is authoritative —
+   * reAppendSessionMetadataForKey writes nothing for a null goal, so
+   * the merged entry's null lets the clear already in the file stand
+   * as the last goal-state entry instead of resurrecting the cleared
+   * goal, and it writes null for a worktree exit so the merged entry's
+   * null lets the exit already in the file stand as the last
+   * worktree-state entry instead of resurrecting the exited worktree.
    */
   private reconcileAliasMetadata(keys: string[]): SessionMetadata {
     let merged: SessionMetadata = {}
@@ -2406,6 +2454,26 @@ class Project {
     } else {
       delete merged.goal
       delete merged.goalSeq
+    }
+    let bestWorktreeSeq = -1
+    let bestWorktree: SessionMetadata['worktree'] = undefined
+    let hasWorktree = false
+    for (const key of keys) {
+      const entry = this.metadataEntryForKey(key)
+      if (!entry || entry.worktree === undefined) continue
+      const seq = entry.worktreeSeq ?? 0
+      if (seq >= bestWorktreeSeq) {
+        bestWorktreeSeq = seq
+        bestWorktree = entry.worktree
+        hasWorktree = true
+      }
+    }
+    if (hasWorktree) {
+      merged.worktree = bestWorktree
+      merged.worktreeSeq = bestWorktreeSeq
+    } else {
+      delete merged.worktree
+      delete merged.worktreeSeq
     }
     return merged
   }
