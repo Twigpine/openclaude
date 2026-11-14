@@ -296,7 +296,12 @@ recorded as `killed`, and `killed` takes precedence over a natural `exited` or
 `failed` outcome for the same process. Terminal outcomes are stored separately
 under `bg-sessions/terminal/`; deleting that directory makes finished sessions
 fall back to liveness-derived status. OpenClaude does not infer POSIX signal
-names on Windows.
+names on Windows. Retention also removes abandoned session metadata temp files
+(`*.tmp` left behind by an interrupted publish): only files older than both
+the retention cutoff and one hour are removed, and a file is kept when its
+publisher process (named in the temp file) is still alive with its publish
+lock held, or when the per-session publish lock cannot be taken — so a live
+or in-flight publish is never deleted.
 Unobservable force termination, host crashes, and power loss remain `stale` on
 every platform.
 

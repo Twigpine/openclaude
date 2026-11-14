@@ -377,17 +377,18 @@ export async function main(
     profileCheckpoint('cli_bg_path');
     const bg = await importers.bg();
     const waitExitCode = await bg.waitHandler(args.slice(1), { featureEnabled: bgSessionsEnabled });
-    // An interrupted waiter can return while a registry read is still
-    // pending on a stalled file (e.g. a FIFO at a metadata or terminal-fact
-    // path): the pending read keeps the event loop alive, and process.exit()
-    // is deferred until the read settles, so the waiter would never
-    // terminate. Re-raise the interrupting signal with its default
-    // disposition instead, so the process actually dies with 130/143.
-    // waitHandler already removed its own listeners, so drop any others
-    // before re-raising; the process is exiting either way. Only the
-    // interrupted outcome (130/143, which only arise from a genuine
-    // SIGINT/SIGTERM to this waiter) takes this path — every other outcome
-    // returns normally and exits on its own.
+    // An interrupted or timed-out waiter can return while a registry read
+    // is still pending on a stalled file (e.g. a FIFO at a metadata or
+    // terminal-fact path): the pending read keeps the event loop alive, and
+    // process.exit() is deferred until the read settles, so the waiter
+    // would never terminate. Re-raise the interrupting signal with its
+    // default disposition instead, so the process actually dies with
+    // 130/143. waitHandler already removed its own listeners, so drop any
+    // others before re-raising; the process is exiting either way. Only
+    // the interrupted outcome (130/143, which only arise from a genuine
+    // SIGINT/SIGTERM to this waiter) takes the signal path, and only the
+    // timeout outcome (124) takes the explicit-exit path below — every
+    // other outcome returns normally and exits on its own.
     if (waitExitCode === 130 || waitExitCode === 143) {
       const signal = waitExitCode === 143 ? 'SIGTERM' : 'SIGINT'
       process.removeAllListeners(signal)
@@ -397,6 +398,12 @@ export async function main(
       // read is pending, but it still records the right code.
       // eslint-disable-next-line custom-rules/no-process-exit
       process.exit(waitExitCode)
+    }
+    if (waitExitCode === 124) {
+      // A timed-out waiter can leave a registry read pending on a stalled
+      // file, so exit explicitly after the timeout result is printed.
+      // eslint-disable-next-line custom-rules/no-process-exit
+      process.exit(124)
     }
     return;
   }

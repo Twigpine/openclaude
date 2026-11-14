@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
@@ -265,6 +265,42 @@ describe('openclaude wait command (bin)', () => {
       error: 'timeout',
     })
   })
+
+  // A FIFO at the session metadata path stalls the registry read forever:
+  // opening it for reading blocks until a writer appears, and no writer
+  // ever opens it. The --timeout deadline still settles the waiter, and
+  // the launcher must exit 124 explicitly afterwards — a plain return
+  // leaves the pending read holding the event loop open, so the waiter
+  // never terminates (CodeRabbit #2497). No signal is sent here.
+  // FIFOs do not exist on Windows, and `mkfifo` is unavailable there.
+  test.skipIf(process.platform === 'win32')('exits 124 on timeout when the metadata read is stalled on a FIFO', async () => {
+    expect(existsSync(DIST_PATH)).toBe(true)
+    const pid = await startSleeper()
+    await createSession('bg-bin-4', { pid, command: ['sleep', '120'] })
+
+    // Replace the metadata file with a FIFO so the registry read never
+    // settles.
+    const metadataPath = join(registryRoot, 'sessions', 'bg-bin-4.json')
+    await unlink(metadataPath)
+    const mkfifo = Bun.spawnSync(['mkfifo', metadataPath], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(mkfifo.exitCode).toBe(0)
+
+    const result = runBin(['wait', 'bg-bin-4', '--timeout', '1s', '--json'], configDir)
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(124)
+    expect(result.stderr).toBe('')
+    const parsed = JSON.parse(result.stdout)
+    expect(parsed).toMatchObject({
+      id: null,
+      status: null,
+      waitResult: 'timeout',
+      error: 'timeout',
+    })
+  }, 30_000)
 
   // Wait until the waiter has installed its SIGINT listener before
   // signalling it. A fixed sleep races slow startup: a SIGINT delivered
