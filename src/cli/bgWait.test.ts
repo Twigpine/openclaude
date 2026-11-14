@@ -552,6 +552,45 @@ describe('wait command handler', () => {
     expect(result.finishedAt).toBeNull()
   })
 
+  it('returns 124 promptly when a pinned registry read stalls past the deadline', async () => {
+    // Regression test for CodeRabbit #2497: --timeout must bound a
+    // pending registry read, not just the polling loop. The deadline
+    // check runs only after observePinnedSession settles, so a stalled
+    // readFile on the pinned metadata (e.g. a FIFO) blocks the timeout
+    // and the waiter never returns 124. The never-settling read below
+    // stands in for that stalled read.
+    await createTestSession('bg-aaa1')
+    const stalledRead = new Promise<BackgroundSession>(() => {})
+    const waiting = runWait(['bg-aaa1', '--timeout', '100ms', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'sleep 30',
+      readPinnedSession: () => stalledRead,
+    })
+    const { code, stdout, stderr } = await Promise.race([
+      waiting,
+      new Promise<never>((_, reject) => {
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                'waitHandler did not return within 5s of a stalled registry read',
+              ),
+            ),
+          5000,
+        )
+      }),
+    ])
+
+    expect(code).toBe(124)
+    expect(stderr).toBe('')
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.id).toBe('bg-aaa1')
+    expect(result.status).toBe('running')
+    expect(result.waitResult).toBe('timeout')
+    expect(result.error).toBe('timeout')
+    expect(result.finishedAt).toBeNull()
+  })
+
   it('returns 3 with unknown JSON when the process stays unreadable past the deadline', async () => {
     await createTestSession('bg-aaa1')
     const { code, stdout, stderr } = await runWait(

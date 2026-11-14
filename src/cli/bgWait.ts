@@ -276,6 +276,21 @@ function raceWithClientSignal<T>(
   })
 }
 
+// Settles a pending registry read when --timeout elapses. A stalled
+// readFile on pinned metadata (e.g. a FIFO) never settles on its own, so
+// the deadline check after the observation runs cannot bound it. This is
+// a separate outcome from the client-signal path: a deadline expiry is a
+// timeout (124), not an interruption (130/143) (CodeRabbit #2497).
+const DEADLINE_EXPIRED = Symbol('deadline-expired')
+
+function raceWithDeadline<T>(
+  promise: Promise<T>,
+  deadlineExpired: Promise<typeof DEADLINE_EXPIRED> | null,
+): Promise<T | typeof DEADLINE_EXPIRED> {
+  if (deadlineExpired === null) return promise
+  return Promise.race([promise, deadlineExpired])
+}
+
 function baseWaitResult(
   id: string | null,
   waitResult: WaitResult['waitResult'],
@@ -627,18 +642,44 @@ export async function waitHandler(
   // still name the session in its structured error result; null when the
   // failure happened during selector resolution.
   let pinnedId: string | null = null
+  // The deadline timer is hoisted so the finally below can clear it on
+  // every exit path.
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
 
   try {
     // The deadline starts from a monotonic clock after argument validation.
     const deadline =
       parsed.timeoutMs === undefined ? null : now() + parsed.timeoutMs
 
+    // Arm the deadline timer when the wait begins, so a stalled registry
+    // read settles as a timeout instead of blocking the waiter until a
+    // signal arrives. The timer is cleared in the finally below.
+    const deadlineExpired =
+      parsed.timeoutMs === undefined
+        ? null
+        : new Promise<typeof DEADLINE_EXPIRED>(resolve => {
+            deadlineTimer = setTimeout(
+              () => resolve(DEADLINE_EXPIRED),
+              parsed.timeoutMs!,
+            )
+          })
+
     let session: BackgroundSession
     try {
-      session = await raceWithClientSignal(
-        resolveSession(parsed.selector!),
-        abortController.signal,
+      const resolved = await raceWithDeadline(
+        raceWithClientSignal(
+          resolveSession(parsed.selector!),
+          abortController.signal,
+        ),
+        deadlineExpired,
       )
+      if (resolved === DEADLINE_EXPIRED) {
+        return finish(
+          baseWaitResult(null, 'timeout', 'timeout'),
+          'Timed out waiting for a background session.',
+        )
+      }
+      session = resolved
     } catch (error) {
       if (clientSignal) {
         return finish(interruptedWaitResult(null, clientSignal))
@@ -667,11 +708,41 @@ export async function waitHandler(
     while (true) {
       let observation: WaitObservation
       try {
-        observation = await observePinnedSession(
+        const observationPromise = observePinnedSession(
           pinned,
           abortController.signal,
           options,
         )
+        const raced = await raceWithDeadline(
+          observationPromise,
+          deadlineExpired,
+        )
+        if (raced === DEADLINE_EXPIRED) {
+          // The deadline elapsed while this observation was in flight:
+          // it is the final timeout-boundary observation, so give it one
+          // poll interval to settle and classify the boundary (unknown
+          // -> 3, terminal -> its outcome) before treating a read stalled
+          // past that as a timeout (124). Returning 124 at once would
+          // misreport a process that stays unreadable past the deadline.
+          let graceTimer: ReturnType<typeof setTimeout> | undefined
+          const graceExpired = new Promise<null>(resolve => {
+            graceTimer = setTimeout(() => resolve(null), pollIntervalMs)
+          })
+          const late = await Promise.race([
+            observationPromise,
+            graceExpired,
+          ])
+          if (graceTimer !== undefined) clearTimeout(graceTimer)
+          if (late === null) {
+            return finish({
+              ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
+              status: 'running',
+            })
+          }
+          observation = late
+        } else {
+          observation = raced
+        }
       } catch (error) {
         if (clientSignal || abortController.signal.aborted) {
           return finish(
@@ -724,6 +795,7 @@ export async function waitHandler(
     const result = baseWaitResult(pinnedId, 'internal_error', 'internal_error')
     return finish(result, `Error: ${errorMessage(error)}`)
   } finally {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
     process.off('SIGINT', onSigint)
     process.off('SIGTERM', onSigterm)
   }
