@@ -1145,6 +1145,16 @@ type SessionMetadata = {
   prUrl?: string
   prRepository?: string
   goal?: GoalStateEntry['goal']
+  /**
+   * Monotonic sequence of the last goal write cached under this key.
+   * Set alongside `goal` (see currentSessionGoal) and cleared with it, so
+   * the two always travel as a pair — including through
+   * mergeSessionMetadata. Lets shutdown reconcile alias entries for one
+   * transcript last-writer-wins (see reconcileAliasMetadata): the caches
+   * carry no timestamps, so without it a stale active goal from an
+   * earlier alias cannot be told apart from a later clear.
+   */
+  goalSeq?: number
   branch?: SessionBranchEntry
 }
 
@@ -1462,6 +1472,14 @@ class Project {
   }
   set currentSessionGoal(goal: GoalStateEntry['goal'] | undefined) {
     this.setSessionMetadataField('goal', goal)
+    // Order stamp for the goal write (see `goalSeq`): a clear (null) is a
+    // real value and gets a stamp like any other write; deleting the field
+    // (undefined) drops its stamp with it, so a stale sequence can never
+    // outrank a live goal in reconcileAliasMetadata.
+    const entry = this.sessionMetadata.get(this.sessionFileKey())
+    if (!entry) return
+    if (goal === undefined) delete entry.goalSeq
+    else entry.goalSeq = ++this.goalWriteSeq
   }
   get currentSessionBranch(): SessionBranchEntry | undefined {
     return this.metadataForRead()?.branch
@@ -1536,6 +1554,11 @@ class Project {
   // turn (see sessionFileKeyForIdentity); the WeakMap releases the memo
   // with the context, so it retains nothing past the turn (#2489).
   private sdkSessionFileKeyMemo = new WeakMap<object, Map<string, string>>()
+
+  // Monotonic counter stamping goal writes (see `goalSeq` on
+  // SessionMetadata). Process-wide: only the relative order of writes
+  // in this process matters for alias reconciliation at shutdown.
+  private goalWriteSeq = 0
 
   // Bound for the per-context transcript caches, matching the LRU default
   // in conversationCache. Far above any realistic count of overlapping
@@ -2184,14 +2207,22 @@ class Project {
    * Re-append cached session metadata for one explicit cache key, with
    * that key's own session id. The ambient reAppendSessionMetadata
    * delegates to this for the current context; the shutdown cleanup
-   * calls it for every retained SDK session after its async context has
+   * calls it once per retained transcript after its async context has
    * ended (#2489). Same serializer and field rules in both cases.
+   *
+   * `entryOverride` is the shutdown-reconciled metadata for several
+   * alias keys of one transcript (see reconcileAliasMetadata): the stamp
+   * uses it instead of the single key's entry. The title/tag tail
+   * refresh below still runs against it, and still writes back into
+   * that key's cache — the merged values are the file's authoritative
+   * ones for this transcript.
    */
   private reAppendSessionMetadataForKey(
     key: string,
     sessionFile: string,
     sessionId: UUID,
     skipTitleRefresh = false,
+    entryOverride?: SessionMetadata,
   ): void {
     // One sync tail read to refresh SDK-mutable fields. Same
     // LITE_READ_BUF_SIZE window readLiteMetadata uses. Empty string on
@@ -2206,7 +2237,7 @@ class Project {
     // Filter with startsWith to match only top-level JSONL entries (col 0)
     // and not "type":"tag" appearing inside a nested tool_use input that
     // happens to be JSON-serialized into a message.
-    const entry = this.metadataEntryForKey(key)
+    const entry = entryOverride ?? this.metadataEntryForKey(key)
     let title = entry?.title
     let tag = entry?.tag
     const tailLines = tail.split('\n')
@@ -2330,46 +2361,118 @@ class Project {
   }
 
   /**
-   * Re-append cached metadata for every retained SDK session. The
-   * shutdown cleanup runs in the host/global context, after the SDK
-   * turns it serves have left their async contexts — the ambient
-   * getters cannot reach those sessions' pointers or metadata, so
-   * without this their titles/tags fall outside the listing windows
-   * (#2489). Only sessions with a retained pointer are covered;
-   * evicted sessions stay out of scope. `alreadyHandled` holds the
-   * resolved paths the ambient re-append just wrote, so a session the
-   * global context also names is not stamped twice. Bounded by the
-   * per-context cache bound (see boundSessionCaches).
+   * One authoritative metadata state for several cache keys naming the
+   * same transcript. Two SDK contexts with the same session id and an
+   * explicit project directory but different cwds keep separate keys
+   * (see sessionFileKeyForIdentity) — deliberately, so genuinely
+   * separate SDK destinations stay isolated — but with an explicit
+   * project directory those keys are aliases of ONE transcript, and
+   * stamping each in turn replays stale state over fresher state.
+   * The keys themselves are left alone; only the shutdown stamp is
+   * reconciled, so per-context isolation during the turns is untouched.
+   *
+   * Other fields fold defined-wins in cache order, matching the old
+   * per-key stamping where the last alias stamped won for tail-read
+   * fields. The goal is the exception: it resolves last-writer-wins
+   * by `goalSeq`, and an explicit clear (goal: null) with the highest
+   * sequence is authoritative — reAppendSessionMetadataForKey writes
+   * nothing for a null goal, so the merged entry's null lets the clear
+   * already in the file stand as the last goal-state entry instead of
+   * resurrecting the cleared goal.
    */
-  private reAppendRetainedSdkSessionMetadata(
-    alreadyHandled: Set<string>,
-  ): void {
-    for (const [key, path] of [...this.sessionFiles]) {
-      const { sessionId, cwd } = splitSessionFileKey(key)
-      // Global keys carry no cwd component; the ambient re-append above
-      // covers the CLI session they name.
-      if (cwd === null) continue
-      if (!sessionId) continue
-      const resolved = resolvePath(path)
-      if (alreadyHandled.has(resolved)) continue
-      if (this.isDeletedSessionFile(resolved)) continue
-      this.reAppendSessionMetadataForKey(key, path, sessionId as UUID)
+  private reconcileAliasMetadata(keys: string[]): SessionMetadata {
+    let merged: SessionMetadata = {}
+    for (const key of keys) {
+      const entry = this.metadataEntryForKey(key)
+      if (!entry) continue
+      merged = mergeSessionMetadata(merged, entry)
     }
+    let bestSeq = -1
+    let bestGoal: SessionMetadata['goal'] = undefined
+    let hasGoal = false
+    for (const key of keys) {
+      const entry = this.metadataEntryForKey(key)
+      if (!entry || entry.goal === undefined) continue
+      const seq = entry.goalSeq ?? 0
+      if (seq >= bestSeq) {
+        bestSeq = seq
+        bestGoal = entry.goal
+        hasGoal = true
+      }
+    }
+    if (hasGoal) {
+      merged.goal = bestGoal
+      merged.goalSeq = bestSeq
+    } else {
+      delete merged.goal
+      delete merged.goalSeq
+    }
+    return merged
   }
 
   /**
-   * Shutdown re-append: the current context's session, then every
-   * retained SDK session (see reAppendRetainedSdkSessionMetadata). Called
-   * by the process-global cleanup handler, not by compaction or
-   * materialization — those serve one live session only.
+   * Shutdown re-append: one stamp per retained transcript, not per
+   * cache key. The shutdown cleanup runs in the host/global context,
+   * after the SDK turns it serves have left their async contexts — the
+   * ambient getters cannot reach those sessions' pointers or metadata,
+   * so without this their titles/tags fall outside the listing windows
+   * (#2489). Only sessions with a retained pointer are covered;
+   * evicted sessions stay out of scope. Called by the process-global
+   * cleanup handler, not by compaction or materialization — those serve
+   * one live session only.
+   *
+   * The ambient pointer is restored first (an evicted session
+   * re-derives it from its existing transcript, as
+   * reAppendSessionMetadata does) so it joins the grouping like any
+   * other retained pointer: a transcript the global context also names
+   * is stamped once, with the same reconciled state, instead of once
+   * per alias. Bounded by the per-context cache bound (see
+   * boundSessionCaches).
    */
   reAppendSessionMetadataOnShutdown(): void {
     if (this.shouldSkipPersistence()) return
-    this.reAppendSessionMetadata()
-    const handled = new Set<string>()
-    const ambient = this.sessionFile
-    if (ambient !== null) handled.add(resolvePath(ambient))
-    this.reAppendRetainedSdkSessionMetadata(handled)
+    if (!this.sessionFile) this.restoreEvictedSessionFile()
+    const keysByPath = new Map<string, string[]>()
+    for (const [key, path] of [...this.sessionFiles]) {
+      const resolved = resolvePath(path)
+      const keys = keysByPath.get(resolved) ?? []
+      keys.push(key)
+      keysByPath.set(resolved, keys)
+    }
+    for (const [resolved, keys] of keysByPath) {
+      if (this.isDeletedSessionFile(resolved)) continue
+      // A transcript removed by another process leaves no deletion
+      // marker: isDeletedSessionFile only covers this instance's
+      // forgetDeletedSession, and readFileTailSync returns '' for a
+      // missing file — so without this check the stamp below recreates
+      // the transcript from cached metadata, and the deleted session
+      // reappears in listings (#2489). The check lives here, not in
+      // reAppendSessionMetadataForKey: materializeSessionFile re-appends
+      // before the file exists on purpose, to create it with the cached
+      // startup metadata. (A deletion racing this check is the same
+      // residual micro-race as materializeSessionFile's — see the
+      // deliberate non-fixes on #2489.)
+      if (!existsSync(resolved)) continue
+      const { sessionId } = splitSessionFileKey(keys[0])
+      if (!sessionId) continue
+      // One key: the existing per-key behavior, unchanged. Several keys
+      // for one transcript: stamp once with the reconciled state.
+      if (keys.length === 1) {
+        this.reAppendSessionMetadataForKey(
+          keys[0],
+          resolved,
+          sessionId as UUID,
+        )
+      } else {
+        this.reAppendSessionMetadataForKey(
+          keys[0],
+          resolved,
+          sessionId as UUID,
+          false,
+          this.reconcileAliasMetadata(keys),
+        )
+      }
+    }
   }
 
   /**
