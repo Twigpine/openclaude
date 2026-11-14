@@ -61,4 +61,50 @@ describe('plugin engines compatibility', () => {
     expect(error).not.toBeNull()
     expect(error).toContain('test-plugin')
   })
+
+  test('multi-component wildcard ranges are valid', () => {
+    for (const range of ['x.x', 'x.x.x', '0.x', '0.36.x', '0.*']) {
+      expect(
+        pluginEnginesIncompatibility(
+          manifest({ 'claude-code': range }),
+          APP_VERSION,
+        ),
+      ).toBeNull()
+    }
+  })
+
+  test('caret, tilde, comparator set, hyphen, and or ranges are valid', () => {
+    const compatible = [
+      '^0.36.0',
+      '~0.36.0',
+      '>=0.30.0 <1.0.0',
+      '0.30.0 - 0.40.0',
+      '>=99.0.0 || >=0.30.0',
+    ]
+    for (const range of compatible) {
+      expect(
+        pluginEnginesIncompatibility(
+          manifest({ 'claude-code': range }),
+          APP_VERSION,
+        ),
+      ).toBeNull()
+    }
+  })
+
+  test('malformed text around a valid range is invalid, not compatible', () => {
+    for (const range of [
+      '>=0.30.0 definitely-invalid',
+      '>=0.30.0 ||',
+      '||',
+      '1.2.3.4',
+      '>=',
+    ]) {
+      const error = pluginEnginesIncompatibility(
+        manifest({ 'claude-code': range }),
+        APP_VERSION,
+      )
+      expect(error).not.toBeNull()
+      expect(error).toContain('invalid')
+    }
+  })
 })

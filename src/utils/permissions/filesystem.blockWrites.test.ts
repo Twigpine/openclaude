@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test'
-import { mkdtemp, rm } from 'fs/promises'
+import { mkdir, mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { z } from 'zod/v4'
@@ -12,7 +12,7 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import type { ToolPermissionContext } from '../../types/permissions.js'
+import type { ToolPermissionContext, ToolUseContext } from '../../Tool.js'
 import type { SettingsJson } from '../settings/types.js'
 
 const realSettings = await import(
@@ -27,6 +27,9 @@ mock.module('../settings/settings.js', () => ({
 }))
 
 const { checkWritePermissionForTool } = await import('./filesystem.js')
+const { hasPermissionsToUseTool, checkRuleBasedPermissions } = await import(
+  './permissions.js'
+)
 
 const writeTool = createToolFixture(
   z.object({ file_path: z.string() }),
@@ -44,16 +47,33 @@ function permissionContext(
     string,
     { path: string; source: 'session' }
   >(),
+  alwaysAskRules: ToolPermissionContext['alwaysAskRules'] = {},
 ): ToolPermissionContext {
   return {
     mode,
     additionalWorkingDirectories,
     alwaysAllowRules: {},
     alwaysDenyRules: {},
-    alwaysAskRules: {},
+    alwaysAskRules,
     isBypassPermissionsModeAvailable:
       mode === 'bypassPermissions' || mode === 'fullAccess',
   } satisfies ToolPermissionContext
+}
+
+function useContext(
+  toolPermissionContext: ToolPermissionContext,
+): ToolUseContext {
+  return {
+    abortController: new AbortController(),
+    getAppState: () => ({ toolPermissionContext }),
+    setAppState: () => {},
+    options: {
+      agentDefinitions: {
+        activeAgents: [],
+        allAgents: [],
+      },
+    },
+  } as unknown as ToolUseContext
 }
 
 describe('permissions.blockWritesOutsideWorkingDirectories', () => {
@@ -145,5 +165,66 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
         'blockWritesOutsideWorkingDirectories',
       )
     }
+  })
+
+  test('a case-variant path does not alias the working directory', async () => {
+    if (process.platform !== 'linux') {
+      return
+    }
+    blockWritesOutsideWorkingDirectories = true
+    const caseDir = join(tmpdir(), `oc-casecheck-${Date.now()}-lower`)
+    await mkdir(caseDir, { recursive: true })
+    try {
+      setOriginalCwd(caseDir)
+      const outside = checkWritePermissionForTool(
+        writeTool,
+        { file_path: join(caseDir.toUpperCase(), 'x.txt') },
+        permissionContext('bypassPermissions'),
+      )
+      expect(outside.behavior).toBe('deny')
+      const inside = checkWritePermissionForTool(
+        writeTool,
+        { file_path: join(caseDir, 'x.txt') },
+        permissionContext('bypassPermissions'),
+      )
+      expect(inside.behavior).not.toBe('deny')
+    } finally {
+      setOriginalCwd(projectDir)
+      await rm(caseDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a whole-tool ask rule cannot bypass the boundary', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const context = useContext(
+      permissionContext('default', new Map(), { localSettings: ['Write'] }),
+    )
+    const result = await hasPermissionsToUseTool(
+      writeTool,
+      { file_path: join(outsideDir, 'out.txt') },
+      context,
+      {} as Parameters<typeof hasPermissionsToUseTool>[3],
+      'tool-use-boundary-1',
+    )
+    if (result.behavior !== 'deny') {
+      throw new Error(`expected deny, got ${result.behavior}`)
+    }
+    expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+  })
+
+  test('checkRuleBasedPermissions enforces the boundary for ask rules', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const context = useContext(
+      permissionContext('default', new Map(), { localSettings: ['Write'] }),
+    )
+    const result = await checkRuleBasedPermissions(
+      writeTool,
+      { file_path: join(outsideDir, 'out.txt') },
+      context,
+    )
+    if (result?.behavior !== 'deny') {
+      throw new Error(`expected deny, got ${result?.behavior}`)
+    }
+    expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
   })
 })

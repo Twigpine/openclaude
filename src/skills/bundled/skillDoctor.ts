@@ -14,20 +14,21 @@ From this session's history, determine which loaded skills were actually invoked
 
 ## Step 3: Cost
 
-For each loaded skill estimate its context cost:
+Estimate two separate costs per skill; do not conflate them:
 
-- If it has an on-disk SKILL.md, run \`wc -c\` on it and estimate tokens as bytes divided by 4 (state that this is an approximation).
-- The description-level cost of a loaded-but-never-invoked skill is small: name, description, and trigger text sit in context. Full content only enters context on invocation.
-- For skills with extracted reference files, note the extra files exist but are only read on demand.
+- Loaded cost: what the skill occupies in context right now. That is its name, description, and trigger text in the skills list, so it stays small for every loaded skill.
+- Invocation cost: what the skill would add to context only if it ran. If it has an on-disk SKILL.md, run \`wc -c\` on it and estimate tokens as bytes divided by 4 (state that this is an approximation). Full SKILL.md content does not enter context until invocation, so this number is potential spend, not current spend.
+
+For skills with extracted reference files, note the extra files exist but are only read on demand.
 
 ## Step 4: Report
 
 Produce a table:
 
-| skill | source | invoked | est. content tokens |
-|---|---|---|---|
+| skill | source | invoked | loaded cost | invocation cost if run |
+|---|---|---|---|---|
 
-Then summarize: total loaded skills, how many went unused, the combined estimated cost of unused skills, and a short prune recommendation (disable or remove the highest-cost unused skills; keep cheap ones). Do not modify any skill files or settings. This skill reports only; it changes nothing.
+Then summarize: total loaded skills, how many went unused, and the combined loaded cost of unused skills (the real cost today). Use the invocation-cost column only to prioritize pruning, never count it as current spend. Recommend disabling or removing the highest-cost unused skills; keep cheap ones. Do not modify any skill files or settings. This skill reports only; it changes nothing.
 `
 
 export function registerSkillDoctorSkill(): void {

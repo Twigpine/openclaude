@@ -31,7 +31,7 @@ test(
           const blocks = await skill.getPromptForCommand('', {})
           result.skills[name] = {
             userInvocable: skill.userInvocable,
-            hasPrompt: blocks.length > 0,
+            prompt: blocks.map(b => b.text ?? '').join('\\n'),
           }
         }
       }
@@ -56,8 +56,23 @@ test(
       for (const name of NEW_SKILLS) {
         expect(result.skills[name], `${name} not registered`).toBeDefined()
         expect(result.skills[name].userInvocable).toBe(true)
-        expect(result.skills[name].hasPrompt).toBe(true)
+        expect(result.skills[name].prompt.length).toBeGreaterThan(0)
       }
+
+      const autoModePrompt = result.skills['auto-mode-setup'].prompt
+      expect(autoModePrompt).toContain('top-level `autoMode`')
+      expect(autoModePrompt).toContain('explicit confirmation')
+      expect(autoModePrompt).toContain('settings.local.json')
+      expect(autoModePrompt).toContain('OPENCLAUDE_CONFIG_DIR')
+
+      expect(result.skills['less-permission-prompts'].prompt).toContain(
+        'OPENCLAUDE_CONFIG_DIR',
+      )
+
+      const doctorPrompt = result.skills['skill-doctor'].prompt
+      expect(doctorPrompt).toContain('Loaded cost')
+      expect(doctorPrompt).toContain('Invocation cost')
+      expect(doctorPrompt).toContain('does not enter context until invocation')
 
       expect(result.validatorPath).not.toBeNull()
       const run = (args: string[]) =>
