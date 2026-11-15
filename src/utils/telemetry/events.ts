@@ -22,6 +22,7 @@
 
 import { getSessionId } from '../../bootstrap/state.js'
 import { registerCleanup } from '../cleanupRegistry.js'
+import { createCombinedAbortSignal } from '../combinedAbortSignal.js'
 import { logForDebugging } from '../debug.js'
 import { isEnvTruthy } from '../envUtils.js'
 import { getProxyFetchOptions } from '../proxy.js'
@@ -305,12 +306,15 @@ export async function flushOTelEvents(): Promise<void> {
 		)
 		return
 	}
+	const timeout = createCombinedAbortSignal(undefined, {
+		timeoutMs: otelExportTimeoutMs(),
+	})
 	try {
 		const response = await fetch(endpoint, {
 			method: 'POST',
 			headers: otelHeaders(),
 			body: JSON.stringify(buildOTelLogsPayload(records)),
-			signal: AbortSignal.timeout(otelExportTimeoutMs()),
+			signal: timeout.signal,
 			...getProxyFetchOptions(),
 		})
 		if (!response.ok) {
@@ -320,6 +324,8 @@ export async function flushOTelEvents(): Promise<void> {
 		logForDebugging(
 			`Failed to export OTel logs: ${error instanceof Error ? error.message : String(error)}`,
 		)
+	} finally {
+		timeout.cleanup()
 	}
 	if (droppedRecordCount > 0) {
 		logForDebugging(
