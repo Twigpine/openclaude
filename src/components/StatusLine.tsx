@@ -93,6 +93,19 @@ export function resolveStatusLineUpdateAction(options: {
   };
 }
 
+/**
+ * Decides whether a periodic refresh tick schedules a status line run: only
+ * when the row is visible and no run is pending or in flight. Ticks never
+ * abort a running command — the 5-second executeCommand timeout applies only
+ * when no signal is passed, and StatusLine always passes its own.
+ */
+export function shouldStatusLineIntervalRefresh(options: {
+  active: boolean;
+  hasPendingUpdate: boolean;
+}): boolean {
+  return options.active && !options.hasPendingUpdate;
+}
+
 export function buildStatusLineCommandInput(permissionMode: PermissionMode, exceeds200kTokens: boolean, settings: ReadonlySettings, messages: Message[], addedDirs: string[], mainLoopModel: ModelName, vimMode?: VimMode): StatusLineCommandInput {
   const agentType = getMainThreadAgentType();
   const worktreeSession = getCurrentWorktreeSession();
@@ -271,6 +284,7 @@ function StatusLineInner({
   const logNextResultRef = useRef(true);
   const hasRunRef = useRef(false);
   const statusLineCommand = settings?.statusLine?.command;
+  const refreshIntervalSeconds = settings?.statusLine?.refreshInterval;
   const previousStatusLineCommandRef = useRef(statusLineCommand);
 
   // Stable update function — reads latest values from refs
@@ -377,13 +391,32 @@ function StatusLineInner({
     if (transition.action === 'schedule') scheduleUpdate();
   }, [active, lastAssistantMessageId, permissionMode, vimMode, mainLoopModel, settings?.outputStyle, additionalWorkingDirectories, statusLineCommand, cancelPendingUpdate, doUpdate, scheduleUpdate]);
 
+  // Periodic refresh: re-run the command on a timer so the line reflects
+  // state that changes without TUI events (e.g. background workers).
+  // Ticks route through the same 300ms-debounced scheduleUpdate used by
+  // event changes; they skip while a run is in flight or scheduled.
+  useEffect(() => {
+    if (!active || refreshIntervalSeconds === undefined) return;
+    const timer = setInterval(() => {
+      if (!shouldStatusLineIntervalRefresh({
+        active: activeRef.current,
+        hasPendingUpdate: debounceTimerRef.current !== undefined || abortControllerRef.current !== undefined
+      })) {
+        return;
+      }
+      scheduleUpdate();
+    }, refreshIntervalSeconds * 1000);
+    return () => clearInterval(timer);
+  }, [active, refreshIntervalSeconds, scheduleUpdate]);
+
   // Separate effect for logging on mount
   useEffect(() => {
     const statusLine = settings?.statusLine;
     if (statusLine) {
       logEvent('tengu_status_line_mount', {
         command_length: statusLine.command.length,
-        padding: statusLine.padding
+        padding: statusLine.padding,
+        refresh_interval: statusLine.refreshInterval
       });
       // Log if status line is configured but disabled by disableAllHooks
       if (settings.disableAllHooks === true) {

@@ -7,6 +7,7 @@ import {
   getLastAssistantMessageId,
   resolveStatusLineUpdateAction,
   resolveStatusLineTokenTotals,
+  shouldStatusLineIntervalRefresh,
 } from './StatusLine.js'
 import type { AssistantMessage, Message } from '../types/message.js'
 
@@ -113,6 +114,21 @@ describe('resolveStatusLineUpdateAction', () => {
 
   it('runs immediately when the statusline command changes', () => {
     expect(resolveStatusLineUpdateAction({ active: true, hasRun: true, needsRefresh: false, stateChanged: false, commandChanged: true, hasPendingUpdate: false })).toEqual({ action: 'run' })
+  })
+})
+
+describe('shouldStatusLineIntervalRefresh', () => {
+  it('schedules a tick while visible and idle', () => {
+    expect(shouldStatusLineIntervalRefresh({ active: true, hasPendingUpdate: false })).toBe(true)
+  })
+
+  it('skips while a run is in flight or a debounce is pending', () => {
+    expect(shouldStatusLineIntervalRefresh({ active: true, hasPendingUpdate: true })).toBe(false)
+  })
+
+  it('never ticks while the status line row is hidden', () => {
+    expect(shouldStatusLineIntervalRefresh({ active: false, hasPendingUpdate: false })).toBe(false)
+    expect(shouldStatusLineIntervalRefresh({ active: false, hasPendingUpdate: true })).toBe(false)
   })
 })
 
