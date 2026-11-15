@@ -35,6 +35,9 @@ export const MAX_MODEL_PRICING_ID_LENGTH = 512
 export const MAX_MODEL_TOKEN_RATE_USD_PER_MILLION = 100_000
 export const MAX_MODEL_WEB_SEARCH_RATE_USD_PER_REQUEST = 1_000
 
+export const MIN_STATUS_LINE_REFRESH_INTERVAL_SECONDS = 1
+export const MAX_STATUS_LINE_REFRESH_INTERVAL_SECONDS = 60
+
 const ModelTokenRateSchema = z
   .number()
   .finite()
@@ -745,6 +748,20 @@ export const SettingsSchema = lazySchema(() =>
           type: z.literal('command'),
           command: z.string(),
           padding: z.number().optional(),
+          refreshInterval: z
+            .number()
+            .int()
+            .min(MIN_STATUS_LINE_REFRESH_INTERVAL_SECONDS)
+            .max(MAX_STATUS_LINE_REFRESH_INTERVAL_SECONDS)
+            .optional()
+            // Invalid values degrade to "absent" instead of failing the whole
+            // settings file — same pattern as strictPluginOnlyCustomization.
+            .catch(undefined)
+            .describe(
+              `Re-run the status line command every N seconds while the session is idle ` +
+                `(integer, ${MIN_STATUS_LINE_REFRESH_INTERVAL_SECONDS}-${MAX_STATUS_LINE_REFRESH_INTERVAL_SECONDS}). ` +
+                'Omit to refresh on session events only. Invalid values are ignored.',
+            ),
         })
         .optional()
         .describe('Custom status line display configuration'),
