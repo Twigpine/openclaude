@@ -1,20 +1,40 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
-import { saveGlobalConfig } from '../../utils/config.js'
+import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 import {
   getIdleCompactionMinTokens,
   isIdleCompactionEnabled,
   shouldArmIdleCompaction,
 } from './idleCompaction.js'
 
+const savedEnv = {
+  minTokens: process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS,
+  disableCompact: process.env.DISABLE_COMPACT,
+}
+const savedIdleCompaction = getGlobalConfig().idleCompaction
+
+function setKnownBaseline(): void {
+  saveGlobalConfig(current => ({ ...current, idleCompaction: true }))
+  delete process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS
+  delete process.env.DISABLE_COMPACT
+}
+
+function restoreIsolation(): void {
+  saveGlobalConfig(current => ({ ...current, idleCompaction: savedIdleCompaction }))
+  for (const [key, value] of [
+    ['CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS', savedEnv.minTokens],
+    ['DISABLE_COMPACT', savedEnv.disableCompact],
+  ] as const) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+}
+
 describe('idle compaction gating', () => {
-  afterEach(() => {
-    saveGlobalConfig(current => ({ ...current, idleCompaction: true }))
-    delete process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS
-    delete process.env.DISABLE_COMPACT
-  })
+  beforeEach(setKnownBaseline)
+  afterEach(restoreIsolation)
 
   test('min tokens defaults to 200k and honors a valid env override', () => {
     expect(getIdleCompactionMinTokens()).toBe(200_000)
@@ -153,10 +173,8 @@ async function importIdleCompaction(): Promise<{
 }
 
 describe('runIdleCompaction', () => {
-  afterEach(() => {
-    saveGlobalConfig(current => ({ ...current, idleCompaction: true }))
-    delete process.env.DISABLE_COMPACT
-  })
+  beforeEach(setKnownBaseline)
+  afterEach(restoreIsolation)
 
   test('returns null without compacting when disabled', async () => {
     saveGlobalConfig(current => ({ ...current, idleCompaction: false }))
@@ -198,5 +216,24 @@ describe('runIdleCompaction', () => {
     expect(mocks.suppressCompactWarning).toHaveBeenCalled()
     expect(mocks.cacheClear).toHaveBeenCalled()
     expect(mocks.runPostCompactCleanup).toHaveBeenCalled()
+  })
+
+  test('returns null and skips cleanup when the compaction was aborted mid-flight', async () => {
+    const { module, mocks } = await importIdleCompaction()
+    const abortController = new AbortController()
+    mocks.compactConversation.mockImplementation(async () => {
+      abortController.abort()
+      return {}
+    })
+    const context = { abortController } as unknown as ToolUseContext
+    const result = await module.runIdleCompaction(
+      [userMessage('hello')],
+      context,
+    )
+    expect(result).toBeNull()
+    expect(mocks.setLastSummarizedMessageId).not.toHaveBeenCalled()
+    expect(mocks.suppressCompactWarning).not.toHaveBeenCalled()
+    expect(mocks.cacheClear).not.toHaveBeenCalled()
+    expect(mocks.runPostCompactCleanup).not.toHaveBeenCalled()
   })
 })

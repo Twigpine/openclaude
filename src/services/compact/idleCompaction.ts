@@ -58,6 +58,9 @@ export async function runIdleCompaction(
     undefined,
     true,
   )
+  // A turn that started mid-compaction aborts this controller and the REPL
+  // discards the result; skip post-compact bookkeeping for that stale run.
+  if (context.abortController.signal.aborted) return null
   setLastSummarizedMessageId(undefined)
   suppressCompactWarning()
   getUserContext.cache.clear?.()

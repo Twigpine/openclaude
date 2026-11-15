@@ -1026,4 +1026,56 @@ describe('watchdog env tuning', () => {
       expect(operation).toHaveBeenCalledTimes(2)
     },
   )
+
+  test('MAX_USAGE_LIMIT_WAIT_MS compares against the uncapped advertised reset', async () => {
+    process.env.CLAUDE_CODE_UNATTENDED_RETRY = '1'
+    // 7h max wait, 8h reset: the 6h per-attempt cap must not make this
+    // acceptable by shrinking the comparison delay below the limit.
+    process.env.CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS = String(
+      7 * 3_600_000,
+    )
+    const m = await importFreshWithRetryModule('firstParty')
+    if (!m.isPersistentRetryEnabled()) return
+
+    const resetSec = Math.floor(Date.now() / 1000) + 8 * 3600
+    const operation = mock(async () => {
+      throw makeResetError(resetSec)
+    })
+    const runRetries = async () => {
+      for await (const _ of m.withRetry(
+        async () => ({} as never),
+        operation,
+        RETRY_OPTS,
+      )) {
+        void _
+      }
+    }
+    await expect(runRetries()).rejects.toBeInstanceOf(m.CannotRetryError)
+    expect(operation).toHaveBeenCalledTimes(1)
+  })
+
+  test('early rechecks do not exhaust the persistent retry budget', async () => {
+    process.env.CLAUDE_CODE_UNATTENDED_RETRY = '1'
+    process.env.CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS = '60000'
+    const m = await importFreshWithRetryModule('firstParty')
+    if (!m.isPersistentRetryEnabled()) return
+
+    const resetSec = Math.floor(Date.now() / 1000) + 3600
+    const maxAttempts = m._PERSISTENT_MAX_ATTEMPTS_FOR_TEST
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      // Stay limited past the old 100-attempt cap, then succeed.
+      if (calls <= maxAttempts + 10) throw makeResetError(resetSec)
+      return { ok: true }
+    })
+    for await (const _ of m.withRetry(
+      async () => ({} as never),
+      operation,
+      RETRY_OPTS,
+    )) {
+      void _
+    }
+    expect(operation).toHaveBeenCalledTimes(maxAttempts + 11)
+  })
 })

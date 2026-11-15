@@ -33,7 +33,7 @@ describe('/scroll-speed', () => {
   })
 
   test('rejects invalid input without writing', async () => {
-    for (const bad of ['abc', '0', '-2', '21']) {
+    for (const bad of ['abc', '0', '0.5', '-2', '21']) {
       const result = await call(bad, noopContext)
       if (result.type === 'text') {
         expect(result.value).toContain('Usage')

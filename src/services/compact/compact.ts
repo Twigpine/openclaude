@@ -565,9 +565,13 @@ export async function compactConversation(
     // Store the current file state before clearing
     const preCompactReadFileState = cacheToObject(context.readFileState)
 
-    // Clear the cache
-    context.readFileState.clear()
-    context.loadedNestedMemoryPaths?.clear()
+    // Clear the caches, unless the compaction was aborted mid-flight, in
+    // which case the caller discards this result and the active session
+    // still needs its read-file and memory state.
+    if (!context.abortController.signal.aborted) {
+      context.readFileState.clear()
+      context.loadedNestedMemoryPaths?.clear()
+    }
 
     // Intentionally NOT resetting sentSkillNames: re-injecting the full
     // skill_listing (~4K tokens) post-compact is pure cache_creation with

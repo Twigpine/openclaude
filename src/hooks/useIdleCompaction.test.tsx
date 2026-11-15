@@ -1,10 +1,33 @@
 import { randomUUID } from 'node:crypto'
 import { PassThrough } from 'node:stream'
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import React, { useEffect, useState } from 'react'
 import { createRoot } from '../ink.js'
 import type { Message } from '../types/message.js'
-import { saveGlobalConfig } from '../utils/config.js'
+import { getGlobalConfig, saveGlobalConfig } from '../utils/config.js'
+
+const savedEnv = {
+  minTokens: process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS,
+  disableCompact: process.env.DISABLE_COMPACT,
+}
+const savedIdleCompaction = getGlobalConfig().idleCompaction
+
+function setKnownBaseline(): void {
+  saveGlobalConfig(current => ({ ...current, idleCompaction: true }))
+  delete process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS
+  delete process.env.DISABLE_COMPACT
+}
+
+function restoreIsolation(): void {
+  saveGlobalConfig(current => ({ ...current, idleCompaction: savedIdleCompaction }))
+  for (const [key, value] of [
+    ['CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS', savedEnv.minTokens],
+    ['DISABLE_COMPACT', savedEnv.disableCompact],
+  ] as const) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+}
 
 const realIdleCompaction = {
   ...(await import(
@@ -88,11 +111,8 @@ async function mount(
 }
 
 describe('useIdleCompaction', () => {
-  afterEach(() => {
-    saveGlobalConfig(current => ({ ...current, idleCompaction: true }))
-    delete process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS
-    delete process.env.DISABLE_COMPACT
-  })
+  beforeEach(setKnownBaseline)
+  afterEach(restoreIsolation)
 
   test('fires after the idle delay when the session is over the minimum', async () => {
     process.env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS = '1'

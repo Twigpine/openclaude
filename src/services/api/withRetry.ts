@@ -266,6 +266,7 @@ export async function* withRetry<T>(
   let consecutive529Errors = options.initialConsecutive529Errors ?? 0
   let lastError: unknown
   let persistentAttempt = 0
+  let recheckWaitedMs = 0
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (options.signal?.aborted) {
       throw new APIUserAbortError()
@@ -589,35 +590,53 @@ export async function* withRetry<T>(
       const retryAfter = getRetryAfter(error)
       let delayMs: number
       if (persistent && error instanceof APIError && error.status === 429) {
-        persistentAttempt++
         // Window-based limits (e.g. 5hr Max/Pro) include a reset timestamp.
         // Wait until reset rather than polling every 5 min uselessly.
         const resetDelay = getRateLimitResetDelayMs(error)
         const maxWaitMs = readWatchdogMaxWaitMs()
-        if (
-          maxWaitMs !== null &&
-          resetDelay !== null &&
-          resetDelay > maxWaitMs
-        ) {
-          throw new CannotRetryError(error, retryContext)
+        if (maxWaitMs !== null && resetDelay !== null) {
+          // Compare against the advertised reset, not the capped sleep.
+          // A reset beyond maxWaitMs must end the request even when the
+          // per-attempt cap would shrink the wait below that limit.
+          const advertisedDelay = getRateLimitResetDelayMs(
+            error,
+            Number.POSITIVE_INFINITY,
+          )
+          if (advertisedDelay !== null && advertisedDelay > maxWaitMs) {
+            throw new CannotRetryError(error, retryContext)
+          }
         }
         // The recheck interval caps the wait so the next attempt acts as the
         // check for a limit lifted before its advertised reset.
         const recheckMs = readWatchdogRecheckMs()
-        delayMs =
-          resetDelay !== null && recheckMs !== null
-            ? Math.min(resetDelay, recheckMs)
-            : (resetDelay ??
-              Math.min(
-                getRetryDelay(
-                  persistentAttempt,
-                  retryAfter,
-                  PERSISTENT_MAX_BACKOFF_MS,
-                ),
-                PERSISTENT_RESET_CAP_MS,
-              ))
+        if (resetDelay !== null && recheckMs !== null && recheckMs < resetDelay) {
+          // Early rechecks are polling, not real retries. Charge one
+          // persistent attempt only once the accumulated polls span the
+          // advertised window, so a far-out reset cannot burn the retry
+          // budget before it arrives.
+          recheckWaitedMs += recheckMs
+          if (recheckWaitedMs >= resetDelay) {
+            persistentAttempt++
+            recheckWaitedMs = 0
+          }
+          delayMs = recheckMs
+        } else {
+          persistentAttempt++
+          recheckWaitedMs = 0
+          delayMs =
+            resetDelay ??
+            Math.min(
+              getRetryDelay(
+                persistentAttempt,
+                retryAfter,
+                PERSISTENT_MAX_BACKOFF_MS,
+              ),
+              PERSISTENT_RESET_CAP_MS,
+            )
+        }
       } else if (persistent) {
         persistentAttempt++
+        recheckWaitedMs = 0
         // Retry-After is a server directive and bypasses maxDelayMs inside
         // getRetryDelay (intentional — honoring it is correct). Cap at the
         // 6hr reset-cap here so a pathological header can't wait unbounded.
@@ -1119,7 +1138,10 @@ export function parseOpenAIDuration(s: string): number | null {
   return total > 0 ? total : null
 }
 
-export function getRateLimitResetDelayMs(error: APIError): number | null {
+export function getRateLimitResetDelayMs(
+  error: APIError,
+  capMs = PERSISTENT_RESET_CAP_MS,
+): number | null {
   const provider = getAPIProvider()
 
   if (provider === 'firstParty') {
@@ -1129,7 +1151,7 @@ export function getRateLimitResetDelayMs(error: APIError): number | null {
     if (!Number.isFinite(resetUnixSec)) return null
     const delayMs = resetUnixSec * 1000 - Date.now()
     if (delayMs <= 0) return null
-    return Math.min(delayMs, PERSISTENT_RESET_CAP_MS)
+    return Math.min(delayMs, capMs)
   }
 
   if (provider === 'openai' || provider === 'codex' || provider === 'github') {
@@ -1140,7 +1162,7 @@ export function getRateLimitResetDelayMs(error: APIError): number | null {
     if (reqMs === null && tokMs === null) return null
     // Use the larger delay so we don't retry before both limits reset
     const delayMs = Math.max(reqMs ?? 0, tokMs ?? 0)
-    return Math.min(delayMs, PERSISTENT_RESET_CAP_MS)
+    return Math.min(delayMs, capMs)
   }
 
   // bedrock, vertex, foundry, gemini — no standard reset header

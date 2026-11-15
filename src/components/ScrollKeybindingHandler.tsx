@@ -284,12 +284,15 @@ export function computeWheelStep(state: WheelAccelState, dir: 1 | -1, now: numbe
     // Direction reversal or long idle: start at 2 (not 1) so the first
     // click after a pause moves a visible amount. Without this, idle-
     // then-resume in the same direction decays to mult≈1 (1 row).
-    state.mult = 2;
+    // Scaled by base so /scroll-speed applies on this path too.
+    state.mult = 2 * state.base;
     state.frac = 0;
   } else {
     const m = Math.pow(0.5, gap / WHEEL_DECAY_HALFLIFE_MS);
-    const cap = gap >= WHEEL_DECAY_GAP_MS ? WHEEL_DECAY_CAP_SLOW : WHEEL_DECAY_CAP_FAST;
-    state.mult = Math.min(cap, 1 + (state.mult - 1) * m + WHEEL_DECAY_STEP * m);
+    const cap =
+      (gap >= WHEEL_DECAY_GAP_MS ? WHEEL_DECAY_CAP_SLOW : WHEEL_DECAY_CAP_FAST) *
+      state.base;
+    state.mult = Math.min(cap, 1 + (state.mult - 1) * m + WHEEL_DECAY_STEP * m * state.base);
   }
   const total = state.mult + state.frac;
   const rows = Math.floor(total);

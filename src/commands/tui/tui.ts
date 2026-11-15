@@ -12,16 +12,17 @@ export const call: LocalCommandCall = async args => {
     ? ` Note: CLAUDE_CODE_NO_FLICKER=${envFlag} takes precedence.`
     : ''
 
-  if (mode === 'fullscreen') {
-    saveGlobalConfig(current => ({ ...current, flickerFreeMode: true }))
+  if (mode === 'fullscreen' || mode === 'inline') {
+    saveGlobalConfig(current => ({ ...current, flickerFreeMode: mode === 'fullscreen' }))
+    const effective = isFullscreenEnvEnabled() ? 'fullscreen' : 'inline'
+    if (effective === mode) {
+      return { type: 'text', value: `Switched to ${effective} display mode.${envNote}` }
+    }
+    const reason = envFlag ? '' : ' This terminal does not support fullscreen.'
     return {
       type: 'text',
-      value: `Switched to fullscreen display mode.${envNote}`,
+      value: `Saved ${mode} preference; effective display mode is ${effective}.${reason}${envNote}`,
     }
-  }
-  if (mode === 'inline') {
-    saveGlobalConfig(current => ({ ...current, flickerFreeMode: false }))
-    return { type: 'text', value: `Switched to inline display mode.${envNote}` }
   }
 
   const current = isFullscreenEnvEnabled() ? 'fullscreen' : 'inline'

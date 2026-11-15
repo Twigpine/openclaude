@@ -3090,7 +3090,7 @@ export function REPL({
     onBackgroundQuery: handleBackgroundQuery
   });
   const idleCompactionAbortRef = useRef<AbortController | null>(null);
-  useIdleCompaction(messages, isLoading, async currentMessages => {
+  useIdleCompaction(messages, isLoading || isRemoteSession, async currentMessages => {
     const idleAbortController = createAbortController();
     idleCompactionAbortRef.current = idleAbortController;
     try {

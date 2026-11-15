@@ -20,7 +20,7 @@ export const call: LocalCommandCall = async args => {
   }
 
   const speed = parseFloat(input)
-  if (Number.isNaN(speed) || speed <= 0 || speed > MAX_SCROLL_SPEED) {
+  if (Number.isNaN(speed) || speed < 1 || speed > MAX_SCROLL_SPEED) {
     return { type: 'text', value: USAGE }
   }
 
