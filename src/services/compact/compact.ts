@@ -562,16 +562,10 @@ export async function compactConversation(
       throw new Error(summary)
     }
 
-    // Store the current file state before clearing
+    // Store the current file state before clearing. The clears happen on
+    // the accepted path below, once the compacted result can no longer be
+    // discarded by a mid-flight abort.
     const preCompactReadFileState = cacheToObject(context.readFileState)
-
-    // Clear the caches, unless the compaction was aborted mid-flight, in
-    // which case the caller discards this result and the active session
-    // still needs its read-file and memory state.
-    if (!context.abortController.signal.aborted) {
-      context.readFileState.clear()
-      context.loadedNestedMemoryPaths?.clear()
-    }
 
     // Intentionally NOT resetting sentSkillNames: re-injecting the full
     // skill_listing (~4K tokens) post-compact is pure cache_creation with
@@ -640,7 +634,7 @@ export async function compactConversation(
     // compaction controller; the result will be discarded, so skip the
     // SessionStart hooks rather than running user hooks for nothing.
     if (context.abortController.signal.aborted) {
-      throw new APIUserAbortError()
+      throw new APIUserAbortError({ message: ERROR_MESSAGE_USER_ABORT })
     }
     context.onCompactProgress?.({
       type: 'hooks_start',
@@ -792,6 +786,15 @@ export async function compactConversation(
     ]
       .filter(Boolean)
       .join('\n')
+
+    // Cleared only here, on the accepted path: an aborted compaction is
+    // thrown away before this point and the active session keeps its
+    // read-file and nested-memory state.
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError({ message: ERROR_MESSAGE_USER_ABORT })
+    }
+    context.readFileState.clear()
+    context.loadedNestedMemoryPaths?.clear()
 
     return {
       boundaryMarker,
@@ -984,12 +987,9 @@ export async function partialCompactConversation(
       throw new Error(summary)
     }
 
-    // Store the current file state before clearing
+    // Store the current file state before clearing; as in
+    // compactConversation(), the clears happen on the accepted path below.
     const preCompactReadFileState = cacheToObject(context.readFileState)
-    if (!context.abortController.signal.aborted) {
-      context.readFileState.clear()
-      context.loadedNestedMemoryPaths?.clear()
-    }
     // Intentionally NOT resetting sentSkillNames — see compactConversation()
     // for rationale (~4K tokens saved per compact event).
 
@@ -1048,7 +1048,7 @@ export async function partialCompactConversation(
     // Same abort guard as compactConversation(): skip SessionStart hooks
     // when the compaction was cancelled mid-flight.
     if (context.abortController.signal.aborted) {
-      throw new APIUserAbortError()
+      throw new APIUserAbortError({ message: ERROR_MESSAGE_USER_ABORT })
     }
     context.onCompactProgress?.({
       type: 'hooks_start',
@@ -1156,6 +1156,15 @@ export async function partialCompactConversation(
       direction === 'up_to'
         ? (summaryMessages.at(-1)?.uuid ?? boundaryMarker.uuid)
         : boundaryMarker.uuid
+
+    // Accepted path only — see compactConversation() for why the clears
+    // happen here rather than before attachment generation.
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError({ message: ERROR_MESSAGE_USER_ABORT })
+    }
+    context.readFileState.clear()
+    context.loadedNestedMemoryPaths?.clear()
+
     return {
       boundaryMarker: annotateBoundaryWithPreservedSegment(
         boundaryMarker,
