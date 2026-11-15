@@ -180,6 +180,24 @@ describe('logOTelEvent', () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1)
 	})
 
+	test('an unfinished response body is cancelled before cleanup', async () => {
+		enableOtlp()
+		let cancelled = false
+		const body = new ReadableStream({
+			start() {},
+			cancel() {
+				cancelled = true
+			},
+		})
+		const fetchMock = mock(async () => new Response(body, { status: 200 }))
+		globalThis.fetch = fetchMock as unknown as typeof fetch
+		await withMockMacro({ VERSION: '1.2.3' }, async () => {
+			await logOTelEvent('user_prompt', { prompt: 'hi' })
+			await expect(flushOTelEvents()).resolves.toBeUndefined()
+		})
+		expect(cancelled).toBe(true)
+	})
+
 	test('a rejected fetch drops the batch without throwing', async () => {
 		enableOtlp()
 		const fetchMock = mock(async () => {

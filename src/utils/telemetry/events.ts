@@ -320,6 +320,7 @@ export async function flushOTelEvents(): Promise<void> {
 		if (!response.ok) {
 			logForDebugging(`OTel logs export failed: HTTP ${response.status}`)
 		}
+		await response.body?.cancel().catch(() => {})
 	} catch (error) {
 		logForDebugging(
 			`Failed to export OTel logs: ${error instanceof Error ? error.message : String(error)}`,
