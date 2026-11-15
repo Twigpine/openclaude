@@ -1078,4 +1078,34 @@ describe('watchdog env tuning', () => {
     }
     expect(operation).toHaveBeenCalledTimes(maxAttempts + 11)
   })
+
+  test('recheck budget compares against a fixed advertised window', async () => {
+    process.env.CLAUDE_CODE_UNATTENDED_RETRY = '1'
+    process.env.CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS = '60000'
+    const m = await importFreshWithRetryModule('firstParty')
+    if (!m.isPersistentRetryEnabled()) return
+
+    const maxAttempts = m._PERSISTENT_MAX_ATTEMPTS_FOR_TEST
+    const resetSec = Math.floor(Date.now() / 1000) + 5 * 3600
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      // Burn the budget down to one attempt with headerless 429s, then
+      // switch to a fixed-window reset. Comparing accumulated polls
+      // against the shrinking per-response delay would charge the final
+      // attempt near the window midpoint (~150 polls); the fixed window
+      // keeps polling until the advertised reset.
+      if (calls <= maxAttempts - 1) throw makeError({})
+      if (calls <= maxAttempts - 1 + 160) throw makeResetError(resetSec)
+      return { ok: true }
+    })
+    for await (const _ of m.withRetry(
+      async () => ({} as never),
+      operation,
+      RETRY_OPTS,
+    )) {
+      void _
+    }
+    expect(operation).toHaveBeenCalledTimes(maxAttempts + 160)
+  })
 })

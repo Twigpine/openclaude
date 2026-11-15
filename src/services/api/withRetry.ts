@@ -267,6 +267,7 @@ export async function* withRetry<T>(
   let lastError: unknown
   let persistentAttempt = 0
   let recheckWaitedMs = 0
+  let recheckWindowMs = 0
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (options.signal?.aborted) {
       throw new APIUserAbortError()
@@ -611,18 +612,22 @@ export async function* withRetry<T>(
         const recheckMs = readWatchdogRecheckMs()
         if (resetDelay !== null && recheckMs !== null && recheckMs < resetDelay) {
           // Early rechecks are polling, not real retries. Charge one
-          // persistent attempt only once the accumulated polls span the
-          // advertised window, so a far-out reset cannot burn the retry
-          // budget before it arrives.
+          // persistent attempt once the accumulated polls span the
+          // advertised window. The window is fixed at first sighting:
+          // resetDelay shrinks with each response, so comparing against it
+          // would charge the attempt at the window's midpoint.
+          if (recheckWindowMs === 0) recheckWindowMs = resetDelay
           recheckWaitedMs += recheckMs
-          if (recheckWaitedMs >= resetDelay) {
+          if (recheckWaitedMs >= recheckWindowMs) {
             persistentAttempt++
             recheckWaitedMs = 0
+            recheckWindowMs = 0
           }
           delayMs = recheckMs
         } else {
           persistentAttempt++
           recheckWaitedMs = 0
+          recheckWindowMs = 0
           delayMs =
             resetDelay ??
             Math.min(
@@ -637,6 +642,7 @@ export async function* withRetry<T>(
       } else if (persistent) {
         persistentAttempt++
         recheckWaitedMs = 0
+        recheckWindowMs = 0
         // Retry-After is a server directive and bypasses maxDelayMs inside
         // getRetryDelay (intentional — honoring it is correct). Cap at the
         // 6hr reset-cap here so a pathological header can't wait unbounded.

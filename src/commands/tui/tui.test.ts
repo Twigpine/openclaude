@@ -56,6 +56,7 @@ describe('/tui', () => {
   })
 
   test('tmux -CC reports the effective inline mode', async () => {
+    clearModeEnv()
     process.env.TMUX = '/tmp/tmux-test'
     process.env.TERM_PROGRAM = 'iTerm.app'
     process.env.TERM = 'xterm-256color'

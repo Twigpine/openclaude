@@ -636,6 +636,12 @@ export async function compactConversation(
       postCompactFileAttachments.push(createAttachmentMessage(att))
     }
 
+    // A turn that started while attachments were generating aborts the
+    // compaction controller; the result will be discarded, so skip the
+    // SessionStart hooks rather than running user hooks for nothing.
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError()
+    }
     context.onCompactProgress?.({
       type: 'hooks_start',
       hookType: 'session_start',
@@ -980,8 +986,10 @@ export async function partialCompactConversation(
 
     // Store the current file state before clearing
     const preCompactReadFileState = cacheToObject(context.readFileState)
-    context.readFileState.clear()
-    context.loadedNestedMemoryPaths?.clear()
+    if (!context.abortController.signal.aborted) {
+      context.readFileState.clear()
+      context.loadedNestedMemoryPaths?.clear()
+    }
     // Intentionally NOT resetting sentSkillNames — see compactConversation()
     // for rationale (~4K tokens saved per compact event).
 
@@ -1037,6 +1045,11 @@ export async function partialCompactConversation(
       postCompactFileAttachments.push(createAttachmentMessage(att))
     }
 
+    // Same abort guard as compactConversation(): skip SessionStart hooks
+    // when the compaction was cancelled mid-flight.
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError()
+    }
     context.onCompactProgress?.({
       type: 'hooks_start',
       hookType: 'session_start',
