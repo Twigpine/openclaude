@@ -50,7 +50,10 @@ import {
 } from '../../utils/contextAnalysis.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { hasExactErrorMessage } from '../../utils/errors.js'
-import { cacheToObject } from '../../utils/fileStateCache.js'
+import {
+  cacheToObject,
+  createFileStateCacheWithSizeLimit,
+} from '../../utils/fileStateCache.js'
 import {
   type CacheSafeParams,
   runForkedAgent,
@@ -1610,6 +1613,15 @@ export async function createPostCompactFileAttachments(
           fileReadingLimits: {
             maxTokens: POST_COMPACT_MAX_TOKENS_PER_FILE,
           },
+          // The restore read must not hit the readFileState dedup stub:
+          // the earlier read was compacted away, so a file_unchanged
+          // result would point at content the model no longer has. A
+          // fresh cache also keeps the restore read from mutating the
+          // live store.
+          readFileState: createFileStateCacheWithSizeLimit(
+            toolUseContext.readFileState.max,
+            toolUseContext.readFileState.maxSize,
+          ),
         },
         'tengu_post_compact_file_restore_success',
         'tengu_post_compact_file_restore_error',
