@@ -24,7 +24,7 @@ import {
   getAPIProvider,
   getAPIProviderForStatsig,
 } from 'src/utils/model/providers.js'
-import { logOTelEvent } from 'src/utils/telemetry/events.js'
+import { isTelemetryEnabled, logOTelEvent } from 'src/utils/telemetry/events.js'
 import type { PermissionMode } from 'src/utils/permissions/PermissionMode.js'
 import { hasPrintFlag } from 'src/utils/printFlag.js'
 import { redactSensitiveInfo, redactUrlForDisplay } from 'src/utils/redaction.js'
@@ -364,7 +364,7 @@ export function logAPIError({
     ...getAnthropicEnvMetadata(),
   })
 
-  void logOTelEvent('api_error', {
+  if (isTelemetryEnabled()) void logOTelEvent('api_error', {
     'gen_ai.provider.name': getAPIProvider(),
     'gen_ai.request.model': model,
     'gen_ai.response.id': requestId ?? undefined,
@@ -570,7 +570,7 @@ function logAPISuccess({
     timeSinceLastApiCallMs,
   })
 
-  void logOTelEvent('api_request', {
+  if (isTelemetryEnabled()) void logOTelEvent('api_request', {
     'gen_ai.provider.name': getAPIProvider(),
     'gen_ai.request.model': model,
     'gen_ai.response.id': requestId ?? undefined,

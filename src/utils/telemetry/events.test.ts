@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import { withMockMacro } from '../../test/mockMacro.js'
+import {
+	acquireSharedMutationLock,
+	releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
 import {
 	flushOTelEvents,
 	isTelemetryEnabled,
@@ -16,30 +21,29 @@ const OTEL_ENV_VARS = [
 	'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
 	'OTEL_EXPORTER_OTLP_HEADERS',
 	'OTEL_EXPORTER_OTLP_LOGS_HEADERS',
+	'OTEL_EXPORTER_OTLP_TIMEOUT',
 	'OTEL_LOGS_EXPORT_INTERVAL',
 	'OTEL_RESOURCE_ATTRIBUTES',
 	'OTEL_LOG_USER_PROMPTS',
 ] as const
 
-let envSnapshot: Record<string, string | undefined>
+let restoreEnv: () => void
 const originalFetch = globalThis.fetch
 
-beforeEach(() => {
-	envSnapshot = {}
-	for (const key of OTEL_ENV_VARS) {
-		envSnapshot[key] = process.env[key]
-		delete process.env[key]
-	}
+beforeEach(async () => {
+	await acquireSharedMutationLock('utils/telemetry/events.test.ts')
+	restoreEnv = snapshotEnv(OTEL_ENV_VARS, { clear: true })
 	resetOTelEventsForTesting()
 })
 
 afterEach(() => {
-	for (const key of OTEL_ENV_VARS) {
-		if (envSnapshot[key] === undefined) delete process.env[key]
-		else process.env[key] = envSnapshot[key]
+	try {
+		restoreEnv()
+		globalThis.fetch = originalFetch
+		resetOTelEventsForTesting()
+	} finally {
+		releaseSharedMutationLock()
 	}
-	globalThis.fetch = originalFetch
-	resetOTelEventsForTesting()
 })
 
 function enableOtlp(endpoint = 'http://collector.test:4318'): void {
@@ -161,6 +165,47 @@ describe('logOTelEvent', () => {
 		expect(url).toBe('http://logs-only.test/v1/logs')
 		expect(headers.Authorization).toBe('Bearer t')
 		expect(headers['X-A']).toBe('1')
+	})
+
+	test('a non-2xx collector response drops the batch without throwing', async () => {
+		enableOtlp()
+		const fetchMock = mock(
+			async () => new Response('nope', { status: 500 }),
+		)
+		globalThis.fetch = fetchMock as unknown as typeof fetch
+		await withMockMacro({ VERSION: '1.2.3' }, async () => {
+			await logOTelEvent('user_prompt', { prompt: 'hi' })
+			await expect(flushOTelEvents()).resolves.toBeUndefined()
+		})
+		expect(fetchMock).toHaveBeenCalledTimes(1)
+	})
+
+	test('a rejected fetch drops the batch without throwing', async () => {
+		enableOtlp()
+		const fetchMock = mock(async () => {
+			throw new Error('connection refused')
+		})
+		globalThis.fetch = fetchMock as unknown as typeof fetch
+		await withMockMacro({ VERSION: '1.2.3' }, async () => {
+			await logOTelEvent('user_prompt', { prompt: 'hi' })
+			await expect(flushOTelEvents()).resolves.toBeUndefined()
+		})
+	})
+
+	test('the buffer caps at 1000 records', async () => {
+		enableOtlp()
+		const fetchMock = mock(async () => new Response('{}'))
+		globalThis.fetch = fetchMock as unknown as typeof fetch
+		await withMockMacro({ VERSION: '1.2.3' }, async () => {
+			for (let i = 0; i < 1005; i++) {
+				await logOTelEvent('user_prompt', { n: i })
+			}
+			await flushOTelEvents()
+		})
+		const { body } = capturedPayload(fetchMock)
+		expect(
+			body.resourceLogs[0]!.scopeLogs[0]!.logRecords,
+		).toHaveLength(1000)
 	})
 
 	test('console exporter writes a JSON line and skips fetch', async () => {

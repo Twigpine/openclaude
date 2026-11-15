@@ -7,61 +7,48 @@
 
 import type { PermissionDecision, PermissionDecisionReason } from '../../types/permissions.js'
 import type { ToolUseContext } from '../../Tool.js'
-import { getParentSessionId } from '../../bootstrap/state.js'
-import { isToolDetailsLoggingEnabled } from '../../services/analytics/metadata.js'
-import { logOTelEvent, type OTelEventMetadata } from './events.js'
+import { getAgentContext } from '../agentContext.js'
+import {
+	isToolDetailsLoggingEnabled,
+	sanitizeToolNameForAnalytics,
+} from '../../services/analytics/metadata.js'
+import { isTelemetryEnabled, logOTelEvent, type OTelEventMetadata } from './events.js'
 
-/** Map a permission decision's reason to the mechanism that produced it. */
-export function safetyMechanism(
-	decisionReason: PermissionDecisionReason | undefined,
-): string {
-	switch (decisionReason?.type) {
-		case 'rule':
-			return 'permission_rule'
-		case 'mode':
-			return 'permission_mode'
-		case 'subcommandResults':
-			return 'subcommand_results'
-		case 'permissionPromptTool':
-			return 'permission_prompt_tool'
-		case 'hook':
-			return 'hook'
-		case 'asyncAgent':
-			return 'async_agent'
-		case 'sandboxOverride':
-			return 'sandbox'
-		case 'classifier':
-			return 'classifier'
-		case 'workingDir':
-			return 'working_dir'
-		case 'safetyCheck':
-			return 'safety_check'
-		case 'other':
-			return 'other'
-		default:
-			return 'unknown'
-	}
+function detailsOnly(value: string | undefined): string | undefined {
+	return isToolDetailsLoggingEnabled() ? value : undefined
 }
 
-function safetyReasonDetail(
+function safetyDecisionFields(
 	decisionReason: PermissionDecisionReason | undefined,
-): string | undefined {
+): { source: string; reason?: string } {
 	switch (decisionReason?.type) {
 		case 'rule':
-			return `${decisionReason.rule.source}:${decisionReason.rule.ruleValue.toolName}`
+			return {
+				source: 'permission_rule',
+				reason: `${decisionReason.rule.source}:${decisionReason.rule.ruleValue.toolName}`,
+			}
 		case 'mode':
-			return decisionReason.mode
+			return { source: 'permission_mode', reason: decisionReason.mode }
+		case 'subcommandResults':
+			return { source: 'subcommand_results' }
+		case 'permissionPromptTool':
+			return { source: 'permission_prompt_tool' }
 		case 'hook':
-			return decisionReason.hookName
-		case 'sandboxOverride':
-		case 'workingDir':
-		case 'safetyCheck':
-		case 'other':
+			return { source: 'hook', reason: decisionReason.hookName }
 		case 'asyncAgent':
+			return { source: 'async_agent', reason: detailsOnly(decisionReason.reason) }
+		case 'sandboxOverride':
+			return { source: 'sandbox', reason: detailsOnly(decisionReason.reason) }
 		case 'classifier':
-			return decisionReason.reason
+			return { source: 'classifier', reason: detailsOnly(decisionReason.reason) }
+		case 'workingDir':
+			return { source: 'working_dir', reason: detailsOnly(decisionReason.reason) }
+		case 'safetyCheck':
+			return { source: 'safety_check', reason: detailsOnly(decisionReason.reason) }
+		case 'other':
+			return { source: 'other', reason: detailsOnly(decisionReason.reason) }
 		default:
-			return undefined
+			return { source: 'unknown' }
 	}
 }
 
@@ -71,17 +58,17 @@ function agentAttributes(
 	if (!toolUseContext.agentId) return {}
 	return {
 		agent_id: toolUseContext.agentId,
-		parent_agent_id: getParentSessionId(),
+		parent_agent_id:
+			toolUseContext.parentAgentId ?? getAgentContext()?.parentSessionId,
 	}
 }
 
 function telemetryToolName(toolName: string): string {
 	// MCP tool names encode user-configured server names, so they stay
 	// sanitized unless detailed tool logging is explicitly enabled.
-	if (!isToolDetailsLoggingEnabled() && toolName.startsWith('mcp__')) {
-		return 'mcp_tool'
-	}
-	return toolName
+	return isToolDetailsLoggingEnabled()
+		? toolName
+		: sanitizeToolNameForAnalytics(toolName)
 }
 
 export function buildSafetyEventAttributes(args: {
@@ -91,11 +78,12 @@ export function buildSafetyEventAttributes(args: {
 	durationMs: number
 }): OTelEventMetadata {
 	const decisionReason = args.decision.decisionReason
+	const { source, reason } = safetyDecisionFields(decisionReason)
 	return {
 		tool_name: telemetryToolName(args.toolName),
 		decision: args.decision.behavior,
-		source: safetyMechanism(decisionReason),
-		reason: safetyReasonDetail(decisionReason),
+		source,
+		reason,
 		...(decisionReason?.type === 'classifier' && {
 			classifier: decisionReason.classifier,
 		}),
@@ -118,6 +106,7 @@ export function buildToolResultAttributes(args: {
 	mcpServerScope?: string
 }): OTelEventMetadata {
 	const decisionInfo = args.toolUseContext.toolDecisions?.get(args.toolUseID)
+	const details = isToolDetailsLoggingEnabled()
 	const attributes: OTelEventMetadata = {
 		tool_name: telemetryToolName(args.toolName),
 		success: args.success,
@@ -130,14 +119,20 @@ export function buildToolResultAttributes(args: {
 		...(args.isInterrupt !== undefined && {
 			is_interrupt: args.isInterrupt,
 		}),
-		...(args.mcpServerType && { mcp_server_type: args.mcpServerType }),
-		...(args.mcpServerBaseUrl && {
-			mcp_server_base_url: args.mcpServerBaseUrl,
-		}),
-		...(args.mcpServerScope && { mcp_server_scope: args.mcpServerScope }),
+		// MCP server identity stays hidden when the tool name is sanitized:
+		// the base URL reveals internal hostnames, which is more identifying
+		// than the collapsed 'mcp_tool' name.
+		...(details &&
+			args.mcpServerType && { mcp_server_type: args.mcpServerType }),
+		...(details &&
+			args.mcpServerBaseUrl && {
+				mcp_server_base_url: args.mcpServerBaseUrl,
+			}),
+		...(details &&
+			args.mcpServerScope && { mcp_server_scope: args.mcpServerScope }),
 		...agentAttributes(args.toolUseContext),
 	}
-	if (isToolDetailsLoggingEnabled() && args.toolParameters) {
+	if (details && args.toolParameters) {
 		for (const [key, value] of Object.entries(args.toolParameters)) {
 			if (
 				typeof value === 'string' ||
@@ -151,19 +146,19 @@ export function buildToolResultAttributes(args: {
 	return attributes
 }
 
-/** Emit `claude_code.safety_event` for a non-allow permission decision. */
 export async function logToolSafetyEvent(args: {
 	toolName: string
 	decision: PermissionDecision
 	toolUseContext: ToolUseContext
 	durationMs: number
 }): Promise<void> {
+	if (!isTelemetryEnabled()) return
 	await logOTelEvent('safety_event', buildSafetyEventAttributes(args))
 }
 
-/** Emit `claude_code.tool_result` for a completed tool execution. */
 export async function logToolResultEvent(
 	args: Parameters<typeof buildToolResultAttributes>[0],
 ): Promise<void> {
+	if (!isTelemetryEnabled()) return
 	await logOTelEvent('tool_result', buildToolResultAttributes(args))
 }

@@ -1,30 +1,50 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
+import { snapshotEnv } from '../../test/envSnapshot.js'
+import {
+	acquireSharedMutationLock,
+	releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
 import type { PermissionDecisionReason } from '../../types/permissions.js'
 import type { ToolUseContext } from '../../Tool.js'
 import {
 	buildSafetyEventAttributes,
 	buildToolResultAttributes,
-	safetyMechanism,
 } from './toolEvents.js'
 
-let savedToolDetails: string | undefined
+let restoreEnv: () => void
 
-beforeEach(() => {
-	savedToolDetails = process.env.OTEL_LOG_TOOL_DETAILS
-	delete process.env.OTEL_LOG_TOOL_DETAILS
+beforeEach(async () => {
+	await acquireSharedMutationLock('utils/telemetry/toolEvents.test.ts')
+	restoreEnv = snapshotEnv(['OTEL_LOG_TOOL_DETAILS'], { clear: true })
 })
 
 afterEach(() => {
-	if (savedToolDetails === undefined) delete process.env.OTEL_LOG_TOOL_DETAILS
-	else process.env.OTEL_LOG_TOOL_DETAILS = savedToolDetails
+	try {
+		restoreEnv()
+	} finally {
+		releaseSharedMutationLock()
+	}
 })
 
 function ctx(overrides: Partial<ToolUseContext> = {}): ToolUseContext {
 	return overrides as ToolUseContext
 }
 
-describe('safetyMechanism', () => {
+function safetySource(reason: PermissionDecisionReason | undefined): unknown {
+	return buildSafetyEventAttributes({
+		toolName: 'Bash',
+		decision: {
+			behavior: 'ask',
+			message: 'x',
+			...(reason !== undefined && { decisionReason: reason }),
+		},
+		toolUseContext: ctx(),
+		durationMs: 1,
+	}).source
+}
+
+describe('safety decision mapping', () => {
 	test.each([
 		[{ type: 'rule', rule: { source: 'userSettings', ruleBehavior: 'deny', ruleValue: { toolName: 'Bash' } } }, 'permission_rule'],
 		[{ type: 'mode', mode: 'default' }, 'permission_mode'],
@@ -39,9 +59,9 @@ describe('safetyMechanism', () => {
 		[{ type: 'other', reason: 'r' }, 'other'],
 		[undefined, 'unknown'],
 	])('maps %j to %s', (reason, expected) => {
-		expect(
-			safetyMechanism(reason as PermissionDecisionReason | undefined),
-		).toBe(expected)
+		expect(safetySource(reason as PermissionDecisionReason | undefined)).toBe(
+			expected,
+		)
 	})
 })
 
@@ -71,7 +91,6 @@ describe('buildSafetyEventAttributes', () => {
 			reason: 'userSettings:Bash',
 			duration_ms: 12,
 		})
-		// ruleContent can contain paths/commands; it must not leak
 		expect(JSON.stringify(attrs)).not.toContain('rm *')
 	})
 
@@ -91,6 +110,31 @@ describe('buildSafetyEventAttributes', () => {
 			source: 'hook',
 			reason: 'PreToolUse',
 		})
+	})
+
+	test('free-text reasons stay hidden unless details logging is on', () => {
+		const decisionReason = {
+			type: 'safetyCheck',
+			reason: 'sensitive file /home/u/.ssh/config',
+			classifierApprovable: true,
+		} as const
+		const base = {
+			toolName: 'Read',
+			decision: {
+				behavior: 'ask',
+				message: 'x',
+				decisionReason,
+			} as const,
+			toolUseContext: ctx(),
+			durationMs: 1,
+		}
+		const off = buildSafetyEventAttributes(base)
+		expect(off.source).toBe('safety_check')
+		expect(off.reason).toBeUndefined()
+		process.env.OTEL_LOG_TOOL_DETAILS = '1'
+		expect(buildSafetyEventAttributes(base).reason).toBe(
+			'sensitive file /home/u/.ssh/config',
+		)
 	})
 
 	test('sanitizes MCP tool names unless details logging is on', () => {
@@ -117,17 +161,19 @@ describe('buildSafetyEventAttributes', () => {
 })
 
 describe('buildToolResultAttributes', () => {
-	test('subagent tool results carry agent_id; main-session results carry neither id', () => {
+	test('subagent tool results carry agent_id and the spawning parent id', () => {
 		const subagent = buildToolResultAttributes({
 			toolName: 'Read',
-			toolUseContext: ctx({ agentId: 'agent-7' as ToolUseContext['agentId'] }),
+			toolUseContext: ctx({
+				agentId: 'agent-7' as ToolUseContext['agentId'],
+				parentAgentId: 'agent-3',
+			}),
 			toolUseID: 'tu_1',
 			success: true,
 			durationMs: 5,
 		})
 		expect(subagent.agent_id).toBe('agent-7')
-		// No parent session is registered in this test context
-		expect(subagent.parent_agent_id).toBeUndefined()
+		expect(subagent.parent_agent_id).toBe('agent-3')
 
 		const main = buildToolResultAttributes({
 			toolName: 'Read',
@@ -172,6 +218,28 @@ describe('buildToolResultAttributes', () => {
 			is_interrupt: false,
 			duration_ms: 40,
 		})
+	})
+
+	test('MCP server attributes only attach when details logging is on', () => {
+		const base = {
+			toolName: 'mcp__srv__tool',
+			toolUseContext: ctx(),
+			toolUseID: 'tu_8',
+			success: true,
+			durationMs: 1,
+			mcpServerType: 'stdio',
+			mcpServerBaseUrl: 'https://internal.host:8443/mcp',
+			mcpServerScope: 'project',
+		}
+		const off = buildToolResultAttributes(base)
+		expect(off.mcp_server_type).toBeUndefined()
+		expect(off.mcp_server_base_url).toBeUndefined()
+		expect(off.mcp_server_scope).toBeUndefined()
+		process.env.OTEL_LOG_TOOL_DETAILS = '1'
+		const on = buildToolResultAttributes(base)
+		expect(on.mcp_server_type).toBe('stdio')
+		expect(on.mcp_server_base_url).toBe('https://internal.host:8443/mcp')
+		expect(on.mcp_server_scope).toBe('project')
 	})
 
 	test('tool parameters only attach when details logging is on', () => {

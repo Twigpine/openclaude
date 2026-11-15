@@ -11,7 +11,6 @@ import {
 import {
   extractMcpToolDetails,
   extractSkillName,
-  extractToolInputForTelemetry,
   getFileExtensionForAnalytics,
   getFileExtensionsFromBashCommand,
   isToolDetailsLoggingEnabled,
@@ -1344,7 +1343,6 @@ export async function checkPermissionsAndCallTool(
   // Prepare tool parameters for logging in tool_result event.
   // Gated by OTEL_LOG_TOOL_DETAILS — tool parameters can contain sensitive
   // content (bash commands, MCP server names, etc.) so they're opt-in only.
-  extractToolInputForTelemetry(processedInput)
   let toolParameters: Record<string, unknown> = {}
   if (isToolDetailsLoggingEnabled()) {
     if (tool.name === BASH_TOOL_NAME && 'command' in processedInput) {
@@ -1540,22 +1538,17 @@ export async function checkPermissionsAndCallTool(
       }
     }
 
-    // Log tool result event for OTLP with tool parameters and decision context
     void logToolResultEvent({
       toolName: tool.name,
       toolUseContext,
       toolUseID,
       success: true,
-      durationMs: Date.now() - startTime,
+      durationMs,
       toolParameters,
       mcpServerType,
       mcpServerBaseUrl,
-      ...(isMcpTool(tool)
-        ? {
-            mcpServerScope:
-              getMcpServerScopeFromToolName(tool.name) ?? undefined,
-          }
-        : {}),
+      mcpServerScope:
+        getMcpServerScopeFromToolName(tool.name) ?? undefined,
     })
 
 
@@ -1861,22 +1854,22 @@ export async function checkPermissionsAndCallTool(
     // Determine if this was a user interrupt
     const isInterrupt = error instanceof AbortError
 
-    // Log tool result error event for OTLP with tool parameters and decision context
     void logToolResultEvent({
       toolName: tool.name,
       toolUseContext,
       toolUseID,
       success: false,
-      durationMs: Date.now() - startTime,
-      error: content,
+      durationMs,
+      // Raw error text carries command output (stderr/stdout up to the
+      // formatError cap), so it only ships with OTEL_LOG_TOOL_DETAILS;
+      // otherwise emit the classified category like the analytics event.
+      error: isToolDetailsLoggingEnabled() ? content : classifyToolError(error),
       toolParameters,
       isInterrupt,
-      ...(isMcpTool(tool)
-        ? {
-            mcpServerScope:
-              getMcpServerScopeFromToolName(tool.name) ?? undefined,
-          }
-        : {}),
+      mcpServerType,
+      mcpServerBaseUrl,
+      mcpServerScope:
+        getMcpServerScopeFromToolName(tool.name) ?? undefined,
     })
 
     // Run PostToolUseFailure hooks

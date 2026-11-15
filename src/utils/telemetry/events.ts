@@ -14,15 +14,17 @@
  *   OTEL_EXPORTER_OTLP_LOGS_ENDPOINT  full logs endpoint (takes precedence)
  *   OTEL_EXPORTER_OTLP_HEADERS        'k=v,k2=v2' headers
  *   OTEL_EXPORTER_OTLP_LOGS_HEADERS   logs-specific headers (precedence)
- *   OTEL_EXPORTER_OTLP_LOGS_PROTOCOL  'http/json' (default) only for now
+ *   OTEL_EXPORTER_OTLP_TIMEOUT        export request timeout ms (default 10000)
  *   OTEL_LOGS_EXPORT_INTERVAL         batch flush interval ms (default 5000)
  *   OTEL_RESOURCE_ATTRIBUTES          'k=v,k2=v2' resource attributes
  *   OTEL_LOG_USER_PROMPTS             include prompt text in user_prompt events
  */
 
 import { getSessionId } from '../../bootstrap/state.js'
+import { registerCleanup } from '../cleanupRegistry.js'
 import { logForDebugging } from '../debug.js'
 import { isEnvTruthy } from '../envUtils.js'
+import { getProxyFetchOptions } from '../proxy.js'
 
 export type OTelEventMetadata = {
 	[key: string]: string | number | boolean | undefined
@@ -45,6 +47,7 @@ type OTelLogRecord = {
 }
 
 const DEFAULT_FLUSH_INTERVAL_MS = 5000
+const DEFAULT_EXPORT_TIMEOUT_MS = 10000
 const MAX_BUFFERED_RECORDS = 1000
 const EVENT_NAME_PREFIX = 'claude_code.'
 // severityNumber 9 = INFO per the OTel logs data model
@@ -63,7 +66,7 @@ function logsExporterKind(): LogsExporterKind {
 	return 'otlp'
 }
 
-export function otelLogsEndpoint(): string | undefined {
+function otelLogsEndpoint(): string | undefined {
 	const logsEndpoint = process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT?.trim()
 	if (logsEndpoint) return logsEndpoint
 	const base = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim().replace(/\/+$/, '')
@@ -71,16 +74,31 @@ export function otelLogsEndpoint(): string | undefined {
 	return `${base}/v1/logs`
 }
 
-export function isTelemetryEnabled(): boolean {
-	if (!isEnvTruthy(process.env.CLAUDE_CODE_ENABLE_TELEMETRY)) return false
-	switch (logsExporterKind()) {
-		case 'console':
-			return true
-		case 'none':
-			return false
-		default:
-			return otelLogsEndpoint() !== undefined
+type ResolvedConfig = {
+	enabled: boolean
+	kind: LogsExporterKind
+	endpoint: string | undefined
+}
+
+let resolvedConfig: ResolvedConfig | undefined
+
+function otelConfig(): ResolvedConfig {
+	if (resolvedConfig) return resolvedConfig
+	const kind = logsExporterKind()
+	const endpoint = kind === 'otlp' ? otelLogsEndpoint() : undefined
+	resolvedConfig = {
+		kind,
+		endpoint,
+		enabled:
+			isEnvTruthy(process.env.CLAUDE_CODE_ENABLE_TELEMETRY) &&
+			kind !== 'none' &&
+			(kind === 'console' || endpoint !== undefined),
 	}
+	return resolvedConfig
+}
+
+export function isTelemetryEnabled(): boolean {
+	return otelConfig().enabled
 }
 
 function logsFlushIntervalMs(): number {
@@ -88,6 +106,13 @@ function logsFlushIntervalMs(): number {
 	return Number.isFinite(parsed) && parsed > 0
 		? parsed
 		: DEFAULT_FLUSH_INTERVAL_MS
+}
+
+function otelExportTimeoutMs(): number {
+	const parsed = Number(process.env.OTEL_EXPORTER_OTLP_TIMEOUT)
+	return Number.isFinite(parsed) && parsed > 0
+		? parsed
+		: DEFAULT_EXPORT_TIMEOUT_MS
 }
 
 function parseKeyValueList(raw: string | undefined): Record<string, string> {
@@ -143,13 +168,20 @@ function toAttributes(metadata: OTelEventMetadata): OTelAttribute[] {
 	return attributes
 }
 
+let staticEventAttributes: OTelEventMetadata | undefined
+
 function commonEventAttributes(): OTelEventMetadata {
+	if (!staticEventAttributes) {
+		staticEventAttributes = {
+			'app.version': MACRO.VERSION,
+			'os.type': process.platform,
+			'host.arch': process.arch,
+			'terminal.type': process.env.TERM_PROGRAM,
+		}
+	}
 	return {
 		'session.id': getSessionId(),
-		'app.version': MACRO.VERSION,
-		'os.type': process.platform,
-		'host.arch': process.arch,
-		'terminal.type': process.env.TERM_PROGRAM,
+		...staticEventAttributes,
 	}
 }
 
@@ -181,10 +213,11 @@ export async function logOTelEvent(
 	eventName: string,
 	metadata: OTelEventMetadata = {},
 ): Promise<void> {
-	if (!isTelemetryEnabled()) return
+	const config = otelConfig()
+	if (!config.enabled) return
 	const record = buildRecord(eventName, metadata)
 
-	if (logsExporterKind() === 'console') {
+	if (config.kind === 'console') {
 		// biome-ignore lint/suspicious/noConsole:: console exporter is an explicit user opt-in
 		console.log(jsonLine(record))
 		return
@@ -195,7 +228,7 @@ export async function logOTelEvent(
 		return
 	}
 	pendingRecords.push(record)
-	installBeforeExitHook()
+	installFlushHooks()
 	scheduleFlush()
 }
 
@@ -215,12 +248,20 @@ function jsonLine(record: OTelLogRecord): string {
 	})
 }
 
-function installBeforeExitHook(): void {
+let beforeExitFlush: (() => void) | undefined
+let unregisterShutdownFlush: (() => void) | undefined
+
+function installFlushHooks(): void {
 	if (beforeExitHookInstalled) return
 	beforeExitHookInstalled = true
-	process.once('beforeExit', () => {
+	beforeExitFlush = () => {
 		void flushOTelEvents()
-	})
+	}
+	process.once('beforeExit', beforeExitFlush)
+	// beforeExit never fires on process.exit(), which every production exit
+	// path takes (gracefulShutdown -> forceExit). The cleanup registry runs
+	// inside gracefulShutdown under its budget, so it reaches the real exits.
+	unregisterShutdownFlush = registerCleanup(() => flushOTelEvents())
 }
 
 function scheduleFlush(): void {
@@ -232,7 +273,7 @@ function scheduleFlush(): void {
 	flushTimer.unref?.()
 }
 
-export function buildOTelLogsPayload(records: OTelLogRecord[]): {
+function buildOTelLogsPayload(records: OTelLogRecord[]): {
 	resourceLogs: unknown[]
 } {
 	return {
@@ -255,16 +296,26 @@ export async function flushOTelEvents(): Promise<void> {
 		clearTimeout(flushTimer)
 		flushTimer = undefined
 	}
+	const endpoint = otelConfig().endpoint
 	const records = pendingRecords.splice(0, pendingRecords.length)
 	if (records.length === 0) return
-	const endpoint = otelLogsEndpoint()
-	if (!endpoint) return
+	if (!endpoint) {
+		logForDebugging(
+			`Dropping ${records.length} OTel log records: no OTLP endpoint configured`,
+		)
+		return
+	}
 	try {
-		await fetch(endpoint, {
+		const response = await fetch(endpoint, {
 			method: 'POST',
 			headers: otelHeaders(),
 			body: JSON.stringify(buildOTelLogsPayload(records)),
+			signal: AbortSignal.timeout(otelExportTimeoutMs()),
+			...getProxyFetchOptions(),
 		})
+		if (!response.ok) {
+			logForDebugging(`OTel logs export failed: HTTP ${response.status}`)
+		}
 	} catch (error) {
 		logForDebugging(
 			`Failed to export OTel logs: ${error instanceof Error ? error.message : String(error)}`,
@@ -288,11 +339,20 @@ export function redactIfDisabled(content: string): string {
 	return '<REDACTED>'
 }
 
-/** Test-only: clear buffered records and timers between tests. */
 export function resetOTelEventsForTesting(): void {
 	pendingRecords.length = 0
 	droppedRecordCount = 0
 	beforeExitHookInstalled = false
+	resolvedConfig = undefined
+	staticEventAttributes = undefined
+	if (beforeExitFlush) {
+		process.off('beforeExit', beforeExitFlush)
+		beforeExitFlush = undefined
+	}
+	if (unregisterShutdownFlush) {
+		unregisterShutdownFlush()
+		unregisterShutdownFlush = undefined
+	}
 	if (flushTimer) {
 		clearTimeout(flushTimer)
 		flushTimer = undefined

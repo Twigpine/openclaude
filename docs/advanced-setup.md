@@ -828,13 +828,16 @@ Events are batched and POSTed to `<endpoint>/v1/logs`. Supported variables:
 - `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_LOGS_HEADERS`:
   `key=value,key2=value2` request headers (for collector auth).
 - `OTEL_LOGS_EXPORT_INTERVAL`: batch flush interval in ms (default 5000).
+- `OTEL_EXPORTER_OTLP_TIMEOUT`: export request timeout in ms (default 10000).
 - `OTEL_RESOURCE_ATTRIBUTES`: `key=value,key2=value2` resource attributes added
   to every batch.
 - `OTEL_LOG_USER_PROMPTS`: include prompt text in `user_prompt` events.
   Without it prompts are sent as `<REDACTED>`.
 - `OTEL_LOG_TOOL_DETAILS`: include tool parameters (bash commands, MCP server
-  and tool names) in `tool_result` events. Off by default; MCP tool names are
-  reported as `mcp_tool` otherwise.
+  and tool names, MCP server URLs), raw error output, and free-text safety
+  reasons in tool and safety events. Off by default; MCP tool names are
+  reported as `mcp_tool`, errors are sent as a classified category, and
+  safety reasons are limited to categorical values.
 
 Emitted events include `claude_code.user_prompt`, `claude_code.api_request`
 and `claude_code.api_error` (with `gen_ai.*` semantic-convention attributes),
