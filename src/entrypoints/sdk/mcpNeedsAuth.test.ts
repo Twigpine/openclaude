@@ -114,17 +114,32 @@ let heldInit: { arrived: boolean; answer: () => void; answered: Promise<void> } 
 // cannot tell whether the flow called it at all. Wrap it with flags and a
 // counter, passing every call through, so a test can hold initialization
 // while it changes the turn state, or fail it to see which error wins.
+//
+// The wrapper must stay transparent to callers that patch the memoized
+// init's cache: tests/sdk/query-concurrency.test.ts replaces `init.cache`
+// with a probe to observe the session id during init. A plain wrapper would
+// swallow that patch — the probe would never fire and the test would fail
+// whenever this mock is registered first (shard 8) — so `.cache` is
+// forwarded to the real memoized function instead of living on the wrapper.
+const mockedInit = (() => {
+  initCalls++
+  if (failInit) throw new Error('init failed for the test')
+  if (heldInit) {
+    heldInit.arrived = true
+    return heldInit.answered.then(() => realInit.init())
+  }
+  return realInit.init()
+}) as typeof realInit.init
+Object.defineProperty(mockedInit, 'cache', {
+  get: () => (realInit.init as unknown as { cache: unknown }).cache,
+  set: value => {
+    ;(realInit.init as unknown as { cache: unknown }).cache = value
+  },
+  configurable: true,
+})
 mock.module('../init.js', () => ({
   ...realInit,
-  init: () => {
-    initCalls++
-    if (failInit) throw new Error('init failed for the test')
-    if (heldInit) {
-      heldInit.arrived = true
-      return heldInit.answered.then(() => realInit.init())
-    }
-    return realInit.init()
-  },
+  init: mockedInit,
 }))
 
 const { connectSdkMcpServers } = await import('./permissions.js')
