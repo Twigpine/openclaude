@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -94,6 +95,25 @@ test('classifies JavaScript template literal syntax as an expected legacy parser
     failureKind: 'expected-limitation',
     reasonCode: 'bad-substitution',
   })
+})
+
+test('security analysis uses the AST path when the tree-sitter flag is enabled', async () => {
+  const analysis = await analyzeBashCommand('echo hello | grep hell')
+
+  if (feature('TREE_SITTER_BASH')) {
+    expect(analysis.astResult.kind).toBe('simple')
+    expect(analysis.legacyParse.kind).toBe('not-run')
+  } else {
+    expect(analysis.astResult).toEqual({ kind: 'parse-unavailable' })
+    expect(analysis.legacyParse.kind).toBe('ok')
+  }
+})
+
+test('the open build enables the tree-sitter flag', async () => {
+  const buildSource = await Bun.file(
+    `${import.meta.dir}/../../../scripts/build.ts`,
+  ).text()
+  expect(buildSource).toContain('TREE_SITTER_BASH: true')
 })
 
 test('keeps parser aborts fail-closed as too complex', () => {
