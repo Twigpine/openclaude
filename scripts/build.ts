@@ -133,6 +133,7 @@ const featureFlags: Record<string, boolean> = {
   HOOK_PROMPTS: true,                 // Allow tools to request interactive user prompts
   CONVERSATION_ARC: true,             // Conversation arc tracking (goals/decisions/phases)
   MULTI_TURN_CONTEXT: true,           // Multi-turn context tracking across tool cycles
+  UNATTENDED_RETRY: true,             // Usage-limit-aware persistent retry for unattended runs; opt-in via CLAUDE_CODE_UNATTENDED_RETRY or CLAUDE_CODE_RETRY_WATCHDOG at runtime
 }
 
 // ── Pre-process: replace feature() calls with boolean literals ──────

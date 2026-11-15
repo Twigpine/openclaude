@@ -298,6 +298,24 @@ export function Config({
       });
     }
   }, {
+    id: 'idleCompaction',
+    label: 'Idle compact',
+    value: globalConfig.idleCompaction,
+    type: 'boolean' as const,
+    onChange(idleCompaction: boolean) {
+      saveGlobalConfig(current => ({
+        ...current,
+        idleCompaction
+      }));
+      setGlobalConfig({
+        ...getGlobalConfig(),
+        idleCompaction
+      });
+      logEvent('tengu_idle_compact_setting_changed', {
+        enabled: idleCompaction
+      });
+    }
+  }, {
     id: 'maxMessagesCompactionThreshold',
     label: 'Message-count compaction',
     value: normalizeMaxMessagesCompactionThreshold(globalConfig.maxMessagesCompactionThreshold),
@@ -1319,6 +1337,9 @@ export function Config({
     }
     if (globalConfig.autoCompactEnabled !== initialConfig.current.autoCompactEnabled) {
       formattedChanges.push(`${globalConfig.autoCompactEnabled ? 'Enabled' : 'Disabled'} auto-compact`);
+    }
+    if (globalConfig.idleCompaction !== initialConfig.current.idleCompaction) {
+      formattedChanges.push(`${globalConfig.idleCompaction ? 'Enabled' : 'Disabled'} idle compact`);
     }
     if (globalConfig.maxMessagesCompactionThreshold !== initialConfig.current.maxMessagesCompactionThreshold) {
       const threshold = normalizeMaxMessagesCompactionThreshold(globalConfig.maxMessagesCompactionThreshold);

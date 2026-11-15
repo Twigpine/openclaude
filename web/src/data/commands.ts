@@ -141,6 +141,8 @@ export const commands: SlashCommand[] = [
   { name: 'vim', description: 'Toggle between Vim and Normal editing modes', category: 'customization' },
   { name: 'statusline', description: "Set up OpenClaude's status line UI", category: 'customization' },
   { name: 'terminal-setup', description: 'Install the Shift+Enter key binding for newlines', category: 'customization' },
+  { name: 'scroll-speed', description: 'Set mouse wheel scroll speed', category: 'customization', args: '<1-20>' },
+  { name: 'tui', description: 'Switch display mode (fullscreen or inline)', category: 'customization', args: '<fullscreen|inline>' },
   { name: 'commit-message', description: 'Configure commit attribution text', category: 'customization', args: '[status|off|default|set "text"|co-author <name> <email>]' },
   { name: 'buddy', description: 'Hatch, pet, and manage your OpenClaude companion', category: 'customization', args: '[status|mute|unmute|dance|images <on|off>|set <form>|name <name>|help]' },
   { name: 'ads', description: 'Earn opengateway credits from sponsored tips (ads.twigpine.com)', category: 'customization', args: 'on | off' },

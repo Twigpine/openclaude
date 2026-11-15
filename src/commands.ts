@@ -54,6 +54,7 @@ import {
 } from './commands/request-size/index.js'
 import resume, { continueCommand } from './commands/resume/index.js'
 import review, { ultrareview } from './commands/review.js'
+import scrollSpeed from './commands/scroll-speed/index.js'
 import search from './commands/search/index.js'
 import session from './commands/session/index.js'
 import sessions from './commands/sessions/index.js'
@@ -76,6 +77,7 @@ import bughunterPerf from './commands/bughunter-perf/index.js'
 import terminalSetup from './commands/terminalSetup/index.js'
 import usage from './commands/usage/index.js'
 import theme from './commands/theme/index.js'
+import tui from './commands/tui/index.js'
 import logo from './commands/logo/index.js'
 import vim from './commands/vim/index.js'
 import { feature } from 'bun:bundle'
@@ -347,6 +349,7 @@ const COMMANDS = memoize((): Command[] => [
   requestSize,
   requestSizeNonInteractive,
   resume,
+  scrollSpeed,
   search,
   session,
   sessions,
@@ -358,6 +361,7 @@ const COMMANDS = memoize((): Command[] => [
   stickers,
   tag,
   theme,
+  tui,
   logo,
   feedback,
   goal,

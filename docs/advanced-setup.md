@@ -1048,6 +1048,18 @@ message count, memory pressure, or context-overflow recovery. It shows `none`
 before the first compaction and `reason not recorded` for automatic compactions
 saved by earlier versions.
 
+### Idle compaction
+
+A session left idle for roughly 54 minutes with at least 200,000 estimated
+tokens compacts automatically, posting a notice when it does. Any activity (a
+new turn) resets the timer, and a session already compacted at its current
+size is not compacted again until new content arrives.
+
+Idle compaction is on by default. Turn it off with the **Idle compact** option
+in `/config`, or set `"idleCompaction": false` in `~/.openclaude.json`.
+`DISABLE_COMPACT` disables it along with the other compaction paths. Lower or
+raise the size threshold with `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`.
+
 ### Long-session memory guard validation
 
 For changes that touch auto-compact, provider request conversion, transcript
