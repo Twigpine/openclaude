@@ -25,7 +25,7 @@ function safetyDecisionFields(
 		case 'rule':
 			return {
 				source: 'permission_rule',
-				reason: `${decisionReason.rule.source}:${decisionReason.rule.ruleValue.toolName}`,
+				reason: `${decisionReason.rule.source}:${telemetryToolName(decisionReason.rule.ruleValue.toolName)}`,
 			}
 		case 'mode':
 			return { source: 'permission_mode', reason: decisionReason.mode }
@@ -63,12 +63,14 @@ function agentAttributes(
 	}
 }
 
-function telemetryToolName(toolName: string): string {
+function telemetryToolName(toolName: string, isMcp?: boolean): string {
 	// MCP tool names encode user-configured server names, so they stay
-	// sanitized unless detailed tool logging is explicitly enabled.
-	return isToolDetailsLoggingEnabled()
-		? toolName
-		: sanitizeToolNameForAnalytics(toolName)
+	// sanitized unless detailed tool logging is explicitly enabled. isMcp
+	// covers unprefixed names under CLAUDE_AGENT_SDK_MCP_NO_PREFIX, which the
+	// name-prefix sanitizer cannot see.
+	if (isToolDetailsLoggingEnabled()) return toolName
+	if (isMcp) return 'mcp_tool'
+	return sanitizeToolNameForAnalytics(toolName)
 }
 
 export function buildSafetyEventAttributes(args: {
@@ -76,11 +78,12 @@ export function buildSafetyEventAttributes(args: {
 	decision: PermissionDecision
 	toolUseContext: ToolUseContext
 	durationMs: number
+	isMcp?: boolean
 }): OTelEventMetadata {
 	const decisionReason = args.decision.decisionReason
 	const { source, reason } = safetyDecisionFields(decisionReason)
 	return {
-		tool_name: telemetryToolName(args.toolName),
+		tool_name: telemetryToolName(args.toolName, args.isMcp),
 		decision: args.decision.behavior,
 		source,
 		reason,
@@ -104,11 +107,12 @@ export function buildToolResultAttributes(args: {
 	mcpServerType?: string
 	mcpServerBaseUrl?: string
 	mcpServerScope?: string
+	isMcp?: boolean
 }): OTelEventMetadata {
 	const decisionInfo = args.toolUseContext.toolDecisions?.get(args.toolUseID)
 	const details = isToolDetailsLoggingEnabled()
 	const attributes: OTelEventMetadata = {
-		tool_name: telemetryToolName(args.toolName),
+		tool_name: telemetryToolName(args.toolName, args.isMcp),
 		success: args.success,
 		duration_ms: args.durationMs,
 		...(decisionInfo && {
@@ -146,12 +150,9 @@ export function buildToolResultAttributes(args: {
 	return attributes
 }
 
-export async function logToolSafetyEvent(args: {
-	toolName: string
-	decision: PermissionDecision
-	toolUseContext: ToolUseContext
-	durationMs: number
-}): Promise<void> {
+export async function logToolSafetyEvent(
+	args: Parameters<typeof buildSafetyEventAttributes>[0],
+): Promise<void> {
 	if (!isTelemetryEnabled()) return
 	await logOTelEvent('safety_event', buildSafetyEventAttributes(args))
 }

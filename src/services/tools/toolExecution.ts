@@ -1180,6 +1180,7 @@ export async function checkPermissionsAndCallTool(
       decision: permissionDecision,
       toolUseContext,
       durationMs: permissionDurationMs,
+      isMcp: isMcpTool(tool),
     })
 
     if (!shouldSkipSessionPersistence()) {
@@ -1542,9 +1543,10 @@ export async function checkPermissionsAndCallTool(
       toolName: tool.name,
       toolUseContext,
       toolUseID,
-      success: true,
+      success: !mappedToolResultBlock.is_error,
       durationMs,
       toolParameters,
+      isMcp: isMcpTool(tool),
       mcpServerType,
       mcpServerBaseUrl,
       mcpServerScope:
@@ -1863,9 +1865,10 @@ export async function checkPermissionsAndCallTool(
       // Raw error text carries command output (stderr/stdout up to the
       // formatError cap), so it only ships with OTEL_LOG_TOOL_DETAILS;
       // otherwise emit the classified category like the analytics event.
-      error: isToolDetailsLoggingEnabled() ? content : classifyToolError(error),
+      error: isToolDetailsLoggingEnabled() ? content : classifyToolError(error).slice(0, 60),
       toolParameters,
       isInterrupt,
+      isMcp: isMcpTool(tool),
       mcpServerType,
       mcpServerBaseUrl,
       mcpServerScope:

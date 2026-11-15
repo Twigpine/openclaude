@@ -137,6 +137,31 @@ describe('buildSafetyEventAttributes', () => {
 		)
 	})
 
+	test('sanitizes MCP names inside rule reasons unless details logging is on', () => {
+		const decision = {
+			behavior: 'deny',
+			message: 'x',
+			decisionReason: {
+				type: 'rule',
+				rule: {
+					source: 'userSettings',
+					ruleBehavior: 'deny',
+					ruleValue: { toolName: 'mcp__private_server__search' },
+				},
+			},
+		} as const
+		const base = { decision, toolUseContext: ctx(), durationMs: 1 }
+		expect(
+			buildSafetyEventAttributes({ toolName: 'mcp__private_server__search', ...base })
+				.reason,
+		).toBe('userSettings:mcp_tool')
+		process.env.OTEL_LOG_TOOL_DETAILS = '1'
+		expect(
+			buildSafetyEventAttributes({ toolName: 'mcp__private_server__search', ...base })
+				.reason,
+		).toBe('userSettings:mcp__private_server__search')
+	})
+
 	test('sanitizes MCP tool names unless details logging is on', () => {
 		const decision = {
 			behavior: 'deny',
@@ -218,6 +243,23 @@ describe('buildToolResultAttributes', () => {
 			is_interrupt: false,
 			duration_ms: 40,
 		})
+	})
+
+	test('unprefixed MCP names still sanitize when isMcp is set', () => {
+		const base = {
+			toolUseContext: ctx(),
+			toolUseID: 'tu_mcp',
+			success: true,
+			durationMs: 1,
+			isMcp: true,
+		}
+		expect(
+			buildToolResultAttributes({ toolName: 'Write', ...base }).tool_name,
+		).toBe('mcp_tool')
+		process.env.OTEL_LOG_TOOL_DETAILS = '1'
+		expect(
+			buildToolResultAttributes({ toolName: 'Write', ...base }).tool_name,
+		).toBe('Write')
 	})
 
 	test('MCP server attributes only attach when details logging is on', () => {

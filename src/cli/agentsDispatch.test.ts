@@ -4,6 +4,7 @@ import { describe, expect, test } from 'bun:test'
 import {
 	agentsDispatchOptions,
 	buildAgentsDispatchArgs,
+	mergeAgentsDispatchOptions,
 	wantsAgentsDispatch,
 	type AgentsDispatchOptionValues,
 } from './agentsDispatch.js'
@@ -114,22 +115,54 @@ describe('buildAgentsDispatchArgs', () => {
 				settingSources: 'user',
 			}),
 		).toEqual([
-			'--add-dir', '/a',
-			'--add-dir', '/b',
-			'--settings', 's.json',
-			'--mcp-config', 'c.json',
-			'--plugin-dir', 'p1',
-			'--plugin-dir', 'p2',
-			'--permission-mode', 'acceptEdits',
-			'--model', 'm1',
-			'--effort', 'high',
+			'--add-dir=/a',
+			'--add-dir=/b',
+			'--settings=s.json',
+			'--mcp-config=c.json',
+			'--plugin-dir=p1',
+			'--plugin-dir=p2',
+			'--permission-mode=acceptEdits',
+			'--model=m1',
+			'--effort=high',
 			'--dangerously-skip-permissions',
-			'--name', 'n1',
-			'--setting-sources', 'user',
+			'--name=n1',
+			'--setting-sources=user',
 		])
 	})
 
 	test('empty options produce no args', () => {
 		expect(buildAgentsDispatchArgs({})).toEqual([])
+	})
+
+	test('an explicitly empty --setting-sources value is preserved', () => {
+		expect(
+			buildAgentsDispatchArgs({ settingSources: '' }),
+		).toEqual(['--setting-sources='])
+	})
+
+	test('flag-looking values serialize inline', () => {
+		expect(
+			buildAgentsDispatchArgs({ name: '-review', model: 'm1' }),
+		).toEqual(['--model=m1', '--name=-review'])
+	})
+})
+
+describe('mergeAgentsDispatchOptions', () => {
+	test('root options fill in flags the subcommand did not set', () => {
+		expect(
+			mergeAgentsDispatchOptions(
+				{ model: 'root-model', permissionMode: 'plan' },
+				{ model: 'sub-model' },
+			),
+		).toEqual({ model: 'sub-model', permissionMode: 'plan' })
+	})
+
+	test('repeatable flags concatenate root and subcommand values', () => {
+		expect(
+			mergeAgentsDispatchOptions(
+				{ addDir: ['/a'], pluginDir: ['p1'] },
+				{ addDir: ['/b'] },
+			),
+		).toEqual({ addDir: ['/a', '/b'], pluginDir: ['p1'] })
 	})
 })

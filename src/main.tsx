@@ -52,6 +52,7 @@ import { BACKGROUND_PROCESS_MARKER_FLAG, isValidBackgroundProcessMarker } from '
 import {
   agentsDispatchOptions,
   buildAgentsDispatchArgs,
+  mergeAgentsDispatchOptions,
   wantsAgentsDispatch,
   type AgentsDispatchOptionValues,
 } from './cli/agentsDispatch.js';
@@ -4172,7 +4173,8 @@ async function run(): Promise<CommanderCommand> {
         handleBgFlag
       } = await import('./cli/bg.js');
       // '--' keeps a flag-looking prompt positional for the child parse
-      await handleBgFlag([...buildAgentsDispatchArgs(options), '--', prompt]);
+      const mergedOptions = mergeAgentsDispatchOptions(program.opts() as AgentsDispatchOptionValues, options);
+      await handleBgFlag([...buildAgentsDispatchArgs(mergedOptions), '--', prompt]);
       process.exit(0);
     }
     const {

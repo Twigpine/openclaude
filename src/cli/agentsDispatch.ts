@@ -72,7 +72,11 @@ const DISPATCH_FLAGS: DispatchFlag[] = [
 ]
 
 function hasValue(value: unknown): boolean {
-	return Array.isArray(value) ? value.length > 0 : Boolean(value)
+	if (Array.isArray(value)) return value.length > 0
+	// A defined string counts even when empty: `--setting-sources ""` is a
+	// real value (an empty source list), not a missing flag.
+	if (typeof value === 'string') return true
+	return Boolean(value)
 }
 
 // --setting-sources scopes the agent list too, so it alone must not turn a
@@ -81,6 +85,22 @@ export function wantsAgentsDispatch(options: AgentsDispatchOptionValues): boolea
 	return DISPATCH_FLAGS.some(
 		({ key }) => key !== 'settingSources' && hasValue(options[key]),
 	)
+}
+
+// Options given on the root command (`openclaude --model X agents "p"`) are
+// parsed into program.opts(), not the subcommand's own values. Merge them so
+// the dispatched session honors flags placed before the subcommand; an
+// explicit subcommand value wins, repeatable flags concatenate.
+export function mergeAgentsDispatchOptions(
+	base: AgentsDispatchOptionValues,
+	overrides: AgentsDispatchOptionValues,
+): AgentsDispatchOptionValues {
+	const merged = { ...base, ...overrides }
+	for (const key of ['addDir', 'mcpConfig', 'pluginDir'] as const) {
+		const values = [...(base[key] ?? []), ...(overrides[key] ?? [])]
+		if (values.length > 0) merged[key] = values
+	}
+	return merged
 }
 
 export function buildAgentsDispatchArgs(
@@ -95,7 +115,10 @@ export function buildAgentsDispatchArgs(
 			continue
 		}
 		for (const item of Array.isArray(value) ? value : [value]) {
-			args.push(flag, String(item))
+			// Serialize inline so a value starting with '-' (e.g. --name=-review)
+			// is not mistaken for another flag by the background parser or the
+			// child's own option parsing.
+			args.push(`${flag}=${String(item)}`)
 		}
 	}
 	return args
