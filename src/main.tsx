@@ -4144,8 +4144,49 @@ async function run(): Promise<CommanderCommand> {
     await setupTokenHandler(root);
   });
 
-  // Agents command - list configured agents
-  program.command('agents').description('List configured agents').option('--setting-sources <sources>', 'Comma-separated list of setting sources to load (user, project, local).').action(async () => {
+  // Agents command - list configured agents, or dispatch a background agent
+  // session when a prompt is given. Dispatch flags mirror the root options and
+  // are forwarded to the spawned session (local equivalent of upstream's
+  // `claude agents` dispatch flags; BG_SESSIONS provides the dispatch target).
+  program.command('agents').description('List configured agents, or dispatch a background agent session').argument('[prompt]', 'Dispatch a background agent session with this prompt').option('--setting-sources <sources>', 'Comma-separated list of setting sources to load (user, project, local).').option('--add-dir <directories...>', 'Additional directories to allow tool access to').option('--settings <file-or-json>', 'Path to a settings JSON file or a JSON string to load additional settings from').option('--mcp-config <configs...>', 'Load MCP servers from JSON files or strings (space-separated)').option('--plugin-dir <path>', 'Load plugins from a directory').option('--permission-mode <mode>', 'Permission mode to use for the session').option('--model <model>', 'Model to use for the session').option('--effort <level>', 'Effort level for the session').option('--dangerously-skip-permissions', 'Bypass all permission checks').option('-n, --name <name>', 'Set a display name for the session').action(async (prompt: string | undefined, options: {
+    settingSources?: string;
+    addDir?: string[];
+    settings?: string;
+    mcpConfig?: string[];
+    pluginDir?: string;
+    permissionMode?: string;
+    model?: string;
+    effort?: string;
+    dangerouslySkipPermissions?: boolean;
+    name?: string;
+  }) => {
+    const wantsDispatch = Boolean(options.addDir?.length || options.mcpConfig?.length || options.settings || options.pluginDir || options.permissionMode || options.model || options.effort || options.dangerouslySkipPermissions || options.name);
+    if (prompt === undefined && wantsDispatch) {
+      console.error('Error: a prompt is required to dispatch a background agent session. Usage: openclaude agents "<prompt>" [dispatch flags]');
+      process.exit(1);
+    }
+    if (prompt !== undefined) {
+      if (!feature('BG_SESSIONS')) {
+        console.error('Error: background sessions are not enabled in this build.');
+        process.exit(1);
+      }
+      const childArgs: string[] = [];
+      if (options.addDir?.length) childArgs.push('--add-dir', ...options.addDir);
+      if (options.settings) childArgs.push('--settings', options.settings);
+      if (options.mcpConfig?.length) childArgs.push('--mcp-config', ...options.mcpConfig);
+      if (options.pluginDir) childArgs.push('--plugin-dir', options.pluginDir);
+      if (options.permissionMode) childArgs.push('--permission-mode', options.permissionMode);
+      if (options.model) childArgs.push('--model', options.model);
+      if (options.effort) childArgs.push('--effort', options.effort);
+      if (options.dangerouslySkipPermissions) childArgs.push('--dangerously-skip-permissions');
+      if (options.name) childArgs.push('--name', options.name);
+      if (options.settingSources) childArgs.push('--setting-sources', options.settingSources);
+      const {
+        handleBgFlag
+      } = await import('./cli/bg.js');
+      await handleBgFlag([...childArgs, prompt]);
+      process.exit(0);
+    }
     const {
       agentsHandler
     } = await import('./cli/handlers/agents.js');

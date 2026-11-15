@@ -117,6 +117,10 @@ import {
 } from '../mcp/client.js'
 import { mcpInfoFromString } from '../mcp/mcpStringUtils.js'
 import { normalizeNameForMCP } from '../mcp/normalization.js'
+import {
+  logToolResultEvent,
+  logToolSafetyEvent,
+} from '../../utils/telemetry/toolEvents.js'
 import { createToolQueryLeaseInput } from './queryActivityLease.js'
 import type { MCPServerConnection } from '../mcp/types.js'
 import {
@@ -1172,7 +1176,12 @@ export async function checkPermissionsAndCallTool(
 
   if (permissionDecision.behavior !== 'allow') {
     logForDebugging(`${tool.name} tool permission denied`)
-    toolUseContext.toolDecisions?.get(toolUseID)
+    void logToolSafetyEvent({
+      toolName: tool.name,
+      decision: permissionDecision,
+      toolUseContext,
+      durationMs: permissionDurationMs,
+    })
 
     if (!shouldSkipSessionPersistence()) {
       try {
@@ -1532,9 +1541,22 @@ export async function checkPermissionsAndCallTool(
     }
 
     // Log tool result event for OTLP with tool parameters and decision context
-    if (isMcpTool(tool)) {
-      getMcpServerScopeFromToolName(tool.name)
-    }
+    void logToolResultEvent({
+      toolName: tool.name,
+      toolUseContext,
+      toolUseID,
+      success: true,
+      durationMs: Date.now() - startTime,
+      toolParameters,
+      mcpServerType,
+      mcpServerBaseUrl,
+      ...(isMcpTool(tool)
+        ? {
+            mcpServerScope:
+              getMcpServerScopeFromToolName(tool.name) ?? undefined,
+          }
+        : {}),
+    })
 
 
     // Run PostToolUse hooks
@@ -1833,16 +1855,29 @@ export async function checkPermissionsAndCallTool(
           mcpServerBaseUrl,
         ),
       })
-      // Log tool result error event for OTLP with tool parameters and decision context
-      if (isMcpTool(tool)) {
-        getMcpServerScopeFromToolName(tool.name)
-      }
-
           }
     const content = formatError(error)
 
     // Determine if this was a user interrupt
     const isInterrupt = error instanceof AbortError
+
+    // Log tool result error event for OTLP with tool parameters and decision context
+    void logToolResultEvent({
+      toolName: tool.name,
+      toolUseContext,
+      toolUseID,
+      success: false,
+      durationMs: Date.now() - startTime,
+      error: content,
+      toolParameters,
+      isInterrupt,
+      ...(isMcpTool(tool)
+        ? {
+            mcpServerScope:
+              getMcpServerScopeFromToolName(tool.name) ?? undefined,
+          }
+        : {}),
+    })
 
     // Run PostToolUseFailure hooks
     const hookMessages: MessageUpdateLazy<

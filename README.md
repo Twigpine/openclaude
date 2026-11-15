@@ -287,6 +287,19 @@ The command remains a log viewer and does not return the child's exit code.
 points to `openclaude logs <id> -f`; full terminal reattach is not implemented
 for local background sessions yet.
 
+`openclaude agents <prompt>` dispatches a background agent session the same way
+`--bg` does, with flags that configure the spawned session:
+
+```bash
+openclaude agents "review the auth module" --model gpt-4o --permission-mode acceptEdits
+openclaude agents "run the test suite" --add-dir ../lib --mcp-config ./mcp.json
+```
+
+Supported dispatch flags: `--add-dir`, `--settings`, `--mcp-config`,
+`--plugin-dir`, `--permission-mode`, `--model`, `--effort`,
+`--dangerously-skip-permissions`, and `-n/--name`. Bare `openclaude agents`
+(with no prompt) still lists configured agents.
+
 ### OpenClaude config cutover
 
 OpenClaude stores its own config under `~/.openclaude` and `~/.openclaude.json`

@@ -807,6 +807,41 @@ Notes:
   Source builds (`bun install`) already include it as a dev dependency, so no
   extra step is needed there.
 
+## OpenTelemetry logs (opt-in)
+
+OpenClaude can emit `claude_code.*` log events to your own OTLP collector over
+OTLP/HTTP JSON. This is off by default; nothing is sent anywhere unless you
+enable it and point it at an endpoint:
+
+```bash
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+```
+
+Events are batched and POSTed to `<endpoint>/v1/logs`. Supported variables:
+
+- `CLAUDE_CODE_ENABLE_TELEMETRY`: master switch, required.
+- `OTEL_LOGS_EXPORTER`: `otlp` (default), `console` (print each event as a JSON
+  line to stdout, no endpoint needed), or `none`.
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: base endpoint; `/v1/logs` is appended.
+- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: full logs endpoint, takes precedence.
+- `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_LOGS_HEADERS`:
+  `key=value,key2=value2` request headers (for collector auth).
+- `OTEL_LOGS_EXPORT_INTERVAL`: batch flush interval in ms (default 5000).
+- `OTEL_RESOURCE_ATTRIBUTES`: `key=value,key2=value2` resource attributes added
+  to every batch.
+- `OTEL_LOG_USER_PROMPTS`: include prompt text in `user_prompt` events.
+  Without it prompts are sent as `<REDACTED>`.
+- `OTEL_LOG_TOOL_DETAILS`: include tool parameters (bash commands, MCP server
+  and tool names) in `tool_result` events. Off by default; MCP tool names are
+  reported as `mcp_tool` otherwise.
+
+Emitted events include `claude_code.user_prompt`, `claude_code.api_request`
+and `claude_code.api_error` (with `gen_ai.*` semantic-convention attributes),
+`claude_code.tool_result`, `claude_code.safety_event` (which mechanism denied
+or prompted on a tool call), and hook lifecycle events. Tool events from
+subagents carry `agent_id` and `parent_agent_id`.
+
 ## Safety strictness
 
 OpenClaude runs several "safety" checks: a model-level refusal directive, bash

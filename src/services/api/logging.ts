@@ -9,6 +9,7 @@ import {
   consumePostCompaction,
   getIsNonInteractiveSession,
   getLastApiCompletionTimestamp,
+  getSessionId,
   getTeleportedSessionInfo,
   markFirstTeleportMessageLogged,
   setLastApiCompletionTimestamp,
@@ -19,7 +20,11 @@ import type { AssistantMessage } from 'src/types/message.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import type { EffortLevel } from 'src/utils/effort.js'
 import { logError } from 'src/utils/log.js'
-import { getAPIProviderForStatsig } from 'src/utils/model/providers.js'
+import {
+  getAPIProvider,
+  getAPIProviderForStatsig,
+} from 'src/utils/model/providers.js'
+import { logOTelEvent } from 'src/utils/telemetry/events.js'
 import type { PermissionMode } from 'src/utils/permissions/PermissionMode.js'
 import { hasPrintFlag } from 'src/utils/printFlag.js'
 import { redactSensitiveInfo, redactUrlForDisplay } from 'src/utils/redaction.js'
@@ -359,6 +364,19 @@ export function logAPIError({
     ...getAnthropicEnvMetadata(),
   })
 
+  void logOTelEvent('api_error', {
+    'gen_ai.provider.name': getAPIProvider(),
+    'gen_ai.request.model': model,
+    'gen_ai.response.id': requestId ?? undefined,
+    'gen_ai.conversation.id': queryTracking?.chainId ?? getSessionId(),
+    'error.type': errorType,
+    status,
+    duration_ms: durationMs,
+    duration_ms_including_retries: durationMsIncludingRetries,
+    attempt,
+    query_source: querySource,
+  })
+
 
   // Log first error for teleported sessions (reliability tracking)
   const teleportInfo = getTeleportedSessionInfo()
@@ -550,6 +568,26 @@ function logAPISuccess({
     ...(isPostCompaction ? { isPostCompaction } : {}),
     ...getAnthropicEnvMetadata(),
     timeSinceLastApiCallMs,
+  })
+
+  void logOTelEvent('api_request', {
+    'gen_ai.provider.name': getAPIProvider(),
+    'gen_ai.request.model': model,
+    'gen_ai.response.id': requestId ?? undefined,
+    'gen_ai.conversation.id': queryTracking?.chainId ?? getSessionId(),
+    'gen_ai.usage.input_tokens': usage.input_tokens,
+    'gen_ai.usage.output_tokens': usage.output_tokens,
+    'gen_ai.usage.cache_read_input_tokens':
+      usage.cache_read_input_tokens ?? undefined,
+    'gen_ai.usage.cache_creation_input_tokens':
+      usage.cache_creation_input_tokens ?? undefined,
+    duration_ms: durationMs,
+    duration_ms_including_retries: durationMsIncludingRetries,
+    ttft_ms: ttftMs ?? undefined,
+    attempt,
+    stop_reason: stopReason ?? undefined,
+    cost_usd: costUSD,
+    query_source: querySource,
   })
 
   setLastApiCompletionTimestamp(now)
