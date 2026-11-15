@@ -540,6 +540,15 @@ test(
       )
     }
 
+    const setIntervalSpy = jest.spyOn(globalThis, 'setInterval')
+    const clearIntervalSpy = jest.spyOn(globalThis, 'clearInterval')
+    // The status-line periodic timer is the only interval in this render
+    // tree using the 100ms and 5000ms delays, so handles are keyed by delay.
+    const intervalHandles = (delay: number) =>
+      setIntervalSpy.mock.calls.flatMap((call, index) =>
+        call[1] === delay ? [setIntervalSpy.mock.results[index]!.value] : [],
+      )
+
     setSessionTrustAccepted(true)
     try {
       render(true, 1)
@@ -561,21 +570,43 @@ test(
       }))
       // Let any debounce armed by an old-interval tick settle first.
       await Bun.sleep(500)
+      const shortHandles = intervalHandles(100)
       const callsAfterIntervalChange = calls.length
       await Bun.sleep(1500)
+      // Behavior check: the old 100ms interval stops firing commands.
       expect(calls.length).toBe(callsAfterIntervalChange)
+      // Cleanup check: the interval change cleared the exact old handles.
+      for (const handle of shortHandles) {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(handle)
+      }
 
+      const longHandles = intervalHandles(5000)
       render(false, 2)
       await waitFor(() => commits.includes(2), 'inactive commit')
+      // Cleanup check: hiding the row cleared the 5s handles it left behind.
+      for (const handle of longHandles) {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(handle)
+      }
+      // Behavior check: nothing runs while the row is hidden.
       await Bun.sleep(1000)
       expect(calls.length).toBe(callsAfterIntervalChange)
 
       // Re-arm the periodic timer so unmounting exercises its cleanup.
       render(true, 3)
       await waitFor(() => commits.includes(3), 'reactivated commit')
-      const clearIntervalSpy = jest.spyOn(globalThis, 'clearInterval')
+      await waitFor(
+        () => intervalHandles(5000).length > longHandles.length,
+        're-armed periodic timer',
+        5000,
+      )
+      const reArmed = intervalHandles(5000).filter(
+        handle => !longHandles.includes(handle),
+      )
       root.unmount()
-      expect(clearIntervalSpy).toHaveBeenCalled()
+      // Cleanup check: unmounting cleared the re-armed handles.
+      for (const handle of reArmed) {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(handle)
+      }
     } finally {
       root.unmount()
       jest.restoreAllMocks()
