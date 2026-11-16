@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'child_process'
 import { SandboxManager as BaseSandboxManager } from '@anthropic-ai/sandbox-runtime'
-import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join, resolve, sep } from 'path'
 import {
@@ -392,5 +392,61 @@ describe('convertToSandboxRuntimeConfig', () => {
 
     const childConfig = convertToSandboxRuntimeConfig({} as SettingsJson)
     expect(childConfig.filesystem.allowWrite).toContain(repository)
+  })
+
+  test('refreshWorktreeMainRepoPath keeps the cached main repo path when detection fails', async () => {
+    // The failure path relies on EACCES, which chmod cannot produce on
+    // Windows or for root.
+    if (process.platform === 'win32' || process.geteuid?.() === 0) {
+      return
+    }
+
+    const repository = join(tempRoot, 'main-repo-fail')
+    const linkedWorktree = join(tempRoot, 'linked-worktree-fail')
+    execFileSync('git', ['init', repository])
+    execFileSync('git', [
+      '-C',
+      repository,
+      'config',
+      'user.email',
+      'test@example.com',
+    ])
+    execFileSync('git', [
+      '-C',
+      repository,
+      'config',
+      'user.name',
+      'OpenClaude Test',
+    ])
+    await writeFile(join(repository, 'seed.txt'), 'seed\n')
+    execFileSync('git', ['-C', repository, 'add', 'seed.txt'])
+    execFileSync('git', ['-C', repository, 'commit', '-m', 'seed'])
+    execFileSync('git', [
+      '-C',
+      repository,
+      'worktree',
+      'add',
+      '-b',
+      'feature-branch-fail',
+      linkedWorktree,
+    ])
+
+    setCwdState(linkedWorktree)
+    await SandboxManager.refreshWorktreeMainRepoPath(linkedWorktree)
+    expect(
+      convertToSandboxRuntimeConfig({} as SettingsJson).filesystem.allowWrite,
+    ).toContain(repository)
+
+    // An unreadable .git makes the next lookup fail rather than answer
+    // "not a worktree"; the failure must not clear the valid cache.
+    const gitFile = join(linkedWorktree, '.git')
+    await chmod(gitFile, 0o000)
+    try {
+      await SandboxManager.refreshWorktreeMainRepoPath(linkedWorktree)
+      const config = convertToSandboxRuntimeConfig({} as SettingsJson)
+      expect(config.filesystem.allowWrite).toContain(repository)
+    } finally {
+      await chmod(gitFile, 0o644)
+    }
   })
 })

@@ -90,6 +90,18 @@ describe('/cd', () => {
     expect(workingDirs).toContain(sandbox)
   })
 
+  it('grants exactly the new directory and the previous root after switching', async () => {
+    const sub = join(sandbox, 'sub')
+    mkdirSync(sub)
+    const result = await call('sub', context())
+    expect(result.type).toBe('text')
+    // The session permission set is exactly the new root plus the root the
+    // move left behind; nothing else is added or removed.
+    expect([...allWorkingDirectories(latestPermissionContext)].sort()).toEqual(
+      [sandbox, sub].sort(),
+    )
+  })
+
   it('adds an outside directory to the working set, then switches', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'oc-cd-outside-'))
     try {

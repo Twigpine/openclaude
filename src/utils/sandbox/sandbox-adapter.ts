@@ -409,8 +409,18 @@ let settingsSubscriptionCleanup: (() => void) | undefined
 
 // Cached main repo path for git worktrees, resolved once during initialize().
 // In a worktree, .git is a file containing "gitdir: /path/to/main/repo/.git/worktrees/name".
-// undefined = not yet resolved; null = not a worktree or detection failed.
+// undefined = not yet resolved; null = not a worktree.
 let worktreeMainRepoPath: string | null | undefined
+
+// Detection writes are generation-gated: initialize() runs unawaited, so a
+// slow startup lookup could otherwise overwrite the newer result a /cd
+// refresh already stored.
+let worktreeMainRepoPathGeneration = 0
+
+// Returned by detectWorktreeMainRepoPath when the lookup itself failed (e.g.
+// EACCES), as opposed to a definitive "not a worktree" (null). Callers keep
+// their existing cache on failure rather than dropping a valid allowance.
+const DETECTION_FAILED = Symbol('worktreeDetectionFailed')
 
 // Bare-repo files at cwd that didn't exist at config time and should be
 // scrubbed if they appear after a sandboxed command. See anthropics/claude-code#29316.
@@ -439,17 +449,24 @@ function scrubBareGitRepoFiles(): void {
  * by flows that change cwd (e.g. /cd). .git lives at the worktree root, so a
  * cwd inside a child directory must ascend to find it: the nearest ancestor
  * containing .git defines the repository. In a worktree, .git is a file
- * containing "gitdir: ..."; a .git directory means a normal repo root and a
- * failed lookup means no enclosing repository, so both return null.
+ * containing "gitdir: ..."; a .git directory means a normal repo root, so
+ * both return null. A lookup that errors (e.g. EACCES) returns
+ * DETECTION_FAILED instead so callers can keep a still-valid cached path.
  */
-async function detectWorktreeMainRepoPath(cwd: string): Promise<string | null> {
+async function detectWorktreeMainRepoPath(
+  cwd: string,
+): Promise<string | null | typeof DETECTION_FAILED> {
   let dir = cwd
   while (true) {
     const gitPath = join(dir, '.git')
     let stat
     try {
       stat = await lstat(gitPath)
-    } catch {
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        return DETECTION_FAILED
+      }
       stat = null
     }
     if (stat === null) {
@@ -481,9 +498,14 @@ async function detectWorktreeMainRepoPath(cwd: string): Promise<string | null> {
         return gitdir.substring(0, markerIndex)
       }
       return null
-    } catch {
-      // Can't read the .git file
-      return null
+    } catch (error) {
+      // ENOENT here means the file vanished between lstat and read: the
+      // worktree was torn down, which is a definitive absence. Any other
+      // read failure is a failed lookup.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null
+      }
+      return DETECTION_FAILED
     }
   }
 }
@@ -816,7 +838,14 @@ async function initialize(
       // subsequent refreshConfig() calls (which must be synchronous to avoid
       // race conditions where pending requests slip through with stale config).
       if (worktreeMainRepoPath === undefined) {
-        worktreeMainRepoPath = await detectWorktreeMainRepoPath(getCwdState())
+        const generation = ++worktreeMainRepoPathGeneration
+        const detected = await detectWorktreeMainRepoPath(getCwdState())
+        if (generation === worktreeMainRepoPathGeneration) {
+          // A failed lookup leaves the cache undefined so a later refresh
+          // can retry; it must not record null as a definitive answer.
+          worktreeMainRepoPath =
+            detected === DETECTION_FAILED ? undefined : detected
+        }
       }
 
       const settings = getSettings_DEPRECATED()
@@ -863,7 +892,14 @@ function refreshConfig(): void {
  * allowance (or keep granting one for a worktree the session left).
  */
 async function refreshWorktreeMainRepoPath(cwd: string): Promise<void> {
-  worktreeMainRepoPath = await detectWorktreeMainRepoPath(cwd)
+  const generation = ++worktreeMainRepoPathGeneration
+  const detected = await detectWorktreeMainRepoPath(cwd)
+  // A superseded or failed lookup keeps the previous value: an older result
+  // must not overwrite a newer one, and a failed lookup must not clear a
+  // still-valid allowance.
+  if (generation === worktreeMainRepoPathGeneration && detected !== DETECTION_FAILED) {
+    worktreeMainRepoPath = detected
+  }
 }
 
 /**
@@ -874,6 +910,8 @@ async function reset(): Promise<void> {
   settingsSubscriptionCleanup?.()
   settingsSubscriptionCleanup = undefined
   worktreeMainRepoPath = undefined
+  // Invalidate any detection still in flight so it cannot write post-reset.
+  worktreeMainRepoPathGeneration++
   bareGitRepoScrubPaths.length = 0
 
   // Clear memoized caches
