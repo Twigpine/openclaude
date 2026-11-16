@@ -137,6 +137,10 @@ const featureFlags: Record<string, boolean> = {
   TREE_SITTER_BASH: true,             // AST-based bash command analysis (pure-TS parser, no native dep)
   BASH_CLASSIFIER: true,              // Bash(prompt: ...) natural-language permission rules via side-model classifier; opt-out via CLAUDE_CODE_DISABLE_BASH_CLASSIFIER
   POWERSHELL_AUTO_MODE: true,         // Include PowerShell prompt rules in classifier input
+  AGENT_MEMORY_SNAPSHOT: true,        // Pending agent-memory snapshot merge dialog on --agent sessions
+  LODESTONE: true,                    // claude-cli:// deep links: OS protocol registration + --handle-uri entry; opt-out via disableDeepLinkRegistration setting
+  AUTO_THEME: true,                   // Live light/dark switching via OSC 11 polling while theme is 'auto'
+  SKILL_IMPROVEMENT: true,            // Post-sampling hook that proposes skill file rewrites; opt-in via CLAUDE_CODE_SKILL_IMPROVEMENT
 }
 
 // ── Pre-process: replace feature() calls with boolean literals ──────
