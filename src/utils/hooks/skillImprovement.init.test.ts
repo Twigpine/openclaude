@@ -3,6 +3,8 @@ import { feature } from 'bun:bundle'
 
 const registerSpy = mock((_hook: unknown) => {})
 
+const SAVED = process.env.CLAUDE_CODE_SKILL_IMPROVEMENT
+
 const realPostSampling = {
   ...(await import(`./postSamplingHooks.js?real=${Date.now()}`)),
 }
@@ -12,8 +14,6 @@ mock.module('./postSamplingHooks.js', () => ({
 }))
 
 const { initSkillImprovement } = await import('./skillImprovement.js')
-
-const SAVED = process.env.CLAUDE_CODE_SKILL_IMPROVEMENT
 
 afterEach(() => {
   mock.module('./postSamplingHooks.js', () => realPostSampling)

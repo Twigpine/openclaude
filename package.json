@@ -1,7 +1,7 @@
 {
   "name": "@twigpine/openclaude",
   "version": "0.36.0",
-  "description": "OpenClaude opens coding-agent workflows to any LLM — OpenAI, Gemini, DeepSeek, Ollama, and 200+ models",
+  "description": "OpenClaude opens coding-agent workflows to any LLM \u2014 OpenAI, Gemini, DeepSeek, Ollama, and 200+ models",
   "type": "module",
   "bin": {
     "openclaude": "./bin/openclaude"
@@ -55,7 +55,7 @@
     "web:preview": "bun run --cwd web preview",
     "web:typecheck": "bun run --cwd web typecheck",
     "test": "bun run scripts/run-tests.ts --feature=UNATTENDED_RETRY --max-concurrency=1",
-    "test:full": "bun run scripts/run-tests.ts --shards=8 --feature=UNATTENDED_RETRY --max-concurrency=1 && bun run test:conversation-arc && bun run test:context-efficiency",
+    "test:full": "bun run scripts/run-tests.ts --shards=8 --feature=UNATTENDED_RETRY --max-concurrency=1 && bun run test:conversation-arc && bun run test:context-efficiency && bun run test:feature-gates",
     "test:conversation-arc": "bun run scripts/run-tests.ts --feature=CONVERSATION_ARC --feature=MULTI_TURN_CONTEXT --max-concurrency=1 src/query.conversationArc.test.ts",
     "test:context-efficiency": "bun run scripts/run-tests.ts --feature=UNATTENDED_RETRY --feature=HISTORY_SNIP --max-concurrency=1 src/utils/attachments.contextEfficiency.test.ts",
     "test:coverage": "bun test --feature=UNATTENDED_RETRY --coverage --coverage-reporter=lcov --coverage-dir=coverage --max-concurrency=1 && bun run scripts/render-coverage-heatmap.ts",
@@ -83,7 +83,8 @@
     "doctor:report": "bun run scripts/system-check.ts --out reports/doctor-runtime.json",
     "hardening:check": "bun run smoke && bun run doctor:runtime",
     "hardening:strict": "bun run typecheck && bun run hardening:check",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test:feature-gates": "bun run scripts/run-tests.ts --feature=UNATTENDED_RETRY --feature=AGENT_MEMORY_SNAPSHOT --feature=LODESTONE --feature=AUTO_THEME --feature=SKILL_IMPROVEMENT --max-concurrency=1 src/tools/AgentTool/agentMemorySnapshotGate.test.ts src/utils/deepLink/deepLinkGate.test.ts src/utils/hooks/skillImprovement.init.test.ts src/utils/systemThemeWatcher.test.ts"
   },
   "dependencies": {
     "@orama/orama": "3.1.18",

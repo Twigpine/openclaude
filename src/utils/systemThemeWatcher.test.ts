@@ -4,10 +4,21 @@ import { getSystemThemeName, setCachedSystemTheme } from './systemTheme.js'
 import { watchSystemTheme } from './systemThemeWatcher.js'
 
 const savedSystemTheme = getSystemThemeName()
+const stops: Array<() => void> = []
 
 afterEach(() => {
+  for (const stop of stops.splice(0)) {
+    stop()
+  }
   setCachedSystemTheme(savedSystemTheme)
 })
+
+function watch(
+  querier: TerminalQuerier,
+  onThemeChange: (theme: string) => void,
+): void {
+  stops.push(watchSystemTheme(querier, onThemeChange, 10))
+}
 
 function fakeQuerier(data: { current: string | undefined }): TerminalQuerier {
   return {
@@ -31,11 +42,7 @@ describe('watchSystemTheme', () => {
   test('fires onThemeChange with the detected theme and tracks live changes', async () => {
     const data = { current: 'rgb:0000/0000/0000' as string | undefined }
     const seen: string[] = []
-    const stop = watchSystemTheme(
-      fakeQuerier(data),
-      theme => seen.push(theme),
-      10,
-    )
+    watch(fakeQuerier(data), theme => seen.push(theme))
 
     await sleep(50)
     expect(seen).toEqual(['dark'])
@@ -45,14 +52,12 @@ describe('watchSystemTheme', () => {
     await sleep(50)
     expect(seen).toEqual(['dark', 'light'])
     expect(getSystemThemeName()).toBe('light')
-
-    stop()
   })
 
   test('does not fire for unparseable or unanswered queries', async () => {
     const data = { current: 'not-a-color' as string | undefined }
     const onThemeChange = mock(() => {})
-    const stop = watchSystemTheme(fakeQuerier(data), onThemeChange, 10)
+    watch(fakeQuerier(data), onThemeChange)
 
     await sleep(50)
     expect(onThemeChange).not.toHaveBeenCalled()
@@ -60,18 +65,13 @@ describe('watchSystemTheme', () => {
     data.current = undefined
     await sleep(50)
     expect(onThemeChange).not.toHaveBeenCalled()
-
-    stop()
   })
 
   test('stops polling after unsubscribe', async () => {
     const data = { current: 'rgb:0000/0000/0000' as string | undefined }
     const seen: string[] = []
-    const stop = watchSystemTheme(
-      fakeQuerier(data),
-      theme => seen.push(theme),
-      10,
-    )
+    const stop = watchSystemTheme(fakeQuerier(data), theme => seen.push(theme), 10)
+    stops.push(stop)
 
     await sleep(50)
     expect(seen).toEqual(['dark'])
