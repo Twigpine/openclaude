@@ -147,7 +147,7 @@ test('classifyBashCommand maps a matching verdict to the description', async () 
   expect(calls()).toBe(1)
 })
 
-test('classifyBashCommand returns no match for index -1 and out-of-range indexes', async () => {
+test('classifyBashCommand treats -1 as an evaluated non-match and other unusable indexes as unavailable', async () => {
   let index = -1
   mockSideQuery(async () =>
     toolUseResponse({
@@ -160,9 +160,8 @@ test('classifyBashCommand returns no match for index -1 and out-of-range indexes
   const { classifyBashCommand } = await importClassifier()
   const descriptions = ['allow git status commands']
 
-  for (const idx of [-1, 5]) {
-    index = idx
-    const result = await classifyBashCommand(
+  const run = () =>
+    classifyBashCommand(
       'rm -rf /',
       '/repo',
       descriptions,
@@ -170,11 +169,22 @@ test('classifyBashCommand returns no match for index -1 and out-of-range indexes
       new AbortController().signal,
       false,
     )
+
+  index = -1
+  const sentinel = await run()
+  expect(sentinel.matches).toBe(false)
+  if (classifierEnabled) {
+    expect(sentinel.confidence).toBe('medium')
+    expect(sentinel.reason).toBe('outside scope')
+    expect(sentinel.unavailable).toBeUndefined()
+  }
+
+  for (const idx of [-2, 5]) {
+    index = idx
+    const result = await run()
     expect(result.matches).toBe(false)
     if (classifierEnabled) {
-      expect(result.confidence).toBe('medium')
-      expect(result.reason).toBe('outside scope')
-      expect(result.unavailable).toBeUndefined()
+      expect(result.unavailable).toBe(true)
     }
   }
 })

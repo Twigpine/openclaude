@@ -688,6 +688,43 @@ describe('Bash prompt rules when the classifier is unavailable', () => {
     expect(sideQueryCalls).toBe(classifierEnabled ? 1 : 0)
   })
 
+  // A verdict claiming a match at an index beyond the description list is
+  // not an evaluated non-match; it must fail closed the same as a provider
+  // error, or a restrictive prompt rule would fall through to literal allow.
+  test('out-of-range matched_index fails closed instead of falling through to literal allow', async () => {
+    sideQueryImpl = async () => ({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'report_bash_rule_match',
+          id: 'tu_1',
+          input: {
+            reasoning: 'claimed match',
+            matched_index: 5,
+            confidence: 'high',
+            reason: 'hallucinated index',
+          },
+        },
+      ],
+    })
+    const result = await bashToolHasPermission(
+      { command: 'git status' },
+      makeToolUseContext(promptRuleContext()),
+    )
+    if (classifierEnabled) {
+      expect(result.behavior).toBe('ask')
+      expect(result.decisionReason).toMatchObject({
+        type: 'other',
+        reason: expect.stringContaining('could not be evaluated'),
+      })
+      expect(sideQueryCalls).toBe(1)
+    } else {
+      // Feature gated off: the prompt rule is inert, literal allow applies.
+      expect(result.behavior).toBe('allow')
+      expect(sideQueryCalls).toBe(0)
+    }
+  })
+
   test('evaluated non-match still falls through to literal allow', async () => {
     sideQueryImpl = async () => ({
       content: [

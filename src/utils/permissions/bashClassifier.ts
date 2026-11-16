@@ -223,12 +223,19 @@ export async function classifyBashCommand(
     }
 
     const matched = descriptions[parsed.matched_index]
-    if (parsed.matched_index < 0 || matched === undefined) {
-      return {
-        matches: false,
-        confidence: parsed.confidence,
-        reason: parsed.reason,
+    if (matched === undefined) {
+      // -1 is the documented non-match sentinel; any other unusable index
+      // means the verdict cannot be trusted.
+      if (parsed.matched_index === -1) {
+        return {
+          matches: false,
+          confidence: parsed.confidence,
+          reason: parsed.reason,
+        }
       }
+      return unavailableNoMatch(
+        `Classifier returned an out-of-range description index (${parsed.matched_index})`,
+      )
     }
     return {
       matches: true,
