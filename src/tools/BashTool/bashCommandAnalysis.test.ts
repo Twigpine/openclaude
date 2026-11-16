@@ -176,14 +176,26 @@ test('unconditional ; assignments still resolve as literals', () => {
   expect(result.commands.map(c => c.argv)).toEqual([['cmd', 'x']])
 })
 
-test('a var added by a && RHS expands as the unknown-value placeholder', () => {
-  const result = astResultFor('true && V=x; echo "got $V"')
+test('a var added by a && RHS holding a placeholder stays unknown', () => {
+  // `$(...)` output is runtime-unknown, so the merge keeps the placeholder:
+  // bash ran V=$(printf x) or skipped it, and either way the analyzer
+  // cannot name a literal. `printf x` is extracted and checked as a command.
+  const result = astResultFor('true && V=$(printf x); echo "got $V"')
   expect(result.kind).toBe('simple')
   if (result.kind !== 'simple') throw new Error('expected simple')
   expect(result.commands.map(c => c.argv)).toEqual([
     ['true'],
+    ['printf', 'x'],
     ['echo', 'got __TRACKED_VAR__'],
   ])
+})
+
+test('a var introduced by a && RHS with a literal value fails closed', () => {
+  // Storing VAR_PLACEHOLDER for V here would let `"./$V"` keep its `./`
+  // prefix and validate as workspace-relative `./__TRACKED_VAR__` while
+  // bash expands the real literal `../../etc/passwd`.
+  const result = astResultFor('true && V=../../etc/passwd; cat "./$V"')
+  expect(result.kind).toBe('too-complex')
 })
 
 test('logs one sanitized debug event for an expected legacy parser limitation', async () => {

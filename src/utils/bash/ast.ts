@@ -526,14 +526,18 @@ function collectCommands(
     //   SUB=push; git "$SUB"` would then analyze `git status` while bash
     //   runs `git push`.
     // Fix: walk each `&&` RHS in a forked scope, then merge its scope diffs
-    // back. A var the RHS added becomes VAR_PLACEHOLDER (the same
+    // back. Two cases fail closed. A conditional write that could overwrite
+    // or remove a tracked LITERAL: the runtime value is either the old
+    // literal or a different one, and marking it unknown would hide the
+    // literal from downstream path checks, same bypass the `read VAR` guard
+    // in if_statement covers. And a NEW var the RHS sets to a literal:
+    // storing VAR_PLACEHOLDER lets `"./$V"` keep its `./` prefix and
+    // validate as the workspace-relative `./__TRACKED_VAR__` while bash
+    // expands the real literal (e.g. `../../etc/passwd`). Only added values
+    // that already contain a placeholder merge as VAR_PLACEHOLDER (the same
     // unknown-value sentinel used for `read VAR` and loop vars): the value
     // is runtime-conditional, so it resolves only inside strings, never as
-    // a literal. A conditional write that could overwrite or remove a
-    // tracked LITERAL fails closed instead: the runtime value is either the
-    // old literal or a different one, and marking it unknown would hide the
-    // literal from downstream path checks, same bypass the `read VAR` guard
-    // in if_statement covers.
+    // a literal.
     //
     // NOTE: `scope` and `varScope` diverge after the first `||`/`|`/`&`. The
     // caller's varScope is only mutated for the `&&`/`;` prefix — this is
@@ -583,7 +587,8 @@ function collectCommands(
       if (prevSep === '&&') {
         // Conditional RHS: fork the scope so it still reads LHS assignments
         // (`VAR=x && cmd $VAR` resolves), then merge the diffs back. Added
-        // vars become VAR_PLACEHOLDER; a changed or removed tracked literal
+        // vars become VAR_PLACEHOLDER only when the value already holds a
+        // placeholder; a new literal or a changed/removed tracked literal
         // fails closed (see SECURITY comment above).
         const branch = new Map(scope)
         const err = collectCommands(child, commands, branch)
@@ -596,6 +601,17 @@ function collectCommands(
             return {
               kind: 'too-complex',
               reason: `'${k}' changed in && RHS may not execute; cannot prove it overwrites tracked literal '${prior}'`,
+              nodeType: node.type,
+            }
+          }
+          if (
+            prior === undefined &&
+            next !== undefined &&
+            !containsAnyPlaceholder(next)
+          ) {
+            return {
+              kind: 'too-complex',
+              reason: `'${k}' introduced in && RHS may not execute; cannot prove the skipped-branch value is not literal '${next}'`,
               nodeType: node.type,
             }
           }
