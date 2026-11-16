@@ -4359,10 +4359,6 @@ export function getCompactionReminderAttachment(
   messages: Message[],
   model: string,
 ): Attachment[] {
-  if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_marble_fox', false)) {
-    return []
-  }
-
   if (!isAutoCompactEnabled()) {
     return []
   }
@@ -4376,6 +4372,23 @@ export function getCompactionReminderAttachment(
   const usedTokens = tokenCountWithEstimation(messages)
   if (usedTokens < effectiveWindow * 0.25) {
     return []
+  }
+
+  // The tool loop calls getAttachments on every round with the growing message
+  // list, so without this the reminder repeats every round above the threshold.
+  // One reminder per compaction cycle: a prior one in the transcript suppresses
+  // it, and a compact boundary resets the cycle (same reset as the snip nudge).
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message?.type === 'system' && message.subtype === 'compact_boundary') {
+      break
+    }
+    if (
+      message?.type === 'attachment' &&
+      message.attachment.type === 'compaction_reminder'
+    ) {
+      return []
+    }
   }
 
   return [{ type: 'compaction_reminder' }]
