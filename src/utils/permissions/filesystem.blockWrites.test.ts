@@ -33,7 +33,15 @@ mock.module('../settings/settings.js', () => ({
 }))
 
 let hookPermissionResult:
-  | { behavior: 'allow'; updatedInput?: { [key: string]: unknown } }
+  | {
+      behavior: 'allow'
+      updatedInput?: { [key: string]: unknown }
+      updatedPermissions?: {
+        type: 'removeDirectories'
+        directories: string[]
+        destination: 'session'
+      }[]
+    }
   | undefined
 const realHooks = await import(
   `../hooks.js?blockWritesHooksActual=${Date.now()}-${Math.random()}`
@@ -584,6 +592,166 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     } finally {
       denyInsteadOfPrompting = false
       hookPermissionResult = undefined
+    }
+  })
+
+  test('a hook cannot remove a working directory and allow a write under it', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    // The hook allows a write under outsideDir while the same decision
+    // removes outsideDir from the working set. The boundary must be
+    // rechecked against the post-update context, before the update is
+    // applied or persisted.
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(outsideDir, 'hooked.txt') },
+      updatedPermissions: [
+        {
+          type: 'removeDirectories',
+          directories: [outsideDir],
+          destination: 'session',
+        },
+      ],
+    }
+    try {
+      const toolPermissionContext = permissionContext(
+        'default',
+        new Map([[outsideDir, { path: outsideDir, source: 'session' }]]),
+      )
+      const result = await executePermissionRequestHooksForSDK(
+        writeTool,
+        'blockwrites-sdk-remove-dir',
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(toolPermissionContext),
+        undefined,
+      )
+      expect(result?.behavior).toBe('deny')
+      if (result?.behavior === 'deny') {
+        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      }
+    } finally {
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('a forced ask is suppressed without an SDK prompt', async () => {
+    denyInsteadOfPrompting = true
+    try {
+      const io = new StructuredIO((async function* () {})())
+      let prompted = false
+      const canUseTool = io.createCanUseTool(() => {
+        prompted = true
+      })
+      const result = await canUseTool(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(permissionContext('default')),
+        {} as never,
+        'blockwrites-forced-ask',
+        { behavior: 'ask' as const } as never,
+      )
+      expect(prompted).toBe(false)
+      expect(result.behavior).toBe('deny')
+      if (result.behavior === 'deny') {
+        expect(result.message).toContain('denyInsteadOfPrompting')
+      }
+    } finally {
+      denyInsteadOfPrompting = false
+    }
+  })
+
+  test('a forced ask still reaches the SDK prompt when prompts are allowed', async () => {
+    const queued: string[] = []
+    let wake: (() => void) | undefined
+    const input = (async function* () {
+      for (;;) {
+        while (queued.length === 0) {
+          await new Promise<void>(resolve => {
+            wake = resolve
+          })
+        }
+        wake = undefined
+        yield queued.shift()!
+      }
+    })()
+    const io = new StructuredIO(input)
+    // Drive structuredInput so control_response routing resolves the
+    // pending can_use_tool request.
+    void (async () => {
+      for await (const _ of io.structuredInput) {
+        // drain
+      }
+    })()
+    let requestId: string | undefined
+    const canUseTool = io.createCanUseTool(details => {
+      requestId = details.request_id
+    })
+    const pending = canUseTool(
+      writeTool,
+      { file_path: join(projectDir, 'inside.txt') },
+      useContext(permissionContext('default')),
+      {} as never,
+      'blockwrites-forced-ask-prompt',
+      { behavior: 'ask' as const } as never,
+    )
+    while (requestId === undefined) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    queued.push(
+      JSON.stringify({
+        type: 'control_response',
+        response: {
+          request_id: requestId,
+          subtype: 'success',
+          response: {
+            behavior: 'allow',
+            updatedInput: { file_path: join(projectDir, 'inside.txt') },
+          },
+        },
+      }) + '\n',
+    )
+    wake?.()
+    const result = await pending
+    expect(result.behavior).toBe('allow')
+  })
+
+  test('denyInsteadOfPrompting suppresses the external permission_request path', async () => {
+    denyInsteadOfPrompting = true
+    try {
+      let emitted = false
+      let registered = false
+      const canUseTool = createExternalCanUseTool(
+        undefined,
+        async () => ({
+          behavior: 'deny' as const,
+          message: 'fallback unreached',
+          decisionReason: { type: 'other' as const, reason: 'unreached' },
+        }),
+        {
+          registerPendingPermission: async () => {
+            registered = true
+            return undefined as never
+          },
+          deletePendingPermission: () => {},
+        } as never,
+        () => {
+          emitted = true
+        },
+      )
+      const result = await canUseTool(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(permissionContext('default')),
+        {} as never,
+        'blockwrites-external-suppression',
+      )
+      expect(emitted).toBe(false)
+      expect(registered).toBe(false)
+      expect(result.behavior).toBe('deny')
+      if (result.behavior === 'deny') {
+        expect(result.message).toContain('denyInsteadOfPrompting')
+      }
+    } finally {
+      denyInsteadOfPrompting = false
     }
   })
 

@@ -1,0 +1,168 @@
+import { PassThrough } from 'node:stream'
+
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import React from 'react'
+
+// Hook mock registered before the useCanUseTool import so the permission
+// context resolves the stub: yields a PermissionRequest allow when set.
+let hookDecision: { behavior: 'allow' } | undefined
+const realHooks = await import(
+  `../utils/hooks.js?interactiveSuppressionActual=${Date.now()}-${Math.random()}`
+)
+mock.module('../utils/hooks.js', () => ({
+  ...realHooks,
+  executePermissionRequestHooks: async function* () {
+    if (hookDecision) {
+      yield { permissionRequestResult: hookDecision }
+    }
+  },
+}))
+
+const { getSessionId } = await import('../bootstrap/state.js')
+const { createRoot, Text } = await import('../ink.js')
+const { getDefaultAppState } = await import('../state/AppStateStore.js')
+const {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} = await import('../test/sharedMutationLock.js')
+const { DENY_INSTEAD_OF_PROMPTING_REASON } = await import(
+  '../utils/permissions/permissions.js'
+)
+const useCanUseTool = (await import('./useCanUseTool.js')).default
+
+import type { ToolUseConfirm } from '../components/permissions/PermissionRequest.js'
+import type { Tool, ToolUseContext } from '../Tool.js'
+import type { AssistantMessage } from '../types/message.js'
+import type { PermissionDecision } from '../utils/permissions/PermissionResult.js'
+import type { CanUseToolFn } from './useCanUseTool.js'
+
+let canUseTool: CanUseToolFn | undefined
+
+function HookProbe({
+  setQueue,
+}: {
+  setQueue: React.Dispatch<React.SetStateAction<ToolUseConfirm[]>>
+}) {
+  canUseTool = useCanUseTool(setQueue, () => {})
+  return React.createElement(Text, null, 'probe')
+}
+
+function createTestStreams() {
+  const stdout = new PassThrough()
+  const stdin = new PassThrough() as PassThrough & {
+    isTTY: boolean
+    setRawMode: (mode: boolean) => void
+    ref: () => void
+    unref: () => void
+  }
+  stdin.isTTY = true
+  stdin.setRawMode = () => {}
+  stdin.ref = () => {}
+  stdin.unref = () => {}
+  ;(stdout as unknown as { columns: number }).columns = 120
+  return { stdout, stdin }
+}
+
+const suppressionDeny = {
+  behavior: 'deny',
+  message: `Tool requires permission, but ${DENY_INSTEAD_OF_PROMPTING_REASON}`,
+  decisionReason: {
+    type: 'other',
+    reason: DENY_INSTEAD_OF_PROMPTING_REASON,
+  },
+} as unknown as PermissionDecision
+
+async function mount(): Promise<{
+  root: Awaited<ReturnType<typeof createRoot>>
+  canUseTool: CanUseToolFn
+}> {
+  let queue: ToolUseConfirm[] = []
+  const setQueue: React.Dispatch<React.SetStateAction<ToolUseConfirm[]>> =
+    update => {
+      queue = typeof update === 'function' ? update(queue) : update
+    }
+  const { stdout, stdin } = createTestStreams()
+  const root = await createRoot({
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+  root.render(React.createElement(HookProbe, { setQueue }))
+  await Bun.sleep(10)
+  if (!canUseTool) throw new Error('useCanUseTool did not mount')
+  return { root, canUseTool }
+}
+
+function context(): ToolUseContext {
+  const appState = getDefaultAppState()
+  return {
+    options: {
+      permissionSessionId: getSessionId(),
+      isNonInteractiveSession: false,
+      tools: [],
+    },
+    abortController: new AbortController(),
+    getAppState: () => appState,
+  } as unknown as ToolUseContext
+}
+
+const tool = {
+  name: 'SuppressionProbeTool',
+  description: async () => 'probe',
+  requiresUserInteraction: () => false,
+} as unknown as Tool
+
+const assistantMessage = {
+  message: { id: 'suppression-message' },
+} as unknown as AssistantMessage
+
+beforeEach(async () => {
+  await acquireSharedMutationLock('hooks/useCanUseTool.suppression.test.tsx')
+  canUseTool = undefined
+  hookDecision = undefined
+})
+
+afterEach(() => {
+  releaseSharedMutationLock()
+})
+
+test('a suppression denial lets a PermissionRequest hook answer on the interactive path', async () => {
+  const { root, canUseTool: fn } = await mount()
+  try {
+    hookDecision = { behavior: 'allow' }
+    const result = await fn(
+      tool,
+      {},
+      context(),
+      assistantMessage,
+      'interactive-suppression-hook',
+      suppressionDeny,
+    )
+    // The hook gets its chance before the denial stands, matching the
+    // headless and structured-IO ordering.
+    expect(result.behavior).toBe('allow')
+  } finally {
+    hookDecision = undefined
+    root.unmount()
+  }
+})
+
+test('the suppression denial stands on the interactive path when no hook decides', async () => {
+  const { root, canUseTool: fn } = await mount()
+  try {
+    const result = await fn(
+      tool,
+      {},
+      context(),
+      assistantMessage,
+      'interactive-suppression-nohook',
+      suppressionDeny,
+    )
+    expect(result.behavior).toBe('deny')
+    if (result.behavior === 'deny') {
+      expect(result.message).toContain('denyInsteadOfPrompting')
+    }
+  } finally {
+    root.unmount()
+  }
+})

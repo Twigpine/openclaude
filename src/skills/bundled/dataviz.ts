@@ -39,7 +39,7 @@ for (let i = 0; i < args.length; i++) {
   for (let j = i + 1; j < args.length; j++) {
     const r = ratio(luminance(args[i]), luminance(args[j]))
     const tag = r >= 4.5 ? 'AA ok' : r >= 3 ? 'large text only' : 'FAIL'
-    if (r < 3) failed++
+    if (r < 4.5) failed++
     console.log(args[i] + ' vs ' + args[j] + ': ' + r.toFixed(2) + ':1 ' + tag)
   }
 }
@@ -80,7 +80,7 @@ This skill ships a runnable validator. Run it with the palette's hex colors to c
 
 \`node <skill-base-dir>/validate-palette.mjs "#1f77b4" "#ff7f0e" ...\`
 
-Exit 0 means every pair clears AA-large-text (3:1); FAIL lines show pairs under 3:1. When it fails, adjust lightness or saturation and re-run.
+Exit 0 means every pair clears AA normal-text (4.5:1). Pairs between 3:1 and 4.5:1 are tagged 'large text only' but still fail the check; pairs under 3:1 are tagged FAIL. When it fails, adjust lightness or saturation and re-run.
 `
 
 export function registerDatavizSkill(): void {

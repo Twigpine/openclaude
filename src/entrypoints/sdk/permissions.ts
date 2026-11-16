@@ -14,6 +14,7 @@ import {
   checkWriteBoundaryForAskRule,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
+  suppressPromptIfConfigured,
 } from '../../utils/permissions/permissions.js'
 import {
   getEmptyToolPermissionContext,
@@ -389,6 +390,15 @@ export function createExternalCanUseTool(
     // No user callback — if host registered an onPermissionRequest callback,
     // call it directly and await external resolution with timeout.
     if (toolUseID && onPermissionRequest) {
+      // An external permission_request IS the prompt this setting exists to
+      // suppress; deny up front instead of asking the host.
+      const suppressionDeny = suppressPromptIfConfigured(tool, {
+        behavior: 'ask' as const,
+        message: `${tool.name} requires permission`,
+      })
+      if (suppressionDeny.behavior === 'deny') {
+        return suppressionDeny
+      }
       const requestId = randomUUID()
       const messageUuid = randomUUID()
 

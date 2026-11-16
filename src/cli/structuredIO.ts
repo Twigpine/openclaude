@@ -586,29 +586,36 @@ export class StructuredIO {
           assistantMessage,
           toolUseID,
         )
+      // A forced ask bypasses hasPermissionsToUseTool, so the suppression
+      // check has to run here: prompts disabled means this never reaches
+      // the SDK prompt.
+      const suppressedResult =
+        mainPermissionResult.behavior === 'ask'
+          ? suppressPromptIfConfigured(tool, mainPermissionResult)
+          : mainPermissionResult
       // A suppression denial exists only because prompts are disabled. A
       // PermissionRequest hook may still answer it (the headless path
       // already runs hooks before suppressing), so let it through to the
       // hook pass instead of returning immediately.
       const isSuppressionDeny =
-        mainPermissionResult.behavior === 'deny' &&
-        mainPermissionResult.decisionReason?.type === 'other' &&
-        mainPermissionResult.decisionReason.reason ===
+        suppressedResult.behavior === 'deny' &&
+        suppressedResult.decisionReason?.type === 'other' &&
+        suppressedResult.decisionReason.reason ===
           DENY_INSTEAD_OF_PROMPTING_REASON
       // If the tool is allowed or denied, return the result
       if (
-        mainPermissionResult.behavior === 'allow' ||
-        (mainPermissionResult.behavior === 'deny' && !isSuppressionDeny)
+        suppressedResult.behavior === 'allow' ||
+        (suppressedResult.behavior === 'deny' && !isSuppressionDeny)
       ) {
-        return mainPermissionResult
+        return suppressedResult
       }
       const suggestions =
-        'suggestions' in mainPermissionResult
-          ? mainPermissionResult.suggestions
+        'suggestions' in suppressedResult
+          ? suppressedResult.suggestions
           : undefined
       const blockedPath =
-        'blockedPath' in mainPermissionResult
-          ? mainPermissionResult.blockedPath
+        'blockedPath' in suppressedResult
+          ? suppressedResult.blockedPath
           : undefined
 
       // Run PermissionRequest hooks in parallel with the SDK permission
@@ -639,7 +646,7 @@ export class StructuredIO {
           // Prompts are disabled, so hooks are the only responder left.
           // If no hook decides, the suppression denial stands.
           const hookResult = await hookPromise
-          return hookResult.decision ?? mainPermissionResult
+          return hookResult.decision ?? suppressedResult
         }
 
         // Start the SDK permission prompt immediately (don't wait for hooks)
@@ -655,7 +662,7 @@ export class StructuredIO {
             permission_suggestions: suggestions,
             blocked_path: blockedPath,
             decision_reason: serializeDecisionReason(
-              mainPermissionResult.decisionReason,
+              suppressedResult.decisionReason,
             ),
             tool_use_id: toolUseID,
             agent_id: toolUseContext.agentId,
@@ -928,16 +935,26 @@ export async function executePermissionRequestHooksForSDK(
             toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
         )
         if (permissionUpdates.length > 0) {
-          let updatedContext = toolUseContext.getAppState().toolPermissionContext
-          // Update permission context via setAppState
-          toolUseContext.setAppState(prev => {
-            updatedContext = applyPermissionUpdatesToLiveContext(
-              prev.toolPermissionContext,
-              permissionUpdates,
-            )
-            if (prev.toolPermissionContext === updatedContext) return prev
-            return { ...prev, toolPermissionContext: updatedContext }
-          })
+          const updatedContext = applyPermissionUpdatesToLiveContext(
+            toolUseContext.getAppState().toolPermissionContext,
+            permissionUpdates,
+          )
+          // A hook can remove a working directory while allowing a write
+          // under it. Revalidate the boundary against the updated context
+          // before the update is applied or persisted.
+          const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
+            tool,
+            finalInput,
+            updatedContext,
+          )
+          if (postUpdateWriteBoundary) {
+            return postUpdateWriteBoundary
+          }
+          toolUseContext.setAppState(prev =>
+            prev.toolPermissionContext === updatedContext
+              ? prev
+              : { ...prev, toolPermissionContext: updatedContext },
+          )
           persistPermissionUpdates(permissionUpdates)
         }
 
