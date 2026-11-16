@@ -596,6 +596,98 @@ describe('Bash prompt rules when the classifier is unavailable', () => {
     }
   })
 
+  // A literal subcommand deny must beat the unavailable fallback ask:
+  // `echo ok && git push` with Bash(git push:*) denied is a deny, not an
+  // approvable prompt. Regression: the fallback used to return before the
+  // subcommand deny checks ran.
+  test('literal subcommand deny wins over the unavailable fallback ask', async () => {
+    sideQueryImpl = async () => {
+      throw new Error('provider down')
+    }
+    const result = await bashToolHasPermission(
+      { command: 'echo ok && git push' },
+      makeToolUseContext({
+        ...getEmptyToolPermissionContext(),
+        alwaysDenyRules: {
+          projectSettings: [
+            'Bash(prompt: git commands)',
+            'Bash(git push:*)',
+          ],
+        },
+      }),
+    )
+    // Both feature directions deny: the literal rule applies whether or not
+    // the prompt rule was evaluated.
+    expect(result.behavior).toBe('deny')
+    expect(sideQueryCalls).toBe(classifierEnabled ? 1 : 0)
+  })
+
+  // The unavailable fallback ask must not be auto-approvable: it carries no
+  // pendingClassifierCheck, so a matching prompt allow rule cannot silently
+  // approve a command the unevaluated deny rule was meant to hold.
+  test('unavailable fallback ask is not eligible for allow auto-approval', async () => {
+    sideQueryImpl = async () => {
+      throw new Error('provider down')
+    }
+    const result = await bashToolHasPermission(
+      { command: 'git status' },
+      makeToolUseContext({
+        ...getEmptyToolPermissionContext(),
+        alwaysAllowRules: {
+          projectSettings: ['Bash(prompt: routine git inspection)'],
+        },
+        alwaysDenyRules: {
+          projectSettings: ['Bash(prompt: git commands)'],
+        },
+      }),
+    )
+    if (result.behavior === 'ask') {
+      expect(result.pendingClassifierCheck).toBeUndefined()
+    }
+    if (classifierEnabled) {
+      expect(result.behavior).toBe('ask')
+      expect(result.decisionReason).toMatchObject({
+        type: 'other',
+        reason: expect.stringContaining('could not be evaluated'),
+      })
+      expect(sideQueryCalls).toBe(1)
+    }
+  })
+
+  // Same precedence for the confident-ask path: a literal subcommand deny
+  // wins over a high-confidence prompt-ask match.
+  test('literal subcommand deny wins over a confident prompt-ask match', async () => {
+    sideQueryImpl = async () => ({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'report_bash_rule_match',
+          id: 'tu_1',
+          input: {
+            reasoning: 'compound command runs git',
+            matched_index: 0,
+            confidence: 'high',
+            reason: 'git commands',
+          },
+        },
+      ],
+    })
+    const result = await bashToolHasPermission(
+      { command: 'echo ok && git push' },
+      makeToolUseContext({
+        ...getEmptyToolPermissionContext(),
+        alwaysDenyRules: {
+          projectSettings: ['Bash(git push:*)'],
+        },
+        alwaysAskRules: {
+          projectSettings: ['Bash(prompt: git commands)'],
+        },
+      }),
+    )
+    expect(result.behavior).toBe('deny')
+    expect(sideQueryCalls).toBe(classifierEnabled ? 1 : 0)
+  })
+
   test('evaluated non-match still falls through to literal allow', async () => {
     sideQueryImpl = async () => ({
       content: [
