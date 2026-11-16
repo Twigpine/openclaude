@@ -134,6 +134,7 @@ const featureFlags: Record<string, boolean> = {
   CONVERSATION_ARC: true,             // Conversation arc tracking (goals/decisions/phases)
   MULTI_TURN_CONTEXT: true,           // Multi-turn context tracking across tool cycles
   UNATTENDED_RETRY: true,             // Usage-limit-aware persistent retry for unattended runs; opt-in via CLAUDE_CODE_UNATTENDED_RETRY or CLAUDE_CODE_RETRY_WATCHDOG at runtime
+  TREE_SITTER_BASH: true,             // AST-based bash command analysis (pure-TS parser, no native dep)
 }
 
 // ── Pre-process: replace feature() calls with boolean literals ──────
