@@ -78,6 +78,7 @@ const originalEnv = {
   OPENCLAUDE_CONFIG_DIR: process.env.OPENCLAUDE_CONFIG_DIR,
   CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
   XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
 }
 
 describe('ensureDeepLinkProtocolRegistered opt-out', () => {
@@ -101,6 +102,7 @@ describe('ensureDeepLinkProtocolRegistered opt-out', () => {
     process.env.OPENCLAUDE_CONFIG_DIR = configDir
     process.env.CLAUDE_CONFIG_DIR = configDir
     process.env.XDG_DATA_HOME = dataDir
+    process.env.XDG_CONFIG_HOME = join(tempDir, 'xdg-config')
     resetSettingsCache()
   })
 
