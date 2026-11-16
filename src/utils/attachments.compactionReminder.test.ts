@@ -128,6 +128,8 @@ describe('getCompactionReminderAttachment', () => {
   })
 
   test('stays quiet on models without a 1M context window', () => {
+    process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '40000'
+
     expect(
       getCompactionReminderAttachment([userMessage(10_000)], 'gpt-4o'),
     ).toEqual([])
