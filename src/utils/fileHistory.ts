@@ -13,7 +13,7 @@ import {
 import { dirname, isAbsolute, join, relative } from 'path'
 import {
   getIsNonInteractiveSession,
-  getOriginalCwd,
+  getProjectRoot,
   getSessionId,
 } from 'src/bootstrap/state.js'
 import { logEvent } from 'src/services/analytics/index.js'
@@ -865,7 +865,10 @@ function maybeShortenFilePath(filePath: string): string {
   if (!isAbsolute(filePath)) {
     return filePath
   }
-  const cwd = getOriginalCwd()
+  // Relative keys must stay anchored to the session's project root: a
+  // mid-session /cd moves originalCwd, and keys written before the move
+  // would otherwise resolve against the wrong directory on rewind.
+  const cwd = getProjectRoot()
   if (filePath.startsWith(cwd)) {
     return relative(cwd, filePath)
   }
@@ -876,7 +879,7 @@ function maybeExpandFilePath(filePath: string): string {
   if (isAbsolute(filePath)) {
     return filePath
   }
-  return join(getOriginalCwd(), filePath)
+  return join(getProjectRoot(), filePath)
 }
 
 /**

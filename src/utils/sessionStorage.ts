@@ -25,6 +25,7 @@ import {
 import {
   getOriginalCwd,
   getPlanSlugCache,
+  getProjectRoot,
   getPromptId,
   getReplayIndexBuilder,
   getSessionId,
@@ -566,7 +567,7 @@ export function isEphemeralToolProgress(dataType: unknown): boolean {
 }
 
 export function getTranscriptPath(): string {
-  const projectDir = getSessionProjectDir() ?? getProjectDir(getOriginalCwd())
+  const projectDir = getSessionProjectDir() ?? getProjectDir(getProjectRoot())
   return join(projectDir, `${getSessionId()}.jsonl`)
 }
 
@@ -586,7 +587,7 @@ export function getTranscriptPathForSession(sessionId: string): string {
   if (sessionId === getSessionId()) {
     return getTranscriptPath()
   }
-  const projectDir = getProjectDir(getOriginalCwd())
+  const projectDir = getProjectDir(getProjectRoot())
   return join(projectDir, `${sessionId}.jsonl`)
 }
 
@@ -614,7 +615,7 @@ export function getAgentTranscriptPath(agentId: AgentId): string {
   // Same sessionProjectDir consistency as getTranscriptPathForSession —
   // subagent transcripts live under the session dir, so if the session
   // transcript is at sessionProjectDir, subagent transcripts are too.
-  const projectDir = getSessionProjectDir() ?? getProjectDir(getOriginalCwd())
+  const projectDir = getSessionProjectDir() ?? getProjectDir(getProjectRoot())
   const sessionId = getSessionId()
   const subdir = agentTranscriptSubdirs.get(agentId)
   const base = subdir
@@ -722,7 +723,7 @@ export type RemoteAgentMetadata = {
 function getRemoteAgentsDir(): string {
   // Same sessionProjectDir fallback as getAgentTranscriptPath — the project
   // dir (containing the .jsonl), not the session dir, so sessionId is joined.
-  const projectDir = getSessionProjectDir() ?? getProjectDir(getOriginalCwd())
+  const projectDir = getSessionProjectDir() ?? getProjectDir(getProjectRoot())
   return join(projectDir, getSessionId(), 'remote-agents')
 }
 
@@ -801,7 +802,7 @@ export async function listRemoteAgentMetadata(): Promise<
 }
 
 export function sessionIdExists(sessionId: string): boolean {
-  const projectDir = getProjectDir(getOriginalCwd())
+  const projectDir = getProjectDir(getProjectRoot())
   const sessionFile = join(projectDir, `${sessionId}.jsonl`)
   const fs = getFsImplementation()
   try {
@@ -2600,7 +2601,7 @@ export async function hydrateRemoteSession(
     }
 
     // Ensure the project directory and session file exist
-    const projectDir = getProjectDir(getOriginalCwd())
+    const projectDir = getProjectDir(getProjectRoot())
     await mkdir(projectDir, { recursive: true, mode: 0o700 })
 
     const sessionFile = getTranscriptPathForSession(sessionId)
@@ -2654,7 +2655,7 @@ export async function hydrateFromCCRv2InternalEvents(
       return false
     }
 
-    const projectDir = getProjectDir(getOriginalCwd())
+    const projectDir = getProjectDir(getProjectRoot())
     await mkdir(projectDir, { recursive: true, mode: 0o700 })
 
     // Commit the foreground transcript before reporting hydration success.
@@ -5169,7 +5170,7 @@ async function loadSessionFile(sessionId: UUID): Promise<{
   contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
 }> {
   const sessionFile = join(
-    getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
+    getSessionProjectDir() ?? getProjectDir(getProjectRoot()),
     `${sessionId}.jsonl`,
   )
   return loadTranscriptFile(sessionFile)
@@ -5669,7 +5670,7 @@ export async function loadAllSubagentTranscriptsFromDisk(): Promise<{
   [agentId: string]: Message[]
 }> {
   const subagentsDir = join(
-    getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
+    getSessionProjectDir() ?? getProjectDir(getProjectRoot()),
     getSessionId(),
     'subagents',
   )

@@ -6,14 +6,21 @@ import {
   getAdditionalDirectoriesForClaudeMd,
   getCwdState,
   getOriginalCwd,
+  getProjectRoot,
   setAdditionalDirectoriesForClaudeMd,
   setCwdState,
   setOriginalCwd,
+  setProjectRoot,
 } from '../../bootstrap/state.js'
 import { getEmptyToolPermissionContext } from '../../Tool.js'
 import type { LocalJSXCommandContext } from '../../types/command.js'
 import { getCwd } from '../../utils/cwd.js'
-import { allWorkingDirectories } from '../../utils/permissions/filesystem.js'
+import {
+  allWorkingDirectories,
+  getFileReadIgnorePatterns,
+} from '../../utils/permissions/filesystem.js'
+import { applyPermissionUpdate } from '../../utils/permissions/PermissionUpdate.js'
+import { getTranscriptPath } from '../../utils/sessionStorage.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -24,6 +31,7 @@ describe('/cd', () => {
   let sandbox: string
   let savedCwdState: string
   let savedOriginalCwd: string
+  let savedProjectRoot: string
   let savedAdditionalDirs: string[]
   let savedProcessCwd: string
   let latestPermissionContext: ReturnType<
@@ -48,11 +56,13 @@ describe('/cd', () => {
     savedProcessCwd = process.cwd()
     savedCwdState = getCwdState()
     savedOriginalCwd = getOriginalCwd()
+    savedProjectRoot = getProjectRoot()
     savedAdditionalDirs = getAdditionalDirectoriesForClaudeMd()
     latestPermissionContext = getEmptyToolPermissionContext()
     process.chdir(sandbox)
     setCwdState(sandbox)
     setOriginalCwd(sandbox)
+    setProjectRoot(sandbox)
   })
 
   afterEach(() => {
@@ -60,6 +70,7 @@ describe('/cd', () => {
       process.chdir(savedProcessCwd)
       setCwdState(savedCwdState)
       setOriginalCwd(savedOriginalCwd)
+      setProjectRoot(savedProjectRoot)
       setAdditionalDirectoriesForClaudeMd(savedAdditionalDirs)
       rmSync(sandbox, { recursive: true, force: true })
     } finally {
@@ -83,8 +94,13 @@ describe('/cd', () => {
     if (result.type === 'text') expect(result.value).toContain(sub)
     expect(getCwd()).toBe(sub)
     expect(process.cwd()).toBe(sub)
+    // The working root retargets; the project root does not.
     expect(getOriginalCwd()).toBe(sub)
-    expect(getAdditionalDirectoriesForClaudeMd()).toEqual([])
+    expect(getProjectRoot()).toBe(sandbox)
+    // The sandbox reads this list for allowWrite, so the retained previous
+    // root must be mirrored into it (the subdirectory is covered by that
+    // root, so it does not need its own entry).
+    expect(getAdditionalDirectoriesForClaudeMd()).toEqual([sandbox])
     const workingDirs = allWorkingDirectories(latestPermissionContext)
     expect(workingDirs).toContain(sub)
     expect(workingDirs).toContain(sandbox)
@@ -118,6 +134,67 @@ describe('/cd', () => {
     } finally {
       rmSync(outside, { recursive: true, force: true })
     }
+  })
+
+  it('keeps session rules and the transcript bound to the project root', async () => {
+    const sub = join(sandbox, 'sub')
+    mkdirSync(sub)
+    const ctx = context()
+
+    // A session-sourced deny rule written before the move, and the path the
+    // materialized transcript already lives at, are session records: they
+    // must not retarget when the working root changes.
+    ctx.setAppState(prev => ({
+      ...prev,
+      toolPermissionContext: applyPermissionUpdate(prev.toolPermissionContext, {
+        type: 'addRules',
+        behavior: 'deny',
+        rules: [{ toolName: 'Read', ruleContent: '/secret.txt' }],
+        destination: 'session',
+      }),
+    }))
+    const denyBefore = getFileReadIgnorePatterns(latestPermissionContext)
+    expect(denyBefore.size).toBeGreaterThan(0)
+    const transcriptBefore = getTranscriptPath()
+
+    const result = await call('sub', ctx)
+    expect(result.type).toBe('text')
+
+    expect(getFileReadIgnorePatterns(latestPermissionContext)).toEqual(
+      denyBefore,
+    )
+    expect(getTranscriptPath()).toBe(transcriptBefore)
+    // The working root still moves; only the bound records stay anchored.
+    expect(getOriginalCwd()).toBe(sub)
+    expect(getProjectRoot()).toBe(sandbox)
+  })
+
+  it('preserves a permission update made while validation was awaiting', async () => {
+    const sub = join(sandbox, 'sub')
+    mkdirSync(sub)
+    const ctx = context()
+    // A rule added by a concurrent writer between validation and setAppState
+    // must survive the /cd update.
+    await call('sub', {
+      ...ctx,
+      setAppState: updater => {
+        ctx.setAppState(prev => ({
+          ...prev,
+          toolPermissionContext: applyPermissionUpdate(
+            prev.toolPermissionContext,
+            {
+              type: 'addRules',
+              behavior: 'deny',
+              rules: [{ toolName: 'Read', ruleContent: '/concurrent.txt' }],
+              destination: 'session',
+            },
+          ),
+        }))
+        ctx.setAppState(updater)
+      },
+    } as LocalJSXCommandContext)
+    const deny = getFileReadIgnorePatterns(latestPermissionContext)
+    expect([...deny.values()].flat()).toContain('/concurrent.txt')
   })
 
   it('errors when the path does not exist', async () => {

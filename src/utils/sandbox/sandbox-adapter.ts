@@ -20,18 +20,26 @@ import {
   SandboxRuntimeConfigSchema,
   SandboxViolationStore,
 } from '@anthropic-ai/sandbox-runtime'
-import { rmSync, statSync } from 'fs'
+import { realpathSync, rmSync, statSync } from 'fs'
 import { lstat, readFile } from 'fs/promises'
 import { memoize } from 'lodash-es'
 import { homedir } from 'os'
-import { dirname, join, resolve, sep } from 'path'
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  resolve,
+  sep,
+} from 'path'
 import {
   getAdditionalDirectoriesForClaudeMd,
   getCwdState,
   getOriginalCwd,
+  getProjectRoot,
 } from '../../bootstrap/state.js'
 import { logForDebugging } from '../debug.js'
-import { expandPath } from '../path.js'
+import { expandPath, isPathInsideDir } from '../path.js'
 import { getPlatform, type Platform } from '../platform.js'
 import { settingsChangeDetector } from '../settings/changeDetector.js'
 import { SETTING_SOURCES, type SettingSource } from '../settings/constants.js'
@@ -254,7 +262,14 @@ export function convertToSandboxRuntimeConfig(
   // This handles the case where the user has cd'd to a different directory
   const cwd = getCwdState()
   const originalCwd = getOriginalCwd()
-  denyWrite.push(...getLegacyClaudeConfigDenyWritePaths(originalCwd))
+  const projectRoot = getProjectRoot()
+  // The session's config lives at the project root; originalCwd follows the
+  // working root after /cd, so denyWrite needs both to keep covering the
+  // directory the session's settings actually came from.
+  denyWrite.push(...getLegacyClaudeConfigDenyWritePaths(projectRoot))
+  if (projectRoot !== originalCwd) {
+    denyWrite.push(...getLegacyClaudeConfigDenyWritePaths(originalCwd))
+  }
   denyWrite.push(...getLegacyClaudeConfigDenyWritePaths(homedir()))
   if (process.env.CLAUDE_CONFIG_DIR) {
     denyWrite.push(resolve(process.env.CLAUDE_CONFIG_DIR))
@@ -269,8 +284,11 @@ export function convertToSandboxRuntimeConfig(
   // .openclaude/agents but not .openclaude/skills. Skills have the same privilege level
   // (auto-discovered, auto-loaded, full Claude capabilities) so they need the
   // same OS-level sandbox protection.
-  denyWrite.push(resolve(originalCwd, '.openclaude', 'skills'))
-  if (cwd !== originalCwd) {
+  denyWrite.push(resolve(projectRoot, '.openclaude', 'skills'))
+  if (originalCwd !== projectRoot) {
+    denyWrite.push(resolve(originalCwd, '.openclaude', 'skills'))
+  }
+  if (cwd !== originalCwd && cwd !== projectRoot) {
     denyWrite.push(resolve(cwd, '.openclaude', 'skills'))
   }
 
@@ -286,7 +304,8 @@ export function convertToSandboxRuntimeConfig(
   // unsandboxed git runs; inside the command, git is itself sandboxed.
   bareGitRepoScrubPaths.length = 0
   const bareGitRepoFiles = ['HEAD', 'objects', 'refs', 'hooks', 'config']
-  for (const dir of cwd === originalCwd ? [originalCwd] : [originalCwd, cwd]) {
+  const bareGitDirs = new Set([projectRoot, originalCwd, cwd])
+  for (const dir of bareGitDirs) {
     for (const gitFile of bareGitRepoFiles) {
       const p = resolve(dir, gitFile)
       try {
@@ -412,6 +431,12 @@ let settingsSubscriptionCleanup: (() => void) | undefined
 // undefined = not yet resolved; null = not a worktree.
 let worktreeMainRepoPath: string | null | undefined
 
+// The worktree root (the directory whose .git file earned the allowance
+// above). A failed re-detection may keep the cached grant only while the cwd
+// still sits inside this owner — after /cd into a different worktree a stale
+// grant must not carry across.
+let worktreeAllowanceOwner: string | null = null
+
 // Detection writes are generation-gated: initialize() runs unawaited, so a
 // slow startup lookup could otherwise overwrite the newer result a /cd
 // refresh already stored.
@@ -443,6 +468,14 @@ function scrubBareGitRepoFiles(): void {
   }
 }
 
+type WorktreeDetection = {
+  // Directory whose .git file established worktree membership: the owner a
+  // cached allowance may be kept for when a later re-detection fails.
+  worktreeRoot: string
+  // Main repo path granted write access (the worktree's .git lives inside it).
+  mainRepoPath: string
+}
+
 /**
  * Detect if cwd is inside a git worktree and resolve the main repo path.
  * Called once during initialize() and cached for the session, then refreshed
@@ -452,11 +485,39 @@ function scrubBareGitRepoFiles(): void {
  * containing "gitdir: ..."; a .git directory means a normal repo root, so
  * both return null. A lookup that errors (e.g. EACCES) returns
  * DETECTION_FAILED instead so callers can keep a still-valid cached path.
+ *
+ * Ascent honors GIT_CEILING_DIRECTORIES the same way findGitRootImpl does,
+ * and starts from the canonical (symlink-resolved) cwd so the returned owner
+ * can be containment-checked against other canonical cwds.
  */
 async function detectWorktreeMainRepoPath(
   cwd: string,
-): Promise<string | null | typeof DETECTION_FAILED> {
+): Promise<WorktreeDetection | null | typeof DETECTION_FAILED> {
   let dir = cwd
+  const ceilings = new Set<string>()
+  let resolveSymlinks = true
+  for (const entry of (process.env.GIT_CEILING_DIRECTORIES ?? '').split(
+    delimiter,
+  )) {
+    if (!entry) {
+      resolveSymlinks = false
+    } else if (isAbsolute(entry)) {
+      try {
+        ceilings.add(resolveSymlinks ? realpathSync(entry) : entry)
+      } catch {
+        // Git ignores ceiling entries that cannot be resolved.
+      }
+    }
+  }
+  try {
+    // Canonicalize the start so the owner check in
+    // refreshWorktreeMainRepoPath compares canonical paths on both sides.
+    // With ceilings set, realpath also matches git's own discovery.
+    dir = realpathSync(dir)
+  } catch {
+    // Keep the lexical path for directories that cannot be resolved.
+  }
+
   while (true) {
     const gitPath = join(dir, '.git')
     let stat
@@ -470,9 +531,10 @@ async function detectWorktreeMainRepoPath(
       stat = null
     }
     if (stat === null) {
-      // No .git at this level; keep ascending toward the filesystem root
+      // No .git at this level; keep ascending unless the parent is a ceiling.
+      // A ceiling excludes ascent into that directory, never the start.
       const parent = dirname(dir)
-      if (parent === dir) {
+      if (parent === dir || ceilings.has(parent)) {
         return null
       }
       dir = parent
@@ -495,7 +557,10 @@ async function detectWorktreeMainRepoPath(
       const marker = `${sep}.git${sep}worktrees${sep}`
       const markerIndex = gitdir.lastIndexOf(marker)
       if (markerIndex > 0) {
-        return gitdir.substring(0, markerIndex)
+        return {
+          worktreeRoot: dir,
+          mainRepoPath: gitdir.substring(0, markerIndex),
+        }
       }
       return null
     } catch (error) {
@@ -844,7 +909,9 @@ async function initialize(
           // A failed lookup leaves the cache undefined so a later refresh
           // can retry; it must not record null as a definitive answer.
           worktreeMainRepoPath =
-            detected === DETECTION_FAILED ? undefined : detected
+            detected === DETECTION_FAILED ? undefined : (detected?.mainRepoPath ?? null)
+          worktreeAllowanceOwner =
+            detected === DETECTION_FAILED ? null : (detected?.worktreeRoot ?? null)
         }
       }
 
@@ -894,12 +961,32 @@ function refreshConfig(): void {
 async function refreshWorktreeMainRepoPath(cwd: string): Promise<void> {
   const generation = ++worktreeMainRepoPathGeneration
   const detected = await detectWorktreeMainRepoPath(cwd)
-  // A superseded or failed lookup keeps the previous value: an older result
-  // must not overwrite a newer one, and a failed lookup must not clear a
-  // still-valid allowance.
-  if (generation === worktreeMainRepoPathGeneration && detected !== DETECTION_FAILED) {
-    worktreeMainRepoPath = detected
+  // A superseded lookup keeps the previous value: an older result must not
+  // overwrite a newer one.
+  if (generation !== worktreeMainRepoPathGeneration) {
+    return
   }
+  if (detected === DETECTION_FAILED) {
+    // A failed lookup must not clear a still-valid allowance — but only while
+    // the cwd is still inside the worktree that earned it. After moving to a
+    // different worktree, a stale grant must not carry across.
+    let canonicalCwd = cwd
+    try {
+      canonicalCwd = realpathSync(cwd)
+    } catch {
+      // Keep the lexical path for directories that cannot be resolved.
+    }
+    if (
+      worktreeAllowanceOwner === null ||
+      !isPathInsideDir(canonicalCwd, worktreeAllowanceOwner)
+    ) {
+      worktreeMainRepoPath = null
+      worktreeAllowanceOwner = null
+    }
+    return
+  }
+  worktreeMainRepoPath = detected?.mainRepoPath ?? null
+  worktreeAllowanceOwner = detected?.worktreeRoot ?? null
 }
 
 /**
@@ -910,6 +997,7 @@ async function reset(): Promise<void> {
   settingsSubscriptionCleanup?.()
   settingsSubscriptionCleanup = undefined
   worktreeMainRepoPath = undefined
+  worktreeAllowanceOwner = null
   // Invalidate any detection still in flight so it cannot write post-reset.
   worktreeMainRepoPathGeneration++
   bareGitRepoScrubPaths.length = 0
