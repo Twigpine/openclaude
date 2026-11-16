@@ -112,14 +112,14 @@ export async function fileHistoryTrackEdit(
     return
   }
   // A checkpoint restored from a legacy log may carry this file under an
-  // unprefixed key. Reuse that identity only when the key can only denote
-  // this file: tracking './x' separately for the same file would run
+  // unprefixed key. Reuse that identity only when it provably denotes this
+  // file: tracking './x' separately for the same file would run
   // createBackup(filePath, 1), overwriting the existing v1 backup file and
-  // destroying the original contents rewind needs. When a same-named file
-  // exists under the post-/cd working root the legacy anchor is unknowable
-  // (the key may have tracked that file, not this one), so keep the './'
-  // identity distinct; its backup name derives from this file's path and
-  // does not collide.
+  // destroying the original contents rewind needs. A same-named file under
+  // the post-/cd working root makes the anchor ambiguous; there the v1
+  // backup name decides — it derives from the source file's absolute path,
+  // so a match proves the legacy key tracked this file. Different names
+  // mean different files, and keeping './' cannot collide.
   if (
     trackingPath.startsWith('./') &&
     !mostRecent.trackedFileBackups[trackingPath]
@@ -128,7 +128,10 @@ export async function fileHistoryTrackEdit(
     const ambiguousAnchor =
       getOriginalCwd() !== getProjectRoot() &&
       existsSync(join(getOriginalCwd(), legacyKey))
-    if (mostRecent.trackedFileBackups[legacyKey] && !ambiguousAnchor) {
+    const legacyBackup = mostRecent.trackedFileBackups[legacyKey]
+    const sameFileBackup =
+      legacyBackup?.backupFileName === getBackupFileName(filePath, 1)
+    if (legacyBackup && (!ambiguousAnchor || sameFileBackup)) {
       trackingPath = legacyKey
     }
   }

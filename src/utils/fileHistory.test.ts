@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { createHash } from 'crypto'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -167,5 +168,33 @@ describe('fileHistory project-root anchoring', () => {
         'utf8',
       ),
     ).toBe('project content')
+  })
+
+  it('reuses a legacy key for the same project file despite the ambiguous anchor', async () => {
+    // The legacy checkpoint tracked the project-root file.txt itself.
+    // A same-named file under the working root makes the anchor ambiguous,
+    // but the v1 backup name derives from the absolute path, so a match
+    // proves the key tracked this file and reuse is safe: a './' twin
+    // would overwrite that very backup blob.
+    const projectFile = join(projectRoot, 'file.txt')
+    writeFileSync(projectFile, 'edited content')
+    writeFileSync(join(workRoot, 'file.txt'), 'working-root content')
+    const backupName = `${createHash('sha256').update(projectFile).digest('hex').slice(0, 16)}@v1`
+    const backupDir = join(root, 'config', 'file-history', getSessionId())
+    mkdirSync(backupDir, { recursive: true })
+    writeFileSync(join(backupDir, backupName), 'original content')
+    latest.trackedFiles.add('file.txt')
+    latest.snapshots[0].trackedFileBackups['file.txt'] = {
+      backupFileName: backupName,
+      version: 1,
+      backupTime: new Date(),
+    }
+
+    await fileHistoryTrackEdit(stateUpdater, projectFile, 'm3' as never)
+
+    expect(latest.snapshots.at(-1)!.trackedFileBackups['./file.txt']).toBeUndefined()
+    expect(readFileSync(join(backupDir, backupName), 'utf8')).toBe(
+      'original content',
+    )
   })
 })

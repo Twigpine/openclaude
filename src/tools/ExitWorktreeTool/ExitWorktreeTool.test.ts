@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -11,7 +11,11 @@ import {
   setProjectRoot,
 } from '../../bootstrap/state.js'
 import { setCwd } from '../../utils/Shell.js'
-import { restoreWorktreeForResume } from '../../utils/sessionRestore.js'
+import * as hooksConfigSnapshot from '../../utils/hooks/hooksConfigSnapshot.js'
+import {
+  exitRestoredWorktree,
+  restoreWorktreeForResume,
+} from '../../utils/sessionRestore.js'
 import {
   getClaudeConfigHomeDirOverrideForTesting,
   setClaudeConfigHomeDirForTesting,
@@ -110,18 +114,31 @@ describe('ExitWorktreeTool startup-worktree ownership', () => {
     setOriginalCwd(originalRoot)
     setProjectRoot(originalRoot)
 
-    restoreWorktreeForResume(session())
+    const hooksSpy = spyOn(
+      hooksConfigSnapshot,
+      'updateHooksConfigSnapshot',
+    )
+    try {
+      restoreWorktreeForResume(session())
 
-    expect(getOriginalCwd()).toBe(worktreePath)
-    expect(getProjectRoot()).toBe(worktreePath)
-    const restored = getCurrentWorktreeSession()
-    expect(restored).not.toBeNull()
-    expect(worktreeSessionOwnsProjectRoot(restored!)).toBe(true)
+      expect(getOriginalCwd()).toBe(worktreePath)
+      expect(getProjectRoot()).toBe(worktreePath)
+      // Owning the project root means re-reading hooks for the new root,
+      // mirroring setup.ts's --worktree block.
+      expect(hooksSpy).toHaveBeenCalledTimes(1)
+      const restored = getCurrentWorktreeSession()
+      expect(restored).not.toBeNull()
+      expect(worktreeSessionOwnsProjectRoot(restored!)).toBe(true)
 
-    restoreSessionToOriginalCwd(originalRoot, worktreeSessionOwnsProjectRoot(restored!))
-
-    expect(getOriginalCwd()).toBe(originalRoot)
-    expect(getProjectRoot()).toBe(originalRoot)
+      // The mid-session /resume undo path must also refresh so hooks do not
+      // stay bound to the abandoned worktree root.
+      exitRestoredWorktree()
+      expect(hooksSpy).toHaveBeenCalledTimes(2)
+      expect(getOriginalCwd()).toBe(originalRoot)
+      expect(getProjectRoot()).toBe(originalRoot)
+    } finally {
+      hooksSpy.mockRestore()
+    }
   })
 
   it('keeps projectRoot on the launch root when resuming a mid-session worktree', () => {
@@ -131,11 +148,21 @@ describe('ExitWorktreeTool startup-worktree ownership', () => {
     const midSession = session()
     delete midSession.projectRootIsWorktree
 
-    restoreWorktreeForResume(midSession)
+    const hooksSpy = spyOn(
+      hooksConfigSnapshot,
+      'updateHooksConfigSnapshot',
+    )
+    try {
+      restoreWorktreeForResume(midSession)
 
-    expect(getOriginalCwd()).toBe(worktreePath)
-    expect(getProjectRoot()).toBe(originalRoot)
-    expect(getCurrentWorktreeSession()).not.toBeNull()
-    expect(worktreeSessionOwnsProjectRoot(getCurrentWorktreeSession()!)).toBe(false)
+      expect(getOriginalCwd()).toBe(worktreePath)
+      expect(getProjectRoot()).toBe(originalRoot)
+      // No root move, no hooks refresh.
+      expect(hooksSpy).not.toHaveBeenCalled()
+      expect(getCurrentWorktreeSession()).not.toBeNull()
+      expect(worktreeSessionOwnsProjectRoot(getCurrentWorktreeSession()!)).toBe(false)
+    } finally {
+      hooksSpy.mockRestore()
+    }
   })
 })

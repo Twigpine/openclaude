@@ -9,6 +9,12 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+import {
+  getCwdState,
+  getProjectRoot,
+  setCwdState,
+  setProjectRoot,
+} from '../../bootstrap/state.js'
 import { call } from './reload-skills.js'
 
 const context = {} as LocalJSXCommandContext
@@ -79,6 +85,62 @@ describe('/reload-skills', () => {
     if (result.type === 'text') {
       expect(result.value).toContain('1 removed')
       expect(result.value).toContain('skill-gone')
+    }
+  })
+
+  it('scans project skills from the project root after /cd', async () => {
+    // After /cd the working dir differs from the project root. The scan must
+    // stay anchored to the project root — the same root prefetch and session
+    // identity use — so a skill under the new cwd is out of scope and a new
+    // skill under the project root is picked up.
+    const projectDir = mkdtempSync(join(tmpdir(), 'oc-proj-'))
+    const workDir = mkdtempSync(join(tmpdir(), 'oc-work-'))
+    mkdirSync(join(projectDir, '.git'))
+    mkdirSync(join(workDir, '.git'))
+    const projectSkill = join(
+      projectDir,
+      '.openclaude',
+      'skills',
+      'proj-skill',
+    )
+    const workSkill = join(workDir, '.openclaude', 'skills', 'work-skill')
+    mkdirSync(projectSkill, { recursive: true })
+    mkdirSync(workSkill, { recursive: true })
+    writeFileSync(
+      join(projectSkill, 'SKILL.md'),
+      '---\nname: proj-skill\ndescription: p\n---\nbody\n',
+    )
+    writeFileSync(
+      join(workSkill, 'SKILL.md'),
+      '---\nname: work-skill\ndescription: w\n---\nbody\n',
+    )
+
+    const prevRoot = getProjectRoot()
+    const prevCwd = getCwdState()
+    try {
+      setProjectRoot(projectDir)
+      setCwdState(workDir)
+      clearSkillCaches()
+      await call('', context)
+
+      const newSkill = join(projectDir, '.openclaude', 'skills', 'new-skill')
+      mkdirSync(newSkill, { recursive: true })
+      writeFileSync(
+        join(newSkill, 'SKILL.md'),
+        '---\nname: new-skill\ndescription: n\n---\nbody\n',
+      )
+      const second = await call('', context)
+      expect(second.type).toBe('text')
+      if (second.type === 'text') {
+        expect(second.value).toContain('1 added')
+        expect(second.value).toContain('new-skill')
+      }
+    } finally {
+      setProjectRoot(prevRoot)
+      setCwdState(prevCwd)
+      clearSkillCaches()
+      rmSync(projectDir, { recursive: true, force: true })
+      rmSync(workDir, { recursive: true, force: true })
     }
   })
 })

@@ -1,11 +1,13 @@
 import { getSkillDirCommands } from '../../skills/loadSkillsDir.js'
 import type { LocalCommandCall } from '../../types/command.js'
-import { getCwd } from '../../utils/cwd.js'
+import { getProjectRoot } from '../../bootstrap/state.js'
 import { skillChangeDetector } from '../../utils/skills/skillChangeDetector.js'
 import { plural } from '../../utils/stringUtils.js'
 
 async function skillNames(): Promise<Set<string>> {
-  const commands = await getSkillDirCommands(getCwd())
+  // Skills anchor to the project root (the same root command prefetch and
+  // identity use), not the post-/cd working directory.
+  const commands = await getSkillDirCommands(getProjectRoot())
   return new Set(commands.map(command => command.name))
 }
 

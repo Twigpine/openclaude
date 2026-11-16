@@ -43,6 +43,8 @@ import type { FileHistorySnapshot } from './fileHistory.js'
 import { fileHistoryRestoreStateFromLog } from './fileHistory.js'
 import { createSystemMessage } from './messages.js'
 import { parseUserSpecifiedModel } from './model/model.js'
+// Import as module object so spyOn works in tests (direct imports bypass spies)
+import * as hooksConfigSnapshot from './hooks/hooksConfigSnapshot.js'
 import { getPlansDirectory } from './plans.js'
 import { setCwd } from './Shell.js'
 import {
@@ -378,6 +380,10 @@ export function restoreWorktreeForResume(
   // skills/history stay anchored to the original project.
   if (worktreeSession.projectRootIsWorktree) {
     setProjectRoot(worktreeSession.worktreePath)
+    // Match setup.ts's --worktree block and ExitWorktreeTool: a project
+    // root change re-reads hooks so settings-relative configs resolve
+    // against the owning root.
+    hooksConfigSnapshot.updateHooksConfigSnapshot()
   }
   restoreWorktreeSession(worktreeSession)
   // The /resume slash command calls this mid-session after caches have been
@@ -424,6 +430,9 @@ export function exitRestoredWorktree(): void {
   // project root, put it back on the directory it came from.
   if (current.projectRootIsWorktree) {
     setProjectRoot(current.originalCwd)
+    // Undo the snapshot refresh restoreWorktreeForResume ran on entry, so
+    // hooks resolve against the original root again.
+    hooksConfigSnapshot.updateHooksConfigSnapshot()
   }
 }
 
