@@ -21,10 +21,14 @@ const realSettings = await import(
   `../settings/settings.js?blockWritesActual=${Date.now()}-${Math.random()}`
 )
 let blockWritesOutsideWorkingDirectories = false
+let denyInsteadOfPrompting = false
 mock.module('../settings/settings.js', () => ({
   ...realSettings,
   getInitialSettings: (): SettingsJson => ({
-    permissions: { blockWritesOutsideWorkingDirectories },
+    permissions: {
+      blockWritesOutsideWorkingDirectories,
+      denyInsteadOfPrompting,
+    },
   }),
 }))
 
@@ -64,8 +68,11 @@ const { hasPermissionsToUseTool, checkRuleBasedPermissions } = await import(
 const { createPermissionContext } = await import(
   '../../hooks/toolPermission/PermissionContext.js'
 )
-const { executePermissionRequestHooksForSDK } = await import(
+const { executePermissionRequestHooksForSDK, StructuredIO } = await import(
   '../../cli/structuredIO.js'
+)
+const { createExternalCanUseTool } = await import(
+  '../../entrypoints/sdk/permissions.js'
 )
 
 const writeTool = createToolFixture(
@@ -466,6 +473,154 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
       }
     } finally {
       hookPermissionResult = undefined
+    }
+  })
+
+  test('a user allow with an outside rewrite still hits the boundary', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const toolPermissionContext = permissionContext('default')
+    const permissionCtx = createPermissionContext(
+      writeTool,
+      { file_path: join(projectDir, 'inside.txt') },
+      useContext(toolPermissionContext),
+      { message: { id: 'blockwrites-user-allow' } } as never,
+      'blockwrites-user-allow',
+      () => {},
+    )
+    const result = await permissionCtx.handleUserAllow(
+      { file_path: join(outsideDir, 'user-edited.txt') },
+      [],
+    )
+    expect(result.behavior).toBe('deny')
+    if (result.behavior === 'deny') {
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    }
+  })
+
+  test('a classifier allow with an outside rewrite still hits the boundary', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const toolPermissionContext = permissionContext('default')
+    const permissionCtx = createPermissionContext(
+      writeTool,
+      { file_path: join(projectDir, 'inside.txt') },
+      useContext(toolPermissionContext),
+      { message: { id: 'blockwrites-classifier-allow' } } as never,
+      'blockwrites-classifier-allow',
+      () => {},
+    )
+    const result = await permissionCtx.handleClassifierAllow(
+      { file_path: join(outsideDir, 'classifier.txt') },
+      { type: 'hook', hookName: 'PermissionRequest' },
+    )
+    expect(result.behavior).toBe('deny')
+    if (result.behavior === 'deny') {
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    }
+  })
+
+  test('an SDK callback allow with an outside rewrite still hits the boundary', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const toolPermissionContext = permissionContext('default')
+    const canUseTool = createExternalCanUseTool(
+      async () => ({
+        behavior: 'allow' as const,
+        updatedInput: { file_path: join(outsideDir, 'sdk.txt') },
+      }),
+      async () => ({
+        behavior: 'deny' as const,
+        message: 'unreached',
+        decisionReason: { type: 'other' as const, reason: 'unreached' },
+      }),
+      { deletePendingPermission: () => {} } as never,
+    )
+    const result = await canUseTool(
+      writeTool,
+      { file_path: join(projectDir, 'inside.txt') },
+      useContext(toolPermissionContext),
+      {} as never,
+      'blockwrites-sdk-callback',
+    )
+    expect(result.behavior).toBe('deny')
+    if (result.behavior === 'deny') {
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    }
+  })
+
+  test('an SDK PermissionRequest hook can answer a suppression denial', async () => {
+    denyInsteadOfPrompting = true
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(projectDir, 'hook-allowed.txt') },
+    }
+    try {
+      const askWriteTool = createToolFixture(
+        z.object({ file_path: z.string() }),
+        {
+          name: 'Write',
+          getPath(input: { file_path: string }) {
+            return input.file_path
+          },
+          async checkPermissions(input) {
+            return {
+              behavior: 'ask' as const,
+              message: 'Write requires approval',
+              updatedInput: input,
+            }
+          },
+        },
+      )
+      const io = new StructuredIO((async function* () {})())
+      const canUseTool = io.createCanUseTool()
+      const result = await canUseTool(
+        askWriteTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(permissionContext('default')),
+        {} as never,
+        'blockwrites-suppression-hook',
+      )
+      // denyInsteadOfPrompting converted the ask to a denial, but the hook
+      // gets its chance first, matching the headless ordering.
+      expect(result.behavior).toBe('allow')
+    } finally {
+      denyInsteadOfPrompting = false
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('the suppression denial stands when no hook decides', async () => {
+    denyInsteadOfPrompting = true
+    try {
+      const askWriteTool = createToolFixture(
+        z.object({ file_path: z.string() }),
+        {
+          name: 'Write',
+          getPath(input: { file_path: string }) {
+            return input.file_path
+          },
+          async checkPermissions(input) {
+            return {
+              behavior: 'ask' as const,
+              message: 'Write requires approval',
+              updatedInput: input,
+            }
+          },
+        },
+      )
+      const io = new StructuredIO((async function* () {})())
+      const canUseTool = io.createCanUseTool()
+      const result = await canUseTool(
+        askWriteTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(permissionContext('default')),
+        {} as never,
+        'blockwrites-suppression-nohook',
+      )
+      expect(result.behavior).toBe('deny')
+      if (result.behavior === 'deny') {
+        expect(result.message).toContain('denyInsteadOfPrompting')
+      }
+    } finally {
+      denyInsteadOfPrompting = false
     }
   })
 

@@ -11,6 +11,7 @@ import { randomUUID } from 'crypto'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { PermissionDecision, PermissionMode } from '../../types/permissions.js'
 import {
+  checkWriteBoundaryForAskRule,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
 } from '../../utils/permissions/permissions.js'
@@ -304,13 +305,28 @@ export function createExternalCanUseTool(
       const planModeWasActive =
         typeof toolUseContext.getAppState === 'function' &&
         toolUseContext.getAppState().toolPermissionContext.mode === 'plan'
-      return await revalidatePlanModePermissionAllowWithRaceGuard(
-        tool,
-        originalInput,
-        finalInput,
-        toolUseContext,
-        planModeWasActive,
-      )
+      const revalidation =
+        await revalidatePlanModePermissionAllowWithRaceGuard(
+          tool,
+          originalInput,
+          finalInput,
+          toolUseContext,
+          planModeWasActive,
+        )
+      if (revalidation) {
+        return revalidation
+      }
+      // An SDK callback or remote responder can allow with an updatedInput
+      // pointing outside the working directories; the write boundary is a
+      // hard cap, not a prompt, so it applies to external allows too.
+      if (typeof toolUseContext.getAppState === 'function') {
+        return checkWriteBoundaryForAskRule(
+          tool,
+          finalInput,
+          toolUseContext.getAppState().toolPermissionContext,
+        )
+      }
+      return null
     }
     const isFullAccessMode =
       typeof toolUseContext.getAppState === 'function' &&

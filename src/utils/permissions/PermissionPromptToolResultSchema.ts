@@ -13,7 +13,10 @@ import {
 } from './PermissionUpdate.js'
 import { permissionUpdateSchema } from './PermissionUpdateSchema.js'
 import { applyPermissionUpdatesToLiveContext } from './permissionSetup.js'
-import { revalidatePlanModePermissionAllowWithRaceGuard } from './permissions.js'
+import {
+  checkWriteBoundaryForAskRule,
+  revalidatePlanModePermissionAllowWithRaceGuard,
+} from './permissions.js'
 
 export const inputSchema = lazySchema(() =>
   z.object({
@@ -149,6 +152,18 @@ export async function permissionPromptToolResultToPermissionDecision(
       )
     if (postUpdatePlanModeDecision) {
       return postUpdatePlanModeDecision
+    }
+    // An SDK or mobile responder can allow with an updatedInput outside
+    // the working directories; the write boundary is a hard cap, not a
+    // prompt, so it applies to the accepted input here the same as on
+    // hook allows.
+    const writeBoundary = checkWriteBoundaryForAskRule(
+      tool,
+      updatedInput,
+      toolUseContext.getAppState().toolPermissionContext,
+    )
+    if (writeBoundary) {
+      return writeBoundary
     }
     const { updatedPermissions: _updatedPermissions, ...allowResult } = result
     return {

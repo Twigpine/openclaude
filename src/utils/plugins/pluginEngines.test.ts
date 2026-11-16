@@ -19,6 +19,9 @@ describe('plugin engines compatibility', () => {
       engines: { 'claude-code': '>=0.30.0' },
     })
     expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.engines).toEqual({ 'claude-code': '>=0.30.0' })
+    }
   })
 
   test('manifest without engines is compatible', () => {

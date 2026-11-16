@@ -547,6 +547,17 @@ function createPermissionContext(
       const userModified = tool.inputsEquivalent
         ? !tool.inputsEquivalent(input, updatedInput)
         : false
+      // A user edit in the prompt UI can move the target outside the
+      // working directories; the write boundary is a hard cap, not a
+      // prompt, so it applies to user allows the same as hook allows.
+      const writeBoundary = checkWriteBoundaryForAskRule(
+        tool,
+        updatedInput,
+        toolUseContext.getAppState().toolPermissionContext,
+      )
+      if (writeBoundary) {
+        return writeBoundary
+      }
       const trimmedFeedback = feedback?.trim()
       return this.buildAllow(updatedInput, {
         userModified,
@@ -638,6 +649,14 @@ function createPermissionContext(
         { decision: 'accept', source: { type: 'classifier' } },
         { input: finalInput, permissionPromptStartTimeMs },
       )
+      const writeBoundary = checkWriteBoundaryForAskRule(
+        tool,
+        finalInput,
+        toolUseContext.getAppState().toolPermissionContext,
+      )
+      if (writeBoundary) {
+        return writeBoundary
+      }
       return this.buildAllow(finalInput, { decisionReason })
     },
     pushToQueue(item: ToolUseConfirm) {

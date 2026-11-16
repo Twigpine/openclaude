@@ -38,6 +38,7 @@ import {
   checkWriteBoundaryForAskRule,
   checkPlanModePermissions,
   checkRuleBasedPermissions,
+  DENY_INSTEAD_OF_PROMPTING_REASON,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
   samePermissionAskConstraint,
@@ -585,13 +586,30 @@ export class StructuredIO {
           assistantMessage,
           toolUseID,
         )
+      // A suppression denial exists only because prompts are disabled. A
+      // PermissionRequest hook may still answer it (the headless path
+      // already runs hooks before suppressing), so let it through to the
+      // hook pass instead of returning immediately.
+      const isSuppressionDeny =
+        mainPermissionResult.behavior === 'deny' &&
+        mainPermissionResult.decisionReason?.type === 'other' &&
+        mainPermissionResult.decisionReason.reason ===
+          DENY_INSTEAD_OF_PROMPTING_REASON
       // If the tool is allowed or denied, return the result
       if (
         mainPermissionResult.behavior === 'allow' ||
-        mainPermissionResult.behavior === 'deny'
+        (mainPermissionResult.behavior === 'deny' && !isSuppressionDeny)
       ) {
         return mainPermissionResult
       }
+      const suggestions =
+        'suggestions' in mainPermissionResult
+          ? mainPermissionResult.suggestions
+          : undefined
+      const blockedPath =
+        'blockedPath' in mainPermissionResult
+          ? mainPermissionResult.blockedPath
+          : undefined
 
       // Run PermissionRequest hooks in parallel with the SDK permission
       // prompt.  In the terminal CLI, hooks race against the interactive
@@ -614,8 +632,15 @@ export class StructuredIO {
           toolUseID,
           input,
           toolUseContext,
-          mainPermissionResult.suggestions,
+          suggestions,
         ).then(decision => ({ source: 'hook' as const, decision }))
+
+        if (isSuppressionDeny) {
+          // Prompts are disabled, so hooks are the only responder left.
+          // If no hook decides, the suppression denial stands.
+          const hookResult = await hookPromise
+          return hookResult.decision ?? mainPermissionResult
+        }
 
         // Start the SDK permission prompt immediately (don't wait for hooks)
         const requestId = randomUUID()
@@ -627,8 +652,8 @@ export class StructuredIO {
             subtype: 'can_use_tool',
             tool_name: tool.name,
             input,
-            permission_suggestions: mainPermissionResult.suggestions,
-            blocked_path: mainPermissionResult.blockedPath,
+            permission_suggestions: suggestions,
+            blocked_path: blockedPath,
             decision_reason: serializeDecisionReason(
               mainPermissionResult.decisionReason,
             ),

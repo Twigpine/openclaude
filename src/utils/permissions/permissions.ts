@@ -126,6 +126,9 @@ export function checkWriteBoundaryForAskRule(
 // hasPermissionsToUseToolWithModeHandling and by early returns (whole-tool
 // ask rules, auto-mode fallbacks to manual approval) that would otherwise
 // bypass it.
+export const DENY_INSTEAD_OF_PROMPTING_REASON =
+  'permissions.denyInsteadOfPrompting is enabled'
+
 export function suppressPromptIfConfigured<T extends PermissionDecision>(
   tool: Tool,
   res: T,
@@ -135,9 +138,9 @@ export function suppressPromptIfConfigured<T extends PermissionDecision>(
         behavior: 'deny',
         decisionReason: {
           type: 'other',
-          reason: 'permissions.denyInsteadOfPrompting is enabled',
+          reason: DENY_INSTEAD_OF_PROMPTING_REASON,
         },
-        message: `${tool.name} requires permission, but permissions.denyInsteadOfPrompting is enabled`,
+        message: `${tool.name} requires permission, but ${DENY_INSTEAD_OF_PROMPTING_REASON}`,
       }
     : res
 }
