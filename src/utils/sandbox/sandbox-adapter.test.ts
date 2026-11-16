@@ -14,10 +14,16 @@ import { join, resolve, sep } from 'path'
 import {
   getCwdState,
   getOriginalCwd,
+  getProjectRoot,
   setCwdState,
   setOriginalCwd,
+  setProjectRoot,
 } from '../../bootstrap/state.js'
 import { snapshotEnv } from '../../test/envSnapshot.js'
+import {
+  getClaudeConfigHomeDirOverrideForTesting,
+  setClaudeConfigHomeDirForTesting,
+} from '../envUtils.js'
 import { gitFixtureEnv } from '../../test/gitEnv.js'
 import {
   acquireSharedMutationLock,
@@ -93,6 +99,8 @@ async function inspectRuntimePolicy(config: SandboxRuntimeConfig): Promise<Runti
 describe('convertToSandboxRuntimeConfig', () => {
   let restoreEnv: () => void
   let previousOriginalCwd: string
+  let previousProjectRoot: string
+  let previousConfigHome: string | undefined
   let previousCwd: string
   let tempRoot: string
   let activeCwd: string
@@ -104,6 +112,8 @@ describe('convertToSandboxRuntimeConfig', () => {
     previousRuntimeConfig = BaseSandboxManager.getConfig()
     restoreEnv = snapshotEnv(['CLAUDE_CONFIG_DIR', 'OPENCLAUDE_CONFIG_DIR'])
     previousOriginalCwd = getOriginalCwd()
+    previousProjectRoot = getProjectRoot()
+    previousConfigHome = getClaudeConfigHomeDirOverrideForTesting()
     previousCwd = getCwdState()
 
     tempRoot = await mkdtemp(join(tmpdir(), 'openclaude-sandbox-adapter-'))
@@ -112,8 +122,13 @@ describe('convertToSandboxRuntimeConfig', () => {
 
     process.env.CLAUDE_CONFIG_DIR = join(tempRoot, 'config')
     process.env.OPENCLAUDE_CONFIG_DIR = join(tempRoot, 'openclaude-config')
+    // Pin the same root triple the settings-bearing fixtures use and clear
+    // any config-home override left by an earlier test in the shard, so
+    // getSettingsForSource reads the file under OPENCLAUDE_CONFIG_DIR.
+    setClaudeConfigHomeDirForTesting(undefined)
     resetSettingsCache()
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalCwd)
     setCwdState(activeCwd)
   })
 
@@ -128,6 +143,8 @@ describe('convertToSandboxRuntimeConfig', () => {
       try {
         restoreEnv()
         setOriginalCwd(previousOriginalCwd)
+        setProjectRoot(previousProjectRoot)
+        setClaudeConfigHomeDirForTesting(previousConfigHome)
         setCwdState(previousCwd)
         resetSettingsCache()
         await rm(tempRoot, { recursive: true, force: true })

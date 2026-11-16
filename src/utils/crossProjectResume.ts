@@ -1,5 +1,5 @@
 import { sep } from 'path'
-import { getOriginalCwd } from '../bootstrap/state.js'
+import { getProjectRoot } from '../bootstrap/state.js'
 import type { LogOption } from '../types/logs.js'
 import { quote } from './bash/shellQuote.js'
 import { getSessionIdFromLog } from './sessionStorage.js'
@@ -32,7 +32,7 @@ export function checkCrossProjectResume(
   showAllProjects: boolean,
   worktreePaths: string[],
 ): CrossProjectResumeResult {
-  const currentCwd = getOriginalCwd()
+  const currentCwd = getProjectRoot()
 
   if (!showAllProjects || !log.projectPath || log.projectPath === currentCwd) {
     return { isCrossProject: false }

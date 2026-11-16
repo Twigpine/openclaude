@@ -94,7 +94,7 @@ export async function fileHistoryTrackEdit(
     return
   }
 
-  const trackingPath = maybeShortenFilePath(filePath)
+  let trackingPath = maybeShortenFilePath(filePath)
 
   // Phase 1: check if backup is needed. Speculative writes would overwrite
   // the deterministic {hash}@v1 backup on every repeat call — a second
@@ -110,6 +110,17 @@ export async function fileHistoryTrackEdit(
     logError(new Error('FileHistory: Missing most recent snapshot'))
     logEvent('tengu_file_history_track_edit_failed', {})
     return
+  }
+  // A checkpoint restored from a legacy log carries the same file under an
+  // unprefixed key. Reuse that identity: tracking './x' as a new key would
+  // run createBackup(filePath, 1), overwriting the existing v1 backup file
+  // and destroying the original contents rewind needs.
+  if (
+    trackingPath.startsWith('./') &&
+    !mostRecent.trackedFileBackups[trackingPath] &&
+    mostRecent.trackedFileBackups[trackingPath.slice(2)]
+  ) {
+    trackingPath = trackingPath.slice(2)
   }
   if (mostRecent.trackedFileBackups[trackingPath]) {
     // Already tracked in the most recent snapshot; next makeSnapshot will

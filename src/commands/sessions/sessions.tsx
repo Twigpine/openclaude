@@ -1,6 +1,6 @@
 import type { UUID } from 'crypto'
 import * as React from 'react'
-import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
+import { getProjectRoot, getSessionId } from '../../bootstrap/state.js'
 import { Select } from '../../components/CustomSelect/index.js'
 import { Dialog } from '../../components/design-system/Dialog.js'
 import { Box, Text, useInput } from '../../ink.js'
@@ -67,7 +67,7 @@ function SessionsManager({
   const [listVersion, setListVersion] = React.useState(0)
 
   const loadLogs = React.useCallback(async (): Promise<LogOption[]> => {
-    const paths = await getWorktreePaths(getOriginalCwd())
+    const paths = await getWorktreePaths(getProjectRoot())
     const all = await loadSameRepoMessageLogs(paths)
     return filterResumableSessions(all, getSessionId())
   }, [])

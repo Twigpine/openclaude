@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import type { UUID } from 'crypto';
 import figures from 'figures';
 import * as React from 'react';
-import { getOriginalCwd, getProjectRoot, getSessionId } from '../../bootstrap/state.js';
+import { getProjectRoot, getSessionId } from '../../bootstrap/state.js';
 import { buildGoalStartInstruction } from '../../services/goal/instructions.js';
 import { saveGoalState } from '../../services/goal/persistence.js';
 import { resumeGoal } from '../../services/goal/state.js';
