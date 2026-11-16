@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { feature } from 'bun:bundle'
 import { existsSync } from 'fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
@@ -14,8 +14,25 @@ import {
   setClaudeConfigHomeDirForTesting,
 } from '../envUtils.js'
 import { resetSettingsCache } from '../settings/settingsCache.js'
+import { handleUriArgIfEnabled } from './handleUriArg.js'
 import { buildDeepLink, parseDeepLink } from './parseDeepLink.js'
 import { ensureDeepLinkProtocolRegistered } from './registerProtocol.js'
+
+const handleDeepLinkUriSpy = mock(async (_uri: string) => 0)
+const realProtocolHandler = {
+  ...(await import(`./protocolHandler.js?real=${Date.now()}`)),
+}
+mock.module('./protocolHandler.js', () => ({
+  ...realProtocolHandler,
+  handleDeepLinkUri: handleDeepLinkUriSpy,
+}))
+const realConfig = {
+  ...(await import(`../config.js?real=${Date.now()}`)),
+}
+mock.module('../config.js', () => ({
+  ...realConfig,
+  enableConfigs: () => {},
+}))
 
 describe('parseDeepLink', () => {
   test('parses an open action with cwd, repo, and query', () => {
@@ -70,6 +87,37 @@ describe('LODESTONE gate', () => {
     } else {
       expect(registerProtocolModule).toBeNull()
     }
+  })
+})
+
+describe('handleUriArgIfEnabled gate', () => {
+  test('dispatches --handle-uri to the deep-link handler only when the flag is on', async () => {
+    handleDeepLinkUriSpy.mockClear()
+    const code = await handleUriArgIfEnabled([
+      'node',
+      'openclaude',
+      '--handle-uri',
+      'claude-cli://open?cwd=/tmp',
+    ])
+
+    if (feature('LODESTONE')) {
+      expect(handleDeepLinkUriSpy).toHaveBeenCalledWith(
+        'claude-cli://open?cwd=/tmp',
+      )
+      expect(code).toBe(0)
+    } else {
+      expect(handleDeepLinkUriSpy).not.toHaveBeenCalled()
+      expect(code).toBeUndefined()
+    }
+  })
+
+  test('ignores a missing or absent uri argument', async () => {
+    handleDeepLinkUriSpy.mockClear()
+    expect(await handleUriArgIfEnabled(['node', 'openclaude'])).toBeUndefined()
+    expect(
+      await handleUriArgIfEnabled(['node', 'openclaude', '--handle-uri']),
+    ).toBeUndefined()
+    expect(handleDeepLinkUriSpy).not.toHaveBeenCalled()
   })
 })
 

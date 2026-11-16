@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import type { TerminalQuerier } from '../ink/terminal-querier.js'
 import { getSystemThemeName, setCachedSystemTheme } from './systemTheme.js'
+import { startSystemThemeWatchIfEnabled } from './systemThemeWatchGate.js'
 import { watchSystemTheme } from './systemThemeWatcher.js'
 
 const savedSystemTheme = getSystemThemeName()
@@ -80,5 +82,18 @@ describe('watchSystemTheme', () => {
     data.current = 'rgb:ffff/ffff/ffff'
     await sleep(50)
     expect(seen).toEqual(['dark'])
+  })
+
+  test('AUTO_THEME gate starts the watcher only when the flag is on', async () => {
+    const querier = fakeQuerier({ current: 'rgb:0000/0000/0000' })
+    const stop = startSystemThemeWatchIfEnabled(querier, () => {})
+    stops.push(stop)
+
+    await sleep(50)
+    if (feature('AUTO_THEME')) {
+      expect(querier.send).toHaveBeenCalled()
+    } else {
+      expect(querier.send).not.toHaveBeenCalled()
+    }
   })
 })
