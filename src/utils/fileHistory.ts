@@ -1,6 +1,6 @@
 import { createHash, type UUID } from 'crypto'
 import { diffLines } from 'diff'
-import type { Stats } from 'fs'
+import { existsSync, type Stats } from 'fs'
 import {
   chmod,
   copyFile,
@@ -13,6 +13,7 @@ import {
 import { dirname, isAbsolute, join, relative } from 'path'
 import {
   getIsNonInteractiveSession,
+  getOriginalCwd,
   getProjectRoot,
   getSessionId,
 } from 'src/bootstrap/state.js'
@@ -879,7 +880,19 @@ function maybeExpandFilePath(filePath: string): string {
   if (isAbsolute(filePath)) {
     return filePath
   }
-  return join(getProjectRoot(), filePath)
+  const projectPath = join(getProjectRoot(), filePath)
+  // Keys stored before relative paths anchored to the project root were
+  // relative to the working root at write time (e.g. inside a worktree,
+  // where projectRoot stays at the session origin). When the key only
+  // resolves under the current working root, expand against it.
+  const origin = getOriginalCwd()
+  if (origin !== getProjectRoot() && !existsSync(projectPath)) {
+    const originPath = join(origin, filePath)
+    if (existsSync(originPath)) {
+      return originPath
+    }
+  }
+  return projectPath
 }
 
 /**

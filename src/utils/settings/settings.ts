@@ -6,6 +6,7 @@ import {
   getFlagSettingsInline,
   getFlagSettingsPath,
   getOriginalCwd,
+  getProjectRoot,
   getUseCoworkPlugins,
 } from '../../bootstrap/state.js'
 import { getRemoteManagedSettingsSyncFromCache } from '../../services/remoteManagedSettings/syncCacheState.js'
@@ -270,11 +271,11 @@ export function getSettingsRootPathForSource(source: SettingSource): string {
     case 'policySettings':
     case 'projectSettings':
     case 'localSettings': {
-      return resolve(getOriginalCwd())
+      return resolve(getProjectRoot())
     }
     case 'flagSettings': {
       const path = getFlagSettingsPath()
-      return path ? dirname(resolve(path)) : resolve(getOriginalCwd())
+      return path ? dirname(resolve(path)) : resolve(getProjectRoot())
     }
   }
 }

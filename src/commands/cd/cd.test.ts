@@ -20,6 +20,7 @@ import {
   getFileReadIgnorePatterns,
 } from '../../utils/permissions/filesystem.js'
 import { applyPermissionUpdate } from '../../utils/permissions/PermissionUpdate.js'
+import { getSettingsRootPathForSource } from '../../utils/settings/settings.js'
 import { getTranscriptPath } from '../../utils/sessionStorage.js'
 import {
   acquireSharedMutationLock,
@@ -167,6 +168,41 @@ describe('/cd', () => {
     // The working root still moves; only the bound records stay anchored.
     expect(getOriginalCwd()).toBe(sub)
     expect(getProjectRoot()).toBe(sandbox)
+  })
+
+  it('keeps settings-sourced deny rules bound to the project root', async () => {
+    const sub = join(sandbox, 'sub')
+    mkdirSync(sub)
+    const ctx = context()
+
+    // Rules loaded from .openclaude/settings.json carry the projectSettings
+    // source; their root must stay at the session's project directory when
+    // the working root moves, or the deny silently retargets.
+    ctx.setAppState(prev => ({
+      ...prev,
+      toolPermissionContext: applyPermissionUpdate(prev.toolPermissionContext, {
+        type: 'addRules',
+        behavior: 'deny',
+        rules: [{ toolName: 'Read', ruleContent: '/secret.txt' }],
+        destination: 'projectSettings',
+      }),
+    }))
+    const denyBefore = getFileReadIgnorePatterns(latestPermissionContext)
+    expect(denyBefore.size).toBeGreaterThan(0)
+    expect(getSettingsRootPathForSource('projectSettings')).toBe(
+      resolve(sandbox),
+    )
+
+    const result = await call('sub', ctx)
+    expect(result.type).toBe('text')
+
+    expect(getFileReadIgnorePatterns(latestPermissionContext)).toEqual(
+      denyBefore,
+    )
+    expect(getSettingsRootPathForSource('projectSettings')).toBe(
+      resolve(sandbox),
+    )
+    expect(getOriginalCwd()).toBe(sub)
   })
 
   it('preserves a permission update made while validation was awaiting', async () => {

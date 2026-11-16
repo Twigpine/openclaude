@@ -3846,8 +3846,8 @@ async function trackSessionBranchingAnalytics(
 }
 
 export async function fetchLogs(limit?: number): Promise<LogOption[]> {
-  const projectDir = getProjectDir(getOriginalCwd())
-  const logs = await getSessionFilesLite(projectDir, limit, getOriginalCwd())
+  const projectDir = getProjectDir(getProjectRoot())
+  const logs = await getSessionFilesLite(projectDir, limit, getProjectRoot())
 
   await trackSessionBranchingAnalytics(logs)
 
@@ -5462,7 +5462,7 @@ async function getStatOnlyLogsForWorktrees(
   const projectsDir = getProjectsDir()
 
   if (worktreePaths.length <= 1) {
-    const cwd = getOriginalCwd()
+    const cwd = getProjectRoot()
     const projectDir = getProjectDir(cwd)
     return getSessionFilesLite(projectDir, undefined, cwd)
   }
@@ -5496,8 +5496,8 @@ async function getStatOnlyLogsForWorktrees(
     logForDebugging(
       `Failed to read projects dir ${projectsDir}, falling back to current project: ${e}`,
     )
-    const projectDir = getProjectDir(getOriginalCwd())
-    return getSessionFilesLite(projectDir, limit, getOriginalCwd())
+    const projectDir = getProjectDir(getProjectRoot())
+    return getSessionFilesLite(projectDir, limit, getProjectRoot())
   }
 
   for (const dirent of allDirents) {

@@ -414,6 +414,7 @@ type SdkContext = {
   sessionProjectDir: string | null
   cwd: string
   originalCwd: string
+  projectRoot?: string
   parentSessionId?: SessionId
   registeredHooks?: Partial<Record<HookEvent, RegisteredHookMatcher[]>>
 }
@@ -588,7 +589,8 @@ export function getOriginalCwd(): string {
  * Use for project identity (history, skills, sessions) not file operations.
  */
 export function getProjectRoot(): string {
-  return STATE.projectRoot
+  const ctx = getSdkContext()
+  return ctx?.projectRoot ?? STATE.projectRoot
 }
 
 export function setOriginalCwd(cwd: string): void {
@@ -605,6 +607,11 @@ export function setOriginalCwd(cwd: string): void {
  * call this — skills/history should stay anchored to where the session started.
  */
 export function setProjectRoot(cwd: string): void {
+  const ctx = getSdkContext()
+  if (ctx) {
+    ctx.projectRoot = cwd.normalize('NFC')
+    return
+  }
   STATE.projectRoot = cwd.normalize('NFC')
 }
 
