@@ -111,6 +111,27 @@ describe('handleUriArgIfEnabled gate', () => {
     }
   })
 
+  test('dispatches the native binary argv layout', async () => {
+    handleDeepLinkUriSpy.mockClear()
+    // The registered Exec line launches `<exec> --handle-uri %u`, so a
+    // native install sees the flag at argv[1], not argv[2].
+    const code = await handleUriArgIfEnabled([
+      'openclaude',
+      '--handle-uri',
+      'claude-cli://open?cwd=/tmp',
+    ])
+
+    if (feature('LODESTONE')) {
+      expect(handleDeepLinkUriSpy).toHaveBeenCalledWith(
+        'claude-cli://open?cwd=/tmp',
+      )
+      expect(code).toBe(0)
+    } else {
+      expect(handleDeepLinkUriSpy).not.toHaveBeenCalled()
+      expect(code).toBeUndefined()
+    }
+  })
+
   test('ignores a missing or absent uri argument', async () => {
     handleDeepLinkUriSpy.mockClear()
     expect(await handleUriArgIfEnabled(['node', 'openclaude'])).toBeUndefined()
