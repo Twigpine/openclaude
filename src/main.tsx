@@ -49,6 +49,13 @@ import { createSyntheticOutputTool, isSyntheticOutputToolEnabled } from './tools
 import { registerTaskReportCommand } from './cli/commands/taskReport.js';
 import { registerAimlapiCommand } from './cli/aimlapiCommand.js';
 import { BACKGROUND_PROCESS_MARKER_FLAG, isValidBackgroundProcessMarker } from './cli/bgRouting.js';
+import {
+  agentsDispatchOptions,
+  buildAgentsDispatchArgs,
+  mergeAgentsDispatchOptions,
+  wantsAgentsDispatch,
+  type AgentsDispatchOptionValues,
+} from './cli/agentsDispatch.js';
 import { getTools } from './tools.js';
 import { canUserConfigureAdvisor, getInitialAdvisorSetting, isAdvisorEnabled, isValidAdvisorModel, modelSupportsAdvisor } from './utils/advisor.js';
 import { isAgentSwarmsEnabled } from './utils/agentSwarmsEnabled.js';
@@ -4144,8 +4151,32 @@ async function run(): Promise<CommanderCommand> {
     await setupTokenHandler(root);
   });
 
-  // Agents command - list configured agents
-  program.command('agents').description('List configured agents').option('--setting-sources <sources>', 'Comma-separated list of setting sources to load (user, project, local).').action(async () => {
+  // Agents command - list configured agents, or dispatch a background agent
+  // session when a prompt is given. Dispatch flags mirror the root options and
+  // are forwarded to the spawned session (local equivalent of upstream's
+  // `claude agents` dispatch flags; BG_SESSIONS provides the dispatch target).
+  const agentsCmd = program.command('agents').description('List configured agents, or dispatch a background agent session').argument('[prompt]', 'Dispatch a background agent session with this prompt');
+  for (const option of agentsDispatchOptions()) {
+    agentsCmd.addOption(option);
+  }
+  agentsCmd.action(async (prompt: string | undefined, options: AgentsDispatchOptionValues) => {
+    if (prompt === undefined && wantsAgentsDispatch(options)) {
+      console.error('Error: a prompt is required to dispatch a background agent session. Usage: openclaude agents "<prompt>" [dispatch flags]');
+      process.exit(1);
+    }
+    if (prompt !== undefined) {
+      if (!feature('BG_SESSIONS')) {
+        console.error('Error: background sessions are not enabled in this build.');
+        process.exit(1);
+      }
+      const {
+        handleBgFlag
+      } = await import('./cli/bg.js');
+      // '--' keeps a flag-looking prompt positional for the child parse
+      const mergedOptions = mergeAgentsDispatchOptions(program.opts() as AgentsDispatchOptionValues, options);
+      await handleBgFlag([...buildAgentsDispatchArgs(mergedOptions), '--', prompt]);
+      process.exit(0);
+    }
     const {
       agentsHandler
     } = await import('./cli/handlers/agents.js');
