@@ -133,4 +133,39 @@ describe('fileHistory project-root anchoring', () => {
       'original content',
     )
   })
+
+  it('keeps a distinct identity when both roots contain the file', async () => {
+    // A legacy checkpoint tracked file.txt while anchored to the working
+    // root. Editing the project-root file.txt must not adopt that key:
+    // its v1 backup holds the other file's contents.
+    const projectFile = join(projectRoot, 'file.txt')
+    writeFileSync(projectFile, 'project content')
+    writeFileSync(join(workRoot, 'file.txt'), 'working-root content')
+    const backupName = 'workroot-backup-v1'
+    const backupDir = join(root, 'config', 'file-history', getSessionId())
+    mkdirSync(backupDir, { recursive: true })
+    writeFileSync(join(backupDir, backupName), 'working-root original')
+    latest.trackedFiles.add('file.txt')
+    latest.snapshots[0].trackedFileBackups['file.txt'] = {
+      backupFileName: backupName,
+      version: 1,
+      backupTime: new Date(),
+    }
+
+    await fileHistoryTrackEdit(stateUpdater, projectFile, 'm3' as never)
+
+    const backups = latest.snapshots.at(-1)!.trackedFileBackups
+    // The two files are different, so they keep different identities and
+    // each backup file holds its own contents.
+    expect(backups['./file.txt']).toBeDefined()
+    expect(readFileSync(join(backupDir, backupName), 'utf8')).toBe(
+      'working-root original',
+    )
+    expect(
+      readFileSync(
+        join(backupDir, backups['./file.txt'].backupFileName!),
+        'utf8',
+      ),
+    ).toBe('project content')
+  })
 })

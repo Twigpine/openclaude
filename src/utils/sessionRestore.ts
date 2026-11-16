@@ -7,6 +7,7 @@ import {
   setMainLoopModelOverride,
   setMainThreadAgentType,
   setOriginalCwd,
+  setProjectRoot,
   switchSession,
 } from '../bootstrap/state.js'
 import { clearSystemPromptSections } from '../constants/systemPromptSections.js'
@@ -371,11 +372,13 @@ export function restoreWorktreeForResume(
 
   setCwd(worktreeSession.worktreePath)
   setOriginalCwd(getCwd())
-  // projectRoot is intentionally NOT set here. The transcript doesn't record
-  // whether the worktree was entered via --worktree (which sets projectRoot)
-  // or EnterWorktreeTool (which doesn't). Leaving projectRoot stable matches
-  // EnterWorktreeTool's behavior — skills/history stay anchored to the
-  // original project.
+  // projectRoot follows the persisted flag: only --worktree startup owns the
+  // project root. Sessions entered via EnterWorktreeTool (and transcripts
+  // written before the flag existed) leave projectRoot stable, so
+  // skills/history stay anchored to the original project.
+  if (worktreeSession.projectRootIsWorktree) {
+    setProjectRoot(worktreeSession.worktreePath)
+  }
   restoreWorktreeSession(worktreeSession)
   // The /resume slash command calls this mid-session after caches have been
   // populated against the old cwd. Cheap no-ops for the CLI-flag path
@@ -417,6 +420,11 @@ export function exitRestoredWorktree(): void {
   }
   setCwd(current.originalCwd)
   setOriginalCwd(getCwd())
+  // Mirror restoreWorktreeForResume: when the resumed session owned the
+  // project root, put it back on the directory it came from.
+  if (current.projectRootIsWorktree) {
+    setProjectRoot(current.originalCwd)
+  }
 }
 
 /**

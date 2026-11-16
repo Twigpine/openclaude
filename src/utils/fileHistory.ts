@@ -111,16 +111,26 @@ export async function fileHistoryTrackEdit(
     logEvent('tengu_file_history_track_edit_failed', {})
     return
   }
-  // A checkpoint restored from a legacy log carries the same file under an
-  // unprefixed key. Reuse that identity: tracking './x' as a new key would
-  // run createBackup(filePath, 1), overwriting the existing v1 backup file
-  // and destroying the original contents rewind needs.
+  // A checkpoint restored from a legacy log may carry this file under an
+  // unprefixed key. Reuse that identity only when the key can only denote
+  // this file: tracking './x' separately for the same file would run
+  // createBackup(filePath, 1), overwriting the existing v1 backup file and
+  // destroying the original contents rewind needs. When a same-named file
+  // exists under the post-/cd working root the legacy anchor is unknowable
+  // (the key may have tracked that file, not this one), so keep the './'
+  // identity distinct; its backup name derives from this file's path and
+  // does not collide.
   if (
     trackingPath.startsWith('./') &&
-    !mostRecent.trackedFileBackups[trackingPath] &&
-    mostRecent.trackedFileBackups[trackingPath.slice(2)]
+    !mostRecent.trackedFileBackups[trackingPath]
   ) {
-    trackingPath = trackingPath.slice(2)
+    const legacyKey = trackingPath.slice(2)
+    const ambiguousAnchor =
+      getOriginalCwd() !== getProjectRoot() &&
+      existsSync(join(getOriginalCwd(), legacyKey))
+    if (mostRecent.trackedFileBackups[legacyKey] && !ambiguousAnchor) {
+      trackingPath = legacyKey
+    }
   }
   if (mostRecent.trackedFileBackups[trackingPath]) {
     // Already tracked in the most recent snapshot; next makeSnapshot will
