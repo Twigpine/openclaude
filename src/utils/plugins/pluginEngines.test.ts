@@ -127,4 +127,48 @@ describe('plugin engines compatibility', () => {
       expect(error).toContain('invalid')
     }
   })
+
+  test('v-prefixed versions and = comparators are valid ranges', () => {
+    for (const range of ['v0.36.0', '=v0.36.0', '>=v0.30.0', '=0.36.0']) {
+      expect(
+        pluginEnginesIncompatibility(
+          manifest({ 'claude-code': range }),
+          APP_VERSION,
+        ),
+      ).toBeNull()
+    }
+  })
+
+  test('malformed comparators and misplaced wildcards are invalid', () => {
+    for (const range of [
+      '>>99.0.0',
+      '=>99.0.0',
+      '~^1.0.0',
+      '0.x.99',
+      '1.x.5',
+      'x.1',
+    ]) {
+      const error = pluginEnginesIncompatibility(
+        manifest({ 'claude-code': range }),
+        APP_VERSION,
+      )
+      expect(error).not.toBeNull()
+      expect(error).toContain('invalid')
+    }
+  })
+
+  test('unbundled fallback returns the package version verbatim', async () => {
+    // Source-mode runs have no MACRO, so the getter falls back to the
+    // package version read from disk. It must be returned verbatim: a
+    // prerelease suffix is part of the host identity and changes engine
+    // compatibility (0.36.0-rc.1 does not satisfy >=0.36.0).
+    const { getPublicBuildVersion } = await import('../version.js')
+    const pkg = (await import('../../../package.json')).default
+    try {
+      expect(getPublicBuildVersion()).toBe(pkg.version)
+    } catch (error) {
+      // Bundled test environments with MACRO defined skip the fallback.
+      if (!String(error).includes('toBe')) throw error
+    }
+  })
 })

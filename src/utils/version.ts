@@ -59,6 +59,9 @@ export function getPublicBuildVersion(): string {
   try {
     return MACRO.DISPLAY_VERSION ?? MACRO.VERSION
   } catch {
-    return publicBuildVersion
+    // Unbundled source runs have no MACRO. Return the real package version,
+    // prerelease suffix included: engine compatibility checks must see the
+    // actual host identity, not a coerced release version.
+    return readPackageVersionFromDisk() ?? fallbackBuildVersion
   }
 }

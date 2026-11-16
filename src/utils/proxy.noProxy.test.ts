@@ -56,7 +56,7 @@ beforeAll(async () => {
               unused as revalidatePlanModePermissionAllowWithRaceGuard, unused as samePermissionAskConstraint,
               unused as executePermissionRequestHooks, unused as filterPermissionRequestHookUpdates,
               unused as persistPermissionUpdates, unused as applyPermissionUpdatesToLiveContext,
-              unused as notifySessionStateChanged
+              unused as suppressPromptIfConfigured, unused as notifySessionStateChanged
             };
           `,
           loader: 'js',

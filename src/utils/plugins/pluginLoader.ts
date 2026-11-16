@@ -1166,10 +1166,17 @@ export async function cachePlugin(
 // validated before comparing: `1.x`-style wildcards, plain versions,
 // `>=`-style comparator sets, `^`/`~` ranges, `a - b` hyphen ranges, and
 // `||` alternation of those. Anything else is an invalid range.
+// Wildcards only fill trailing components (`1.x`, `1.2.x`, `x`): a numeric
+// component after a wildcard (`0.x.99`) is not a version. An optional `v`
+// prefix is part of the version, not a comparator.
 const ENGINE_VERSION_SRC =
-  '(?:\\d+|x|X|\\*)(?:\\.(?:\\d+|x|X|\\*)){0,2}(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?'
+  'v?(?:(?:x|X|\\*)(?:\\.(?:x|X|\\*)){0,2}|\\d+(?:\\.(?:\\d+(?:\\.(?:\\d+|x|X|\\*))?|(?:x|X|\\*)(?:\\.(?:x|X|\\*))?))?)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?'
 const ENGINE_VERSION_RE = new RegExp(`^${ENGINE_VERSION_SRC}$`)
-const ENGINE_COMPARATOR_RE = new RegExp(`^[<>=~^]*${ENGINE_VERSION_SRC}$`)
+// One prefix per comparator: either `~`/`^` or a single comparison
+// operator. Sequences like `>>`, `=>`, `~^` are not comparators.
+const ENGINE_COMPARATOR_RE = new RegExp(
+  `^(?:[~^]|>=|<=|=|>|<)?${ENGINE_VERSION_SRC}$`,
+)
 
 // A comparator may be separated from its version by whitespace
 // (`>= 0.30.0`, `^ 0.36.0`). npm semver accepts that, but
@@ -1178,7 +1185,7 @@ const ENGINE_COMPARATOR_RE = new RegExp(`^[<>=~^]*${ENGINE_VERSION_SRC}$`)
 // comparison. Hyphen ranges and `||` alternatives are unaffected: `-` and
 // `|` are not operator characters.
 const normalizeEngineRange = (range: string): string =>
-  range.replace(/([<>=~^]+)\s+(?=[\dxX*])/g, '$1')
+  range.replace(/([<>=~^]+)\s+(?=[\dxX*v])/g, '$1')
 
 function isValidEngineRange(range: string): boolean {
   return range.split('||').every(alternative => {

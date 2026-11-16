@@ -131,6 +131,7 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
       setOriginalCwd(originalCwd)
       mock.restore()
       mock.module('../settings/settings.js', () => realSettings)
+      mock.module('../hooks.js', () => realHooks)
       mock.module(
         '../../services/analytics/growthbook.js',
         () => realGrowthbook,

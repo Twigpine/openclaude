@@ -90,19 +90,28 @@ export function getAgentMemoryRoot(absolutePath: string): string | undefined {
 
   // Local scope: persisted to mount when CLAUDE_CODE_REMOTE_MEMORY_DIR is set, otherwise cwd-based
   if (process.env.CLAUDE_CODE_REMOTE_MEMORY_DIR) {
-    const marker = sep + 'agent-memory-local' + sep
+    const marker = sep + 'agent-memory-local'
     const remoteProjectsRoot = join(
       process.env.CLAUDE_CODE_REMOTE_MEMORY_DIR,
       'projects',
     )
-    const markerIndex = normalizedPath.indexOf(marker)
-    if (
-      markerIndex !== -1 &&
-      normalizedPath.startsWith(remoteProjectsRoot + sep)
-    ) {
-      // Anchor the containment root at the agent-memory-local segment rather
-      // than the whole projects namespace.
-      return normalizedPath.slice(0, markerIndex + marker.length - 1)
+    // The generated layout is projects/<project>/agent-memory-local, so the
+    // marker must sit directly below a single project segment inside the
+    // projects root. Searching the whole path would let an
+    // agent-memory-local segment inside the configured base anchor the
+    // containment root at the wrong directory.
+    if (normalizedPath.startsWith(remoteProjectsRoot + sep)) {
+      const rest = normalizedPath.slice(remoteProjectsRoot.length + 1)
+      const projectEnd = rest.indexOf(sep)
+      if (
+        projectEnd > 0 &&
+        rest.slice(projectEnd).startsWith(marker + sep)
+      ) {
+        return normalizedPath.slice(
+          0,
+          remoteProjectsRoot.length + 1 + projectEnd + marker.length,
+        )
+      }
     }
   } else {
     const localRoot = join(getCwd(), '.openclaude', 'agent-memory-local')
