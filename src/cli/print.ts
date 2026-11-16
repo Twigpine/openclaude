@@ -14,7 +14,7 @@ import {
   formatDescriptionWithSource,
   getCommandName,
 } from 'src/commands.js'
-import { createStreamlinedTransformer } from 'src/utils/streamlinedTransform.js'
+import { resolveStreamlinedTransformer } from 'src/utils/streamlinedTransform.js'
 import { installStreamJsonStdoutGuard } from 'src/utils/streamJsonStdoutGuard.js'
 import { noteBackgroundSessionTerminationSignal } from 'src/utils/backgroundSessionTermination.js'
 import type { ToolPermissionContext } from 'src/Tool.js'
@@ -954,12 +954,9 @@ export async function runHeadless(
   let lastMessage: SDKMessage | undefined
   // Streamlined mode transforms messages when CLAUDE_CODE_STREAMLINED_OUTPUT=true and using stream-json
   // Build flag gates this out of external builds; env var is the runtime opt-in for ant builds
-  const transformToStreamlined =
-    feature('STREAMLINED_OUTPUT') &&
-    isEnvTruthy(process.env.CLAUDE_CODE_STREAMLINED_OUTPUT) &&
-    options.outputFormat === 'stream-json'
-      ? createStreamlinedTransformer()
-      : null
+  const transformToStreamlined = resolveStreamlinedTransformer(
+    options.outputFormat,
+  )
 
   headlessProfilerCheckpoint('before_runHeadlessStreaming')
   streamJsonDrainStarted = true
