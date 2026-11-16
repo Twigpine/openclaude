@@ -11,10 +11,13 @@ export async function handleUriArgIfEnabled(
   argv: string[],
 ): Promise<number | undefined> {
   if (!feature('LODESTONE')) return undefined
-  const idx = argv.indexOf('--handle-uri')
-  if (idx === -1 || !argv[idx + 1]) return undefined
+  // Position-0 only: the OS protocol handler invokes
+  // `claude --handle-uri <url>` as the first argument. An indexOf scan
+  // would false-positive on `--handle-uri` appearing as another option's
+  // operand, e.g. --system-prompt '--handle-uri'.
+  if (argv[2] !== '--handle-uri' || !argv[3]) return undefined
   const { enableConfigs } = await import('../config.js')
   enableConfigs()
   const { handleDeepLinkUri } = await import('./protocolHandler.js')
-  return handleDeepLinkUri(argv[idx + 1]!)
+  return handleDeepLinkUri(argv[3])
 }

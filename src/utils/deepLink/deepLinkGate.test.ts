@@ -119,6 +119,20 @@ describe('handleUriArgIfEnabled gate', () => {
     ).toBeUndefined()
     expect(handleDeepLinkUriSpy).not.toHaveBeenCalled()
   })
+
+  test('does not treat another option\'s operand as a handler invocation', async () => {
+    handleDeepLinkUriSpy.mockClear()
+    const code = await handleUriArgIfEnabled([
+      'node',
+      'openclaude',
+      '--system-prompt',
+      '--handle-uri',
+      'claude-cli://open?cwd=/tmp',
+    ])
+
+    expect(code).toBeUndefined()
+    expect(handleDeepLinkUriSpy).not.toHaveBeenCalled()
+  })
 })
 
 const originalEnv = {
