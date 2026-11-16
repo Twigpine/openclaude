@@ -33,6 +33,7 @@ import {
 } from '../../utils/messages.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import {
+  checkWriteBoundaryForAskRule,
   checkPlanModePermissions,
   checkRuleBasedPermissions,
   revalidatePlanModePermissionAllowWithRaceGuard,
@@ -371,6 +372,18 @@ function createPermissionContext(
           const decision = hookResult.permissionRequestResult
           if (decision.behavior === 'allow') {
             const finalInput = decision.updatedInput ?? updatedInput ?? input
+            // A hook can allow with an updatedInput pointing outside the
+            // working directories. Recheck the hard write boundary on the
+            // input actually being allowed; tool.checkPermissions never
+            // sees finalInput here.
+            const writeBoundary = checkWriteBoundaryForAskRule(
+              tool,
+              finalInput,
+              toolUseContext.getAppState().toolPermissionContext,
+            )
+            if (writeBoundary) {
+              return writeBoundary
+            }
             const finalPlanMode =
               enforcePlanMode ||
               toolUseContext.getAppState().toolPermissionContext.mode ===

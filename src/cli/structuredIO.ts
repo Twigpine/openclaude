@@ -35,6 +35,7 @@ import type {
   PermissionDecisionReason,
 } from 'src/utils/permissions/PermissionResult.js'
 import {
+  checkWriteBoundaryForAskRule,
   checkPlanModePermissions,
   checkRuleBasedPermissions,
   hasPermissionsToUseTool,
@@ -818,7 +819,7 @@ function exitWithMessage(message: string): never {
  * Execute PermissionRequest hooks and return a decision if one is made.
  * Returns undefined if no hook made a decision.
  */
-async function executePermissionRequestHooksForSDK(
+export async function executePermissionRequestHooksForSDK(
   tool: Tool,
   toolUseID: string,
   input: Record<string, unknown>,
@@ -855,6 +856,18 @@ async function executePermissionRequestHooksForSDK(
       const decision = hookResult.permissionRequestResult
       if (decision.behavior === 'allow') {
         const finalInput = decision.updatedInput || input
+        // A hook can allow with an updatedInput pointing outside the
+        // working directories. Recheck the hard write boundary on the
+        // input actually being allowed; tool.checkPermissions never
+        // sees finalInput here.
+        const writeBoundary = checkWriteBoundaryForAskRule(
+          tool,
+          finalInput,
+          toolUseContext.getAppState().toolPermissionContext,
+        )
+        if (writeBoundary) {
+          return writeBoundary
+        }
         const finalPlanMode =
           enforcePlanMode ||
           toolUseContext.getAppState().toolPermissionContext.mode === 'plan'

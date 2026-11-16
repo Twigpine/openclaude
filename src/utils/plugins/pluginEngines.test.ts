@@ -164,11 +164,8 @@ describe('plugin engines compatibility', () => {
     // compatibility (0.36.0-rc.1 does not satisfy >=0.36.0).
     const { getPublicBuildVersion } = await import('../version.js')
     const pkg = (await import('../../../package.json')).default
-    try {
-      expect(getPublicBuildVersion()).toBe(pkg.version)
-    } catch (error) {
-      // Bundled test environments with MACRO defined skip the fallback.
-      if (!String(error).includes('toBe')) throw error
-    }
+    // bun test never defines MACRO, so the getter always takes the
+    // fallback here; a mismatched version must fail the test.
+    expect(getPublicBuildVersion()).toBe(pkg.version)
   })
 })

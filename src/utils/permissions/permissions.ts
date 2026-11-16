@@ -100,7 +100,7 @@ function isActivePlanFileForContext(
 // blockWritesOutsideWorkingDirectories boundary inside
 // checkWritePermissionForTool would never run for Write/Edit/NotebookEdit.
 // Check it here, ahead of the ask-rule early returns.
-function checkWriteBoundaryForAskRule(
+export function checkWriteBoundaryForAskRule(
   tool: Tool,
   input: { [key: string]: unknown },
   toolPermissionContext: ToolPermissionContext,

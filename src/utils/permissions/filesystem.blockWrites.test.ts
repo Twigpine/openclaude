@@ -61,6 +61,12 @@ const { checkWritePermissionForTool, getScratchpadDir } = await import(
 const { hasPermissionsToUseTool, checkRuleBasedPermissions } = await import(
   './permissions.js'
 )
+const { createPermissionContext } = await import(
+  '../../hooks/toolPermission/PermissionContext.js'
+)
+const { executePermissionRequestHooksForSDK } = await import(
+  '../../cli/structuredIO.js'
+)
 
 const writeTool = createToolFixture(
   z.object({ file_path: z.string() }),
@@ -408,6 +414,56 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
         throw new Error(`expected deny, got ${result.behavior}`)
       }
       expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    } finally {
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('an interactive hook allow still hits the boundary', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(outsideDir, 'hooked.txt') },
+    }
+    try {
+      const toolPermissionContext = permissionContext('default')
+      const permissionCtx = createPermissionContext(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(toolPermissionContext),
+        { message: { id: 'blockwrites-interactive' } } as never,
+        'blockwrites-interactive',
+        () => {},
+      )
+      const result = await permissionCtx.runHooks(undefined, undefined)
+      expect(result?.behavior).toBe('deny')
+      if (result?.behavior === 'deny') {
+        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      }
+    } finally {
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('an SDK hook allow still hits the boundary', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(outsideDir, 'hooked.txt') },
+    }
+    try {
+      const toolPermissionContext = permissionContext('default')
+      const result = await executePermissionRequestHooksForSDK(
+        writeTool,
+        'blockwrites-sdk',
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(toolPermissionContext),
+        undefined,
+      )
+      expect(result?.behavior).toBe('deny')
+      if (result?.behavior === 'deny') {
+        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      }
     } finally {
       hookPermissionResult = undefined
     }
