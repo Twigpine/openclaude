@@ -5,6 +5,7 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { parseForSecurityFromAst } from '../../utils/bash/ast.js'
+import { getParserModule } from '../../utils/bash/bashParser.js'
 import { PARSE_ABORTED } from '../../utils/bash/parser.js'
 import { analyzeBashCommand } from './bashCommandAnalysis.js'
 
@@ -125,6 +126,64 @@ test('keeps parser aborts fail-closed as too complex', () => {
   }
   expect(result.nodeType).toBe('PARSE_ABORT')
   expect(result.reason).toContain('Parser aborted')
+})
+
+function astResultFor(command: string) {
+  // Infinity: disable the 50ms parse timeout (correctness tests per
+  // bashParser.ts guidance; avoids spurious nulls on slow CI).
+  const root = getParserModule()?.parse(command, Infinity)
+  if (!root) throw new Error('pure-TS bash parser unavailable')
+  return parseForSecurityFromAst(command, root)
+}
+
+test('a skipped && RHS assignment does not become the expanded value', () => {
+  // bash short-circuits `false && SUB=status`, keeps SUB=push, and runs
+  // `git push`. Leaking the RHS assignment would analyze `git status`
+  // instead and a `Bash(git push:*)` deny would miss the command bash
+  // actually runs.
+  const result = astResultFor('SUB=push; false && SUB=status; git "$SUB"')
+  expect(result.kind).toBe('too-complex')
+})
+
+test('an executed && RHS assignment still does not resolve as a literal', () => {
+  // Mirror of the skip case: bash does run SUB=push here, but the analyzer
+  // cannot prove the && LHS succeeds, so the value is runtime-conditional
+  // and must not silently resolve to `git status` either.
+  const result = astResultFor('SUB=status; true && SUB=push; git "$SUB"')
+  expect(result.kind).toBe('too-complex')
+})
+
+test('a conditional && RHS write cannot overwrite a tracked literal', () => {
+  // Either '../../etc/passwd' (skipped) or 'x' (ran) is possible; marking
+  // the var unknown would hide the literal from path validation.
+  const result = astResultFor(
+    'VAR=../../etc/passwd; false && VAR=x; cat "/tmp/$VAR"',
+  )
+  expect(result.kind).toBe('too-complex')
+})
+
+test('&& RHS still reads variables assigned by its own LHS', () => {
+  const result = astResultFor('VAR=x && cmd $VAR')
+  expect(result.kind).toBe('simple')
+  if (result.kind !== 'simple') throw new Error('expected simple')
+  expect(result.commands.map(c => c.argv)).toEqual([['cmd', 'x']])
+})
+
+test('unconditional ; assignments still resolve as literals', () => {
+  const result = astResultFor('VAR=x; cmd $VAR')
+  expect(result.kind).toBe('simple')
+  if (result.kind !== 'simple') throw new Error('expected simple')
+  expect(result.commands.map(c => c.argv)).toEqual([['cmd', 'x']])
+})
+
+test('a var added by a && RHS expands as the unknown-value placeholder', () => {
+  const result = astResultFor('true && V=x; echo "got $V"')
+  expect(result.kind).toBe('simple')
+  if (result.kind !== 'simple') throw new Error('expected simple')
+  expect(result.commands.map(c => c.argv)).toEqual([
+    ['true'],
+    ['echo', 'got __TRACKED_VAR__'],
+  ])
 })
 
 test('logs one sanitized debug event for an expected legacy parser limitation', async () => {
