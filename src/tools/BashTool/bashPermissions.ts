@@ -1979,6 +1979,31 @@ export async function bashToolHasPermission(
             : {}),
         }
       }
+
+      // A deny/ask prompt rule the classifier could not evaluate (provider
+      // error, malformed verdict, disabled mid-check) must not fall through
+      // to literal allow rules - fail toward prompting the user.
+      if (denyResult?.unavailable || askResult?.unavailable) {
+        const decisionReason: PermissionDecisionReason = {
+          type: 'other' as const,
+          reason:
+            'A Bash prompt rule could not be evaluated; approval required',
+        }
+        return {
+          behavior: 'ask',
+          message: createPermissionRequestMessage(BashTool.name, decisionReason),
+          decisionReason,
+          suggestions: suggestionForExactCommand(input.command),
+          ...(feature('BASH_CLASSIFIER')
+            ? {
+                pendingClassifierCheck: buildPendingClassifierCheck(
+                  input.command,
+                  appState.toolPermissionContext,
+                ),
+              }
+            : {}),
+        }
+      }
     }
   }
 

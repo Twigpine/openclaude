@@ -36,6 +36,8 @@ export type ClassifierResult = {
   matchedDescription?: string
   confidence: 'high' | 'medium' | 'low'
   reason: string
+  /** True when no verdict was produced (provider error, malformed output, disabled); callers must not treat it as an evaluated non-match. */
+  unavailable?: boolean
 }
 
 export type ClassifierBehavior = 'deny' | 'ask' | 'allow'
@@ -170,9 +172,15 @@ export async function classifyBashCommand(
     confidence: 'low',
     reason,
   })
+  const unavailableNoMatch = (reason: string): ClassifierResult => ({
+    matches: false,
+    confidence: 'low',
+    reason,
+    unavailable: true,
+  })
 
   if (!isClassifierPermissionsEnabled()) {
-    return noMatch('Bash prompt rules are disabled')
+    return unavailableNoMatch('Bash prompt rules are disabled')
   }
   if (descriptions.length === 0) {
     return noMatch('No prompt rule descriptions configured')
@@ -207,11 +215,11 @@ export async function classifyBashCommand(
 
     const toolUse = extractToolUseBlock(result.content, BASH_CLASSIFIER_TOOL_NAME)
     if (!toolUse) {
-      return noMatch('Classifier returned no structured verdict')
+      return unavailableNoMatch('Classifier returned no structured verdict')
     }
     const parsed = parseClassifierResponse(toolUse, responseSchema)
     if (!parsed) {
-      return noMatch('Classifier returned an unparseable verdict')
+      return unavailableNoMatch('Classifier returned an unparseable verdict')
     }
 
     const matched = descriptions[parsed.matched_index]
@@ -236,7 +244,7 @@ export async function classifyBashCommand(
       }`,
     )
     // Fail toward prompting the user rather than silently deciding.
-    return noMatch('Classifier unavailable')
+    return unavailableNoMatch('Classifier unavailable')
   }
 }
 

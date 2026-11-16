@@ -174,6 +174,7 @@ test('classifyBashCommand returns no match for index -1 and out-of-range indexes
     if (classifierEnabled) {
       expect(result.confidence).toBe('medium')
       expect(result.reason).toBe('outside scope')
+      expect(result.unavailable).toBeUndefined()
     }
   }
 })
@@ -214,6 +215,7 @@ test('classifyBashCommand fails open toward prompting on classifier errors', asy
     reason: classifierEnabled
       ? 'Classifier unavailable'
       : 'Bash prompt rules are disabled',
+    unavailable: true,
   })
   expect(calls()).toBe(classifierEnabled ? 1 : 0)
 })
@@ -233,6 +235,7 @@ test('classifyBashCommand fails open on malformed model output', async () => {
   )
   expect(result.matches).toBe(false)
   expect(result.confidence).toBe('low')
+  expect(result.unavailable).toBe(true)
 })
 
 test('classifyBashCommand propagates aborts', async () => {

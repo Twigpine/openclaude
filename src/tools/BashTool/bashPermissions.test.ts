@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -527,5 +528,95 @@ describe('speculative cache eviction', () => {
     const consumedOverflow = consumeSpeculativeClassifierCheck('overflow')
     expect(consumedOverflow).toBeDefined()
     expect(peekSpeculativeClassifierCheck('overflow')).toBeUndefined()
+  })
+})
+
+// Regression: a literal allow rule must not silently win when a Bash prompt
+// deny/ask rule exists but the classifier could not evaluate it (provider
+// error, malformed verdict). Only an evaluated non-match may fall through.
+// sideQuery is mocked so the whole classifyBashCommand path runs for real.
+describe('Bash prompt rules when the classifier is unavailable', () => {
+  const classifierEnabled = feature('BASH_CLASSIFIER') ? true : false
+  let realSideQueryModule: Record<string, unknown> | undefined
+  let sideQueryCalls = 0
+  let sideQueryImpl: (opts: unknown) => Promise<unknown> = async () => {
+    throw new Error('sideQuery mock not configured')
+  }
+
+  beforeEach(async () => {
+    sideQueryCalls = 0
+    realSideQueryModule ??= (await import('../../utils/sideQuery.js')) as Record<
+      string,
+      unknown
+    >
+    mock.module('../../utils/sideQuery.js', () => ({
+      ...realSideQueryModule,
+      sideQuery: (opts: unknown) => {
+        sideQueryCalls++
+        return sideQueryImpl(opts)
+      },
+    }))
+  })
+
+  afterEach(() => {
+    // mock.module() is process-global and mock.restore() does not undo it.
+    if (realSideQueryModule) {
+      const real = realSideQueryModule
+      mock.module('../../utils/sideQuery.js', () => real)
+    }
+  })
+
+  function promptRuleContext() {
+    return {
+      ...getEmptyToolPermissionContext(),
+      alwaysAllowRules: { projectSettings: ['Bash(git status)'] },
+      alwaysDenyRules: { projectSettings: ['Bash(prompt: git commands)'] },
+    }
+  }
+
+  test('unavailable deny classifier prompts instead of falling through to literal allow', async () => {
+    sideQueryImpl = async () => {
+      throw new Error('provider down')
+    }
+    const result = await bashToolHasPermission(
+      { command: 'git status' },
+      makeToolUseContext(promptRuleContext()),
+    )
+    if (classifierEnabled) {
+      expect(result.behavior).toBe('ask')
+      expect(result.decisionReason).toMatchObject({
+        type: 'other',
+        reason: expect.stringContaining('could not be evaluated'),
+      })
+      expect(sideQueryCalls).toBe(1)
+    } else {
+      // Feature gated off: the prompt rule is inert, literal allow applies.
+      expect(result.behavior).toBe('allow')
+      expect(sideQueryCalls).toBe(0)
+    }
+  })
+
+  test('evaluated non-match still falls through to literal allow', async () => {
+    sideQueryImpl = async () => ({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'report_bash_rule_match',
+          id: 'tu_1',
+          input: {
+            reasoning: 'no fit',
+            matched_index: -1,
+            confidence: 'medium',
+            reason: 'outside scope',
+          },
+        },
+      ],
+    })
+    const result = await bashToolHasPermission(
+      { command: 'git status' },
+      makeToolUseContext(promptRuleContext()),
+    )
+    expect(result.behavior).toBe('allow')
+    expect(sideQueryCalls).toBe(classifierEnabled ? 1 : 0)
   })
 })
