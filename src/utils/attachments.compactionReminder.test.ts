@@ -5,8 +5,10 @@ import { getDefaultAppState } from '../state/AppStateStore.js'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
 import type { Message } from '../types/message.js'
 import { asAgentId } from '../types/ids.js'
+import { createAttachmentMessage } from './attachments.js'
 import { createFileStateCacheWithSizeLimit } from './fileStateCache.js'
 import { createUserMessage } from './messages.js'
+import { createCompactBoundaryMessage } from './messages/systemFactories.js'
 
 const ENV_KEYS = [
   'DISABLE_COMPACT',
@@ -63,6 +65,11 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     restoreEnv()
+    // mock.module registrations are process-global and mock.restore() does not
+    // undo them, so re-register the genuine module to keep the forced
+    // autoCompactEnabled from leaking into other files in this process.
+    mock.restore()
+    mock.module('./config.js', () => realConfig)
   } finally {
     releaseSharedMutationLock()
   }
@@ -142,6 +149,49 @@ describe('getCompactionReminderAttachment', () => {
     expect(
       getCompactionReminderAttachment([userMessage(10_000)], ONE_MILLION_MODEL),
     ).toEqual([])
+  })
+})
+
+describe('compaction reminder pacing across tool-loop passes', () => {
+  // The tool loop calls getAttachments on every round with the growing message
+  // list, so the helper itself has to notice a reminder it already injected.
+  test('stays quiet once a reminder is already in the transcript', () => {
+    process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '40000'
+    const first: Message[] = [userMessage(10_000)]
+    const reminders = getCompactionReminderAttachment(first, ONE_MILLION_MODEL)
+    expect(reminders).toEqual([{ type: 'compaction_reminder' }])
+
+    const second: Message[] = [
+      ...first,
+      createAttachmentMessage(reminders[0]!),
+      userMessage(500),
+    ]
+    expect(getCompactionReminderAttachment(second, ONE_MILLION_MODEL)).toEqual([])
+  })
+
+  test('stays quiet across several further tool rounds', () => {
+    process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '40000'
+    let messages: Message[] = [userMessage(10_000)]
+    let emitted = 0
+    for (let round = 0; round < 5; round++) {
+      const out = getCompactionReminderAttachment(messages, ONE_MILLION_MODEL)
+      emitted += out.length
+      messages = [...messages, ...out.map(createAttachmentMessage), userMessage(500)]
+    }
+    expect(emitted).toBe(1)
+  })
+
+  test('reminds again after a compact boundary resets the transcript', () => {
+    process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '40000'
+    const messages: Message[] = [
+      userMessage(10_000),
+      createAttachmentMessage({ type: 'compaction_reminder' }),
+      createCompactBoundaryMessage('auto', 10_000),
+      userMessage(10_000),
+    ]
+    expect(getCompactionReminderAttachment(messages, ONE_MILLION_MODEL)).toEqual([
+      { type: 'compaction_reminder' },
+    ])
   })
 })
 
