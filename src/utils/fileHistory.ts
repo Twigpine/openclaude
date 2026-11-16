@@ -868,10 +868,16 @@ function maybeShortenFilePath(filePath: string): string {
   }
   // Relative keys must stay anchored to the session's project root: a
   // mid-session /cd moves originalCwd, and keys written before the move
-  // would otherwise resolve against the wrong directory on rewind.
-  const cwd = getProjectRoot()
-  if (filePath.startsWith(cwd)) {
-    return relative(cwd, filePath)
+  // would otherwise resolve against the wrong directory on rewind. The
+  // './' prefix marks keys written against this anchor so expand can
+  // distinguish them from legacy unprefixed keys, which anchored to the
+  // working root at write time (see maybeExpandFilePath).
+  const root = getProjectRoot()
+  if (filePath.startsWith(root)) {
+    const rel = relative(root, filePath)
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
+      return './' + rel
+    }
   }
   return filePath
 }
@@ -880,11 +886,18 @@ function maybeExpandFilePath(filePath: string): string {
   if (isAbsolute(filePath)) {
     return filePath
   }
+  // Keys written against the project root carry a './' prefix and always
+  // expand there, even when the file no longer exists. Falling back on
+  // existence would let a same-named file under the post-/cd working
+  // root hijack a rewind write for a deleted project file.
+  if (filePath.startsWith('./')) {
+    return join(getProjectRoot(), filePath.slice(2))
+  }
   const projectPath = join(getProjectRoot(), filePath)
-  // Keys stored before relative paths anchored to the project root were
-  // relative to the working root at write time (e.g. inside a worktree,
-  // where projectRoot stays at the session origin). When the key only
-  // resolves under the current working root, expand against it.
+  // Legacy unprefixed keys anchored to the working root at write time
+  // (e.g. inside a worktree, where projectRoot stays at the session
+  // origin). Best-effort expansion: project root first, then the
+  // working root when the key only resolves there.
   const origin = getOriginalCwd()
   if (origin !== getProjectRoot() && !existsSync(projectPath)) {
     const originPath = join(origin, filePath)

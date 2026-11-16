@@ -5,6 +5,7 @@ import {
   setOriginalCwd,
   setProjectRoot,
 } from '../../bootstrap/state.js'
+import { SandboxManager } from '../../utils/sandbox/sandbox-adapter.js'
 import { clearSystemPromptSections } from '../../constants/systemPromptSections.js'
 import { logEvent } from '../../services/analytics/index.js'
 import type { Tool } from '../../Tool.js'
@@ -261,6 +262,8 @@ export const ExitWorktreeTool: Tool<InputSchema, Output> = buildTool({
     if (input.action === 'keep') {
       await keepWorktree()
       restoreSessionToOriginalCwd(originalCwd, projectRootIsWorktree)
+      await SandboxManager.refreshWorktreeMainRepoPath(originalCwd)
+      SandboxManager.refreshConfig()
 
       logEvent('tengu_worktree_kept', {
         mid_session: true,
@@ -289,6 +292,8 @@ export const ExitWorktreeTool: Tool<InputSchema, Output> = buildTool({
     }
     await cleanupWorktree()
     restoreSessionToOriginalCwd(originalCwd, projectRootIsWorktree)
+    await SandboxManager.refreshWorktreeMainRepoPath(originalCwd)
+    SandboxManager.refreshConfig()
 
     logEvent('tengu_worktree_removed', {
       mid_session: true,

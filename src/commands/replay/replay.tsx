@@ -2,7 +2,7 @@ import { c as _c } from "react-compiler-runtime";
 import chalk from 'chalk';
 import type { UUID } from 'crypto';
 import * as React from 'react';
-import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js';
+import { getOriginalCwd, getProjectRoot, getSessionId } from '../../bootstrap/state.js';
 import { LogSelector } from '../../components/LogSelector.js';
 import { MessageResponse } from '../../components/MessageResponse.js';
 import { Spinner } from '../../components/Spinner.js';
@@ -18,7 +18,7 @@ import { validateUuid } from '../../utils/uuid.js';
 import { ReplayTimeline } from './ReplayTimeline.js';
 
 async function findLogBySessionId(sessionId: UUID): Promise<LogOption | undefined> {
-  const logs = await loadSameRepoMessageLogs(await getWorktreePaths(getOriginalCwd()));
+  const logs = await loadSameRepoMessageLogs(await getWorktreePaths(getProjectRoot()));
   return logs.find(log => getSessionIdFromLog(log) === sessionId);
 }
 
@@ -38,7 +38,7 @@ function ReplaySessionPicker({
     async function loadLogs() {
       setLoading(true);
       try {
-        const allLogs = await loadSameRepoMessageLogs(await getWorktreePaths(getOriginalCwd()));
+        const allLogs = await loadSameRepoMessageLogs(await getWorktreePaths(getProjectRoot()));
         // Filter out sidechain sessions and current session
         const replayable = allLogs.filter(l => !l.isSidechain && getSessionIdFromLog(l) !== getSessionId());
         if (replayable.length === 0) {
@@ -135,7 +135,7 @@ export const call: LocalJSXCommandCall = async (onDone, context, args) => {
       }
 
       // Try to search by title
-      const logs = await loadSameRepoMessageLogs(await getWorktreePaths(getOriginalCwd()));
+      const logs = await loadSameRepoMessageLogs(await getWorktreePaths(getProjectRoot()));
       const matchingLog = logs.find(l =>
         l.customTitle?.toLowerCase().includes(query.toLowerCase()) ||
         l.firstPrompt?.toLowerCase().includes(query.toLowerCase())

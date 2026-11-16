@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
 import {
@@ -53,12 +53,13 @@ describe('/cd', () => {
 
   beforeEach(async () => {
     await acquireSharedMutationLock('commands/cd.test.ts')
-    sandbox = mkdtempSync(join(tmpdir(), 'oc-cd-test-'))
+    sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'oc-cd-test-')))
     savedProcessCwd = process.cwd()
     savedCwdState = getCwdState()
     savedOriginalCwd = getOriginalCwd()
     savedProjectRoot = getProjectRoot()
     savedAdditionalDirs = getAdditionalDirectoriesForClaudeMd()
+    setAdditionalDirectoriesForClaudeMd([])
     latestPermissionContext = getEmptyToolPermissionContext()
     process.chdir(sandbox)
     setCwdState(sandbox)
@@ -120,7 +121,7 @@ describe('/cd', () => {
   })
 
   it('adds an outside directory to the working set, then switches', async () => {
-    const outside = mkdtempSync(join(tmpdir(), 'oc-cd-outside-'))
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'oc-cd-outside-')))
     try {
       const result = await call(outside, context())
       expect(result.type).toBe('text')

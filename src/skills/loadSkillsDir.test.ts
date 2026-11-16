@@ -32,10 +32,12 @@ import { getManagedFilePath, getManagedSettingsDropInDir } from '../utils/settin
 
 import {
   getOriginalCwd,
+  getProjectRoot,
   getFlagSettingsPath,
   setFlagSettingsPath,
   setAllowedSettingSources,
   setOriginalCwd,
+  setProjectRoot,
 } from '../bootstrap/state.js'
 import {
   enableUserAndProjectSettingSources,
@@ -519,6 +521,7 @@ async function withSiblingHomeFixture(
     configHomeOverride: getClaudeConfigHomeDirOverrideForTesting(),
   }
   const originalOriginalCwd = getOriginalCwd()
+  const originalProjectRoot = getProjectRoot()
   const originalCwd = process.cwd()
   const originalSettingsState = enableUserAndProjectSettingSources()
   const originalFs = setRealFilesystemForTest()
@@ -529,6 +532,7 @@ async function withSiblingHomeFixture(
     setConfigDirEnv(configDir, homeDir)
     process.chdir(cwd)
     setOriginalCwd(cwd)
+    setProjectRoot(cwd)
     clearSkillAndConfigCaches()
     await run({ homeDir, configDir, cwd })
   } finally {
@@ -536,6 +540,7 @@ async function withSiblingHomeFixture(
       process.chdir(originalCwd)
       restoreConfigDirEnv(originalConfigDir)
       setOriginalCwd(originalOriginalCwd)
+      setProjectRoot(originalProjectRoot)
       setFsImplementation(originalFs)
       restoreSettingState(originalSettingsState)
       clearDynamicSkills()
@@ -1084,11 +1089,12 @@ for (const home of ['.agents', '.claude'] as const) {
           import { activateConditionalSkillsForPaths, clearDynamicSkills } from ${moduleUrl('./loadSkillsDir.ts')}
           import { setSiblingSkillsHomeDirForTesting } from ${moduleUrl('./siblingSkillHomes.ts')}
           import { enableUserAndProjectSettingSources } from ${moduleUrl('../test/settingSourceState.ts')}
-          import { setOriginalCwd } from ${moduleUrl('../bootstrap/state.ts')}
+          import { setOriginalCwd, setProjectRoot } from ${moduleUrl('../bootstrap/state.ts')}
           import { registerLoopSkill } from ${moduleUrl('./bundled/loop.ts')}
           import { getBundledSkills, registerBundledSkill } from ${moduleUrl('./bundledSkills.ts')}
           enableUserAndProjectSettingSources()
           setOriginalCwd(${JSON.stringify(cwd)})
+          setProjectRoot(${JSON.stringify(cwd)})
           setSiblingSkillsHomeDirForTesting(${JSON.stringify(homeDir)})
           registerLoopSkill()
           registerBundledSkill({ name: 'reserved-owner', aliases: ['reserved-alias'],

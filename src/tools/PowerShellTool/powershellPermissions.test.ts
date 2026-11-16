@@ -7,6 +7,8 @@ import {
   setAllowedSettingSources,
   setCwdState,
   setOriginalCwd,
+  setProjectRoot,
+  getProjectRoot,
 } from '../../bootstrap/state.js'
 import type { ToolPermissionContext } from '../../types/permissions.js'
 import {
@@ -49,18 +51,22 @@ function permissionContext(mode: ToolPermissionContext['mode']) {
 
 describe('PowerShell .git write safety', () => {
   let originalCwd: string
+let originalProjectRoot: string
   let projectDir: string
 
   beforeEach(async () => {
     originalCwd = getOriginalCwd()
+    originalProjectRoot = getProjectRoot()
     projectDir = await mkdtemp(join(tmpdir(), 'openclaude-ps-perms-'))
     await mkdir(join(projectDir, '.git'))
     setOriginalCwd(projectDir)
+    setProjectRoot(projectDir)
     setCwdState(projectDir)
   })
 
   afterEach(async () => {
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalProjectRoot)
     setCwdState(originalCwd)
     await rm(projectDir, { recursive: true, force: true })
   })

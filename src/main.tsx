@@ -182,7 +182,7 @@ import { createHeadlessHeartbeat, parseHeadlessHeartbeatDuration, validateHeadle
 import { setCwd } from 'src/utils/Shell.js';
 import { type ProcessedResume, processResumedConversation } from 'src/utils/sessionRestore.js';
 import { plural } from 'src/utils/stringUtils.js';
-import { type ChannelEntry, getInitialMainLoopModel, getIsNonInteractiveSession, getSdkBetas, getSessionId, getUserMsgOptIn, setAllowedChannels, setChromeFlagOverride, setClientType, setCwdState, setDirectConnectServerUrl, setInitialMainLoopModel, setInlinePlugins, setIsInteractive, setKairosActive, setOriginalCwd, setQuestionPreviewFormat, setSdkBetas, setSessionBypassPermissionsMode, setSessionDangerousPermissionMode, setSessionPersistenceDisabled, setSessionSource, setUserMsgOptIn, switchSession } from './bootstrap/state.js';
+import { type ChannelEntry, getInitialMainLoopModel, getIsNonInteractiveSession, getSdkBetas, getSessionId, getUserMsgOptIn, setAllowedChannels, setChromeFlagOverride, setClientType, setCwdState, setDirectConnectServerUrl, setInitialMainLoopModel, setInlinePlugins, setIsInteractive, setKairosActive, setOriginalCwd, setQuestionPreviewFormat, setSdkBetas, setProjectRoot, setSessionBypassPermissionsMode, setSessionDangerousPermissionMode, setSessionPersistenceDisabled, setSessionSource, setUserMsgOptIn, switchSession } from './bootstrap/state.js';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const autoModeStateModule = feature('TRANSCRIPT_CLASSIFIER') ? require('./utils/permissions/autoModeState.js') as typeof import('./utils/permissions/autoModeState.js') : null;
@@ -3110,6 +3110,7 @@ async function run(): Promise<CommanderCommand> {
         });
         if (session.workDir) {
           setOriginalCwd(session.workDir);
+          setProjectRoot(session.workDir);
           setCwdState(session.workDir);
         }
         setDirectConnectServerUrl(_pendingConnect.url);
@@ -3179,6 +3180,7 @@ async function run(): Promise<CommanderCommand> {
           if (hadProgress) process.stderr.write('\n');
         }
         setOriginalCwd(sshSession.remoteCwd);
+        setProjectRoot(sshSession.remoteCwd);
         setCwdState(sshSession.remoteCwd);
         setDirectConnectServerUrl(_pendingSSH.local ? 'local' : _pendingSSH.host);
       } catch (err) {
@@ -3492,6 +3494,7 @@ async function run(): Promise<CommanderCommand> {
                     process.chdir(selectedPath);
                     setCwd(selectedPath);
                     setOriginalCwd(selectedPath);
+                    setProjectRoot(selectedPath);
                   } else {
                     // User cancelled
                     await gracefulShutdown(0);
@@ -3932,6 +3935,7 @@ async function run(): Promise<CommanderCommand> {
         });
         if (session.workDir) {
           setOriginalCwd(session.workDir);
+          setProjectRoot(session.workDir);
           setCwdState(session.workDir);
         }
         setDirectConnectServerUrl(serverUrl);

@@ -4386,7 +4386,7 @@ export async function searchSessionsByCustomTitle(
 ): Promise<LogOption[]> {
   const { limit, exact } = options || {}
   // Use worktree-aware loading to search across same-repo sessions
-  const worktreePaths = await getWorktreePaths(getOriginalCwd())
+  const worktreePaths = await getWorktreePaths(getProjectRoot())
   const allStatLogs = await getStatOnlyLogsForWorktrees(worktreePaths)
   // Enrich all logs to access customTitle metadata
   const { logs } = await enrichLogs(allStatLogs, 0, allStatLogs.length)
