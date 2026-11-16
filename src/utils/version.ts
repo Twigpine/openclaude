@@ -56,5 +56,9 @@ export function getReleaseTagUrl(version: string = publicBuildVersion): string {
 }
 
 export function getPublicBuildVersion(): string {
-  return MACRO.DISPLAY_VERSION ?? MACRO.VERSION
+  try {
+    return MACRO.DISPLAY_VERSION ?? MACRO.VERSION
+  } catch {
+    return publicBuildVersion
+  }
 }

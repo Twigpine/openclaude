@@ -40,6 +40,7 @@ import {
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
   samePermissionAskConstraint,
+  suppressPromptIfConfigured,
 } from 'src/utils/permissions/permissions.js'
 import { writeToStdout } from 'src/utils/process.js'
 import { jsonStringify } from 'src/utils/slowOperations.js'
@@ -879,7 +880,7 @@ async function executePermissionRequestHooksForSDK(
             finalRuleDecision,
           )
         ) {
-          return finalRuleDecision
+          return suppressPromptIfConfigured(tool, finalRuleDecision)
         }
 
         // Apply permission updates if provided by hook ("always allow")

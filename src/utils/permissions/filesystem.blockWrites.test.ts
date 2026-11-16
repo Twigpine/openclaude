@@ -4,7 +4,9 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { z } from 'zod/v4'
 import {
+  getCwdState,
   getOriginalCwd,
+  setCwdState,
   setOriginalCwd,
 } from '../../bootstrap/state.js'
 import { createToolFixture } from '../../test/toolFixtures.js'
@@ -41,7 +43,21 @@ mock.module('../hooks.js', () => ({
   },
 }))
 
-const { checkWritePermissionForTool } = await import('./filesystem.js')
+let scratchpadGateEnabled = false
+const realGrowthbook = await import(
+  `../../services/analytics/growthbook.js?blockWritesGrowthbookActual=${Date.now()}-${Math.random()}`
+)
+mock.module('../../services/analytics/growthbook.js', () => ({
+  ...realGrowthbook,
+  checkStatsigFeatureGate_CACHED_MAY_BE_STALE: (gateName: string): boolean =>
+    gateName === 'tengu_scratch'
+      ? scratchpadGateEnabled
+      : realGrowthbook.checkStatsigFeatureGate_CACHED_MAY_BE_STALE(gateName),
+}))
+
+const { checkWritePermissionForTool, getScratchpadDir } = await import(
+  './filesystem.js'
+)
 const { hasPermissionsToUseTool, checkRuleBasedPermissions } = await import(
   './permissions.js'
 )
@@ -111,9 +127,14 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
   afterAll(async () => {
     try {
       blockWritesOutsideWorkingDirectories = false
+      scratchpadGateEnabled = false
       setOriginalCwd(originalCwd)
       mock.restore()
       mock.module('../settings/settings.js', () => realSettings)
+      mock.module(
+        '../../services/analytics/growthbook.js',
+        () => realGrowthbook,
+      )
       await rm(projectDir, { recursive: true, force: true })
       await rm(outsideDir, { recursive: true, force: true })
       await rm(addedDir, { recursive: true, force: true })
@@ -388,6 +409,94 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
       expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
     } finally {
       hookPermissionResult = undefined
+    }
+  })
+
+  test('a symlink inside project agent-memory cannot escape the boundary', async () => {
+    if (process.platform === 'win32') {
+      return
+    }
+    blockWritesOutsideWorkingDirectories = true
+    const previousCwdState = getCwdState()
+    setCwdState(projectDir)
+    try {
+      const memoryDir = join(projectDir, '.openclaude', 'agent-memory')
+      await mkdir(memoryDir, { recursive: true })
+      const linkPath = join(memoryDir, 'redirect')
+      await rm(linkPath, { force: true, recursive: true })
+      await symlink(outsideDir, linkPath)
+      const result = checkWritePermissionForTool(
+        writeTool,
+        { file_path: join(linkPath, 'out.txt') },
+        permissionContext('bypassPermissions'),
+      )
+      if (result.behavior !== 'deny') {
+        throw new Error(`expected deny, got ${result.behavior}`)
+      }
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    } finally {
+      setCwdState(previousCwdState)
+    }
+  })
+
+  test('a normal project agent-memory write stays allowed', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const previousCwdState = getCwdState()
+    setCwdState(projectDir)
+    try {
+      const memoryDir = join(projectDir, '.openclaude', 'agent-memory')
+      await mkdir(memoryDir, { recursive: true })
+      const result = checkWritePermissionForTool(
+        writeTool,
+        { file_path: join(memoryDir, 'subdir', 'note.md') },
+        permissionContext('bypassPermissions'),
+      )
+      expect(result.behavior).toBe('allow')
+    } finally {
+      setCwdState(previousCwdState)
+    }
+  })
+
+  test('a symlink inside the scratchpad cannot escape the boundary', async () => {
+    if (process.platform === 'win32') {
+      return
+    }
+    blockWritesOutsideWorkingDirectories = true
+    scratchpadGateEnabled = true
+    try {
+      const scratchpadDir = getScratchpadDir()
+      await mkdir(scratchpadDir, { recursive: true })
+      const linkPath = join(scratchpadDir, 'redirect')
+      await rm(linkPath, { force: true, recursive: true })
+      await symlink(outsideDir, linkPath)
+      const result = checkWritePermissionForTool(
+        writeTool,
+        { file_path: join(linkPath, 'out.txt') },
+        permissionContext('bypassPermissions'),
+      )
+      if (result.behavior !== 'deny') {
+        throw new Error(`expected deny, got ${result.behavior}`)
+      }
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    } finally {
+      scratchpadGateEnabled = false
+    }
+  })
+
+  test('a normal scratchpad write stays allowed', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    scratchpadGateEnabled = true
+    try {
+      const scratchpadDir = getScratchpadDir()
+      await mkdir(scratchpadDir, { recursive: true })
+      const result = checkWritePermissionForTool(
+        writeTool,
+        { file_path: join(scratchpadDir, 'note.txt') },
+        permissionContext('bypassPermissions'),
+      )
+      expect(result.behavior).toBe('allow')
+    } finally {
+      scratchpadGateEnabled = false
     }
   })
 })

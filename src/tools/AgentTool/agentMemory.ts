@@ -64,43 +64,59 @@ export function getAgentMemoryDir(
   }
 }
 
-// Check if file is within an agent memory directory (any scope).
-export function isAgentMemoryPath(absolutePath: string): boolean {
+/**
+ * Returns the agent memory root directory containing the given path, or
+ * undefined when the path is outside every agent-memory scope. Companion to
+ * isAgentMemoryPath for callers that validate the resolved (symlink-free)
+ * destination stays inside the matched root, so a symlink inside the memory
+ * dir cannot redirect a write elsewhere.
+ */
+export function getAgentMemoryRoot(absolutePath: string): string | undefined {
   // SECURITY: Normalize to prevent path traversal bypasses via .. segments
   const normalizedPath = normalize(absolutePath)
   const memoryBase = getMemoryBaseDir()
 
   // User scope: check memory base (may be custom dir or config home)
-  if (normalizedPath.startsWith(join(memoryBase, 'agent-memory') + sep)) {
-    return true
+  const userRoot = join(memoryBase, 'agent-memory')
+  if (normalizedPath.startsWith(userRoot + sep)) {
+    return userRoot
   }
 
   // Project scope: always cwd-based (not redirected)
-  if (
-    normalizedPath.startsWith(join(getCwd(), '.openclaude', 'agent-memory') + sep)
-  ) {
-    return true
+  const projectRoot = join(getCwd(), '.openclaude', 'agent-memory')
+  if (normalizedPath.startsWith(projectRoot + sep)) {
+    return projectRoot
   }
 
   // Local scope: persisted to mount when CLAUDE_CODE_REMOTE_MEMORY_DIR is set, otherwise cwd-based
   if (process.env.CLAUDE_CODE_REMOTE_MEMORY_DIR) {
-    if (
-      normalizedPath.includes(sep + 'agent-memory-local' + sep) &&
-      normalizedPath.startsWith(
-        join(process.env.CLAUDE_CODE_REMOTE_MEMORY_DIR, 'projects') + sep,
-      )
-    ) {
-      return true
-    }
-  } else if (
-    normalizedPath.startsWith(
-      join(getCwd(), '.openclaude', 'agent-memory-local') + sep,
+    const marker = sep + 'agent-memory-local' + sep
+    const remoteProjectsRoot = join(
+      process.env.CLAUDE_CODE_REMOTE_MEMORY_DIR,
+      'projects',
     )
-  ) {
-    return true
+    const markerIndex = normalizedPath.indexOf(marker)
+    if (
+      markerIndex !== -1 &&
+      normalizedPath.startsWith(remoteProjectsRoot + sep)
+    ) {
+      // Anchor the containment root at the agent-memory-local segment rather
+      // than the whole projects namespace.
+      return normalizedPath.slice(0, markerIndex + marker.length - 1)
+    }
+  } else {
+    const localRoot = join(getCwd(), '.openclaude', 'agent-memory-local')
+    if (normalizedPath.startsWith(localRoot + sep)) {
+      return localRoot
+    }
   }
 
-  return false
+  return undefined
+}
+
+// Check if file is within an agent memory directory (any scope).
+export function isAgentMemoryPath(absolutePath: string): boolean {
+  return getAgentMemoryRoot(absolutePath) !== undefined
 }
 
 /**

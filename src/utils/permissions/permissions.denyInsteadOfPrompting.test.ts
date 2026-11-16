@@ -8,6 +8,7 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { PermissionsSchema, type SettingsJson } from '../settings/types.js'
+import type { PermissionRequestResult } from '../../types/hooks.js'
 
 const realSettings = await import(
   `../settings/settings.js?denyInsteadOfPromptingActual=${Date.now()}-${Math.random()}`
@@ -18,6 +19,21 @@ mock.module('../settings/settings.js', () => ({
   getInitialSettings: (): SettingsJson => ({
     permissions: { denyInsteadOfPrompting },
   }),
+}))
+
+const realHooks = await import(
+  `../hooks.js?denyInsteadOfPromptingHooksActual=${Date.now()}-${Math.random()}`
+)
+let hookDecision: PermissionRequestResult | undefined
+let hookInvocations = 0
+mock.module('../hooks.js', () => ({
+  ...realHooks,
+  async *executePermissionRequestHooks() {
+    hookInvocations += 1
+    if (hookDecision) {
+      yield { permissionRequestResult: hookDecision }
+    }
+  },
 }))
 
 const { hasPermissionsToUseTool } = await import('./permissions.js')
@@ -44,6 +60,36 @@ const allowTool = createToolFixture(emptyInputSchema, {
     }
   },
 })
+
+const hookGatedReadTool = createToolFixture(emptyInputSchema, {
+  name: 'HookGatedReadTool',
+  isReadOnly: () => true,
+})
+
+const hookRewriteAskTool = createToolFixture(
+  z.object({ target: z.enum(['review', 'sensitive']) }),
+  {
+    name: 'HookRewriteAskTool',
+    isReadOnly: () => true,
+    async checkPermissions(input) {
+      return {
+        behavior: 'ask' as const,
+        message: `Approval required for ${input.target}`,
+        decisionReason: {
+          type: 'rule' as const,
+          rule: {
+            source: 'localSettings' as const,
+            ruleBehavior: 'ask' as const,
+            ruleValue: {
+              toolName: 'HookRewriteAskTool',
+              ruleContent: input.target,
+            },
+          },
+        },
+      }
+    },
+  },
+)
 
 function contextFor(
   mode: ToolPermissionContext['mode'],
@@ -85,8 +131,10 @@ describe('permissions.denyInsteadOfPrompting', () => {
   afterAll(() => {
     try {
       denyInsteadOfPrompting = false
+      hookDecision = undefined
       mock.restore()
       mock.module('../settings/settings.js', () => realSettings)
+      mock.module('../hooks.js', () => realHooks)
     } finally {
       releaseSharedMutationLock()
     }
@@ -162,6 +210,48 @@ describe('permissions.denyInsteadOfPrompting', () => {
       'tool-use-6',
     )
     expect(result.behavior).toBe('deny')
+  })
+
+  test('an allowing PermissionRequest hook still runs for a whole-tool ask rule in headless plan mode', async () => {
+    denyInsteadOfPrompting = true
+    hookInvocations = 0
+    hookDecision = { behavior: 'allow' }
+    const result = await hasPermissionsToUseTool(
+      hookGatedReadTool,
+      {},
+      contextFor('plan', {
+        alwaysAskRules: { localSettings: ['HookGatedReadTool'] },
+        shouldAvoidPermissionPrompts: true,
+      }),
+      assistantMessage,
+      'tool-use-hook-allow',
+    )
+    expect(hookInvocations).toBeGreaterThan(0)
+    expect(result).toMatchObject({
+      behavior: 'allow',
+      decisionReason: { type: 'hook', hookName: 'PermissionRequest' },
+    })
+  })
+
+  test('denies a hook-approved input that introduces a new ask constraint', async () => {
+    denyInsteadOfPrompting = true
+    hookInvocations = 0
+    hookDecision = {
+      behavior: 'allow',
+      updatedInput: { target: 'sensitive' },
+    }
+    const result = await hasPermissionsToUseTool(
+      hookRewriteAskTool,
+      { target: 'review' },
+      contextFor('plan', { shouldAvoidPermissionPrompts: true }),
+      assistantMessage,
+      'tool-use-hook-rewrite-ask',
+    )
+    expect(hookInvocations).toBeGreaterThan(0)
+    if (result.behavior !== 'deny') {
+      throw new Error(`expected deny, got ${result.behavior}`)
+    }
+    expect(result.message).toContain('denyInsteadOfPrompting')
   })
 
   test('prompts as usual when the setting is off', async () => {

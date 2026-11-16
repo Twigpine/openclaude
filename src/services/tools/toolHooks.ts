@@ -33,6 +33,7 @@ import {
   checkRuleBasedPermissions,
   hasPermissionsToUseTool,
   samePermissionAskConstraint,
+  suppressPromptIfConfigured,
 } from '../../utils/permissions/permissions.js'
 import { formatError } from '../../utils/toolErrors.js'
 import { getAutoFixConfig } from '../autoFix/autoFixConfig.js'
@@ -485,7 +486,10 @@ export async function resolveHookPermissionDecision(
         !samePermissionAskConstraint(candidateRuleDecision, finalRuleDecision)
       ) {
         if (remainingRuleApprovalReplays === 0) {
-          return { decision: finalRuleDecision, input: finalInput }
+          return {
+            decision: suppressPromptIfConfigured(tool, finalRuleDecision),
+            input: finalInput,
+          }
         }
         return callCanUseToolWithPlanGuard(
           finalInput,

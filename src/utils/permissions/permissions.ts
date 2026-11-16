@@ -126,7 +126,7 @@ function checkWriteBoundaryForAskRule(
 // hasPermissionsToUseToolWithModeHandling and by early returns (whole-tool
 // ask rules, auto-mode fallbacks to manual approval) that would otherwise
 // bypass it.
-function suppressPromptIfConfigured<T extends PermissionDecision>(
+export function suppressPromptIfConfigured<T extends PermissionDecision>(
   tool: Tool,
   res: T,
 ): PermissionDenyDecision | T {
@@ -543,7 +543,7 @@ async function runPermissionRequestHooksForHeadlessAgent(
             finalRuleDecision,
           )
         ) {
-          return finalRuleDecision
+          return suppressPromptIfConfigured(tool, finalRuleDecision)
         }
         // Persist permission updates if provided
         const permissionUpdates = filterPermissionRequestHookUpdates(
@@ -1281,14 +1281,17 @@ export async function checkRuleBasedPermissions(
       if (writeBoundary) {
         return writeBoundary
       }
-      return suppressPromptIfConfigured(tool, {
+      // Return the raw ask so intermediate callers can still run
+      // PermissionRequest hooks before deciding. Prompt suppression is
+      // applied where a rule-derived ask escapes as the final decision.
+      return {
         behavior: 'ask',
         decisionReason: {
           type: 'rule',
           rule: askRule,
         },
         message: createPermissionRequestMessage(tool.name),
-      })
+      }
     }
     // Fall through to let tool.checkPermissions handle command-specific rules
   }
@@ -1432,7 +1435,10 @@ export async function revalidatePlanModePermissionAllow(
     finalRuleDecision?.behavior === 'ask' &&
     !samePermissionAskConstraint(candidateRuleDecision, finalRuleDecision)
   ) {
-    return { ...finalRuleDecision, updatedInput: finalInput }
+    return suppressPromptIfConfigured(tool, {
+      ...finalRuleDecision,
+      updatedInput: finalInput,
+    })
   }
 
   return null

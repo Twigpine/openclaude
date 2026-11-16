@@ -4,8 +4,15 @@ import ignore from 'ignore'
 import memoize from 'lodash-es/memoize.js'
 import { homedir, tmpdir } from 'os'
 import { basename, dirname, join, normalize, parse, posix, sep } from 'path'
-import { hasAutoMemPathOverride, isAutoMemPath } from 'src/memdir/paths.js'
-import { isAgentMemoryPath } from 'src/tools/AgentTool/agentMemory.js'
+import {
+  getAutoMemPath,
+  hasAutoMemPathOverride,
+  isAutoMemPath,
+} from 'src/memdir/paths.js'
+import {
+  getAgentMemoryRoot,
+  isAgentMemoryPath,
+} from 'src/tools/AgentTool/agentMemory.js'
 import {
   CLAUDE_FOLDER_PERMISSION_PATTERN,
   FILE_EDIT_TOOL_NAME,
@@ -1745,6 +1752,31 @@ function writePathsInsideWorkingDirectories(
   })
 }
 
+// Canonical containment of a candidate inside a specific internal directory,
+// for the internal editable-path carveouts. isScratchpadPath,
+// isAgentMemoryPath, and isAutoMemPath match lexically, so a symlinked
+// component inside the internal dir (agent-memory/redirect -> /outside) would
+// let the write land elsewhere while the prefix check still passes. Require
+// every resolved form of the candidate to stay inside the resolved dir, the
+// same policy isSessionPlanFile applies via isResolvedPathWithinPlansDir.
+// getPathsForPermissionCheck also resolves dangling symlinks and
+// canonicalPathForContainment resolves the deepest existing ancestor, so
+// targets and internal dirs that do not exist yet still compare correctly.
+function isResolvedPathWithinDir(
+  candidatePath: string,
+  dir: string,
+): boolean {
+  const canonicalDir = canonicalPathForContainment(dir)
+  const prefix =
+    canonicalDir === parse(canonicalDir).root
+      ? canonicalDir
+      : canonicalDir + sep
+  return getPathsForPermissionCheck(candidatePath).every(pathToCheck => {
+    const canonical = canonicalPathForContainment(pathToCheck)
+    return canonical === canonicalDir || canonical.startsWith(prefix)
+  })
+}
+
 /**
  * The hard write boundary for permission paths that return before
  * tool.checkPermissions runs (the whole-tool ask-rule early return in
@@ -1807,8 +1839,12 @@ export function checkEditableInternalPath(
     }
   }
 
-  // Scratchpad directory for current session
-  if (isScratchpadPath(normalizedPath)) {
+  // Scratchpad directory for current session. Resolved containment keeps a
+  // symlink inside the scratchpad dir from redirecting the write elsewhere.
+  if (
+    isScratchpadPath(normalizedPath) &&
+    isResolvedPathWithinDir(normalizedPath, getScratchpadDir())
+  ) {
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1861,8 +1897,14 @@ export function checkEditableInternalPath(
     }
   }
 
-  // Agent memory directory (for self-improving agents)
-  if (isAgentMemoryPath(normalizedPath)) {
+  // Agent memory directory (for self-improving agents). Same resolved
+  // containment as the scratchpad: a symlink inside the memory root must not
+  // redirect the write outside it.
+  const agentMemoryRoot = getAgentMemoryRoot(normalizedPath)
+  if (
+    agentMemoryRoot !== undefined &&
+    isResolvedPathWithinDir(normalizedPath, agentMemoryRoot)
+  ) {
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1878,7 +1920,12 @@ export function checkEditableInternalPath(
   // memory at a caller-designated directory. The silent pre-safety-check
   // carve-out below exists only for the default/settings-backed path because
   // it can live under ~/.claude/, which is in DANGEROUS_DIRECTORIES.
-  if (isAutoMemPath(normalizedPath) && isMemoryWriteApprovalRequired()) {
+  // Resolved containment keeps a symlink inside the memory dir from
+  // redirecting the write elsewhere.
+  const isWithinAutoMemDir =
+    isAutoMemPath(normalizedPath) &&
+    isResolvedPathWithinDir(normalizedPath, getAutoMemPath())
+  if (isWithinAutoMemDir && isMemoryWriteApprovalRequired()) {
     return {
       behavior: 'ask',
       message: `${PRODUCT_DISPLAY_NAME} wants to save persistent memory. Approve this memory write?`,
@@ -1890,7 +1937,7 @@ export function checkEditableInternalPath(
     }
   }
 
-  if (!hasAutoMemPathOverride() && isAutoMemPath(normalizedPath)) {
+  if (!hasAutoMemPathOverride() && isWithinAutoMemDir) {
     return {
       behavior: 'allow',
       updatedInput: input,

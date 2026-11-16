@@ -33,7 +33,7 @@ Rules:
 
 ## Step 4: Confirm, then write
 
-Present the drafted \`autoMode\` block to the user and ask for explicit confirmation before writing anything.
+Present the drafted \`autoMode\` block to the user and wait for explicit confirmation before writing anything. Do not modify any settings file until the user approves the draft.
 
 Only after confirmation, merge it into a local settings file: \`.openclaude/settings.local.json\` for this project, or the user-level settings file under the active config home to apply it to every project. The active config home is the directory in the \`OPENCLAUDE_CONFIG_DIR\` environment variable when it is set, otherwise \`~/.openclaude\`; check the variable and resolve the path yourself rather than assuming \`~/.openclaude\`. The user-level filename is \`cowork_settings.json\` when cowork mode is active (the \`--cowork\` flag or \`CLAUDE_CODE_USE_COWORK_PLUGINS\`), otherwise \`settings.json\`; check both signals and pick the right file, since a write to the wrong one is ignored. Never write it to \`.openclaude/settings.json\`: shared project settings are not a trusted source for classifier configuration and are ignored when autoMode is loaded.
 

@@ -37,6 +37,7 @@ import {
   checkRuleBasedPermissions,
   revalidatePlanModePermissionAllowWithRaceGuard,
   samePermissionAskConstraint,
+  suppressPromptIfConfigured,
 } from '../../utils/permissions/permissions.js'
 import {
   applyPermissionUpdate,
@@ -400,7 +401,7 @@ function createPermissionContext(
                 finalRuleDecision,
               )
             ) {
-              return finalRuleDecision
+              return suppressPromptIfConfigured(tool, finalRuleDecision)
             }
             return await this.handleHookAllow(
               finalInput,
