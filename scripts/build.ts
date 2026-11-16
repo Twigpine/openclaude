@@ -135,6 +135,8 @@ const featureFlags: Record<string, boolean> = {
   MULTI_TURN_CONTEXT: true,           // Multi-turn context tracking across tool cycles
   UNATTENDED_RETRY: true,             // Usage-limit-aware persistent retry for unattended runs; opt-in via CLAUDE_CODE_UNATTENDED_RETRY or CLAUDE_CODE_RETRY_WATCHDOG at runtime
   TREE_SITTER_BASH: true,             // AST-based bash command analysis (pure-TS parser, no native dep)
+  BASH_CLASSIFIER: true,              // Bash(prompt: ...) natural-language permission rules via side-model classifier; opt-out via CLAUDE_CODE_DISABLE_BASH_CLASSIFIER
+  POWERSHELL_AUTO_MODE: true,         // Include PowerShell prompt rules in classifier input
 }
 
 // ── Pre-process: replace feature() calls with boolean literals ──────
