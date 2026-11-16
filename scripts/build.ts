@@ -137,7 +137,7 @@ const featureFlags: Record<string, boolean> = {
   TREE_SITTER_BASH: true,             // AST-based bash command analysis (pure-TS parser, no native dep)
   BASH_CLASSIFIER: true,              // Bash(prompt: ...) natural-language permission rules via side-model classifier; opt-out via CLAUDE_CODE_DISABLE_BASH_CLASSIFIER
   POWERSHELL_AUTO_MODE: true,         // Include PowerShell prompt rules in classifier input
-  HOOK_CHAINS: true,                  // Chained hook evaluation and action dispatch on PostToolUseFailure/TaskCompleted
+  HOOK_CHAINS: true,                  // Chained hook evaluation and action dispatch on PostToolUseFailure/TaskCompleted; opt-in via CLAUDE_CODE_ENABLE_HOOK_CHAINS
   MCP_RICH_OUTPUT: true,              // Rich MCP tool output rendering (unwrapped JSON, linkified URLs)
   COMPACTION_REMINDERS: true,         // compaction_reminder attachment nudging post-compact continuation
   NEW_INIT: true,                     // /init AGENTS.md onboarding; opt-in via USER_TYPE=ant or CLAUDE_CODE_NEW_INIT
