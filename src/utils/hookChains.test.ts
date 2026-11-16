@@ -9,6 +9,14 @@ import {
 
 import * as policyLimits from '../services/policyLimits/index.js'
 
+// mock.module registrations are process-global and mock.restore() does not
+// undo them, so the real modules are re-registered after every test to keep
+// the partial mocks from leaking into other files that share this process.
+const realEvents = await import(`./telemetry/events.js?real=${Date.now()}`)
+const realAnalytics = await import(
+	`../services/analytics/index.js?real=${Date.now()}`
+)
+
 type HookChainsModule = typeof import('./hookChains.js')
 
 const tempDirs: string[] = []
@@ -52,6 +60,8 @@ beforeEach(async () => {
 afterEach(async () => {
   try {
     mock.restore()
+    mock.module('./telemetry/events.js', () => realEvents)
+    mock.module('../services/analytics/index.js', () => realAnalytics)
 
     if (originalHookChainsEnabled === undefined) {
       delete process.env.CLAUDE_CODE_ENABLE_HOOK_CHAINS
