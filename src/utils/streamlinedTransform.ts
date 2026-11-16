@@ -192,15 +192,19 @@ export function createStreamlinedTransformer(): (
         // Keep result messages as-is (they have structured_output, permission_denials)
         return message
 
+      // Control-protocol messages (initialize, permission prompts, cancels)
+      // must reach the SDK client unchanged; dropping them hangs the session.
+      case 'control_response':
+      case 'control_request':
+      case 'control_cancel_request':
+        return message
+
       case 'system':
       case 'user':
       case 'stream_event':
       case 'tool_progress':
       case 'auth_status':
       case 'rate_limit_event':
-      case 'control_response':
-      case 'control_request':
-      case 'control_cancel_request':
       case 'keep_alive':
         return null
 

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { feature } from 'bun:bundle'
-import { resolveStreamlinedTransformer } from './streamlinedTransform.js'
+import {
+  createStreamlinedTransformer,
+  resolveStreamlinedTransformer,
+} from './streamlinedTransform.js'
 
 const SAVED = process.env.CLAUDE_CODE_STREAMLINED_OUTPUT
 
@@ -35,5 +38,30 @@ describe('resolveStreamlinedTransformer', () => {
 
     expect(resolveStreamlinedTransformer('json')).toBeNull()
     expect(resolveStreamlinedTransformer('text')).toBeNull()
+  })
+})
+
+describe('createStreamlinedTransformer', () => {
+  test('passes control-protocol messages through unchanged', () => {
+    const transform = createStreamlinedTransformer()
+
+    const initResponse = {
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req-1',
+        response: { commands: [], output_styles: [] },
+      },
+    }
+    const permissionRequest = {
+      type: 'control_request',
+      request_id: 'req-2',
+      request: { subtype: 'can_use_tool', tool_name: 'Bash' },
+    }
+    const cancel = { type: 'control_cancel_request', request_id: 'req-2' }
+
+    for (const message of [initResponse, permissionRequest, cancel]) {
+      expect(transform(message)).toBe(message)
+    }
   })
 })
