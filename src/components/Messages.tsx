@@ -540,7 +540,7 @@ const MessagesImpl = ({
       hasTruncatedMessages,
       hiddenMessageCount
     };
-  }, [verbose, normalizedMessages, isTranscriptMode, syntheticStreamingToolUseMessages, shouldTruncate, tools, isBriefOnly, isFocusView, isLoading]);
+  }, [verbose, normalizedMessages, isTranscriptMode, syntheticStreamingToolUseMessages, shouldTruncate, tools, isBriefOnly, isFocusView, isFocusView && isLoading]);
 
   // Cheap slice — only runs when scroll range or slice config changes.
   const renderableMessages = useMemo(() => {

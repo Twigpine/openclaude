@@ -1427,7 +1427,7 @@ export function REPL({
       }))
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- length change covers appends; useUnseenDivider's count-drop guard clears dividerIndex on replace/rewind
-  }, [dividerIndex, messages.length, focusViewOn, isLoading]);
+  }, [dividerIndex, messages.length, focusViewOn, focusViewOn && isLoading]);
   // Re-pin scroll to bottom and clear the unseen-messages baseline. Called
   // on any user-driven return-to-live action (submit, type-into-empty,
   // overlay appear/dismiss).
