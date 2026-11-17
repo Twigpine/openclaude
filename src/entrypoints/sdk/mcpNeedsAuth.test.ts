@@ -1528,6 +1528,98 @@ test('authenticateMcpServer SWAPS THE CLIENT AND THE REAL TOOLS INTO THE SESSION
   expect(clients.map(client => [client.name, client.type])).toEqual([['gated', 'connected']])
 }, 30_000)
 
+/** Completes the browser step of a sign-in and awaits its status. */
+async function completeSignIn(session: SDKSession, name: string) {
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer(name, {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  return done
+}
+
+/**
+ * The tool swap must replace tools by exact server ownership, not by a
+ * display-name prefix: `gated` and `gated__other` are distinct servers,
+ * and signing in `gated` must not delete the sibling's already-usable
+ * tool — the prefix mcp__gated__ matches mcp__gated__other__hello.
+ */
+test('AUTHENTICATING ONE SERVER KEEPS A SIBLING WHOSE NAME EXTENDS ITS OWN', async () => {
+  const url = serveNeedingAuth()
+  const session = openSessionWith({
+    gated: { type: 'http', url },
+    gated__other: { type: 'http', url },
+  })
+  const calls = recordEngine(session)
+
+  // The sibling signs in first, so its real tool is in the pool.
+  expect((await completeSignIn(session, 'gated__other')).status).toBe('connected')
+  expect(calls.updateTools.at(-1)!.map(tool => tool.name)).toContain('mcp__gated__other__hello')
+
+  // Signing in `gated` swaps only `gated`.
+  expect((await completeSignIn(session, 'gated')).status).toBe('connected')
+  const afterGated = calls.updateTools.at(-1)!.map(tool => tool.name)
+  expect(afterGated).toContain('mcp__gated__hello')
+  expect(afterGated).toContain('mcp__gated__other__hello')
+}, 30_000)
+
+/**
+ * The failed outcome drops the failed server's stale tools — and only
+ * those. The same prefix that deletes the sibling's tool on success
+ * deletes it here too, while dropping the target's stale tools.
+ */
+test('A FAILED RECONNECT DROPS ONLY THE FAILED SERVER, NOT ITS NAME-EXTENDING SIBLING', async () => {
+  const url = serveNeedingAuth()
+  const session = openSessionWith({
+    gated: { type: 'http', url },
+    gated__other: { type: 'http', url },
+  })
+  const calls = recordEngine(session)
+
+  expect((await completeSignIn(session, 'gated__other')).status).toBe('connected')
+
+  // The server is down for the next reconnect: /mcp answers 500.
+  failMcpRequests = true
+  try {
+    expect((await completeSignIn(session, 'gated')).status).toBe('failed')
+  } finally {
+    failMcpRequests = false
+  }
+  const afterFailed = calls.updateTools.at(-1)!.map(tool => tool.name)
+  expect(afterFailed).toContain('mcp__gated__other__hello')
+  expect(afterFailed).not.toContain('mcp__gated__hello')
+  expect(afterFailed).not.toContain('mcp__gated__authenticate')
+}, 30_000)
+
+/**
+ * The needs-auth outcome replaces the target's stale real tools with its
+ * authenticate tool — and only the target's. The prefix membership check
+ * would treat the sibling's real tool as the target's stale one and
+ * replace it too.
+ */
+test('A RECONNECT THAT STILL NEEDS AUTH REPLACES ONLY ITS OWN SERVER, NOT ITS NAME-EXTENDING SIBLING', async () => {
+  const url = serveNeedingAuth()
+  const session = openSessionWith({
+    gated: { type: 'http', url },
+    gated__other: { type: 'http', url },
+  })
+  const calls = recordEngine(session)
+
+  expect((await completeSignIn(session, 'gated__other')).status).toBe('connected')
+
+  // The server stops accepting the tokens it issued.
+  rejectTokens = true
+  try {
+    expect((await completeSignIn(session, 'gated')).status).toBe('needs-auth')
+  } finally {
+    rejectTokens = false
+  }
+  const afterNeedsAuth = calls.updateTools.at(-1)!.map(tool => tool.name)
+  expect(afterNeedsAuth).toContain('mcp__gated__authenticate')
+  expect(afterNeedsAuth).toContain('mcp__gated__other__hello')
+}, 30_000)
+
 /**
  * The user-visible behaviour the recording engine above cannot show: what
  * the next turn actually reports. system:init is yielded before the model

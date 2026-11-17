@@ -27,7 +27,6 @@ import {
   releaseUnownedMcpClient,
 } from '../../services/mcp/client.js'
 import { resumeIn, type ActiveCredentialScope } from '../../services/mcp/credentialScope.js'
-import { getMcpPrefix } from '../../services/mcp/mcpStringUtils.js'
 import {
   createMcpAuthTool,
   getSdkSignInEntryKeys,
@@ -1024,21 +1023,25 @@ class SDKSessionImpl implements SDKSession {
         throw new AuthenticationCancelledError()
       }
 
-      // Swap just this server in, as the CLI does (prefix-based replacement):
-      // the reconnected tools replace the server's old ones — including the
-      // authenticate pseudo-tool on success — and the client record is
-      // replaced so the next turn's system:init reports the new status.
-      // updateTools validates (and commits) before setMcpClients runs, so a
-      // validation failure leaves both untouched — but the reconnected client
-      // was never installed either, and close() only cleans up installed
-      // clients, so a failed swap releases it here instead of leaving its
-      // transport or subprocess behind.
-      const prefix = getMcpPrefix(name)
+      // Swap just this server in: the reconnected tools replace the
+      // server's old ones — including the authenticate pseudo-tool on
+      // success — and the client record is replaced so the next turn's
+      // system:init reports the new status. updateTools validates (and
+      // commits) before setMcpClients runs, so a validation failure leaves
+      // both untouched — but the reconnected client was never installed
+      // either, and close() only cleans up installed clients, so a failed
+      // swap releases it here instead of leaving its transport or
+      // subprocess behind.
+      // Ownership is exact: a tool belongs to this server only when its
+      // mcpInfo names it. A display-name prefix would also match a sibling
+      // whose name extends this one (gated vs gated__other) and delete the
+      // sibling's already-usable tools.
+      const ownsServerTool = (tool: Tool): boolean => tool.mcpInfo?.serverName === name
       const permissionContext = this.appStateStore.getState().toolPermissionContext
       try {
         if (result.client.type === 'connected') {
           const nextTools = [
-            ...this.mcpTools.filter(tool => !tool.name?.startsWith(prefix)),
+            ...this.mcpTools.filter(tool => !ownsServerTool(tool)),
             ...result.tools,
           ]
           this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
@@ -1047,7 +1050,7 @@ class SDKSessionImpl implements SDKSession {
           // The server's tools are stale — drop them. A server that still
           // needs auth keeps its authenticate tool (below), so the host or
           // the model can try again.
-          const nextTools = this.mcpTools.filter(tool => !tool.name?.startsWith(prefix))
+          const nextTools = this.mcpTools.filter(tool => !ownsServerTool(tool))
           this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
           this.mcpTools = nextTools
         } else if (result.client.type === 'needs-auth') {
@@ -1073,10 +1076,10 @@ class SDKSessionImpl implements SDKSession {
           // A pool that already holds only the authenticate tool keeps it.
           if (
             !this.mcpTools.some(tool => tool.name === authTool.name) ||
-            this.mcpTools.some(tool => tool.name?.startsWith(prefix) && tool.name !== authTool.name)
+            this.mcpTools.some(tool => ownsServerTool(tool) && tool.name !== authTool.name)
           ) {
             const nextTools = [
-              ...this.mcpTools.filter(tool => !tool.name?.startsWith(prefix)),
+              ...this.mcpTools.filter(tool => !ownsServerTool(tool)),
               authTool,
             ]
             this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
