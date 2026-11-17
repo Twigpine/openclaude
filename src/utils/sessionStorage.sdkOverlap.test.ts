@@ -7,11 +7,13 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   getOriginalCwd,
+  getProjectRoot,
   getSessionId,
   getSessionProjectDir,
   isSessionPersistenceDisabled,
   runWithSdkContext,
   setOriginalCwd,
+  setProjectRoot,
   setSessionPersistenceDisabled,
   switchSession,
 } from '../bootstrap/state.js'
@@ -80,6 +82,7 @@ const TIMESTAMP = '2026-09-30T00:00:00.000Z'
 let testRoot = ''
 let workspace = ''
 let originalCwd = ''
+let originalProjectRoot = ''
 let originalSessionId = ''
 let originalSessionProjectDir: string | null = null
 let originalConfigOverride: string | undefined
@@ -104,6 +107,7 @@ function sdkContext(sessionId: string, projectDir: string | null = null) {
     sessionProjectDir: projectDir,
     cwd: projectDir ?? workspace,
     originalCwd: projectDir ?? workspace,
+    projectRoot: projectDir ?? workspace,
   }
 }
 
@@ -118,6 +122,7 @@ function sdkContextInCwd(sessionId: string, cwd: string) {
     sessionProjectDir: null,
     cwd,
     originalCwd: cwd,
+    projectRoot: cwd,
   }
 }
 
@@ -173,6 +178,7 @@ beforeEach(async () => {
   await acquireSharedMutationLock('utils/sessionStorage.sdkOverlap.test.ts')
   testRoot = await mkdtemp(join(tmpdir(), 'openclaude-session-sdk-overlap-'))
   originalCwd = getOriginalCwd()
+  originalProjectRoot = getProjectRoot()
   originalSessionId = getSessionId()
   originalSessionProjectDir = getSessionProjectDir()
   originalConfigOverride = getClaudeConfigHomeDirOverrideForTesting()
@@ -190,6 +196,9 @@ beforeEach(async () => {
   await mkdir(workspace, { recursive: true })
   setClaudeConfigHomeDirForTesting(configDir)
   setOriginalCwd(workspace)
+  // Session-record paths anchor to the project root, so the fixture must
+  // pin it alongside originalCwd or transcripts resolve to the real repo.
+  setProjectRoot(workspace)
   resetProjectForTesting()
 })
 
@@ -202,6 +211,7 @@ afterEach(async () => {
   resetProjectForTesting()
   switchSession(originalSessionId as never, originalSessionProjectDir)
   setOriginalCwd(originalCwd)
+  setProjectRoot(originalProjectRoot)
   setClaudeConfigHomeDirForTesting(originalConfigOverride)
   setSessionPersistenceDisabled(originalPersistenceDisabled)
   if (originalNodeEnv === undefined) delete process.env.NODE_ENV
@@ -982,6 +992,7 @@ test('a second context switching to the same id still migrates its startup selec
       sessionProjectDir: null,
       cwd: workspaceA,
       originalCwd: workspaceA,
+      projectRoot: workspaceA,
     },
     async () => {
       switchSession(SESSION_B as never, null)
@@ -998,6 +1009,7 @@ test('a second context switching to the same id still migrates its startup selec
       sessionProjectDir: null,
       cwd: workspaceC,
       originalCwd: workspaceC,
+      projectRoot: workspaceC,
     },
     async () => {
       cacheSessionTitle('C Startup Title')
@@ -1629,12 +1641,14 @@ test('shutdown does not replay a stale goal from an alias of one transcript', as
     sessionProjectDir: projectDir,
     cwd: cwdA,
     originalCwd: cwdA,
+    projectRoot: cwdA,
   }
   const contextB = {
     sessionId: SESSION_A as SessionId,
     sessionProjectDir: projectDir,
     cwd: cwdB,
     originalCwd: cwdB,
+    projectRoot: cwdB,
   }
 
   await runWithSdkContext(contextA, async () => {
@@ -1678,12 +1692,14 @@ test('shutdown replays a goal set after a clear from an alias of one transcript'
     sessionProjectDir: projectDir,
     cwd: cwdA,
     originalCwd: cwdA,
+    projectRoot: cwdA,
   }
   const contextB = {
     sessionId: SESSION_A as SessionId,
     sessionProjectDir: projectDir,
     cwd: cwdB,
     originalCwd: cwdB,
+    projectRoot: cwdB,
   }
 
   await runWithSdkContext(contextA, async () => {
@@ -1753,12 +1769,14 @@ test('shutdown keeps a worktree exit recorded by one alias over a stale enter fr
     sessionProjectDir: projectDir,
     cwd: cwdA,
     originalCwd: cwdA,
+    projectRoot: cwdA,
   }
   const contextB = {
     sessionId: SESSION_A as SessionId,
     sessionProjectDir: projectDir,
     cwd: cwdB,
     originalCwd: cwdB,
+    projectRoot: cwdB,
   }
   const worktree = {
     originalCwd: cwdA,
