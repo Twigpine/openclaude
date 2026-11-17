@@ -9,7 +9,9 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { count } from '../../utils/array.js'
 import { clearMemoryFileCaches } from '../../utils/claudemd.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
-import { updateHooksConfigSnapshot } from '../../utils/hooks/hooksConfigSnapshot.js'
+// Import as module object so spyOn works in tests (direct imports bypass
+// spies) - matches the convention documented in hooksConfigSnapshot.ts.
+import * as hooksConfigSnapshot from '../../utils/hooks/hooksConfigSnapshot.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { getPlansDirectory } from '../../utils/plans.js'
 import { setCwd } from '../../utils/Shell.js'
@@ -145,7 +147,7 @@ export function restoreSessionToOriginalCwd(
     // setup.ts's --worktree block called updateHooksConfigSnapshot() to re-read
     // hooks from the worktree. Restore symmetrically. (Mid-session
     // EnterWorktreeTool never touched the snapshot, so no-op there.)
-    updateHooksConfigSnapshot()
+    hooksConfigSnapshot.updateHooksConfigSnapshot()
   }
   saveWorktreeState(null)
   clearSystemPromptSections()
