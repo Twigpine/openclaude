@@ -114,13 +114,31 @@ type CommitPause = {
 }
 let commitPause: CommitPause | undefined
 
+// Forces link()/linkSync() to fail with EPERM: simulates a filesystem
+// that rejects hard links (same mechanism as
+// bgRegistry.noHardLinks.test.ts). Armed per-test below, so the
+// concurrent-create and delayed-commit regressions can run the
+// rename() fallback path (CodeRabbit #2497 review 5945720742).
+let linkUnsupported = false
+const linkUnsupportedError = Object.assign(
+  new Error('Operation not permitted'),
+  { code: 'EPERM' },
+)
+
+// Records every mocked link() destination, so a test can wait until a
+// second create has entered the commit before releasing the first
+// create's paused rename (CodeRabbit #2497).
+const linkCallTargets: string[] = []
+
 async function mockedLink(oldPath: string, newPath: string): Promise<void> {
+  linkCallTargets.push(newPath)
   if (commitInjection && newPath === commitInjection.target) {
     const injection = commitInjection
     commitInjection = undefined
     await realWriteFile(newPath, JSON.stringify(injection.successor))
     injection.fired()
   }
+  if (linkUnsupported) throw linkUnsupportedError
   if (commitPause && newPath === commitPause.target) {
     let release!: () => void
     const gate = new Promise<void>(resolve => {
@@ -160,6 +178,7 @@ function mockedLinkSync(oldPath: string, newPath: string): void {
     realWriteFileSync(newPath, JSON.stringify(injection.successor))
     injection.fired()
   }
+  if (linkUnsupported) throw linkUnsupportedError
   realLinkSync(oldPath, newPath)
 }
 
@@ -323,6 +342,23 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
   }
 
+  // Waits until link() has been called `count` times for the target,
+  // failing fast when the calls never arrive (e.g. the mock stopped
+  // applying), instead of hanging.
+  async function awaitLinkCalls(target: string, count: number): Promise<void> {
+    const deadline = Date.now() + 5000
+    while (
+      linkCallTargets.filter(path => path === target).length < count
+    ) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `link() was not called ${count} times for ${target}: the link mock is not active`,
+        )
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+  }
+
   async function storedExitCode(id: string): Promise<number | undefined> {
     const stored = JSON.parse(
       await readFile(terminalFactPath(id, 'natural'), 'utf8'),
@@ -353,6 +389,8 @@ describe('terminal-fact publish across withdrawn claims', () => {
     pausedClaimWrite = undefined
     commitInjection = undefined
     commitPause = undefined
+    linkUnsupported = false
+    linkCallTargets.length = 0
     mock.restore()
     // See bgRegistry.noHardLinks.test.ts: mock.restore() does not undo a
     // mock.module registration, so re-register the real module explicitly
@@ -443,6 +481,50 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
   })
 
+  it('keeps the successor fact when a delayed owner commits after it was published without hard links', async () => {
+    // Same delayed-commit race as the test above, but with link()
+    // rejected (EPERM): the commit falls back to rename(), which
+    // overwrites the successor fact, and the readback matches the
+    // owner's own bytes — so without an exclusive fallback the delayed
+    // owner replaces the published fact (CodeRabbit #2497 review
+    // 5945720742).
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-async-no-link',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-async-no-link',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let injectionFired = false
+    commitInjection = {
+      target: terminalFactPath(session.id, 'natural'),
+      successor: successorFact(session.id, 3),
+      fired: () => {
+        injectionFired = true
+      },
+    }
+    linkUnsupported = true
+    try {
+      const terminated =
+        await registry.recordBackgroundSessionNaturalTermination(
+          session.id,
+          { exitCode: 0 },
+          { ownerPid: session.pid, expectedSession: session },
+        )
+      expect(injectionFired).toBe(true)
+      // The delayed owner must not replace the published fact.
+      expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+    } finally {
+      commitInjection = undefined
+      linkUnsupported = false
+    }
+  })
+
   it('keeps the successor fact when the sync fallback adopts after it was published', async () => {
     // Same delayed-commit race through the synchronous exit fallback:
     // the async installer is paused after claiming, the sync fallback
@@ -507,6 +589,83 @@ describe('terminal-fact publish across withdrawn claims', () => {
       expect(await storedExitCode(session.id)).toBe(3)
     } finally {
       commitInjection = undefined
+      registry._setTerminalFactPublishHookForTesting(undefined)
+      releaseHook?.()
+      await asyncTermination.catch(() => {})
+    }
+  })
+
+  it('keeps the successor fact when the sync fallback adopts after it was published without hard links', async () => {
+    // Same sync-adopt race as the test above, but with linkSync()
+    // rejected (EPERM): the sync commit falls back to renameSync(),
+    // which overwrites the successor fact, and the readback matches
+    // the adopter's own bytes — so without an exclusive fallback the
+    // adopter replaces the published fact (CodeRabbit #2497 review
+    // 5945720742).
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-sync-no-link',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-sync-no-link',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let releaseHook: (() => void) | undefined
+    let hookReachedResolve: (() => void) | undefined
+    const hookReached = new Promise<void>(resolve => {
+      hookReachedResolve = resolve
+    })
+    const hookGate = new Promise<void>(resolve => {
+      releaseHook = resolve
+    })
+    registry._setTerminalFactPublishHookForTesting(async () => {
+      hookReachedResolve?.()
+      await hookGate
+    })
+    const asyncTermination =
+      registry.recordBackgroundSessionNaturalTermination(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+    asyncTermination.catch(() => {})
+    try {
+      await hookReached
+      let injectionFired = false
+      commitInjection = {
+        target: terminalFactPath(session.id, 'natural'),
+        successor: successorFact(session.id, 3),
+        fired: () => {
+          injectionFired = true
+        },
+      }
+      linkUnsupported = true
+      // The first installer holds the per-ID lock, so the sync call
+      // takes the ELOCKED fallback and adopts the pending publish.
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      expect(injectionFired).toBe(true)
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+      // Let the resumed async installer commit through the normal
+      // link() path (linkUnsupported cleared below): it must not
+      // replace the published fact either.
+      linkUnsupported = false
+      releaseHook?.()
+      const first = await asyncTermination
+      expect(first).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+    } finally {
+      commitInjection = undefined
+      linkUnsupported = false
       registry._setTerminalFactPublishHookForTesting(undefined)
       releaseHook?.()
       await asyncTermination.catch(() => {})
@@ -757,6 +916,84 @@ describe('terminal-fact publish across withdrawn claims', () => {
       const stored = await registry.readBackgroundSessionForOwner(id)
       expect(stored?.pid).toBe(424243)
     } finally {
+      commitPause = undefined
+      for (const commit of commits) commit.release()
+      await firstCreate.catch(() => {})
+    }
+      },
+    },
+    {
+      name: 'keeps the first publisher metadata when a second create commits after it without hard links',
+      run: async () => {
+    // Same duplicate-create race as the scenario above, but with
+    // link() rejected (EPERM): the commit falls back to rename(),
+    // which overwrites the first publisher's row, and the readback
+    // matches the second creator's own bytes — so without an
+    // exclusive fallback both creates succeed instead of rejecting
+    // the duplicate (CodeRabbit #2497 review 5945720742). The
+    // fallback must preserve exclusive publication without hard
+    // links.
+    const id = 'bg-commit-race-create-no-link'
+    const logDir = join(configDir, 'bg-commit-race-create-no-link-logs')
+    await mkdir(logDir, { recursive: true })
+    const stdoutLogPath = join(logDir, 'stdout.log')
+    const stderrLogPath = join(logDir, 'stderr.log')
+    await writeFile(stdoutLogPath, '')
+    await writeFile(stderrLogPath, '')
+    const commits: Array<{ release: () => void }> = []
+    linkUnsupported = true
+    commitPause = {
+      target: metadataPath(id),
+      onPaused: control => {
+        commits.push(control)
+      },
+    }
+    const firstCreate = registry.createBackgroundSession({
+      id,
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-create-no-link',
+      logFilesPrecreated: true,
+      stdoutLogPath,
+      stderrLogPath,
+    })
+    firstCreate.catch(() => {})
+    try {
+      await awaitCommitPaused(commits, 0)
+      // The first create holds the per-ID lock: age it past the stale
+      // threshold so the second create can proceed while the first is
+      // paused mid-publish.
+      await ageSessionLock(id)
+      const secondCreate = registry.createBackgroundSession({
+        id,
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-commit-race-create-no-link-2',
+        logFilesPrecreated: true,
+        stdoutLogPath,
+        stderrLogPath,
+      })
+      secondCreate.catch(() => {})
+      // Wait until the second create has entered the commit — its
+      // link() call — so it is inside the fallback, past its
+      // duplicate check, while the first create is still paused
+      // before its rename.
+      await awaitLinkCalls(metadataPath(id), 2)
+      // The first create commits first...
+      commits[0]!.release()
+      const first = await firstCreate
+      expect(first.pid).toBe(424243)
+      // ...then the second create's commit lands on the published row.
+      // Without the exclusive fallback its rename is paused here too,
+      // so release any recorded commit before awaiting it.
+      for (const commit of commits) commit.release()
+      await expect(secondCreate).rejects.toThrow('already exists')
+      const stored = await registry.readBackgroundSessionForOwner(id)
+      expect(stored?.pid).toBe(424243)
+    } finally {
+      linkUnsupported = false
       commitPause = undefined
       for (const commit of commits) commit.release()
       await firstCreate.catch(() => {})
