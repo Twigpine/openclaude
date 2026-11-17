@@ -892,10 +892,8 @@ export async function executePermissionRequestHooksForSDK(
       const decision = hookResult.permissionRequestResult
       if (decision.behavior === 'allow') {
         const finalInput = decision.updatedInput || input
-        // A hook can allow with an updatedInput pointing outside the
-        // working directories. Recheck the hard write boundary on the
-        // input actually being allowed; tool.checkPermissions never
-        // sees finalInput here.
+        // A hook approval may rewrite the input, but cannot grant itself a
+        // working directory for the write it is approving.
         const writeBoundary = checkWriteBoundaryForAskRule(
           tool,
           finalInput,

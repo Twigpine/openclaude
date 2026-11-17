@@ -154,6 +154,28 @@ export function enforceForcedAllowWriteBoundary(
   )
 }
 
+/** A forced ask can still be answered by a hook without showing a prompt. */
+export async function resolveSuppressedForcedAsk(
+  tool: Tool,
+  input: Record<string, unknown>,
+  context: ToolUseContext,
+  toolUseID: string,
+  ask: PermissionAskDecision,
+): Promise<PermissionDecision> {
+  const decision = suppressPromptIfConfigured(tool, ask)
+  if (decision.behavior !== 'deny') return decision
+
+  const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
+    tool,
+    ask.updatedInput ?? input,
+    toolUseID,
+    context,
+    context.getAppState().toolPermissionContext.mode,
+    ask.suggestions,
+  )
+  return hookDecision ?? decision
+}
+
 function commitPermissionRequestUpdates(
   context: ToolUseContext,
   updates: PermissionUpdate[],
@@ -680,9 +702,8 @@ async function resolvePermissionRequestHooksForHeadlessAgent(
       const decision = hookResult.permissionRequestResult
       if (decision.behavior === 'allow') {
         const finalInput = decision.updatedInput ?? input
-        // A hook can allow with an updatedInput pointing outside the working
-        // directories. Recheck the hard write boundary on the input actually
-        // being allowed; tool.checkPermissions never sees finalInput here.
+        // A hook approval may rewrite the input, but cannot grant itself a
+        // working directory for the write it is approving.
         const writeBoundary = checkWriteBoundaryForAskRule(
           tool,
           finalInput,

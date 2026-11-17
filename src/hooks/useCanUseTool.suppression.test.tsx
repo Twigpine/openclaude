@@ -6,6 +6,7 @@ import React from 'react'
 // Hook mock registered before the useCanUseTool import so the permission
 // context resolves the stub: yields a PermissionRequest allow when set.
 let hookDecision: { behavior: 'allow' } | undefined
+let beforeHookDecision: (() => void) | undefined
 const realHooks = await import(
   `../utils/hooks.js?interactiveSuppressionActual=${Date.now()}-${Math.random()}`
 )
@@ -13,6 +14,8 @@ mock.module('../utils/hooks.js', () => ({
   ...realHooks,
   executePermissionRequestHooks: async function* () {
     if (hookDecision) {
+      await Promise.resolve()
+      beforeHookDecision?.()
       yield { permissionRequestResult: hookDecision }
     }
   },
@@ -29,7 +32,8 @@ mock.module('../utils/settings/settings.js', () => ({
   }),
 }))
 
-const { getSessionId } = await import('../bootstrap/state.js')
+const { getSessionId, switchSession } = await import('../bootstrap/state.js')
+const { asSessionId } = await import('../types/ids.js')
 const { createRoot, Text } = await import('../ink.js')
 const { getDefaultAppState } = await import('../state/AppStateStore.js')
 const {
@@ -174,6 +178,27 @@ test('the suppression denial stands on the interactive path when no hook decides
       expect(result.message).toContain('denyInsteadOfPrompting')
     }
   } finally {
+    root.unmount()
+  }
+})
+
+test('a suppression hook cannot approve after its owning session changes', async () => {
+  const { root, canUseTool: fn } = await mount()
+  const owner = getSessionId()
+  hookDecision = { behavior: 'allow' }
+  beforeHookDecision = () => switchSession(asSessionId('suppression-test-session'))
+  try {
+    const result = await fn(
+      tool, {}, context(), assistantMessage, 'interactive-suppression-switch',
+      suppressionDeny,
+    )
+    expect(result).toMatchObject({
+      behavior: 'deny',
+      decisionReason: { reason: 'originating session is not active' },
+    })
+  } finally {
+    beforeHookDecision = undefined
+    switchSession(owner)
     root.unmount()
   }
 })

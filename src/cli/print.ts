@@ -145,6 +145,7 @@ import type { CanUseToolFn } from 'src/hooks/useCanUseTool.js'
 import {
   enforceForcedAllowWriteBoundary,
   hasPermissionsToUseTool,
+  resolveSuppressedForcedAsk,
 } from 'src/utils/permissions/permissions.js'
 import { safeParseJSON } from 'src/utils/json.js'
 import {
@@ -4376,7 +4377,15 @@ export function createCanUseToolWithPermissionPrompt(
       toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
     const mainPermissionResult =
       forceDecision !== undefined && !shouldBypassForcedAsk
-        ? enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
+        ? forceDecision.behavior === 'ask'
+          ? await resolveSuppressedForcedAsk(
+              tool,
+              input,
+              toolUseContext,
+              toolUseId,
+              forceDecision,
+            )
+          : enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
         : await hasPermissionsToUseTool(
         tool,
         input,
@@ -4472,9 +4481,10 @@ export function createCanUseToolWithPermissionPrompt(
       permissionToolOutputSchema().parse(
         safeParseJSON(permissionToolResultBlockParam.content[0].text),
       ),
-      permissionPromptTool,
+      tool,
       input,
       toolUseContext,
+      permissionPromptTool.name,
     )
   }
   return canUseTool
@@ -4504,7 +4514,15 @@ export function getCanUseToolFn(
         forceDecision?.behavior === 'ask' &&
         toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
       return forceDecision !== undefined && !shouldBypassForcedAsk
-        ? enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
+        ? forceDecision.behavior === 'ask'
+          ? resolveSuppressedForcedAsk(
+              tool,
+              input,
+              toolUseContext,
+              toolUseId,
+              forceDecision,
+            )
+          : enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
         : await hasPermissionsToUseTool(
         tool,
         input,

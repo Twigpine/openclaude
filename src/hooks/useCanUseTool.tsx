@@ -74,7 +74,7 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
               // matching the headless and structured-IO ordering; when no
               // hook decides, the denial stands.
               if (result.decisionReason?.type === "other" && result.decisionReason.reason === DENY_INSTEAD_OF_PROMPTING_REASON) {
-                const hookDecision = await ctx.runHooks(appState.toolPermissionContext.mode, undefined, undefined, Date.now(), permissionSessionIsActive());
+                const hookDecision = await ctx.runHooks(appState.toolPermissionContext.mode, undefined, undefined, Date.now());
                 if (ctx.resolveIfAborted(resolve)) {
                   return;
                 }

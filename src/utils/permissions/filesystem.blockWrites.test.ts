@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { z } from 'zod/v4'
+import type { ToolUseConfirm } from '../../components/permissions/PermissionRequest.js'
 import {
   getCwdState,
   getOriginalCwd,
@@ -18,6 +19,12 @@ import {
 import type { ToolPermissionContext, ToolUseContext } from '../../Tool.js'
 import { setGovernancePolicySettingsForSourceForTesting } from '../governancePolicy.js'
 import type { SettingsJson } from '../settings/types.js'
+import {
+  registerLeaderSetToolPermissionContext,
+  registerLeaderToolUseConfirmQueue,
+  unregisterLeaderSetToolPermissionContext,
+  unregisterLeaderToolUseConfirmQueue,
+} from '../swarm/leaderPermissionBridge.js'
 import * as permissionUpdateModule from './PermissionUpdate.js'
 
 const realSettings = await import(
@@ -41,7 +48,7 @@ let hookPermissionResult:
       updatedInput?: { [key: string]: unknown }
       updatedPermissions?: (
         | {
-            type: 'removeDirectories'
+            type: 'addDirectories' | 'removeDirectories'
             directories: string[]
             destination: 'session'
           }
@@ -761,6 +768,168 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
       expect(result.behavior).toBe('allow')
     } finally {
       denyInsteadOfPrompting = false
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('forced asks respect suppression in print mode and in-process workers', async () => {
+    const { createCanUseToolWithPermissionPrompt, getCanUseToolFn } =
+      await import('../../cli/print.js')
+    const { createInProcessCanUseTool } = await import('../swarm/inProcessRunner.js')
+    const mutable = useMutableContext(permissionContext('default'))
+    const worker = createInProcessCanUseTool(
+      {
+        agentId: 'permission-test',
+        agentName: 'permission-test',
+        teamName: 'permission-test',
+        planModeRequired: false,
+        parentSessionId: 'permission-test',
+      },
+      mutable.ctx.abortController,
+    )
+    const prompt = createToolFixture(z.object({}), {
+      name: 'mcp__fixture__approve',
+      call: async () => {
+        throw new Error('unexpected prompt')
+      },
+    })
+    const io = new StructuredIO((async function* () {})())
+    const noPrompt = getCanUseToolFn(undefined, io, () => [])
+    let prompts = 0
+    registerLeaderToolUseConfirmQueue(() => { prompts++ })
+    denyInsteadOfPrompting = true
+    try {
+      const customPrompt = createCanUseToolWithPermissionPrompt(prompt as never)
+      for (const canUseTool of [noPrompt, customPrompt, worker]) {
+        const run = () => canUseTool(
+          writeTool, { file_path: join(projectDir, 'note.txt') },
+          mutable.ctx, {} as never, 'forced-ask',
+          { behavior: 'ask', message: 'approval required' },
+        )
+        expect(await run()).toMatchObject({ behavior: 'deny' })
+        hookPermissionResult = { behavior: 'allow' }
+        expect(await run()).toMatchObject({ behavior: 'allow' })
+        hookPermissionResult = undefined
+      }
+      expect(prompts).toBe(0)
+      denyInsteadOfPrompting = false
+      expect(await noPrompt(
+        writeTool, { file_path: join(projectDir, 'note.txt') },
+        mutable.ctx, {} as never, 'forced-ask-off',
+        { behavior: 'ask', message: 'approval required' },
+      )).toMatchObject({ behavior: 'ask' })
+    } finally {
+      denyInsteadOfPrompting = false
+      hookPermissionResult = undefined
+      unregisterLeaderToolUseConfirmQueue()
+      mutable.ctx.abortController.abort()
+    }
+  })
+
+  test('the custom print prompt validates the effective input using the requested tool', async () => {
+    const { createCanUseToolWithPermissionPrompt } = await import('../../cli/print.js')
+    let finalPath = join(outsideDir, 'rewritten.txt')
+    const prompt = createToolFixture(z.object({}), {
+      name: 'mcp__fixture__approve',
+      call: async () => ({ data: '' }),
+      mapToolResultToToolResultBlockParam: () => ({
+        type: 'tool_result',
+        tool_use_id: 'print-approval',
+        content: [{ type: 'text', text: JSON.stringify({
+          behavior: 'allow', updatedInput: { file_path: finalPath },
+        }) }],
+      }),
+    })
+    const ctx = useContext(permissionContext('default'))
+    const canUseTool = createCanUseToolWithPermissionPrompt(prompt as never)
+    const run = () => canUseTool(
+      writeTool, { file_path: join(projectDir, 'note.txt') },
+      ctx, {} as never, 'print-approval',
+      { behavior: 'ask', message: 'approval required' },
+    )
+    blockWritesOutsideWorkingDirectories = true
+    expect(await run()).toMatchObject({
+      behavior: 'deny',
+      decisionReason: { reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled' },
+    })
+    finalPath = join(projectDir, 'rewritten.txt')
+    expect(await run()).toMatchObject({
+      behavior: 'allow',
+      updatedInput: { file_path: finalPath },
+      decisionReason: { permissionPromptToolName: prompt.name },
+    })
+  })
+
+  test('leader approvals validate both the rewritten target and bundled directory changes', async () => {
+    const { createInProcessCanUseTool } = await import('../swarm/inProcessRunner.js')
+    const mutable = useMutableContext(permissionContext('default', new Map([
+      [addedDir, { path: addedDir, source: 'session' }],
+    ])))
+    const worker = createInProcessCanUseTool(
+      {
+        agentId: 'permission-test',
+        agentName: 'permission-test',
+        teamName: 'permission-test',
+        planModeRequired: false,
+        parentSessionId: 'permission-test',
+      },
+      mutable.ctx.abortController,
+    )
+    let updateCount = 0
+    let receivePrompt: (item: ToolUseConfirm) => void
+    registerLeaderToolUseConfirmQueue(update => {
+      const item = update([])[0]
+      if (item) receivePrompt(item)
+    })
+    registerLeaderSetToolPermissionContext(() => { updateCount++ })
+    blockWritesOutsideWorkingDirectories = true
+    try {
+      async function approve(path: string, removeDirectory: boolean) {
+        const presented = new Promise<ToolUseConfirm>(resolve => { receivePrompt = resolve })
+        const decision = worker(
+          writeTool, { file_path: join(projectDir, 'note.txt') },
+          mutable.ctx, {} as never, 'leader-approval',
+          { behavior: 'ask', message: 'approval required' },
+        )
+        const prompt = await presented
+        await prompt.onAllow({ file_path: path }, removeDirectory ? [{
+          type: 'removeDirectories', directories: [addedDir], destination: 'session',
+        }] : [])
+        return decision
+      }
+      expect(await approve(join(outsideDir, 'note.txt'), false)).toMatchObject({ behavior: 'deny' })
+      expect(await approve(join(addedDir, 'note.txt'), true)).toMatchObject({ behavior: 'deny' })
+      expect(await approve(join(addedDir, 'note.txt'), false)).toMatchObject({ behavior: 'allow' })
+      expect(updateCount).toBe(0)
+    } finally {
+      unregisterLeaderToolUseConfirmQueue()
+      unregisterLeaderSetToolPermissionContext()
+      mutable.ctx.abortController.abort()
+    }
+  })
+
+  test('hooks cannot grant the working directory for the write in their own approval', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const originalInput = { file_path: join(projectDir, 'note.txt') }
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(addedDir, 'note.txt') },
+      updatedPermissions: [{
+        type: 'addDirectories', directories: [addedDir], destination: 'session',
+      }],
+    }
+    const mutable = useMutableContext(permissionContext('default'))
+    try {
+      const sdk = await executePermissionRequestHooksForSDK(
+        writeTool, 'self-grant', originalInput, mutable.ctx, undefined,
+      )
+      const headless = await runPermissionRequestHooksForHeadlessAgent(
+        writeTool, originalInput, 'self-grant', mutable.ctx, 'default', undefined,
+      )
+      expect(sdk).toMatchObject({ behavior: 'deny' })
+      expect(headless).toMatchObject({ behavior: 'deny' })
+      expect(mutable.setAppStateCalls()).toBe(0)
+    } finally {
       hookPermissionResult = undefined
     }
   })

@@ -88,10 +88,11 @@ export async function permissionPromptToolResultToPermissionDecision(
   tool: Tool,
   input: { [key: string]: unknown },
   toolUseContext: ToolUseContext,
+  permissionPromptToolName = tool.name,
 ): Promise<PermissionDecision> {
   const decisionReason: PermissionDecisionReason = {
     type: 'permissionPromptTool',
-    permissionPromptToolName: tool.name,
+    permissionPromptToolName,
     toolResult: result,
   }
   if (result.behavior === 'allow') {
