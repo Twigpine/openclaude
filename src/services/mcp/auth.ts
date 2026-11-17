@@ -777,7 +777,6 @@ async function performMCPXaaAuth(
 
       // IdP client secret lives in a separate keychain slot (keyed by IdP issuer),
       // NOT the AS secret — different trust domain. Optional: if absent, PKCE-only.
-      // Acquire id_token (cached or via one OIDC browser pop at the IdP).
       // Peek the cache first so we can report idTokenCacheHit in analytics before
       // acquireIdpIdToken potentially writes a fresh one.
       return {
@@ -795,6 +794,7 @@ async function performMCPXaaAuth(
   try {
     let idToken
     try {
+      // Acquire id_token (cached or via one OIDC browser pop at the IdP).
       idToken = await acquireIdpIdToken({
         idpIssuer: idp.issuer,
         idpClientId: idp.clientId,
