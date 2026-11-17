@@ -16,7 +16,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from 'bun:test'
 import { feature } from 'bun:bundle'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -3921,6 +3921,106 @@ test('A JOINER THAT CLOSES BEFORE ITS CONNECT SETTLES ADOPTS NOTHING', async () 
   // The cleanup closes the transport, whose onclose evicts the cache.
   await waitFor(() => realClient.connectToServer.cache.get(key) === undefined)
   await settlesWithin(joinerCaught, 5_000).catch(() => {})
+}, 30_000)
+
+/** Whether a process with this pid is still running. */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+    throw error
+  }
+}
+
+/**
+ * A stalled stdio connect must close once its last waiter cancels. The
+ * creator aborts while a joiner remains, so the creator preserves the
+ * transport for the joiner; when the joiner then aborts, the last-waiter
+ * path must find a closer and kill the subprocess instead of holding
+ * both callers until the connection timeout. A plain stdio connect
+ * reaches the closer registration without an await, so the wrapper has
+ * not supplied the originating promise yet — the registration must be
+ * deferred until it has.
+ */
+test('A STALLED STDIO CONNECT CLOSES ONCE ITS CREATOR AND JOINER HAVE BOTH ABORTED', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openclaude-stalled-stdio-'))
+  const pidFile = join(dir, 'server.pid')
+  // A server that starts but never answers initialize: the connect stalls
+  // until the transport closes or the connection timeout fires.
+  const serverRef = {
+    type: 'stdio',
+    command: process.execPath,
+    args: [
+      '-e',
+      `require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 120_000)`,
+      pidFile,
+    ],
+    scope: 'session',
+  } as never
+
+  const creator = new AbortController()
+  const creatorConnect = realClient.connectToServer(
+    'stalled-stdio',
+    serverRef,
+    undefined,
+    creator.signal,
+  )
+  const creatorCaught = creatorConnect.catch(error => error)
+  // The joiner shares the creator's pending connect.
+  const joiner = new AbortController()
+  const joinerConnect = realClient.connectToServer(
+    'stalled-stdio',
+    serverRef,
+    undefined,
+    joiner.signal,
+  )
+  const joinerCaught = joinerConnect.catch(error => error)
+
+  // Wait until the subprocess has started and the connect is stalled on
+  // initialize — only then is an abort a cancellation of a stalled
+  // connect rather than a race with startup.
+  await waitFor(() => existsSync(pidFile))
+  const pid = Number.parseInt(await readFile(pidFile, 'utf8'), 10)
+  expect(Number.isInteger(pid)).toBe(true)
+  expect(isProcessAlive(pid)).toBe(true)
+
+  // The creator aborts while the joiner remains: the transport is
+  // preserved for the joiner, so the connect stays stalled.
+  creator.abort()
+  // The joiner aborts too: the last waiter cancels, so the transport
+  // must close and the connect must reject — promptly, not at the
+  // connection timeout.
+  joiner.abort()
+  try {
+    // A failed connect resolves to a failed client, not a rejection — the
+    // point is that it settles promptly with a closed-connection error,
+    // not at the 30s connection timeout.
+    const creatorClient = (await settlesWithin(
+      creatorCaught,
+      5_000,
+    )) as MCPServerConnection
+    expect(creatorClient.type).toBe('failed')
+    if (creatorClient.type !== 'failed') {
+      throw new Error('expected a failed client')
+    }
+    expect(creatorClient.error).not.toContain('timed out')
+    expect(creatorClient.error).toContain('Connection closed')
+    expect(await settlesWithin(joinerCaught, 5_000)).toBe(creatorClient)
+    // The abandoned subprocess is gone, not left until the timeout.
+    await waitFor(() => !isProcessAlive(pid))
+  } finally {
+    // A failed assertion must not leave a sleeping subprocess behind.
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
+    await rm(dir, { recursive: true, force: true })
+    await settlesWithin(creatorCaught, 5_000).catch(() => {})
+    await settlesWithin(joinerCaught, 5_000).catch(() => {})
+  }
 }, 30_000)
 
 /**

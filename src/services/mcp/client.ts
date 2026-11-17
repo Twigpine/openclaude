@@ -939,11 +939,20 @@ const connectToServerMemoized = memoize(
      * Holds this connect's own promise, set by the wrapper once memoize
      * returns it: the body cannot read its promise back from the cache,
      * which is set only after the body returns and may hold a newer
-     * generation by then. The waiter counts and the transport closer
-     * below use this originating promise, not whichever entry is current.
-     * Not part of the memo key (getServerCacheKey ignores it).
+     * generation by then. The waiter counts use this originating
+     * promise, not whichever entry is current; the transport closer is
+     * registered by the wrapper against it, not by the body below.
+     * Also carries the closer the wrapper registers for this connect:
+     * the body leaves it here because it cannot register the closer
+     * itself — on the synchronous stdio path it reaches the connect
+     * before the wrapper has supplied the promise, so reading it here
+     * yields undefined and no closer would ever be registered. Not part
+     * of the memo key (getServerCacheKey ignores it).
      */
-    generation?: { promise?: Promise<MCPServerConnection> },
+    generation?: {
+      promise?: Promise<MCPServerConnection>
+      closeStalledTransport?: () => void
+    },
   ): Promise<MCPServerConnection> => {
     const connectStartTime = Date.now()
     let inProcessServer: InProcessMcpServer | undefined
@@ -977,6 +986,23 @@ const connectToServerMemoized = memoize(
       const stopConnectAbort = () => {
         if (signal && onConnectAbort) {
           signal.removeEventListener('abort', onConnectAbort)
+        }
+      }
+
+      // Leave the stalled-transport closer on the generation holder for
+      // the wrapper to register, keyed by the originating promise. This
+      // runs before the first await on every path, so the wrapper sees
+      // it even on the synchronous stdio path, where the body reaches
+      // the connect before the wrapper has supplied the promise. The
+      // closure reads the transport lazily: it may not exist yet when
+      // the wrapper registers it. The connectSettled guard keeps a
+      // waiter that cancels in the same window from closing a transport
+      // that just connected.
+      if (generation) {
+        generation.closeStalledTransport = () => {
+          if (!connectSettled) {
+            transport?.close().catch(() => {})
+          }
         }
       }
 
@@ -1441,27 +1467,11 @@ const connectToServerMemoized = memoize(
       }
 
       const connectPromise = client.connect(transport)
-      // A waiter that is not the creator cannot close a stalled transport
-      // through the abort listener above — it watches only the creator's
-      // signal. Register a closer the wrapper invokes when the last waiter
-      // cancels, so a connect stalled on initialize still rejects instead
-      // of holding its callers until the connection timeout. Keyed by this
-      // connect's own promise, from the generation holder: the cache holds
-      // the promise only after the body returns, and may hold a newer
-      // generation by then. The closer is inert once the connect
-      // settles; the wrapper drops it then.
-      const ownPromise = generation?.promise
-      if (ownPromise) {
-        connectTransportClosers.set(ownPromise, () => {
-          if (!connectSettled) {
-            transport?.close().catch(() => {})
-          }
-        })
-        const dropCloser = () => {
-          connectTransportClosers.delete(ownPromise)
-        }
-        void ownPromise.then(dropCloser, dropCloser)
-      }
+      // The closer for this connect is registered by the wrapper (see
+      // connectToServer below), keyed by this connect's own promise: the
+      // wrapper supplies the promise only after this body returns, so
+      // reading generation.promise here yields undefined on the
+      // synchronous stdio path and no closer would be registered.
       // An abort that landed before the transport existed still cancels
       // the connect: the listener above could not close what did not exist.
       // Shared like the listener: another waiter keeps the transport.
@@ -2104,9 +2114,29 @@ export const connectToServer = Object.assign(
     // or during the wait, in which case its adoption would keep a
     // transport alive the creator's abort should close.
     const hadCached = connectToServerMemoized.cache.get(key) !== undefined
-    const generation: { promise?: Promise<MCPServerConnection> } = {}
+    const generation: {
+      promise?: Promise<MCPServerConnection>
+      closeStalledTransport?: () => void
+    } = {}
     const promise = connectToServerMemoized(name, serverRef, serverStats, signal, generation)
     generation.promise = promise
+    // Register this connect's stalled-transport closer, keyed by the
+    // originating promise. The body leaves it on the generation holder:
+    // on the synchronous stdio path it runs before this promise exists
+    // and so cannot register it itself. A cache hit reuses the creator's
+    // registration — this generation holds none. A waiter that is not
+    // the creator cannot close a stalled transport through the creator's
+    // abort listener, so the wrapper invokes the closer when the last
+    // waiter cancels, and the connect rejects instead of holding its
+    // callers until the connection timeout. The closer is inert once
+    // the connect settles; drop it then.
+    if (generation.closeStalledTransport) {
+      connectTransportClosers.set(promise, generation.closeStalledTransport)
+      const dropCloser = () => {
+        connectTransportClosers.delete(promise)
+      }
+      void promise.then(dropCloser, dropCloser)
+    }
     if (hadCached) {
       void promise.then(
         client => {
