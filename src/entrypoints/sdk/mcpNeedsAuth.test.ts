@@ -665,6 +665,8 @@ beforeAll(() => {
 afterAll(() => {
   mock.module('../../services/mcp/client.js', () => realClient)
   mock.module('../../services/mcp/auth.js', () => realAuth)
+  mock.module('../../services/mcp/xaaIdpLogin.js', () => realXaaIdpLogin)
+  mock.module('../../services/mcp/xaa.js', () => realXaa)
   mock.module('../../utils/secureStorage/index.js', () => realSecureStorage)
   if (hadMacro) (globalThis as Record<string, unknown>).MACRO = savedMacro
   else delete (globalThis as Record<string, unknown>).MACRO
