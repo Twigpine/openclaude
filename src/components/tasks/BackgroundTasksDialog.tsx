@@ -17,6 +17,7 @@ import type { LocalShellTaskState } from 'src/tasks/LocalShellTask/guards.js';
 import { LocalShellTask } from 'src/tasks/LocalShellTask/LocalShellTask.js';
 // Type import is erased at build time — safe even though module is ant-gated.
 import type { LocalWorkflowTaskState } from 'src/tasks/LocalWorkflowTask/LocalWorkflowTask.js';
+import { killMcpServerTask, type McpServerTaskState } from 'src/tasks/McpServerTask/McpServerTask.js';
 import type { MonitorMcpTaskState } from 'src/tasks/MonitorMcpTask/MonitorMcpTask.js';
 import { RemoteAgentTask, type RemoteAgentTaskState } from 'src/tasks/RemoteAgentTask/RemoteAgentTask.js';
 import { type BackgroundTaskState, isBackgroundTask, type TaskState } from 'src/tasks/types.js';
@@ -39,6 +40,7 @@ import { AsyncAgentDetailDialog } from './AsyncAgentDetailDialog.js';
 import { BackgroundTask as BackgroundTaskComponent } from './BackgroundTask.js';
 import { DreamDetailDialog } from './DreamDetailDialog.js';
 import { InProcessTeammateDetailDialog } from './InProcessTeammateDetailDialog.js';
+import { McpServerTaskDetailDialog } from './McpServerTaskDetailDialog.js';
 import { RemoteSessionDetailDialog } from './RemoteSessionDetailDialog.js';
 import { ShellDetailDialog } from './ShellDetailDialog.js';
 type ViewState = {
@@ -90,6 +92,12 @@ type ListItem = {
   label: string;
   status: string;
   task: DeepImmutable<MonitorMcpTaskState>;
+} | {
+  id: string;
+  type: 'mcp_server';
+  label: string;
+  status: string;
+  task: DeepImmutable<McpServerTaskState>;
 } | {
   id: string;
   type: 'dream';
@@ -176,6 +184,7 @@ export function BackgroundTasksDialog({
     teammateTasks,
     workflowTasks,
     mcpMonitors,
+    mcpServerTasks,
     dreamTasks: dreamTasks_0,
     allSelectableItems
   } = useMemo(() => {
@@ -197,9 +206,10 @@ export function BackgroundTasksDialog({
     const agent = sorted.filter(item_1 => item_1.type === 'local_agent' && item_1.id !== foregroundedTaskId);
     const workflows = sorted.filter(item_2 => item_2.type === 'local_workflow');
     const monitorMcp = sorted.filter(item_3 => item_3.type === 'monitor_mcp');
-    const dreamTasks = sorted.filter(item_4 => item_4.type === 'dream');
+    const mcpServer = sorted.filter(item_4 => item_4.type === 'mcp_server');
+    const dreamTasks = sorted.filter(item_5 => item_5.type === 'dream');
     // In spinner-tree mode, exclude teammates from the dialog (they appear in the tree)
-    const teammates = showSpinnerTree ? [] : sorted.filter(item_5 => item_5.type === 'in_process_teammate');
+    const teammates = showSpinnerTree ? [] : sorted.filter(item_6 => item_6.type === 'in_process_teammate');
     // Add leader entry when there are teammates, so users can foreground back to leader
     const leaderItem: ListItem[] = teammates.length > 0 ? [{
       id: '__leader__',
@@ -213,12 +223,13 @@ export function BackgroundTasksDialog({
       agentTasks: agent,
       workflowTasks: workflows,
       mcpMonitors: monitorMcp,
+      mcpServerTasks: mcpServer,
       dreamTasks,
       teammateTasks: [...leaderItem, ...teammates],
       // Order MUST match JSX render order (teammates \u2192 bash \u2192 monitorMcp \u2192
       // remote \u2192 agent \u2192 workflows \u2192 dream) so \u2193/\u2191 navigation moves the cursor
       // visually downward.
-      allSelectableItems: [...leaderItem, ...teammates, ...bash, ...monitorMcp, ...remote, ...agent, ...workflows, ...dreamTasks]
+      allSelectableItems: [...leaderItem, ...teammates, ...bash, ...monitorMcp, ...mcpServer, ...remote, ...agent, ...workflows, ...dreamTasks]
     };
   }, [typedTasks, foregroundedTaskId, showSpinnerTree]);
   const currentSelection = allSelectableItems[selectedIndex] ?? null;
@@ -278,6 +289,8 @@ export function BackgroundTasksDialog({
         killWorkflowTask(currentSelection_0.id, setAppState);
       } else if (currentSelection_0.type === 'monitor_mcp' && currentSelection_0.status === 'running' && killMonitorMcp) {
         killMonitorMcp(currentSelection_0.id, setAppState);
+      } else if (currentSelection_0.type === 'mcp_server' && currentSelection_0.status === 'running') {
+        killMcpServerTask(currentSelection_0.id, setAppState);
       } else if (currentSelection_0.type === 'dream' && currentSelection_0.status === 'running') {
         void killDreamTask(currentSelection_0.id);
       } else if (currentSelection_0.type === 'remote_agent' && currentSelection_0.status === 'running') {
@@ -393,6 +406,8 @@ export function BackgroundTasksDialog({
       case 'monitor_mcp':
         if (!MonitorMcpDetailDialog) return null;
         return <MonitorMcpDetailDialog task={task_0} onKill={task_0.status === 'running' && killMonitorMcp ? () => killMonitorMcp(task_0.id, setAppState) : undefined} onBack={goBackToList} key={`monitor-mcp-${task_0.id}`} />;
+      case 'mcp_server':
+        return <McpServerTaskDetailDialog task={task_0} onDone={onDone} onBack={goBackToList} onKill={task_0.status === 'running' ? () => killMcpServerTask(task_0.id, setAppState) : undefined} key={`mcp-server-${task_0.id}`} />;
       case 'dream':
         return <DreamDetailDialog task={task_0} onDone={() => onDone('Background tasks dialog dismissed', {
           display: 'system'
@@ -453,37 +468,46 @@ export function BackgroundTasksDialog({
                 </Box>
               </Box>}
 
-            {remoteSessions.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 ? 1 : 0}>
+            {mcpServerTasks.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 ? 1 : 0}>
+                <Text dimColor>
+                  <Text bold>{'  '}Server tasks</Text> ({mcpServerTasks.length})
+                </Text>
+                <Box flexDirection="column">
+                  {mcpServerTasks.map(item_8 => <Item key={item_8.id} item={item_8} isSelected={item_8.id === currentSelection?.id} />)}
+                </Box>
+              </Box>}
+
+            {remoteSessions.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 || mcpServerTasks.length > 0 ? 1 : 0}>
                 <Text dimColor>
                   <Text bold>{'  '}Remote agents</Text> ({remoteSessions.length}
                   )
                 </Text>
                 <Box flexDirection="column">
-                  {remoteSessions.map(item_8 => <Item key={item_8.id} item={item_8} isSelected={item_8.id === currentSelection?.id} />)}
+                  {remoteSessions.map(item_9 => <Item key={item_9.id} item={item_9} isSelected={item_9.id === currentSelection?.id} />)}
                 </Box>
               </Box>}
 
-            {agentTasks.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 || remoteSessions.length > 0 ? 1 : 0}>
+            {agentTasks.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 || mcpServerTasks.length > 0 || remoteSessions.length > 0 ? 1 : 0}>
                 <Text dimColor>
                   <Text bold>{'  '}Local agents</Text> ({agentTasks.length})
                 </Text>
                 <Box flexDirection="column">
-                  {agentTasks.map(item_9 => <Item key={item_9.id} item={item_9} isSelected={item_9.id === currentSelection?.id} />)}
+                  {agentTasks.map(item_10 => <Item key={item_10.id} item={item_10} isSelected={item_10.id === currentSelection?.id} />)}
                 </Box>
               </Box>}
 
-            {workflowTasks.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 || remoteSessions.length > 0 || agentTasks.length > 0 ? 1 : 0}>
+            {workflowTasks.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 || mcpServerTasks.length > 0 || remoteSessions.length > 0 || agentTasks.length > 0 ? 1 : 0}>
                 <Text dimColor>
                   <Text bold>{'  '}Workflows</Text> ({workflowTasks.length})
                 </Text>
                 <Box flexDirection="column">
-                  {workflowTasks.map(item_10 => <Item key={item_10.id} item={item_10} isSelected={item_10.id === currentSelection?.id} />)}
+                  {workflowTasks.map(item_11 => <Item key={item_11.id} item={item_11} isSelected={item_11.id === currentSelection?.id} />)}
                 </Box>
               </Box>}
 
-            {dreamTasks_0.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 || remoteSessions.length > 0 || agentTasks.length > 0 || workflowTasks.length > 0 ? 1 : 0}>
+            {dreamTasks_0.length > 0 && <Box flexDirection="column" marginTop={teammateTasks.length > 0 || bashTasks.length > 0 || mcpMonitors.length > 0 || mcpServerTasks.length > 0 || remoteSessions.length > 0 || agentTasks.length > 0 || workflowTasks.length > 0 ? 1 : 0}>
                 <Box flexDirection="column">
-                  {dreamTasks_0.map(item_11 => <Item key={item_11.id} item={item_11} isSelected={item_11.id === currentSelection?.id} />)}
+                  {dreamTasks_0.map(item_12 => <Item key={item_12.id} item={item_12} isSelected={item_12.id === currentSelection?.id} />)}
                 </Box>
               </Box>}
           </Box>}
@@ -536,6 +560,14 @@ function toListItem(task: BackgroundTaskState): ListItem {
       return {
         id: task.id,
         type: 'monitor_mcp',
+        label: task.description,
+        status: task.status,
+        task
+      };
+    case 'mcp_server':
+      return {
+        id: task.id,
+        type: 'mcp_server',
         label: task.description,
         status: task.status,
         task

@@ -633,6 +633,7 @@ remain in the selected model, but context-limit keys use the model name before
 | `CLAUDE_CODE_DISABLE_ULTRATHINK` | No | Set truthy to stop the `ultrathink` keyword from raising the turn to high effort |
 | `CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES` | No | Set truthy to stop periodic forked-agent progress-summary requests for running agents |
 | `CLAUDE_CODE_DISABLE_FILE_MENTIONS` | No | Set truthy so `@`-mentioned files pass their path only; contents are not read into context |
+| `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND` | No | Set truthy to stop advertising MCP task support, so tools/call never returns a server-side task |
 | `CLAUDE_CODE_RESUME_HINT_COMMAND` | No | Override the program name printed in the exit-time resume hint (default: `openclaude`) |
 
 ### Web search
@@ -1136,3 +1137,19 @@ project's `disabledMcpServers` key to restore inheritance. Builtin servers that
 are disabled by default keep their separate project-level `enabledMcpServers`
 allowlist. Existing running sessions are not forcibly disconnected by a toggle
 in another project.
+
+## MCP server tasks
+
+A server that supports the MCP tasks extension may answer a `tools/call` with
+a task handle instead of a result when the tool's listing marks it
+`execution.taskSupport`. When that happens, OpenClaude registers a
+`mcp_server` background task, returns a "task started" result immediately,
+and delivers the real result as a task notification when the server finishes.
+The task list (`/tasks` or the background-tasks dialog) shows these under
+"Server tasks"; `x` sends `tasks/cancel` to the server.
+
+The client polls `tasks/get` at the interval the server suggests and also
+listens for `notifications/tasks/status`. A disconnect before the task
+finishes marks the local task failed. Set
+`CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND` to disable the whole path: the
+tasks capability is then not advertised and every tool call stays synchronous.

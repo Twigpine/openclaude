@@ -21,6 +21,7 @@ import {
 } from '@modelcontextprotocol/sdk/shared/transport.js'
 import {
   CallToolResultSchema,
+  CreateTaskResultSchema,
   ElicitRequestSchema,
   type ElicitRequestURLParams,
   type ElicitResult,
@@ -34,7 +35,10 @@ import {
   McpError,
   type PromptMessage,
   type ResourceLink,
+  type Task as McpTask,
+  TaskStatusNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import { z } from 'zod'
 import memoize from 'lodash-es/memoize.js'
 import zipObject from 'lodash-es/zipObject.js'
 import pMap from 'p-map'
@@ -138,6 +142,15 @@ import { markClaudeAiMcpConnected } from './claudeai.js'
 import { getAllMcpConfigs, isMcpServerDisabled } from './config.js'
 import { getMcpServerHeaders } from './headersHelper.js'
 import { SdkControlClientTransport } from './SdkControlTransport.js'
+import {
+  clearMcpToolTaskSupport,
+  failMcpServerTasksForServer,
+  handleMcpTaskStatusNotification,
+  isMcpTaskBackgroundingDisabled,
+  mcpTaskSupportForTool,
+  recordMcpToolTaskSupport,
+  trackMcpServerTask,
+} from './tasks.js'
 import type {
   ConnectedMCPServer,
   MCPServerConnection,
@@ -1245,6 +1258,13 @@ export const connectToServer = memoize(
             // breaks Java MCP SDK servers (Spring AI) whose Elicitation class
             // has zero fields and fails on unknown properties.
             elicitation: {},
+            // Client task capability (SEP-1686 wire shape): the server may
+            // run tools/call as a durable task and we poll tasks/get. The
+            // requests key is omitted; taskified server-initiated requests
+            // (sampling/elicitation) are not supported here.
+            ...(isMcpTaskBackgroundingDisabled()
+              ? {}
+              : { tasks: { list: {}, cancel: {} } }),
           },
         },
       )
@@ -1264,6 +1284,17 @@ export const connectToServer = memoize(
           ],
         }
       })
+
+      if (!isMcpTaskBackgroundingDisabled()) {
+        // Eager status pushes for server-initiated tasks. Polling stays the
+        // reliable path; notifications only shorten the latency.
+        client.setNotificationHandler(
+          TaskStatusNotificationSchema,
+          notification => {
+            handleMcpTaskStatusNotification(name, notification.params)
+          },
+        )
+      }
 
       // Add a timeout to connection attempts to prevent tests from hanging indefinitely
       logMCPDebug(
@@ -1638,6 +1669,11 @@ export const connectToServer = memoize(
         fetchToolsForClient.cache.delete(name)
         fetchResourcesForClient.cache.delete(name)
         fetchCommandsForClient.cache.delete(name)
+        clearMcpToolTaskSupport(name)
+        failMcpServerTasksForServer(
+          name,
+          `MCP server "${name}" disconnected before the task completed`,
+        )
         if (feature('MCP_SKILLS')) {
           fetchMcpSkillsForClient!.cache.delete(name)
         }
@@ -2053,6 +2089,10 @@ export const fetchToolsForClient = memoizeWithLRU(
 
       // Sanitize tool data from MCP server after the complete list succeeds.
       const toolsToProcess = recursivelySanitizeUnicode(tools)
+
+      // execution.taskSupport decides which tools/call requests get task
+      // augmentation; the SDK's own cache is private, so keep ours.
+      recordMcpToolTaskSupport(client.name, toolsToProcess)
 
       // Check if we should skip the mcp__ prefix for SDK MCP servers
       const skipPrefix =
@@ -3192,6 +3232,15 @@ export async function processMCPResult(
  * displaying the URL elicitation to the user, waiting for the completion
  * notification, and retrying the tool call.
  */
+/**
+ * tools/call augmented with task creation params can answer with either a
+ * normal tool result or a CreateTaskResult when the server taskifies it.
+ */
+const TaskAugmentedCallToolResultSchema = z.union([
+  CreateTaskResultSchema,
+  CallToolResultSchema,
+])
+
 type MCPToolCallResult = {
   content: MCPToolResult
   _meta?: Record<string, unknown>
@@ -3228,6 +3277,7 @@ export async function callMCPToolWithUrlElicitationRetry({
     meta?: Record<string, unknown>
     signal: AbortSignal
     onProgress?: (data: MCPProgress) => void
+    onServerTaskCreated?: (task: McpTask) => MCPToolCallResult
   }) => Promise<MCPToolCallResult>
   /** Handler for URL elicitations when no hook handles them.
    * In print/SDK mode, delegates to structuredIO. In REPL, falls back to queue. */
@@ -3254,6 +3304,19 @@ export async function callMCPToolWithUrlElicitationRetry({
         meta,
         signal,
         onProgress,
+        onServerTaskCreated: mcpTask => {
+          const description = `${connectedClient.name}: ${tool}`
+          const taskId = trackMcpServerTask({
+            connection: connectedClient,
+            task: mcpTask,
+            toolName: tool,
+            description,
+            setAppState,
+          })
+          return {
+            content: `MCP server "${connectedClient.name}" started "${tool}" as background task ${taskId}. The task runs on the server; you will be notified when it completes. Do not retry or poll for the result.`,
+          }
+        },
       })
     } catch (error) {
       // The MCP SDK's Protocol creates plain McpError (not UrlElicitationRequiredError)
@@ -3425,12 +3488,13 @@ export async function callMCPToolWithUrlElicitationRetry({
 }
 
 async function callMCPTool({
-  client: { client, name, config },
+  client: connection,
   tool,
   args,
   meta,
   signal,
   onProgress,
+  onServerTaskCreated,
 }: {
   client: ConnectedMCPServer
   tool: string
@@ -3438,11 +3502,17 @@ async function callMCPTool({
   meta?: Record<string, unknown>
   signal: AbortSignal
   onProgress?: (data: MCPProgress) => void
+  /**
+   * Called when the server taskifies the call (CreateTaskResult instead of a
+   * tool result). Returns the tool result the model should see immediately.
+   */
+  onServerTaskCreated?: (task: McpTask) => MCPToolCallResult
 }): Promise<{
   content: MCPToolResult
   _meta?: Record<string, unknown>
   structuredContent?: Record<string, unknown>
 }> {
+  const { client, name, config } = connection
   const toolStartTime = Date.now()
   let progressInterval: NodeJS.Timeout | undefined
 
@@ -3492,32 +3562,52 @@ async function callMCPTool({
       }, timeoutMs)
     })
 
+    const requestOptions = {
+      signal: requestSignal,
+      timeout: timeoutMs,
+      onprogress: onProgress
+        ? sdkProgress => {
+          onProgress({
+            type: 'mcp_progress',
+            status: 'progress',
+            serverName: name,
+            toolName: tool,
+            progress: sdkProgress.progress,
+            total: sdkProgress.total,
+            progressMessage: sdkProgress.message,
+          })
+        }
+        : undefined,
+    }
+
+    // A server that advertises tasks.requests.tools.call may run task-marked
+    // tools as durable tasks. Augment the request so it can answer with a
+    // CreateTaskResult; the task then moves to the background task list.
+    const taskSupport = mcpTaskSupportForTool(connection, tool)
+
     const result = await Promise.race([
-      client.callTool(
-        {
-          name: tool,
-          arguments: args,
-          _meta: meta,
-        },
-        CallToolResultSchema,
-        {
-          signal: requestSignal,
-          timeout: timeoutMs,
-          onprogress: onProgress
-            ? sdkProgress => {
-              onProgress({
-                type: 'mcp_progress',
-                status: 'progress',
-                serverName: name,
-                toolName: tool,
-                progress: sdkProgress.progress,
-                total: sdkProgress.total,
-                progressMessage: sdkProgress.message,
-              })
-            }
-            : undefined,
-        },
-      ),
+      taskSupport
+        ? client.request(
+            {
+              method: 'tools/call' as const,
+              params: {
+                name: tool,
+                arguments: args,
+                _meta: meta,
+              },
+            },
+            TaskAugmentedCallToolResultSchema,
+            { ...requestOptions, task: {} },
+          )
+        : client.callTool(
+            {
+              name: tool,
+              arguments: args,
+              _meta: meta,
+            },
+            CallToolResultSchema,
+            requestOptions,
+          ),
       timeoutPromise,
     ]).finally(() => {
       if (timeoutId) {
@@ -3525,6 +3615,23 @@ async function callMCPTool({
       }
       cleanupRequestSignal()
     })
+
+    if ('task' in result && result.task) {
+      // The server accepted taskification. Register the remote task as a
+      // background task and let the model continue; the real result arrives
+      // as a task notification on completion.
+      clearInterval(progressInterval)
+      const task = result.task as McpTask
+      logMCPDebug(
+        name,
+        `Tool '${tool}' taskified by server as task ${task.taskId} (status ${task.status})`,
+      )
+      return (
+        onServerTaskCreated?.(task) ?? {
+          content: `MCP server "${name}" started tool "${tool}" as background task ${task.taskId}.`,
+        }
+      )
+    }
 
     if ('isError' in result && result.isError) {
       let errorDetails = 'Unknown error'
