@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, utimes } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +34,12 @@ import { fileURLToPath } from 'node:url'
 const realFsPromises = await import('node:fs/promises')
 const realWriteFile = realFsPromises.writeFile
 const realOpen = realFsPromises.open
+const realLink = realFsPromises.link
+const realRename = realFsPromises.rename
+const realFs = await import('node:fs')
+const realLinkSync = realFs.linkSync
+const realRenameSync = realFs.renameSync
+const realWriteFileSync = realFs.writeFileSync
 
 const TEST_PROCESS_MARKER = 'a'.repeat(64)
 
@@ -73,6 +86,91 @@ async function mockedWriteFile(
     return
   }
   await realWriteFile(path, data, options)
+}
+
+// Commit-injection control for the delayed-commit regression tests
+// (maintainer review 5942761094 on #2497). When armed, the next commit
+// call for the given target first publishes the successor fact to the
+// target, then performs the real commit — reproducing a fact another
+// installer already published landing between the owner's ownership
+// check and its commit. The commit must be atomic (link() EEXIST), so
+// the delayed owner returns the successor's fact instead of replacing
+// it. One-shot: consumed by the first matching commit call.
+type CommitInjection = {
+  target: string
+  successor: Record<string, unknown>
+  fired: () => void
+}
+let commitInjection: CommitInjection | undefined
+
+// Commit-pause control for the writeNewSession race test. When armed,
+// every commit call for the given target waits on a gate the test
+// releases, so the test can order two creates' commits: the first
+// create commits first, the second create's commit then lands on the
+// published row.
+type CommitPause = {
+  target: string
+  onPaused: (control: { release: () => void }) => void
+}
+let commitPause: CommitPause | undefined
+
+async function mockedLink(oldPath: string, newPath: string): Promise<void> {
+  if (commitInjection && newPath === commitInjection.target) {
+    const injection = commitInjection
+    commitInjection = undefined
+    await realWriteFile(newPath, JSON.stringify(injection.successor))
+    injection.fired()
+  }
+  if (commitPause && newPath === commitPause.target) {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    commitPause.onPaused({ release })
+    await gate
+  }
+  await realLink(oldPath, newPath)
+}
+
+async function mockedRename(
+  oldPath: string,
+  newPath: string,
+): Promise<void> {
+  if (commitInjection && newPath === commitInjection.target) {
+    const injection = commitInjection
+    commitInjection = undefined
+    await realWriteFile(newPath, JSON.stringify(injection.successor))
+    injection.fired()
+  }
+  if (commitPause && newPath === commitPause.target) {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    commitPause.onPaused({ release })
+    await gate
+  }
+  await realRename(oldPath, newPath)
+}
+
+function mockedLinkSync(oldPath: string, newPath: string): void {
+  if (commitInjection && newPath === commitInjection.target) {
+    const injection = commitInjection
+    commitInjection = undefined
+    realWriteFileSync(newPath, JSON.stringify(injection.successor))
+    injection.fired()
+  }
+  realLinkSync(oldPath, newPath)
+}
+
+function mockedRenameSync(oldPath: string, newPath: string): void {
+  if (commitInjection && newPath === commitInjection.target) {
+    const injection = commitInjection
+    commitInjection = undefined
+    realWriteFileSync(newPath, JSON.stringify(injection.successor))
+    injection.fired()
+  }
+  realRenameSync(oldPath, newPath)
 }
 
 describe('terminal-fact publish across withdrawn claims', () => {
@@ -128,8 +226,31 @@ describe('terminal-fact publish across withdrawn claims', () => {
     )
   }
 
+  function metadataPath(id: string): string {
+    return join(configDir, 'bg-sessions', 'sessions', `${id}.json`)
+  }
+
   function sessionLockfilePath(id: string): string {
     return join(configDir, 'bg-sessions', 'sessions', `${id}.json.lock`)
+  }
+
+  // Builds the successor fact the commit-injection mock publishes: same
+  // session and owner pid as the first installer, but the opposite
+  // outcome, so the stored fact proves which publisher won.
+  function successorFact(
+    id: string,
+    exitCode: number,
+  ): Record<string, unknown> {
+    return {
+      version: 1,
+      id,
+      pid: 424242,
+      generation: TEST_PROCESS_MARKER,
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      terminalReason: 'exit_code',
+      exitCode,
+    }
   }
 
   // Ages the per-ID lock past proper-lockfile's 10 s stale threshold
@@ -184,6 +305,24 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
   }
 
+  // Waits until the commit-pause mock has paused the nth commit for the
+  // target, failing fast when the pause never fires (e.g. the mock
+  // stopped applying), instead of hanging on the gate.
+  async function awaitCommitPaused(
+    commits: Array<{ release: () => void }>,
+    index: number,
+  ): Promise<void> {
+    const deadline = Date.now() + 5000
+    while (commits[index] === undefined) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `commit pause ${index} never fired: the link/rename mock is not active`,
+        )
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+  }
+
   async function storedExitCode(id: string): Promise<number | undefined> {
     const stored = JSON.parse(
       await readFile(terminalFactPath(id, 'natural'), 'utf8'),
@@ -196,6 +335,13 @@ describe('terminal-fact publish across withdrawn claims', () => {
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
       writeFile: mockedWriteFile,
+      link: mockedLink,
+      rename: mockedRename,
+    }))
+    mock.module('node:fs', () => ({
+      ...realFs,
+      linkSync: mockedLinkSync,
+      renameSync: mockedRenameSync,
     }))
     registry = await import('./bgRegistry.js')
     registry._setBackgroundSessionsRootForTesting(
@@ -205,6 +351,8 @@ describe('terminal-fact publish across withdrawn claims', () => {
 
   afterEach(async () => {
     pausedClaimWrite = undefined
+    commitInjection = undefined
+    commitPause = undefined
     mock.restore()
     // See bgRegistry.noHardLinks.test.ts: mock.restore() does not undo a
     // mock.module registration, so re-register the real module explicitly
@@ -212,6 +360,13 @@ describe('terminal-fact publish across withdrawn claims', () => {
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
       writeFile: realWriteFile,
+      link: realLink,
+      rename: realRename,
+    }))
+    mock.module('node:fs', () => ({
+      ...realFs,
+      linkSync: realLinkSync,
+      renameSync: realRenameSync,
     }))
     registry?._setBackgroundSessionsRootForTesting(undefined)
     await rm(configDir, { force: true, recursive: true })
@@ -241,6 +396,120 @@ describe('terminal-fact publish across withdrawn claims', () => {
       pausedClaimWrite = undefined
       release()
       await writing.catch(() => {})
+    }
+  })
+
+  it('keeps the successor fact when a delayed owner commits after it was published', async () => {
+    // Regression test for maintainer review 5942761094 (P2) on #2497:
+    // the owner's ownership check passed, but a successor published its
+    // fact before the owner's commit landed. The commit must be atomic
+    // (link() EEXIST), so the delayed owner returns the successor's
+    // fact instead of renaming over it. The commit-injection mock
+    // publishes the successor fact inside the owner's commit call, so
+    // the interleaving is deterministic: on a rename commit the
+    // successor fact is overwritten, on a link commit it wins.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-async',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-async',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let injectionFired = false
+    commitInjection = {
+      target: terminalFactPath(session.id, 'natural'),
+      successor: successorFact(session.id, 3),
+      fired: () => {
+        injectionFired = true
+      },
+    }
+    try {
+      const terminated =
+        await registry.recordBackgroundSessionNaturalTermination(
+          session.id,
+          { exitCode: 0 },
+          { ownerPid: session.pid, expectedSession: session },
+        )
+      expect(injectionFired).toBe(true)
+      // The delayed owner must not replace the published fact.
+      expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+    } finally {
+      commitInjection = undefined
+    }
+  })
+
+  it('keeps the successor fact when the sync fallback adopts after it was published', async () => {
+    // Same delayed-commit race through the synchronous exit fallback:
+    // the async installer is paused after claiming, the sync fallback
+    // adopts its tmp, and a successor fact lands before the adopt
+    // commit. The adopt commit must be atomic too.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-sync',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-sync',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let releaseHook: (() => void) | undefined
+    let hookReachedResolve: (() => void) | undefined
+    const hookReached = new Promise<void>(resolve => {
+      hookReachedResolve = resolve
+    })
+    const hookGate = new Promise<void>(resolve => {
+      releaseHook = resolve
+    })
+    registry._setTerminalFactPublishHookForTesting(async () => {
+      hookReachedResolve?.()
+      await hookGate
+    })
+    const asyncTermination =
+      registry.recordBackgroundSessionNaturalTermination(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+    asyncTermination.catch(() => {})
+    try {
+      await hookReached
+      let injectionFired = false
+      commitInjection = {
+        target: terminalFactPath(session.id, 'natural'),
+        successor: successorFact(session.id, 3),
+        fired: () => {
+          injectionFired = true
+        },
+      }
+      // The first installer holds the per-ID lock, so the sync call
+      // takes the ELOCKED fallback and adopts the pending publish.
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      expect(injectionFired).toBe(true)
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+      releaseHook?.()
+      const first = await asyncTermination
+      // The resumed installer must not replace the published fact.
+      expect(first).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+    } finally {
+      commitInjection = undefined
+      registry._setTerminalFactPublishHookForTesting(undefined)
+      releaseHook?.()
+      await asyncTermination.catch(() => {})
     }
   })
 
@@ -420,6 +689,79 @@ describe('terminal-fact publish across withdrawn claims', () => {
       await firstTermination.catch(() => {})
     }
     },
+    },
+    {
+      name: 'keeps the first publisher metadata when a second create commits after it',
+      run: async () => {
+    // Regression test for maintainer review 5942761094 (P2) on #2497:
+    // a second create whose duplicate check ran before the first commit
+    // must not replace the first publisher's metadata row. The
+    // per-ID lock is aged past the stale threshold (a clock jump), as
+    // in the review's probe, and both creates use caller-owned
+    // precreated logs so the duplicate-ID check — not log creation —
+    // decides the outcome. The commit-pause mock orders the commits:
+    // the first create commits first, the second create's commit then
+    // lands on the published row. The first publisher must win (base
+    // behavior): the second create is rejected and the stored PID is
+    // the first publisher's.
+    const id = 'bg-commit-race-create'
+    const logDir = join(configDir, 'bg-commit-race-create-logs')
+    await mkdir(logDir, { recursive: true })
+    const stdoutLogPath = join(logDir, 'stdout.log')
+    const stderrLogPath = join(logDir, 'stderr.log')
+    await writeFile(stdoutLogPath, '')
+    await writeFile(stderrLogPath, '')
+    const commits: Array<{ release: () => void }> = []
+    commitPause = {
+      target: metadataPath(id),
+      onPaused: control => {
+        commits.push(control)
+      },
+    }
+    const firstCreate = registry.createBackgroundSession({
+      id,
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-create',
+      logFilesPrecreated: true,
+      stdoutLogPath,
+      stderrLogPath,
+    })
+    firstCreate.catch(() => {})
+    try {
+      await awaitCommitPaused(commits, 0)
+      // The first create holds the per-ID lock: age it past the stale
+      // threshold so the second create can proceed while the first is
+      // paused mid-publish.
+      await ageSessionLock(id)
+      const secondCreate = registry.createBackgroundSession({
+        id,
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-commit-race-create-2',
+        logFilesPrecreated: true,
+        stdoutLogPath,
+        stderrLogPath,
+      })
+      secondCreate.catch(() => {})
+      await awaitCommitPaused(commits, 1)
+      // The first create commits first...
+      commits[0]!.release()
+      const first = await firstCreate
+      expect(first.pid).toBe(424243)
+      // ...then the second create's commit lands on the published row.
+      commits[1]!.release()
+      await expect(secondCreate).rejects.toThrow('already exists')
+      const stored = await registry.readBackgroundSessionForOwner(id)
+      expect(stored?.pid).toBe(424243)
+    } finally {
+      commitPause = undefined
+      for (const commit of commits) commit.release()
+      await firstCreate.catch(() => {})
+    }
+      },
     },
   ]
 

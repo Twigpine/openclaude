@@ -1,4 +1,5 @@
 import {
+  link,
   lstat,
   mkdir,
   open,
@@ -16,6 +17,7 @@ import {
   constants as fsConstants,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -775,6 +777,18 @@ function isErrno(error: unknown, code: string): boolean {
   )
 }
 
+// Whether link() failed because the filesystem rejects hard links: the
+// no-hard-link publication fallback applies. Any other link() failure
+// (EEXIST, ENOENT, EACCES, ...) is a real outcome, not a capability
+// signal (CodeRabbit #2497).
+function isHardLinkUnsupported(error: unknown): boolean {
+  return (
+    isErrno(error, 'EPERM') ||
+    isErrno(error, 'ENOSYS') ||
+    isErrno(error, 'EOPNOTSUPP')
+  )
+}
+
 type CleanupJsonRead<T> =
   | { state: 'missing' }
   | { state: 'valid'; value: T; identity?: CleanupFileIdentity }
@@ -994,24 +1008,28 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
       }
     }
     // Publish atomically: write the document to a temp file in the same
-    // directory and rename it into place, so a concurrent name/prefix scan
-    // in resolveBackgroundSessionForWait never reads a partially-written
-    // metadata document as malformed (CodeRabbit #2497). rename() is
-    // atomic within a filesystem and, unlike link(), works on filesystems
-    // that reject hard links. rename() would overwrite an existing target,
-    // so the duplicate check is an lstat pre-check: every writer of this
-    // id holds the per-ID lock (withBackgroundSessionIdLock), so no other
-    // writer can publish the id between the check and the rename. Temp
-    // files end in .tmp so the scan skips them.
+    // directory and commit it into place, so a concurrent name/prefix
+    // scan in resolveBackgroundSessionForWait never reads a
+    // partially-written metadata document as malformed (CodeRabbit
+    // #2497). The commit is link(), which fails with EEXIST when the
+    // target is already published: the lstat pre-check below is not
+    // enough on its own, because the per-ID lock can be stolen after a
+    // wall-clock jump, and a second create whose check ran before the
+    // first commit would otherwise rename over the first publisher's
+    // metadata (maintainer review 5942761094 on #2497). On filesystems
+    // that reject hard links the commit falls back to rename(), and the
+    // row is re-read afterwards so a beaten publisher reports the
+    // duplicate instead of claiming its row. Temp files end in .tmp so
+    // the scan skips them.
     const target = metadataPathForId(session.id)
     const tmp = join(
       getBackgroundSessionMetadataDir(),
       `${session.id}.${process.pid}.${randomUUID()}.tmp`,
     )
-    // Sync the completed temp file to storage before renaming it into
+    // Sync the completed temp file to storage before committing it into
     // place, matching installTerminalFact: without a sync, a crash or
-    // power loss after rename can leave a zero-length or partial session
-    // metadata file on filesystems with delayed allocation
+    // power loss after the commit can leave a zero-length or partial
+    // session metadata file on filesystems with delayed allocation
     // (CodeRabbit #2497).
     let handle: Awaited<ReturnType<typeof open>> | undefined
     try {
@@ -1024,7 +1042,16 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
         await lstat(target)
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
-        await rename(tmp, target)
+        const committed = await commitPublishFile(
+          tmp,
+          target,
+          jsonStringify(session),
+        )
+        if (committed !== 'committed') {
+          throw new Error(
+            `Background session id "${session.id}" already exists`,
+          )
+        }
         return
       }
       throw new Error(`Background session id "${session.id}" already exists`)
@@ -1774,25 +1801,104 @@ function readTerminalFactClaimSync(target: string): string | undefined {
   }
 }
 
+type PublishCommitOutcome = 'committed' | 'exists' | 'gone'
+
 /**
- * Publishes one terminal fact with atomic no-overwrite semantics and
- * without hard links (CodeRabbit #2497). The target only ever appears
- * complete, via rename() of a synced temp file, so a concurrent `wait`
- * never reads a partially-written fact as malformed; and the first
- * publisher wins: an installer claims the target by creating
- * `<target>.claim` (mkdir is atomic) and recording its temp path in
- * `<target>.claim/tmp`, so a second installer that finds the claim —
- * including the synchronous ELOCKED exit fallback, which publishes
- * without the per-ID lock — completes the winner's publish instead of
- * racing it. A loser whose winner died after claiming removes the stale
- * claim and retries. A claim whose pointer write is still in flight
- * reads as empty, so an adopter polls for it instead of removing it;
- * and a publisher rechecks the target and its claim immediately before
- * renaming, so a delayed owner whose claim was withdrawn never replaces
- * a fact another installer published (maintainer review 5896325929 on
- * #2497). This preserves the old link() EEXIST duplicate semantics
- * without link(), which fails on filesystems that reject hard links
- * (maintainer review 5830922741 on #2497).
+ * Commits a synced temp file as a published fact or session row, and
+ * reports which fact actually ended up at the target.
+ *
+ * link() is the atomic commit: it fails with EEXIST when the target is
+ * already published, so a delayed owner whose claim was withdrawn can
+ * never replace a fact another installer published (maintainer review
+ * 5942761094 on #2497) — the rename() pre-checks alone leave a window
+ * between the check and the rename, which a successor's publish can
+ * land in. A missing temp file means another installer adopted this
+ * publish, so the caller waits for the fact at the target instead.
+ *
+ * On filesystems that reject hard links, link() fails with
+ * EPERM/ENOSYS/EOPNOTSUPP and the commit falls back to rename(); the
+ * target is then re-read and compared with the expected bytes, so a
+ * loser whose rename was beaten by another publisher reports the stored
+ * fact instead of claiming its own. The fallback cannot close the
+ * check-rename window on those filesystems the way link() does; it is
+ * the no-hard-link path, not the atomic one.
+ */
+async function commitPublishFile(
+  tmp: string,
+  target: string,
+  expected: string,
+): Promise<PublishCommitOutcome> {
+  try {
+    await link(tmp, target)
+    return 'committed'
+  } catch (error) {
+    if (isErrno(error, 'EEXIST')) return 'exists'
+    if (isErrno(error, 'ENOENT')) return 'gone'
+    if (!isHardLinkUnsupported(error)) throw error
+  }
+  // Hard links are unsupported on this filesystem: rename the synced
+  // temp file into place, as before. The caller already rechecked the
+  // target and the claim immediately before this call; the re-read below
+  // catches a publisher that committed between that recheck and the
+  // rename, so the caller returns the fact actually stored.
+  try {
+    await rename(tmp, target)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return 'gone'
+  }
+  const stored = await readFile(target, 'utf8').catch(() => undefined)
+  return stored === expected ? 'committed' : 'exists'
+}
+
+function commitPublishFileSync(
+  tmp: string,
+  target: string,
+  expected: string,
+): PublishCommitOutcome {
+  try {
+    linkSync(tmp, target)
+    return 'committed'
+  } catch (error) {
+    if (isErrno(error, 'EEXIST')) return 'exists'
+    if (isErrno(error, 'ENOENT')) return 'gone'
+    if (!isHardLinkUnsupported(error)) throw error
+  }
+  try {
+    renameSync(tmp, target)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return 'gone'
+  }
+  let stored: string | undefined
+  try {
+    stored = readFileSync(target, 'utf8')
+  } catch {
+    stored = undefined
+  }
+  return stored === expected ? 'committed' : 'exists'
+}
+
+/**
+ * Publishes one terminal fact with atomic no-overwrite semantics. The
+ * target only ever appears complete, via link() (or rename() on
+ * filesystems that reject hard links) of a synced temp file, so a
+ * concurrent `wait` never reads a partially-written fact as malformed;
+ * and the first publisher wins: an installer claims the target by
+ * creating `<target>.claim` (mkdir is atomic) and recording its temp
+ * path in `<target>.claim/tmp`, so a second installer that finds the
+ * claim — including the synchronous ELOCKED exit fallback, which
+ * publishes without the per-ID lock — completes the winner's publish
+ * instead of racing it. A loser whose winner died after claiming removes
+ * the stale claim and retries. A claim whose pointer write is still in
+ * flight reads as empty, so an adopter polls for it instead of removing
+ * it; and the commit itself is atomic (link() EEXIST, with a rename()
+ * fallback that re-reads the target), so a delayed owner whose claim was
+ * withdrawn never replaces a fact another installer published
+ * (maintainer review 5896325929 and 5942761094 on #2497). This keeps
+ * the old link() EEXIST duplicate semantics where hard links work, and
+ * keeps publication working without them where they fail (maintainer
+ * review 5830922741 on #2497).
  */
 async function publishTerminalFact(
   fact: BackgroundSessionTerminalFact,
@@ -1836,10 +1942,15 @@ async function publishTerminalFact(
     }
     // Recheck the target now that this installer holds the claim: a
     // publisher may have completed and removed its claim after the
-    // lstat above.
+    // lstat above. Drop this installer's own fresh claim directory, but
+    // only the directory: the claim file has not been written yet, so a
+    // claim file present here belongs to another publisher that claimed
+    // into this directory meanwhile, and rmdir refuses a non-empty
+    // directory, so that claim survives (maintainer review 5942761094
+    // on #2497).
     try {
       await lstat(target)
-      await removeTerminalFactClaim(target)
+      await rmdir(claimDir).catch(() => {})
       const existing = await readTerminalFact(fact.id, kind, fact.generation)
       if (!existing) {
         throw new Error(`Invalid background session ${kind} terminal fact`)
@@ -1852,6 +1963,10 @@ async function publishTerminalFact(
       await writeFile(claimFile, tmp, { flag: 'wx' })
     } catch (error) {
       if (isErrno(error, 'ENOENT')) continue
+      // Another publisher claimed first and wrote its pointer while this
+      // installer was stalled: retry the publish instead of failing —
+      // the loop rechecks the target and adopts that publish.
+      if (isErrno(error, 'EEXIST')) continue
       throw error
     }
     await terminalFactPublishHookForTesting?.()
@@ -1860,9 +1975,11 @@ async function publishTerminalFact(
     // while this installer was stalled — e.g. between opening the
     // claim file and finishing its pointer write — and a successor may
     // have adopted the publish or published its own fact in the
-    // meantime. Renaming over that fact would replace the
+    // meantime. Committing over that fact would replace the
     // first-published fact, so return it instead (or retry the publish
-    // if nothing was published yet).
+    // if nothing was published yet). The commit itself is atomic
+    // (link() EEXIST), so no publisher can land between this recheck
+    // and the commit.
     let targetPublished = false
     try {
       await lstat(target)
@@ -1878,10 +1995,12 @@ async function publishTerminalFact(
       return existing
     }
     if (!(await ownsTerminalFactClaim(target, tmp))) continue
-    try {
-      await rename(tmp, target)
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
+    const committed = await commitPublishFile(
+      tmp,
+      target,
+      jsonStringify(fact),
+    )
+    if (committed === 'gone') {
       // Another installer adopted this tmp and published it; the fact
       // now at the target is this publish, so return it.
       const existing = await waitForTerminalFact(
@@ -1889,6 +2008,14 @@ async function publishTerminalFact(
         kind,
         fact.generation,
       )
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    if (committed === 'exists') {
+      // Another installer published first; the fact at the target wins.
+      const existing = await readTerminalFact(fact.id, kind, fact.generation)
       if (!existing) {
         throw new Error(`Invalid background session ${kind} terminal fact`)
       }
@@ -1909,9 +2036,11 @@ async function adoptTerminalFactPublish(
   const existing = await waitForTerminalFact(fact.id, kind, fact.generation)
   if (existing) return existing
   // The winner died or stalled after claiming: complete its publish by
-  // renaming its tmp to the target. Its tmp is complete — the claim file
-  // is written only after the tmp is synced — so the target only ever
-  // appears complete, and the first publisher still wins.
+  // committing its tmp to the target. Its tmp is complete — the claim
+  // file is written only after the tmp is synced — so the target only
+  // ever appears complete, and the first publisher still wins. The
+  // commit is atomic (link() EEXIST), so a publisher that committed
+  // after this adopter read the claim is not overwritten.
   const claimedTmp = await readTerminalFactClaim(target)
   if (claimedTmp === undefined) {
     // No claim file: the winner died between mkdir and the claim-file
@@ -1920,16 +2049,32 @@ async function adoptTerminalFactPublish(
     await removeTerminalFactClaim(target)
     return null
   }
+  let expected: string
   try {
-    await rename(claimedTmp, target)
+    expected = await readFile(claimedTmp, 'utf8')
   } catch (error) {
     if (!isErrno(error, 'ENOENT')) throw error
     // The winner published after all, or another adopter did: return
     // the fact at the target if it appeared, else retry the publish.
     return await waitForTerminalFact(fact.id, kind, fact.generation)
   }
-  // This publish is complete, so the winner's claim is stale.
-  await removeTerminalFactClaim(target)
+  const committed = await commitPublishFile(claimedTmp, target, expected)
+  if (committed !== 'committed') {
+    // The target already holds a fact, or the winner's tmp was adopted
+    // by another installer: return the fact at the target if it
+    // appeared, else retry the publish.
+    return await waitForTerminalFact(fact.id, kind, fact.generation)
+  }
+  // The winner's tmp is now redundant at the target: unlink it so a
+  // stalled winner's delayed cleanup cannot mistake it for a live
+  // publish. The winner's own commit sees the target already published
+  // and returns the fact instead.
+  await unlink(claimedTmp).catch(() => {})
+  // This publish is complete, so the winner's claim is stale — remove
+  // it only while it still names the adopted tmp, so a newer
+  // publisher's claim is left alone (maintainer review 5942761094
+  // on #2497).
+  await removeOwnTerminalFactClaim(target, claimedTmp)
   const adopted = await readTerminalFact(fact.id, kind, fact.generation)
   if (!adopted) {
     throw new Error(`Invalid background session ${kind} terminal fact`)
@@ -1972,9 +2117,14 @@ function publishTerminalFactSync(
     }
     // Same post-claim recheck as publishTerminalFact: a publisher may
     // have completed and removed its claim after the lstat above.
+    // Drop only this installer's own fresh claim directory (see the
+    // async path): a claim file present here belongs to another
+    // publisher, and rmdir refuses a non-empty directory.
     try {
       lstatSync(target)
-      removeTerminalFactClaimSync(target)
+      try {
+        rmdirSync(claimDir)
+      } catch {}
       const existing = readTerminalFactSync(fact.id, kind, fact.generation)
       if (!existing) {
         throw new Error(`Invalid background session ${kind} terminal fact`)
@@ -1987,6 +2137,9 @@ function publishTerminalFactSync(
       writeFileSync(claimFile, tmp, { flag: 'wx' })
     } catch (error) {
       if (isErrno(error, 'ENOENT')) continue
+      // Same claim-write race as publishTerminalFact: another publisher
+      // claimed first, so retry instead of failing.
+      if (isErrno(error, 'EEXIST')) continue
       throw error
     }
     // Same pre-commit ownership check as publishTerminalFact: only
@@ -2007,10 +2160,8 @@ function publishTerminalFactSync(
       return existing
     }
     if (!ownsTerminalFactClaimSync(target, tmp)) continue
-    try {
-      renameSync(tmp, target)
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
+    const committed = commitPublishFileSync(tmp, target, jsonStringify(fact))
+    if (committed === 'gone') {
       // Same adoption case as publishTerminalFact: another installer
       // adopted this tmp and published it.
       const existing = waitForTerminalFactSync(
@@ -2018,6 +2169,14 @@ function publishTerminalFactSync(
         kind,
         fact.generation,
       )
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    if (committed === 'exists') {
+      // Another installer published first; the fact at the target wins.
+      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
       if (!existing) {
         throw new Error(`Invalid background session ${kind} terminal fact`)
       }
@@ -2040,13 +2199,24 @@ function adoptTerminalFactPublishSync(
     removeTerminalFactClaimSync(target)
     return null
   }
+  let expected: string
   try {
-    renameSync(claimedTmp, target)
+    expected = readFileSync(claimedTmp, 'utf8')
   } catch (error) {
     if (!isErrno(error, 'ENOENT')) throw error
     return waitForTerminalFactSync(fact.id, kind, fact.generation)
   }
-  removeTerminalFactClaimSync(target)
+  const committed = commitPublishFileSync(claimedTmp, target, expected)
+  if (committed !== 'committed') {
+    return waitForTerminalFactSync(fact.id, kind, fact.generation)
+  }
+  // Same post-adoption cleanup as adoptTerminalFactPublish: the
+  // winner's tmp is redundant at the target, and the claim is removed
+  // only while it still names the adopted tmp.
+  try {
+    unlinkSync(claimedTmp)
+  } catch {}
+  removeOwnTerminalFactClaimSync(target, claimedTmp)
   const adopted = readTerminalFactSync(fact.id, kind, fact.generation)
   if (!adopted) {
     throw new Error(`Invalid background session ${kind} terminal fact`)
