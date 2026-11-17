@@ -90,10 +90,24 @@ describe('ExitWorktreeTool startup-worktree ownership', () => {
     setOriginalCwd(subdir)
     expect(getProjectRoot()).toBe(worktreePath)
 
-    restoreSessionToOriginalCwd(originalRoot, worktreeSessionOwnsProjectRoot(session()))
+    // Same no-op spy as the resume/exit tests below: the real refresh would
+    // recompute the module-level hooks snapshot from this fixture and leak it.
+    const hooksSpy = spyOn(
+      hooksConfigSnapshot,
+      'updateHooksConfigSnapshot',
+    ).mockImplementation(() => {})
+    try {
+      restoreSessionToOriginalCwd(originalRoot, worktreeSessionOwnsProjectRoot(session()))
 
-    expect(getOriginalCwd()).toBe(originalRoot)
-    expect(getProjectRoot()).toBe(originalRoot)
+      expect(getOriginalCwd()).toBe(originalRoot)
+      expect(getProjectRoot()).toBe(originalRoot)
+      // Owning the project root means re-reading hooks for the original root,
+      // symmetric to setup.ts's --worktree block (the exit-side counterpart
+      // of the resume assertions in the persisted-session test below).
+      expect(hooksSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      hooksSpy.mockRestore()
+    }
   })
 
   it('does not restore projectRoot for a mid-session entered worktree', () => {
@@ -114,10 +128,14 @@ describe('ExitWorktreeTool startup-worktree ownership', () => {
     setOriginalCwd(originalRoot)
     setProjectRoot(originalRoot)
 
+    // Replace the implementation: the real refresh resets the settings
+    // cache and recomputes the module-level snapshot from this test's
+    // temporary fixture, which leaks to later tests in the same process.
+    // These tests only assert the call count, so a no-op keeps that contract.
     const hooksSpy = spyOn(
       hooksConfigSnapshot,
       'updateHooksConfigSnapshot',
-    )
+    ).mockImplementation(() => {})
     try {
       restoreWorktreeForResume(session())
 
@@ -148,10 +166,14 @@ describe('ExitWorktreeTool startup-worktree ownership', () => {
     const midSession = session()
     delete midSession.projectRootIsWorktree
 
+    // Replace the implementation: the real refresh resets the settings
+    // cache and recomputes the module-level snapshot from this test's
+    // temporary fixture, which leaks to later tests in the same process.
+    // These tests only assert the call count, so a no-op keeps that contract.
     const hooksSpy = spyOn(
       hooksConfigSnapshot,
       'updateHooksConfigSnapshot',
-    )
+    ).mockImplementation(() => {})
     try {
       restoreWorktreeForResume(midSession)
 
