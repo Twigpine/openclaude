@@ -939,6 +939,46 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     }
   })
 
+  test('an unverified hook rewrite cannot commit permission updates with the boundary enabled', async () => {
+    const strictWrite = {
+      ...writeTool,
+      inputSchema: z.strictObject({ file_path: z.string() }),
+    }
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(projectDir, 'note.txt'), unexpected: true },
+      updatedPermissions: [{
+        type: 'addDirectories', directories: [addedDir], destination: 'session',
+      }],
+    }
+    const mutable = useMutableContext(permissionContext('default'))
+    const persist = spyOn(permissionUpdateModule, 'persistPermissionUpdates')
+      .mockImplementation(() => {})
+    const run = () => runPermissionRequestHooksForHeadlessAgent(
+      strictWrite,
+      { file_path: join(projectDir, 'original.txt') },
+      'invalid-hook-approval',
+      mutable.ctx,
+      'default',
+      undefined,
+    )
+    try {
+      blockWritesOutsideWorkingDirectories = true
+      expect(await run()).toMatchObject({
+        behavior: 'deny',
+        decisionReason: { type: 'workingDir', reason: 'Input failed schema validation' },
+      })
+      expect(mutable.setAppStateCalls()).toBe(0)
+      expect(persist).not.toHaveBeenCalled()
+
+      blockWritesOutsideWorkingDirectories = false
+      expect(await run()).toMatchObject({ behavior: 'allow' })
+    } finally {
+      persist.mockRestore()
+      hookPermissionResult = undefined
+    }
+  })
+
   test('a hook cannot remove a working directory and allow a write under it', async () => {
     blockWritesOutsideWorkingDirectories = true
     // The hook allows a write under outsideDir while the same decision
@@ -1875,7 +1915,7 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
           useContext(permissionContext('default')),
           {} as never,
           'forced-allow-external',
-          { behavior: 'allow', updatedInput: {} },
+          { behavior: 'allow', updatedInput: { file_path: join(projectDir, 'inside.txt') } },
         )
         expect(allow.behavior).toBe('allow')
         const deny = await externalFactory()(

@@ -129,7 +129,14 @@ export function checkWriteBoundaryForAskRule(
   }
   const parsed = tool.inputSchema.safeParse(input)
   if (!parsed.success) {
-    return null
+    return {
+      behavior: 'deny',
+      message: `Cannot verify the working directories for ${tool.name} because its input does not match the tool schema.`,
+      decisionReason: {
+        type: 'workingDir',
+        reason: 'Input failed schema validation',
+      },
+    }
   }
   const { checkWriteBoundaryForTool } =
     require('./filesystem.js') as typeof import('./filesystem.js')
