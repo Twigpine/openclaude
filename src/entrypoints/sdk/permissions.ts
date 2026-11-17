@@ -353,7 +353,37 @@ export function createExternalCanUseTool(
 
     if (forceDecision) {
       if (!(forceDecision.behavior === 'ask' && isFullAccessMode)) {
-        return forceDecision
+        if (forceDecision.behavior !== 'ask') {
+          return forceDecision
+        }
+        // A forced ask never reaches hasPermissionsToUseTool, so the
+        // suppression check runs here. A suppression denial exists only
+        // because prompts are disabled, so a PermissionRequest hook may
+        // still answer it, as on the interactive and structured-IO paths.
+        const suppressed = suppressPromptIfConfigured(tool, forceDecision)
+        if (suppressed.behavior !== 'deny' || !toolUseID) {
+          return suppressed
+        }
+        try {
+          const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
+            tool,
+            forceDecision.updatedInput ?? typedInput,
+            toolUseID,
+            toolUseContext,
+            toolUseContext.getAppState().toolPermissionContext.mode,
+            undefined,
+          )
+          if (hookDecision) {
+            return hookDecision
+          }
+        } catch (err) {
+          logError(
+            err instanceof Error
+              ? err
+              : new Error('PermissionRequest hook dispatch failed'),
+          )
+        }
+        return suppressed
       }
     }
 
@@ -846,7 +876,9 @@ export function createDefaultCanUseTool(
           return fullAccessDecision
         }
       } else {
-        return forceDecision
+        return forceDecision.behavior === 'ask'
+          ? suppressPromptIfConfigured(tool, forceDecision)
+          : forceDecision
       }
     }
     if (!warnedDefaultPermissions) {

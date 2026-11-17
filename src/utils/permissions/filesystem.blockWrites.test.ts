@@ -137,7 +137,7 @@ const { createPermissionContext } = await import(
 const { executePermissionRequestHooksForSDK, StructuredIO } = await import(
   '../../cli/structuredIO.js'
 )
-const { createExternalCanUseTool } = await import(
+const { createExternalCanUseTool, createDefaultCanUseTool } = await import(
   '../../entrypoints/sdk/permissions.js'
 )
 const { permissionPromptToolResultToPermissionDecision } = await import(
@@ -1518,6 +1518,146 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     } finally {
       denyInsteadOfPrompting = false
     }
+  })
+
+  describe('SDK forceDecision ask under denyInsteadOfPrompting', () => {
+    const forcedAsk = () => ({
+      behavior: 'ask' as const,
+      message: 'Write requires approval',
+      updatedInput: { file_path: join(projectDir, 'inside.txt') },
+    })
+    const externalFactory = (onPermissionRequest?: () => void) =>
+      createExternalCanUseTool(
+        undefined,
+        async () => ({
+          behavior: 'deny' as const,
+          message: 'fallback unreached',
+          decisionReason: { type: 'other' as const, reason: 'unreached' },
+        }),
+        {
+          registerPendingPermission: async () => undefined as never,
+          deletePendingPermission: () => {},
+        } as never,
+        onPermissionRequest,
+      )
+
+    test('external factory converts a forced ask to the suppression denial', async () => {
+      denyInsteadOfPrompting = true
+      try {
+        const result = await externalFactory()(
+          writeTool,
+          { file_path: join(projectDir, 'inside.txt') },
+          useContext(permissionContext('default')),
+          {} as never,
+          'forced-ask-external',
+          forcedAsk(),
+        )
+        expect(result.behavior).toBe('deny')
+        if (result.behavior === 'deny') {
+          expect(result.message).toContain('denyInsteadOfPrompting')
+        }
+      } finally {
+        denyInsteadOfPrompting = false
+      }
+    })
+
+    test('external factory lets a PermissionRequest hook answer the suppressed forced ask', async () => {
+      denyInsteadOfPrompting = true
+      hookPermissionResult = { behavior: 'allow' }
+      try {
+        const result = await externalFactory(() => {})(
+          writeTool,
+          { file_path: join(projectDir, 'inside.txt') },
+          useContext(permissionContext('default')),
+          {} as never,
+          'forced-ask-external-hook',
+          forcedAsk(),
+        )
+        expect(result.behavior).toBe('allow')
+      } finally {
+        hookPermissionResult = undefined
+        denyInsteadOfPrompting = false
+      }
+    })
+
+    test('external factory still returns the forced ask when the setting is off', async () => {
+      const result = await externalFactory()(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(permissionContext('default')),
+        {} as never,
+        'forced-ask-external-off',
+        forcedAsk(),
+      )
+      expect(result.behavior).toBe('ask')
+    })
+
+    test('external factory leaves a forced allow and a forced deny untouched', async () => {
+      denyInsteadOfPrompting = true
+      try {
+        const allow = await externalFactory()(
+          writeTool,
+          { file_path: join(projectDir, 'inside.txt') },
+          useContext(permissionContext('default')),
+          {} as never,
+          'forced-allow-external',
+          { behavior: 'allow', updatedInput: {} },
+        )
+        expect(allow.behavior).toBe('allow')
+        const deny = await externalFactory()(
+          writeTool,
+          { file_path: join(projectDir, 'inside.txt') },
+          useContext(permissionContext('default')),
+          {} as never,
+          'forced-deny-external',
+          {
+            behavior: 'deny',
+            message: 'forced deny',
+            decisionReason: { type: 'other', reason: 'forced' },
+          },
+        )
+        expect(deny.behavior).toBe('deny')
+        if (deny.behavior === 'deny') {
+          expect(deny.message).toBe('forced deny')
+        }
+      } finally {
+        denyInsteadOfPrompting = false
+      }
+    })
+
+    test('default factory converts a forced ask to the suppression denial', async () => {
+      denyInsteadOfPrompting = true
+      try {
+        const result = await createDefaultCanUseTool(
+          permissionContext('default'),
+        )(
+          writeTool,
+          { file_path: join(projectDir, 'inside.txt') },
+          useContext(permissionContext('default')),
+          {} as never,
+          'forced-ask-default',
+          forcedAsk(),
+        )
+        expect(result.behavior).toBe('deny')
+        if (result.behavior === 'deny') {
+          expect(result.message).toContain('denyInsteadOfPrompting')
+        }
+      } finally {
+        denyInsteadOfPrompting = false
+      }
+    })
+
+    test('default factory still returns the forced ask when the setting is off', async () => {
+      const result = await createDefaultCanUseTool(permissionContext('default'))(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(permissionContext('default')),
+        {} as never,
+        'forced-ask-default-off',
+        forcedAsk(),
+      )
+      expect(result.behavior).toBe('ask')
+    })
   })
 
   test('a symlink inside project agent-memory cannot escape the boundary', async () => {
