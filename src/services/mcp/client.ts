@@ -147,6 +147,8 @@ import {
   failMcpServerTasksForServer,
   handleMcpTaskStatusNotification,
   isMcpTaskBackgroundingDisabled,
+  clearMcpToolTaskSupport,
+  isMcpToolTaskSupportUnknown,
   mcpTaskSupportForTool,
   recordMcpToolTaskSupport,
   trackMcpServerTask,
@@ -1669,10 +1671,9 @@ export const connectToServer = memoize(
         fetchToolsForClient.cache.delete(name)
         fetchResourcesForClient.cache.delete(name)
         fetchCommandsForClient.cache.delete(name)
-        // taskSupportByServer is deliberately not cleared here: the tools/call
-        // path refetches before consulting it, and every tools/list attempt
-        // rewrites the entry (a failed one records none), so a stale entry is
-        // replaced before it can be read.
+        // Task support is keyed by the connection's SDK client, so the closed
+        // connection's entry is unreachable from the next connection and a
+        // discovery run still in flight on this one can only write to it.
         failMcpServerTasksForServer(
           name,
           `MCP server "${name}" disconnected before the task completed`,
@@ -2095,7 +2096,7 @@ export const fetchToolsForClient = memoizeWithLRU(
 
       // execution.taskSupport decides which tools/call requests get task
       // augmentation; the SDK's own cache is private, so keep ours.
-      recordMcpToolTaskSupport(client.name, toolsToProcess)
+      recordMcpToolTaskSupport(client, toolsToProcess)
 
       // Check if we should skip the mcp__ prefix for SDK MCP servers
       const skipPrefix =
@@ -2427,9 +2428,10 @@ export const fetchToolsForClient = memoizeWithLRU(
         .filter(isIncludedMcpTool)
     } catch (error) {
       logMCPError(client.name, `Failed to fetch tools: ${errorMessage(error)}`)
-      // Discovery did not refresh support; drop the previous connection's
-      // entry so a call is not task-augmented on stale metadata.
-      recordMcpToolTaskSupport(client.name, [])
+      // Discovery did not record support for this connection. Support is
+      // keyed by the connection's SDK client, so this only ever clears this
+      // connection's own entry.
+      clearMcpToolTaskSupport(client)
       return []
     }
   },
@@ -3621,6 +3623,12 @@ async function callMCPTool({
       // a request that has already been given up on.
       if (requestSignal.aborted) {
         throw requestSignal.reason ?? new AbortError()
+      }
+      // Discovery failed on this connection, so support is unknown, and the
+      // failed run's empty result is memoized. Drop it so a later call
+      // rediscovers instead of staying on the plain path until reconnect.
+      if (isMcpToolTaskSupportUnknown(connection)) {
+        fetchToolsForClient.cache.delete(connection.name)
       }
       const taskSupport = mcpTaskSupportForTool(connection, tool)
       return taskSupport

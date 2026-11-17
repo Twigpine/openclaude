@@ -329,7 +329,7 @@ test('mcpTaskSupportForTool gates on capability, tool metadata, and env', () => 
   const { client } = makeClient({})
   const connection = makeConnection(client, { capabilities: TASK_CAPS })
 
-  recordMcpToolTaskSupport('srv', [
+  recordMcpToolTaskSupport(connection, [
     { name: 'slow_tool', execution: { taskSupport: 'optional' } },
     { name: 'required_tool', execution: { taskSupport: 'required' } },
     { name: 'forbidden_tool', execution: { taskSupport: 'forbidden' } },

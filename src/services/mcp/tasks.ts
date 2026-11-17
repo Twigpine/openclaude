@@ -47,16 +47,21 @@ export function isMcpTaskBackgroundingDisabled(): boolean {
 // Task-capable tool bookkeeping
 //
 // tools/list entries carry execution.taskSupport ('optional' | 'required' |
-// 'forbidden'). fetchToolsForClient records it here per server; callMCPTool
-// checks it to decide between plain callTool and a task-augmented request.
+// 'forbidden'). fetchToolsForClient records it here per connection (keyed by
+// the SDK Client, so a discovery run on a superseded connection cannot touch
+// the entry of the connection that replaced it); callMCPTool checks it to
+// decide between plain callTool and a task-augmented request.
 // ---------------------------------------------------------------------------
 
 type McpToolTaskSupport = 'optional' | 'required'
 
-const taskSupportByServer = new Map<string, Map<string, McpToolTaskSupport>>()
+let taskSupportByClient = new WeakMap<
+  Client,
+  Map<string, McpToolTaskSupport>
+>()
 
 export function recordMcpToolTaskSupport(
-  serverName: string,
+  connection: ConnectedMCPServer,
   tools: readonly { name: string; execution?: { taskSupport?: string } }[],
 ): void {
   const supported = new Map<string, McpToolTaskSupport>()
@@ -66,7 +71,32 @@ export function recordMcpToolTaskSupport(
       supported.set(tool.name, taskSupport)
     }
   }
-  taskSupportByServer.set(serverName, supported)
+  taskSupportByClient.set(connection.client, supported)
+}
+
+/** Forget a connection's recorded support after a failed discovery. */
+export function clearMcpToolTaskSupport(connection: ConnectedMCPServer): void {
+  taskSupportByClient.delete(connection.client)
+}
+
+/**
+ * True when the server advertises task-augmented tools/call but no successful
+ * tools/list has recorded support for this connection, so the answer from
+ * mcpTaskSupportForTool is "unknown", not "none".
+ */
+export function isMcpToolTaskSupportUnknown(
+  connection: ConnectedMCPServer,
+): boolean {
+  if (isMcpTaskBackgroundingDisabled()) {
+    return false
+  }
+  const serverTasks = connection.capabilities?.tasks as
+    | { requests?: { tools?: { call?: unknown } } }
+    | undefined
+  return (
+    !!serverTasks?.requests?.tools?.call &&
+    !taskSupportByClient.has(connection.client)
+  )
 }
 
 /**
@@ -88,7 +118,7 @@ export function mcpTaskSupportForTool(
   if (!serverTasks?.requests?.tools?.call) {
     return undefined
   }
-  return taskSupportByServer.get(connection.name)?.get(toolName)
+  return taskSupportByClient.get(connection.client)?.get(toolName)
 }
 
 // ---------------------------------------------------------------------------
@@ -372,5 +402,5 @@ export function _resetMcpServerTasksForTest(): void {
   }
   trackedByLocalId.clear()
   localIdByMcpTaskId.clear()
-  taskSupportByServer.clear()
+  taskSupportByClient = new WeakMap()
 }

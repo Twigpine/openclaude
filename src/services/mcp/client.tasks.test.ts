@@ -262,6 +262,120 @@ describe('MCP server tasks', () => {
     reset()
   }, 15000)
 
+  test('a transient tools/list failure does not pin a task-required tool to the plain path', async () => {
+    reset()
+    const state = makeState()
+    let listWorks = false
+    const request = vi.fn(
+      async (req: { method: string }, _schema: unknown, opts: { task?: object }) => {
+        if (req.method === 'tools/list') {
+          if (!listWorks) throw new Error('tools/list unavailable')
+          return {
+            tools: [
+              {
+                name: 'required-tool',
+                description: 'must run as a task',
+                inputSchema: { type: 'object', properties: {} },
+                execution: { taskSupport: 'required' },
+              },
+            ],
+          }
+        }
+        expect(opts.task).toEqual({})
+        return { task: makeMcpTask() }
+      },
+    )
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'plain result' }],
+    }))
+    const connection = makeConnection({ request, callTool })
+    const call = () =>
+      callMCPToolWithUrlElicitationRetry({
+        client: connection,
+        clientConnection: connection,
+        tool: 'required-tool',
+        args: {},
+        signal: new AbortController().signal,
+        setAppState: state.set,
+      })
+
+    // Discovery fails (all three attempts), so the first call goes plain.
+    await call()
+    expect(callTool).toHaveBeenCalledTimes(1)
+
+    // Discovery recovers without a reconnect: the next call must re-discover
+    // and take the task-augmented path.
+    listWorks = true
+    await call()
+    expect(callTool).toHaveBeenCalledTimes(1)
+    expect(Object.keys(state.get().tasks)).toHaveLength(1)
+    reset()
+  }, 15000)
+
+  test('a superseded connection\'s late discovery failure cannot overwrite the new connection\'s support', async () => {
+    reset()
+    const state = makeState()
+    let releaseOld: () => void = () => {}
+    const oldGate = new Promise<void>(resolve => {
+      releaseOld = resolve
+    })
+    const oldRequest = vi.fn(async () => {
+      await oldGate
+      throw new Error('transport closed')
+    })
+    const newRequest = vi.fn(
+      async (req: { method: string }, _schema: unknown, opts: { task?: object }) => {
+        if (req.method === 'tools/list') {
+          return {
+            tools: [
+              {
+                name: 'required-tool',
+                description: 'must run as a task',
+                inputSchema: { type: 'object', properties: {} },
+                execution: { taskSupport: 'required' },
+              },
+            ],
+          }
+        }
+        expect(opts.task).toEqual({})
+        return { task: makeMcpTask() }
+      },
+    )
+    const newCallTool = vi.fn(async () => {
+      throw new Error('task-required tool must not take plain tools/call')
+    })
+    const oldConnection = makeConnection({ request: oldRequest, callTool: vi.fn() })
+    const newConnection = makeConnection({
+      request: newRequest,
+      callTool: newCallTool,
+    })
+
+    // Old connection starts discovery, then disconnects (onclose clears the
+    // memo entry) while its tools/list is still retrying.
+    const oldDiscovery = fetchToolsForClient(oldConnection)
+    fetchToolsForClient.cache.delete('task-server')
+
+    // The reconnected connection finishes discovery first.
+    await fetchToolsForClient(newConnection)
+
+    // Now the old run fails and reaches its catch block.
+    releaseOld()
+    await oldDiscovery
+
+    await callMCPToolWithUrlElicitationRetry({
+      client: newConnection,
+      clientConnection: newConnection,
+      tool: 'required-tool',
+      args: {},
+      signal: new AbortController().signal,
+      setAppState: state.set,
+    })
+
+    expect(newCallTool).not.toHaveBeenCalled()
+    expect(Object.keys(state.get().tasks)).toHaveLength(1)
+    reset()
+  }, 15000)
+
   test('slow tool discovery counts against MCP_TOOL_TIMEOUT', async () => {
     reset()
     const state = makeState()
