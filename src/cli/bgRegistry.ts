@@ -3411,7 +3411,13 @@ async function readWaitRegistryFile(
       fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
     )
   } catch (error) {
-    return isErrno(error, 'ENOENT')
+    // A path that cannot exist is missing, not unreadable: a valid long
+    // session name exceeds the 255-byte filename limit, so the
+    // speculative exact-ID metadata path fails with ENAMETOOLONG before
+    // the name/prefix scan can find the session (maintainer review
+    // 5942761094 on #2497). True unreadable errors for paths that can
+    // exist are unchanged.
+    return isErrno(error, 'ENOENT') || isErrno(error, 'ENAMETOOLONG')
       ? { state: 'missing' }
       : { state: 'unreadable' }
   }

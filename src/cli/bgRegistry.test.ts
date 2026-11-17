@@ -3939,6 +3939,28 @@ describe('background session wait strict reads', () => {
     ).toBe('metadata_malformed')
   })
 
+  it('resolves a valid long session name in the strict wait selector', async () => {
+    // Regression test for maintainer review 5942761094 (P2) on #2497:
+    // a 300-char ASCII name is accepted by launch, but the speculative
+    // exact-ID metadata path is 305 chars — over the 255-byte filename
+    // limit — so the open fails with ENAMETOOLONG. That must read as
+    // missing (a path that cannot exist), so the name scan can find the
+    // session, not as unreadable metadata.
+    const longName = 'a'.repeat(300)
+    await createBackgroundSession({
+      id: 'bg-wait-long',
+      name: longName,
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-long',
+    })
+
+    expect((await resolveBackgroundSessionForWait(longName)).id).toBe(
+      'bg-wait-long',
+    )
+  })
+
   it('reports metadata_unreadable for an unreadable name-resolution entry', async () => {
     await createBackgroundSession({
       id: 'bg-wait-1',
