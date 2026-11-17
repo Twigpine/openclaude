@@ -55,6 +55,7 @@ import {
 } from './commands/request-size/index.js'
 import resume, { continueCommand } from './commands/resume/index.js'
 import review, { ultrareview } from './commands/review.js'
+import focus from './commands/focus/index.js'
 import scrollSpeed from './commands/scroll-speed/index.js'
 import search from './commands/search/index.js'
 import session from './commands/session/index.js'
@@ -354,6 +355,7 @@ const COMMANDS = memoize((): Command[] => [
   requestSize,
   requestSizeNonInteractive,
   resume,
+  focus,
   scrollSpeed,
   search,
   session,

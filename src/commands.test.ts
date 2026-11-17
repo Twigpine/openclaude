@@ -68,6 +68,16 @@ describe('builtInCommandNames', () => {
     }
   })
 
+  test('includes the focus command', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'oc-test-focus-'))
+    try {
+      const cmds = await getCommands(cwd)
+      expect(cmds.map(c => c.name)).toContain('focus')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   test('project skills take precedence over bundled skills with the same name', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'oc-test-skill-precedence-'))
     const originalSources = getAllowedSettingSources()
