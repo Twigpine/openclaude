@@ -3616,7 +3616,7 @@ async function callMCPTool({
       removeCallerAbortListener = () =>
         signal.removeEventListener('abort', onCallerAbort)
     })
-    const dispatch = () => {
+    const dispatch = async () => {
       // Discovery can outlive the timeout or the caller's abort; do not send
       // a request that has already been given up on.
       if (requestSignal.aborted) {
