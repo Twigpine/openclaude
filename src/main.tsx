@@ -26,6 +26,7 @@ import mapValues from 'lodash-es/mapValues.js';
 import pickBy from 'lodash-es/pickBy.js';
 import uniqBy from 'lodash-es/uniqBy.js';
 import { getOauthConfig } from './constants/oauth.js';
+import { handleUriArgIfEnabled } from './utils/deepLink/handleUriArg.js';
 import { parseSshFlags, sshArgvImpliesHeadless } from './utils/sshPreParse.js';
 import { hasPrintFlag } from './utils/printFlag.js';
 import { getRemoteSessionUrl } from './constants/product.js';
@@ -622,21 +623,14 @@ export async function main() {
   // Handle deep link URIs early — this is invoked by the OS protocol handler
   // and should bail out before full init since it only needs to parse the URI
   // and open a terminal.
-  if (feature('LODESTONE')) {
-    const handleUriIdx = process.argv.indexOf('--handle-uri');
-    if (handleUriIdx !== -1 && process.argv[handleUriIdx + 1]) {
-      const {
-        enableConfigs
-      } = await import('./utils/config.js');
-      enableConfigs();
-      const uri = process.argv[handleUriIdx + 1]!;
-      const {
-        handleDeepLinkUri
-      } = await import('./utils/deepLink/protocolHandler.js');
-      const exitCode = await handleDeepLinkUri(uri);
-      process.exit(exitCode);
+  {
+    const deepLinkExit = await handleUriArgIfEnabled(process.argv);
+    if (deepLinkExit !== undefined) {
+      process.exit(deepLinkExit);
     }
+  }
 
+  if (feature('LODESTONE')) {
     // macOS URL handler: when LaunchServices launches our .app bundle, the
     // URL arrives via Apple Event (not argv). LaunchServices overwrites
     // __CFBundleIdentifier to the launching bundle's ID, which is a precise
