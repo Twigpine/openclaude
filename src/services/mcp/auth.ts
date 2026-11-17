@@ -731,52 +731,65 @@ async function performMCPXaaAuth(
     throw new Error('XAA: oauth.xaa must be set') // guarded by caller
   }
 
-  // IdP config comes from user-level settings, not per-server.
-  const idp = getXaaIdpSettings()
-  if (!idp) {
-    throw new Error(
-      "XAA: no IdP connection configured. Run 'claude mcp xaa setup --issuer <url> --client-id <id> --client-secret' to configure.",
-    )
-  }
+  // The initial credential reads belong to the namespace the flow began
+  // in, like the exchange and the token save below: another turn may have
+  // applied its own environment while setup was pending, and reads outside
+  // the scope would look the client secret up in that namespace instead
+  // of this flow's. The browser wait stays outside the scope — only these
+  // reads enter it.
+  const { idp, clientId, clientSecret, idpClientSecret, idTokenCacheHit } =
+    await resumeIn(credentialScope, async () => {
+      // IdP config comes from user-level settings, not per-server.
+      const settings = getXaaIdpSettings()
+      if (!settings) {
+        throw new Error(
+          "XAA: no IdP connection configured. Run 'claude mcp xaa setup --issuer <url> --client-id <id> --client-secret' to configure.",
+        )
+      }
 
-  const clientId = serverConfig.oauth?.clientId
-  if (!clientId) {
-    throw new Error(
-      `XAA: server '${serverName}' needs an AS client_id. Re-add with --client-id.`,
-    )
-  }
+      const configuredClientId = serverConfig.oauth?.clientId
+      if (!configuredClientId) {
+        throw new Error(
+          `XAA: server '${serverName}' needs an AS client_id. Re-add with --client-id.`,
+        )
+      }
 
-  const clientConfig = getMcpClientConfig(serverName, serverConfig)
-  const clientSecret = clientConfig?.clientSecret
-  if (!clientSecret) {
-    // Diagnostic context for serverKey mismatch debugging. Only computed
-    // on the error path so there's no perf cost on success.
-    const wantedKey = getServerKey(serverName, serverConfig)
-    const haveKeys = Object.keys(
-      getSecureStorage().read()?.mcpOAuthClientConfig ?? {},
-    )
-    const headersForLogging = JSON.parse(
-      JSON.stringify(serverConfig.headers ?? {}, jsonRedactor),
-    )
-    logMCPDebug(
-      serverName,
-      `XAA: secret lookup miss. wanted=${wantedKey} have=[${haveKeys.join(', ')}] configHeaders=${jsonStringify(headersForLogging)}`,
-    )
-    throw new Error(
-      `XAA: AS client secret not found for '${serverName}'. Re-add with --client-secret.`,
-    )
-  }
+      const clientConfig = getMcpClientConfig(serverName, serverConfig)
+      const secret = clientConfig?.clientSecret
+      if (!secret) {
+        // Diagnostic context for serverKey mismatch debugging. Only computed
+        // on the error path so there's no perf cost on success.
+        const wantedKey = getServerKey(serverName, serverConfig)
+        const haveKeys = Object.keys(
+          getSecureStorage().read()?.mcpOAuthClientConfig ?? {},
+        )
+        const headersForLogging = JSON.parse(
+          JSON.stringify(serverConfig.headers ?? {}, jsonRedactor),
+        )
+        logMCPDebug(
+          serverName,
+          `XAA: secret lookup miss. wanted=${wantedKey} have=[${haveKeys.join(', ')}] configHeaders=${jsonStringify(headersForLogging)}`,
+        )
+        throw new Error(
+          `XAA: AS client secret not found for '${serverName}'. Re-add with --client-secret.`,
+        )
+      }
+
+      // IdP client secret lives in a separate keychain slot (keyed by IdP issuer),
+      // NOT the AS secret — different trust domain. Optional: if absent, PKCE-only.
+      // Acquire id_token (cached or via one OIDC browser pop at the IdP).
+      // Peek the cache first so we can report idTokenCacheHit in analytics before
+      // acquireIdpIdToken potentially writes a fresh one.
+      return {
+        idp: settings,
+        clientId: configuredClientId,
+        clientSecret: secret,
+        idpClientSecret: getIdpClientSecret(settings.issuer),
+        idTokenCacheHit: getCachedIdpIdToken(settings.issuer) !== undefined,
+      }
+    })
 
   logMCPDebug(serverName, 'XAA: starting cross-app access flow')
-
-  // IdP client secret lives in a separate keychain slot (keyed by IdP issuer),
-  // NOT the AS secret — different trust domain. Optional: if absent, PKCE-only.
-  const idpClientSecret = getIdpClientSecret(idp.issuer)
-
-  // Acquire id_token (cached or via one OIDC browser pop at the IdP).
-  // Peek the cache first so we can report idTokenCacheHit in analytics before
-  // acquireIdpIdToken potentially writes a fresh one.
-  const idTokenCacheHit = getCachedIdpIdToken(idp.issuer) !== undefined
 
   let failureStage: XaaFailureStage = 'idp_login'
   try {

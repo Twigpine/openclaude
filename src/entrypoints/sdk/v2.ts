@@ -940,12 +940,30 @@ class SDKSessionImpl implements SDKSession {
       throw new AuthenticationCancelledError()
     }
     // The namespace the flow's credentials belong to is the environment as
-    // it is now — before another session's turn can change it while the
-    // user is in the browser. Snapshot the turn that called this method
-    // before init awaits: by the time the flow starts, another turn may
-    // hold the field, and the exchange would then run in that turn's
-    // namespace instead of this call's.
+    // it is now — before initialization yields and before another session's
+    // turn can change it while the user is in the browser. Freeze the
+    // actual environment, the originating-turn delegate and the shared
+    // sign-in aliases now: a call with no active turn has no delegate to
+    // lend, so only the frozen environment saves its namespace, and by the
+    // time the flow starts another turn may hold the field, so the
+    // exchange would then run in that turn's namespace instead of this
+    // call's. Called from a canUseTool callback during a turn, this is
+    // that turn's environment, lent rather than re-acquired: the turn
+    // holds the mutex the scope would otherwise wait on. The scope's
+    // mutex wait is abortable by this attempt, so a cancel or a session
+    // close while it waits ends the flow instead of holding the mutex
+    // until another turn releases it. The turn is the one this call
+    // started in, not whichever holds the field by now.
     const entryCredentialScope = this.turnCredentialScope
+    const signInEntryKeys = getSdkSignInEntryKeys(name, serverConfig)
+    // The attempt exists from here so its signal can make the scope's
+    // mutex wait abortable; it is registered — and supersedes the
+    // previous attempt — after initialization, below.
+    const attempt = new AbortController()
+    const credentialScope = captureCredentialScope(
+      () => entryCredentialScope ?? undefined,
+      { signal: attempt.signal },
+    )
 
     // Process-wide networking (proxy, mTLS client certificate, CA certs) is
     // configured by init() — which sendMessage runs before the first turn —
@@ -983,34 +1001,16 @@ class SDKSessionImpl implements SDKSession {
     // its code with the newer one's client and fail after the user had
     // signed in — same rule as cli/print.ts mcp_authenticate.
     this.pendingMcpAuth.get(name)?.abort()
-    const attempt = new AbortController()
     this.pendingMcpAuth.set(name, attempt)
     // The same rule across the host-facing method and the authenticate
     // pseudo-tool: attempts share one credential entry, so a sign-in
     // started either way replaces an attempt still pending for that entry.
-    const releaseSharedSignIn = registerSdkSignIn(
-      getSdkSignInEntryKeys(name, serverConfig),
-      attempt,
-    )
+    // The entry keys are the ones frozen before initialization, above.
+    const releaseSharedSignIn = registerSdkSignIn(signInEntryKeys, attempt)
     const stopAttempt = () => attempt.abort()
     options?.signal?.addEventListener('abort', stopAttempt, { once: true })
     sessionSignal?.addEventListener('abort', stopAttempt, { once: true })
     if (sessionSignal?.aborted || options?.signal?.aborted) attempt.abort()
-
-    // The namespace the flow's credentials belong to is the environment as
-    // it is now — before another session's turn can change it while the
-    // user is in the browser. The flow's exchange, the cache clear and the
-    // reconnect all run back inside it. Called from a canUseTool callback
-    // during a turn, this is that turn's environment, lent rather than
-    // re-acquired: the turn holds the mutex the scope would otherwise wait
-    // on. The scope's mutex wait is abortable by this attempt, so a cancel
-    // or a session close while it waits ends the flow instead of holding
-    // the mutex until another turn releases it. The turn is the one this
-    // call started in, not whichever holds the field by now.
-    const credentialScope = captureCredentialScope(
-      () => entryCredentialScope ?? undefined,
-      { signal: attempt.signal },
-    )
 
     try {
       // A settings page signs in before the first turn; connect first so the

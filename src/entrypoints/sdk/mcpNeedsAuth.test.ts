@@ -39,6 +39,12 @@ import {
 } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import { acquireEnvMutex, releaseEnvMutex, resetEnvMutexForTesting } from './shared.js'
 import type { CanUseToolCallback } from './shared.js'
+import { saveIdpIdTokenFromJwt } from '../../services/mcp/xaaIdpLogin.js'
+import {
+  getSessionSettingsCache,
+  resetSettingsCache,
+  setSessionSettingsCache,
+} from '../../utils/settings/settingsCache.js'
 
 // Discovery and client registration write credentials through
 // getSecureStorage, which prefers the OS vault (Keychain, libsecret) under a
@@ -100,6 +106,39 @@ mock.module('../../services/mcp/client.js', () => ({
     reconnects++
     return realClient.reconnectMcpServerImpl(...args)
   },
+}))
+
+// The XAA exchange and its OIDC discovery refuse plaintext token endpoints
+// by design, and the stand-in is plain http: the exchange's own legs are
+// covered by xaa.test.ts with mocked fetch, so answer both here and keep
+// the reads, the token save and the reconnect live.
+const realXaaIdpLogin = { ...(await import('../../services/mcp/xaaIdpLogin.js')) }
+mock.module('../../services/mcp/xaaIdpLogin.js', () => ({
+  ...realXaaIdpLogin,
+  discoverOidc: async (
+    issuer: string,
+  ): Promise<Awaited<ReturnType<typeof realXaaIdpLogin.discoverOidc>>> => ({
+    issuer,
+    authorization_endpoint: `${issuer}/authorize`,
+    token_endpoint: `${issuer}/token`,
+    jwks_uri: `${issuer}/.well-known/jwks.json`,
+    response_types_supported: ['code'],
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    code_challenge_methods_supported: ['S256'],
+  }),
+}))
+const realXaa = { ...(await import('../../services/mcp/xaa.js')) }
+mock.module('../../services/mcp/xaa.js', () => ({
+  ...realXaa,
+  performCrossAppAccess: async (
+    serverUrl: string,
+  ): Promise<Awaited<ReturnType<typeof realXaa.performCrossAppAccess>>> => ({
+    access_token: 'token-for-xaa',
+    token_type: 'Bearer',
+    expires_in: 3600,
+    authorizationServerUrl: new URL(serverUrl).origin,
+  }),
 }))
 
 const realInit = { ...(await import('../init.js')) }
@@ -3362,6 +3401,150 @@ test('THE HOST FLOW KEEPS THE CALL-ENTRY CREDENTIAL NAMESPACE ACROSS INITIALIZAT
       `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
     ])
   } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+test('THE HOST FLOW KEEPS THE CALL-ENTRY NAMESPACE ACROSS INITIALIZATION WITH NO TURN TO LEND IT', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    // Out of a turn: no delegate is lent, so only the environment
+    // frozen at call entry can save the flow's namespace.
+    const session = openGatedSession(url)
+    expect(
+      (session as unknown as { turnCredentialScope: unknown }).turnCredentialScope,
+    ).toBeNull()
+
+    const held = holdInit()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => held.arrived)
+    // Another turn applies its own environment while init waits.
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    held.answer()
+
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The tokens landed where the flow started, not in the later
+    // turn's store.
+    expect(storedAccessTokens(storeIn(ambient))).toEqual([])
+    expect(storedAccessTokens(storeIn(origin))).toEqual([
+      `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
+    ])
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+test('THE HOST FLOW KEEPS THE CALL-ENTRY NAMESPACE WHEN ITS LENT TURN ENDS DURING INITIALIZATION', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    const url = serveNeedingAuth()
+    const session = openGatedSession(url)
+    // A turn lends its environment, then ends while init waits: the
+    // delegate declines afterwards, so only the frozen environment can
+    // save the flow's namespace.
+    let delegateActive = true
+    const scopeField = session as unknown as { turnCredentialScope: unknown }
+    // An expired delegate declines by returning undefined, not a promise
+    // resolving to undefined — that is how the scope falls back to its
+    // frozen environment.
+    scopeField.turnCredentialScope = <T>(work: () => Promise<T>): Promise<T> | undefined => {
+      if (!delegateActive) return undefined
+      return work()
+    }
+
+    const held = holdInit()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => held.arrived)
+    delegateActive = false
+    // Another turn applies its own environment while init waits.
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    held.answer()
+
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The tokens landed where the flow started, not in the later
+    // turn's store.
+    expect(storedAccessTokens(storeIn(ambient))).toEqual([])
+    expect(storedAccessTokens(storeIn(origin))).toEqual([
+      `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
+    ])
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+test('THE HOST FLOW READS XAA CREDENTIALS IN THE NAMESPACE IT STARTED IN', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR', 'CLAUDE_CODE_ENABLE_XAA'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  const savedSettings = getSessionSettingsCache()
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    process.env.CLAUDE_CODE_ENABLE_XAA = '1'
+    const url = serveNeedingAuth()
+    const base = new URL(url).origin
+    // The IdP is the stand-in itself: its discovery, token-exchange and
+    // jwt-bearer legs answer from the same server.
+    setSessionSettingsCache({
+      settings: { xaaIdp: { issuer: base, clientId: 'idp-client' } },
+      errors: [],
+    })
+    // A registered client, stored tokens and a cached id_token, all in
+    // the origin namespace: the initial connect is authorized, so its
+    // initialize can be held while another environment is applied.
+    realAuth.saveMcpClientSecret('gated', { type: 'http', url } as never, 'not-a-secret')
+    seedStoredToken('gated', url, 'token-for-seeded')
+    saveIdpIdTokenFromJwt(base, 'fake-id-token')
+    const session = unstable_v2_createSession({
+      cwd: process.cwd(),
+      mcpServers: {
+        gated: { type: 'http', url, oauth: { xaa: true, clientId: 'xaa-client' } },
+      },
+    })
+    sdkSessions.push(session)
+    const held = holdInitialize()
+    const done = session.authenticateMcpServer('gated', {})
+    await waitFor(() => held.arrived)
+    // Another turn applies its own environment while setup is pending.
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    held.answer()
+
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The exchange ran where the flow started: the new token is in the
+    // origin store, and nothing landed in the later turn's store.
+    expect(storedAccessTokens(storeIn(origin))).toEqual(['token-for-xaa'])
+    expect(storedAccessTokens(storeIn(ambient))).toEqual([])
+  } finally {
+    if (savedSettings) setSessionSettingsCache(savedSettings)
+    else resetSettingsCache()
     setClaudeConfigHomeDirForTesting(configHome)
     restoreEnv()
   }
