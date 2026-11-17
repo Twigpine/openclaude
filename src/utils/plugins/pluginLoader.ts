@@ -46,7 +46,7 @@ import {
 } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path'
-import { Range } from 'semver'
+import { Range, valid } from 'semver'
 import { getInlinePlugins } from '../../bootstrap/state.js'
 import {
   BUILTIN_MARKETPLACE_NAME,
@@ -1177,8 +1177,14 @@ export function pluginEnginesIncompatibility(
     return null
   }
   const invalidRangeError = `Plugin ${manifest.name} declares an invalid claude-code engine range "${range}"`
-  // npm semver treats an empty alternative as an unrestricted range.
-  if (range.split('||').some(alternative => alternative.trim() === '')) {
+  // Range treats an empty alternative as unrestricted and strips build
+  // metadata before parsing. Check that metadata decorates a complete version.
+  if (
+    range.split('||').some(alternative => alternative.trim() === '') ||
+    range.split(/\|\||\s+/).some(token =>
+      token.includes('+') && !valid(token.replace(/^[<>=~^]+/, '')),
+    )
+  ) {
     return invalidRangeError
   }
   try {

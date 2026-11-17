@@ -1939,21 +1939,18 @@ export function checkEditableInternalPath(
   }
 
   // Memdir directory (persistent memory for cross-session learning).
-  // Explicit memory-write approval applies even when the env override points
-  // memory at a caller-designated directory. The silent pre-safety-check
-  // carve-out below exists only for the default/settings-backed path because
-  // it can live under ~/.claude/, which is in DANGEROUS_DIRECTORIES.
-  // Resolved containment keeps a symlink inside the memory dir from
-  // redirecting the write elsewhere.
+  // The default/settings-backed path can live outside the workspace.
+  // An environment override still needs a working-directory grant, and
+  // redirects that leave the internal memory directory must stay in scope.
   if (isAutoMemPath(normalizedPath)) {
-    const withinAutoMemDir =
-      !enforceWriteBoundary ||
-      isResolvedPathWithinDir(normalizedPath, getAutoMemPath())
+    const isInternalMemoryPath =
+      !hasAutoMemPathOverride() &&
+      (!enforceWriteBoundary ||
+        isResolvedPathWithinDir(normalizedPath, getAutoMemPath()))
     if (isMemoryWriteApprovalRequired()) {
-      // A redirected memory request still needs approval. If its target
-      // leaves both memory and the workspace, the boundary denies it.
       if (
-        !withinAutoMemDir &&
+        enforceWriteBoundary &&
+        !isInternalMemoryPath &&
         toolPermissionContext &&
         !writePathsInsideWorkingDirectories(
           getPathsForPermissionCheck(absolutePath),
@@ -1973,7 +1970,7 @@ export function checkEditableInternalPath(
       }
     }
 
-    if (!hasAutoMemPathOverride() && withinAutoMemDir) {
+    if (isInternalMemoryPath) {
       return {
         behavior: 'allow',
         updatedInput: input,

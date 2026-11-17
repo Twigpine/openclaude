@@ -148,6 +148,26 @@ describe('plugin engines compatibility', () => {
     }
   })
 
+  test('build metadata must be attached to a complete version', () => {
+    const check = (range: string) =>
+      pluginEnginesIncompatibility(
+        manifest({ 'claude-code': range }),
+        APP_VERSION,
+      )
+
+    expect(check('>=0.30.0+build')).toBeNull()
+    expect(check('0.30.0+build - 0.40.0+build')).toBeNull()
+    expect(check('>=99.0.0+build')).toContain('running version')
+    for (const range of [
+      '+build',
+      '>=99.0.0 || +build',
+      '>=0.30.0 +build',
+      '>=0.30.0+build+extra',
+    ]) {
+      expect(check(range), range).toContain('invalid')
+    }
+  })
+
   test('v-prefixed versions and = comparators are valid ranges', () => {
     for (const range of ['v0.36.0', '=v0.36.0', '>=v0.30.0', '=0.36.0']) {
       expect(

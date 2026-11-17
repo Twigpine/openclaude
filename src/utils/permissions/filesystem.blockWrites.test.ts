@@ -2138,6 +2138,61 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     }
   })
 
+  test('an environment memory override needs a working directory grant even after approval', async () => {
+    const savedOverride = process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE
+    const savedBoundary = blockWritesOutsideWorkingDirectories
+    const memoryDir = outsideDir
+    const context = permissionContext('acceptEdits')
+    const input = { file_path: join(memoryDir, 'note.md') }
+    const check = (permissions: ToolPermissionContext) =>
+      checkWritePermissionForTool(writeTool, input, permissions)
+    const approve = (permissions: ToolPermissionContext) =>
+      permissionPromptToolResultToPermissionDecision(
+        { behavior: 'allow', updatedInput: input },
+        writeTool,
+        { file_path: join(projectDir, 'note.md') },
+        useContext(permissions),
+      )
+
+    try {
+      process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE = memoryDir
+      getAutoMemPath.cache.clear?.()
+      setGovernancePolicySettingsForSourceForTesting(() => ({
+        memory: { requireApprovalBeforeWrite: true },
+      }))
+      const ask = {
+        behavior: 'ask',
+        decisionReason: { type: 'safetyCheck', classifierApprovable: false },
+      }
+
+      blockWritesOutsideWorkingDirectories = false
+      expect(check(context)).toMatchObject(ask)
+      expect(await approve(context)).toMatchObject({ behavior: 'allow' })
+
+      blockWritesOutsideWorkingDirectories = true
+      const deny = {
+        behavior: 'deny',
+        decisionReason: {
+          reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled',
+        },
+      }
+      expect([check(context), await approve(context)]).toMatchObject([deny, deny])
+
+      const granted = permissionContext(
+        'acceptEdits',
+        new Map([[memoryDir, { path: memoryDir, source: 'session' }]]),
+      )
+      expect(check(granted)).toMatchObject(ask)
+      expect(await approve(granted)).toMatchObject({ behavior: 'allow' })
+    } finally {
+      if (savedOverride === undefined) delete process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE
+      else process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE = savedOverride
+      blockWritesOutsideWorkingDirectories = savedBoundary
+      getAutoMemPath.cache.clear?.()
+      setGovernancePolicySettingsForSourceForTesting(null)
+    }
+  })
+
   test('a normal scratchpad write stays allowed', async () => {
     blockWritesOutsideWorkingDirectories = true
     scratchpadGateEnabled = true
