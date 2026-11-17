@@ -139,45 +139,12 @@ const COMPLETED_STATUSES = new Set<BackgroundSessionStatus>([
   'killed',
 ])
 const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/
-// A publish writes its temp file and renames it within milliseconds, so a
-// temp file older than this is almost never an in-flight publish. The grace
-// period is only a cheap pre-filter: the per-ID lock is what protects an
-// active publish, because a wall-clock jump can make a fresh temp file
-// look older than the grace period (CodeRabbit #2497).
-const ABANDONED_SESSION_TEMP_FILE_MIN_AGE_MS = 60 * 60 * 1000
 // Temp files written by writeNewSession/replaceSessionFile are named
 // `<id>.<pid>.<uuid>.tmp`; the id is everything before the numeric pid
 // and the random UUID suffix, and the pid is the publishing process.
 const SESSION_TEMP_FILE_RE =
   /^(.*)\.(\d+)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
 
-function sessionIdFromTempFileName(name: string): string | undefined {
-  const match = SESSION_TEMP_FILE_RE.exec(name)
-  if (!match) return undefined
-  const id = match[1]
-  return SAFE_ID_RE.test(id) ? id : undefined
-}
-
-function publisherPidFromTempFileName(name: string): number | undefined {
-  const match = SESSION_TEMP_FILE_RE.exec(name)
-  if (!match) return undefined
-  const pid = Number(match[2])
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
-}
-
-// Whether the process with this pid is alive. `process.kill(pid, 0)`
-// performs no signal delivery; ESRCH means no such process, while EPERM
-// means a process exists but cannot be signalled, which still proves it
-// is alive. A pid reused by an unrelated process can only make cleanup
-// keep a stale file for a later sweep, never remove a live one.
-function isBackgroundSessionPublisherAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return isErrno(error, 'EPERM')
-  }
-}
 const SAFE_SIGNAL_RE = /^SIG[A-Z0-9]{1,24}$/
 const BACKGROUND_RECOVERY_JOURNAL_ENTRY_LIMIT = 256
 const BACKGROUND_RECOVERY_JOURNAL_RECORD_MAX_BYTES = 512
@@ -2668,179 +2635,6 @@ async function cleanupOrphanedTerminalFacts(
   }
 }
 
-/**
- * Removes session metadata temp files left behind when a publish was
- * interrupted (for example, SIGKILL between writeFile and rename).
- * A temp file is removed only when it is older than both the retention
- * cutoff and the publish grace period, and — when its name carries the
- * publishing session id — only while that session's per-ID lock is free:
- * writeNewSession and replaceSessionFile hold the lock for the whole
- * write+rename, so a held lock means a publish is in flight even when a
- * wall-clock jump makes the file look older than the grace period. The
- * lock alone cannot prove that: a clock jump can also age the lock past
- * proper-lockfile's stale threshold, so when the lock is held, a temp
- * file whose publisher pid is still alive is never removed, whatever the
- * lock's mtime says. Temp files whose names do not carry a session id
- * keep the age-only behavior. Removed files count as artifacts in the
- * cleanup result.
- */
-async function cleanupAbandonedSessionTempFilesInDirectory(
-  cutoffMs: number,
-  metadataDirectory: CleanupDirectorySnapshot,
-  fileSystem: BackgroundCleanupFileSystem,
-  result: BackgroundCleanupResult,
-  maxDirectoryEntries?: number,
-): Promise<void> {
-  const directoryState = await inspectCleanupDirectory(
-    metadataDirectory,
-    fileSystem.lstatFile,
-  )
-  if (directoryState !== 'same') {
-    if (directoryState !== 'missing') result.errors++
-    return
-  }
-  let entries: Dirent<string>[]
-  try {
-    entries = await readDirectoryEntries(
-      getBackgroundSessionMetadataDir(),
-      maxDirectoryEntries,
-    )
-  } catch (error) {
-    if (!isErrno(error, 'ENOENT')) result.errors++
-    return
-  }
-  // A temp file is abandoned only when it is older than the retention
-  // cutoff and older than the publish grace period. The grace period
-  // alone cannot prove a file is abandoned: a wall-clock jump forward
-  // during a publish makes a fresh temp file look old, so the publisher
-  // pid and the per-ID lock below are the checks that decide.
-  const oldestActiveMs = Date.now() - ABANDONED_SESSION_TEMP_FILE_MIN_AGE_MS
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.tmp')) continue
-    const path = join(getBackgroundSessionMetadataDir(), entry.name)
-    let stats: Stats
-    try {
-      stats = await fileSystem.lstatFile(path)
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) result.errors++
-      continue
-    }
-    if (!stats.isFile() || stats.isSymbolicLink()) continue
-    if (stats.mtimeMs >= cutoffMs || stats.mtimeMs >= oldestActiveMs) {
-      continue
-    }
-    // A publisher holds the per-ID lock for the whole write+rename, so
-    // try to take it without waiting: if it is held, a publish for this
-    // session is in flight and the temp file must stay, whatever its
-    // mtime says. A lock that cannot be taken for any other reason also
-    // leaves the file for a later sweep; the file is stale, not lost.
-    const sessionId = sessionIdFromTempFileName(entry.name)
-    // The pid embedded in the temp file name is the publisher, so when
-    // the per-ID lock is actually held, a live pid means a publish for
-    // this file may still be in flight even when the lock looks stale:
-    // a wall-clock jump can age the lock past proper-lockfile's stale
-    // threshold, and that threshold cannot be disabled (stale: 0/false
-    // clamps to 2000ms), so the lock acquire below cannot prove a live
-    // publisher is gone. With no lock held, no publish can be in flight
-    // for this id — a publisher holds the lock for the whole write+rename
-    // — so a leftover temp is abandoned whatever its pid says. A dead
-    // pid means the publisher is gone; the lock acquire still guards a
-    // live publisher for the same id that owns a different temp file.
-    const publisherPid = publisherPidFromTempFileName(entry.name)
-    if (
-      sessionId !== undefined &&
-      publisherPid !== undefined &&
-      isBackgroundSessionPublisherAlive(publisherPid)
-    ) {
-      try {
-        // proper-lockfile's lockfile path for a locked file is
-        // `<file>.lock` (no custom lockfilePath is used here); existence
-        // alone is the signal — the mtime is what a clock jump corrupts.
-        if (
-          (await lstat(`${metadataPathForId(sessionId)}.lock`)).isDirectory()
-        ) {
-          continue
-        }
-      } catch {
-        // No lock held: fall through to the acquire below.
-      }
-    }
-    let releasePublishLock: (() => Promise<void>) | undefined
-    if (sessionId !== undefined) {
-      try {
-        releasePublishLock = await lockfile.lock(
-          metadataPathForId(sessionId),
-          {
-            ...NAME_RESERVATION_LOCK_OPTIONS,
-            retries: 0,
-          },
-        )
-      } catch {
-        continue
-      }
-    }
-    try {
-      // Recheck the captured metadata-directory identity and the
-      // inspected temp identity immediately before unlinking: the
-      // directory may have been replaced since the scan inspected the
-      // file, and the unlink must not follow the replacement.
-      await removeCleanupArtifact(
-        path,
-        result,
-        metadataDirectory,
-        fileSystem,
-        { dev: stats.dev, ino: stats.ino },
-      )
-    } finally {
-      await releasePublishLock?.().catch(() => {})
-    }
-  }
-}
-
-/**
- * Removes abandoned session metadata temp files once, for a whole
- * retention sweep or recovery batch. Use this instead of running the
- * per-call temp cleanup inside every cleanupBackgroundSessionsBefore call
- * when a batch processes many session ids: one directory scan covers the
- * batch, rather than one scan per id (CodeRabbit #2497).
- */
-export async function cleanupAbandonedSessionTempFiles(
-  cutoff: Date,
-  options: { maxDirectoryEntries?: number } = {},
-): Promise<BackgroundCleanupResult> {
-  const result: BackgroundCleanupResult = {
-    sessionsRemoved: 0,
-    artifactsRemoved: 0,
-    errors: 0,
-  }
-  const cutoffMs = cutoff.getTime()
-  if (!Number.isFinite(cutoffMs)) {
-    result.errors++
-    return result
-  }
-  const fileSystem: BackgroundCleanupFileSystem = {
-    lstatFile: lstat,
-    readTextFile: async path => await readFile(path, 'utf8'),
-    unlinkFile: async path => await unlink(path),
-  }
-  const metadataRead = await snapshotCleanupDirectory(
-    getBackgroundSessionMetadataDir(),
-    fileSystem.lstatFile,
-  )
-  if (metadataRead.state !== 'valid') {
-    result.errors++
-    return result
-  }
-  await cleanupAbandonedSessionTempFilesInDirectory(
-    cutoffMs,
-    metadataRead.value,
-    fileSystem,
-    result,
-    options.maxDirectoryEntries,
-  )
-  return result
-}
-
 export async function cleanupBackgroundSessionsBefore(
   cutoff: Date,
   options: {
@@ -2851,10 +2645,6 @@ export async function cleanupBackgroundSessionsBefore(
     _beforeArtifactRemovalForTesting?: (id: string) => Promise<void>
     _beforeReservationRemovalForTesting?: (path: string) => Promise<void>
     sessionIds?: readonly string[]
-    // Skip the trailing abandoned-temp-file cleanup: a caller processing
-    // a batch of ids runs cleanupAbandonedSessionTempFiles once for the
-    // whole batch instead of once per id (CodeRabbit #2497).
-    skipAbandonedTempFileCleanup?: boolean
     onRetry?: (target?: BackgroundSessionRecoveryTarget) => void
     orphanedTerminalFacts?: readonly BackgroundSessionRecoveryTarget[]
     maxDirectoryEntries?: number
@@ -3235,16 +3025,6 @@ export async function cleanupBackgroundSessionsBefore(
       options.maxDirectoryEntries,
       options.orphanedTerminalFacts,
       options.onRetry,
-    )
-  }
-
-  if (!options.skipAbandonedTempFileCleanup) {
-    await cleanupAbandonedSessionTempFilesInDirectory(
-      cutoffMs,
-      metadataDirectory,
-      fileSystem,
-      result,
-      options.maxDirectoryEntries,
     )
   }
 

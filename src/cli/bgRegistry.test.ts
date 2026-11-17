@@ -22,7 +22,6 @@ import * as backgroundSessionRegistry from './bgRegistry.js'
 import {
   _setBackgroundSessionsRootForTesting,
   BackgroundSessionWaitError,
-  cleanupAbandonedSessionTempFiles,
   cleanupBackgroundSessionsBefore,
   createBackgroundSession,
   isBackgroundSessionProcessAlive,
@@ -2372,137 +2371,6 @@ describe('background session registry', () => {
     expect(await Bun.file(metadataPath).exists()).toBe(false)
   })
 
-  it('removes abandoned session metadata temp files during cleanup', async () => {
-    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
-    await mkdir(sessionsDir, { recursive: true })
-    const staleTmp = join(
-      sessionsDir,
-      'bg-stale-tmp.424242.00000000-0000-4000-8000-000000000000.tmp',
-    )
-    await writeFile(staleTmp, '{"id":"bg-stale-tmp"}')
-    // A SIGKILL between writeFile and rename leaves the temp file behind;
-    // age it past the retention cutoff so cleanup can tell it is abandoned
-    // (CodeRabbit #2497).
-    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
-    expect(
-      await cleanupBackgroundSessionsBefore(
-        new Date(Date.now() - 24 * 60 * 60 * 1000),
-      ),
-    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
-    expect(await Bun.file(staleTmp).exists()).toBe(false)
-  })
-
-  it('keeps unrelated data when the metadata directory is replaced during abandoned temp cleanup', async () => {
-    // Regression test for jatmn review #2497 (P2): the abandoned-temp
-    // scan lstat'ed the temp file and then unlinked it directly, so a
-    // directory replaced between inspection and removal let cleanup
-    // delete a same-named file outside the registry. The removal must
-    // go through the guarded helper, which rechecks the captured
-    // directory identity immediately before unlinking.
-    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
-    await mkdir(sessionsDir, { recursive: true })
-    const tempName =
-      'bg-swap-tmp.424242.00000000-0000-4000-8000-000000000000.tmp'
-    const staleTmp = join(sessionsDir, tempName)
-    await writeFile(staleTmp, '{"id":"bg-swap-tmp"}')
-    // Age it past the retention cutoff and the publish grace period, so
-    // only the directory guard can still protect the replacement.
-    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
-    // Unrelated data outside the registry that happens to share the
-    // temp file's name once the directory is swapped.
-    const victimDir = join(configDir, 'victim-sessions')
-    await mkdir(victimDir, { recursive: true })
-    const victim = join(victimDir, tempName)
-    await writeFile(victim, 'unrelated data')
-    let swapped = false
-    const lstatFile = async (path: string) => {
-      const stats = await lstat(path)
-      if (!swapped && path === staleTmp) {
-        swapped = true
-        // Replace the metadata directory immediately after the temp
-        // file inspection, before cleanup deletes it.
-        await rename(sessionsDir, join(configDir, 'swapped-away-sessions'))
-        await symlink(victimDir, sessionsDir, 'dir')
-      }
-      return stats
-    }
-    expect(
-      await cleanupBackgroundSessionsBefore(
-        new Date(Date.now() - 24 * 60 * 60 * 1000),
-        { lstatFile },
-      ),
-    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 1 })
-    expect(swapped).toBe(true)
-    expect(await Bun.file(victim).text()).toBe('unrelated data')
-  })
-
-  it('keeps a freshly written session metadata temp file during cleanup', async () => {
-    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
-    await mkdir(sessionsDir, { recursive: true })
-    const freshTmp = join(
-      sessionsDir,
-      'bg-fresh-tmp.424243.00000000-0000-4000-8000-000000000001.tmp',
-    )
-    await writeFile(freshTmp, '{"id":"bg-fresh-tmp"}')
-    // A temp file written moments ago may belong to a concurrent publish
-    // that has not renamed yet, even when the cutoff is already past it.
-    expect(
-      await cleanupBackgroundSessionsBefore(new Date(Date.now() + 1)),
-    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
-    expect(await Bun.file(freshTmp).exists()).toBe(true)
-  })
-
-  it('keeps an abandoned session metadata temp file while its session publish lock is held', async () => {
-    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
-    await mkdir(sessionsDir, { recursive: true })
-    // The temp file carries its publisher's pid, exactly like a real
-    // writeNewSession temp file, so cleanup can tell the publisher is
-    // still alive even when the lock looks stale (CodeRabbit #2497).
-    const staleTmp = join(
-      sessionsDir,
-      `bg-locked-tmp.${process.pid}.00000000-0000-4000-8000-000000000002.tmp`,
-    )
-    await writeFile(staleTmp, '{"id":"bg-locked-tmp"}')
-    // Age it past the retention cutoff and the publish grace period, so
-    // only the publish lock can still protect it (CodeRabbit #2497).
-    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
-    // A concurrent writeNewSession holds the per-ID lock for the whole
-    // write+rename; cleanup must not unlink its temp file even when the
-    // clock jumps forward past the grace period.
-    const release = await lockfile.lock(join(sessionsDir, 'bg-locked-tmp.json'), {
-      realpath: false,
-      retries: 0,
-    })
-    try {
-      // Age the lock itself past the stale threshold too: after a clock
-      // jump the lock can also look stale, so proper-lockfile would let
-      // cleanup steal it and remove the active temp file (CodeRabbit
-      // #2497). The live publisher pid above is what must protect it.
-      await utimes(
-        join(sessionsDir, 'bg-locked-tmp.json.lock'),
-        twoDaysAgo,
-        twoDaysAgo,
-      )
-      expect(
-        await cleanupBackgroundSessionsBefore(
-          new Date(Date.now() - 24 * 60 * 60 * 1000),
-        ),
-      ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
-      expect(await Bun.file(staleTmp).exists()).toBe(true)
-    } finally {
-      await release()
-    }
-    expect(
-      await cleanupBackgroundSessionsBefore(
-        new Date(Date.now() - 24 * 60 * 60 * 1000),
-      ),
-    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
-    expect(await Bun.file(staleTmp).exists()).toBe(false)
-  })
-
   it('keeps the first-published terminal fact when the sync exit fallback races async finalization', async () => {
     // Regression test for CodeRabbit #2497: if exit occurs while
     // asynchronous finalization is pending, the synchronous ELOCKED
@@ -2654,33 +2522,6 @@ describe('background session registry', () => {
       releaseHook?.()
       await asyncTermination.catch(() => {})
     }
-  })
-
-  it('defers abandoned session metadata temp file cleanup when asked', async () => {
-    const sessionsDir = join(configDir, 'bg-sessions', 'sessions')
-    await mkdir(sessionsDir, { recursive: true })
-    const staleTmp = join(
-      sessionsDir,
-      'bg-deferred-tmp.424242.00000000-0000-4000-8000-000000000003.tmp',
-    )
-    await writeFile(staleTmp, '{"id":"bg-deferred-tmp"}')
-    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-    await utimes(staleTmp, twoDaysAgo, twoDaysAgo)
-    // A recovery batch skips the per-ID temp cleanup and runs it once
-    // for the whole batch instead (CodeRabbit #2497).
-    expect(
-      await cleanupBackgroundSessionsBefore(
-        new Date(Date.now() - 24 * 60 * 60 * 1000),
-        { skipAbandonedTempFileCleanup: true },
-      ),
-    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 0, errors: 0 })
-    expect(await Bun.file(staleTmp).exists()).toBe(true)
-    expect(
-      await cleanupAbandonedSessionTempFiles(
-        new Date(Date.now() - 24 * 60 * 60 * 1000),
-      ),
-    ).toEqual({ sessionsRemoved: 0, artifactsRemoved: 1, errors: 0 })
-    expect(await Bun.file(staleTmp).exists()).toBe(false)
   })
 
   it('reconciles stronger terminal facts and retries reservation release', async () => {
