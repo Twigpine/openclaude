@@ -288,6 +288,7 @@ test('disconnect fails tracked tasks for that server only', async () => {
   })
 
   failMcpServerTasksForServer('srv', 'MCP server "srv" disconnected before the task completed')
+  await waitFor(() => taskFrom(state, taskA).status !== 'running')
 
   assert.equal(taskFrom(state, taskA).status, 'failed')
   assert.equal(taskFrom(state, taskA).notified, true)
@@ -404,11 +405,12 @@ test('terminal transition enqueues exactly one task-notification', async () => {
     setAppState: state.set,
   })
 
-  // A status notification and a poll-loop result racing the same terminal
-  // transition must still produce a single notification.
+  // Two concurrent terminal causes - a status notification's finalize and
+  // a disconnect - must still produce a single notification.
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ status: 'completed' }),
   })
+  failMcpServerTasksForServer('srv', 'connection closed')
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
   await new Promise(resolve => setTimeout(resolve, 50))
 

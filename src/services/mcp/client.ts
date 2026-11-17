@@ -144,7 +144,6 @@ import { getAllMcpConfigs, isMcpServerDisabled } from './config.js'
 import { getMcpServerHeaders } from './headersHelper.js'
 import { SdkControlClientTransport } from './SdkControlTransport.js'
 import {
-  clearMcpToolTaskSupport,
   failMcpServerTasksForServer,
   handleMcpTaskStatusNotification,
   isMcpTaskBackgroundingDisabled,
@@ -1670,7 +1669,10 @@ export const connectToServer = memoize(
         fetchToolsForClient.cache.delete(name)
         fetchResourcesForClient.cache.delete(name)
         fetchCommandsForClient.cache.delete(name)
-        clearMcpToolTaskSupport(name)
+        // taskSupportByServer is deliberately not cleared here: entries are
+        // only ever written by a successful tools/list, and the tools/call
+        // path refetches before consulting them, so a stale entry is always
+        // re-recorded before it can be read.
         failMcpServerTasksForServer(
           name,
           `MCP server "${name}" disconnected before the task completed`,

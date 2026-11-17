@@ -69,10 +69,6 @@ export function recordMcpToolTaskSupport(
   taskSupportByServer.set(serverName, supported)
 }
 
-export function clearMcpToolTaskSupport(serverName: string): void {
-  taskSupportByServer.delete(serverName)
-}
-
 /**
  * Task support for a tool call, or undefined when the call must take the
  * normal tools/call path. Requires the server to advertise
@@ -354,10 +350,18 @@ export function failMcpServerTasksForServer(
     trackedByLocalId.delete(localTaskId)
     localIdByMcpTaskId.delete(entry.mcpTaskId)
     appendTaskOutput(localTaskId, reason)
-    void flushTaskOutput(localTaskId)
-    markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
-      statusMessage: reason,
-    })
+    // Flush before the terminal mark so the notification's output-file is
+    // readable by the time the model can consume it.
+    void (async () => {
+      try {
+        await flushTaskOutput(localTaskId)
+      } catch (e) {
+        logForDebugging(`[MCP] task output flush failed: ${e}`)
+      }
+      markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
+        statusMessage: reason,
+      })
+    })()
   }
 }
 
