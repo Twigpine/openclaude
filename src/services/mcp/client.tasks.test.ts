@@ -222,4 +222,117 @@ describe('MCP server tasks', () => {
     expect(Object.keys(state.get().tasks)).toHaveLength(1)
     reset()
   })
+
+  test('a failed tools/list after a reconnect drops the previous support entry', async () => {
+    reset()
+    const state = makeState()
+    let listWorks = true
+    const request = vi.fn(async (req: { method: string }) => {
+      if (req.method === 'tools/list') {
+        if (listWorks) return { tools: [SLOW_TOOL_LIST] }
+        throw new Error('tools/list unavailable')
+      }
+      throw new Error('unknown support must not send a task-augmented call')
+    })
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'plain result' }],
+    }))
+    const connection = makeConnection({ request, callTool })
+
+    // First connection: discovery succeeds and records support.
+    await fetchToolsForClient(connection)
+    // Reconnect: caches are cleared (onclose), discovery now fails.
+    fetchToolsForClient.cache.delete('task-server')
+    listWorks = false
+
+    await callMCPToolWithUrlElicitationRetry({
+      client: connection,
+      clientConnection: connection,
+      tool: 'slow-tool',
+      args: {},
+      signal: new AbortController().signal,
+      setAppState: state.set,
+    })
+
+    expect(callTool).toHaveBeenCalledTimes(1)
+    expect(
+      request.mock.calls.filter(c => c[0].method === 'tools/call'),
+    ).toHaveLength(0)
+    expect(Object.keys(state.get().tasks)).toHaveLength(0)
+    reset()
+  }, 15000)
+
+  test('slow tool discovery counts against MCP_TOOL_TIMEOUT', async () => {
+    reset()
+    const state = makeState()
+    const request = vi.fn(async (req: { method: string }) => {
+      if (req.method === 'tools/list') {
+        await new Promise(resolve => setTimeout(resolve, 600))
+        return { tools: [] }
+      }
+      throw new Error('a timed-out call must not dispatch')
+    })
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'late result' }],
+    }))
+    const connection = makeConnection({ request, callTool })
+
+    process.env.MCP_TOOL_TIMEOUT = '50'
+    const started = Date.now()
+    try {
+      await expect(
+        callMCPToolWithUrlElicitationRetry({
+          client: connection,
+          clientConnection: connection,
+          tool: 'slow-tool',
+          args: {},
+          signal: new AbortController().signal,
+          setAppState: state.set,
+        }),
+      ).rejects.toThrow(/timed out/)
+    } finally {
+      delete process.env.MCP_TOOL_TIMEOUT
+    }
+
+    expect(Date.now() - started).toBeLessThan(400)
+    // Let the slow discovery finish: the abandoned call must not dispatch.
+    await new Promise(resolve => setTimeout(resolve, 700))
+    expect(callTool).not.toHaveBeenCalled()
+    reset()
+  })
+
+  test('cancelling the call interrupts a pending tool discovery', async () => {
+    reset()
+    const state = makeState()
+    const request = vi.fn(async (req: { method: string }) => {
+      if (req.method === 'tools/list') {
+        await new Promise(resolve => setTimeout(resolve, 600))
+        return { tools: [] }
+      }
+      throw new Error('a cancelled call must not dispatch')
+    })
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'late result' }],
+    }))
+    const connection = makeConnection({ request, callTool })
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 50)
+
+    const started = Date.now()
+    await expect(
+      callMCPToolWithUrlElicitationRetry({
+        client: connection,
+        clientConnection: connection,
+        tool: 'slow-tool',
+        args: {},
+        signal: controller.signal,
+        setAppState: state.set,
+      }),
+    ).rejects.toThrow()
+
+    expect(Date.now() - started).toBeLessThan(400)
+    await new Promise(resolve => setTimeout(resolve, 700))
+    expect(callTool).not.toHaveBeenCalled()
+    reset()
+  })
 })

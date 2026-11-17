@@ -1669,10 +1669,10 @@ export const connectToServer = memoize(
         fetchToolsForClient.cache.delete(name)
         fetchResourcesForClient.cache.delete(name)
         fetchCommandsForClient.cache.delete(name)
-        // taskSupportByServer is deliberately not cleared here: entries are
-        // only ever written by a successful tools/list, and the tools/call
-        // path refetches before consulting them, so a stale entry is always
-        // re-recorded before it can be read.
+        // taskSupportByServer is deliberately not cleared here: the tools/call
+        // path refetches before consulting it, and every tools/list attempt
+        // rewrites the entry (a failed one records none), so a stale entry is
+        // replaced before it can be read.
         failMcpServerTasksForServer(
           name,
           `MCP server "${name}" disconnected before the task completed`,
@@ -2427,6 +2427,9 @@ export const fetchToolsForClient = memoizeWithLRU(
         .filter(isIncludedMcpTool)
     } catch (error) {
       logMCPError(client.name, `Failed to fetch tools: ${errorMessage(error)}`)
+      // Discovery did not refresh support; drop the previous connection's
+      // entry so a call is not task-augmented on stale metadata.
+      recordMcpToolTaskSupport(client.name, [])
       return []
     }
   },
@@ -3598,11 +3601,29 @@ async function callMCPTool({
     // A reconnect clears the recorded support, so ensure tools/list has run
     // on this connection first: a task-required tool sent as a plain
     // tools/call is rejected by the server.
-    await fetchToolsForClient(connection)
-    const taskSupport = mcpTaskSupportForTool(connection, tool)
-
-    const result = await Promise.race([
-      taskSupport
+    // Discovery runs inside the timed race and the caller's abort also ends
+    // the wait, so a slow tools/list counts against MCP_TOOL_TIMEOUT and Esc
+    // interrupts it. Dispatch stays one `.then` after discovery, the same
+    // depth as a plain await.
+    let removeCallerAbortListener: (() => void) | undefined
+    const callerAbortPromise = new Promise<never>((_, reject) => {
+      const onCallerAbort = () => reject(new AbortError())
+      if (signal.aborted) {
+        onCallerAbort()
+        return
+      }
+      signal.addEventListener('abort', onCallerAbort, { once: true })
+      removeCallerAbortListener = () =>
+        signal.removeEventListener('abort', onCallerAbort)
+    })
+    const dispatch = () => {
+      // Discovery can outlive the timeout or the caller's abort; do not send
+      // a request that has already been given up on.
+      if (requestSignal.aborted) {
+        throw requestSignal.reason ?? new AbortError()
+      }
+      const taskSupport = mcpTaskSupportForTool(connection, tool)
+      return taskSupport
         ? client.request(
             {
               method: 'tools/call' as const,
@@ -3623,12 +3644,18 @@ async function callMCPTool({
             },
             CallToolResultSchema,
             requestOptions,
-          ),
+          )
+    }
+
+    const result = await Promise.race([
+      fetchToolsForClient(connection).then(dispatch),
+      callerAbortPromise,
       timeoutPromise,
     ]).finally(() => {
       if (timeoutId) {
         clearTimeout(timeoutId)
       }
+      removeCallerAbortListener?.()
       cleanupRequestSignal()
     })
 
