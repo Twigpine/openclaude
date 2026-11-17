@@ -509,6 +509,7 @@ async function observePinnedSession(
   pinned: { id: string; pid: number },
   signal: AbortSignal,
   deps: WaitHandlerOptions,
+  lookupSignal: AbortSignal,
 ): Promise<WaitObservation> {
   const readPinned = deps.readPinnedSession ?? readPinnedBackgroundSessionForWait
   let session: BackgroundSession
@@ -524,11 +525,16 @@ async function observePinnedSession(
     return terminalObservation(session)
   }
 
+  // The process lookup gets the combined client-or-deadline signal, so
+  // a slow `ps` is aborted when the waiter is interrupted or the
+  // deadline expires; the registry reads above and below keep the
+  // client signal only, so a deadline expiry cannot turn them into an
+  // interruption (maintainer review 5942761094 on #2497).
   const identity = await verifyBackgroundSessionProcessIdentityAsync(session, {
     isProcessAlive: deps.isProcessAlive,
     signalProcess: deps.signalProcess,
     getProcessCommandAsync: deps.getProcessCommandAsync,
-    signal,
+    signal: lookupSignal,
   })
 
   // A natural or killed fact published during the lookup wins over derived
@@ -625,6 +631,17 @@ export async function waitHandler(
   // wins; neither signal is forwarded to the background session.
   let clientSignal: 'SIGINT' | 'SIGTERM' | null = null
   const abortController = new AbortController()
+  // The deadline signal aborts only the in-flight process lookup (see
+  // the grace branch below): the lookup's `ps` child is killed by the
+  // abort, so no lookup child survives after the waiter returns, while
+  // the registry reads keep the client signal only. Combined with the
+  // client signal so an interruption still aborts a slow lookup, as
+  // before (maintainer review 5942761094 on #2497).
+  const deadlineAbortController = new AbortController()
+  const lookupSignal = AbortSignal.any([
+    abortController.signal,
+    deadlineAbortController.signal,
+  ])
   const onSigint = () => {
     if (clientSignal) return
     clientSignal = 'SIGINT'
@@ -712,6 +729,7 @@ export async function waitHandler(
           pinned,
           abortController.signal,
           options,
+          lookupSignal,
         )
         const raced = await raceWithDeadline(
           observationPromise,
@@ -719,11 +737,16 @@ export async function waitHandler(
         )
         if (raced === DEADLINE_EXPIRED) {
           // The deadline elapsed while this observation was in flight:
-          // it is the final timeout-boundary observation, so give it one
-          // poll interval to settle and classify the boundary (unknown
-          // -> 3, terminal -> its outcome) before treating a read stalled
-          // past that as a timeout (124). Returning 124 at once would
+          // abort the in-flight process lookup first, so a slow `ps`
+          // cannot outlive the waiter and its child is killed, then give
+          // the observation one poll interval to settle and classify the
+          // boundary (unknown -> 3, terminal -> its outcome) before
+          // treating a read stalled past that as a timeout (124).
+          // A stalled registry read is unaffected by the abort — the
+          // reads keep the client signal — so it still settles as 124
+          // via the grace timer below. Returning 124 at once would
           // misreport a process that stays unreadable past the deadline.
+          deadlineAbortController.abort()
           let graceTimer: ReturnType<typeof setTimeout> | undefined
           const graceExpired = new Promise<null>(resolve => {
             graceTimer = setTimeout(() => resolve(null), pollIntervalMs)

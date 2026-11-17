@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { spawn } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -181,10 +182,11 @@ describe('wait command handler', () => {
     id: string,
     kind: 'natural' | 'killed',
     fact: Record<string, unknown>,
+    pid: number = FAKE_PID,
   ): void {
     writeFileSync(
       terminalFactPath(id, kind),
-      JSON.stringify({ version: 1, id, pid: FAKE_PID, ...fact }),
+      JSON.stringify({ version: 1, id, pid, ...fact }),
     )
   }
 
@@ -550,6 +552,98 @@ describe('wait command handler', () => {
     expect(result.waitResult).toBe('timeout')
     expect(result.error).toBe('timeout')
     expect(result.finishedAt).toBeNull()
+  })
+
+  it('aborts the in-flight lookup at the deadline and lets the published fact win', async () => {
+    // Regression test for maintainer review 5942761094 (P2) on #2497:
+    // when the deadline fires during an in-flight process lookup, the
+    // waiter must abort the lookup (killing its `ps` child) and classify
+    // the boundary from the observation that then settles — not discard
+    // it and return 124. A real short-lived child is the session's
+    // process; a deliberately slow injected lookup stands in for `ps`;
+    // a concurrent finalizer publishes the terminal fact mid-lookup.
+    // Without the abort the lookup sleeps past the deadline and the
+    // grace timer expires first, so the waiter returns 124.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 200)'], {
+      stdio: 'ignore',
+    })
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    const childPid = child.pid
+    await createTestSession('bg-aaa1', { pid: childPid })
+    let lookupSignal: AbortSignal | undefined
+    let lookupSettled = false
+    const slowLookup = async (
+      _pid: number,
+      options: { signal?: AbortSignal },
+    ): Promise<string | null> => {
+      lookupSignal = options.signal
+      try {
+        // A slow `ps`: sleeps 2 s unless the lookup signal aborts it.
+        await new Promise<null>(resolve => {
+          const timer = setTimeout(() => resolve(null), 2000)
+          options.signal?.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer)
+              resolve(null)
+            },
+            { once: true },
+          )
+        })
+        return null
+      } finally {
+        lookupSettled = true
+      }
+    }
+    const startedAt = performance.now()
+    const waiting = runWait(['bg-aaa1', '--timeout', '300ms', '--json'], {
+      getProcessCommandAsync: slowLookup,
+    })
+    // The concurrent finalizer publishes the terminal fact mid-lookup,
+    // before the deadline: the post-abort re-read must see it.
+    const publishTimer = setTimeout(() => {
+      writeTerminalFactSync(
+        'bg-aaa1',
+        'natural',
+        {
+          status: 'exited',
+          finishedAt: new Date().toISOString(),
+          terminalReason: 'exit_code',
+          exitCode: 0,
+        },
+        childPid,
+      )
+    }, 100)
+    try {
+      const { code, stdout, stderr } = await Promise.race([
+        waiting,
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  'waitHandler did not return within 5s of the deadline',
+                ),
+              ),
+            5000,
+          )
+        }),
+      ])
+      const elapsedMs = performance.now() - startedAt
+      // The terminal fact published mid-lookup wins: exit 0, not 124.
+      expect(code).toBe(0)
+      expect(stderr).toBe('')
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.status).toBe('exited')
+      // The lookup was aborted at the deadline and settled promptly:
+      // the waiter returned well before the 2 s lookup would have.
+      expect(lookupSignal?.aborted).toBe(true)
+      expect(lookupSettled).toBe(true)
+      expect(elapsedMs).toBeLessThan(1500)
+    } finally {
+      clearTimeout(publishTimer)
+      child.kill()
+    }
   })
 
   it('returns 124 promptly when a pinned registry read stalls past the deadline', async () => {
