@@ -76,15 +76,31 @@ const realPermissions = await import(
 // When set, the race-guard revalidation removes this directory from the live
 // permission context while the caller awaits it — exercising the post-await
 // boundary recheck.
-let removeDirDuringRevalidation: string | null = null
+let removeDirDuringRevalidation:
+  | string
+  | { dir: string; onCall: number }
+  | null = null
+let revalidationCallCount = 0
 mock.module('./permissions.js', () => ({
   ...realPermissions,
   revalidatePlanModePermissionAllowWithRaceGuard: (async (
     ...args: unknown[]
   ) => {
+    revalidationCallCount++
     if (removeDirDuringRevalidation) {
-      const dir = removeDirDuringRevalidation
+      const spec =
+        typeof removeDirDuringRevalidation === 'string'
+          ? { dir: removeDirDuringRevalidation, onCall: 1 }
+          : removeDirDuringRevalidation
+      const dir = spec.onCall === revalidationCallCount ? spec.dir : null
       const toolUseContext = args[3] as ToolUseContext
+      if (!dir) {
+        return (
+          realPermissions.revalidatePlanModePermissionAllowWithRaceGuard as (
+            ...a: unknown[]
+          ) => unknown
+        )(...args)
+      }
       toolUseContext.setAppState(prev => {
         const dirs = new Map(
           prev.toolPermissionContext.additionalWorkingDirectories,
@@ -179,6 +195,7 @@ function useContext(
 function useMutableContext(toolPermissionContext: ToolPermissionContext): {
   ctx: ToolUseContext
   setAppStateCalls: () => number
+  setPermissionContext: (next: ToolPermissionContext) => void
 } {
   let current = toolPermissionContext
   let calls = 0
@@ -200,7 +217,13 @@ function useMutableContext(toolPermissionContext: ToolPermissionContext): {
       },
     },
   } as unknown as ToolUseContext
-  return { ctx, setAppStateCalls: () => calls }
+  return {
+    ctx,
+    setAppStateCalls: () => calls,
+    setPermissionContext: (next: ToolPermissionContext) => {
+      current = next
+    },
+  }
 }
 
 describe('permissions.blockWritesOutsideWorkingDirectories', () => {
@@ -916,6 +939,7 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     // The boundary check before the revalidation await sees addedDir as
     // working; the concurrent removal lands during the await, so the
     // post-await recheck against the live context must catch it.
+    revalidationCallCount = 0
     removeDirDuringRevalidation = addedDir
     hookPermissionResult = {
       behavior: 'allow',
@@ -1061,6 +1085,7 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     // The pre-check in runHooks sees addedDir as working; the removal lands
     // during handleHookAllow's awaited persistence and plan-mode
     // revalidation, so the live recheck before buildAllow must catch it.
+    revalidationCallCount = 0
     removeDirDuringRevalidation = addedDir
     hookPermissionResult = {
       behavior: 'allow',
@@ -1089,6 +1114,208 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     } finally {
       removeDirDuringRevalidation = null
       hookPermissionResult = undefined
+    }
+  })
+
+  test('a denied hook allow never commits its permission updates', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(addedDir, 'hooked.txt') },
+      updatedPermissions: [
+        { type: 'setMode', mode: 'plan', destination: 'session' },
+      ],
+    }
+    const mutable = useMutableContext(
+      permissionContext(
+        'default',
+        new Map([[addedDir, { path: addedDir, source: 'session' }]]),
+      ),
+    )
+    const modeDecisionSpy = spyOn(
+      permissionSetupModule,
+      'getPermissionModeChangeRequestDecision',
+    ).mockImplementation(async () => {
+      // The staged boundary check already passed; the covering directory
+      // disappears during the awaited mode validation inside
+      // preparePermissionUpdates. The final deny must not leave the setMode
+      // update applied or persisted.
+      mutable.ctx.setAppState(prev => ({
+        ...prev,
+        toolPermissionContext: {
+          ...prev.toolPermissionContext,
+          additionalWorkingDirectories: new Map(),
+        },
+      }))
+      return { status: 'apply' } as const
+    })
+    const liveApplySpy = spyOn(
+      permissionSetupModule,
+      'applyPermissionUpdatesToLiveContext',
+    )
+    try {
+      const permissionCtx = createPermissionContext(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        mutable.ctx,
+        { message: { id: 'blockwrites-hook-commit' } } as never,
+        'blockwrites-hook-commit',
+        () => {},
+      )
+      const result = await permissionCtx.runHooks(undefined, undefined)
+      expect(result?.behavior).toBe('deny')
+      if (result?.behavior === 'deny') {
+        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      }
+      expect(mutable.ctx.getAppState().toolPermissionContext.mode).toBe(
+        'default',
+      )
+      expect(liveApplySpy).not.toHaveBeenCalled()
+    } finally {
+      modeDecisionSpy.mockRestore()
+      liveApplySpy.mockRestore()
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('a denied user allow never commits its permission updates', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const mutable = useMutableContext(
+      permissionContext(
+        'default',
+        new Map([[addedDir, { path: addedDir, source: 'session' }]]),
+      ),
+    )
+    const modeDecisionSpy = spyOn(
+      permissionSetupModule,
+      'getPermissionModeChangeRequestDecision',
+    ).mockImplementation(async () => {
+      mutable.ctx.setAppState(prev => ({
+        ...prev,
+        toolPermissionContext: {
+          ...prev.toolPermissionContext,
+          additionalWorkingDirectories: new Map(),
+        },
+      }))
+      return { status: 'apply' } as const
+    })
+    const liveApplySpy = spyOn(
+      permissionSetupModule,
+      'applyPermissionUpdatesToLiveContext',
+    )
+    try {
+      const permissionCtx = createPermissionContext(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        mutable.ctx,
+        { message: { id: 'blockwrites-user-commit' } } as never,
+        'blockwrites-user-commit',
+        () => {},
+      )
+      const result = await permissionCtx.handleUserAllow(
+        { file_path: join(addedDir, 'user-edited.txt') },
+        [
+          { type: 'setMode', mode: 'plan', destination: 'session' },
+        ],
+      )
+      expect(result.behavior).toBe('deny')
+      if (result.behavior === 'deny') {
+        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      }
+      expect(mutable.ctx.getAppState().toolPermissionContext.mode).toBe(
+        'default',
+      )
+      expect(liveApplySpy).not.toHaveBeenCalled()
+    } finally {
+      modeDecisionSpy.mockRestore()
+      liveApplySpy.mockRestore()
+    }
+  })
+
+  test('an allow whose updates add the covering directory is not denied', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    // The write targets a directory that only exists in the updates. The
+    // pre-commit boundary check must evaluate the live context merged
+    // with the prepared updates, or this allow is denied fail-closed.
+    const mutable = useMutableContext(permissionContext('default'))
+    try {
+      const permissionCtx = createPermissionContext(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        mutable.ctx,
+        { message: { id: 'blockwrites-adddir-allow' } } as never,
+        'blockwrites-adddir-allow',
+        mutable.setPermissionContext,
+      )
+      const result = await permissionCtx.handleUserAllow(
+        { file_path: join(addedDir, 'newdir-write.txt') },
+        [
+          {
+            type: 'addDirectories',
+            directories: [addedDir],
+            destination: 'session',
+          },
+        ],
+      )
+      expect(result.behavior).toBe('allow')
+      expect(
+        mutable.ctx
+          .getAppState()
+          .toolPermissionContext.additionalWorkingDirectories.has(
+            addedDir,
+          ),
+      ).toBe(true)
+    } finally {
+    }
+  })
+
+  test('removal during post-commit revalidation still denies, updates stand', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    // The covering directory is removed during the awaited plan-mode
+    // revalidation, which runs after the commit by design (a setMode
+    // update must be live for that check). The boundary deny still
+    // fires; the committed updates stand, matching the mode-transition
+    // semantics the headlessPlanHooks suite documents.
+    revalidationCallCount = 0
+    removeDirDuringRevalidation = { dir: addedDir, onCall: 2 }
+    const mutable = useMutableContext(
+      permissionContext(
+        'default',
+        new Map([[addedDir, { path: addedDir, source: 'session' }]]),
+      ),
+    )
+    try {
+      const permissionCtx = createPermissionContext(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        mutable.ctx,
+        { message: { id: 'blockwrites-postcommit-deny' } } as never,
+        'blockwrites-postcommit-deny',
+        mutable.setPermissionContext,
+      )
+      const result = await permissionCtx.handleUserAllow(
+        { file_path: join(addedDir, 'postcommit.txt') },
+        [
+          {
+            type: 'addDirectories',
+            directories: [join(projectDir, 'extra')],
+            destination: 'session',
+          },
+        ],
+      )
+      expect(result.behavior).toBe('deny')
+      if (result.behavior === 'deny') {
+        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      }
+      expect(
+        mutable.ctx
+          .getAppState()
+          .toolPermissionContext.additionalWorkingDirectories.has(
+            join(projectDir, 'extra'),
+          ),
+      ).toBe(true)
+    } finally {
+      removeDirDuringRevalidation = null
     }
   })
 

@@ -180,7 +180,15 @@ function createPermissionContext(
         toolName: sanitizeToolNameForAnalytics(tool.name),
       })
     },
-    async persistPermissions(
+    // Validation for permission updates is awaited (mode changes consult
+    // getPermissionModeChangeRequestDecision); the commit is synchronous.
+    // Splitting them lets callers run the boundary decision between the
+    // two, so the denial they most need to keep clean cannot follow a
+    // committed update. Denies that require committed state still run
+    // after: plan-mode revalidation needs a setMode update live to
+    // evaluate the input under the mode it just entered, and the update
+    // stands through that deny by design.
+    async preparePermissionUpdates(
       updates: PermissionUpdate[],
       hookPlanModeWasActive?: boolean,
     ) {
@@ -189,9 +197,9 @@ function createPermissionContext(
           toolUseContext.options.permissionSessionId,
         )
       ) {
-        return false
+        return null
       }
-      if (updates.length === 0) return false
+      if (updates.length === 0) return null
       const validationRootState =
         toolUseContext.getRootAppState?.() ?? toolUseContext.getAppState()
       const validatedUpdates: PermissionUpdate[] = []
@@ -220,7 +228,7 @@ function createPermissionContext(
           update,
         )
       }
-      if (validatedUpdates.length === 0) return false
+      if (validatedUpdates.length === 0) return null
       const latestAppState = toolUseContext.getAppState()
       const rootAppState =
         toolUseContext.getRootAppState?.() ?? latestAppState
@@ -233,23 +241,48 @@ function createPermissionContext(
                 latestAppState.toolPermissionContext.mode === 'plan' ||
                 rootAppState.toolPermissionContext.mode === 'plan',
             )
-      if (updatesToApply.length === 0) return false
+      if (updatesToApply.length === 0) return null
       if (
         !isPermissionSessionActive(
           toolUseContext.options.permissionSessionId,
         )
       ) {
-        return false
+        return null
       }
+      return {
+        updatesToApply,
+        shouldPersist: updatesToApply.some(update =>
+          supportsPersistence(update.destination),
+        ),
+      }
+    },
+    commitPermissionUpdates(prepared: {
+      updatesToApply: PermissionUpdate[]
+      shouldPersist: boolean
+    }): boolean {
+      // Recompute against the live root context so concurrent updates
+      // applied since preparation are carried forward, not clobbered.
+      const latestAppState = toolUseContext.getAppState()
+      const rootAppState =
+        toolUseContext.getRootAppState?.() ?? latestAppState
       const updatedContext = applyPermissionUpdatesToLiveContext(
         rootAppState.toolPermissionContext,
-        updatesToApply,
+        prepared.updatesToApply,
       )
-      persistPermissionUpdates(updatesToApply)
+      persistPermissionUpdates(prepared.updatesToApply)
       setToolPermissionContext(updatedContext)
-      return updatesToApply.some(update =>
-        supportsPersistence(update.destination),
+      return prepared.shouldPersist
+    },
+    async persistPermissions(
+      updates: PermissionUpdate[],
+      hookPlanModeWasActive?: boolean,
+    ) {
+      const prepared = await this.preparePermissionUpdates(
+        updates,
+        hookPlanModeWasActive,
       )
+      if (!prepared) return false
+      return this.commitPermissionUpdates(prepared)
     },
     resolveIfAborted(resolve: (decision: PermissionDecision) => void) {
       if (!toolUseContext.abortController.signal.aborted) return false
@@ -534,8 +567,49 @@ function createPermissionContext(
           return postUpdateWriteBoundary
         }
       }
-      const acceptedPermanentUpdates =
-        await this.persistPermissions(permissionUpdates, planModeWasActive)
+      const preparedUpdates = await this.preparePermissionUpdates(
+        permissionUpdates,
+        planModeWasActive,
+      )
+      if (
+        !ownerDecisionAuthorized &&
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return buildInactivePermissionSessionDecision()
+      }
+      const userModified = tool.inputsEquivalent
+        ? !tool.inputsEquivalent(input, updatedInput)
+        : false
+      // A user edit in the prompt UI can move the target outside the
+      // working directories; the write boundary is a hard cap, not a
+      // prompt, so it applies to user allows the same as hook allows.
+      // This is the last check that can deny before the updates commit:
+      // a directory removed during the awaited validation above must
+      // reject the allow without leaving its updates applied. Evaluate
+      // the live context merged with the prepared updates so an allow
+      // that adds the covering directory itself is not denied.
+      const writeBoundary = checkWriteBoundaryForAskRule(
+        tool,
+        updatedInput,
+        preparedUpdates
+          ? applyPermissionUpdates(
+              toolUseContext.getAppState().toolPermissionContext,
+              preparedUpdates.updatesToApply,
+            )
+          : toolUseContext.getAppState().toolPermissionContext,
+      )
+      if (writeBoundary) {
+        return writeBoundary
+      }
+      if (preparedUpdates) {
+        this.commitPermissionUpdates(preparedUpdates)
+      }
+      // Plan-mode revalidation runs after the commit on purpose: a
+      // setMode update has to be live for the check to evaluate
+      // updatedInput under the mode the approval just entered, and the
+      // mode change itself stands even when the input is denied.
       const finalRevalidation =
         await revalidatePlanModePermissionAllowWithRaceGuard(
           tool,
@@ -547,35 +621,27 @@ function createPermissionContext(
       if (finalRevalidation) {
         return finalRevalidation
       }
-      if (
-        !ownerDecisionAuthorized &&
-        !isPermissionSessionActive(
-          toolUseContext.options.permissionSessionId,
-        )
-      ) {
-        return buildInactivePermissionSessionDecision()
-      }
-      this.logDecision(
-        {
-          decision: 'accept',
-          source: { type: 'user', permanent: acceptedPermanentUpdates },
-        },
-        { input: updatedInput, permissionPromptStartTimeMs },
-      )
-      const userModified = tool.inputsEquivalent
-        ? !tool.inputsEquivalent(input, updatedInput)
-        : false
-      // A user edit in the prompt UI can move the target outside the
-      // working directories; the write boundary is a hard cap, not a
-      // prompt, so it applies to user allows the same as hook allows.
-      const writeBoundary = checkWriteBoundaryForAskRule(
+      // The revalidation above is awaited; recheck the live boundary one
+      // last time in case a concurrent decision removed the covering
+      // directory during that wait.
+      const finalWriteBoundary = checkWriteBoundaryForAskRule(
         tool,
         updatedInput,
         toolUseContext.getAppState().toolPermissionContext,
       )
-      if (writeBoundary) {
-        return writeBoundary
+      if (finalWriteBoundary) {
+        return finalWriteBoundary
       }
+      this.logDecision(
+        {
+          decision: 'accept',
+          source: {
+            type: 'user',
+            permanent: preparedUpdates?.shouldPersist ?? false,
+          },
+        },
+        { input: updatedInput, permissionPromptStartTimeMs },
+      )
       const trimmedFeedback = feedback?.trim()
       return this.buildAllow(updatedInput, {
         userModified,
@@ -616,8 +682,44 @@ function createPermissionContext(
           return postUpdateWriteBoundary
         }
       }
-      const acceptedPermanentUpdates =
-        await this.persistPermissions(permissionUpdates, planModeWasActive)
+      const preparedUpdates = await this.preparePermissionUpdates(
+        permissionUpdates,
+        planModeWasActive,
+      )
+      if (
+        !ownerDecisionAuthorized &&
+        !isPermissionSessionActive(
+          toolUseContext.options.permissionSessionId,
+        )
+      ) {
+        return buildInactivePermissionSessionDecision()
+      }
+      // Recheck the boundary before committing the updates: the
+      // awaited validation above can overlap a concurrent decision that
+      // removed the directory covering finalInput, and a denied allow
+      // must not leave its updates applied. Evaluate the live context
+      // merged with the prepared updates so an allow that adds the
+      // covering directory itself is not denied.
+      const writeBoundary = checkWriteBoundaryForAskRule(
+        tool,
+        finalInput,
+        preparedUpdates
+          ? applyPermissionUpdates(
+              toolUseContext.getAppState().toolPermissionContext,
+              preparedUpdates.updatesToApply,
+            )
+          : toolUseContext.getAppState().toolPermissionContext,
+      )
+      if (writeBoundary) {
+        return writeBoundary
+      }
+      if (preparedUpdates) {
+        this.commitPermissionUpdates(preparedUpdates)
+      }
+      // Plan-mode revalidation runs after the commit on purpose: a
+      // setMode update has to be live for the check to evaluate
+      // finalInput under the mode the approval just entered, and the
+      // mode change itself stands even when the input is denied.
       const postUpdatePlanModeDecision =
         await revalidatePlanModePermissionAllowWithRaceGuard(
           tool,
@@ -630,33 +732,27 @@ function createPermissionContext(
       if (postUpdatePlanModeDecision) {
         return postUpdatePlanModeDecision
       }
-      if (
-        !ownerDecisionAuthorized &&
-        !isPermissionSessionActive(
-          toolUseContext.options.permissionSessionId,
-        )
-      ) {
-        return buildInactivePermissionSessionDecision()
-      }
-      this.logDecision(
-        {
-          decision: 'accept',
-          source: { type: 'hook', permanent: acceptedPermanentUpdates },
-        },
-        { input: finalInput, permissionPromptStartTimeMs },
-      )
-      // Persistence and plan-mode revalidation above are awaited; a
-      // concurrent decision can remove the directory covering finalInput
-      // meanwhile. Recheck the live boundary before allowing, matching
-      // handleUserAllow and handleClassifierAllow.
-      const writeBoundary = checkWriteBoundaryForAskRule(
+      // The revalidation above is awaited; recheck the live boundary one
+      // last time in case a concurrent decision removed the covering
+      // directory during that wait.
+      const finalWriteBoundary = checkWriteBoundaryForAskRule(
         tool,
         finalInput,
         toolUseContext.getAppState().toolPermissionContext,
       )
-      if (writeBoundary) {
-        return writeBoundary
+      if (finalWriteBoundary) {
+        return finalWriteBoundary
       }
+      this.logDecision(
+        {
+          decision: 'accept',
+          source: {
+            type: 'hook',
+            permanent: preparedUpdates?.shouldPersist ?? false,
+          },
+        },
+        { input: finalInput, permissionPromptStartTimeMs },
+      )
       return this.buildAllow(finalInput, {
         decisionReason: { type: 'hook', hookName: 'PermissionRequest' },
       })
