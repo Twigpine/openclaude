@@ -1824,3 +1824,34 @@ test('shutdown keeps a worktree exit recorded by one alias over a stale enter fr
   }
   expect(last.worktreeSession).toBeNull()
 })
+
+test('same session id in two project directories keeps independent message dedup', async () => {
+  // CodeRabbit Major on #2489: getSessionMessages was memoized by
+  // sessionId only, while loadSessionFile resolves per context. When A
+  // records UUID U and B replays that history into another directory,
+  // recordTranscript skipped U in B — B's transcript stayed missing it
+  // even though B has a separate pointer and file.
+  const sharedId = '31000000-0000-4000-8000-000000000009'
+  const sharedUuid = '41000000-0000-4000-8000-000000000009'
+  const dirA = join(testRoot, 'workspace-a')
+  const dirC = join(testRoot, 'workspace-c')
+  await mkdir(dirA, { recursive: true })
+  await mkdir(dirC, { recursive: true })
+
+  await turnStart(sharedId, async () => {
+    await recordTranscript([message(sharedUuid, 'shared in A')])
+    await flushSessionStorage()
+  }, dirA)
+
+  await turnStart(sharedId, async () => {
+    await recordTranscript([message(sharedUuid, 'shared in B')])
+    await flushSessionStorage()
+  }, dirC)
+
+  const aPath = join(dirA, `${sharedId}.jsonl`)
+  const bPath = join(dirC, `${sharedId}.jsonl`)
+  expect(existsSync(aPath)).toBe(true)
+  expect(await readFile(aPath, 'utf8')).toContain('shared in A')
+  expect(existsSync(bPath)).toBe(true)
+  expect(await readFile(bPath, 'utf8')).toContain('shared in B')
+})
