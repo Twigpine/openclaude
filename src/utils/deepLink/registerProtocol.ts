@@ -16,7 +16,6 @@
 import { promises as fs } from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -303,9 +302,6 @@ export async function isProtocolHandlerCurrent(
  */
 export async function ensureDeepLinkProtocolRegistered(): Promise<void> {
   if (getInitialSettings().disableDeepLinkRegistration === 'disable') {
-    return
-  }
-  if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_lodestone_enabled', false)) {
     return
   }
 

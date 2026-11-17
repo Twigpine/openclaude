@@ -19,7 +19,11 @@ import {
   GLOBAL_CLAUDE_FOLDER_PERMISSION_PATTERN,
 } from 'src/tools/FileEditTool/constants.js'
 import type { z } from 'zod/v4'
-import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
+import {
+  getOriginalCwd,
+  getProjectRoot,
+  getSessionId,
+} from '../../bootstrap/state.js'
 import { PRODUCT_DISPLAY_NAME } from '../../constants/product.js'
 import { checkStatsigFeatureGate_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import type {
@@ -134,7 +138,7 @@ export function getClaudeSkillScope(
 
   const bases = [
     {
-      dir: expandPath(join(getOriginalCwd(), '.openclaude', 'skills')),
+      dir: expandPath(join(getProjectRoot(), '.openclaude', 'skills')),
       prefix: '/.openclaude/skills/',
     },
     {
@@ -262,9 +266,9 @@ function isClaudeConfigFilePath(filePath: string): boolean {
   // Check if file is within .openclaude/commands or .openclaude/agents directories
   // using proper path segment validation (not string matching with includes())
   // pathInWorkingPath now handles case-insensitive comparison to prevent bypasses
-  const commandsDir = join(getOriginalCwd(), '.openclaude', 'commands')
-  const agentsDir = join(getOriginalCwd(), '.openclaude', 'agents')
-  const skillsDir = join(getOriginalCwd(), '.openclaude', 'skills')
+  const commandsDir = join(getProjectRoot(), '.openclaude', 'commands')
+  const agentsDir = join(getProjectRoot(), '.openclaude', 'agents')
+  const skillsDir = join(getProjectRoot(), '.openclaude', 'skills')
 
   return (
     pathInWorkingPath(filePath, commandsDir) ||
@@ -334,7 +338,10 @@ function isSessionPlanFile(absolutePath: string): boolean {
  * Path format: {projectDir}/{sessionId}/session-memory/
  */
 export function getSessionMemoryDir(): string {
-  return join(getProjectDir(getCwd()), getSessionId(), 'session-memory') + sep
+  return (
+    join(getProjectDir(getProjectRoot()), getSessionId(), 'session-memory') +
+    sep
+  )
 }
 
 /**
@@ -357,7 +364,7 @@ function isSessionMemoryPath(absolutePath: string): boolean {
  * Path format: ~/.claude/projects/{sanitized-cwd}/...
  */
 function isProjectDirPath(absolutePath: string): boolean {
-  const projectDir = getProjectDir(getCwd())
+  const projectDir = getProjectDir(getProjectRoot())
   // SECURITY: Normalize to prevent path traversal bypasses via .. segments
   const normalizedPath = normalize(absolutePath)
   return (
@@ -946,7 +953,11 @@ function rootPathForSource(source: PermissionRuleSource): string {
     case 'cliArg':
     case 'command':
     case 'session':
-      return expandPath(getOriginalCwd())
+      // Session-scoped rules bind to the session's project root, not the
+      // current working root: a mid-session /cd (or worktree switch) moves
+      // originalCwd, and rules created before the move must keep resolving
+      // against the directory they were written for.
+      return expandPath(getProjectRoot())
     case 'userSettings':
     case 'policySettings':
     case 'projectSettings':

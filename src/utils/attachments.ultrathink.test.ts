@@ -22,6 +22,10 @@ beforeEach(async () => {
   mock.module('./thinking.js', () => ({
     ...realThinking,
     isUltrathinkEnabled: () => true,
+    // getUltrathinkEffortAttachment calls this directly; the real one closes
+    // over the module-internal isUltrathinkEnabled, so stubbing only the
+    // export above cannot arm the keyword under test feature flags.
+    isUltrathinkKeywordArmed: () => true,
   }))
   ;({ getUltrathinkEffortAttachment } = await import(
     `./attachments.ts?test=${Date.now()}-${Math.random()}`

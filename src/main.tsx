@@ -26,6 +26,7 @@ import mapValues from 'lodash-es/mapValues.js';
 import pickBy from 'lodash-es/pickBy.js';
 import uniqBy from 'lodash-es/uniqBy.js';
 import { getOauthConfig } from './constants/oauth.js';
+import { handleUriArgIfEnabled } from './utils/deepLink/handleUriArg.js';
 import { parseSshFlags, sshArgvImpliesHeadless } from './utils/sshPreParse.js';
 import { hasPrintFlag } from './utils/printFlag.js';
 import { getRemoteSessionUrl } from './constants/product.js';
@@ -182,7 +183,7 @@ import { createHeadlessHeartbeat, parseHeadlessHeartbeatDuration, validateHeadle
 import { setCwd } from 'src/utils/Shell.js';
 import { type ProcessedResume, processResumedConversation } from 'src/utils/sessionRestore.js';
 import { plural } from 'src/utils/stringUtils.js';
-import { type ChannelEntry, getInitialMainLoopModel, getIsNonInteractiveSession, getSdkBetas, getSessionId, getUserMsgOptIn, setAllowedChannels, setChromeFlagOverride, setClientType, setCwdState, setDirectConnectServerUrl, setInitialMainLoopModel, setInlinePlugins, setIsInteractive, setKairosActive, setOriginalCwd, setQuestionPreviewFormat, setSdkBetas, setSessionBypassPermissionsMode, setSessionDangerousPermissionMode, setSessionPersistenceDisabled, setSessionSource, setUserMsgOptIn, switchSession } from './bootstrap/state.js';
+import { type ChannelEntry, getInitialMainLoopModel, getIsNonInteractiveSession, getSdkBetas, getSessionId, getProjectRoot, getUserMsgOptIn, setAllowedChannels, setChromeFlagOverride, setClientType, setCwdState, setDirectConnectServerUrl, setInitialMainLoopModel, setInlinePlugins, setIsInteractive, setKairosActive, setOriginalCwd, setQuestionPreviewFormat, setSdkBetas, setProjectRoot, setSessionBypassPermissionsMode, setSessionDangerousPermissionMode, setSessionPersistenceDisabled, setSessionSource, setUserMsgOptIn, switchSession } from './bootstrap/state.js';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const autoModeStateModule = feature('TRANSCRIPT_CLASSIFIER') ? require('./utils/permissions/autoModeState.js') as typeof import('./utils/permissions/autoModeState.js') : null;
@@ -622,21 +623,14 @@ export async function main() {
   // Handle deep link URIs early — this is invoked by the OS protocol handler
   // and should bail out before full init since it only needs to parse the URI
   // and open a terminal.
-  if (feature('LODESTONE')) {
-    const handleUriIdx = process.argv.indexOf('--handle-uri');
-    if (handleUriIdx !== -1 && process.argv[handleUriIdx + 1]) {
-      const {
-        enableConfigs
-      } = await import('./utils/config.js');
-      enableConfigs();
-      const uri = process.argv[handleUriIdx + 1]!;
-      const {
-        handleDeepLinkUri
-      } = await import('./utils/deepLink/protocolHandler.js');
-      const exitCode = await handleDeepLinkUri(uri);
-      process.exit(exitCode);
+  {
+    const deepLinkExit = await handleUriArgIfEnabled(process.argv);
+    if (deepLinkExit !== undefined) {
+      process.exit(deepLinkExit);
     }
+  }
 
+  if (feature('LODESTONE')) {
     // macOS URL handler: when LaunchServices launches our .app bundle, the
     // URL arrives via Apple Event (not argv). LaunchServices overwrites
     // __CFBundleIdentifier to the launching bundle's ID, which is a precise
@@ -3110,6 +3104,7 @@ async function run(): Promise<CommanderCommand> {
         });
         if (session.workDir) {
           setOriginalCwd(session.workDir);
+          setProjectRoot(session.workDir);
           setCwdState(session.workDir);
         }
         setDirectConnectServerUrl(_pendingConnect.url);
@@ -3179,6 +3174,7 @@ async function run(): Promise<CommanderCommand> {
           if (hadProgress) process.stderr.write('\n');
         }
         setOriginalCwd(sshSession.remoteCwd);
+        setProjectRoot(sshSession.remoteCwd);
         setCwdState(sshSession.remoteCwd);
         setDirectConnectServerUrl(_pendingSSH.local ? 'local' : _pendingSSH.host);
       } catch (err) {
@@ -3492,6 +3488,7 @@ async function run(): Promise<CommanderCommand> {
                     process.chdir(selectedPath);
                     setCwd(selectedPath);
                     setOriginalCwd(selectedPath);
+                    setProjectRoot(selectedPath);
                   } else {
                     // User cancelled
                     await gracefulShutdown(0);
@@ -3613,7 +3610,7 @@ async function run(): Promise<CommanderCommand> {
           getFpsMetrics,
           stats,
           initialState
-        }, getWorktreePaths(getOriginalCwd()), {
+        }, getWorktreePaths(getProjectRoot()), {
           ...sessionConfig,
           initialSearchQuery: searchTerm,
           forkSession: options.forkSession,
@@ -3932,6 +3929,7 @@ async function run(): Promise<CommanderCommand> {
         });
         if (session.workDir) {
           setOriginalCwd(session.workDir);
+          setProjectRoot(session.workDir);
           setCwdState(session.workDir);
         }
         setDirectConnectServerUrl(serverUrl);

@@ -3,7 +3,7 @@ import { feature } from 'bun:bundle';
 import { dirname } from 'path';
 import React from 'react';
 import { useTerminalSize } from 'src/hooks/useTerminalSize.js';
-import { getOriginalCwd, switchSession } from '../bootstrap/state.js';
+import { getProjectRoot, switchSession } from '../bootstrap/state.js';
 import type { Command } from '../commands.js';
 import { LogSelector } from '../components/LogSelector.js';
 import { Spinner } from '../components/Spinner.js';
@@ -192,7 +192,7 @@ export function ResumeConversation({
           } = require('../tools/AgentTool/loadAgentsDir.js') as typeof import('../tools/AgentTool/loadAgentsDir.js');
           /* eslint-enable @typescript-eslint/no-require-imports */
           getAgentDefinitionsWithOverrides.cache.clear?.();
-          const freshAgentDefs = await getAgentDefinitionsWithOverrides(getOriginalCwd());
+          const freshAgentDefs = await getAgentDefinitionsWithOverrides(getProjectRoot());
           setAppState(prev_0 => ({
             ...prev_0,
             agentDefinitions: {

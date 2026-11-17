@@ -167,6 +167,13 @@ export type WorktreeSession = {
   creationDurationMs?: number
   /** True if git sparse-checkout was applied via settings.worktree.sparsePaths. */
   usedSparsePaths?: boolean
+  /**
+   * True when entering this worktree also moved the session's projectRoot
+   * (--worktree startup). Recorded at entry because both mutable roots can
+   * change before exit (a mid-session /cd moves originalCwd), so exit must
+   * not re-derive ownership by comparing them.
+   */
+  projectRootIsWorktree?: boolean
 }
 
 let currentWorktreeSession: WorktreeSession | null = null

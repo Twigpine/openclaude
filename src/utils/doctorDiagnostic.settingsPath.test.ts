@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
-import { getOriginalCwd, setOriginalCwd } from '../bootstrap/state.js'
+import { getOriginalCwd, getProjectRoot, setOriginalCwd, setProjectRoot } from '../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -10,7 +10,8 @@ import {
 import { detectStaleProjectSettingsPaths } from './doctorDiagnostic.js'
 
 let tempDir: string | null = null
-let originalCwd: string | null = null
+let originalCwd: string | null
+let originalProjectRoot: string | null = null
 
 function createProject(): string {
   tempDir = mkdtempSync(join(tmpdir(), 'openclaude-settings-drift-'))
@@ -25,13 +26,16 @@ function writeJson(path: string): void {
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/doctorDiagnostic.settingsPath.test.ts')
   originalCwd = getOriginalCwd()
+  originalProjectRoot = getProjectRoot()
 })
 
 afterEach(() => {
   try {
     if (originalCwd) {
       setOriginalCwd(originalCwd)
+      if (originalProjectRoot) setProjectRoot(originalProjectRoot)
       originalCwd = null
+      originalProjectRoot = null
     }
     if (tempDir) {
       rmSync(tempDir, { recursive: true, force: true })
@@ -91,6 +95,7 @@ describe('detectStaleProjectSettingsPaths', () => {
     const project = createProject()
     writeJson(join(project, '.claude', 'settings.json'))
     setOriginalCwd(project)
+    setProjectRoot(project)
 
     await expect(detectStaleProjectSettingsPaths()).resolves.toBeNull()
   })
