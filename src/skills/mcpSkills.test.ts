@@ -133,6 +133,20 @@ describe('fetchMcpSkillsForClient privilege stripping', () => {
             return { resources: [{ uri: 'skill://held', name: 'held' }] }
           }
           if (request.method === 'resources/read') {
+            // Without a signal the read answers at once, so a retry after
+            // the aborted fetch can discover the skill instead of reusing
+            // the aborted empty result.
+            if (!options?.signal) {
+              return {
+                contents: [
+                  {
+                    uri: 'skill://held',
+                    mimeType: 'text/markdown',
+                    text: '---\nname: held\ndescription: Held skill\n---\n# Held\n',
+                  },
+                ],
+              }
+            }
             if (options?.signal?.aborted) {
               throw new DOMException('aborted', 'AbortError')
             }
@@ -161,6 +175,13 @@ describe('fetchMcpSkillsForClient privilege stripping', () => {
     }
     controller.abort()
     await expect(commands).resolves.toEqual([])
+    // A cancelled fetch must not poison the cache: the next fetch for this
+    // server re-lists instead of reusing the aborted empty result — so a
+    // second unsignalled fetch discovers the skill the first one could not
+    // read.
+    const retried = await fetchMcpSkillsForClient(client)
+    expect(retried).toHaveLength(1)
+    expect(retried[0]?.name).toBe('mcp__aborted-skill-read-server__held')
   }, 10_000)
 
   test('discovers and reads a skill resource that appears only on page two', async () => {

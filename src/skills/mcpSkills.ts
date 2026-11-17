@@ -86,6 +86,14 @@ async function readSkillResource(
       allowedTools: [],
     })
   } catch (error) {
+    // A read the new signal cancelled is not an ordinary skippable
+    // failure: swallowing it lets the outer fetch fulfill with the
+    // empty/partial result and cache it, so the next fetch reuses the
+    // aborted result instead of re-listing. Rethrow so the outer catch
+    // evicts the entry and the retry re-lists.
+    if (options?.signal?.aborted || isAbortError(error)) {
+      throw error
+    }
     logForDebugging(
       `[mcp-skills] failed to read skill resource ${resource.uri} on ${client.name}: ${String(error)}`,
       { level: 'warn' },
