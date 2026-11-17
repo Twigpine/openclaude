@@ -39,6 +39,7 @@ import {
   checkPlanModePermissions,
   checkRuleBasedPermissions,
   DENY_INSTEAD_OF_PROMPTING_REASON,
+  getSuppressedPermissionAsk,
   hasPermissionsToUseTool,
   enforceForcedAllowWriteBoundary,
   revalidatePermissionRequestAllow,
@@ -613,10 +614,9 @@ export class StructuredIO {
       ) {
         return suppressedResult
       }
-      const suggestions =
-        'suggestions' in suppressedResult
-          ? suppressedResult.suggestions
-          : undefined
+      const suppressedAsk = getSuppressedPermissionAsk(suppressedResult)
+      const suggestions = suppressedAsk?.suggestions ??
+        ('suggestions' in suppressedResult ? suppressedResult.suggestions : undefined)
       const blockedPath =
         'blockedPath' in suppressedResult
           ? suppressedResult.blockedPath
@@ -641,7 +641,7 @@ export class StructuredIO {
         const hookPromise = executePermissionRequestHooksForSDK(
           tool,
           toolUseID,
-          input,
+          suppressedAsk?.updatedInput ?? input,
           toolUseContext,
           suggestions,
         ).then(decision => ({ source: 'hook' as const, decision }))

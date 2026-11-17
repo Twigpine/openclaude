@@ -396,7 +396,7 @@ function createPermissionContext(
       for await (const hookResult of executePermissionRequestHooks(
         tool.name,
         toolUseID,
-        input,
+        candidateInput,
         toolUseContext,
         permissionMode,
         suggestions,

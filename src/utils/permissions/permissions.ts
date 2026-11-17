@@ -154,16 +154,19 @@ export function enforceForcedAllowWriteBoundary(
   )
 }
 
-/** A forced ask can still be answered by a hook without showing a prompt. */
-export async function resolveSuppressedForcedAsk(
+/** Give automatic hooks a chance to answer before a prompt denial stands. */
+export async function resolvePermissionPromptSuppression(
   tool: Tool,
   input: Record<string, unknown>,
   context: ToolUseContext,
   toolUseID: string,
-  ask: PermissionAskDecision,
+  decision: PermissionDecision,
 ): Promise<PermissionDecision> {
-  const decision = suppressPromptIfConfigured(tool, ask)
-  if (decision.behavior !== 'deny') return decision
+  const result = decision.behavior === 'ask'
+    ? suppressPromptIfConfigured(tool, decision)
+    : decision
+  const ask = getSuppressedPermissionAsk(result)
+  if (!ask) return result
 
   const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
     tool,
@@ -173,7 +176,7 @@ export async function resolveSuppressedForcedAsk(
     context.getAppState().toolPermissionContext.mode,
     ask.suggestions,
   )
-  return hookDecision ?? decision
+  return hookDecision ?? result
 }
 
 function commitPermissionRequestUpdates(
@@ -275,20 +278,38 @@ export async function revalidatePermissionRequestAllow(
 export const DENY_INSTEAD_OF_PROMPTING_REASON =
   'permissions.denyInsteadOfPrompting is enabled'
 
+// Keep the effective request available to local hook dispatch without adding
+// approval input or suggestions to the serialized denial.
+const suppressedPermissionAsk = Symbol('suppressedPermissionAsk')
+type SuppressionDeny = PermissionDenyDecision & {
+  [suppressedPermissionAsk]: PermissionAskDecision
+}
+
+export function getSuppressedPermissionAsk(
+  decision: PermissionDecision,
+): PermissionAskDecision | undefined {
+  return suppressedPermissionAsk in decision
+    ? (decision as SuppressionDeny)[suppressedPermissionAsk]
+    : undefined
+}
+
 export function suppressPromptIfConfigured<T extends PermissionDecision>(
   tool: Tool,
   res: T,
 ): PermissionDenyDecision | T {
-  return getInitialSettings().permissions?.denyInsteadOfPrompting
-    ? {
-        behavior: 'deny',
-        decisionReason: {
-          type: 'other',
-          reason: DENY_INSTEAD_OF_PROMPTING_REASON,
-        },
-        message: `${tool.name} requires permission, but ${DENY_INSTEAD_OF_PROMPTING_REASON}`,
-      }
-    : res
+  if (res.behavior !== 'ask' || !getInitialSettings().permissions?.denyInsteadOfPrompting) {
+    return res
+  }
+  const denial: SuppressionDeny = {
+    behavior: 'deny',
+    decisionReason: {
+      type: 'other',
+      reason: DENY_INSTEAD_OF_PROMPTING_REASON,
+    },
+    message: `${tool.name} requires permission, but ${DENY_INSTEAD_OF_PROMPTING_REASON}`,
+    [suppressedPermissionAsk]: res,
+  }
+  return denial
 }
 
 import {

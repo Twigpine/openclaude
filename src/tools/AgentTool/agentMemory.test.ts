@@ -4,7 +4,7 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import { getAgentMemoryRoot } from './agentMemory.js'
+import { getAgentMemoryRoot, isAgentMemoryPath } from './agentMemory.js'
 
 describe('getAgentMemoryRoot with CLAUDE_CODE_REMOTE_MEMORY_DIR', () => {
   // The configured base itself contains the agent-memory-local segment. The
@@ -51,17 +51,9 @@ describe('getAgentMemoryRoot with CLAUDE_CODE_REMOTE_MEMORY_DIR', () => {
   })
 
   test('a marker nested deeper than one project segment is rejected', () => {
-    expect(
-      getAgentMemoryRoot(
-        join(
-          projectsRoot,
-          'a',
-          'b',
-          'agent-memory-local',
-          'file.txt',
-        ),
-      ),
-    ).toBeUndefined()
+    const path = join(projectsRoot, 'a', 'b', 'agent-memory-local', 'file.txt')
+    expect(getAgentMemoryRoot(path)).toBeUndefined()
+    expect(isAgentMemoryPath(path)).toBe(true)
   })
 
   test('paths outside the projects root are not local scope', () => {

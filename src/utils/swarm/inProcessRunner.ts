@@ -102,7 +102,7 @@ import {
   enforceForcedAllowWriteBoundary,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
-  resolveSuppressedForcedAsk,
+  resolvePermissionPromptSuppression,
 } from '../permissions/permissions.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { sleep } from '../sleep.js'
@@ -212,7 +212,9 @@ export function createInProcessCanUseTool(
 
     // Pass through allow/deny decisions directly
     if (result.behavior !== 'ask') {
-      return result
+      return resolvePermissionPromptSuppression(
+        tool, input, toolUseContext, toolUseID, result,
+      )
     }
 
     // For bash commands, try classifier auto-approval before showing leader dialog.
@@ -244,16 +246,14 @@ export function createInProcessCanUseTool(
       }
     }
 
-    if (forceDecision?.behavior === 'ask' && !shouldBypassForcedAsk) {
-      const decision = await resolveSuppressedForcedAsk(
-        tool,
-        input,
-        toolUseContext,
-        toolUseID,
-        result,
-      )
-      if (decision.behavior !== 'ask') return decision
-    }
+    const decision = await resolvePermissionPromptSuppression(
+      tool,
+      input,
+      toolUseContext,
+      toolUseID,
+      result,
+    )
+    if (decision.behavior !== 'ask') return decision
 
     // Check if aborted before showing UI
     if (abortController.signal.aborted) {

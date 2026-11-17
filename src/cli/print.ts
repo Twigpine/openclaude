@@ -145,7 +145,7 @@ import type { CanUseToolFn } from 'src/hooks/useCanUseTool.js'
 import {
   enforceForcedAllowWriteBoundary,
   hasPermissionsToUseTool,
-  resolveSuppressedForcedAsk,
+  resolvePermissionPromptSuppression,
 } from 'src/utils/permissions/permissions.js'
 import { safeParseJSON } from 'src/utils/json.js'
 import {
@@ -4375,24 +4375,23 @@ export function createCanUseToolWithPermissionPrompt(
     const shouldBypassForcedAsk =
       forceDecision?.behavior === 'ask' &&
       toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
-    const mainPermissionResult =
+    const decision =
       forceDecision !== undefined && !shouldBypassForcedAsk
-        ? forceDecision.behavior === 'ask'
-          ? await resolveSuppressedForcedAsk(
-              tool,
-              input,
-              toolUseContext,
-              toolUseId,
-              forceDecision,
-            )
-          : enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
+        ? enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
         : await hasPermissionsToUseTool(
-        tool,
-        input,
-        toolUseContext,
-        assistantMessage,
-        toolUseId,
-      )
+            tool,
+            input,
+            toolUseContext,
+            assistantMessage,
+            toolUseId,
+          )
+    const mainPermissionResult = await resolvePermissionPromptSuppression(
+      tool,
+      input,
+      toolUseContext,
+      toolUseId,
+      decision,
+    )
 
     // If the tool is allowed or denied, return the result
     if (
@@ -4513,22 +4512,22 @@ export function getCanUseToolFn(
       const shouldBypassForcedAsk =
         forceDecision?.behavior === 'ask' &&
         toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
-      return forceDecision !== undefined && !shouldBypassForcedAsk
-        ? forceDecision.behavior === 'ask'
-          ? resolveSuppressedForcedAsk(
+      const decision =
+        forceDecision !== undefined && !shouldBypassForcedAsk
+          ? enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
+          : await hasPermissionsToUseTool(
               tool,
               input,
               toolUseContext,
+              assistantMessage,
               toolUseId,
-              forceDecision,
             )
-          : enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
-        : await hasPermissionsToUseTool(
+      return resolvePermissionPromptSuppression(
         tool,
         input,
         toolUseContext,
-        assistantMessage,
         toolUseId,
+        decision,
       )
     }
   }

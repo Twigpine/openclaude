@@ -7,13 +7,15 @@ import React from 'react'
 // context resolves the stub: yields a PermissionRequest allow when set.
 let hookDecision: { behavior: 'allow' } | undefined
 let beforeHookDecision: (() => void) | undefined
+let hookInput: unknown
 const realHooks = await import(
   `../utils/hooks.js?interactiveSuppressionActual=${Date.now()}-${Math.random()}`
 )
 mock.module('../utils/hooks.js', () => ({
   ...realHooks,
-  executePermissionRequestHooks: async function* () {
+  executePermissionRequestHooks: async function* (_name: string, _id: string, input: unknown) {
     if (hookDecision) {
+      hookInput = input
       await Promise.resolve()
       beforeHookDecision?.()
       yield { permissionRequestResult: hookDecision }
@@ -135,6 +137,7 @@ beforeEach(async () => {
   await acquireSharedMutationLock('hooks/useCanUseTool.suppression.test.tsx')
   canUseTool = undefined
   hookDecision = undefined
+  hookInput = undefined
 })
 
 afterEach(() => {
@@ -238,16 +241,21 @@ test('a forced ask under suppression still lets a PermissionRequest hook answer'
   try {
     const result = await fn(
       tool,
-      {},
+      { target: 'original' },
       context(),
       assistantMessage,
       'interactive-forced-ask-hook',
       {
         behavior: 'ask',
         message: 'SuppressionProbeTool requires permission',
+        updatedInput: { target: 'replacement' },
       } as unknown as PermissionDecision,
     )
-    expect(result.behavior).toBe('allow')
+    expect(hookInput).toEqual({ target: 'replacement' })
+    expect(result).toMatchObject({
+      behavior: 'allow',
+      updatedInput: { target: 'replacement' },
+    })
   } finally {
     denyInsteadOfPrompting = false
     hookDecision = undefined

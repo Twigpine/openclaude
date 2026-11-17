@@ -58,6 +58,7 @@ beforeAll(async () => {
               unused as persistPermissionUpdates, unused as applyPermissionUpdatesToLiveContext,
               unused as suppressPromptIfConfigured, unused as checkWriteBoundaryForAskRule,
               unused as enforceForcedAllowWriteBoundary, unused as revalidatePermissionRequestAllow,
+              unused as getSuppressedPermissionAsk,
               unused as applyPermissionUpdates, unused as runPermissionRequestHooksForHeadlessAgent,
               unused as DENY_INSTEAD_OF_PROMPTING_REASON,
               unused as notifySessionStateChanged

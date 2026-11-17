@@ -772,7 +772,7 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     }
   })
 
-  test('forced asks respect suppression in print mode and in-process workers', async () => {
+  test('print, structured IO, and worker suppression give hooks the effective ask', async () => {
     const { createCanUseToolWithPermissionPrompt, getCanUseToolFn } =
       await import('../../cli/print.js')
     const { createInProcessCanUseTool } = await import('../swarm/inProcessRunner.js')
@@ -795,21 +795,26 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     })
     const io = new StructuredIO((async function* () {})())
     const noPrompt = getCanUseToolFn(undefined, io, () => [])
+    const originalInput = { file_path: join(projectDir, 'original.txt') }
+    const updatedInput = { file_path: join(projectDir, 'replacement.txt') }
+    const ask = { behavior: 'ask', message: 'approval required', updatedInput } as const
+    const askWrite = { ...writeTool, checkPermissions: async () => ask }
     let prompts = 0
     registerLeaderToolUseConfirmQueue(() => { prompts++ })
     denyInsteadOfPrompting = true
     try {
       const customPrompt = createCanUseToolWithPermissionPrompt(prompt as never)
-      for (const canUseTool of [noPrompt, customPrompt, worker]) {
-        const run = () => canUseTool(
-          writeTool, { file_path: join(projectDir, 'note.txt') },
-          mutable.ctx, {} as never, 'forced-ask',
-          { behavior: 'ask', message: 'approval required' },
-        )
-        expect(await run()).toMatchObject({ behavior: 'deny' })
-        hookPermissionResult = { behavior: 'allow' }
-        expect(await run()).toMatchObject({ behavior: 'allow' })
-        hookPermissionResult = undefined
+      for (const canUseTool of [noPrompt, customPrompt, worker, io.createCanUseTool()]) {
+        for (const forceDecision of [ask, undefined]) {
+          const run = () => canUseTool(
+            askWrite, originalInput, mutable.ctx, {} as never, 'suppressed-ask',
+            forceDecision,
+          )
+          expect(await run()).toMatchObject({ behavior: 'deny' })
+          hookPermissionResult = { behavior: 'allow' }
+          expect(await run()).toMatchObject({ behavior: 'allow', updatedInput })
+          hookPermissionResult = undefined
+        }
       }
       expect(prompts).toBe(0)
       denyInsteadOfPrompting = false
