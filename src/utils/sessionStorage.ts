@@ -6631,8 +6631,10 @@ export async function getLastSessionLog(
   // changes what sessionMessagesDestination resolves to, and priming under
   // the new directory's key would install this file's UUIDs there — a later
   // recordTranscript into the new directory would then skip entries its
-  // transcript does not contain (#2489). The load and the priming both use
-  // this one value, so they can never drift apart.
+  // transcript does not contain (#2489). The load, the priming, and the
+  // returned fullPath all use this one value, so they can never drift apart:
+  // resolving fullPath after the await would pair the old directory's
+  // messages with the new directory's transcript path.
   const destination = sessionMessagesDestination(sessionId)
   // Single read: load all session data at once instead of reading the file twice
   const {
@@ -6684,7 +6686,7 @@ export async function getLastSessionLog(
       customTitle,
       buildFileHistorySnapshotChain(fileHistorySnapshots, transcript),
       tag,
-      getTranscriptPathForSession(sessionId),
+      destination,
       buildAttributionSnapshotChain(attributionSnapshots, transcript),
       agentSetting,
       contentReplacements.get(sessionId) ?? [],

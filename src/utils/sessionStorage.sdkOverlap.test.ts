@@ -1863,7 +1863,10 @@ test('getLastSessionLog does not prime the second directory\u2019s dedup cache w
   // same id to a second project directory while the read is pending, the
   // priming installs the first directory's UUIDs under the second
   // directory's key — and a later recordTranscript into the second
-  // directory skips entries its transcript does not contain.
+  // directory skips entries its transcript does not contain. The same
+  // drift also affected the returned fullPath: resolving it after the
+  // await paired the first directory's messages with the second
+  // directory's transcript path.
   const sharedId = '31000000-0000-4000-8000-00000000000a'
   const sharedUuid = '41000000-0000-4000-8000-00000000000a'
   const dirA = join(testRoot, 'workspace-a')
@@ -1884,6 +1887,9 @@ test('getLastSessionLog does not prime the second directory\u2019s dedup cache w
     switchSession(sharedId as never, dirC)
     const log = await pending
     expect(log).not.toBeNull()
+    // fullPath must stay with the directory the messages were loaded
+    // from, not follow the session to the second directory.
+    expect(log?.fullPath).toBe(join(dirA, `${sharedId}.jsonl`))
   })
 
   // The same UUID replayed into the second directory must land there.
