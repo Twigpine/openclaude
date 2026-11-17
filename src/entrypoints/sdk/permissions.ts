@@ -14,6 +14,7 @@ import {
   checkWriteBoundaryForAskRule,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
+  runPermissionRequestHooksForHeadlessAgent,
   suppressPromptIfConfigured,
 } from '../../utils/permissions/permissions.js'
 import {
@@ -390,6 +391,20 @@ export function createExternalCanUseTool(
     // No user callback — if host registered an onPermissionRequest callback,
     // call it directly and await external resolution with timeout.
     if (toolUseID && onPermissionRequest) {
+      // PermissionRequest hooks answer before any host prompt, matching the
+      // structured-IO ordering: a hook decision stands on its own and no
+      // permission_request is emitted for it.
+      const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
+        tool,
+        effectiveInput,
+        toolUseID,
+        toolUseContext,
+        toolUseContext.getAppState().toolPermissionContext.mode,
+        undefined,
+      )
+      if (hookDecision) {
+        return hookDecision
+      }
       // An external permission_request IS the prompt this setting exists to
       // suppress; deny up front instead of asking the host.
       const suppressionDeny = suppressPromptIfConfigured(tool, {

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -36,11 +36,14 @@ let hookPermissionResult:
   | {
       behavior: 'allow'
       updatedInput?: { [key: string]: unknown }
-      updatedPermissions?: {
-        type: 'removeDirectories'
-        directories: string[]
-        destination: 'session'
-      }[]
+      updatedPermissions?: (
+        | {
+            type: 'removeDirectories'
+            directories: string[]
+            destination: 'session'
+          }
+        | { type: 'setMode'; mode: 'plan'; destination: 'session' }
+      )[]
     }
   | undefined
 const realHooks = await import(
@@ -67,6 +70,43 @@ mock.module('../../services/analytics/growthbook.js', () => ({
       : realGrowthbook.checkStatsigFeatureGate_CACHED_MAY_BE_STALE(gateName),
 }))
 
+const realPermissions = await import(
+  `./permissions.js?blockWritesPermissionsActual=${Date.now()}-${Math.random()}`
+)
+// When set, the race-guard revalidation removes this directory from the live
+// permission context while the caller awaits it — exercising the post-await
+// boundary recheck.
+let removeDirDuringRevalidation: string | null = null
+mock.module('./permissions.js', () => ({
+  ...realPermissions,
+  revalidatePlanModePermissionAllowWithRaceGuard: (async (
+    ...args: unknown[]
+  ) => {
+    if (removeDirDuringRevalidation) {
+      const dir = removeDirDuringRevalidation
+      const toolUseContext = args[3] as ToolUseContext
+      toolUseContext.setAppState(prev => {
+        const dirs = new Map(
+          prev.toolPermissionContext.additionalWorkingDirectories,
+        )
+        dirs.delete(dir)
+        return {
+          ...prev,
+          toolPermissionContext: {
+            ...prev.toolPermissionContext,
+            additionalWorkingDirectories: dirs,
+          },
+        }
+      })
+    }
+    return (
+      realPermissions.revalidatePlanModePermissionAllowWithRaceGuard as (
+        ...a: unknown[]
+      ) => unknown
+    )(...args)
+  }) as typeof realPermissions.revalidatePlanModePermissionAllowWithRaceGuard,
+}))
+
 const { checkWritePermissionForTool, getScratchpadDir } = await import(
   './filesystem.js'
 )
@@ -82,6 +122,10 @@ const { executePermissionRequestHooksForSDK, StructuredIO } = await import(
 const { createExternalCanUseTool } = await import(
   '../../entrypoints/sdk/permissions.js'
 )
+const { permissionPromptToolResultToPermissionDecision } = await import(
+  './PermissionPromptToolResultSchema.js'
+)
+const permissionSetupModule = await import('./permissionSetup.js')
 
 const writeTool = createToolFixture(
   z.object({ file_path: z.string() }),
@@ -126,6 +170,35 @@ function useContext(
       },
     },
   } as unknown as ToolUseContext
+}
+
+// Unlike useContext, actually applies setAppState updates so tests can
+// observe whether a denied path ever applied or persisted anything.
+function useMutableContext(toolPermissionContext: ToolPermissionContext): {
+  ctx: ToolUseContext
+  setAppStateCalls: () => number
+} {
+  let current = toolPermissionContext
+  let calls = 0
+  const ctx = {
+    abortController: new AbortController(),
+    getAppState: () => ({ toolPermissionContext: current }),
+    setAppState: (
+      fn: (prev: { toolPermissionContext: ToolPermissionContext }) => {
+        toolPermissionContext: ToolPermissionContext
+      },
+    ) => {
+      calls++
+      current = fn({ toolPermissionContext: current }).toolPermissionContext
+    },
+    options: {
+      agentDefinitions: {
+        activeAgents: [],
+        allAgents: [],
+      },
+    },
+  } as unknown as ToolUseContext
+  return { ctx, setAppStateCalls: () => calls }
 }
 
 describe('permissions.blockWritesOutsideWorkingDirectories', () => {
@@ -628,6 +701,284 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
       if (result?.behavior === 'deny') {
         expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
       }
+    } finally {
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('boundary validation does not fire live mode-transition effects', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    // A hook bundles a mode change with the directory removal that dooms its
+    // own allow. The staged check must not run live transitions: on deny,
+    // applyPermissionUpdatesToLiveContext must never be reached.
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(outsideDir, 'hooked.txt') },
+      updatedPermissions: [
+        { type: 'setMode', mode: 'plan', destination: 'session' },
+        {
+          type: 'removeDirectories',
+          directories: [outsideDir],
+          destination: 'session',
+        },
+      ],
+    }
+    const liveApplySpy = spyOn(
+      permissionSetupModule,
+      'applyPermissionUpdatesToLiveContext',
+    )
+    try {
+      const toolPermissionContext = permissionContext(
+        'default',
+        new Map([[outsideDir, { path: outsideDir, source: 'session' }]]),
+      )
+      const result = await executePermissionRequestHooksForSDK(
+        writeTool,
+        'blockwrites-staged-pure',
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(toolPermissionContext),
+        undefined,
+      )
+      expect(result?.behavior).toBe('deny')
+      expect(liveApplySpy).not.toHaveBeenCalled()
+    } finally {
+      liveApplySpy.mockRestore()
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('a headless hook cannot remove a working directory and allow a write under it', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(outsideDir, 'hooked.txt') },
+      updatedPermissions: [
+        {
+          type: 'removeDirectories',
+          directories: [outsideDir],
+          destination: 'session',
+        },
+      ],
+    }
+    try {
+      const askWriteTool = createToolFixture(
+        z.object({ file_path: z.string() }),
+        {
+          name: 'Write',
+          getPath(input: { file_path: string }) {
+            return input.file_path
+          },
+          async checkPermissions(input) {
+            return {
+              behavior: 'ask' as const,
+              message: 'Write requires approval',
+              updatedInput: input,
+            }
+          },
+        },
+      )
+      const toolPermissionContext: ToolPermissionContext = {
+        ...permissionContext(
+          'default',
+          new Map([[outsideDir, { path: outsideDir, source: 'session' }]]),
+        ),
+        shouldAvoidPermissionPrompts: true,
+      }
+      const mutable = useMutableContext(toolPermissionContext)
+      const result = await hasPermissionsToUseTool(
+        askWriteTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        mutable.ctx,
+        {} as Parameters<typeof hasPermissionsToUseTool>[3],
+        'blockwrites-headless-remove-dir',
+      )
+      if (result.behavior !== 'deny') {
+        throw new Error(`expected deny, got ${result.behavior}`)
+      }
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      // The removal must never have been applied to session state.
+      expect(mutable.setAppStateCalls()).toBe(0)
+    } finally {
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('an interactive hook allow cannot remove a working directory and allow a write under it', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(outsideDir, 'hooked.txt') },
+      updatedPermissions: [
+        {
+          type: 'removeDirectories',
+          directories: [outsideDir],
+          destination: 'session',
+        },
+      ],
+    }
+    let contextWrites = 0
+    try {
+      const toolPermissionContext = permissionContext(
+        'default',
+        new Map([[outsideDir, { path: outsideDir, source: 'session' }]]),
+      )
+      const permissionCtx = createPermissionContext(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(toolPermissionContext),
+        { message: { id: 'blockwrites-hook-remove-dir' } } as never,
+        'blockwrites-hook-remove-dir',
+        () => {
+          contextWrites++
+        },
+      )
+      const result = await permissionCtx.runHooks(undefined, undefined)
+      expect(result?.behavior).toBe('deny')
+      if (result?.behavior === 'deny') {
+        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      }
+      // persistPermissions applies via the context setter; on deny it must
+      // never run.
+      expect(contextWrites).toBe(0)
+    } finally {
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('a user allow cannot remove a working directory and allow a write under it', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    let contextWrites = 0
+    const toolPermissionContext = permissionContext(
+      'default',
+      new Map([[outsideDir, { path: outsideDir, source: 'session' }]]),
+    )
+    const permissionCtx = createPermissionContext(
+      writeTool,
+      { file_path: join(projectDir, 'inside.txt') },
+      useContext(toolPermissionContext),
+      { message: { id: 'blockwrites-user-remove-dir' } } as never,
+      'blockwrites-user-remove-dir',
+      () => {
+        contextWrites++
+      },
+    )
+    const result = await permissionCtx.handleUserAllow(
+      { file_path: join(outsideDir, 'user-edited.txt') },
+      [
+        {
+          type: 'removeDirectories',
+          directories: [outsideDir],
+          destination: 'session',
+        },
+      ] as never,
+    )
+    expect(result.behavior).toBe('deny')
+    if (result.behavior === 'deny') {
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    }
+    expect(contextWrites).toBe(0)
+  })
+
+  test('a permission-prompt responder cannot remove a working directory and allow a write under it', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const toolPermissionContext = permissionContext(
+      'default',
+      new Map([[outsideDir, { path: outsideDir, source: 'session' }]]),
+    )
+    const mutable = useMutableContext(toolPermissionContext)
+    const result = await permissionPromptToolResultToPermissionDecision(
+      {
+        behavior: 'allow',
+        updatedInput: { file_path: join(outsideDir, 'responder.txt') },
+        updatedPermissions: [
+          {
+            type: 'removeDirectories',
+            directories: [outsideDir],
+            destination: 'session',
+          },
+        ],
+      } as never,
+      writeTool,
+      { file_path: join(projectDir, 'inside.txt') },
+      mutable.ctx,
+    )
+    expect(result.behavior).toBe('deny')
+    if (result.behavior === 'deny') {
+      expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+    }
+    expect(mutable.setAppStateCalls()).toBe(0)
+  })
+
+  test('a write allowed before revalidation is denied when a concurrent update removes its directory', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    // The boundary check before the revalidation await sees addedDir as
+    // working; the concurrent removal lands during the await, so the
+    // post-await recheck against the live context must catch it.
+    removeDirDuringRevalidation = addedDir
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(addedDir, 'hooked.txt') },
+    }
+    try {
+      const toolPermissionContext = permissionContext(
+        'default',
+        new Map([[addedDir, { path: addedDir, source: 'session' }]]),
+      )
+      const mutable = useMutableContext(toolPermissionContext)
+      const result = await executePermissionRequestHooksForSDK(
+        writeTool,
+        'blockwrites-post-await',
+        { file_path: join(projectDir, 'inside.txt') },
+        mutable.ctx,
+        undefined,
+      )
+      expect(result?.behavior).toBe('deny')
+      if (result?.behavior === 'deny') {
+        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+      }
+    } finally {
+      removeDirDuringRevalidation = null
+      hookPermissionResult = undefined
+    }
+  })
+
+  test('PermissionRequest hooks answer before the external permission_request prompt', async () => {
+    hookPermissionResult = {
+      behavior: 'allow',
+      updatedInput: { file_path: join(projectDir, 'inside.txt') },
+    }
+    let emitted = false
+    let registered = false
+    try {
+      const canUseTool = createExternalCanUseTool(
+        undefined,
+        async () => ({
+          behavior: 'deny' as const,
+          message: 'fallback unreached',
+          decisionReason: { type: 'other' as const, reason: 'unreached' },
+        }),
+        {
+          registerPendingPermission: async () => {
+            registered = true
+            return undefined as never
+          },
+          deletePendingPermission: () => {},
+        } as never,
+        () => {
+          emitted = true
+        },
+      )
+      const result = await canUseTool(
+        writeTool,
+        { file_path: join(projectDir, 'inside.txt') },
+        useContext(permissionContext('default')),
+        {} as never,
+        'blockwrites-external-hook',
+      )
+      // The hook decided: no permission_request emission, no pending entry.
+      expect(emitted).toBe(false)
+      expect(registered).toBe(false)
+      expect(result.behavior).toBe('allow')
     } finally {
       hookPermissionResult = undefined
     }

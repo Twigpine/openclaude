@@ -478,7 +478,7 @@ export function getRuleByContentsForToolName(
  * Returns a PermissionDecision if a hook made a decision, or null if no
  * hook provided a decision (caller should proceed to auto-deny).
  */
-async function runPermissionRequestHooksForHeadlessAgent(
+export async function runPermissionRequestHooksForHeadlessAgent(
   tool: Tool,
   input: { [key: string]: unknown },
   toolUseID: string,
@@ -555,6 +555,22 @@ async function runPermissionRequestHooksForHeadlessAgent(
             context.getAppState().toolPermissionContext.mode === 'plan',
         )
         if (permissionUpdates.length) {
+          // A hook can remove a working directory while allowing a write
+          // under it. Stage the updates purely (no live mode transitions)
+          // and revalidate the boundary against the staged context before
+          // anything is applied or persisted.
+          const stagedContext = applyPermissionUpdates(
+            context.getAppState().toolPermissionContext,
+            permissionUpdates,
+          )
+          const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
+            tool,
+            finalInput,
+            stagedContext,
+          )
+          if (postUpdateWriteBoundary) {
+            return postUpdateWriteBoundary
+          }
           // Capture so the narrowing survives into the setAppState callback
           const updatedPermissions = permissionUpdates
           let updatedContext = context.getAppState().toolPermissionContext

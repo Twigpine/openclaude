@@ -18,6 +18,17 @@ mock.module('../utils/hooks.js', () => ({
   },
 }))
 
+let denyInsteadOfPrompting = false
+const realSettings = await import(
+  `../utils/settings/settings.js?interactiveSuppressionSettings=${Date.now()}-${Math.random()}`
+)
+mock.module('../utils/settings/settings.js', () => ({
+  ...realSettings,
+  getInitialSettings: () => ({
+    permissions: { denyInsteadOfPrompting },
+  }),
+}))
+
 const { getSessionId } = await import('../bootstrap/state.js')
 const { createRoot, Text } = await import('../ink.js')
 const { getDefaultAppState } = await import('../state/AppStateStore.js')
@@ -163,6 +174,58 @@ test('the suppression denial stands on the interactive path when no hook decides
       expect(result.message).toContain('denyInsteadOfPrompting')
     }
   } finally {
+    root.unmount()
+  }
+})
+
+test('a forced ask is suppressed on the interactive path when prompts are disabled', async () => {
+  const { root, canUseTool: fn } = await mount()
+  denyInsteadOfPrompting = true
+  try {
+    // The forced ask must pass through suppression before reaching the
+    // interactive dialog; this promise resolving at all proves no prompt
+    // was enqueued, since nothing here answers one.
+    const result = await fn(
+      tool,
+      {},
+      context(),
+      assistantMessage,
+      'interactive-forced-ask',
+      {
+        behavior: 'ask',
+        message: 'SuppressionProbeTool requires permission',
+      } as unknown as PermissionDecision,
+    )
+    expect(result.behavior).toBe('deny')
+    if (result.behavior === 'deny') {
+      expect(result.message).toContain('denyInsteadOfPrompting')
+    }
+  } finally {
+    denyInsteadOfPrompting = false
+    root.unmount()
+  }
+})
+
+test('a forced ask under suppression still lets a PermissionRequest hook answer', async () => {
+  const { root, canUseTool: fn } = await mount()
+  denyInsteadOfPrompting = true
+  hookDecision = { behavior: 'allow' }
+  try {
+    const result = await fn(
+      tool,
+      {},
+      context(),
+      assistantMessage,
+      'interactive-forced-ask-hook',
+      {
+        behavior: 'ask',
+        message: 'SuppressionProbeTool requires permission',
+      } as unknown as PermissionDecision,
+    )
+    expect(result.behavior).toBe('allow')
+  } finally {
+    denyInsteadOfPrompting = false
+    hookDecision = undefined
     root.unmount()
   }
 })

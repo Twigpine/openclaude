@@ -16,7 +16,7 @@ import type { ClassifierResult } from '../utils/permissions/bashClassifier.js';
 import { AbortError } from '../utils/errors.js';
 import { logError } from '../utils/log.js';
 import type { PermissionDecision } from '../utils/permissions/PermissionResult.js';
-import { DENY_INSTEAD_OF_PROMPTING_REASON, hasPermissionsToUseTool } from '../utils/permissions/permissions.js';
+import { DENY_INSTEAD_OF_PROMPTING_REASON, hasPermissionsToUseTool, suppressPromptIfConfigured } from '../utils/permissions/permissions.js';
 import { handleCoordinatorPermission } from './toolPermission/handlers/coordinatorHandler.js';
 import { handleInteractivePermission } from './toolPermission/handlers/interactiveHandler.js';
 import { handleSwarmWorkerPermission } from './toolPermission/handlers/swarmWorkerHandler.js';
@@ -35,7 +35,10 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
         return;
       }
       const shouldBypassForcedAsk = forceDecision?.behavior === "ask" && toolUseContext.getAppState().toolPermissionContext.mode === "fullAccess";
-      const decisionPromise = forceDecision !== undefined && !shouldBypassForcedAsk ? Promise.resolve(forceDecision) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
+      // A forced ask is still a prompt, so denyInsteadOfPrompting suppresses
+      // it. The resulting suppression denial flows into the deny branch,
+      // which lets PermissionRequest hooks answer before it stands.
+      const decisionPromise = forceDecision !== undefined && !shouldBypassForcedAsk ? Promise.resolve(suppressPromptIfConfigured(tool, forceDecision)) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
       return decisionPromise.then(async result => {
         if (result.behavior === "allow") {
           if (ctx.resolveIfAborted(resolve)) {

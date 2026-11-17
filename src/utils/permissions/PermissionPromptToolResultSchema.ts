@@ -8,6 +8,7 @@ import type {
   PermissionDecisionReason,
 } from './PermissionResult.js'
 import {
+  applyPermissionUpdates,
   filterPermissionRequestHookUpdates,
   persistPermissionUpdates,
 } from './PermissionUpdate.js'
@@ -127,6 +128,21 @@ export async function permissionPromptToolResultToPermissionDecision(
         toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
     )
     if (updatedPermissions.length > 0) {
+      // A responder can bundle an allow with updates that remove the
+      // working directory containing the accepted write. Stage purely and
+      // revalidate the boundary before anything is applied or persisted.
+      const stagedContext = applyPermissionUpdates(
+        toolUseContext.getAppState().toolPermissionContext,
+        updatedPermissions,
+      )
+      const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
+        tool,
+        updatedInput,
+        stagedContext,
+      )
+      if (postUpdateWriteBoundary) {
+        return postUpdateWriteBoundary
+      }
       let updatedContext = toolUseContext.getAppState().toolPermissionContext
       toolUseContext.setAppState(prev => {
         updatedContext = applyPermissionUpdatesToLiveContext(

@@ -3,7 +3,8 @@ import { registerBundledSkill } from '../bundledSkills.js'
 const VALIDATE_PALETTE_SCRIPT = `#!/usr/bin/env node
 // Checks a color palette for WCAG contrast failures.
 // Usage: node validate-palette.mjs <hex> [<hex> ...]
-// Exit 0 when every pair passes AA (4.5:1 normal text, 3:1 large text).
+// Exit 0 when every pair clears the graphics threshold (3:1); pairs
+// also reaching 4.5:1 are additionally safe as normal-text pairs.
 
 const toSrgb = hex => {
   const h = hex.replace(/^#/, '')
@@ -38,8 +39,8 @@ let failed = 0
 for (let i = 0; i < args.length; i++) {
   for (let j = i + 1; j < args.length; j++) {
     const r = ratio(luminance(args[i]), luminance(args[j]))
-    const tag = r >= 4.5 ? 'AA ok' : r >= 3 ? 'large text only' : 'FAIL'
-    if (r < 4.5) failed++
+    const tag = r >= 4.5 ? 'AA ok' : r >= 3 ? 'graphics or large text only' : 'FAIL'
+    if (r < 3) failed++
     console.log(args[i] + ' vs ' + args[j] + ': ' + r.toFixed(2) + ':1 ' + tag)
   }
 }
@@ -80,7 +81,7 @@ This skill ships a runnable validator. Run it with the palette's hex colors to c
 
 \`node <skill-base-dir>/validate-palette.mjs "#1f77b4" "#ff7f0e" ...\`
 
-Exit 0 means every pair clears AA normal-text (4.5:1). Pairs between 3:1 and 4.5:1 are tagged 'large text only' but still fail the check; pairs under 3:1 are tagged FAIL. When it fails, adjust lightness or saturation and re-run.
+Exit 0 means every pair clears the WCAG graphics threshold (3:1, non-text contrast for chart marks). Pairs between 3:1 and 4.5:1 are tagged 'graphics or large text only' — fine for data marks and large text, but not as normal-text foreground/background pairs; pairs under 3:1 are tagged FAIL. When it fails, adjust lightness or saturation and re-run.
 `
 
 export function registerDatavizSkill(): void {

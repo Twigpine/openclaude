@@ -89,8 +89,9 @@ test(
         }).exited
       // Black on white is the canonical compliant pair
       expect(await run(['#000000', '#ffffff'])).toBe(0)
-      // A pair between 3:1 and 4.5:1 is large-text only, not full AA
-      expect(await run(['#555555', '#aaaaaa'])).toBe(1)
+      // A pair between 3:1 and 4.5:1 passes as graphics/large-text only
+      // (WCAG non-text threshold), though it is not full AA normal text
+      expect(await run(['#555555', '#aaaaaa'])).toBe(0)
       // Two near-identical grays fail every pair
       expect(await run(['#777777', '#888888'])).toBe(1)
       // No args is a usage error, not a palette failure

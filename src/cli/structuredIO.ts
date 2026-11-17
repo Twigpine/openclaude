@@ -53,10 +53,11 @@ import { normalizeControlMessageKeys } from '../utils/controlMessageCompat.js'
 import { executePermissionRequestHooks } from '../utils/hooks.js'
 import { clearMTLSCache } from '../utils/mtls.js'
 import {
+  applyPermissionUpdates,
   filterPermissionRequestHookUpdates,
   persistPermissionUpdates,
 } from '../utils/permissions/PermissionUpdate.js'
-import { applyPermissionUpdatesToLiveContext } from '../utils/permissions/permissionSetup.js'
+import * as permissionSetup from '../utils/permissions/permissionSetup.js'
 import {
   AGENT_CONFIG_ENV_VARS,
   clearProxyCache,
@@ -935,7 +936,10 @@ export async function executePermissionRequestHooksForSDK(
             toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
         )
         if (permissionUpdates.length > 0) {
-          const updatedContext = applyPermissionUpdatesToLiveContext(
+          // Stage the updates purely so validation does not fire live
+          // mode-transition side effects; those run only on the real apply
+          // after the boundary check passes.
+          const stagedContext = applyPermissionUpdates(
             toolUseContext.getAppState().toolPermissionContext,
             permissionUpdates,
           )
@@ -945,11 +949,15 @@ export async function executePermissionRequestHooksForSDK(
           const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
             tool,
             finalInput,
-            updatedContext,
+            stagedContext,
           )
           if (postUpdateWriteBoundary) {
             return postUpdateWriteBoundary
           }
+          const updatedContext = permissionSetup.applyPermissionUpdatesToLiveContext(
+            toolUseContext.getAppState().toolPermissionContext,
+            permissionUpdates,
+          )
           toolUseContext.setAppState(prev =>
             prev.toolPermissionContext === updatedContext
               ? prev
@@ -970,6 +978,17 @@ export async function executePermissionRequestHooksForSDK(
           )
         if (postUpdatePlanModeDecision) {
           return postUpdatePlanModeDecision
+        }
+        // A concurrent decision can remove a working directory during the
+        // awaited revalidation; the earlier checks predate that await, so
+        // recheck the boundary against the live context before allowing.
+        const liveWriteBoundary = checkWriteBoundaryForAskRule(
+          tool,
+          finalInput,
+          toolUseContext.getAppState().toolPermissionContext,
+        )
+        if (liveWriteBoundary) {
+          return liveWriteBoundary
         }
 
         return {

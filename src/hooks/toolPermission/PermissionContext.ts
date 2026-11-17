@@ -42,6 +42,7 @@ import {
 } from '../../utils/permissions/permissions.js'
 import {
   applyPermissionUpdate,
+  applyPermissionUpdates,
   filterPermissionRequestHookUpdates,
   persistPermissionUpdates,
   supportsPersistence,
@@ -516,6 +517,23 @@ function createPermissionContext(
       if (revalidation) {
         return revalidation
       }
+      if (permissionUpdates.length > 0) {
+        // A user allow can carry updates that remove the working directory
+        // containing the accepted write. Stage purely and revalidate the
+        // boundary before anything is applied or persisted.
+        const stagedContext = applyPermissionUpdates(
+          toolUseContext.getAppState().toolPermissionContext,
+          permissionUpdates,
+        )
+        const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
+          tool,
+          updatedInput,
+          stagedContext,
+        )
+        if (postUpdateWriteBoundary) {
+          return postUpdateWriteBoundary
+        }
+      }
       const acceptedPermanentUpdates =
         await this.persistPermissions(permissionUpdates, planModeWasActive)
       const finalRevalidation =
@@ -580,6 +598,23 @@ function createPermissionContext(
         )
       ) {
         return buildInactivePermissionSessionDecision()
+      }
+      if (permissionUpdates.length > 0) {
+        // A hook allow can carry updates that remove the working directory
+        // containing the accepted write. Stage purely and revalidate the
+        // boundary before anything is applied or persisted.
+        const stagedContext = applyPermissionUpdates(
+          toolUseContext.getAppState().toolPermissionContext,
+          permissionUpdates,
+        )
+        const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
+          tool,
+          finalInput,
+          stagedContext,
+        )
+        if (postUpdateWriteBoundary) {
+          return postUpdateWriteBoundary
+        }
       }
       const acceptedPermanentUpdates =
         await this.persistPermissions(permissionUpdates, planModeWasActive)
