@@ -14,6 +14,7 @@ import {
   formatCommandInputTags,
 } from './messages.js'
 import {
+  assembleFocusRows,
   countUnseenFocusTurns,
   selectFocusView,
   type FocusMessage,
@@ -612,5 +613,102 @@ describe('countUnseenFocusTurns', () => {
     expect(countUnseenFocusTurns(msgs, 0)).toBe(2)
     // Divider past the final response of turn two sees nothing new.
     expect(countUnseenFocusTurns(msgs, 10)).toBe(0)
+  })
+})
+
+describe('assembleFocusRows', () => {
+  function threeTurns(extra: FocusMessage[] = []) {
+    return [
+      prompt('p1', 'one'),
+      say('f1', 'final one'),
+      prompt('p2', 'two'),
+      say('f2', 'final two'),
+      prompt('p3', 'three'),
+      use('u3', 't3', 'Bash'),
+      result('r3', 't3'),
+      ...extra,
+      say('f3', 'final three'),
+    ] as FocusMessage[]
+  }
+  const assemble = (msgs: FocusMessage[]) =>
+    assembleFocusRows(selectFocusView(msgs))
+
+  test('three turns assemble to marker, prompt, summary, final response', () => {
+    const rows = assemble(threeTurns())
+    expect(rows.map(r => r.subtype ?? r.uuid)).toEqual([
+      'focus_marker',
+      'p3',
+      'focus_summary',
+      'f3',
+    ])
+    expect(rows[0]).toMatchObject({ type: 'system', hiddenTurns: 2, compacted: false })
+    expect(rows[2]).toMatchObject({
+      type: 'system',
+      summary: { toolCount: 1, linesAdded: 0, linesRemoved: 0, failed: 0 },
+    })
+  })
+
+  test('an extra tool result keeps both row uuids and changes only the summary', () => {
+    const before = assemble(threeTurns())
+    const after = assemble(
+      threeTurns([use('u3b', 't3b', 'Bash'), result('r3b', 't3b')]),
+    )
+    expect(after[0]!.uuid).toBe(before[0]!.uuid)
+    expect(after[2]!.uuid).toBe(before[2]!.uuid)
+    expect(after[2]!.uuid).not.toBe(before[0]!.uuid)
+    expect((before[2] as { summary: { toolCount: number } }).summary.toolCount).toBe(1)
+    expect((after[2] as { summary: { toolCount: number } }).summary.toolCount).toBe(2)
+  })
+
+  test('a new boundary changes both uuids', () => {
+    const before = assemble(threeTurns())
+    const after = assemble([
+      ...threeTurns(),
+      prompt('p4', 'four'),
+      use('u4', 't4', 'Bash'),
+      result('r4', 't4'),
+    ] as FocusMessage[])
+    expect(after[0]!.uuid).not.toBe(before[0]!.uuid)
+    expect(after[2]!.uuid).not.toBe(before[2]!.uuid)
+  })
+
+  test('no marker when nothing is hidden and not compacted', () => {
+    const rows = assemble([
+      prompt('p1', 'one'),
+      use('u1', 't1', 'Bash'),
+      result('r1', 't1'),
+      say('f1', 'done'),
+    ] as FocusMessage[])
+    expect(rows.map(r => r.subtype ?? r.uuid)).toEqual(['p1', 'focus_summary', 'f1'])
+  })
+
+  test('no summary row when the turn used no tools', () => {
+    const rows = assemble([
+      prompt('p1', 'one'),
+      say('f1', 'final one'),
+      prompt('p2', 'two'),
+      say('f2', 'final two'),
+    ] as FocusMessage[])
+    expect(rows.map(r => r.subtype ?? r.uuid)).toEqual(['focus_marker', 'p2', 'f2'])
+  })
+
+  test('a compaction with no prompt since gets a compacted marker before the boundary and no summary', () => {
+    const boundary = label('c1', createCompactBoundaryMessage('manual', 100))
+    const rows = assemble([
+      prompt('p1', 'one'),
+      say('f1', 'final one'),
+      prompt('p2', 'two'),
+      say('f2', 'final two'),
+      prompt('p3', 'three'),
+      say('f3', 'final three'),
+      boundary,
+    ] as FocusMessage[])
+    expect(rows.map(r => r.subtype ?? r.uuid)).toEqual(['focus_marker', 'compact_boundary'])
+    expect(rows[0]).toMatchObject({ hiddenTurns: 3, compacted: true })
+  })
+
+  test('returns the input unchanged when there is no boundary', () => {
+    const msgs = [say('f1', 'orphan')] as FocusMessage[]
+    expect(assemble(msgs)).toBe(msgs)
   })
 })

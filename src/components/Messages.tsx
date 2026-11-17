@@ -817,7 +817,9 @@ export function shouldRenderStatically(message: RenderableMessage, streamingTool
       {
         // api errors always render dynamically, since we hide
         // them as soon as we see another non-error message.
-        return message.subtype !== 'api_error';
+        // The focus summary updates in place under a stable uuid, so it must
+        // keep re-rendering.
+        return message.subtype !== 'api_error' && message.subtype !== 'focus_summary';
       }
     case 'grouped_tool_use':
       {

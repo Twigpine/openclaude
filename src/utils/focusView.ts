@@ -1,3 +1,4 @@
+import type { UUID } from 'crypto'
 import { stripSystemReminders } from '../components/messageActions.js'
 import { countHunkLines, isFileEditResult } from '../hooks/useTurnDiffs.js'
 import {
@@ -10,6 +11,11 @@ import {
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
   SYNTHETIC_MESSAGES,
 } from './messages.js'
+import { deriveUUID } from './messages/normalize.js'
+import type {
+  SystemFocusMarkerMessage,
+  SystemFocusSummaryMessage,
+} from '../types/message.js'
 
 type FocusBlock = {
   type: string
@@ -29,6 +35,7 @@ export type FocusMessage = {
   type: string
   subtype?: string
   uuid?: string
+  timestamp?: string
   level?: string
   isMeta?: boolean
   isCompactSummary?: boolean
@@ -365,6 +372,45 @@ export function selectFocusView<T extends FocusMessage>(
     summary,
     boundary,
   }
+}
+
+/**
+ * Turns a selection into the final list: the hidden-turns marker directly
+ * before the boundary row and the summary row directly after it, then the
+ * kept rows. Both synthetic uuids derive from the boundary uuid, so they stay
+ * the same while the summary content changes. Returns the input array when
+ * there is no boundary.
+ */
+export function assembleFocusRows<T extends FocusMessage>(
+  selection: FocusSelection<T>,
+): Array<T | SystemFocusMarkerMessage | SystemFocusSummaryMessage> {
+  const { rows, boundary, hiddenTurns, compacted, summary } = selection
+  if (boundary === undefined) return rows
+  const parent = (boundary.uuid ?? '') as UUID
+  const timestamp = boundary.timestamp ?? ''
+  const out: Array<T | SystemFocusMarkerMessage | SystemFocusSummaryMessage> = []
+  if (hiddenTurns > 0 || compacted) {
+    out.push({
+      type: 'system',
+      subtype: 'focus_marker',
+      uuid: deriveUUID(parent, 0),
+      timestamp,
+      hiddenTurns,
+      compacted,
+    })
+  }
+  out.push(rows[0]!)
+  if (summary.toolCount > 0) {
+    out.push({
+      type: 'system',
+      subtype: 'focus_summary',
+      uuid: deriveUUID(parent, 1),
+      timestamp,
+      summary,
+    })
+  }
+  for (let i = 1; i < rows.length; i++) out.push(rows[i]!)
+  return out
 }
 
 /**
