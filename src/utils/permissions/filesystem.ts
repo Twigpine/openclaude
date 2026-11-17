@@ -1811,6 +1811,9 @@ export function checkWriteBoundaryForTool(
     input,
     toolPermissionContext,
   )
+  if (internalEditResult.behavior === 'deny') {
+    return internalEditResult
+  }
   if (internalEditResult.behavior !== 'passthrough') {
     return null
   }
@@ -1837,6 +1840,8 @@ export function checkEditableInternalPath(
   // SECURITY: Normalize path to prevent traversal bypasses via .. segments
   // This is defense-in-depth; individual helper functions also normalize
   const normalizedPath = normalize(absolutePath)
+  const enforceWriteBoundary =
+    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories === true
 
   // Plan files for current session
   if (isSessionPlanFile(normalizedPath)) {
@@ -1854,7 +1859,8 @@ export function checkEditableInternalPath(
   // symlink inside the scratchpad dir from redirecting the write elsewhere.
   if (
     isScratchpadPath(normalizedPath) &&
-    isResolvedPathWithinDir(normalizedPath, getScratchpadDir())
+    (!enforceWriteBoundary ||
+      isResolvedPathWithinDir(normalizedPath, getScratchpadDir()))
   ) {
     return {
       behavior: 'allow',
@@ -1911,11 +1917,14 @@ export function checkEditableInternalPath(
   // Agent memory directory (for self-improving agents). Same resolved
   // containment as the scratchpad: a symlink inside the memory root must not
   // redirect the write outside it.
-  const agentMemoryRoot = getAgentMemoryRoot(normalizedPath)
-  if (
-    agentMemoryRoot !== undefined &&
-    isResolvedPathWithinDir(normalizedPath, agentMemoryRoot)
-  ) {
+  const agentMemoryRoot = enforceWriteBoundary
+    ? getAgentMemoryRoot(normalizedPath)
+    : undefined
+  const isEditableAgentMemory = enforceWriteBoundary
+    ? agentMemoryRoot !== undefined &&
+      isResolvedPathWithinDir(normalizedPath, agentMemoryRoot)
+    : isAgentMemoryPath(normalizedPath)
+  if (isEditableAgentMemory) {
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1933,29 +1942,43 @@ export function checkEditableInternalPath(
   // it can live under ~/.claude/, which is in DANGEROUS_DIRECTORIES.
   // Resolved containment keeps a symlink inside the memory dir from
   // redirecting the write elsewhere.
-  const isWithinAutoMemDir =
-    isAutoMemPath(normalizedPath) &&
-    isResolvedPathWithinDir(normalizedPath, getAutoMemPath())
-  if (isWithinAutoMemDir && isMemoryWriteApprovalRequired()) {
-    return {
-      behavior: 'ask',
-      message: `${PRODUCT_DISPLAY_NAME} wants to save persistent memory. Approve this memory write?`,
-      decisionReason: {
-        type: 'safetyCheck',
-        reason: 'Persistent memory writes require explicit approval',
-        classifierApprovable: false,
-      },
+  if (isAutoMemPath(normalizedPath)) {
+    const withinAutoMemDir =
+      !enforceWriteBoundary ||
+      isResolvedPathWithinDir(normalizedPath, getAutoMemPath())
+    if (isMemoryWriteApprovalRequired()) {
+      // A redirected memory request still needs approval. If its target
+      // leaves both memory and the workspace, the boundary denies it.
+      if (
+        !withinAutoMemDir &&
+        toolPermissionContext &&
+        !writePathsInsideWorkingDirectories(
+          getPathsForPermissionCheck(absolutePath),
+          allWorkingDirectories(toolPermissionContext),
+        )
+      ) {
+        return writeBoundaryDenial(absolutePath)
+      }
+      return {
+        behavior: 'ask',
+        message: `${PRODUCT_DISPLAY_NAME} wants to save persistent memory. Approve this memory write?`,
+        decisionReason: {
+          type: 'safetyCheck',
+          reason: 'Persistent memory writes require explicit approval',
+          classifierApprovable: false,
+        },
+      }
     }
-  }
 
-  if (!hasAutoMemPathOverride() && isWithinAutoMemDir) {
-    return {
-      behavior: 'allow',
-      updatedInput: input,
-      decisionReason: {
-        type: 'other',
-        reason: 'auto memory files are allowed for writing',
-      },
+    if (!hasAutoMemPathOverride() && withinAutoMemDir) {
+      return {
+        behavior: 'allow',
+        updatedInput: input,
+        decisionReason: {
+          type: 'other',
+          reason: 'auto memory files are allowed for writing',
+        },
+      }
     }
   }
 
@@ -1975,7 +1998,7 @@ export function checkEditableInternalPath(
     // working directories, or the allow becomes an outside-dir write.
     if (
       toolPermissionContext &&
-      getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+      enforceWriteBoundary &&
       !writePathsInsideWorkingDirectories(
         getPathsForPermissionCheck(absolutePath),
         allWorkingDirectories(toolPermissionContext),
@@ -2006,7 +2029,7 @@ export function checkEditableInternalPath(
     // directories must not ride this carve-out past the boundary.
     if (
       toolPermissionContext &&
-      getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+      enforceWriteBoundary &&
       !writePathsInsideWorkingDirectories(
         getPathsForPermissionCheck(absolutePath),
         allWorkingDirectories(toolPermissionContext),

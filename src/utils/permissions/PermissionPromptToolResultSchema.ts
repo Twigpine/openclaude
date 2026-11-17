@@ -7,15 +7,10 @@ import type {
   PermissionDecision,
   PermissionDecisionReason,
 } from './PermissionResult.js'
-import {
-  applyPermissionUpdates,
-  filterPermissionRequestHookUpdates,
-  persistPermissionUpdates,
-} from './PermissionUpdate.js'
+import { filterPermissionRequestHookUpdates } from './PermissionUpdate.js'
 import { permissionUpdateSchema } from './PermissionUpdateSchema.js'
-import { applyPermissionUpdatesToLiveContext } from './permissionSetup.js'
 import {
-  checkWriteBoundaryForAskRule,
+  revalidatePermissionRequestAllow,
   revalidatePlanModePermissionAllowWithRaceGuard,
 } from './permissions.js'
 
@@ -127,60 +122,15 @@ export async function permissionPromptToolResultToPermissionDecision(
       enforcePlanMode ||
         toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
     )
-    if (updatedPermissions.length > 0) {
-      // A responder can bundle an allow with updates that remove the
-      // working directory containing the accepted write. Stage purely and
-      // revalidate the boundary before anything is applied or persisted.
-      const stagedContext = applyPermissionUpdates(
-        toolUseContext.getAppState().toolPermissionContext,
-        updatedPermissions,
-      )
-      const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
-        tool,
-        updatedInput,
-        stagedContext,
-      )
-      if (postUpdateWriteBoundary) {
-        return postUpdateWriteBoundary
-      }
-      let updatedContext = toolUseContext.getAppState().toolPermissionContext
-      toolUseContext.setAppState(prev => {
-        updatedContext = applyPermissionUpdatesToLiveContext(
-          prev.toolPermissionContext,
-          updatedPermissions,
-        )
-        if (prev.toolPermissionContext === updatedContext) return prev
-        return {
-          ...prev,
-          toolPermissionContext: updatedContext,
-        }
-      })
-      persistPermissionUpdates(updatedPermissions)
-    }
-    const postUpdatePlanModeDecision =
-      await revalidatePlanModePermissionAllowWithRaceGuard(
-        tool,
-        input,
-        updatedInput,
-        toolUseContext,
-        enforcePlanMode ||
-          toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
-      )
-    if (postUpdatePlanModeDecision) {
-      return postUpdatePlanModeDecision
-    }
-    // An SDK or mobile responder can allow with an updatedInput outside
-    // the working directories; the write boundary is a hard cap, not a
-    // prompt, so it applies to the accepted input here the same as on
-    // hook allows.
-    const writeBoundary = checkWriteBoundaryForAskRule(
+    const finalRevalidation = await revalidatePermissionRequestAllow(
       tool,
+      input,
       updatedInput,
-      toolUseContext.getAppState().toolPermissionContext,
+      toolUseContext,
+      enforcePlanMode,
+      updatedPermissions,
     )
-    if (writeBoundary) {
-      return writeBoundary
-    }
+    if (finalRevalidation) return finalRevalidation
     const { updatedPermissions: _updatedPermissions, ...allowResult } = result
     return {
       ...allowResult,

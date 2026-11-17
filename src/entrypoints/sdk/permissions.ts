@@ -12,6 +12,7 @@ import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { PermissionDecision, PermissionMode } from '../../types/permissions.js'
 import {
   checkWriteBoundaryForAskRule,
+  enforceForcedAllowWriteBoundary,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
   runPermissionRequestHooksForHeadlessAgent,
@@ -322,14 +323,11 @@ export function createExternalCanUseTool(
       // An SDK callback or remote responder can allow with an updatedInput
       // pointing outside the working directories; the write boundary is a
       // hard cap, not a prompt, so it applies to external allows too.
-      if (typeof toolUseContext.getAppState === 'function') {
-        return checkWriteBoundaryForAskRule(
-          tool,
-          finalInput,
-          toolUseContext.getAppState().toolPermissionContext,
-        )
-      }
-      return null
+      return checkWriteBoundaryForAskRule(
+        tool,
+        finalInput,
+        toolUseContext.getAppState?.().toolPermissionContext,
+      )
     }
     const isFullAccessMode =
       typeof toolUseContext.getAppState === 'function' &&
@@ -354,7 +352,9 @@ export function createExternalCanUseTool(
     if (forceDecision) {
       if (!(forceDecision.behavior === 'ask' && isFullAccessMode)) {
         if (forceDecision.behavior !== 'ask') {
-          return forceDecision
+          return enforceForcedAllowWriteBoundary(
+            tool, effectiveInput, toolUseContext, forceDecision,
+          )
         }
         // A forced ask never reaches hasPermissionsToUseTool, so the
         // suppression check runs here. A suppression denial exists only
@@ -878,7 +878,7 @@ export function createDefaultCanUseTool(
       } else {
         return forceDecision.behavior === 'ask'
           ? suppressPromptIfConfigured(tool, forceDecision)
-          : forceDecision
+          : enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
       }
     }
     if (!warnedDefaultPermissions) {

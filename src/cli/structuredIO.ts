@@ -40,7 +40,8 @@ import {
   checkRuleBasedPermissions,
   DENY_INSTEAD_OF_PROMPTING_REASON,
   hasPermissionsToUseTool,
-  revalidatePlanModePermissionAllowWithRaceGuard,
+  enforceForcedAllowWriteBoundary,
+  revalidatePermissionRequestAllow,
   samePermissionAskConstraint,
   suppressPromptIfConfigured,
 } from 'src/utils/permissions/permissions.js'
@@ -53,11 +54,8 @@ import { normalizeControlMessageKeys } from '../utils/controlMessageCompat.js'
 import { executePermissionRequestHooks } from '../utils/hooks.js'
 import { clearMTLSCache } from '../utils/mtls.js'
 import {
-  applyPermissionUpdates,
   filterPermissionRequestHookUpdates,
-  persistPermissionUpdates,
 } from '../utils/permissions/PermissionUpdate.js'
-import * as permissionSetup from '../utils/permissions/permissionSetup.js'
 import {
   AGENT_CONFIG_ENV_VARS,
   clearProxyCache,
@@ -579,7 +577,12 @@ export class StructuredIO {
         toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
       const mainPermissionResult =
         forceDecision !== undefined && !shouldBypassForcedAsk
-          ? forceDecision
+          ? enforceForcedAllowWriteBoundary(
+            tool,
+            input,
+            toolUseContext,
+            forceDecision,
+          )
           : await hasPermissionsToUseTool(
           tool,
           input,
@@ -935,61 +938,16 @@ export async function executePermissionRequestHooksForSDK(
           enforcePlanMode ||
             toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
         )
-        if (permissionUpdates.length > 0) {
-          // Stage the updates purely so validation does not fire live
-          // mode-transition side effects; those run only on the real apply
-          // after the boundary check passes.
-          const stagedContext = applyPermissionUpdates(
-            toolUseContext.getAppState().toolPermissionContext,
-            permissionUpdates,
-          )
-          // A hook can remove a working directory while allowing a write
-          // under it. Revalidate the boundary against the updated context
-          // before the update is applied or persisted.
-          const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
-            tool,
-            finalInput,
-            stagedContext,
-          )
-          if (postUpdateWriteBoundary) {
-            return postUpdateWriteBoundary
-          }
-          const updatedContext = permissionSetup.applyPermissionUpdatesToLiveContext(
-            toolUseContext.getAppState().toolPermissionContext,
-            permissionUpdates,
-          )
-          toolUseContext.setAppState(prev =>
-            prev.toolPermissionContext === updatedContext
-              ? prev
-              : { ...prev, toolPermissionContext: updatedContext },
-          )
-          persistPermissionUpdates(permissionUpdates)
-        }
-
-        const postUpdatePlanModeDecision =
-          await revalidatePlanModePermissionAllowWithRaceGuard(
-            tool,
-            input,
-            finalInput,
-            toolUseContext,
-            enforcePlanMode ||
-              toolUseContext.getAppState().toolPermissionContext.mode ===
-                'plan',
-          )
-        if (postUpdatePlanModeDecision) {
-          return postUpdatePlanModeDecision
-        }
-        // A concurrent decision can remove a working directory during the
-        // awaited revalidation; the earlier checks predate that await, so
-        // recheck the boundary against the live context before allowing.
-        const liveWriteBoundary = checkWriteBoundaryForAskRule(
+        const revalidation = await revalidatePermissionRequestAllow(
           tool,
+          input,
           finalInput,
-          toolUseContext.getAppState().toolPermissionContext,
+          toolUseContext,
+          enforcePlanMode ||
+            toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
+          permissionUpdates,
         )
-        if (liveWriteBoundary) {
-          return liveWriteBoundary
-        }
+        if (revalidation) return revalidation
 
         return {
           behavior: 'allow',

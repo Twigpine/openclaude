@@ -38,6 +38,7 @@ import {
   permissionModeTitle,
 } from './PermissionMode.js'
 import type {
+  PermissionAllowDecision,
   PermissionAskDecision,
   PermissionDecision,
   PermissionDecisionReason,
@@ -96,21 +97,35 @@ function isActivePlanFileForContext(
   return isActiveSessionPlanFile(path, agentId)
 }
 
-// Whole-tool ask rules return before tool.checkPermissions, so the
-// blockWritesOutsideWorkingDirectories boundary inside
-// checkWritePermissionForTool would never run for Write/Edit/NotebookEdit.
-// Check it here, ahead of the ask-rule early returns.
+function hasWriteBoundary(tool: Tool): boolean {
+  return (
+    (tool.name === FILE_WRITE_TOOL_NAME ||
+      tool.name === FILE_EDIT_TOOL_NAME ||
+      tool.name === NOTEBOOK_EDIT_TOOL_NAME) &&
+    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories ===
+      true
+  )
+}
+
+// Apply the same boundary on early returns and approvals that can replace
+// the input after tool.checkPermissions has already run.
 export function checkWriteBoundaryForAskRule(
   tool: Tool,
   input: { [key: string]: unknown },
-  toolPermissionContext: ToolPermissionContext,
+  toolPermissionContext: ToolPermissionContext | undefined,
 ): PermissionDenyDecision | null {
-  if (
-    tool.name !== FILE_WRITE_TOOL_NAME &&
-    tool.name !== FILE_EDIT_TOOL_NAME &&
-    tool.name !== NOTEBOOK_EDIT_TOOL_NAME
-  ) {
+  if (!hasWriteBoundary(tool)) {
     return null
+  }
+  if (!toolPermissionContext) {
+    return {
+      behavior: 'deny',
+      message: `Cannot verify the working directories for ${tool.name} while permissions.blockWritesOutsideWorkingDirectories is enabled.`,
+      decisionReason: {
+        type: 'workingDir',
+        reason: 'Permission context is unavailable',
+      },
+    }
   }
   const parsed = tool.inputSchema.safeParse(input)
   if (!parsed.success) {
@@ -119,6 +134,115 @@ export function checkWriteBoundaryForAskRule(
   const { checkWriteBoundaryForTool } =
     require('./filesystem.js') as typeof import('./filesystem.js')
   return checkWriteBoundaryForTool(tool, parsed.data, toolPermissionContext)
+}
+
+export function enforceForcedAllowWriteBoundary(
+  tool: Tool,
+  input: Record<string, unknown>,
+  context: ToolUseContext,
+  decision: PermissionDecision,
+): PermissionDecision {
+  if (decision.behavior !== 'allow' || !hasWriteBoundary(tool)) {
+    return decision
+  }
+  return (
+    checkWriteBoundaryForAskRule(
+      tool,
+      decision.updatedInput ?? input,
+      context.getAppState?.().toolPermissionContext,
+    ) ?? decision
+  )
+}
+
+function commitPermissionRequestUpdates(
+  context: ToolUseContext,
+  updates: PermissionUpdate[],
+): void {
+  if (!updates.length) return
+
+  context.setAppState(prev => {
+    const toolPermissionContext = applyPermissionUpdatesToLiveContext(
+      prev.toolPermissionContext,
+      updates,
+    )
+    return prev.toolPermissionContext === toolPermissionContext
+      ? prev
+      : { ...prev, toolPermissionContext }
+  })
+  persistPermissionUpdates(updates)
+}
+
+/** Finish validation before publishing updates bundled with a write approval. */
+export async function revalidatePermissionRequestAllow(
+  tool: Tool,
+  originalInput: Record<string, unknown>,
+  finalInput: Record<string, unknown>,
+  context: ToolUseContext,
+  planModeWasActive: boolean,
+  updates: PermissionUpdate[],
+): Promise<PermissionDecision | null> {
+  if (!hasWriteBoundary(tool)) {
+    commitPermissionRequestUpdates(context, updates)
+    return revalidatePlanModePermissionAllowWithRaceGuard(
+      tool,
+      originalInput,
+      finalInput,
+      context,
+      planModeWasActive || context.getAppState().toolPermissionContext.mode === 'plan',
+    )
+  }
+
+  const updatesForContext = (permissionContext: ToolPermissionContext) =>
+    filterPermissionRequestHookUpdates(
+      updates,
+      planModeWasActive || permissionContext.mode === 'plan',
+    )
+  // Re-evaluate against live state on every read, so an unrelated directory
+  // removal during plan validation is visible before the updates are committed.
+  const stagedContext: ToolUseContext =
+    updates.length === 0
+      ? context
+      : {
+          ...context,
+          getAppState: () => {
+            const state = context.getAppState()
+            return {
+              ...state,
+              toolPermissionContext: applyPermissionUpdates(
+                state.toolPermissionContext,
+                updatesForContext(state.toolPermissionContext),
+              ),
+            }
+          },
+        }
+  const initialBoundary = checkWriteBoundaryForAskRule(
+    tool,
+    finalInput,
+    stagedContext.getAppState().toolPermissionContext,
+  )
+  if (initialBoundary) return initialBoundary
+
+  const planDecision = await revalidatePlanModePermissionAllowWithRaceGuard(
+    tool,
+    originalInput,
+    finalInput,
+    stagedContext,
+    planModeWasActive ||
+      stagedContext.getAppState().toolPermissionContext.mode === 'plan',
+  )
+  const liveContext = context.getAppState().toolPermissionContext
+  const finalUpdates = updatesForContext(liveContext)
+  const finalBoundary = checkWriteBoundaryForAskRule(
+    tool,
+    finalInput,
+    applyPermissionUpdates(liveContext, finalUpdates),
+  )
+  if (finalBoundary) return finalBoundary
+
+  // A deliberate mode transition still stands when only plan mode rejects
+  // the tool input. A boundary denial rejects the whole bundled approval.
+  commitPermissionRequestUpdates(context, finalUpdates)
+  return planDecision
 }
 
 // permissions.denyInsteadOfPrompting: a decision that survives to a user
@@ -486,6 +610,52 @@ export async function runPermissionRequestHooksForHeadlessAgent(
   permissionMode: string | undefined,
   suggestions: PermissionUpdate[] | undefined,
 ): Promise<PermissionDecision | null> {
+  const planModeWasActive =
+    context.getAppState().toolPermissionContext.mode === 'plan'
+  const result = await resolvePermissionRequestHooksForHeadlessAgent(
+    tool,
+    input,
+    toolUseID,
+    context,
+    permissionMode,
+    suggestions,
+  )
+  if (!result || !('pendingUpdates' in result)) return result
+
+  return finishHeadlessHookAllow(tool, input, context, planModeWasActive, result)
+}
+
+type PendingHeadlessHookAllow = {
+  decision: PermissionAllowDecision & { updatedInput: Record<string, unknown> }
+  pendingUpdates: PermissionUpdate[]
+}
+
+async function finishHeadlessHookAllow(
+  tool: Tool,
+  input: Record<string, unknown>,
+  context: ToolUseContext,
+  planModeWasActive: boolean,
+  result: PendingHeadlessHookAllow,
+): Promise<PermissionDecision> {
+  const revalidation = await revalidatePermissionRequestAllow(
+    tool,
+    input,
+    result.decision.updatedInput,
+    context,
+    planModeWasActive,
+    result.pendingUpdates,
+  )
+  return revalidation ?? result.decision
+}
+
+async function resolvePermissionRequestHooksForHeadlessAgent(
+  tool: Tool,
+  input: Record<string, unknown>,
+  toolUseID: string,
+  context: ToolUseContext,
+  permissionMode: string | undefined,
+  suggestions: PermissionUpdate[] | undefined,
+): Promise<PermissionDecision | PendingHeadlessHookAllow | null> {
   const enforcePlanMode =
     context.getAppState().toolPermissionContext.mode === 'plan'
   const candidateRuleDecision = enforcePlanMode
@@ -548,58 +718,12 @@ export async function runPermissionRequestHooksForHeadlessAgent(
         ) {
           return suppressPromptIfConfigured(tool, finalRuleDecision)
         }
-        // Persist permission updates if provided
         const permissionUpdates = filterPermissionRequestHookUpdates(
           decision.updatedPermissions ?? [],
           enforcePlanMode ||
             context.getAppState().toolPermissionContext.mode === 'plan',
         )
-        if (permissionUpdates.length) {
-          // A hook can remove a working directory while allowing a write
-          // under it. Stage the updates purely (no live mode transitions)
-          // and revalidate the boundary against the staged context before
-          // anything is applied or persisted.
-          const stagedContext = applyPermissionUpdates(
-            context.getAppState().toolPermissionContext,
-            permissionUpdates,
-          )
-          const postUpdateWriteBoundary = checkWriteBoundaryForAskRule(
-            tool,
-            finalInput,
-            stagedContext,
-          )
-          if (postUpdateWriteBoundary) {
-            return postUpdateWriteBoundary
-          }
-          // Capture so the narrowing survives into the setAppState callback
-          const updatedPermissions = permissionUpdates
-          let updatedContext = context.getAppState().toolPermissionContext
-          context.setAppState(prev => {
-            updatedContext = applyPermissionUpdatesToLiveContext(
-              prev.toolPermissionContext,
-              updatedPermissions,
-            )
-            if (prev.toolPermissionContext === updatedContext) return prev
-            return {
-              ...prev,
-              toolPermissionContext: updatedContext,
-            }
-          })
-          persistPermissionUpdates(permissionUpdates)
-        }
-        // The awaited checks above can span a concurrent removal of the
-        // directory covering finalInput. Recheck against the live context:
-        // the external SDK caller returns this decision directly, without
-        // the hasPermissionsToUseTool revalidation tail.
-        const liveWriteBoundary = checkWriteBoundaryForAskRule(
-          tool,
-          finalInput,
-          context.getAppState().toolPermissionContext,
-        )
-        if (liveWriteBoundary) {
-          return liveWriteBoundary
-        }
-        return {
+        const allow: PendingHeadlessHookAllow['decision'] = {
           behavior: 'allow',
           updatedInput: finalInput,
           decisionReason: {
@@ -607,6 +731,13 @@ export async function runPermissionRequestHooksForHeadlessAgent(
             hookName: 'PermissionRequest',
           },
         }
+        // The outer permission check owns the final, awaited validation.
+        // Keep this approval's updates staged until that check completes.
+        if (hasWriteBoundary(tool)) {
+          return { decision: allow, pendingUpdates: permissionUpdates }
+        }
+        commitPermissionRequestUpdates(context, permissionUpdates)
+        return allow
       }
       if (decision.behavior === 'deny') {
         if (decision.interrupt) {
@@ -641,13 +772,13 @@ export async function runPermissionRequestHooksForHeadlessAgent(
   return null
 }
 
-const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
-  tool,
-  input,
-  context,
-  assistantMessage,
-  toolUseID,
-): Promise<PermissionDecision> => {
+async function hasPermissionsToUseToolWithModeHandling(
+  tool: Tool,
+  input: Record<string, unknown>,
+  context: ToolUseContext,
+  assistantMessage: AssistantMessage,
+  toolUseID: string,
+): Promise<PermissionDecision | PendingHeadlessHookAllow> {
   const result = await hasPermissionsToUseToolInner(tool, input, context)
 
   // Reset consecutive denials on any allowed tool use in auto mode.
@@ -1097,7 +1228,7 @@ const hasPermissionsToUseToolWithModeHandling: CanUseToolFn = async (
     // run PermissionRequest hooks first to give them a chance to allow/deny.
     // Only auto-deny if no hook provides a decision.
     if (appState.toolPermissionContext.shouldAvoidPermissionPrompts) {
-      const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
+      const hookDecision = await resolvePermissionRequestHooksForHeadlessAgent(
         tool,
         input,
         toolUseID,
@@ -1144,6 +1275,9 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
     assistantMessage,
     toolUseID,
   )
+  if ('pendingUpdates' in result) {
+    return finishHeadlessHookAllow(tool, input, context, planModeWasActive, result)
+  }
   if (result.behavior !== 'allow') {
     return result
   }

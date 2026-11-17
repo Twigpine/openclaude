@@ -98,6 +98,7 @@ import {
 } from '../permissions/PermissionUpdate.js'
 import type { PermissionUpdate } from '../permissions/PermissionUpdateSchema.js'
 import {
+  enforceForcedAllowWriteBoundary,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
 } from '../permissions/permissions.js'
@@ -198,7 +199,7 @@ export function createInProcessCanUseTool(
       toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
     const result =
       forceDecision !== undefined && !shouldBypassForcedAsk
-        ? forceDecision
+        ? enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
         : await hasPermissionsToUseTool(
         tool,
         input,

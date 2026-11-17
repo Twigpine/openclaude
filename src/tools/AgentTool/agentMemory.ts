@@ -125,7 +125,18 @@ export function getAgentMemoryRoot(absolutePath: string): string | undefined {
 
 // Check if file is within an agent memory directory (any scope).
 export function isAgentMemoryPath(absolutePath: string): boolean {
-  return getAgentMemoryRoot(absolutePath) !== undefined
+  if (getAgentMemoryRoot(absolutePath) !== undefined) return true
+
+  // Keep the lexical match for reads and for writes without the optional
+  // boundary. Only the boundary uses the exact generated containment root.
+  const remoteMemoryDir = process.env.CLAUDE_CODE_REMOTE_MEMORY_DIR
+  if (!remoteMemoryDir) return false
+
+  const normalizedPath = normalize(absolutePath)
+  return (
+    normalizedPath.startsWith(join(remoteMemoryDir, 'projects') + sep) &&
+    normalizedPath.includes(sep + 'agent-memory-local' + sep)
+  )
 }
 
 /**

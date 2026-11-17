@@ -16,7 +16,7 @@ import type { ClassifierResult } from '../utils/permissions/bashClassifier.js';
 import { AbortError } from '../utils/errors.js';
 import { logError } from '../utils/log.js';
 import type { PermissionDecision } from '../utils/permissions/PermissionResult.js';
-import { DENY_INSTEAD_OF_PROMPTING_REASON, hasPermissionsToUseTool, suppressPromptIfConfigured } from '../utils/permissions/permissions.js';
+import { DENY_INSTEAD_OF_PROMPTING_REASON, enforceForcedAllowWriteBoundary, hasPermissionsToUseTool, suppressPromptIfConfigured } from '../utils/permissions/permissions.js';
 import { handleCoordinatorPermission } from './toolPermission/handlers/coordinatorHandler.js';
 import { handleInteractivePermission } from './toolPermission/handlers/interactiveHandler.js';
 import { handleSwarmWorkerPermission } from './toolPermission/handlers/swarmWorkerHandler.js';
@@ -38,9 +38,8 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
       // A forced ask is still a prompt, so denyInsteadOfPrompting suppresses
       // it. The resulting suppression denial flows into the deny branch,
       // which lets PermissionRequest hooks answer before it stands. Forced
-      // allow and deny pass through unchanged, matching the structured-IO
-      // ordering: only asks are prompts.
-      const decisionPromise = forceDecision !== undefined && !shouldBypassForcedAsk ? Promise.resolve(forceDecision.behavior === "ask" ? suppressPromptIfConfigured(tool, forceDecision) : forceDecision) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
+      // allows still honor the opt-in write boundary.
+      const decisionPromise = forceDecision !== undefined && !shouldBypassForcedAsk ? Promise.resolve(forceDecision.behavior === "ask" ? suppressPromptIfConfigured(tool, forceDecision) : enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
       return decisionPromise.then(async result => {
         if (result.behavior === "allow") {
           if (ctx.resolveIfAborted(resolve)) {

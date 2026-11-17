@@ -9,13 +9,16 @@ import {
   setCwdState,
   setOriginalCwd,
 } from '../../bootstrap/state.js'
+import { getAutoMemPath } from '../../memdir/paths.js'
 import { createToolFixture } from '../../test/toolFixtures.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { ToolPermissionContext, ToolUseContext } from '../../Tool.js'
+import { setGovernancePolicySettingsForSourceForTesting } from '../governancePolicy.js'
 import type { SettingsJson } from '../settings/types.js'
+import * as permissionUpdateModule from './PermissionUpdate.js'
 
 const realSettings = await import(
   `../settings/settings.js?blockWritesActual=${Date.now()}-${Math.random()}`
@@ -42,7 +45,7 @@ let hookPermissionResult:
             directories: string[]
             destination: 'session'
           }
-        | { type: 'setMode'; mode: 'plan'; destination: 'session' }
+        | { type: 'setMode'; mode: 'plan' | 'acceptEdits'; destination: 'session' }
       )[]
     }
   | undefined
@@ -129,6 +132,7 @@ const { checkWritePermissionForTool, getScratchpadDir } = await import(
 const {
   hasPermissionsToUseTool,
   checkRuleBasedPermissions,
+  checkWriteBoundaryForAskRule,
   runPermissionRequestHooksForHeadlessAgent,
 } = await import('./permissions.js')
 const { createPermissionContext } = await import(
@@ -137,9 +141,11 @@ const { createPermissionContext } = await import(
 const { executePermissionRequestHooksForSDK, StructuredIO } = await import(
   '../../cli/structuredIO.js'
 )
-const { createExternalCanUseTool, createDefaultCanUseTool } = await import(
-  '../../entrypoints/sdk/permissions.js'
-)
+const {
+  createExternalCanUseTool,
+  createDefaultCanUseTool,
+  createPermissionTarget,
+} = await import('../../entrypoints/sdk/permissions.js')
 const { permissionPromptToolResultToPermissionDecision } = await import(
   './PermissionPromptToolResultSchema.js'
 )
@@ -652,6 +658,72 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     }
   })
 
+  test.each(['callback', 'permission request'] as const)(
+    'SDK %s approvals require working-directory context only with the boundary enabled',
+    async route => {
+      const fallback = createDefaultCanUseTool(permissionContext('default'))
+      const target = createPermissionTarget()
+      const allow = {
+        behavior: 'allow',
+        updatedInput: { file_path: join(outsideDir, 'sdk.txt') },
+      } as const
+      const canUseTool = createExternalCanUseTool(
+        route === 'callback' ? async () => allow : undefined,
+        fallback,
+        target,
+        route === 'permission request'
+          ? ({ tool_use_id }) => {
+              target.pendingPermissionPrompts.get(tool_use_id)?.resolve(allow)
+            }
+          : undefined,
+        undefined,
+        500,
+      )
+      const minimalContext = { getAppState: undefined } as unknown as ToolUseContext
+      const check = () =>
+        canUseTool(
+          writeTool,
+          { file_path: join(projectDir, 'inside.txt') },
+          minimalContext,
+          {} as never,
+          'minimal-sdk',
+        )
+
+      blockWritesOutsideWorkingDirectories = true
+      expect(await check()).toMatchObject({
+        behavior: 'deny',
+        decisionReason: { reason: 'Permission context is unavailable' },
+      })
+      blockWritesOutsideWorkingDirectories = false
+      expect((await check()).behavior).toBe('allow')
+    },
+  )
+
+  test('SDK and structured IO forced allows honor the rewritten write path', async () => {
+    blockWritesOutsideWorkingDirectories = true
+    const ctx = useContext(permissionContext('default'))
+    const fallback = createDefaultCanUseTool(ctx.getAppState().toolPermissionContext)
+    const external = createExternalCanUseTool(undefined, fallback, {} as never)
+    const structured = new StructuredIO((async function* () {})()).createCanUseTool()
+    const originalInput = { file_path: join(projectDir, 'inside.txt') }
+    for (const canUseTool of [fallback, external, structured]) {
+      const check = (file_path: string) => canUseTool(
+        writeTool, originalInput, ctx, {} as never, 'forced-write',
+        { behavior: 'allow', updatedInput: { file_path } },
+      )
+      expect(await check(join(outsideDir, 'forced.txt'))).toMatchObject({
+        behavior: 'deny',
+        decisionReason: {
+          reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled',
+        },
+      })
+      expect(await check(originalInput.file_path)).toMatchObject({
+        behavior: 'allow',
+        updatedInput: originalInput,
+      })
+    }
+  })
+
   test('an SDK PermissionRequest hook can answer a suppression denial', async () => {
     denyInsteadOfPrompting = true
     hookPermissionResult = {
@@ -934,39 +1006,67 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
     expect(mutable.setAppStateCalls()).toBe(0)
   })
 
-  test('a write allowed before revalidation is denied when a concurrent update removes its directory', async () => {
-    blockWritesOutsideWorkingDirectories = true
-    // The boundary check before the revalidation await sees addedDir as
-    // working; the concurrent removal lands during the await, so the
-    // post-await recheck against the live context must catch it.
-    revalidationCallCount = 0
-    removeDirDuringRevalidation = addedDir
-    hookPermissionResult = {
-      behavior: 'allow',
-      updatedInput: { file_path: join(addedDir, 'hooked.txt') },
-    }
-    try {
-      const toolPermissionContext = permissionContext(
-        'default',
-        new Map([[addedDir, { path: addedDir, source: 'session' }]]),
-      )
-      const mutable = useMutableContext(toolPermissionContext)
-      const result = await executePermissionRequestHooksForSDK(
-        writeTool,
-        'blockwrites-post-await',
-        { file_path: join(projectDir, 'inside.txt') },
-        mutable.ctx,
-        undefined,
-      )
-      expect(result?.behavior).toBe('deny')
-      if (result?.behavior === 'deny') {
-        expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
+  test.each(['structured IO', 'headless', 'prompt tool'] as const)(
+    '%s discards bundled updates when the live write boundary denies',
+    async route => {
+      blockWritesOutsideWorkingDirectories = true
+      const originalInput = { file_path: join(projectDir, 'inside.txt') }
+      const updatedInput = { file_path: join(addedDir, 'approved.txt') }
+      const update = { type: 'setMode', mode: 'acceptEdits', destination: 'session' } as const
+      const allow = { behavior: 'allow', updatedInput, updatedPermissions: [update] } as const
+      hookPermissionResult = { ...allow, updatedPermissions: [update] }
+      const mutable = useMutableContext({
+        ...permissionContext('default', new Map([
+          [addedDir, { path: addedDir, source: 'session' }],
+        ])),
+        shouldAvoidPermissionPrompts: true,
+      })
+      let rootReads = 0
+      const ctx: ToolUseContext = {
+        ...mutable.ctx,
+        getRootAppState: () => {
+          // The prompt result has an additional validation before staging.
+          // Remove the directory only during the final validation round.
+          if (++rootReads === (route === 'prompt tool' ? 3 : 1)) {
+            mutable.setPermissionContext(permissionContext('default'))
+          }
+          return mutable.ctx.getAppState()
+        },
       }
-    } finally {
-      removeDirDuringRevalidation = null
-      hookPermissionResult = undefined
-    }
-  })
+      const askWrite = { ...writeTool, checkPermissions: async () => ({
+        behavior: 'ask' as const,
+        message: 'Confirm write',
+      }) }
+      const persist = spyOn(permissionUpdateModule, 'persistPermissionUpdates')
+        .mockImplementation(() => {})
+      try {
+        const result = route === 'structured IO'
+          ? await executePermissionRequestHooksForSDK(
+              askWrite, 'staged-structured', originalInput, ctx, undefined,
+            )
+          : route === 'headless'
+            ? await hasPermissionsToUseTool(
+                askWrite, originalInput, ctx, {} as never, 'staged-headless',
+              )
+            : await permissionPromptToolResultToPermissionDecision(
+                { ...allow, updatedPermissions: [update] }, askWrite, originalInput, ctx,
+              )
+
+        expect(result).toMatchObject({
+          behavior: 'deny',
+          decisionReason: {
+            reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled',
+          },
+        })
+        expect(rootReads).toBeGreaterThan(0)
+        expect(mutable.setAppStateCalls()).toBe(0)
+        expect(persist).not.toHaveBeenCalled()
+      } finally {
+        persist.mockRestore()
+        hookPermissionResult = undefined
+      }
+    },
+  )
 
   test('a headless hook allow is denied when a concurrent update removes its directory', async () => {
     blockWritesOutsideWorkingDirectories = true
@@ -1728,6 +1828,66 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
       expect(result.message).toContain('blockWritesOutsideWorkingDirectories')
     } finally {
       scratchpadGateEnabled = false
+    }
+  })
+
+  test('a redirected scratchpad write keeps its legacy exception with the boundary off', async () => {
+    if (process.platform === 'win32') return
+    blockWritesOutsideWorkingDirectories = false
+    scratchpadGateEnabled = true
+    const scratchpadDir = getScratchpadDir()
+    const linkPath = join(scratchpadDir, 'legacy-scratchpad-redirect')
+    try {
+      await mkdir(scratchpadDir, { recursive: true })
+      await symlink(outsideDir, linkPath)
+      expect(checkWritePermissionForTool(
+        writeTool, { file_path: join(linkPath, 'note.txt') }, permissionContext('default'),
+      )).toMatchObject({ behavior: 'allow' })
+    } finally {
+      await rm(linkPath, { force: true })
+      scratchpadGateEnabled = false
+    }
+  })
+
+  test('redirected auto-memory writes keep explicit approval within the working directories', async () => {
+    if (process.platform === 'win32') return
+    const savedOverride = process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE
+    const memoryDir = join(projectDir, 'persistent-memory')
+    const insideTarget = join(projectDir, 'memory-target')
+    try {
+      process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE = memoryDir
+      getAutoMemPath.cache.clear?.()
+      setGovernancePolicySettingsForSourceForTesting(() => ({
+        memory: { requireApprovalBeforeWrite: true },
+      }))
+      await mkdir(memoryDir)
+      await mkdir(insideTarget)
+      await symlink(insideTarget, join(memoryDir, 'inside'))
+      await symlink(outsideDir, join(memoryDir, 'outside'))
+      const ctx = permissionContext('acceptEdits')
+      const insideInput = { file_path: join(memoryDir, 'inside', 'note.md') }
+      const outsideInput = { file_path: join(memoryDir, 'outside', 'note.md') }
+      for (const enabled of [false, true]) {
+        blockWritesOutsideWorkingDirectories = enabled
+        expect(checkWritePermissionForTool(writeTool, insideInput, ctx)).toMatchObject({
+          behavior: 'ask',
+          decisionReason: { type: 'safetyCheck', classifierApprovable: false },
+        })
+      }
+      expect(checkWritePermissionForTool(writeTool, outsideInput, ctx)).toMatchObject({
+        behavior: 'deny',
+        decisionReason: {
+          reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled',
+        },
+      })
+      expect(checkWriteBoundaryForAskRule(writeTool, outsideInput, ctx)).toMatchObject({
+        behavior: 'deny',
+      })
+    } finally {
+      if (savedOverride === undefined) delete process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE
+      else process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE = savedOverride
+      getAutoMemPath.cache.clear?.()
+      setGovernancePolicySettingsForSourceForTesting(null)
     }
   })
 
