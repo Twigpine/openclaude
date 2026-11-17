@@ -11,6 +11,8 @@ import {
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
   SYNTHETIC_MESSAGES,
 } from './messages.js'
+import { getGlobalConfig } from './config.js'
+import { isFullscreenEnvEnabled } from './fullscreen.js'
 import { deriveUUID } from './messages/normalize.js'
 import type {
   SystemFocusMarkerMessage,
@@ -442,4 +444,13 @@ export function countUnseenFocusTurns(
     }
   }
   return count
+}
+
+/**
+ * Whether focus view applies right now: the stored setting is on and the
+ * fullscreen renderer is active. Read at render time because /tui can switch
+ * the renderer mid-session while the stored setting stays on.
+ */
+export function isFocusViewActive(): boolean {
+  return isFullscreenEnvEnabled() && (getGlobalConfig().focusView ?? false)
 }

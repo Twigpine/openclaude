@@ -26,6 +26,7 @@ import { collapseReadSearchGroups } from '../utils/collapseReadSearch.js';
 import { collapseTeammateShutdowns } from '../utils/collapseTeammateShutdowns.js';
 import { getGlobalConfig } from '../utils/config.js';
 import { isEnvTruthy } from '../utils/envUtils.js';
+import { assembleFocusRows, selectFocusView } from '../utils/focusView.js';
 import { isFullscreenEnvEnabled } from '../utils/fullscreen.js';
 import { applyGrouping } from '../utils/groupToolUses.js';
 import { buildMessageLookups, createAssistantMessage, deriveUUID, getMessagesAfterCompactBoundary, getToolUseID, getToolUseIDs, hasUnresolvedHooksFromLookup, isNotEmptyMessage, normalizeMessages, normalizeMessagesCached, reorderMessagesInUI, type StreamingThinking, type StreamingToolUse, shouldShowUserMessage } from '../utils/messages.js';
@@ -235,6 +236,8 @@ type Props = {
   streamingText?: string | null;
   /** When true, only show Brief tool output (hide everything else) */
   isBriefOnly?: boolean;
+  /** Fullscreen focus view: show only the latest prompt, a tool summary and the final response. */
+  isFocusView?: boolean;
   /** Fullscreen-mode "─── N new ───" divider. Renders before the first
    *  renderableMessage derived from firstUnseenUuid (matched by the 24-char
    *  prefix that deriveUUID preserves). */
@@ -360,6 +363,7 @@ const MessagesImpl = ({
   streamingThinking,
   streamingText,
   isBriefOnly = false,
+  isFocusView = false,
   unseenDivider,
   scrollRef,
   trackStickyPrompt,
@@ -516,8 +520,14 @@ const MessagesImpl = ({
     // assistant text for file-only turns would leave the user with no context.
     const dropTextToolNames = [BRIEF_TOOL_NAME].filter((n_0): n_0 is string => n_0 !== null);
     const briefFiltered = briefToolNames.length > 0 && !isTranscriptMode ? isBriefOnly ? filterForBriefTool(messagesToShowNotTruncated, briefToolNames) : dropTextToolNames.length > 0 ? dropTextInBriefTurns(messagesToShowNotTruncated, dropTextToolNames) : messagesToShowNotTruncated : messagesToShowNotTruncated;
-    const messagesToShow = shouldTruncate ? briefFiltered.slice(-MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE) : briefFiltered;
-    const hasTruncatedMessages = shouldTruncate && briefFiltered.length > MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE;
+    // Focus view runs after the brief tier and before truncation and grouping,
+    // and never in the ctrl+o transcript, which stays unfiltered.
+    const focusFiltered = isFocusView && !isTranscriptMode ? assembleFocusRows(selectFocusView(briefFiltered, {
+      isLoading,
+      syntheticToolUseIds: new Set(syntheticStreamingToolUseMessages.flatMap(m => m.message.content.flatMap(b => b.type === 'tool_use' ? [b.id] : [])))
+    })) : briefFiltered;
+    const messagesToShow = shouldTruncate ? focusFiltered.slice(-MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE) : focusFiltered;
+    const hasTruncatedMessages = shouldTruncate && focusFiltered.length > MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE;
     const {
       messages: groupedMessages
     } = applyGrouping(messagesToShow, tools, verbose);
@@ -530,7 +540,7 @@ const MessagesImpl = ({
       hasTruncatedMessages,
       hiddenMessageCount
     };
-  }, [verbose, normalizedMessages, isTranscriptMode, syntheticStreamingToolUseMessages, shouldTruncate, tools, isBriefOnly]);
+  }, [verbose, normalizedMessages, isTranscriptMode, syntheticStreamingToolUseMessages, shouldTruncate, tools, isBriefOnly, isFocusView, isLoading]);
 
   // Cheap slice — only runs when scroll range or slice config changes.
   const renderableMessages = useMemo(() => {
@@ -553,8 +563,19 @@ const MessagesImpl = ({
   const dividerBeforeIndex = useMemo(() => {
     if (!unseenDivider) return -1;
     const prefix = unseenDivider.firstUnseenUuid.slice(0, 24);
-    return renderableMessages.findIndex(m => m.uuid.slice(0, 24) === prefix);
-  }, [unseenDivider, renderableMessages]);
+    const exact = renderableMessages.findIndex(m => m.uuid.slice(0, 24) === prefix);
+    if (exact >= 0 || !isFocusView) return exact;
+    // Focus view hides the first unseen message: put the divider before the
+    // first rendered row that sits at or after it in the full list.
+    const position = new Map<string, number>();
+    normalizedMessages.forEach((m, i) => {
+      const key = m.uuid.slice(0, 24);
+      if (!position.has(key)) position.set(key, i);
+    });
+    const unseenPosition = position.get(prefix);
+    if (unseenPosition === undefined) return -1;
+    return renderableMessages.findIndex(m => (position.get(m.uuid.slice(0, 24)) ?? -1) >= unseenPosition);
+  }, [unseenDivider, renderableMessages, isFocusView, normalizedMessages]);
   const selectedIdx = useMemo(() => {
     if (!cursor) return -1;
     return renderableMessages.findIndex(m_0 => m_0.uuid === cursor.uuid);
@@ -715,7 +736,7 @@ const MessagesImpl = ({
           </Box>
         </Box>}
 
-      {isStreamingThinkingVisible && streamingThinking && !isBriefOnly && <Box marginTop={1}>
+      {isStreamingThinkingVisible && streamingThinking && !isBriefOnly && !isFocusView && <Box marginTop={1}>
           <AssistantThinkingMessage param={{
         type: 'thinking',
         thinking: streamingThinking.thinking

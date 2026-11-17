@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { getGlobalConfig, saveGlobalConfig } from './config.js'
+import { _resetTmuxControlModeProbeForTesting } from './fullscreen.js'
 import {
   CANCEL_MESSAGE,
   INTERRUPT_MESSAGE_FOR_TOOL_USE,
@@ -16,6 +18,7 @@ import {
 import {
   assembleFocusRows,
   countUnseenFocusTurns,
+  isFocusViewActive,
   selectFocusView,
   type FocusMessage,
 } from './focusView.js'
@@ -710,5 +713,46 @@ describe('assembleFocusRows', () => {
   test('returns the input unchanged when there is no boundary', () => {
     const msgs = [say('f1', 'orphan')] as FocusMessage[]
     expect(assemble(msgs)).toBe(msgs)
+  })
+})
+
+describe('isFocusViewActive', () => {
+  const ENV_KEYS = ['CLAUDE_CODE_NO_FLICKER', 'TMUX', 'TERM_PROGRAM', 'TERM'] as const
+  const savedEnv = new Map<string, string | undefined>(
+    ENV_KEYS.map(k => [k, process.env[k]]),
+  )
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k]
+    _resetTmuxControlModeProbeForTesting()
+  })
+
+  afterEach(() => {
+    saveGlobalConfig(current => ({ ...current, focusView: undefined }))
+    for (const k of ENV_KEYS) {
+      const v = savedEnv.get(k)
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    _resetTmuxControlModeProbeForTesting()
+  })
+
+  test('follows fullscreen while the stored setting stays on', () => {
+    saveGlobalConfig(current => ({ ...current, focusView: true }))
+    process.env.CLAUDE_CODE_NO_FLICKER = '1'
+    expect(isFocusViewActive()).toBe(true)
+    process.env.CLAUDE_CODE_NO_FLICKER = '0'
+    expect(isFocusViewActive()).toBe(false)
+    expect(getGlobalConfig().focusView).toBe(true)
+    process.env.CLAUDE_CODE_NO_FLICKER = '1'
+    expect(isFocusViewActive()).toBe(true)
+  })
+
+  test('is off when the setting is off, even in fullscreen', () => {
+    process.env.CLAUDE_CODE_NO_FLICKER = '1'
+    saveGlobalConfig(current => ({ ...current, focusView: false }))
+    expect(isFocusViewActive()).toBe(false)
+    saveGlobalConfig(current => ({ ...current, focusView: undefined }))
+    expect(isFocusViewActive()).toBe(false)
   })
 })
