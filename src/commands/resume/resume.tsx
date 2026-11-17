@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import type { UUID } from 'crypto';
 import figures from 'figures';
 import * as React from 'react';
-import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js';
+import { getProjectRoot, getSessionId } from '../../bootstrap/state.js';
 import { buildGoalStartInstruction } from '../../services/goal/instructions.js';
 import { saveGoalState } from '../../services/goal/persistence.js';
 import { resumeGoal } from '../../services/goal/state.js';
@@ -174,7 +174,7 @@ function ResumeCommand({
   }, [onDone]);
   React.useEffect(() => {
     async function init() {
-      const paths_0 = await getWorktreePaths(getOriginalCwd());
+      const paths_0 = await getWorktreePaths(getProjectRoot());
       setWorktreePaths(paths_0);
       void loadLogs(false, paths_0);
     }
@@ -477,7 +477,7 @@ export const call: LocalJSXCommandCall = async (onDone, context, args) => {
   }
 
   // Load logs to search (includes same-repo worktrees)
-  const worktreePaths = await getWorktreePaths(getOriginalCwd());
+  const worktreePaths = await getWorktreePaths(getProjectRoot());
   const logs = await loadSameRepoMessageLogs(worktreePaths);
   if (logs.length === 0) {
     const message = 'No conversations found to resume.';

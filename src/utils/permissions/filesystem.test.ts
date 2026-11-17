@@ -292,3 +292,50 @@ describe('nested Git worktree write permissions', () => {
     }
   })
 })
+
+describe('SDK-context project roots', () => {
+  test('session rules and projectRoot resolve per SDK context', async () => {
+    const { runWithSdkContext } = await import('../../bootstrap/state.js')
+    const { getFileReadIgnorePatterns } = await import('./filesystem.js')
+    const { applyPermissionUpdate } = await import(
+      './PermissionUpdate.js'
+    )
+    const { getEmptyToolPermissionContext } = await import('../../Tool.js')
+    const rootA = await mkdtemp(join(tmpdir(), 'oc-sdk-root-a-'))
+    const rootB = await mkdtemp(join(tmpdir(), 'oc-sdk-root-b-'))
+    try {
+      for (const [root, name] of [
+        [rootA, 'a'],
+        [rootB, 'b'],
+      ] as const) {
+        const keys = await runWithSdkContext(
+          {
+            sessionId: `sdk-root-${name}` as import('../../types/ids.js').SessionId,
+            sessionProjectDir: null,
+            cwd: root,
+            originalCwd: root,
+            projectRoot: root,
+          },
+          () => {
+            const ctx = applyPermissionUpdate(
+              getEmptyToolPermissionContext(),
+              {
+                type: 'addRules',
+                behavior: 'deny',
+                rules: [{ toolName: 'Read', ruleContent: '/secret.txt' }],
+                destination: 'session',
+              },
+            )
+            return [...getFileReadIgnorePatterns(ctx).keys()]
+          },
+        )
+        // The deny rule's root resolves against this context's project
+        // root, not the process-global STATE.projectRoot.
+        expect(keys).toContain(root)
+      }
+    } finally {
+      await rm(rootA, { recursive: true, force: true })
+      await rm(rootB, { recursive: true, force: true })
+    }
+  })
+})

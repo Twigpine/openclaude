@@ -30,6 +30,7 @@ import { isAutoDreamEnabled } from './config.js'
 import { getProjectDir } from '../../utils/sessionStorage.js'
 import {
   getOriginalCwd,
+  getProjectRoot,
   getKairosActive,
   getIsRemoteMode,
   getSessionId,
@@ -211,7 +212,7 @@ export function initAutoDream(): void {
 
     try {
       const memoryRoot = getAutoMemPath()
-      const transcriptDir = getProjectDir(getOriginalCwd())
+      const transcriptDir = getProjectDir(getProjectRoot())
       // Tool constraints note goes in `extra`, not the shared prompt body —
       // manual /dream runs in the main loop with normal permissions and this
       // would be misleading there.

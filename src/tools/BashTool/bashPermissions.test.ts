@@ -9,6 +9,8 @@ import {
   getOriginalCwd,
   setAllowedSettingSources,
   setOriginalCwd,
+  setProjectRoot,
+  getProjectRoot,
 } from '../../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
@@ -277,10 +279,12 @@ test('checkSandboxAutoAllow caps fanout when astSubcommands is null', () => {
 
 test('git commit governance policy runs through the production Bash permission path', async () => {
   const originalCwd = getOriginalCwd()
+  const originalProjectRoot = getProjectRoot()
   const projectDir = await mkdtemp(join(tmpdir(), 'openclaude-git-policy-'))
 
   try {
     setOriginalCwd(projectDir)
+    setProjectRoot(projectDir)
     setAllowedSettingSources([...SETTING_SOURCES])
     await mkdir(join(projectDir, '.openclaude'), { recursive: true })
     await writeFile(
@@ -390,6 +394,7 @@ test('git commit governance policy runs through the production Bash permission p
     })
   } finally {
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalProjectRoot)
     setAllowedSettingSources([...SETTING_SOURCES])
     resetSettingsCache()
     await rm(projectDir, { recursive: true, force: true })

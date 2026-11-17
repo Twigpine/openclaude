@@ -5,8 +5,10 @@ import { join } from 'path'
 
 import {
   getOriginalCwd,
+  getProjectRoot,
   setAllowedSettingSources,
   setOriginalCwd,
+  setProjectRoot,
 } from '../../bootstrap/state.js'
 import { SETTING_SOURCES } from '../../utils/settings/constants.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
@@ -20,10 +22,12 @@ async function withProjectSettings(
   fn: () => void,
 ): Promise<void> {
   const originalCwd = getOriginalCwd()
+  const originalProjectRoot = getProjectRoot()
   const projectDir = await mkdtemp(join(tmpdir(), 'openclaude-bash-security-'))
 
   try {
     setOriginalCwd(projectDir)
+    setProjectRoot(projectDir)
     setAllowedSettingSources([...SETTING_SOURCES])
     await mkdir(join(projectDir, '.openclaude'), { recursive: true })
     await writeFile(
@@ -34,6 +38,7 @@ async function withProjectSettings(
     fn()
   } finally {
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalProjectRoot)
     setAllowedSettingSources([...SETTING_SOURCES])
     resetSettingsCache()
     await rm(projectDir, { recursive: true, force: true })

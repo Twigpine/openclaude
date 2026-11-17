@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import React from 'react'
 import { stripVTControlCharacters as stripAnsi } from 'node:util'
 
-import { getOriginalCwd, setOriginalCwd } from '../../../bootstrap/state.js'
+import { getOriginalCwd, getProjectRoot, setOriginalCwd, setProjectRoot } from '../../../bootstrap/state.js'
 import { handleInteractivePermission } from '../../../hooks/toolPermission/handlers/interactiveHandler.js'
 import { createPermissionContext } from '../../../hooks/toolPermission/PermissionContext.js'
 import { createRoot } from '../../../ink.js'
@@ -434,10 +434,12 @@ describe('MonitorPermissionRequest', () => {
 
   test('rendered persistent allow resolves the real pending permission promise with a Bash allow rule', async () => {
     const originalCwd = getOriginalCwd()
+    const originalProjectRoot = getProjectRoot()
     const tempCwd = mkdtempSync(join(tmpdir(), 'monitor-permission-'))
     const onDone = mock(() => {})
 
     setOriginalCwd(tempCwd)
+    setProjectRoot(tempCwd)
     const { toolUseConfirm, toolUseContext, decisionPromise } =
       createInteractiveMonitorPermission()
     const mounted = await renderMonitorPermission(toolUseConfirm, { onDone })
@@ -457,6 +459,7 @@ describe('MonitorPermissionRequest', () => {
     } finally {
       mounted.cleanup()
       setOriginalCwd(originalCwd)
+      setProjectRoot(originalProjectRoot)
       rmSync(tempCwd, { recursive: true, force: true })
     }
   })

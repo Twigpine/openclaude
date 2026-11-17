@@ -1,6 +1,6 @@
 import { createHash, type UUID } from 'crypto'
 import { diffLines } from 'diff'
-import type { Stats } from 'fs'
+import { existsSync, type Stats } from 'fs'
 import {
   chmod,
   copyFile,
@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, relative } from 'path'
 import {
   getIsNonInteractiveSession,
   getOriginalCwd,
+  getProjectRoot,
   getSessionId,
 } from 'src/bootstrap/state.js'
 import { logEvent } from 'src/services/analytics/index.js'
@@ -93,7 +94,7 @@ export async function fileHistoryTrackEdit(
     return
   }
 
-  const trackingPath = maybeShortenFilePath(filePath)
+  let trackingPath = maybeShortenFilePath(filePath)
 
   // Phase 1: check if backup is needed. Speculative writes would overwrite
   // the deterministic {hash}@v1 backup on every repeat call — a second
@@ -109,6 +110,30 @@ export async function fileHistoryTrackEdit(
     logError(new Error('FileHistory: Missing most recent snapshot'))
     logEvent('tengu_file_history_track_edit_failed', {})
     return
+  }
+  // A checkpoint restored from a legacy log may carry this file under an
+  // unprefixed key. Reuse that identity only when it provably denotes this
+  // file: tracking './x' separately for the same file would run
+  // createBackup(filePath, 1), overwriting the existing v1 backup file and
+  // destroying the original contents rewind needs. A same-named file under
+  // the post-/cd working root makes the anchor ambiguous; there the v1
+  // backup name decides — it derives from the source file's absolute path,
+  // so a match proves the legacy key tracked this file. Different names
+  // mean different files, and keeping './' cannot collide.
+  if (
+    trackingPath.startsWith('./') &&
+    !mostRecent.trackedFileBackups[trackingPath]
+  ) {
+    const legacyKey = trackingPath.slice(2)
+    const ambiguousAnchor =
+      getOriginalCwd() !== getProjectRoot() &&
+      existsSync(join(getOriginalCwd(), legacyKey))
+    const legacyBackup = mostRecent.trackedFileBackups[legacyKey]
+    const sameFileBackup =
+      legacyBackup?.backupFileName === getBackupFileName(filePath, 1)
+    if (legacyBackup && (!ambiguousAnchor || sameFileBackup)) {
+      trackingPath = legacyKey
+    }
   }
   if (mostRecent.trackedFileBackups[trackingPath]) {
     // Already tracked in the most recent snapshot; next makeSnapshot will
@@ -865,9 +890,18 @@ function maybeShortenFilePath(filePath: string): string {
   if (!isAbsolute(filePath)) {
     return filePath
   }
-  const cwd = getOriginalCwd()
-  if (filePath.startsWith(cwd)) {
-    return relative(cwd, filePath)
+  // Relative keys must stay anchored to the session's project root: a
+  // mid-session /cd moves originalCwd, and keys written before the move
+  // would otherwise resolve against the wrong directory on rewind. The
+  // './' prefix marks keys written against this anchor so expand can
+  // distinguish them from legacy unprefixed keys, which anchored to the
+  // working root at write time (see maybeExpandFilePath).
+  const root = getProjectRoot()
+  if (filePath.startsWith(root)) {
+    const rel = relative(root, filePath)
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
+      return './' + rel
+    }
   }
   return filePath
 }
@@ -876,7 +910,26 @@ function maybeExpandFilePath(filePath: string): string {
   if (isAbsolute(filePath)) {
     return filePath
   }
-  return join(getOriginalCwd(), filePath)
+  // Keys written against the project root carry a './' prefix and always
+  // expand there, even when the file no longer exists. Falling back on
+  // existence would let a same-named file under the post-/cd working
+  // root hijack a rewind write for a deleted project file.
+  if (filePath.startsWith('./')) {
+    return join(getProjectRoot(), filePath.slice(2))
+  }
+  const projectPath = join(getProjectRoot(), filePath)
+  // Legacy unprefixed keys anchored to the working root at write time
+  // (e.g. inside a worktree, where projectRoot stays at the session
+  // origin). Best-effort expansion: project root first, then the
+  // working root when the key only resolves there.
+  const origin = getOriginalCwd()
+  if (origin !== getProjectRoot() && !existsSync(projectPath)) {
+    const originPath = join(origin, filePath)
+    if (existsSync(originPath)) {
+      return originPath
+    }
+  }
+  return projectPath
 }
 
 /**

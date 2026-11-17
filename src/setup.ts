@@ -273,6 +273,7 @@ export async function setup(
     // cron/etc. should resolve here. (EnterWorktreeTool mid-session does NOT
     // touch projectRoot — that's a throwaway worktree, project stays stable.)
     setProjectRoot(getCwd())
+    worktreeSession.projectRootIsWorktree = true
     saveWorktreeState(worktreeSession)
     // Clear memory files cache since originalCwd has changed
     clearMemoryFileCaches()
