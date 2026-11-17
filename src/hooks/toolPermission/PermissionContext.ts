@@ -645,6 +645,18 @@ function createPermissionContext(
         },
         { input: finalInput, permissionPromptStartTimeMs },
       )
+      // Persistence and plan-mode revalidation above are awaited; a
+      // concurrent decision can remove the directory covering finalInput
+      // meanwhile. Recheck the live boundary before allowing, matching
+      // handleUserAllow and handleClassifierAllow.
+      const writeBoundary = checkWriteBoundaryForAskRule(
+        tool,
+        finalInput,
+        toolUseContext.getAppState().toolPermissionContext,
+      )
+      if (writeBoundary) {
+        return writeBoundary
+      }
       return this.buildAllow(finalInput, {
         decisionReason: { type: 'hook', hookName: 'PermissionRequest' },
       })

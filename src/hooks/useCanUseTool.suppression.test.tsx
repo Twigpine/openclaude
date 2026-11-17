@@ -229,3 +229,58 @@ test('a forced ask under suppression still lets a PermissionRequest hook answer'
     root.unmount()
   }
 })
+
+test('a forced allow passes through unchanged when prompts are disabled', async () => {
+  const { root, canUseTool: fn } = await mount()
+  denyInsteadOfPrompting = true
+  try {
+    // Only asks are prompts: a forced allow must not become a suppression
+    // denial.
+    const result = await fn(
+      tool,
+      {},
+      context(),
+      assistantMessage,
+      'interactive-forced-allow',
+      {
+        behavior: 'allow',
+        updatedInput: {},
+      } as unknown as PermissionDecision,
+    )
+    expect(result.behavior).toBe('allow')
+  } finally {
+    denyInsteadOfPrompting = false
+    root.unmount()
+  }
+})
+
+test('a forced deny keeps its reason when prompts are disabled', async () => {
+  const { root, canUseTool: fn } = await mount()
+  denyInsteadOfPrompting = true
+  hookDecision = { behavior: 'allow' }
+  try {
+    // A forced deny is not a prompt either: suppression must not rewrite
+    // its reason, and it must not enter the suppression-denial hook pass
+    // that could turn it into an allow.
+    const result = await fn(
+      tool,
+      {},
+      context(),
+      assistantMessage,
+      'interactive-forced-deny',
+      {
+        behavior: 'deny',
+        message: 'denied by host policy',
+        decisionReason: { type: 'other', reason: 'host policy' },
+      } as unknown as PermissionDecision,
+    )
+    expect(result.behavior).toBe('deny')
+    if (result.behavior === 'deny') {
+      expect(result.message).toBe('denied by host policy')
+    }
+  } finally {
+    denyInsteadOfPrompting = false
+    hookDecision = undefined
+    root.unmount()
+  }
+})

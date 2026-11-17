@@ -587,6 +587,18 @@ export async function runPermissionRequestHooksForHeadlessAgent(
           })
           persistPermissionUpdates(permissionUpdates)
         }
+        // The awaited checks above can span a concurrent removal of the
+        // directory covering finalInput. Recheck against the live context:
+        // the external SDK caller returns this decision directly, without
+        // the hasPermissionsToUseTool revalidation tail.
+        const liveWriteBoundary = checkWriteBoundaryForAskRule(
+          tool,
+          finalInput,
+          context.getAppState().toolPermissionContext,
+        )
+        if (liveWriteBoundary) {
+          return liveWriteBoundary
+        }
         return {
           behavior: 'allow',
           updatedInput: finalInput,
@@ -1145,7 +1157,18 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
       context,
       planModeWasActive,
     )
-  return planModeDecision ?? result
+  if (planModeDecision) {
+    return planModeDecision
+  }
+  // The awaited revalidation can span a concurrent removal of the directory
+  // covering finalInput; the allow must hold against the live boundary.
+  return (
+    checkWriteBoundaryForAskRule(
+      tool,
+      finalInput,
+      context.getAppState().toolPermissionContext,
+    ) ?? result
+  )
 }
 
 /**

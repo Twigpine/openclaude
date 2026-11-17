@@ -27,6 +27,7 @@ import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
 import { connectToServer, fetchToolsForClient, getServerCacheKey } from '../../services/mcp/client.js'
 import { ClaudeAuthProvider } from '../../services/mcp/auth.js'
+import { logError } from '../../utils/log.js'
 import type { ActiveCredentialScope, CredentialScope } from '../../services/mcp/credentialScope.js'
 import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import {
@@ -393,17 +394,24 @@ export function createExternalCanUseTool(
     if (toolUseID && onPermissionRequest) {
       // PermissionRequest hooks answer before any host prompt, matching the
       // structured-IO ordering: a hook decision stands on its own and no
-      // permission_request is emitted for it.
-      const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
-        tool,
-        effectiveInput,
-        toolUseID,
-        toolUseContext,
-        toolUseContext.getAppState().toolPermissionContext.mode,
-        undefined,
-      )
-      if (hookDecision) {
-        return hookDecision
+      // permission_request is emitted for it. Hook dispatch is best-effort —
+      // a failure falls through to the normal prompt path.
+      try {
+        const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
+          tool,
+          effectiveInput,
+          toolUseID,
+          toolUseContext,
+          toolUseContext.getAppState().toolPermissionContext.mode,
+          undefined,
+        )
+        if (hookDecision) {
+          return hookDecision
+        }
+      } catch (err) {
+        logError(
+          err instanceof Error ? err : new Error('PermissionRequest hook dispatch failed'),
+        )
       }
       // An external permission_request IS the prompt this setting exists to
       // suppress; deny up front instead of asking the host.

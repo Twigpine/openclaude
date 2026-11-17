@@ -37,8 +37,10 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
       const shouldBypassForcedAsk = forceDecision?.behavior === "ask" && toolUseContext.getAppState().toolPermissionContext.mode === "fullAccess";
       // A forced ask is still a prompt, so denyInsteadOfPrompting suppresses
       // it. The resulting suppression denial flows into the deny branch,
-      // which lets PermissionRequest hooks answer before it stands.
-      const decisionPromise = forceDecision !== undefined && !shouldBypassForcedAsk ? Promise.resolve(suppressPromptIfConfigured(tool, forceDecision)) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
+      // which lets PermissionRequest hooks answer before it stands. Forced
+      // allow and deny pass through unchanged, matching the structured-IO
+      // ordering: only asks are prompts.
+      const decisionPromise = forceDecision !== undefined && !shouldBypassForcedAsk ? Promise.resolve(forceDecision.behavior === "ask" ? suppressPromptIfConfigured(tool, forceDecision) : forceDecision) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
       return decisionPromise.then(async result => {
         if (result.behavior === "allow") {
           if (ctx.resolveIfAborted(resolve)) {
