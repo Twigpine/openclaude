@@ -175,6 +175,12 @@ let initializes = 0
 let pendingTurnRelease: (() => void) | null = null
 /** When set, the stand-in answers 401 to a bearer token it would accept. */
 let rejectTokens = false
+/** When set, the stand-in asks the client for its roots over the SSE stream. */
+let offerRootsList = false
+/** Roots URIs the client reported in answer to roots/list requests. */
+let rootsSeen: string[] = []
+/** Roots/list requests the stand-in has sent, for unique ids. */
+let rootsRequests = 0
 /** Authorization-server metadata the stand-in sends headers for, then holds. */
 let heldMetadata: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
 /** Every session a test opens; teardown closes them, whatever the test did. */
@@ -290,9 +296,42 @@ function serveNeedingAuth(invalidClient = false): string {
         }
         return Response.json(tokens)
       }
+      if (path === '/mcp' && request.method === 'GET' && offerRootsList) {
+        // The client opens this stream after initialize to hear server
+        // requests. Ask it for its roots at once: the answer comes back as
+        // a POST, and the roots it reports show which directory the client
+        // believes the session works in.
+        const requestId = `roots-${++rootsRequests}`
+        return new Response(
+          new ReadableStream({
+            start(stream) {
+              stream.enqueue(
+                new TextEncoder().encode(
+                  `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: requestId, method: 'roots/list', params: {} })}\n\n`,
+                ),
+              )
+            },
+          }),
+          {
+            headers: {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+            },
+          },
+        )
+      }
       if (path === '/mcp' && request.headers.get('authorization')?.startsWith('Bearer token-for-') && !rejectTokens) {
         if (request.method !== 'POST') return new Response(null, { status: 405 })
         const rpc = (await request.json()) as { id?: string | number; method: string }
+        // A JSON-RPC response to a server request (no method): the client's
+        // answer to roots/list. Record the roots it reported.
+        if (rpc.method === undefined) {
+          const roots = (
+            rpc as unknown as { result?: { roots?: { uri: string }[] } }
+          ).result?.roots
+          if (roots) rootsSeen.push(...roots.map(root => root.uri))
+          return new Response(null, { status: 202 })
+        }
         // A notification gets no body back.
         if (rpc.id === undefined) return new Response(null, { status: 202 })
         // A reconnect's initialize can be held, so a test can act while the
@@ -500,6 +539,26 @@ function storedAccessTokens(store?: string): string[] {
   return Object.values(stored(store).mcpOAuth ?? {}).map(entry => entry.accessToken).filter(Boolean)
 }
 
+/** Seeds a valid stored token for a server, so its next connect is authorized. */
+function seedStoredToken(name: string, url: string, accessToken: string): void {
+  const key = realAuth.getServerKey(name, { type: 'http', url } as never)
+  const data = stored()
+  testStorage.update({
+    ...data,
+    mcpOAuth: {
+      ...(data.mcpOAuth ?? {}),
+      [key]: {
+        serverName: name,
+        serverUrl: url,
+        accessToken,
+        expiresAt: Date.now() + 3600_000,
+        clientId: 'seeded',
+        clientSecret: 'seeded',
+      },
+    },
+  })
+}
+
 /** The vault entry a config home selects, the rest of the environment as it is. */
 function storeIn(configDir: string): string {
   const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
@@ -555,6 +614,9 @@ beforeEach(async () => {
   refusedExchanges = 0
   failMcpRequests = false
   rejectTokens = false
+  offerRootsList = false
+  rootsSeen = []
+  rootsRequests = 0
   initializes = 0
   initCalls = 0
   failInit = false
@@ -1538,6 +1600,39 @@ async function completeSignIn(session: SDKSession, name: string) {
   expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
   return done
 }
+
+/**
+ * Pre-turn MCP work runs in the session's SDK context: a session whose cwd
+ * differs from the process directory must see its own directory in a real
+ * server-initiated roots/list request — for the fresh client the first
+ * connect creates and for the fresh client the reconnect creates. Outside
+ * the context, both would report the process directory instead.
+ */
+test('PRE-TURN AUTHENTICATION INITIALIZES A FRESH SERVER IN THE SESSION DIRECTORY', async () => {
+  const url = serveNeedingAuth()
+  offerRootsList = true
+  // A session whose cwd differs from the process directory.
+  const sessionDir = await mkdtemp(join(tmpdir(), 'openclaude-mcp-roots-'))
+  try {
+    seedStoredToken('gated', url, 'token-for-seeded')
+    const session = unstable_v2_createSession({
+      cwd: sessionDir,
+      mcpServers: { gated: { type: 'http', url } },
+    })
+    sdkSessions.push(session)
+
+    const status = await completeSignIn(session, 'gated')
+    expect(status.status).toBe('connected')
+    // One roots/list per fresh client: the first connect and the reconnect.
+    await waitFor(() => rootsSeen.length >= 2)
+    expect(rootsSeen.length).toBeGreaterThan(0)
+    for (const uri of rootsSeen) {
+      expect(uri).toBe(`file://${sessionDir}`)
+    }
+  } finally {
+    await rm(sessionDir, { recursive: true, force: true })
+  }
+}, 30_000)
 
 /**
  * The tool swap must replace tools by exact server ownership, not by a

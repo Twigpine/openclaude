@@ -58,6 +58,7 @@ import {
   switchSession,
   bindSdkContextToAsyncGenerator,
   runOutsideSdkContext,
+  runWithSdkContext,
 } from '../../bootstrap/state.js'
 import type { SessionId } from '../../types/ids.js'
 import {
@@ -818,6 +819,24 @@ class SDKSessionImpl implements SDKSession {
   }
 
   /**
+   * Runs pre-turn MCP work in this session's SDK context, as sendMessage
+   * does for a turn: a fresh server initialized here answers a roots/list
+   * request with this session's directory, not the process directory.
+   * Process-wide init() stays outside it.
+   */
+  private runInSdkContext<T>(work: () => Promise<T>): Promise<T> {
+    return runWithSdkContext(
+      {
+        sessionId: this._sessionId as SessionId,
+        sessionProjectDir: this._sessionProjectDir,
+        cwd: this.options.cwd,
+        originalCwd: this.options.cwd,
+      },
+      work,
+    )
+  }
+
+  /**
    * Await the shared MCP connect, but stop waiting when this sign-in is
    * aborted — the connect itself keeps running for a first turn that may
    * still be awaiting it, so an aborted sign-in does not cancel another
@@ -979,8 +998,10 @@ class SDKSessionImpl implements SDKSession {
       // A settings page signs in before the first turn; connect first so the
       // server list — and the tool pool the reconnect swaps into — exists.
       // An aborted sign-in stops waiting here, while the shared connect
-      // keeps running for a first turn that may still need it.
-      if (!(await this.ensureMcpConnectedForAuth(attempt.signal))) {
+      // keeps running for a first turn that may still need it. The connect
+      // runs in the session's SDK context, as a turn's would, so a fresh
+      // server initialized here sees the session's directory.
+      if (!(await this.runInSdkContext(() => this.ensureMcpConnectedForAuth(attempt.signal)))) {
         if (this.closed) throw new Error('SDK session is closed')
         throw new AuthenticationCancelledError()
       }
@@ -1006,9 +1027,13 @@ class SDKSessionImpl implements SDKSession {
       // where the flow began, too. Its connect carries the attempt's signal,
       // so a cancel while it is stalled closes the transport instead of
       // waiting out the connection timeout — the scope above is released
-      // with it, and the attempt rejects rather than hanging.
-      const result = await resumeIn(credentialScope, () =>
-        reconnectMcpServerImpl(name, config, attempt.signal),
+      // with it, and the attempt rejects rather than hanging. The reconnect
+      // also runs in the session's SDK context, as the first connect does,
+      // so the fresh client it creates sees the session's directory.
+      const result = await this.runInSdkContext(() =>
+        resumeIn(credentialScope, () =>
+          reconnectMcpServerImpl(name, config, attempt.signal),
+        ),
       )
 
       // The attempt may have been cancelled or superseded while the
