@@ -1,6 +1,8 @@
 import * as React from 'react';
-import { Settings } from '../../components/Settings/Settings.js';
+import { UsageDialog } from '../../components/Usage/UsageDialog.js';
 import type { LocalJSXCommandCall } from '../../types/command.js';
-export const call: LocalJSXCommandCall = async (onDone, context) => {
-  return <Settings onClose={onDone} context={context} defaultTab="Usage" />;
+import { hasProviderPlanUsage, resolveInitialUsageTab } from './providerScreen.js';
+export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
+  const showPlan = hasProviderPlanUsage();
+  return <UsageDialog onClose={onDone} showPlan={showPlan} initialTab={resolveInitialUsageTab(args ?? '', showPlan)} />;
 };

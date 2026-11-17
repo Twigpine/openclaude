@@ -515,7 +515,29 @@ function collectCommands(
     // for clauses BETWEEN `&&`/`;` chains shares state (common `VAR=x && cmd
     // $VAR`). `scope` crosses `||`/`|`/`&` as the pre-structure snapshot only.
     //
-    // `&&` and `;` DO carry scope: `VAR=x && cmd $VAR` is sequential, VAR is set.
+    // `;` carries scope linearly (sequential, unconditional): `VAR=x; cmd
+    // $VAR` sets VAR. `&&` carries scope INTO its RHS (`VAR=x && cmd $VAR`
+    // resolves VAR) but the RHS itself runs only when the LHS succeeded, so
+    // assignments it makes are runtime-conditional:
+    //   `SUB=push; false && SUB=status; git "$SUB"`: bash skips SUB=status
+    //   and runs `git push`, but unconditional leakage analyzes `git status`
+    //   and a `Bash(git push:*)` deny misses the command bash runs. Dropping
+    //   the writes instead would mirror the hole: `SUB=status; true &&
+    //   SUB=push; git "$SUB"` would then analyze `git status` while bash
+    //   runs `git push`.
+    // Fix: walk each `&&` RHS in a forked scope, then merge its scope diffs
+    // back. Two cases fail closed. A conditional write that could overwrite
+    // or remove a tracked LITERAL: the runtime value is either the old
+    // literal or a different one, and marking it unknown would hide the
+    // literal from downstream path checks, same bypass the `read VAR` guard
+    // in if_statement covers. And a NEW var the RHS sets to a literal:
+    // storing VAR_PLACEHOLDER lets `"./$V"` keep its `./` prefix and
+    // validate as the workspace-relative `./__TRACKED_VAR__` while bash
+    // expands the real literal (e.g. `../../etc/passwd`). Only added values
+    // that already contain a placeholder merge as VAR_PLACEHOLDER (the same
+    // unknown-value sentinel used for `read VAR` and loop vars): the value
+    // is runtime-conditional, so it resolves only inside strings, never as
+    // a literal.
     //
     // NOTE: `scope` and `varScope` diverge after the first `||`/`|`/`&`. The
     // caller's varScope is only mutated for the `&&`/`;` prefix — this is
@@ -542,6 +564,9 @@ function collectCommands(
     // nothing mutates caller's scope. For `list`/`program`, the `&&`/`;`
     // chain mutates caller's scope (sequential); fork only on `||`/`&`.
     let scope = isPipeline ? new Map(varScope) : varScope
+    // Separator preceding the next non-separator child. `&&` marks its RHS
+    // as conditional (see SECURITY comment above).
+    let prevSep: string | null = null
     for (const child of node.children) {
       if (!child) continue
       if (SEPARATOR_TYPES.has(child.type)) {
@@ -555,6 +580,42 @@ function collectCommands(
           // For list/program: snapshot is non-null (pre-scan set it).
           // `|`/`|&` only appear under `pipeline` nodes; `||`/`&` under list.
           scope = new Map(snapshot ?? varScope)
+        }
+        prevSep = child.type
+        continue
+      }
+      if (prevSep === '&&') {
+        // Conditional RHS: fork the scope so it still reads LHS assignments
+        // (`VAR=x && cmd $VAR` resolves), then merge the diffs back. Added
+        // vars become VAR_PLACEHOLDER only when the value already holds a
+        // placeholder; a new literal or a changed/removed tracked literal
+        // fails closed (see SECURITY comment above).
+        const branch = new Map(scope)
+        const err = collectCommands(child, commands, branch)
+        if (err) return err
+        for (const k of new Set([...branch.keys(), ...scope.keys()])) {
+          const next = branch.get(k)
+          const prior = scope.get(k)
+          if (next === prior) continue
+          if (prior !== undefined && !containsAnyPlaceholder(prior)) {
+            return {
+              kind: 'too-complex',
+              reason: `'${k}' changed in && RHS may not execute; cannot prove it overwrites tracked literal '${prior}'`,
+              nodeType: node.type,
+            }
+          }
+          if (
+            prior === undefined &&
+            next !== undefined &&
+            !containsAnyPlaceholder(next)
+          ) {
+            return {
+              kind: 'too-complex',
+              reason: `'${k}' introduced in && RHS may not execute; cannot prove the skipped-branch value is not literal '${next}'`,
+              nodeType: node.type,
+            }
+          }
+          scope.set(k, VAR_PLACEHOLDER)
         }
         continue
       }

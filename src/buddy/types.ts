@@ -56,6 +56,41 @@ export const SPECIES = [
 ] as const
 export type Species = (typeof SPECIES)[number] // biome-ignore format: keep compact
 
+// Twig, the pine marten, is OpenClaude's flagship buddy. It is a chosen form
+// only (/buddy set twig) and deliberately NOT in SPECIES: growing the hatch
+// pool would re-roll every existing user's species.
+export const twig = c(0x74, 0x77, 0x69, 0x67) as 'twig'
+
+// Keynote, the leather-jacket stage presenter, is also chosen-only.
+export const keynote = c(0x6b, 0x65, 0x79, 0x6e, 0x6f, 0x74, 0x65) as 'keynote'
+
+// Every form a companion can take: the hatch pool plus chosen-only forms.
+export const FORMS = [...SPECIES, twig, keynote] as const
+export type Form = (typeof FORMS)[number]
+
+// What users see. kaio and strawhat keep their ids (stored configs and the
+// hatch roll depend on them) but now render as the original characters Nova
+// and Inky, which keep the energy-wave and long-reach effects.
+export const FORM_NAMES: Record<Form, string> = {
+  [robinhood]: 'Robin',
+  [kaio]: 'Nova',
+  [strawhat]: 'Inky',
+  [merlin]: 'Merlin',
+  [kage]: 'Kage',
+  [ember]: 'Ember',
+  [corsair]: 'Corsair',
+  [twig]: 'Twig',
+  [keynote]: 'Keynote',
+}
+
+/** Resolve a form from its id or its display name, case-insensitively. */
+export function parseForm(input: string): Form | undefined {
+  const wanted = input.trim().toLowerCase()
+  return FORMS.find(
+    form => form === wanted || FORM_NAMES[form].toLowerCase() === wanted,
+  )
+}
+
 export const EYES = ['·', '✦', '×', '◉', '@', '°'] as const
 export type Eye = (typeof EYES)[number]
 
@@ -83,7 +118,8 @@ export type StatName = (typeof STAT_NAMES)[number]
 // Deterministic parts — derived from hash(userId)
 export type CompanionBones = {
   rarity: Rarity
-  species: Species
+  /** Rolled from SPECIES; a chosen override can be any Form. */
+  species: Form
   eye: Eye
   hat: Hat
   shiny: boolean
@@ -108,7 +144,7 @@ export type StoredCompanion = CompanionSoul & {
   hatchedAt: number
   // Persisted /buddy set choice. Applied over the rolled bones' species in
   // getCompanion(); does NOT touch rarity/stats (can't fake a legendary).
-  speciesOverride?: Species
+  speciesOverride?: Form
 }
 
 export const RARITY_WEIGHTS = {
@@ -122,16 +158,18 @@ export const RARITY_WEIGHTS = {
 // Every hero's signature color. A full Record so adding a species without a
 // color is a compile error, not a silent fallback.
 export const SPECIES_COLORS: Record<
-  Species,
+  Form,
   keyof import('../utils/theme.js').Theme
 > = {
   [robinhood]: 'success',
-  [kaio]: 'warning',
-  [strawhat]: 'error',
+  [kaio]: 'ide',
+  [strawhat]: 'planMode',
   [merlin]: 'autoAccept',
   [kage]: 'inactive',
   [ember]: 'error',
   [corsair]: 'permission',
+  [twig]: 'warning',
+  [keynote]: 'inactive',
 }
 
 export function companionColor(

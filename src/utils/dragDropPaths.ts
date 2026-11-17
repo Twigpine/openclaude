@@ -11,12 +11,11 @@ const IMAGE_EXTENSION_REGEX = /\.(png|jpe?g|gif|webp)$/i
  * Returns the cleaned paths if ALL segments are existing non-image files,
  * or an empty array otherwise.
  *
- * Splitting logic mirrors usePasteHandler: space preceding `/` or a Windows
- * drive letter, plus newline separators.
+ * Split before absolute paths, including quoted paths, and at newlines.
  */
 export function extractDraggedFilePaths(text: string): string[] {
   const segments = text
-    .split(/ (?=\/|[A-Za-z]:\\)/)
+    .split(/ (?=["']?(?:\/|[A-Za-z]:\\))/)
     .flatMap(part => part.split('\n'))
     .map(s => s.trim())
     .filter(Boolean)

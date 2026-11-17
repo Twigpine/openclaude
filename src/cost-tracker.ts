@@ -10,6 +10,10 @@ import {
 } from './services/api/cacheStatsTracker.js'
 import { getAPIProvider, isGithubNativeAnthropicMode } from './utils/model/providers.js'
 import { getRoutingSummaryForDisplay, resetRoutingTally } from './services/api/smartRouting/index.js'
+import {
+  type RecordUsageInput,
+  recordUsageEvent,
+} from './services/usage/ledger.js'
 import { getSettings_DEPRECATED } from './utils/settings/settings.js'
 import {
   addToTotalCostState,
@@ -347,13 +351,23 @@ function addToTotalModelUsage(
   return modelUsage
 }
 
+/**
+ * Request context for the local usage ledger. Callers that make real billed
+ * requests pass it; callers without it (e.g. VCR replays) are not recorded.
+ */
+type UsageRecordingContext = Omit<RecordUsageInput, 'usage' | 'model'>
+
 export function addToTotalSessionCost(
   cost: number,
   usage: Usage,
   model: string,
+  usageContext?: UsageRecordingContext,
 ): number {
   const modelUsage = addToTotalModelUsage(cost, usage, model)
   addToTotalCostState(cost, modelUsage, model)
+  if (usageContext) {
+    recordUsageEvent({ ...usageContext, usage, model })
+  }
 
   // Record normalized cache metrics for REPL display + /cache-stats.
   // Resolved from the current process provider — at this point `usage` has
@@ -393,7 +407,12 @@ export function addToTotalSessionCost(
   }
 
   let totalCost = cost
+  let advisorIndex = 0
   for (const advisorUsage of getAdvisorUsage(usage)) {
+    const advisorKey = usageContext?.requestKey
+      ? `${usageContext.requestKey}:advisor:${advisorIndex}`
+      : undefined
+    advisorIndex++
     const advisorCost = calculateUSDCost(advisorUsage.model, advisorUsage)
     logEvent('tengu_advisor_tool_token_usage', {
       advisor_model:
@@ -409,6 +428,11 @@ export function addToTotalSessionCost(
       advisorCost,
       advisorUsage,
       advisorUsage.model,
+      usageContext && {
+        ...usageContext,
+        querySource: 'advisor',
+        requestKey: advisorKey,
+      },
     )
   }
   return totalCost

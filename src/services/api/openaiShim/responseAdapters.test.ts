@@ -193,3 +193,23 @@ test('openaiStreamToAnthropic wrapper emits text, usage, and terminal stop', asy
   })
   expect(events.at(-1)).toEqual({ type: 'message_stop' })
 })
+
+test('maps Gemini cachedContentTokenCount to cache_read_input_tokens', () => {
+  const message = convertGeminiToAnthropicResponse({
+    candidates: [{
+      content: { parts: [{ text: 'hi' }] },
+      finishReason: 'STOP',
+    }],
+    usageMetadata: {
+      promptTokenCount: 100,
+      cachedContentTokenCount: 80,
+      candidatesTokenCount: 2,
+    },
+  }, 'gemini-test')
+
+  expect(message.usage).toMatchObject({
+    input_tokens: 20,
+    output_tokens: 2,
+    cache_read_input_tokens: 80,
+  })
+})

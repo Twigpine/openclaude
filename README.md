@@ -136,7 +136,7 @@ OpenClaude is also mirrored to Twigpine:
 - Guided provider setup and saved profiles with `/provider`
 - Coding-agent workflows in one place: bash, file tools, grep, glob, agents, tasks, MCP, and web tools
 - A bundled VS Code extension for launch integration and theme support
-- A pixel-art hero companion who fires an arrow every time you press Enter (really — see [Meet your buddy](#meet-your-buddy))
+- A pixel-art hero companion who reacts to what the agent is doing and plays its own signature move when you press Enter, from an arrow to an acorn (see [Meet your buddy](#meet-your-buddy))
 
 ## Quick Start
 
@@ -287,6 +287,19 @@ The command remains a log viewer and does not return the child's exit code.
 points to `openclaude logs <id> -f`; full terminal reattach is not implemented
 for local background sessions yet.
 
+`openclaude agents <prompt>` dispatches a background agent session the same way
+`--bg` does, with flags that configure the spawned session:
+
+```bash
+openclaude agents "review the auth module" --model gpt-4o --permission-mode acceptEdits
+openclaude agents "run the test suite" --add-dir ../lib --mcp-config ./mcp.json
+```
+
+Supported dispatch flags: `--add-dir`, `--settings`, `--mcp-config`,
+`--plugin-dir`, `--permission-mode`, `--model`, `--effort`,
+`--dangerously-skip-permissions`, and `-n/--name`. Bare `openclaude agents`
+(with no prompt) still lists configured agents.
+
 ### OpenClaude config cutover
 
 OpenClaude stores its own config under `~/.openclaude` and `~/.openclaude.json`
@@ -420,25 +433,40 @@ Advanced and source-build guides:
 ## Meet Your Buddy
 
 Run `/buddy` to hatch a companion — a truecolor pixel-art hero who stands
-beside your prompt, idles, blinks, and fires their signature move every time
-you submit a message:
+beside your prompt and plays their signature move when you submit a message
+(each form has its own move). In the full color sprite, its mood follows the
+agent: it thinks while the model streams, gets busy while tools run, hops
+when a turn finishes, celebrates after a long task, flinches when a request
+fails, and dozes off after five quiet minutes. The line-art and one-line
+fallbacks don't show moods.
+
+In terminals that support the kitty graphics protocol (iTerm2 3.6+, kitty,
+Ghostty, WezTerm; not inside tmux or screen) the buddy is drawn as a smooth,
+anti-aliased image about 4 rows tall instead of the pixel sprite. The CLI
+asks the terminal at startup; `/buddy images off` keeps the pixel sprite.
 
 ```
 /buddy                  hatch (first run) or pet your companion
-/buddy set robinhood    the green archer — arrow shot on every Enter
-/buddy set kaio         gold-haired warrior — charges a full-width energy wave
-/buddy set strawhat     stretchy punch that snaps back
+/buddy set twig         the pine marten, OpenClaude's flagship — acorn lob
+/buddy set robin        the green archer — arrow shot on every Enter
+/buddy set nova         little astronaut — charges a full-width energy wave
+/buddy set inky         octopus — long-reach punch that snaps back
 /buddy set merlin       twinkling sparkle stream
 /buddy set kage         spinning shuriken
 /buddy set ember        dragon fire with a real heat gradient
 /buddy set corsair      cannonball with smoke trail
-/buddy name Robin       rename your companion
+/buddy set keynote      leather-jacket stage presenter — tosses a glowing chip
+/buddy dance            a few seconds of dancing
+/buddy images off       always use the pixel sprite (on to undo)
+/buddy name Pip         rename your companion
 /buddy set random       back to your rolled hero
 ```
 
-Companions respect `prefersReducedMotion`, degrade gracefully to line art in
-low-color terminals, and can be silenced with `/buddy mute`. Requires a
-terminal at least 100 columns wide for the full sprite.
+Forms also accept their old ids (`robinhood`, `kaio`, `strawhat`). Companions
+respect `prefersReducedMotion` (no animation or Enter move), degrade gracefully
+to line art in low-color terminals, and can be silenced with `/buddy mute`.
+The full sprite (24 columns × 10 rows) and the Enter move need a terminal at
+least 100 columns wide; narrower terminals show a one-line face.
 
 ## Provider Notes
 
@@ -449,7 +477,7 @@ OpenClaude supports multiple providers, but behavior is not identical across all
 - Smaller local models can struggle with long multi-step tool flows
 - Some providers impose lower output caps than the CLI defaults, and OpenClaude adapts where possible
 - AI/ML API uses the OpenAI-compatible route, defaults to `gpt-4o`, and only surfaces chat-capable models from its public catalog
-- Twigpine OpenGateway is the fresh-install startup default and requires an API key from https://twigpine.com/console/gateway/keys. It uses one OpenAI-compatible base URL (`https://api.twigpine.com/v1`; the older `opengateway.gitlawb.com` address still works). `/model` lists the gateway's active models from a cached copy of its live list, on top of a catalog floor of `auto`, `mimo-v2.6-pro`, and `mimo-v2.6-flash`; see [Advanced Setup](docs/advanced-setup.md#twigpine-opengateway) for how the list is cached and refreshed, and what happens when a refresh fails. Do not pin the base URL to `/v1/xiaomi-mimo`.
+- Twigpine OpenGateway is the fresh-install startup default and requires an API key from https://twigpine.com/console/gateway/keys. It uses one OpenAI-compatible base URL (`https://api.twigpine.com/v1`; the older `opengateway.gitlawb.com` address still works) and defaults to `auto`, the gateway's smart routing. `/model` lists the gateway's active models from a cached copy of its live list, on top of a catalog floor of `auto`, `mimo-v2.6-pro`, and `mimo-v2.6-flash`; see [Advanced Setup](docs/advanced-setup.md#twigpine-opengateway) for how the list is cached and refreshed, and what happens when a refresh fails. Do not pin the base URL to `/v1/xiaomi-mimo`.
 - Z.AI GLM Coding Plan uses `https://api.z.ai/api/coding/paas/v4` with `glm-5.2` by default. On that direct route, GLM-5.3-Flash is selectable as `glm-5.3-flash` and accepts image input. Its OpenClaude effort choices are `low`, `high`, and `xhigh`, with `xhigh` requesting Z.AI `max`; GLM-5.3 and the existing GLM-5.2 query controls remain supported. These capabilities are not claimed for gateways that happen to carry the same model name.
 - Xiaomi MiMo uses `api-key` header auth on the direct OpenAI-compatible route and currently does not support `/usage` reporting in OpenClaude
 - GitHub Copilot serializes sub-agent execution by default to reduce Premium Request consumption — see [Agent Routing and Step Limits](docs/agent-routing.md#github-copilot-sub-agent-optimization) for tuning

@@ -1,6 +1,129 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 16" shape-rendering="crispEdges" role="img" aria-label="corsair pixel-art buddy">
-<style>.f0{animation:f0 4s step-end infinite}.f1{animation:f1 4s step-end infinite;opacity:0}
-@keyframes f0{0%,90%{opacity:1}90.01%,95%{opacity:0}95.01%,100%{opacity:1}}
-@keyframes f1{0%,90%{opacity:0}90.01%,95%{opacity:1}95.01%,100%{opacity:0}}
-@media (prefers-reduced-motion: reduce){.f0,.f1,.f2{animation:none}.f0{opacity:1}.f1,.f2{opacity:0}}</style>
-<g class="f0"><rect x="4" y="0" width="2" height="1" fill="#283c6e"/><rect x="13" y="0" width="2" height="1" fill="#283c6e"/><rect x="5" y="1" width="9" height="1" fill="#283c6e"/><rect x="4" y="2" width="11" height="1" fill="#d6a83c"/><rect x="5" y="3" width="9" height="1" fill="#283c6e"/><rect x="5" y="4" width="8" height="1" fill="#e8be98"/><rect x="4" y="5" width="1" height="1" fill="#e8be98"/><rect x="5" y="5" width="1" height="1" fill="#262220"/><rect x="6" y="5" width="1" height="1" fill="#f0f0f0"/><rect x="7" y="5" width="3" height="1" fill="#e8be98"/><rect x="10" y="5" width="3" height="1" fill="#282624"/><rect x="13" y="5" width="1" height="2" fill="#c6946e"/><rect x="4" y="6" width="9" height="1" fill="#e8be98"/><rect x="5" y="7" width="1" height="1" fill="#c6946e"/><rect x="6" y="7" width="6" height="1" fill="#e8be98"/><rect x="12" y="7" width="1" height="1" fill="#c6946e"/><rect x="4" y="8" width="9" height="1" fill="#cc3333"/><rect x="3" y="9" width="2" height="2" fill="#e8be98"/><rect x="5" y="9" width="1" height="1" fill="#cc3333"/><rect x="6" y="9" width="5" height="1" fill="#ebeef5"/><rect x="11" y="9" width="1" height="1" fill="#cc3333"/><rect x="12" y="9" width="2" height="2" fill="#e8be98"/><rect x="6" y="10" width="1" height="1" fill="#cc3333"/><rect x="7" y="10" width="1" height="1" fill="#d6a83c"/><rect x="8" y="10" width="1" height="1" fill="#cc3333"/><rect x="9" y="10" width="1" height="1" fill="#d6a83c"/><rect x="10" y="10" width="1" height="1" fill="#cc3333"/><rect x="5" y="11" width="7" height="1" fill="#cc3333"/><rect x="5" y="12" width="2" height="2" fill="#283c6e"/><rect x="11" y="12" width="2" height="2" fill="#283c6e"/><rect x="4" y="14" width="3" height="1" fill="#283c6e"/><rect x="11" y="14" width="3" height="1" fill="#283c6e"/></g><g class="f1"><rect x="4" y="0" width="2" height="1" fill="#283c6e"/><rect x="13" y="0" width="2" height="1" fill="#283c6e"/><rect x="5" y="1" width="9" height="1" fill="#283c6e"/><rect x="4" y="2" width="11" height="1" fill="#d6a83c"/><rect x="5" y="3" width="9" height="1" fill="#283c6e"/><rect x="5" y="4" width="8" height="1" fill="#e8be98"/><rect x="4" y="5" width="1" height="1" fill="#e8be98"/><rect x="5" y="5" width="2" height="1" fill="#262220"/><rect x="7" y="5" width="3" height="1" fill="#e8be98"/><rect x="10" y="5" width="3" height="1" fill="#282624"/><rect x="13" y="5" width="1" height="2" fill="#c6946e"/><rect x="4" y="6" width="9" height="1" fill="#e8be98"/><rect x="5" y="7" width="1" height="1" fill="#c6946e"/><rect x="6" y="7" width="6" height="1" fill="#e8be98"/><rect x="12" y="7" width="1" height="1" fill="#c6946e"/><rect x="4" y="8" width="9" height="1" fill="#cc3333"/><rect x="3" y="9" width="2" height="2" fill="#e8be98"/><rect x="5" y="9" width="1" height="1" fill="#cc3333"/><rect x="6" y="9" width="5" height="1" fill="#ebeef5"/><rect x="11" y="9" width="1" height="1" fill="#cc3333"/><rect x="12" y="9" width="2" height="2" fill="#e8be98"/><rect x="6" y="10" width="1" height="1" fill="#cc3333"/><rect x="7" y="10" width="1" height="1" fill="#d6a83c"/><rect x="8" y="10" width="1" height="1" fill="#cc3333"/><rect x="9" y="10" width="1" height="1" fill="#d6a83c"/><rect x="10" y="10" width="1" height="1" fill="#cc3333"/><rect x="5" y="11" width="7" height="1" fill="#cc3333"/><rect x="5" y="12" width="2" height="2" fill="#283c6e"/><rect x="11" y="12" width="2" height="2" fill="#283c6e"/><rect x="4" y="14" width="3" height="1" fill="#283c6e"/><rect x="11" y="14" width="3" height="1" fill="#283c6e"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -1 48 41" shape-rendering="crispEdges" role="img" aria-label="Corsair pixel-art buddy">
+<style>
+  .b{animation:b 1.8s ease-in-out infinite}
+  @keyframes b{0%,100%{transform:translateY(0)}50%{transform:translateY(-1px)}}
+  @media (prefers-reduced-motion: reduce){.b{animation:none}}
+</style>
+<g class="b">
+  <path fill="#231815" d="
+    M28 4h3v1h-3z
+    M11 5h4v1h-4zM25 5h3v1h-3zM31 5h1v1h-1z
+    M10 6h1v1h-1zM15 6h10v1h-10zM31 6h1v1h-1z
+    M9 7h1v1h-1zM32 7h1v1h-1z
+    M9 8h1v1h-1zM33 8h1v1h-1z
+    M8 9h1v1h-1zM33 9h1v1h-1z
+    M7 10h1v1h-1zM34 10h1v1h-1z
+    M6 11h1v1h-1zM35 11h1v1h-1z
+    M6 12h1v1h-1zM35 12h1v1h-1z
+    M7 13h23v1h-23zM31 13h4v1h-4z
+    M10 14h3v1h-3zM32 14h1v1h-1z
+    M10 15h1v1h-1zM13 15h4v1h-4zM32 15h1v1h-1z
+    M10 16h1v1h-1zM13 16h4v1h-4zM32 16h1v1h-1z
+    M10 17h1v1h-1zM13 17h4v1h-4zM32 17h1v1h-1z
+    M10 18h1v1h-1zM13 18h4v1h-4zM32 18h1v1h-1z
+    M10 19h1v1h-1zM31 19h1v1h-1z
+    M10 20h1v1h-1zM31 20h1v1h-1z
+    M11 21h1v1h-1zM30 21h1v1h-1z
+    M12 22h1v1h-1zM29 22h1v1h-1z
+    M13 23h1v1h-1zM28 23h1v1h-1z
+    M13 24h2v1h-2zM27 24h3v1h-3z
+    M12 25h1v1h-1zM15 25h2v1h-2zM26 25h2v1h-2zM30 25h1v1h-1z
+    M11 26h1v1h-1zM31 26h1v1h-1z
+    M11 27h1v1h-1zM31 27h1v1h-1z
+    M11 28h1v1h-1zM31 28h1v1h-1z
+    M10 29h1v1h-1zM32 29h1v1h-1z
+    M10 30h1v1h-1zM32 30h1v1h-1z
+    M10 31h1v1h-1zM14 31h1v1h-1zM28 31h1v1h-1zM32 31h1v1h-1z
+    M10 32h1v1h-1zM14 32h1v1h-1zM28 32h1v1h-1zM32 32h1v1h-1z
+    M10 33h1v1h-1zM14 33h2v1h-2zM27 33h2v1h-2zM32 33h1v1h-1z
+    M11 34h3v1h-3zM15 34h1v1h-1zM27 34h1v1h-1zM29 34h3v1h-3z
+    M14 35h1v1h-1zM20 35h1v1h-1zM22 35h1v1h-1zM28 35h1v1h-1z
+    M13 36h1v1h-1zM20 36h3v1h-3zM29 36h1v1h-1z
+    M13 37h1v1h-1zM20 37h1v1h-1zM22 37h1v1h-1zM29 37h1v1h-1z
+    M14 38h1v1h-1zM19 38h1v1h-1zM23 38h1v1h-1zM28 38h1v1h-1z
+    M15 39h4v1h-4zM24 39h4v1h-4z"/>
+  <path fill="#2f4a8c" d="
+    M28 5h3v1h-3z
+    M11 6h4v1h-4zM25 6h6v1h-6z
+    M10 7h9v1h-9zM22 7h10v1h-10z
+    M10 8h10v1h-10zM22 8h11v1h-11z
+    M9 9h11v1h-11zM22 9h11v1h-11z
+    M8 10h12v1h-12zM22 10h12v1h-12z
+    M13 25h2v1h-2zM17 25h1v1h-1zM24 25h2v1h-2zM28 25h2v1h-2z
+    M12 26h8v1h-8zM23 26h8v1h-8z
+    M12 27h7v1h-7zM24 27h7v1h-7z
+    M12 28h6v1h-6zM24 28h1v1h-1zM26 28h5v1h-5z
+    M11 29h8v1h-8zM24 29h8v1h-8z
+    M11 30h8v1h-8zM24 30h8v1h-8z
+    M15 31h3v1h-3zM24 31h1v1h-1zM26 31h2v1h-2z
+    M15 32h5v1h-5zM23 32h5v1h-5z
+    M16 33h5v1h-5zM22 33h5v1h-5z
+    M17 34h9v1h-9z
+    M21 35h1v1h-1z"/>
+  <path fill="#f0c8a0" d="
+    M19 7h3v1h-3z
+    M13 14h14v1h-14z
+    M11 15h2v1h-2zM17 15h6v1h-6zM25 15h2v1h-2z
+    M11 16h2v1h-2zM17 16h5v1h-5zM26 16h1v1h-1z
+    M11 17h2v1h-2zM17 17h5v1h-5zM26 17h1v1h-1z
+    M11 18h2v1h-2zM17 18h5v1h-5zM26 18h1v1h-1z
+    M11 19h1v1h-1zM14 19h11v1h-11z
+    M11 20h1v1h-1zM14 20h11v1h-11z
+    M12 21h6v1h-6zM20 21h10v1h-10z
+    M13 22h16v1h-16z
+    M14 23h14v1h-14z
+    M15 24h12v1h-12z
+    M18 25h6v1h-6z
+    M11 31h3v1h-3zM29 31h3v1h-3z
+    M11 32h3v1h-3zM29 32h3v1h-3z
+    M11 33h3v1h-3zM29 33h3v1h-3z"/>
+  <path fill="#f1f2f6" d="
+    M20 8h2v1h-2z
+    M20 9h2v1h-2z
+    M20 10h2v1h-2z
+    M20 26h3v1h-3z
+    M19 27h5v1h-5z
+    M19 28h5v1h-5z
+    M19 29h5v1h-5z
+    M19 30h5v1h-5z
+    M19 31h5v1h-5z
+    M20 32h3v1h-3z
+    M21 33h1v1h-1z"/>
+  <path fill="#f2c14e" d="
+    M7 11h28v1h-28z
+    M7 12h28v1h-28z
+    M18 28h1v1h-1zM25 28h1v1h-1z
+    M18 31h1v1h-1zM25 31h1v1h-1z"/>
+  <path fill="#7a522e" d="
+    M30 13h1v1h-1z
+    M27 14h5v1h-5z
+    M27 15h5v1h-5z
+    M27 16h5v1h-5z
+    M27 17h5v1h-5z
+    M27 18h5v1h-5z
+    M28 19h3v1h-3z
+    M28 20h3v1h-3z"/>
+  <path fill="#ffffff" d="
+    M23 15h1v1h-1z
+    M23 16h1v1h-1z"/>
+  <path fill="#17110f" d="
+    M24 15h1v1h-1z
+    M22 16h1v1h-1zM24 16h2v1h-2z
+    M22 17h4v1h-4z
+    M22 18h4v1h-4z"/>
+  <path fill="#ee8f86" d="
+    M12 19h2v1h-2zM25 19h3v1h-3z
+    M12 20h2v1h-2zM25 20h3v1h-3z"/>
+  <path fill="#3b2622" d="
+    M18 21h2v1h-2z"/>
+  <path fill="#3a3d46" d="
+    M16 34h1v1h-1zM26 34h1v1h-1z
+    M16 35h4v1h-4zM23 35h4v1h-4z
+    M17 36h2v1h-2zM24 36h2v1h-2z"/>
+  <path fill="#5f3c29" d="
+    M15 35h1v1h-1zM27 35h1v1h-1z
+    M14 36h3v1h-3zM19 36h1v1h-1zM23 36h1v1h-1zM26 36h3v1h-3z
+    M14 37h6v1h-6zM23 37h6v1h-6z
+    M15 38h4v1h-4zM24 38h4v1h-4z"/>
+</g>
+</svg>

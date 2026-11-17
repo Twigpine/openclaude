@@ -24,6 +24,7 @@ import type { ToolUseContext } from '../Tool.js'
 import type { AgentDefinition } from '../tools/AgentTool/loadAgentsDir.js'
 import type { AgentId } from '../types/ids.js'
 import type { Message } from '../types/message.js'
+import { getSessionId } from '../bootstrap/state.js'
 import { createChildAbortController } from './abortController.js'
 import { raceAbort } from './boundedAsync.js'
 import { AbortError } from './errors.js'
@@ -553,6 +554,10 @@ export function createSubagentContext(
     messages: overrides?.messages ?? parentContext.messages,
     // Generate new agentId for subagents (each subagent should have its own ID)
     agentId,
+    // The spawning context's agent id, or the main session id when the
+    // parent is the main thread — subagent telemetry reports it as
+    // parent_agent_id.
+    parentAgentId: parentContext.agentId ?? getSessionId(),
     // Runtime options retain the concrete model for budgets and capabilities.
     // Request aliases/reasoning travel separately, owned by this child. Explicit
     // options start a new selection even when the concrete model is unchanged.

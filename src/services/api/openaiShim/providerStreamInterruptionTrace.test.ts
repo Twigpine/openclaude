@@ -157,7 +157,7 @@ test('all non-Codex readers distinguish raw, parsed, control, and ignored frames
 })
 
 for (const traceEnabled of [false, true]) {
-  test(`OpenAI-compatible and Gemini null payloads fail with tracing ${traceEnabled ? 'enabled' : 'disabled'}`, async () => {
+  test(`null payload handling is preserved with tracing ${traceEnabled ? 'enabled' : 'disabled'}`, async () => {
     const previousTrace = process.env.OPENCLAUDE_INTERRUPT_TRACE
     try {
       if (traceEnabled) process.env.OPENCLAUDE_INTERRUPT_TRACE = '1'
@@ -166,6 +166,7 @@ for (const traceEnabled of [false, true]) {
       const cases = [
         {
           transport: 'openai_chat_completions',
+          outcome: 'failed',
           stream: () =>
             openaiStreamToAnthropic(
               responseFromText('data: null\n\ndata: [DONE]\n\n'),
@@ -174,6 +175,7 @@ for (const traceEnabled of [false, true]) {
         },
         {
           transport: 'gemini_sse',
+          outcome: 'complete',
           stream: () =>
             geminiSseToAnthropic(
               responseFromText('data: null\n\ndata: [DONE]\n\n'),
@@ -184,7 +186,12 @@ for (const traceEnabled of [false, true]) {
 
       for (const scenario of cases) {
         __resetInterruptionTraceForTests()
-        await expect(collect(scenario.stream())).rejects.toBeInstanceOf(TypeError)
+        if (scenario.outcome === 'failed') {
+          await expect(collect(scenario.stream())).rejects.toBeInstanceOf(TypeError)
+        } else {
+          const events = await collect(scenario.stream())
+          expect(events.at(-1)).toEqual({ type: 'message_stop' })
+        }
         const snapshot = __getInterruptionTraceSnapshotForTests()
         if (!traceEnabled) {
           expect(snapshot).toEqual([])
@@ -197,7 +204,7 @@ for (const traceEnabled of [false, true]) {
               entry.transport === scenario.transport,
           ),
         ).toMatchObject({
-          outcome: 'failed',
+          outcome: scenario.outcome,
           ignoredFrameCount: 1,
         })
       }

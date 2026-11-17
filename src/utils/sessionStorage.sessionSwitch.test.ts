@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path'
 import {
   getCwdState,
   getOriginalCwd,
+  getProjectRoot,
   getSessionId,
   getSessionProjectDir,
   isSessionPersistenceDisabled,
@@ -16,6 +17,7 @@ import {
   runWithSdkContext,
   setCwdState,
   setOriginalCwd,
+  setProjectRoot,
   setSessionPersistenceDisabled,
   resetStateForTests,
   switchSession,
@@ -70,6 +72,7 @@ let originalSessionId = ''
 let originalSessionProjectDir: string | null = null
 let originalConfigOverride: string | undefined
 let originalPersistenceDisabled = false
+let originalProjectRoot = ''
 let originalNodeEnv: string | undefined
 let originalTestPersistence: string | undefined
 let originalPersistence: string | undefined
@@ -105,6 +108,7 @@ beforeEach(async () => {
   await acquireSharedMutationLock('utils/sessionStorage.sessionSwitch.test.ts')
   testRoot = await mkdtemp(join(tmpdir(), 'openclaude-session-switch-'))
   originalCwd = getOriginalCwd()
+  originalProjectRoot = getProjectRoot()
   originalSessionId = getSessionId()
   // Restored with the id below: switchSession sets both, and handing back
   // `null` would move the active session's transcript for every later test.
@@ -124,6 +128,9 @@ beforeEach(async () => {
   await mkdir(workspace, { recursive: true })
   setClaudeConfigHomeDirForTesting(configDir)
   setOriginalCwd(workspace)
+  // Session-record paths anchor to the project root, so the fixture must
+  // pin it alongside originalCwd or transcripts resolve to the real repo.
+  setProjectRoot(workspace)
   resetProjectForTesting()
 })
 
@@ -136,6 +143,7 @@ afterEach(async () => {
   resetProjectForTesting()
   switchSession(originalSessionId as never, originalSessionProjectDir)
   setOriginalCwd(originalCwd)
+  setProjectRoot(originalProjectRoot)
   setClaudeConfigHomeDirForTesting(originalConfigOverride)
   setSessionPersistenceDisabled(originalPersistenceDisabled)
   if (originalNodeEnv === undefined) delete process.env.NODE_ENV
@@ -481,6 +489,7 @@ test('the switch listener is re-registered after the signal is cleared', async (
   // Then this file's own setup runs again, as it would in a full-suite pass.
   setSessionPersistenceDisabled(false)
   setOriginalCwd(join(testRoot, 'workspace'))
+  setProjectRoot(join(testRoot, 'workspace'))
   resetProjectForTesting()
 
   switchSession(FIRST as never, null)

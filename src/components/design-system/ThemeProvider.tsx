@@ -1,8 +1,8 @@
-import { feature } from 'bun:bundle';
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import useStdin from '../../ink/hooks/use-stdin.js';
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js';
 import { getSystemThemeName, type SystemTheme } from '../../utils/systemTheme.js';
+import { startSystemThemeWatchIfEnabled } from '../../utils/systemThemeWatchGate.js';
 import type { ThemeName, ThemeSetting } from '../../utils/theme.js';
 type ThemeContextValue = {
   /** The saved user preference. May be 'auto'. */
@@ -58,24 +58,11 @@ export function ThemeProvider({
   } = useStdin();
 
   // Watch for live terminal theme changes while 'auto' is active.
-  // Positive feature() pattern so the watcher import is dead-code-eliminated
-  // in external builds.
+  // startSystemThemeWatchIfEnabled keeps the flag gate and the lazy
+  // watcher load in one testable place.
   useEffect(() => {
-    if (feature('AUTO_THEME')) {
-      if (activeSetting !== 'auto' || !internal_querier) return;
-      let cleanup: (() => void) | undefined;
-      let cancelled = false;
-      void import('../../utils/systemThemeWatcher.js').then(({
-        watchSystemTheme
-      }) => {
-        if (cancelled) return;
-        cleanup = watchSystemTheme(internal_querier, setSystemTheme);
-      });
-      return () => {
-        cancelled = true;
-        cleanup?.();
-      };
-    }
+    if (activeSetting !== 'auto' || !internal_querier) return;
+    return startSystemThemeWatchIfEnabled(internal_querier, setSystemTheme);
   }, [activeSetting, internal_querier]);
   const currentTheme: ThemeName = activeSetting === 'auto' ? systemTheme : activeSetting;
   const value = useMemo<ThemeContextValue>(() => ({

@@ -11,7 +11,6 @@ import {
 import {
   extractMcpToolDetails,
   extractSkillName,
-  extractToolInputForTelemetry,
   getFileExtensionForAnalytics,
   getFileExtensionsFromBashCommand,
   isToolDetailsLoggingEnabled,
@@ -117,6 +116,10 @@ import {
 } from '../mcp/client.js'
 import { mcpInfoFromString } from '../mcp/mcpStringUtils.js'
 import { normalizeNameForMCP } from '../mcp/normalization.js'
+import {
+  logToolResultEvent,
+  logToolSafetyEvent,
+} from '../../utils/telemetry/toolEvents.js'
 import { createToolQueryLeaseInput } from './queryActivityLease.js'
 import type { MCPServerConnection } from '../mcp/types.js'
 import {
@@ -1172,7 +1175,13 @@ export async function checkPermissionsAndCallTool(
 
   if (permissionDecision.behavior !== 'allow') {
     logForDebugging(`${tool.name} tool permission denied`)
-    toolUseContext.toolDecisions?.get(toolUseID)
+    void logToolSafetyEvent({
+      toolName: tool.name,
+      decision: permissionDecision,
+      toolUseContext,
+      durationMs: permissionDurationMs,
+      isMcp: isMcpTool(tool),
+    })
 
     if (!shouldSkipSessionPersistence()) {
       try {
@@ -1335,7 +1344,6 @@ export async function checkPermissionsAndCallTool(
   // Prepare tool parameters for logging in tool_result event.
   // Gated by OTEL_LOG_TOOL_DETAILS — tool parameters can contain sensitive
   // content (bash commands, MCP server names, etc.) so they're opt-in only.
-  extractToolInputForTelemetry(processedInput)
   let toolParameters: Record<string, unknown> = {}
   if (isToolDetailsLoggingEnabled()) {
     if (tool.name === BASH_TOOL_NAME && 'command' in processedInput) {
@@ -1531,10 +1539,19 @@ export async function checkPermissionsAndCallTool(
       }
     }
 
-    // Log tool result event for OTLP with tool parameters and decision context
-    if (isMcpTool(tool)) {
-      getMcpServerScopeFromToolName(tool.name)
-    }
+    void logToolResultEvent({
+      toolName: tool.name,
+      toolUseContext,
+      toolUseID,
+      success: !mappedToolResultBlock.is_error,
+      durationMs,
+      toolParameters,
+      isMcp: isMcpTool(tool),
+      mcpServerType,
+      mcpServerBaseUrl,
+      mcpServerScope:
+        getMcpServerScopeFromToolName(tool.name) ?? undefined,
+    })
 
 
     // Run PostToolUse hooks
@@ -1833,16 +1850,30 @@ export async function checkPermissionsAndCallTool(
           mcpServerBaseUrl,
         ),
       })
-      // Log tool result error event for OTLP with tool parameters and decision context
-      if (isMcpTool(tool)) {
-        getMcpServerScopeFromToolName(tool.name)
-      }
-
           }
     const content = formatError(error)
 
     // Determine if this was a user interrupt
     const isInterrupt = error instanceof AbortError
+
+    void logToolResultEvent({
+      toolName: tool.name,
+      toolUseContext,
+      toolUseID,
+      success: false,
+      durationMs,
+      // Raw error text carries command output (stderr/stdout up to the
+      // formatError cap), so it only ships with OTEL_LOG_TOOL_DETAILS;
+      // otherwise emit the classified category like the analytics event.
+      error: isToolDetailsLoggingEnabled() ? content : classifyToolError(error).slice(0, 60),
+      toolParameters,
+      isInterrupt,
+      isMcp: isMcpTool(tool),
+      mcpServerType,
+      mcpServerBaseUrl,
+      mcpServerScope:
+        getMcpServerScopeFromToolName(tool.name) ?? undefined,
+    })
 
     // Run PostToolUseFailure hooks
     const hookMessages: MessageUpdateLazy<

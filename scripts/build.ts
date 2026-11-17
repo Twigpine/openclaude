@@ -133,6 +133,19 @@ const featureFlags: Record<string, boolean> = {
   HOOK_PROMPTS: true,                 // Allow tools to request interactive user prompts
   CONVERSATION_ARC: true,             // Conversation arc tracking (goals/decisions/phases)
   MULTI_TURN_CONTEXT: true,           // Multi-turn context tracking across tool cycles
+  UNATTENDED_RETRY: true,             // Usage-limit-aware persistent retry for unattended runs; opt-in via CLAUDE_CODE_UNATTENDED_RETRY or CLAUDE_CODE_RETRY_WATCHDOG at runtime
+  TREE_SITTER_BASH: true,             // AST-based bash command analysis (pure-TS parser, no native dep)
+  BASH_CLASSIFIER: true,              // Bash(prompt: ...) natural-language permission rules via side-model classifier; opt-out via CLAUDE_CODE_DISABLE_BASH_CLASSIFIER
+  POWERSHELL_AUTO_MODE: true,         // Include PowerShell prompt rules in classifier input
+  HOOK_CHAINS: true,                  // Chained hook evaluation and action dispatch on PostToolUseFailure/TaskCompleted; opt-in via CLAUDE_CODE_ENABLE_HOOK_CHAINS
+  MCP_RICH_OUTPUT: true,              // Rich MCP tool output rendering (unwrapped JSON, linkified URLs)
+  COMPACTION_REMINDERS: true,         // compaction_reminder attachment nudging post-compact continuation
+  NEW_INIT: true,                     // /init AGENTS.md onboarding; opt-in via USER_TYPE=ant or CLAUDE_CODE_NEW_INIT
+  STREAMLINED_OUTPUT: true,           // Streamlined stream-json output transformer; opt-in via CLAUDE_CODE_STREAMLINED_OUTPUT
+  AGENT_MEMORY_SNAPSHOT: false,       // Deferred: SnapshotUpdateDialog is a stub that never resolves, so --agent startup would hang waiting on it
+  LODESTONE: true,                    // claude-cli:// deep links: OS protocol registration + --handle-uri entry; opt-out via disableDeepLinkRegistration setting
+  AUTO_THEME: true,                   // Live light/dark switching via OSC 11 polling while theme is 'auto'
+  SKILL_IMPROVEMENT: true,            // Post-sampling hook that proposes skill file rewrites; opt-in via CLAUDE_CODE_SKILL_IMPROVEMENT
 }
 
 // ── Pre-process: replace feature() calls with boolean literals ──────

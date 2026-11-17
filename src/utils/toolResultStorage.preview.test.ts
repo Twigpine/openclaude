@@ -7,6 +7,8 @@ import {
   getOriginalCwd,
   getSessionId,
   setOriginalCwd,
+  setProjectRoot,
+  getProjectRoot,
   switchSession,
 } from '../bootstrap/state.ts'
 import type { SessionId } from '../types/ids.ts'
@@ -364,21 +366,25 @@ describe('persisted tool-result preview integration', () => {
   let tempConfigDir: string
   let previousConfigDir: string | undefined
   let previousCwd: string
+let previousProjectRoot: string
   let previousSessionId: SessionId
 
   beforeAll(async () => {
     tempConfigDir = await mkdtemp(join(tmpdir(), 'tool-preview-'))
     previousConfigDir = getClaudeConfigHomeDirOverrideForTesting()
     previousCwd = getOriginalCwd()
+    previousProjectRoot = getProjectRoot()
     previousSessionId = getSessionId()
     setClaudeConfigHomeDirForTesting(tempConfigDir)
     setOriginalCwd(join(tempConfigDir, 'workspace'))
+    setProjectRoot(join(tempConfigDir, 'workspace'))
     switchSession('tool-preview-session' as SessionId)
   })
 
   afterAll(async () => {
     switchSession(previousSessionId)
     setOriginalCwd(previousCwd)
+    setProjectRoot(previousProjectRoot)
     setClaudeConfigHomeDirForTesting(previousConfigDir)
     await rm(tempConfigDir, { recursive: true, force: true })
   })

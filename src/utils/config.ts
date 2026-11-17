@@ -291,6 +291,7 @@ export type GlobalConfig = {
   bypassPermissionsModeAccepted?: boolean
   hasUsedBackslashReturn?: boolean
   autoCompactEnabled: boolean // Controls whether auto-compact is enabled
+  idleCompaction: boolean // Compact the session automatically after a long idle period (default: on)
   contextCollapseEnabled: boolean // Opt-in: collapse old transcript spans into summaries (lossy; off by default)
   toolHistoryCompressionEnabled: boolean // Compress old tool_result content (shim providers; Anthropic-native only while prompt caching is inactive)
   compactTailTurns?: number // Recent messages preserved verbatim by auto-compact's relevance pruning (default: 3)
@@ -350,6 +351,8 @@ export type GlobalConfig = {
   // /buddy companion soul — bones regenerated from userId on read. See src/buddy/.
   companion?: import('../buddy/types.js').StoredCompanion
   companionMuted?: boolean
+  /** false = never draw the companion as a terminal image (/buddy images off) */
+  companionImages?: boolean
 
   // Feedback survey tracking
   feedbackSurveyState?: {
@@ -558,6 +561,10 @@ export type GlobalConfig = {
   // Env var still takes precedence: =0 always off, =1 always on.
   flickerFreeMode?: boolean
 
+  // Mouse wheel scroll speed multiplier (rows per wheel event, baseline 1).
+  // Set via /scroll-speed. CLAUDE_CODE_SCROLL_SPEED env var takes precedence.
+  scrollSpeed?: number
+
   // GitHub repo path mapping for teleport directory switching
   // Key: "owner/repo" (lowercase), Value: array of absolute paths where repo is cloned
   githubRepoPaths?: Record<string, string[]>
@@ -726,6 +733,7 @@ function createDefaultGlobalConfig(): GlobalConfig {
     verbose: false,
     editorMode: 'normal',
     autoCompactEnabled: true,
+    idleCompaction: true,
     contextCollapseEnabled: false,
     toolHistoryCompressionEnabled: true,
     showTurnDuration: true,
@@ -782,6 +790,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'editorMode',
   'hasUsedBackslashReturn',
   'autoCompactEnabled',
+  'idleCompaction',
   'compactTailTurns',
   'replMaxTurns',
   'queryIdleTimeoutMs',
@@ -813,6 +822,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'copyFullResponse',
   'copyOnSelect',
   'flickerFreeMode',
+  'scrollSpeed',
   'permissionExplainerEnabled',
   'prStatusFooterEnabled',
   'defaultStatusLineEnabled',

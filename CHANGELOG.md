@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.36.0](https://github.com/Twigpine/openclaude/compare/v0.35.1...v0.36.0) (2026-11-11)
+
+
+### Features
+
+* **opengateway:** default new setups to auto smart routing ([#2508](https://github.com/Twigpine/openclaude/issues/2508)) ([77a96c2](https://github.com/Twigpine/openclaude/commit/77a96c21a98fa3a939b038bd4fba313911712466))
+* **usage:** add a Local view to /usage ([#2506](https://github.com/Twigpine/openclaude/issues/2506)) ([b9ec49b](https://github.com/Twigpine/openclaude/commit/b9ec49b2dc830976aa0f8066248cb9b47cf1369d))
+* **usage:** record a local per-request usage ledger ([#2504](https://github.com/Twigpine/openclaude/issues/2504)) ([ac81fcc](https://github.com/Twigpine/openclaude/commit/ac81fcc26edf1b09334b0cfe1c754d8ad3143bd0))
+
+
+### Bug Fixes
+
+* address reported AI code quality findings ([#2511](https://github.com/Twigpine/openclaude/issues/2511)) ([2d98d10](https://github.com/Twigpine/openclaude/commit/2d98d107bf305f02e092568da2b1f5b08385b6d1))
+* **bg:** stop logs -f after the background session reaches a terminal state ([#2500](https://github.com/Twigpine/openclaude/issues/2500)) ([98c971e](https://github.com/Twigpine/openclaude/commit/98c971e0407d02da7ae5e06ee344b4238719248e))
+* **image:** restore opt-in BMP paste and accurate failures ([#2498](https://github.com/Twigpine/openclaude/issues/2498)) ([8367b55](https://github.com/Twigpine/openclaude/commit/8367b55b5d4f709a3c6b1d18c6563c3f498c80a1))
+* **model:** gate Codex catalog by active route (supersedes [#2495](https://github.com/Twigpine/openclaude/issues/2495)) ([#2499](https://github.com/Twigpine/openclaude/issues/2499)) ([436aaff](https://github.com/Twigpine/openclaude/commit/436aaff1a1d4844755984e986ccbf8a1fcee1f25))
+* **openai-shim:** preserve reasoning across assistant history ([#2503](https://github.com/Twigpine/openclaude/issues/2503)) ([44d4952](https://github.com/Twigpine/openclaude/commit/44d49522a32aca808612c4f139732e82168690dd))
+* **openai-shim:** report Gemini cachedContentTokenCount as cache_read_input_tokens ([#2494](https://github.com/Twigpine/openclaude/issues/2494)) ([ae64040](https://github.com/Twigpine/openclaude/commit/ae640404944f7dc1a6cc697a1d19ab2cd2522440))
+
 ## [0.35.1](https://github.com/Twigpine/openclaude/compare/v0.35.0...v0.35.1) (2026-11-09)
 
 

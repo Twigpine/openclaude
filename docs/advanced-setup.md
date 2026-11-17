@@ -38,6 +38,14 @@ bun run dev
 
 ## Provider Examples
 
+An explicit `--provider` selection is reapplied after settings environment
+variables are loaded. If the selection becomes invalid, reapplication raises a
+validation error instead of continuing with another provider enabled by settings.
+A runtime settings update rejected during provider validation keeps the
+previously active provider and transport configuration.
+For `--provider custom-anthropic`, keep `ANTHROPIC_BASE_URL` set to a non-Anthropic
+endpoint and provide `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`.
+
 ### OpenAI
 
 ```bash
@@ -59,6 +67,12 @@ tag preserves the same route, including when combined with a reasoning query.
 If you use the in-app provider wizard, choose `Codex OAuth` to open ChatGPT sign-in in your browser and let OpenClaude store Codex credentials securely.
 
 If you already use the Codex CLI, OpenClaude reads `~/.codex/auth.json` automatically. You can also point it elsewhere with `CODEX_AUTH_JSON_PATH` or override the token directly with `CODEX_API_KEY`.
+
+For file-based automatic detection, an explicit `CODEX_AUTH_JSON_PATH` must
+resolve both an access token and an account ID under the runtime's credential
+rules. A missing, malformed, or incomplete file does not select Codex ahead of
+another usable provider credential. The `CODEX_API_KEY`, `CHATGPT_ACCOUNT_ID`,
+and `CODEX_ACCOUNT_ID` environment overrides take priority over file detection.
 
 If you set `CODEX_API_KEY` manually and are not relying on `auth.json` or stored
 Codex OAuth credentials, also set `CHATGPT_ACCOUNT_ID` (or
@@ -321,13 +335,21 @@ OpenCode Go requires for prompt caching and traffic attribution.
 export CLAUDE_CODE_USE_OPENAI=1
 export OPENAI_BASE_URL=https://api.twigpine.com/v1
 export OPENGATEWAY_API_KEY=ogw_live_...
-export OPENAI_MODEL=mimo-v2.6-pro
+export OPENAI_MODEL=auto
 ```
 
 The OpenGateway route is the fresh-install startup default and requires an API
 key from https://twigpine.com/console/gateway/keys. Keep the base URL at `/v1`
 and switch models with `/model` or `OPENAI_MODEL`. The older
 `https://opengateway.gitlawb.com/v1` address still works for existing setups.
+
+New setups default to `auto`, the gateway's smart routing: it may select an
+eligible free model for a key with no credits, subject to free-usage quotas and
+rate limits. For funded keys, routing starts with the cheapest model expected
+to handle the request. The `x-gateway-served-model` response header names the
+model that answered. OpenGateway setups keep a saved profile's model or an
+`OPENAI_MODEL` you already set; settings tied to another provider's endpoint
+are not adopted by the fresh-install default.
 
 `/model` shows the gateway's list of active models from the public
 `GET https://api.twigpine.com/v1/models` endpoint (no key needed). OpenClaude
@@ -449,14 +471,14 @@ bundled**. They are loaded on demand, and the CLI prints an `npm install <pkg>`
 hint (add `-g` for the global CLI) if you enable a feature whose package is
 missing. Install only what you need:
 
-**Image handling note:** default global installs do **not** ship `sharp`. Clipboard paste, drag-and-drop of a local image path, and FileReadTool paths that decode a local file need `npm i -g sharp`. Forwarding an already-encoded image URL/base64 that the API accepts without local decode (passthrough) does not. This opt-in is intentional for published installs; it is not an accidental omission.
+**Image handling note:** default global installs do **not** ship `sharp`. Install it with `npm i -g sharp` when an image needs resizing, compression, or BMP-to-PNG conversion. Clipboard images, dragged image paths, and Read tool results can pass through without it when their format and size already meet the applicable API and token limits. Read may require compression even when the same image fits the clipboard's byte limit. Common uncompressed 24/32-bit BMP screenshots are converted after opting in; missing processing support produces installation guidance rather than an empty-clipboard message. This opt-in is intentional for published installs; it is not an accidental omission.
 
 | Feature | Trigger | Install |
 | --- | --- | --- |
 | AWS Bedrock | `CLAUDE_CODE_USE_BEDROCK=1` | `npm i -g @anthropic-ai/bedrock-sdk`. Profile-based auth (`~/.aws/credentials`) additionally needs `@aws-sdk/credential-providers` and `@aws-sdk/client-sts`; model listing needs `@aws-sdk/client-bedrock`. Proxy and skip-auth setups may also need `@aws-sdk/credential-provider-node`, `@smithy/node-http-handler`, or `@smithy/core`. The CLI prints the exact missing package if you hit one. |
 | Azure Foundry | `CLAUDE_CODE_USE_FOUNDRY=1` | `npm i -g @anthropic-ai/foundry-sdk @azure/identity` |
 | Claude on Vertex AI / Gemini ADC / Gemini on Vertex AI | `CLAUDE_CODE_USE_VERTEX=1` / Gemini ADC auth / `CLAUDE_CODE_USE_GEMINI_VERTEX=1` | `npm i -g google-auth-library` |
-| Reading/processing images (clipboard paste, drag-and-drop paths, FileReadTool local decode) | local image decode — **not** pre-encoded URL/base64 passthrough | `npm i -g sharp` (intentionally opt-in; prebuilt releases load it externally only when processing requires it) |
+| Image resizing, compression, and BMP clipboard conversion | image processing required to meet format, byte or token limits; in-budget supported images can pass through | `npm i -g sharp` (intentionally opt-in; prebuilt releases load it externally only when processing requires it) |
 | Optional error reporting | `SENTRY_DSN` is set | `npm i -g @sentry/node@11.9.0`. Without this package installed, setting `SENTRY_DSN` has no effect and reporting is silently disabled. |
 
 When installing OpenClaude from source (`bun install`), all of these are
@@ -603,6 +625,15 @@ model in its configured list and the supported saved `/model` selection restored
 for that profile. Query options such as `?reasoning=high` or `?thinking=disabled`
 remain in the selected model, but context-limit keys use the model name before
 `?`. For example, `gpt-5.4?reasoning=high` uses the `gpt-5.4` context limit.
+
+### Session behavior
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CLAUDE_CODE_DISABLE_ULTRATHINK` | No | Set truthy to stop the `ultrathink` keyword from raising the turn to high effort |
+| `CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES` | No | Set truthy to stop periodic forked-agent progress-summary requests for running agents |
+| `CLAUDE_CODE_DISABLE_FILE_MENTIONS` | No | Set truthy so `@`-mentioned files pass their path only; contents are not read into context |
+| `CLAUDE_CODE_RESUME_HINT_COMMAND` | No | Override the program name printed in the exit-time resume hint (default: `openclaude`) |
 
 ### Web search
 
@@ -784,6 +815,44 @@ Notes:
 
   Source builds (`bun install`) already include it as a dev dependency, so no
   extra step is needed there.
+
+## OpenTelemetry logs (opt-in)
+
+OpenClaude can emit `claude_code.*` log events to your own OTLP collector over
+OTLP/HTTP JSON. This is off by default; nothing is sent anywhere unless you
+enable it and point it at an endpoint:
+
+```bash
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+```
+
+Events are batched and POSTed to `<endpoint>/v1/logs`. Supported variables:
+
+- `CLAUDE_CODE_ENABLE_TELEMETRY`: master switch, required.
+- `OTEL_LOGS_EXPORTER`: `otlp` (default), `console` (print each event as a JSON
+  line to stdout, no endpoint needed), or `none`.
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: base endpoint; `/v1/logs` is appended.
+- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: full logs endpoint, takes precedence.
+- `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_LOGS_HEADERS`:
+  `key=value,key2=value2` request headers (for collector auth).
+- `OTEL_LOGS_EXPORT_INTERVAL`: batch flush interval in ms (default 5000).
+- `OTEL_EXPORTER_OTLP_TIMEOUT`: export request timeout in ms (default 10000).
+- `OTEL_RESOURCE_ATTRIBUTES`: `key=value,key2=value2` resource attributes added
+  to every batch.
+- `OTEL_LOG_USER_PROMPTS`: include prompt text in `user_prompt` events.
+  Without it prompts are sent as `<REDACTED>`.
+- `OTEL_LOG_TOOL_DETAILS`: include tool parameters (bash commands, MCP server
+  and tool names, MCP server URLs), raw error output, and free-text safety
+  reasons in tool and safety events. Off by default; MCP tool names are
+  reported as `mcp_tool`, errors are sent as a classified category, and
+  safety reasons are limited to categorical values.
+
+Emitted events include `claude_code.user_prompt`, `claude_code.api_request`
+and `claude_code.api_error` (with `gen_ai.*` semantic-convention attributes),
+`claude_code.tool_result`, `claude_code.safety_event` (which mechanism denied
+or prompted on a tool call), and hook lifecycle events. Tool events from
+subagents carry `agent_id` and `parent_agent_id`.
 
 ## Safety strictness
 
@@ -1025,6 +1094,18 @@ automatic and, for automatic compaction, which trigger fired: token threshold,
 message count, memory pressure, or context-overflow recovery. It shows `none`
 before the first compaction and `reason not recorded` for automatic compactions
 saved by earlier versions.
+
+### Idle compaction
+
+A session left idle for roughly 54 minutes with at least 200,000 estimated
+tokens compacts automatically, posting a notice when it does. Any activity (a
+new turn) resets the timer, and a session already compacted at its current
+size is not compacted again until new content arrives.
+
+Idle compaction is on by default. Turn it off with the **Idle compact** option
+in `/config`, or set `"idleCompaction": false` in `~/.openclaude.json`.
+`DISABLE_COMPACT` disables it along with the other compaction paths. Lower or
+raise the size threshold with `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`.
 
 ### Long-session memory guard validation
 

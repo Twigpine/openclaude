@@ -350,4 +350,26 @@ if (needsChild) {
       })
     })
   })
+
+  describe('sideQuery local usage ledger', () => {
+    test('records the side query with its source and token counts', async () => {
+      const { getRecordedUsageEvents, resetUsageLedgerForTesting } =
+        await import('../services/usage/ledger.js')
+      resetUsageLedgerForTesting()
+      try {
+        await captureSideQueryRequest()
+        const recorded = getRecordedUsageEvents()
+        expect(recorded).toHaveLength(1)
+        expect(recorded[0]).toMatchObject({
+          model: 'claude-side-attribution-test',
+          route: 'anthropic',
+          source: 'model_validation',
+          input: 1,
+          output: 1,
+        })
+      } finally {
+        resetUsageLedgerForTesting()
+      }
+    })
+  })
 }

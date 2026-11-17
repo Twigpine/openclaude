@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { getOriginalCwd, setOriginalCwd } from '../bootstrap/state.js'
+import { getOriginalCwd, getProjectRoot, setOriginalCwd, setProjectRoot } from '../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -50,6 +50,7 @@ async function waitFor(
 }
 
 let originalCwd: string
+let originalProjectRoot: string
 let originalConfigDir: string | undefined
 let originalClaudeTmpDir: string | undefined
 let testRoot: string
@@ -57,6 +58,8 @@ let testRoot: string
 beforeEach(async () => {
   await acquireSharedMutationLock('tasks/LocalMainSessionTask.test.ts')
   originalCwd = getOriginalCwd()
+
+  originalProjectRoot = getProjectRoot()
   originalConfigDir = getClaudeConfigHomeDirOverrideForTesting()
   originalClaudeTmpDir = process.env.CLAUDE_CODE_TMPDIR
   testRoot = await mkdtemp(join(tmpdir(), 'openclaude-main-session-task-'))
@@ -67,6 +70,7 @@ beforeEach(async () => {
   getClaudeConfigHomeDir.cache?.clear?.()
   getProjectDir.cache?.clear?.()
   setOriginalCwd(projectDir)
+  setProjectRoot(projectDir)
   process.env.CLAUDE_CODE_TMPDIR = join(testRoot, 'tmp')
   getClaudeTempDir.cache?.clear?.()
   _resetTaskOutputDirForTest()
@@ -85,6 +89,7 @@ afterEach(async () => {
     getClaudeConfigHomeDir.cache?.clear?.()
     getProjectDir.cache?.clear?.()
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalProjectRoot)
     if (originalClaudeTmpDir === undefined) {
       delete process.env.CLAUDE_CODE_TMPDIR
     } else {

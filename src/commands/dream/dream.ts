@@ -2,7 +2,7 @@ import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs
 import type { Command } from '../../commands.js'
 import { isAutoMemoryEnabled, getAutoMemPath } from '../../memdir/paths.js'
 import { getProjectDir } from '../../utils/sessionStorage.js'
-import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
+import { getProjectRoot, getSessionId } from '../../bootstrap/state.js'
 import { buildConsolidationPrompt } from '../../services/autoDream/consolidationPrompt.js'
 import {
   readLastConsolidatedAt,
@@ -21,7 +21,7 @@ const command = {
   source: 'builtin',
   async getPromptForCommand(): Promise<ContentBlockParam[]> {
     const memoryRoot = getAutoMemPath()
-    const transcriptDir = getProjectDir(getOriginalCwd())
+    const transcriptDir = getProjectDir(getProjectRoot())
 
     let lastAt: number
     try {

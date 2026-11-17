@@ -24,8 +24,11 @@ import {
 } from './managedEnv.js'
 import {
   applyModelFlagFromArgs,
+  applyProviderFlagFromArgs,
   clearRememberedModelFlagForTests,
+  clearRememberedProviderFlagForTests,
 } from './providerFlag.js'
+import { snapshotEnv } from '../test/envSnapshot.js'
 import {
   applyProviderProfileToProcessEnv,
   clearProviderProfileEnvFromProcessEnv,
@@ -144,6 +147,78 @@ describe('host-managed API Route settings boundary', () => {
       expect(process.env.GEMINI_ACCESS_TOKEN).toBe('host-google-token')
     })
   }
+})
+
+describe('remembered custom Anthropic validation', () => {
+  const envKeys = [
+    ...PROVIDER_SELECTION_FLAGS, ...ENV_KEYS,
+    'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+    'ANTHROPIC_MODEL', 'NVIDIA_NIM', 'OPENAI_API_BASE', 'OPENAI_API_FORMAT',
+    'OPENAI_AUTH_HEADER', 'OPENAI_AUTH_SCHEME', 'OPENAI_AUTH_HEADER_VALUE',
+    'CONCENTRATE_API_KEY', 'CONCENTRATE_BASE_URL', 'CONCENTRATE_MODEL',
+    'APISMART_API_KEY', 'APISMART_MODEL',
+    'ANTHROPIC_UNIX_SOCKET',
+  ]
+  for (const [name, applySettings] of [
+    ['pre-trust', applySafeConfigEnvironmentVariables],
+    ['post-trust', applyConfigEnvironmentVariables],
+  ] as const) {
+    it(`propagates invalid explicit selection during ${name} settings merge`, () => {
+      const restoreEnv = snapshotEnv(envKeys)
+      clearRememberedProviderFlagForTests()
+      try {
+        delete process.env.ANTHROPIC_UNIX_SOCKET
+        process.env.ANTHROPIC_BASE_URL = 'https://proxy.example/v1'
+        process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token'
+        expect(applyProviderFlagFromArgs(['--provider', 'custom-anthropic'], {
+          rememberForSettingsEnv: true,
+        })?.error).toBeUndefined()
+        saveGlobalConfig(current => ({
+          ...current,
+          env: { ANTHROPIC_BASE_URL: ' ', CLAUDE_CODE_USE_FOUNDRY: '1' },
+        }))
+
+        expect(() => applySettings()).toThrow('ANTHROPIC_BASE_URL')
+
+        // Correcting settings allows the remembered native route to win again.
+        saveGlobalConfig(current => ({
+          ...current,
+          env: { ANTHROPIC_BASE_URL: 'https://proxy.example/v1' },
+        }))
+        expect(() => applySettings()).not.toThrow()
+        expect(process.env.CLAUDE_CODE_USE_FOUNDRY).toBeUndefined()
+        expect(process.env.ANTHROPIC_BASE_URL).toBe('https://proxy.example/v1')
+      } finally {
+        clearRememberedProviderFlagForTests()
+        restoreEnv()
+      }
+    })
+  }
+
+  it('keeps routing and proxy coherent when the runtime handler catches a rejected merge', () => {
+    // Proxy ownership, caches and global clients are process-wide. Exercise the
+    // real callback in a child instead of reconstructing private transport state.
+    const childEnv = { ...process.env }
+    for (const key of [
+      ...envKeys,
+      'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy',
+      'NODE_EXTRA_CA_CERTS', 'NODE_OPTIONS', 'CLAUDE_CODE_CLIENT_CERT',
+      'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
+    ]) delete childEnv[key]
+    const child = Bun.spawnSync([
+      process.execPath, 'run',
+      join(import.meta.dir, '../test/fixtures/managedEnvTransport.fixture.ts'),
+    ], {
+      cwd: tempDir,
+      env: { ...childEnv, OPENCLAUDE_CONFIG_DIR: join(tempDir, 'config') },
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 15_000,
+    })
+    expect(child.exitCode, child.stderr.toString()).toBe(0)
+    expect(child.stdout.toString()).toContain('MANAGED_ENV_TRANSPORT_OK')
+    // Allow the child's 15-second deadline plus startup and result assertions.
+  }, 20_000)
 })
 
 describe('applyConfigEnvironmentVariables', () => {
