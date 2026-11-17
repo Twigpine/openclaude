@@ -3252,6 +3252,61 @@ test('AN ALREADY-ABORTED CALL DOES NOT RUN INITIALIZATION', async () => {
 }, 30_000)
 
 /**
+ * Aborting the caller while initialization is held must reject at once,
+ * before initialization is released: the later abortable MCP wait never
+ * gets a chance to run, and the sign-in must not wait out init. The
+ * shared initialization itself keeps waiting — only this sign-in ends.
+ */
+test('ABORTING THE CALLER WHILE INITIALIZATION IS HELD REJECTS AT ONCE', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const held = holdInit()
+
+  const caller = new AbortController()
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+    signal: caller.signal,
+  })
+  const doneCaught = done.catch(error => error)
+  await waitFor(() => held.arrived)
+  caller.abort()
+  try {
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    // The sign-in ended while init was still held: no URL was delivered.
+    expect(seenUrls).toEqual([])
+  } finally {
+    held.answer()
+  }
+}, 30_000)
+
+/**
+ * Closing the session while initialization is held rejects at once too,
+ * with the session-closed error — not with a cancellation, and not after
+ * initialization is released.
+ */
+test('CLOSING THE SESSION WHILE INITIALIZATION IS HELD REJECTS AT ONCE', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const held = holdInit()
+
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  await waitFor(() => held.arrived)
+  session.close()
+  try {
+    await expect(settlesWithin(done, 5_000)).rejects.toThrow('SDK session is closed')
+    expect(seenUrls).toEqual([])
+  } finally {
+    held.answer()
+  }
+}, 30_000)
+
+/**
  * The host flow must keep the credential namespace it started in even
  * when initialization waits: while init is held, another turn takes the
  * session's turn scope, and the flow must still sign in — and store its

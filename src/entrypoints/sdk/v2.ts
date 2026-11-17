@@ -46,6 +46,7 @@ import {
   clearOAuthTokenCache,
 } from '../../utils/auth.js'
 import { requestSdkRootAbort } from './interruption.js'
+import { raceAbort } from '../../utils/boundedAsync.js'
 import { init } from '../init.js'
 import {
   resolveSessionFilePath,
@@ -951,8 +952,25 @@ class SDKSessionImpl implements SDKSession {
     // and the OAuth fetch uses the global dispatcher it installs. A settings
     // page signs in before any turn, so run it here too, outside the
     // session's environment, or a configured client certificate would never
-    // reach the OAuth endpoint.
-    await runOutsideSdkContext(init)
+    // reach the OAuth endpoint. The wait is raced against caller and
+    // session cancellation: aborting the caller or closing the session ends
+    // this sign-in at once, while the shared initialization keeps running
+    // for another caller — the race rejects without cancelling it.
+    const initCancel = new AbortController()
+    const cancelInitWait = () => initCancel.abort(new AuthenticationCancelledError())
+    options?.signal?.addEventListener('abort', cancelInitWait, { once: true })
+    sessionSignal?.addEventListener('abort', cancelInitWait, { once: true })
+    try {
+      await raceAbort(runOutsideSdkContext(init), initCancel.signal)
+    } catch (error) {
+      if (error instanceof AuthenticationCancelledError && this.closed) {
+        throw new Error('SDK session is closed')
+      }
+      throw error
+    } finally {
+      options?.signal?.removeEventListener('abort', cancelInitWait)
+      sessionSignal?.removeEventListener('abort', cancelInitWait)
+    }
     if (this.closed) {
       throw new Error('SDK session is closed')
     }
