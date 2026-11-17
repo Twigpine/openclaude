@@ -6544,6 +6544,26 @@ export async function loadTranscriptFile(
 }
 
 /**
+ * Resolved transcript destination whose message UUIDs `getSessionMessages`
+ * caches: the file a session's messages are read from and written to.
+ * For the current session that is `getTranscriptPath()` — the pinned
+ * pointer when one is established — so the dedup set always matches the
+ * file `recordTranscript` and `appendEntry` write to. For any other
+ * session it is the project-directory derivation `loadSessionFile` has
+ * always used. One helper, so the memo key, the load, and the priming
+ * can never drift apart: two sessions sharing an id in different
+ * project directories resolve to different destinations and never
+ * share a UUID set (#2489).
+ */
+function sessionMessagesDestination(sessionId: UUID): string {
+  if (sessionId === getSessionId()) return getTranscriptPath()
+  return join(
+    getSessionProjectDir() ?? getProjectDir(getProjectRoot()),
+    `${sessionId}.jsonl`,
+  )
+}
+
+/**
  * Loads all messages, summaries, file history snapshots, and attribution snapshots from a specific session file.
  */
 async function loadSessionFile(sessionId: UUID): Promise<{
@@ -6561,23 +6581,21 @@ async function loadSessionFile(sessionId: UUID): Promise<{
   contextCollapseCommits: ContextCollapseCommitEntry[]
   contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
 }> {
-  const sessionFile = join(
-    getSessionProjectDir() ?? getProjectDir(getProjectRoot()),
-    `${sessionId}.jsonl`,
-  )
-  return loadTranscriptFile(sessionFile)
+  return loadTranscriptFile(sessionMessagesDestination(sessionId))
 }
 
 /**
  * Gets message UUIDs for a specific session without loading all sessions.
- * Memoized to avoid re-reading the same session file multiple times.
+ * Memoized per resolved transcript destination — not per session id — to
+ * avoid re-reading the same session file multiple times. The same id in
+ * two project directories is two destinations, so each keeps its own set.
  */
 const getSessionMessages = memoize(
   async (sessionId: UUID): Promise<Set<UUID>> => {
     const { messages } = await loadSessionFile(sessionId)
     return new Set(messages.keys())
   },
-  (sessionId: UUID) => sessionId,
+  (sessionId: UUID) => sessionMessagesDestination(sessionId),
 )
 
 /**
@@ -6624,9 +6642,12 @@ export async function getLastSessionLog(
   // Guard: only prime if cache is empty. Mid-session callers (e.g. IssueFeedback)
   // may call getLastSessionLog on the current session — overwriting a live cache
   // with a stale disk snapshot would lose unflushed UUIDs and break dedup.
-  if (!getSessionMessages.cache.has(sessionId)) {
+  // The cache is keyed by resolved transcript destination, so prime under
+  // the same destination the memo uses.
+  const destination = sessionMessagesDestination(sessionId)
+  if (!getSessionMessages.cache.has(destination)) {
     getSessionMessages.cache.set(
-      sessionId,
+      destination,
       Promise.resolve(new Set(messages.keys())),
     )
   }
