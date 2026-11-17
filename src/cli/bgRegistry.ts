@@ -1017,10 +1017,11 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
     // wall-clock jump, and a second create whose check ran before the
     // first commit would otherwise rename over the first publisher's
     // metadata (maintainer review 5942761094 on #2497). On filesystems
-    // that reject hard links the commit falls back to rename(), and the
-    // row is re-read afterwards so a beaten publisher reports the
-    // duplicate instead of claiming its row. Temp files end in .tmp so
-    // the scan skips them.
+    // that reject hard links the commit falls back to a claim-serialized
+    // rename, so the second publisher still reports the duplicate
+    // instead of overwriting the first publisher's row (CodeRabbit
+    // #2497 review 5945720742). Temp files end in .tmp so the scan
+    // skips them.
     const target = metadataPathForId(session.id)
     const tmp = join(
       getBackgroundSessionMetadataDir(),
@@ -1042,11 +1043,7 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
         await lstat(target)
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
-        const committed = await commitPublishFile(
-          tmp,
-          target,
-          jsonStringify(session),
-        )
+        const committed = await commitPublishFile(tmp, target)
         if (committed !== 'committed') {
           throw new Error(
             `Background session id "${session.id}" already exists`,
@@ -1571,6 +1568,16 @@ const TERMINAL_FACT_PUBLISH_WAIT_MS = 250
 // Maximum publish attempts (claim, adopt, retry) before giving up with
 // the invalid-fact error.
 const TERMINAL_FACT_PUBLISH_ATTEMPTS = 3
+// Bound for the no-hard-link commit-claim wait below: a claim holder's
+// critical section (recheck + rename) takes microseconds, so a waiter
+// only polls this long when the holder is suspended; the claim goes
+// stale after COMMIT_PUBLISH_CLAIM_STALE_MS and is reclaimed first.
+// 3000 polls at 10 ms is about 30 s.
+const COMMIT_PUBLISH_CLAIM_MAX_POLLS = 3000
+// A commit claim older than this belongs to a dead or suspended
+// holder: the waiter reclaims it. Matches proper-lockfile's 10 s stale
+// threshold used by the per-ID locks in this file.
+const COMMIT_PUBLISH_CLAIM_STALE_MS = 10_000
 
 function terminalFactTempPath(id: string): string {
   return join(
@@ -1816,17 +1823,21 @@ type PublishCommitOutcome = 'committed' | 'exists' | 'gone'
  * publish, so the caller waits for the fact at the target instead.
  *
  * On filesystems that reject hard links, link() fails with
- * EPERM/ENOSYS/EOPNOTSUPP and the commit falls back to rename(); the
- * target is then re-read and compared with the expected bytes, so a
- * loser whose rename was beaten by another publisher reports the stored
- * fact instead of claiming its own. The fallback cannot close the
- * check-rename window on those filesystems the way link() does; it is
- * the no-hard-link path, not the atomic one.
+ * EPERM/ENOSYS/EOPNOTSUPP and the commit falls back to a
+ * claim-serialized rename: mkdir() on `<target>.commit` is atomic, so
+ * exactly one publisher wins the claim, rechecks the target under it,
+ * and renames, while a loser that finds the claim waits for the target
+ * to appear and reports it. A plain rename() cannot replace link()
+ * here — it overwrites an existing target, so two publishers that both
+ * reach the fallback publish in turn and the second one's readback
+ * matches its own bytes, letting both creates succeed instead of
+ * rejecting the duplicate (CodeRabbit #2497 review 5945720742). The
+ * target still only ever appears complete, via rename, and a stale
+ * claim is reclaimed by the waiter.
  */
 async function commitPublishFile(
   tmp: string,
   target: string,
-  expected: string,
 ): Promise<PublishCommitOutcome> {
   try {
     await link(tmp, target)
@@ -1836,25 +1847,58 @@ async function commitPublishFile(
     if (isErrno(error, 'ENOENT')) return 'gone'
     if (!isHardLinkUnsupported(error)) throw error
   }
-  // Hard links are unsupported on this filesystem: rename the synced
-  // temp file into place, as before. The caller already rechecked the
-  // target and the claim immediately before this call; the re-read below
-  // catches a publisher that committed between that recheck and the
-  // rename, so the caller returns the fact actually stored.
-  try {
-    await rename(tmp, target)
-  } catch (error) {
-    if (!isErrno(error, 'ENOENT')) throw error
-    return 'gone'
+  const claimDir = commitPublishClaimDir(target)
+  let claimed = false
+  for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
+    try {
+      await mkdir(claimDir)
+      claimed = true
+      break
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+    }
+    // Another publisher holds the claim: its rename lands within
+    // microseconds, so the target appears — report it instead of
+    // racing it.
+    try {
+      await lstat(target)
+      return 'exists'
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (await isCommitPublishClaimStale(claimDir)) {
+      await rmdir(claimDir).catch(() => {})
+      continue
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
-  const stored = await readFile(target, 'utf8').catch(() => undefined)
-  return stored === expected ? 'committed' : 'exists'
+  if (!claimed) {
+    throw new Error(
+      `Timed out waiting for a concurrent publish to ${target}`,
+    )
+  }
+  try {
+    try {
+      await lstat(target)
+      return 'exists'
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    try {
+      await rename(tmp, target)
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+      return 'gone'
+    }
+    return 'committed'
+  } finally {
+    await rmdir(claimDir).catch(() => {})
+  }
 }
 
 function commitPublishFileSync(
   tmp: string,
   target: string,
-  expected: string,
 ): PublishCommitOutcome {
   try {
     linkSync(tmp, target)
@@ -1864,19 +1908,86 @@ function commitPublishFileSync(
     if (isErrno(error, 'ENOENT')) return 'gone'
     if (!isHardLinkUnsupported(error)) throw error
   }
-  try {
-    renameSync(tmp, target)
-  } catch (error) {
-    if (!isErrno(error, 'ENOENT')) throw error
-    return 'gone'
+  const claimDir = commitPublishClaimDir(target)
+  let claimed = false
+  for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
+    try {
+      mkdirSync(claimDir)
+      claimed = true
+      break
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+    }
+    try {
+      lstatSync(target)
+      return 'exists'
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (isCommitPublishClaimStaleSync(claimDir)) {
+      try {
+        rmdirSync(claimDir)
+      } catch {}
+      continue
+    }
+    sleepSync(10)
   }
-  let stored: string | undefined
+  if (!claimed) {
+    throw new Error(
+      `Timed out waiting for a concurrent publish to ${target}`,
+    )
+  }
   try {
-    stored = readFileSync(target, 'utf8')
+    try {
+      lstatSync(target)
+      return 'exists'
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    try {
+      renameSync(tmp, target)
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+      return 'gone'
+    }
+    return 'committed'
+  } finally {
+    try {
+      rmdirSync(claimDir)
+    } catch {}
+  }
+}
+
+// The publish claim for one commit target: a directory, so creating it
+// with mkdir() is atomic and works on filesystems without hard-link
+// support — the same idiom as the terminal-fact claim directories
+// above. It serializes the recheck-and-rename in the no-hard-link
+// fallback only; the link() path never creates one.
+function commitPublishClaimDir(target: string): string {
+  return `${target}.commit`
+}
+
+// Whether a commit claim belongs to a dead or suspended holder: its
+// mtime is older than the stale threshold. A live holder's critical
+// section (recheck + rename) takes microseconds, so a fresh claim
+// means the holder is about to publish.
+async function isCommitPublishClaimStale(claimDir: string): Promise<boolean> {
+  try {
+    const stats = await lstat(claimDir)
+    return Date.now() - stats.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
   } catch {
-    stored = undefined
+    // The claim disappeared: not stale, the waiter just retries.
+    return false
   }
-  return stored === expected ? 'committed' : 'exists'
+}
+
+function isCommitPublishClaimStaleSync(claimDir: string): boolean {
+  try {
+    const stats = lstatSync(claimDir)
+    return Date.now() - stats.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -1892,8 +2003,8 @@ function commitPublishFileSync(
  * instead of racing it. A loser whose winner died after claiming removes
  * the stale claim and retries. A claim whose pointer write is still in
  * flight reads as empty, so an adopter polls for it instead of removing
- * it; and the commit itself is atomic (link() EEXIST, with a rename()
- * fallback that re-reads the target), so a delayed owner whose claim was
+ * it; and the commit itself is atomic (link() EEXIST, with a
+ * claim-serialized rename() fallback where hard links fail), so a delayed owner whose claim was
  * withdrawn never replaces a fact another installer published
  * (maintainer review 5896325929 and 5942761094 on #2497). This keeps
  * the old link() EEXIST duplicate semantics where hard links work, and
@@ -1995,11 +2106,7 @@ async function publishTerminalFact(
       return existing
     }
     if (!(await ownsTerminalFactClaim(target, tmp))) continue
-    const committed = await commitPublishFile(
-      tmp,
-      target,
-      jsonStringify(fact),
-    )
+    const committed = await commitPublishFile(tmp, target)
     if (committed === 'gone') {
       // Another installer adopted this tmp and published it; the fact
       // now at the target is this publish, so return it.
@@ -2049,16 +2156,7 @@ async function adoptTerminalFactPublish(
     await removeTerminalFactClaim(target)
     return null
   }
-  let expected: string
-  try {
-    expected = await readFile(claimedTmp, 'utf8')
-  } catch (error) {
-    if (!isErrno(error, 'ENOENT')) throw error
-    // The winner published after all, or another adopter did: return
-    // the fact at the target if it appeared, else retry the publish.
-    return await waitForTerminalFact(fact.id, kind, fact.generation)
-  }
-  const committed = await commitPublishFile(claimedTmp, target, expected)
+  const committed = await commitPublishFile(claimedTmp, target)
   if (committed !== 'committed') {
     // The target already holds a fact, or the winner's tmp was adopted
     // by another installer: return the fact at the target if it
@@ -2160,7 +2258,7 @@ function publishTerminalFactSync(
       return existing
     }
     if (!ownsTerminalFactClaimSync(target, tmp)) continue
-    const committed = commitPublishFileSync(tmp, target, jsonStringify(fact))
+    const committed = commitPublishFileSync(tmp, target)
     if (committed === 'gone') {
       // Same adoption case as publishTerminalFact: another installer
       // adopted this tmp and published it.
@@ -2199,14 +2297,7 @@ function adoptTerminalFactPublishSync(
     removeTerminalFactClaimSync(target)
     return null
   }
-  let expected: string
-  try {
-    expected = readFileSync(claimedTmp, 'utf8')
-  } catch (error) {
-    if (!isErrno(error, 'ENOENT')) throw error
-    return waitForTerminalFactSync(fact.id, kind, fact.generation)
-  }
-  const committed = commitPublishFileSync(claimedTmp, target, expected)
+  const committed = commitPublishFileSync(claimedTmp, target)
   if (committed !== 'committed') {
     return waitForTerminalFactSync(fact.id, kind, fact.generation)
   }
