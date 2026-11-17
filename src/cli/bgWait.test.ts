@@ -559,23 +559,40 @@ describe('wait command handler', () => {
     // when the deadline fires during an in-flight process lookup, the
     // waiter must abort the lookup (killing its `ps` child) and classify
     // the boundary from the observation that then settles — not discard
-    // it and return 124. A real short-lived child is the session's
-    // process; a deliberately slow injected lookup stands in for `ps`;
-    // a concurrent finalizer publishes the terminal fact mid-lookup.
+    // it and return 124. A real child process is the session's process;
+    // a deliberately slow injected lookup stands in for `ps`; a
+    // concurrent finalizer publishes the terminal fact mid-lookup.
     // Without the abort the lookup sleeps past the deadline and the
     // grace timer expires first, so the waiter returns 124.
-    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 200)'], {
+    //
+    // Publication is gated on a lookup-entry barrier, not a fixed delay:
+    // the handler reads the terminal fact before the lookup, so a
+    // timer-fired publish could land before the lookup starts and the
+    // handler would return the terminal outcome without ever entering
+    // it, failing the cancellation assertions below (CodeRabbit #2497
+    // review 5945720742). The child stays alive until cleanup, so its
+    // exit cannot prevent lookup entry either. The deadline ordering is
+    // therefore causal — lookup entry, then publication, then the
+    // 300 ms deadline aborts the lookup — instead of relying on the
+    // relative sizes of fixed delays.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
       stdio: 'ignore',
     })
     if (child.pid === undefined) throw new Error('spawned child has no pid')
     const childPid = child.pid
     await createTestSession('bg-aaa1', { pid: childPid })
+    let lookupEnteredResolve!: () => void
+    const lookupEntered = new Promise<void>(resolve => {
+      lookupEnteredResolve = resolve
+    })
     let lookupSignal: AbortSignal | undefined
     let lookupSettled = false
+    let publishError: unknown
     const slowLookup = async (
       _pid: number,
       options: { signal?: AbortSignal },
     ): Promise<string | null> => {
+      lookupEnteredResolve()
       lookupSignal = options.signal
       try {
         // A slow `ps`: sleeps 2 s unless the lookup signal aborts it.
@@ -600,8 +617,8 @@ describe('wait command handler', () => {
       getProcessCommandAsync: slowLookup,
     })
     // The concurrent finalizer publishes the terminal fact mid-lookup,
-    // before the deadline: the post-abort re-read must see it.
-    const publishTimer = setTimeout(() => {
+    // after lookup entry: the post-abort re-read must see it.
+    const published = lookupEntered.then(() => {
       writeTerminalFactSync(
         'bg-aaa1',
         'natural',
@@ -613,7 +630,10 @@ describe('wait command handler', () => {
         },
         childPid,
       )
-    }, 100)
+    })
+    published.catch(error => {
+      publishError = error
+    })
     try {
       const { code, stdout, stderr } = await Promise.race([
         waiting,
@@ -631,6 +651,7 @@ describe('wait command handler', () => {
       ])
       const elapsedMs = performance.now() - startedAt
       // The terminal fact published mid-lookup wins: exit 0, not 124.
+      expect(publishError).toBeUndefined()
       expect(code).toBe(0)
       expect(stderr).toBe('')
       const result = expectWaitJsonShape(JSON.parse(stdout))
@@ -641,7 +662,6 @@ describe('wait command handler', () => {
       expect(lookupSettled).toBe(true)
       expect(elapsedMs).toBeLessThan(1500)
     } finally {
-      clearTimeout(publishTimer)
       child.kill()
     }
   })
