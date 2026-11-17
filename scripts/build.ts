@@ -142,7 +142,7 @@ const featureFlags: Record<string, boolean> = {
   COMPACTION_REMINDERS: true,         // compaction_reminder attachment nudging post-compact continuation
   NEW_INIT: true,                     // /init AGENTS.md onboarding; opt-in via USER_TYPE=ant or CLAUDE_CODE_NEW_INIT
   STREAMLINED_OUTPUT: true,           // Streamlined stream-json output transformer; opt-in via CLAUDE_CODE_STREAMLINED_OUTPUT
-  AGENT_MEMORY_SNAPSHOT: true,        // Pending agent-memory snapshot merge dialog on --agent sessions
+  AGENT_MEMORY_SNAPSHOT: false,       // Deferred: SnapshotUpdateDialog is a stub that never resolves, so --agent startup would hang waiting on it
   LODESTONE: true,                    // claude-cli:// deep links: OS protocol registration + --handle-uri entry; opt-out via disableDeepLinkRegistration setting
   AUTO_THEME: true,                   // Live light/dark switching via OSC 11 polling while theme is 'auto'
   SKILL_IMPROVEMENT: true,            // Post-sampling hook that proposes skill file rewrites; opt-in via CLAUDE_CODE_SKILL_IMPROVEMENT
