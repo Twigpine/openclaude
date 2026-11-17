@@ -5,7 +5,7 @@ import { useContext } from 'react';
 import { useQueuedMessage } from '../../context/QueuedMessageContext.js';
 import { Box, Text } from '../../ink.js';
 import { formatBriefTimestamp } from '../../utils/formatBriefTimestamp.js';
-import { findThinkingTriggerPositions, getRainbowColor, isUltrathinkEnabled } from '../../utils/thinking.js';
+import { findThinkingTriggerPositions, getRainbowColor, isUltrathinkKeywordArmed } from '../../utils/thinking.js';
 import { MessageActionsSelectedContext } from '../messageActions.js';
 type Props = {
   text: string;
@@ -84,7 +84,7 @@ export function HighlightedThinkingText(t0) {
   if ($[15] !== pointerColor || $[16] !== text) {
     t1 = Symbol.for("react.early_return_sentinel");
     bb0: {
-      const triggers = isUltrathinkEnabled() ? findThinkingTriggerPositions(text) : [];
+      const triggers = isUltrathinkKeywordArmed() ? findThinkingTriggerPositions(text) : [];
       if (triggers.length === 0) {
         let t2;
         if ($[19] !== pointerColor) {

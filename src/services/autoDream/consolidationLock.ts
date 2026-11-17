@@ -6,7 +6,7 @@
 
 import { mkdir, readFile, stat, unlink, utimes, writeFile } from 'fs/promises'
 import { join } from 'path'
-import { getOriginalCwd } from '../../bootstrap/state.js'
+import { getProjectRoot } from '../../bootstrap/state.js'
 import { getAutoMemPath } from '../../memdir/paths.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isProcessRunning } from '../../utils/genericProcessUtils.js'
@@ -118,7 +118,7 @@ export async function rollbackConsolidationLock(
 export async function listSessionsTouchedSince(
   sinceMs: number,
 ): Promise<string[]> {
-  const dir = getProjectDir(getOriginalCwd())
+  const dir = getProjectDir(getProjectRoot())
   const candidates = await listCandidates(dir, true)
   return candidates.filter(c => c.mtime > sinceMs).map(c => c.sessionId)
 }

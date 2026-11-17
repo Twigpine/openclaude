@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import type { Readable } from 'node:stream'
 import { expect, test } from 'bun:test'
-import { getOriginalCwd, setOriginalCwd } from '../../bootstrap/state.js'
+import { getOriginalCwd, getProjectRoot, setOriginalCwd, setProjectRoot } from '../../bootstrap/state.js'
 import {
   getClaudeConfigHomeDirOverrideForTesting,
   setClaudeConfigHomeDirForTesting,
@@ -149,9 +149,11 @@ async function withSyncEnvironment(
   const project = join(root, 'project')
   const previousConfig = getClaudeConfigHomeDirOverrideForTesting()
   const previousCwd = getOriginalCwd()
+  const previousProjectRoot = getProjectRoot()
   mkdirSync(project)
   setClaudeConfigHomeDirForTesting(root)
   setOriginalCwd(project)
+  setProjectRoot(project)
   resetSettingsCache()
   try {
     await run({
@@ -163,6 +165,7 @@ async function withSyncEnvironment(
   } finally {
     setClaudeConfigHomeDirForTesting(previousConfig)
     setOriginalCwd(previousCwd)
+    setProjectRoot(previousProjectRoot)
     resetSettingsCache()
     rmSync(root, { recursive: true, force: true })
   }

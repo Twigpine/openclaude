@@ -92,7 +92,7 @@ import { isInProcessTeammate } from '../../utils/teammateContext.js';
 import { writeToMailbox } from '../../utils/teammateMailbox.js';
 import type { TextHighlight } from '../../utils/textHighlighting.js';
 import type { Theme } from '../../utils/theme.js';
-import { findThinkingTriggerPositions, getRainbowColor, isUltrathinkEnabled } from '../../utils/thinking.js';
+import { findThinkingTriggerPositions, getRainbowColor, isUltrathinkKeywordArmed } from '../../utils/thinking.js';
 import { findTokenBudgetPositions } from '../../utils/tokenBudget.js';
 import { findUltraplanTriggerPositions, findUltrareviewTriggerPositions } from '../../utils/ultraplan/keyword.js';
 import { AutoModeOptInDialog } from '../AutoModeOptInDialog.js';
@@ -703,7 +703,7 @@ function PromptInput({
     }
 
     // Rainbow highlighting for ultrathink keyword (per-character cycling colors)
-    if (isUltrathinkEnabled()) {
+    if (isUltrathinkKeywordArmed()) {
       for (const trigger of thinkTriggers) {
         for (let i = trigger.start; i < trigger.end; i++) {
           highlights.push({
@@ -766,7 +766,7 @@ function PromptInput({
 
   // Show ultrathink notification
   useEffect(() => {
-    if (thinkTriggers.length && isUltrathinkEnabled()) {
+    if (thinkTriggers.length && isUltrathinkKeywordArmed()) {
       addNotification({
         key: 'ultrathink-active',
         text: 'Effort set to high for this turn',

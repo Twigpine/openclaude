@@ -11,6 +11,8 @@ import {
   setFlagSettingsInline,
   setFlagSettingsPath,
   setOriginalCwd,
+  setProjectRoot,
+  getProjectRoot,
 } from '../../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
@@ -33,6 +35,7 @@ const paid = (inputTokens: number) => ({
 
 let tempDir: string
 let originalCwd: string
+let originalProjectRoot: string
 let originalSources: ReturnType<typeof getAllowedSettingSources>
 let originalFlagPath: string | undefined
 let originalFlagInline: Record<string, unknown> | null
@@ -44,10 +47,12 @@ beforeEach(async () => {
   mock.restore()
   tempDir = mkdtempSync(join(tmpdir(), 'openclaude-model-pricing-'))
   originalCwd = getOriginalCwd()
+  originalProjectRoot = getProjectRoot()
   originalSources = [...getAllowedSettingSources()]
   originalFlagPath = getFlagSettingsPath()
   originalFlagInline = getFlagSettingsInline()
   setOriginalCwd(tempDir)
+  setProjectRoot(tempDir)
   setFlagSettingsPath(undefined)
   setFlagSettingsInline(null)
   resetSettingsCache()
@@ -66,6 +71,7 @@ afterEach(() => {
   try {
     mock.restore()
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalProjectRoot)
     setAllowedSettingSources(originalSources)
     setFlagSettingsPath(originalFlagPath)
     setFlagSettingsInline(originalFlagInline)

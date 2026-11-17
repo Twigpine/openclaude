@@ -10,6 +10,8 @@ import {
   getSessionProjectDir,
   isSessionPersistenceDisabled,
   setOriginalCwd,
+  setProjectRoot,
+  getProjectRoot,
   setSessionPersistenceDisabled,
   switchSession,
 } from '../../bootstrap/state.js'
@@ -55,6 +57,7 @@ let originalNodeEnv: string | undefined
 let originalTestPersistence: string | undefined
 let originalPersistence: string | undefined
 let originalCwd: string
+let originalProjectRoot: string
 let originalSessionId: string
 let originalSessionProjectDir: string | null
 let originalPersistenceDisabled: boolean
@@ -256,6 +259,7 @@ async function setupSourceTranscript(
   getClaudeConfigHomeDir.cache?.clear?.()
   getProjectDir.cache?.clear?.()
   setOriginalCwd(projectCwd)
+  setProjectRoot(projectCwd)
   switchSession(sourceSessionId as never, sessionProjectDir)
   resetProjectForTesting()
 
@@ -317,6 +321,8 @@ beforeEach(async () => {
   originalTestPersistence = process.env.TEST_ENABLE_SESSION_PERSISTENCE
   originalPersistence = process.env.ENABLE_SESSION_PERSISTENCE
   originalCwd = getOriginalCwd()
+
+  originalProjectRoot = getProjectRoot()
   originalSessionId = getSessionId()
   originalSessionProjectDir = getSessionProjectDir()
   originalPersistenceDisabled = isSessionPersistenceDisabled()
@@ -358,6 +364,7 @@ afterEach(async () => {
     getClaudeConfigHomeDir.cache?.clear?.()
     getProjectDir.cache?.clear?.()
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalProjectRoot)
     switchSession(originalSessionId as never, originalSessionProjectDir)
     resetProjectForTesting()
     mock.module('../../services/analytics/index.js', () => realAnalytics)
