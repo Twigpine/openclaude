@@ -667,13 +667,25 @@ export async function connectSdkMcpServers(
         if (serverConfig.type === 'http' || serverConfig.type === 'sse') {
           const key = getServerCacheKey(name, serverConfig)
           const cached = connectToServer.cache.get(key)
-          if (cached && (await cached).type !== 'connected') {
-            clearKeychainCache()
-            if (
-              await new ClaudeAuthProvider(name, serverConfig).tokens() &&
-              connectToServer.cache.get(key) === cached
-            ) {
-              connectToServer.cache.delete(key)
+          if (cached) {
+            // Register as a waiter before awaiting the shared pending
+            // connect: awaiting the cached promise directly would leave
+            // this caller uncounted, and a creator abort would close a
+            // transport this session still needs.
+            const joined = await connectToServer(
+              name,
+              serverConfig,
+              undefined,
+              sessionSignal,
+            )
+            if (joined.type !== 'connected') {
+              clearKeychainCache()
+              if (
+                await new ClaudeAuthProvider(name, serverConfig).tokens() &&
+                connectToServer.cache.get(key) === cached
+              ) {
+                connectToServer.cache.delete(key)
+              }
             }
           }
         }

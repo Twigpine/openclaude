@@ -812,20 +812,15 @@ export function getServerCacheKey(
 }
 
 /**
- * Callers currently awaiting one memoized connect, by cache key and the
- * promise they share. The memoize body runs once per key, so an adopter
- * of the cached promise attaches nothing — but the creator's abort
- * listener still fires. The body consults this before closing the
- * transport, so cancelling the creator does not fail the other session's
- * in-flight MCP calls. Entries are per promise, not per key: a cache
- * clear and a fresh connect for the same key starts a new generation,
- * replacing the entry — so the count always belongs to the latest
- * generation, and a cleared cache entry must not hide a waiter that is
- * still awaiting the old promise.
+ * Callers awaiting a connect, keyed by the connect's own promise — not
+ * the cache key: a cache clear replaces the entry for a key while an
+ * older generation is still pending, and re-keying by the string would
+ * drop the older generation's waiters (or count a newer generation's).
+ * A generation's waiter count is its own.
  */
 const connectWaiters = new Map<
-  string,
-  { promise: Promise<MCPServerConnection>; count: number }
+  Promise<MCPServerConnection>,
+  { count: number }
 >()
 
 /**
@@ -895,14 +890,17 @@ const connectTransportClosers = new Map<
 >()
 
 /**
- * Whether another caller is still awaiting the connect this cache entry
+ * Whether another caller is still awaiting the connect this promise
  * belongs to. Tracked by the originating promise, not the current cache
  * entry: a cache clear removes the mapping but not the waiter, and
  * cancelling the creator must not close a transport another waiter
- * still needs.
+ * still needs. A promise not yet handed to a waiter has none.
  */
-function hasOtherConnectWaiters(key: string): boolean {
-  const entry = connectWaiters.get(key)
+function hasOtherConnectWaiters(
+  promise: Promise<MCPServerConnection> | undefined,
+): boolean {
+  if (!promise) return false
+  const entry = connectWaiters.get(promise)
   if (!entry) return false
   return entry.count > 1
 }
@@ -937,6 +935,15 @@ const connectToServerMemoized = memoize(
      * it), so sharing is unchanged.
      */
     signal?: AbortSignal,
+    /**
+     * Holds this connect's own promise, set by the wrapper once memoize
+     * returns it: the body cannot read its promise back from the cache,
+     * which is set only after the body returns and may hold a newer
+     * generation by then. The waiter counts and the transport closer
+     * below use this originating promise, not whichever entry is current.
+     * Not part of the memo key (getServerCacheKey ignores it).
+     */
+    generation?: { promise?: Promise<MCPServerConnection> },
   ): Promise<MCPServerConnection> => {
     const connectStartTime = Date.now()
     let inProcessServer: InProcessMcpServer | undefined
@@ -957,7 +964,7 @@ const connectToServerMemoized = memoize(
           // the failed result and skip MCP setup on later turns. Only
           // the last waiter closes it — the creator still cancels, once
           // the shared connect settles and the attempt check runs.
-          if (!hasOtherConnectWaiters(getServerCacheKey(name, serverRef))) {
+          if (!hasOtherConnectWaiters(generation?.promise)) {
             transport?.close().catch(() => {})
           }
         }
@@ -1439,13 +1446,11 @@ const connectToServerMemoized = memoize(
       // signal. Register a closer the wrapper invokes when the last waiter
       // cancels, so a connect stalled on initialize still rejects instead
       // of holding its callers until the connection timeout. Keyed by this
-      // connect's own promise, read back from the memoize cache (which
-      // holds it while pending), so a newer generation for the same key
-      // cannot close this one. The closer is inert once the connect
+      // connect's own promise, from the generation holder: the cache holds
+      // the promise only after the body returns, and may hold a newer
+      // generation by then. The closer is inert once the connect
       // settles; the wrapper drops it then.
-      const ownPromise = connectToServerMemoized.cache.get(
-        getServerCacheKey(name, serverRef),
-      ) as Promise<MCPServerConnection> | undefined
+      const ownPromise = generation?.promise
       if (ownPromise) {
         connectTransportClosers.set(ownPromise, () => {
           if (!connectSettled) {
@@ -1462,7 +1467,7 @@ const connectToServerMemoized = memoize(
       // Shared like the listener: another waiter keeps the transport.
       if (
         signal?.aborted &&
-        !hasOtherConnectWaiters(getServerCacheKey(name, serverRef))
+        !hasOtherConnectWaiters(generation?.promise)
       ) {
         transport.close().catch(() => {})
       }
@@ -2095,22 +2100,26 @@ export const connectToServer = Object.assign(
   ): Promise<MCPServerConnection> => {
     const key = getServerCacheKey(name, serverRef)
     // A cache hit reuses a connect another caller started; that caller
-    // adopts the client it resolves to.
+    // adopts the client it resolves to — unless it was cancelled before
+    // or during the wait, in which case its adoption would keep a
+    // transport alive the creator's abort should close.
     const hadCached = connectToServerMemoized.cache.get(key) !== undefined
-    const promise = connectToServerMemoized(name, serverRef, serverStats, signal)
+    const generation: { promise?: Promise<MCPServerConnection> } = {}
+    const promise = connectToServerMemoized(name, serverRef, serverStats, signal, generation)
+    generation.promise = promise
     if (hadCached) {
       void promise.then(
         client => {
-          if (client.type === 'connected') adoptedMcpClients.add(client)
+          if (client.type === 'connected' && !signal?.aborted) adoptedMcpClients.add(client)
         },
         () => {},
       )
     }
-    const entry = connectWaiters.get(key)
-    if (entry && entry.promise === promise) {
+    const entry = connectWaiters.get(promise)
+    if (entry) {
       entry.count++
     } else {
-      connectWaiters.set(key, { promise, count: 1 })
+      connectWaiters.set(promise, { count: 1 })
     }
     let released = false
     let releaseOnAbort: (() => void) | undefined
@@ -2120,10 +2129,10 @@ export const connectToServer = Object.assign(
       if (signal && releaseOnAbort) {
         signal.removeEventListener('abort', releaseOnAbort)
       }
-      const current = connectWaiters.get(key)
-      if (current && current.promise === promise) {
+      const current = connectWaiters.get(promise)
+      if (current) {
         if (current.count <= 1) {
-          connectWaiters.delete(key)
+          connectWaiters.delete(promise)
           // Only an abort leaves the transport stalled: on settle the
           // client is live and its callers hold it.
           if (onAbort) {

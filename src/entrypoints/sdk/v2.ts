@@ -1189,7 +1189,15 @@ class SDKSessionImpl implements SDKSession {
     client: MCPServerConnection,
   ): Promise<void> {
     if (client.type !== 'connected') return
-    if (this.engine.getMcpClients().some(installed => installed === client)) return
+    // The session may have closed, and there is no engine to ask whether
+    // the client is installed: the release below still protects a client
+    // another caller adopted.
+    if (
+      this._engine &&
+      this.engine.getMcpClients().some(installed => installed === client)
+    ) {
+      return
+    }
     await releaseUnownedMcpClient(name, config, client)
   }
 

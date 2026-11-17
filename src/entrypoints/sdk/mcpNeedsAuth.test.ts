@@ -100,11 +100,19 @@ mock.module('../../services/mcp/auth.js', () => ({
 }))
 const realClient = { ...(await import('../../services/mcp/client.js')) }
 let reconnects = 0
+/** A hook a test sets to run when the mocked reconnect settles. */
+let onReconnectSettled:
+  | ((result: Awaited<ReturnType<typeof realClient.reconnectMcpServerImpl>>) => void)
+  | null = null
 mock.module('../../services/mcp/client.js', () => ({
   ...realClient,
   reconnectMcpServerImpl: (...args: Parameters<typeof realClient.reconnectMcpServerImpl>) => {
     reconnects++
-    return realClient.reconnectMcpServerImpl(...args)
+    const result = realClient.reconnectMcpServerImpl(...args)
+    // Attached here, before the host awaits the same promise, so the
+    // hook runs before the host's continuation resumes.
+    if (onReconnectSettled) void result.then(onReconnectSettled)
+    return result
   },
 }))
 
@@ -674,6 +682,7 @@ beforeEach(async () => {
   stores.clear()
   flows = []
   reconnects = 0
+  onReconnectSettled = null
   registrations = 0
   refusedExchanges = 0
   failMcpRequests = false
@@ -3780,5 +3789,166 @@ test("A SURVIVING SHARED DISCOVERY KEEPS ITS ORIGINATING CREDENTIAL NAMESPACE", 
   } finally {
     setClaudeConfigHomeDirForTesting(configHome)
     restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The SDK preamble joins a pending connect before awaiting it: a creator
+ * abort while it waits must not close the transport the SDK session
+ * still needs. An explicit Authorization header authorizes the connect
+ * with no stored token, so the preamble's retry cannot save a failed
+ * client by deleting the cache — only the waiter registration can.
+ */
+test('AN SDK SESSION JOINING A PENDING CONNECT SURVIVES THE CREATOR ABORTING', async () => {
+  const url = serveNeedingAuth()
+  const headers = { Authorization: 'Bearer token-for-seeded' }
+  const config = { type: 'http', url, headers, scope: 'session' } as never
+  const held = holdInitialize()
+
+  const creator = new AbortController()
+  const creatorConnect = realClient.connectToServer('gated', config, undefined, creator.signal)
+  // The creator's connect is stalled on initialize.
+  await waitFor(() => held.arrived)
+
+  // The SDK session joins the pending connect: its preamble registers a
+  // waiter before awaiting it.
+  const sdkConnect = connectSdkMcpServers({
+    gated: { type: 'http', url, headers },
+  })
+  // The creator aborts while the SDK session is still joining.
+  creator.abort()
+  held.answer()
+
+  const { clients } = await sdkConnect
+  expect(clients.map(client => client.type)).toEqual(['connected'])
+  expect((await creatorConnect).type).toBe('connected')
+}, 30_000)
+
+/**
+ * Waiter counts belong to their own generation: a cache clear and a fresh
+ * connect for the same key must not let the older generation's creator
+ * abort close a transport its joiner still needs.
+ */
+test('AN OLDER GENERATION KEEPS ITS TRANSPORT WHILE ITS JOINER STILL WAITS', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const held = holdInitialize()
+  const key = realClient.getServerCacheKey('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+
+  const creator = new AbortController()
+  const creatorConnect = realClient.connectToServer(
+    'gated',
+    { type: 'http', url, scope: 'session' } as never,
+    undefined,
+    creator.signal,
+  )
+  // A joiner on the same generation, still waiting when the creator aborts.
+  const joinerConnect = realClient.connectToServer('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+  await waitFor(() => held.arrived)
+  // A cache clear forces the next connect to start a newer generation.
+  realClient.connectToServer.cache.delete(key)
+  const nextCreator = new AbortController()
+  const nextConnect = realClient.connectToServer(
+    'gated',
+    { type: 'http', url, scope: 'session' } as never,
+    undefined,
+    nextCreator.signal,
+  )
+  // The older creator aborts: its generation's transport must stay open
+  // for its joiner, even though a newer generation exists for the key.
+  creator.abort()
+  held.answer()
+
+  expect((await joinerConnect).type).toBe('connected')
+  expect((await creatorConnect).type).toBe('connected')
+  expect((await nextConnect).type).toBe('connected')
+}, 30_000)
+
+/**
+ * A joiner cancelled before its connect settles adopts nothing: a later
+ * release must evict the cache instead of keeping a client no session
+ * holds.
+ */
+test('A JOINER THAT CLOSES BEFORE ITS CONNECT SETTLES ADOPTS NOTHING', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const held = holdInitialize()
+  const key = realClient.getServerCacheKey('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+
+  const creator = new AbortController()
+  const creatorConnect = realClient.connectToServer(
+    'gated',
+    { type: 'http', url, scope: 'session' } as never,
+    undefined,
+    creator.signal,
+  )
+  // The joiner closes while the connect is still stalled on initialize.
+  const joiner = new AbortController()
+  const joinerConnect = realClient.connectToServer(
+    'gated',
+    { type: 'http', url, scope: 'session' } as never,
+    undefined,
+    joiner.signal,
+  )
+  const joinerCaught = joinerConnect.catch(error => error)
+  await waitFor(() => held.arrived)
+  joiner.abort()
+  held.answer()
+
+  const client = await creatorConnect
+  expect(client.type).toBe('connected')
+  // The joiner adopted nothing, so the release evicts the cache.
+  expect(realClient.isMcpClientAdopted(client)).toBe(false)
+  await realClient.releaseUnownedMcpClient(
+    'gated',
+    { type: 'http', url, scope: 'session' } as never,
+    client,
+  )
+  // The cleanup closes the transport, whose onclose evicts the cache.
+  await waitFor(() => realClient.connectToServer.cache.get(key) === undefined)
+  await settlesWithin(joinerCaught, 5_000).catch(() => {})
+}, 30_000)
+
+/**
+ * A close that lands after the reconnect succeeds but before the host
+ * handles its result must report the session as closed, not fail on the
+ * engine the close already cleared — and the unowned client must still
+ * be released.
+ */
+test('A CLOSE AFTER THE RECONNECT SUCCEEDS REPORTS THE SESSION AS CLOSED', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const key = realClient.getServerCacheKey('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+  // Close the session the moment the reconnect settles: the mock's
+  // continuation runs before the host's await resumes.
+  onReconnectSettled = () => session.close()
+  try {
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    await expect(settlesWithin(done, 5_000)).rejects.toThrow('SDK session is closed')
+    // The unowned client was released: the cache no longer holds it.
+    expect(realClient.connectToServer.cache.get(key)).toBeUndefined()
+  } finally {
+    onReconnectSettled = null
   }
 }, 30_000)
