@@ -34,6 +34,7 @@ import {
   forgetDeletedSession,
   getCurrentSessionTitle,
   getDroppedSessionMetadataSizeForTesting,
+  getLastSessionLog,
   getProjectDir,
   getSessionFileForTesting,
   getSessionTranscriptCacheSizeForTesting,
@@ -1852,6 +1853,46 @@ test('same session id in two project directories keeps independent message dedup
   const bPath = join(dirC, `${sharedId}.jsonl`)
   expect(existsSync(aPath)).toBe(true)
   expect(await readFile(aPath, 'utf8')).toContain('shared in A')
+  expect(existsSync(bPath)).toBe(true)
+  expect(await readFile(bPath, 'utf8')).toContain('shared in B')
+})
+
+test('getLastSessionLog does not prime the second directory\u2019s dedup cache with the first directory\u2019s UUIDs', async () => {
+  // CodeRabbit Minor on #2489: getLastSessionLog computed the priming
+  // destination AFTER awaiting loadSessionFile. If switchSession moves the
+  // same id to a second project directory while the read is pending, the
+  // priming installs the first directory's UUIDs under the second
+  // directory's key — and a later recordTranscript into the second
+  // directory skips entries its transcript does not contain.
+  const sharedId = '31000000-0000-4000-8000-00000000000a'
+  const sharedUuid = '41000000-0000-4000-8000-00000000000a'
+  const dirA = join(testRoot, 'workspace-a')
+  const dirC = join(testRoot, 'workspace-c')
+  await mkdir(dirA, { recursive: true })
+  await mkdir(dirC, { recursive: true })
+
+  await turnStart(sharedId, async () => {
+    await recordTranscript([message(sharedUuid, 'shared in A')])
+    await flushSessionStorage()
+  }, dirA)
+
+  // Switch the same id to the second directory while the load is pending:
+  // the call runs synchronously until loadTranscriptFile's first await, so
+  // the switch below lands before the read resolves.
+  await runWithSdkContext(sdkContext(sharedId, dirA), async () => {
+    const pending = getLastSessionLog(sharedId as never)
+    switchSession(sharedId as never, dirC)
+    const log = await pending
+    expect(log).not.toBeNull()
+  })
+
+  // The same UUID replayed into the second directory must land there.
+  await turnStart(sharedId, async () => {
+    await recordTranscript([message(sharedUuid, 'shared in B')])
+    await flushSessionStorage()
+  }, dirC)
+
+  const bPath = join(dirC, `${sharedId}.jsonl`)
   expect(existsSync(bPath)).toBe(true)
   expect(await readFile(bPath, 'utf8')).toContain('shared in B')
 })

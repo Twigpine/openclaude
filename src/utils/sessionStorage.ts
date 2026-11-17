@@ -6566,7 +6566,14 @@ function sessionMessagesDestination(sessionId: UUID): string {
 /**
  * Loads all messages, summaries, file history snapshots, and attribution snapshots from a specific session file.
  */
-async function loadSessionFile(sessionId: UUID): Promise<{
+async function loadSessionFile(
+  sessionId: UUID,
+  // Callers that already resolved the destination pass it in so the load
+  // reads exactly that file: a switchSession during the read must not move
+  // the load (or the priming in getLastSessionLog) to another directory's
+  // transcript. Defaults to the same resolution as before.
+  destination: string = sessionMessagesDestination(sessionId),
+): Promise<{
   messages: Map<UUID, TranscriptMessage>
   summaries: Map<UUID, string>
   customTitles: Map<UUID, string>
@@ -6581,7 +6588,7 @@ async function loadSessionFile(sessionId: UUID): Promise<{
   contextCollapseCommits: ContextCollapseCommitEntry[]
   contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
 }> {
-  return loadTranscriptFile(sessionMessagesDestination(sessionId))
+  return loadTranscriptFile(destination)
 }
 
 /**
@@ -6620,6 +6627,13 @@ export async function doesMessageExistInSession(
 export async function getLastSessionLog(
   sessionId: UUID,
 ): Promise<LogOption | null> {
+  // Pin the destination before the load: a switchSession during the read
+  // changes what sessionMessagesDestination resolves to, and priming under
+  // the new directory's key would install this file's UUIDs there — a later
+  // recordTranscript into the new directory would then skip entries its
+  // transcript does not contain (#2489). The load and the priming both use
+  // this one value, so they can never drift apart.
+  const destination = sessionMessagesDestination(sessionId)
   // Single read: load all session data at once instead of reading the file twice
   const {
     messages,
@@ -6635,7 +6649,7 @@ export async function getLastSessionLog(
     sessionBranches,
     contextCollapseCommits,
     contextCollapseSnapshot,
-  } = await loadSessionFile(sessionId)
+  } = await loadSessionFile(sessionId, destination)
   if (messages.size === 0) return null
   // Prime getSessionMessages cache so recordTranscript (called after REPL
   // mount on --resume) skips a second full file load. -170~227ms on large sessions.
@@ -6643,8 +6657,7 @@ export async function getLastSessionLog(
   // may call getLastSessionLog on the current session — overwriting a live cache
   // with a stale disk snapshot would lose unflushed UUIDs and break dedup.
   // The cache is keyed by resolved transcript destination, so prime under
-  // the same destination the memo uses.
-  const destination = sessionMessagesDestination(sessionId)
+  // the same destination the load read from.
   if (!getSessionMessages.cache.has(destination)) {
     getSessionMessages.cache.set(
       destination,
