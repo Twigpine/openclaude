@@ -133,7 +133,7 @@ mock.module('./permissions.js', () => ({
   }) as typeof realPermissions.revalidatePlanModePermissionAllowWithRaceGuard,
 }))
 
-const { checkWritePermissionForTool, getScratchpadDir } = await import(
+const { checkWritePermissionForTool, getScratchpadDir, toPosixPath } = await import(
   './filesystem.js'
 )
 const {
@@ -307,6 +307,39 @@ describe('permissions.blockWritesOutsideWorkingDirectories', () => {
       permissionContext('default'),
     )
     expect(result.behavior).not.toBe('deny')
+  })
+
+  test('the write boundary leaves Read inheritance and explicit Read rules intact', async () => {
+    const { FileReadTool } = await import('../../tools/FileReadTool/FileReadTool.js')
+    const input = { file_path: join(outsideDir, 'note.txt') }
+    const pattern = `/${toPosixPath(input.file_path)}`
+    const context = {
+      ...permissionContext('default'),
+      alwaysAllowRules: { session: [`Edit(${pattern})`] },
+    }
+    const read = (permissions: ToolPermissionContext) =>
+      FileReadTool.checkPermissions(input, useContext(permissions))
+
+    blockWritesOutsideWorkingDirectories = false
+    expect(await read(context)).toMatchObject({ behavior: 'allow' })
+    expect(checkWritePermissionForTool(writeTool, input, context)).toMatchObject({
+      behavior: 'allow',
+    })
+
+    blockWritesOutsideWorkingDirectories = true
+    expect(await read(context)).toMatchObject({ behavior: 'allow' })
+    expect(checkWritePermissionForTool(writeTool, input, context)).toMatchObject({
+      behavior: 'deny',
+      decisionReason: { reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled' },
+    })
+    expect(await read({
+      ...context,
+      alwaysDenyRules: { session: [`Read(${pattern})`] },
+    })).toMatchObject({ behavior: 'deny' })
+    expect(await read({
+      ...context,
+      alwaysAskRules: { session: [`Read(${pattern})`] },
+    })).toMatchObject({ behavior: 'ask', decisionReason: { type: 'rule' } })
   })
 
   test('an added directory counts as inside', () => {

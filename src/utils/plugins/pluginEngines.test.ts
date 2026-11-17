@@ -121,6 +121,7 @@ describe('plugin engines compatibility', () => {
       '||',
       '1.2.3.4',
       '>=',
+      ' ',
     ]) {
       const error = pluginEnginesIncompatibility(
         manifest({ 'claude-code': range }),
@@ -128,6 +129,22 @@ describe('plugin engines compatibility', () => {
       )
       expect(error).not.toBeNull()
       expect(error).toContain('invalid')
+    }
+  })
+
+  test('malformed semver versions invalidate the entire engine range', () => {
+    for (const range of [
+      '0.36-rc.1',
+      '0.36.0-01',
+      '00.36.x',
+      '0.36-rc.1 || >=0.30.0',
+    ]) {
+      expect(
+        pluginEnginesIncompatibility(
+          manifest({ 'claude-code': range }),
+          APP_VERSION,
+        ),
+      ).toContain('invalid')
     }
   })
 

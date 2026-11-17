@@ -1254,7 +1254,7 @@ export function checkReadPermissionForTool(
   const path = expandPath(tool.getPath(input))
 
   // Get paths to check (includes both original and resolved symlinks).
-  // Computed once here and threaded through checkWritePermissionForTool →
+  // Computed once here and threaded through checkEditPermissionForPath →
   // checkPathSafetyForAutoEdit → pathInAllowedWorkingPath to avoid redundant
   // existsSync/lstatSync/realpathSync syscalls on the same path (previously
   // 6× = 30 syscalls per Read permission check).
@@ -1334,13 +1334,14 @@ export function checkReadPermissionForTool(
     }
   }
 
-  // 5. Edit access implies read access (but only if no read-specific deny/ask rules exist)
-  // We check this after read-specific rules so that explicit read restrictions take precedence
-  const editResult = checkWritePermissionForTool(
-    tool,
+  // 5. Inherit the existing edit policy after checking explicit Read rules.
+  // The working-directory boundary only applies to an actual write.
+  const editResult = checkEditPermissionForPath(
+    path,
     input,
     toolPermissionContext,
     pathsToCheck,
+    false,
   )
   if (editResult.behavior === 'allow') {
     return editResult
@@ -1406,20 +1407,10 @@ export function checkReadPermissionForTool(
   }
 }
 
-/**
- * Permission result for write permission for the specified tool & tool input.
- *
- * @param precomputedPathsToCheck - Optional cached result of
- *   `getPathsForPermissionCheck(expandPath(tool.getPath(input)))`. Callers MUST
- *   derive this from the same `tool` and `input` in the same synchronous frame
- *   — `path` is re-derived internally for error messages and internal-path
- *   checks, so a stale value would silently check deny rules for the wrong path.
- */
 export function checkWritePermissionForTool<Input extends AnyObject>(
   tool: Tool<Input>,
   input: z.infer<Input>,
   toolPermissionContext: ToolPermissionContext,
-  precomputedPathsToCheck?: readonly string[],
 ): PermissionDecision {
   if (typeof tool.getPath !== 'function') {
     return {
@@ -1432,10 +1423,23 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
   // symlink variants so every permission check uses the same session-relative
   // absolute path.
   const path = expandPath(tool.getPath(input))
+  return checkEditPermissionForPath(
+    path,
+    input,
+    toolPermissionContext,
+    getPathsForPermissionCheck(path),
+    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories === true,
+  )
+}
 
+function checkEditPermissionForPath(
+  path: string,
+  input: Record<string, unknown>,
+  toolPermissionContext: ToolPermissionContext,
+  pathsToCheck: readonly string[],
+  enforceWriteBoundary: boolean,
+): PermissionDecision {
   // 1. Check for deny rules - check both the original path and resolved symlink path
-  const pathsToCheck =
-    precomputedPathsToCheck ?? getPathsForPermissionCheck(path)
   for (const pathToCheck of pathsToCheck) {
     const denyRule = matchingRuleForInput(
       pathToCheck,
@@ -1457,11 +1461,11 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
 
   // 1.5. Allow writes to internal editable paths (plan files, scratchpad)
   // This MUST come before isDangerousFilePathToAutoEdit check since .claude is a dangerous directory
-  const absolutePathForEdit = expandPath(path)
   const internalEditResult = checkEditableInternalPath(
-    absolutePathForEdit,
+    path,
     input,
     toolPermissionContext,
+    enforceWriteBoundary,
   )
   if (internalEditResult.behavior !== 'passthrough') {
     return internalEditResult
@@ -1472,7 +1476,7 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
   // internal editable-path carveout (plan files, scratchpad) so those still
   // work, and before allow-rule checks so no rule can widen the boundary.
   if (
-    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories &&
+    enforceWriteBoundary &&
     !writePathsInsideWorkingDirectories(
       pathsToCheck,
       allWorkingDirectories(toolPermissionContext),
@@ -1836,13 +1840,12 @@ export function checkEditableInternalPath(
   absolutePath: string,
   input: { [key: string]: unknown },
   toolPermissionContext?: ToolPermissionContext,
+  enforceWriteBoundary =
+    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories === true,
 ): PermissionResult {
   // SECURITY: Normalize path to prevent traversal bypasses via .. segments
   // This is defense-in-depth; individual helper functions also normalize
   const normalizedPath = normalize(absolutePath)
-  const enforceWriteBoundary =
-    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories === true
-
   // Plan files for current session
   if (isSessionPlanFile(normalizedPath)) {
     return {
