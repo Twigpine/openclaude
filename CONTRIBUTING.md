@@ -288,7 +288,7 @@ strictness, defaults, error customization, dependency compatibility and SDK
 peer handling. Regenerate both lockfiles with `bun install` after changing
 the shared pin.
 
-The static website in `web/` uses Astro `7.4.2`, `@astrojs/check` `0.9.12`,
+The static website in `web/` uses Astro `7.4.12`, `@astrojs/check` `0.9.12`,
 and `@astrojs/sitemap` `3.7.4`, all pinned exactly. Install its dependencies
 with `bun install --cwd web`, then run `bun run web:typecheck` and
 `bun run web:build` from the root. The build includes `scripts/verify-dist.ts`
