@@ -2929,7 +2929,14 @@ export async function reconnectMcpServerImpl(
     // stay cached for the other waiter; the race below rejects this caller
     // promptly on abort instead, and the attempt check in
     // authenticateMcpServer turns that into the cancellation error.
-    const discoveryPartsList = [
+    // The list stays a tuple so Promise.all keeps each fetcher's type
+    // (tools, commands, skills, resources) instead of widening to a union.
+    const discoveryPartsList: [
+      Promise<Tool[]>,
+      Promise<Command[]>,
+      Promise<Command[]>,
+      Promise<ServerResource[]>,
+    ] = [
       fetchToolsForClient(client),
       fetchCommandsForClient(client),
       feature('MCP_SKILLS') && supportsResources

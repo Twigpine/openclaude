@@ -987,7 +987,7 @@ class SDKSessionImpl implements SDKSession {
     options?.signal?.addEventListener('abort', cancelInitWait, { once: true })
     sessionSignal?.addEventListener('abort', cancelInitWait, { once: true })
     try {
-      await raceAbort(runOutsideSdkContext(init), initCancel.signal)
+      await raceAbort(runOutsideSdkContext(() => init()), initCancel.signal)
     } catch (error) {
       if (error instanceof AuthenticationCancelledError && this.closed) {
         throw new Error('SDK session is closed')
