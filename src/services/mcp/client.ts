@@ -138,6 +138,7 @@ import {
 } from './auth.js'
 import { markClaudeAiMcpConnected } from './claudeai.js'
 import { getAllMcpConfigs, isMcpServerDisabled } from './config.js'
+import { type CredentialScope, resumeIn } from './credentialScope.js'
 import { getMcpServerHeaders } from './headersHelper.js'
 import { SdkControlClientTransport } from './SdkControlTransport.js'
 import type {
@@ -2863,6 +2864,15 @@ export async function reconnectMcpServerImpl(
    * caller that started this reconnect passes one.
    */
   signal?: AbortSignal,
+  /**
+   * Where a discovery that outlives this caller finishes: another caller
+   * may have adopted the shared client, so its remaining credential
+   * operations — a later tools/list page, a skill read — run inside the
+   * namespace the reconnect began in. It carries no signal: the
+   * cancelled attempt must not fail the re-entry that keeps it there.
+   * Only the host-facing caller passes one.
+   */
+  survivingDiscoveryScope?: CredentialScope,
 ): Promise<{
   client: MCPServerConnection
   tools: Tool[]
@@ -2873,6 +2883,10 @@ export async function reconnectMcpServerImpl(
   // no session adopted, and only the catch sees it — the race below turns
   // the cancellation into a failed result before the caller does.
   let connected: MCPServerConnection | undefined
+  // The individual discovery fetches, for the catch: Promise.all rejects
+  // on the first failure and would drop the stragglers, so the surviving
+  // discovery awaits these instead.
+  let discoveryParts: Promise<unknown>[] | undefined
   try {
     // Invalidate the keychain cache so we read fresh credentials from disk.
     // This is necessary when another process (e.g. the VS Code extension host)
@@ -2906,7 +2920,7 @@ export async function reconnectMcpServerImpl(
     // stay cached for the other waiter; the race below rejects this caller
     // promptly on abort instead, and the attempt check in
     // authenticateMcpServer turns that into the cancellation error.
-    const discovery = Promise.all([
+    const discoveryPartsList = [
       fetchToolsForClient(client),
       fetchCommandsForClient(client),
       feature('MCP_SKILLS') && supportsResources
@@ -2915,7 +2929,9 @@ export async function reconnectMcpServerImpl(
       supportsResources
         ? fetchResourcesForClient(client)
         : Promise.resolve([]),
-    ])
+    ]
+    discoveryParts = discoveryPartsList
+    const discovery = Promise.all(discoveryPartsList)
     const [tools, mcpCommands, mcpSkills, resources] = await raceAbort(
       discovery,
       signal,
@@ -2946,6 +2962,24 @@ export async function reconnectMcpServerImpl(
     // knows it aborted.
     if (!signal?.aborted && !isAbortError(error)) {
       logMCPError(name, `Error during reconnection: ${errorMessage(error)}`)
+    }
+
+    // A cancelled discovery can outlive this caller: another caller may
+    // have adopted the shared client, so the fetchers keep running for
+    // it. Their remaining credential operations run back inside the
+    // namespace the reconnect began in, not whatever the process has by
+    // now. The caller is not kept waiting — the re-entry runs in the
+    // background — and it is not attached to the cancelled signal, so it
+    // cannot strip the adopter's tools the way a shared signal would.
+    if (
+      (signal?.aborted || isAbortError(error)) &&
+      discoveryParts !== undefined &&
+      survivingDiscoveryScope !== undefined
+    ) {
+      const parts = discoveryParts
+      void resumeIn(survivingDiscoveryScope, () =>
+        Promise.allSettled(parts),
+      ).catch(() => {})
     }
 
     // A cancelled discovery leaves a connected client no session adopted:

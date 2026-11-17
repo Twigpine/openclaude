@@ -206,6 +206,10 @@ let heldExchange: {
 let heldInitialize: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
 /** A tools/list the stand-in keeps waiting until the test lets it answer. */
 let heldToolsList: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
+/** When set, the stand-in answers tools/list in two pages: hello, then world. */
+let pagedToolsList = false
+/** The Authorization header of each tools/list request, in order. */
+const toolsListAuth: string[] = []
 /** A skill resources/read the stand-in keeps waiting until the test lets it answer. */
 let heldSkillRead: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
 /** Authorized initialize requests the stand-in has answered, so a test can tell a dial from a cache lookup. */
@@ -361,7 +365,11 @@ function serveNeedingAuth(invalidClient = false): string {
       }
       if (path === '/mcp' && request.headers.get('authorization')?.startsWith('Bearer token-for-') && !rejectTokens) {
         if (request.method !== 'POST') return new Response(null, { status: 405 })
-        const rpc = (await request.json()) as { id?: string | number; method: string }
+        const rpc = (await request.json()) as {
+          id?: string | number
+          method: string
+          params?: { cursor?: string }
+        }
         // A JSON-RPC response to a server request (no method): the client's
         // answer to roots/list. Record the roots it reported.
         if (rpc.method === undefined) {
@@ -382,8 +390,12 @@ function serveNeedingAuth(invalidClient = false): string {
         }
         // A reconnect's tools/list can be held the same way, so a test can
         // act while discovery is pending — abort it, and the reconnect must
-        // reject instead of waiting out the request timeout.
-        if (rpc.method === 'tools/list' && heldToolsList) {
+        // reject instead of waiting out the request timeout. Only the first
+        // page is held: a later page is the work that outlives the caller.
+        if (rpc.method === 'tools/list') {
+          toolsListAuth.push(request.headers.get('authorization') ?? '')
+        }
+        if (rpc.method === 'tools/list' && heldToolsList && !rpc.params?.cursor) {
           heldToolsList.arrived = true
           await heldToolsList.answered
         }
@@ -403,7 +415,14 @@ function serveNeedingAuth(invalidClient = false): string {
                 serverInfo: { name: 'gated', version: '1' },
               }
             : rpc.method === 'tools/list'
-              ? { tools: [{ name: 'hello', description: 'hello', inputSchema: { type: 'object', properties: {} } }] }
+              ? pagedToolsList
+                ? rpc.params?.cursor === 'page-2'
+                  ? { tools: [{ name: 'world', description: 'world', inputSchema: { type: 'object', properties: {} } }] }
+                  : {
+                      tools: [{ name: 'hello', description: 'hello', inputSchema: { type: 'object', properties: {} } }],
+                      nextCursor: 'page-2',
+                    }
+                : { tools: [{ name: 'hello', description: 'hello', inputSchema: { type: 'object', properties: {} } }] }
               : rpc.method === 'resources/list'
                 ? {
                     resources: [
@@ -491,6 +510,12 @@ function holdToolsList() {
   })
   heldToolsList = { arrived: false, answer, answered }
   return heldToolsList
+}
+
+/** Makes the stand-in answer tools/list in two pages, recording each page's bearer. */
+function pageToolsList() {
+  pagedToolsList = true
+  toolsListAuth.length = 0
 }
 
 /** Makes the stand-in hold its answer to a skill resources/read. */
@@ -654,6 +679,8 @@ beforeEach(async () => {
   failMcpRequests = false
   rejectTokens = false
   offerRootsList = false
+  pagedToolsList = false
+  toolsListAuth.length = 0
   rootsSeen = []
   rootsRequests = 0
   initializes = 0
@@ -3129,6 +3156,10 @@ test('ABORTING DURING DISCOVERY REJECTS PROMPTLY INSTEAD OF WAITING OUT THE REQU
     await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
       realAuth.AuthenticationCancelledError,
     )
+    // The surviving discovery holds the environment mutex until its
+    // fetchers settle, so answer the held list before asking for it:
+    // the cancelled attempt still rejects promptly, above.
+    held.answer()
     const acquired = await acquireEnvMutex({ timeoutMs: 5_000 })
     expect(acquired.acquired).toBe(true)
     releaseEnvMutex()
@@ -3248,6 +3279,10 @@ skillReadTest('CANCELLING DURING A STALLED SKILL READ REJECTS PROMPTLY AND RELEA
     await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
       realAuth.AuthenticationCancelledError,
     )
+    // The surviving discovery holds the environment mutex until its
+    // fetchers settle, so answer the held read before asking for it:
+    // the cancelled attempt still rejects promptly, above.
+    held.answer()
     const acquired = await acquireEnvMutex({ timeoutMs: 5_000 })
     expect(acquired.acquired).toBe(true)
     releaseEnvMutex()
@@ -3659,4 +3694,91 @@ test("ONE CALLER CANCELLING DISCOVERY DOES NOT STRIP ANOTHER CALLER'S TOOLS", as
   }
   // The adopter still gets the server's tools once the list answers.
   await expect(settlesWithin(adopterTools, 5_000)).resolves.toEqual(['hello'])
+}, 30_000)
+
+/**
+ * A discovery that outlives its caller keeps the namespace it began in:
+ * another caller adopted the shared client, the creator cancels, and a
+ * later turn applies its own environment before the next tools/list page
+ * is read. The page must still carry the origin token, not the later
+ * turn's — the prompt rejecting alone would not show that.
+ */
+test("A SURVIVING SHARED DISCOVERY KEEPS ITS ORIGINATING CREDENTIAL NAMESPACE", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  try {
+    const url = serveNeedingAuth()
+    // The later turn's token, in its own store: no page may carry it.
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    seedStoredToken('gated', url, 'token-for-other-session')
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    pageToolsList()
+
+    const session = openGatedSession(url)
+    const calls = recordEngine(session)
+    const held = holdToolsList()
+
+    const caller = new AbortController()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+      signal: caller.signal,
+    })
+    const doneCaught = done.catch(error => error)
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    // The reconnect connected, and its discovery is stalled on page one.
+    await waitFor(() => held.arrived)
+
+    // Another caller adopts the in-flight discovery: it connects through
+    // the shared client, then fetches the same tools/list the reconnect
+    // started. Awaiting the connect lets the adoption register before the
+    // abort below.
+    const connectedClient = (await realClient.connectToServer('gated', {
+      type: 'http',
+      url,
+      scope: 'session',
+    } as never)) as MCPServerConnection
+    expect(connectedClient.type).toBe('connected')
+    const adopterTools = realClient
+      .fetchToolsForClient(connectedClient)
+      // The names the model sees, as the status projects them.
+      .then(tools => tools.map(tool => tool.mcpInfo?.toolName ?? tool.name))
+
+    caller.abort()
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    // The cancelled attempt installed nothing.
+    expect(calls.setMcpClients).toHaveLength(1)
+
+    // A later turn applies its own environment: it takes the mutex, so it
+    // queues behind the surviving discovery's scope and only applies once
+    // that discovery has settled.
+    const laterTurnApplied = (async () => {
+      const { acquired } = await acquireEnvMutex()
+      expect(acquired).toBe(true)
+      process.env.OPENCLAUDE_CONFIG_DIR = ambient
+      releaseEnvMutex()
+    })()
+    // Page one answers: the second page is read while the later turn is
+    // still queued, so it must carry the origin token, not the later
+    // turn's.
+    held.answer()
+    await expect(settlesWithin(adopterTools, 5_000)).resolves.toEqual([
+      'hello',
+      'world',
+    ])
+    await laterTurnApplied
+    expect(toolsListAuth).toEqual([
+      'Bearer token-for-stand-in-client-2',
+      'Bearer token-for-stand-in-client-2',
+    ])
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
 }, 30_000)

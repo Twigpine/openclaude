@@ -964,6 +964,14 @@ class SDKSessionImpl implements SDKSession {
       () => entryCredentialScope ?? undefined,
       { signal: attempt.signal },
     )
+    // Discovery that outlives this caller — a shared fetch another caller
+    // adopted — keeps running after the attempt is cancelled, so its
+    // scope carries no signal: the attempt's abort must not fail the
+    // re-entry that keeps its remaining credential operations in the
+    // namespace this call began in.
+    const survivingDiscoveryScope = captureCredentialScope(
+      () => entryCredentialScope ?? undefined,
+    )
 
     // Process-wide networking (proxy, mTLS client certificate, CA certs) is
     // configured by init() — which sendMessage runs before the first turn —
@@ -1047,10 +1055,17 @@ class SDKSessionImpl implements SDKSession {
       // waiting out the connection timeout — the scope above is released
       // with it, and the attempt rejects rather than hanging. The reconnect
       // also runs in the session's SDK context, as the first connect does,
-      // so the fresh client it creates sees the session's directory.
+      // so the fresh client it creates sees the session's directory. A
+      // discovery that outlives the attempt keeps the namespace above:
+      // the survival scope has no signal, so the cancel cannot fail it.
       const result = await this.runInSdkContext(() =>
         resumeIn(credentialScope, () =>
-          reconnectMcpServerImpl(name, config, attempt.signal),
+          reconnectMcpServerImpl(
+            name,
+            config,
+            attempt.signal,
+            survivingDiscoveryScope,
+          ),
         ),
       )
 
