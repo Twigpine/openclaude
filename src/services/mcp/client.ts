@@ -128,6 +128,7 @@ const fetchMcpSkillsForClient = feature('MCP_SKILLS')
   : null
 
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
+import type { AgentId } from 'src/types/ids.js'
 import type { AssistantMessage } from 'src/types/message.js'
 /* eslint-enable @typescript-eslint/no-require-imports */
 import { classifyMcpToolForCollapse } from '../../tools/MCPTool/classifyForCollapse.js'
@@ -2249,6 +2250,8 @@ export const fetchToolsForClient = memoizeWithLRU(
                     meta,
                     signal: context.abortController.signal,
                     setAppState: context.setAppState,
+                    toolUseId,
+                    agentId: context.agentId,
                     onUrlElicitationRequired: () => {
                       // The protocol attempt has ended before elicitation
                       // handling begins, so its cached progress is stale.
@@ -3257,6 +3260,8 @@ export async function callMCPToolWithUrlElicitationRetry({
   signal,
   setAppState,
   onProgress,
+  toolUseId,
+  agentId,
   callToolFn = callMCPTool,
   handleElicitation,
   onUrlElicitationRequired,
@@ -3269,6 +3274,9 @@ export async function callMCPToolWithUrlElicitationRetry({
   signal: AbortSignal
   setAppState: (f: (prev: AppState) => AppState) => void
   onProgress?: (data: MCPProgress) => void
+  /** Caller context for the background task notification. */
+  toolUseId?: string
+  agentId?: AgentId
   /** Injectable for testing. Defaults to callMCPTool. */
   callToolFn?: (opts: {
     client: ConnectedMCPServer
@@ -3311,6 +3319,8 @@ export async function callMCPToolWithUrlElicitationRetry({
             task: mcpTask,
             toolName: tool,
             description,
+            toolUseId,
+            agentId,
             setAppState,
           })
           return {
@@ -3583,6 +3593,10 @@ async function callMCPTool({
     // A server that advertises tasks.requests.tools.call may run task-marked
     // tools as durable tasks. Augment the request so it can answer with a
     // CreateTaskResult; the task then moves to the background task list.
+    // A reconnect clears the recorded support, so ensure tools/list has run
+    // on this connection first: a task-required tool sent as a plain
+    // tools/call is rejected by the server.
+    await fetchToolsForClient(connection)
     const taskSupport = mcpTaskSupportForTool(connection, tool)
 
     const result = await Promise.race([

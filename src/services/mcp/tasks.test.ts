@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -18,6 +19,10 @@ import {
   _resetTaskOutputDirForTest,
   getTaskOutputPath,
 } from '../../utils/task/diskOutput.js'
+import {
+  clearCommandQueue,
+  getCommandQueue,
+} from '../../utils/messageQueueManager.js'
 import type { ConnectedMCPServer } from './types.js'
 
 function makeState() {
@@ -374,5 +379,218 @@ test('notifications for unknown or other-server tasks are ignored', async () => 
 
   assert.equal(taskFrom(state, taskId).status, 'running')
   assert.deepEqual(calls.getTaskResult, [])
+  _resetMcpServerTasksForTest()
+})
+
+test('terminal transition enqueues exactly one task-notification', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  const { client } = makeClient({
+    getTaskResult: async () => ({
+      content: [{ type: 'text', text: 'answer: 42' }],
+    }),
+  })
+  const connection = makeConnection(client, { capabilities: TASK_CAPS })
+
+  const taskId = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 'slow_tool',
+    description: 'srv: slow_tool',
+    toolUseId: 'toolu_abc',
+    agentId: 'agent-1' as never,
+    setAppState: state.set,
+  })
+
+  // A status notification and a poll-loop result racing the same terminal
+  // transition must still produce a single notification.
+  handleMcpTaskStatusNotification('srv', {
+    ...makeMcpTask({ status: 'completed' }),
+  })
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+  await new Promise(resolve => setTimeout(resolve, 50))
+
+  const notifications = getCommandQueue().filter(
+    c => c.mode === 'task-notification',
+  )
+  assert.equal(notifications.length, 1)
+  const value = String(notifications[0]!.value)
+  assert.match(value, new RegExp(`<task-id>${taskId}</task-id>`))
+  assert.match(value, /<tool-use-id>toolu_abc<\/tool-use-id>/)
+  assert.match(value, /<status>completed<\/status>/)
+  assert.match(value, /<output-file>[^<]+<\/output-file>/)
+  assert.equal(notifications[0]!.agentId, 'agent-1')
+  clearCommandQueue()
+  _resetMcpServerTasksForTest()
+})
+
+test('isError task result marks the task failed', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  const { client } = makeClient({
+    getTaskResult: async () => ({
+      content: [{ type: 'text', text: 'disk full' }],
+      isError: true,
+    }),
+  })
+  const connection = makeConnection(client, { capabilities: TASK_CAPS })
+
+  const taskId = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 'slow_tool',
+    description: 'srv: slow_tool',
+    setAppState: state.set,
+  })
+
+  handleMcpTaskStatusNotification('srv', {
+    ...makeMcpTask({ status: 'completed' }),
+  })
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+
+  const task = taskFrom(state, taskId)
+  assert.equal(task.status, 'failed')
+  assert.equal(task.statusMessage, 'disk full')
+  _resetMcpServerTasksForTest()
+})
+
+test('rejected tasks/result marks failed and keeps the error', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  const { client } = makeClient({
+    getTaskResult: async () => {
+      throw new Error('result expired')
+    },
+  })
+  const connection = makeConnection(client, { capabilities: TASK_CAPS })
+
+  const taskId = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 'slow_tool',
+    description: 'srv: slow_tool',
+    setAppState: state.set,
+  })
+
+  handleMcpTaskStatusNotification('srv', {
+    ...makeMcpTask({ status: 'completed' }),
+  })
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+
+  const task = taskFrom(state, taskId)
+  assert.equal(task.status, 'failed')
+  assert.match(task.statusMessage ?? '', /result expired/)
+
+  const notifications = getCommandQueue().filter(
+    c => c.mode === 'task-notification',
+  )
+  assert.equal(notifications.length, 1)
+  assert.match(String(notifications[0]!.value), /<status>failed<\/status>/)
+  clearCommandQueue()
+  _resetMcpServerTasksForTest()
+})
+
+test('cancelled status marks the task killed', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  const { client } = makeClient({})
+  const connection = makeConnection(client, { capabilities: TASK_CAPS })
+
+  const taskId = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 'slow_tool',
+    description: 'srv: slow_tool',
+    setAppState: state.set,
+  })
+
+  handleMcpTaskStatusNotification('srv', {
+    ...makeMcpTask({ status: 'cancelled' }),
+  })
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+
+  assert.equal(taskFrom(state, taskId).status, 'killed')
+  _resetMcpServerTasksForTest()
+})
+
+test('a user kill during a pending tasks/result wins the terminal race', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  let resolveResult!: (value: unknown) => void
+  const { client, calls } = makeClient({
+    getTaskResult: () =>
+      new Promise(resolve => {
+        resolveResult = resolve
+      }),
+  })
+  const connection = makeConnection(client, { capabilities: TASK_CAPS })
+
+  const taskId = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 'slow_tool',
+    description: 'srv: slow_tool',
+    setAppState: state.set,
+  })
+
+  handleMcpTaskStatusNotification('srv', {
+    ...makeMcpTask({ status: 'completed' }),
+  })
+  await waitFor(() => calls.getTaskResult.length === 1)
+
+  await McpServerTask.kill(taskId, state.set)
+  assert.equal(taskFrom(state, taskId).status, 'killed')
+
+  resolveResult({ content: [{ type: 'text', text: 'late answer' }] })
+  await waitFor(() => existsSync(getTaskOutputPath(taskId)))
+  await new Promise(resolve => setTimeout(resolve, 50))
+
+  const task = taskFrom(state, taskId)
+  assert.equal(task.status, 'killed')
+
+  const notifications = getCommandQueue().filter(
+    c => c.mode === 'task-notification',
+  )
+  assert.equal(notifications.length, 1)
+  assert.match(String(notifications[0]!.value), /<status>killed<\/status>/)
+  clearCommandQueue()
+  _resetMcpServerTasksForTest()
+})
+
+test('server disconnect fails the task and notifies', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  const { client } = makeClient({})
+  const connection = makeConnection(client, { capabilities: TASK_CAPS })
+
+  const taskId = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 'slow_tool',
+    description: 'srv: slow_tool',
+    setAppState: state.set,
+  })
+
+  failMcpServerTasksForServer('srv', 'connection closed')
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+
+  assert.equal(taskFrom(state, taskId).status, 'failed')
+  assert.match(taskFrom(state, taskId).statusMessage ?? '', /connection closed/)
+  const notifications = getCommandQueue().filter(
+    c => c.mode === 'task-notification',
+  )
+  assert.equal(notifications.length, 1)
+  assert.match(String(notifications[0]!.value), /<status>failed<\/status>/)
+  clearCommandQueue()
   _resetMcpServerTasksForTest()
 })

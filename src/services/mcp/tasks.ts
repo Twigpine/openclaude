@@ -19,6 +19,7 @@ import {
 import { createTaskStateBase, generateTaskId } from '../../Task.js'
 import type { SetAppState } from '../../Task.js'
 import {
+  markMcpServerTaskTerminal,
   type McpServerTaskState,
   registerMcpServerTaskCanceler,
 } from '../../tasks/McpServerTask/McpServerTask.js'
@@ -31,6 +32,7 @@ import {
   flushTaskOutput,
 } from '../../utils/task/diskOutput.js'
 import { registerTask, updateTaskState } from '../../utils/task/framework.js'
+import type { AgentId } from '../../types/ids.js'
 import type { ConnectedMCPServer } from './types.js'
 
 const MIN_POLL_INTERVAL_MS = 1000
@@ -120,9 +122,10 @@ export function trackMcpServerTask(opts: {
   toolName: string
   description: string
   toolUseId?: string
+  agentId?: AgentId
   setAppState: SetAppState
 }): string {
-  const { connection, task, toolName, description, toolUseId, setAppState } = opts
+  const { connection, task, toolName, description, toolUseId, agentId, setAppState } = opts
   const localTaskId = generateTaskId('mcp_server')
 
   // Register the kill hook lazily: a module-level call races the circular
@@ -136,6 +139,7 @@ export function trackMcpServerTask(opts: {
     mcpServerName: connection.name,
     mcpToolName: toolName,
     mcpTaskId: task.taskId,
+    agentId,
     statusMessage: task.statusMessage,
   }
   registerTask(state, setAppState)
@@ -227,20 +231,6 @@ function applyMcpTaskStatusMessage(
   )
 }
 
-function markMcpTaskTerminal(
-  localTaskId: string,
-  entry: TrackedMcpServerTask,
-  status: McpServerTaskState['status'],
-  statusMessage?: string,
-): void {
-  updateTaskState<McpServerTaskState>(localTaskId, entry.setAppState, task => ({
-    ...task,
-    status,
-    statusMessage: statusMessage ?? task.statusMessage,
-    notified: true,
-    endTime: Date.now(),
-  }))
-}
 
 /**
  * Terminal transition, single-flight across the poll loop, status
@@ -267,13 +257,30 @@ async function finalizeMcpServerTask(
       )
       appendTaskOutput(localTaskId, jsonStringify(result, null, 2) ?? '')
       await flushTaskOutput(localTaskId)
-      markMcpTaskTerminal(localTaskId, entry, 'completed')
+      // CallToolResult.isError marks a tool execution error reported as a
+      // successful task completion; it is a failure for the UI and the
+      // notification, same as the synchronous path treats it.
+      if (result.isError) {
+        const errorText = result.content?.find(
+          block => block.type === 'text' && 'text' in block,
+        )
+        markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
+          statusMessage:
+            errorText && 'text' in errorText
+              ? errorText.text
+              : 'MCP tool reported an error',
+        })
+      } else {
+        markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'completed')
+      }
     } catch (e) {
       const message = `Task completed but tasks/result failed: ${e instanceof Error ? e.message : String(e)}`
       logForDebugging(`[MCP] ${message}`)
       appendTaskOutput(localTaskId, message)
       await flushTaskOutput(localTaskId)
-      markMcpTaskTerminal(localTaskId, entry, 'failed', message)
+      markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
+        statusMessage: message,
+      })
     }
     return
   }
@@ -282,11 +289,15 @@ async function finalizeMcpServerTask(
     const message = statusMessage ?? 'MCP server reported task failure'
     appendTaskOutput(localTaskId, message)
     await flushTaskOutput(localTaskId)
-    markMcpTaskTerminal(localTaskId, entry, 'failed', message)
+    markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
+      statusMessage: message,
+    })
     return
   }
 
-  markMcpTaskTerminal(localTaskId, entry, 'killed', statusMessage)
+  markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'killed', {
+    statusMessage,
+  })
 }
 
 /**
@@ -344,7 +355,9 @@ export function failMcpServerTasksForServer(
     localIdByMcpTaskId.delete(entry.mcpTaskId)
     appendTaskOutput(localTaskId, reason)
     void flushTaskOutput(localTaskId)
-    markMcpTaskTerminal(localTaskId, entry, 'failed', reason)
+    markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
+      statusMessage: reason,
+    })
   }
 }
 

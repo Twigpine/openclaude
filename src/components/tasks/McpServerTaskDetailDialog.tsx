@@ -2,6 +2,7 @@ import * as React from 'react'
 import { useElapsedTime } from '../../hooks/useElapsedTime.js'
 import type { KeyboardEvent } from '../../ink/events/keyboard-event.js'
 import { Box, Text } from '../../ink.js'
+import { useKeybindings } from '../../keybindings/useKeybinding.js'
 import type { McpServerTaskState } from '../../tasks/McpServerTask/McpServerTask.js'
 import type { DeepImmutable } from '../../types/utils.js'
 import { Byline } from '../design-system/Byline.js'
@@ -33,19 +34,36 @@ export function McpServerTaskDetailDialog({
     0,
   )
 
+  useKeybindings({ 'confirm:yes': onDone }, { context: 'Confirmation' })
+
   function onKeyDown(e: KeyboardEvent) {
-    if (e.key === 'x' && onKill) {
+    if (e.key === ' ') {
       e.preventDefault()
-      onKill()
-    }
-    if (e.key === 'Escape' && onBack) {
+      onDone()
+    } else if (e.key === 'left' && onBack) {
       e.preventDefault()
       onBack()
+    } else if (e.key === 'x' && task.status === 'running' && onKill) {
+      e.preventDefault()
+      onKill()
     }
   }
 
   return (
-    <Dialog title={task.description} onCancel={onDone} color="background">
+    <Dialog
+      title={task.description}
+      onCancel={onDone}
+      color="background"
+      inputGuide={() => (
+        <Byline>
+          {onBack && <KeyboardShortcutHint shortcut="←" action="go back" />}
+          <KeyboardShortcutHint shortcut="Esc/Enter/Space" action="close" />
+          {task.status === 'running' && onKill && (
+            <KeyboardShortcutHint shortcut="x" action="cancel" />
+          )}
+        </Byline>
+      )}
+    >
       <Box
         flexDirection="column"
         gap={1}
@@ -72,13 +90,6 @@ export function McpServerTaskDetailDialog({
             {elapsedTime}
           </Text>
         </Box>
-        <Byline>
-          {onBack && <KeyboardShortcutHint shortcut="Esc" action="go back" />}
-          <KeyboardShortcutHint shortcut="Enter" action="close" />
-          {task.status === 'running' && onKill && (
-            <KeyboardShortcutHint shortcut="x" action="cancel" />
-          )}
-        </Byline>
       </Box>
     </Dialog>
   )
