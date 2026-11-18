@@ -2259,7 +2259,9 @@ export const fetchToolsForClient = memoizeWithLRU(
                     meta,
                     signal: context.abortController.signal,
                     setAppState: context.setAppState,
-                    toolUseId,
+                    // The scheduler's id names this tool use; the first
+                    // block of parentMessage can belong to a sibling call.
+                    toolUseId: context.toolUseId ?? toolUseId,
                     agentId: context.agentId,
                     onUrlElicitationRequired: () => {
                       // The protocol attempt has ended before elicitation

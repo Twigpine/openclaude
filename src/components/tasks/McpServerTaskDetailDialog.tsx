@@ -85,6 +85,12 @@ export function McpServerTaskDetailDialog({
             {task.status}
             {task.statusMessage ? `: ${task.statusMessage}` : ''}
           </Text>
+          {task.cancelError && (
+            <Text>
+              <Text dimColor>stop: </Text>
+              {task.cancelError}
+            </Text>
+          )}
           <Text>
             <Text dimColor>elapsed: </Text>
             {elapsedTime}

@@ -13,6 +13,8 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import {
   CallToolResultSchema,
+  ErrorCode,
+  McpError,
   type Task as McpTask,
   type TaskStatusNotificationParams,
 } from '@modelcontextprotocol/sdk/types.js'
@@ -141,6 +143,9 @@ type TrackedMcpServerTask = {
   setAppState: SetAppState
   abort: AbortController
   finalized: boolean
+  // Newest server update time accepted so far (ms since epoch); a status
+  // observation older than this is a late reply and is ignored.
+  lastUpdatedAtMs: number
 }
 
 const trackedByLocalId = new Map<string, TrackedMcpServerTask>()
@@ -192,6 +197,7 @@ export function trackMcpServerTask(opts: {
     setAppState,
     abort: new AbortController(),
     finalized: false,
+    lastUpdatedAtMs: parseTimeMs(task.lastUpdatedAt) ?? 0,
   }
   trackedByLocalId.set(localTaskId, entry)
   localIdByMcpTaskId.set(mcpTaskKey(connection.name, task.taskId), localTaskId)
@@ -203,11 +209,43 @@ export function trackMcpServerTask(opts: {
   return localTaskId
 }
 
+function parseTimeMs(iso: string | undefined): number | undefined {
+  if (iso === undefined) return undefined
+  const ms = Date.parse(iso)
+  return Number.isNaN(ms) ? undefined : ms
+}
+
 function clampPollInterval(interval: number | undefined): number {
   if (interval === undefined || !Number.isFinite(interval)) {
     return DEFAULT_POLL_INTERVAL_MS
   }
   return Math.min(Math.max(interval, MIN_POLL_INTERVAL_MS), MAX_POLL_INTERVAL_MS)
+}
+
+// The server may purge a task's result when its TTL ends, so the next poll
+// has to land inside the remaining TTL. Aim for half of what is left, with a
+// small floor so a nearly expired task is not polled in a tight loop. Tasks
+// far from expiry keep the normal interval bounds.
+const MIN_TTL_POLL_INTERVAL_MS = 50
+
+function pollDelayWithinTtl(
+  interval: number,
+  task: Pick<McpTask, 'ttl' | 'createdAt'>,
+): number {
+  const createdAtMs = parseTimeMs(task.createdAt)
+  if (
+    task.ttl === null ||
+    task.ttl === undefined ||
+    !Number.isFinite(task.ttl) ||
+    createdAtMs === undefined
+  ) {
+    return interval
+  }
+  const remaining = createdAtMs + task.ttl - Date.now()
+  return Math.min(
+    interval,
+    Math.max(MIN_TTL_POLL_INTERVAL_MS, Math.floor(remaining / 2)),
+  )
 }
 
 async function pollMcpServerTask(
@@ -217,7 +255,10 @@ async function pollMcpServerTask(
   const entry = trackedByLocalId.get(localTaskId)
   if (!entry) return
 
-  let delay = clampPollInterval(initialTask.pollInterval)
+  let delay = pollDelayWithinTtl(
+    clampPollInterval(initialTask.pollInterval),
+    initialTask,
+  )
   while (!entry.abort.signal.aborted && !entry.finalized) {
     await sleep(delay, entry.abort.signal)
     if (entry.abort.signal.aborted || entry.finalized) {
@@ -245,8 +286,12 @@ async function pollMcpServerTask(
       return
     }
 
-    delay = clampPollInterval(status.pollInterval)
-    applyMcpTaskStatusMessage(localTaskId, status.statusMessage)
+    delay = pollDelayWithinTtl(clampPollInterval(status.pollInterval), status)
+    applyMcpTaskStatusMessage(
+      localTaskId,
+      status.statusMessage,
+      status.lastUpdatedAt,
+    )
 
     if (
       status.status === 'completed' ||
@@ -267,10 +312,18 @@ async function pollMcpServerTask(
 function applyMcpTaskStatusMessage(
   localTaskId: string,
   statusMessage: string | undefined,
+  lastUpdatedAt?: string,
 ): void {
-  if (statusMessage === undefined) return
   const entry = trackedByLocalId.get(localTaskId)
   if (!entry) return
+  // A tasks/get reply and a pushed notification can cross. Keep the newest
+  // server observation; an equal timestamp is not older, so it applies.
+  const observedAtMs = parseTimeMs(lastUpdatedAt)
+  if (observedAtMs !== undefined) {
+    if (observedAtMs < entry.lastUpdatedAtMs) return
+    entry.lastUpdatedAtMs = observedAtMs
+  }
+  if (statusMessage === undefined) return
   updateTaskState<McpServerTaskState>(localTaskId, entry.setAppState, task =>
     task.statusMessage === statusMessage ? task : { ...task, statusMessage },
   )
@@ -339,6 +392,9 @@ async function finalizeMcpServerTask(
   // content under tasks/result. Fetch it best-effort; the statusMessage
   // stays the fallback, and the local terminal state does not depend on it.
   let payload: string | undefined
+  // A JSON-RPC error from tasks/result is the task's own error, as opposed
+  // to a timeout or a closed connection, which say nothing about the task.
+  let protocolError: string | undefined
   if (serverReported) {
     try {
       const result = await entry.client.experimental.tasks.getTaskResult(
@@ -351,14 +407,24 @@ async function finalizeMcpServerTask(
       logForDebugging(
         `[MCP] tasks/result for ${status} task ${entry.mcpTaskId} unavailable: ${e instanceof Error ? e.message : String(e)}`,
       )
+      if (
+        e instanceof McpError &&
+        e.code !== ErrorCode.RequestTimeout &&
+        e.code !== ErrorCode.ConnectionClosed
+      ) {
+        protocolError = e.message
+      }
     }
   }
 
   if (status === 'failed') {
-    const message = statusMessage ?? 'MCP server reported task failure'
+    const message =
+      statusMessage ?? protocolError ?? 'MCP server reported task failure'
+    const diagnostic =
+      payload ?? (statusMessage === undefined ? undefined : protocolError)
     appendTaskOutput(
       localTaskId,
-      payload === undefined ? message : `${message}\n${payload}`,
+      diagnostic === undefined ? message : `${message}\n${diagnostic}`,
     )
     await flushTaskOutput(localTaskId)
     markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
@@ -367,8 +433,10 @@ async function finalizeMcpServerTask(
     return
   }
 
-  if (payload !== undefined) {
-    appendTaskOutput(localTaskId, payload)
+  // No payload: the server's reason is all there is to read.
+  const output = payload ?? protocolError ?? statusMessage
+  if (output !== undefined) {
+    appendTaskOutput(localTaskId, output)
     await flushTaskOutput(localTaskId)
   }
   markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'killed', {
@@ -392,7 +460,11 @@ export function handleMcpTaskStatusNotification(
   const entry = trackedByLocalId.get(localTaskId)
   if (!entry || entry.serverName !== serverName || entry.finalized) return
 
-  applyMcpTaskStatusMessage(localTaskId, params.statusMessage)
+  applyMcpTaskStatusMessage(
+    localTaskId,
+    params.statusMessage,
+    params.lastUpdatedAt,
+  )
   if (
     params.status === 'completed' ||
     params.status === 'failed' ||
@@ -421,7 +493,10 @@ async function cancelMcpServerTask(localTaskId: string): Promise<void> {
     // so the task may still be running there. Keep tracking it, say why the
     // stop did not take, and let the caller leave it running and retryable.
     const reason = `Cancel request failed (tasks/cancel): ${e instanceof Error ? e.message : String(e)}`
-    applyMcpTaskStatusMessage(localTaskId, reason)
+    updateTaskState<McpServerTaskState>(localTaskId, entry.setAppState, task => ({
+      ...task,
+      cancelError: reason,
+    }))
     throw e
   }
   await finalizeMcpServerTask(localTaskId, 'cancelled')

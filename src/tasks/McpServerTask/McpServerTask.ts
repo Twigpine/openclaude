@@ -7,6 +7,7 @@
 // through the same task-notification machinery as local background tasks.
 
 import type { SetAppState, Task, TaskStateBase } from '../../Task.js'
+import type { AppState } from '../../state/AppState.js'
 import {
   OUTPUT_FILE_TAG,
   STATUS_TAG,
@@ -17,7 +18,10 @@ import {
 } from '../../constants/xml.js'
 import type { AgentId } from '../../types/ids.js'
 import { logForDebugging } from '../../utils/debug.js'
-import { enqueuePendingNotification } from '../../utils/messageQueueManager.js'
+import {
+  dequeueAllMatching,
+  enqueuePendingNotification,
+} from '../../utils/messageQueueManager.js'
 import {
   evictTaskOutput,
   getTaskOutputPath,
@@ -37,6 +41,11 @@ export type McpServerTaskState = TaskStateBase & {
   agentId?: AgentId
   /** Last statusMessage reported by the server, if any. */
   statusMessage?: string
+  /**
+   * Why the last tasks/cancel did not take. Kept apart from statusMessage so
+   * a routine server update cannot overwrite it; cleared on a terminal state.
+   */
+  cancelError?: string
 }
 
 export function isMcpServerTask(task: unknown): task is McpServerTaskState {
@@ -72,7 +81,7 @@ function mcpTerminalSummary(
     case 'failed':
       return `MCP server task "${description}" failed${statusMessage ? `: ${statusMessage}` : ''}`
     case 'killed':
-      return `MCP server task "${description}" was stopped`
+      return `MCP server task "${description}" was stopped${statusMessage ? `: ${statusMessage}` : ''}`
   }
 }
 
@@ -108,6 +117,7 @@ export function markMcpServerTaskTerminal(
       ...task,
       status,
       statusMessage: opts?.statusMessage ?? task.statusMessage,
+      cancelError: undefined,
       notified: true,
       endTime: Date.now(),
     }
@@ -163,4 +173,36 @@ export function killMcpServerTask(
   setAppState: SetAppState,
 ): void {
   void McpServerTask.kill(taskId, setAppState)
+}
+
+/**
+ * Cancel the running server tasks an exiting agent started and purge its
+ * queued notifications. The agent's query loop is gone, so nothing would
+ * drain a completion addressed to it. Tasks are marked notified first so the
+ * cancel's terminal transition does not enqueue a fresh notification for the
+ * dead agent after the purge.
+ */
+export function killMcpServerTasksForAgent(
+  agentId: AgentId,
+  getAppState: () => AppState,
+  setAppState: SetAppState,
+): void {
+  const tasks = getAppState().tasks ?? {}
+  for (const [taskId, task] of Object.entries(tasks)) {
+    if (
+      isMcpServerTask(task) &&
+      task.agentId === agentId &&
+      task.status === 'running'
+    ) {
+      logForDebugging(
+        `killMcpServerTasksForAgent: cancelling mcp_server task ${taskId} (agent ${agentId} exiting)`,
+      )
+      updateTaskState<McpServerTaskState>(taskId, setAppState, t => ({
+        ...t,
+        notified: true,
+      }))
+      void McpServerTask.kill(taskId, setAppState)
+    }
+  }
+  dequeueAllMatching(cmd => cmd.agentId === agentId)
 }

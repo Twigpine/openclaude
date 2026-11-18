@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { Task as McpTask } from '@modelcontextprotocol/sdk/types.js'
 import type { AppState } from '../../state/AppState.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import type { McpServerTaskState } from '../../tasks/McpServerTask/McpServerTask.js'
 import {
   callIdeRpc,
   callMCPToolWithUrlElicitationRetry,
+  connectToServer,
   fetchToolsForClient,
+  getServerCacheKey,
 } from './client.js'
 import {
   _resetMcpServerTasksForTest,
@@ -64,14 +67,16 @@ function reset(name = 'task-server') {
 
 describe('MCP server tasks', () => {
   const OPT_OUT = 'CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND'
-  let priorOptOut: string | undefined
+  let restoreEnv: (() => void) | undefined
   beforeEach(() => {
-    priorOptOut = process.env[OPT_OUT]
-    delete process.env[OPT_OUT]
+    restoreEnv = snapshotEnv(
+      ['CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND', 'MCP_TOOL_TIMEOUT'],
+      { clear: true },
+    )
   })
   afterEach(() => {
-    if (priorOptOut === undefined) delete process.env[OPT_OUT]
-    else process.env[OPT_OUT] = priorOptOut
+    restoreEnv?.()
+    restoreEnv = undefined
   })
 
   test('task-capable tool call is augmented and registered as background task', async () => {
@@ -588,7 +593,7 @@ describe('MCP server tasks', () => {
     const state = makeState()
     // Expired HTTP session: tools/list fails (so discovery returns []),
     // then the closed SDK client rejects the dispatch with "Not connected".
-    const request = vi.fn(async () => {
+    const request = vi.fn(async (_req: { method: string }) => {
       throw new Error('Not connected')
     })
     const callTool = vi.fn(async () => {
@@ -598,6 +603,15 @@ describe('MCP server tasks', () => {
       ...makeConnection({ request, callTool }),
       config: { type: 'http', url: 'http://localhost:1/mcp' } as ConnectedMCPServer['config'],
     }
+    // The session-expiry path calls clearServerCache, which asks the
+    // connection cache for the old connection. Own that entry so no real
+    // connection to the URL above is attempted.
+    const cleanup = vi.fn(async () => {})
+    const cacheKey = getServerCacheKey(connection.name, connection.config)
+    ;(connectToServer.cache as unknown as Map<string, unknown>).set(
+      cacheKey,
+      Promise.resolve({ type: 'connected', cleanup }),
+    )
 
     await expect(
       callMCPToolWithUrlElicitationRetry({
@@ -609,6 +623,15 @@ describe('MCP server tasks', () => {
         setAppState: state.set,
       }),
     ).rejects.toMatchObject({ name: 'McpSessionExpiredError' })
+    // The closed connection was torn down, never re-dispatched on, and the
+    // stale cache entry is gone so the next call reconnects.
+    expect(cleanup).toHaveBeenCalledTimes(1)
+    expect(
+      request.mock.calls.filter(c => c[0].method === 'tools/call'),
+    ).toHaveLength(0)
+    expect(
+      (connectToServer.cache as unknown as Map<string, unknown>).has(cacheKey),
+    ).toBe(false)
     reset()
   }, 15000)
 })

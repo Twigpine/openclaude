@@ -5,10 +5,18 @@ import test from 'node:test'
 import { Client as SdkClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import type { Task as McpTask } from '@modelcontextprotocol/sdk/types.js'
+import {
+  ErrorCode,
+  McpError,
+  type Task as McpTask,
+} from '@modelcontextprotocol/sdk/types.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import type { AppState } from '../../state/AppState.js'
 import type { McpServerTaskState } from '../../tasks/McpServerTask/McpServerTask.js'
-import { McpServerTask } from '../../tasks/McpServerTask/McpServerTask.js'
+import {
+  killMcpServerTasksForAgent,
+  McpServerTask,
+} from '../../tasks/McpServerTask/McpServerTask.js'
 import {
   _resetMcpServerTasksForTest,
   failMcpServerTasksForServer,
@@ -292,7 +300,7 @@ test('a rejected tasks/cancel keeps the task running, reports the error, and can
   // The server may still be running it: stay visible with the reason.
   const afterReject = taskFrom(state, taskId)
   assert.equal(afterReject.status, 'running')
-  assert.match(afterReject.statusMessage ?? '', /tasks\/cancel/)
+  assert.match(afterReject.cancelError ?? '', /tasks\/cancel/)
 
   // The stop request is retryable and a successful one finishes the kill.
   rejectCancel = false
@@ -365,39 +373,36 @@ test('getTask errors fail the task instead of hanging', async () => {
 
 test('mcpTaskSupportForTool gates on capability, tool metadata, and env', () => {
   _resetMcpServerTasksForTest()
-  const priorOptOut = process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
-  delete process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
-  const { client } = makeClient({})
-  const connection = makeConnection(client, { capabilities: TASK_CAPS })
-
-  recordMcpToolTaskSupport(connection, [
-    { name: 'slow_tool', execution: { taskSupport: 'optional' } },
-    { name: 'required_tool', execution: { taskSupport: 'required' } },
-    { name: 'forbidden_tool', execution: { taskSupport: 'forbidden' } },
-    { name: 'plain_tool' },
-  ])
-
-  assert.equal(mcpTaskSupportForTool(connection, 'slow_tool'), 'optional')
-  assert.equal(mcpTaskSupportForTool(connection, 'required_tool'), 'required')
-  assert.equal(mcpTaskSupportForTool(connection, 'forbidden_tool'), undefined)
-  assert.equal(mcpTaskSupportForTool(connection, 'plain_tool'), undefined)
-
-  // No server capability: never augment, even for task-marked tools.
-  const noCaps = makeConnection(client, {})
-  assert.equal(mcpTaskSupportForTool(noCaps, 'slow_tool'), undefined)
-
-  // Env opt-out: never augment.
-  process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND = '1'
+  const restoreEnv = snapshotEnv(['CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND'], {
+    clear: true,
+  })
   try {
+    const { client } = makeClient({})
+    const connection = makeConnection(client, { capabilities: TASK_CAPS })
+
+    recordMcpToolTaskSupport(connection, [
+      { name: 'slow_tool', execution: { taskSupport: 'optional' } },
+      { name: 'required_tool', execution: { taskSupport: 'required' } },
+      { name: 'forbidden_tool', execution: { taskSupport: 'forbidden' } },
+      { name: 'plain_tool' },
+    ])
+
+    assert.equal(mcpTaskSupportForTool(connection, 'slow_tool'), 'optional')
+    assert.equal(mcpTaskSupportForTool(connection, 'required_tool'), 'required')
+    assert.equal(mcpTaskSupportForTool(connection, 'forbidden_tool'), undefined)
+    assert.equal(mcpTaskSupportForTool(connection, 'plain_tool'), undefined)
+
+    // No server capability: never augment, even for task-marked tools.
+    const noCaps = makeConnection(client, {})
+    assert.equal(mcpTaskSupportForTool(noCaps, 'slow_tool'), undefined)
+
+    // Env opt-out: never augment.
+    process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND = '1'
     assert.equal(mcpTaskSupportForTool(connection, 'slow_tool'), undefined)
   } finally {
-    if (priorOptOut === undefined) {
-      delete process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
-    } else {
-      process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND = priorOptOut
-    }
+    restoreEnv()
+    _resetMcpServerTasksForTest()
   }
-  _resetMcpServerTasksForTest()
 })
 
 test('notifications for unknown or other-server tasks are ignored', async () => {
@@ -882,5 +887,244 @@ test('tasks/result is requested with an explicit timeout', async () => {
   handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'completed' }))
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
   assert.equal(typeof (seenOptions as { timeout?: number })?.timeout, 'number')
+  _resetMcpServerTasksForTest()
+})
+
+test('a short task TTL is polled before it can expire', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  const { client, calls } = makeClient({
+    getTask: async id => makeMcpTask({ taskId: id, status: 'completed' }),
+  })
+  const taskId = trackMcpServerTask({
+    connection: makeConnection(client, { capabilities: TASK_CAPS }),
+    // Server suggests 250 ms but the 1 s floor would land after the 900 ms
+    // TTL, when the server may already have purged the result.
+    task: makeMcpTask({
+      ttl: 900,
+      pollInterval: 250,
+      createdAt: new Date().toISOString(),
+    }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+  await waitFor(() => calls.getTask.length > 0, 800)
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+  assert.equal(taskFrom(state, taskId).status, 'completed')
+  _resetMcpServerTasksForTest()
+})
+
+test('a stale tasks/get response does not overwrite a newer pushed status', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  const { client, calls } = makeClient({
+    getTask: async id => {
+      await gate
+      return makeMcpTask({
+        taskId: id,
+        statusMessage: 'Processing',
+        lastUpdatedAt: '2026-01-01T00:00:01Z',
+      })
+    },
+  })
+  const taskId = trackMcpServerTask({
+    connection: makeConnection(client, { capabilities: TASK_CAPS }),
+    task: makeMcpTask({ pollInterval: 1000 }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+  // The poll has sampled 'working' and is in flight; a newer push lands first.
+  await waitFor(() => calls.getTask.length === 1, 2500)
+  handleMcpTaskStatusNotification('srv', {
+    ...makeMcpTask({
+      status: 'input_required',
+      statusMessage: 'Waiting for input',
+      lastUpdatedAt: '2026-01-01T00:00:02Z',
+    }),
+  })
+  assert.equal(taskFrom(state, taskId).statusMessage, 'Waiting for input')
+  release()
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(taskFrom(state, taskId).statusMessage, 'Waiting for input')
+
+  // An in-order observation still updates the message.
+  handleMcpTaskStatusNotification('srv', {
+    ...makeMcpTask({
+      status: 'working',
+      statusMessage: 'Resumed',
+      lastUpdatedAt: '2026-01-01T00:00:03Z',
+    }),
+  })
+  assert.equal(taskFrom(state, taskId).statusMessage, 'Resumed')
+  _resetMcpServerTasksForTest()
+})
+
+test('a protocol error from tasks/result on a failed task is kept as the diagnostic', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  const { client } = makeClient({
+    getTaskResult: async () => {
+      throw new McpError(ErrorCode.InternalError, 'disk quota exceeded')
+    },
+  })
+  const taskId = trackMcpServerTask({
+    connection: makeConnection(client, { capabilities: TASK_CAPS }),
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'failed' }))
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+  const task = taskFrom(state, taskId)
+  assert.equal(task.status, 'failed')
+  assert.match(task.statusMessage ?? '', /disk quota exceeded/)
+  const output = await readFile(getTaskOutputPath(taskId), 'utf8')
+  assert.match(output, /disk quota exceeded/)
+  _resetMcpServerTasksForTest()
+})
+
+test('a timeout or transport error from tasks/result is not reported as the task error', async () => {
+  for (const code of [ErrorCode.RequestTimeout, ErrorCode.ConnectionClosed]) {
+    _resetMcpServerTasksForTest()
+    _resetTaskOutputDirForTest()
+    const state = makeState()
+    const { client } = makeClient({
+      getTaskResult: async () => {
+        throw new McpError(code, 'transport detail')
+      },
+    })
+    const taskId = trackMcpServerTask({
+      connection: makeConnection(client, { capabilities: TASK_CAPS }),
+      task: makeMcpTask({ pollInterval: 60000 }),
+      toolName: 't',
+      description: 'srv: t',
+      setAppState: state.set,
+    })
+    handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'failed' }))
+    await waitFor(() => taskFrom(state, taskId).status !== 'running')
+    assert.equal(
+      taskFrom(state, taskId).statusMessage,
+      'MCP server reported task failure',
+    )
+    _resetMcpServerTasksForTest()
+  }
+})
+
+test('a server cancellation reason reaches the output file and the notification', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  const { client } = makeClient({
+    getTaskResult: async () => {
+      throw new Error('no result for cancelled task')
+    },
+  })
+  const taskId = trackMcpServerTask({
+    connection: makeConnection(client, { capabilities: TASK_CAPS }),
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+  handleMcpTaskStatusNotification(
+    'srv',
+    makeMcpTask({ status: 'cancelled', statusMessage: 'Revoked by administrator' }),
+  )
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(taskFrom(state, taskId).status, 'killed')
+  const output = await readFile(getTaskOutputPath(taskId), 'utf8')
+  assert.match(output, /Revoked by administrator/)
+  const notification = getCommandQueue().find(c => c.mode === 'task-notification')
+  assert.match(String(notification?.value), /Revoked by administrator/)
+  clearCommandQueue()
+  _resetMcpServerTasksForTest()
+})
+
+test('a failed tasks/cancel is kept apart from the server status message', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  let rejectCancel = true
+  const { client } = makeClient({
+    cancelTask: async () => {
+      if (rejectCancel) throw new Error('Method not found: tasks/cancel')
+      return {}
+    },
+  })
+  const taskId = trackMcpServerTask({
+    connection: makeConnection(client, { capabilities: TASK_CAPS }),
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+  await McpServerTask.kill(taskId, state.set)
+  assert.match(taskFrom(state, taskId).cancelError ?? '', /tasks\/cancel/)
+
+  // A routine working update must not erase why Stop failed.
+  handleMcpTaskStatusNotification(
+    'srv',
+    makeMcpTask({ statusMessage: 'Processing', lastUpdatedAt: '2026-01-01T00:00:05Z' }),
+  )
+  const during = taskFrom(state, taskId)
+  assert.equal(during.statusMessage, 'Processing')
+  assert.match(during.cancelError ?? '', /tasks\/cancel/)
+
+  // An acknowledged Stop clears it.
+  rejectCancel = false
+  await McpServerTask.kill(taskId, state.set)
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+  assert.equal(taskFrom(state, taskId).cancelError, undefined)
+  _resetMcpServerTasksForTest()
+})
+
+test('an exiting agent cancels its own server tasks and leaves no notification behind', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  const { client, calls } = makeClient({})
+  const connection = makeConnection(client, { capabilities: TASK_CAPS })
+  const owned = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ taskId: 'owned', pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: owned',
+    agentId: 'agent-1' as never,
+    setAppState: state.set,
+  })
+  const other = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ taskId: 'other', pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: other',
+    agentId: 'agent-2' as never,
+    setAppState: state.set,
+  })
+
+  killMcpServerTasksForAgent('agent-1' as never, state.get, state.set)
+  await waitFor(() => taskFrom(state, owned).status !== 'running')
+  await new Promise(resolve => setTimeout(resolve, 50))
+
+  assert.deepEqual(calls.cancelTask, ['owned'])
+  assert.equal(taskFrom(state, owned).status, 'killed')
+  assert.equal(taskFrom(state, other).status, 'running')
+  assert.equal(
+    getCommandQueue().filter(c => c.agentId === ('agent-1' as never)).length,
+    0,
+  )
+  clearCommandQueue()
   _resetMcpServerTasksForTest()
 })

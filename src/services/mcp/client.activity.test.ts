@@ -448,6 +448,76 @@ describe('MCP tool activity', () => {
     expect(statuses).not.toContain('completed')
   })
 
+  test('a taskified call is attributed to the scheduled tool use, not the first block of the message', async () => {
+    const sdkClient = {
+      request: vi.fn(async (req: { method: string }) => {
+        if (req.method === 'tools/list') {
+          return {
+            tools: [
+              {
+                name: 'slow-tool',
+                inputSchema: { type: 'object' },
+                execution: { taskSupport: 'optional' },
+              },
+            ],
+          }
+        }
+        return {
+          task: {
+            taskId: 'remote-attrib-1',
+            status: 'working',
+            ttl: null,
+            createdAt: '2026-01-01T00:00:00Z',
+            lastUpdatedAt: '2026-01-01T00:00:00Z',
+            pollInterval: 60000,
+          },
+        }
+      }),
+      callTool: vi.fn(),
+    }
+    const connection = {
+      type: 'connected',
+      name: 'taskified-attribution-test',
+      config: { type: 'sdk' },
+      capabilities: { tools: {}, tasks: { requests: { tools: { call: {} } } } },
+      client: sdkClient,
+    } as unknown as ConnectedMCPServer
+    const [tool] = await fetchToolsForClient(connection)
+    expect(tool).toBeDefined()
+    // One assistant message carrying two tool uses; the scheduler runs the
+    // second one and says so through context.toolUseId.
+    const parentMessage = createAssistantMessage({
+      content: [
+        { type: 'tool_use', id: 'toolu_first', name: 'other', input: {} },
+        { type: 'tool_use', id: 'toolu_second', name: tool!.name, input: {} },
+      ],
+    })
+    let state = { tasks: {} } as Record<string, unknown>
+    const setAppState = (f: (prev: typeof state) => typeof state) => {
+      state = f(state)
+    }
+
+    try {
+      await tool!.call(
+        {},
+        {
+          abortController: new AbortController(),
+          setAppState,
+          toolUseId: 'toolu_second',
+        } as never,
+        undefined as never,
+        parentMessage,
+        vi.fn(),
+      )
+    } finally {
+      _resetMcpServerTasksForTest()
+    }
+
+    const tasks = Object.values(state.tasks as Record<string, { toolUseId?: string }>)
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]!.toolUseId).toBe('toolu_second')
+  })
+
   test('a throwing completed callback does not turn success into failure', async () => {
     const sdkClient = {
       request: vi.fn(async () => ({
