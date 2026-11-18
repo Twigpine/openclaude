@@ -617,7 +617,21 @@ export function captureCredentialScope(
           }
         }
         turnEnv.delete(key)
-      } else turnEnv.set(key, value)
+      } else {
+        // Same case-insensitivity for a defined override: keeping both
+        // spellings would let replay restore the stale inherited value
+        // last when the ambient key was recreated in lowercase, so the
+        // override keeps exactly one entry per case-insensitive key
+        // (CodeRabbit #2493 review 5955577457).
+        if (process.platform === 'win32') {
+          for (const existing of [...turnEnv.keys()]) {
+            if (existing !== key && existing.toUpperCase() === key.toUpperCase()) {
+              turnEnv.delete(existing)
+            }
+          }
+        }
+        turnEnv.set(key, value)
+      }
     }
   }
   // The turn the call starts in lends its environment; freeze that scope

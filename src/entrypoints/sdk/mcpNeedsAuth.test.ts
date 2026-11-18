@@ -3218,6 +3218,59 @@ test('THE TWO CREDENTIAL SCOPES SHARE ONE SNAPSHOT OF THE SESSION ENV', async ()
 }, 30_000)
 
 /**
+ * The snapshot reads `this.options.env` once: a host env getter that
+ * answers differently per read must not give the snapshot the second
+ * answer — reading the value in both the condition and the spread
+ * would snapshot the later object, and the sign-in would store its
+ * token in the wrong namespace (CodeRabbit #2493 review 5955577457).
+ */
+test('THE CREDENTIAL SNAPSHOT READS THE SESSION ENV GETTER ONCE', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const homeA = join(configHome, 'getter-first')
+  const homeB = join(configHome, 'getter-later')
+  try {
+    const url = serveNeedingAuth()
+    let reads = 0
+    const options: Parameters<typeof unstable_v2_createSession>[0] = {
+      cwd: process.cwd(),
+      mcpServers: { gated: { type: 'http', url } },
+    }
+    Object.defineProperty(options, 'env', {
+      configurable: true,
+      get() {
+        reads++
+        return reads === 1
+          ? { OPENCLAUDE_CONFIG_DIR: homeA }
+          : { OPENCLAUDE_CONFIG_DIR: homeB }
+      },
+    })
+    const session = unstable_v2_createSession(options)
+    sdkSessions.push(session)
+    recordEngine(session)
+
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The snapshot holds the first answer: the token lands in the
+    // first namespace, and the later namespace was never touched.
+    expect(storedAccessTokens(storeIn(homeA))).toEqual([
+      `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
+    ])
+    expect(stores.has(storeIn(homeB))).toBe(false)
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
  * An abort that lands after the registration callback is scheduled but
  * before it runs must not register: registration would supersede another
  * session's pending sign-in for the same credential entry, and the
@@ -3303,6 +3356,58 @@ test('AN ENV OVERRIDE DELETES AN INHERITED VARIABLE CASE-INSENSITIVELY ON WINDOW
     expect(await linuxScope(async () => process.env.OPENCLAUDE_CONFIG_DIR)).toBe(
       join(configHome, 'ambient'),
     )
+  } finally {
+    Object.defineProperty(process, 'platform', {
+      value: originalPlatform,
+      configurable: true,
+    })
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The defined-write mirror of the deletion case above: on Windows, an
+ * `env` override that sets `openclaude_config_dir` must replace an
+ * inherited `OPENCLAUDE_CONFIG_DIR` — keeping both spellings would let
+ * replay restore the stale inherited value last when the ambient key
+ * was recreated in lowercase, so pre-turn authentication would use the
+ * ambient config home instead of the session's override. Other
+ * platforms keep exact-key matching (CodeRabbit #2493 review
+ * 5955577457).
+ */
+test('AN ENV OVERRIDE REPLACES AN INHERITED VARIABLE CASE-INSENSITIVELY ON WINDOWS', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR', 'openclaude_config_dir'])
+  const originalPlatform = process.platform
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = join(configHome, 'ambient')
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    const scope = captureCredentialScope(undefined, {
+      env: { openclaude_config_dir: join(configHome, 'session') },
+    })
+    // The snapshot keeps one entry per case-insensitive key: the
+    // inherited spelling is gone, so replay deletes it and the
+    // override's spelling carries the session home. (On Linux the two
+    // spellings are distinct variables, so the override lands under its
+    // own spelling while the inherited one is removed; on Windows both
+    // spellings are the one variable, which ends as the session home.)
+    expect(
+      await scope(async () => [
+        process.env.OPENCLAUDE_CONFIG_DIR,
+        process.env.openclaude_config_dir,
+      ]),
+    ).toEqual([undefined, join(configHome, 'session')])
+    // On other platforms the same override sets only its exact key and
+    // the inherited spelling survives.
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+    const linuxScope = captureCredentialScope(undefined, {
+      env: { openclaude_config_dir: join(configHome, 'session') },
+    })
+    expect(
+      await linuxScope(async () => [
+        process.env.OPENCLAUDE_CONFIG_DIR,
+        process.env.openclaude_config_dir,
+      ]),
+    ).toEqual([join(configHome, 'ambient'), join(configHome, 'session')])
   } finally {
     Object.defineProperty(process, 'platform', {
       value: originalPlatform,
@@ -4155,9 +4260,52 @@ test('AN ABORTED SETTLED JOIN LEAVES THE CLIENT UNOWNED FOR THE CREATOR\'S RELEA
     await realClient.releaseUnownedMcpClient('gated', config, client)
     expect(cleanedUp).toBe(1)
     await waitFor(() => realClient.connectToServer.cache.get(key) === undefined)
-    await settlesWithin(joinerCaught, 5_000).catch(() => {})
+    // The cancelled joiner still receives the shared client object — the
+    // abort withdraws its adoption claim, it does not reject the shared
+    // connect — so assert the settled value directly instead of
+    // swallowing any outcome (CodeRabbit #2493 review 5955577457).
+    await expect(settlesWithin(joinerCaught, 5_000)).resolves.toBe(client)
   } finally {
     client.cleanup = realCleanup
+    await client.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * Each join of a settled connect claims the client — one join per tool
+ * call through ensureConnectedClient — so the claims must consolidate
+ * once the caller holds the client: repeated joins keep the single
+ * permanent marker instead of retaining one claim object each for the
+ * client's lifetime, and the client stays adopted (CodeRabbit #2493
+ * review 5955577457).
+ */
+test('REPEATED JOINS OF ONE CLIENT KEEP A SINGLE ADOPTION CLAIM', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const client = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(client.type).toBe('connected')
+  if (client.type !== 'connected') throw new Error('expected a connected client')
+  try {
+    expect(realClient.getMcpClientAdoptionClaimCountForTesting(client)).toBe(0)
+    for (let join = 0; join < 5; join++) {
+      const joined = await realClient.connectToServer('gated', config)
+      expect(joined).toBe(client)
+      // Let the receipt marker run: it is two ticks out, after the
+      // caller's continuation.
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+    // The last join's receipt marker runs after the caller's
+    // continuation; wait for every provisional claim to consolidate
+    // instead of assuming a fixed tick count.
+    await waitFor(
+      () => realClient.getMcpClientAdoptionClaimCountForTesting(client) === 1,
+    )
+    expect(realClient.getMcpClientAdoptionClaimCountForTesting(client)).toBe(1)
+    // The client stays adopted: a release is still declined.
+    expect(realClient.isMcpClientAdopted(client)).toBe(true)
+  } finally {
     await client.cleanup().catch(() => {})
   }
 }, 30_000)
@@ -4202,7 +4350,11 @@ test('A BLOCKED RELEASE RE-RUNS WHEN THE LAST SETTLED-JOIN CLAIM IS WITHDRAWN', 
     joiner.abort()
     await waitFor(() => cleanedUp === 1)
     await waitFor(() => realClient.connectToServer.cache.get(key) === undefined)
-    await settlesWithin(joinerCaught, 5_000).catch(() => {})
+    // The cancelled joiner still receives the shared client object — the
+    // abort withdraws its adoption claim, it does not reject the shared
+    // connect — so assert the settled value directly instead of
+    // swallowing any outcome (CodeRabbit #2493 review 5955577457).
+    await expect(settlesWithin(joinerCaught, 5_000)).resolves.toBe(client)
   } finally {
     client.cleanup = realCleanup
     await client.cleanup().catch(() => {})
@@ -5688,7 +5840,11 @@ test('A JOINER THAT CLOSES BEFORE ITS CONNECT SETTLES ADOPTS NOTHING', async () 
   )
   // The cleanup closes the transport, whose onclose evicts the cache.
   await waitFor(() => realClient.connectToServer.cache.get(key) === undefined)
-  await settlesWithin(joinerCaught, 5_000).catch(() => {})
+  // The cancelled joiner still receives the shared client object — the
+  // abort withdraws its adoption claim, it does not reject the shared
+  // connect — so assert the settled value directly instead of swallowing
+  // any outcome (CodeRabbit #2493 review 5955577457).
+  await expect(settlesWithin(joinerCaught, 5_000)).resolves.toBe(client)
 }, 30_000)
 
 /** Whether a process with this pid is still running. */

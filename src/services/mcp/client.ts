@@ -843,8 +843,18 @@ const connectWaiters = new Map<
  * a join that aborts before it receives the client withdraws its own
  * claim, and only when the last claim goes is the client unadopted again.
  * A plain set cannot tell one adopter leaving from the last one leaving.
+ * Once a caller receives the client, its provisional claim is replaced
+ * by the single permanent marker below, so repeated joins keep one claim
+ * per client instead of one per call.
  */
 const adoptedMcpClients = new WeakMap<MCPServerConnection, Set<object>>()
+
+/**
+ * The claim shared by every received adoption of a client. Provisional
+ * claims stay per-caller until receipt — an abort before receipt
+ * withdraws only its own — and consolidate into this marker on receipt.
+ */
+const permanentAdoptionClaim = {}
 
 function adoptMcpClient(client: MCPServerConnection, claim: object): void {
   let claims = adoptedMcpClients.get(client)
@@ -898,6 +908,17 @@ const settledConnectClients = new WeakMap<
 /** Whether another caller adopted this client from the shared connect. */
 export function isMcpClientAdopted(client: MCPServerConnection): boolean {
   return (adoptedMcpClients.get(client)?.size ?? 0) > 0
+}
+
+/**
+ * Adoption claim count for a client, for tests only: repeated joins must
+ * consolidate to the single permanent marker instead of retaining one
+ * claim object per call.
+ */
+export function getMcpClientAdoptionClaimCountForTesting(
+  client: MCPServerConnection,
+): number {
+  return adoptedMcpClients.get(client)?.size ?? 0
 }
 
 /**
@@ -2310,8 +2331,18 @@ export const connectToServer = Object.assign(
       ).then(
         () => {
           adoptionReceived = true
-          // The caller holds the client now: a later abort cannot
-          // withdraw the claim, so the listener can go.
+          // The caller holds the client now: consolidate this call's
+          // provisional claim into the single permanent marker, so
+          // repeated joins — one per tool call through
+          // ensureConnectedClient — do not retain one claim object
+          // each for the client's lifetime (CodeRabbit #2493 review
+          // 5955577457). A later abort cannot withdraw the claim, so
+          // the listener can go.
+          if (adoptedClient !== undefined) {
+            const client = adoptedClient
+            withdrawMcpClientAdoption(client, adoptionClaim)
+            adoptMcpClient(client, permanentAdoptionClaim)
+          }
           if (signal && releaseOnAbort) signal.removeEventListener('abort', releaseOnAbort)
         },
         () => {},

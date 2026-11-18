@@ -1034,7 +1034,11 @@ class SDKSessionImpl implements SDKSession {
     // env whose getter returns different values per read would otherwise
     // give the reconnect scope and the surviving-discovery scope different
     // credential homes. Each scope keeps its own signal/priority setting.
-    const credentialEnv = this.options.env ? { ...this.options.env } : undefined
+    // The value is read into a local first: reading `this.options.env`
+    // in both the condition and the spread would invoke a host getter
+    // twice (CodeRabbit #2493 review 5955577457).
+    const sessionEnv = this.options.env
+    const credentialEnv = sessionEnv ? { ...sessionEnv } : undefined
     const credentialScope = captureCredentialScope(
       () => entryCredentialScope ?? undefined,
       { signal: attempt.signal, env: credentialEnv },
