@@ -592,6 +592,14 @@ export function captureCredentialScope(
      * so overlaying them again changes nothing.
      */
     env?: Record<string, string | undefined>
+    /**
+     * Queue ahead of regular waiters when the scope re-enters the
+     * environment mutex: a discovery that survives its caller must get
+     * the mutex before a session that queued earlier, or the remaining
+     * pages read that session's environment. Only the surviving
+     * discovery scope sets this.
+     */
+    priority?: boolean
   },
 ): CredentialScope {
   // Captured inside the turn's tool call, where its variables are applied.
@@ -627,7 +635,9 @@ export function captureCredentialScope(
     })
     if (owned) return owned
     const { acquired, reason } = await acquireEnvMutex(
-      options?.signal ? { signal: options.signal } : undefined,
+      options?.signal || options?.priority
+        ? { signal: options.signal, priority: options.priority }
+        : undefined,
     )
     if (!acquired) {
       if (reason === 'aborted' || options?.signal?.aborted) {

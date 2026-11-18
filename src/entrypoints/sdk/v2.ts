@@ -836,18 +836,36 @@ class SDKSessionImpl implements SDKSession {
     }
     const inFlight = this.mcpConnectPromise
     if (inFlight) return inFlight
+    // The shared promise is published only after the setup scope is
+    // entered: a turn that joins the promise must never wait on setup
+    // queued behind the mutex that turn holds. A pre-turn sign-in that
+    // waited on init() can resume after the first turn took the mutex
+    // for agent loading; if its setup had already published the
+    // promise, the turn would join it at the connect above and never
+    // reach the cleanup that releases its own mutex — a deadlock broken
+    // only by aborting the sign-in. Entering the scope first means the
+    // turn either finds no promise and connects in its own environment,
+    // or joins one whose setup already holds (or borrows) an
+    // environment. When no compatible turn exists the captured namespace
+    // is preserved: the connect runs in the scope, not in ambient env.
     // A scoped connect stays in its scope until the connect itself
     // settles — not just until the first waiter stops waiting — so the
     // clients it creates keep the namespace they were set up in.
-    const promise = setupScope
-      ? resumeIn(setupScope, () => this.connectMcpServersOnce())
-      : this.connectMcpServersOnce()
-    this.mcpConnectPromise = promise
-    try {
-      return await promise
-    } finally {
-      if (this.mcpConnectPromise === promise) this.mcpConnectPromise = null
+    const runConnect = async (): Promise<boolean> => {
+      // Re-check inside the scope: another caller may have connected
+      // while this setup waited for its environment.
+      if (this.mcpConnected) return !this.closed
+      const existing = this.mcpConnectPromise
+      if (existing) return existing
+      const promise = this.connectMcpServersOnce()
+      this.mcpConnectPromise = promise
+      try {
+        return await promise
+      } finally {
+        if (this.mcpConnectPromise === promise) this.mcpConnectPromise = null
+      }
     }
+    return setupScope ? resumeIn(setupScope, runConnect) : runConnect()
   }
 
   /**
@@ -993,9 +1011,15 @@ class SDKSessionImpl implements SDKSession {
     // mutex wait is abortable by this attempt, so a cancel or a session
     // close while it waits ends the flow instead of holding the mutex
     // until another turn releases it. The turn is the one this call
-    // started in, not whichever holds the field by now.
+    // started in, not whichever holds the field by now. The sign-in
+    // entry keys are derived from that frozen environment, not from the
+    // ambient one here: a pre-turn call's session `env` overrides are
+    // not applied to process.env yet, so reading them here would
+    // register the attempt under the ambient config home while the
+    // flow's credentials land in the session's — and two sessions with
+    // different config homes would abort each other's browser flows.
+    // The keys are computed inside the scope at registration, below.
     const entryCredentialScope = this.turnCredentialScope
-    const signInEntryKeys = getSdkSignInEntryKeys(name, serverConfig)
     // The attempt exists from here so its signal can make the scope's
     // mutex wait abortable; it is registered — and supersedes the
     // previous attempt — after initialization, below. The frozen
@@ -1014,10 +1038,13 @@ class SDKSessionImpl implements SDKSession {
     // adopted — keeps running after the attempt is cancelled, so its
     // scope carries no signal: the attempt's abort must not fail the
     // re-entry that keeps its remaining credential operations in the
-    // namespace this call began in.
+    // namespace this call began in. It queues with precedence: a session
+    // that queued on the mutex before discovery started would otherwise
+    // be picked first when this caller's scope releases, and the
+    // remaining pages would read its environment.
     const survivingDiscoveryScope = captureCredentialScope(
       () => entryCredentialScope ?? undefined,
-      { env: this.options.env },
+      { env: this.options.env, priority: true },
     )
 
     // Process-wide networking (proxy, mTLS client certificate, CA certs) is
@@ -1060,12 +1087,39 @@ class SDKSessionImpl implements SDKSession {
     // The same rule across the host-facing method and the authenticate
     // pseudo-tool: attempts share one credential entry, so a sign-in
     // started either way replaces an attempt still pending for that entry.
-    // The entry keys are the ones frozen before initialization, above.
-    const releaseSharedSignIn = registerSdkSignIn(signInEntryKeys, attempt)
+    // The entry keys are derived inside the scope the flow began in, so
+    // they match the environment the credential operations use: the
+    // frozen environment carries the session's `env` overrides, while
+    // ambient process.env does not, before the first turn. Sessions that
+    // resolve to the same entry still supersede each other; sessions
+    // with different config homes register under different entries and
+    // stay independent. A pre-turn call has no turn to lend the scope,
+    // so this waits on the mutex — abortable by the attempt — instead
+    // of reading ambient env. A superseded attempt is cleaned out of
+    // pendingMcpAuth here, so a later sign-in does not find it.
+    // The attempt's abort must reach it while registration waits on the
+    // mutex: a caller that aborts during that wait ends the flow at once
+    // instead of waiting for a turn that holds the mutex. The listeners
+    // are attached before registration for exactly that reason; an abort
+    // that landed during init is applied here too, so the wait below
+    // throws instead of registering an attempt that is already over.
     const stopAttempt = () => attempt.abort()
     options?.signal?.addEventListener('abort', stopAttempt, { once: true })
     sessionSignal?.addEventListener('abort', stopAttempt, { once: true })
     if (sessionSignal?.aborted || options?.signal?.aborted) attempt.abort()
+    let releaseSharedSignIn: () => void
+    try {
+      releaseSharedSignIn = await resumeIn(credentialScope, () =>
+        Promise.resolve(
+          registerSdkSignIn(getSdkSignInEntryKeys(name, serverConfig), attempt),
+        ),
+      )
+    } catch (error) {
+      options?.signal?.removeEventListener('abort', stopAttempt)
+      sessionSignal?.removeEventListener('abort', stopAttempt)
+      if (this.pendingMcpAuth.get(name) === attempt) this.pendingMcpAuth.delete(name)
+      throw error
+    }
 
     try {
       // A settings page signs in before the first turn; connect first so the

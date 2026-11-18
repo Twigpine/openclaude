@@ -893,15 +893,26 @@ export async function releaseUnownedMcpClient(
     await Promise.resolve()
     settledToThisClient = isSettled && settledValue === client
   }
-  await client.cleanup().catch(() => {})
-  // The entry may have been replaced during cleanup: only delete when
-  // it is still the same promise the probe saw.
+  // A join that ran while the probe yielded records its adoption in a
+  // `.then` on the cached promise, queued behind the probe's continuation:
+  // one more tick lets it land, so the ownership decision below sees every
+  // join that happened before it. Decide ownership here, before cleanup
+  // starts — a recheck after cleanup would be too late, the joiner would
+  // already hold a closing client.
+  await Promise.resolve()
+  if (isMcpClientAdopted(client)) return
+  // Evict the entry before cleanup starts, so a caller that joins after
+  // this decision dials a fresh connect instead of receiving this client
+  // while its transport closes. Only the entry the probe saw goes: a
+  // newer generation that replaced it while this one was being released
+  // stays cached, and the close callback is generation-guarded the same way.
   if (
     settledToThisClient &&
     connectToServerMemoized.cache.get(key) === cached
   ) {
     connectToServerMemoized.cache.delete(key)
   }
+  await client.cleanup().catch(() => {})
 }
 
 /**
@@ -3029,19 +3040,18 @@ export async function reconnectMcpServerImpl(
     ]
     // A cancelled discovery can outlive this caller: another caller may
     // have adopted the shared client, so the fetchers keep running for
-    // it. Enter the surviving scope NOW, at discovery start, so it
-    // queues on the environment mutex ahead of any competitor that
-    // arrives while the race below runs: when this caller cancels and
-    // its scope releases, the surviving entry is head-of-queue and the
-    // remaining credential operations — a later tools/list page, a skill
-    // read — run back inside the namespace the reconnect began in, not
-    // whatever the process has by now. The entry is not awaited and is
-    // not attached to the cancelled signal, so it cannot strip the
+    // it. The surviving entry re-enters the namespace the reconnect
+    // began in for the parts' remaining credential operations. It queues
+    // with precedence over regular waiters, so when this caller's scope
+    // releases it is picked before a session that queued earlier — a
+    // plain FIFO queue would hand the mutex to that session first, and
+    // the remaining pages would read its environment instead. The entry
+    // holds the mutex until the parts settle, so no other session's
+    // environment can apply while they run. The entry is not awaited and
+    // is not attached to the cancelled signal, so it cannot strip the
     // adopter's tools the way a shared signal would. Promise.all below
     // rejects on the first failure and would drop the stragglers, so the
-    // surviving entry awaits the parts themselves. A re-entry in the
-    // catch below would queue behind a competitor that arrived during
-    // the race, so there is none: this entry is the whole mechanism.
+    // surviving entry awaits the parts themselves.
     if (survivingDiscoveryScope !== undefined) {
       const parts = discoveryPartsList
       void resumeIn(survivingDiscoveryScope, () =>

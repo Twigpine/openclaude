@@ -61,6 +61,16 @@ export interface MutexAcquireOptions {
    * later caller is not stuck behind it.
    */
   signal?: AbortSignal
+  /**
+   * Queue ahead of regular waiters: when the holder releases, a priority
+   * waiter is picked before any regular waiter that queued earlier. Only
+   * for a scope that must re-enter its namespace before a competitor that
+   * queued first — a surviving discovery scope, not a turn or a fresh
+   * sign-in. At most one priority waiter exists per discovery, and it
+   * releases once its work settles, so regular waiters cannot starve
+   * behind it.
+   */
+  priority?: boolean
 }
 
 export interface MutexAcquireResult {
@@ -72,6 +82,8 @@ export interface MutexAcquireResult {
 
 function createEnvMutexState() {
   const queue: Array<() => void> = []
+  /** Waiters that jump the regular queue when the holder releases. */
+  const priorityQueue: Array<() => void> = []
   let locked = false
 
   async function acquire(
@@ -89,7 +101,7 @@ function createEnvMutexState() {
     if (options?.timeoutMs === undefined && options?.signal === undefined) {
       // No timeout - wait forever (original behavior for backward compatibility)
       return new Promise(resolve => {
-        queue.push(() => resolve({ acquired: true }))
+        ;(options?.priority ? priorityQueue : queue).push(() => resolve({ acquired: true }))
       })
     }
 
@@ -111,6 +123,11 @@ function createEnvMutexState() {
         const index = queue.indexOf(callback)
         if (index !== -1) {
           queue.splice(index, 1)
+        } else {
+          const priorityIndex = priorityQueue.indexOf(callback)
+          if (priorityIndex !== -1) {
+            priorityQueue.splice(priorityIndex, 1)
+          }
         }
         resolve(result)
       }
@@ -134,22 +151,22 @@ function createEnvMutexState() {
         }
       }
 
-      queue.push(callback)
+      ;(options?.priority ? priorityQueue : queue).push(callback)
     })
   }
 
   function release(): void {
-    if (queue.length > 0) {
-      const next = queue.shift()
-      if (next) {
-        try {
-          next()
-        } catch {
-          // If callback throws, ensure mutex is unlocked so next caller can acquire
-          // The error is intentionally not propagated - callback errors should not
-          // block the mutex system. Callers should handle their own errors.
-          locked = false
-        }
+    // A priority waiter is picked before any regular waiter that queued
+    // earlier; within each queue the order stays FIFO.
+    const next = priorityQueue.length > 0 ? priorityQueue.shift() : queue.shift()
+    if (next) {
+      try {
+        next()
+      } catch {
+        // If callback throws, ensure mutex is unlocked so next caller can acquire
+        // The error is intentionally not propagated - callback errors should not
+        // block the mutex system. Callers should handle their own errors.
+        locked = false
       }
     } else {
       locked = false
@@ -158,6 +175,7 @@ function createEnvMutexState() {
 
   function reset(): void {
     queue.length = 0
+    priorityQueue.length = 0
     locked = false
   }
 
