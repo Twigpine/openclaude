@@ -35,6 +35,11 @@ type ExecFileWithCwdOptions = {
   env?: NodeJS.ProcessEnv
   stdin?: 'ignore' | 'inherit' | 'pipe'
   input?: string
+  // When true, an abort-triggered 'error' does not settle the result
+  // until the child emits 'close': the error can fire while a child
+  // that traps the signal is still alive, so settling on it reports
+  // the command done while its process is still running.
+  awaitCloseOnAbort?: boolean
 }
 
 type ProcessResultWithError = {
@@ -164,6 +169,7 @@ export function execFileNoThrowWithCwd(
     maxBuffer = DEFAULT_MAX_BUFFER,
     stdin: finalStdin,
     input: finalInput,
+    awaitCloseOnAbort: finalAwaitCloseOnAbort = false,
   }: ExecFileWithCwdOptions = {
     timeout: 10 * SECONDS_IN_MINUTE * MS_IN_SECOND,
     preserveOutputOnError: true,
@@ -226,6 +232,10 @@ export function execFileNoThrowWithCwd(
     let combinedBufferSize = 0
     let signal: string | undefined
     let timedOut = false
+    // Set when the child emits 'close', and when an abort-triggered
+    // 'error' arrives before it (see the 'error' handler below).
+    let closed = false
+    let abortError: Error | undefined
 
     const finish = (result: {
       stdout: string
@@ -279,6 +289,20 @@ export function execFileNoThrowWithCwd(
 
     child.once('error', error => {
       logError(error)
+      if (finalAwaitCloseOnAbort && abortSignal?.aborted && !closed) {
+        // The abort error fires as soon as the signal is delivered,
+        // which can precede the child's 'close' by an arbitrary delay
+        // when the child traps the signal: settling here would report
+        // the command finished while its process is still alive, so a
+        // caller that treats settlement as completion (notably the
+        // `wait` inspector cleanup) would return too early (CodeRabbit
+        // #2497 review 5957376769). Record the error and let the
+        // 'close' handler below settle with it once the child has
+        // actually exited. The timeout below still bounds the wait if
+        // the child never closes.
+        abortError = error
+        return
+      }
       finish({ stdout: '', stderr: '', code: 1, error: error.message })
     })
 
@@ -297,12 +321,26 @@ export function execFileNoThrowWithCwd(
         : undefined
 
     child.once('close', (code, closeSignal) => {
+      closed = true
       if (timeoutId) {
         clearTimeout(timeoutId)
       }
 
       signal = closeSignal ?? undefined
       const errorCode = code ?? 1
+
+      if (abortError !== undefined) {
+        // The abort error arrived before the child closed; settle with
+        // it now that the process has actually exited, keeping whatever
+        // output was collected.
+        finish({
+          stdout: finalPreserveOutput ? stdout : '',
+          stderr: finalPreserveOutput ? stderr : '',
+          code: 1,
+          error: abortError.message,
+        })
+        return
+      }
 
       if (timedOut) {
         finish({

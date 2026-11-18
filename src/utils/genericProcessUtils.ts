@@ -130,6 +130,11 @@ export async function getProcessCommandAsync(
           {
             timeout: options?.timeout ?? 1000,
             abortSignal: options?.signal,
+            // The lookup's callers treat settlement as "the inspection
+            // is done": on abort the result must wait for the inspector
+            // child's close, not the abort error that can precede it
+            // (CodeRabbit #2497 review 5957376769).
+            awaitCloseOnAbort: true,
           },
         )
       : await execFileNoThrowWithCwd(
@@ -138,6 +143,7 @@ export async function getProcessCommandAsync(
           {
             timeout: options?.timeout ?? 1000,
             abortSignal: options?.signal,
+            awaitCloseOnAbort: true,
           },
         )
   if (result.code !== 0 || !result.stdout?.trim()) return null
