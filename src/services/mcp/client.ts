@@ -1262,12 +1262,14 @@ export const connectToServer = memoize(
             // has zero fields and fails on unknown properties.
             elicitation: {},
             // Client task capability (SEP-1686 wire shape): the server may
-            // run tools/call as a durable task and we poll tasks/get. The
-            // requests key is omitted; taskified server-initiated requests
-            // (sampling/elicitation) are not supported here.
+            // run tools/call as a durable task and we poll tasks/get. Only
+            // the bare key is declared: list and cancel advertise handlers
+            // for requests a server sends to the client, and none exist.
+            // The requests key is omitted; taskified server-initiated
+            // requests (sampling/elicitation) are not supported here.
             ...(isMcpTaskBackgroundingDisabled()
               ? {}
-              : { tasks: { list: {}, cancel: {} } }),
+              : { tasks: {} }),
           },
         },
       )
@@ -3629,6 +3631,9 @@ async function callMCPTool({
       removeCallerAbortListener = () =>
         signal.removeEventListener('abort', onCallerAbort)
     })
+    // A caller without onServerTaskCreated (the IDE RPC path) cannot register
+    // or fetch a server task, so it must get the plain call and its result.
+    const canTrackServerTask = onServerTaskCreated !== undefined
     const dispatch = async () => {
       // Discovery can outlive the timeout or the caller's abort; do not send
       // a request that has already been given up on.
@@ -3638,10 +3643,12 @@ async function callMCPTool({
       // Discovery failed on this connection, so support is unknown, and the
       // failed run's empty result is memoized. Drop it so a later call
       // rediscovers instead of staying on the plain path until reconnect.
-      if (isMcpToolTaskSupportUnknown(connection)) {
+      if (canTrackServerTask && isMcpToolTaskSupportUnknown(connection)) {
         fetchToolsForClient.cache.delete(connection.name)
       }
-      const taskSupport = mcpTaskSupportForTool(connection, tool)
+      const taskSupport = canTrackServerTask
+        ? mcpTaskSupportForTool(connection, tool)
+        : undefined
       return taskSupport
         ? client.request(
             {
@@ -3653,7 +3660,10 @@ async function callMCPTool({
               },
             },
             TaskAugmentedCallToolResultSchema,
-            { ...requestOptions, task: {} },
+            // The SDK keeps the progress handler until the connection closes
+            // on the task path, so a background task would leave one behind.
+            // Progress stays on the synchronous path only.
+            { ...requestOptions, onprogress: undefined, task: {} },
           )
         : client.callTool(
             {
@@ -3670,7 +3680,7 @@ async function callMCPTool({
       // Discovery only decides plain vs task-augmented, so skip it when the
       // server cannot background anything or the env opt-out is set: a slow
       // tools/list must not delay the plain call in those cases.
-      (mcpServerAdvertisesTaskTools(connection)
+      (canTrackServerTask && mcpServerAdvertisesTaskTools(connection)
         ? fetchToolsForClient(connection)
         : Promise.resolve([])
       ).then(dispatch),
@@ -3803,7 +3813,13 @@ async function callMCPTool({
         (e as Error & { code?: number }).code === -32000 &&
         e.message.includes('Connection closed') &&
         (config.type === 'http' || config.type === 'claudeai-proxy')
-      if (isSessionExpired || isConnectionClosedOnHttp) {
+      // Dispatch-time discovery swallows its own session-loss error and
+      // returns []; the closed SDK client then rejects the call itself with
+      // a plain "Not connected" that has no code to match above.
+      const isNotConnectedOnHttp =
+        e.message === 'Not connected' &&
+        (config.type === 'http' || config.type === 'claudeai-proxy')
+      if (isSessionExpired || isConnectionClosedOnHttp || isNotConnectedOnHttp) {
         logMCPDebug(
           name,
           `MCP session expired during tool call (${isSessionExpired ? '404/-32001' : 'connection closed'}), clearing connection cache for re-initialization`,

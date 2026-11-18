@@ -266,6 +266,43 @@ test('kill sends tasks/cancel and marks killed', async () => {
   _resetMcpServerTasksForTest()
 })
 
+test('a rejected tasks/cancel keeps the task running, reports the error, and can be retried', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  let rejectCancel = true
+  const { client, calls } = makeClient({
+    cancelTask: async () => {
+      if (rejectCancel) throw new Error('Method not found: tasks/cancel')
+      return {}
+    },
+  })
+  const connection = makeConnection(client, { capabilities: TASK_CAPS })
+
+  const taskId = trackMcpServerTask({
+    connection,
+    task: makeMcpTask({ pollInterval: 60000 }),
+    toolName: 'slow_tool',
+    description: 'srv: slow_tool',
+    setAppState: state.set,
+  })
+
+  await McpServerTask.kill(taskId, state.set)
+
+  // The server may still be running it: stay visible with the reason.
+  const afterReject = taskFrom(state, taskId)
+  assert.equal(afterReject.status, 'running')
+  assert.match(afterReject.statusMessage ?? '', /tasks\/cancel/)
+
+  // The stop request is retryable and a successful one finishes the kill.
+  rejectCancel = false
+  await McpServerTask.kill(taskId, state.set)
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+  assert.equal(calls.cancelTask.length, 2)
+  assert.equal(taskFrom(state, taskId).status, 'killed')
+  _resetMcpServerTasksForTest()
+})
+
 test('disconnect fails tracked tasks for that server only', async () => {
   _resetMcpServerTasksForTest()
   _resetTaskOutputDirForTest()
@@ -328,6 +365,8 @@ test('getTask errors fail the task instead of hanging', async () => {
 
 test('mcpTaskSupportForTool gates on capability, tool metadata, and env', () => {
   _resetMcpServerTasksForTest()
+  const priorOptOut = process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
+  delete process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
   const { client } = makeClient({})
   const connection = makeConnection(client, { capabilities: TASK_CAPS })
 
@@ -352,7 +391,11 @@ test('mcpTaskSupportForTool gates on capability, tool metadata, and env', () => 
   try {
     assert.equal(mcpTaskSupportForTool(connection, 'slow_tool'), undefined)
   } finally {
-    delete process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
+    if (priorOptOut === undefined) {
+      delete process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
+    } else {
+      process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND = priorOptOut
+    }
   }
   _resetMcpServerTasksForTest()
 })

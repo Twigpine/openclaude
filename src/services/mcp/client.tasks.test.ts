@@ -1,9 +1,10 @@
-import { describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { Task as McpTask } from '@modelcontextprotocol/sdk/types.js'
 import type { AppState } from '../../state/AppState.js'
 import type { McpServerTaskState } from '../../tasks/McpServerTask/McpServerTask.js'
 import {
+  callIdeRpc,
   callMCPToolWithUrlElicitationRetry,
   fetchToolsForClient,
 } from './client.js'
@@ -62,6 +63,17 @@ function reset(name = 'task-server') {
 }
 
 describe('MCP server tasks', () => {
+  const OPT_OUT = 'CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND'
+  let priorOptOut: string | undefined
+  beforeEach(() => {
+    priorOptOut = process.env[OPT_OUT]
+    delete process.env[OPT_OUT]
+  })
+  afterEach(() => {
+    if (priorOptOut === undefined) delete process.env[OPT_OUT]
+    else process.env[OPT_OUT] = priorOptOut
+  })
+
   test('task-capable tool call is augmented and registered as background task', async () => {
     reset()
     const state = makeState()
@@ -163,7 +175,7 @@ describe('MCP server tasks', () => {
         setAppState: state.set,
       })
     } finally {
-      delete process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
+      delete process.env[OPT_OUT]
     }
 
     expect(callTool).toHaveBeenCalledTimes(1)
@@ -285,9 +297,10 @@ describe('MCP server tasks', () => {
         return { task: makeMcpTask() }
       },
     )
-    const callTool = vi.fn(async () => ({
-      content: [{ type: 'text', text: 'plain result' }],
-    }))
+    // A server rejects a plain tools/call to a task-required tool.
+    const callTool = vi.fn(async () => {
+      throw new Error('Task augmentation is required for tool required-tool')
+    })
     const connection = makeConnection({ request, callTool })
     const call = () =>
       callMCPToolWithUrlElicitationRetry({
@@ -299,8 +312,9 @@ describe('MCP server tasks', () => {
         setAppState: state.set,
       })
 
-    // Discovery fails (all three attempts), so the first call goes plain.
-    await call()
+    // Discovery fails (all three attempts), so the first call goes plain
+    // and the caller sees the server's rejection.
+    await expect(call()).rejects.toThrow(/Task augmentation is required/)
     expect(callTool).toHaveBeenCalledTimes(1)
 
     // Discovery recovers without a reconnect: the next call must re-discover
@@ -400,7 +414,7 @@ describe('MCP server tasks', () => {
       ])
       expect(result).not.toBe('blocked')
     } finally {
-      delete process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
+      delete process.env[OPT_OUT]
     }
     expect(callTool).toHaveBeenCalledTimes(1)
     reset()
@@ -507,4 +521,94 @@ describe('MCP server tasks', () => {
     expect(callTool).not.toHaveBeenCalled()
     reset()
   })
+  test('a call with no task handler stays on the plain path', async () => {
+    reset()
+    const request = vi.fn(async (req: { method: string }) => {
+      if (req.method === 'tools/list') {
+        return { tools: [SLOW_TOOL_LIST] }
+      }
+      return { task: makeMcpTask() }
+    })
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'plain result' }],
+    }))
+    const connection = makeConnection({ request, callTool })
+
+    // callIdeRpc has no way to register or fetch a server task, so a
+    // task-augmented call would hand it a handle string instead of output.
+    await fetchToolsForClient(connection)
+    const content = await callIdeRpc('slow-tool', {}, connection)
+
+    expect(callTool).toHaveBeenCalledTimes(1)
+    expect(
+      request.mock.calls.filter(c => c[0].method === 'tools/call'),
+    ).toHaveLength(0)
+    expect(JSON.stringify(content)).toContain('plain result')
+    reset()
+  })
+
+  test('the foreground progress callback is not attached to a task-augmented request', async () => {
+    reset()
+    const state = makeState()
+    const seen: Array<{ method: string; onprogress: unknown }> = []
+    const request = vi.fn(
+      async (
+        req: { method: string },
+        _schema: unknown,
+        opts: { task?: object; onprogress?: unknown },
+      ) => {
+        if (req.method === 'tools/list') {
+          return { tools: [SLOW_TOOL_LIST] }
+        }
+        seen.push({ method: req.method, onprogress: opts.onprogress })
+        return { task: makeMcpTask() }
+      },
+    )
+    const connection = makeConnection({ request, callTool: vi.fn() })
+
+    await callMCPToolWithUrlElicitationRetry({
+      client: connection,
+      clientConnection: connection,
+      tool: 'slow-tool',
+      args: {},
+      signal: new AbortController().signal,
+      setAppState: state.set,
+      onProgress: () => {},
+    })
+
+    // The SDK keeps the handler until the connection closes, so a task that
+    // outlives the call would leave one per task behind.
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.onprogress).toBeUndefined()
+    reset()
+  })
+
+  test('a closed session found during dispatch-time discovery takes the session-expiry path', async () => {
+    reset()
+    const state = makeState()
+    // Expired HTTP session: tools/list fails (so discovery returns []),
+    // then the closed SDK client rejects the dispatch with "Not connected".
+    const request = vi.fn(async () => {
+      throw new Error('Not connected')
+    })
+    const callTool = vi.fn(async () => {
+      throw new Error('Not connected')
+    })
+    const connection = {
+      ...makeConnection({ request, callTool }),
+      config: { type: 'http', url: 'http://localhost:1/mcp' } as ConnectedMCPServer['config'],
+    }
+
+    await expect(
+      callMCPToolWithUrlElicitationRetry({
+        client: connection,
+        clientConnection: connection,
+        tool: 'slow-tool',
+        args: {},
+        signal: new AbortController().signal,
+        setAppState: state.set,
+      }),
+    ).rejects.toMatchObject({ name: 'McpSessionExpiredError' })
+    reset()
+  }, 15000)
 })

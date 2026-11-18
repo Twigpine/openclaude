@@ -416,9 +416,15 @@ async function cancelMcpServerTask(localTaskId: string): Promise<void> {
   if (!entry || entry.finalized) return
   try {
     await entry.client.experimental.tasks.cancelTask(entry.mcpTaskId)
-  } finally {
-    await finalizeMcpServerTask(localTaskId, 'cancelled')
+  } catch (e) {
+    // The server refused (for example it does not implement tasks/cancel),
+    // so the task may still be running there. Keep tracking it, say why the
+    // stop did not take, and let the caller leave it running and retryable.
+    const reason = `Cancel request failed (tasks/cancel): ${e instanceof Error ? e.message : String(e)}`
+    applyMcpTaskStatusMessage(localTaskId, reason)
+    throw e
   }
+  await finalizeMcpServerTask(localTaskId, 'cancelled')
 }
 
 /**

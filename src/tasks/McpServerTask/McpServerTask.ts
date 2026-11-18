@@ -141,9 +141,13 @@ export const McpServerTask: Task = {
     try {
       await cancelHook?.(taskId)
     } catch (e) {
+      // The server refused the cancel, so it may still be running the task:
+      // leave the local task running (the hook recorded the reason) so a
+      // second stop can retry, instead of reporting a kill that did not happen.
       logForDebugging(
         `mcp_server task ${taskId} cancel request failed: ${e instanceof Error ? e.message : String(e)}`,
       )
+      return
     }
     markMcpServerTaskTerminal(taskId, setAppState, 'killed')
     void evictTaskOutput(taskId)
