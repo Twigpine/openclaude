@@ -3662,7 +3662,7 @@ type StrictSessionRead =
   | { state: 'valid'; value: BackgroundSession }
   | { state: 'unreadable' }
   | { state: 'malformed' }
-  | { state: 'id_mismatch' }
+  | { state: 'id_mismatch'; value: BackgroundSession }
 
 /**
  * Reads a `wait`-path registry file without ever blocking on a
@@ -3745,7 +3745,7 @@ async function readSessionFileStrict(
     storedId !== id &&
     isBackgroundSession(parsed, storedId)
   ) {
-    return { state: 'id_mismatch' }
+    return { state: 'id_mismatch', value: parsed }
   }
   return { state: 'malformed' }
 }
@@ -3903,10 +3903,29 @@ export async function resolveBackgroundSessionForWait(
     const id = entry.slice(0, -'.json'.length)
     if (!SAFE_ID_RE.test(id)) continue
     const read = await readSessionFileStrict(metadataPathForId(id), id)
-    // A stored-id mismatch is the same aliasing as in the exact-ID
-    // path above: the session is enumerated under its real filename,
-    // so skip this entry instead of failing the whole resolution.
-    if (read.state === 'missing' || read.state === 'id_mismatch') continue
+    if (read.state === 'missing') continue
+    if (read.state === 'id_mismatch') {
+      // A stored-id mismatch is an alias only when the stored id names
+      // a valid canonical row: on a case-insensitive registry the same
+      // file is reachable under both spellings, and the canonical row
+      // is enumerated under its real filename. A mismatch with no valid
+      // canonical row is a stray document whose stored name or id could
+      // match the target, so it fails the lookup instead of being
+      // skipped silently — skipping it could pin the wrong session
+      // (CodeRabbit #2497 review 5954753623).
+      const canonical = await readSessionFileStrict(
+        metadataPathForId(read.value.id),
+        read.value.id,
+      )
+      if (canonical.state !== 'valid') {
+        throwWaitMetadataError(
+          'malformed',
+          `Background session ${id} metadata`,
+          null,
+        )
+      }
+      continue
+    }
     if (read.state === 'unreadable' || read.state === 'malformed') {
       // The name lives inside the file, so any entry could be the named or
       // prefix-matched session; it cannot be skipped safely.
