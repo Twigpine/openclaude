@@ -86,7 +86,12 @@ export type ParsedWaitInvocation = {
 }
 
 export type WaitOutput = {
-  write(chunk: string): unknown
+  // The optional callback reports write completion: a real stream's
+  // write() return value describes buffer capacity, not completion, so
+  // the handler awaits the callback (CodeRabbit #2497 review 5950772048).
+  // Synchronous capture outputs (tests) take no callback and resolve at
+  // once; see writeWaitOutput.
+  write(chunk: string, callback?: () => void): unknown
   // Present on real streams (process.stdout/stderr): lets the handler wait
   // for a back-pressured write to drain before a forced exit discards it.
   once?(event: 'drain' | 'error' | 'close', listener: () => void): unknown
@@ -495,38 +500,40 @@ function renderWaitResult(
   humanMessage?: string,
 ): Promise<void> {
   if (json) {
-    return flushWaitOutput(
-      stdout,
-      stdout.write(`${ndjsonSafeStringify(result)}\n`),
-    )
+    return writeWaitOutput(stdout, `${ndjsonSafeStringify(result)}\n`)
   }
   if (result.waitResult === 'terminal') {
-    return flushWaitOutput(
-      stdout,
-      stdout.write(`${humanTerminalLine(result)}\n`),
-    )
+    return writeWaitOutput(stdout, `${humanTerminalLine(result)}\n`)
   }
-  return flushWaitOutput(
-    stderr,
-    stderr.write(`${humanMessage ?? humanErrorLine(result)}\n`),
-  )
+  return writeWaitOutput(stderr, `${humanMessage ?? humanErrorLine(result)}\n`)
 }
 
-// Waits until a write that hit stream backpressure has drained, so a
-// forced exit (124/130/143) in the CLI fast path cannot discard the
-// rendered line — with --json that line is the mandatory v1 JSON object
-// (maintainer review 5948202472 on #2497). Resolves at once when the
-// write flushed or the stream cannot report drain; resolves on error or
-// close as well, so a dead consumer never hangs the waiter.
-function flushWaitOutput(out: WaitOutput, wrote: unknown): Promise<void> {
-  if (wrote !== false) return Promise.resolve()
-  if (typeof out.once !== 'function') return Promise.resolve()
-  // Bind the methods: calling a detached `once` would lose its `this`.
+// Writes one rendered result line and waits until it has actually left
+// the stream, so a forced exit (124/130/143) in the CLI fast path cannot
+// discard the rendered line — with --json that line is the mandatory v1
+// JSON object (maintainer review 5948202472 on #2497). The write's return
+// value is NOT completion: in Node, write() can return true while the
+// chunk is still pending, so a real stream resolves only after its write
+// callback fires (or the drain event, for streams whose callback is tied
+// to it), regardless of the boolean return value (CodeRabbit #2497 review
+// 5950772048). Resolves at once for synchronous capture outputs (no
+// `once`: the chunk is already in the buffer), and on error or close as
+// well, so a dead consumer never hangs the waiter.
+function writeWaitOutput(out: WaitOutput, chunk: string): Promise<void> {
+  if (typeof out.once !== 'function') {
+    out.write(chunk)
+    return Promise.resolve()
+  }
+  // Bind the methods: calling a detached `once`/`off` would lose its
+  // `this`.
   const once = out.once.bind(out)
   const off =
     typeof out.off === 'function' ? out.off.bind(out) : undefined
   return new Promise<void>(resolve => {
+    let settled = false
     const done = () => {
+      if (settled) return
+      settled = true
       off?.('drain', done)
       off?.('error', done)
       off?.('close', done)
@@ -535,6 +542,14 @@ function flushWaitOutput(out: WaitOutput, wrote: unknown): Promise<void> {
     once('drain', done)
     once('error', done)
     once('close', done)
+    try {
+      out.write(chunk, done)
+    } catch {
+      // A synchronously throwing write (e.g. an ended stream) is a
+      // dead consumer, not a reason to fail the waiter: resolve so the
+      // handler still returns its exit code.
+      done()
+    }
   })
 }
 
@@ -744,6 +759,10 @@ export async function waitHandler(
   // Thread the waiter's liveness probes into selector resolution, so the
   // exact-name liveness gate in resolveBackgroundSessionForWait uses the
   // same probes as the poll loop (maintainer review 5948202472 on #2497).
+  // The gate also gets the combined client-or-deadline lookup signal, so
+  // a slow resolution probe is aborted when the waiter is interrupted or
+  // the deadline expires instead of outliving the waiter (CodeRabbit
+  // #2497 review 5950772048).
   const resolveSession =
     options.resolveSession ??
     ((target: string) =>
@@ -751,6 +770,7 @@ export async function waitHandler(
         isProcessAlive: options.isProcessAlive,
         signalProcess: options.signalProcess,
         getProcessCommandAsync: trackedGetProcessCommandAsync,
+        signal: lookupSignal,
       }))
 
   // Install the waiting-client signal listeners immediately after argument
@@ -831,8 +851,9 @@ export async function waitHandler(
   // failure happened during selector resolution.
   let pinnedId: string | null = null
   // Set when the deadline fires during selector resolution: the
-  // resolution lookup is not aborted by the deadline signal, so the
-  // finally below must still await the inspector child's close.
+  // resolution lookup is aborted by the deadline signal (see the
+  // DEADLINE_EXPIRED branch above), and the finally below still awaits
+  // the inspector child's close as a safety net.
   let deadlineExpiredDuringResolution = false
   // The deadline timer is hoisted so the finally below can clear it on
   // every exit path.
@@ -868,6 +889,11 @@ export async function waitHandler(
       )
       if (resolved === DEADLINE_EXPIRED) {
         deadlineExpiredDuringResolution = true
+        // Abort the in-flight resolution lookup as well: its `ps` child
+        // is killed by the lookup signal, so the finally below reaps it
+        // promptly instead of waiting out the poll-interval bound
+        // (CodeRabbit #2497 review 5950772048).
+        deadlineAbortController.abort()
         return finish(
           baseWaitResult(null, 'timeout', 'timeout'),
           'Timed out waiting for a background session.',
@@ -934,6 +960,14 @@ export async function waitHandler(
             if (graceTimer !== undefined) clearTimeout(graceTimer)
           }
           if (late === null) {
+            // A client signal that arrived while the grace timer ran
+            // takes precedence over the timeout: the waiter was
+            // interrupted (130/143), not merely slow (124). The same
+            // check guards the final-observation timeout below
+            // (CodeRabbit #2497 review 5950772048).
+            if (clientSignal) {
+              return finish(interruptedWaitResult(pinned.id, clientSignal))
+            }
             // A read stalled past the grace interval: the session was
             // not observably terminal, so this is a timeout (124), not
             // an unreadable process (3).
@@ -952,6 +986,11 @@ export async function waitHandler(
             const finalObservation =
               await finalTimeoutObservation(pinned, lookupDeps)
             if (finalObservation === null) {
+              // As above: a client signal received during the pending
+              // final lookup takes precedence over the timeout (124).
+              if (clientSignal) {
+                return finish(interruptedWaitResult(pinned.id, clientSignal))
+              }
               return finish({
                 ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
                 status: 'running',
@@ -1033,7 +1072,33 @@ export async function waitHandler(
     // Do not return while the rendered result is still queued in a
     // back-pressured stdout pipe: the CLI fast path exits with 124/130/
     // 143 right after this handler resolves, which would discard it.
-    if (pendingFlush !== null) await pendingFlush
+    // A client signal still cuts the wait short: a consumer that never
+    // drains must not make the waiter ignore SIGINT/SIGTERM forever
+    // (CodeRabbit #2497 review 5950772048). The rendered result keeps
+    // the exit code finish() already set; only the wait is abandoned,
+    // and the signal listeners are removed by the lines below.
+    if (pendingFlush !== null) {
+      let onAbort: (() => void) | undefined
+      try {
+        await Promise.race([
+          pendingFlush,
+          new Promise<void>(resolve => {
+            if (abortController.signal.aborted) {
+              resolve()
+              return
+            }
+            onAbort = () => resolve()
+            abortController.signal.addEventListener('abort', onAbort, {
+              once: true,
+            })
+          }),
+        ])
+      } finally {
+        if (onAbort !== undefined) {
+          abortController.signal.removeEventListener('abort', onAbort)
+        }
+      }
+    }
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
     process.off('SIGINT', onSigint)
     process.off('SIGTERM', onSigterm)
