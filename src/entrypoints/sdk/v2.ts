@@ -336,7 +336,23 @@ async function isClientCached(
 ): Promise<boolean> {
   const key = getServerCacheKey(name, config)
   const cached = connectToServer.cache.get(key)
-  return cached !== undefined && (await cached) === client
+  if (cached === undefined) return false
+  // A pending replacement entry must not make the caller wait out that
+  // connect: one microtask tick tells whether it already settled to this
+  // client. A .then callback on a settled promise runs before the
+  // continuation of the await below; on a pending one it never runs.
+  // (The same probe lives in releaseUnownedMcpClient.)
+  let settledValue: MCPServerConnection | undefined
+  let isSettled = false
+  void cached.then(
+    value => {
+      isSettled = true
+      settledValue = value
+    },
+    () => {},
+  )
+  await Promise.resolve()
+  return isSettled && settledValue === client
 }
 
 class SDKSessionImpl implements SDKSession {
@@ -1195,11 +1211,18 @@ class SDKSessionImpl implements SDKSession {
           // The reconnected client is cached by server key, and another
           // session may have adopted it while the reconnect was in flight.
           // Closing it here would close its transport and fail its
-          // in-flight MCP calls. Only release a client the cache no longer
-          // holds: one still cached is shared, or adoptable, and the next
-          // connection reuses it instead of dialling again.
-          if (!(await isClientCached(name, config, result.client))) {
-            await result.client.cleanup().catch(() => {})
+          // in-flight MCP calls. Adoption is checked first: the cache
+          // entry may since have been replaced by a pending connect for
+          // a newer generation, so cache membership alone cannot tell
+          // whether this client is shared. Only release a client the
+          // cache no longer holds: one still cached is shared, or
+          // adoptable, and the next connection reuses it instead of
+          // dialling again.
+          if (
+            !isMcpClientAdopted(result.client) &&
+            !(await isClientCached(name, config, result.client))
+          ) {
+            await releaseUnownedMcpClient(name, config, result.client)
           }
         }
         throw error

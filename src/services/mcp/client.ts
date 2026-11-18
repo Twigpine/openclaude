@@ -864,26 +864,43 @@ export async function releaseUnownedMcpClient(
 ): Promise<void> {
   if (client.type !== 'connected') return
   if (isMcpClientAdopted(client)) return
-  await client.cleanup().catch(() => {})
-  // Evict the cache entry only when it still holds this client. A newer
-  // connection for the same key replaces the entry while this one is being
-  // released, and awaiting that entry would hang on its pending initialize
-  // — so only a value that has already settled is compared.
+  // Evict the cache entry only when it still holds this client — and
+  // decide that BEFORE cleanup: cleanup fires the close callback, which
+  // evicts by key, so a newer generation that replaced the entry while
+  // this one was being released would be dropped before any comparison
+  // here could save it. A newer connection for the same key replaces the
+  // entry while this one is being released, so only a value that has
+  // already settled is compared — one microtask tick tells whether the
+  // entry settled to this client: a .then callback on a settled promise
+  // runs before the continuation of the await below, and on a pending
+  // one it never runs. Awaiting the entry instead would hang on its
+  // pending initialize.
   const key = getServerCacheKey(name, serverRef)
   const cached = connectToServerMemoized.cache.get(key) as
     | Promise<MCPServerConnection>
     | undefined
+  let settledToThisClient = false
   if (cached !== undefined) {
-    const settled = await Promise.race([
-      cached.then(value => ({ settled: true, value })),
-      Promise.resolve({
-        settled: false,
-        value: undefined as MCPServerConnection | undefined,
-      }),
-    ])
-    if (settled.settled && settled.value === client) {
-      connectToServerMemoized.cache.delete(key)
-    }
+    let settledValue: MCPServerConnection | undefined
+    let isSettled = false
+    void cached.then(
+      value => {
+        isSettled = true
+        settledValue = value
+      },
+      () => {},
+    )
+    await Promise.resolve()
+    settledToThisClient = isSettled && settledValue === client
+  }
+  await client.cleanup().catch(() => {})
+  // The entry may have been replaced during cleanup: only delete when
+  // it is still the same promise the probe saw.
+  if (
+    settledToThisClient &&
+    connectToServerMemoized.cache.get(key) === cached
+  ) {
+    connectToServerMemoized.cache.delete(key)
   }
 }
 
@@ -1854,7 +1871,18 @@ const connectToServerMemoized = memoize(
           fetchMcpSkillsForClient!.cache.delete(key)
         }
 
-        connectToServer.cache.delete(key)
+        // Evict the connect entry only when this generation still owns
+        // it. A newer generation for the same key replaces it while this
+        // one is being released, and an unconditional delete would drop
+        // the newer's entry with it. A generation the wrapper never
+        // supplied a promise for (the synchronous stdio path) owns no
+        // entry by construction, so it still clears.
+        const current = connectToServer.cache.get(key) as
+          | Promise<MCPServerConnection>
+          | undefined
+        if (generation?.promise === undefined || current === generation.promise) {
+          connectToServer.cache.delete(key)
+        }
         logMCPDebug(name, `Cleared connection cache for reconnection`)
 
         if (originalOnclose) {
