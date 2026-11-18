@@ -5,7 +5,7 @@ import { memoizeWithLRU } from '../utils/memoize.js'
 import { recursivelySanitizeUnicode } from '../utils/sanitization.js'
 import { normalizeNameForMCP } from '../services/mcp/normalization.js'
 import { listAllMcpResources } from '../services/mcp/pagination.js'
-import { getServerCacheKey } from '../services/mcp/client.js'
+import { getDiscoveryCacheKey } from '../services/mcp/client.js'
 import type { MCPServerConnection, ServerResource } from '../services/mcp/types.js'
 import { getMCPSkillBuilders } from './mcpSkillBuilders.js'
 import { logForDebugging } from '../utils/debug.js'
@@ -124,10 +124,11 @@ export const fetchMcpSkillsForClient = memoizeWithLRU(
     } catch (error) {
       // A cancelled fetch must not poison the cache: the next fetch for
       // this server re-lists instead of reusing the aborted empty result.
+      // Evicted under the same generation-scoped key the fetch is stored
+      // under — the unsuffixed server key would miss the entry, and the
+      // resource list-change handler deletes the suffixed one.
       if (options?.signal?.aborted || isAbortError(error)) {
-        fetchMcpSkillsForClient.cache.delete(
-          getServerCacheKey(client.name, client.config),
-        )
+        fetchMcpSkillsForClient.cache.delete(getDiscoveryCacheKey(client))
       }
       logForDebugging(
         `[mcp-skills] failed to list skills for ${client.name}: ${String(error)}`,
@@ -138,11 +139,13 @@ export const fetchMcpSkillsForClient = memoizeWithLRU(
   },
   // The cache key ignores the options: a fetch for one connection is one
   // entry, whatever signal it carries. The second parameter only keeps
-  // the memoized function's arity honest. The key is the connection, not
-  // the display name: two sessions can run the same name at different
-  // endpoints, and a name-keyed entry lets a peer's skills answer a
-  // host's reconnect.
+  // the memoized function's arity honest. The key is the connection
+  // generation, not the display name: two sessions can run the same name
+  // at different endpoints, and a name-keyed entry lets a peer's skills
+  // answer a host's reconnect — and a replacement transport must list
+  // its own skills instead of reading the entry the transport it
+  // replaces wrote (CodeRabbit #2493 review 5961865068).
   (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
-    getServerCacheKey(client.name, client.config),
+    getDiscoveryCacheKey(client),
   MCP_SKILL_CACHE_SIZE,
 )

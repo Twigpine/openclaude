@@ -5,14 +5,17 @@ import { getSessionId } from '../../bootstrap/state.js'
 import type { Command } from '../../commands.js'
 import type { Tool } from '../../Tool.js'
 import {
+  areMcpConfigsEqual,
   clearServerCache,
   fetchCommandsForClient,
   fetchResourcesForClient,
   fetchToolsForClient,
   getDiscoveryCacheKey,
   getMcpToolsCommandsAndResources,
+  isMcpClientInstalled,
   isMcpClientRetired,
   reconnectMcpServerImpl,
+  releaseAdoptedMcpClient,
 } from './client.js'
 import type {
   ConnectedMCPServer,
@@ -96,11 +99,51 @@ type PendingUpdate = MCPServerConnection & {
   tools?: Tool[]
   commands?: Command[]
   resources?: ServerResource[]
+  /**
+   * The transport that produced a list refresh, for commit-time
+   * validation in flushPendingUpdates: a refresh applies only when its
+   * transport is still the one the hook owns for that server. Only the
+   * list-changed handlers set it; connection updates replace the record
+   * outright and carry no origin. Stripped before the record is stored.
+   */
+  originClient?: ConnectedMCPServer
 }
 type ConnectedListUpdate = ConnectedMCPServer & {
   tools?: Tool[]
   commands?: Command[]
   resources?: ServerResource[]
+  /**
+   * The transport that produced a list refresh, for commit-time
+   * validation in flushPendingUpdates: a refresh applies only when its
+   * transport is still the one the hook owns for that server. Only the
+   * list-changed handlers set it; connection updates replace the record
+   * outright and carry no origin. Stripped before the record is stored.
+   */
+  originClient?: ConnectedMCPServer
+}
+
+/**
+ * Whether a queued list refresh from `originClient` may still apply to
+ * the record the hook currently owns for that server: the record must
+ * still hold the same transport — a reconnect may have installed a
+ * replacement since the notification arrived — with the same config.
+ * A missing record means the server was removed, so the refresh must
+ * not resurrect it. No cache entry is consulted, so a matching current
+ * in-process client applies (CodeRabbit #2493 review 5961865068).
+ * The disabled check lives in flushPendingUpdates, next to the disk
+ * read it already does.
+ */
+export function isCurrentMcpListUpdateOrigin(
+  originClient: ConnectedMCPServer,
+  current: MCPServerConnection | undefined,
+): boolean {
+  if (current === undefined) return false
+  // The record is a union: only a connected record carries a transport,
+  // and a disabled/failed record means this transport no longer owns
+  // the server.
+  const currentTransport = 'client' in current ? current.client : undefined
+  if (currentTransport !== originClient.client) return false
+  return areMcpConfigsEqual(current.config, originClient.config)
 }
 
 /**
@@ -163,7 +206,7 @@ export function registerMcpListChangedHandlers(
             })
           }
           if (!(await mayApplyListUpdate())) return
-          updateServer({ ...client, tools: newTools })
+          updateServer({ ...client, tools: newTools, originClient: client })
         } catch (error) {
           logMCPError(
             client.name,
@@ -199,6 +242,7 @@ export function registerMcpListChangedHandlers(
           updateServer({
             ...client,
             commands: [...mcpPrompts, ...mcpSkills],
+            originClient: client,
           })
           // MCP skills changed — invalidate skill-search index so next
           // discovery rebuilds with the new set.
@@ -243,6 +287,7 @@ export function registerMcpListChangedHandlers(
               ...client,
               resources: newResources,
               commands: [...mcpPrompts, ...mcpSkills],
+              originClient: client,
             })
             // MCP skills changed — invalidate skill-search index so next
             // discovery rebuilds with the new set.
@@ -250,7 +295,7 @@ export function registerMcpListChangedHandlers(
           } else {
             const newResources = await fetchResourcesForClient(client)
             if (!(await mayApplyListUpdate())) return
-            updateServer({ ...client, resources: newResources })
+            updateServer({ ...client, resources: newResources, originClient: client })
           }
         } catch (error) {
           logMCPError(
@@ -330,6 +375,14 @@ export function useManageMCPConnections(
   // Track active reconnection attempts to allow cancellation
   const reconnectTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map())
 
+  // The connected client object per server, as the connect returned it —
+  // the AppState record is a copy, so it cannot identify the object the
+  // adoption maps and the connect cache are keyed by. When a reconnect
+  // replaces the record, the previous object is the one to release.
+  const mcpClientByNameRef = useRef<Map<string, MCPServerConnection>>(
+    new Map(),
+  )
+
   // Dedup the --channels blocked warning per skip kind so that a user who
   // sees "run /login" (auth skip), logs in, then hits the policy gate
   // gets a second toast.
@@ -393,11 +446,27 @@ export function useManageMCPConnections(
 
       for (const update of updates) {
         const {
+          originClient,
           tools: rawTools,
           commands: rawCmds,
           resources: rawRes,
           ...client
         } = update
+        // A queued list refresh is only as fresh as the transport that
+        // produced it: the mayApplyListUpdate check ran before the
+        // refresh, and a reconnect may have installed a replacement —
+        // or the server may have been disabled — during the batch
+        // window. Re-validate at commit, against the record the hook
+        // currently owns: a refresh from a retired transport must not
+        // overwrite the replacement's tools by server name. The check
+        // needs no cache entry, so a matching current in-process client
+        // still applies (CodeRabbit #2493 review 5961865068).
+        if (originClient !== undefined) {
+          if (isMcpServerDisabled(client.name)) continue
+          const current = mcp.clients.find(c => c.name === client.name)
+          if (!isCurrentMcpListUpdateOrigin(originClient, current))
+            continue
+        }
         const tools =
           client.type === 'disabled' || client.type === 'failed'
             ? (rawTools ?? [])
@@ -493,6 +562,30 @@ export function useManageMCPConnections(
       // Handle side effects based on client state
       switch (client.type) {
         case 'connected': {
+          // A reconnect replaced the record this hook owns for the
+          // server: release the previous transport once no SDK session
+          // still has it installed, or it stays open with no owner —
+          // the reconnect detached it instead of closing it because a
+          // completed tool call had adopted it, and nothing else ever
+          // releases it (CodeRabbit #2493 review 5961865068).
+          const previousClient = mcpClientByNameRef.current.get(client.name)
+          mcpClientByNameRef.current.set(client.name, client)
+          if (
+            previousClient !== undefined &&
+            previousClient !== client &&
+            !isMcpClientInstalled(previousClient)
+          ) {
+            void releaseAdoptedMcpClient(
+              previousClient.name,
+              previousClient.config,
+              previousClient,
+            ).catch(() => {
+              logForDebugging(
+                `Failed to release replaced MCP client: ${previousClient.name}`,
+              )
+            })
+          }
+
           // Overwrite the default elicitation handler registered in connectToServer
           // with the real one (queues elicitation in AppState for UI). Registering
           // here (once per connect) instead of in a [mcpClients] effect avoids
@@ -503,9 +596,31 @@ export function useManageMCPConnections(
           // onclose assignment below can gate it on the generation
           // still being current without re-indenting the body.
           const handleClientClose = () => {
+            // The close callback belongs to the transport generation
+            // that installed it: verify against the record the hook
+            // currently owns before clearing or reconnecting. The
+            // retired probe above yields, so a replacement may have
+            // taken over between the probe and this callback — a stale
+            // callback must not close the replacement or start another
+            // reconnect for a transport the hook already replaced
+            // (CodeRabbit #2493 review 5961865068).
+            const currentOwner = store
+              .getState()
+              .mcp.clients.find(c => c.name === client.name)
+            // The record is a union: only a connected record carries a
+            // transport. A missing record, or one holding a different
+            // transport, means this close is stale.
+            const currentTransport =
+              currentOwner !== undefined && 'client' in currentOwner
+                ? currentOwner.client
+                : undefined
+            if (currentTransport !== client.client) return
+
             const configType = client.config.type ?? 'stdio'
 
-            clearServerCache(client.name, client.config).catch(() => {
+            clearServerCache(client.name, client.config, undefined, {
+              expectedClient: client,
+            }).catch(() => {
               logForDebugging(
                 `Failed to invalidate the server cache: ${client.name}`,
               )
@@ -821,7 +936,7 @@ export function useManageMCPConnections(
           break
       }
     },
-    [updateServer],
+    [updateServer, store],
   )
 
   // Initialize all servers to pending state if they don't exist in appState.

@@ -997,6 +997,12 @@ export function noteMcpClientInstalled(
     installedMcpClients.set(client, owners)
   }
   owners.add(owner)
+  // Installing converts the owner's setup reservation into ownership:
+  // the reservation held the client alive while the session was still
+  // setting up, and the install record holds it from here on. The record
+  // goes in first, so a blocked release the reservation's release re-runs
+  // sees this session as an owner and stands down.
+  releaseMcpClientSetupReservation(client, owner)
 }
 
 /**
@@ -1017,6 +1023,80 @@ export function noteMcpClientUninstalled(
 /** Whether any session still has this client as its current record. */
 export function isMcpClientInstalled(client: MCPServerConnection): boolean {
   return (installedMcpClients.get(client)?.size ?? 0) > 0
+}
+
+/**
+ * Sessions that received a client and are still setting it up, by owner
+ * token. Adoption alone cannot cover that window: connectSdkMcpServers
+ * waits for every server before the caller installs any of them, so a
+ * session that received a client has no install record yet — and the
+ * single permanent adoption marker can be withdrawn by another session's
+ * reauthentication while this one is still setting up, closing the
+ * transport under it. A reservation is per owner, from receipt through
+ * installation: installing converts it (see noteMcpClientInstalled), and
+ * setup failure or cancellation releases it. A WeakMap, so a reservation
+ * never keeps a client — or its transport — alive past the client itself
+ * (CodeRabbit #2493 review 5961865068).
+ */
+const setupMcpClientReservations = new WeakMap<
+  MCPServerConnection,
+  Set<object>
+>()
+
+/** Reserves a received client for one owner's setup, until it installs. */
+export function reserveMcpClientForSetup(
+  client: MCPServerConnection,
+  owner: object,
+): void {
+  let owners = setupMcpClientReservations.get(client)
+  if (!owners) {
+    owners = new Set()
+    setupMcpClientReservations.set(client, owners)
+  }
+  owners.add(owner)
+}
+
+/** Whether any session is still setting this client up. */
+export function hasMcpClientSetupReservation(
+  client: MCPServerConnection,
+): boolean {
+  return (setupMcpClientReservations.get(client)?.size ?? 0) > 0
+}
+
+/**
+ * Releases one owner's setup reservation. When the last reservation goes
+ * and a release was blocked on it, the release is re-run — otherwise a
+ * client whose setup failed keeps a transport open with no owner, and
+ * nobody ever cleans it up. The client carries its own name and config,
+ * so the re-run needs no caller-supplied key.
+ */
+export function releaseMcpClientSetupReservation(
+  client: MCPServerConnection,
+  owner: object,
+): void {
+  const owners = setupMcpClientReservations.get(client)
+  if (!owners) return
+  owners.delete(owner)
+  if (owners.size === 0) {
+    setupMcpClientReservations.delete(client)
+    // A session that installed the client in the meantime owns it now:
+    // leave the blocked release for its own uninstall path instead of
+    // closing a transport under a live owner.
+    if (
+      blockedUnownedReleases.has(client) &&
+      !isMcpClientInstalled(client)
+    ) {
+      blockedUnownedReleases.delete(client)
+      void releaseUnownedMcpClient(client.name, client.config, client)
+    }
+  }
+}
+
+/** Setup-reservation count for a client, for tests only. */
+export function getMcpClientSetupReservationCountForTesting(
+  client: MCPServerConnection,
+): number {
+  return setupMcpClientReservations.get(client)?.size ?? 0
 }
 
 /**
@@ -1057,6 +1137,51 @@ export function getMcpClientAdoptionClaimCountForTesting(
 }
 
 /**
+ * Clients whose transport an installed-release already closed. A session
+ * close runs more than once in practice (engine close, then query close),
+ * and cleanup on an already-closed transport must not run twice.
+ */
+const releasedInstalledMcpClients = new WeakSet<MCPServerConnection>()
+
+/**
+ * The one ownership-aware release for a session-owned client, shared by
+ * the query and v2 session close paths: drops this owner's install
+ * record, and only when no other session still has the client installed
+ * does it withdraw the permanent adoption claim and release the client —
+ * evicting that generation from the connect cache before cleanup, so a
+ * caller joining afterwards dials fresh instead of receiving a client
+ * that is closing. A client another owner still uses stays open; a
+ * client a joiner is still setting up under a reservation stays open
+ * too (releaseUnownedMcpClient re-checks both). Fire-and-forget from
+ * synchronous close() paths (CodeRabbit #2493 review 5961865068).
+ */
+export async function releaseInstalledMcpClient(
+  name: string,
+  serverRef: ScopedMcpServerConfig,
+  client: MCPServerConnection,
+  owner: object,
+): Promise<void> {
+  if (client.type !== 'connected') return
+  noteMcpClientUninstalled(client, owner)
+  if (isMcpClientInstalled(client)) return
+  if (releasedInstalledMcpClients.has(client)) return
+  // This session's install is gone: the permanent adoption claim its
+  // cache reuse left behind goes with it, and the release this claim may
+  // have blocked is the one this call performs — clear the marker first
+  // so the release below does not have to wait for a second withdrawing
+  // call that may never come.
+  withdrawMcpClientAdoption(client, permanentAdoptionClaim)
+  blockedUnownedReleases.delete(client)
+  await releaseUnownedMcpClient(name, serverRef, client)
+  // Only a release that actually ran may mark the client done: a release
+  // declined for a live adopter or a setup reservation leaves the flag
+  // set, and the next withdrawing call re-runs it.
+  if (!blockedUnownedReleases.has(client)) {
+    releasedInstalledMcpClients.add(client)
+  }
+}
+
+/**
  * Releases a connected client no session adopted, and evicts it from the
  * connect cache so a later connection dials fresh instead of reusing a
  * closed client. A client another caller adopted from the shared connect
@@ -1070,9 +1195,19 @@ export async function releaseUnownedMcpClient(
   client: MCPServerConnection,
 ): Promise<void> {
   if (client.type !== 'connected') return
-  if (isMcpClientAdopted(client)) {
-    // A caller holds this client; remember the declined release so the
-    // withdrawing call can re-run it when the last claim goes.
+  if (isMcpClientAdopted(client) || isMcpClientInstalled(client)) {
+    // A caller holds this client — adopted from the shared connect, or
+    // installed as a session's current record; remember the declined
+    // release so the withdrawing call can re-run it when the last
+    // holder goes.
+    blockedUnownedReleases.add(client)
+    return
+  }
+  if (hasMcpClientSetupReservation(client)) {
+    // A session received this client and is still setting it up: it has
+    // no install record yet, so the check above cannot see it. Its
+    // reservation holds the transport until setup installs or releases
+    // it (CodeRabbit #2493 review 5961865068).
     blockedUnownedReleases.add(client)
     return
   }
@@ -1118,8 +1253,14 @@ export async function releaseUnownedMcpClient(
   // caller that joined while the connect was still pending land — that
   // callback was attached at join time, ahead of the probe's continuation.
   await Promise.resolve()
-  if (isMcpClientAdopted(client)) {
-    // As above: a join that landed during the probe holds this client.
+  if (
+    isMcpClientAdopted(client) ||
+    isMcpClientInstalled(client) ||
+    hasMcpClientSetupReservation(client)
+  ) {
+    // As above: a join that landed during the probe holds this client,
+    // and so does a session that installed it — or reserved it for
+    // setup — while the probe yielded.
     blockedUnownedReleases.add(client)
     return
   }
@@ -2592,12 +2733,18 @@ function clearFetchCaches(name: string, serverRef: ScopedMcpServerConfig): void 
  * would fail that caller's in-flight calls. Only the reconnect path
  * passes this — a caller replacing the connection, not ending it.
  * Other callers (disable, session expiry) close the client outright.
+ * @param options.expectedClient When set, only the client this caller
+ * actually failed or saw close is cleared: if the cache already holds a
+ * different generation — a reauthentication swapped in a replacement
+ * while the old transport's tool call was still in flight — the entry
+ * is left intact for the retry to use, and neither the replacement nor
+ * its discovery caches are touched (CodeRabbit #2493 review 5961865068).
  */
 export async function clearServerCache(
   name: string,
   serverRef: ScopedMcpServerConfig,
   signal?: AbortSignal,
-  options?: { keepAdoptedClient?: boolean },
+  options?: { keepAdoptedClient?: boolean; expectedClient?: MCPServerConnection },
 ): Promise<void> {
   const key = getServerCacheKey(name, serverRef)
 
@@ -2612,15 +2759,42 @@ export async function clearServerCache(
     return
   }
 
+  if (options?.expectedClient !== undefined) {
+    // Decide which generation the entry holds before touching it: one
+    // microtask tick tells whether it already settled, and to what. A
+    // pending entry is a newer connect in flight — the expected client
+    // is not current, and awaiting it here would wait out that connect
+    // only to clear the wrong generation. A settled entry holding a
+    // different client is the replacement: leave it, and the retry uses
+    // it. Only an entry settled to the expected client is cleared.
+    const expected = options.expectedClient
+    let settledValue: MCPServerConnection | undefined
+    let isSettled = false
+    void cached.then(
+      value => {
+        isSettled = true
+        settledValue = value
+      },
+      () => {},
+    )
+    await Promise.resolve()
+    if (!isSettled || settledValue !== expected) return
+  }
+
   try {
     const wrappedClient = await raceAbort(cached, signal)
 
     if (wrappedClient.type === 'connected') {
-      if (options?.keepAdoptedClient && isMcpClientAdopted(wrappedClient)) {
-        // Another caller adopted this client from the shared connect:
-        // detach the cache entry below without closing its transport,
-        // so the reconnect dials fresh while the adopter's in-flight
-        // calls finish on the client it holds. The declined release is
+      if (
+        options?.keepAdoptedClient &&
+        (isMcpClientAdopted(wrappedClient) ||
+          hasMcpClientSetupReservation(wrappedClient))
+      ) {
+        // Another caller adopted this client from the shared connect,
+        // or is still setting it up under a reservation: detach the
+        // cache entry below without closing its transport, so the
+        // reconnect dials fresh while the adopter's in-flight calls
+        // finish on the client it holds. The declined release is
         // recorded, so the withdrawing call re-runs it when the last
         // claim goes; a received adoption stays until its owning
         // session closes the client it installed (Copilot #2493 review
@@ -4288,7 +4462,7 @@ export async function callMCPToolWithUrlElicitationRetry({
 }
 
 async function callMCPTool({
-  client: { client, name, config },
+  client: connectedClient,
   tool,
   args,
   meta,
@@ -4306,6 +4480,7 @@ async function callMCPTool({
   _meta?: Record<string, unknown>
   structuredContent?: Record<string, unknown>
 }> {
+  const { client, name, config } = connectedClient
   const toolStartTime = Date.now()
   let progressInterval: NodeJS.Timeout | undefined
 
@@ -4484,7 +4659,13 @@ async function callMCPTool({
       //    after the onerror handler fires, so the pending callTool() rejects
       //    with this derived error instead of the original 404.
       // In both cases, clear the connection cache so the next tool call
-      // creates a fresh session.
+      // creates a fresh session — but only the transport this call
+      // actually failed on. A reauthentication may have swapped in a
+      // replacement while this call was in flight; clearing by name and
+      // config would close the replacement instead and interrupt the
+      // requests already running on it. When the cache already holds a
+      // different generation, the clear leaves it intact and the retry
+      // uses it (CodeRabbit #2493 review 5961865068).
       const isSessionExpired = isMcpSessionExpiredError(e)
       const isConnectionClosedOnHttp =
         'code' in e &&
@@ -4497,7 +4678,9 @@ async function callMCPTool({
           `MCP session expired during tool call (${isSessionExpired ? '404/-32001' : 'connection closed'}), clearing connection cache for re-initialization`,
         )
         logEvent('tengu_mcp_session_expired', {})
-        await clearServerCache(name, config)
+        await clearServerCache(name, config, undefined, {
+          expectedClient: connectedClient,
+        })
         throw new McpSessionExpiredError(name)
       }
     }

@@ -26,7 +26,13 @@ import {
 import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
-import { connectToServer, fetchToolsForClient, getServerCacheKey } from '../../services/mcp/client.js'
+import {
+  connectToServer,
+  fetchToolsForClient,
+  getServerCacheKey,
+  releaseMcpClientSetupReservation,
+  reserveMcpClientForSetup,
+} from '../../services/mcp/client.js'
 import { AuthenticationCancelledError, ClaudeAuthProvider } from '../../services/mcp/auth.js'
 import { logError } from '../../utils/log.js'
 import type { ActiveCredentialScope, CredentialScope } from '../../services/mcp/credentialScope.js'
@@ -704,6 +710,14 @@ export async function connectSdkMcpServers(
   mcpServers: Record<string, unknown> | undefined,
   getOriginScope?: () => ActiveCredentialScope | undefined,
   sessionSignal?: AbortSignal,
+  /**
+   * The session installing these clients: a received client is reserved
+   * for it from receipt through installation, so another session's
+   * reauthentication cannot withdraw the adoption claim and close the
+   * transport while this session is still setting up. The callers pass
+   * their session instance; without one no reservation is tracked.
+   */
+  owner?: object,
 ): Promise<{ clients: MCPServerConnection[]; tools: Tool[] }> {
   if (!mcpServers || Object.keys(mcpServers).length === 0) {
     return { clients: [], tools: [] }
@@ -789,6 +803,15 @@ export async function connectSdkMcpServers(
         }
       }
 
+      // A client this session received but has not installed yet: its
+      // setup reservation holds the transport while fetchTools runs
+      // and until the caller installs it, so another session's
+      // reauthentication cannot close it mid-setup. Released in the
+      // catch below on any failure, converted into the install record
+      // by noteMcpClientInstalled on success (CodeRabbit #2493 review
+      // 5961865068). Declared outside the try: the catch below must see
+      // it.
+      let reservedClient: MCPServerConnection | undefined
       try {
         // Equivalent configs can have different memo keys while sharing
         // credentials. Retry disconnected results when this environment has
@@ -850,6 +873,10 @@ export async function connectSdkMcpServers(
 
         // If connected, fetch tools
         if (client.type === 'connected') {
+          if (owner !== undefined) {
+            reserveMcpClientForSetup(client, owner)
+            reservedClient = client
+          }
           const serverTools = await fetchToolsForClient(client)
           return { client, tools: serverTools }
         }
@@ -885,6 +912,13 @@ export async function connectSdkMcpServers(
         // Return failed/pending client with no tools
         return { client, tools: [] }
       } catch (error) {
+        // Setup failed or was cancelled after receipt: this session will
+        // never install the client, so its reservation goes — otherwise
+        // the transport stays open with no owner, and nobody ever
+        // releases it.
+        if (reservedClient !== undefined && owner !== undefined) {
+          releaseMcpClientSetupReservation(reservedClient, owner)
+        }
         // Connection failed, return failed client with error message
         const errorMessage = error instanceof Error
           ? error.message

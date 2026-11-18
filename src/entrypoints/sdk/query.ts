@@ -58,7 +58,7 @@ import {
 import type { MCPServerConnection } from '../../services/mcp/types.js'
 import {
   noteMcpClientInstalled,
-  noteMcpClientUninstalled,
+  releaseInstalledMcpClient,
 } from '../../services/mcp/client.js'
 import {
   acquireEnvMutex,
@@ -653,7 +653,7 @@ class QueryImpl implements Query {
           // Connect MCP servers if provided
           if (self.mcpServers && Object.keys(self.mcpServers).length > 0) {
             try {
-              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, () => runInQueryEnv, self.abortController.signal)
+              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, () => runInQueryEnv, self.abortController.signal, self)
               self.sdkMcpTools = mcpTools
               if (mcpClients.length > 0) {
                 self.engine.setMcpClients(mcpClients)
@@ -827,15 +827,22 @@ class QueryImpl implements Query {
     const wrapperController = this.abortController
     this.interruptWithSource('sdk_close')
     requestSdkRootAbort(wrapperController, 'sdk_close', 'sdk_query')
-    // Disconnect MCP clients to prevent resource leaks
+    // Disconnect MCP clients to prevent resource leaks: one
+    // ownership-aware release per installed client — a client another
+    // session still has installed stays open, and the last owner's
+    // release evicts that generation before closing it, so a caller
+    // joining afterwards cannot receive a client that is closing
+    // (CodeRabbit #2493 review 5961865068).
     const mcpClients = this._engine?.getMcpClients?.() ?? []
     for (const client of mcpClients) {
-      if (client.type === 'connected' && client.cleanup) {
-        // The record goes with the session: a client another session
-        // still has installed stays installed for it.
-        noteMcpClientUninstalled(client, this)
+      if (client.type === 'connected' && typeof client.cleanup === 'function') {
         // Fire-and-forget cleanup — close() is synchronous
-        void client.cleanup().catch(err => {
+        void releaseInstalledMcpClient(
+          client.name,
+          client.config,
+          client,
+          this,
+        ).catch(err => {
           console.warn('SDK: MCP client cleanup error:', err instanceof Error ? err.message : String(err))
         })
       }

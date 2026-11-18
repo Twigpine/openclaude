@@ -30,6 +30,8 @@ import {
   noteMcpClientUninstalled,
   reconnectMcpServerImpl,
   releaseAdoptedMcpClient,
+  releaseInstalledMcpClient,
+  releaseMcpClientSetupReservation,
   releaseUnownedMcpClient,
 } from '../../services/mcp/client.js'
 import {
@@ -726,16 +728,22 @@ class SDKSessionImpl implements SDKSession {
       requestSdkRootAbort(wrapperController, 'sdk_close', 'sdk_session')
     }
     this._abortController = null
-    // Disconnect MCP clients to prevent resource leaks
+    // Disconnect MCP clients to prevent resource leaks: one
+    // ownership-aware release per installed client — a client another
+    // session still has installed stays open, and the last owner's
+    // release evicts that generation before closing it, so a caller
+    // joining afterwards cannot receive a client that is closing
+    // (CodeRabbit #2493 review 5961865068).
     const mcpClients = this._engine?.getMcpClients?.() ?? []
     for (const client of mcpClients) {
-      if (client.type === 'connected' && client.cleanup) {
-        // The record goes with the session: a client another session
-        // still has installed stays installed for it, and one no session
-        // owns any longer can be released by a swap that replaces it.
-        noteMcpClientUninstalled(client, this)
+      if (client.type === 'connected' && typeof client.cleanup === 'function') {
         // Fire-and-forget cleanup — close() is synchronous
-        void client.cleanup().catch(err => {
+        void releaseInstalledMcpClient(
+          client.name,
+          client.config,
+          client,
+          this,
+        ).catch(err => {
           console.warn('SDK: MCP client cleanup error:', err instanceof Error ? err.message : String(err))
         })
       }
@@ -941,8 +949,21 @@ class SDKSessionImpl implements SDKSession {
         this.mcpServers,
         () => this.turnCredentialScope ?? undefined,
         this._abortController?.signal,
+        this,
       )
-      if (this.closed) return false
+      if (this.closed) {
+        // The session closed while this connect was in flight: the
+        // clients it received will never be installed, so their setup
+        // reservations go here — otherwise the reservation holds the
+        // transport open with no owner, and the next session's close
+        // can never release it (CodeRabbit #2493 review 5961865068).
+        for (const client of mcpClients) {
+          if (client.type === 'connected') {
+            releaseMcpClientSetupReservation(client, this)
+          }
+        }
+        return false
+      }
       if (mcpClients.length > 0) {
         this.engine.setMcpClients(mcpClients)
         for (const client of mcpClients) {
@@ -1248,6 +1269,10 @@ class SDKSessionImpl implements SDKSession {
       // status must describe the same tool set the engine accepted, not
       // a second assembly of the pool (CodeRabbit #2493 review 5957362782).
       let assembledPool: Tools | undefined
+      // The previous client, when the swap replaced it and no other
+      // session still has it installed: released after the commit below,
+      // never awaited inside it (CodeRabbit #2493 review 5961865068).
+      let previousClientToRelease: MCPServerConnection | undefined
       try {
         if (result.client.type === 'connected') {
           const nextTools = [
@@ -1315,6 +1340,12 @@ class SDKSessionImpl implements SDKSession {
         // Release it once no other session still has it installed — a
         // session with a call in flight on it still holds its record —
         // and keep it while one does (CodeRabbit #2493 review 5957362782).
+        // The release itself runs after the commit below, not here: the
+        // final cancellation check, the install, and the successful
+        // return must be one uninterrupted commit, or a session close
+        // — or a newer sign-in — during the release wait would leave
+        // this call resolving `connected` for a client close() already
+        // cleaned up (CodeRabbit #2493 review 5961865068).
         if (result.client.type === 'connected') {
           noteMcpClientInstalled(result.client, this)
         }
@@ -1325,7 +1356,7 @@ class SDKSessionImpl implements SDKSession {
         ) {
           noteMcpClientUninstalled(previousClient, this)
           if (!isMcpClientInstalled(previousClient)) {
-            await releaseAdoptedMcpClient(name, config, previousClient)
+            previousClientToRelease = previousClient
           }
         }
       } catch (error) {
@@ -1348,6 +1379,20 @@ class SDKSessionImpl implements SDKSession {
           }
         }
         throw error
+      }
+      // The commit above ran without yielding, so no close or newer
+      // sign-in could intervene between the cancellation check, the
+      // install, and this return. The old client is released separately:
+      // its cleanup is observed — a failure is logged, not swallowed —
+      // and the last-owner check above already decided it may go.
+      if (previousClientToRelease !== undefined) {
+        const oldClient = previousClientToRelease
+        void releaseAdoptedMcpClient(name, config, oldClient).catch(error => {
+          console.warn(
+            'SDK: MCP client cleanup error:',
+            error instanceof Error ? error.message : String(error),
+          )
+        })
       }
       return this.toMcpServerStatus(name, result, assembledPool)
     } finally {
