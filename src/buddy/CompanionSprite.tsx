@@ -1,5 +1,5 @@
 import figures from 'figures'
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useSyncExternalStore } from 'react'
 import { useSettings } from '../hooks/useSettings.js'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 // Raw ink Text (not the themed wrapper): pixel art needs arbitrary rgb()
@@ -8,6 +8,8 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import RawText from '../ink/components/Text.js'
 import { stringWidth } from '../ink/stringWidth.js'
 import { Box, Text, useAnimationFrame } from '../ink.js'
+import { useImageOverlay } from '../ink/hooks/use-image-overlay.js'
+import { getTerminalGraphics, subscribeTerminalGraphics } from '../ink/terminal.js'
 import { useAppState, useSetAppState } from '../state/AppState.js'
 import type { AppState } from '../state/AppStateStore.js'
 import { getGlobalConfig } from '../utils/config.js'
@@ -17,14 +19,18 @@ import { effectTotalMs, getActionEffect } from './actionEffects.js'
 import { getCompanion } from './companion.js'
 import { isBuddyEnabled } from './feature.js'
 import {
-  hasPixelSprite,
+  HERO_SPRITE_COLS,
+  heroSpriteRows,
   isPixelColorCapable,
-  PIXEL_WIDTH,
-  pixelIdleFrameCount,
-  pixelShootFrameCount,
   type PixelRun,
-  renderPixelSprite,
-} from './pixelSprites.js'
+} from './heroArt.js'
+import {
+  actionPoseTime,
+  type MoodClock,
+  moodFrameMs,
+  resolveMood,
+  startMoodClock,
+} from './heroMoods.js'
 import {
   renderFace,
   renderShootSprite,
@@ -32,7 +38,16 @@ import {
   shootFrameCount,
   spriteFrameCount,
 } from './sprites.js'
-import { companionColor } from './types.js'
+import {
+  type CellSize,
+  CLEAR_COMPANION_IMAGE,
+  COMPANION_IMAGE_ID,
+  heroImageCell,
+  heroImageColumns,
+  heroImageFrame,
+} from './heroImageFrames.js'
+import type { HeroMood } from './heroMoods.js'
+import { companionColor, type Form } from './types.js'
 import { useShotClock } from './useShotClock.js'
 
 /** Sprite pose index during the effect's draw phase; clamps to the release
@@ -54,6 +69,15 @@ const TICK_MS = 500
 const BUBBLE_SHOW = 20 // ticks → ~10s at 500ms
 const FADE_WINDOW = 6 // last ~3s the bubble dims so you know it's about to go
 const PET_BURST_MS = 2500 // how long hearts float after /buddy pet
+const DANCE_MS = 6000 // how long /buddy dance lasts
+
+// Notes bob above the line-art sprite while it dances (hero art draws its own).
+const DANCE_NOTES = [
+  '  ♪      ♫  ',
+  '    ♫  ♪    ',
+  ' ♫    ♪   ♪ ',
+  '   ♪   ♫    ',
+]
 
 // Idle sequence: mostly rest (frame 0), occasional fidget (frames 1-2), rare blink.
 // Sequence indices map to sprite frames; -1 means "blink on frame 0".
@@ -153,20 +177,49 @@ function spriteColWidth(nameWidth: number): number {
 // width); in non-fullscreen it sits inline and needs BUBBLE_WIDTH more.
 // Narrow terminals: 0 — REPL.tsx stacks the one-liner on its own row
 // (above input in fullscreen, below in scrollback), so no reservation.
-// Pixel mode is a pure function of species + terminal color support, so
-// the reservation math and the sprite renderer can never disagree.
-function pixelModeActive(species: Parameters<typeof hasPixelSprite>[0]): boolean {
-  return hasPixelSprite(species) && isPixelColorCapable()
+// Pixel mode depends only on terminal color support (every form has hero
+// art), so the reservation math and the sprite renderer can never disagree.
+function pixelModeActive(): boolean {
+  return isPixelColorCapable()
 }
 
 // Single source of truth for the sprite column width — used by BOTH the
 // reservation math and the renderer so they cannot drift.
-function companionColumnWidth(companion: {
-  species: Parameters<typeof hasPixelSprite>[0]
-  name: string
-}): number {
+function companionColumnWidth(companion: { name: string }): number {
   const base = spriteColWidth(stringWidth(companion.name))
-  return pixelModeActive(companion.species) ? Math.max(base, PIXEL_WIDTH) : base
+  const imageCell = imageModeCell()
+  if (imageCell) return Math.max(base, heroImageColumns(imageCell))
+  return pixelModeActive() ? Math.max(base, HERO_SPRITE_COLS) : base
+}
+
+// Image mode: the terminal answered the kitty graphics probe and reported
+// its cell size, and the user has not turned images off. Returns the cell
+// size to draw at, or undefined for half-block pixels.
+function imageModeCell(): CellSize | undefined {
+  if (getGlobalConfig().companionImages === false) return undefined
+  return heroImageCell()
+}
+
+// The hero drawn as a real terminal image over an empty box of the same
+// size. The renderer places it after each frame (useImageOverlay).
+function HeroImage({
+  form,
+  mood,
+  t,
+  cell,
+}: {
+  form: Form
+  mood: HeroMood
+  t: number
+  cell: CellSize
+}): React.ReactNode {
+  const frame = heroImageFrame(form, mood, t, cell)
+  const ref = useImageOverlay(COMPANION_IMAGE_ID, {
+    key: frame.key,
+    draw: () => frame.draw,
+    clear: CLEAR_COMPANION_IMAGE,
+  })
+  return <Box ref={ref} width={frame.columns} height={frame.rows} flexShrink={0} />
 }
 
 export function companionReservedColumns(
@@ -179,15 +232,6 @@ export function companionReservedColumns(
   if (terminalColumns < MIN_COLS_FOR_FULL_SPRITE) return 0
   const bubble = speaking && !isFullscreenActive() ? BUBBLE_WIDTH : 0
   return companionColumnWidth(companion) + SPRITE_PADDING_X + bubble
-}
-
-// Map the shared idle logic onto pixel frames: 0=rest, 1=blink, 2=fidget.
-// Heroes with only rest+blink frames fall back to rest for fidget steps
-// (clamping to the last frame would double as an extra blink).
-function pixelIdleFrame(step: number, blink: boolean, frameCount: number): number {
-  if (blink) return Math.min(1, frameCount - 1)
-  if (step === 0) return 0
-  return frameCount > 2 ? 2 : 0
 }
 
 function PixelRows({ rows }: { rows: PixelRun[][] }): React.ReactNode {
@@ -211,12 +255,29 @@ function PixelRows({ rows }: { rows: PixelRun[][] }): React.ReactNode {
 }
 
 // React.memo: this file ships as plain source (not committed react-compiler
-// output), and the component is a propless child of REPL, which re-renders
-// per keystroke. memo skips those idle re-renders; animation re-renders come
-// from the component's own clock subscriptions and are unaffected.
-export const CompanionSprite = React.memo(function CompanionSprite(): React.ReactNode {
+// output), and REPL re-renders it per keystroke. The mood clock prop only
+// changes identity when the agent's activity changes, so memo still skips
+// those re-renders; animation re-renders come from the component's own clock
+// subscriptions and are unaffected.
+type CompanionSpriteProps = {
+  /** The agent's activity over time, from useCompanionMoodClock in the REPL.
+   *  Owned there because this sprite unmounts while dialogs cover the prompt. */
+  moodClock?: MoodClock
+}
+
+export const CompanionSprite = React.memo(function CompanionSprite({
+  moodClock: sessionMoodClock,
+}: CompanionSpriteProps): React.ReactNode {
   const reaction = useAppState(s => s.companionReaction)
+  // Re-render when the startup probe learns the terminal can draw images.
+  useSyncExternalStore(subscribeTerminalGraphics, getTerminalGraphics)
   const petAt = useAppState(s => s.companionPetAt)
+  const danceAt = useAppState(s => s.companionDanceAt)
+  // Subscribed only so a /buddy config change (mute, set, name) redraws the
+  // sprite: getCompanion() and companionMuted are read non-reactively below,
+  // and the clock that would otherwise pick them up is paused under reduced
+  // motion and while hidden.
+  useAppState(s => s.companionConfigVersion)
   const shotAt = useAppState(s => s.companionShotAt)
   const focused = useAppState(s => s.footerSelection === 'companion')
   const setAppState = useSetAppState()
@@ -229,11 +290,29 @@ export const CompanionSprite = React.memo(function CompanionSprite(): React.Reac
   const companion = isBuddyEnabled() ? getCompanion() : undefined
   const hidden = !companion || getGlobalConfig().companionMuted === true
 
-  // Shared animation clock at the idle cadence. Paused entirely when the
-  // sprite is hidden or the user prefers reduced motion (time freezes, so
-  // reduced-motion renders below must not derive frames from it).
-  const [, time] = useAnimationFrame(hidden || reducedMotion ? null : TICK_MS)
+  // Hero art animates faster than the line-art fallback, and busier moods
+  // faster than calm ones. The interval follows the mood resolved on the
+  // previous render (sync-during-render below keeps it current).
+  const [frameMs, setFrameMs] = useState(TICK_MS)
+
+  // Shared animation clock. Paused entirely when the sprite is hidden or the
+  // user prefers reduced motion (time freezes, so reduced-motion renders
+  // below must not derive frames from it).
+  const [, time] = useAnimationFrame(hidden || reducedMotion ? null : frameMs)
   const tick = Math.floor(time / TICK_MS)
+
+  // Without a session clock (rendered outside the REPL), stay idle.
+  const [idleMoodClock] = useState<MoodClock>(() => startMoodClock('idle', time))
+  const moodClock = sessionMoodClock ?? idleMoodClock
+
+  // A token seen at mount is from before this mount: it never starts a dance.
+  const [{ danceStartTime, forDanceAt }, setDanceStart] = useState({
+    danceStartTime: Number.NEGATIVE_INFINITY,
+    forDanceAt: danceAt,
+  })
+  if (danceAt !== forDanceAt) {
+    setDanceStart({ danceStartTime: time, forDanceAt: danceAt })
+  }
 
   // Sync-during-render (not useEffect) so the first post-pet render already
   // has petStartTime=time and petAge=0 — otherwise frame 0 is skipped.
@@ -292,6 +371,7 @@ export const CompanionSprite = React.memo(function CompanionSprite(): React.Reac
 
   const color = companionColor(companion)
   const colWidth = companionColumnWidth(companion)
+  const pixelMode = pixelModeActive()
   const bubbleAgeMs =
     reaction !== undefined && reaction === forSpoken ? time - spokeTime : 0
   const fading =
@@ -300,10 +380,29 @@ export const CompanionSprite = React.memo(function CompanionSprite(): React.Reac
     bubbleAgeMs >= (BUBBLE_SHOW - FADE_WINDOW) * TICK_MS
   const petAgeMs = petAt !== undefined ? time - petStartTime : Infinity
   const petting = !reducedMotion && petAgeMs < PET_BURST_MS
+  const shooting = shotElapsed !== null
+  // Frozen under reduced motion, so a dance would never end; /buddy dance
+  // says so instead.
+  const dancing = !reducedMotion && time - danceStartTime < DANCE_MS
+  const fullSprite = columns >= MIN_COLS_FOR_FULL_SPRITE
+  const mood = resolveMood(moodClock, {
+    now: time,
+    shooting: shooting && actionFx !== undefined,
+    petting,
+    dancing,
+    speaking: reaction !== undefined,
+    reducedMotion,
+  })
+  // Only the full hero sprite needs the faster mood clock; the line-art and
+  // narrow-face fallbacks keep the original idle cadence.
+  const wantFrameMs = pixelMode && fullSprite ? moodFrameMs(mood) : TICK_MS
+  if (wantFrameMs !== frameMs) {
+    setFrameMs(wantFrameMs)
+  }
 
   // Narrow terminals: collapse to one-line face. When speaking, the quip
   // replaces the name beside the face (no room for a bubble).
-  if (columns < MIN_COLS_FOR_FULL_SPRITE) {
+  if (!fullSprite) {
     const quip =
       reaction && reaction.length > NARROW_QUIP_CAP
         ? reaction.slice(0, NARROW_QUIP_CAP - 1) + '…'
@@ -317,6 +416,7 @@ export const CompanionSprite = React.memo(function CompanionSprite(): React.Reac
       <Box paddingX={1} alignSelf="flex-end">
         <Text>
           {petting && <Text color="autoAccept">{figures.heart} </Text>}
+          {dancing && !petting && <Text color={color}>♪ </Text>}
           <Text bold color={color}>
             {renderFace(companion)}
           </Text>{' '}
@@ -343,17 +443,22 @@ export const CompanionSprite = React.memo(function CompanionSprite(): React.Reac
   }
 
   const frameCount = spriteFrameCount(companion.species)
-  const heartFrame = petting
-    ? PET_HEARTS[Math.floor(petAgeMs / TICK_MS) % PET_HEARTS.length]
-    : null
-  const shooting = shotElapsed !== null
-  const pixelMode = pixelModeActive(companion.species)
+  // Hearts or notes float above the line-art sprite; hero art draws its own.
+  const heartFrame =
+    petting && !pixelMode
+      ? PET_HEARTS[Math.floor(petAgeMs / TICK_MS) % PET_HEARTS.length]
+      : null
+  const noteFrame =
+    dancing && !petting && !pixelMode
+      ? DANCE_NOTES[tick % DANCE_NOTES.length]
+      : null
+  const overlayFrame = heartFrame ?? noteFrame
 
   // Shared frame selection for both render modes.
   let idleStep = 0
   let blink = false
   if (!reducedMotion && !shooting) {
-    if (reaction || petting) {
+    if (reaction || petting || dancing) {
       // Excited: cycle all fidget frames fast
       idleStep = tick % frameCount
     } else {
@@ -367,30 +472,18 @@ export const CompanionSprite = React.memo(function CompanionSprite(): React.Reac
   }
 
   let pixelRows: PixelRun[][] | null = null
+  let heroImage: React.ReactNode = null
   let sprite: string[] = []
   if (pixelMode) {
-    const idleCount = pixelIdleFrameCount(companion.species)
-    if (shooting && actionFx !== undefined) {
-      pixelRows = renderPixelSprite(
-        companion.species,
-        drawPoseIndex(
-          actionFx.drawMs,
-          shotElapsed,
-          pixelShootFrameCount(companion.species),
-        ),
-        'shoot',
-      )
-    } else if (!reducedMotion && (reaction || petting)) {
-      // Excited: cycle the pixel frames directly — mapping the 3-step
-      // line-art cycle through pixelIdleFrame would freeze 2-frame heroes
-      // on their rest pose.
-      pixelRows = renderPixelSprite(companion.species, tick % idleCount, 'idle')
+    const t =
+      shooting && actionFx !== undefined
+        ? actionPoseTime(shotElapsed, actionFx)
+        : time / 1000
+    const imageCell = imageModeCell()
+    if (imageCell) {
+      heroImage = <HeroImage form={companion.species} mood={mood} t={t} cell={imageCell} />
     } else {
-      pixelRows = renderPixelSprite(
-        companion.species,
-        pixelIdleFrame(idleStep, blink, idleCount),
-        'idle',
-      )
+      pixelRows = heroSpriteRows(companion.species, mood, t)
     }
   } else {
     let body: string[]
@@ -409,7 +502,7 @@ export const CompanionSprite = React.memo(function CompanionSprite(): React.Reac
         blink ? line.replaceAll(companion.eye, '-') : line,
       )
     }
-    sprite = heartFrame ? [heartFrame, ...body] : body
+    sprite = overlayFrame ? [overlayFrame, ...body] : body
   }
 
   // Name row doubles as hint row — unfocused shows dim name + ↓ discovery,
@@ -424,11 +517,10 @@ export const CompanionSprite = React.memo(function CompanionSprite(): React.Reac
       alignItems="center"
       width={colWidth}
     >
-      {pixelRows !== null ? (
-        <>
-          {heartFrame && <Text color="autoAccept">{heartFrame}</Text>}
-          <PixelRows rows={pixelRows} />
-        </>
+      {heroImage !== null ? (
+        heroImage
+      ) : pixelRows !== null ? (
+        <PixelRows rows={pixelRows} />
       ) : (
         sprite.map((line, i) => (
           <Text key={i} color={i === 0 && heartFrame ? 'autoAccept' : color}>

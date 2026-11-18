@@ -107,6 +107,44 @@ export function getProcessCommand(pid: string | number): string | null {
 }
 
 /**
+ * Gets the command line for a given process without blocking the event loop.
+ * Unlike {@link getProcessCommand}, the lookup runs as an abortable child
+ * process, so a slow `ps` or PowerShell call cannot stall signal handling
+ * in a repeated poll loop. Returns null when the process is gone, the
+ * command is empty, or the lookup fails or is aborted.
+ */
+export async function getProcessCommandAsync(
+  pid: string | number,
+  options?: { signal?: AbortSignal; timeout?: number },
+): Promise<string | null> {
+  const pidStr = String(pid)
+  const result =
+    process.platform === 'win32'
+      ? await execFileNoThrowWithCwd(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-Command',
+            `(Get-CimInstance Win32_Process -Filter "ProcessId=${pidStr}").CommandLine`,
+          ],
+          {
+            timeout: options?.timeout ?? 1000,
+            abortSignal: options?.signal,
+          },
+        )
+      : await execFileNoThrowWithCwd(
+          'ps',
+          ['-o', 'command=', '-p', pidStr],
+          {
+            timeout: options?.timeout ?? 1000,
+            abortSignal: options?.signal,
+          },
+        )
+  if (result.code !== 0 || !result.stdout?.trim()) return null
+  return result.stdout.trim()
+}
+
+/**
  * Gets the command lines for a process and its ancestors in a single call
  * @param pid - The starting process ID
  * @param maxDepth - Maximum depth to traverse (default: 10)

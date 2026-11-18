@@ -164,3 +164,55 @@ test('a newly displayed bubble starts at age zero instead of inheriting the prev
     root.unmount()
   }
 })
+
+test('/buddy dance is visible in the line-art fallback, not only in hero art', async () => {
+  const stdout = new PassThrough()
+  const tty = stdout as unknown as NodeJS.WriteStream & {
+    columns: number
+    rows: number
+  }
+  tty.columns = 120
+  tty.rows = 40
+  let output = ''
+  stdout.on('data', chunk => {
+    output += chunk.toString()
+  })
+
+  // Below level 2 the sprite falls back to line art.
+  chalk.level = 1
+  const clock = createFakeClock()
+  let updateAppState: ReturnType<typeof useSetAppState> | undefined
+  function StateController(): null {
+    const setAppState = useSetAppState()
+    useEffect(() => {
+      updateAppState = setAppState
+    }, [setAppState])
+    return null
+  }
+
+  const root = await createRoot({ stdout: tty, patchConsole: false })
+  root.render(
+    <ClockContext.Provider value={clock}>
+      <AppStateProvider initialState={getDefaultAppState()}>
+        <CompanionSprite />
+        <StateController />
+      </AppStateProvider>
+    </ClockContext.Provider>,
+  )
+
+  try {
+    await waitFor(
+      () => output.includes('Testbud') && updateAppState !== undefined,
+      'line-art render',
+    )
+    expect(output).not.toContain('▀')
+    expect(output).not.toContain('♪')
+
+    output = ''
+    updateAppState!(prev => ({ ...prev, companionDanceAt: 1 }))
+    await waitFor(() => output.includes('♪') || output.includes('♫'), 'dance notes')
+  } finally {
+    root.unmount()
+    chalk.level = 3
+  }
+})

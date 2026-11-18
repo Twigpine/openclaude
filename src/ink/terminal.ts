@@ -135,6 +135,60 @@ export function setXtversionName(name: string): void {
   if (xtversionName === undefined) xtversionName = name
 }
 
+// -- Terminal graphics (populated async at startup) --
+//
+// App.tsx asks the terminal whether it implements the kitty graphics
+// protocol and how big a cell is in pixels. Until the replies arrive (or if
+// the terminal ignores the queries) readers see `kitty: false`.
+
+export type TerminalGraphics = {
+  /** The terminal answered the kitty graphics query with OK. */
+  kitty: boolean
+  /** Cell size in pixels, when the terminal reports it. */
+  cell?: { width: number; height: number }
+}
+
+let terminalGraphics: TerminalGraphics = { kitty: false }
+const terminalGraphicsListeners = new Set<() => void>()
+
+export function getTerminalGraphics(): TerminalGraphics {
+  return terminalGraphics
+}
+
+export function setTerminalGraphics(next: TerminalGraphics): void {
+  terminalGraphics = next
+  for (const listener of terminalGraphicsListeners) listener()
+}
+
+export function subscribeTerminalGraphics(listener: () => void): () => void {
+  terminalGraphicsListeners.add(listener)
+  return () => {
+    terminalGraphicsListeners.delete(listener)
+  }
+}
+
+/**
+ * Whether to ask the terminal about kitty graphics at all. The query is an
+ * APC sequence; the terminals listed here are known to ignore unknown APCs
+ * (and to implement the protocol in recent versions), so probing them is
+ * safe. tmux and screen would need passthrough wrapping, so they are
+ * skipped, as are tests.
+ */
+export function shouldProbeKittyGraphics(): boolean {
+  if (process.env.NODE_ENV === 'test') return false
+  if (process.env.TMUX || process.env.STY) return false
+  const program = process.env.TERM_PROGRAM
+  const term = process.env.TERM ?? ''
+  return (
+    program === 'iTerm.app' ||
+    program === 'ghostty' ||
+    program === 'WezTerm' ||
+    term === 'xterm-kitty' ||
+    term === 'xterm-ghostty' ||
+    process.env.KITTY_WINDOW_ID !== undefined
+  )
+}
+
 export function isGhosttyTerminal(): boolean {
   if (process.env.NODE_ENV === 'test') return false
   if (process.env.TERM_PROGRAM === 'ghostty') return true

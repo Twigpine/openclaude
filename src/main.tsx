@@ -26,6 +26,7 @@ import mapValues from 'lodash-es/mapValues.js';
 import pickBy from 'lodash-es/pickBy.js';
 import uniqBy from 'lodash-es/uniqBy.js';
 import { getOauthConfig } from './constants/oauth.js';
+import { handleUriArgIfEnabled } from './utils/deepLink/handleUriArg.js';
 import { parseSshFlags, sshArgvImpliesHeadless } from './utils/sshPreParse.js';
 import { hasPrintFlag } from './utils/printFlag.js';
 import { getRemoteSessionUrl } from './constants/product.js';
@@ -49,6 +50,13 @@ import { createSyntheticOutputTool, isSyntheticOutputToolEnabled } from './tools
 import { registerTaskReportCommand } from './cli/commands/taskReport.js';
 import { registerAimlapiCommand } from './cli/aimlapiCommand.js';
 import { BACKGROUND_PROCESS_MARKER_FLAG, isValidBackgroundProcessMarker } from './cli/bgRouting.js';
+import {
+  agentsDispatchOptions,
+  buildAgentsDispatchArgs,
+  mergeAgentsDispatchOptions,
+  wantsAgentsDispatch,
+  type AgentsDispatchOptionValues,
+} from './cli/agentsDispatch.js';
 import { getTools } from './tools.js';
 import { canUserConfigureAdvisor, getInitialAdvisorSetting, isAdvisorEnabled, isValidAdvisorModel, modelSupportsAdvisor } from './utils/advisor.js';
 import { isAgentSwarmsEnabled } from './utils/agentSwarmsEnabled.js';
@@ -175,7 +183,7 @@ import { createHeadlessHeartbeat, parseHeadlessHeartbeatDuration, validateHeadle
 import { setCwd } from 'src/utils/Shell.js';
 import { type ProcessedResume, processResumedConversation } from 'src/utils/sessionRestore.js';
 import { plural } from 'src/utils/stringUtils.js';
-import { type ChannelEntry, getInitialMainLoopModel, getIsNonInteractiveSession, getSdkBetas, getSessionId, getUserMsgOptIn, setAllowedChannels, setChromeFlagOverride, setClientType, setCwdState, setDirectConnectServerUrl, setInitialMainLoopModel, setInlinePlugins, setIsInteractive, setKairosActive, setOriginalCwd, setQuestionPreviewFormat, setSdkBetas, setSessionBypassPermissionsMode, setSessionDangerousPermissionMode, setSessionPersistenceDisabled, setSessionSource, setUserMsgOptIn, switchSession } from './bootstrap/state.js';
+import { type ChannelEntry, getInitialMainLoopModel, getIsNonInteractiveSession, getSdkBetas, getSessionId, getProjectRoot, getUserMsgOptIn, setAllowedChannels, setChromeFlagOverride, setClientType, setCwdState, setDirectConnectServerUrl, setInitialMainLoopModel, setInlinePlugins, setIsInteractive, setKairosActive, setOriginalCwd, setQuestionPreviewFormat, setSdkBetas, setProjectRoot, setSessionBypassPermissionsMode, setSessionDangerousPermissionMode, setSessionPersistenceDisabled, setSessionSource, setUserMsgOptIn, switchSession } from './bootstrap/state.js';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const autoModeStateModule = feature('TRANSCRIPT_CLASSIFIER') ? require('./utils/permissions/autoModeState.js') as typeof import('./utils/permissions/autoModeState.js') : null;
@@ -615,21 +623,14 @@ export async function main() {
   // Handle deep link URIs early — this is invoked by the OS protocol handler
   // and should bail out before full init since it only needs to parse the URI
   // and open a terminal.
-  if (feature('LODESTONE')) {
-    const handleUriIdx = process.argv.indexOf('--handle-uri');
-    if (handleUriIdx !== -1 && process.argv[handleUriIdx + 1]) {
-      const {
-        enableConfigs
-      } = await import('./utils/config.js');
-      enableConfigs();
-      const uri = process.argv[handleUriIdx + 1]!;
-      const {
-        handleDeepLinkUri
-      } = await import('./utils/deepLink/protocolHandler.js');
-      const exitCode = await handleDeepLinkUri(uri);
-      process.exit(exitCode);
+  {
+    const deepLinkExit = await handleUriArgIfEnabled(process.argv);
+    if (deepLinkExit !== undefined) {
+      process.exit(deepLinkExit);
     }
+  }
 
+  if (feature('LODESTONE')) {
     // macOS URL handler: when LaunchServices launches our .app bundle, the
     // URL arrives via Apple Event (not argv). LaunchServices overwrites
     // __CFBundleIdentifier to the launching bundle's ID, which is a precise
@@ -3103,6 +3104,7 @@ async function run(): Promise<CommanderCommand> {
         });
         if (session.workDir) {
           setOriginalCwd(session.workDir);
+          setProjectRoot(session.workDir);
           setCwdState(session.workDir);
         }
         setDirectConnectServerUrl(_pendingConnect.url);
@@ -3172,6 +3174,7 @@ async function run(): Promise<CommanderCommand> {
           if (hadProgress) process.stderr.write('\n');
         }
         setOriginalCwd(sshSession.remoteCwd);
+        setProjectRoot(sshSession.remoteCwd);
         setCwdState(sshSession.remoteCwd);
         setDirectConnectServerUrl(_pendingSSH.local ? 'local' : _pendingSSH.host);
       } catch (err) {
@@ -3485,6 +3488,7 @@ async function run(): Promise<CommanderCommand> {
                     process.chdir(selectedPath);
                     setCwd(selectedPath);
                     setOriginalCwd(selectedPath);
+                    setProjectRoot(selectedPath);
                   } else {
                     // User cancelled
                     await gracefulShutdown(0);
@@ -3606,7 +3610,7 @@ async function run(): Promise<CommanderCommand> {
           getFpsMetrics,
           stats,
           initialState
-        }, getWorktreePaths(getOriginalCwd()), {
+        }, getWorktreePaths(getProjectRoot()), {
           ...sessionConfig,
           initialSearchQuery: searchTerm,
           forkSession: options.forkSession,
@@ -3925,6 +3929,7 @@ async function run(): Promise<CommanderCommand> {
         });
         if (session.workDir) {
           setOriginalCwd(session.workDir);
+          setProjectRoot(session.workDir);
           setCwdState(session.workDir);
         }
         setDirectConnectServerUrl(serverUrl);
@@ -4144,8 +4149,32 @@ async function run(): Promise<CommanderCommand> {
     await setupTokenHandler(root);
   });
 
-  // Agents command - list configured agents
-  program.command('agents').description('List configured agents').option('--setting-sources <sources>', 'Comma-separated list of setting sources to load (user, project, local).').action(async () => {
+  // Agents command - list configured agents, or dispatch a background agent
+  // session when a prompt is given. Dispatch flags mirror the root options and
+  // are forwarded to the spawned session (local equivalent of upstream's
+  // `claude agents` dispatch flags; BG_SESSIONS provides the dispatch target).
+  const agentsCmd = program.command('agents').description('List configured agents, or dispatch a background agent session').argument('[prompt]', 'Dispatch a background agent session with this prompt');
+  for (const option of agentsDispatchOptions()) {
+    agentsCmd.addOption(option);
+  }
+  agentsCmd.action(async (prompt: string | undefined, options: AgentsDispatchOptionValues) => {
+    if (prompt === undefined && wantsAgentsDispatch(options)) {
+      console.error('Error: a prompt is required to dispatch a background agent session. Usage: openclaude agents "<prompt>" [dispatch flags]');
+      process.exit(1);
+    }
+    if (prompt !== undefined) {
+      if (!feature('BG_SESSIONS')) {
+        console.error('Error: background sessions are not enabled in this build.');
+        process.exit(1);
+      }
+      const {
+        handleBgFlag
+      } = await import('./cli/bg.js');
+      // '--' keeps a flag-looking prompt positional for the child parse
+      const mergedOptions = mergeAgentsDispatchOptions(program.opts() as AgentsDispatchOptionValues, options);
+      await handleBgFlag([...buildAgentsDispatchArgs(mergedOptions), '--', prompt]);
+      process.exit(0);
+    }
     const {
       agentsHandler
     } = await import('./cli/handlers/agents.js');

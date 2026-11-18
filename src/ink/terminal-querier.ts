@@ -41,6 +41,8 @@ type KittyResponse = Extract<TerminalResponse, { type: 'kittyKeyboard' }>
 type CursorPosResponse = Extract<TerminalResponse, { type: 'cursorPosition' }>
 type OscResponse = Extract<TerminalResponse, { type: 'osc' }>
 type XtversionResponse = Extract<TerminalResponse, { type: 'xtversion' }>
+type CellSizeResponse = Extract<TerminalResponse, { type: 'cellSize' }>
+type KittyGraphicsResponse = Extract<TerminalResponse, { type: 'kittyGraphics' }>
 
 // -- Query builders --
 
@@ -109,6 +111,25 @@ export function xtversion(): TerminalQuery<XtversionResponse> {
   return {
     request: csi('>0q'),
     match: (r): r is XtversionResponse => r.type === 'xtversion',
+  }
+}
+
+/** XTWINOPS 16: report the cell size in pixels (CSI 16 t).
+ *  Terminal replies with CSI 6 ; height ; width t or ignores. */
+export function cellPixelSize(): TerminalQuery<CellSizeResponse> {
+  return {
+    request: csi('16t'),
+    match: (r): r is CellSizeResponse => r.type === 'cellSize',
+  }
+}
+
+/** Kitty graphics protocol support query: asks the terminal to validate a
+ *  1×1 image without storing it. Supporting terminals reply
+ *  APC G i=<id> ; OK ST; others ignore the APC. */
+export function kittyGraphics(id: number): TerminalQuery<KittyGraphicsResponse> {
+  return {
+    request: `\x1b_Gi=${id},s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\`,
+    match: (r): r is KittyGraphicsResponse => r.type === 'kittyGraphics' && r.id === id,
   }
 }
 

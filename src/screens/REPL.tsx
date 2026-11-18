@@ -12,6 +12,9 @@ import chalk from 'chalk';
 // eslint-disable-next-line custom-rules/prefer-use-keybindings -- / n N Esc [ v are bare letters in transcript modal context, same class as g/G/j/k in ScrollKeybindingHandler
 import { useInput } from '../ink.js';
 import { useSearchInput } from '../hooks/useSearchInput.js';
+import { useIdleCompaction } from '../hooks/useIdleCompaction.js';
+import { runIdleCompaction } from '../services/compact/idleCompaction.js';
+import { getCacheSafeParams } from '../services/compact/getCacheSafeParams.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useSearchHighlight } from '../ink/hooks/use-search-highlight.js';
 import type { JumpHandle } from '../components/VirtualMessageList.js';
@@ -294,6 +297,9 @@ import { CompanionSprite, CompanionFloatingBubble, MIN_COLS_FOR_FULL_SPRITE } fr
 import { CompanionActionFX } from '../buddy/CompanionActionFX.js';
 import { isBuddyEnabled } from '../buddy/feature.js';
 import { fireCompanionObserver } from '../buddy/observer.js';
+import type { CompanionActivity } from '../buddy/heroMoods.js';
+import { lastTurnFailed } from '../buddy/turnOutcome.js';
+import { useCompanionMoodClock } from '../buddy/useCompanionMoodClock.js';
 // Session manager removed - using AppState now
 import type { RemoteSessionConfig } from '../remote/RemoteSessionManager.js';
 import { REMOTE_SAFE_COMMANDS } from '../commands.js';
@@ -1540,6 +1546,13 @@ export function REPL({
     setLocalCommands(prev => prev.filter(cmd => remoteCommandSet.has(cmd.name) || REMOTE_SAFE_COMMANDS.has(cmd)));
   }, [setLocalCommands]);
   const [inProgressToolUseIDs, setInProgressToolUseIDs] = useState<Set<string>>(new Set());
+  // What the agent is doing, for the companion's mood. isWaitingForApproval
+  // is scoped to this session's permission queue and prompts. lastTurnFailed
+  // scans back only to the last assistant message, so it stays cheap. The
+  // mood clock lives here, not in the sprite, because the sprite unmounts
+  // while dialogs cover the prompt.
+  const companionActivity: CompanionActivity = isWaitingForApproval ? 'waiting' : isLoading ? inProgressToolUseIDs.size > 0 ? 'working' : 'thinking' : 'idle';
+  const companionMoodClock = useCompanionMoodClock(companionActivity, lastTurnFailed(messages));
   const hasInterruptibleToolInProgressRef = useRef(false);
   const queryLifecycleTrackerRef = useRef(new QueryLifecycleOperationTracker());
 
@@ -3076,6 +3089,48 @@ export function REPL({
     setAbortController,
     onBackgroundQuery: handleBackgroundQuery
   });
+  const idleCompactionAbortRef = useRef<AbortController | null>(null);
+  useIdleCompaction(messages, isLoading || isRemoteSession, async currentMessages => {
+    const idleAbortController = createAbortController();
+    idleCompactionAbortRef.current = idleAbortController;
+    try {
+      const context = getToolUseContext([...currentMessages], [], idleAbortController, mainLoopModel);
+      const postCompact = await runIdleCompaction(currentMessages, context);
+      if (!postCompact || idleAbortController.signal.aborted) return false;
+      // A turn submitted while compaction was in flight replaced the
+      // messages array; drop the stale result instead of clobbering it.
+      if (messagesRef.current !== currentMessages) return false;
+      setMessages(prev => {
+        if (prev !== currentMessages) return prev;
+        // Match the compact-boundary path in onQueryEvent: fullscreen
+        // keeps one compact-interval of pre-boundary scrollback.
+        return isFullscreenEnvEnabled() ? [...getMessagesAfterCompactBoundary(prev, {
+          includeSnipped: true
+        }), ...postCompact] : postCompact;
+      });
+      setAutoCompactTrackingForSession(getSessionId(), undefined);
+      if (feature('PROACTIVE') || feature('KAIROS')) {
+        proactiveModule?.setContextBlocked(false);
+      }
+      setConversationId(randomUUID());
+      addNotification({
+        key: 'idle-compact-notice',
+        text: 'Conversation compacted after a long idle. Turn it off with the "Idle compact" option in /config or by setting "idleCompaction" to false.',
+        priority: 'medium',
+        timeoutMs: 10000
+      });
+      return true;
+    } finally {
+      if (idleCompactionAbortRef.current === idleAbortController) {
+        idleCompactionAbortRef.current = null;
+      }
+    }
+  });
+  // Cancel in-flight idle compaction when a turn starts or the REPL unmounts.
+  useEffect(() => {
+    if (isLoading) idleCompactionAbortRef.current?.abort();
+    return () => idleCompactionAbortRef.current?.abort();
+  }, [isLoading]);
   const onQueryEvent = useCallback((event: Parameters<typeof handleMessageFromStream>[0]) => {
     handleMessageFromStream(event, newMessage => {
       if (isCompactBoundaryMessage(newMessage)) {
@@ -5221,7 +5276,7 @@ export function REPL({
         {!showSpinner && !isLoading && !userInputOnProcessing && !hasRunningTeammates && isBriefOnly && !viewedAgentTask && <BriefIdleStatus />}
         {isFullscreenEnvEnabled() && <PromptInputQueuedCommands />}
       </>} bottom={<Box flexDirection={isBuddyEnabled() && companionNarrow ? 'column' : 'row'} width="100%" alignItems={isBuddyEnabled() && companionNarrow ? undefined : 'flex-end'}>
-        {isBuddyEnabled() && companionNarrow && isFullscreenEnvEnabled() && companionVisible ? <CompanionSprite /> : null}
+        {isBuddyEnabled() && companionNarrow && isFullscreenEnvEnabled() && companionVisible ? <CompanionSprite moodClock={companionMoodClock} /> : null}
         <Box flexDirection="column" flexGrow={1}>
           {permissionStickyFooter}
           {/* Immediate local-jsx commands (/btw, /sandbox, /assistant,
@@ -5567,23 +5622,8 @@ export function REPL({
             }
             const newAbortController = createAbortController();
             const context = getToolUseContext(compactMessages, [], newAbortController, mainLoopModel);
-            const appState = context.getAppState();
-            const defaultSysPrompt = await getSystemPrompt(context.options.tools, context.options.mainLoopModel, Array.from(appState.toolPermissionContext.additionalWorkingDirectories.keys()), context.options.mcpClients);
-            const systemPrompt = buildEffectiveSystemPrompt({
-              mainThreadAgentDefinition: undefined,
-              toolUseContext: context,
-              customSystemPrompt: context.options.customSystemPrompt,
-              defaultSystemPrompt: defaultSysPrompt,
-              appendSystemPrompt: context.options.appendSystemPrompt
-            });
-            const [userContext, systemContext] = await Promise.all([getUserContext(), getSystemContext()]);
-            const result = await partialCompactConversation(compactMessages, messageIndex, context, {
-              systemPrompt,
-              userContext,
-              systemContext,
-              toolUseContext: context,
-              forkContextMessages: compactMessages
-            }, feedback, direction);
+            const cacheSafeParams = await getCacheSafeParams(context, compactMessages);
+            const result = await partialCompactConversation(compactMessages, messageIndex, context, cacheSafeParams, feedback, direction);
             const kept = result.messagesToKeep ?? [];
             const ordered = direction === 'up_to' ? [...result.summaryMessages, ...kept] : [...kept, ...result.summaryMessages];
             const postCompact = [result.boundaryMarker, ...ordered, ...result.attachments, ...result.hookResults];
@@ -5629,7 +5669,7 @@ export function REPL({
             setMessageSelectorPreselect(undefined);
           }} />}
         </Box>
-        {isBuddyEnabled() && !(companionNarrow && isFullscreenEnvEnabled()) && companionVisible ? <CompanionSprite /> : null}
+        {isBuddyEnabled() && !(companionNarrow && isFullscreenEnvEnabled()) && companionVisible ? <CompanionSprite moodClock={companionMoodClock} /> : null}
       </Box>} />
     </MCPConnectionManager>
   </KeybindingSetup>;

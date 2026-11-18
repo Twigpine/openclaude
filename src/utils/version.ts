@@ -56,5 +56,12 @@ export function getReleaseTagUrl(version: string = publicBuildVersion): string {
 }
 
 export function getPublicBuildVersion(): string {
-  return MACRO.DISPLAY_VERSION ?? MACRO.VERSION
+  try {
+    return MACRO.DISPLAY_VERSION ?? MACRO.VERSION
+  } catch {
+    // Unbundled source runs have no MACRO. Return the real package version,
+    // prerelease suffix included: engine compatibility checks must see the
+    // actual host identity, not a coerced release version.
+    return readPackageVersionFromDisk() ?? fallbackBuildVersion
+  }
 }

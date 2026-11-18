@@ -1,10 +1,7 @@
 import { z } from 'zod/v4'
-import {
-  getOriginalCwd,
-  getProjectRoot,
-  setOriginalCwd,
-  setProjectRoot,
-} from '../../bootstrap/state.js'
+import { setOriginalCwd, setProjectRoot } from '../../bootstrap/state.js'
+import { SandboxManager } from '../../utils/sandbox/sandbox-adapter.js'
+import type { WorktreeSession } from '../../utils/worktree.js'
 import { clearSystemPromptSections } from '../../constants/systemPromptSections.js'
 import { logEvent } from '../../services/analytics/index.js'
 import type { Tool } from '../../Tool.js'
@@ -12,7 +9,9 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { count } from '../../utils/array.js'
 import { clearMemoryFileCaches } from '../../utils/claudemd.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
-import { updateHooksConfigSnapshot } from '../../utils/hooks/hooksConfigSnapshot.js'
+// Import as module object so spyOn works in tests (direct imports bypass
+// spies) - matches the convention documented in hooksConfigSnapshot.ts.
+import * as hooksConfigSnapshot from '../../utils/hooks/hooksConfigSnapshot.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { getPlansDirectory } from '../../utils/plans.js'
 import { setCwd } from '../../utils/Shell.js'
@@ -119,7 +118,18 @@ async function countWorktreeChanges(
  * keepWorktree()/cleanupWorktree() handle process.chdir and currentWorktreeSession;
  * this handles everything above the worktree utility layer.
  */
-function restoreSessionToOriginalCwd(
+// --worktree startup moves projectRoot onto the worktree; mid-session
+// EnterWorktreeTool does not. Read the flag recorded at entry: both roots
+// are mutable, so a mid-session /cd moves originalCwd off the worktree while
+// projectRoot stays, and comparing them would misjudge a startup session as
+// mid-session.
+export function worktreeSessionOwnsProjectRoot(
+  session: WorktreeSession,
+): boolean {
+  return session.projectRootIsWorktree === true
+}
+
+export function restoreSessionToOriginalCwd(
   originalCwd: string,
   projectRootIsWorktree: boolean,
 ): void {
@@ -137,7 +147,7 @@ function restoreSessionToOriginalCwd(
     // setup.ts's --worktree block called updateHooksConfigSnapshot() to re-read
     // hooks from the worktree. Restore symmetrically. (Mid-session
     // EnterWorktreeTool never touched the snapshot, so no-op there.)
-    updateHooksConfigSnapshot()
+    hooksConfigSnapshot.updateHooksConfigSnapshot()
   }
   saveWorktreeState(null)
   clearSystemPromptSections()
@@ -241,13 +251,9 @@ export const ExitWorktreeTool: Tool<InputSchema, Output> = buildTool({
       originalHeadCommit,
     } = session
 
-    // --worktree startup calls setOriginalCwd(getCwd()) and
-    // setProjectRoot(getCwd()) back-to-back right after setCwd(worktreePath)
-    // (setup.ts:235/239), so both hold the same realpath'd value and BashTool
-    // cd never touches either. Mid-session EnterWorktreeTool sets originalCwd
-    // but NOT projectRoot. (Can't use getCwd() — BashTool mutates it on every
-    // cd. Can't use session.worktreePath — it's join()'d, not realpath'd.)
-    const projectRootIsWorktree = getProjectRoot() === getOriginalCwd()
+    // Ownership is recorded on the session at entry; re-deriving it from
+    // mutable roots here would misjudge a startup session after /cd.
+    const projectRootIsWorktree = worktreeSessionOwnsProjectRoot(session)
 
     // Re-count at execution time for accurate analytics and output — the
     // worktree state at validateInput time may not match now. Null (git
@@ -261,6 +267,8 @@ export const ExitWorktreeTool: Tool<InputSchema, Output> = buildTool({
     if (input.action === 'keep') {
       await keepWorktree()
       restoreSessionToOriginalCwd(originalCwd, projectRootIsWorktree)
+      await SandboxManager.refreshWorktreeMainRepoPath(originalCwd)
+      SandboxManager.refreshConfig()
 
       logEvent('tengu_worktree_kept', {
         mid_session: true,
@@ -289,6 +297,8 @@ export const ExitWorktreeTool: Tool<InputSchema, Output> = buildTool({
     }
     await cleanupWorktree()
     restoreSessionToOriginalCwd(originalCwd, projectRootIsWorktree)
+    await SandboxManager.refreshWorktreeMainRepoPath(originalCwd)
+    SandboxManager.refreshConfig()
 
     logEvent('tengu_worktree_removed', {
       mid_session: true,

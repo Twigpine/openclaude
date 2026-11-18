@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.37.0](https://github.com/Twigpine/openclaude/compare/v0.36.0...v0.37.0) (2026-11-17)
+
+
+### Features
+
+* /scroll-speed and /tui commands, unattended retry, idle compaction ([#2525](https://github.com/Twigpine/openclaude/issues/2525)) ([766d48d](https://github.com/Twigpine/openclaude/commit/766d48db5b7ea5b5d520007435906724b6c4b6ed))
+* add /todos, /cd, /reload-skills and four CLAUDE_CODE_* env toggles ([#2521](https://github.com/Twigpine/openclaude/issues/2521)) ([d8a35c4](https://github.com/Twigpine/openclaude/commit/d8a35c44c24e498e5ca5989f180efac7addc09f1))
+* **buddy:** procedural hero art with moods that follow the agent ([#2515](https://github.com/Twigpine/openclaude/issues/2515)) ([b932e2b](https://github.com/Twigpine/openclaude/commit/b932e2b933e4a7ecddc4ef0ef950aa72f1c33302))
+* **buddy:** sharp image tier for terminals with kitty graphics, and Keynote ([#2516](https://github.com/Twigpine/openclaude/issues/2516)) ([0c6b6f9](https://github.com/Twigpine/openclaude/commit/0c6b6f9ed4863a3bb8cea8c0233527da89d1937a))
+* deep links, live auto theme, opt-in skill improvement ([#2537](https://github.com/Twigpine/openclaude/issues/2537)) ([d8e6666](https://github.com/Twigpine/openclaude/commit/d8e6666e16f045f4f40f611ba6f3ec7399aff753))
+* opt-in OpenTelemetry event export and openclaude agents dispatch ([#2529](https://github.com/Twigpine/openclaude/issues/2529)) ([ce4129a](https://github.com/Twigpine/openclaude/commit/ce4129a7e038d44ba6fcdb1a67445bdb5b11cc59))
+* parse bash command structure for permission and safety checks ([#2532](https://github.com/Twigpine/openclaude/issues/2532)) ([849e58b](https://github.com/Twigpine/openclaude/commit/849e58bb573713326e0db5b69a5886222b594dd9))
+* **permissions:** support Bash(prompt: ...) natural-language rules ([#2533](https://github.com/Twigpine/openclaude/issues/2533)) ([9afab41](https://github.com/Twigpine/openclaude/commit/9afab41d394fe684b2cc7d32ee96b478f27ceb21))
+* **statusline:** add optional refreshInterval for periodic re-runs ([#2527](https://github.com/Twigpine/openclaude/issues/2527)) ([0a8df0e](https://github.com/Twigpine/openclaude/commit/0a8df0ed67e74fc73e400baf6563a870a3d27d97))
+
+
+### Bug Fixes
+
+* **files:** invalidate cached reads after preserved-mtime updates ([#2518](https://github.com/Twigpine/openclaude/issues/2518)) ([034586c](https://github.com/Twigpine/openclaude/commit/034586cc636d2386e071d00b4f2fa059c184ffaa))
+* **input:** recognize multiple quoted dragged paths ([#2517](https://github.com/Twigpine/openclaude/issues/2517)) ([fae8eff](https://github.com/Twigpine/openclaude/commit/fae8eff2fdde410d4e8cf9f740e9d6f957968c03))
+* **usage:** never overwrite a corrupt usage rollup file ([#2512](https://github.com/Twigpine/openclaude/issues/2512)) ([520c6fa](https://github.com/Twigpine/openclaude/commit/520c6faa931a29ebbf59e3704dd6ea5f4a1efd7d))
+* **usage:** validate saved rollup rows and lock every event-file delete ([#2514](https://github.com/Twigpine/openclaude/issues/2514)) ([3311b68](https://github.com/Twigpine/openclaude/commit/3311b68f879ef005d4123bc8a15ff47e91a3ee55))
+
+## [0.36.0](https://github.com/Twigpine/openclaude/compare/v0.35.1...v0.36.0) (2026-11-11)
+
+
+### Features
+
+* **opengateway:** default new setups to auto smart routing ([#2508](https://github.com/Twigpine/openclaude/issues/2508)) ([77a96c2](https://github.com/Twigpine/openclaude/commit/77a96c21a98fa3a939b038bd4fba313911712466))
+* **usage:** add a Local view to /usage ([#2506](https://github.com/Twigpine/openclaude/issues/2506)) ([b9ec49b](https://github.com/Twigpine/openclaude/commit/b9ec49b2dc830976aa0f8066248cb9b47cf1369d))
+* **usage:** record a local per-request usage ledger ([#2504](https://github.com/Twigpine/openclaude/issues/2504)) ([ac81fcc](https://github.com/Twigpine/openclaude/commit/ac81fcc26edf1b09334b0cfe1c754d8ad3143bd0))
+
+
+### Bug Fixes
+
+* address reported AI code quality findings ([#2511](https://github.com/Twigpine/openclaude/issues/2511)) ([2d98d10](https://github.com/Twigpine/openclaude/commit/2d98d107bf305f02e092568da2b1f5b08385b6d1))
+* **bg:** stop logs -f after the background session reaches a terminal state ([#2500](https://github.com/Twigpine/openclaude/issues/2500)) ([98c971e](https://github.com/Twigpine/openclaude/commit/98c971e0407d02da7ae5e06ee344b4238719248e))
+* **image:** restore opt-in BMP paste and accurate failures ([#2498](https://github.com/Twigpine/openclaude/issues/2498)) ([8367b55](https://github.com/Twigpine/openclaude/commit/8367b55b5d4f709a3c6b1d18c6563c3f498c80a1))
+* **model:** gate Codex catalog by active route (supersedes [#2495](https://github.com/Twigpine/openclaude/issues/2495)) ([#2499](https://github.com/Twigpine/openclaude/issues/2499)) ([436aaff](https://github.com/Twigpine/openclaude/commit/436aaff1a1d4844755984e986ccbf8a1fcee1f25))
+* **openai-shim:** preserve reasoning across assistant history ([#2503](https://github.com/Twigpine/openclaude/issues/2503)) ([44d4952](https://github.com/Twigpine/openclaude/commit/44d49522a32aca808612c4f139732e82168690dd))
+* **openai-shim:** report Gemini cachedContentTokenCount as cache_read_input_tokens ([#2494](https://github.com/Twigpine/openclaude/issues/2494)) ([ae64040](https://github.com/Twigpine/openclaude/commit/ae640404944f7dc1a6cc697a1d19ab2cd2522440))
+
+## [0.35.1](https://github.com/Twigpine/openclaude/compare/v0.35.0...v0.35.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **opengateway:** cache the live model list for an hour, not a day ([#2490](https://github.com/Twigpine/openclaude/issues/2490)) ([96fb014](https://github.com/Twigpine/openclaude/commit/96fb01476901f54c8fdfa25b6909253907a47209))
+
 ## [0.35.0](https://github.com/Twigpine/openclaude/compare/v0.34.0...v0.35.0) (2026-11-06)
 
 

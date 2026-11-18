@@ -14,7 +14,7 @@ import {
   formatDescriptionWithSource,
   getCommandName,
 } from 'src/commands.js'
-import { createStreamlinedTransformer } from 'src/utils/streamlinedTransform.js'
+import { resolveStreamlinedTransformer } from 'src/utils/streamlinedTransform.js'
 import { installStreamJsonStdoutGuard } from 'src/utils/streamJsonStdoutGuard.js'
 import { noteBackgroundSessionTerminationSignal } from 'src/utils/backgroundSessionTermination.js'
 import type { ToolPermissionContext } from 'src/Tool.js'
@@ -142,7 +142,11 @@ import { buildBridgeConnectUrl } from 'src/bridge/bridgeStatusUtil.js'
 import { extractInboundMessageFields } from 'src/bridge/inboundMessages.js'
 import { resolveAndPrepend } from 'src/bridge/inboundAttachments.js'
 import type { CanUseToolFn } from 'src/hooks/useCanUseTool.js'
-import { hasPermissionsToUseTool } from 'src/utils/permissions/permissions.js'
+import {
+  enforceForcedAllowWriteBoundary,
+  hasPermissionsToUseTool,
+  resolvePermissionPromptSuppression,
+} from 'src/utils/permissions/permissions.js'
 import { safeParseJSON } from 'src/utils/json.js'
 import {
   outputSchema as permissionToolOutputSchema,
@@ -954,12 +958,9 @@ export async function runHeadless(
   let lastMessage: SDKMessage | undefined
   // Streamlined mode transforms messages when CLAUDE_CODE_STREAMLINED_OUTPUT=true and using stream-json
   // Build flag gates this out of external builds; env var is the runtime opt-in for ant builds
-  const transformToStreamlined =
-    feature('STREAMLINED_OUTPUT') &&
-    isEnvTruthy(process.env.CLAUDE_CODE_STREAMLINED_OUTPUT) &&
-    options.outputFormat === 'stream-json'
-      ? createStreamlinedTransformer()
-      : null
+  const transformToStreamlined = resolveStreamlinedTransformer(
+    options.outputFormat,
+  )
 
   headlessProfilerCheckpoint('before_runHeadlessStreaming')
   streamJsonDrainStarted = true
@@ -4374,16 +4375,23 @@ export function createCanUseToolWithPermissionPrompt(
     const shouldBypassForcedAsk =
       forceDecision?.behavior === 'ask' &&
       toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
-    const mainPermissionResult =
+    const decision =
       forceDecision !== undefined && !shouldBypassForcedAsk
-        ? forceDecision
+        ? enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
         : await hasPermissionsToUseTool(
-        tool,
-        input,
-        toolUseContext,
-        assistantMessage,
-        toolUseId,
-      )
+            tool,
+            input,
+            toolUseContext,
+            assistantMessage,
+            toolUseId,
+          )
+    const mainPermissionResult = await resolvePermissionPromptSuppression(
+      tool,
+      input,
+      toolUseContext,
+      toolUseId,
+      decision,
+    )
 
     // If the tool is allowed or denied, return the result
     if (
@@ -4472,9 +4480,10 @@ export function createCanUseToolWithPermissionPrompt(
       permissionToolOutputSchema().parse(
         safeParseJSON(permissionToolResultBlockParam.content[0].text),
       ),
-      permissionPromptTool,
+      tool,
       input,
       toolUseContext,
+      permissionPromptTool.name,
     )
   }
   return canUseTool
@@ -4503,14 +4512,22 @@ export function getCanUseToolFn(
       const shouldBypassForcedAsk =
         forceDecision?.behavior === 'ask' &&
         toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
-      return forceDecision !== undefined && !shouldBypassForcedAsk
-        ? forceDecision
-        : await hasPermissionsToUseTool(
+      const decision =
+        forceDecision !== undefined && !shouldBypassForcedAsk
+          ? enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
+          : await hasPermissionsToUseTool(
+              tool,
+              input,
+              toolUseContext,
+              assistantMessage,
+              toolUseId,
+            )
+      return resolvePermissionPromptSuppression(
         tool,
         input,
         toolUseContext,
-        assistantMessage,
         toolUseId,
+        decision,
       )
     }
   }

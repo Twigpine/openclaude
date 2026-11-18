@@ -339,3 +339,336 @@ test('refreshes mounted statusline with null usage after full compaction', async
     setSessionTrustAccepted(originalTrust)
   }
 })
+
+test(
+  'reruns the status line command periodically on the refresh interval',
+  async () => {
+    const stdout = new PassThrough()
+    ;(stdout as unknown as { columns: number }).columns = 80
+    const root = await createRoot({
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      patchConsole: false,
+    })
+    const originalTrust = getSessionTrustAccepted()
+    const calls: StatusLineCommandInput[] = []
+    const messagesRef: RefObject<Message[]> = { current: [] }
+    const initialState: AppState = {
+      ...getDefaultAppState(),
+      settings: {
+        statusLine: {
+          type: 'command',
+          command: 'test-statusline',
+          refreshInterval: 0.1,
+        },
+      },
+    }
+    let latestState = initialState
+    const executeCommand: typeof executeStatusLineCommand = async input => {
+      calls.push(input)
+      return `tick-${calls.length}`
+    }
+    root.render(
+      <AppStateProvider
+        initialState={initialState}
+        onChangeAppState={({ newState }) => {
+          latestState = newState
+        }}
+      >
+        <StatusLine
+          active={true}
+          executeCommand={executeCommand}
+          messagesRef={messagesRef}
+          lastAssistantMessageId={null}
+        />
+      </AppStateProvider>,
+    )
+
+    setSessionTrustAccepted(true)
+    try {
+      await waitFor(() => calls.length === 1, 'initial statusline execution')
+      await waitFor(
+        () => calls.length >= 3,
+        'periodic statusline runs',
+        5000,
+      )
+      await waitFor(
+        () => latestState.statusLineText?.startsWith('tick-') === true,
+        'statusline text from a stubbed run',
+      )
+      expect(latestState.statusLineText).toMatch(/^tick-\d+$/)
+    } finally {
+      root.unmount()
+      stdout.end()
+      setSessionTrustAccepted(originalTrust)
+    }
+  },
+  20000,
+)
+
+test(
+  'skips interval ticks while a status line run is in flight without aborting it',
+  async () => {
+    const stdout = new PassThrough()
+    ;(stdout as unknown as { columns: number }).columns = 80
+    const root = await createRoot({
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      patchConsole: false,
+    })
+    const originalTrust = getSessionTrustAccepted()
+    const calls: PendingExecution[] = []
+    const messagesRef: RefObject<Message[]> = { current: [] }
+    const initialState: AppState = {
+      ...getDefaultAppState(),
+      settings: {
+        statusLine: {
+          type: 'command',
+          command: 'test-statusline',
+          refreshInterval: 0.15,
+        },
+      },
+    }
+    let latestState = initialState
+    const executeCommand: typeof executeStatusLineCommand = async (
+      input,
+      signal,
+    ) =>
+      new Promise(resolve => {
+        const pending = { input, signal: signal!, resolve }
+        calls.push(pending)
+        signal?.addEventListener('abort', () => resolve(undefined), {
+          once: true,
+        })
+      })
+    root.render(
+      <AppStateProvider
+        initialState={initialState}
+        onChangeAppState={({ newState }) => {
+          latestState = newState
+        }}
+      >
+        <StatusLine
+          active={true}
+          executeCommand={executeCommand}
+          messagesRef={messagesRef}
+          lastAssistantMessageId={null}
+        />
+      </AppStateProvider>,
+    )
+
+    setSessionTrustAccepted(true)
+    try {
+      await waitFor(() => calls.length === 1, 'initial statusline execution')
+      await Bun.sleep(1000)
+      expect(calls.length).toBe(1)
+      expect(calls[0]!.signal.aborted).toBe(false)
+
+      calls[0]!.resolve('after-flight')
+      await waitFor(
+        () => calls.length === 2,
+        'next tick after in-flight run resolves',
+        5000,
+      )
+      expect(calls[0]!.signal.aborted).toBe(false)
+      calls[1]!.resolve('second-run')
+      await waitFor(
+        () => latestState.statusLineText === 'second-run',
+        'statusline text after the in-flight run',
+      )
+    } finally {
+      root.unmount()
+      stdout.end()
+      setSessionTrustAccepted(originalTrust)
+    }
+  },
+  20000,
+)
+
+test(
+  'clears the periodic timer when the interval changes, the row hides, or the component unmounts',
+  async () => {
+    const stdout = new PassThrough()
+    ;(stdout as unknown as { columns: number }).columns = 80
+    const root = await createRoot({
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      patchConsole: false,
+    })
+    const originalTrust = getSessionTrustAccepted()
+    const calls: StatusLineCommandInput[] = []
+    const commits: number[] = []
+    let updateAppState: ReturnType<typeof useSetAppState> | undefined
+    const messagesRef: RefObject<Message[]> = { current: [] }
+    const initialState: AppState = {
+      ...getDefaultAppState(),
+      settings: {
+        statusLine: {
+          type: 'command',
+          command: 'test-statusline',
+          refreshInterval: 0.1,
+        },
+      },
+    }
+    let latestState = initialState
+    const executeCommand: typeof executeStatusLineCommand = async input => {
+      calls.push(input)
+      return `tick-${calls.length}`
+    }
+    const onCommit = (token: number) => commits.push(token)
+    function StateController(): null {
+      const setAppState = useSetAppState()
+      useEffect(() => {
+        updateAppState = setAppState
+      }, [setAppState])
+      return null
+    }
+    const render = (active: boolean, token: number) => {
+      root.render(
+        <AppStateProvider
+          initialState={initialState}
+          onChangeAppState={({ newState }) => {
+            latestState = newState
+          }}
+        >
+          <StatusLine
+            active={active}
+            executeCommand={executeCommand}
+            messagesRef={messagesRef}
+            lastAssistantMessageId={null}
+          />
+          <CommitProbe token={token} onCommit={onCommit} onLayoutCommit={() => {}} />
+          <StateController />
+        </AppStateProvider>,
+      )
+    }
+
+    const setIntervalSpy = jest.spyOn(globalThis, 'setInterval')
+    const clearIntervalSpy = jest.spyOn(globalThis, 'clearInterval')
+    // The status-line periodic timer is the only interval in this render
+    // tree using the 100ms and 5000ms delays, so handles are keyed by delay.
+    const intervalHandles = (delay: number) =>
+      setIntervalSpy.mock.calls.flatMap((call, index) =>
+        call[1] === delay ? [setIntervalSpy.mock.results[index]!.value] : [],
+      )
+
+    setSessionTrustAccepted(true)
+    try {
+      render(true, 1)
+      await waitFor(
+        () => calls.length === 1 && updateAppState !== undefined,
+        'initial statusline execution and state controller',
+      )
+
+      updateAppState!(prev => ({
+        ...prev,
+        settings: {
+          ...prev.settings,
+          statusLine: {
+            type: 'command',
+            command: 'test-statusline',
+            refreshInterval: 5,
+          },
+        },
+      }))
+      // Let any debounce armed by an old-interval tick settle first.
+      await Bun.sleep(500)
+      const shortHandles = intervalHandles(100)
+      const callsAfterIntervalChange = calls.length
+      await Bun.sleep(1500)
+      // Behavior check: the old 100ms interval stops firing commands.
+      expect(calls.length).toBe(callsAfterIntervalChange)
+      // Cleanup check: the interval change cleared the exact old handles.
+      for (const handle of shortHandles) {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(handle)
+      }
+
+      const longHandles = intervalHandles(5000)
+      render(false, 2)
+      await waitFor(() => commits.includes(2), 'inactive commit')
+      // Cleanup check: hiding the row cleared the 5s handles it left behind.
+      for (const handle of longHandles) {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(handle)
+      }
+      // Behavior check: nothing runs while the row is hidden.
+      await Bun.sleep(1000)
+      expect(calls.length).toBe(callsAfterIntervalChange)
+
+      // Re-arm the periodic timer so unmounting exercises its cleanup.
+      render(true, 3)
+      await waitFor(() => commits.includes(3), 'reactivated commit')
+      await waitFor(
+        () => intervalHandles(5000).length > longHandles.length,
+        're-armed periodic timer',
+        5000,
+      )
+      const reArmed = intervalHandles(5000).filter(
+        handle => !longHandles.includes(handle),
+      )
+      root.unmount()
+      // Cleanup check: unmounting cleared the re-armed handles.
+      for (const handle of reArmed) {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(handle)
+      }
+    } finally {
+      root.unmount()
+      jest.restoreAllMocks()
+      stdout.end()
+      setSessionTrustAccepted(originalTrust)
+    }
+  },
+  20000,
+)
+
+test(
+  'does not run periodically when no refresh interval is configured',
+  async () => {
+    const stdout = new PassThrough()
+    ;(stdout as unknown as { columns: number }).columns = 80
+    const root = await createRoot({
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      patchConsole: false,
+    })
+    const originalTrust = getSessionTrustAccepted()
+    const calls: StatusLineCommandInput[] = []
+    const messagesRef: RefObject<Message[]> = { current: [] }
+    const initialState: AppState = {
+      ...getDefaultAppState(),
+      settings: {
+        statusLine: { type: 'command', command: 'test-statusline' },
+      },
+    }
+    let latestState = initialState
+    const executeCommand: typeof executeStatusLineCommand = async input => {
+      calls.push(input)
+      return 'initial-only'
+    }
+    root.render(
+      <AppStateProvider
+        initialState={initialState}
+        onChangeAppState={({ newState }) => {
+          latestState = newState
+        }}
+      >
+        <StatusLine
+          active={true}
+          executeCommand={executeCommand}
+          messagesRef={messagesRef}
+          lastAssistantMessageId={null}
+        />
+      </AppStateProvider>,
+    )
+
+    setSessionTrustAccepted(true)
+    try {
+      await waitFor(
+        () => calls.length === 1 && latestState.statusLineText === 'initial-only',
+        'initial statusline execution',
+      )
+      await Bun.sleep(1200)
+      expect(calls.length).toBe(1)
+    } finally {
+      root.unmount()
+      stdout.end()
+      setSessionTrustAccepted(originalTrust)
+    }
+  },
+  20000,
+)

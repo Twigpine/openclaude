@@ -1,5 +1,13 @@
 import { homedir } from 'os'
-import { dirname, isAbsolute, join, normalize, relative, resolve } from 'path'
+import {
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+  relative,
+  resolve,
+  sep,
+} from 'path'
 import { getCwd } from './cwd.js'
 import { getFsImplementation } from './fsOperations.js'
 import { getPlatform } from './platform.js'
@@ -201,4 +209,18 @@ export function normalizePathForConfigKey(path: string): string {
   // Then convert all backslashes to forward slashes for consistent JSON keys
   // This is safe because forward slashes work in Windows paths for most operations
   return normalized.replace(/\\/g, '/')
+}
+
+/**
+ * Lexical containment check: true when `child` is `dir` itself or nested
+ * inside it. Cross-drive safe: on Windows, path.relative across drives
+ * returns the target as an absolute path, which correctly reads as outside.
+ * Does not resolve symlinks; canonicalize inputs first when that matters.
+ */
+export function isPathInsideDir(child: string, dir: string): boolean {
+  const rel = relative(dir, child)
+  return (
+    rel === '' ||
+    (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+  )
 }

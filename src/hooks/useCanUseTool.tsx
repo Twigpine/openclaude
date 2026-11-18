@@ -16,7 +16,7 @@ import type { ClassifierResult } from '../utils/permissions/bashClassifier.js';
 import { AbortError } from '../utils/errors.js';
 import { logError } from '../utils/log.js';
 import type { PermissionDecision } from '../utils/permissions/PermissionResult.js';
-import { hasPermissionsToUseTool } from '../utils/permissions/permissions.js';
+import { DENY_INSTEAD_OF_PROMPTING_REASON, enforceForcedAllowWriteBoundary, getSuppressedPermissionAsk, hasPermissionsToUseTool, suppressPromptIfConfigured } from '../utils/permissions/permissions.js';
 import { handleCoordinatorPermission } from './toolPermission/handlers/coordinatorHandler.js';
 import { handleInteractivePermission } from './toolPermission/handlers/interactiveHandler.js';
 import { handleSwarmWorkerPermission } from './toolPermission/handlers/swarmWorkerHandler.js';
@@ -35,7 +35,11 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
         return;
       }
       const shouldBypassForcedAsk = forceDecision?.behavior === "ask" && toolUseContext.getAppState().toolPermissionContext.mode === "fullAccess";
-      const decisionPromise = forceDecision !== undefined && !shouldBypassForcedAsk ? Promise.resolve(forceDecision) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
+      // A forced ask is still a prompt, so denyInsteadOfPrompting suppresses
+      // it. The resulting suppression denial flows into the deny branch,
+      // which lets PermissionRequest hooks answer before it stands. Forced
+      // allows still honor the opt-in write boundary.
+      const decisionPromise = forceDecision !== undefined && !shouldBypassForcedAsk ? Promise.resolve(forceDecision.behavior === "ask" ? suppressPromptIfConfigured(tool, forceDecision) : enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
       return decisionPromise.then(async result => {
         if (result.behavior === "allow") {
           if (ctx.resolveIfAborted(resolve)) {
@@ -65,6 +69,21 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
         switch (result.behavior) {
           case "deny":
             {
+              // A suppression denial exists only because prompts are
+              // disabled. A PermissionRequest hook may still answer it,
+              // matching the headless and structured-IO ordering; when no
+              // hook decides, the denial stands.
+              if (result.decisionReason?.type === "other" && result.decisionReason.reason === DENY_INSTEAD_OF_PROMPTING_REASON) {
+                const suppressedAsk = getSuppressedPermissionAsk(result);
+                const hookDecision = await ctx.runHooks(appState.toolPermissionContext.mode, suppressedAsk?.suggestions, suppressedAsk?.updatedInput, Date.now());
+                if (ctx.resolveIfAborted(resolve)) {
+                  return;
+                }
+                if (hookDecision) {
+                  resolve(hookDecision);
+                  return;
+                }
+              }
               logPermissionDecision({
                 tool,
                 input,

@@ -86,7 +86,7 @@ export const en = {
   'commands.terminal-setup.description':
     'Install Shift+Enter key binding for newlines',
   'commands.theme.description': 'Change the theme',
-  'commands.usage.description': 'Show plan usage limits',
+  'commands.usage.description': 'Show token usage on this machine and plan usage limits',
   'commands.vim.description': 'Toggle between Vim and Normal editing modes',
   'commands.wiki.description':
     'Initialize and inspect the OpenClaude project wiki',
@@ -102,6 +102,14 @@ export const en = {
     'Run a prompt on a fixed interval or dynamically reschedule it, including bare maintenance-mode loops.',
   'skills.loop.whenToUse':
     'When the user wants to poll for status, babysit a workflow, run recurring maintenance, or keep re-running a prompt within the current session.',
+  'skills.skillDoctor.description':
+    'Audit loaded skills: which went unused this session and what they cost in context.',
+  'skills.lessPermissionPrompts.description':
+    'Scan recent sessions for frequently prompted read-only commands and propose a project allowlist.',
+  'skills.dataviz.description':
+    'Chart and dashboard design guidance, with a palette contrast validator.',
+  'skills.autoModeSetup.description':
+    'Inspect this project and recent sessions, then write autoMode classifier configuration.',
   'skills.simplify.description':
     'Review changed code for reuse, quality, and efficiency, then fix any issues found.',
   'skills.update-config.description':

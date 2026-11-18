@@ -23,6 +23,8 @@ import { WEB_SEARCH_TOOL_NAME } from 'src/tools/WebSearchTool/prompt.js'
 import { extractTextContent } from 'src/utils/messages.js'
 import { SHELL_TOOL_NAMES } from 'src/utils/shell/shellToolUtils.js'
 import { capitalize } from 'src/utils/stringUtils.js'
+import { feature } from 'bun:bundle'
+import { isEnvTruthy } from 'src/utils/envUtils.js'
 
 type ToolCounts = {
   searches: number
@@ -125,6 +127,21 @@ function accumulateToolUses(
 }
 
 /**
+ * Resolve the streamlined transformer for the given output format, or null.
+ * The build flag gates the code path; CLAUDE_CODE_STREAMLINED_OUTPUT is the
+ * runtime opt-in and only stream-json output is transformed.
+ */
+export function resolveStreamlinedTransformer(
+  outputFormat: string | undefined,
+): ((message: StdoutMessage) => StdoutMessage | null) | null {
+  return feature('STREAMLINED_OUTPUT') &&
+    isEnvTruthy(process.env.CLAUDE_CODE_STREAMLINED_OUTPUT) &&
+    outputFormat === 'stream-json'
+    ? createStreamlinedTransformer()
+    : null
+}
+
+/**
  * Create a stateful transformer that accumulates tool counts between text messages.
  * Tool counts reset when a message with text content is encountered.
  */
@@ -175,15 +192,19 @@ export function createStreamlinedTransformer(): (
         // Keep result messages as-is (they have structured_output, permission_denials)
         return message
 
+      // Control-protocol messages (initialize, permission prompts, cancels)
+      // must reach the SDK client unchanged; dropping them hangs the session.
+      case 'control_response':
+      case 'control_request':
+      case 'control_cancel_request':
+        return message
+
       case 'system':
       case 'user':
       case 'stream_event':
       case 'tool_progress':
       case 'auth_status':
       case 'rate_limit_event':
-      case 'control_response':
-      case 'control_request':
-      case 'control_cancel_request':
       case 'keep_alive':
         return null
 

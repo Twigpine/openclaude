@@ -350,6 +350,8 @@ export type CompactMockOptions = {
   queryModelWithStreaming?: ReturnType<typeof mock>
   /** Override for getMaxOutputTokensForModel(). */
   getMaxOutputTokensForModel?: ReturnType<typeof mock>
+  /** Spy on generateFileAttachment to inspect the read context it receives. */
+  generateFileAttachment?: ReturnType<typeof mock>
 }
 
 /**
@@ -526,6 +528,7 @@ async function registerCommonCompactStubs(options: CompactMockOptions = {}) {
   // --- File state cache (DEFENSIVE) ---
   mock.module('../../utils/fileStateCache.js', () => ({
     cacheToObject: mock(() => ({})),
+    createFileStateCacheWithSizeLimit: mock(() => new Map()),
   }))
 
   // --- Session storage (DEFENSIVE) ---
@@ -535,11 +538,14 @@ async function registerCommonCompactStubs(options: CompactMockOptions = {}) {
   }))
 
   // --- Session start hooks (DEFENSIVE) ---
+  const processSessionStartHooks = mock(async () => [])
   mock.module('../../utils/sessionStart.js', () => ({
-    processSessionStartHooks: mock(async () => []),
+    processSessionStartHooks,
   }))
 
   // --- Attachments (DEFENSIVE) ---
+  const generateFileAttachment =
+    options.generateFileAttachment ?? mock(async () => ({}))
   mock.module('../../utils/attachments.js', () => ({
     createAttachmentMessage: mock(() => ({
       type: 'attachment' as const,
@@ -547,7 +553,7 @@ async function registerCommonCompactStubs(options: CompactMockOptions = {}) {
       uuid: `att-${Math.random()}`,
       timestamp: new Date().toISOString(),
     })),
-    generateFileAttachment: mock(() => ({})),
+    generateFileAttachment,
     getAgentListingDeltaAttachment: mock(() => []),
     getDeferredToolsDeltaAttachment: mock(() => []),
     getMcpInstructionsDeltaAttachment: mock(() => []),
@@ -644,7 +650,7 @@ async function registerCommonCompactStubs(options: CompactMockOptions = {}) {
     get3PModelCapabilityOverride: mock(() => undefined),
   }))
 
-  return { runForkedAgent }
+  return { runForkedAgent, processSessionStartHooks, generateFileAttachment }
 }
 
 /**
@@ -668,12 +674,12 @@ async function registerCommonCompactStubs(options: CompactMockOptions = {}) {
  *   trigger hundreds of failed transitive resolution steps.
  */
 async function importCompact(options: CompactMockOptions = {}) {
-  const { runForkedAgent } = await registerCommonCompactStubs(options)
+  const stubs = await registerCommonCompactStubs(options)
 
   // Dynamic import with cache-busting so each test gets fresh module state
   const nonce = `${Date.now()}-${Math.random()}`
   const mod = await import(`./compact.ts?test=${nonce}`)
-  return { ...mod, runForkedAgent }
+  return { ...mod, ...stubs }
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,6 +1043,78 @@ describe('compactConversation provider gate', () => {
     await compactConversation(messages, ctx, csp, false)
 
     expect(runForkedAgent).toHaveBeenCalled()
+  })
+})
+
+describe('compactConversation abort handling', () => {
+  test('skips SessionStart hooks when the compaction is aborted mid-flight', async () => {
+    const abortController = new AbortController()
+    // Abort inside the summary await: by the time attachments finish and
+    // the hooks point is reached, the signal is already aborted.
+    const runForkedAgent = mock(async () => {
+      abortController.abort()
+      return {
+        messages: [
+          assistantMessage('This is a compact summary of the conversation.'),
+        ],
+        totalUsage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      }
+    })
+    const { compactConversation, processSessionStartHooks } =
+      await importCompact({ runForkedAgent })
+
+    const messages = [userMessage('Hello'), assistantMessage('Hi there!')]
+    // The shared session caches belong to the active turn; an aborted
+    // compaction must leave them intact.
+    const readFileState = new Map([
+      ['x.ts', { content: 'y', timestamp: 1 }],
+    ])
+    const ctx = {
+      ...(toolUseContext() as object),
+      abortController,
+      readFileState,
+    } as never
+    const csp = cacheSafeParams(messages)
+
+    await expect(
+      compactConversation(messages, ctx, csp, false),
+    ).rejects.toThrow()
+    expect(processSessionStartHooks).not.toHaveBeenCalled()
+    expect(readFileState.size).toBe(1)
+  })
+})
+
+describe('createPostCompactFileAttachments', () => {
+  test('restore reads cannot hit the readFileState dedup stub', async () => {
+    const generateFileAttachment = mock(async () => ({}))
+    const { createPostCompactFileAttachments } = await importCompact({
+      generateFileAttachment,
+    })
+
+    const readFileState = {
+      '/tmp/keep.ts': { content: 'export const x = 1', timestamp: 1 },
+    }
+    const liveStore = new Map([['live.ts', { content: 'z', timestamp: 2 }]])
+    const ctx = {
+      ...(toolUseContext() as object),
+      readFileState: liveStore,
+    } as never
+
+    await createPostCompactFileAttachments(readFileState, ctx, 5)
+
+    expect(generateFileAttachment).toHaveBeenCalledTimes(1)
+    const passedCtx = (generateFileAttachment.mock.calls[0] as unknown[])[1] as {
+      readFileState: { size: number }
+    }
+    // A populated live cache would let FileReadTool return a
+    // file_unchanged stub pointing at compacted-away content.
+    expect(passedCtx.readFileState.size).toBe(0)
+    expect(passedCtx.readFileState).not.toBe(liveStore)
   })
 })
 

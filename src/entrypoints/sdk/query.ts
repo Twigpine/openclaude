@@ -534,6 +534,7 @@ class QueryImpl implements Query {
       sessionProjectDir: null as string | null, // Resolved below after session resolution
       cwd: this.cwd,
       originalCwd: this.cwd,
+      projectRoot: this.cwd,
       registeredHooks: this.hookCallbacks,
     }
 

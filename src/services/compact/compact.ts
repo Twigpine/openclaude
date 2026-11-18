@@ -50,7 +50,10 @@ import {
 } from '../../utils/contextAnalysis.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { hasExactErrorMessage } from '../../utils/errors.js'
-import { cacheToObject } from '../../utils/fileStateCache.js'
+import {
+  cacheToObject,
+  createFileStateCacheWithSizeLimit,
+} from '../../utils/fileStateCache.js'
 import {
   type CacheSafeParams,
   runForkedAgent,
@@ -562,12 +565,10 @@ export async function compactConversation(
       throw new Error(summary)
     }
 
-    // Store the current file state before clearing
+    // Store the current file state before clearing. The clears happen on
+    // the accepted path below, once the compacted result can no longer be
+    // discarded by a mid-flight abort.
     const preCompactReadFileState = cacheToObject(context.readFileState)
-
-    // Clear the cache
-    context.readFileState.clear()
-    context.loadedNestedMemoryPaths?.clear()
 
     // Intentionally NOT resetting sentSkillNames: re-injecting the full
     // skill_listing (~4K tokens) post-compact is pure cache_creation with
@@ -632,6 +633,12 @@ export async function compactConversation(
       postCompactFileAttachments.push(createAttachmentMessage(att))
     }
 
+    // A turn that started while attachments were generating aborts the
+    // compaction controller; the result will be discarded, so skip the
+    // SessionStart hooks rather than running user hooks for nothing.
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError({ message: ERROR_MESSAGE_USER_ABORT })
+    }
     context.onCompactProgress?.({
       type: 'hooks_start',
       hookType: 'session_start',
@@ -782,6 +789,15 @@ export async function compactConversation(
     ]
       .filter(Boolean)
       .join('\n')
+
+    // Cleared only here, on the accepted path: an aborted compaction is
+    // thrown away before this point and the active session keeps its
+    // read-file and nested-memory state.
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError({ message: ERROR_MESSAGE_USER_ABORT })
+    }
+    context.readFileState.clear()
+    context.loadedNestedMemoryPaths?.clear()
 
     return {
       boundaryMarker,
@@ -974,10 +990,9 @@ export async function partialCompactConversation(
       throw new Error(summary)
     }
 
-    // Store the current file state before clearing
+    // Store the current file state before clearing; as in
+    // compactConversation(), the clears happen on the accepted path below.
     const preCompactReadFileState = cacheToObject(context.readFileState)
-    context.readFileState.clear()
-    context.loadedNestedMemoryPaths?.clear()
     // Intentionally NOT resetting sentSkillNames — see compactConversation()
     // for rationale (~4K tokens saved per compact event).
 
@@ -1033,6 +1048,11 @@ export async function partialCompactConversation(
       postCompactFileAttachments.push(createAttachmentMessage(att))
     }
 
+    // Same abort guard as compactConversation(): skip SessionStart hooks
+    // when the compaction was cancelled mid-flight.
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError({ message: ERROR_MESSAGE_USER_ABORT })
+    }
     context.onCompactProgress?.({
       type: 'hooks_start',
       hookType: 'session_start',
@@ -1139,6 +1159,15 @@ export async function partialCompactConversation(
       direction === 'up_to'
         ? (summaryMessages.at(-1)?.uuid ?? boundaryMarker.uuid)
         : boundaryMarker.uuid
+
+    // Accepted path only — see compactConversation() for why the clears
+    // happen here rather than before attachment generation.
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError({ message: ERROR_MESSAGE_USER_ABORT })
+    }
+    context.readFileState.clear()
+    context.loadedNestedMemoryPaths?.clear()
+
     return {
       boundaryMarker: annotateBoundaryWithPreservedSegment(
         boundaryMarker,
@@ -1584,6 +1613,15 @@ export async function createPostCompactFileAttachments(
           fileReadingLimits: {
             maxTokens: POST_COMPACT_MAX_TOKENS_PER_FILE,
           },
+          // The restore read must not hit the readFileState dedup stub:
+          // the earlier read was compacted away, so a file_unchanged
+          // result would point at content the model no longer has. A
+          // fresh cache also keeps the restore read from mutating the
+          // live store.
+          readFileState: createFileStateCacheWithSizeLimit(
+            toolUseContext.readFileState.max,
+            toolUseContext.readFileState.maxSize,
+          ),
         },
         'tengu_post_compact_file_restore_success',
         'tengu_post_compact_file_restore_error',

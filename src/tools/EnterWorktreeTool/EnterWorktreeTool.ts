@@ -1,5 +1,6 @@
 import { z } from 'zod/v4'
 import { getSessionId, setOriginalCwd } from '../../bootstrap/state.js'
+import { SandboxManager } from '../../utils/sandbox/sandbox-adapter.js'
 import { clearSystemPromptSections } from '../../constants/systemPromptSections.js'
 import { logEvent } from '../../services/analytics/index.js'
 import type { Tool } from '../../Tool.js'
@@ -94,6 +95,8 @@ export const EnterWorktreeTool: Tool<InputSchema, Output> = buildTool({
     process.chdir(worktreeSession.worktreePath)
     setCwd(worktreeSession.worktreePath)
     setOriginalCwd(getCwd())
+    await SandboxManager.refreshWorktreeMainRepoPath(getCwd())
+    SandboxManager.refreshConfig()
     saveWorktreeState(worktreeSession)
     // Clear cached system prompt sections so env_info_simple recomputes with worktree context
     clearSystemPromptSections()

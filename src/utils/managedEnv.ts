@@ -205,16 +205,30 @@ export function applySafeConfigEnvironmentVariables(): void {
  * dangerous environment variables such as LD_PRELOAD, PATH, etc.
  */
 export function applyConfigEnvironmentVariables(): void {
-  Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
+  const previousEnv = { ...process.env }
+  try {
+    Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
 
-  Object.assign(process.env, filterSettingsEnv(getSettings_DEPRECATED()?.env))
+    Object.assign(process.env, filterSettingsEnv(getSettings_DEPRECATED()?.env))
 
-  // Keep runtime provider/model env aligned with the active profile, except
-  // when an explicit provider selection is already present in process.env.
-  applyActiveProviderProfileFromConfig()
-  reapplyRememberedEnvFileValues()
-  reapplyRememberedProviderFlag()
-  reapplyRememberedModelFlag()
+    // Keep runtime provider/model env aligned with the active profile, except
+    // when an explicit provider selection is already present in process.env.
+    applyActiveProviderProfileFromConfig()
+    reapplyRememberedEnvFileValues()
+    reapplyRememberedProviderFlag()
+    reapplyRememberedModelFlag()
+  } catch (error) {
+    // The runtime settings handler logs errors and continues. Roll back this
+    // synchronous merge, including profile/env-file replay, so the previous
+    // route and installed transport agents still match the effective env.
+    for (const key of new Set([...Object.keys(previousEnv), ...Object.keys(process.env)])) {
+      const value = previousEnv[key]
+      if (process.env[key] === value) continue
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    throw error
+  }
 
   // Clear caches so agents are rebuilt with the new env vars
   clearCACertsCache()

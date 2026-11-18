@@ -11,8 +11,12 @@ import { randomUUID } from 'crypto'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { PermissionDecision, PermissionMode } from '../../types/permissions.js'
 import {
+  checkWriteBoundaryForAskRule,
+  enforceForcedAllowWriteBoundary,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
+  runPermissionRequestHooksForHeadlessAgent,
+  suppressPromptIfConfigured,
 } from '../../utils/permissions/permissions.js'
 import {
   getEmptyToolPermissionContext,
@@ -24,6 +28,7 @@ import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
 import { connectToServer, fetchToolsForClient, getServerCacheKey } from '../../services/mcp/client.js'
 import { AuthenticationCancelledError, ClaudeAuthProvider } from '../../services/mcp/auth.js'
+import { logError } from '../../utils/log.js'
 import type { ActiveCredentialScope, CredentialScope } from '../../services/mcp/credentialScope.js'
 import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import {
@@ -304,12 +309,24 @@ export function createExternalCanUseTool(
       const planModeWasActive =
         typeof toolUseContext.getAppState === 'function' &&
         toolUseContext.getAppState().toolPermissionContext.mode === 'plan'
-      return await revalidatePlanModePermissionAllowWithRaceGuard(
+      const revalidation =
+        await revalidatePlanModePermissionAllowWithRaceGuard(
+          tool,
+          originalInput,
+          finalInput,
+          toolUseContext,
+          planModeWasActive,
+        )
+      if (revalidation) {
+        return revalidation
+      }
+      // An SDK callback or remote responder can allow with an updatedInput
+      // pointing outside the working directories; the write boundary is a
+      // hard cap, not a prompt, so it applies to external allows too.
+      return checkWriteBoundaryForAskRule(
         tool,
-        originalInput,
         finalInput,
-        toolUseContext,
-        planModeWasActive,
+        toolUseContext.getAppState?.().toolPermissionContext,
       )
     }
     const isFullAccessMode =
@@ -334,7 +351,39 @@ export function createExternalCanUseTool(
 
     if (forceDecision) {
       if (!(forceDecision.behavior === 'ask' && isFullAccessMode)) {
-        return forceDecision
+        if (forceDecision.behavior !== 'ask') {
+          return enforceForcedAllowWriteBoundary(
+            tool, effectiveInput, toolUseContext, forceDecision,
+          )
+        }
+        // A forced ask never reaches hasPermissionsToUseTool, so the
+        // suppression check runs here. A suppression denial exists only
+        // because prompts are disabled, so a PermissionRequest hook may
+        // still answer it, as on the interactive and structured-IO paths.
+        const suppressed = suppressPromptIfConfigured(tool, forceDecision)
+        if (suppressed.behavior !== 'deny' || !toolUseID) {
+          return suppressed
+        }
+        try {
+          const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
+            tool,
+            forceDecision.updatedInput ?? typedInput,
+            toolUseID,
+            toolUseContext,
+            toolUseContext.getAppState().toolPermissionContext.mode,
+            undefined,
+          )
+          if (hookDecision) {
+            return hookDecision
+          }
+        } catch (err) {
+          logError(
+            err instanceof Error
+              ? err
+              : new Error('PermissionRequest hook dispatch failed'),
+          )
+        }
+        return suppressed
       }
     }
 
@@ -373,6 +422,36 @@ export function createExternalCanUseTool(
     // No user callback — if host registered an onPermissionRequest callback,
     // call it directly and await external resolution with timeout.
     if (toolUseID && onPermissionRequest) {
+      // PermissionRequest hooks answer before any host prompt, matching the
+      // structured-IO ordering: a hook decision stands on its own and no
+      // permission_request is emitted for it. Hook dispatch is best-effort —
+      // a failure falls through to the normal prompt path.
+      try {
+        const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
+          tool,
+          effectiveInput,
+          toolUseID,
+          toolUseContext,
+          toolUseContext.getAppState().toolPermissionContext.mode,
+          undefined,
+        )
+        if (hookDecision) {
+          return hookDecision
+        }
+      } catch (err) {
+        logError(
+          err instanceof Error ? err : new Error('PermissionRequest hook dispatch failed'),
+        )
+      }
+      // An external permission_request IS the prompt this setting exists to
+      // suppress; deny up front instead of asking the host.
+      const suppressionDeny = suppressPromptIfConfigured(tool, {
+        behavior: 'ask' as const,
+        message: `${tool.name} requires permission`,
+      })
+      if (suppressionDeny.behavior === 'deny') {
+        return suppressionDeny
+      }
       const requestId = randomUUID()
       const messageUuid = randomUUID()
 
@@ -847,7 +926,9 @@ export function createDefaultCanUseTool(
           return fullAccessDecision
         }
       } else {
-        return forceDecision
+        return forceDecision.behavior === 'ask'
+          ? suppressPromptIfConfigured(tool, forceDecision)
+          : enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
       }
     }
     if (!warnedDefaultPermissions) {

@@ -9,6 +9,7 @@ import { getClipboardPath } from '../ink/termio/osc.js';
 // eslint-disable-next-line custom-rules/prefer-use-keybindings -- Esc needs conditional propagation based on selection state
 import { type Key, useInput } from '../ink.js';
 import { useKeybindings } from '../keybindings/useKeybinding.js';
+import { getGlobalConfig } from '../utils/config.js';
 import { logForDebugging } from '../utils/debug.js';
 type Props = {
   scrollRef: RefObject<ScrollBoxHandle | null>;
@@ -283,12 +284,15 @@ export function computeWheelStep(state: WheelAccelState, dir: 1 | -1, now: numbe
     // Direction reversal or long idle: start at 2 (not 1) so the first
     // click after a pause moves a visible amount. Without this, idle-
     // then-resume in the same direction decays to mult≈1 (1 row).
-    state.mult = 2;
+    // Scaled by base so /scroll-speed applies on this path too.
+    state.mult = 2 * state.base;
     state.frac = 0;
   } else {
     const m = Math.pow(0.5, gap / WHEEL_DECAY_HALFLIFE_MS);
-    const cap = gap >= WHEEL_DECAY_GAP_MS ? WHEEL_DECAY_CAP_SLOW : WHEEL_DECAY_CAP_FAST;
-    state.mult = Math.min(cap, 1 + (state.mult - 1) * m + WHEEL_DECAY_STEP * m);
+    const cap =
+      (gap >= WHEEL_DECAY_GAP_MS ? WHEEL_DECAY_CAP_SLOW : WHEEL_DECAY_CAP_FAST) *
+      state.base;
+    state.mult = Math.min(cap, 1 + (state.mult - 1) * m + WHEEL_DECAY_STEP * m * state.base);
   }
   const total = state.mult + state.frac;
   const rows = Math.floor(total);
@@ -296,17 +300,23 @@ export function computeWheelStep(state: WheelAccelState, dir: 1 | -1, now: numbe
   return rows;
 }
 
-/** Read CLAUDE_CODE_SCROLL_SPEED, default 1, clamp (0, 20].
- *  Some terminals pre-multiply wheel events (ghostty discrete=3, iTerm2
- *  "faster scroll") — base=1 is correct there. Others send 1 event/notch —
- *  set CLAUDE_CODE_SCROLL_SPEED=3 to match vim/nvim/opencode. We can't
- *  detect which kind of terminal we're in, hence the knob. Called lazily
- *  from initAndLogWheelAccel so globalSettings.env has loaded. */
+export const MAX_SCROLL_SPEED = 20;
+
+function normalizeScrollSpeed(n: number): number {
+  return Number.isNaN(n) || n <= 0 ? 1 : Math.min(n, MAX_SCROLL_SPEED);
+}
+
+/** Read CLAUDE_CODE_SCROLL_SPEED then the persisted scrollSpeed config,
+ *  default 1, clamp (0, MAX_SCROLL_SPEED]. Some terminals pre-multiply
+ *  wheel events (ghostty discrete=3, iTerm2 "faster scroll") — base=1 is
+ *  correct there. Others send 1 event/notch — set the speed to 3 to match
+ *  vim/nvim/opencode. We can't detect which kind of terminal we're in,
+ *  hence the knob. Called lazily from initAndLogWheelAccel so
+ *  globalSettings.env has loaded. */
 export function readScrollSpeedBase(): number {
   const raw = process.env.CLAUDE_CODE_SCROLL_SPEED;
-  if (!raw) return 1;
-  const n = parseFloat(raw);
-  return Number.isNaN(n) || n <= 0 ? 1 : Math.min(n, 20);
+  if (raw) return normalizeScrollSpeed(parseFloat(raw));
+  return normalizeScrollSpeed(getGlobalConfig().scrollSpeed ?? 1);
 }
 
 /** Initial wheel accel state. xtermJs=true selects the decay curve.
@@ -336,6 +346,14 @@ function initAndLogWheelAccel(): WheelAccelState {
   const base = readScrollSpeedBase();
   logForDebugging(`wheel accel: ${xtermJs ? 'decay (xterm.js)' : 'window (native)'} · base=${base} · TERM_PROGRAM=${process.env.TERM_PROGRAM ?? 'unset'}`);
   return initWheelAccel(xtermJs, base);
+}
+
+function syncWheelBaseFromConfig(state: WheelAccelState): void {
+  const base = readScrollSpeedBase();
+  if (state.base !== base) {
+    state.base = base;
+    state.mult = base;
+  }
 }
 
 // Drag-to-scroll: when dragging past the viewport edge, scroll by this many
@@ -473,6 +491,7 @@ export function ScrollKeybindingHandler({
       // inside the centered Modal, where the paginated slice always fits).
       if (!s_2 || s_2.getScrollHeight() <= s_2.getViewportHeight()) return false;
       wheelAccel.current ??= initAndLogWheelAccel();
+      syncWheelBaseFromConfig(wheelAccel.current);
       scrollUp(s_2, computeWheelStep(wheelAccel.current, -1, performance.now()));
       onScroll?.(false, s_2);
     },
@@ -481,6 +500,7 @@ export function ScrollKeybindingHandler({
       const s_3 = scrollRef.current;
       if (!s_3 || s_3.getScrollHeight() <= s_3.getViewportHeight()) return false;
       wheelAccel.current ??= initAndLogWheelAccel();
+      syncWheelBaseFromConfig(wheelAccel.current);
       const step = computeWheelStep(wheelAccel.current, 1, performance.now());
       const reachedBottom = scrollDown(s_3, step);
       onScroll?.(reachedBottom, s_3);

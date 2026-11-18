@@ -1,6 +1,6 @@
 import { feature } from 'bun:bundle'
 import { getInvokedSkillsForAgent } from '../../bootstrap/state.js'
-import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
+import { isEnvTruthy } from '../envUtils.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_PII_TAGGED,
@@ -175,7 +175,7 @@ Output <updates>[]</updates> if no updates are needed.`,
 export function initSkillImprovement(): void {
   if (
     feature('SKILL_IMPROVEMENT') &&
-    getFeatureValue_CACHED_MAY_BE_STALE('tengu_copper_panda', false)
+    isEnvTruthy(process.env.CLAUDE_CODE_SKILL_IMPROVEMENT)
   ) {
     registerPostSamplingHook(createSkillImprovementHook())
   }

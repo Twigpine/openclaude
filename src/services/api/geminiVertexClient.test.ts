@@ -685,3 +685,78 @@ test('direct native client rejects a host-changing location before resolving a b
   })).toThrow('GEMINI_VERTEX_LOCATION')
   expect(credentials).toBe(0)
 })
+
+test('Gemini Vertex client reports cachedContentTokenCount as cache_read_input_tokens', async () => {
+  const client = createGeminiVertexClient({
+    project: 'project-123',
+    location: 'us-central1',
+    model: 'gemini-3.5-flash',
+    getAccessToken: async () => 'access-token-123',
+    fetch: (async (_input, _init) =>
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'hi' }] } }],
+          usageMetadata: {
+            promptTokenCount: 100,
+            cachedContentTokenCount: 80,
+            candidatesTokenCount: 2,
+          },
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch,
+  })
+
+  const response = await client.messages.create({
+    model: 'gemini-3.5-flash',
+    max_tokens: 100,
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+
+  expect(response.usage).toMatchObject({
+    input_tokens: 20,
+    output_tokens: 2,
+    cache_read_input_tokens: 80,
+  })
+})
+
+test('Gemini Vertex streaming publishes cache-aware usage on the terminal message_delta', async () => {
+  const client = createGeminiVertexClient({
+    project: 'project-123',
+    location: 'us-central1',
+    model: 'gemini-3.5-flash',
+    getAccessToken: async () => 'access-token-123',
+    fetch: (async () =>
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'hi' }] } }],
+          usageMetadata: {
+            promptTokenCount: 100,
+            cachedContentTokenCount: 80,
+            candidatesTokenCount: 2,
+          },
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as unknown as typeof fetch,
+  })
+
+  const result = await client.beta.messages.create({
+    model: 'gemini-3.5-flash',
+    max_tokens: 100,
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: true,
+  }).withResponse()
+
+  const events: GeminiVertexStreamEvent[] = []
+  for await (const event of result.data) {
+    events.push(event)
+  }
+
+  const start = events.find(e => e.type === 'message_start')
+  const delta = events.find(e => e.type === 'message_delta')
+  expect(start).toMatchObject({
+    message: { usage: { input_tokens: 20, cache_read_input_tokens: 80, output_tokens: 2 } },
+  })
+  expect(delta).toMatchObject({
+    usage: { input_tokens: 20, cache_read_input_tokens: 80, output_tokens: 2 },
+  })
+})

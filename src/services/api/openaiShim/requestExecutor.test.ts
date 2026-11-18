@@ -291,7 +291,7 @@ afterEach(() => {
 })
 
 
-test('gitlawb opengateway provider flag prefers OPENGATEWAY_API_KEY over generic OPENAI_API_KEYS pool', async () => {
+test('twigpine opengateway provider flag prefers OPENGATEWAY_API_KEY over generic OPENAI_API_KEYS pool', async () => {
   process.env.OPENGATEWAY_BASE_URL = 'http://localhost:8181/v1'
   process.env.OPENGATEWAY_API_KEY = 'fake-ogw-key'
   process.env.OPENAI_API_KEYS = 'fake-openai-pool-a,fake-openai-pool-b'
@@ -528,7 +528,7 @@ test('custom endpoints preserve configured auth and custom headers', async () =>
   expect(captured.headers['X-Tenant-Secret']).toBe('tenant-secret')
 })
 
-test('gitlawb opengateway provider flag uses generic OPENAI_API_KEYS pool before generic OPENAI_API_KEY fallback', async () => {
+test('twigpine opengateway provider flag uses generic OPENAI_API_KEYS pool before generic OPENAI_API_KEY fallback', async () => {
   process.env.OPENGATEWAY_BASE_URL = 'http://localhost:8181/v1'
   process.env.OPENAI_API_KEYS = 'fake-openai-pool-a,fake-openai-pool-b'
   process.env.OPENAI_API_KEY = 'fake-generic-openai-key'

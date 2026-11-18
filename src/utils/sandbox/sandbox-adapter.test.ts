@@ -1,15 +1,30 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { execFileSync } from 'child_process'
 import { SandboxManager as BaseSandboxManager } from '@anthropic-ai/sandbox-runtime'
-import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from 'fs/promises'
 import { tmpdir } from 'os'
 import { join, resolve, sep } from 'path'
 import {
   getCwdState,
   getOriginalCwd,
+  getProjectRoot,
   setCwdState,
   setOriginalCwd,
+  setProjectRoot,
 } from '../../bootstrap/state.js'
 import { snapshotEnv } from '../../test/envSnapshot.js'
+import {
+  getClaudeConfigHomeDirOverrideForTesting,
+  setClaudeConfigHomeDirForTesting,
+} from '../envUtils.js'
+import { gitFixtureEnv } from '../../test/gitEnv.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -26,6 +41,11 @@ import {
   type SandboxRuntimeConfig,
   SandboxRuntimeConfigSchema,
 } from './sandbox-adapter.js'
+
+// Git fixture commands must not inherit the invoking shell's repo env
+// (GIT_DIR, GIT_WORK_TREE, ...) or they may operate on the wrong repository.
+const git = (args: string[]) =>
+  execFileSync('git', args, { env: gitFixtureEnv() })
 
 const policyGetters = [
   'getFsReadConfig',
@@ -79,6 +99,8 @@ async function inspectRuntimePolicy(config: SandboxRuntimeConfig): Promise<Runti
 describe('convertToSandboxRuntimeConfig', () => {
   let restoreEnv: () => void
   let previousOriginalCwd: string
+  let previousProjectRoot: string
+  let previousConfigHome: string | undefined
   let previousCwd: string
   let tempRoot: string
   let activeCwd: string
@@ -90,6 +112,8 @@ describe('convertToSandboxRuntimeConfig', () => {
     previousRuntimeConfig = BaseSandboxManager.getConfig()
     restoreEnv = snapshotEnv(['CLAUDE_CONFIG_DIR', 'OPENCLAUDE_CONFIG_DIR'])
     previousOriginalCwd = getOriginalCwd()
+    previousProjectRoot = getProjectRoot()
+    previousConfigHome = getClaudeConfigHomeDirOverrideForTesting()
     previousCwd = getCwdState()
 
     tempRoot = await mkdtemp(join(tmpdir(), 'openclaude-sandbox-adapter-'))
@@ -98,8 +122,13 @@ describe('convertToSandboxRuntimeConfig', () => {
 
     process.env.CLAUDE_CONFIG_DIR = join(tempRoot, 'config')
     process.env.OPENCLAUDE_CONFIG_DIR = join(tempRoot, 'openclaude-config')
+    // Pin the same root triple the settings-bearing fixtures use and clear
+    // any config-home override left by an earlier test in the shard, so
+    // getSettingsForSource reads the file under OPENCLAUDE_CONFIG_DIR.
+    setClaudeConfigHomeDirForTesting(undefined)
     resetSettingsCache()
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalCwd)
     setCwdState(activeCwd)
   })
 
@@ -114,6 +143,8 @@ describe('convertToSandboxRuntimeConfig', () => {
       try {
         restoreEnv()
         setOriginalCwd(previousOriginalCwd)
+        setProjectRoot(previousProjectRoot)
+        setClaudeConfigHomeDirForTesting(previousConfigHome)
         setCwdState(previousCwd)
         resetSettingsCache()
         await rm(tempRoot, { recursive: true, force: true })
@@ -338,6 +369,230 @@ describe('convertToSandboxRuntimeConfig', () => {
     } finally {
       unsubscribe()
       store.clear()
+    }
+  })
+
+  test('refreshWorktreeMainRepoPath adds the main-repo write allowance for a linked worktree', async () => {
+    const repository = join(tempRoot, 'main-repo')
+    const linkedWorktree = join(tempRoot, 'linked-worktree')
+    git(['init', repository])
+    git([
+      '-C',
+      repository,
+      'config',
+      'user.email',
+      'test@example.com',
+    ])
+    git([
+      '-C',
+      repository,
+      'config',
+      'user.name',
+      'OpenClaude Test',
+    ])
+    await writeFile(join(repository, 'seed.txt'), 'seed\n')
+    git(['-C', repository, 'add', 'seed.txt'])
+    git(['-C', repository, 'commit', '-m', 'seed'])
+    git([
+      '-C',
+      repository,
+      'worktree',
+      'add',
+      '-b',
+      'feature-branch',
+      linkedWorktree,
+    ])
+
+    // Mirrors the /cd flow: the session cwd moves into a linked worktree
+    // after initialize(), so the once-at-init cache must be re-detected
+    // before refreshConfig() runs.
+    setCwdState(linkedWorktree)
+    await SandboxManager.refreshWorktreeMainRepoPath(linkedWorktree)
+
+    const config = convertToSandboxRuntimeConfig({} as SettingsJson)
+    expect(config.filesystem.allowWrite).toContain(repository)
+
+    // /cd into a child directory of the worktree must keep the allowance:
+    // .git only exists at the worktree root, so detection has to ascend
+    // rather than clearing the cached main-repo path.
+    const childDir = join(linkedWorktree, 'src')
+    await mkdir(childDir, { recursive: true })
+    setCwdState(childDir)
+    await SandboxManager.refreshWorktreeMainRepoPath(childDir)
+
+    const childConfig = convertToSandboxRuntimeConfig({} as SettingsJson)
+    expect(childConfig.filesystem.allowWrite).toContain(repository)
+  })
+
+  test('refreshWorktreeMainRepoPath keeps the cached main repo path when detection fails', async () => {
+    // The failure path relies on EACCES, which chmod cannot produce on
+    // Windows or for root.
+    if (process.platform === 'win32' || process.geteuid?.() === 0) {
+      return
+    }
+
+    const repository = join(tempRoot, 'main-repo-fail')
+    const linkedWorktree = join(tempRoot, 'linked-worktree-fail')
+    git(['init', repository])
+    git([
+      '-C',
+      repository,
+      'config',
+      'user.email',
+      'test@example.com',
+    ])
+    git([
+      '-C',
+      repository,
+      'config',
+      'user.name',
+      'OpenClaude Test',
+    ])
+    await writeFile(join(repository, 'seed.txt'), 'seed\n')
+    git(['-C', repository, 'add', 'seed.txt'])
+    git(['-C', repository, 'commit', '-m', 'seed'])
+    git([
+      '-C',
+      repository,
+      'worktree',
+      'add',
+      '-b',
+      'feature-branch-fail',
+      linkedWorktree,
+    ])
+
+    setCwdState(linkedWorktree)
+    await SandboxManager.refreshWorktreeMainRepoPath(linkedWorktree)
+    expect(
+      convertToSandboxRuntimeConfig({} as SettingsJson).filesystem.allowWrite,
+    ).toContain(repository)
+
+    // An unreadable .git makes the next lookup fail rather than answer
+    // "not a worktree"; the failure must not clear the valid cache.
+    const gitFile = join(linkedWorktree, '.git')
+    await chmod(gitFile, 0o000)
+    try {
+      await SandboxManager.refreshWorktreeMainRepoPath(linkedWorktree)
+      const config = convertToSandboxRuntimeConfig({} as SettingsJson)
+      expect(config.filesystem.allowWrite).toContain(repository)
+    } finally {
+      await chmod(gitFile, 0o644)
+    }
+  })
+
+  test('drops the allowance when detection fails inside a different worktree', async () => {
+    // The failure path relies on EACCES, which chmod cannot produce on
+    // Windows or for root.
+    if (process.platform === 'win32' || process.geteuid?.() === 0) {
+      return
+    }
+
+    const repoA = join(tempRoot, 'main-repo-a')
+    const worktreeA = join(tempRoot, 'worktree-a')
+    const repoB = join(tempRoot, 'main-repo-b')
+    const worktreeB = join(tempRoot, 'worktree-b')
+    for (const [repo, worktree, branch] of [
+      [repoA, worktreeA, 'branch-a'],
+      [repoB, worktreeB, 'branch-b'],
+    ] as const) {
+      git(['init', repo])
+      git(['-C', repo, 'config', 'user.email', 'test@example.com'])
+      git(['-C', repo, 'config', 'user.name', 'OpenClaude Test'])
+      await writeFile(join(repo, 'seed.txt'), 'seed\n')
+      git(['-C', repo, 'add', 'seed.txt'])
+      git(['-C', repo, 'commit', '-m', 'seed'])
+      git(['-C', repo, 'worktree', 'add', '-b', branch, worktree])
+    }
+
+    setCwdState(worktreeA)
+    await SandboxManager.refreshWorktreeMainRepoPath(worktreeA)
+    expect(
+      convertToSandboxRuntimeConfig({} as SettingsJson).filesystem.allowWrite,
+    ).toContain(repoA)
+
+    // /cd into a different worktree whose .git is unreadable: a failed
+    // re-detection there must not keep worktree A's grant.
+    const gitFileB = join(worktreeB, '.git')
+    await chmod(gitFileB, 0o000)
+    try {
+      setCwdState(worktreeB)
+      await SandboxManager.refreshWorktreeMainRepoPath(worktreeB)
+      const config = convertToSandboxRuntimeConfig({} as SettingsJson)
+      expect(config.filesystem.allowWrite).not.toContain(repoA)
+    } finally {
+      await chmod(gitFileB, 0o644)
+    }
+  })
+
+  test('detection stops ascending at GIT_CEILING_DIRECTORIES', async () => {
+    const repository = join(tempRoot, 'main-repo-ceiling')
+    const linkedWorktree = join(tempRoot, 'linked-worktree-ceiling')
+    git(['init', repository])
+    git(['-C', repository, 'config', 'user.email', 'test@example.com'])
+    git(['-C', repository, 'config', 'user.name', 'OpenClaude Test'])
+    await writeFile(join(repository, 'seed.txt'), 'seed\n')
+    git(['-C', repository, 'add', 'seed.txt'])
+    git(['-C', repository, 'commit', '-m', 'seed'])
+    git(['-C', repository, 'worktree', 'add', '-b', 'branch-ceiling', linkedWorktree])
+
+    // cwd sits below the worktree root; ceiling at the worktree root means the
+    // .git there must not be seen, matching git's own root discovery.
+    const childDir = join(linkedWorktree, 'nested')
+    await mkdir(childDir, { recursive: true })
+    const restoreCeiling = snapshotEnv(['GIT_CEILING_DIRECTORIES'], {
+      clear: true,
+    })
+    try {
+      process.env.GIT_CEILING_DIRECTORIES = linkedWorktree
+      setCwdState(childDir)
+      await SandboxManager.refreshWorktreeMainRepoPath(childDir)
+      expect(
+        convertToSandboxRuntimeConfig({} as SettingsJson).filesystem
+          .allowWrite,
+      ).not.toContain(repository)
+    } finally {
+      restoreCeiling()
+    }
+  })
+
+  test('keeps the allowance across a failed detection from a canonical path', async () => {
+    // The failure path relies on EACCES, which chmod cannot produce on
+    // Windows or for root.
+    if (process.platform === 'win32' || process.geteuid?.() === 0) {
+      return
+    }
+
+    const repository = join(tempRoot, 'main-repo-link')
+    const linkedWorktree = join(tempRoot, 'linked-worktree-link')
+    git(['init', repository])
+    git(['-C', repository, 'config', 'user.email', 'test@example.com'])
+    git(['-C', repository, 'config', 'user.name', 'OpenClaude Test'])
+    await writeFile(join(repository, 'seed.txt'), 'seed\n')
+    git(['-C', repository, 'add', 'seed.txt'])
+    git(['-C', repository, 'commit', '-m', 'seed'])
+    git(['-C', repository, 'worktree', 'add', '-b', 'branch-link', linkedWorktree])
+
+    // Detect via a symlinked path: the recorded owner must be canonical, or a
+    // later lookup from the real path reads as a different worktree.
+    const link = join(tempRoot, 'worktree-link')
+    await symlink(linkedWorktree, link)
+    setCwdState(link)
+    await SandboxManager.refreshWorktreeMainRepoPath(link)
+    expect(
+      convertToSandboxRuntimeConfig({} as SettingsJson).filesystem.allowWrite,
+    ).toContain(repository)
+
+    const childDir = join(linkedWorktree, 'inner')
+    await mkdir(childDir, { recursive: true })
+    const gitFile = join(linkedWorktree, '.git')
+    await chmod(gitFile, 0o000)
+    try {
+      setCwdState(childDir)
+      await SandboxManager.refreshWorktreeMainRepoPath(childDir)
+      const config = convertToSandboxRuntimeConfig({} as SettingsJson)
+      expect(config.filesystem.allowWrite).toContain(repository)
+    } finally {
+      await chmod(gitFile, 0o644)
     }
   })
 })

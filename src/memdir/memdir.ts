@@ -8,7 +8,7 @@ const teamMemPaths = feature('TEAMMEM')
   ? (require('./teamMemPaths.js') as typeof import('./teamMemPaths.js'))
   : null
 
-import { getKairosActive, getOriginalCwd } from '../bootstrap/state.js'
+import { getKairosActive, getProjectRoot } from '../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 /* eslint-enable @typescript-eslint/no-require-imports */
 import {
@@ -402,7 +402,7 @@ export function buildSearchingPastContextSection(autoMemDir: string): string[] {
   if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_coral_fern', false)) {
     return []
   }
-  const projectDir = getProjectDir(getOriginalCwd())
+  const projectDir = getProjectDir(getProjectRoot())
   // Ant-native builds alias grep to embedded ugrep and remove the dedicated
   // Grep tool, so give the model a real shell invocation there.
   // In REPL mode, both Grep and Bash are hidden from direct use — the model

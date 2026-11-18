@@ -41,6 +41,7 @@ import installSlackApp from './commands/install-slack-app/index.js'
 import breakCache from './commands/break-cache/index.js'
 import cacheProbe from './commands/cache-probe/index.js'
 import cacheStats from './commands/cacheStats/index.js'
+import cd from './commands/cd/index.js'
 import mcp from './commands/mcp/index.js'
 import mobile from './commands/mobile/index.js'
 import onboarding from './commands/onboarding/index.js'
@@ -54,6 +55,7 @@ import {
 } from './commands/request-size/index.js'
 import resume, { continueCommand } from './commands/resume/index.js'
 import review, { ultrareview } from './commands/review.js'
+import scrollSpeed from './commands/scroll-speed/index.js'
 import search from './commands/search/index.js'
 import session from './commands/session/index.js'
 import sessions from './commands/sessions/index.js'
@@ -62,6 +64,7 @@ import share from './commands/share/index.js'
 import skills from './commands/skills/index.js'
 import status from './commands/status/index.js'
 import tasks from './commands/tasks/index.js'
+import todos from './commands/todos/index.js'
 import teleport from './commands/teleport/index.js'
 /* eslint-disable @typescript-eslint/no-require-imports */
 const agentsPlatform =
@@ -76,6 +79,7 @@ import bughunterPerf from './commands/bughunter-perf/index.js'
 import terminalSetup from './commands/terminalSetup/index.js'
 import usage from './commands/usage/index.js'
 import theme from './commands/theme/index.js'
+import tui from './commands/tui/index.js'
 import logo from './commands/logo/index.js'
 import vim from './commands/vim/index.js'
 import { feature } from 'bun:bundle'
@@ -151,6 +155,7 @@ import agents from './commands/agents/index.js'
 import autoFix from './commands/auto-fix.js'
 import plugin from './commands/plugin/index.js'
 import reloadPlugins from './commands/reload-plugins/index.js'
+import reloadSkills from './commands/reload-skills/index.js'
 import rewind from './commands/rewind/index.js'
 import heapDump from './commands/heapdump/index.js'
 import mockLimits from './commands/mock-limits/index.js'
@@ -298,6 +303,7 @@ const COMMANDS = memoize((): Command[] => [
   btw,
   cacheProbe,
   cacheStats,
+  cd,
   chrome,
   clear,
   clearContextWindow,
@@ -341,12 +347,14 @@ const COMMANDS = memoize((): Command[] => [
   pr_comments,
   releaseNotes,
   reloadPlugins,
+  reloadSkills,
   rename,
   repomap,
   replay,
   requestSize,
   requestSizeNonInteractive,
   resume,
+  scrollSpeed,
   search,
   session,
   sessions,
@@ -358,6 +366,7 @@ const COMMANDS = memoize((): Command[] => [
   stickers,
   tag,
   theme,
+  tui,
   logo,
   feedback,
   goal,
@@ -395,6 +404,7 @@ const COMMANDS = memoize((): Command[] => [
   passes,
   ...(peersCmd ? [peersCmd] : []),
   tasks,
+  todos,
   ...(workflowsCmd ? [workflowsCmd] : []),
   ...(torch ? [torch] : []),
   ...(process.env.USER_TYPE === 'ant' && !process.env.IS_DEMO

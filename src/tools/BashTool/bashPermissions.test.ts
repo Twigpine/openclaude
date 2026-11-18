@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -8,6 +9,8 @@ import {
   getOriginalCwd,
   setAllowedSettingSources,
   setOriginalCwd,
+  setProjectRoot,
+  getProjectRoot,
 } from '../../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
@@ -276,10 +279,12 @@ test('checkSandboxAutoAllow caps fanout when astSubcommands is null', () => {
 
 test('git commit governance policy runs through the production Bash permission path', async () => {
   const originalCwd = getOriginalCwd()
+  const originalProjectRoot = getProjectRoot()
   const projectDir = await mkdtemp(join(tmpdir(), 'openclaude-git-policy-'))
 
   try {
     setOriginalCwd(projectDir)
+    setProjectRoot(projectDir)
     setAllowedSettingSources([...SETTING_SOURCES])
     await mkdir(join(projectDir, '.openclaude'), { recursive: true })
     await writeFile(
@@ -389,6 +394,7 @@ test('git commit governance policy runs through the production Bash permission p
     })
   } finally {
     setOriginalCwd(originalCwd)
+    setProjectRoot(originalProjectRoot)
     setAllowedSettingSources([...SETTING_SOURCES])
     resetSettingsCache()
     await rm(projectDir, { recursive: true, force: true })
@@ -527,5 +533,224 @@ describe('speculative cache eviction', () => {
     const consumedOverflow = consumeSpeculativeClassifierCheck('overflow')
     expect(consumedOverflow).toBeDefined()
     expect(peekSpeculativeClassifierCheck('overflow')).toBeUndefined()
+  })
+})
+
+// Regression: a literal allow rule must not silently win when a Bash prompt
+// deny/ask rule exists but the classifier could not evaluate it (provider
+// error, malformed verdict). Only an evaluated non-match may fall through.
+// sideQuery is mocked so the whole classifyBashCommand path runs for real.
+describe('Bash prompt rules when the classifier is unavailable', () => {
+  const classifierEnabled = feature('BASH_CLASSIFIER') ? true : false
+  let realSideQueryModule: Record<string, unknown> | undefined
+  let sideQueryCalls = 0
+  let sideQueryImpl: (opts: unknown) => Promise<unknown> = async () => {
+    throw new Error('sideQuery mock not configured')
+  }
+
+  beforeEach(async () => {
+    sideQueryCalls = 0
+    realSideQueryModule ??= (await import('../../utils/sideQuery.js')) as Record<
+      string,
+      unknown
+    >
+    mock.module('../../utils/sideQuery.js', () => ({
+      ...realSideQueryModule,
+      sideQuery: (opts: unknown) => {
+        sideQueryCalls++
+        return sideQueryImpl(opts)
+      },
+    }))
+  })
+
+  afterEach(() => {
+    // mock.module() is process-global and mock.restore() does not undo it.
+    if (realSideQueryModule) {
+      const real = realSideQueryModule
+      mock.module('../../utils/sideQuery.js', () => real)
+    }
+  })
+
+  function promptRuleContext() {
+    return {
+      ...getEmptyToolPermissionContext(),
+      alwaysAllowRules: { projectSettings: ['Bash(git status)'] },
+      alwaysDenyRules: { projectSettings: ['Bash(prompt: git commands)'] },
+    }
+  }
+
+  test('unavailable deny classifier prompts instead of falling through to literal allow', async () => {
+    sideQueryImpl = async () => {
+      throw new Error('provider down')
+    }
+    const result = await bashToolHasPermission(
+      { command: 'git status' },
+      makeToolUseContext(promptRuleContext()),
+    )
+    if (classifierEnabled) {
+      expect(result.behavior).toBe('ask')
+      expect(result.decisionReason).toMatchObject({
+        type: 'other',
+        reason: expect.stringContaining('could not be evaluated'),
+      })
+      expect(sideQueryCalls).toBe(1)
+    } else {
+      // Feature gated off: the prompt rule is inert, literal allow applies.
+      expect(result.behavior).toBe('allow')
+      expect(sideQueryCalls).toBe(0)
+    }
+  })
+
+  // A literal subcommand deny must beat the unavailable fallback ask:
+  // `echo ok && git push` with Bash(git push:*) denied is a deny, not an
+  // approvable prompt. Regression: the fallback used to return before the
+  // subcommand deny checks ran.
+  test('literal subcommand deny wins over the unavailable fallback ask', async () => {
+    sideQueryImpl = async () => {
+      throw new Error('provider down')
+    }
+    const result = await bashToolHasPermission(
+      { command: 'echo ok && git push' },
+      makeToolUseContext({
+        ...getEmptyToolPermissionContext(),
+        alwaysDenyRules: {
+          projectSettings: [
+            'Bash(prompt: git commands)',
+            'Bash(git push:*)',
+          ],
+        },
+      }),
+    )
+    // Both feature directions deny: the literal rule applies whether or not
+    // the prompt rule was evaluated.
+    expect(result.behavior).toBe('deny')
+    expect(sideQueryCalls).toBe(classifierEnabled ? 1 : 0)
+  })
+
+  // The unavailable fallback ask must not be auto-approvable: it carries no
+  // pendingClassifierCheck, so a matching prompt allow rule cannot silently
+  // approve a command the unevaluated deny rule was meant to hold.
+  test('unavailable fallback ask is not eligible for allow auto-approval', async () => {
+    sideQueryImpl = async () => {
+      throw new Error('provider down')
+    }
+    const result = await bashToolHasPermission(
+      { command: 'git status' },
+      makeToolUseContext({
+        ...getEmptyToolPermissionContext(),
+        alwaysAllowRules: {
+          projectSettings: ['Bash(prompt: routine git inspection)'],
+        },
+        alwaysDenyRules: {
+          projectSettings: ['Bash(prompt: git commands)'],
+        },
+      }),
+    )
+    if (result.behavior === 'ask') {
+      expect(result.pendingClassifierCheck).toBeUndefined()
+    }
+    if (classifierEnabled) {
+      expect(result.behavior).toBe('ask')
+      expect(result.decisionReason).toMatchObject({
+        type: 'other',
+        reason: expect.stringContaining('could not be evaluated'),
+      })
+      expect(sideQueryCalls).toBe(1)
+    }
+  })
+
+  // Same precedence for the confident-ask path: a literal subcommand deny
+  // wins over a high-confidence prompt-ask match.
+  test('literal subcommand deny wins over a confident prompt-ask match', async () => {
+    sideQueryImpl = async () => ({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'report_bash_rule_match',
+          id: 'tu_1',
+          input: {
+            reasoning: 'compound command runs git',
+            matched_index: 0,
+            confidence: 'high',
+            reason: 'git commands',
+          },
+        },
+      ],
+    })
+    const result = await bashToolHasPermission(
+      { command: 'echo ok && git push' },
+      makeToolUseContext({
+        ...getEmptyToolPermissionContext(),
+        alwaysDenyRules: {
+          projectSettings: ['Bash(git push:*)'],
+        },
+        alwaysAskRules: {
+          projectSettings: ['Bash(prompt: git commands)'],
+        },
+      }),
+    )
+    expect(result.behavior).toBe('deny')
+    expect(sideQueryCalls).toBe(classifierEnabled ? 1 : 0)
+  })
+
+  // A verdict claiming a match at an index beyond the description list is
+  // not an evaluated non-match; it must fail closed the same as a provider
+  // error, or a restrictive prompt rule would fall through to literal allow.
+  test('out-of-range matched_index fails closed instead of falling through to literal allow', async () => {
+    sideQueryImpl = async () => ({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'report_bash_rule_match',
+          id: 'tu_1',
+          input: {
+            reasoning: 'claimed match',
+            matched_index: 5,
+            confidence: 'high',
+            reason: 'hallucinated index',
+          },
+        },
+      ],
+    })
+    const result = await bashToolHasPermission(
+      { command: 'git status' },
+      makeToolUseContext(promptRuleContext()),
+    )
+    if (classifierEnabled) {
+      expect(result.behavior).toBe('ask')
+      expect(result.decisionReason).toMatchObject({
+        type: 'other',
+        reason: expect.stringContaining('could not be evaluated'),
+      })
+      expect(sideQueryCalls).toBe(1)
+    } else {
+      // Feature gated off: the prompt rule is inert, literal allow applies.
+      expect(result.behavior).toBe('allow')
+      expect(sideQueryCalls).toBe(0)
+    }
+  })
+
+  test('evaluated non-match still falls through to literal allow', async () => {
+    sideQueryImpl = async () => ({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'report_bash_rule_match',
+          id: 'tu_1',
+          input: {
+            reasoning: 'no fit',
+            matched_index: -1,
+            confidence: 'medium',
+            reason: 'outside scope',
+          },
+        },
+      ],
+    })
+    const result = await bashToolHasPermission(
+      { command: 'git status' },
+      makeToolUseContext(promptRuleContext()),
+    )
+    expect(result.behavior).toBe('allow')
+    expect(sideQueryCalls).toBe(classifierEnabled ? 1 : 0)
   })
 })

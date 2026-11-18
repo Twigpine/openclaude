@@ -1,8 +1,8 @@
 import { feature } from 'bun:bundle'
 import chalk from 'chalk'
 import { markPostCompaction } from 'src/bootstrap/state.js'
-import { getSystemPrompt } from '../../constants/prompts.js'
-import { getSystemContext, getUserContext } from '../../context.js'
+import { getUserContext } from '../../context.js'
+import { getCacheSafeParams } from '../../services/compact/getCacheSafeParams.js'
 import { getShortcutDisplay } from '../../keybindings/shortcutFormat.js'
 import { notifyCompaction } from '../../services/api/promptCacheBreakDetection.js'
 import {
@@ -26,10 +26,6 @@ import { executePreCompactHooks } from '../../utils/hooks.js'
 import { logError } from '../../utils/log.js'
 import { getMessagesAfterCompactBoundary } from '../../utils/messages.js'
 import { getUpgradeMessage } from '../../utils/model/contextWindowUpgradeCheck.js'
-import {
-  buildEffectiveSystemPrompt,
-  type SystemPrompt,
-} from '../../utils/systemPrompt.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const reactiveCompact = feature('REACTIVE_COMPACT')
@@ -115,7 +111,7 @@ export const call: LocalCommandCall = async (args, context) => {
     const result = await compactConversation(
       messagesForCompact,
       context,
-      await getCacheSharingParams(context, messagesForCompact),
+      await getCacheSafeParams(context, messagesForCompact),
       false,
       customInstructions,
       false,
@@ -168,14 +164,14 @@ async function compactViaReactive(
 
   try {
     // Hooks and cache-param build are independent — run concurrently.
-    // getCacheSharingParams walks all tools to build the system prompt;
+    // getCacheSafeParams walks all tools to build the system prompt;
     // pre-compact hooks spawn subprocesses. Neither depends on the other.
     const [hookResult, cacheSafeParams] = await Promise.all([
       executePreCompactHooks(
         { trigger: 'manual', customInstructions: customInstructions || null },
         context.abortController.signal,
       ),
-      getCacheSharingParams(context, messages),
+      getCacheSafeParams(context, messages),
     ])
     const mergedInstructions = mergeHookInstructions(
       customInstructions,
@@ -219,7 +215,7 @@ async function compactViaReactive(
     // reactiveCompactOnPromptTooLong runs PostCompact hooks but not PreCompact
     // — both callers (here and tryReactiveCompact) run PreCompact outside so
     // they can merge its userDisplayMessage with PostCompact's here. This
-    // caller additionally runs it concurrently with getCacheSharingParams.
+    // caller additionally runs it concurrently with getCacheSafeParams.
     const combinedMessage =
       [hookResult.userDisplayMessage, outcome.result.userDisplayMessage]
         .filter(Boolean)
@@ -259,43 +255,4 @@ function buildDisplayText(
     ...(upgradeMessage ? [upgradeMessage] : []),
   ]
   return chalk.dim('Compacted ' + dimmed.join('\n'))
-}
-
-async function getCacheSharingParams(
-  context: ToolUseContext,
-  forkContextMessages: Message[],
-): Promise<{
-  systemPrompt: SystemPrompt
-  userContext: { [k: string]: string }
-  systemContext: { [k: string]: string }
-  toolUseContext: ToolUseContext
-  forkContextMessages: Message[]
-}> {
-  const appState = context.getAppState()
-  const defaultSysPrompt = await getSystemPrompt(
-    context.options.tools,
-    context.options.mainLoopModel,
-    Array.from(
-      appState.toolPermissionContext.additionalWorkingDirectories.keys(),
-    ),
-    context.options.mcpClients,
-  )
-  const systemPrompt = buildEffectiveSystemPrompt({
-    mainThreadAgentDefinition: undefined,
-    toolUseContext: context,
-    customSystemPrompt: context.options.customSystemPrompt,
-    defaultSystemPrompt: defaultSysPrompt,
-    appendSystemPrompt: context.options.appendSystemPrompt,
-  })
-  const [userContext, systemContext] = await Promise.all([
-    getUserContext(),
-    getSystemContext(),
-  ])
-  return {
-    systemPrompt,
-    userContext,
-    systemContext,
-    toolUseContext: context,
-    forkContextMessages,
-  }
 }
