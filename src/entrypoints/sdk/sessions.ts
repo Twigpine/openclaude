@@ -3,6 +3,13 @@
  *
  * Provides CRUD operations on sessions: list, get info, get messages,
  * rename, tag, delete, and fork.
+ *
+ * Host contract for delete vs portable JSONL mutations: `deleteSession`
+ * marks a transcript deleted before removing it, but the portable appends
+ * used by `renameSession`, `tagSession`, and `forkSession` (title) do not
+ * consult that mark. Hosts must serialize a delete with any
+ * rename/tag/fork title append on the same resolved transcript, or accept
+ * that only internal/sessionStorage writers honor the deletion mark today.
  */
 
 import { randomUUID, type UUID } from 'crypto'
@@ -222,6 +229,10 @@ export async function getSessionMessages(
 
 // ============================================================================
 // Internal: append a JSONL entry to a session file (portable, no heavy deps)
+//
+// Note: this append does not consult the deletion mark set by
+// forgetDeletedSession, so callers must not interleave it with an in-flight
+// deleteSession on the same resolved transcript (see deleteSession).
 // ============================================================================
 
 async function appendJsonlEntry(
@@ -293,11 +304,21 @@ export async function tagSession(
 /**
  * Delete a session by removing its JSONL file from disk.
  *
- * Blocks later writes to it first (see forgetDeletedSession): a pending AI
- * title, task summary, or metadata append would otherwise recreate the
- * file and the session would come back. That also drops the deleted
- * session's per-context caches, so a later query reusing its id and cwd
- * starts clean instead of inheriting its cached title/tag (#2489).
+ * Blocks later Project-tracked writes to it first (see
+ * forgetDeletedSession): a pending AI title, task summary, or metadata
+ * append would otherwise recreate the file and the session would come
+ * back. That also drops the deleted session's per-context caches, so a
+ * later query reusing its id and cwd starts clean instead of inheriting
+ * its cached title/tag (#2489).
+ *
+ * This blocking covers internal/sessionStorage writers only. The portable
+ * JSONL appends used by `renameSession`, `tagSession`, and `forkSession`
+ * (title) do not consult the deletion mark, so a host must serialize a
+ * delete with any rename/tag/fork title append on the same resolved
+ * transcript — otherwise metadata can land during the mark-before-`unlink`
+ * window and recreate the file. If hosts later need fully concurrent
+ * lifecycle on one transcript, the append path needs a central guard
+ * (see `appendJsonlEntry`).
  *
  * A query that starts while the deletion is still in flight waits for
  * it to settle (see waitForDeletionToSettle in sessionStorage.ts) instead
