@@ -22,6 +22,28 @@
  * The sanitization is always enabled to protect against these attacks.
  */
 
+/**
+ * Strip hidden/invisible Unicode characters without NFKC normalization.
+ * For identifiers (e.g. MCP resource URI templates) where normalization
+ * would change the value's meaning: fullwidth characters must stay
+ * fullwidth, or a URI built from the listed value targets a different
+ * resource. Visible characters are preserved exactly.
+ */
+export function stripDangerousUnicodeChars(value: string): string {
+  return (
+    value
+      // Strip dangerous Unicode property classes (primary defence)
+      .replace(/[\p{Cf}\p{Co}\p{Cn}]/gu, '')
+      // Explicit character ranges (fallback for environments without
+      // unicode property class support)
+      .replace(/[\u200B-\u200F]/g, '') // Zero-width spaces, LTR/RTL marks
+      .replace(/[\u202A-\u202E]/g, '') // Directional formatting characters
+      .replace(/[\u2066-\u2069]/g, '') // Directional isolates
+      .replace(/[\uFEFF]/g, '') // Byte order mark
+      .replace(/[\uE000-\uF8FF]/g, '')
+  ) // Basic Multilingual Plane private use
+}
+
 export function partiallySanitizeUnicode(prompt: string): string {
   let current = prompt
   let previous = ''
@@ -36,20 +58,7 @@ export function partiallySanitizeUnicode(prompt: string): string {
     current = current.normalize('NFKC')
 
     // Remove dangerous Unicode categories using explicit character ranges
-
-    // Method 1: Strip dangerous Unicode property classes
-    // This is the primary defence and is the solution that is widely used in OSS libraries.
-    current = current.replace(/[\p{Cf}\p{Co}\p{Cn}]/gu, '')
-
-    // Method 2: Explicit character ranges. There are some subtle issues with the above method
-    // failing in certain environments that don't support regexes for unicode property classes,
-    // so we also implement a fallback that strips out some specifically known dangerous ranges.
-    current = current
-      .replace(/[\u200B-\u200F]/g, '') // Zero-width spaces, LTR/RTL marks
-      .replace(/[\u202A-\u202E]/g, '') // Directional formatting characters
-      .replace(/[\u2066-\u2069]/g, '') // Directional isolates
-      .replace(/[\uFEFF]/g, '') // Byte order mark
-      .replace(/[\uE000-\uF8FF]/g, '') // Basic Multilingual Plane private use
+    current = stripDangerousUnicodeChars(current)
 
     iterations++
   }

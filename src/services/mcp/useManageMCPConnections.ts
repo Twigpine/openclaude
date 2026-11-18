@@ -6,11 +6,13 @@ import type { Command } from '../../commands.js'
 import type { Tool } from '../../Tool.js'
 import {
   clearServerCache,
+  enqueueResourceRefresh,
   fetchCommandsForClient,
-  fetchResourcesForClient,
   fetchToolsForClient,
+  getMcpFetchCacheGeneration,
   getMcpToolsCommandsAndResources,
   reconnectMcpServerImpl,
+  refreshMcpResourcesAndTemplates,
 } from './client.js'
 import type {
   ConnectedMCPServer,
@@ -94,11 +96,24 @@ type PendingUpdate = MCPServerConnection & {
   tools?: Tool[]
   commands?: Command[]
   resources?: ServerResource[]
+  /**
+   * Refresh-only update: apply only if the server still exists in AppState
+   * when the queued update flushes. A list_changed refresh is queued via
+   * setTimeout and flushed later; if the plugin server was removed in
+   * between, applying the update would resurrect the removed client with
+   * its resources, commands, and skills.
+   */
+  requireExistingClient?: boolean
 }
 type ConnectedListUpdate = ConnectedMCPServer & {
   tools?: Tool[]
   commands?: Command[]
   resources?: ServerResource[]
+  /**
+   * Refresh-only update: apply only if the server still exists in AppState
+   * when the queued update flushes (see PendingUpdate).
+   */
+  requireExistingClient?: boolean
 }
 
 /**
@@ -146,7 +161,7 @@ export function registerMcpListChangedHandlers(
               newCount,
             })
           }
-          updateServer({ ...client, tools: newTools })
+          updateServer({ ...client, tools: newTools, requireExistingClient: true })
         } catch (error) {
           logMCPError(
             client.name,
@@ -181,6 +196,7 @@ export function registerMcpListChangedHandlers(
           updateServer({
             ...client,
             commands: [...mcpPrompts, ...mcpSkills],
+            requireExistingClient: true,
           })
           // MCP skills changed — invalidate skill-search index so next
           // discovery rebuilds with the new set.
@@ -196,9 +212,22 @@ export function registerMcpListChangedHandlers(
   }
 
   if (client.capabilities?.resources?.listChanged) {
+    // Generation this connection was registered at — see
+    // registerMcpResourceListChangedHandler in client.ts: a notification
+    // arriving on a retired connection must not queue a refresh for it.
+    const connectionGeneration = getMcpFetchCacheGeneration(client.name)
     client.client.setNotificationHandler(
       ResourceListChangedNotificationSchema,
       async () => {
+        if (
+          getMcpFetchCacheGeneration(client.name) !== connectionGeneration
+        ) {
+          logMCPDebug(
+            client.name,
+            `Ignoring resources/list_changed notification from a retired connection`,
+          )
+          return
+        }
         logMCPDebug(
           client.name,
           `Received resources/list_changed notification, refreshing resources`,
@@ -207,31 +236,77 @@ export function registerMcpListChangedHandlers(
           type: 'resources' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         })
         try {
-          fetchResourcesForClient.cache.delete(client.name)
-          if (feature('MCP_SKILLS')) {
-            // Skills are discovered from resources, so refresh them too.
-            // Invalidate prompts cache as well: we write commands here, and a
-            // concurrent prompts/list_changed could otherwise have us stomp
-            // its fresh result with our cached stale one.
-            fetchMcpSkillsForClient!.cache.delete(client.name)
-            fetchCommandsForClient.cache.delete(client.name)
-            const [newResources, mcpPrompts, mcpSkills] = await Promise.all([
-              fetchResourcesForClient(client),
-              fetchCommandsForClient(client),
-              fetchMcpSkillsForClient!(client),
-            ])
-            updateServer({
-              ...client,
-              resources: newResources,
-              commands: [...mcpPrompts, ...mcpSkills],
-            })
-            // MCP skills changed — invalidate skill-search index so next
-            // discovery rebuilds with the new set.
-            clearSkillIndexCache?.()
-          } else {
-            const newResources = await fetchResourcesForClient(client)
-            updateServer({ ...client, resources: newResources })
-          }
+          // Refresh resources and templates as one transaction: the caches
+          // swap only after both traversals succeed, and updateServer runs
+          // only then, so a failed refresh keeps the previous AppState.
+          // A stale refresh (server replaced mid-flight) publishes nothing.
+          await enqueueResourceRefresh(
+            client.name,
+            async () => {
+              if (feature('MCP_SKILLS')) {
+                // Skills are discovered from resources, so refresh them too.
+                // Invalidate prompts cache as well: we write commands here, and a
+                // concurrent prompts/list_changed could otherwise have us stomp
+                // its fresh result with our cached stale one.
+                fetchMcpSkillsForClient!.cache.delete(client.name)
+                fetchCommandsForClient.cache.delete(client.name)
+                // Wait for every sibling to settle before propagating a
+                // failure: Promise.all would release the refresh queue as
+                // soon as skill discovery rejects (e.g. its warning write
+                // fails), while the paired resource/template traversal is
+                // still in flight — a queued refresh could then finish
+                // first and the older traversal would overwrite both
+                // caches with stale data. Outcomes are unchanged: a
+                // refresh failure still throws, and a sibling failure
+                // still aborts the publish — only later, once the
+                // traversals have settled.
+                const [
+                  refreshResult,
+                  promptsResult,
+                  skillsResult,
+                ] = await Promise.allSettled([
+                  refreshMcpResourcesAndTemplates(client),
+                  fetchCommandsForClient(client),
+                  fetchMcpSkillsForClient!(client),
+                ])
+                if (refreshResult.status === 'rejected') {
+                  throw refreshResult.reason
+                }
+                if (promptsResult.status === 'rejected') {
+                  throw promptsResult.reason
+                }
+                if (skillsResult.status === 'rejected') {
+                  throw skillsResult.reason
+                }
+                const {
+                  resources: newResources,
+                  stale,
+                } = refreshResult.value
+                const mcpPrompts = promptsResult.value
+                const mcpSkills = skillsResult.value
+                if (stale) return
+                updateServer({
+                  ...client,
+                  resources: newResources,
+                  commands: [...mcpPrompts, ...mcpSkills],
+                  requireExistingClient: true,
+                })
+                // MCP skills changed — invalidate skill-search index so next
+                // discovery rebuilds with the new set.
+                clearSkillIndexCache?.()
+              } else {
+                const { resources: newResources, stale } =
+                  await refreshMcpResourcesAndTemplates(client)
+                if (stale) return
+                updateServer({
+                  ...client,
+                  resources: newResources,
+                  requireExistingClient: true,
+                })
+              }
+            },
+            connectionGeneration,
+          )
         } catch (error) {
           logMCPError(
             client.name,
@@ -376,6 +451,7 @@ export function useManageMCPConnections(
           tools: rawTools,
           commands: rawCmds,
           resources: rawRes,
+          requireExistingClient,
           ...client
         } = update
         const tools =
@@ -395,6 +471,30 @@ export function useManageMCPConnections(
         const existingClientIndex = mcp.clients.findIndex(
           c => c.name === client.name,
         )
+
+        // A refresh queued before its server was removed must not resurrect
+        // it: the flush runs later, and by then the client is gone from
+        // AppState. Connection attempts may still create a client; only
+        // refreshes carry this guard.
+        if (requireExistingClient && existingClientIndex === -1) {
+          continue
+        }
+        // A reload keeps the server name but replaces the client: a queued
+        // refresh recorded for the retired client must not apply over the
+        // pending replacement. The name-only guard above would accept it.
+        // Connected clients are identified by their SDK client instance —
+        // a refresh only applies when AppState still holds that exact
+        // client.
+        if (requireExistingClient && existingClientIndex !== -1) {
+          const currentClient = mcp.clients[existingClientIndex]
+          if (
+            currentClient.type !== 'connected' ||
+            client.type !== 'connected' ||
+            currentClient.client !== client.client
+          ) {
+            continue
+          }
+        }
 
         const updatedClients =
           existingClientIndex === -1

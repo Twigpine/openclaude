@@ -1,6 +1,7 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type {
   Resource,
+  ResourceTemplate,
   ServerCapabilities,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod/v4'
@@ -225,6 +226,7 @@ export type MCPServerConnection =
 
 // Resource types
 export type ServerResource = Resource & { server: string }
+export type ServerResourceTemplate = ResourceTemplate & { server: string }
 
 // MCP CLI State types
 export interface SerializedTool {

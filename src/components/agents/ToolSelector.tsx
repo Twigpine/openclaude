@@ -14,6 +14,7 @@ import { FileWriteTool } from 'src/tools/FileWriteTool/FileWriteTool.js';
 import { GlobTool } from 'src/tools/GlobTool/GlobTool.js';
 import { GrepTool } from 'src/tools/GrepTool/GrepTool.js';
 import { ListMcpResourcesTool } from 'src/tools/ListMcpResourcesTool/ListMcpResourcesTool.js';
+import { ListMcpResourceTemplatesTool } from 'src/tools/ListMcpResourceTemplatesTool/ListMcpResourceTemplatesTool.js';
 import { NotebookEditTool } from 'src/tools/NotebookEditTool/NotebookEditTool.js';
 import { ReadMcpResourceTool } from 'src/tools/ReadMcpResourceTool/ReadMcpResourceTool.js';
 import { TaskOutputTool } from 'src/tools/TaskOutputTool/TaskOutputTool.js';
@@ -49,7 +50,7 @@ function getToolBuckets(): ToolBuckets {
   return {
     READ_ONLY: {
       name: 'Read-only tools',
-      toolNames: new Set([GlobTool.name, GrepTool.name, ExitPlanModeV2Tool.name, FileReadTool.name, WebFetchTool.name, TodoWriteTool.name, WebSearchTool.name, TaskStopTool.name, TaskOutputTool.name, ListMcpResourcesTool.name, ReadMcpResourceTool.name])
+      toolNames: new Set([GlobTool.name, GrepTool.name, ExitPlanModeV2Tool.name, FileReadTool.name, WebFetchTool.name, TodoWriteTool.name, WebSearchTool.name, TaskStopTool.name, TaskOutputTool.name, ListMcpResourcesTool.name, ListMcpResourceTemplatesTool.name, ReadMcpResourceTool.name])
     },
     EDIT: {
       name: 'Edit tools',
