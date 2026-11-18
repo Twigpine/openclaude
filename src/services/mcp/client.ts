@@ -812,6 +812,17 @@ export function getServerCacheKey(
 }
 
 /**
+ * Discovery cache key for a connection. The display name alone does not
+ * identify a connection — two sessions can run the same server name at
+ * different endpoints — so the discovery memos are keyed by the same
+ * connection key the connect cache uses. A fetch keyed by name alone
+ * lets a same-named peer's tools answer a host's reconnect.
+ */
+export function getDiscoveryCacheKey(client: MCPServerConnection): string {
+  return getServerCacheKey(client.name, client.config)
+}
+
+/**
  * Callers awaiting a connect, keyed by the connect's own promise — not
  * the cache key: a cache clear replaces the entry for a key while an
  * older generation is still pending, and re-keying by the string would
@@ -1823,14 +1834,16 @@ const connectToServerMemoized = memoize(
         // Clear the memoization cache so next operation reconnects
         const key = getServerCacheKey(name, serverRef)
 
-        // Also clear fetch caches (keyed by server name). Reconnection
+        // Also clear fetch caches (keyed by connection). Reconnection
         // creates a new connection object; without clearing, the next
         // fetch would return stale tools/resources from the old connection.
-        fetchToolsForClient.cache.delete(name)
-        fetchResourcesForClient.cache.delete(name)
-        fetchCommandsForClient.cache.delete(name)
+        // The key is the connection, not the display name, so a
+        // same-named peer's discovery survives this close.
+        fetchToolsForClient.cache.delete(key)
+        fetchResourcesForClient.cache.delete(key)
+        fetchCommandsForClient.cache.delete(key)
         if (feature('MCP_SKILLS')) {
-          fetchMcpSkillsForClient!.cache.delete(name)
+          fetchMcpSkillsForClient!.cache.delete(key)
         }
 
         connectToServer.cache.delete(key)
@@ -2191,15 +2204,18 @@ export const connectToServer = Object.assign(
 )
 
 /**
- * Drops the per-server discovery caches so a reconnect fetches fresh
- * tools/resources/commands instead of stale ones.
+ * Drops the per-connection discovery caches so a reconnect fetches fresh
+ * tools/resources/commands instead of stale ones. Keyed by connection,
+ * not by display name, so clearing one endpoint never drops another
+ * same-named connection's discovery.
  */
-function clearFetchCaches(name: string): void {
-  fetchToolsForClient.cache.delete(name)
-  fetchResourcesForClient.cache.delete(name)
-  fetchCommandsForClient.cache.delete(name)
+function clearFetchCaches(name: string, serverRef: ScopedMcpServerConfig): void {
+  const key = getServerCacheKey(name, serverRef)
+  fetchToolsForClient.cache.delete(key)
+  fetchResourcesForClient.cache.delete(key)
+  fetchCommandsForClient.cache.delete(key)
   if (feature('MCP_SKILLS')) {
-    fetchMcpSkillsForClient!.cache.delete(name)
+    fetchMcpSkillsForClient!.cache.delete(key)
   }
 }
 
@@ -2225,7 +2241,7 @@ export async function clearServerCache(
     | Promise<MCPServerConnection>
     | undefined
   if (cached === undefined) {
-    clearFetchCaches(name)
+    clearFetchCaches(name, serverRef)
     return
   }
 
@@ -2248,7 +2264,7 @@ export async function clearServerCache(
   // Clear from cache (both connection and fetch caches so reconnect
   // fetches fresh tools/resources/commands instead of stale ones)
   connectToServer.cache.delete(key)
-  clearFetchCaches(name)
+  clearFetchCaches(name, serverRef)
 }
 
 /**
@@ -2731,18 +2747,21 @@ export const fetchToolsForClient = memoizeWithLRU(
       // A cancelled fetch must not poison the cache: the next fetch for
       // this server re-lists instead of reusing the aborted empty result.
       if (options?.signal?.aborted || isAbortError(error)) {
-        fetchToolsForClient.cache.delete(client.name)
+        fetchToolsForClient.cache.delete(getDiscoveryCacheKey(client))
         return []
       }
       logMCPError(client.name, `Failed to fetch tools: ${errorMessage(error)}`)
       return []
     }
   },
-  // The cache key ignores the options: a fetch for one server is one
+  // The cache key ignores the options: a fetch for one connection is one
   // entry, whatever signal it carries. The second parameter only keeps
-  // the memoized function's arity honest.
+  // the memoized function's arity honest. The key is the connection, not
+  // the display name: two sessions can run the same name at different
+  // endpoints, and a name-keyed entry lets a peer's tools answer a
+  // host's reconnect.
   (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
-    client.name,
+    getDiscoveryCacheKey(client),
   MCP_FETCH_CACHE_SIZE,
 )
 
@@ -2762,7 +2781,7 @@ export const fetchResourcesForClient = memoizeWithLRU(
     } catch (error) {
       // Same cache-poisoning guard as fetchToolsForClient above.
       if (options?.signal?.aborted || isAbortError(error)) {
-        fetchResourcesForClient.cache.delete(client.name)
+        fetchResourcesForClient.cache.delete(getDiscoveryCacheKey(client))
         return []
       }
       logMCPError(
@@ -2773,7 +2792,7 @@ export const fetchResourcesForClient = memoizeWithLRU(
     }
   },
   (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
-    client.name,
+    getDiscoveryCacheKey(client),
   MCP_FETCH_CACHE_SIZE,
 )
 
@@ -2850,7 +2869,7 @@ export const fetchCommandsForClient = memoizeWithLRU(
     } catch (error) {
       // Same cache-poisoning guard as fetchToolsForClient above.
       if (options?.signal?.aborted || isAbortError(error)) {
-        fetchCommandsForClient.cache.delete(client.name)
+        fetchCommandsForClient.cache.delete(getDiscoveryCacheKey(client))
         return []
       }
       logMCPError(
@@ -2861,7 +2880,7 @@ export const fetchCommandsForClient = memoizeWithLRU(
     }
   },
   (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
-    client.name,
+    getDiscoveryCacheKey(client),
   MCP_FETCH_CACHE_SIZE,
 )
 

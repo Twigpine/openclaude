@@ -10,6 +10,7 @@ import {
   fetchCommandsForClient,
   fetchResourcesForClient,
   fetchToolsForClient,
+  getDiscoveryCacheKey,
 } from './client.js'
 
 type ListMethod = 'tools/list' | 'resources/list' | 'prompts/list'
@@ -753,9 +754,9 @@ describe('MCP list cursor pagination', () => {
       fetchCommandsForClient(connection),
     ])
     generation = 2
-    fetchToolsForClient.cache.delete(connection.name)
-    fetchResourcesForClient.cache.delete(connection.name)
-    fetchCommandsForClient.cache.delete(connection.name)
+    fetchToolsForClient.cache.delete(getDiscoveryCacheKey(connection))
+    fetchResourcesForClient.cache.delete(getDiscoveryCacheKey(connection))
+    fetchCommandsForClient.cache.delete(getDiscoveryCacheKey(connection))
     requests.length = 0
 
     const [tools, resources, prompts] = await Promise.all([

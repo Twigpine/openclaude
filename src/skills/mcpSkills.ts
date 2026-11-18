@@ -5,6 +5,7 @@ import { memoizeWithLRU } from '../utils/memoize.js'
 import { recursivelySanitizeUnicode } from '../utils/sanitization.js'
 import { normalizeNameForMCP } from '../services/mcp/normalization.js'
 import { listAllMcpResources } from '../services/mcp/pagination.js'
+import { getServerCacheKey } from '../services/mcp/client.js'
 import type { MCPServerConnection, ServerResource } from '../services/mcp/types.js'
 import { getMCPSkillBuilders } from './mcpSkillBuilders.js'
 import { logForDebugging } from '../utils/debug.js'
@@ -124,7 +125,9 @@ export const fetchMcpSkillsForClient = memoizeWithLRU(
       // A cancelled fetch must not poison the cache: the next fetch for
       // this server re-lists instead of reusing the aborted empty result.
       if (options?.signal?.aborted || isAbortError(error)) {
-        fetchMcpSkillsForClient.cache.delete(client.name)
+        fetchMcpSkillsForClient.cache.delete(
+          getServerCacheKey(client.name, client.config),
+        )
       }
       logForDebugging(
         `[mcp-skills] failed to list skills for ${client.name}: ${String(error)}`,
@@ -133,10 +136,13 @@ export const fetchMcpSkillsForClient = memoizeWithLRU(
       return []
     }
   },
-  // The cache key ignores the options: a fetch for one server is one
+  // The cache key ignores the options: a fetch for one connection is one
   // entry, whatever signal it carries. The second parameter only keeps
-  // the memoized function's arity honest.
+  // the memoized function's arity honest. The key is the connection, not
+  // the display name: two sessions can run the same name at different
+  // endpoints, and a name-keyed entry lets a peer's skills answer a
+  // host's reconnect.
   (client: MCPServerConnection, _options?: { signal?: AbortSignal }) =>
-    client.name,
+    getServerCacheKey(client.name, client.config),
   MCP_SKILL_CACHE_SIZE,
 )
