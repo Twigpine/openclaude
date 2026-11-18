@@ -213,6 +213,10 @@ export function createMcpAuthTool(
   return {
     name: buildMcpToolName(serverName, 'authenticate'),
     isMcp: true,
+    // The marker the host swap uses to tell this local recovery tool from
+    // a remote tool the server itself names `authenticate`: both share
+    // the qualified name and owner metadata.
+    isMcpAuthTool: true,
     mcpInfo: { serverName, toolName: 'authenticate' },
     isEnabled: () => true,
     isConcurrencySafe: () => false,

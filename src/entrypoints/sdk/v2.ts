@@ -1133,8 +1133,12 @@ class SDKSessionImpl implements SDKSession {
           // server at all: a first connection that failed, or an earlier
           // reconnect that failed, leaves no tool to offer the next turn.
           // A pool that already holds only the authenticate tool keeps it.
+          // The name alone cannot tell the local recovery tool from a
+          // remote tool the server itself names `authenticate` — both
+          // share the qualified name and owner metadata — so the
+          // already-installed check requires the local marker.
           if (
-            !this.mcpTools.some(tool => tool.name === authTool.name) ||
+            !this.mcpTools.some(tool => tool.name === authTool.name && tool.isMcpAuthTool) ||
             this.mcpTools.some(tool => ownsServerTool(tool) && tool.name !== authTool.name)
           ) {
             const nextTools = [
