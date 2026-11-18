@@ -994,6 +994,17 @@ describe('chronology and terminal diagnostics', () => {
       prompt('e', '<bash-stderr>boom</bash-stderr>'),
     ])
     expect(r.boundary?.uuid).toBe('p1')
+    expect(ids(r.rows)).toContain('e')
+  })
+
+  test('shell stderr after shell input stays visible with it', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      prompt('sh', '<bash-input>ls</bash-input>'),
+      prompt('se', '<bash-stderr>boom</bash-stderr>'),
+    ])
+    expect(ids(r.rows)).toEqual(['p1', 'a1', 'sh', 'se'])
   })
 
   test('a SendUserMessage reply stays visible with its call', () => {
@@ -1023,5 +1034,48 @@ describe('chronology and terminal diagnostics', () => {
     expect(ids(r.rows)).toContain('a1')
     expect(ids(r.rows)).toContain('a2')
     expect(r.summary.toolCount).toBe(1)
+  })
+
+  test('a timeout that ends the typed turn stays visible after a scheduled run answers', () => {
+    const r = select([
+      prompt('p', 'typed'),
+      use('u1', 't1'),
+      result('r1', 't1'),
+      sys('w', 'informational', { level: 'warning', content: 'Query timed out before completion.' }),
+      sys('fire', 'scheduled_task_fire'),
+      use('u2', 't2'),
+      result('r2', 't2'),
+      say('a2', 'scheduled answer'),
+    ])
+    expect(ids(r.rows)).toContain('w')
+    expect(ids(r.rows)).toContain('a2')
+  })
+
+  test('a typed-turn warning before its own answer stays hidden when a scheduled run follows', () => {
+    const r = select([
+      prompt('p', 'typed'),
+      use('u1', 't1'),
+      result('r1', 't1'),
+      sys('w', 'informational', { level: 'warning' }),
+      say('a1', 'typed answer'),
+      sys('fire', 'scheduled_task_fire'),
+      use('u2', 't2'),
+      result('r2', 't2'),
+    ])
+    expect(ids(r.rows)).not.toContain('w')
+  })
+
+  test('a warning followed by more tool work in its scheduled run stays hidden', () => {
+    const r = select([
+      prompt('p', 'typed'),
+      say('a1', 'typed answer'),
+      sys('fire', 'scheduled_task_fire'),
+      use('u2', 't2'),
+      sys('w', 'informational', { level: 'warning' }),
+      result('r2', 't2'),
+      use('u3', 't3'),
+      result('r3', 't3'),
+    ])
+    expect(ids(r.rows)).not.toContain('w')
   })
 })

@@ -1417,7 +1417,7 @@ export function REPL({
   const focusViewOn = isFocusViewActive({
     isBriefOnly,
     disableSlashCommands,
-    isRemoteSession
+    isRemoteSession: isRemoteSession || !!sshSession || !!directConnectConfig
   });
   const unseenDivider = useMemo(() => {
     const divider = computeUnseenDivider(messages, dividerIndex);

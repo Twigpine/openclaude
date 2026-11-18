@@ -418,16 +418,15 @@ export function selectFocusView<T extends FocusMessage>(
   const segmentLastTool = edges
     .slice(0, -1)
     .map((from, k) => lastToolActivityIndex(messages, from, edges[k + 1]!))
-  const lastTool = segmentLastTool[segmentLastTool.length - 1]!
   const toolResponses = toolCallingResponseIds(messages)
   const replyTools = options.replyToolNames
   const replyCalls = new Map<string, number>()
   const keep = new Set<number>()
   const callLineIdx = new Map<string, number>()
   let lastInterrupt = -1
-  let finalIdx = -1
+  const segmentFinal = segmentLastTool.map(() => -1)
   let segment = 0
-  const warnings: number[] = []
+  const warnings: Array<{ index: number; segment: number }> = []
   const rejections: Array<{ index: number; toolUseId: string | undefined }> = []
 
   for (let i = start; i < messages.length; i++) {
@@ -448,7 +447,7 @@ export function selectFocusView<T extends FocusMessage>(
       if (m.isApiErrorMessage) keep.add(i)
       else if (i > segmentLastTool[segment]! && isFinalResponseText(m, toolResponses)) {
         keep.add(i)
-        finalIdx = i
+        segmentFinal[segment] = i
       }
     } else if (m.type === 'user') {
       const tr = toolResultOf(m)
@@ -479,7 +478,13 @@ export function selectFocusView<T extends FocusMessage>(
         keep.add(i)
       } else {
         const t = stripSystemReminders(firstText(m) ?? '')
-        if (t.startsWith('<bash-input>') || t.startsWith('<bash-stdout>')) keep.add(i)
+        if (
+          t.startsWith('<bash-input>') ||
+          t.startsWith('<bash-stdout>') ||
+          t.startsWith('<bash-stderr>')
+        ) {
+          keep.add(i)
+        }
       }
     } else if (m.type === 'attachment') {
       if (m.attachment?.type === 'max_turns_reached') keep.add(i)
@@ -491,13 +496,17 @@ export function selectFocusView<T extends FocusMessage>(
       ) {
         keep.add(i)
       } else if (m.level === 'error') keep.add(i)
-      else if (m.level === 'warning') warnings.push(i)
+      else if (m.level === 'warning') warnings.push({ index: i, segment })
     }
   }
 
-  // A warning that ends the turn is the reason it stopped. One followed by
-  // more tool work or a final response is routine.
-  for (const w of warnings) if (w > finalIdx && w > lastTool) keep.add(w)
+  // A warning that ends its segment is the reason it stopped. One followed by
+  // more tool work or a final response in the same segment is routine.
+  for (const w of warnings) {
+    if (w.index > segmentFinal[w.segment]! && w.index > segmentLastTool[w.segment]!) {
+      keep.add(w.index)
+    }
+  }
   for (const r of rejections) {
     if (lastInterrupt > r.index) continue
     keep.add(r.index)
