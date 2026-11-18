@@ -712,13 +712,69 @@ export async function waitHandler(
     return code
   }
 
+  // The one bounded flush wait for the last rendered result: every
+  // --json return awaits it, including the pre-poll paths below that
+  // never enter the poll loop's finally (maintainer review 5962625271
+  // on #2497). `boundMs` is one production poll interval except for an
+  // unsignalled timeout, which gets the longer TIMEOUT_FLUSH_BOUND_MS
+  // (chosen by the caller from finishedState); `signal`, when given,
+  // shortens a long flush to one poll interval if the client is
+  // interrupted mid-flush. A failed write settles at once, so a
+  // consumer that never drains still cannot stall the waiter. A
+  // forced 124/130/143 exit in the CLI fast path cannot discard a
+  // line still queued in a back-pressured stdout pipe.
+  const awaitPendingFlush = async (
+    boundMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    if (pendingFlush === null) return
+    let flushTimer: ReturnType<typeof setTimeout> | undefined
+    let signalShortenTimer: ReturnType<typeof setTimeout> | undefined
+    let onClientAbort: (() => void) | undefined
+    try {
+      const flushRacers: Array<Promise<void>> = [
+        pendingFlush,
+        new Promise<void>(resolve => {
+          flushTimer = setTimeout(() => resolve(), boundMs)
+        }),
+      ]
+      if (signal !== undefined) {
+        flushRacers.push(
+          new Promise<void>(resolve => {
+            onClientAbort = () => {
+              signalShortenTimer = setTimeout(
+                () => resolve(),
+                WAIT_POLL_INTERVAL_MS,
+              )
+            }
+            if (signal.aborted) onClientAbort()
+            else {
+              signal.addEventListener('abort', onClientAbort, { once: true })
+            }
+          }),
+        )
+      }
+      await Promise.race(flushRacers)
+    } finally {
+      if (flushTimer !== undefined) clearTimeout(flushTimer)
+      if (signalShortenTimer !== undefined) {
+        clearTimeout(signalShortenTimer)
+      }
+      if (onClientAbort !== undefined) {
+        signal?.removeEventListener('abort', onClientAbort)
+      }
+    }
+  }
+
   let parsed: ParsedWaitInvocation
   try {
     parsed = parseWaitInvocation(argsArray)
   } catch (error) {
     if (error instanceof BackgroundSessionWaitError) {
       const result = baseWaitResult(null, 'selector_error', error.code)
-      return finishEarly(result, hasJsonFlag(argsArray), error.message)
+      const code = finishEarly(result, hasJsonFlag(argsArray), error.message)
+      await awaitPendingFlush(WAIT_POLL_INTERVAL_MS)
+      return code
     }
     throw error
   }
@@ -737,6 +793,7 @@ export async function waitHandler(
     const result = baseWaitResult(null, 'selector_error', 'unsupported')
     pendingFlush = renderWaitResult(result, json, stdout, stderr)
     process.exitCode = 2
+    await awaitPendingFlush(WAIT_POLL_INTERVAL_MS)
     return 2
   }
 
@@ -837,6 +894,42 @@ export async function waitHandler(
     getProcessCommandAsync: trackedGetProcessCommandAsync,
   }
 
+  // One last re-read of the pinned session at the timeout boundary: a
+  // terminal fact published while an observation was still settling
+  // (a lookup whose inspector close lagged, or a stalled registry read)
+  // must win over the timeout, or the waiter reports a false 124 for a
+  // session that already finished. The read is bounded by one poll
+  // interval, so a stalled read still settles as a timeout, and any
+  // other outcome — running, stale, unreadable, or a read that never
+  // settles — keeps the timeout (CodeRabbit #2497 review 5961433156).
+  // Uses the caller's pinned reader when one is injected, so tests can
+  // observe the same re-read the production path makes.
+  const readTerminalAtTimeoutBoundary = async (
+    pinned: { id: string; pid: number },
+    deps: WaitHandlerOptions,
+  ): Promise<BackgroundSession | null> => {
+    const readPinned =
+      deps.readPinnedSession ?? readPinnedBackgroundSessionForWait
+    let readTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const read = await Promise.race([
+        readPinned(pinned).then(
+          session => session,
+          () => null,
+        ),
+        new Promise<null>(resolve => {
+          readTimer = setTimeout(() => resolve(null), pollIntervalMs)
+        }),
+      ])
+      if (read === null) return null
+      return isTerminalBackgroundSession(read) && read.status !== 'stale'
+        ? read
+        : null
+    } finally {
+      if (readTimer !== undefined) clearTimeout(readTimer)
+    }
+  }
+
   // One final observation at the timeout boundary, with its own lookup
   // signal that the deadline abort has not fired on. Returns null when
   // the fresh lookup never settles within one poll interval (a stalled
@@ -868,6 +961,8 @@ export async function waitHandler(
       ])
       if (settled === null) {
         finalLookupController.abort()
+        const terminal = await readTerminalAtTimeoutBoundary(pinned, deps)
+        if (terminal !== null) return terminalObservation(terminal)
         return null
       }
       return settled
@@ -998,15 +1093,27 @@ export async function waitHandler(
             if (clientSignal) {
               return finish(interruptedWaitResult(pinned.id, clientSignal))
             }
-            // A read stalled past the grace interval: the session was
-            // not observably terminal, so this is a timeout (124), not
-            // an unreadable process (3).
-            return finish({
-              ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
-              status: 'running',
-            })
-          }
-          if (late.kind === 'aborted') {
+            // The observation never settled, but a terminal fact may
+            // have been published while it was pending: re-read once
+            // before reporting a timeout, and let the shared
+            // classification below return the terminal outcome (or the
+            // metadata error, for an exited record with no exit code).
+            // A read stalled past the grace interval, or a session
+            // still not observably terminal, is a timeout (124), not
+            // an unreadable process (3) (CodeRabbit #2497 review
+            // 5961433156).
+            const refreshed = await readTerminalAtTimeoutBoundary(
+              pinned,
+              lookupDeps,
+            )
+            if (refreshed === null) {
+              return finish({
+                ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
+                status: 'running',
+              })
+            }
+            observation = terminalObservation(refreshed)
+          } else if (late.kind === 'aborted') {
             // The in-flight lookup was self-cancelled by the deadline
             // abort, so its classification is meaningless — it never
             // observed the process. Run one final observation with a
@@ -1120,7 +1227,8 @@ export async function waitHandler(
     // far shorter than a back-pressured drain or a slow write
     // callback, and the flush bound must give a live consumer time to
     // drain. The rendered result keeps the exit code finish() already
-    // set.
+    // set. The wait itself lives in awaitPendingFlush above, which the
+    // pre-poll returns share (maintainer review 5962625271 on #2497).
     if (pendingFlush !== null) {
       const finished = finishedState.result
       const unsignalledTimeout =
@@ -1130,50 +1238,14 @@ export async function waitHandler(
       const flushBoundMs = unsignalledTimeout
         ? TIMEOUT_FLUSH_BOUND_MS
         : WAIT_POLL_INTERVAL_MS
-      let flushTimer: ReturnType<typeof setTimeout> | undefined
-      let signalShortenTimer: ReturnType<typeof setTimeout> | undefined
-      let onClientAbort: (() => void) | undefined
-      try {
-        const flushRacers: Array<Promise<void>> = [
-          pendingFlush,
-          new Promise<void>(resolve => {
-            flushTimer = setTimeout(() => resolve(), flushBoundMs)
-          }),
-        ]
-        if (unsignalledTimeout) {
-          // A signal during the flush shortens the remaining wait to
-          // one poll interval instead of abandoning the flush: the
-          // timeout result (124) is already selected, and the waiter
-          // must still return promptly on SIGINT/SIGTERM.
-          flushRacers.push(
-            new Promise<void>(resolve => {
-              onClientAbort = () => {
-                signalShortenTimer = setTimeout(
-                  () => resolve(),
-                  WAIT_POLL_INTERVAL_MS,
-                )
-              }
-              if (abortController.signal.aborted) onClientAbort()
-              else {
-                abortController.signal.addEventListener(
-                  'abort',
-                  onClientAbort,
-                  { once: true },
-                )
-              }
-            }),
-          )
-        }
-        await Promise.race(flushRacers)
-      } finally {
-        if (flushTimer !== undefined) clearTimeout(flushTimer)
-        if (signalShortenTimer !== undefined) {
-          clearTimeout(signalShortenTimer)
-        }
-        if (onClientAbort !== undefined) {
-          abortController.signal.removeEventListener('abort', onClientAbort)
-        }
-      }
+      // A signal during the flush shortens the remaining wait to one
+      // poll interval instead of abandoning the flush: the timeout
+      // result (124) is already selected, and the waiter must still
+      // return promptly on SIGINT/SIGTERM.
+      await awaitPendingFlush(
+        flushBoundMs,
+        unsignalledTimeout ? abortController.signal : undefined,
+      )
     }
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
     process.off('SIGINT', onSigint)

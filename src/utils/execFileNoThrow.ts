@@ -13,6 +13,17 @@ export { execSyncWithDefaults_DEPRECATED } from './execFileNoThrowPortable.js'
 const MS_IN_SECOND = 1000
 const SECONDS_IN_MINUTE = 60
 const DEFAULT_MAX_BUFFER = 1_000_000
+// How long an aborted child that traps its signal gets to close on its
+// own before it is force-stopped with SIGKILL (awaitCloseOnAbort only):
+// above the 200 ms cooperative close the `wait` inspector tests use, so
+// a child that exits on SIGTERM is never killed, and below the waiter's
+// 500 ms cleanup grace, so the close lands before the waiter stops
+// waiting (CodeRabbit #2497 review 5961433156).
+const ABORT_SIGKILL_GRACE_MS = 350
+// Last-resort bound for a SIGKILLed child that still has not emitted
+// 'close' (uninterruptible sleep): settle with the timeout error rather
+// than leaving the result pending forever.
+const ABORT_KILL_SETTLE_MS = 1000
 
 type ExecFileOptions = {
   abortSignal?: AbortSignal
@@ -236,6 +247,22 @@ export function execFileNoThrowWithCwd(
     // 'error' arrives before it (see the 'error' handler below).
     let closed = false
     let abortError: Error | undefined
+    // Escalation timers for a child that ignores its abort SIGTERM
+    // (awaitCloseOnAbort only): the SIGKILL grace, and the last-resort
+    // settle bound after a SIGKILL. Both are cleared on close/finish
+    // so no timer outlives the result.
+    let abortKillTimer: ReturnType<typeof setTimeout> | undefined
+    let killSettleTimer: ReturnType<typeof setTimeout> | undefined
+    const clearAbortTimers = (): void => {
+      if (abortKillTimer !== undefined) {
+        clearTimeout(abortKillTimer)
+        abortKillTimer = undefined
+      }
+      if (killSettleTimer !== undefined) {
+        clearTimeout(killSettleTimer)
+        killSettleTimer = undefined
+      }
+    }
 
     const finish = (result: {
       stdout: string
@@ -247,6 +274,7 @@ export function execFileNoThrowWithCwd(
         return
       }
       settled = true
+      clearAbortTimers()
       void resolve(result)
     }
 
@@ -301,6 +329,19 @@ export function execFileNoThrowWithCwd(
         // actually exited. The timeout below still bounds the wait if
         // the child never closes.
         abortError = error
+        // A child that ignores the abort SIGTERM never closes on its
+        // own: force-stop it after a short grace so a caller waiting
+        // for the close (notably `wait`, whose cleanup grace is one
+        // poll interval) does not return while the child is still
+        // alive. SIGKILL cannot be trapped, so the 'close' handler
+        // below settles promptly after it (CodeRabbit #2497 review
+        // 5961433156).
+        if (abortKillTimer === undefined) {
+          abortKillTimer = setTimeout(() => {
+            abortKillTimer = undefined
+            if (!closed) child.kill('SIGKILL')
+          }, ABORT_SIGKILL_GRACE_MS)
+        }
         return
       }
       finish({ stdout: '', stderr: '', code: 1, error: error.message })
@@ -310,6 +351,34 @@ export function execFileNoThrowWithCwd(
       finalTimeout > 0
         ? setTimeout(() => {
             timedOut = true
+            if (
+              finalAwaitCloseOnAbort &&
+              abortError !== undefined &&
+              !closed
+            ) {
+              // The child already ignored its abort SIGTERM: a second
+              // SIGTERM is equally useless, so escalate to SIGKILL and
+              // let the 'close' handler settle once the child has
+              // actually exited, instead of resolving while it is
+              // still alive (CodeRabbit #2497 review 5961433156). The
+              // settle bound below keeps the result from pending
+              // forever if the close never arrives.
+              if (abortKillTimer !== undefined) {
+                clearTimeout(abortKillTimer)
+                abortKillTimer = undefined
+              }
+              child.kill('SIGKILL')
+              killSettleTimer = setTimeout(() => {
+                killSettleTimer = undefined
+                finish({
+                  stdout: finalPreserveOutput ? stdout : '',
+                  stderr: finalPreserveOutput ? stderr : '',
+                  code: 1,
+                  error: `Command timed out after ${finalTimeout}ms`,
+                })
+              }, ABORT_KILL_SETTLE_MS)
+              return
+            }
             child.kill?.()
             finish({
               stdout: finalPreserveOutput ? stdout : '',
@@ -322,6 +391,7 @@ export function execFileNoThrowWithCwd(
 
     child.once('close', (code, closeSignal) => {
       closed = true
+      clearAbortTimers()
       if (timeoutId) {
         clearTimeout(timeoutId)
       }

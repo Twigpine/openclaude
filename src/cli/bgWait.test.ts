@@ -325,8 +325,13 @@ describe('wait command handler', () => {
     } finally {
       // Never leave the write callback held if an assertion above
       // fails: the waiter's flush bound returns it regardless, and
-      // releasing an already-fired callback is a no-op.
+      // releasing an already-fired callback is a no-op. Join the
+      // waiter as well, so it finishes before teardown and cannot
+      // retain its process signal listeners into the next test; the
+      // catch keeps a waiter failure from masking the original test
+      // failure (CodeRabbit #2497 review 5961433156).
       releaseWrite?.()
+      await waiting.catch(() => {})
     }
   }
 
@@ -926,6 +931,298 @@ describe('wait command handler', () => {
     expect(result.error).toBe('timeout')
   })
 
+  it('waits for a back-pressured stdout drain before returning 2 on a parse error', async () => {
+    // Regression test for maintainer review 5962625271 (P2) on #2497:
+    // the pre-poll parse-error path returns before the poll loop's
+    // finally, so with --json and a back-pressured stdout the mandatory
+    // v1 JSON line could be lost. The fake stdout reports every write
+    // as back-pressured and drains 50 ms later; the waiter must return
+    // only after the drain, not at once.
+    class BackpressuredOutput {
+      chunks: string[] = []
+      drained = false
+      private listeners = new Map<string, Array<() => void>>()
+      write(chunk: string): boolean {
+        this.chunks.push(chunk)
+        setTimeout(() => {
+          this.drained = true
+          for (const listener of this.listeners.get('drain') ?? []) {
+            listener()
+          }
+        }, 50)
+        return false
+      }
+      once(event: string, listener: () => void): void {
+        const list = this.listeners.get(event) ?? []
+        list.push(listener)
+        this.listeners.set(event, list)
+      }
+      off(event: string, listener: () => void): void {
+        this.listeners.set(
+          event,
+          (this.listeners.get(event) ?? []).filter(l => l !== listener),
+        )
+      }
+      text(): string {
+        return this.chunks.join('')
+      }
+    }
+    const stdout = new BackpressuredOutput()
+    const startedAt = performance.now()
+    const { code } = await runWait(
+      ['bg-aaa1', '--timeout', 'bogus', '--json'],
+      { stdout },
+    )
+    const elapsedMs = performance.now() - startedAt
+    expect(code).toBe(2)
+    expect(stdout.drained).toBe(true)
+    expect(elapsedMs).toBeGreaterThanOrEqual(40)
+    const result = expectWaitJsonShape(JSON.parse(stdout.text()))
+    expect(result.waitResult).toBe('selector_error')
+    expect(result.error).toBe('invalid_arguments')
+  })
+
+  it('waits for a back-pressured stdout drain before returning 2 when background sessions are unsupported', async () => {
+    // Regression test for maintainer review 5962625271 (P2) on #2497:
+    // same pre-poll gap as the parse-error path — the
+    // featureEnabled === false path returns before the poll loop's
+    // finally, so with --json and a back-pressured stdout the mandatory
+    // v1 JSON line could be lost. The fake stdout reports every write
+    // as back-pressured and drains 50 ms later.
+    class BackpressuredOutput {
+      chunks: string[] = []
+      drained = false
+      private listeners = new Map<string, Array<() => void>>()
+      write(chunk: string): boolean {
+        this.chunks.push(chunk)
+        setTimeout(() => {
+          this.drained = true
+          for (const listener of this.listeners.get('drain') ?? []) {
+            listener()
+          }
+        }, 50)
+        return false
+      }
+      once(event: string, listener: () => void): void {
+        const list = this.listeners.get(event) ?? []
+        list.push(listener)
+        this.listeners.set(event, list)
+      }
+      off(event: string, listener: () => void): void {
+        this.listeners.set(
+          event,
+          (this.listeners.get(event) ?? []).filter(l => l !== listener),
+        )
+      }
+      text(): string {
+        return this.chunks.join('')
+      }
+    }
+    const stdout = new BackpressuredOutput()
+    const startedAt = performance.now()
+    const { code } = await runWait(['bg-aaa1', '--json'], {
+      featureEnabled: false,
+      stdout,
+    })
+    const elapsedMs = performance.now() - startedAt
+    expect(code).toBe(2)
+    expect(stdout.drained).toBe(true)
+    expect(elapsedMs).toBeGreaterThanOrEqual(40)
+    const result = expectWaitJsonShape(JSON.parse(stdout.text()))
+    expect(result.waitResult).toBe('selector_error')
+    expect(result.error).toBe('unsupported')
+  })
+
+  it('returns the terminal outcome when a terminal fact lands while the lookup is still pending past the grace', async () => {
+    // Regression test for CodeRabbit #2497 review 5961433156 (Minor):
+    // the deadline expired while the in-flight lookup was still
+    // pending, and the grace expired before the observation settled, so
+    // the waiter returned 124 without re-reading the pinned session —
+    // even though a terminal fact was published while the lookup was
+    // pending. The stub lookup never settles (it stands in for a
+    // lookup whose inspector close is delayed past the grace); the fact
+    // is published as soon as the lookup starts, and the waiter must
+    // return the terminal outcome instead of 124.
+    await createTestSession('bg-aaa1')
+    let lookupStartedResolve!: () => void
+    const lookupStarted = new Promise<void>(resolve => {
+      lookupStartedResolve = resolve
+    })
+    const hangingLookup = async (
+      _pid: number,
+      _options: { signal?: AbortSignal },
+    ): Promise<string | null> => {
+      lookupStartedResolve()
+      return new Promise<string | null>(() => {})
+    }
+    const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: hangingLookup,
+      pollIntervalMs: 500,
+    })
+    await lookupStarted
+    await finishSession('bg-aaa1', { exitCode: 0 })
+    const { code, stdout } = await waiting
+    expect(code).toBe(0)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.waitResult).toBe('terminal')
+    expect(result.exitCode).toBe(0)
+  })
+
+  it('returns the terminal outcome when a terminal fact lands during the final timeout observation', async () => {
+    // Regression test for CodeRabbit #2497 review 5961433156 (Minor):
+    // same grace-expiry re-read, for the final timeout observation:
+    // the first observation was aborted by the deadline, and the fresh
+    // final lookup never settled within its grace, so the waiter
+    // returned 124 without re-reading the pinned session. The stub
+    // lookup returns null once its signal aborts (first call, so the
+    // observation is 'aborted'), then signals the test and hangs
+    // (second call, the final observation); the fact is published as
+    // soon as the final lookup starts, and the waiter must return the
+    // terminal outcome instead of 124.
+    await createTestSession('bg-aaa1')
+    let lookupCalls = 0
+    let finalLookupStartedResolve!: () => void
+    const finalLookupStarted = new Promise<void>(resolve => {
+      finalLookupStartedResolve = resolve
+    })
+    const waitForAbort = (signal?: AbortSignal): Promise<void> =>
+      new Promise<void>(resolve => {
+        if (signal === undefined || signal.aborted) resolve()
+        else {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        }
+      })
+    const stubLookup = async (
+      _pid: number,
+      options: { signal?: AbortSignal },
+    ): Promise<string | null> => {
+      lookupCalls++
+      if (lookupCalls === 1) {
+        await waitForAbort(options.signal)
+        return null
+      }
+      finalLookupStartedResolve()
+      await waitForAbort(options.signal)
+      return null
+    }
+    const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: stubLookup,
+      pollIntervalMs: 500,
+    })
+    await finalLookupStarted
+    await finishSession('bg-aaa1', { exitCode: 0 })
+    const { code, stdout } = await waiting
+    expect(code).toBe(0)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.waitResult).toBe('terminal')
+    expect(result.exitCode).toBe(0)
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'returns the terminal outcome when a terminal fact lands while the inspector close is delayed past the grace',
+    async () => {
+      // Regression test for CodeRabbit #2497 review 5961433156 (Minor),
+      // on the real production lookup: the deadline expires while the
+      // in-flight lookup is still pending, and a terminal fact is
+      // published before the observation settles — the waiter must
+      // return the terminal outcome instead of 124. The shim traps
+      // SIGTERM and closes 600 ms later, past the 500 ms grace; the
+      // fact is published as soon as the shim reports the signal, so
+      // it lands while the lookup is pending. (The stub tests above
+      // cover the two grace-expiry re-read sites deterministically;
+      // this one covers the real lookup path.) No `exited` marker is
+      // expected: the SIGKILL escalation stops the shim before its
+      // delayed exit fires.
+      const { shimDir, markerDir } = await createPsShim(600)
+      const savedPath = process.env.PATH
+      const sessionChild = spawn(
+        process.execPath,
+        ['-e', 'setTimeout(() => {}, 60000)'],
+        { stdio: 'ignore' },
+      )
+      if (sessionChild.pid === undefined) {
+        throw new Error('spawned session child has no pid')
+      }
+      let waiting: ReturnType<typeof runWait> | undefined
+      let waitingSettled = false
+      try {
+        process.env.PATH = `${shimDir}${savedPath ? `:${savedPath}` : ''}`
+        await createTestSession('bg-aaa1', { pid: sessionChild.pid })
+        waiting = runWait(['bg-aaa1', '--timeout', '500ms', '--json'], {
+          isProcessAlive: () => true,
+          getProcessCommandAsync,
+          pollIntervalMs: 500,
+        })
+        // Track settlement: the finally below must only emit a signal
+        // while the waiter is still listening — emitting SIGINT after
+        // it returned (and removed its listeners) terminates the test
+        // process via the signal-exit handler.
+        void waiting.then(
+          () => {
+            waitingSettled = true
+          },
+          () => {
+            waitingSettled = true
+          },
+        )
+        const startedDeadline = Date.now() + 2000
+        while (
+          !existsSync(join(markerDir, 'started')) &&
+          Date.now() < startedDeadline
+        ) {
+          await new Promise(resolve => setTimeout(resolve, 10))
+        }
+        expect(existsSync(join(markerDir, 'started'))).toBe(true)
+        // Wait for the shim to report the deadline's SIGTERM before
+        // publishing: the fact must land while the lookup is pending.
+        // Fail explicitly instead of hanging if it never does.
+        const signalledDeadline = Date.now() + 5000
+        while (
+          !existsSync(join(markerDir, 'signalled')) &&
+          Date.now() < signalledDeadline
+        ) {
+          await new Promise(resolve => setTimeout(resolve, 10))
+        }
+        expect(existsSync(join(markerDir, 'signalled'))).toBe(true)
+        await finishSession('bg-aaa1', { exitCode: 0 }, sessionChild.pid)
+        const { code, stdout } = await waiting
+        expect(code).toBe(0)
+        const result = expectWaitJsonShape(JSON.parse(stdout))
+        expect(result.waitResult).toBe('terminal')
+        expect(result.exitCode).toBe(0)
+      } finally {
+        process.env.PATH = savedPath
+        sessionChild.kill()
+        // Never leave a shim behind if an assertion above fails: the
+        // started marker carries its pid.
+        try {
+          const shimPid = Number.parseInt(
+            await readFile(join(markerDir, 'started'), 'utf8'),
+            10,
+          )
+          if (Number.isInteger(shimPid)) process.kill(shimPid, 'SIGKILL')
+        } catch {}
+        // Settle the waiter if the test failed before awaiting it, so
+        // no signal listener or pending lookup leaks into later tests.
+        // Only emit while the waiter is still pending (see above).
+        if (waiting !== undefined && !waitingSettled) {
+          process.emit('SIGINT')
+          await Promise.race([
+            waiting.then(
+              () => undefined,
+              () => undefined,
+            ),
+            new Promise(resolve => setTimeout(resolve, 2000)),
+          ])
+        }
+        await rm(shimDir, { recursive: true, force: true })
+        await rm(markerDir, { recursive: true, force: true })
+      }
+    },
+  )
+
   it('waits for the write callback even when write() returns true', async () => {
     // Regression test for CodeRabbit #2497 review 5950772048: a real
     // stream's write() can return true while the chunk is still
@@ -1347,6 +1644,7 @@ describe('wait command handler', () => {
     const markerDir = await mkdtemp(join(tmpdir(), 'openclaude-ps-markers-'))
     const shim = join(shimDir, 'ps')
     const startedMarker = join(markerDir, 'started')
+    const signalledMarker = join(markerDir, 'signalled')
     const exitedMarker = join(markerDir, 'exited')
     const onTerm =
       closeDelayMs === null
@@ -1358,8 +1656,16 @@ describe('wait command handler', () => {
         '#!/usr/bin/env node',
         `const fs = require('node:fs')`,
         `process.stdout.write('sleep 30\\n')`,
+        // Install the SIGTERM handler before publishing readiness:
+        // a test that signals the shim as soon as it sees `started`
+        // must not land before cancellation handling is ready, or the
+        // shim can die before writing `exited` even when the waiter
+        // handles child closure correctly (CodeRabbit #2497 review
+        // 5961433156). The handler records the signal at once, so a
+        // test can publish a terminal fact while the close is still
+        // delayed.
+        `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(signalledMarker)}, 'signalled'); ${onTerm} })`,
         `fs.writeFileSync(${JSON.stringify(startedMarker)}, String(process.pid))`,
-        `process.on('SIGTERM', () => { ${onTerm} })`,
         'setTimeout(() => {}, 60000)',
         '',
       ].join('\n'),
@@ -1519,6 +1825,16 @@ describe('wait command handler', () => {
         const result = expectWaitJsonShape(JSON.parse(stdout))
         expect(result.waitResult).toBe('interrupted')
         expect(result.waitSignal).toBe('SIGINT')
+        // The waiter must not return while the inspector is still
+        // alive: an inspector that ignores SIGTERM must have been
+        // force-stopped before the waiter returned (CodeRabbit #2497
+        // review 5961433156, execFileNoThrow escalation).
+        const shimPid = Number.parseInt(
+          await readFile(join(markerDir, 'started'), 'utf8'),
+          10,
+        )
+        expect(Number.isInteger(shimPid)).toBe(true)
+        expect(() => process.kill(shimPid, 0)).toThrow()
       } finally {
         process.env.PATH = savedPath
         sessionChild.kill()
