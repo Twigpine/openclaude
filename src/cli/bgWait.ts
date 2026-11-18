@@ -889,6 +889,28 @@ export async function waitHandler(
   process.on('SIGINT', onSigint)
   process.on('SIGTERM', onSigterm)
 
+  // Finishes a timeout outcome, then reclassifies it when a client
+  // signal was recorded during the pending flush: a signal that lands
+  // after the timeout result was selected but before its JSON leaves a
+  // back-pressured stdout still interrupts the waiter (130/143) — it
+  // does not merely shorten the flush (maintainer review 5964758980
+  // on #2497). The interrupted result is rendered in place of the
+  // timeout one; the finally below flushes that render for at most one
+  // poll interval, so a consumer that never drains still cannot stall
+  // the waiter. An unsignalled timeout keeps today's longer flush
+  // bound and returns 124.
+  const finishTimeout = async (
+    result: WaitResult,
+    humanMessage?: string,
+  ): Promise<number> => {
+    finish(result, humanMessage)
+    await awaitPendingFlush(TIMEOUT_FLUSH_BOUND_MS, abortController.signal)
+    if (clientSignal !== null) {
+      return finish(interruptedWaitResult(result.id, clientSignal))
+    }
+    return waitExitCode(result)
+  }
+
   const lookupDeps: WaitHandlerOptions = {
     ...options,
     getProcessCommandAsync: trackedGetProcessCommandAsync,
@@ -899,31 +921,42 @@ export async function waitHandler(
   // (a lookup whose inspector close lagged, or a stalled registry read)
   // must win over the timeout, or the waiter reports a false 124 for a
   // session that already finished. The read is bounded by one poll
-  // interval, so a stalled read still settles as a timeout, and any
-  // other outcome — running, stale, unreadable, or a read that never
-  // settles — keeps the timeout (CodeRabbit #2497 review 5961433156).
-  // Uses the caller's pinned reader when one is injected, so tests can
-  // observe the same re-read the production path makes.
+  // interval, so a stalled read still settles as a timeout. A strict
+  // metadata failure (missing, unreadable, malformed, or replaced) is
+  // returned as an observation error, not swallowed: the boundary must
+  // report exit 4 for it, like the main poll loop does (maintainer
+  // review 5964758980 and CodeRabbit #2497 review 5963778469 on #2497).
+  // An unexpected (non-wait) read failure still settles as a timeout,
+  // as before. A read that never settles within one poll interval
+  // returns null, distinct from an error, so callers can tell an
+  // unsettled read from a failed one. Uses the caller's pinned reader
+  // when one is injected, so tests can observe the same re-read the
+  // production path makes.
   const readTerminalAtTimeoutBoundary = async (
     pinned: { id: string; pid: number },
     deps: WaitHandlerOptions,
-  ): Promise<BackgroundSession | null> => {
+  ): Promise<WaitObservation | null> => {
     const readPinned =
       deps.readPinnedSession ?? readPinnedBackgroundSessionForWait
     let readTimer: ReturnType<typeof setTimeout> | undefined
     try {
       const read = await Promise.race([
         readPinned(pinned).then(
-          session => session,
-          () => null,
+          session => ({ kind: 'session' as const, session }),
+          (error: unknown) =>
+            error instanceof BackgroundSessionWaitError
+              ? { kind: 'metadata_error' as const, error }
+              : null,
         ),
         new Promise<null>(resolve => {
           readTimer = setTimeout(() => resolve(null), pollIntervalMs)
         }),
       ])
       if (read === null) return null
-      return isTerminalBackgroundSession(read) && read.status !== 'stale'
-        ? read
+      if (read.kind === 'metadata_error') return read
+      return isTerminalBackgroundSession(read.session) &&
+        read.session.status !== 'stale'
+        ? terminalObservation(read.session)
         : null
     } finally {
       if (readTimer !== undefined) clearTimeout(readTimer)
@@ -961,8 +994,11 @@ export async function waitHandler(
       ])
       if (settled === null) {
         finalLookupController.abort()
-        const terminal = await readTerminalAtTimeoutBoundary(pinned, deps)
-        if (terminal !== null) return terminalObservation(terminal)
+        // A terminal fact or a strict metadata failure found by the
+        // boundary re-read wins over the timeout; a read that never
+        // settles returns null (CodeRabbit #2497 review 5963778469).
+        const boundary = await readTerminalAtTimeoutBoundary(pinned, deps)
+        if (boundary !== null) return boundary
         return null
       }
       return settled
@@ -1019,7 +1055,7 @@ export async function waitHandler(
         // promptly instead of waiting out the poll-interval bound
         // (CodeRabbit #2497 review 5950772048).
         deadlineAbortController.abort()
-        return finish(
+        return finishTimeout(
           baseWaitResult(null, 'timeout', 'timeout'),
           'Timed out waiting for a background session.',
         )
@@ -1093,33 +1129,41 @@ export async function waitHandler(
             if (clientSignal) {
               return finish(interruptedWaitResult(pinned.id, clientSignal))
             }
-            // The observation never settled, but a terminal fact may
-            // have been published while it was pending: re-read once
-            // before reporting a timeout, and let the shared
-            // classification below return the terminal outcome (or the
-            // metadata error, for an exited record with no exit code).
-            // A read stalled past the grace interval, or a session
-            // still not observably terminal, is a timeout (124), not
-            // an unreadable process (3) (CodeRabbit #2497 review
-            // 5961433156).
-            const refreshed = await readTerminalAtTimeoutBoundary(
-              pinned,
-              lookupDeps,
-            )
-            if (refreshed === null) {
-              return finish({
+            // The observation never settled, so a metadata-only
+            // re-read cannot classify the boundary: run one final
+            // complete observation instead. A terminal fact published
+            // while it was pending wins, a pinned metadata failure
+            // reports exit 4, and a genuinely unreadable process
+            // reports exit 3 — the deadline table's outcomes — while
+            // a fresh observation that never settles either is still
+            // a timeout (124), as in the aborted branch below
+            // (maintainer review 5964758980 on #2497). A client
+            // signal received during that final observation takes
+            // precedence over the timeout, as below.
+            const finalObservation =
+              await finalTimeoutObservation(pinned, lookupDeps)
+            if (finalObservation === null) {
+              if (clientSignal) {
+                return finish(interruptedWaitResult(pinned.id, clientSignal))
+              }
+              return finishTimeout({
                 ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
                 status: 'running',
               })
             }
-            observation = terminalObservation(refreshed)
-          } else if (late.kind === 'aborted') {
-            // The in-flight lookup was self-cancelled by the deadline
-            // abort, so its classification is meaningless — it never
-            // observed the process. Run one final observation with a
-            // fresh lookup signal that is not self-cancelled, bounded
-            // by one poll interval: terminal wins, running returns 124,
-            // genuinely unreadable returns 3.
+            observation = finalObservation
+          } else if (late.kind === 'aborted' || late.kind === 'running') {
+            // An aborted in-flight lookup never observed the process,
+            // so its classification is meaningless; a running result
+            // settled from a pre-deadline lookup can likewise be
+            // stale — the child may have exited in the meantime
+            // without publishing a terminal fact. Run one final
+            // observation with a fresh lookup signal that is not
+            // self-cancelled, bounded by one poll interval: terminal
+            // wins, a genuinely unreadable process returns 3, and a
+            // child that is still alive returns 124 (maintainer
+            // review 5964758980 and CodeRabbit #2497 review 5963778469
+            // on #2497).
             const finalObservation =
               await finalTimeoutObservation(pinned, lookupDeps)
             if (finalObservation === null) {
@@ -1128,7 +1172,7 @@ export async function waitHandler(
               if (clientSignal) {
                 return finish(interruptedWaitResult(pinned.id, clientSignal))
               }
-              return finish({
+              return finishTimeout({
                 ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
                 status: 'running',
               })
@@ -1172,7 +1216,7 @@ export async function waitHandler(
             status: 'unknown',
           })
         }
-        return finish({
+        return finishTimeout({
           ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
           status: 'running',
         })
@@ -1229,6 +1273,9 @@ export async function waitHandler(
     // drain. The rendered result keeps the exit code finish() already
     // set. The wait itself lives in awaitPendingFlush above, which the
     // pre-poll returns share (maintainer review 5962625271 on #2497).
+    // A timeout result reclassified by finishTimeout already rendered
+    // its interrupted replacement: this await only flushes that render,
+    // bounded by one poll interval as for every other outcome.
     if (pendingFlush !== null) {
       const finished = finishedState.result
       const unsignalledTimeout =

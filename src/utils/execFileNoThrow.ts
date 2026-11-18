@@ -247,6 +247,13 @@ export function execFileNoThrowWithCwd(
     // 'error' arrives before it (see the 'error' handler below).
     let closed = false
     let abortError: Error | undefined
+    // Set when the output buffer overflows while an aborted child is
+    // still alive (awaitCloseOnAbort only): the overflow must not settle
+    // the result before the child closes, so the error is recorded here
+    // and reported by the 'close' handler (or the kill settle bound)
+    // once the child has actually exited (CodeRabbit #2497 review
+    // 5963778469).
+    let overflowError: string | undefined
     // Escalation timers for a child that ignores its abort SIGTERM
     // (awaitCloseOnAbort only): the SIGKILL grace, and the last-resort
     // settle bound after a SIGKILL. Both are cleared on close/finish
@@ -278,6 +285,47 @@ export function execFileNoThrowWithCwd(
       void resolve(result)
     }
 
+    // Starts the last-resort settle bound once a SIGKILL has been sent:
+    // a SIGKILLed child in uninterruptible sleep — or one whose stdio
+    // pipe a descendant keeps open — may never emit 'close', so the
+    // result must still settle (CodeRabbit #2497 review 5963778469).
+    // The first starter wins: the timeout callback below passes its own
+    // error, while the abort escalation reports the overflow or abort
+    // error that caused it.
+    const startKillSettleTimer = (error?: string): void => {
+      if (killSettleTimer !== undefined) return
+      killSettleTimer = setTimeout(() => {
+        killSettleTimer = undefined
+        finish({
+          stdout: finalPreserveOutput ? stdout : '',
+          stderr: finalPreserveOutput ? stderr : '',
+          code: 1,
+          error:
+            error ??
+            overflowError ??
+            abortError?.message ??
+            `Command timed out after ${finalTimeout}ms`,
+        })
+      }, ABORT_KILL_SETTLE_MS)
+    }
+
+    // Force-stops an aborted child that ignored its SIGTERM and starts
+    // the last-resort settle bound, independently of the command
+    // timeout: with timeout 0 there is no timeout callback to start it
+    // (CodeRabbit #2497 review 5963778469).
+    const escalateAbortedChild = (): void => {
+      abortKillTimer = undefined
+      if (!closed) {
+        child.kill('SIGKILL')
+        startKillSettleTimer()
+      }
+    }
+
+    const scheduleAbortKill = (): void => {
+      if (abortKillTimer !== undefined) return
+      abortKillTimer = setTimeout(escalateAbortedChild, ABORT_SIGKILL_GRACE_MS)
+    }
+
     const appendOutput = (
       chunk: string | Buffer,
       target: 'stdout' | 'stderr',
@@ -286,6 +334,18 @@ export function execFileNoThrowWithCwd(
       combinedBufferSize += Buffer.byteLength(text, 'utf8')
       if (combinedBufferSize > maxBuffer) {
         child.kill()
+        if (finalAwaitCloseOnAbort && abortSignal?.aborted && !closed) {
+          // The child is still alive after its abort SIGTERM: settling
+          // here would report the command finished while its process
+          // is still running, and finishing would clear the pending
+          // SIGKILL escalation. Record the overflow and keep the
+          // escalation active; the 'close' handler (or the kill settle
+          // bound) settles with it once the child has actually exited
+          // (CodeRabbit #2497 review 5963778469).
+          overflowError = 'maxBuffer exceeded'
+          scheduleAbortKill()
+          return
+        }
         finish({
           stdout: finalPreserveOutput ? stdout : '',
           stderr: finalPreserveOutput ? stderr : '',
@@ -336,12 +396,7 @@ export function execFileNoThrowWithCwd(
         // alive. SIGKILL cannot be trapped, so the 'close' handler
         // below settles promptly after it (CodeRabbit #2497 review
         // 5961433156).
-        if (abortKillTimer === undefined) {
-          abortKillTimer = setTimeout(() => {
-            abortKillTimer = undefined
-            if (!closed) child.kill('SIGKILL')
-          }, ABORT_SIGKILL_GRACE_MS)
-        }
+        scheduleAbortKill()
         return
       }
       finish({ stdout: '', stderr: '', code: 1, error: error.message })
@@ -368,15 +423,9 @@ export function execFileNoThrowWithCwd(
                 abortKillTimer = undefined
               }
               child.kill('SIGKILL')
-              killSettleTimer = setTimeout(() => {
-                killSettleTimer = undefined
-                finish({
-                  stdout: finalPreserveOutput ? stdout : '',
-                  stderr: finalPreserveOutput ? stderr : '',
-                  code: 1,
-                  error: `Command timed out after ${finalTimeout}ms`,
-                })
-              }, ABORT_KILL_SETTLE_MS)
+              startKillSettleTimer(
+                `Command timed out after ${finalTimeout}ms`,
+              )
               return
             }
             child.kill?.()
@@ -398,6 +447,19 @@ export function execFileNoThrowWithCwd(
 
       signal = closeSignal ?? undefined
       const errorCode = code ?? 1
+
+      if (overflowError !== undefined) {
+        // The output buffer overflowed while the child was still alive:
+        // the truncated output is the result, whatever else happened
+        // afterward (CodeRabbit #2497 review 5963778469).
+        finish({
+          stdout: finalPreserveOutput ? stdout : '',
+          stderr: finalPreserveOutput ? stderr : '',
+          code: 1,
+          error: overflowError,
+        })
+        return
+      }
 
       if (abortError !== undefined) {
         // The abort error arrived before the child closed; settle with

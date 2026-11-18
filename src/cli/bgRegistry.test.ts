@@ -3882,7 +3882,11 @@ describe('background session wait strict reads', () => {
       command: ['sleep', '30'],
       sessionId: 'sess-wait-1',
     })
-    const creations = Promise.all(
+    // Both groups are awaited with allSettled, so a rejection in either
+    // group cannot skip the other group's join: teardown must never run
+    // while a creation is still using the registry root (CodeRabbit
+    // #2497 review 5963778469).
+    const creations = Promise.allSettled(
       Array.from({ length: 8 }, (_, index) =>
         createBackgroundSession({
           id: `bg-wait-new-${index}`,
@@ -3893,13 +3897,23 @@ describe('background session wait strict reads', () => {
         }),
       ),
     )
-    const codes = await Promise.all(
+    const scans = Promise.allSettled(
       Array.from({ length: 40 }, () =>
         waitErrorCode(() => resolveBackgroundSessionForWait('target')),
       ),
     )
-    await creations
-    expect(codes.every(code => code === undefined)).toBe(true)
+    const [creationResults, scanResults] = await Promise.all([
+      creations,
+      scans,
+    ])
+    expect(
+      creationResults.every(result => result.status === 'fulfilled'),
+    ).toBe(true)
+    expect(
+      scanResults.every(
+        result => result.status === 'fulfilled' && result.value === undefined,
+      ),
+    ).toBe(true)
   })
 
   it('resolves by live name, ID prefix, and terminal name in selection order', async () => {
@@ -3924,13 +3938,108 @@ describe('background session wait strict reads', () => {
       { exitCode: 0 },
       { ownerPid: 424242 },
     )
+    // A competing session whose ID starts with `worker`: without
+    // live-name precedence the ID-prefix fallback would select it, so
+    // the `worker` assertion below only passes when the live name
+    // match wins (CodeRabbit #2497 review 5963778469).
+    await createBackgroundSession({
+      id: 'worker-cccc3',
+      name: 'other',
+      pid: 424244,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-cccc3',
+    })
 
-    expect((await resolveBackgroundSessionForWait('worker')).id).toBe('bg-wbbb2')
+    expect(
+      (
+        await resolveBackgroundSessionForWait('worker', {
+          isProcessAlive: () => true,
+          getProcessCommandAsync: async () => 'sleep 30',
+        })
+      ).id,
+    ).toBe('bg-wbbb2')
     expect((await resolveBackgroundSessionForWait('bg-wbbb')).id).toBe(
       'bg-wbbb2',
     )
     expect((await resolveBackgroundSessionForWait('nightly')).id).toBe('bg-waaa1')
     expect(live.id).toBe('bg-wbbb2')
+  })
+
+  it('lets a live name match win over an exited row with a malformed terminal fact', async () => {
+    // Regression test for CodeRabbit #2497 review 5963778469: an old
+    // exited `worker` row whose terminal fact is malformed must not
+    // block a newer live `worker` — the old row cannot become live, so
+    // its facts are read only when selection reaches it. The persisted
+    // exited status below is what the reconciler writes back after
+    // applying a terminal fact.
+    const old = await createBackgroundSession({
+      id: 'bg-old1',
+      name: 'worker',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-old1',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-old1',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+    await writeFile(
+      metadataPath('bg-old1'),
+      JSON.stringify({ ...old, status: 'exited' }),
+    )
+    await writeFile(terminalFactPath('bg-old1', 'natural'), '{not json')
+    await createBackgroundSession({
+      id: 'bg-new2',
+      name: 'worker',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-new2',
+    })
+
+    const resolved = await resolveBackgroundSessionForWait('worker', {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'sleep 30',
+    })
+
+    expect(resolved.id).toBe('bg-new2')
+  })
+
+  it('still reports metadata_malformed when an exited row with a malformed terminal fact is selected', async () => {
+    // Same fixture as the live-wins test above, but with no live
+    // `worker` to select: selection reaches the exited row, so its
+    // malformed fact still reports exit 4 (CodeRabbit #2497 review
+    // 5963778469).
+    const old = await createBackgroundSession({
+      id: 'bg-old1',
+      name: 'worker',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-old1',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-old1',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+    await writeFile(
+      metadataPath('bg-old1'),
+      JSON.stringify({ ...old, status: 'exited' }),
+    )
+    await writeFile(terminalFactPath('bg-old1', 'natural'), '{not json')
+
+    expect(
+      await waitErrorCode(() =>
+        resolveBackgroundSessionForWait('worker', {
+          isProcessAlive: () => true,
+          getProcessCommandAsync: async () => 'sleep 30',
+        }),
+      ),
+    ).toBe('metadata_malformed')
   })
 
   it('treats a stored-ID mismatch in the exact-ID file as missing and resolves by name', async () => {
@@ -4276,21 +4385,28 @@ describe('background session wait strict reads', () => {
       // the alias read and the canonical read, the two reads disagree
       // — the resolver must re-read both paths and accept the row once
       // the fresh reads agree, instead of failing with
-      // metadata_malformed. The repoint happens in the mismatch hook,
-      // so it lands strictly between the mismatch and the retry's
-      // re-reads: no timer, and the hook count proves the retry path
-      // ran (CodeRabbit #2497 review 5961433156).
+      // metadata_malformed. The replacement and repoint happen in the
+      // mismatch hook, so they land strictly between the mismatch and
+      // the retry's re-reads: no timer, and the hook count proves the
+      // retry path ran (CodeRabbit #2497 review 5961433156). The hook
+      // replaces the canonical file with a new file first, then points
+      // the alias at that replacement: a retry that refreshes only the
+      // alias would compare the fresh alias identity against the stale
+      // canonical one and fail this row (CodeRabbit #2497 review
+      // 5963778469).
       const { child } = await createSplitAliasFixture()
       try {
-        // Repoint the alias spelling at the canonical file: a prepared
-        // hard link to bg-other.json renamed into place atomically.
         const sessionsDir = dirname(metadataPath('bg-other'))
-        const repoint = join(sessionsDir, 'BG-other.tmp')
-        await link(metadataPath('bg-other'), repoint)
         let mismatchHookCalls = 0
         const resolved = await resolveBackgroundSessionForWait('bg-job', {
           _onAliasIdentityMismatchForTesting: async () => {
             mismatchHookCalls++
+            const replacement = join(sessionsDir, 'bg-other.tmp')
+            const content = await readFile(metadataPath('bg-other'), 'utf8')
+            await writeFile(replacement, content)
+            await rename(replacement, metadataPath('bg-other'))
+            const repoint = join(sessionsDir, 'BG-other.tmp')
+            await link(metadataPath('bg-other'), repoint)
             await rename(repoint, metadataPath('BG-other'))
           },
         })
