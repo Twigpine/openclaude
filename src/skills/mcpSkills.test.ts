@@ -184,6 +184,65 @@ describe('fetchMcpSkillsForClient privilege stripping', () => {
     expect(retried[0]?.name).toBe('mcp__aborted-skill-read-server__held')
   }, 10_000)
 
+  test('a replacement transport lists its own skills, not the old transport\u2019s', async () => {
+    // The skills cache is keyed by transport generation, not by server
+    // name+config: after a reconnect, the replacement must list its own
+    // skills instead of reading the entry the transport it replaces
+    // wrote — a name-keyed entry would hand back the old skill set
+    // (CodeRabbit #2493 review 5961865068).
+    const skillMarkdown = (skill: string) =>
+      [
+        '---',
+        `name: ${skill}`,
+        `description: ${skill} skill`,
+        '---',
+        `# ${skill}`,
+      ].join('\n')
+    function mockClientServingSkill(
+      skill: string,
+      config: MCPServerConnection['config'],
+    ): MCPServerConnection {
+      return {
+        type: 'connected',
+        name: 'skills-reconnect-server',
+        config,
+        capabilities: { resources: {} },
+        client: {
+          request: async (req: { method: string; params?: { uri?: string } }) => {
+            if (req.method === 'resources/list') {
+              return { resources: [{ uri: `skill://${skill}`, name: skill }] }
+            }
+            if (req.method === 'resources/read') {
+              return {
+                contents: [
+                  {
+                    uri: `skill://${skill}`,
+                    mimeType: 'text/markdown',
+                    text: skillMarkdown(skill),
+                  },
+                ],
+              }
+            }
+            throw new Error(`unexpected method ${req.method}`)
+          },
+        },
+      } as unknown as MCPServerConnection
+    }
+    const config = { type: 'sdk', scope: 'local' } as unknown as MCPServerConnection['config']
+    const oldClient = mockClientServingSkill('old-skill', config)
+    const replacement = mockClientServingSkill('new-skill', config)
+    expect(
+      (await fetchMcpSkillsForClient(oldClient)).map(c => c.name),
+    ).toEqual(['mcp__skills-reconnect-server__old-skill'])
+    expect(
+      (await fetchMcpSkillsForClient(replacement)).map(c => c.name),
+    ).toEqual(['mcp__skills-reconnect-server__new-skill'])
+    // And the old transport's entry still answers for the old client.
+    expect(
+      (await fetchMcpSkillsForClient(oldClient)).map(c => c.name),
+    ).toEqual(['mcp__skills-reconnect-server__old-skill'])
+  })
+
   test('discovers and reads a skill resource that appears only on page two', async () => {
     const listRequests: Array<{
       method: string

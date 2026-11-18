@@ -4314,7 +4314,11 @@ test('A REAUTHENTICATION CLOSES THE PREVIOUS TRANSPORT ONCE THE SESSION REPLACES
     expect(newClient).not.toBe(oldClient)
     expect(newClient.type).toBe('connected')
     // The replaced transport is closed, not left open with no owner.
-    expect(cleanedUp).toBe(1)
+    // The release runs separately from the commit that returned the
+    // status above, so it may still be in flight when the call
+    // resolves — wait for it instead of assuming it already ran
+    // (CodeRabbit #2493 review 5961865068).
+    await waitFor(() => cleanedUp === 1)
     // And the new client is the cached one: a later connection reuses it.
     const config = { type: 'http', url, scope: 'session' } as never
     expect(await realClient.connectToServer('gated', config)).toBe(newClient)
