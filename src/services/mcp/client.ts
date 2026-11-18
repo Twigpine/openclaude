@@ -839,10 +839,46 @@ const connectWaiters = new Map<
  * reconnect that created one must not close it on cancellation, or it
  * would fail the session that adopted it. A client is adopted when a
  * caller reuses a connect it did not start — joining one in flight, or a
- * settled cached one. Adoption is sticky for the client object: once a
- * session holds it, only that session's own cleanup releases it.
+ * settled cached one. Adoption is counted per caller, not a single flag:
+ * a join that aborts before it receives the client withdraws its own
+ * claim, and only when the last claim goes is the client unadopted again.
+ * A plain set cannot tell one adopter leaving from the last one leaving.
  */
-const adoptedMcpClients = new WeakSet<MCPServerConnection>()
+const adoptedMcpClients = new WeakMap<MCPServerConnection, Set<object>>()
+
+function adoptMcpClient(client: MCPServerConnection, claim: object): void {
+  let claims = adoptedMcpClients.get(client)
+  if (!claims) {
+    claims = new Set()
+    adoptedMcpClients.set(client, claims)
+  }
+  claims.add(claim)
+}
+
+/**
+ * Withdraws one caller's adoption claim. Returns true when the client has
+ * no claims left. Withdrawing alone does not clean the client up — the
+ * caller re-runs a release the claim had blocked (see
+ * blockedUnownedReleases), since no other step re-runs it.
+ */
+function withdrawMcpClientAdoption(client: MCPServerConnection, claim: object): boolean {
+  const claims = adoptedMcpClients.get(client)
+  if (!claims) return true
+  claims.delete(claim)
+  if (claims.size === 0) {
+    adoptedMcpClients.delete(client)
+    return true
+  }
+  return false
+}
+
+/**
+ * Clients a release declined to clean up because a caller had adopted
+ * them. When the last claim is withdrawn, the withdrawing call re-runs
+ * the release — otherwise an abandoned join leaves the transport open
+ * and cached with no owner, and nobody ever cleans it up.
+ */
+const blockedUnownedReleases = new WeakSet<MCPServerConnection>()
 
 /**
  * The client each connect promise settled to, once it has settled.
@@ -861,7 +897,7 @@ const settledConnectClients = new WeakMap<
 
 /** Whether another caller adopted this client from the shared connect. */
 export function isMcpClientAdopted(client: MCPServerConnection): boolean {
-  return adoptedMcpClients.has(client)
+  return (adoptedMcpClients.get(client)?.size ?? 0) > 0
 }
 
 /**
@@ -878,7 +914,12 @@ export async function releaseUnownedMcpClient(
   client: MCPServerConnection,
 ): Promise<void> {
   if (client.type !== 'connected') return
-  if (isMcpClientAdopted(client)) return
+  if (isMcpClientAdopted(client)) {
+    // A caller holds this client; remember the declined release so the
+    // withdrawing call can re-run it when the last claim goes.
+    blockedUnownedReleases.add(client)
+    return
+  }
   // Evict the cache entry only when it still holds this client — and
   // decide that BEFORE cleanup: cleanup fires the close callback, which
   // evicts by key, so a newer generation that replaced the entry while
@@ -921,7 +962,11 @@ export async function releaseUnownedMcpClient(
   // caller that joined while the connect was still pending land — that
   // callback was attached at join time, ahead of the probe's continuation.
   await Promise.resolve()
-  if (isMcpClientAdopted(client)) return
+  if (isMcpClientAdopted(client)) {
+    // As above: a join that landed during the probe holds this client.
+    blockedUnownedReleases.add(client)
+    return
+  }
   // Evict the entry before cleanup starts, so a caller that joins after
   // this decision dials a fresh connect instead of receiving this client
   // while its transport closes. Only the entry the probe saw goes: a
@@ -2229,6 +2274,15 @@ export const connectToServer = Object.assign(
       }
       void promise.then(dropCloser, dropCloser)
     }
+    // One claim per caller, shared by the synchronous add and the `.then`
+    // below: a second adopter never un-adopts the first. `adoptedClient`
+    // is the client this call claimed, if any; `adoptionReceived` turns
+    // true once the caller's continuation has resumed with it — the marker
+    // runs two ticks out, after that continuation — so an abort before
+    // then means the caller never received the client.
+    const adoptionClaim = {}
+    let adoptedClient: MCPServerConnection | undefined
+    let adoptionReceived = false
     if (hadCached) {
       // A settled connect adopts synchronously: the `.then` below records
       // adoption a microtask later, and a release deciding ownership in
@@ -2238,11 +2292,27 @@ export const connectToServer = Object.assign(
       // stays for the pending case, where the client is not known yet.
       const settled = settledConnectClients.get(promise)
       if (settled?.type === 'connected' && !signal?.aborted) {
-        adoptedMcpClients.add(settled)
+        adoptMcpClient(settled, adoptionClaim)
+        adoptedClient = settled
       }
       void promise.then(
         client => {
-          if (client.type === 'connected' && !signal?.aborted) adoptedMcpClients.add(client)
+          if (client.type === 'connected' && !signal?.aborted) {
+            adoptMcpClient(client, adoptionClaim)
+            adoptedClient = client
+          }
+        },
+        () => {},
+      )
+      void promise.then(
+        () => Promise.resolve(),
+        () => {},
+      ).then(
+        () => {
+          adoptionReceived = true
+          // The caller holds the client now: a later abort cannot
+          // withdraw the claim, so the listener can go.
+          if (signal && releaseOnAbort) signal.removeEventListener('abort', releaseOnAbort)
         },
         () => {},
       )
@@ -2255,11 +2325,38 @@ export const connectToServer = Object.assign(
     }
     let released = false
     let releaseOnAbort: (() => void) | undefined
+    // Withdraws this call's adoption claim when the caller aborts before
+    // receiving the client. Runs on abort even after the settle path
+    // already did the waiter bookkeeping — that bookkeeping is guarded
+    // by `released` below, this is not, and the abort listener stays
+    // attached until receipt for exactly this reason. A release the claim
+    // had blocked is re-run here — withdrawal alone leaves nobody to run
+    // it — and the re-run re-checks adoption, so a second live adopter
+    // still keeps the client open.
+    const withdrawIfUnreceived = () => {
+      if (adoptedClient === undefined || adoptionReceived) return
+      const client = adoptedClient
+      adoptedClient = undefined
+      if (signal && releaseOnAbort) signal.removeEventListener('abort', releaseOnAbort)
+      if (
+        withdrawMcpClientAdoption(client, adoptionClaim) &&
+        blockedUnownedReleases.has(client)
+      ) {
+        blockedUnownedReleases.delete(client)
+        void releaseUnownedMcpClient(name, serverRef, client)
+      }
+    }
     const release = (onAbort: boolean) => {
       if (released) return
       released = true
       if (signal && releaseOnAbort) {
-        signal.removeEventListener('abort', releaseOnAbort)
+        // Keep the abort listener while this call's adoption claim is
+        // live and unreceived: the settle path already did the waiter
+        // bookkeeping, but an abort before receipt must still withdraw
+        // the claim.
+        if (adoptedClient === undefined || adoptionReceived) {
+          signal.removeEventListener('abort', releaseOnAbort)
+        }
       }
       const current = connectWaiters.get(promise)
       if (current) {
@@ -2276,7 +2373,10 @@ export const connectToServer = Object.assign(
         }
       }
     }
-    releaseOnAbort = () => release(true)
+    releaseOnAbort = () => {
+      withdrawIfUnreceived()
+      release(true)
+    }
     void promise.then(
       () => release(false),
       () => release(false),

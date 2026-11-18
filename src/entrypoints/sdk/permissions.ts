@@ -606,8 +606,18 @@ export function captureCredentialScope(
   const turnEnv = new Map(Object.entries(process.env))
   if (options?.env) {
     for (const [key, value] of Object.entries(options.env)) {
-      if (value === undefined) turnEnv.delete(key)
-      else turnEnv.set(key, value)
+      if (value === undefined) {
+        // On Windows process.env is case-insensitive, so an override that
+        // deletes `openclaude_config_dir` must also remove an inherited
+        // `OPENCLAUDE_CONFIG_DIR` — otherwise the pre-turn scope keeps the
+        // ambient config home. Other platforms keep exact-key matching.
+        if (process.platform === 'win32') {
+          for (const existing of [...turnEnv.keys()]) {
+            if (existing.toUpperCase() === key.toUpperCase()) turnEnv.delete(existing)
+          }
+        }
+        turnEnv.delete(key)
+      } else turnEnv.set(key, value)
     }
   }
   // The turn the call starts in lends its environment; freeze that scope

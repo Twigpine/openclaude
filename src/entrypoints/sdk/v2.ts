@@ -1030,9 +1030,14 @@ class SDKSessionImpl implements SDKSession {
     // namespace. Inside a turn the overrides are already applied, so
     // overlaying them again changes nothing.
     const attempt = new AbortController()
+    // Snapshot the session env once, for both scopes below: a host-supplied
+    // env whose getter returns different values per read would otherwise
+    // give the reconnect scope and the surviving-discovery scope different
+    // credential homes. Each scope keeps its own signal/priority setting.
+    const credentialEnv = this.options.env ? { ...this.options.env } : undefined
     const credentialScope = captureCredentialScope(
       () => entryCredentialScope ?? undefined,
-      { signal: attempt.signal, env: this.options.env },
+      { signal: attempt.signal, env: credentialEnv },
     )
     // Discovery that outlives this caller — a shared fetch another caller
     // adopted — keeps running after the attempt is cancelled, so its
@@ -1044,7 +1049,7 @@ class SDKSessionImpl implements SDKSession {
     // remaining pages would read its environment.
     const survivingDiscoveryScope = captureCredentialScope(
       () => entryCredentialScope ?? undefined,
-      { env: this.options.env, priority: true },
+      { env: credentialEnv, priority: true },
     )
 
     // Process-wide networking (proxy, mTLS client certificate, CA certs) is
@@ -1109,11 +1114,17 @@ class SDKSessionImpl implements SDKSession {
     if (sessionSignal?.aborted || options?.signal?.aborted) attempt.abort()
     let releaseSharedSignIn: () => void
     try {
-      releaseSharedSignIn = await resumeIn(credentialScope, () =>
-        Promise.resolve(
+      releaseSharedSignIn = await resumeIn(credentialScope, () => {
+        // An abort that lands after the scope is entered but before this
+        // callback runs must not register: registration would supersede
+        // another session's pending sign-in for the same entry, and the
+        // replacement then rejects without starting OAuth. Live attempts
+        // still supersede, as before.
+        if (attempt.signal.aborted) throw new AuthenticationCancelledError()
+        return Promise.resolve(
           registerSdkSignIn(getSdkSignInEntryKeys(name, serverConfig), attempt),
-        ),
-      )
+        )
+      })
     } catch (error) {
       options?.signal?.removeEventListener('abort', stopAttempt)
       sessionSignal?.removeEventListener('abort', stopAttempt)
