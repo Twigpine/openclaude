@@ -3,9 +3,16 @@ import { randomBytes } from 'crypto'
 import ignore from 'ignore'
 import memoize from 'lodash-es/memoize.js'
 import { homedir, tmpdir } from 'os'
-import { join, normalize, posix, sep } from 'path'
-import { hasAutoMemPathOverride, isAutoMemPath } from 'src/memdir/paths.js'
-import { isAgentMemoryPath } from 'src/tools/AgentTool/agentMemory.js'
+import { basename, dirname, join, normalize, parse, posix, sep } from 'path'
+import {
+  getAutoMemPath,
+  hasAutoMemPathOverride,
+  isAutoMemPath,
+} from 'src/memdir/paths.js'
+import {
+  getAgentMemoryRoot,
+  isAgentMemoryPath,
+} from 'src/tools/AgentTool/agentMemory.js'
 import {
   CLAUDE_FOLDER_PERMISSION_PATTERN,
   FILE_EDIT_TOOL_NAME,
@@ -52,6 +59,7 @@ import { getPlatform } from '../platform.js'
 import { getProjectDir } from '../sessionStorage.js'
 import { SETTING_SOURCES } from '../settings/constants.js'
 import {
+  getInitialSettings,
   getSettingsFilePathForSource,
   getSettingsRootPathForSource,
 } from '../settings/settings.js'
@@ -60,6 +68,7 @@ import { getToolResultsDir } from '../toolResultStorage.js'
 import { windowsPathToPosixPath } from '../windowsPaths.js'
 import type {
   PermissionDecision,
+  PermissionDenyDecision,
   PermissionResult,
 } from './PermissionResult.js'
 import type { PermissionRule, PermissionRuleSource } from './PermissionRule.js'
@@ -1245,7 +1254,7 @@ export function checkReadPermissionForTool(
   const path = expandPath(tool.getPath(input))
 
   // Get paths to check (includes both original and resolved symlinks).
-  // Computed once here and threaded through checkWritePermissionForTool →
+  // Computed once here and threaded through checkEditPermissionForPath →
   // checkPathSafetyForAutoEdit → pathInAllowedWorkingPath to avoid redundant
   // existsSync/lstatSync/realpathSync syscalls on the same path (previously
   // 6× = 30 syscalls per Read permission check).
@@ -1325,13 +1334,14 @@ export function checkReadPermissionForTool(
     }
   }
 
-  // 5. Edit access implies read access (but only if no read-specific deny/ask rules exist)
-  // We check this after read-specific rules so that explicit read restrictions take precedence
-  const editResult = checkWritePermissionForTool(
-    tool,
+  // 5. Inherit the existing edit policy after checking explicit Read rules.
+  // The working-directory boundary only applies to an actual write.
+  const editResult = checkEditPermissionForPath(
+    path,
     input,
     toolPermissionContext,
     pathsToCheck,
+    false,
   )
   if (editResult.behavior === 'allow') {
     return editResult
@@ -1397,20 +1407,10 @@ export function checkReadPermissionForTool(
   }
 }
 
-/**
- * Permission result for write permission for the specified tool & tool input.
- *
- * @param precomputedPathsToCheck - Optional cached result of
- *   `getPathsForPermissionCheck(expandPath(tool.getPath(input)))`. Callers MUST
- *   derive this from the same `tool` and `input` in the same synchronous frame
- *   — `path` is re-derived internally for error messages and internal-path
- *   checks, so a stale value would silently check deny rules for the wrong path.
- */
 export function checkWritePermissionForTool<Input extends AnyObject>(
   tool: Tool<Input>,
   input: z.infer<Input>,
   toolPermissionContext: ToolPermissionContext,
-  precomputedPathsToCheck?: readonly string[],
 ): PermissionDecision {
   if (typeof tool.getPath !== 'function') {
     return {
@@ -1423,10 +1423,23 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
   // symlink variants so every permission check uses the same session-relative
   // absolute path.
   const path = expandPath(tool.getPath(input))
+  return checkEditPermissionForPath(
+    path,
+    input,
+    toolPermissionContext,
+    getPathsForPermissionCheck(path),
+    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories === true,
+  )
+}
 
+function checkEditPermissionForPath(
+  path: string,
+  input: Record<string, unknown>,
+  toolPermissionContext: ToolPermissionContext,
+  pathsToCheck: readonly string[],
+  enforceWriteBoundary: boolean,
+): PermissionDecision {
   // 1. Check for deny rules - check both the original path and resolved symlink path
-  const pathsToCheck =
-    precomputedPathsToCheck ?? getPathsForPermissionCheck(path)
   for (const pathToCheck of pathsToCheck) {
     const denyRule = matchingRuleForInput(
       pathToCheck,
@@ -1448,14 +1461,28 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
 
   // 1.5. Allow writes to internal editable paths (plan files, scratchpad)
   // This MUST come before isDangerousFilePathToAutoEdit check since .claude is a dangerous directory
-  const absolutePathForEdit = expandPath(path)
   const internalEditResult = checkEditableInternalPath(
-    absolutePathForEdit,
+    path,
     input,
     toolPermissionContext,
+    enforceWriteBoundary,
   )
   if (internalEditResult.behavior !== 'passthrough') {
     return internalEditResult
+  }
+
+  // permissions.blockWritesOutsideWorkingDirectories: hard boundary applied in
+  // every permission mode, including bypassPermissions. Placed after the
+  // internal editable-path carveout (plan files, scratchpad) so those still
+  // work, and before allow-rule checks so no rule can widen the boundary.
+  if (
+    enforceWriteBoundary &&
+    !writePathsInsideWorkingDirectories(
+      pathsToCheck,
+      allWorkingDirectories(toolPermissionContext),
+    )
+  ) {
+    return writeBoundaryDenial(path)
   }
 
   // 1.6. Check for .claude/** allow rules BEFORE safety checks
@@ -1682,6 +1709,129 @@ export function generateSuggestions(
     : []
 }
 
+function writeBoundaryDenial(path: string): PermissionDenyDecision {
+  return {
+    behavior: 'deny',
+    message: `Writing to ${path} is blocked because it is outside the working directories (permissions.blockWritesOutsideWorkingDirectories is enabled).`,
+    decisionReason: {
+      type: 'other',
+      reason: 'permissions.blockWritesOutsideWorkingDirectories is enabled',
+    },
+  }
+}
+
+// Canonical containment for the hard write boundary. pathInWorkingPath
+// lowercases both sides so case-insensitive filesystems cannot be bypassed
+// with mixed-case paths; here that is wrong, because a case-variant target
+// on a case-sensitive filesystem is a different directory. Realpath
+// canonicalizes to the stored casing, so an exact comparison is correct on
+// both. The nearest existing ancestor is resolved so writes to files that
+// do not exist yet still compare correctly.
+function canonicalPathForContainment(path: string): string {
+  // UNC paths are compared lexically: realpathSync on \\server\share can
+  // issue network requests during validation, matching the policy in
+  // getPathsForPermissionCheck.
+  if (path.startsWith('//') || path.startsWith('\\\\')) {
+    return normalize(path)
+  }
+  let current = path
+  const tail: string[] = []
+  while (true) {
+    try {
+      const resolved = getFsImplementation().realpathSync(current)
+      return tail.length > 0 ? join(resolved, ...tail) : resolved
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return current
+      tail.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+function writePathsInsideWorkingDirectories(
+  pathsToCheck: readonly string[],
+  workingPaths: Iterable<string>,
+): boolean {
+  const canonicalWorking = [...workingPaths].map(canonicalPathForContainment)
+  return pathsToCheck.every(pathToCheck => {
+    const canonical = canonicalPathForContainment(pathToCheck)
+    return canonicalWorking.some(dir => {
+      // A filesystem root keeps its trailing separator: '/' on POSIX still
+      // contains everything (single volume), but 'C:\' on Windows must not
+      // contain 'D:\' paths, so root compares against the dir itself and
+      // non-root against the separator-bounded form.
+      const prefix = dir === parse(dir).root ? dir : dir + sep
+      return canonical === dir || canonical.startsWith(prefix)
+    })
+  })
+}
+
+// Canonical containment of a candidate inside a specific internal directory,
+// for the internal editable-path carveouts. isScratchpadPath,
+// isAgentMemoryPath, and isAutoMemPath match lexically, so a symlinked
+// component inside the internal dir (agent-memory/redirect -> /outside) would
+// let the write land elsewhere while the prefix check still passes. Require
+// every resolved form of the candidate to stay inside the resolved dir, the
+// same policy isSessionPlanFile applies via isResolvedPathWithinPlansDir.
+// getPathsForPermissionCheck also resolves dangling symlinks and
+// canonicalPathForContainment resolves the deepest existing ancestor, so
+// targets and internal dirs that do not exist yet still compare correctly.
+function isResolvedPathWithinDir(
+  candidatePath: string,
+  dir: string,
+): boolean {
+  const canonicalDir = canonicalPathForContainment(dir)
+  const prefix =
+    canonicalDir === parse(canonicalDir).root
+      ? canonicalDir
+      : canonicalDir + sep
+  return getPathsForPermissionCheck(candidatePath).every(pathToCheck => {
+    const canonical = canonicalPathForContainment(pathToCheck)
+    return canonical === canonicalDir || canonical.startsWith(prefix)
+  })
+}
+
+/**
+ * The hard write boundary for permission paths that return before
+ * tool.checkPermissions runs (the whole-tool ask-rule early return in
+ * permissions.ts). Runs the same steps checkWritePermissionForTool applies:
+ * the internal editable-path carveout first, then the outside-dirs denial.
+ */
+export function checkWriteBoundaryForTool(
+  tool: Tool<AnyObject>,
+  input: { [key: string]: unknown },
+  toolPermissionContext: ToolPermissionContext,
+): PermissionDenyDecision | null {
+  if (
+    !getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories ||
+    typeof tool.getPath !== 'function'
+  ) {
+    return null
+  }
+  const path = expandPath(tool.getPath(input))
+  const internalEditResult = checkEditableInternalPath(
+    path,
+    input,
+    toolPermissionContext,
+  )
+  if (internalEditResult.behavior === 'deny') {
+    return internalEditResult
+  }
+  if (internalEditResult.behavior !== 'passthrough') {
+    return null
+  }
+  if (
+    writePathsInsideWorkingDirectories(
+      getPathsForPermissionCheck(path),
+      allWorkingDirectories(toolPermissionContext),
+    )
+  ) {
+    return null
+  }
+  return writeBoundaryDenial(path)
+}
+
 /**
  * Check if a path is an internal path that can be edited without permission.
  * Returns a PermissionResult - either 'allow' if matched, or 'passthrough' to continue checking.
@@ -1690,11 +1840,12 @@ export function checkEditableInternalPath(
   absolutePath: string,
   input: { [key: string]: unknown },
   toolPermissionContext?: ToolPermissionContext,
+  enforceWriteBoundary =
+    getInitialSettings().permissions?.blockWritesOutsideWorkingDirectories === true,
 ): PermissionResult {
   // SECURITY: Normalize path to prevent traversal bypasses via .. segments
   // This is defense-in-depth; individual helper functions also normalize
   const normalizedPath = normalize(absolutePath)
-
   // Plan files for current session
   if (isSessionPlanFile(normalizedPath)) {
     return {
@@ -1707,8 +1858,13 @@ export function checkEditableInternalPath(
     }
   }
 
-  // Scratchpad directory for current session
-  if (isScratchpadPath(normalizedPath)) {
+  // Scratchpad directory for current session. Resolved containment keeps a
+  // symlink inside the scratchpad dir from redirecting the write elsewhere.
+  if (
+    isScratchpadPath(normalizedPath) &&
+    (!enforceWriteBoundary ||
+      isResolvedPathWithinDir(normalizedPath, getScratchpadDir()))
+  ) {
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1761,8 +1917,17 @@ export function checkEditableInternalPath(
     }
   }
 
-  // Agent memory directory (for self-improving agents)
-  if (isAgentMemoryPath(normalizedPath)) {
+  // Agent memory directory (for self-improving agents). Same resolved
+  // containment as the scratchpad: a symlink inside the memory root must not
+  // redirect the write outside it.
+  const agentMemoryRoot = enforceWriteBoundary
+    ? getAgentMemoryRoot(normalizedPath)
+    : undefined
+  const isEditableAgentMemory = enforceWriteBoundary
+    ? agentMemoryRoot !== undefined &&
+      isResolvedPathWithinDir(normalizedPath, agentMemoryRoot)
+    : isAgentMemoryPath(normalizedPath)
+  if (isEditableAgentMemory) {
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1774,30 +1939,46 @@ export function checkEditableInternalPath(
   }
 
   // Memdir directory (persistent memory for cross-session learning).
-  // Explicit memory-write approval applies even when the env override points
-  // memory at a caller-designated directory. The silent pre-safety-check
-  // carve-out below exists only for the default/settings-backed path because
-  // it can live under ~/.claude/, which is in DANGEROUS_DIRECTORIES.
-  if (isAutoMemPath(normalizedPath) && isMemoryWriteApprovalRequired()) {
-    return {
-      behavior: 'ask',
-      message: `${PRODUCT_DISPLAY_NAME} wants to save persistent memory. Approve this memory write?`,
-      decisionReason: {
-        type: 'safetyCheck',
-        reason: 'Persistent memory writes require explicit approval',
-        classifierApprovable: false,
-      },
+  // The default/settings-backed path can live outside the workspace.
+  // An environment override still needs a working-directory grant, and
+  // redirects that leave the internal memory directory must stay in scope.
+  if (isAutoMemPath(normalizedPath)) {
+    const isInternalMemoryPath =
+      !hasAutoMemPathOverride() &&
+      (!enforceWriteBoundary ||
+        isResolvedPathWithinDir(normalizedPath, getAutoMemPath()))
+    if (isMemoryWriteApprovalRequired()) {
+      if (
+        enforceWriteBoundary &&
+        !isInternalMemoryPath &&
+        toolPermissionContext &&
+        !writePathsInsideWorkingDirectories(
+          getPathsForPermissionCheck(absolutePath),
+          allWorkingDirectories(toolPermissionContext),
+        )
+      ) {
+        return writeBoundaryDenial(absolutePath)
+      }
+      return {
+        behavior: 'ask',
+        message: `${PRODUCT_DISPLAY_NAME} wants to save persistent memory. Approve this memory write?`,
+        decisionReason: {
+          type: 'safetyCheck',
+          reason: 'Persistent memory writes require explicit approval',
+          classifierApprovable: false,
+        },
+      }
     }
-  }
 
-  if (!hasAutoMemPathOverride() && isAutoMemPath(normalizedPath)) {
-    return {
-      behavior: 'allow',
-      updatedInput: input,
-      decisionReason: {
-        type: 'other',
-        reason: 'auto memory files are allowed for writing',
-      },
+    if (isInternalMemoryPath) {
+      return {
+        behavior: 'allow',
+        updatedInput: input,
+        decisionReason: {
+          type: 'other',
+          reason: 'auto memory files are allowed for writing',
+        },
+      }
     }
   }
 
@@ -1812,6 +1993,19 @@ export function checkEditableInternalPath(
     normalizeCaseForComparison(normalizedPath) ===
     normalizeCaseForComparison(join(getOriginalCwd(), '.openclaude', 'launch.json'))
   ) {
+    // The carve-out intends a file inside the project. When the write
+    // boundary is on, a symlinked launch.json must still resolve inside the
+    // working directories, or the allow becomes an outside-dir write.
+    if (
+      toolPermissionContext &&
+      enforceWriteBoundary &&
+      !writePathsInsideWorkingDirectories(
+        getPathsForPermissionCheck(absolutePath),
+        allWorkingDirectories(toolPermissionContext),
+      )
+    ) {
+      return { behavior: 'passthrough', message: '' }
+    }
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1830,6 +2024,19 @@ export function checkEditableInternalPath(
       toolPermissionContext?.mode === 'fullAccess') &&
     isOpenClaudeCommitMessagePath(normalizedPath)
   ) {
+    // Same containment guard as launch.json: the commit message file lives
+    // inside the project, so a symlinked target outside the working
+    // directories must not ride this carve-out past the boundary.
+    if (
+      toolPermissionContext &&
+      enforceWriteBoundary &&
+      !writePathsInsideWorkingDirectories(
+        getPathsForPermissionCheck(absolutePath),
+        allWorkingDirectories(toolPermissionContext),
+      )
+    ) {
+      return { behavior: 'passthrough', message: '' }
+    }
     return {
       behavior: 'allow',
       updatedInput: input,
