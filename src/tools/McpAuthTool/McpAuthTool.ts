@@ -1,7 +1,7 @@
 import reject from 'lodash-es/reject.js'
 import { resolve } from 'node:path'
 import { z } from 'zod/v4'
-import { getServerKey, performMCPOAuthFlow } from '../../services/mcp/auth.js'
+import { AuthenticationCancelledError, getServerKey, performMCPOAuthFlow } from '../../services/mcp/auth.js'
 import {
   clearMcpAuthCache,
   connectToServer,
@@ -181,13 +181,33 @@ export function createMcpAuthTool(
       return {
         signal: aborted,
         release: () => {}, returnedUrl: () => {},
+        register: async () => {},
       }
     }
-    const entryKeys = getSdkSignInEntryKeys(serverName, serverConfig)
+    // The shared sign-in entry is NOT registered here: the entry keys are
+    // derived from the environment, and the flow's namespace is the frozen
+    // credential scope captured below in call() — registering from the
+    // ambient environment here would put the attempt under a different
+    // config home than the flow's credentials when the session's `env`
+    // overrides it, so a host sign-in would not supersede this one and
+    // two browser OAuth flows could run (jatmn #2493 review 5965105241).
+    // Registration happens in register(), inside that scope, mirroring
+    // the host path in v2.ts authenticateMcpServer.
     pendingSignIn?.abort()
     const attempt = new AbortController()
     pendingSignIn = attempt
-    const releaseSharedSignIn = registerSdkSignIn(entryKeys, attempt)
+    let releaseSharedSignIn: () => void = () => {}
+    const register = async (scope: CredentialScope | undefined) => {
+      releaseSharedSignIn = await resumeIn(scope, () => {
+        // An abort that lands while the scope waits on the mutex must
+        // not register: it would supersede another session's pending
+        // sign-in for the same entry.
+        if (attempt.signal.aborted) throw new AuthenticationCancelledError()
+        return Promise.resolve(
+          registerSdkSignIn(getSdkSignInEntryKeys(serverName, serverConfig), attempt),
+        )
+      })
+    }
     const stop = () => attempt.abort()
     const separateToolSignal = toolSignal !== sessionSignal && toolSignal !== resultSignal
     // A completed tool hands background ownership to the session/result.
@@ -207,7 +227,7 @@ export function createMcpAuthTool(
     resultSignal?.addEventListener('abort', stop, { once: true })
     if (separateToolSignal) toolSignal.addEventListener('abort', stop, { once: true })
     if (sessionSignal.aborted || toolSignal.aborted || resultSignal?.aborted) stop()
-    return { signal: attempt.signal, release, returnedUrl }
+    return { signal: attempt.signal, release, returnedUrl, register }
   }
 
   return {
@@ -280,7 +300,7 @@ export function createMcpAuthTool(
       // tool's callback survives sibling failures, while close/interrupt and
       // intentional discard still shut it down.
       const signIn = realToolsInCurrentContext
-        ? { signal: new AbortController().signal, release: () => {}, returnedUrl: () => {} }
+        ? { signal: new AbortController().signal, release: () => {}, returnedUrl: () => {}, register: async () => {} }
         : beginSessionSignIn(context.abortController.signal, sseOrHttpConfig, context.toolResultAbortSignal)
       const { setAppState } = context
       // Captured now, inside the call: the flow's reads and writes after the
@@ -289,6 +309,24 @@ export function createMcpAuthTool(
       // abortable: a superseded or cancelled sign-in ends instead of
       // queueing behind the turn that holds the mutex.
       const credentialScope = options.captureCredentialScope?.(signIn.signal)
+
+      if (!realToolsInCurrentContext) {
+        // Register the shared sign-in entry inside the same frozen scope
+        // the flow's credentials use — never from ambient env (see
+        // beginSessionSignIn). A registration that fails (aborted while
+        // the scope waited) starts no flow.
+        try {
+          await signIn.register(credentialScope)
+        } catch (err) {
+          signIn.release()
+          return {
+            data: {
+              status: 'error' as const,
+              message: `Failed to start OAuth flow for ${serverName}: ${errorMessage(err)}. Ask the user to run /mcp and authenticate manually.`,
+            },
+          }
+        }
+      }
 
       const oauthPromise = performMCPOAuthFlow(
         serverName,

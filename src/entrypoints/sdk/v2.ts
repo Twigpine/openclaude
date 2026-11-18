@@ -879,6 +879,10 @@ class SDKSessionImpl implements SDKSession {
       try {
         return await promise
       } finally {
+        // Identity, not value: the promise is already awaited above, so
+        // this only clears the slot when it still holds this attempt —
+        // a later caller may have installed a newer one (CodeQL alert
+        // 495, "Missing await", is a false positive here).
         if (this.mcpConnectPromise === promise) this.mcpConnectPromise = null
       }
     }
@@ -1114,7 +1118,10 @@ class SDKSessionImpl implements SDKSession {
       await raceAbort(runOutsideSdkContext(() => init()), initCancel.signal)
     } catch (error) {
       if (error instanceof AuthenticationCancelledError && this.closed) {
-        throw new Error('SDK session is closed')
+        // The session closed mid-flow: per the sdk.d.ts contract that is
+        // a cancellation, so keep the cancellation error class instead
+        // of converting it to a plain error (jatmn #2493 review 5965105241).
+        throw new AuthenticationCancelledError()
       }
       throw error
     } finally {
@@ -1122,7 +1129,7 @@ class SDKSessionImpl implements SDKSession {
       sessionSignal?.removeEventListener('abort', cancelInitWait)
     }
     if (this.closed) {
-      throw new Error('SDK session is closed')
+      throw new AuthenticationCancelledError()
     }
     if (options?.signal?.aborted || sessionSignal?.aborted) {
       throw new AuthenticationCancelledError()
@@ -1190,7 +1197,7 @@ class SDKSessionImpl implements SDKSession {
       // their headers and credentials in the namespace the flow began in
       // instead of whichever environment is applied by now.
       if (!(await this.runInSdkContext(() => this.ensureMcpConnectedForAuth(attempt.signal, credentialScope)))) {
-        if (this.closed) throw new Error('SDK session is closed')
+        if (this.closed) throw new AuthenticationCancelledError()
         throw new AuthenticationCancelledError()
       }
       // Mirror cli/print.ts mcp_authenticate and the authenticate tool:
@@ -1227,6 +1234,11 @@ class SDKSessionImpl implements SDKSession {
             config,
             attempt.signal,
             survivingDiscoveryScope,
+            // The session owns this reconnect's setup window: the client
+            // is reserved for it until the swap below installs it, so
+            // another session's close cannot close the transport while
+            // discovery is still running (CodeRabbit #2493 review 5964014825).
+            this,
           ),
         ),
       )
@@ -1238,8 +1250,17 @@ class SDKSessionImpl implements SDKSession {
       // The reconnected client is released below unless another session
       // adopted it while the reconnect was in flight.
       if (this.closed || attempt.signal.aborted || this.pendingMcpAuth.get(name) !== attempt) {
+        // The release runs before the reservation below goes: while the
+        // reservation is held it declines and records the block, and the
+        // reservation's release re-runs it exactly once — the other
+        // order would race two releases through the probe.
         await this.releaseUnownedClient(name, config, result.client)
-        if (this.closed) throw new Error('SDK session is closed')
+        // The swap below never runs, so the setup reservation the
+        // reconnect held for this session goes here — nobody else
+        // releases it, and the session's close only reaches installed
+        // clients.
+        releaseMcpClientSetupReservation(result.client, this)
+        if (this.closed) throw new AuthenticationCancelledError()
         throw new AuthenticationCancelledError()
       }
 
@@ -1370,13 +1391,20 @@ class SDKSessionImpl implements SDKSession {
           // whether this client is shared. Only release a client the
           // cache no longer holds: one still cached is shared, or
           // adoptable, and the next connection reuses it instead of
-          // dialling again.
+          // dialling again. The release runs before the reservation
+          // below goes: while the reservation is held it declines and
+          // records the block, and the reservation's release re-runs it
+          // exactly once — the other order would race two releases.
           if (
             !isMcpClientAdopted(result.client) &&
             !(await isClientCached(name, config, result.client))
           ) {
             await releaseUnownedMcpClient(name, config, result.client)
           }
+          // The swap never installed this client, so the setup
+          // reservation the reconnect held for this session goes here —
+          // the session's close only reaches installed clients.
+          releaseMcpClientSetupReservation(result.client, this)
         }
         throw error
       }
@@ -1387,7 +1415,7 @@ class SDKSessionImpl implements SDKSession {
       // and the last-owner check above already decided it may go.
       if (previousClientToRelease !== undefined) {
         const oldClient = previousClientToRelease
-        void releaseAdoptedMcpClient(name, config, oldClient).catch(error => {
+        void releaseAdoptedMcpClient(name, config, oldClient, this).catch(error => {
           console.warn(
             'SDK: MCP client cleanup error:',
             error instanceof Error ? error.message : String(error),

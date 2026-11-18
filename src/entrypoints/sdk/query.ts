@@ -59,6 +59,7 @@ import type { MCPServerConnection } from '../../services/mcp/types.js'
 import {
   noteMcpClientInstalled,
   releaseInstalledMcpClient,
+  releaseMcpClientSetupReservation,
 } from '../../services/mcp/client.js'
 import {
   acquireEnvMutex,
@@ -380,6 +381,8 @@ async function loadAndInjectSessionMessages(
 
 class QueryImpl implements Query {
   private _engine: QueryEngine | null = null
+  /** Set when close() runs: a connect still in flight must not install. */
+  private closed = false
   /** Track whether engine was injected at construction (test/mock) vs created fresh. */
   private _engineWasInjected: boolean
   private get engine(): QueryEngine {
@@ -654,17 +657,31 @@ class QueryImpl implements Query {
           if (self.mcpServers && Object.keys(self.mcpServers).length > 0) {
             try {
               const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, () => runInQueryEnv, self.abortController.signal, self)
-              self.sdkMcpTools = mcpTools
-              if (mcpClients.length > 0) {
-                self.engine.setMcpClients(mcpClients)
+              if (self.closed) {
+                // Mirror v2.ts connectMcpServersOnce: the query closed
+                // while this connect was in flight, so the clients it
+                // received will never be installed — their setup
+                // reservations go here, since close() only reaches
+                // installed clients (jatmn #2493 review 5965105241,
+                // CodeRabbit #2493 review 5964014825).
                 for (const client of mcpClients) {
                   if (client.type === 'connected') {
-                    noteMcpClientInstalled(client, self)
+                    releaseMcpClientSetupReservation(client, self)
                   }
                 }
-              }
-              if (mcpTools.length > 0) {
-                self.engine.updateTools(assembleToolPool(self.permissionContext, mcpTools))
+              } else {
+                self.sdkMcpTools = mcpTools
+                if (mcpClients.length > 0) {
+                  self.engine.setMcpClients(mcpClients)
+                  for (const client of mcpClients) {
+                    if (client.type === 'connected') {
+                      noteMcpClientInstalled(client, self)
+                    }
+                  }
+                }
+                if (mcpTools.length > 0) {
+                  self.engine.updateTools(assembleToolPool(self.permissionContext, mcpTools))
+                }
               }
             } catch (err) {
               // MCP connection failed — continue without MCP tools
@@ -823,6 +840,7 @@ class QueryImpl implements Query {
   }
 
   close(): void {
+    this.closed = true
     this.clearHookCallbacks()
     const wrapperController = this.abortController
     this.interruptWithSource('sdk_close')

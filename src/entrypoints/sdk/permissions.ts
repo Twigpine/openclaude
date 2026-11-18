@@ -830,6 +830,7 @@ export async function connectSdkMcpServers(
               serverConfig,
               undefined,
               sessionSignal,
+              owner,
             )
             if (joined.type !== 'connected') {
               clearKeychainCache()
@@ -869,6 +870,10 @@ export async function connectSdkMcpServers(
           ) !== undefined
             ? sessionSignal
             : undefined,
+          // A join through this connect adopts the client under the
+          // session's owner token (see connectToServer), so a setup
+          // abandonment can withdraw only this session's claim.
+          owner,
         )
 
         // If connected, fetch tools
@@ -877,7 +882,26 @@ export async function connectSdkMcpServers(
             reserveMcpClientForSetup(client, owner)
             reservedClient = client
           }
-          const serverTools = await fetchToolsForClient(client)
+          const serverTools = await fetchToolsForClient(client, { signal: sessionSignal })
+          if (sessionSignal?.aborted) {
+            // fetchToolsForClient returns [] on abort instead of throwing
+            // (client.ts), so the catch below never runs: release the
+            // reservation explicitly, and report the server as failed so
+            // the caller does not install a client from a dead session
+            // (jatmn #2493 review 5965105241).
+            if (reservedClient !== undefined && owner !== undefined) {
+              releaseMcpClientSetupReservation(reservedClient, owner)
+            }
+            return {
+              client: {
+                type: 'failed' as const,
+                name,
+                config: scopedConfig,
+                error: 'MCP tool discovery aborted',
+              },
+              tools: [],
+            }
+          }
           return { client, tools: serverTools }
         }
 

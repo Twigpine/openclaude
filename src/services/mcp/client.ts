@@ -873,6 +873,10 @@ const adoptedMcpClients = new WeakMap<MCPServerConnection, Set<object>>()
  * The claim shared by every received adoption of a client. Provisional
  * claims stay per-caller until receipt — an abort before receipt
  * withdraws only its own — and consolidate into this marker on receipt.
+ * A caller that passes an owner consolidates into the owner instead:
+ * setup joins adopt under their session, so abandoning one session's
+ * setup withdraws only that session's claim (CodeRabbit #2493 review
+ * 5964014825) instead of stripping every adopter's.
  */
 const permanentAdoptionClaim = {}
 
@@ -1077,6 +1081,20 @@ export function releaseMcpClientSetupReservation(
   const owners = setupMcpClientReservations.get(client)
   if (!owners) return
   owners.delete(owner)
+  // The reservation goes with the owner's adoption claim: a session that
+  // received this client for setup adopted it from the shared connect
+  // under its owner token, and no install record ever followed. The
+  // claim must go here, not only when the last reservation goes — with
+  // another owner still holding a reservation, a claim left behind would
+  // survive that owner's later release too, and the retry would decline
+  // on it forever (CodeRabbit #2493 review 5964014825). Only the
+  // abandoning owner's claim goes — the shared marker belongs to joins
+  // that passed no owner (a tool call through ensureConnectedClient, a
+  // second session's join), and withdrawing it would close a transport
+  // a live caller still holds. A joiner still awaiting receipt keeps
+  // the client alive either way: its provisional claim is still in the
+  // set, so the retry declines and re-blocks.
+  withdrawMcpClientAdoption(client, owner)
   if (owners.size === 0) {
     setupMcpClientReservations.delete(client)
     // A session that installed the client in the meantime owns it now:
@@ -1107,17 +1125,22 @@ export function getMcpClientSetupReservationCountForTesting(
  * and withdrawing them would break the abort-before-receipt path; a
  * joiner whose receipt lands afterwards re-adds the marker, and its own
  * install record keeps the client alive until that session drops it.
- * Callers must have uninstalled the client first and checked no other
- * session still has it installed.
+ * A caller that knows the adopting owner passes it so that owner's claim
+ * goes too; a session that adopted under its owner token leaves no claim
+ * behind otherwise. Callers must have uninstalled the client first and
+ * checked no other session still has it installed.
  */
 export async function releaseAdoptedMcpClient(
   name: string,
   serverRef: ScopedMcpServerConfig,
   client: MCPServerConnection,
+  owner?: object,
 ): Promise<void> {
   if (client.type !== 'connected') return
+  withdrawMcpClientAdoption(client, permanentAdoptionClaim)
+  if (owner !== undefined) withdrawMcpClientAdoption(client, owner)
   if (
-    withdrawMcpClientAdoption(client, permanentAdoptionClaim) &&
+    !isMcpClientAdopted(client) &&
     blockedUnownedReleases.has(client)
   ) {
     blockedUnownedReleases.delete(client)
@@ -1127,8 +1150,9 @@ export async function releaseAdoptedMcpClient(
 
 /**
  * Adoption claim count for a client, for tests only: repeated joins must
- * consolidate to the single permanent marker instead of retaining one
- * claim object per call.
+ * consolidate to one claim per adopting caller — the single permanent
+ * marker for joins that passed no owner, the owner object for joins
+ * that did — instead of retaining one claim object per call.
  */
 export function getMcpClientAdoptionClaimCountForTesting(
   client: MCPServerConnection,
@@ -1147,7 +1171,8 @@ const releasedInstalledMcpClients = new WeakSet<MCPServerConnection>()
  * The one ownership-aware release for a session-owned client, shared by
  * the query and v2 session close paths: drops this owner's install
  * record, and only when no other session still has the client installed
- * does it withdraw the permanent adoption claim and release the client —
+ * does it withdraw the adoption claims — the permanent marker and this
+ * owner's own claim — and release the client —
  * evicting that generation from the connect cache before cleanup, so a
  * caller joining afterwards dials fresh instead of receiving a client
  * that is closing. A client another owner still uses stays open; a
@@ -1166,11 +1191,13 @@ export async function releaseInstalledMcpClient(
   if (isMcpClientInstalled(client)) return
   if (releasedInstalledMcpClients.has(client)) return
   // This session's install is gone: the permanent adoption claim its
-  // cache reuse left behind goes with it, and the release this claim may
-  // have blocked is the one this call performs — clear the marker first
-  // so the release below does not have to wait for a second withdrawing
-  // call that may never come.
+  // cache reuse left behind goes with it — and so does this session's
+  // own claim, if it adopted under its owner token — and the release
+  // this claim may have blocked is the one this call performs: clear
+  // the claims first so the release below does not have to wait for a
+  // second withdrawing call that may never come.
   withdrawMcpClientAdoption(client, permanentAdoptionClaim)
+  withdrawMcpClientAdoption(client, owner)
   blockedUnownedReleases.delete(client)
   await releaseUnownedMcpClient(name, serverRef, client)
   // Only a release that actually ran may mark the client done: a release
@@ -2527,6 +2554,10 @@ export const connectToServer = Object.assign(
       wsIdeCount: number
     },
     signal?: AbortSignal,
+    // A setup caller passes its session so its adoption is its own claim
+    // (see the permanentAdoptionClaim comment). Callers that omit it keep
+    // the shared marker, as before.
+    owner?: object,
   ): Promise<MCPServerConnection> => {
     const key = getServerCacheKey(name, serverRef)
     // A cache hit reuses a connect another caller started; that caller
@@ -2609,12 +2640,15 @@ export const connectToServer = Object.assign(
           // repeated joins — one per tool call through
           // ensureConnectedClient — do not retain one claim object
           // each for the client's lifetime (CodeRabbit #2493 review
-          // 5955577457). A later abort cannot withdraw the claim, so
-          // the listener can go.
+          // 5955577457). A join that passed an owner consolidates into
+          // the owner instead, so one claim object per adopting session
+          // and the abandoning session's setup release can withdraw
+          // only its own claim. A later abort cannot withdraw the
+          // claim, so the listener can go.
           if (adoptedClient !== undefined) {
             const client = adoptedClient
             withdrawMcpClientAdoption(client, adoptionClaim)
-            adoptMcpClient(client, permanentAdoptionClaim)
+            adoptMcpClient(client, owner ?? permanentAdoptionClaim)
           }
           if (signal && releaseOnAbort) signal.removeEventListener('abort', releaseOnAbort)
         },
@@ -2788,7 +2822,8 @@ export async function clearServerCache(
       if (
         options?.keepAdoptedClient &&
         (isMcpClientAdopted(wrappedClient) ||
-          hasMcpClientSetupReservation(wrappedClient))
+          hasMcpClientSetupReservation(wrappedClient) ||
+          isMcpClientInstalled(wrappedClient))
       ) {
         // Another caller adopted this client from the shared connect,
         // or is still setting it up under a reservation: detach the
@@ -3494,6 +3529,17 @@ export async function reconnectMcpServerImpl(
    * Only the host-facing caller passes one.
    */
   survivingDiscoveryScope?: CredentialScope,
+  /**
+   * The session reconnecting: the received client is reserved for it
+   * from receipt through installation, so another session's close cannot
+   * withdraw the adoption claim and close the transport while this
+   * session is still discovering (its prompts/list may still be pending
+   * after tools/list completes). The caller converts the reservation
+   * into the install record on success (noteMcpClientInstalled); the
+   * catch below releases it on every other exit. Only the host-facing
+   * caller passes one (CodeRabbit #2493 review 5964014825).
+   */
+  owner?: object,
 ): Promise<{
   client: MCPServerConnection
   tools: Tool[]
@@ -3504,6 +3550,11 @@ export async function reconnectMcpServerImpl(
   // no session adopted, and only the catch sees it — the race below turns
   // the cancellation into a failed result before the caller does.
   let connected: MCPServerConnection | undefined
+  // A client this session received but has not installed yet: reserved
+  // for it from receipt through installation, so another session's
+  // close cannot withdraw the adoption claim and close the transport
+  // while discovery is still running (see the owner parameter above).
+  let reservedClient: MCPServerConnection | undefined
   try {
     // Invalidate the keychain cache so we read fresh credentials from disk.
     // This is necessary when another process (e.g. the VS Code extension host)
@@ -3526,6 +3577,11 @@ export async function reconnectMcpServerImpl(
         tools: [],
         commands: [],
       }
+    }
+
+    if (owner !== undefined) {
+      reserveMcpClientForSetup(client, owner)
+      reservedClient = client
     }
 
     if (config.type === 'claudeai-proxy') {
@@ -3619,7 +3675,18 @@ export async function reconnectMcpServerImpl(
       (signal?.aborted || isAbortError(error)) &&
       connected !== undefined
     ) {
+      // The release is attempted before the reservation goes: while the
+      // reservation is held it declines and records the block, and the
+      // reservation's release below re-runs it exactly once — the other
+      // order would race two releases through the probe.
       await releaseUnownedMcpClient(name, config, connected)
+    }
+    // A setup reservation outlives every exit except installation: the
+    // caller converts it on success, so any exit here releases it, or
+    // the transport stays reserved with no owner. A blocked release the
+    // reservation held back is re-run by the release itself.
+    if (reservedClient !== undefined && owner !== undefined) {
+      releaseMcpClientSetupReservation(reservedClient, owner)
     }
 
     // Return with failed status

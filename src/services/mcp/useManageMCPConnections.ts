@@ -138,9 +138,12 @@ export function isCurrentMcpListUpdateOrigin(
   current: MCPServerConnection | undefined,
 ): boolean {
   if (current === undefined) return false
-  // The record is a union: only a connected record carries a transport,
-  // and a disabled/failed record means this transport no longer owns
-  // the server.
+  // The record is a union: only a connected record carries a transport.
+  // A pending/failed record built by spreading a connected client still
+  // carries its `.client` and config, so the transport comparison alone
+  // cannot tell it apart — a stale refresh would resurrect the closed
+  // transport as connected (CodeRabbit #2493 review 5964014825).
+  if (current.type !== 'connected') return false
   const currentTransport = 'client' in current ? current.client : undefined
   if (currentTransport !== originClient.client) return false
   return areMcpConfigsEqual(current.config, originClient.config)
@@ -609,12 +612,24 @@ export function useManageMCPConnections(
               .mcp.clients.find(c => c.name === client.name)
             // The record is a union: only a connected record carries a
             // transport. A missing record, or one holding a different
-            // transport, means this close is stale.
+            // transport, means this close is stale — unless the hook's
+            // own ref still names this client: the connected update is
+            // batched and flushes up to MCP_BATCH_FLUSH_MS later, so a
+            // close in that window reads a `pending` record with no
+            // transport from the store while the ref (set synchronously
+            // when the handler was registered) already names this
+            // generation. Without the ref check the close returns before
+            // reconnectWithBackoff, and the flush then publishes the
+            // closed transport as `connected` (CodeRabbit #2493 review
+            // 5964014825). The ref is invalidated on replacement,
+            // removal and disable, so a retired transport cannot restart
+            // recovery through it.
+            const refClient = mcpClientByNameRef.current.get(client.name)
             const currentTransport =
               currentOwner !== undefined && 'client' in currentOwner
                 ? currentOwner.client
                 : undefined
-            if (currentTransport !== client.client) return
+            if (refClient !== client && currentTransport !== client.client) return
 
             const configType = client.config.type ?? 'stdio'
 
@@ -984,6 +999,17 @@ export function useManageMCPConnections(
           }
           if (s.type === 'connected') {
             s.client.onclose = undefined
+            // The hook's ref keeps the removed generation forever unless
+            // it goes here: a plugin reload that never re-adds the server
+            // would retain the closed client and its handler state. Drop
+            // it only when it still names this generation — the transport
+            // comparison, not object identity, because the store record
+            // is a copy of the connected client (CodeRabbit #2493 review
+            // 5964014825).
+            const refClient = mcpClientByNameRef.current.get(s.name)
+            if (refClient !== undefined && 'client' in refClient && refClient.client === s.client) {
+              mcpClientByNameRef.current.delete(s.name)
+            }
             void clearServerCache(s.name, s.config).catch(() => {})
           }
         }
@@ -1284,6 +1310,14 @@ export function useManageMCPConnections(
         // Disabling: disconnect and clean up if currently connected
         if (client.type === 'connected') {
           await clearServerCache(serverName, client.config)
+          // Drop the hook's ref entry for this generation, as the stale
+          // cleanup does: a close on the disabled transport must not
+          // restart recovery through it, and a later re-add must not
+          // inherit it (CodeRabbit #2493 review 5964014825).
+          const refClient = mcpClientByNameRef.current.get(serverName)
+          if (refClient !== undefined && 'client' in refClient && refClient.client === client.client) {
+            mcpClientByNameRef.current.delete(serverName)
+          }
         }
 
         // Update to disabled state (tools/commands/resources auto-cleared)
