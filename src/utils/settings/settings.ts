@@ -5,7 +5,6 @@ import { z } from 'zod/v4'
 import {
   getFlagSettingsInline,
   getFlagSettingsPath,
-  getOriginalCwd,
   getProjectRoot,
   getUseCoworkPlugins,
 } from '../../bootstrap/state.js'

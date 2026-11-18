@@ -29,7 +29,6 @@ import { isMemoryWriteApprovalRequired } from '../../utils/governancePolicy.js'
 import { isAutoDreamEnabled } from './config.js'
 import { getProjectDir } from '../../utils/sessionStorage.js'
 import {
-  getOriginalCwd,
   getProjectRoot,
   getKairosActive,
   getIsRemoteMode,
