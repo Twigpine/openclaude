@@ -190,7 +190,33 @@ mock.module('../init.js', () => ({
   init: mockedInit,
 }))
 
-const { connectSdkMcpServers } = await import('./permissions.js')
+// Agent loading runs inside the turn's environment-mutex hold, before the
+// turn connects: a test can hold the turn there by gating the load, so a
+// pre-turn sign-in reaches setup while the turn holds the mutex. The
+// wrapper passes through to the real loader whenever no gate is set, so
+// other tests see no change.
+const realLoadAgentsDir = { ...(await import('../../tools/AgentTool/loadAgentsDir.js')) }
+/** An agent-definition load the mock keeps waiting until the test lets it answer. */
+let heldAgentDefinitions: {
+  arrived: boolean
+  answer: () => void
+  answered: Promise<void>
+} | null = null
+mock.module('../../tools/AgentTool/loadAgentsDir.js', () => ({
+  ...realLoadAgentsDir,
+  getAgentDefinitionsWithOverrides: async (
+    ...args: Parameters<typeof realLoadAgentsDir.getAgentDefinitionsWithOverrides>
+  ) => {
+    const held = heldAgentDefinitions
+    if (held) {
+      held.arrived = true
+      await held.answered
+    }
+    return realLoadAgentsDir.getAgentDefinitionsWithOverrides(...args)
+  },
+}))
+
+const { connectSdkMcpServers, captureCredentialScope } = await import('./permissions.js')
 const { unstable_v2_createSession } = await import('./v2.js')
 
 let server: ReturnType<typeof Bun.serve> | null = null
@@ -732,6 +758,16 @@ function holdInit() {
   return heldInit
 }
 
+/** Makes the mocked agent-definition load hold until the test lets it answer. */
+function holdAgentDefinitions() {
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldAgentDefinitions = { arrived: false, answer, answered }
+  return heldAgentDefinitions
+}
+
 /**
  * A headersHelper script that blocks until the test releases it, so a
  * connect can be held in header setup — before any transport exists.
@@ -999,6 +1035,8 @@ afterEach(async () => {
   heldSkillRead = null
   heldInit?.answer()
   heldInit = null
+  heldAgentDefinitions?.answer()
+  heldAgentDefinitions = null
   heldMetadata?.answer()
   heldMetadata = null
   server?.stop(true)
@@ -3068,6 +3106,13 @@ test('A canUseTool CALLBACK THAT SIGNS IN DURING AN ENV TURN DOES NOT DEADLOCK',
  * initialization that waits on the turn, and neither could finish. The
  * turn connects in its own environment instead, and the sign-in follows
  * once the turn releases the mutex.
+ *
+ * The ordering is exercised, not assumed: the sign-in starts first, so
+ * its registration finishes before the turn takes the mutex — the turn
+ * is then held in agent loading while the sign-in reaches setup, and the
+ * turn must finish before the sign-in gets the mutex. A setup that
+ * published its promise before entering the scope would let the turn
+ * join it at the connect below and deadlock, instead of finishing.
  */
 test('A PRE-TURN SIGN-IN HELD ON INIT DOES NOT DEADLOCK THE FIRST TURN', async () => {
   const url = serveNeedingAuth()
@@ -3075,29 +3120,196 @@ test('A PRE-TURN SIGN-IN HELD ON INIT DOES NOT DEADLOCK THE FIRST TURN', async (
   const session = openGatedSessionWithEnv(url, canUseTool)
   recordEngine(session)
   const held = holdInit()
+  const heldAgents = holdAgentDefinitions()
 
-  // The turn starts first, so its init waiter is attached first; the
-  // sign-in starts while init is held. When init answers, the turn
-  // takes the mutex for agent loading before the sign-in's setup can
-  // enter its scope.
-  const turn = (async () => {
-    for await (const _ of session.sendMessage('hi')) {
-    }
-  })()
+  // Hold the mutex in the test so the sign-in's registration queues
+  // behind it: when init answers, the sign-in reaches registration only
+  // after the test releases the mutex — and the turn, started in the
+  // same synchronous block as that release, takes the mutex before the
+  // sign-in's setup acquire is queued. The sign-in therefore reaches
+  // setup while the turn holds the mutex, instead of waiting at
+  // registration: if setup published its connect before entering the
+  // scope, the turn would join it and deadlock.
+  const { acquired: testMutexAcquired } = await acquireEnvMutex()
+  expect(testMutexAcquired).toBe(true)
+  let testMutexHeld = true
+  try {
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    void done.catch(() => {})
+    held.answer()
+    // Let the sign-in's init resolve and its registration acquire queue
+    // behind the test-held mutex; the sign-in produces no URL while it
+    // waits at registration.
+    await Bun.sleep(1_000)
+    expect(seenUrls).toHaveLength(0)
+
+    // Release the mutex and start the turn in one synchronous block:
+    // the release wakes the registration waiter first, the turn's init
+    // is already resolved so its mutex acquire is queued next, and the
+    // sign-in's setup acquire is queued last — the turn holds the mutex
+    // through agent loading while the sign-in waits at setup.
+    releaseEnvMutex()
+    testMutexHeld = false
+    const turn = (async () => {
+      for await (const _ of session.sendMessage('hi')) {
+      }
+    })()
+    // The turn is held in agent loading, holding the mutex; the sign-in
+    // has reached setup by now and waits on that mutex — it has
+    // published no shared connect for the turn to join.
+    await waitFor(() => heldAgents.arrived)
+    // The turn can finish before the sign-in gets the mutex: releasing
+    // the agent-loading hold lets the turn connect in its own
+    // environment and finish, while the sign-in still waits for the
+    // mutex.
+    heldAgents.answer()
+    await settlesWithin(turn, 10_000)
+    // The sign-in reaches its browser step instead of waiting on a
+    // connect the turn joined: the URL arrives within a bound.
+    await settlesWithin(waitFor(() => seenUrls.length > 0), 5_000)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    // And the sign-in finishes once the turn releases the mutex.
+    await expect(settlesWithin(done, 5_000)).resolves.toMatchObject({ status: 'connected' })
+  } finally {
+    if (testMutexHeld) releaseEnvMutex()
+  }
+}, 30_000)
+
+/**
+ * The reconnect scope and the surviving-discovery scope share one
+ * snapshot of the session env: a host env whose getter answers
+ * differently per read must not give the two scopes different
+ * credential homes. The host object is read once per key — for the
+ * snapshot — not once per scope.
+ */
+test('THE TWO CREDENTIAL SCOPES SHARE ONE SNAPSHOT OF THE SESSION ENV', async () => {
+  const url = serveNeedingAuth()
+  let reads = 0
+  const target = { OPENCLAUDE_TEST_SNAPSHOT: '1' }
+  const env = new Proxy(target, {
+    get(t, prop, receiver) {
+      if (prop === 'OPENCLAUDE_TEST_SNAPSHOT') reads++
+      return Reflect.get(t, prop, receiver)
+    },
+  })
+  const session = unstable_v2_createSession({
+    cwd: process.cwd(),
+    mcpServers: { gated: { type: 'http', url } },
+    env,
+  })
+  sdkSessions.push(session)
+  recordEngine(session)
+  const readsAtSignIn = reads
   const seenUrls: string[] = []
   const done = session.authenticateMcpServer('gated', {
     onAuthorizationUrl: seen => seenUrls.push(seen),
   })
   void done.catch(() => {})
-  held.answer()
-
-  // The sign-in reaches its browser step instead of waiting on a
-  // connect the turn joined: the URL arrives within a bound.
   await settlesWithin(waitFor(() => seenUrls.length > 0), 5_000)
+  // Both scopes were captured before the browser step: the host env was
+  // read once, for the snapshot — a second read would mean one scope
+  // read the live object again.
+  expect(reads - readsAtSignIn).toBe(1)
   expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
-  // And both finish: the turn, then the sign-in it no longer blocks.
-  await settlesWithin(turn, 10_000)
   await expect(settlesWithin(done, 5_000)).resolves.toMatchObject({ status: 'connected' })
+}, 30_000)
+
+/**
+ * An abort that lands after the registration callback is scheduled but
+ * before it runs must not register: registration would supersede another
+ * session's pending sign-in for the same credential entry, and the
+ * replacement then rejects without starting OAuth. The abort lands in
+ * the same synchronous block as the mutex release that schedules the
+ * callback, so the callback runs with the attempt already aborted —
+ * while the other session's sign-in still completes.
+ */
+test('AN ABORTED SIGN-IN DOES NOT SUPERSEDE ANOTHER SESSION\'S PENDING SIGN-IN', async () => {
+  const url = serveNeedingAuth()
+  // Session A registers first and waits at its browser step.
+  const sessionA = openGatedSession(url)
+  recordEngine(sessionA)
+  const seenA: string[] = []
+  const doneA = sessionA.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenA.push(seen),
+  })
+  const doneACaught = doneA.catch(error => error)
+  await waitFor(() => seenA.length > 0)
+  // Hold the mutex so session B's registration waits on it.
+  const { acquired } = await acquireEnvMutex()
+  expect(acquired).toBe(true)
+  let held = true
+  const callerB = new AbortController()
+  try {
+    const sessionB = openGatedSession(url)
+    recordEngine(sessionB)
+    const seenB: string[] = []
+    const doneB = sessionB.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenB.push(seen),
+      signal: callerB.signal,
+    })
+    const doneBCaught = doneB.catch(error => error)
+    // B reached its registration wait: it produced no URL while the
+    // mutex was held.
+    await new Promise(resolve => setImmediate(resolve))
+    expect(seenB).toHaveLength(0)
+    // Release the mutex and abort B in the same synchronous block: the
+    // registration callback is scheduled by the release but has not run.
+    releaseEnvMutex()
+    held = false
+    callerB.abort()
+    // B rejects as cancelled without registering...
+    await expect(settlesWithin(doneBCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    // ...and A was not superseded: its browser step still completes it.
+    expect((await fetch(callbackFor(seenA[0]!))).status).toBe(200)
+    await expect(settlesWithin(doneACaught, 5_000)).resolves.toMatchObject({
+      status: 'connected',
+    })
+  } finally {
+    // Abort first: while B is still queued, the abort settles its mutex
+    // wait as cancelled, so the registration callback never runs.
+    callerB.abort()
+    if (held) releaseEnvMutex()
+  }
+}, 30_000)
+
+/**
+ * On Windows, process.env is case-insensitive but the pre-turn scope
+ * builds its env from a case-sensitive Map: an `env` override that
+ * deletes `openclaude_config_dir` must remove an inherited
+ * `OPENCLAUDE_CONFIG_DIR`, or pre-turn authentication uses the ambient
+ * config home instead of the session's override. Other platforms keep
+ * exact-key matching.
+ */
+test('AN ENV OVERRIDE DELETES AN INHERITED VARIABLE CASE-INSENSITIVELY ON WINDOWS', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR', 'openclaude_config_dir'])
+  const originalPlatform = process.platform
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = join(configHome, 'ambient')
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    const scope = captureCredentialScope(undefined, {
+      env: { openclaude_config_dir: undefined },
+    })
+    expect(await scope(async () => process.env.OPENCLAUDE_CONFIG_DIR)).toBeUndefined()
+    // On other platforms the same override deletes only its exact key.
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+    const linuxScope = captureCredentialScope(undefined, {
+      env: { openclaude_config_dir: undefined },
+    })
+    expect(await linuxScope(async () => process.env.OPENCLAUDE_CONFIG_DIR)).toBe(
+      join(configHome, 'ambient'),
+    )
+  } finally {
+    Object.defineProperty(process, 'platform', {
+      value: originalPlatform,
+      configurable: true,
+    })
+    restoreEnv()
+  }
 }, 30_000)
 
 /**
@@ -3889,6 +4101,108 @@ test('A JOIN QUEUED BEHIND THE RELEASE PROBE KEEPS THE CLIENT OPEN', async () =>
     expect(realClient.connectToServer.cache.get(key)).toBeDefined()
     const tools = await realClient.fetchToolsForClient(joinerClient!)
     expect(tools.map(tool => tool.mcpInfo?.toolName ?? tool.name)).toEqual(['hello'])
+  } finally {
+    client.cleanup = realCleanup
+    await client.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * The settled mirror of the joiner that closes before its connect
+ * settles: a join of an already-settled connect adopts synchronously,
+ * before its await resumes. If that joiner aborts before its
+ * continuation runs, it never installs the client — its claim must go,
+ * or the cancelled creator's release returns early on the adoption and
+ * the transport stays open and cached with no owner.
+ */
+test('AN ABORTED SETTLED JOIN LEAVES THE CLIENT UNOWNED FOR THE CREATOR\'S RELEASE', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  const creator = new AbortController()
+  const client = (await realClient.connectToServer(
+    'gated',
+    config,
+    undefined,
+    creator.signal,
+  )) as MCPServerConnection
+  expect(client.type).toBe('connected')
+  if (client.type !== 'connected') throw new Error('expected a connected client')
+  const realCleanup = client.cleanup
+  let cleanedUp = 0
+  client.cleanup = async (...args: Parameters<typeof realCleanup>) => {
+    cleanedUp++
+    return realCleanup(...args)
+  }
+  try {
+    // The joiner joins the settled connect and aborts before its
+    // continuation runs — in the same synchronous block, so the
+    // adoption's receipt marker has not run yet.
+    const joiner = new AbortController()
+    const joinerConnect = realClient.connectToServer(
+      'gated',
+      config,
+      undefined,
+      joiner.signal,
+    )
+    const joinerCaught = joinerConnect.catch(error => error)
+    joiner.abort()
+    expect(realClient.isMcpClientAdopted(client)).toBe(false)
+    // The creator cancels: the release must now close the transport and
+    // evict the cache entry, instead of returning early on the stale claim.
+    creator.abort()
+    await realClient.releaseUnownedMcpClient('gated', config, client)
+    expect(cleanedUp).toBe(1)
+    await waitFor(() => realClient.connectToServer.cache.get(key) === undefined)
+    await settlesWithin(joinerCaught, 5_000).catch(() => {})
+  } finally {
+    client.cleanup = realCleanup
+    await client.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * The other order: the creator's release runs first, while the settled
+ * joiner's claim still stands, and is declined — then the joiner aborts.
+ * Withdrawing the claim alone re-runs nothing, so the withdrawal must
+ * re-run the blocked release itself, or the transport still stays open
+ * and cached with no owner.
+ */
+test('A BLOCKED RELEASE RE-RUNS WHEN THE LAST SETTLED-JOIN CLAIM IS WITHDRAWN', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  const client = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(client.type).toBe('connected')
+  if (client.type !== 'connected') throw new Error('expected a connected client')
+  const realCleanup = client.cleanup
+  let cleanedUp = 0
+  client.cleanup = async (...args: Parameters<typeof realCleanup>) => {
+    cleanedUp++
+    return realCleanup(...args)
+  }
+  try {
+    const joiner = new AbortController()
+    const joinerConnect = realClient.connectToServer(
+      'gated',
+      config,
+      undefined,
+      joiner.signal,
+    )
+    const joinerCaught = joinerConnect.catch(error => error)
+    // The joiner holds the client: a release now is declined.
+    await realClient.releaseUnownedMcpClient('gated', config, client)
+    expect(cleanedUp).toBe(0)
+    expect(realClient.connectToServer.cache.get(key)).toBeDefined()
+    // The joiner aborts before its continuation runs: the withdrawal
+    // re-runs the blocked release, closing the transport and evicting
+    // the cache entry without another release call.
+    joiner.abort()
+    await waitFor(() => cleanedUp === 1)
+    await waitFor(() => realClient.connectToServer.cache.get(key) === undefined)
+    await settlesWithin(joinerCaught, 5_000).catch(() => {})
   } finally {
     client.cleanup = realCleanup
     await client.cleanup().catch(() => {})
@@ -4765,6 +5079,8 @@ test('A SURVIVING SHARED DISCOVERY KEEPS ITS NAMESPACE AGAINST A COMPETITOR QUEU
   const origin = join(configHome, 'origin')
   const ambient = join(configHome, 'ambient')
   let releaseCompetitor: (() => void) | undefined
+  let competitorCancel: AbortController | undefined
+  let competitorApplied: Promise<void> | undefined
   try {
     const url = serveNeedingAuth()
     // The competitor's token, in its own store: no page may carry it.
@@ -4794,15 +5110,26 @@ test('A SURVIVING SHARED DISCOVERY KEEPS ITS NAMESPACE AGAINST A COMPETITOR QUEU
     // holds the mutex: the competitor queues behind that scope — ahead
     // of the surviving entry, which is only entered at discovery start.
     await waitFor(() => heldConnect.arrived)
+    // Cancellable: if an assertion below fails while discovery still
+    // holds the mutex, the test's finally aborts this wait instead of
+    // letting the queued competitor run after the environment is
+    // restored — it would apply its own home and leave it set. A
+    // competitor that already acquired restores its own environment
+    // before releasing the mutex.
+    competitorCancel = new AbortController()
     const competitorHeld = new Promise<void>(resolve => {
       releaseCompetitor = resolve
     })
-    const competitorApplied = (async () => {
-      const { acquired } = await acquireEnvMutex()
-      expect(acquired).toBe(true)
-      process.env.OPENCLAUDE_CONFIG_DIR = ambient
-      await competitorHeld
-      releaseEnvMutex()
+    competitorApplied = (async () => {
+      const { acquired } = await acquireEnvMutex({ signal: competitorCancel!.signal })
+      if (!acquired) return
+      try {
+        process.env.OPENCLAUDE_CONFIG_DIR = ambient
+        await competitorHeld
+      } finally {
+        process.env.OPENCLAUDE_CONFIG_DIR = origin
+        releaseEnvMutex()
+      }
     })()
     heldConnect.answer()
     // The reconnect connected, and its discovery is stalled on page one.
@@ -4847,7 +5174,14 @@ test('A SURVIVING SHARED DISCOVERY KEEPS ITS NAMESPACE AGAINST A COMPETITOR QUEU
     releaseCompetitor?.()
     await competitorApplied
   } finally {
+    // Cancel the queued competitor before restoring the environment:
+    // resolving its hold alone does not cancel its mutex wait, and it
+    // would apply its home after the restore. Awaiting its settlement
+    // joins it either way; a competitor that already acquired restores
+    // its own environment before releasing the mutex.
+    competitorCancel?.abort()
     releaseCompetitor?.()
+    await competitorApplied?.catch(() => {})
     setClaudeConfigHomeDirForTesting(configHome)
     restoreEnv()
   }
@@ -5508,3 +5842,4 @@ test('A CLOSE AFTER THE RECONNECT SUCCEEDS REPORTS THE SESSION AS CLOSED', async
     onReconnectSettled = null
   }
 }, 30_000)
+
