@@ -543,7 +543,16 @@ function writeWaitOutput(out: WaitOutput, chunk: string): Promise<void> {
     once('error', done)
     once('close', done)
     try {
-      out.write(chunk, done)
+      // Complete the write from the callback only on success. On Node
+      // a failed write invokes its callback before emitting 'error',
+      // so completing here would remove the error listener installed
+      // above and the later 'error' event would throw instead of
+      // settling the waiter with its selected exit code (CodeRabbit
+      // #2497 review 5952674466). On failure leave the listeners in
+      // place and let the stream's error path settle the waiter.
+      out.write(chunk, (error?: Error | null) => {
+        if (!error) done()
+      })
     } catch {
       // A synchronously throwing write (e.g. an ended stream) is a
       // dead consumer, not a reason to fail the waiter: resolve so the
@@ -717,13 +726,16 @@ export async function waitHandler(
   const pollIntervalMs = options.pollIntervalMs ?? WAIT_POLL_INTERVAL_MS
   const sleep = options.sleep ?? abortableSleep
   // Track the in-flight process lookup so every cancellation path can
-  // await the inspector child's close before the waiter returns
-  // (maintainer review 5948202472 on #2497): awaiting the lookup promise
-  // awaits the `ps` close, because getProcessCommandAsync resolves only
-  // on child close. The wait is bounded by one poll interval, so a child
-  // that ignores SIGTERM delays the return by at most that. Defined
-  // before selector resolution so the exact-name liveness gate's lookups
-  // are tracked too — a deadline or signal during resolution must not
+  // await the inspector child's settlement before the waiter returns
+  // (maintainer review 5948202472 on #2497). The lookup promise is the
+  // settlement signal: the production lookup resolves when its exec
+  // wrapper settles, which on an abort can precede the child's close
+  // — the wrapper resolves on the spawn 'error' event, and a child
+  // that traps SIGTERM may still be alive then — so this await bounds
+  // the wait by one poll interval rather than proving the child has
+  // exited (CodeRabbit #2497 review 5952674466). Defined before
+  // selector resolution so the exact-name liveness gate's lookups are
+  // tracked too — a deadline or signal during resolution must not
   // return while that inspector child is still alive either.
   let pendingLookup: Promise<string | null> | null = null
   let lookupSettled = true
@@ -1072,31 +1084,33 @@ export async function waitHandler(
     // Do not return while the rendered result is still queued in a
     // back-pressured stdout pipe: the CLI fast path exits with 124/130/
     // 143 right after this handler resolves, which would discard it.
-    // A client signal still cuts the wait short: a consumer that never
-    // drains must not make the waiter ignore SIGINT/SIGTERM forever
-    // (CodeRabbit #2497 review 5950772048). The rendered result keeps
-    // the exit code finish() already set; only the wait is abandoned,
-    // and the signal listeners are removed by the lines below.
+    // A client signal does not abandon this wait: with --json the
+    // rendered line is the waiter's one mandatory JSON object, and
+    // exiting before it is written would break that contract. The wait
+    // is still bounded by one production poll interval, so a consumer
+    // that never drains cannot block the waiter indefinitely — a
+    // signal during the flush therefore delays the return by at most
+    // that (CodeRabbit #2497 review 5952674466). The bound uses the
+    // production poll interval, not the caller's pollIntervalMs: the
+    // latter is a lookup-polling knob that tests accelerate to 10 ms,
+    // far shorter than a back-pressured drain or a slow write
+    // callback, and the flush bound must give a live consumer time to
+    // drain. The rendered result keeps the exit code finish() already
+    // set.
     if (pendingFlush !== null) {
-      let onAbort: (() => void) | undefined
+      let flushTimer: ReturnType<typeof setTimeout> | undefined
       try {
         await Promise.race([
           pendingFlush,
           new Promise<void>(resolve => {
-            if (abortController.signal.aborted) {
-              resolve()
-              return
-            }
-            onAbort = () => resolve()
-            abortController.signal.addEventListener('abort', onAbort, {
-              once: true,
-            })
+            flushTimer = setTimeout(
+              () => resolve(),
+              WAIT_POLL_INTERVAL_MS,
+            )
           }),
         ])
       } finally {
-        if (onAbort !== undefined) {
-          abortController.signal.removeEventListener('abort', onAbort)
-        }
+        if (flushTimer !== undefined) clearTimeout(flushTimer)
       }
     }
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)

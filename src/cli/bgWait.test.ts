@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { writeFileSync } from 'node:fs'
+import { Writable } from 'node:stream'
 import {
   DEADLINE_EXPIRED,
   parseWaitInvocation,
@@ -248,6 +249,52 @@ describe('wait command handler', () => {
       options: { signal?: AbortSignal },
     ): Promise<string | null> =>
       options.signal?.aborted ? null : command
+  }
+
+  // Runs the delayed-flush scenario for one client signal: the write
+  // callback fires 250 ms after the write starts, the signal lands at
+  // 100 ms, and the flush bound is the production poll interval
+  // (500 ms), so the callback must have fired before the waiter
+  // returns (CodeRabbit #2497 review 5952674466). The exit code stays
+  // the already-selected 124; whether a signal during the flush should
+  // report 130/143 instead is a maintainer decision (see the review
+  // thread), not asserted here.
+  async function flushesResultOnDelayedWrite(
+    signal: 'SIGINT' | 'SIGTERM',
+  ): Promise<void> {
+    await createTestSession('bg-aaa1')
+    class DelayedOutput extends Writable {
+      chunks: string[] = []
+      callbackFired = false
+      _write(
+        chunk: unknown,
+        _encoding: BufferEncoding,
+        callback: (error?: Error | null) => void,
+      ): void {
+        this.chunks.push(String(chunk))
+        setTimeout(() => {
+          this.callbackFired = true
+          callback(null)
+        }, 250)
+      }
+    }
+    const stdout = new DelayedOutput()
+    const startedAt = performance.now()
+    const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: liveLookup('sleep 30'),
+      stdout,
+    })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    process.emit(signal)
+    const { code } = await waiting
+    const elapsedMs = performance.now() - startedAt
+    expect(code).toBe(124)
+    expect(elapsedMs).toBeLessThan(2000)
+    expect(stdout.callbackFired).toBe(true)
+    const result = expectWaitJsonShape(JSON.parse(stdout.chunks.join('')))
+    expect(result.waitResult).toBe('timeout')
+    expect(result.error).toBe('timeout')
   }
 
   function expectWaitJsonShape(value: unknown): Record<string, unknown> {
@@ -971,7 +1018,16 @@ describe('wait command handler', () => {
         pollIntervalMs: 50,
         getProcessCommandAsync: stalledFinalLookup,
       })
-      await finalEntered
+      // Race the entry barrier against early handler completion: if
+      // selector resolution is slow, the handler can return 124 before
+      // the final lookup starts, and awaiting the barrier alone would
+      // hang the test past teardown instead of failing it (CodeRabbit
+      // #2497 review 5952674466).
+      const entered = await Promise.race([
+        finalEntered.then(() => true),
+        waiting.then(() => false),
+      ])
+      expect(entered).toBe(true)
       process.emit('SIGINT')
       const { code, stdout, stderr } = await waiting
       expect(code).toBe(130)
@@ -988,10 +1044,11 @@ describe('wait command handler', () => {
   it('returns promptly on SIGINT while the result flush is stalled', async () => {
     // Regression test for CodeRabbit #2497 review 5950772048: when the
     // consumer never drains, the pending-flush wait in the finally must
-    // still respond to a client signal — otherwise the waiter ignores
-    // SIGINT/SIGTERM indefinitely. The rendered timeout result (124)
-    // is preserved; only the wait is abandoned, and the signal
-    // listeners are removed.
+    // stay bounded — otherwise the waiter ignores SIGINT/SIGTERM
+    // indefinitely. A client signal does not abandon the wait outright:
+    // the flush is awaited for at most one poll interval, so the
+    // rendered timeout result (124) is preserved and the signal
+    // listeners are removed (CodeRabbit #2497 review 5952674466).
     await createTestSession('bg-aaa1')
     class NeverDrainingOutput {
       chunks: string[] = []
@@ -1040,20 +1097,60 @@ describe('wait command handler', () => {
     expect(getEventListeners(process, 'SIGTERM').length).toBe(sigtermBefore)
   })
 
+  it('preserves the selected exit code when the result write fails asynchronously', async () => {
+    // Regression test for CodeRabbit #2497 review 5952674466: on Node
+    // a failed write invokes its callback before emitting 'error', so
+    // completing the write from the callback removes the error listener
+    // and the later 'error' event throws instead of preserving the
+    // waiter's selected exit code. A real Writable that fails an
+    // asynchronous write proves the waiter still returns 124.
+    await createTestSession('bg-aaa1')
+    class FailingOutput extends Writable {
+      chunks: string[] = []
+      _write(
+        chunk: unknown,
+        _encoding: BufferEncoding,
+        callback: (error?: Error | null) => void,
+      ): void {
+        this.chunks.push(String(chunk))
+        setTimeout(() => callback(new Error('boom')), 0)
+      }
+    }
+    const stdout = new FailingOutput()
+    const { code } = await runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: liveLookup('sleep 30'),
+      stdout,
+    })
+    expect(code).toBe(124)
+    const result = expectWaitJsonShape(JSON.parse(stdout.chunks.join('')))
+    expect(result.waitResult).toBe('timeout')
+    expect(result.error).toBe('timeout')
+  })
+
+  it('flushes the rendered result when SIGINT lands during a delayed write', async () => {
+    await flushesResultOnDelayedWrite('SIGINT')
+  })
+
+  it('flushes the rendered result when SIGTERM lands during a delayed write', async () => {
+    await flushesResultOnDelayedWrite('SIGTERM')
+  })
+
   it('does not return while a resolution-time inspector outlasts the cleanup grace', async () => {
     // Regression test for CodeRabbit #2497 review 5950772048: when the
     // deadline fires during selector resolution, the resolution lookup
-    // must be aborted (killing its `ps` child) instead of running on
-    // past the cleanup grace. The stub stands in for the real lookup:
-    // the first (resolution-time) probe spawns a real child that traps
-    // SIGTERM and exits 300 ms later, so a waiter that never signals
-    // the probe returns at the 500 ms grace bound with the child
-    // observably alive. Two same-name candidates also prove no further
-    // probe starts once the waiter is cancelled. The deadline is
-    // 500 ms, not 60 ms: the child is a fresh Bun process, and a
-    // SIGTERM that lands before it installs its trap kills it at once
-    // instead of after the 300 ms trap — the test would then pass or
-    // fail on startup timing instead of on the abort wiring.
+    // must be aborted instead of running on past the cleanup grace.
+    // The stub stands in for the real lookup: the first
+    // (resolution-time) probe observes the abort signal and then waits
+    // on a test-controlled close barrier, standing in for an inspector
+    // child that stays alive after the abort. The waiter must not
+    // return while the barrier is held — a waiter that never signals
+    // the probe, or returns at the deadline without awaiting it, is
+    // already settled by then. No wall-clock minimum is asserted: the
+    // old 700 ms bound assumed a POSIX SIGTERM trap, which Windows
+    // forceful termination does not honour (CodeRabbit #2497 review
+    // 5952674466). Two same-name candidates also prove no further
+    // probe starts once the waiter is cancelled.
     const sessionChild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
       stdio: 'ignore',
     })
@@ -1061,7 +1158,15 @@ describe('wait command handler', () => {
       throw new Error('spawned session child has no pid')
     }
     const sessionPid = sessionChild.pid
-    let inspector: ReturnType<typeof spawn> | undefined
+    let lookupStartedResolve!: () => void
+    const lookupStarted = new Promise<void>(resolve => {
+      lookupStartedResolve = resolve
+    })
+    let releaseCloseResolve!: () => void
+    const releaseClose = new Promise<void>(resolve => {
+      releaseCloseResolve = resolve
+    })
+    let abortSeen = false
     try {
       await createTestSession('bg-aaa1', {
         name: 'worker',
@@ -1083,35 +1188,46 @@ describe('wait command handler', () => {
       secondRaw.name = 'worker'
       await writeFile(secondPath, JSON.stringify(secondRaw))
       let lookups = 0
-      const slowRealLookup = async (
+      const slowLookup = async (
         _pid: number,
         options: { signal?: AbortSignal },
       ): Promise<string | null> => {
         lookups += 1
         if (lookups !== 1) return liveLookup('sleep 30')(_pid, options)
-        inspector = spawn(
-          process.execPath,
-          [
-            '-e',
-            "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300)); setTimeout(() => {}, 60000)",
-          ],
-          { stdio: 'ignore', signal: options.signal },
+        lookupStartedResolve()
+        if (options.signal?.aborted) abortSeen = true
+        options.signal?.addEventListener(
+          'abort',
+          () => {
+            abortSeen = true
+          },
+          { once: true },
         )
-        await new Promise<void>(resolve => {
-          inspector?.once('error', () => {})
-          inspector?.once('close', () => resolve())
-        })
-        return options.signal?.aborted ? null : 'sleep 30'
+        // Stay "alive" until the test releases the close barrier.
+        await releaseClose
+        return 'sleep 30'
       }
-      const startedAt = performance.now()
-      const { code, stdout, stderr } = await runWait(
-        ['worker', '--timeout', '500ms', '--json'],
-        {
-          pollIntervalMs: 500,
-          getProcessCommandAsync: slowRealLookup,
-        },
-      )
-      const elapsedMs = performance.now() - startedAt
+      const waiting = runWait(['worker', '--timeout', '500ms', '--json'], {
+        pollIntervalMs: 500,
+        getProcessCommandAsync: slowLookup,
+      })
+      await lookupStarted
+      // The 500 ms deadline must fire and abort the lookup before the
+      // waiter can return: wait until the abort is observed, then
+      // prove the waiter is still pending while the close barrier is
+      // held.
+      const abortDeadline = Date.now() + 5000
+      while (!abortSeen && Date.now() < abortDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(abortSeen).toBe(true)
+      const settledBeforeRelease = await Promise.race([
+        waiting.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 150)),
+      ])
+      expect(settledBeforeRelease).toBe(false)
+      releaseCloseResolve()
+      const { code, stdout, stderr } = await waiting
       expect(code).toBe(124)
       expect(stderr).toBe('')
       const result = expectWaitJsonShape(JSON.parse(stdout))
@@ -1120,16 +1236,11 @@ describe('wait command handler', () => {
       // Only the first candidate was probed: the scan stopped once the
       // deadline cancelled the waiter.
       expect(lookups).toBe(1)
-      // The waiter returned only after the trapped inspector exited
-      // (~500 ms deadline + 300 ms trap), not at the deadline.
-      expect(elapsedMs).toBeGreaterThanOrEqual(700)
-      expect(inspector?.pid).toBeDefined()
-      expect(() => process.kill(inspector!.pid!, 0)).toThrow()
     } finally {
       sessionChild.kill()
-      try {
-        inspector?.kill('SIGKILL')
-      } catch {}
+      // Never leave the waiter hanging on the barrier if an assertion
+      // above fails: releasing an already-settled barrier is a no-op.
+      releaseCloseResolve()
     }
   })
 
