@@ -3659,10 +3659,14 @@ export class BackgroundSessionWaitError extends Error {
 
 type StrictSessionRead =
   | { state: 'missing' }
-  | { state: 'valid'; value: BackgroundSession }
+  | { state: 'valid'; value: BackgroundSession; identity: FileIdentity }
   | { state: 'unreadable' }
   | { state: 'malformed' }
-  | { state: 'id_mismatch'; value: BackgroundSession }
+  | { state: 'id_mismatch'; value: BackgroundSession; identity: FileIdentity }
+
+/** The (device, inode) identity of an opened registry file, used to tell
+ * whether two spellings of a path opened the same file. */
+type FileIdentity = { dev: number; ino: number }
 
 /**
  * Reads a `wait`-path registry file without ever blocking on a
@@ -3683,7 +3687,7 @@ async function readWaitRegistryFile(
 ): Promise<
   | { state: 'missing' }
   | { state: 'unreadable' }
-  | { state: 'ok'; content: string }
+  | { state: 'ok'; content: string; identity: FileIdentity }
 > {
   let handle: Awaited<ReturnType<typeof open>>
   try {
@@ -3703,8 +3707,13 @@ async function readWaitRegistryFile(
       : { state: 'unreadable' }
   }
   try {
-    if (!(await handle.stat()).isFile()) return { state: 'unreadable' }
-    return { state: 'ok', content: await handle.readFile('utf8') }
+    const fileStat = await handle.stat()
+    if (!fileStat.isFile()) return { state: 'unreadable' }
+    return {
+      state: 'ok',
+      content: await handle.readFile('utf8'),
+      identity: { dev: fileStat.dev, ino: fileStat.ino },
+    }
   } catch {
     return { state: 'unreadable' }
   } finally {
@@ -3726,7 +3735,7 @@ async function readSessionFileStrict(
     return { state: 'malformed' }
   }
   if (isBackgroundSession(parsed, id)) {
-    return { state: 'valid', value: parsed }
+    return { state: 'valid', value: parsed, identity: read.identity }
   }
   // A structurally valid session whose stored id differs from the
   // requested id is not a corrupt document: on a case-insensitive
@@ -3745,7 +3754,7 @@ async function readSessionFileStrict(
     storedId !== id &&
     isBackgroundSession(parsed, storedId)
   ) {
-    return { state: 'id_mismatch', value: parsed }
+    return { state: 'id_mismatch', value: parsed, identity: read.identity }
   }
   return { state: 'malformed' }
 }
@@ -3898,6 +3907,22 @@ export async function resolveBackgroundSessionForWait(
   }
 
   const candidates: BackgroundSession[] = []
+  // One row per file: on a case-insensitive registry the same file can
+  // be enumerated under two spellings (bg-other.json and BG-other.json),
+  // and the mismatch branch below retains the verified row, so a second
+  // spelling of the same file must not add a duplicate candidate — two
+  // identical name rows would report an ambiguous name (CodeRabbit #2497
+  // review 5956497652).
+  const seenCandidateIdentities = new Set<string>()
+  const addCandidateOnce = (
+    session: BackgroundSession,
+    identity: FileIdentity,
+  ): void => {
+    const key = `${identity.dev}:${identity.ino}`
+    if (seenCandidateIdentities.has(key)) return
+    seenCandidateIdentities.add(key)
+    candidates.push(session)
+  }
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue
     const id = entry.slice(0, -'.json'.length)
@@ -3924,6 +3949,27 @@ export async function resolveBackgroundSessionForWait(
           null,
         )
       }
+      // A valid canonical row makes the mismatch an alias only when
+      // both reads opened the same file. A row in a different file
+      // that claims the canonical id is a stray document, not an
+      // alias: skipping it could pin the wrong session, so it fails
+      // the lookup instead. When the identities match, the canonical
+      // row may be enumerated only under its case variant on a
+      // case-insensitive registry, so retain the verified row once
+      // instead of discarding it — discarding it would let an
+      // unrelated prefix match win over a live named session
+      // (CodeRabbit #2497 review 5956497652).
+      if (
+        canonical.identity.dev !== read.identity.dev ||
+        canonical.identity.ino !== read.identity.ino
+      ) {
+        throwWaitMetadataError(
+          'malformed',
+          `Background session ${id} metadata`,
+          null,
+        )
+      }
+      addCandidateOnce(read.value, read.identity)
       continue
     }
     if (read.state === 'unreadable' || read.state === 'malformed') {
@@ -3935,7 +3981,7 @@ export async function resolveBackgroundSessionForWait(
         null,
       )
     }
-    candidates.push(read.value)
+    addCandidateOnce(read.value, read.identity)
   }
 
   const exactId = candidates.filter(s => s.id === target)
