@@ -3,14 +3,17 @@ import { getGlobalConfig, saveGlobalConfig } from './config.js'
 import { _resetTmuxControlModeProbeForTesting } from './fullscreen.js'
 import {
   CANCEL_MESSAGE,
+  HOOK_STOPPED_MESSAGE,
   INTERRUPT_MESSAGE_FOR_TOOL_USE,
   PLAN_REJECTION_PREFIX,
   REJECT_MESSAGE,
   REJECT_MESSAGE_WITH_REASON_PREFIX,
+  UNKNOWN_SKILL_PREFIX,
   createAssistantAPIErrorMessage,
   createAssistantMessage,
   createCommandInputMessage,
   createCompactBoundaryMessage,
+  createSyntheticUserCaveatMessage,
   createUserInterruptionMessage,
   createUserMessage,
   formatCommandInputTags,
@@ -1077,5 +1080,93 @@ describe('chronology and terminal diagnostics', () => {
       result('r3', 't3'),
     ])
     expect(ids(r.rows)).not.toContain('w')
+  })
+})
+
+describe('stop reasons and diagnostics from the input pipeline', () => {
+  test('a hook that stops a submission keeps the real prompt as the boundary and shows the stop', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      prompt('p2', 'the real prompt'),
+      prompt('h', `${HOOK_STOPPED_MESSAGE}: policy says no`),
+    ])
+    expect(r.boundary?.uuid).toBe('p2')
+    expect(r.hiddenTurns).toBe(1)
+    expect(ids(r.rows)).toEqual(['p2', 'h'])
+  })
+
+  test('a hook stop with no reason is not a prompt either', () => {
+    const r = select([prompt('p2', 'go'), prompt('h', HOOK_STOPPED_MESSAGE)])
+    expect(r.boundary?.uuid).toBe('p2')
+    expect(ids(r.rows)).toContain('h')
+  })
+
+  test('an unknown skill notice and its arguments warning stay in the tail without moving the boundary', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      label('cv', createSyntheticUserCaveatMessage()),
+      prompt('u', `${UNKNOWN_SKILL_PREFIX}nope`),
+      sys('w', 'informational', { level: 'warning', content: 'Args from unknown skill: x' }),
+    ])
+    expect(r.boundary?.uuid).toBe('p1')
+    expect(ids(r.rows)).toEqual(['p1', 'a1', 'u', 'w'])
+  })
+
+  const advisorCall = (id: string) =>
+    label(
+      id,
+      createAssistantMessage({
+        content: [{ type: 'server_tool_use', id: 's1', name: 'advisor', input: {} } as never],
+      }),
+    )
+  const advisorResult = (id: string, content: object) =>
+    label(
+      id,
+      createAssistantMessage({
+        content: [{ type: 'advisor_tool_result', tool_use_id: 's1', content } as never],
+      }),
+    )
+
+  test('a failed Advisor call is counted and its error row is kept with the call', () => {
+    const r = select([
+      prompt('p', 'go'),
+      advisorCall('ac'),
+      advisorResult('ae', { type: 'advisor_tool_result_error', error_code: 'overloaded' }),
+      say('a', 'done'),
+    ])
+    expect(ids(r.rows)).toEqual(['p', 'ac', 'ae', 'a'])
+    expect(r.summary.toolCount).toBe(1)
+    expect(r.summary.failed).toBe(1)
+  })
+
+  test('a successful Advisor call is counted and hidden', () => {
+    const r = select([
+      prompt('p', 'go'),
+      advisorCall('ac'),
+      advisorResult('ar', { type: 'advisor_result', text: 'looks fine' }),
+      say('a', 'done'),
+    ])
+    expect(ids(r.rows)).toEqual(['p', 'a'])
+    expect(r.summary.toolCount).toBe(1)
+    expect(r.summary.failed).toBe(0)
+  })
+
+  test('a failed Advisor call is found after real normalization splits the blocks', () => {
+    const msg = createAssistantMessage({
+      content: [
+        { type: 'server_tool_use', id: 's1', name: 'advisor', input: {} } as never,
+        {
+          type: 'advisor_tool_result',
+          tool_use_id: 's1',
+          content: { type: 'advisor_tool_result_error', error_code: 'overloaded' },
+        } as never,
+      ],
+    })
+    const rows = normalized([createUserMessage({ content: 'go' }), msg])
+    const r = select(rows)
+    expect(r.rows).toHaveLength(3)
+    expect(r.summary.failed).toBe(1)
   })
 })

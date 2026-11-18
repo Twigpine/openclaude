@@ -29,7 +29,7 @@ import { toArray } from '../generators.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { logError } from '../log.js';
 import { enqueuePendingNotification } from '../messageQueueManager.js';
-import { createCommandInputMessage, createSyntheticUserCaveatMessage, createSystemMessage, createUserInterruptionMessage, createUserMessage, formatCommandInputTags, isCompactBoundaryMessage, isSystemLocalCommandMessage, normalizeMessages, prepareUserContent } from '../messages.js';
+import { createCommandInputMessage, createSyntheticUserCaveatMessage, createSystemMessage, createUserInterruptionMessage, createUserMessage, formatCommandInputTags, isCompactBoundaryMessage, isSystemLocalCommandMessage, normalizeMessages, prepareUserContent, UNKNOWN_SKILL_PREFIX } from '../messages.js';
 import type { ModelAlias } from '../model/aliases.js';
 import { parseToolListFromCLI } from '../permissions/permissionSetup.js';
 import { hasPermissionsToUseTool } from '../permissions/permissions.js';
@@ -351,7 +351,7 @@ export async function processSlashCommand(inputString: string, precedingInputBlo
       logEvent('tengu_input_slash_invalid', {
         input: commandName as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
       });
-      const unknownMessage = `Unknown skill: ${commandName}`;
+      const unknownMessage = `${UNKNOWN_SKILL_PREFIX}${commandName}`;
       return {
         messages: [createSyntheticUserCaveatMessage(), ...attachmentMessages, createUserMessage({
           content: prepareUserContent({
