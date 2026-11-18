@@ -4084,11 +4084,24 @@ export async function resolveBackgroundSessionForWait(
   }
 
   // Liveness is an effective-status property, so name candidates need their
-  // terminal facts applied strictly before the live/terminal split.
+  // terminal facts applied strictly before the live/terminal split — but
+  // only for rows that could still be live. A row whose recorded status
+  // is already terminal cannot become live, regardless of its terminal
+  // facts, so its facts are read only when selection reaches it: an old
+  // exited row with a malformed fact must not block a newer live row
+  // with the same name (CodeRabbit #2497 review 5963778469). The
+  // deferred rows are strict-read in the terminal-name fallback below,
+  // where a malformed fact still reports exit 4 when the row is
+  // selected.
   const byName = candidates.filter(s => s.name === target)
   const effectiveByName: BackgroundSession[] = []
+  const deferredTerminalByName: BackgroundSession[] = []
   for (const session of byName) {
-    effectiveByName.push(await readEffectiveSessionStrict(session, null))
+    if (isTerminalBackgroundSession(session)) {
+      deferredTerminalByName.push(session)
+    } else {
+      effectiveByName.push(await readEffectiveSessionStrict(session, null))
+    }
   }
   // A `status: running` row whose child is already gone must not win
   // exact-name resolution over a unique live ID-prefix match: a name
@@ -4135,6 +4148,12 @@ export async function resolveBackgroundSessionForWait(
     )
   }
 
+  // Terminal-name fallback: only now are the deferred terminal rows'
+  // facts read, in scan order, so a malformed fact still reports exit 4
+  // when its row is the selected one (CodeRabbit #2497 review 5963778469).
+  for (const session of deferredTerminalByName) {
+    effectiveByName.push(await readEffectiveSessionStrict(session, null))
+  }
   if (effectiveByName.length === 1) return effectiveByName[0]
   if (effectiveByName.length > 1) {
     throw new BackgroundSessionWaitError(
