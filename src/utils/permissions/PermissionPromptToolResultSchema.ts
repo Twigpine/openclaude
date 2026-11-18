@@ -7,13 +7,12 @@ import type {
   PermissionDecision,
   PermissionDecisionReason,
 } from './PermissionResult.js'
-import {
-  filterPermissionRequestHookUpdates,
-  persistPermissionUpdates,
-} from './PermissionUpdate.js'
+import { filterPermissionRequestHookUpdates } from './PermissionUpdate.js'
 import { permissionUpdateSchema } from './PermissionUpdateSchema.js'
-import { applyPermissionUpdatesToLiveContext } from './permissionSetup.js'
-import { revalidatePlanModePermissionAllowWithRaceGuard } from './permissions.js'
+import {
+  revalidatePermissionRequestAllow,
+  revalidatePlanModePermissionAllowWithRaceGuard,
+} from './permissions.js'
 
 export const inputSchema = lazySchema(() =>
   z.object({
@@ -89,10 +88,11 @@ export async function permissionPromptToolResultToPermissionDecision(
   tool: Tool,
   input: { [key: string]: unknown },
   toolUseContext: ToolUseContext,
+  permissionPromptToolName = tool.name,
 ): Promise<PermissionDecision> {
   const decisionReason: PermissionDecisionReason = {
     type: 'permissionPromptTool',
-    permissionPromptToolName: tool.name,
+    permissionPromptToolName,
     toolResult: result,
   }
   if (result.behavior === 'allow') {
@@ -123,33 +123,15 @@ export async function permissionPromptToolResultToPermissionDecision(
       enforcePlanMode ||
         toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
     )
-    if (updatedPermissions.length > 0) {
-      let updatedContext = toolUseContext.getAppState().toolPermissionContext
-      toolUseContext.setAppState(prev => {
-        updatedContext = applyPermissionUpdatesToLiveContext(
-          prev.toolPermissionContext,
-          updatedPermissions,
-        )
-        if (prev.toolPermissionContext === updatedContext) return prev
-        return {
-          ...prev,
-          toolPermissionContext: updatedContext,
-        }
-      })
-      persistPermissionUpdates(updatedPermissions)
-    }
-    const postUpdatePlanModeDecision =
-      await revalidatePlanModePermissionAllowWithRaceGuard(
-        tool,
-        input,
-        updatedInput,
-        toolUseContext,
-        enforcePlanMode ||
-          toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
-      )
-    if (postUpdatePlanModeDecision) {
-      return postUpdatePlanModeDecision
-    }
+    const finalRevalidation = await revalidatePermissionRequestAllow(
+      tool,
+      input,
+      updatedInput,
+      toolUseContext,
+      enforcePlanMode,
+      updatedPermissions,
+    )
+    if (finalRevalidation) return finalRevalidation
     const { updatedPermissions: _updatedPermissions, ...allowResult } = result
     return {
       ...allowResult,
