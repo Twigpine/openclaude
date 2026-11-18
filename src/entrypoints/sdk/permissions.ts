@@ -581,10 +581,27 @@ export function createExternalCanUseTool(
  */
 export function captureCredentialScope(
   getOriginScope?: () => ActiveCredentialScope | undefined,
-  options?: { signal?: AbortSignal },
+  options?: {
+    signal?: AbortSignal
+    /**
+     * Environment to freeze alongside the process environment: a call
+     * made before the first turn has no turn to lend it the session's
+     * `env` overrides, so the caller passes them here and the frozen
+     * namespace is the session's established environment, not ambient.
+     * A call inside a turn already runs with those overrides applied,
+     * so overlaying them again changes nothing.
+     */
+    env?: Record<string, string | undefined>
+  },
 ): CredentialScope {
   // Captured inside the turn's tool call, where its variables are applied.
   const turnEnv = new Map(Object.entries(process.env))
+  if (options?.env) {
+    for (const [key, value] of Object.entries(options.env)) {
+      if (value === undefined) turnEnv.delete(key)
+      else turnEnv.set(key, value)
+    }
+  }
   // The turn the call starts in lends its environment; freeze that scope
   // now, instead of reading the live turn at resume time — by the time the
   // user is back from the browser, another turn may hold the field, and the

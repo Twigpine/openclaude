@@ -23,10 +23,15 @@ import {
   clearMcpAuthCache,
   connectToServer,
   getServerCacheKey,
+  isMcpClientAdopted,
   reconnectMcpServerImpl,
   releaseUnownedMcpClient,
 } from '../../services/mcp/client.js'
-import { resumeIn, type ActiveCredentialScope } from '../../services/mcp/credentialScope.js'
+import {
+  type CredentialScope,
+  resumeIn,
+  type ActiveCredentialScope,
+} from '../../services/mcp/credentialScope.js'
 import {
   createMcpAuthTool,
   getSdkSignInEntryKeys,
@@ -805,13 +810,18 @@ class SDKSessionImpl implements SDKSession {
    * own snapshot, which would let the turn's earlier needs-auth install
    * land after the sign-in's reconnect and put the pseudo-tool back.
    */
-  private async ensureMcpConnected(): Promise<boolean> {
+  private async ensureMcpConnected(setupScope?: CredentialScope): Promise<boolean> {
     if (this.mcpConnected || !this.mcpServers || Object.keys(this.mcpServers).length === 0) {
       return !this.closed
     }
     const inFlight = this.mcpConnectPromise
     if (inFlight) return inFlight
-    const promise = this.connectMcpServersOnce()
+    // A scoped connect stays in its scope until the connect itself
+    // settles — not just until the first waiter stops waiting — so the
+    // clients it creates keep the namespace they were set up in.
+    const promise = setupScope
+      ? resumeIn(setupScope, () => this.connectMcpServersOnce())
+      : this.connectMcpServersOnce()
     this.mcpConnectPromise = promise
     try {
       return await promise
@@ -846,8 +856,17 @@ class SDKSessionImpl implements SDKSession {
    *
    * Returns false when the session closed or the sign-in was aborted; the
    * caller tells those apart.
+   *
+   * When `setupScope` is given, the connect itself runs inside it — not
+   * just this caller's wait on it — so the sibling clients the setup
+   * creates (their headers, credentials, stdio environments) are read in
+   * the namespace the flow began in, and stay that way even if this
+   * caller stops waiting first.
    */
-  private async ensureMcpConnectedForAuth(signal: AbortSignal): Promise<boolean> {
+  private async ensureMcpConnectedForAuth(
+    signal: AbortSignal,
+    setupScope?: CredentialScope,
+  ): Promise<boolean> {
     if (signal.aborted) return false
     let onAbort: () => void
     const aborted = new Promise<never>((_, reject) => {
@@ -855,7 +874,7 @@ class SDKSessionImpl implements SDKSession {
       signal.addEventListener('abort', onAbort, { once: true })
     })
     try {
-      return await Promise.race([this.ensureMcpConnected(), aborted])
+      return await Promise.race([this.ensureMcpConnected(setupScope), aborted])
     } catch (error) {
       if (error instanceof AuthenticationCancelledError) return false
       throw error
@@ -959,11 +978,17 @@ class SDKSessionImpl implements SDKSession {
     const signInEntryKeys = getSdkSignInEntryKeys(name, serverConfig)
     // The attempt exists from here so its signal can make the scope's
     // mutex wait abortable; it is registered — and supersedes the
-    // previous attempt — after initialization, below.
+    // previous attempt — after initialization, below. The frozen
+    // environment also carries the session's `env` overrides: a call made
+    // before the first turn has no turn to lend them, so without the
+    // overlay the capture would freeze ambient env and the pre-turn
+    // setup would read sibling credentials and headers from the wrong
+    // namespace. Inside a turn the overrides are already applied, so
+    // overlaying them again changes nothing.
     const attempt = new AbortController()
     const credentialScope = captureCredentialScope(
       () => entryCredentialScope ?? undefined,
-      { signal: attempt.signal },
+      { signal: attempt.signal, env: this.options.env },
     )
     // Discovery that outlives this caller — a shared fetch another caller
     // adopted — keeps running after the attempt is cancelled, so its
@@ -972,6 +997,7 @@ class SDKSessionImpl implements SDKSession {
     // namespace this call began in.
     const survivingDiscoveryScope = captureCredentialScope(
       () => entryCredentialScope ?? undefined,
+      { env: this.options.env },
     )
 
     // Process-wide networking (proxy, mTLS client certificate, CA certs) is
@@ -1027,8 +1053,13 @@ class SDKSessionImpl implements SDKSession {
       // An aborted sign-in stops waiting here, while the shared connect
       // keeps running for a first turn that may still need it. The connect
       // runs in the session's SDK context, as a turn's would, so a fresh
-      // server initialized here sees the session's directory.
-      if (!(await this.runInSdkContext(() => this.ensureMcpConnectedForAuth(attempt.signal)))) {
+      // server initialized here sees the session's directory — and inside
+      // this call's captured credential scope (threaded into the connect
+      // itself, so it lasts until the connect settles even if this caller
+      // stops waiting first), so the sibling clients it creates read
+      // their headers and credentials in the namespace the flow began in
+      // instead of whichever environment is applied by now.
+      if (!(await this.runInSdkContext(() => this.ensureMcpConnectedForAuth(attempt.signal, credentialScope)))) {
         if (this.closed) throw new Error('SDK session is closed')
         throw new AuthenticationCancelledError()
       }

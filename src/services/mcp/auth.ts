@@ -976,7 +976,15 @@ export async function performMCPOAuthFlow(
   // Servers with `oauth.xaa` but CLAUDE_CODE_ENABLE_XAA unset hard-fail with
   // actionable copy rather than silently degrade to consent.
   if (serverConfig.oauth?.xaa) {
-    if (!isXaaEnabled()) {
+    // The enablement flag is part of the captured namespace, not the
+    // ambient environment: another session's turn may have applied its
+    // own flag while this flow waited (on init, or in the browser), so
+    // read it inside the scope the flow's reads and writes already use.
+    // A caller with no scope (print mode / CLI) reads it as it stands.
+    const xaaEnabled = options?.credentialScope
+      ? await resumeIn(options.credentialScope, async () => isXaaEnabled())
+      : isXaaEnabled()
+    if (!xaaEnabled) {
       throw new Error(
         `XAA is not enabled (set CLAUDE_CODE_ENABLE_XAA=1). Remove 'oauth.xaa' from server '${serverName}' to use the standard consent flow.`,
       )
