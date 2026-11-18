@@ -149,6 +149,7 @@ import {
   isMcpTaskBackgroundingDisabled,
   clearMcpToolTaskSupport,
   isMcpToolTaskSupportUnknown,
+  mcpServerAdvertisesTaskTools,
   mcpTaskSupportForTool,
   recordMcpToolTaskSupport,
   trackMcpServerTask,
@@ -2241,6 +2242,9 @@ export const fetchToolsForClient = memoizeWithLRU(
                 }
               }
 
+              // A taskified call returns a handle while the work continues on
+              // the server, so it must not report 'completed' below.
+              let taskified = false
               const MAX_SESSION_RETRIES = 1
               for (let attempt = 0; ; attempt++) {
                 try {
@@ -2299,11 +2303,14 @@ export const fetchToolsForClient = memoizeWithLRU(
                         }
                         : undefined,
                     handleElicitation: context.handleElicitation,
+                    onServerTaskStarted: () => {
+                      taskified = true
+                    },
                   })
 
                   stopActivityHeartbeat()
                   // Emit progress when tool completes successfully
-                  if (onProgress && toolUseId) {
+                  if (onProgress && toolUseId && !taskified) {
                     try {
                       onProgress({
                         toolUseID: toolUseId,
@@ -3272,6 +3279,7 @@ export async function callMCPToolWithUrlElicitationRetry({
   callToolFn = callMCPTool,
   handleElicitation,
   onUrlElicitationRequired,
+  onServerTaskStarted,
 }: {
   client: ConnectedMCPServer
   clientConnection: MCPServerConnection
@@ -3303,6 +3311,8 @@ export async function callMCPToolWithUrlElicitationRetry({
   ) => Promise<ElicitResult>
   /** Called after validating a URL-elicitation error, before awaiting handling. */
   onUrlElicitationRequired?: () => void
+  /** Called when the server accepted taskification and the call returned a background handle. */
+  onServerTaskStarted?: () => void
 }): Promise<MCPToolCallResult> {
   const MAX_URL_ELICITATION_RETRIES = 3
   for (let attempt = 0; ; attempt++) {
@@ -3320,6 +3330,7 @@ export async function callMCPToolWithUrlElicitationRetry({
         signal,
         onProgress,
         onServerTaskCreated: mcpTask => {
+          onServerTaskStarted?.()
           const description = `${connectedClient.name}: ${tool}`
           const taskId = trackMcpServerTask({
             connection: connectedClient,
@@ -3656,7 +3667,13 @@ async function callMCPTool({
     }
 
     const result = await Promise.race([
-      fetchToolsForClient(connection).then(dispatch),
+      // Discovery only decides plain vs task-augmented, so skip it when the
+      // server cannot background anything or the env opt-out is set: a slow
+      // tools/list must not delay the plain call in those cases.
+      (mcpServerAdvertisesTaskTools(connection)
+        ? fetchToolsForClient(connection)
+        : Promise.resolve([])
+      ).then(dispatch),
       callerAbortPromise,
       timeoutPromise,
     ]).finally(() => {

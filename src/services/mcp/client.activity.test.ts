@@ -9,6 +9,7 @@ import {
   callMCPToolWithUrlElicitationRetry,
   fetchToolsForClient,
 } from './client.js'
+import { _resetMcpServerTasksForTest } from './tasks.js'
 import type { ConnectedMCPServer } from './types.js'
 
 describe('MCP tool activity', () => {
@@ -375,6 +376,76 @@ describe('MCP tool activity', () => {
     await expect(callPromise).resolves.toMatchObject({
       data: [{ type: 'text', text: 'done' }],
     })
+  })
+
+  test('a taskified call does not report completed progress', async () => {
+    const sdkClient = {
+      request: vi.fn(async (req: { method: string }) => {
+        if (req.method === 'tools/list') {
+          return {
+            tools: [
+              {
+                name: 'slow-tool',
+                inputSchema: { type: 'object' },
+                execution: { taskSupport: 'optional' },
+              },
+            ],
+          }
+        }
+        return {
+          task: {
+            taskId: 'remote-progress-1',
+            status: 'working',
+            ttl: null,
+            createdAt: '2026-01-01T00:00:00Z',
+            lastUpdatedAt: '2026-01-01T00:00:00Z',
+            pollInterval: 60000,
+          },
+        }
+      }),
+      callTool: vi.fn(),
+    }
+    const connection = {
+      type: 'connected',
+      name: 'taskified-progress-test',
+      config: { type: 'sdk' },
+      capabilities: { tools: {}, tasks: { requests: { tools: { call: {} } } } },
+      client: sdkClient,
+    } as unknown as ConnectedMCPServer
+    const [tool] = await fetchToolsForClient(connection)
+    expect(tool).toBeDefined()
+    const onProgress = vi.fn()
+    const parentMessage = createAssistantMessage({
+      content: [
+        {
+          type: 'tool_use',
+          id: 'toolu_taskified_progress',
+          name: tool!.name,
+          input: {},
+        },
+      ],
+    })
+
+    try {
+      await tool!.call(
+        {},
+        {
+          abortController: new AbortController(),
+          setAppState: vi.fn(),
+        } as never,
+        undefined as never,
+        parentMessage,
+        onProgress,
+      )
+    } finally {
+      _resetMcpServerTasksForTest()
+    }
+
+    const statuses = onProgress.mock.calls.map(
+      ([arg]) => (arg as { data: { status: string } }).data.status,
+    )
+    expect(statuses).toContain('started')
+    expect(statuses).not.toContain('completed')
   })
 
   test('a throwing completed callback does not turn success into failure', async () => {

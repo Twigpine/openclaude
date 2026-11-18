@@ -376,6 +376,64 @@ describe('MCP server tasks', () => {
     reset()
   }, 15000)
 
+  test('opt-out dispatches without waiting for a pending tool discovery', async () => {
+    reset()
+    const state = makeState()
+    const request = vi.fn(() => new Promise(() => {}))
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'plain result' }],
+    }))
+    const connection = makeConnection({ request, callTool })
+
+    process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND = '1'
+    try {
+      const result = await Promise.race([
+        callMCPToolWithUrlElicitationRetry({
+          client: connection,
+          clientConnection: connection,
+          tool: 'slow-tool',
+          args: {},
+          signal: new AbortController().signal,
+          setAppState: state.set,
+        }),
+        new Promise<'blocked'>(resolve => setTimeout(() => resolve('blocked'), 300)),
+      ])
+      expect(result).not.toBe('blocked')
+    } finally {
+      delete process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND
+    }
+    expect(callTool).toHaveBeenCalledTimes(1)
+    reset()
+  })
+
+  test('a server without task capability dispatches without waiting for discovery', async () => {
+    reset()
+    const state = makeState()
+    const request = vi.fn(() => new Promise(() => {}))
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'plain result' }],
+    }))
+    const connection = {
+      ...makeConnection({ request, callTool }),
+      capabilities: { tools: {} } as ConnectedMCPServer['capabilities'],
+    }
+
+    const result = await Promise.race([
+      callMCPToolWithUrlElicitationRetry({
+        client: connection,
+        clientConnection: connection,
+        tool: 'slow-tool',
+        args: {},
+        signal: new AbortController().signal,
+        setAppState: state.set,
+      }),
+      new Promise<'blocked'>(resolve => setTimeout(() => resolve('blocked'), 300)),
+    ])
+    expect(result).not.toBe('blocked')
+    expect(callTool).toHaveBeenCalledTimes(1)
+    reset()
+  })
+
   test('slow tool discovery counts against MCP_TOOL_TIMEOUT', async () => {
     reset()
     const state = makeState()

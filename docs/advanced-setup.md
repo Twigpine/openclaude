@@ -1150,6 +1150,9 @@ The task list (`/tasks` or the background-tasks dialog) shows these under
 
 The client polls `tasks/get` at the interval the server suggests and also
 listens for `notifications/tasks/status`. A disconnect before the task
-finishes marks the local task failed. Set
+finishes marks the local task failed. When the server reports a task as
+failed or cancelled, OpenClaude also asks for `tasks/result` and, if the server
+returns diagnostic content, saves it to the task output file; otherwise the
+notification and output rely on the server's `statusMessage`. Set
 `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND` to disable the whole path: the
 tasks capability is then not advertised and every tool call stays synchronous.

@@ -38,6 +38,9 @@ import type { ConnectedMCPServer } from './types.js'
 const MIN_POLL_INTERVAL_MS = 1000
 const DEFAULT_POLL_INTERVAL_MS = 2000
 const MAX_POLL_INTERVAL_MS = 60000
+// Bound on a tasks/result fetch after a terminal status. Explicit rather than
+// the SDK default so the limit stays ours if that default changes.
+const RESULT_FETCH_TIMEOUT_MS = 60000
 
 export function isMcpTaskBackgroundingDisabled(): boolean {
   return isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND)
@@ -80,11 +83,11 @@ export function clearMcpToolTaskSupport(connection: ConnectedMCPServer): void {
 }
 
 /**
- * True when the server advertises task-augmented tools/call but no successful
- * tools/list has recorded support for this connection, so the answer from
- * mcpTaskSupportForTool is "unknown", not "none".
+ * True when the server advertises task-augmented tools/call and the env
+ * opt-out is unset. Only then does a call need tool discovery to decide
+ * between the plain and the task-augmented path.
  */
-export function isMcpToolTaskSupportUnknown(
+export function mcpServerAdvertisesTaskTools(
   connection: ConnectedMCPServer,
 ): boolean {
   if (isMcpTaskBackgroundingDisabled()) {
@@ -93,8 +96,19 @@ export function isMcpToolTaskSupportUnknown(
   const serverTasks = connection.capabilities?.tasks as
     | { requests?: { tools?: { call?: unknown } } }
     | undefined
+  return !!serverTasks?.requests?.tools?.call
+}
+
+/**
+ * True when the server advertises task-augmented tools/call but no successful
+ * tools/list has recorded support for this connection, so the answer from
+ * mcpTaskSupportForTool is "unknown", not "none".
+ */
+export function isMcpToolTaskSupportUnknown(
+  connection: ConnectedMCPServer,
+): boolean {
   return (
-    !!serverTasks?.requests?.tools?.call &&
+    mcpServerAdvertisesTaskTools(connection) &&
     !taskSupportByClient.has(connection.client)
   )
 }
@@ -109,13 +123,7 @@ export function mcpTaskSupportForTool(
   connection: ConnectedMCPServer,
   toolName: string,
 ): McpToolTaskSupport | undefined {
-  if (isMcpTaskBackgroundingDisabled()) {
-    return undefined
-  }
-  const serverTasks = connection.capabilities?.tasks as
-    | { requests?: { tools?: { call?: unknown } } }
-    | undefined
-  if (!serverTasks?.requests?.tools?.call) {
+  if (!mcpServerAdvertisesTaskTools(connection)) {
     return undefined
   }
   return taskSupportByClient.get(connection.client)?.get(toolName)
@@ -136,7 +144,13 @@ type TrackedMcpServerTask = {
 }
 
 const trackedByLocalId = new Map<string, TrackedMcpServerTask>()
+// Remote task ids are unique per server, not across servers, so the lookup
+// is keyed by both.
 const localIdByMcpTaskId = new Map<string, string>()
+
+function mcpTaskKey(serverName: string, mcpTaskId: string): string {
+  return JSON.stringify([serverName, mcpTaskId])
+}
 
 /**
  * Register a server-created MCP task as a local background task and start
@@ -180,7 +194,7 @@ export function trackMcpServerTask(opts: {
     finalized: false,
   }
   trackedByLocalId.set(localTaskId, entry)
-  localIdByMcpTaskId.set(task.taskId, localTaskId)
+  localIdByMcpTaskId.set(mcpTaskKey(connection.name, task.taskId), localTaskId)
 
   logForDebugging(
     `[MCP] tracking server task ${task.taskId} as local task ${localTaskId} (tool ${toolName} on ${connection.name})`,
@@ -239,7 +253,12 @@ async function pollMcpServerTask(
       status.status === 'failed' ||
       status.status === 'cancelled'
     ) {
-      await finalizeMcpServerTask(localTaskId, status.status, status.statusMessage)
+      await finalizeMcpServerTask(
+        localTaskId,
+        status.status,
+        status.statusMessage,
+        true,
+      )
       return
     }
   }
@@ -267,19 +286,24 @@ async function finalizeMcpServerTask(
   localTaskId: string,
   status: 'completed' | 'failed' | 'cancelled',
   statusMessage?: string,
+  // True when the server itself reported the terminal status, so a stored
+  // tasks/result may exist. Locally generated terminals (poll errors, kill)
+  // never ask the server for one.
+  serverReported = false,
 ): Promise<void> {
   const entry = trackedByLocalId.get(localTaskId)
   if (!entry || entry.finalized) return
   entry.finalized = true
   entry.abort.abort()
   trackedByLocalId.delete(localTaskId)
-  localIdByMcpTaskId.delete(entry.mcpTaskId)
+  localIdByMcpTaskId.delete(mcpTaskKey(entry.serverName, entry.mcpTaskId))
 
   if (status === 'completed') {
     try {
       const result = await entry.client.experimental.tasks.getTaskResult(
         entry.mcpTaskId,
         CallToolResultSchema,
+        { timeout: RESULT_FETCH_TIMEOUT_MS },
       )
       appendTaskOutput(localTaskId, jsonStringify(result, null, 2) ?? '')
       await flushTaskOutput(localTaskId)
@@ -311,9 +335,31 @@ async function finalizeMcpServerTask(
     return
   }
 
+  // Server-reported failed or cancelled: the server may keep diagnostic
+  // content under tasks/result. Fetch it best-effort; the statusMessage
+  // stays the fallback, and the local terminal state does not depend on it.
+  let payload: string | undefined
+  if (serverReported) {
+    try {
+      const result = await entry.client.experimental.tasks.getTaskResult(
+        entry.mcpTaskId,
+        CallToolResultSchema,
+        { timeout: RESULT_FETCH_TIMEOUT_MS },
+      )
+      payload = jsonStringify(result, null, 2) || undefined
+    } catch (e) {
+      logForDebugging(
+        `[MCP] tasks/result for ${status} task ${entry.mcpTaskId} unavailable: ${e instanceof Error ? e.message : String(e)}`,
+      )
+    }
+  }
+
   if (status === 'failed') {
     const message = statusMessage ?? 'MCP server reported task failure'
-    appendTaskOutput(localTaskId, message)
+    appendTaskOutput(
+      localTaskId,
+      payload === undefined ? message : `${message}\n${payload}`,
+    )
     await flushTaskOutput(localTaskId)
     markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
       statusMessage: message,
@@ -321,6 +367,10 @@ async function finalizeMcpServerTask(
     return
   }
 
+  if (payload !== undefined) {
+    appendTaskOutput(localTaskId, payload)
+    await flushTaskOutput(localTaskId)
+  }
   markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'killed', {
     statusMessage,
   })
@@ -335,7 +385,9 @@ export function handleMcpTaskStatusNotification(
   serverName: string,
   params: TaskStatusNotificationParams,
 ): void {
-  const localTaskId = localIdByMcpTaskId.get(params.taskId)
+  const localTaskId = localIdByMcpTaskId.get(
+    mcpTaskKey(serverName, params.taskId),
+  )
   if (!localTaskId) return
   const entry = trackedByLocalId.get(localTaskId)
   if (!entry || entry.serverName !== serverName || entry.finalized) return
@@ -346,7 +398,12 @@ export function handleMcpTaskStatusNotification(
     params.status === 'failed' ||
     params.status === 'cancelled'
   ) {
-    void finalizeMcpServerTask(localTaskId, params.status, params.statusMessage)
+    void finalizeMcpServerTask(
+      localTaskId,
+      params.status,
+      params.statusMessage,
+      true,
+    )
   }
 }
 
@@ -378,7 +435,7 @@ export function failMcpServerTasksForServer(
     entry.finalized = true
     entry.abort.abort()
     trackedByLocalId.delete(localTaskId)
-    localIdByMcpTaskId.delete(entry.mcpTaskId)
+    localIdByMcpTaskId.delete(mcpTaskKey(entry.serverName, entry.mcpTaskId))
     appendTaskOutput(localTaskId, reason)
     // Flush before the terminal mark so the notification's output-file is
     // readable by the time the model can consume it.
