@@ -2977,10 +2977,6 @@ export async function reconnectMcpServerImpl(
   // no session adopted, and only the catch sees it — the race below turns
   // the cancellation into a failed result before the caller does.
   let connected: MCPServerConnection | undefined
-  // The individual discovery fetches, for the catch: Promise.all rejects
-  // on the first failure and would drop the stragglers, so the surviving
-  // discovery awaits these instead.
-  let discoveryParts: Promise<unknown>[] | undefined
   try {
     // Invalidate the keychain cache so we read fresh credentials from disk.
     // This is necessary when another process (e.g. the VS Code extension host)
@@ -3031,7 +3027,27 @@ export async function reconnectMcpServerImpl(
         ? fetchResourcesForClient(client)
         : Promise.resolve([]),
     ]
-    discoveryParts = discoveryPartsList
+    // A cancelled discovery can outlive this caller: another caller may
+    // have adopted the shared client, so the fetchers keep running for
+    // it. Enter the surviving scope NOW, at discovery start, so it
+    // queues on the environment mutex ahead of any competitor that
+    // arrives while the race below runs: when this caller cancels and
+    // its scope releases, the surviving entry is head-of-queue and the
+    // remaining credential operations — a later tools/list page, a skill
+    // read — run back inside the namespace the reconnect began in, not
+    // whatever the process has by now. The entry is not awaited and is
+    // not attached to the cancelled signal, so it cannot strip the
+    // adopter's tools the way a shared signal would. Promise.all below
+    // rejects on the first failure and would drop the stragglers, so the
+    // surviving entry awaits the parts themselves. A re-entry in the
+    // catch below would queue behind a competitor that arrived during
+    // the race, so there is none: this entry is the whole mechanism.
+    if (survivingDiscoveryScope !== undefined) {
+      const parts = discoveryPartsList
+      void resumeIn(survivingDiscoveryScope, () =>
+        Promise.allSettled(parts),
+      ).catch(() => {})
+    }
     const discovery = Promise.all(discoveryPartsList)
     const [tools, mcpCommands, mcpSkills, resources] = await raceAbort(
       discovery,
@@ -3063,24 +3079,6 @@ export async function reconnectMcpServerImpl(
     // knows it aborted.
     if (!signal?.aborted && !isAbortError(error)) {
       logMCPError(name, `Error during reconnection: ${errorMessage(error)}`)
-    }
-
-    // A cancelled discovery can outlive this caller: another caller may
-    // have adopted the shared client, so the fetchers keep running for
-    // it. Their remaining credential operations run back inside the
-    // namespace the reconnect began in, not whatever the process has by
-    // now. The caller is not kept waiting — the re-entry runs in the
-    // background — and it is not attached to the cancelled signal, so it
-    // cannot strip the adopter's tools the way a shared signal would.
-    if (
-      (signal?.aborted || isAbortError(error)) &&
-      discoveryParts !== undefined &&
-      survivingDiscoveryScope !== undefined
-    ) {
-      const parts = discoveryParts
-      void resumeIn(survivingDiscoveryScope, () =>
-        Promise.allSettled(parts),
-      ).catch(() => {})
     }
 
     // A cancelled discovery leaves a connected client no session adopted:
