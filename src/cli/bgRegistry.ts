@@ -780,12 +780,15 @@ function isErrno(error: unknown, code: string): boolean {
 // Whether link() failed because the filesystem rejects hard links: the
 // no-hard-link publication fallback applies. Any other link() failure
 // (EEXIST, ENOENT, EACCES, ...) is a real outcome, not a capability
-// signal (CodeRabbit #2497).
+// signal (CodeRabbit #2497). Node on Linux surfaces a refused link() as
+// ENOTSUP as well as EOPNOTSUPP, so both enter the fallback (maintainer
+// review 5948202472 on #2497).
 function isHardLinkUnsupported(error: unknown): boolean {
   return (
     isErrno(error, 'EPERM') ||
     isErrno(error, 'ENOSYS') ||
-    isErrno(error, 'EOPNOTSUPP')
+    isErrno(error, 'EOPNOTSUPP') ||
+    isErrno(error, 'ENOTSUP')
   )
 }
 
@@ -1686,6 +1689,29 @@ export function _setTerminalFactPublishClaimHookForTesting(
   terminalFactPublishClaimHookForTesting = hook
 }
 
+// Test-only hook invoked by commitPublishFile after it has claimed a
+// no-hard-link publish and rechecked the target, and before it renames
+// the temp file into place, so a test can pause one publisher while a
+// second publisher reclaims its stale claim and publishes (maintainer
+// review 5948202472 on #2497). Never set outside tests.
+let commitPublishHookForTesting: (() => Promise<void>) | undefined
+
+export function _setCommitPublishHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  commitPublishHookForTesting = hook
+}
+
+// Synchronous counterpart of the hook above, for commitPublishFileSync.
+// Never set outside tests.
+let commitPublishHookForTestingSync: (() => void) | undefined
+
+export function _setCommitPublishHookForTestingSync(
+  hook: (() => void) | undefined,
+): void {
+  commitPublishHookForTestingSync = hook
+}
+
 async function waitForTerminalFact(
   id: string,
   kind: 'natural' | 'killed',
@@ -1808,6 +1834,29 @@ function readTerminalFactClaimSync(target: string): string | undefined {
   }
 }
 
+// Whether the temp file a claim names no longer exists: the winner died
+// (or its publish failed) after writing the claim, and its temp was
+// unlinked. Any error other than ENOENT is treated as "still there",
+// so the commit surfaces the real failure instead of reclaiming a live
+// publisher's claim.
+async function isTerminalFactClaimTempGone(tmp: string): Promise<boolean> {
+  try {
+    await lstat(tmp)
+    return false
+  } catch (error) {
+    return isErrno(error, 'ENOENT')
+  }
+}
+
+function isTerminalFactClaimTempGoneSync(tmp: string): boolean {
+  try {
+    lstatSync(tmp)
+    return false
+  } catch (error) {
+    return isErrno(error, 'ENOENT')
+  }
+}
+
 type PublishCommitOutcome = 'committed' | 'exists' | 'gone'
 
 /**
@@ -1833,7 +1882,13 @@ type PublishCommitOutcome = 'committed' | 'exists' | 'gone'
  * matches its own bytes, letting both creates succeed instead of
  * rejecting the duplicate (CodeRabbit #2497 review 5945720742). The
  * target still only ever appears complete, via rename, and a stale
- * claim is reclaimed by the waiter.
+ * claim is reclaimed by the waiter. A holder that stalls past the
+ * stale threshold can lose its claim that way, so the holder records
+ * the claim directory's (dev, ino) identity when it wins the claim
+ * and re-verifies it immediately before the rename: a superseded
+ * holder reports the successor's publish instead of overwriting it,
+ * and the claim directory is only removed while it is still the
+ * holder's own (maintainer review 5948202472 on #2497).
  */
 async function commitPublishFile(
   tmp: string,
@@ -1848,52 +1903,75 @@ async function commitPublishFile(
     if (!isHardLinkUnsupported(error)) throw error
   }
   const claimDir = commitPublishClaimDir(target)
-  let claimed = false
   for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
+    let claimIdentity: CleanupFileIdentity | undefined
     try {
       await mkdir(claimDir)
-      claimed = true
-      break
+      claimIdentity = await readCommitPublishClaimIdentity(claimDir)
     } catch (error) {
       if (!isErrno(error, 'EEXIST')) throw error
     }
-    // Another publisher holds the claim: its rename lands within
-    // microseconds, so the target appears — report it instead of
-    // racing it.
-    try {
-      await lstat(target)
-      return 'exists'
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
-    }
-    if (await isCommitPublishClaimStale(claimDir)) {
-      await rmdir(claimDir).catch(() => {})
+    if (claimIdentity === undefined) {
+      // Another publisher holds the claim: its rename lands within
+      // microseconds, so the target appears — report it instead of
+      // racing it.
+      try {
+        await lstat(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      if (await isCommitPublishClaimStale(claimDir)) {
+        await rmdir(claimDir).catch(() => {})
+        continue
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
       continue
     }
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
-  if (!claimed) {
-    throw new Error(
-      `Timed out waiting for a concurrent publish to ${target}`,
-    )
-  }
-  try {
+    // We hold the claim: recheck the target, then verify we still own
+    // the claim immediately before the rename. A holder stalled past
+    // the stale threshold can lose its claim to a successor, which
+    // publishes first; without the ownership check the resumed rename
+    // would overwrite the successor's publish and still report success
+    // (maintainer review 5948202472 on #2497).
     try {
-      await lstat(target)
-      return 'exists'
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
+      try {
+        await lstat(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      await commitPublishHookForTesting?.()
+      if (!(await ownsCommitPublishClaim(claimDir, claimIdentity))) {
+        try {
+          await lstat(target)
+          return 'exists'
+        } catch (error) {
+          if (!isErrno(error, 'ENOENT')) throw error
+        }
+        // The claim is gone but nothing was published (the successor's
+        // commit failed): re-enter the claim loop instead of reporting
+        // a fact that does not exist.
+        continue
+      }
+      try {
+        await lstat(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      try {
+        await rename(tmp, target)
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        return 'gone'
+      }
+      return 'committed'
+    } finally {
+      await removeOwnCommitPublishClaim(claimDir, claimIdentity)
     }
-    try {
-      await rename(tmp, target)
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
-      return 'gone'
-    }
-    return 'committed'
-  } finally {
-    await rmdir(claimDir).catch(() => {})
   }
+  throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
 function commitPublishFileSync(
@@ -1909,53 +1987,69 @@ function commitPublishFileSync(
     if (!isHardLinkUnsupported(error)) throw error
   }
   const claimDir = commitPublishClaimDir(target)
-  let claimed = false
   for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
+    let claimIdentity: CleanupFileIdentity | undefined
     try {
       mkdirSync(claimDir)
-      claimed = true
-      break
+      claimIdentity = readCommitPublishClaimIdentitySync(claimDir)
     } catch (error) {
       if (!isErrno(error, 'EEXIST')) throw error
     }
-    try {
-      lstatSync(target)
-      return 'exists'
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
-    }
-    if (isCommitPublishClaimStaleSync(claimDir)) {
+    if (claimIdentity === undefined) {
       try {
-        rmdirSync(claimDir)
-      } catch {}
+        lstatSync(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      if (isCommitPublishClaimStaleSync(claimDir)) {
+        try {
+          rmdirSync(claimDir)
+        } catch {}
+        continue
+      }
+      sleepSync(10)
       continue
     }
-    sleepSync(10)
-  }
-  if (!claimed) {
-    throw new Error(
-      `Timed out waiting for a concurrent publish to ${target}`,
-    )
-  }
-  try {
+    // We hold the claim: recheck the target, then verify we still own
+    // the claim immediately before the rename (see commitPublishFile).
     try {
-      lstatSync(target)
-      return 'exists'
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
+      try {
+        lstatSync(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      commitPublishHookForTestingSync?.()
+      if (!ownsCommitPublishClaimSync(claimDir, claimIdentity)) {
+        try {
+          lstatSync(target)
+          return 'exists'
+        } catch (error) {
+          if (!isErrno(error, 'ENOENT')) throw error
+        }
+        // The claim is gone but nothing was published: re-enter the
+        // claim loop instead of reporting a fact that does not exist.
+        continue
+      }
+      try {
+        lstatSync(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      try {
+        renameSync(tmp, target)
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        return 'gone'
+      }
+      return 'committed'
+    } finally {
+      removeOwnCommitPublishClaimSync(claimDir, claimIdentity)
     }
-    try {
-      renameSync(tmp, target)
-    } catch (error) {
-      if (!isErrno(error, 'ENOENT')) throw error
-      return 'gone'
-    }
-    return 'committed'
-  } finally {
-    try {
-      rmdirSync(claimDir)
-    } catch {}
   }
+  throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
 // The publish claim for one commit target: a directory, so creating it
@@ -1965,6 +2059,82 @@ function commitPublishFileSync(
 // fallback only; the link() path never creates one.
 function commitPublishClaimDir(target: string): string {
   return `${target}.commit`
+}
+
+// The identity of a commit claim directory, recorded when the claim is
+// won: a stale-reclaiming successor removes this directory and creates
+// a new one, so the (dev, ino) pair no longer matches and a delayed
+// holder can tell its claim was superseded. The pair is the same
+// identity idiom as CleanupFileIdentity above.
+async function readCommitPublishClaimIdentity(
+  claimDir: string,
+): Promise<CleanupFileIdentity | undefined> {
+  try {
+    const stats = await lstat(claimDir)
+    return { dev: stats.dev, ino: stats.ino }
+  } catch {
+    return undefined
+  }
+}
+
+function readCommitPublishClaimIdentitySync(
+  claimDir: string,
+): CleanupFileIdentity | undefined {
+  try {
+    const stats = lstatSync(claimDir)
+    return { dev: stats.dev, ino: stats.ino }
+  } catch {
+    return undefined
+  }
+}
+
+// Whether the claim directory is still the one this publisher won: a
+// successor that reclaimed a stale claim removed it and created a new
+// directory, so the identity differs (or the directory is gone).
+async function ownsCommitPublishClaim(
+  claimDir: string,
+  identity: CleanupFileIdentity,
+): Promise<boolean> {
+  const current = await readCommitPublishClaimIdentity(claimDir)
+  return (
+    current !== undefined &&
+    current.dev === identity.dev &&
+    current.ino === identity.ino
+  )
+}
+
+function ownsCommitPublishClaimSync(
+  claimDir: string,
+  identity: CleanupFileIdentity,
+): boolean {
+  const current = readCommitPublishClaimIdentitySync(claimDir)
+  return (
+    current !== undefined &&
+    current.dev === identity.dev &&
+    current.ino === identity.ino
+  )
+}
+
+// Removes a commit claim only while it is still ours: an unguarded
+// rmdir() in the commit finally could delete a successor's active
+// claim directory after our claim was stale-reclaimed, letting a third
+// publisher claim while the successor is mid-publish.
+async function removeOwnCommitPublishClaim(
+  claimDir: string,
+  identity: CleanupFileIdentity,
+): Promise<void> {
+  if (!(await ownsCommitPublishClaim(claimDir, identity))) return
+  await rmdir(claimDir).catch(() => {})
+}
+
+function removeOwnCommitPublishClaimSync(
+  claimDir: string,
+  identity: CleanupFileIdentity,
+): void {
+  if (!ownsCommitPublishClaimSync(claimDir, identity)) return
+  try {
+    rmdirSync(claimDir)
+  } catch {}
 }
 
 // Whether a commit claim belongs to a dead or suspended holder: its
@@ -2156,6 +2326,21 @@ async function adoptTerminalFactPublish(
     await removeTerminalFactClaim(target)
     return null
   }
+  // Abandoned winner: the claim names a temp that no longer exists
+  // and the target is still unpublished — the winner died (or its
+  // publish failed) after writing the claim, and its temp was
+  // unlinked. Committing the missing temp would return 'gone' and the
+  // caller would retry against the same dead pointer until the
+  // attempts run out, leaving the session `running` and `wait` never
+  // reaching terminal JSON. Reclaim the claim — removeOwn leaves a
+  // successor's active claim alone — so the next attempt can claim
+  // the publish itself (maintainer review 5948202472 on #2497).
+  if (await isTerminalFactClaimTempGone(claimedTmp)) {
+    const adopted = await readTerminalFact(fact.id, kind, fact.generation)
+    if (adopted) return adopted
+    await removeOwnTerminalFactClaim(target, claimedTmp)
+    return null
+  }
   const committed = await commitPublishFile(claimedTmp, target)
   if (committed !== 'committed') {
     // The target already holds a fact, or the winner's tmp was adopted
@@ -2295,6 +2480,16 @@ function adoptTerminalFactPublishSync(
   const claimedTmp = readTerminalFactClaimSync(target)
   if (claimedTmp === undefined) {
     removeTerminalFactClaimSync(target)
+    return null
+  }
+  // Abandoned winner, same as adoptTerminalFactPublish: a valid claim
+  // naming a temp that no longer exists must be reclaimed so the next
+  // attempt can claim the publish instead of retrying against the
+  // same dead pointer (maintainer review 5948202472 on #2497).
+  if (isTerminalFactClaimTempGoneSync(claimedTmp)) {
+    const adopted = readTerminalFactSync(fact.id, kind, fact.generation)
+    if (adopted) return adopted
+    removeOwnTerminalFactClaimSync(target, claimedTmp)
     return null
   }
   const committed = commitPublishFileSync(claimedTmp, target)
@@ -3634,8 +3829,18 @@ async function readEffectiveSessionStrict(
  * file still allows name or prefix matching, while an unreadable or
  * malformed entry that could change matching fails with exit code 4.
  */
+export type ResolveBackgroundSessionForWaitOptions = {
+  isProcessAlive?: (pid: number) => boolean
+  signalProcess?: (pid: number, signal: 0) => unknown
+  getProcessCommandAsync?: (
+    pid: number,
+    options: { signal?: AbortSignal },
+  ) => Promise<string | null>
+}
+
 export async function resolveBackgroundSessionForWait(
   target: string,
+  options?: ResolveBackgroundSessionForWaitOptions,
 ): Promise<BackgroundSession> {
   if (SAFE_ID_RE.test(target)) {
     const exact = await readSessionFileStrict(
@@ -3702,9 +3907,27 @@ export async function resolveBackgroundSessionForWait(
   for (const session of byName) {
     effectiveByName.push(await readEffectiveSessionStrict(session, null))
   }
-  const liveByName = effectiveByName.filter(
-    s => !isTerminalBackgroundSession(s),
-  )
+  // A `status: running` row whose child is already gone must not win
+  // exact-name resolution over a unique live ID-prefix match: a name
+  // candidate counts as live only when read-only inspection says its
+  // pinned PID is still alive and its recorded command still matches
+  // (maintainer review 5948202472 on #2497). This reuses the async
+  // process-identity verifier with no abort signal, writes nothing, and
+  // never refreshes registry status from `wait`. Terminal candidates are
+  // unaffected — they fall through to the terminal-name match below.
+  const liveByName: BackgroundSession[] = []
+  for (const session of effectiveByName) {
+    if (isTerminalBackgroundSession(session)) continue
+    const identity = await verifyBackgroundSessionProcessIdentityAsync(
+      session,
+      {
+        isProcessAlive: options?.isProcessAlive,
+        signalProcess: options?.signalProcess,
+        getProcessCommandAsync: options?.getProcessCommandAsync,
+      },
+    )
+    if (identity.state === 'matches') liveByName.push(session)
+  }
   if (liveByName.length === 1) return liveByName[0]
   if (liveByName.length > 1) {
     throw new BackgroundSessionWaitError(
@@ -3932,7 +4155,7 @@ export async function refreshBackgroundSessionStatus(
   const nextStatus: BackgroundSessionStatus =
     identity.state === 'matches'
       ? 'running'
-      : identity.state === 'unreadable'
+      : identity.state === 'unreadable' || identity.state === 'aborted'
         ? 'unknown'
         : 'stale'
   if (
@@ -3954,7 +4177,7 @@ export async function refreshBackgroundSessionStatus(
 }
 
 export type BackgroundSessionProcessIdentity = {
-  state: 'not-running' | 'matches' | 'mismatch' | 'unreadable'
+  state: 'not-running' | 'matches' | 'mismatch' | 'unreadable' | 'aborted'
   backgroundSessionId: string
   pid: number
 }
@@ -4136,15 +4359,24 @@ export async function verifyBackgroundSessionProcessIdentityAsync(
 
   const readCommand =
     options?.getProcessCommandAsync ?? getProcessCommandAsync
+  // A lookup cut short by the caller's abort signal is not an unreadable
+  // process: the command was never observed, so callers (notably the wait
+  // timeout boundary) must not classify it as unknown state. The real
+  // lookup returns null on abort rather than throwing, so the aborted
+  // check runs on both the throw and the null paths below.
+  const isAborted = () => options?.signal?.aborted === true
+  if (isAborted()) return result('aborted')
   let command: string | null
   try {
     command = await readCommand(session.pid, { signal: options?.signal })
   } catch {
     const latestLiveness = getLiveness()
-    return result(latestLiveness === 'alive' ? 'unreadable' : latestLiveness)
+    if (latestLiveness !== 'alive') return result(latestLiveness)
+    return result(isAborted() ? 'aborted' : 'unreadable')
   }
   const latestLiveness = getLiveness()
   if (latestLiveness !== 'alive') return result(latestLiveness)
+  if (isAborted()) return result('aborted')
   if (command == null || command.trim() === '') {
     return result('unreadable')
   }

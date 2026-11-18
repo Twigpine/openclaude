@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test'
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import {
@@ -3676,7 +3677,7 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
     stderrLogPath: '/tmp/stderr.log',
   }
 
-  it('settles promptly as unreadable when the command lookup is aborted', async () => {
+  it('settles promptly as aborted when the command lookup is aborted', async () => {
     const abort = new AbortController()
     const verifying = verifyBackgroundSessionProcessIdentityAsync(session, {
       isProcessAlive: () => true,
@@ -3697,7 +3698,11 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
     expect(settled).toBe(false)
 
     abort.abort()
-    await expect(verifying).resolves.toMatchObject({ state: 'unreadable' })
+    // An aborted lookup observed nothing: it is 'aborted', not
+    // 'unreadable', so the wait timeout boundary can re-observe with a
+    // fresh lookup instead of reporting the process unreadable
+    // (maintainer review 5948202472 on #2497).
+    await expect(verifying).resolves.toMatchObject({ state: 'aborted' })
   })
 
   it('reads the live command through the real async lookup', async () => {
@@ -3886,6 +3891,41 @@ describe('background session wait strict reads', () => {
     expect(live.id).toBe('bg-wbbb2')
   })
 
+  it('prefers a live ID-prefix match over a dead exact-name row', async () => {
+    // Regression test for maintainer review 5948202472 (P2) on #2497:
+    // a `status: running` row with no terminal fact but a dead PID must
+    // not win exact-name resolution over a unique live ID-prefix match.
+    // The selector 'bg-abc' is both the dead row's name and the live
+    // row's ID prefix; the read-only liveness gate excludes the dead
+    // row, so prefix resolution reaches the live child.
+    await createBackgroundSession({
+      id: 'bg-dead1',
+      name: 'bg-abc',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-dead1',
+    })
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    })
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    try {
+      await createBackgroundSession({
+        id: 'bg-abc999',
+        pid: child.pid,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-abc999',
+      })
+      const resolved = await resolveBackgroundSessionForWait('bg-abc')
+      expect(resolved.id).toBe('bg-abc999')
+      expect(resolved.status).toBe('running')
+    } finally {
+      child.kill()
+    }
+  })
+
   it('reports not_found for an unknown selector', async () => {
     expect(
       await waitErrorCode(() => resolveBackgroundSessionForWait('nope')),
@@ -4060,7 +4100,7 @@ describe('background session wait strict reads', () => {
     expect(notRunning.state).toBe('not-running')
   })
 
-  it('reports unreadable when the async identity lookup aborts', async () => {
+  it('reports aborted when the async identity lookup aborts', async () => {
     const session: BackgroundSession = {
       id: 'bg-identity',
       pid: 4242,
@@ -4077,8 +4117,10 @@ describe('background session wait strict reads', () => {
     controller.abort()
 
     // Main's verify helper catches a lookup aborted by the client signal
-    // and reports it as unreadable instead of rethrowing, so a lookup
-    // that rejects on abort (like the real async helper) resolves here.
+    // and reports it as aborted instead of rethrowing, so a lookup that
+    // rejects on abort (like the real async helper) resolves here — and
+    // the caller can tell it apart from a genuinely unreadable process
+    // (maintainer review 5948202472 on #2497).
     const aborted = await verifyBackgroundSessionProcessIdentityAsync(session, {
       isProcessAlive: () => true,
       getProcessCommandAsync: async () => {
@@ -4086,7 +4128,7 @@ describe('background session wait strict reads', () => {
       },
       signal: controller.signal,
     })
-    expect(aborted.state).toBe('unreadable')
+    expect(aborted.state).toBe('aborted')
   })
 
   it('sleeps between polls while synchronously waiting for a terminal fact (CodeRabbit #2497)', async () => {

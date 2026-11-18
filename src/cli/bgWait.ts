@@ -7,6 +7,7 @@ import {
   type BackgroundSession,
 } from './bgRegistry.js'
 import { ndjsonSafeStringify } from './ndjsonSafeStringify.js'
+import { getProcessCommandAsync } from '../utils/genericProcessUtils.js'
 
 // Scriptable wait for one local background session (issue #2162, v1).
 //
@@ -40,7 +41,8 @@ Exit codes:
   1    Child failed, was killed, or became stale.
   2    Invalid arguments, unknown or ambiguous selector, unsupported build,
        or an internal wait error.
-  3    Process state could not be observed at the timeout boundary.
+  3    Process state was still unreadable when the timeout boundary was
+       classified (after the grace poll).
   4    Session metadata is missing, unreadable, malformed, or replaced.
   124  Timeout while the session was still running.
   130  Waiting client received SIGINT.
@@ -85,6 +87,10 @@ export type ParsedWaitInvocation = {
 
 export type WaitOutput = {
   write(chunk: string): unknown
+  // Present on real streams (process.stdout/stderr): lets the handler wait
+  // for a back-pressured write to drain before a forced exit discards it.
+  once?(event: 'drain' | 'error' | 'close', listener: () => void): unknown
+  off?(event: 'drain' | 'error' | 'close', listener: () => void): unknown
 }
 
 export type WaitHandlerOptions = {
@@ -281,14 +287,37 @@ function raceWithClientSignal<T>(
 // the deadline check after the observation runs cannot bound it. This is
 // a separate outcome from the client-signal path: a deadline expiry is a
 // timeout (124), not an interruption (130/143) (CodeRabbit #2497).
-const DEADLINE_EXPIRED = Symbol('deadline-expired')
+//
+// The deadline is a signal, not a shared promise: racing one long-lived
+// promise per poll would retain a reaction per poll for the whole wait
+// (maintainer review 5948202472 on #2497). Each call attaches exactly one
+// abort listener and removes it when the awaited promise settles, so
+// completed polls release their bookkeeping.
+//
+// Exported for the regression test that counts the deadline signal's
+// listeners after settled races.
+export const DEADLINE_EXPIRED = Symbol('deadline-expired')
 
-function raceWithDeadline<T>(
+export function raceWithDeadline<T>(
   promise: Promise<T>,
-  deadlineExpired: Promise<typeof DEADLINE_EXPIRED> | null,
+  deadlineSignal: AbortSignal | null,
 ): Promise<T | typeof DEADLINE_EXPIRED> {
-  if (deadlineExpired === null) return promise
-  return Promise.race([promise, deadlineExpired])
+  if (deadlineSignal === null) return promise
+  if (deadlineSignal.aborted) return Promise.resolve(DEADLINE_EXPIRED)
+  return new Promise<T | typeof DEADLINE_EXPIRED>((resolve, reject) => {
+    const onAbort = () => resolve(DEADLINE_EXPIRED)
+    deadlineSignal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      value => {
+        deadlineSignal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      error => {
+        deadlineSignal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 function baseWaitResult(
@@ -464,22 +493,60 @@ function renderWaitResult(
   stdout: WaitOutput,
   stderr: WaitOutput,
   humanMessage?: string,
-): void {
+): Promise<void> {
   if (json) {
-    stdout.write(`${ndjsonSafeStringify(result)}\n`)
-    return
+    return flushWaitOutput(
+      stdout,
+      stdout.write(`${ndjsonSafeStringify(result)}\n`),
+    )
   }
   if (result.waitResult === 'terminal') {
-    stdout.write(`${humanTerminalLine(result)}\n`)
-    return
+    return flushWaitOutput(
+      stdout,
+      stdout.write(`${humanTerminalLine(result)}\n`),
+    )
   }
-  stderr.write(`${humanMessage ?? humanErrorLine(result)}\n`)
+  return flushWaitOutput(
+    stderr,
+    stderr.write(`${humanMessage ?? humanErrorLine(result)}\n`),
+  )
+}
+
+// Waits until a write that hit stream backpressure has drained, so a
+// forced exit (124/130/143) in the CLI fast path cannot discard the
+// rendered line — with --json that line is the mandatory v1 JSON object
+// (maintainer review 5948202472 on #2497). Resolves at once when the
+// write flushed or the stream cannot report drain; resolves on error or
+// close as well, so a dead consumer never hangs the waiter.
+function flushWaitOutput(out: WaitOutput, wrote: unknown): Promise<void> {
+  if (wrote !== false) return Promise.resolve()
+  if (typeof out.once !== 'function') return Promise.resolve()
+  // Bind the methods: calling a detached `once` would lose its `this`.
+  const once = out.once.bind(out)
+  const off =
+    typeof out.off === 'function' ? out.off.bind(out) : undefined
+  return new Promise<void>(resolve => {
+    const done = () => {
+      off?.('drain', done)
+      off?.('error', done)
+      off?.('close', done)
+      resolve()
+    }
+    once('drain', done)
+    once('error', done)
+    once('close', done)
+  })
 }
 
 type WaitObservation =
   | { kind: 'terminal'; session: BackgroundSession }
   | { kind: 'running'; session: BackgroundSession }
   | { kind: 'unknown'; session: BackgroundSession }
+  // The process lookup was cut short by an abort before it observed
+  // anything: not evidence the process is unreadable, so the caller must
+  // re-observe with a fresh lookup instead of classifying it (maintainer
+  // review 5948202472 on #2497).
+  | { kind: 'aborted'; session: BackgroundSession }
   | { kind: 'metadata_error'; error: BackgroundSessionWaitError }
 
 /**
@@ -551,6 +618,11 @@ async function observePinnedSession(
     return terminalObservation(session)
   }
   if (identity.state === 'matches') return { kind: 'running', session }
+  // An aborted lookup observed nothing: never report it as an unreadable
+  // process (exit 3). The caller re-observes with a fresh lookup at the
+  // timeout boundary, or reports the interruption when the client signal
+  // fired.
+  if (identity.state === 'aborted') return { kind: 'aborted', session }
   if (identity.state === 'unreadable') return { kind: 'unknown', session }
   // PID absence or identity mismatch, with no terminal fact: stale.
   return {
@@ -582,12 +654,17 @@ export async function waitHandler(
   const stdout = options.stdout ?? process.stdout
   const stderr = options.stderr ?? process.stderr
 
+  // The flush of the last rendered result: the finally below awaits it,
+  // so a forced 124/130/143 exit in the CLI fast path cannot discard a
+  // line still queued in a back-pressured stdout pipe.
+  let pendingFlush: Promise<void> | null = null
+
   const finishEarly = (
     result: WaitResult,
     json: boolean,
     humanMessage?: string,
   ): number => {
-    renderWaitResult(result, json, stdout, stderr, humanMessage)
+    pendingFlush = renderWaitResult(result, json, stdout, stderr, humanMessage)
     const code = waitExitCode(result)
     process.exitCode = code
     return code
@@ -616,7 +693,7 @@ export async function waitHandler(
 
   if (options.featureEnabled === false) {
     const result = baseWaitResult(null, 'selector_error', 'unsupported')
-    renderWaitResult(result, json, stdout, stderr)
+    pendingFlush = renderWaitResult(result, json, stdout, stderr)
     process.exitCode = 2
     return 2
   }
@@ -624,7 +701,57 @@ export async function waitHandler(
   const now = options.now ?? (() => performance.now())
   const pollIntervalMs = options.pollIntervalMs ?? WAIT_POLL_INTERVAL_MS
   const sleep = options.sleep ?? abortableSleep
-  const resolveSession = options.resolveSession ?? resolveBackgroundSessionForWait
+  // Track the in-flight process lookup so every cancellation path can
+  // await the inspector child's close before the waiter returns
+  // (maintainer review 5948202472 on #2497): awaiting the lookup promise
+  // awaits the `ps` close, because getProcessCommandAsync resolves only
+  // on child close. The wait is bounded by one poll interval, so a child
+  // that ignores SIGTERM delays the return by at most that. Defined
+  // before selector resolution so the exact-name liveness gate's lookups
+  // are tracked too — a deadline or signal during resolution must not
+  // return while that inspector child is still alive either.
+  let pendingLookup: Promise<string | null> | null = null
+  let lookupSettled = true
+  const trackedGetProcessCommandAsync = async (
+    pid: number,
+    lookupOptions: { signal?: AbortSignal },
+  ): Promise<string | null> => {
+    const baseLookup = options.getProcessCommandAsync ?? getProcessCommandAsync
+    const promise = baseLookup(pid, lookupOptions)
+    pendingLookup = promise
+    lookupSettled = false
+    void promise.then(
+      () => {
+        lookupSettled = true
+      },
+      () => {
+        lookupSettled = true
+      },
+    )
+    return promise
+  }
+  const awaitPendingLookup = async (): Promise<void> => {
+    if (pendingLookup === null || lookupSettled) return
+    const pending = pendingLookup
+    await Promise.race([
+      pending.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise(resolve => setTimeout(resolve, pollIntervalMs)),
+    ])
+  }
+  // Thread the waiter's liveness probes into selector resolution, so the
+  // exact-name liveness gate in resolveBackgroundSessionForWait uses the
+  // same probes as the poll loop (maintainer review 5948202472 on #2497).
+  const resolveSession =
+    options.resolveSession ??
+    ((target: string) =>
+      resolveBackgroundSessionForWait(target, {
+        isProcessAlive: options.isProcessAlive,
+        signalProcess: options.signalProcess,
+        getProcessCommandAsync: trackedGetProcessCommandAsync,
+      }))
 
   // Install the waiting-client signal listeners immediately after argument
   // validation and before any selector or metadata I/O. The first signal
@@ -655,10 +782,58 @@ export async function waitHandler(
   process.on('SIGINT', onSigint)
   process.on('SIGTERM', onSigterm)
 
+  const lookupDeps: WaitHandlerOptions = {
+    ...options,
+    getProcessCommandAsync: trackedGetProcessCommandAsync,
+  }
+
+  // One final observation at the timeout boundary, with its own lookup
+  // signal that the deadline abort has not fired on. Returns null when
+  // the fresh lookup never settles within one poll interval (a stalled
+  // read, reported as a timeout). The fresh lookup is aborted on grace
+  // expiry so its `ps` child is killed; the tracked-lookup await in the
+  // finally below reaps it before the waiter returns.
+  const finalTimeoutObservation = async (
+    pinned: { id: string; pid: number },
+    deps: WaitHandlerOptions,
+  ): Promise<WaitObservation | null> => {
+    const finalLookupController = new AbortController()
+    const finalLookupSignal = AbortSignal.any([
+      abortController.signal,
+      finalLookupController.signal,
+    ])
+    let finalTimer: ReturnType<typeof setTimeout> | undefined
+    const finalExpired = new Promise<null>(resolve => {
+      finalTimer = setTimeout(() => resolve(null), pollIntervalMs)
+    })
+    try {
+      const settled = await Promise.race([
+        observePinnedSession(
+          pinned,
+          abortController.signal,
+          deps,
+          finalLookupSignal,
+        ),
+        finalExpired,
+      ])
+      if (settled === null) {
+        finalLookupController.abort()
+        return null
+      }
+      return settled
+    } finally {
+      if (finalTimer !== undefined) clearTimeout(finalTimer)
+    }
+  }
+
   // The pinned id is hoisted so an unexpected failure after pinning can
   // still name the session in its structured error result; null when the
   // failure happened during selector resolution.
   let pinnedId: string | null = null
+  // Set when the deadline fires during selector resolution: the
+  // resolution lookup is not aborted by the deadline signal, so the
+  // finally below must still await the inspector child's close.
+  let deadlineExpiredDuringResolution = false
   // The deadline timer is hoisted so the finally below can clear it on
   // every exit path.
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined
@@ -670,16 +845,17 @@ export async function waitHandler(
 
     // Arm the deadline timer when the wait begins, so a stalled registry
     // read settles as a timeout instead of blocking the waiter until a
-    // signal arrives. The timer is cleared in the finally below.
-    const deadlineExpired =
-      parsed.timeoutMs === undefined
-        ? null
-        : new Promise<typeof DEADLINE_EXPIRED>(resolve => {
-            deadlineTimer = setTimeout(
-              () => resolve(DEADLINE_EXPIRED),
-              parsed.timeoutMs!,
-            )
-          })
+    // signal arrives. The timer is cleared in the finally below. The
+    // deadline is a signal (not a shared promise) so each poll's race
+    // attaches exactly one listener and removes it on settle.
+    const deadlineController =
+      parsed.timeoutMs === undefined ? null : new AbortController()
+    if (deadlineController !== null) {
+      deadlineTimer = setTimeout(
+        () => deadlineController.abort(),
+        parsed.timeoutMs!,
+      )
+    }
 
     let session: BackgroundSession
     try {
@@ -688,9 +864,10 @@ export async function waitHandler(
           resolveSession(parsed.selector!),
           abortController.signal,
         ),
-        deadlineExpired,
+        deadlineController?.signal ?? null,
       )
       if (resolved === DEADLINE_EXPIRED) {
+        deadlineExpiredDuringResolution = true
         return finish(
           baseWaitResult(null, 'timeout', 'timeout'),
           'Timed out waiting for a background session.',
@@ -728,41 +905,62 @@ export async function waitHandler(
         const observationPromise = observePinnedSession(
           pinned,
           abortController.signal,
-          options,
+          lookupDeps,
           lookupSignal,
         )
         const raced = await raceWithDeadline(
           observationPromise,
-          deadlineExpired,
+          deadlineController?.signal ?? null,
         )
         if (raced === DEADLINE_EXPIRED) {
           // The deadline elapsed while this observation was in flight:
           // abort the in-flight process lookup first, so a slow `ps`
           // cannot outlive the waiter and its child is killed, then give
           // the observation one poll interval to settle and classify the
-          // boundary (unknown -> 3, terminal -> its outcome) before
-          // treating a read stalled past that as a timeout (124).
-          // A stalled registry read is unaffected by the abort — the
-          // reads keep the client signal — so it still settles as 124
-          // via the grace timer below. Returning 124 at once would
-          // misreport a process that stays unreadable past the deadline.
+          // boundary from what it observed. A stalled registry read is
+          // unaffected by the abort — the reads keep the client signal —
+          // so it still settles as 124 via the grace timer below.
+          // The grace timer is cleared in a finally, so it cannot leak
+          // when the observation rejects or a signal lands mid-grace.
           deadlineAbortController.abort()
           let graceTimer: ReturnType<typeof setTimeout> | undefined
           const graceExpired = new Promise<null>(resolve => {
             graceTimer = setTimeout(() => resolve(null), pollIntervalMs)
           })
-          const late = await Promise.race([
-            observationPromise,
-            graceExpired,
-          ])
-          if (graceTimer !== undefined) clearTimeout(graceTimer)
+          let late: WaitObservation | null
+          try {
+            late = await Promise.race([observationPromise, graceExpired])
+          } finally {
+            if (graceTimer !== undefined) clearTimeout(graceTimer)
+          }
           if (late === null) {
+            // A read stalled past the grace interval: the session was
+            // not observably terminal, so this is a timeout (124), not
+            // an unreadable process (3).
             return finish({
               ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
               status: 'running',
             })
           }
-          observation = late
+          if (late.kind === 'aborted') {
+            // The in-flight lookup was self-cancelled by the deadline
+            // abort, so its classification is meaningless — it never
+            // observed the process. Run one final observation with a
+            // fresh lookup signal that is not self-cancelled, bounded
+            // by one poll interval: terminal wins, running returns 124,
+            // genuinely unreadable returns 3.
+            const finalObservation =
+              await finalTimeoutObservation(pinned, lookupDeps)
+            if (finalObservation === null) {
+              return finish({
+                ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
+                status: 'running',
+              })
+            }
+            observation = finalObservation
+          } else {
+            observation = late
+          }
         } else {
           observation = raced
         }
@@ -787,7 +985,10 @@ export async function waitHandler(
         return finish(result, observation.error.message)
       }
       // Running or transiently unknown: only the final timeout-boundary
-      // observation classifies as a timeout (124) or unknown (3).
+      // observation classifies as a timeout (124) or unknown (3). An
+      // 'aborted' observation reaching here was cut short without
+      // observing the process, so it falls through to the timeout below
+      // (124), never to the unreadable outcome (3).
       if (deadline !== null && now() >= deadline) {
         if (observation.kind === 'unknown') {
           return finish({
@@ -818,6 +1019,21 @@ export async function waitHandler(
     const result = baseWaitResult(pinnedId, 'internal_error', 'internal_error')
     return finish(result, `Error: ${errorMessage(error)}`)
   } finally {
+    // On a cancellation path (client signal, deadline abort, or
+    // deadline expiry during selector resolution), do not return while
+    // the inspector child may still be alive: await the in-flight
+    // lookup's settlement within one poll interval first.
+    if (
+      clientSignal !== null ||
+      deadlineAbortController.signal.aborted ||
+      deadlineExpiredDuringResolution
+    ) {
+      await awaitPendingLookup()
+    }
+    // Do not return while the rendered result is still queued in a
+    // back-pressured stdout pipe: the CLI fast path exits with 124/130/
+    // 143 right after this handler resolves, which would discard it.
+    if (pendingFlush !== null) await pendingFlush
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
     process.off('SIGINT', onSigint)
     process.off('SIGTERM', onSigterm)

@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { spawn } from 'node:child_process'
+import { getEventListeners } from 'node:events'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { writeFileSync } from 'node:fs'
-import { parseWaitInvocation, waitHandler } from './bgWait.js'
+import {
+  DEADLINE_EXPIRED,
+  parseWaitInvocation,
+  raceWithDeadline,
+  waitHandler,
+} from './bgWait.js'
 import {
   _setBackgroundSessionsRootForTesting,
   BackgroundSessionWaitError,
@@ -227,6 +233,21 @@ describe('wait command handler', () => {
       ...options,
     })
     return { code, stdout: stdout.text(), stderr: stderr.text() }
+  }
+
+  // A faithful stand-in for the real process-command lookup: it honors
+  // the abort signal like getProcessCommandAsync does — a lookup cut
+  // short by an abort returns null instead of a command the aborted `ps`
+  // could never have produced (maintainer review 5948202472 on #2497).
+  // Stubs that ignore the signal mask wiring regressions at the timeout
+  // boundary, where the real lookup is aborted and must not read as a
+  // live process.
+  function liveLookup(command: string | null) {
+    return async (
+      _pid: number,
+      options: { signal?: AbortSignal },
+    ): Promise<string | null> =>
+      options.signal?.aborted ? null : command
   }
 
   function expectWaitJsonShape(value: unknown): Record<string, unknown> {
@@ -540,7 +561,7 @@ describe('wait command handler', () => {
       ['bg-aaa1', '--timeout', '60ms', '--json'],
       {
         isProcessAlive: () => true,
-        getProcessCommandAsync: async () => 'sleep 30',
+        getProcessCommandAsync: liveLookup('sleep 30'),
       },
     )
 
@@ -552,6 +573,353 @@ describe('wait command handler', () => {
     expect(result.waitResult).toBe('timeout')
     expect(result.error).toBe('timeout')
     expect(result.finishedAt).toBeNull()
+  })
+
+  it('returns 124 with running JSON when the deadline aborts the in-flight lookup', async () => {
+    // Regression test for maintainer review 5948202472 (P1) on #2497:
+    // the deadline fires while the process lookup is still in flight, so
+    // the in-flight lookup is aborted and its null result must not read
+    // as an unreadable process (exit 3). The waiter runs one final
+    // observation with a fresh, non-aborted lookup signal, which sees
+    // the live child and reports the timeout (124). The first lookup is
+    // deliberately slow so the deadline branch is forced; the second
+    // lookup is fast, so the final observation classifies from a real
+    // observation instead of the grace timer.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    })
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    const childPid = child.pid
+    try {
+      await createTestSession('bg-aaa1', { pid: childPid })
+      let lookups = 0
+      let lookupEnteredResolve!: () => void
+      const lookupEntered = new Promise<void>(resolve => {
+        lookupEnteredResolve = resolve
+      })
+      const slowThenFastLookup = async (
+        _pid: number,
+        options: { signal?: AbortSignal },
+      ): Promise<string | null> => {
+        lookups += 1
+        if (lookups === 1) {
+          lookupEnteredResolve()
+          // A slow `ps`: waits until the lookup signal aborts it.
+          await new Promise<void>(resolve => {
+            options.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            })
+          })
+          return null
+        }
+        return liveLookup('sleep 30')(_pid, options)
+      }
+      const startedAt = performance.now()
+      const waiting = runWait(['bg-aaa1', '--timeout', '300ms', '--json'], {
+        getProcessCommandAsync: slowThenFastLookup,
+      })
+      await lookupEntered
+      const { code, stdout, stderr } = await Promise.race([
+        waiting,
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  'waitHandler did not return within 5s of the deadline',
+                ),
+              ),
+            5000,
+          )
+        }),
+      ])
+      const elapsedMs = performance.now() - startedAt
+      expect(code).toBe(124)
+      expect(stderr).toBe('')
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.id).toBe('bg-aaa1')
+      expect(result.status).toBe('running')
+      expect(result.waitResult).toBe('timeout')
+      expect(result.error).toBe('timeout')
+      // The boundary was classified by the fresh final observation, not
+      // by the aborted in-flight lookup or the grace timer.
+      expect(lookups).toBe(2)
+      expect(elapsedMs).toBeLessThan(1500)
+    } finally {
+      child.kill()
+    }
+  })
+
+  it('does not return while the inspector child is still alive', async () => {
+    // Regression test for maintainer review 5948202472 (P2) on #2497:
+    // after the waiter is interrupted, it must await the inspector
+    // child's close before returning — not exit while a slow or
+    // signal-ignoring `ps` child remains alive. The stub stands in for
+    // the real lookup: it spawns a real child that traps SIGTERM and
+    // exits 300 ms later, so a waiter that returns without awaiting the
+    // lookup would report 130 while the child is observably alive.
+    const sessionChild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    })
+    if (sessionChild.pid === undefined) {
+      throw new Error('spawned session child has no pid')
+    }
+    const sessionPid = sessionChild.pid
+    let inspector: ReturnType<typeof spawn> | undefined
+    try {
+      await createTestSession('bg-aaa1', { pid: sessionPid })
+      let lookupEnteredResolve!: () => void
+      const lookupEntered = new Promise<void>(resolve => {
+        lookupEnteredResolve = resolve
+      })
+      const slowRealLookup = async (
+        _pid: number,
+        options: { signal?: AbortSignal },
+      ): Promise<string | null> => {
+        lookupEnteredResolve()
+        inspector = spawn(
+          process.execPath,
+          [
+            '-e',
+            "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300)); setTimeout(() => {}, 60000)",
+          ],
+          { stdio: 'ignore', signal: options.signal },
+        )
+        await new Promise<void>(resolve => {
+          // Resolve on child close only, like the real lookup
+          // (execFileNoThrow resolves on close): resolving on the
+          // abort 'error' event would return while the child is
+          // still dying. The 'error' listener only swallows the
+          // abort error — without it Node throws synchronously when
+          // the abort fires.
+          inspector?.once('error', () => {})
+          inspector?.once('close', () => resolve())
+        })
+        return options.signal?.aborted ? null : 'sleep 30'
+      }
+      const waiting = runWait(['bg-aaa1', '--json'], {
+        pollIntervalMs: 500,
+        getProcessCommandAsync: slowRealLookup,
+      })
+      await lookupEntered
+      process.emit('SIGINT')
+      const { code, stdout } = await waiting
+      expect(code).toBe(130)
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.waitResult).toBe('interrupted')
+      // The inspector child has closed by the time the waiter returns.
+      expect(inspector?.pid).toBeDefined()
+      expect(() => process.kill(inspector!.pid!, 0)).toThrow()
+    } finally {
+      sessionChild.kill()
+      try {
+        inspector?.kill('SIGKILL')
+      } catch {}
+    }
+  })
+
+  it('does not return while a resolution-time inspector child is still alive', async () => {
+    // Regression test for maintainer review 5948202472 (P2) on #2497:
+    // the deadline can also fire during selector resolution, while the
+    // exact-name liveness gate's process lookup is still in flight. The
+    // waiter must await that inspector child's close before returning
+    // the timeout — not exit at the deadline while the child is alive.
+    // The stub stands in for the real lookup: only the first call (the
+    // resolution-time liveness probe) spawns a real child, which exits
+    // on its own after 150 ms; later calls answer at once. A waiter
+    // that skips the resolution lookup — or returns at the 60 ms
+    // deadline without awaiting it — would report 124 in ~60 ms while
+    // the child is observably alive.
+    const sessionChild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    })
+    if (sessionChild.pid === undefined) {
+      throw new Error('spawned session child has no pid')
+    }
+    const sessionPid = sessionChild.pid
+    let inspector: ReturnType<typeof spawn> | undefined
+    try {
+      await createTestSession('bg-aaa1', {
+        name: 'worker',
+        pid: sessionPid,
+      })
+      let lookups = 0
+      const slowRealLookup = async (
+        _pid: number,
+        _options: { signal?: AbortSignal },
+      ): Promise<string | null> => {
+        lookups += 1
+        // Only the resolution-time probe is slow: the poll loop must
+        // never run here, so a fast later call would prove the waiter
+        // resolved before the probe.
+        if (lookups !== 1) return liveLookup('sleep 30')(_pid, _options)
+        inspector = spawn(
+          process.execPath,
+          ['-e', 'setTimeout(() => process.exit(0), 150)'],
+          { stdio: 'ignore' },
+        )
+        await new Promise<void>(resolve => {
+          inspector?.once('error', () => {})
+          inspector?.once('close', () => resolve())
+        })
+        return 'sleep 30'
+      }
+      const startedAt = performance.now()
+      const { code, stdout, stderr } = await runWait(
+        ['worker', '--timeout', '60ms', '--json'],
+        {
+          pollIntervalMs: 500,
+          getProcessCommandAsync: slowRealLookup,
+        },
+      )
+      const elapsedMs = performance.now() - startedAt
+      expect(code).toBe(124)
+      expect(stderr).toBe('')
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.waitResult).toBe('timeout')
+      expect(result.error).toBe('timeout')
+      // The resolution lookup ran once, and the waiter returned only
+      // after it settled (~150 ms), not at the 60 ms deadline.
+      expect(lookups).toBe(1)
+      expect(elapsedMs).toBeGreaterThanOrEqual(140)
+      expect(inspector?.pid).toBeDefined()
+      expect(() => process.kill(inspector!.pid!, 0)).toThrow()
+    } finally {
+      sessionChild.kill()
+      try {
+        inspector?.kill('SIGKILL')
+      } catch {}
+    }
+  })
+
+  it('waits for a back-pressured stdout drain before returning 124', async () => {
+    // Regression test for maintainer review 5948202472 (P2) on #2497:
+    // with --json the waiter must not return (and the CLI fast path
+    // must not force-exit) while the JSON line is still queued in a
+    // back-pressured stdout pipe, or the line is lost. The fake stdout
+    // reports every write as back-pressured and drains 20 ms later.
+    await createTestSession('bg-aaa1')
+    class BackpressuredOutput {
+      chunks: string[] = []
+      drained = false
+      private listeners = new Map<string, Array<() => void>>()
+      write(chunk: string): boolean {
+        this.chunks.push(chunk)
+        setTimeout(() => {
+          this.drained = true
+          for (const listener of this.listeners.get('drain') ?? []) {
+            listener()
+          }
+        }, 20)
+        return false
+      }
+      once(event: string, listener: () => void): void {
+        const list = this.listeners.get(event) ?? []
+        list.push(listener)
+        this.listeners.set(event, list)
+      }
+      off(event: string, listener: () => void): void {
+        this.listeners.set(
+          event,
+          (this.listeners.get(event) ?? []).filter(l => l !== listener),
+        )
+      }
+      text(): string {
+        return this.chunks.join('')
+      }
+    }
+    const stdout = new BackpressuredOutput()
+    const startedAt = performance.now()
+    const { code } = await runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: liveLookup('sleep 30'),
+      stdout,
+    })
+    const elapsedMs = performance.now() - startedAt
+    expect(code).toBe(124)
+    // The waiter returned only after the drain fired (~20 ms after the
+    // write), not at the 60 ms deadline.
+    expect(stdout.drained).toBe(true)
+    expect(elapsedMs).toBeGreaterThanOrEqual(70)
+    const result = expectWaitJsonShape(JSON.parse(stdout.text()))
+    expect(result.waitResult).toBe('timeout')
+    expect(result.error).toBe('timeout')
+  })
+
+  it('releases deadline reactions when each poll settles', async () => {
+    // Regression test for maintainer review 5948202472 (P3) on #2497:
+    // racing one long-lived deadline promise per poll retains a
+    // reaction per poll for the whole wait. The signal-based race
+    // attaches one listener per await and removes it on settle.
+    const controller = new AbortController()
+    for (let i = 0; i < 50; i++) {
+      const result = await raceWithDeadline(
+        Promise.resolve(i),
+        controller.signal,
+      )
+      expect(result).toBe(i)
+    }
+    expect(getEventListeners(controller.signal, 'abort').length).toBe(0)
+    expect(await raceWithDeadline(Promise.resolve(1), null)).toBe(1)
+    const pending = raceWithDeadline(
+      new Promise<number>(() => {}),
+      controller.signal,
+    )
+    controller.abort()
+    await expect(pending).resolves.toBe(DEADLINE_EXPIRED)
+    expect(getEventListeners(controller.signal, 'abort').length).toBe(0)
+  })
+
+  it('returns 130 when SIGINT lands during the final timeout observation', async () => {
+    // Regression test for maintainer review 5948202472 (P3) on #2497:
+    // the grace timer must be cleared on exceptional completion as well
+    // as success — a signal landing during the final observation still
+    // reports the interruption promptly instead of waiting out the
+    // grace interval.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    })
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    const childPid = child.pid
+    try {
+      await createTestSession('bg-aaa1', { pid: childPid })
+      let lookups = 0
+      let finalEnteredResolve!: () => void
+      const finalEntered = new Promise<void>(resolve => {
+        finalEnteredResolve = resolve
+      })
+      const slowLookup = async (
+        _pid: number,
+        options: { signal?: AbortSignal },
+      ): Promise<string | null> => {
+        lookups += 1
+        if (lookups === 2) finalEnteredResolve()
+        await new Promise<void>(resolve => {
+          options.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          })
+        })
+        return null
+      }
+      const startedAt = performance.now()
+      const waiting = runWait(['bg-aaa1', '--timeout', '100ms', '--json'], {
+        pollIntervalMs: 500,
+        getProcessCommandAsync: slowLookup,
+      })
+      await finalEntered
+      process.emit('SIGINT')
+      const { code, stdout, stderr } = await waiting
+      const elapsedMs = performance.now() - startedAt
+      expect(code).toBe(130)
+      expect(stderr).toBe('')
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.waitResult).toBe('interrupted')
+      expect(result.waitSignal).toBe('SIGINT')
+      expect(lookups).toBe(2)
+      expect(elapsedMs).toBeLessThan(1000)
+    } finally {
+      child.kill()
+    }
   })
 
   it('aborts the in-flight lookup at the deadline and lets the published fact win', async () => {
@@ -575,12 +943,19 @@ describe('wait command handler', () => {
     // therefore causal — lookup entry, then publication, then the
     // 300 ms deadline aborts the lookup — instead of relying on the
     // relative sizes of fixed delays.
-    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
-      stdio: 'ignore',
-    })
-    if (child.pid === undefined) throw new Error('spawned child has no pid')
-    const childPid = child.pid
-    await createTestSession('bg-aaa1', { pid: childPid })
+    //
+    // The child and the watchdog timer are acquired inside the try and
+    // torn down in the finally, so a setup failure cannot leak either
+    // (maintainer review 5948202472 on #2497).
+    let child: ReturnType<typeof spawn> | undefined
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    try {
+      child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+        stdio: 'ignore',
+      })
+      if (child.pid === undefined) throw new Error('spawned child has no pid')
+      const childPid = child.pid
+      await createTestSession('bg-aaa1', { pid: childPid })
     let lookupEnteredResolve!: () => void
     const lookupEntered = new Promise<void>(resolve => {
       lookupEnteredResolve = resolve
@@ -638,7 +1013,7 @@ describe('wait command handler', () => {
       const { code, stdout, stderr } = await Promise.race([
         waiting,
         new Promise<never>((_, reject) => {
-          setTimeout(
+          watchdog = setTimeout(
             () =>
               reject(
                 new Error(
@@ -662,7 +1037,10 @@ describe('wait command handler', () => {
       expect(lookupSettled).toBe(true)
       expect(elapsedMs).toBeLessThan(1500)
     } finally {
-      child.kill()
+      if (watchdog !== undefined) clearTimeout(watchdog)
+    }
+    } finally {
+      child?.kill()
     }
   })
 
@@ -677,23 +1055,32 @@ describe('wait command handler', () => {
     const stalledRead = new Promise<BackgroundSession>(() => {})
     const waiting = runWait(['bg-aaa1', '--timeout', '100ms', '--json'], {
       isProcessAlive: () => true,
-      getProcessCommandAsync: async () => 'sleep 30',
+      getProcessCommandAsync: liveLookup('sleep 30'),
       readPinnedSession: () => stalledRead,
     })
-    const { code, stdout, stderr } = await Promise.race([
-      waiting,
-      new Promise<never>((_, reject) => {
-        setTimeout(
-          () =>
-            reject(
-              new Error(
-                'waitHandler did not return within 5s of a stalled registry read',
+    // The watchdog timer is stored and cleared in the finally, so it
+    // cannot leak past the test (maintainer review 5948202472 on #2497).
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    let waited: { code: number; stdout: string; stderr: string }
+    try {
+      waited = await Promise.race([
+        waiting,
+        new Promise<never>((_, reject) => {
+          watchdog = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  'waitHandler did not return within 5s of a stalled registry read',
+                ),
               ),
-            ),
-          5000,
-        )
-      }),
-    ])
+            5000,
+          )
+        }),
+      ])
+    } finally {
+      if (watchdog !== undefined) clearTimeout(watchdog)
+    }
+    const { code, stdout, stderr } = waited
 
     expect(code).toBe(124)
     expect(stderr).toBe('')

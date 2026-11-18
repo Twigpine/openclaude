@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
+import { randomUUID } from 'node:crypto'
 import {
   mkdir,
   mkdtemp,
@@ -282,6 +283,68 @@ describe('terminal-fact publish across withdrawn claims', () => {
     await utimes(lockfile, stale, stale)
   }
 
+  // Ages a no-hard-link commit claim (`<target>.commit`) past the
+  // 10 s stale threshold, so a second publisher reclaims it while the
+  // first is paused between its target recheck and its rename —
+  // the stale-claim probe from maintainer review 5948202472 on #2497.
+  async function ageCommitClaim(target: string): Promise<void> {
+    const stale = new Date(Date.now() - 11_000)
+    await utimes(`${target}.commit`, stale, stale)
+  }
+
+  // Arms the commit-publish hook so only the first commit call pauses:
+  // the holder stalls between its target recheck and its rename, and
+  // every later commit (the successor's) proceeds normally. `entered`
+  // resolves once the holder has reached the hook.
+  function armCommitHookPause(): {
+    entered: Promise<void>
+    release: () => void
+  } {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    let enteredResolve!: () => void
+    const entered = new Promise<void>(resolve => {
+      enteredResolve = resolve
+    })
+    let calls = 0
+    registry._setCommitPublishHookForTesting(async () => {
+      calls += 1
+      if (calls === 1) {
+        enteredResolve()
+        await gate
+      }
+    })
+    return { entered, release }
+  }
+
+  // Fails fast with a clear message when the commit hook never fires
+  // (e.g. the holder never reached its commit), instead of hanging.
+  async function awaitCommitHookEntered(
+    entered: Promise<void>,
+  ): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        entered,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  'commit hook never fired: the holder never reached its commit',
+                ),
+              ),
+            5000,
+          )
+        }),
+      ])
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
+    }
+  }
+
   // Arms the one-shot open-before-write pause; `opened` resolves once
   // the owner's claim file exists but is still empty.
   function armClaimWritePause(): {
@@ -391,6 +454,8 @@ describe('terminal-fact publish across withdrawn claims', () => {
     commitPause = undefined
     linkUnsupported = false
     linkCallTargets.length = 0
+    registry?._setCommitPublishHookForTesting(undefined)
+    registry?._setCommitPublishHookForTestingSync(undefined)
     mock.restore()
     // See bgRegistry.noHardLinks.test.ts: mock.restore() does not undo a
     // mock.module registration, so re-register the real module explicitly
@@ -523,6 +588,78 @@ describe('terminal-fact publish across withdrawn claims', () => {
       commitInjection = undefined
       linkUnsupported = false
     }
+  })
+
+  it('recovers an abandoned terminal-fact claim whose temp is gone', async () => {
+    // Regression test for maintainer review 5948202472 (P2) on #2497:
+    // a valid claim naming a temp that was unlinked — the winner died
+    // after writing the claim, as in the review-probe fixture
+    // runtime/wave1-contract/stale-claim.log — must be reclaimed so
+    // the next attempt can claim the publish itself, instead of
+    // retrying against the same dead pointer until the attempts run
+    // out and the session stays `running`.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-stale-claim-async',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-stale-claim-async',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const target = terminalFactPath(session.id, 'natural')
+    const claimDir = `${target}.claim`
+    await mkdir(claimDir, { recursive: true })
+    const missingTmp = join(
+      configDir,
+      'bg-sessions',
+      'terminal',
+      `${session.id}.${session.pid}.${randomUUID()}.tmp`,
+    )
+    await writeFile(join(claimDir, 'tmp'), missingTmp)
+    const terminated = await registry.recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      { ownerPid: session.pid, expectedSession: session },
+    )
+    expect(terminated).toMatchObject({ status: 'exited', exitCode: 0 })
+    expect(
+      await registry.resolveBackgroundSessionForWait(session.id),
+    ).toMatchObject({ status: 'exited', exitCode: 0 })
+    expect(await storedExitCode(session.id)).toBe(0)
+  })
+
+  it('recovers an abandoned terminal-fact claim whose temp is gone through the sync fallback', async () => {
+    // Same abandoned-claim recovery as the test above, but through the
+    // synchronous exit fallback (maintainer review 5948202472 on
+    // #2497): the sync adopter reclaims the dead pointer and the
+    // termination completes instead of throwing after its attempts.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-stale-claim-sync',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-stale-claim-sync',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const target = terminalFactPath(session.id, 'natural')
+    const claimDir = `${target}.claim`
+    await mkdir(claimDir, { recursive: true })
+    const missingTmp = join(
+      configDir,
+      'bg-sessions',
+      'terminal',
+      `${session.id}.${session.pid}.${randomUUID()}.tmp`,
+    )
+    await writeFile(join(claimDir, 'tmp'), missingTmp)
+    registry.recordBackgroundSessionNaturalTerminationSync(
+      session.id,
+      { exitCode: 0 },
+      { ownerPid: session.pid, expectedSession: session },
+    )
+    expect(await storedExitCode(session.id)).toBe(0)
+    expect(
+      await registry.resolveBackgroundSessionForWait(session.id),
+    ).toMatchObject({ status: 'exited', exitCode: 0 })
   })
 
   it('keeps the successor fact when the sync fallback adopts after it was published', async () => {
@@ -997,6 +1134,185 @@ describe('terminal-fact publish across withdrawn claims', () => {
       commitPause = undefined
       for (const commit of commits) commit.release()
       await firstCreate.catch(() => {})
+    }
+      },
+    },
+    {
+      name: 'keeps the first publisher metadata when a stalled holder loses its commit claim without hard links',
+      run: async () => {
+    // Regression test for maintainer review 5948202472 (P2) on #2497:
+    // with link() rejected (EPERM), a session create that stalls past
+    // the stale threshold after claiming `<target>.commit` loses its
+    // claim to a second create, which publishes first. The stalled
+    // holder's resumed rename must not overwrite the first
+    // publisher's row: the holder re-verifies claim ownership
+    // immediately before the rename and reports the duplicate
+    // instead. The first publisher (second create, pid 424242) wins.
+    const id = 'bg-commit-race-stale-create-no-link'
+    const logDir = join(configDir, 'bg-commit-race-stale-create-no-link-logs')
+    await mkdir(logDir, { recursive: true })
+    const stdoutLogPath = join(logDir, 'stdout.log')
+    const stderrLogPath = join(logDir, 'stderr.log')
+    await writeFile(stdoutLogPath, '')
+    await writeFile(stderrLogPath, '')
+    linkUnsupported = true
+    const { entered, release } = armCommitHookPause()
+    const firstCreate = registry.createBackgroundSession({
+      id,
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-stale-create-no-link',
+      logFilesPrecreated: true,
+      stdoutLogPath,
+      stderrLogPath,
+    })
+    firstCreate.catch(() => {})
+    try {
+      await awaitCommitHookEntered(entered)
+      // The first create holds the per-ID lock and the commit claim:
+      // age both past their stale thresholds so the second create can
+      // proceed and reclaim the claim while the first is paused
+      // between its target recheck and its rename.
+      await ageSessionLock(id)
+      await ageCommitClaim(metadataPath(id))
+      const secondCreate = registry.createBackgroundSession({
+        id,
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-commit-race-stale-create-no-link-2',
+        logFilesPrecreated: true,
+        stdoutLogPath,
+        stderrLogPath,
+      })
+      const second = await secondCreate
+      expect(second.pid).toBe(424242)
+      // The resumed holder must not overwrite the first publisher.
+      release()
+      await expect(firstCreate).rejects.toThrow('already exists')
+      const stored = await registry.readBackgroundSessionForOwner(id)
+      expect(stored?.pid).toBe(424242)
+    } finally {
+      linkUnsupported = false
+      release()
+      await firstCreate.catch(() => {})
+    }
+      },
+    },
+    {
+      name: 'keeps the first publisher fact when a stalled holder loses its commit claim without hard links',
+      run: async () => {
+    // Regression test for maintainer review 5948202472 (P2) on #2497:
+    // same stale-commit-claim race as the metadata scenario, but for a
+    // terminal fact. The holder (exitCode 0) stalls between its target
+    // recheck and its rename; the successor (exitCode 3) must publish
+    // its own fact, not adopt the holder's tmp — so the holder's
+    // terminal-fact claim is withdrawn first (as an adopter does when
+    // the pointer is unreadable), letting the successor claim the
+    // publish itself. The holder's resumed rename must not overwrite
+    // the successor's fact, and the holder must return it.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-stale-fact-no-link',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-stale-fact-no-link',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    linkUnsupported = true
+    const { entered, release } = armCommitHookPause()
+    const firstTermination =
+      registry.recordBackgroundSessionNaturalTermination(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+    firstTermination.catch(() => {})
+    try {
+      await awaitCommitHookEntered(entered)
+      // Withdraw the holder's terminal-fact claim and age its commit
+      // claim, so the successor claims the publish itself (with its
+      // own fact) instead of adopting the holder's tmp; age the
+      // per-ID lock so the successor can proceed while the holder is
+      // paused.
+      await rm(`${terminalFactPath(session.id, 'natural')}.claim`, {
+        force: true,
+        recursive: true,
+      })
+      await ageCommitClaim(terminalFactPath(session.id, 'natural'))
+      await ageSessionLock(session.id)
+      const secondTermination =
+        await registry.recordBackgroundSessionNaturalTermination(
+          session.id,
+          { exitCode: 3 },
+          { ownerPid: session.pid, expectedSession: session },
+        )
+      expect(secondTermination).toMatchObject({
+        status: 'failed',
+        exitCode: 3,
+      })
+      // The resumed holder must not overwrite the first publisher.
+      release()
+      const first = await firstTermination
+      expect(first).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+    } finally {
+      linkUnsupported = false
+      release()
+      await firstTermination.catch(() => {})
+    }
+      },
+    },
+    {
+      name: 'keeps the first publisher fact when a stalled holder loses its sync commit claim without hard links',
+      run: async () => {
+    // Same stale-commit-claim race as the async fact scenario, but
+    // through the synchronous exit fallback: the holder is a sync
+    // termination paused at its commit, and the successor is a second
+    // sync termination run from inside the sync commit hook (the
+    // holder's per-ID lock forces the ELOCKED fallback). The sync hook
+    // withdraws the holder's terminal-fact claim and ages its commit
+    // claim, then publishes the successor's fact inline; the resumed
+    // holder must return the successor's fact, not overwrite it.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-stale-fact-sync-no-link',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-stale-fact-sync-no-link',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    linkUnsupported = true
+    let calls = 0
+    registry._setCommitPublishHookForTestingSync(() => {
+      calls += 1
+      if (calls !== 1) return
+      const target = terminalFactPath(session.id, 'natural')
+      realFs.rmSync(`${target}.claim`, { force: true, recursive: true })
+      const stale = new Date(Date.now() - 11_000)
+      realFs.utimesSync(`${target}.commit`, stale, stale)
+      // The holder's per-ID lock is held, so this sync termination
+      // takes the ELOCKED fallback and publishes without it.
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+    })
+    try {
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      expect(await storedExitCode(session.id)).toBe(3)
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+    } finally {
+      linkUnsupported = false
+      registry._setCommitPublishHookForTestingSync(undefined)
     }
       },
     },
