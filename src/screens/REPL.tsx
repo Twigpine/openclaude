@@ -1414,7 +1414,11 @@ export function REPL({
   const cursorNavRef = useRef<MessageActionsNav | null>(null);
   // Memoized so Messages' React.memo holds.
   // Read at render time: /tui and /config can change the inputs mid-session.
-  const focusViewOn = isFocusViewActive();
+  const focusViewOn = isFocusViewActive({
+    isBriefOnly,
+    disableSlashCommands,
+    isRemoteSession
+  });
   const unseenDivider = useMemo(() => {
     const divider = computeUnseenDivider(messages, dividerIndex);
     if (!divider || !focusViewOn) return divider;

@@ -1,4 +1,5 @@
 import { c as _c } from "react-compiler-runtime";
+import { syncItemKeys } from '../utils/syncItemKeys.js';
 import type { RefObject } from 'react';
 import * as React from 'react';
 import { useCallback, useContext, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore } from 'react';
@@ -68,6 +69,9 @@ export type JumpHandle = {
 };
 type Props = {
   messages: RenderableMessage[];
+  /** Rows can be replaced in place at an unchanged length (focus view), so
+   *  rebuild the key array whenever messages changes instead of appending. */
+  rekeyOnChange?: boolean;
   scrollRef: RefObject<ScrollBoxHandle | null>;
   /** Invalidates heightCache on change — cached heights from a different
    *  width are wrong (text rewrap → black screen on scroll-up after widen). */
@@ -303,7 +307,8 @@ export function VirtualMessageList({
   jumpRef,
   onSearchMatchesChange,
   scanElement,
-  setPositions
+  setPositions,
+  rekeyOnChange
 }: Props): React.ReactNode {
   // Incremental key array. Streaming appends one message at a time; rebuilding
   // the full string array on every commit allocates O(n) per message (~1MB
@@ -312,13 +317,10 @@ export function VirtualMessageList({
   const keysRef = useRef<string[]>([]);
   const prevMessagesRef = useRef<typeof messages>(messages);
   const prevItemKeyRef = useRef(itemKey);
-  if (prevItemKeyRef.current !== itemKey || messages.length < keysRef.current.length || messages[0] !== prevMessagesRef.current[0]) {
-    keysRef.current = messages.map(m => itemKey(m));
-  } else {
-    for (let i = keysRef.current.length; i < messages.length; i++) {
-      keysRef.current.push(itemKey(messages[i]!));
-    }
-  }
+  keysRef.current = syncItemKeys(keysRef.current, prevMessagesRef.current, messages, itemKey, {
+    itemKeyChanged: prevItemKeyRef.current !== itemKey,
+    rekeyOnChange: rekeyOnChange ?? false
+  });
   prevMessagesRef.current = messages;
   prevItemKeyRef.current = itemKey;
   const keys = keysRef.current;

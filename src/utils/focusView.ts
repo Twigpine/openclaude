@@ -46,7 +46,7 @@ export type FocusMessage = {
   hookErrors?: unknown[]
   preventedContinuation?: boolean
   toolUseResult?: unknown
-  message?: { content: string | FocusBlock[] }
+  message?: { id?: string; content: string | FocusBlock[] }
   attachment?: {
     type: string
     isMeta?: boolean
@@ -67,6 +67,11 @@ export type FocusOptions = {
   isLoading?: boolean
   /** tool_use ids of the synthetic streaming rows Messages appends. */
   syntheticToolUseIds?: ReadonlySet<string>
+  /**
+   * Tools whose result is the reply the user reads (SendUserMessage). Their
+   * call and successful result stay visible and are not counted as tool use.
+   */
+  replyToolNames?: ReadonlySet<string>
 }
 
 export type FocusSelection<T> = {
@@ -95,6 +100,7 @@ const EMPTY_SUMMARY: FocusSummary = {
 const NON_PROMPT_TAGS = [
   '<bash-input>',
   '<bash-stdout>',
+  '<bash-stderr>',
   '<local-command-',
   '<task-notification>',
   '<teammate-message>',
@@ -159,6 +165,10 @@ function isCompactBoundary(m: FocusMessage): boolean {
   return m.type === 'system' && m.subtype === 'compact_boundary'
 }
 
+function isScheduledFire(m: FocusMessage): boolean {
+  return m.type === 'system' && m.subtype === 'scheduled_task_fire'
+}
+
 function isLocalCommandOutput(m: FocusMessage): boolean {
   if (m.type === 'system') return m.subtype === 'local_command'
   if (m.type !== 'user') return false
@@ -202,19 +212,57 @@ function candidateKind(m: FocusMessage): CandidateKind | undefined {
 }
 
 /**
+ * normalizeMessages splits one submitted message into a row per content block
+ * and derives every row's uuid from the original, keeping its first 24
+ * characters. Rows with the same prefix therefore come from one submission.
+ */
+function sourceKey(m: FocusMessage): string | undefined {
+  return m.type === 'user' && m.uuid ? m.uuid.slice(0, 24) : undefined
+}
+
+/** user rows of the list grouped by the submission they were split from. */
+function submissionGroups(
+  messages: readonly FocusMessage[],
+): Map<string, number[]> {
+  const groups = new Map<string, number[]>()
+  messages.forEach((m, i) => {
+    const key = sourceKey(m)
+    if (key === undefined) return
+    const g = groups.get(key)
+    if (g) g.push(i)
+    else groups.set(key, [i])
+  })
+  return groups
+}
+
+/**
  * Indices of every row that starts a prompt turn, with slash commands
  * classified: a command invocation is a prompt only when no local command
  * output follows it before the next candidate and either an assistant
  * message follows or it is the last candidate during a turn in flight.
+ * Rows split from one submission count once, at the group's first row, and a
+ * submission that carries a tool_result (permission feedback) is not a prompt.
  */
 function promptBoundaryIndices(
   messages: readonly FocusMessage[],
   isLoading: boolean,
 ): number[] {
+  const groups = submissionGroups(messages)
   const candidates: Array<{ index: number; kind: CandidateKind }> = []
   messages.forEach((m, index) => {
     const kind = candidateKind(m)
-    if (kind) candidates.push({ index, kind })
+    if (!kind) return
+    const key = sourceKey(m)
+    const group = key === undefined ? undefined : groups.get(key)
+    if (group) {
+      if (group.some(j => toolResultOf(messages[j]!))) return
+      const first = group.find(j => candidateKind(messages[j]!))
+      if (first !== index) return
+      const kinds = group.map(j => candidateKind(messages[j]!))
+      candidates.push({ index, kind: kinds.includes('command') ? 'command' : kind })
+      return
+    }
+    candidates.push({ index, kind })
   })
   const out: number[] = []
   candidates.forEach((c, n) => {
@@ -249,15 +297,69 @@ function lastToolActivityIndex(
   return from - 1
 }
 
-function isFinalResponseText(m: FocusMessage): boolean {
-  return m.type === 'assistant' && !m.isApiErrorMessage && hasVisibleText(m)
+/**
+ * ids of API responses that called a tool. Tools run after their response
+ * completes, so text from such a response was emitted before the results and
+ * is narration whatever position display reordering gave it.
+ */
+function toolCallingResponseIds(messages: readonly FocusMessage[]): Set<string> {
+  const ids = new Set<string>()
+  for (const m of messages) {
+    const id = m.message?.id
+    if (id !== undefined && toolUsesOf(m).length > 0) ids.add(id)
+  }
+  return ids
+}
+
+function isFinalResponseText(
+  m: FocusMessage,
+  toolResponses: ReadonlySet<string>,
+): boolean {
+  if (m.type !== 'assistant' || m.isApiErrorMessage || !hasVisibleText(m)) return false
+  const id = m.message?.id
+  return id === undefined || !toolResponses.has(id)
+}
+
+/**
+ * Compact boundaries that end a turn. A boundary the query emits while the
+ * latest prompt is still unanswered (auto or reactive compaction) belongs to
+ * that turn and is not a boundary here. A boundary with no earlier prompt
+ * (restored history) or after a finished turn (idle or manual) is one.
+ */
+function turnEndingCompactions(
+  messages: readonly FocusMessage[],
+  prompts: readonly number[],
+): number[] {
+  const out: number[] = []
+  const toolResponses = toolCallingResponseIds(messages)
+  messages.forEach((m, c) => {
+    if (!isCompactBoundary(m)) return
+    let p = -1
+    for (const i of prompts) if (i < c) p = i
+    const prev = out.length > 0 ? out[out.length - 1]! : -1
+    if (p === -1 || p < prev) {
+      out.push(c)
+      return
+    }
+    const lastTool = lastToolActivityIndex(messages, p + 1, c)
+    for (let i = c - 1; i > lastTool; i--) {
+      if (isFinalResponseText(messages[i]!, toolResponses)) {
+        out.push(c)
+        return
+      }
+    }
+  })
+  return out
 }
 
 function addEditLines(result: unknown, into: FocusSummary): void {
   if (!isFileEditResult(result)) return
   const isCreate = 'type' in result && result.type === 'create'
   if (isCreate && result.structuredPatch.length === 0 && 'content' in result) {
-    into.linesAdded += result.content.split('\n').length
+    // Same convention as the diff path: a trailing newline ends the last line
+    // instead of starting another, and empty content adds nothing.
+    const c = result.content
+    into.linesAdded += c === '' ? 0 : c.split('\n').length - (c.endsWith('\n') ? 1 : 0)
     return
   }
   const { added, removed } = countHunkLines(result.structuredPatch)
@@ -278,12 +380,9 @@ export function selectFocusView<T extends FocusMessage>(
   const synthetic = options.syntheticToolUseIds
   const prompts = promptBoundaryIndices(messages, options.isLoading ?? false)
   let boundaryIdx = prompts.length > 0 ? prompts[prompts.length - 1]! : -1
-  for (let i = messages.length - 1; i > boundaryIdx; i--) {
-    if (isCompactBoundary(messages[i]!)) {
-      boundaryIdx = i
-      break
-    }
-  }
+  const compactions = turnEndingCompactions(messages, prompts)
+  const lastCompaction = compactions.length > 0 ? compactions[compactions.length - 1]! : -1
+  if (lastCompaction > boundaryIdx) boundaryIdx = lastCompaction
   if (boundaryIdx < 0) {
     return {
       rows: messages,
@@ -294,43 +393,81 @@ export function selectFocusView<T extends FocusMessage>(
     }
   }
   const boundary = messages[boundaryIdx]!
+  const boundaryKey = sourceKey(boundary)
+  const siblings = new Set<number>(
+    boundaryKey === undefined
+      ? []
+      : (submissionGroups(messages).get(boundaryKey) ?? []).filter(
+          j => j > boundaryIdx && candidateKind(messages[j]!) !== undefined,
+        ),
+  )
   const hiddenTurns = prompts.filter(i => i < boundaryIdx).length
   const summary = { ...EMPTY_SUMMARY }
   const isSynthetic = (m: FocusMessage) =>
     toolUsesOf(m).some(b => b.id !== undefined && synthetic?.has(b.id))
 
   const start = boundaryIdx + 1
-  const lastTool = lastToolActivityIndex(messages, start, messages.length)
+  // A scheduled run's marker splits the rows after the boundary: tool activity
+  // and final-response rules apply per segment, and only the typed segment
+  // feeds the summary.
+  const fires: number[] = []
+  for (let i = start; i < messages.length; i++) {
+    if (isScheduledFire(messages[i]!)) fires.push(i)
+  }
+  const edges = [start, ...fires, messages.length]
+  const segmentLastTool = edges
+    .slice(0, -1)
+    .map((from, k) => lastToolActivityIndex(messages, from, edges[k + 1]!))
+  const lastTool = segmentLastTool[segmentLastTool.length - 1]!
+  const toolResponses = toolCallingResponseIds(messages)
+  const replyTools = options.replyToolNames
+  const replyCalls = new Map<string, number>()
   const keep = new Set<number>()
   const callLineIdx = new Map<string, number>()
   let lastInterrupt = -1
   let finalIdx = -1
+  let segment = 0
   const warnings: number[] = []
   const rejections: Array<{ index: number; toolUseId: string | undefined }> = []
 
   for (let i = start; i < messages.length; i++) {
     const m = messages[i]!
+    while (segment < fires.length && i > fires[segment]!) segment++
+    const typed = segment === 0
+    if (siblings.has(i)) keep.add(i)
     if (m.type === 'assistant') {
       for (const b of toolUsesOf(m)) {
         if (b.id !== undefined && synthetic?.has(b.id)) continue
-        summary.toolCount++
+        if (b.id !== undefined && b.name !== undefined && replyTools?.has(b.name)) {
+          replyCalls.set(b.id, i)
+          continue
+        }
+        if (typed) summary.toolCount++
         if (b.id !== undefined) callLineIdx.set(b.id, i)
       }
       if (m.isApiErrorMessage) keep.add(i)
-      else if (i > lastTool && isFinalResponseText(m)) {
+      else if (i > segmentLastTool[segment]! && isFinalResponseText(m, toolResponses)) {
         keep.add(i)
         finalIdx = i
       }
     } else if (m.type === 'user') {
       const tr = toolResultOf(m)
       if (tr) {
+        const reply = tr.tool_use_id !== undefined ? replyCalls.get(tr.tool_use_id) : undefined
+        if (reply !== undefined && !tr.is_error) {
+          keep.add(i)
+          keep.add(reply)
+          continue
+        }
         const agentCount = (m.toolUseResult as { totalToolUseCount?: unknown } | undefined)
           ?.totalToolUseCount
-        if (typeof agentCount === 'number') summary.toolCount += agentCount
-        addEditLines(m.toolUseResult, summary)
+        if (typed) {
+          if (typeof agentCount === 'number') summary.toolCount += agentCount
+          addEditLines(m.toolUseResult, summary)
+        }
         if (isRejection(tr)) rejections.push({ index: i, toolUseId: tr.tool_use_id })
         else if (tr.is_error) {
-          summary.failed++
+          if (typed) summary.failed++
           keep.add(i)
           const call = tr.tool_use_id !== undefined ? callLineIdx.get(tr.tool_use_id) : undefined
           if (call !== undefined) keep.add(call)
@@ -344,6 +481,8 @@ export function selectFocusView<T extends FocusMessage>(
         const t = stripSystemReminders(firstText(m) ?? '')
         if (t.startsWith('<bash-input>') || t.startsWith('<bash-stdout>')) keep.add(i)
       }
+    } else if (m.type === 'attachment') {
+      if (m.attachment?.type === 'max_turns_reached') keep.add(i)
     } else if (m.type === 'system') {
       if (m.subtype === 'api_error' || m.subtype === 'local_command') keep.add(i)
       else if (
@@ -351,11 +490,14 @@ export function selectFocusView<T extends FocusMessage>(
         ((m.hookErrors?.length ?? 0) > 0 || m.preventedContinuation)
       ) {
         keep.add(i)
-      } else if (m.level === 'warning' || m.level === 'error') warnings.push(i)
+      } else if (m.level === 'error') keep.add(i)
+      else if (m.level === 'warning') warnings.push(i)
     }
   }
 
-  for (const w of warnings) if (finalIdx >= 0 && w > finalIdx) keep.add(w)
+  // A warning that ends the turn is the reason it stopped. One followed by
+  // more tool work or a final response is routine.
+  for (const w of warnings) if (w > finalIdx && w > lastTool) keep.add(w)
   for (const r of rejections) {
     if (lastInterrupt > r.index) continue
     keep.add(r.index)
@@ -377,6 +519,13 @@ export function selectFocusView<T extends FocusMessage>(
 }
 
 /**
+ * Block indices normalizeMessages uses count up from 0 and never reach these,
+ * so synthetic row ids cannot equal a normalized row id with the same prefix.
+ */
+const FOCUS_MARKER_SUFFIX = 0xf0c5_0000_0000
+const FOCUS_SUMMARY_SUFFIX = FOCUS_MARKER_SUFFIX + 1
+
+/**
  * Turns a selection into the final list: the hidden-turns marker directly
  * before the boundary row and the summary row directly after it, then the
  * kept rows. Both synthetic uuids derive from the boundary uuid, so they stay
@@ -395,7 +544,7 @@ export function assembleFocusRows<T extends FocusMessage>(
     out.push({
       type: 'system',
       subtype: 'focus_marker',
-      uuid: deriveUUID(parent, 0),
+      uuid: deriveUUID(parent, FOCUS_MARKER_SUFFIX),
       timestamp,
       hiddenTurns,
       compacted,
@@ -406,7 +555,7 @@ export function assembleFocusRows<T extends FocusMessage>(
     out.push({
       type: 'system',
       subtype: 'focus_summary',
-      uuid: deriveUUID(parent, 1),
+      uuid: deriveUUID(parent, FOCUS_SUMMARY_SUFFIX),
       timestamp,
       summary,
     })
@@ -425,11 +574,13 @@ export function countUnseenFocusTurns(
   dividerIndex: number,
   options: FocusOptions = {},
 ): number {
-  const starts = promptBoundaryIndices(messages, options.isLoading ?? false)
+  const prompts = promptBoundaryIndices(messages, options.isLoading ?? false)
+  const starts = [...prompts, ...turnEndingCompactions(messages, prompts)]
   messages.forEach((m, i) => {
-    if (isCompactBoundary(m)) starts.push(i)
+    if (isScheduledFire(m)) starts.push(i)
   })
   starts.sort((a, b) => a - b)
+  const toolResponses = toolCallingResponseIds(messages)
   const edges = [-1, ...starts, messages.length]
   let count = 0
   for (let n = 0; n < edges.length - 1; n++) {
@@ -437,7 +588,7 @@ export function countUnseenFocusTurns(
     const to = edges[n + 1]!
     const lastTool = lastToolActivityIndex(messages, from, to)
     for (let i = Math.max(lastTool + 1, from, dividerIndex); i < to; i++) {
-      if (isFinalResponseText(messages[i]!)) {
+      if (isFinalResponseText(messages[i]!, toolResponses)) {
         count++
         break
       }
@@ -448,9 +599,21 @@ export function countUnseenFocusTurns(
 
 /**
  * Whether focus view applies right now: the stored setting is on and the
- * fullscreen renderer is active. Read at render time because /tui can switch
+ * fullscreen renderer is active, and nothing else owns the display. Read at render time because /tui can switch
  * the renderer mid-session while the stored setting stays on.
  */
-export function isFocusViewActive(): boolean {
+export function isFocusViewActive(
+  blockers: {
+    /** Brief-only owns the display and bypasses focus filtering. */
+    isBriefOnly?: boolean
+    /** /focus is unavailable, so the stored setting cannot be undone. */
+    disableSlashCommands?: boolean
+    /** Commands run on the remote host, not against this config. */
+    isRemoteSession?: boolean
+  } = {},
+): boolean {
+  if (blockers.isBriefOnly || blockers.disableSlashCommands || blockers.isRemoteSession) {
+    return false
+  }
   return isFullscreenEnvEnabled() && (getGlobalConfig().focusView ?? false)
 }

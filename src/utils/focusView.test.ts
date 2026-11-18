@@ -755,4 +755,273 @@ describe('isFocusViewActive', () => {
     saveGlobalConfig(current => ({ ...current, focusView: undefined }))
     expect(isFocusViewActive()).toBe(false)
   })
+
+  test('is off where /focus cannot toggle it or Brief-only owns the display', () => {
+    process.env.CLAUDE_CODE_NO_FLICKER = '1'
+    saveGlobalConfig(current => ({ ...current, focusView: true }))
+    expect(isFocusViewActive({})).toBe(true)
+    expect(isFocusViewActive({ isBriefOnly: true })).toBe(false)
+    expect(isFocusViewActive({ disableSlashCommands: true })).toBe(false)
+    expect(isFocusViewActive({ isRemoteSession: true })).toBe(false)
+  })
+})
+
+// Review round: fixtures that go through real normalization, so uuids and
+// block splitting match what Messages hands to selectFocusView.
+import { normalizeMessages } from './messages/normalize.js'
+
+const IMG = {
+  type: 'image',
+  source: { type: 'base64', media_type: 'image/png', data: 'x' },
+} as never
+const txt = (t: string) => ({ type: 'text', text: t }) as never
+
+function normalized(msgs: unknown[]): FocusMessage[] {
+  return normalizeMessages(msgs as never) as unknown as FocusMessage[]
+}
+
+describe('system rows', () => {
+  test('keeps an error-level system row that precedes the final response', () => {
+    const r = select([
+      prompt('p', 'go'),
+      sys('e1', 'informational', { level: 'error' }),
+      say('a', 'done'),
+    ])
+    expect(ids(r.rows)).toContain('e1')
+  })
+
+  test('keeps an error-level system row when the turn has no final response', () => {
+    const r = select([prompt('p', 'go'), sys('e1', 'informational', { level: 'error' })])
+    expect(ids(r.rows)).toContain('e1')
+  })
+
+  test('still drops a warning that precedes the final response', () => {
+    const r = select([
+      prompt('p', 'go'),
+      sys('w1', 'informational', { level: 'warning' }),
+      say('a', 'done'),
+    ])
+    expect(ids(r.rows)).not.toContain('w1')
+  })
+})
+
+describe('one submitted prompt is one turn', () => {
+  test('an image plus typed text counts once and both rows stay visible', () => {
+    const first = createUserMessage({ content: 'first question' })
+    const second = createUserMessage({ content: [IMG, txt('what is this')] })
+    const msgs = normalized([first, createAssistantMessage({ content: 'a1' }), second, createAssistantMessage({ content: 'a2' })])
+    const r = select(msgs)
+    expect(r.hiddenTurns).toBe(1)
+    const kept = r.rows.map(row => row.message?.content)
+    expect(JSON.stringify(kept)).toContain('what is this')
+    expect(JSON.stringify(kept)).toContain('"image"')
+  })
+
+  test('text first then an image is also one turn', () => {
+    const msgs = normalized([
+      createUserMessage({ content: 'one' }),
+      createAssistantMessage({ content: 'a1' }),
+      createUserMessage({ content: [txt('look'), IMG, IMG] }),
+      createAssistantMessage({ content: 'a2' }),
+    ])
+    const r = select(msgs)
+    expect(r.hiddenTurns).toBe(1)
+    expect(r.rows.filter(row => row.type === 'user')).toHaveLength(3)
+  })
+
+  test('permission feedback split from a tool_result is not a prompt', () => {
+    const u = use('u1', 't1')
+    const fb = createUserMessage({
+      content: [
+        { type: 'tool_result', tool_use_id: 't1', content: 'ok' } as never,
+        txt('also do the other thing'),
+      ],
+    })
+    const msgs = normalized([prompt('p', 'go'), u, fb, say('a', 'done')])
+    const r = select(msgs)
+    expect(r.boundary?.uuid).toBe('p')
+    expect(r.hiddenTurns).toBe(0)
+  })
+})
+
+describe('synthetic row ids', () => {
+  test('marker and summary ids never collide with normalized block ids', () => {
+    const multi = createAssistantMessage({ content: [{ type: 'text', text: 'x' } as never, { type: 'text', text: 'y' } as never] })
+    const msgs = normalized([
+      createUserMessage({ content: 'one' }),
+      multi,
+      createUserMessage({ content: 'two' }),
+      createAssistantMessage({ content: [{ type: 'tool_use', id: 't', name: 'Read', input: {} } as never] }),
+      createUserMessage({ content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' } as never] }),
+      createAssistantMessage({ content: 'end' }),
+    ])
+    const rows = assembleFocusRows(select(msgs))
+    const all = rows.map(r => r.uuid)
+    expect(new Set(all).size).toBe(all.length)
+    expect(rows.some(r => r.type === 'system' && (r as { subtype?: string }).subtype === 'focus_marker')).toBe(true)
+  })
+
+  test('summary id stays distinct from a second block of the boundary prompt', () => {
+    const msgs = normalized([
+      createUserMessage({ content: [txt('q'), IMG] }),
+      createAssistantMessage({ content: [{ type: 'tool_use', id: 't', name: 'Read', input: {} } as never] }),
+      createUserMessage({ content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' } as never] }),
+      createAssistantMessage({ content: 'end' }),
+    ])
+    const rows = assembleFocusRows(select(msgs))
+    const all = rows.map(r => r.uuid)
+    expect(new Set(all).size).toBe(all.length)
+  })
+})
+
+describe('compaction inside a query', () => {
+  test('an auto-compaction mid-turn keeps the typed prompt as the boundary', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'x'),
+      prompt('p2', 'big task'),
+      use('u1', 't1'),
+      result('r1', 't1'),
+      label('cb', createCompactBoundaryMessage('auto', 100)),
+      use('u2', 't2'),
+      result('r2', 't2'),
+      say('a2', 'finished'),
+    ])
+    expect(r.boundary?.uuid).toBe('p2')
+    expect(r.hiddenTurns).toBe(1)
+    expect(r.compacted).toBe(false)
+    expect(r.summary.toolCount).toBe(2)
+  })
+
+  test('the unseen count agrees: a mid-turn compaction does not split the turn', () => {
+    const msgs = [
+      prompt('p2', 'big task'),
+      use('u1', 't1'),
+      result('r1', 't1'),
+      label('cb', createCompactBoundaryMessage('auto', 100)),
+      say('a2', 'finished'),
+    ]
+    expect(countUnseenFocusTurns(msgs, 0)).toBe(1)
+  })
+})
+
+describe('new file line counts', () => {
+  const created = (content: string) =>
+    select([
+      prompt('p', 'write it'),
+      use('u', 't', 'Write'),
+      result('r', 't', {
+        toolUseResult: { type: 'create', filePath: '/x', content, structuredPatch: [] },
+      }),
+      say('a', 'done'),
+    ]).summary.linesAdded
+
+  test('a trailing newline does not add a line', () => {
+    expect(created('a\nb\n')).toBe(2)
+  })
+  test('empty content adds none', () => {
+    expect(created('')).toBe(0)
+  })
+  test('content without a trailing newline counts its lines', () => {
+    expect(created('a\nb')).toBe(2)
+  })
+  test('CRLF content counts lines', () => {
+    expect(created('a\r\nb\r\n')).toBe(2)
+  })
+})
+
+describe('chronology and terminal diagnostics', () => {
+  test('narration emitted with a tool call stays hidden even when display order puts the result first', () => {
+    const call = use('u1', 't1')
+    const narration = {
+      ...say('n', 'I will wait for the read to complete'),
+    } as ReturnType<typeof say>
+    ;(narration.message as { id: string }).id = (call.message as { id: string }).id
+    // Display order: reorderMessagesInUI moves the result beside its call.
+    const r = select([
+      prompt('p', 'go'),
+      call,
+      result('r1', 't1'),
+      narration,
+      say('a', 'the real answer'),
+    ])
+    expect(ids(r.rows)).toContain('a')
+    expect(ids(r.rows)).not.toContain('n')
+  })
+
+  test('the unseen count ignores that narration as well', () => {
+    const call = use('u1', 't1')
+    const narration = say('n', 'I will wait')
+    ;(narration.message as { id: string }).id = (call.message as { id: string }).id
+    expect(countUnseenFocusTurns([prompt('p', 'go'), call, result('r1', 't1'), narration], 0)).toBe(0)
+  })
+
+  test('a timeout warning after the last tool call is kept with no final response', () => {
+    const r = select([
+      prompt('p', 'go'),
+      use('u', 't'),
+      result('r', 't'),
+      sys('w', 'informational', { level: 'warning', content: 'Query timed out before completion.' }),
+    ])
+    expect(ids(r.rows)).toContain('w')
+  })
+
+  test('a mid-turn warning followed by more tool work stays hidden', () => {
+    const r = select([
+      prompt('p', 'go'),
+      use('u', 't'),
+      sys('w', 'informational', { level: 'warning' }),
+      result('r', 't'),
+      say('a', 'done'),
+    ])
+    expect(ids(r.rows)).not.toContain('w')
+  })
+
+  test('the turn-limit attachment is kept', () => {
+    const r = select([
+      prompt('p', 'go'),
+      use('u', 't'),
+      result('r', 't'),
+      label('m', { type: 'attachment' as const, timestamp: '', attachment: { type: 'max_turns_reached' } }),
+    ])
+    expect(ids(r.rows)).toContain('m')
+  })
+
+  test('standalone shell stderr is not a prompt', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      prompt('e', '<bash-stderr>boom</bash-stderr>'),
+    ])
+    expect(r.boundary?.uuid).toBe('p1')
+  })
+
+  test('a SendUserMessage reply stays visible with its call', () => {
+    const r = select(
+      [
+        prompt('p', 'go'),
+        use('u', 't', 'SendUserMessage'),
+        result('r', 't', { content: 'Message delivered' }),
+      ],
+      { replyToolNames: new Set(['SendUserMessage']) },
+    )
+    expect(ids(r.rows)).toEqual(['p', 'u', 'r'])
+    expect(r.summary.toolCount).toBe(0)
+  })
+
+  test('a scheduled run after a finished typed turn keeps both answers and the typed summary', () => {
+    const r = select([
+      prompt('p', 'typed'),
+      use('u1', 't1'),
+      result('r1', 't1'),
+      say('a1', 'typed answer'),
+      sys('fire', 'scheduled_task_fire'),
+      use('u2', 't2'),
+      result('r2', 't2'),
+      say('a2', 'scheduled answer'),
+    ])
+    expect(ids(r.rows)).toContain('a1')
+    expect(ids(r.rows)).toContain('a2')
+    expect(r.summary.toolCount).toBe(1)
+  })
 })

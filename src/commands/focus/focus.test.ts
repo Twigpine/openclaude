@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import type { LocalCommandResult } from '../../types/command.js'
+import * as configModule from '../../utils/config.js'
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 import { _resetTmuxControlModeProbeForTesting } from '../../utils/fullscreen.js'
 import { call } from './focus.js'
@@ -82,5 +83,37 @@ describe('/focus', () => {
     const res = expectText(await call('', noopContext))
     expect(res.value).toContain('/tui fullscreen')
     expect(getGlobalConfig().focusView).toBeUndefined()
+  })
+
+  test('toggles against the config the locked updater sees, not a stale cached read', async () => {
+    setFocus(true)
+    // Another session already turned focus on; this session's cache still says off.
+    const stale = spyOn(configModule, 'getGlobalConfig').mockReturnValue({
+      ...getGlobalConfig(),
+      focusView: false,
+    })
+    try {
+      const res = expectText(await call('', noopContext))
+      stale.mockRestore()
+      expect(getGlobalConfig().focusView).toBe(false)
+      expect(res.value).toContain('Focus view is off')
+    } finally {
+      stale.mockRestore()
+    }
+  })
+
+  test('does not report success when the write was skipped', async () => {
+    setFocus(false)
+    const skipped = spyOn(configModule, 'saveGlobalConfig').mockImplementation(
+      () => {},
+    )
+    try {
+      const res = expectText(await call('', noopContext))
+      expect(getGlobalConfig().focusView).toBe(false)
+      expect(res.value).not.toContain('Focus view is on')
+      expect(res.value).toContain('Could not save')
+    } finally {
+      skipped.mockRestore()
+    }
   })
 })

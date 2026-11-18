@@ -524,6 +524,7 @@ const MessagesImpl = ({
     // and never in the ctrl+o transcript, which stays unfiltered.
     const focusFiltered = isFocusView && !isTranscriptMode ? assembleFocusRows(selectFocusView(briefFiltered, {
       isLoading,
+      replyToolNames: new Set(dropTextToolNames),
       syntheticToolUseIds: new Set(syntheticStreamingToolUseMessages.flatMap(m => m.message.content.flatMap(b => b.type === 'tool_use' ? [b.id] : [])))
     })) : briefFiltered;
     const messagesToShow = shouldTruncate ? focusFiltered.slice(-MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE) : focusFiltered;
@@ -722,7 +723,7 @@ const MessagesImpl = ({
           passing the array would accumulate every historical version
           (~1-2MB over a 7-turn session). */}
       {virtualScrollRuntimeGate ? <InVirtualListContext.Provider value={true}>
-          <VirtualMessageList messages={renderableMessages} scrollRef={scrollRef} columns={columns} itemKey={messageKey} renderItem={renderMessageRow} onItemClick={onItemClick} isItemClickable={isItemClickable} isItemExpanded={isItemExpanded} trackStickyPrompt={trackStickyPrompt} selectedIndex={selectedIdx >= 0 ? selectedIdx : undefined} cursorNavRef={cursorNavRef} setCursor={setCursor} jumpRef={jumpRef} onSearchMatchesChange={onSearchMatchesChange} scanElement={scanElement} setPositions={setPositions} extractSearchText={extractSearchText} />
+          <VirtualMessageList messages={renderableMessages} scrollRef={scrollRef} columns={columns} itemKey={messageKey} renderItem={renderMessageRow} onItemClick={onItemClick} isItemClickable={isItemClickable} isItemExpanded={isItemExpanded} trackStickyPrompt={trackStickyPrompt} selectedIndex={selectedIdx >= 0 ? selectedIdx : undefined} cursorNavRef={cursorNavRef} setCursor={setCursor} jumpRef={jumpRef} onSearchMatchesChange={onSearchMatchesChange} scanElement={scanElement} setPositions={setPositions} extractSearchText={extractSearchText} rekeyOnChange={isFocusView} />
         </InVirtualListContext.Provider> : renderableMessages.flatMap(renderMessageRow)}
 
       {streamingText && !isBriefOnly && <Box alignItems="flex-start" flexDirection="row" marginTop={1} width="100%">
