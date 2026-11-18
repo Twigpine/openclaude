@@ -3662,6 +3662,7 @@ type StrictSessionRead =
   | { state: 'valid'; value: BackgroundSession }
   | { state: 'unreadable' }
   | { state: 'malformed' }
+  | { state: 'id_mismatch' }
 
 /**
  * Reads a `wait`-path registry file without ever blocking on a
@@ -3724,9 +3725,29 @@ async function readSessionFileStrict(
   } catch {
     return { state: 'malformed' }
   }
-  return isBackgroundSession(parsed, id)
-    ? { state: 'valid', value: parsed }
-    : { state: 'malformed' }
+  if (isBackgroundSession(parsed, id)) {
+    return { state: 'valid', value: parsed }
+  }
+  // A structurally valid session whose stored id differs from the
+  // requested id is not a corrupt document: on a case-insensitive
+  // registry the exact-ID path can open another session's file (for
+  // example `wait BG-ab` opens `bg-ab.json`). Report it distinctly so
+  // the resolver can treat that read as missing instead of failing
+  // with a malformed-metadata error, while a file whose stored id
+  // matches but fails other validation still reports `malformed`
+  // (CodeRabbit #2497 review 5953263672).
+  const storedId =
+    parsed !== null && typeof parsed === 'object'
+      ? (parsed as Partial<BackgroundSession>).id
+      : undefined
+  if (
+    typeof storedId === 'string' &&
+    storedId !== id &&
+    isBackgroundSession(parsed, storedId)
+  ) {
+    return { state: 'id_mismatch' }
+  }
+  return { state: 'malformed' }
 }
 
 type StrictTerminalFactRead =
@@ -3855,7 +3876,9 @@ export async function resolveBackgroundSessionForWait(
     if (exact.state === 'valid') {
       return await readEffectiveSessionStrict(exact.value, null)
     }
-    // A missing exact-ID file can still allow name or prefix matching.
+    // A missing exact-ID file — or one whose stored id differs from
+    // the requested id (a case-insensitive registry opening another
+    // session's file) — can still allow name or prefix matching.
   }
 
   let entries: string[]
@@ -3880,7 +3903,10 @@ export async function resolveBackgroundSessionForWait(
     const id = entry.slice(0, -'.json'.length)
     if (!SAFE_ID_RE.test(id)) continue
     const read = await readSessionFileStrict(metadataPathForId(id), id)
-    if (read.state === 'missing') continue
+    // A stored-id mismatch is the same aliasing as in the exact-ID
+    // path above: the session is enumerated under its real filename,
+    // so skip this entry instead of failing the whole resolution.
+    if (read.state === 'missing' || read.state === 'id_mismatch') continue
     if (read.state === 'unreadable' || read.state === 'malformed') {
       // The name lives inside the file, so any entry could be the named or
       // prefix-matched session; it cannot be skipped safely.
@@ -3985,9 +4011,15 @@ export async function readPinnedBackgroundSessionForWait(pinned: {
       pinned.id,
     )
   }
-  if (read.state === 'unreadable' || read.state === 'malformed') {
+  if (
+    read.state === 'unreadable' ||
+    read.state === 'malformed' ||
+    read.state === 'id_mismatch'
+  ) {
+    // A pinned re-read whose stored id differs is a replaced document,
+    // not an absent one: fail with the metadata error, never retarget.
     throwWaitMetadataError(
-      read.state,
+      read.state === 'id_mismatch' ? 'malformed' : read.state,
       `Background session ${pinned.id} metadata`,
       pinned.id,
     )

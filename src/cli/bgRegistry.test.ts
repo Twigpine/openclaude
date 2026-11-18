@@ -3891,6 +3891,72 @@ describe('background session wait strict reads', () => {
     expect(live.id).toBe('bg-wbbb2')
   })
 
+  it('treats a stored-ID mismatch in the exact-ID file as missing and resolves by name', async () => {
+    // Regression test for CodeRabbit #2497 review 5953263672: on a
+    // case-insensitive registry `wait BG-ab` opens `bg-ab.json`, whose
+    // stored id (`bg-ab`) differs from the requested ID. The strict
+    // reader must treat that read as missing — not malformed — so name
+    // matching can still select the session named `BG-ab`. The symlink
+    // reproduces the case-insensitive open on a case-sensitive
+    // filesystem: the same file is reachable under both case variants.
+    await createBackgroundSession({
+      id: 'bg-ab',
+      name: 'BG-ab',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-bg-ab',
+    })
+    await symlink(metadataPath('bg-ab'), metadataPath('BG-ab'))
+
+    const resolved = await resolveBackgroundSessionForWait('BG-ab')
+
+    expect(resolved.id).toBe('bg-ab')
+    expect(resolved.name).toBe('BG-ab')
+  })
+
+  it('returns not found instead of malformed when no name matches a stored-ID mismatch', async () => {
+    // Same case-insensitive exact-ID mismatch as above, but no session
+    // is named `BG-ab`: the user must get `not_found`, not a
+    // malformed-metadata error (CodeRabbit #2497 review 5953263672).
+    await createBackgroundSession({
+      id: 'bg-ab',
+      name: 'other-name',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-bg-ab',
+    })
+    await symlink(metadataPath('bg-ab'), metadataPath('BG-ab'))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('BG-ab')),
+    ).toBe('not_found')
+  })
+
+  it('keeps failing closed when a pinned re-read has a stored-ID mismatch', async () => {
+    // The mismatch-as-missing rule applies to the resolver's exact-ID
+    // path only: a pinned re-read whose stored id differs from the
+    // pinned id is a replaced document and must still fail with exit
+    // code 4 instead of retargeting (CodeRabbit #2497 review
+    // 5953263672).
+    await createBackgroundSession({
+      id: 'bg-ab',
+      name: 'BG-ab',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-bg-ab',
+    })
+    await symlink(metadataPath('bg-ab'), metadataPath('BG-ab'))
+
+    expect(
+      await waitErrorCode(() =>
+        readPinnedBackgroundSessionForWait({ id: 'BG-ab', pid: 424242 }),
+      ),
+    ).toBe('metadata_malformed')
+  })
+
   it('prefers a live ID-prefix match over a dead exact-name row', async () => {
     // Regression test for maintainer review 5948202472 (P2) on #2497:
     // a `status: running` row with no terminal fact but a dead PID must
