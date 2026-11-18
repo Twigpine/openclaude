@@ -988,4 +988,153 @@ describe('MCP list cursor pagination', () => {
       }
     }
   })
+
+  test('isMcpClientRetired distinguishes the cached generation from a replacement', async () => {
+    const { connectToServer, getServerCacheKey, isMcpClientRetired } =
+      await import('./client.js')
+    const name = 'retired-check'
+    const config = { type: 'sdk', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    const current = {
+      type: 'connected',
+      name,
+      config,
+    } as unknown as ConnectedMCPServer
+    const replacement = {
+      type: 'connected',
+      name,
+      config,
+    } as unknown as ConnectedMCPServer
+    try {
+      // No entry: an in-process client with no connect-cache involvement
+      // is not retired.
+      expect(await isMcpClientRetired(name, config, current)).toBe(false)
+      // The cached generation is current.
+      connectToServer.cache.set(key, Promise.resolve(current))
+      expect(await isMcpClientRetired(name, config, current)).toBe(false)
+      // A pending replacement in flight retires it.
+      let resolveReplacement!: (value: ConnectedMCPServer) => void
+      const pending = new Promise<ConnectedMCPServer>(resolve => {
+        resolveReplacement = resolve
+      })
+      connectToServer.cache.set(key, pending)
+      expect(await isMcpClientRetired(name, config, current)).toBe(true)
+      resolveReplacement(replacement)
+      await pending
+      // A settled replacement retires it too.
+      expect(await isMcpClientRetired(name, config, current)).toBe(true)
+      expect(await isMcpClientRetired(name, config, replacement)).toBe(false)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('a list-changed update from a retired transport does not apply', async () => {
+    const { connectToServer, getServerCacheKey, isMcpClientRetired } =
+      await import('./client.js')
+    const { registerMcpListChangedHandlers } = await import(
+      './useManageMCPConnections.js'
+    )
+    const { getCurrentProjectConfig, saveCurrentProjectConfig } =
+      await import('../../utils/config.js')
+    const handlers = new Map<string, () => Promise<void>>()
+    const client = {
+      request: async (
+        request: ListRequest,
+        resultSchema: { parse: (value: unknown) => unknown },
+      ) => {
+        if (request.method !== 'tools/list') {
+          throw new Error(`unexpected ${request.method}`)
+        }
+        return resultSchema.parse({
+          tools: [{ name: 'retired-tool', inputSchema: { type: 'object' } }],
+        })
+      },
+      setNotificationHandler: (
+        schema: unknown,
+        handler: () => Promise<void>,
+      ) => {
+        if (schema === ToolListChangedNotificationSchema) {
+          handlers.set('tools/list', handler)
+        }
+      },
+    }
+    const connection = {
+      type: 'connected',
+      name: 'retired-list-changed',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { tools: { listChanged: true } },
+      client,
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    type ListChangedUpdate = Parameters<
+      Parameters<typeof registerMcpListChangedHandlers>[1]
+    >[0]
+    const updates: ListChangedUpdate[] = []
+    registerMcpListChangedHandlers(connection, update => updates.push(update))
+    const toolsHandler = handlers.get('tools/list')
+    expect(toolsHandler).toBeDefined()
+
+    // Control: the current generation's notification applies.
+    await toolsHandler!()
+    expect(updates).toHaveLength(1)
+    expect(updates[0]?.tools?.map(tool => tool.mcpInfo?.toolName)).toEqual([
+      'retired-tool',
+    ])
+
+    // A replacement takes over the cache entry: the retired transport's
+    // next notification must not apply — the UI would otherwise restore
+    // tools for a server the reconnect already replaced (CodeRabbit
+    // #2493 review 5957362782).
+    const replacement = {
+      type: 'connected',
+      name: 'retired-list-changed',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { tools: { listChanged: true } },
+      client,
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+    const key = getServerCacheKey('retired-list-changed', connection.config)
+    connectToServer.cache.set(key, Promise.resolve(replacement))
+    expect(
+      await isMcpClientRetired(
+        'retired-list-changed',
+        connection.config,
+        connection,
+      ),
+    ).toBe(true)
+    try {
+      updates.length = 0
+      await toolsHandler!()
+      expect(updates).toHaveLength(0)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+
+    // A disabled server's notification must not apply either, even while
+    // its transport is still the cached generation.
+    expect(
+      await isMcpClientRetired(
+        'retired-list-changed',
+        connection.config,
+        connection,
+      ),
+    ).toBe(false)
+    const savedDisabled = getCurrentProjectConfig().disabledMcpServers
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: ['retired-list-changed'],
+    }))
+    try {
+      updates.length = 0
+      await toolsHandler!()
+      expect(updates).toHaveLength(0)
+    } finally {
+      saveCurrentProjectConfig(c => ({
+        ...c,
+        disabledMcpServers: savedDisabled,
+      }))
+    }
+  })
 })

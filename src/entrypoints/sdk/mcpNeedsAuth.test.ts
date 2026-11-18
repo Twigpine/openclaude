@@ -4142,6 +4142,10 @@ test('RELEASING AN OLDER CONNECTION KEEPS A NEWER GENERATION CACHED', async () =
  * 5956557301). The stub stands in for that interleaving: the replacement
  * is started after the real cleanup resolves, before the clear's
  * post-cleanup step runs, which is exactly the state the race leaves.
+ * The stub also completes the replacement's initialize and populates its
+ * discovery cache: without that, the test would pass even if the clear
+ * preserved the replacement connection but dropped its discovery cache
+ * unconditionally (CodeRabbit #2493 review 5957362782).
  */
 test('CLEARING AN OLDER CONNECTION KEEPS A NEWER GENERATION CACHED', async () => {
   const url = serveNeedingAuth()
@@ -4171,6 +4175,18 @@ test('CLEARING AN OLDER CONNECTION KEEPS A NEWER GENERATION CACHED', async () =>
     // stores the replacement before the clear's final delete runs.
     realClient.connectToServer.cache.delete(key)
     replacement = realClient.connectToServer('gated', config)
+    // Complete the replacement's initialize and populate its discovery
+    // cache while the clear is still in flight: the clear must keep
+    // both, not just the connection.
+    await waitFor(() => held.arrived)
+    held.answer()
+    newClient = (await settlesWithin(replacement, 5_000)) as MCPServerConnection
+    expect(newClient.type).toBe('connected')
+    expect(
+      (await realClient.fetchToolsForClient(newClient)).map(
+        tool => tool.mcpInfo?.toolName ?? tool.name,
+      ),
+    ).toEqual(['hello'])
   }
   try {
     await realClient.clearServerCache('gated', config)
@@ -4184,6 +4200,15 @@ test('CLEARING AN OLDER CONNECTION KEEPS A NEWER GENERATION CACHED', async () =>
     expect(newClient.type).toBe('connected')
     expect(newClient).not.toBe(oldClient)
     expect(await realClient.connectToServer('gated', config)).toBe(newClient)
+    // And the replacement's discovery cache survived the clear too:
+    // fetching its tools again sends no further tools/list request.
+    const toolsListBefore = toolsListAuth.length
+    expect(
+      (await realClient.fetchToolsForClient(newClient)).map(
+        tool => tool.mcpInfo?.toolName ?? tool.name,
+      ),
+    ).toEqual(['hello'])
+    expect(toolsListAuth.length).toBe(toolsListBefore)
   } finally {
     oldClient.cleanup = realCleanup
     held.answer()
@@ -4231,6 +4256,114 @@ test('A RECONNECT DOES NOT CLOSE A TRANSPORT ANOTHER SESSION ADOPTED', async () 
   } finally {
     await creator.cleanup().catch(() => {})
     if (fresh?.type === 'connected') await fresh.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * A single session reauthenticating after a tool call must not leak the
+ * old transport: the completed call adopted the client through
+ * ensureConnectedClient, so the reconnect detaches it instead of closing
+ * it — but the session then replaces its client record, so close() only
+ * reaches the new client. Replacing the record must release the old
+ * transport once no other session still owns it (CodeRabbit #2493 review
+ * 5957362782).
+ */
+test('A REAUTHENTICATION CLOSES THE PREVIOUS TRANSPORT ONCE THE SESSION REPLACES IT', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+
+  const firstUrls: string[] = []
+  const first = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => firstUrls.push(seen),
+  })
+  await waitFor(() => firstUrls.length > 0)
+  expect((await fetch(callbackFor(firstUrls[0]!))).status).toBe(200)
+  expect((await first).status).toBe('connected')
+  const oldClient = calls.setMcpClients.at(-1)![0]!
+  expect(oldClient.type).toBe('connected')
+  if (oldClient.type !== 'connected') throw new Error('expected a connected client')
+
+  // The completed tool call: ensureConnectedClient joins the cached
+  // connect, which marks the reuse as a permanent adoption — the same
+  // marker a real tool call leaves.
+  await realClient.ensureConnectedClient(oldClient)
+  await waitFor(
+    () => realClient.getMcpClientAdoptionClaimCountForTesting(oldClient) === 1,
+  )
+  expect(realClient.isMcpClientAdopted(oldClient)).toBe(true)
+
+  // Count the old transport's close: the reconnect detaches it (adopted),
+  // so only the record replacement may close it.
+  const realCleanup = oldClient.cleanup
+  let cleanedUp = 0
+  oldClient.cleanup = async (...args: Parameters<typeof realCleanup>) => {
+    cleanedUp++
+    return realCleanup(...args)
+  }
+  try {
+    const secondUrls: string[] = []
+    const second = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => secondUrls.push(seen),
+    })
+    await waitFor(() => secondUrls.length > 0)
+    expect((await fetch(callbackFor(secondUrls[0]!))).status).toBe(200)
+    const status = await second
+    expect(status.status).toBe('connected')
+    const newClient = calls.setMcpClients.at(-1)![0]!
+    expect(newClient).not.toBe(oldClient)
+    expect(newClient.type).toBe('connected')
+    // The replaced transport is closed, not left open with no owner.
+    expect(cleanedUp).toBe(1)
+    // And the new client is the cached one: a later connection reuses it.
+    const config = { type: 'http', url, scope: 'session' } as never
+    expect(await realClient.connectToServer('gated', config)).toBe(newClient)
+  } finally {
+    oldClient.cleanup = realCleanup
+    await oldClient.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * Discovery entries belong to the transport generation that wrote them:
+ * a replacement must not read tools the old transport cached under the
+ * shared name+config key — the old transport's tools/list could be stale
+ * or fetched with revoked credentials (CodeRabbit #2493 review 5957362782).
+ */
+test('A REPLACEMENT TRANSPORT DOES NOT READ THE OLD TRANSPORT\'S DISCOVERY CACHE', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  const oldClient = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(oldClient.type).toBe('connected')
+  if (oldClient.type !== 'connected') throw new Error('expected a connected client')
+  try {
+    // The old transport's discovery is populated.
+    expect(
+      (await realClient.fetchToolsForClient(oldClient)).map(
+        tool => tool.mcpInfo?.toolName ?? tool.name,
+      ),
+    ).toEqual(['hello'])
+    const toolsListAfterOld = toolsListAuth.length
+    expect(toolsListAfterOld).toBeGreaterThan(0)
+    // The entry is superseded by a newer generation: evict without
+    // cleanup, then connect the replacement.
+    realClient.connectToServer.cache.delete(key)
+    const newClient = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+    expect(newClient.type).toBe('connected')
+    expect(newClient).not.toBe(oldClient)
+    // The replacement fetches its own tools/list instead of reading the
+    // old generation's entry.
+    expect(
+      (await realClient.fetchToolsForClient(newClient)).map(
+        tool => tool.mcpInfo?.toolName ?? tool.name,
+      ),
+    ).toEqual(['hello'])
+    expect(toolsListAuth.length).toBeGreaterThan(toolsListAfterOld)
+    if (newClient.type === 'connected') await newClient.cleanup().catch(() => {})
+  } finally {
+    await oldClient.cleanup().catch(() => {})
   }
 }, 30_000)
 
