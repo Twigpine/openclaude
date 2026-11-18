@@ -901,19 +901,22 @@ const connectTransportClosers = new Map<
 >()
 
 /**
- * Whether another caller is still awaiting the connect this promise
- * belongs to. Tracked by the originating promise, not the current cache
+ * Whether no caller is still awaiting the connect this promise belongs
+ * to. Tracked by the originating promise, not the current cache
  * entry: a cache clear removes the mapping but not the waiter, and
  * cancelling the creator must not close a transport another waiter
- * still needs. A promise not yet handed to a waiter has none.
+ * still needs. The creator leaves the count when it cancels, so a count
+ * of one after that is a live joiner, not the creator alone — only an
+ * absent entry (the wrapper deletes it when the last waiter leaves)
+ * means nobody remains. A promise the wrapper has not supplied yet (the
+ * synchronous stdio path) has no waiters by construction: no other code
+ * can have joined before the body yields.
  */
-function hasOtherConnectWaiters(
+function hasNoConnectWaiters(
   promise: Promise<MCPServerConnection> | undefined,
 ): boolean {
-  if (!promise) return false
-  const entry = connectWaiters.get(promise)
-  if (!entry) return false
-  return entry.count > 1
+  if (!promise) return true
+  return connectWaiters.get(promise) === undefined
 }
 
 /**
@@ -983,8 +986,11 @@ const connectToServerMemoized = memoize(
           // the transport while other waiters remain: they would keep
           // the failed result and skip MCP setup on later turns. Only
           // the last waiter closes it — the creator still cancels, once
-          // the shared connect settles and the attempt check runs.
-          if (!hasOtherConnectWaiters(generation?.promise)) {
+          // the shared connect settles and the attempt check runs. The
+          // creator leaves the count when it cancels, so "no waiter
+          // remains" is an absent entry, not a count of one: after the
+          // creator leaves, one is the live joiner alone.
+          if (hasNoConnectWaiters(generation?.promise)) {
             transport?.close().catch(() => {})
           }
         }
@@ -1485,10 +1491,12 @@ const connectToServerMemoized = memoize(
       // synchronous stdio path and no closer would be registered.
       // An abort that landed before the transport existed still cancels
       // the connect: the listener above could not close what did not exist.
-      // Shared like the listener: another waiter keeps the transport.
+      // Shared like the listener: another waiter keeps the transport. The
+      // creator leaves the count when it cancels, so a count of one here
+      // is a live joiner — only an absent entry means nobody remains.
       if (
         signal?.aborted &&
-        !hasOtherConnectWaiters(generation?.promise)
+        hasNoConnectWaiters(generation?.promise)
       ) {
         transport.close().catch(() => {})
       }
