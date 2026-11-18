@@ -98,8 +98,11 @@ import {
 } from '../permissions/PermissionUpdate.js'
 import type { PermissionUpdate } from '../permissions/PermissionUpdateSchema.js'
 import {
+  checkWriteBoundaryForAskRule,
+  enforceForcedAllowWriteBoundary,
   hasPermissionsToUseTool,
   revalidatePlanModePermissionAllowWithRaceGuard,
+  resolvePermissionPromptSuppression,
 } from '../permissions/permissions.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { sleep } from '../sleep.js'
@@ -198,7 +201,7 @@ export function createInProcessCanUseTool(
       toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
     const result =
       forceDecision !== undefined && !shouldBypassForcedAsk
-        ? forceDecision
+        ? enforceForcedAllowWriteBoundary(tool, input, toolUseContext, forceDecision)
         : await hasPermissionsToUseTool(
         tool,
         input,
@@ -209,7 +212,9 @@ export function createInProcessCanUseTool(
 
     // Pass through allow/deny decisions directly
     if (result.behavior !== 'ask') {
-      return result
+      return resolvePermissionPromptSuppression(
+        tool, input, toolUseContext, toolUseID, result,
+      )
     }
 
     // For bash commands, try classifier auto-approval before showing leader dialog.
@@ -240,6 +245,15 @@ export function createInProcessCanUseTool(
         }
       }
     }
+
+    const decision = await resolvePermissionPromptSuppression(
+      tool,
+      input,
+      toolUseContext,
+      toolUseID,
+      result,
+    )
+    if (decision.behavior !== 'ask') return decision
 
     // Check if aborted before showing UI
     if (abortController.signal.aborted) {
@@ -322,29 +336,31 @@ export function createInProcessCanUseTool(
                 resolve(approval.decision)
                 return
               }
+              const liveContext =
+                toolUseContext.getAppState().toolPermissionContext
               const updatesToApply = filterPermissionRequestHookUpdates(
                 approval.permissionUpdates,
-                toolUseContext.getAppState().toolPermissionContext.mode ===
-                  'plan',
+                liveContext.mode === 'plan',
               )
+              const updatedContext = applyPermissionUpdates(
+                liveContext,
+                updatesToApply,
+              )
+              const setToolPermissionContext = getLeaderSetToolPermissionContext()
+              const boundary =
+                checkWriteBoundaryForAskRule(tool, updatedInput, updatedContext) ??
+                (!setToolPermissionContext
+                  ? checkWriteBoundaryForAskRule(tool, updatedInput, liveContext)
+                  : null)
+              if (boundary) {
+                resolve(boundary)
+                return
+              }
               persistPermissionUpdates(updatesToApply)
               // Write back permission updates to the leader's shared context
-              if (updatesToApply.length > 0) {
-                const setToolPermissionContext =
-                  getLeaderSetToolPermissionContext()
-                if (setToolPermissionContext) {
-                  const currentAppState = toolUseContext.getAppState()
-                  const updatedContext = applyPermissionUpdates(
-                    currentAppState.toolPermissionContext,
-                    updatesToApply,
-                  )
-                  // Preserve the leader's mode to prevent workers'
-                  // transformed 'acceptEdits' context from leaking back
-                  // to the coordinator
-                  setToolPermissionContext(updatedContext, {
-                    preserveMode: true,
-                  })
-                }
+              if (updatesToApply.length > 0 && setToolPermissionContext) {
+                // Keep the leader's mode when publishing worker updates.
+                setToolPermissionContext(updatedContext, { preserveMode: true })
               }
               const trimmedFeedback = feedback?.trim()
               resolve({
@@ -451,13 +467,25 @@ export function createInProcessCanUseTool(
             resolve(approval.decision)
             return
           }
-          persistPermissionUpdates(
-            filterPermissionRequestHookUpdates(
-              approval.permissionUpdates,
-              toolUseContext.getAppState().toolPermissionContext.mode ===
-                'plan',
-            ),
+          const liveContext =
+            toolUseContext.getAppState().toolPermissionContext
+          const updatesToApply = filterPermissionRequestHookUpdates(
+            approval.permissionUpdates,
+            liveContext.mode === 'plan',
           )
+          // The mailbox persists updates without publishing live directories.
+          const boundary =
+            checkWriteBoundaryForAskRule(tool, finalInput, liveContext) ??
+            checkWriteBoundaryForAskRule(
+              tool,
+              finalInput,
+              applyPermissionUpdates(liveContext, updatesToApply),
+            )
+          if (boundary) {
+            resolve(boundary)
+            return
+          }
+          persistPermissionUpdates(updatesToApply)
           resolve({
             behavior: 'allow',
             updatedInput: finalInput,

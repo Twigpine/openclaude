@@ -35,11 +35,16 @@ import type {
   PermissionDecisionReason,
 } from 'src/utils/permissions/PermissionResult.js'
 import {
+  checkWriteBoundaryForAskRule,
   checkPlanModePermissions,
   checkRuleBasedPermissions,
+  DENY_INSTEAD_OF_PROMPTING_REASON,
+  getSuppressedPermissionAsk,
   hasPermissionsToUseTool,
-  revalidatePlanModePermissionAllowWithRaceGuard,
+  enforceForcedAllowWriteBoundary,
+  revalidatePermissionRequestAllow,
   samePermissionAskConstraint,
+  suppressPromptIfConfigured,
 } from 'src/utils/permissions/permissions.js'
 import { writeToStdout } from 'src/utils/process.js'
 import { jsonStringify } from 'src/utils/slowOperations.js'
@@ -51,9 +56,7 @@ import { executePermissionRequestHooks } from '../utils/hooks.js'
 import { clearMTLSCache } from '../utils/mtls.js'
 import {
   filterPermissionRequestHookUpdates,
-  persistPermissionUpdates,
 } from '../utils/permissions/PermissionUpdate.js'
-import { applyPermissionUpdatesToLiveContext } from '../utils/permissions/permissionSetup.js'
 import {
   AGENT_CONFIG_ENV_VARS,
   clearProxyCache,
@@ -575,7 +578,12 @@ export class StructuredIO {
         toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
       const mainPermissionResult =
         forceDecision !== undefined && !shouldBypassForcedAsk
-          ? forceDecision
+          ? enforceForcedAllowWriteBoundary(
+            tool,
+            input,
+            toolUseContext,
+            forceDecision,
+          )
           : await hasPermissionsToUseTool(
           tool,
           input,
@@ -583,13 +591,36 @@ export class StructuredIO {
           assistantMessage,
           toolUseID,
         )
+      // A forced ask bypasses hasPermissionsToUseTool, so the suppression
+      // check has to run here: prompts disabled means this never reaches
+      // the SDK prompt.
+      const suppressedResult =
+        mainPermissionResult.behavior === 'ask'
+          ? suppressPromptIfConfigured(tool, mainPermissionResult)
+          : mainPermissionResult
+      // A suppression denial exists only because prompts are disabled. A
+      // PermissionRequest hook may still answer it (the headless path
+      // already runs hooks before suppressing), so let it through to the
+      // hook pass instead of returning immediately.
+      const isSuppressionDeny =
+        suppressedResult.behavior === 'deny' &&
+        suppressedResult.decisionReason?.type === 'other' &&
+        suppressedResult.decisionReason.reason ===
+          DENY_INSTEAD_OF_PROMPTING_REASON
       // If the tool is allowed or denied, return the result
       if (
-        mainPermissionResult.behavior === 'allow' ||
-        mainPermissionResult.behavior === 'deny'
+        suppressedResult.behavior === 'allow' ||
+        (suppressedResult.behavior === 'deny' && !isSuppressionDeny)
       ) {
-        return mainPermissionResult
+        return suppressedResult
       }
+      const suppressedAsk = getSuppressedPermissionAsk(suppressedResult)
+      const suggestions = suppressedAsk?.suggestions ??
+        ('suggestions' in suppressedResult ? suppressedResult.suggestions : undefined)
+      const blockedPath =
+        'blockedPath' in suppressedResult
+          ? suppressedResult.blockedPath
+          : undefined
 
       // Run PermissionRequest hooks in parallel with the SDK permission
       // prompt.  In the terminal CLI, hooks race against the interactive
@@ -610,10 +641,17 @@ export class StructuredIO {
         const hookPromise = executePermissionRequestHooksForSDK(
           tool,
           toolUseID,
-          input,
+          suppressedAsk?.updatedInput ?? input,
           toolUseContext,
-          mainPermissionResult.suggestions,
+          suggestions,
         ).then(decision => ({ source: 'hook' as const, decision }))
+
+        if (isSuppressionDeny) {
+          // Prompts are disabled, so hooks are the only responder left.
+          // If no hook decides, the suppression denial stands.
+          const hookResult = await hookPromise
+          return hookResult.decision ?? suppressedResult
+        }
 
         // Start the SDK permission prompt immediately (don't wait for hooks)
         const requestId = randomUUID()
@@ -625,10 +663,10 @@ export class StructuredIO {
             subtype: 'can_use_tool',
             tool_name: tool.name,
             input,
-            permission_suggestions: mainPermissionResult.suggestions,
-            blocked_path: mainPermissionResult.blockedPath,
+            permission_suggestions: suggestions,
+            blocked_path: blockedPath,
             decision_reason: serializeDecisionReason(
-              mainPermissionResult.decisionReason,
+              suppressedResult.decisionReason,
             ),
             tool_use_id: toolUseID,
             agent_id: toolUseContext.agentId,
@@ -817,7 +855,7 @@ function exitWithMessage(message: string): never {
  * Execute PermissionRequest hooks and return a decision if one is made.
  * Returns undefined if no hook made a decision.
  */
-async function executePermissionRequestHooksForSDK(
+export async function executePermissionRequestHooksForSDK(
   tool: Tool,
   toolUseID: string,
   input: Record<string, unknown>,
@@ -854,6 +892,16 @@ async function executePermissionRequestHooksForSDK(
       const decision = hookResult.permissionRequestResult
       if (decision.behavior === 'allow') {
         const finalInput = decision.updatedInput || input
+        // A hook approval may rewrite the input, but cannot grant itself a
+        // working directory for the write it is approving.
+        const writeBoundary = checkWriteBoundaryForAskRule(
+          tool,
+          finalInput,
+          toolUseContext.getAppState().toolPermissionContext,
+        )
+        if (writeBoundary) {
+          return writeBoundary
+        }
         const finalPlanMode =
           enforcePlanMode ||
           toolUseContext.getAppState().toolPermissionContext.mode === 'plan'
@@ -879,7 +927,7 @@ async function executePermissionRequestHooksForSDK(
             finalRuleDecision,
           )
         ) {
-          return finalRuleDecision
+          return suppressPromptIfConfigured(tool, finalRuleDecision)
         }
 
         // Apply permission updates if provided by hook ("always allow")
@@ -888,33 +936,16 @@ async function executePermissionRequestHooksForSDK(
           enforcePlanMode ||
             toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
         )
-        if (permissionUpdates.length > 0) {
-          let updatedContext = toolUseContext.getAppState().toolPermissionContext
-          // Update permission context via setAppState
-          toolUseContext.setAppState(prev => {
-            updatedContext = applyPermissionUpdatesToLiveContext(
-              prev.toolPermissionContext,
-              permissionUpdates,
-            )
-            if (prev.toolPermissionContext === updatedContext) return prev
-            return { ...prev, toolPermissionContext: updatedContext }
-          })
-          persistPermissionUpdates(permissionUpdates)
-        }
-
-        const postUpdatePlanModeDecision =
-          await revalidatePlanModePermissionAllowWithRaceGuard(
-            tool,
-            input,
-            finalInput,
-            toolUseContext,
-            enforcePlanMode ||
-              toolUseContext.getAppState().toolPermissionContext.mode ===
-                'plan',
-          )
-        if (postUpdatePlanModeDecision) {
-          return postUpdatePlanModeDecision
-        }
+        const revalidation = await revalidatePermissionRequestAllow(
+          tool,
+          input,
+          finalInput,
+          toolUseContext,
+          enforcePlanMode ||
+            toolUseContext.getAppState().toolPermissionContext.mode === 'plan',
+          permissionUpdates,
+        )
+        if (revalidation) return revalidation
 
         return {
           behavior: 'allow',

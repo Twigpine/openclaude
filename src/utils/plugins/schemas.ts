@@ -348,6 +348,12 @@ const PluginManifestMetadataSchema = lazySchema(() =>
       .describe(
         'Plugins that must be enabled for this plugin to function. Bare names (no "@marketplace") are resolved against the declaring plugin\'s own marketplace.',
       ),
+    engines: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        'Host version requirements as semver ranges, e.g. { "claude-code": ">=2.1.0" }. Unknown engine names are ignored.',
+      ),
   }),
 )
 
