@@ -2,7 +2,7 @@ import { existsSync } from 'fs'
 import { rm } from 'fs/promises'
 import { basename, dirname, join } from 'path'
 import { logError } from './log.js'
-import { forgetDeletedSession, restoreSessionWrites } from './sessionStorage.js'
+import { forgetDeletedSession, finishDeletedSession, restoreSessionWrites } from './sessionStorage.js'
 import { validateUuid } from './uuid.js'
 
 export type DeleteSessionResult =
@@ -50,6 +50,7 @@ export async function deleteSessionFiles({
     // Nothing was removed (a pending write failed while settling): undo the
     // mark so the still-present transcript keeps receiving writes.
     restoreSessionWrites(transcriptPath)
+    finishDeletedSession(transcriptPath)
     throw error
   }
 
@@ -73,10 +74,13 @@ export async function deleteSessionFiles({
     // The transcript survived (e.g. EBUSY on Windows): stop dropping writes
     // to it, or disk and this process disagree until restart.
     restoreSessionWrites(transcriptPath)
+    finishDeletedSession(transcriptPath)
     throw failures[0]
   }
   // The transcript is gone, so the conversation is deleted; a sidecar that
-  // could not be removed is only an orphan, like any missing one.
+  // could not be removed is only an orphan, like any missing one. Drop the
+  // metadata snapshot forgetDeletedSession kept for the failure path.
+  finishDeletedSession(transcriptPath)
   for (const failure of failures) logError(failure)
   return {
     ok: true,
