@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -17,7 +18,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import * as lockfile from '../utils/lockfile.js'
 import * as backgroundSessionRegistry from './bgRegistry.js'
 import {
@@ -3716,6 +3717,29 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
   }, 15_000)
 })
 
+// Whether the temp filesystem folds filename case. The case-variant
+// fixtures that need two distinct directory entries (a canonical file
+// and a separate alias spelling) cannot exist on a case-insensitive
+// registry, so they are skipped there; the single-entry layout is
+// covered by a test that branches on the same probe at run time
+// (CodeRabbit #2497 review 5957376769). Probed once in the temp
+// directory, where the per-test registries live too.
+const CASE_INSENSITIVE_FS = ((): boolean => {
+  const probeDir = mkdtempSync(join(tmpdir(), 'openclaude-case-probe-'))
+  try {
+    const probe = join(probeDir, 'probe.json')
+    writeFileSync(probe, '{}')
+    try {
+      statSync(join(probeDir, 'PROBE.json'))
+      return true
+    } catch {
+      return false
+    }
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true })
+  }
+})()
+
 describe('background session wait strict reads', () => {
   let configDir: string
 
@@ -4050,17 +4074,17 @@ describe('background session wait strict reads', () => {
   })
 
   it('retains a verified case-variant alias as the only candidate for its name', async () => {
-    // Regression test for CodeRabbit #2497 review 5956497652: on a
+    // Regression test for CodeRabbit #2497 review 5956497652, kept as
+    // the TWO-ENTRY deduplication test (CodeRabbit #2497 review
+    // 5957376769): on a case-sensitive filesystem the symlink makes
+    // both spellings list the same file, so resolving the live name
+    // once proves the deduplication — without it the same file would
+    // appear twice and the name would report ambiguous. On a
     // case-insensitive registry the canonical row may be enumerated
-    // only under its case variant, so a verified alias must be
+    // only under its case variant, so a verified alias must still be
     // retained as a candidate instead of skipped — otherwise the live
     // named session loses to the unrelated bg-job2 prefix match. The
-    // symlink reproduces the aliasing on a case-sensitive filesystem;
-    // both spellings are listed there, so resolving the live name once
-    // also proves the deduplication: without it the same file would
-    // appear twice and the name would report ambiguous. The
-    // only-one-spelling-listed case itself needs a case-insensitive
-    // filesystem and is covered by the same code path.
+    // only-one-spelling-listed layout is covered by the next test.
     const child = spawn(
       process.execPath,
       ['-e', 'setTimeout(() => {}, 60000)', 'sess-bg-other'],
@@ -4092,6 +4116,185 @@ describe('background session wait strict reads', () => {
       child.kill()
     }
   })
+
+  it('resolves by name when only the case-variant spelling is listed', async () => {
+    // Regression test for CodeRabbit #2497 review 5957376769: the
+    // two-entry fixture above proves deduplication, but on a
+    // case-sensitive filesystem both spellings are listed there, so it
+    // cannot prove the resolver handles the layout where the canonical
+    // row is enumerated ONLY under its case variant. Rename the row
+    // through an intermediate filename to BG-other.json — a direct
+    // rename to the case variant is a no-op on a case-insensitive
+    // filesystem — and assert only that spelling is listed before
+    // resolving bg-job. On a case-insensitive registry the alias
+    // spelling opens the canonical file, so the name resolves; on a
+    // case-sensitive registry the canonical file is genuinely gone, so
+    // the row is a stray document and the lookup fails closed instead
+    // of silently pinning the unrelated prefix candidate.
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)', 'sess-bg-other'],
+      { stdio: 'ignore' },
+    )
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    try {
+      await createBackgroundSession({
+        id: 'bg-other',
+        name: 'bg-job',
+        pid: child.pid,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-bg-other',
+      })
+      await createBackgroundSession({
+        id: 'bg-job2',
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-job2',
+      })
+      const sessionsDir = dirname(metadataPath('bg-other'))
+      const intermediate = join(sessionsDir, 'bg-other.tmp')
+      await rename(metadataPath('bg-other'), intermediate)
+      await rename(intermediate, metadataPath('BG-other'))
+      const listed = (await readdir(sessionsDir)).filter(f =>
+        f.endsWith('.json'),
+      )
+      expect(listed).toContain('BG-other.json')
+      expect(listed).not.toContain('bg-other.json')
+      let caseInsensitive = false
+      try {
+        await stat(metadataPath('bg-other'))
+        caseInsensitive = true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          throw error
+        }
+      }
+      if (caseInsensitive) {
+        const resolved = await resolveBackgroundSessionForWait('bg-job')
+        expect(resolved.id).toBe('bg-other')
+        expect(resolved.name).toBe('bg-job')
+      } else {
+        expect(
+          await waitErrorCode(() => resolveBackgroundSessionForWait('bg-job')),
+        ).toBe('metadata_malformed')
+      }
+    } finally {
+      child.kill()
+    }
+  })
+
+  // Builds the two-file alias fixture for the identity-retry tests:
+  // bg-other.json and BG-other.json hold sessions for id bg-other, but
+  // are different files (different inodes), so the alias read and the
+  // canonical read disagree until the BG-other.json entry is repointed
+  // at the canonical file. The alias spelling holds a large stored
+  // command while the canonical file holds a small one: whichever entry
+  // the directory lists first, the alias read's stat lands within
+  // ~1 ms (a small preceding read at most), and parsing the
+  // multi-megabyte alias document then keeps that read in flight for
+  // milliseconds — so a timer-scheduled repoint lands after the alias
+  // read's stat but before the retry's re-read. (Making both files
+  // large backfires: when the canonical file lists first, its parse
+  // delays the alias read's stat past the repoint.) Liveness still
+  // matches on the sessionId token, not the stored command.
+  // Case-sensitive filesystems only (CodeRabbit #2497 review
+  // 5957376769).
+  async function createSplitAliasFixture(): Promise<{
+    child: ReturnType<typeof spawn>
+  }> {
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)', 'sess-bg-other'],
+      { stdio: 'ignore' },
+    )
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    const padding = Array.from({ length: 20000 }, () => 'x'.repeat(100))
+    await createBackgroundSession({
+      id: 'bg-other',
+      name: 'bg-job',
+      pid: child.pid,
+      cwd: '/repo',
+      command: ['sleep', '30', ...padding],
+      sessionId: 'sess-bg-other',
+    })
+    await createBackgroundSession({
+      id: 'bg-job2',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-job2',
+    })
+    // Hard-link the alias spelling to the created (large) row, then
+    // replace the canonical path with a small session for the same
+    // id/name/pid under a new inode.
+    await link(metadataPath('bg-other'), metadataPath('BG-other'))
+    const large = JSON.parse(
+      await readFile(metadataPath('bg-other'), 'utf8'),
+    ) as Record<string, unknown>
+    const small = { ...large, command: ['sleep', '30'] }
+    const tmp = join(dirname(metadataPath('bg-other')), 'bg-other.tmp')
+    await writeFile(tmp, JSON.stringify(small))
+    await rename(tmp, metadataPath('bg-other'))
+    return { child }
+  }
+
+  it.skipIf(CASE_INSENSITIVE_FS)(
+    'still fails closed when a verified alias read and its canonical read open different files',
+    async () => {
+      // Regression test for CodeRabbit #2497 review 5957376769: the
+      // identity-mismatch retry must not accept a row whose alias and
+      // canonical reads stably open different files — re-reading the
+      // enumerated path returns the same distinct identity, so the
+      // lookup still fails with metadata_malformed instead of pinning
+      // the row or the unrelated prefix candidate.
+      const { child } = await createSplitAliasFixture()
+      try {
+        expect(
+          await waitErrorCode(() => resolveBackgroundSessionForWait('bg-job')),
+        ).toBe('metadata_malformed')
+      } finally {
+        child.kill()
+      }
+    },
+  )
+
+  it.skipIf(CASE_INSENSITIVE_FS)(
+    'retries the alias check when the enumerated file is replaced between reads',
+    async () => {
+      // Regression test for CodeRabbit #2497 review 5957376769: when
+      // replaceSessionFile renames a valid update into place between
+      // the alias read and the canonical read, the two reads disagree
+      // — the resolver must re-read the enumerated path and accept the
+      // row once the fresh read agrees with the canonical identity,
+      // instead of failing with metadata_malformed. The repoint is
+      // scheduled with a short timer so it lands after the alias
+      // read's stat (the large document keeps that read in flight
+      // for milliseconds) but before the retry's re-read.
+      const { child } = await createSplitAliasFixture()
+      try {
+        // Repoint the alias spelling at the canonical file: a prepared
+        // hard link to bg-other.json renamed into place atomically.
+        const sessionsDir = dirname(metadataPath('bg-other'))
+        const repoint = join(sessionsDir, 'BG-other.tmp')
+        await link(metadataPath('bg-other'), repoint)
+        const resolving = resolveBackgroundSessionForWait('bg-job')
+        let repointError: unknown
+        setTimeout(() => {
+          rename(repoint, metadataPath('BG-other')).catch(error => {
+            repointError = error
+          })
+        }, 2)
+        const resolved = await resolving
+        if (repointError !== undefined) throw repointError
+        expect(resolved.id).toBe('bg-other')
+        expect(resolved.name).toBe('bg-job')
+      } finally {
+        child.kill()
+      }
+    },
+  )
 
   it('prefers a live ID-prefix match over a dead exact-name row', async () => {
     // Regression test for maintainer review 5948202472 (P2) on #2497:

@@ -21,6 +21,17 @@ import { getProcessCommandAsync } from '../utils/genericProcessUtils.js'
 // result is exposed in human output and in the version-1 JSON object.
 
 export const WAIT_POLL_INTERVAL_MS = 500
+// How long an unsignalled timeout waits for its rendered result to
+// leave a back-pressured stdout before returning anyway: the timeout
+// outcome's JSON line is the waiter's one mandatory output object, so
+// it gets a longer bound than the one poll interval other paths use.
+// A client signal arriving during the flush caps the remaining wait at
+// one poll interval instead (see the finally below), and a failed write
+// settles at once, so a consumer that never drains still cannot stall
+// the waiter indefinitely. The longer bound (rather than unbounded) is
+// the mechanism chosen for this tradeoff; the choice itself is a
+// maintainer decision (CodeRabbit #2497 review 5957376769).
+export const TIMEOUT_FLUSH_BOUND_MS = 10 * WAIT_POLL_INTERVAL_MS
 export const WAIT_MAX_TIMEOUT_MS = 2_147_483_647
 
 export const WAIT_HELP_TEXT = `Usage: openclaude wait <id-or-name> [--timeout <duration>] [--json]
@@ -682,12 +693,19 @@ export async function waitHandler(
   // so a forced 124/130/143 exit in the CLI fast path cannot discard a
   // line still queued in a back-pressured stdout pipe.
   let pendingFlush: Promise<void> | null = null
+  // The result finish() rendered, if any: the finally below gives an
+  // unsignalled timeout a longer flush bound than other outcomes.
+  // Boxed in an object (not a plain `let`): a closure-assigned `let`
+  // narrows to `never` under control-flow analysis at the finally
+  // below, while a property read keeps its declared type.
+  const finishedState: { result: WaitResult | null } = { result: null }
 
   const finishEarly = (
     result: WaitResult,
     json: boolean,
     humanMessage?: string,
   ): number => {
+    finishedState.result = result
     pendingFlush = renderWaitResult(result, json, stdout, stderr, humanMessage)
     const code = waitExitCode(result)
     process.exitCode = code
@@ -728,15 +746,15 @@ export async function waitHandler(
   // Track the in-flight process lookup so every cancellation path can
   // await the inspector child's settlement before the waiter returns
   // (maintainer review 5948202472 on #2497). The lookup promise is the
-  // settlement signal: the production lookup resolves when its exec
-  // wrapper settles, which on an abort can precede the child's close
-  // — the wrapper resolves on the spawn 'error' event, and a child
-  // that traps SIGTERM may still be alive then — so this await bounds
-  // the wait by one poll interval rather than proving the child has
-  // exited (CodeRabbit #2497 review 5952674466). Defined before
-  // selector resolution so the exact-name liveness gate's lookups are
-  // tracked too — a deadline or signal during resolution must not
-  // return while that inspector child is still alive either.
+  // settlement signal: the production lookup waits for the inspector
+  // child's close before settling on abort (getProcessCommandAsync
+  // passes awaitCloseOnAbort), so settlement proves the child has
+  // exited; the await below still bounds the wait by one poll interval
+  // for a child that never closes (CodeRabbit #2497 review 5957376769).
+  // Defined before selector resolution so the exact-name liveness
+  // gate's lookups are tracked too — a deadline or signal during
+  // resolution must not return while that inspector child is still
+  // alive either.
   let pendingLookup: Promise<string | null> | null = null
   let lookupSettled = true
   const trackedGetProcessCommandAsync = async (
@@ -1086,11 +1104,17 @@ export async function waitHandler(
     // 143 right after this handler resolves, which would discard it.
     // A client signal does not abandon this wait: with --json the
     // rendered line is the waiter's one mandatory JSON object, and
-    // exiting before it is written would break that contract. The wait
-    // is still bounded by one production poll interval, so a consumer
-    // that never drains cannot block the waiter indefinitely — a
-    // signal during the flush therefore delays the return by at most
-    // that (CodeRabbit #2497 review 5952674466). The bound uses the
+    // exiting before it is written would break that contract. An
+    // unsignalled timeout gets the longer TIMEOUT_FLUSH_BOUND_MS so a
+    // slow-but-live consumer still receives that one mandatory object;
+    // a failed write settles at once, so the longer bound only waits
+    // out a queued write. Every other path keeps the one-production-
+    // poll-interval bound, and a client signal arriving during an
+    // unsignalled-timeout flush caps the remaining wait at one poll
+    // interval from the signal — so a consumer that never drains
+    // cannot block the waiter indefinitely, and a signal during the
+    // flush still delays the return by at most that (CodeRabbit #2497
+    // reviews 5952674466 and 5957376769). The bounds use the
     // production poll interval, not the caller's pollIntervalMs: the
     // latter is a lookup-polling knob that tests accelerate to 10 ms,
     // far shorter than a back-pressured drain or a slow write
@@ -1098,19 +1122,57 @@ export async function waitHandler(
     // drain. The rendered result keeps the exit code finish() already
     // set.
     if (pendingFlush !== null) {
+      const finished = finishedState.result
+      const unsignalledTimeout =
+        finished !== null &&
+        finished.waitResult === 'timeout' &&
+        clientSignal === null
+      const flushBoundMs = unsignalledTimeout
+        ? TIMEOUT_FLUSH_BOUND_MS
+        : WAIT_POLL_INTERVAL_MS
       let flushTimer: ReturnType<typeof setTimeout> | undefined
+      let signalShortenTimer: ReturnType<typeof setTimeout> | undefined
+      let onClientAbort: (() => void) | undefined
       try {
-        await Promise.race([
+        const flushRacers: Array<Promise<void>> = [
           pendingFlush,
           new Promise<void>(resolve => {
-            flushTimer = setTimeout(
-              () => resolve(),
-              WAIT_POLL_INTERVAL_MS,
-            )
+            flushTimer = setTimeout(() => resolve(), flushBoundMs)
           }),
-        ])
+        ]
+        if (unsignalledTimeout) {
+          // A signal during the flush shortens the remaining wait to
+          // one poll interval instead of abandoning the flush: the
+          // timeout result (124) is already selected, and the waiter
+          // must still return promptly on SIGINT/SIGTERM.
+          flushRacers.push(
+            new Promise<void>(resolve => {
+              onClientAbort = () => {
+                signalShortenTimer = setTimeout(
+                  () => resolve(),
+                  WAIT_POLL_INTERVAL_MS,
+                )
+              }
+              if (abortController.signal.aborted) onClientAbort()
+              else {
+                abortController.signal.addEventListener(
+                  'abort',
+                  onClientAbort,
+                  { once: true },
+                )
+              }
+            }),
+          )
+        }
+        await Promise.race(flushRacers)
       } finally {
         if (flushTimer !== undefined) clearTimeout(flushTimer)
+        if (signalShortenTimer !== undefined) {
+          clearTimeout(signalShortenTimer)
+        }
+        if (onClientAbort !== undefined) {
+          abortController.signal.removeEventListener('abort', onClientAbort)
+        }
       }
     }
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)

@@ -3665,8 +3665,17 @@ type StrictSessionRead =
   | { state: 'id_mismatch'; value: BackgroundSession; identity: FileIdentity }
 
 /** The (device, inode) identity of an opened registry file, used to tell
- * whether two spellings of a path opened the same file. */
-type FileIdentity = { dev: number; ino: number }
+ * whether two spellings of a path opened the same file. Kept as bigint:
+ * Node on Windows can expose 64-bit file IDs, and two distinct IDs above
+ * 2^53 round to the same JavaScript number — a collision that could drop
+ * a distinct candidate row or accept two separate files as one alias
+ * (CodeRabbit #2497 review 5957376769). The string key built from these
+ * values stays exact because bigint template interpolation never rounds. */
+type FileIdentity = { dev: bigint; ino: bigint }
+
+function sameFileIdentity(first: FileIdentity, second: FileIdentity): boolean {
+  return first.dev === second.dev && first.ino === second.ino
+}
 
 /**
  * Reads a `wait`-path registry file without ever blocking on a
@@ -3707,7 +3716,7 @@ async function readWaitRegistryFile(
       : { state: 'unreadable' }
   }
   try {
-    const fileStat = await handle.stat()
+    const fileStat = await handle.stat({ bigint: true })
     if (!fileStat.isFile()) return { state: 'unreadable' }
     return {
       state: 'ok',
@@ -3959,17 +3968,57 @@ export async function resolveBackgroundSessionForWait(
       // instead of discarding it — discarding it would let an
       // unrelated prefix match win over a live named session
       // (CodeRabbit #2497 review 5956497652).
-      if (
-        canonical.identity.dev !== read.identity.dev ||
-        canonical.identity.ino !== read.identity.ino
+      //
+      // The two reads can disagree without the row being stray:
+      // replaceSessionFile can rename a valid update into place
+      // between them, so the alias read returns the old inode and
+      // the canonical read the new one. Re-read the enumerated path
+      // and retry the comparison while its identity keeps changing;
+      // a stable mismatch is still a genuinely different file and
+      // fails the lookup. The retry is bounded so a file replaced
+      // on every read cannot spin the resolver (CodeRabbit #2497
+      // review 5957376769).
+      const MAX_ALIAS_IDENTITY_RETRIES = 2
+      let aliasRead = read
+      let aliasVerified = false
+      for (
+        let attempt = 0;
+        attempt <= MAX_ALIAS_IDENTITY_RETRIES;
+        attempt++
       ) {
+        if (sameFileIdentity(aliasRead.identity, canonical.identity)) {
+          aliasVerified = true
+          break
+        }
+        if (attempt === MAX_ALIAS_IDENTITY_RETRIES) break
+        const reread = await readSessionFileStrict(
+          metadataPathForId(id),
+          id,
+        )
+        if (
+          reread.state !== 'id_mismatch' ||
+          reread.value.id !== read.value.id
+        ) {
+          // The enumerated row changed shape while it was being
+          // verified (for example it was replaced by a row for
+          // another id): fail closed rather than guess which row
+          // it is now.
+          throwWaitMetadataError(
+            'malformed',
+            `Background session ${id} metadata`,
+            null,
+          )
+        }
+        aliasRead = reread
+      }
+      if (!aliasVerified) {
         throwWaitMetadataError(
           'malformed',
           `Background session ${id} metadata`,
           null,
         )
       }
-      addCandidateOnce(read.value, read.identity)
+      addCandidateOnce(aliasRead.value, aliasRead.identity)
       continue
     }
     if (read.state === 'unreadable' || read.state === 'malformed') {
