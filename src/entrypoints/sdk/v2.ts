@@ -1023,12 +1023,15 @@ class SDKSessionImpl implements SDKSession {
     // The attempt exists from here so its signal can make the scope's
     // mutex wait abortable; it is registered — and supersedes the
     // previous attempt — after initialization, below. The frozen
-    // environment also carries the session's `env` overrides: a call made
-    // before the first turn has no turn to lend them, so without the
-    // overlay the capture would freeze ambient env and the pre-turn
-    // setup would read sibling credentials and headers from the wrong
-    // namespace. Inside a turn the overrides are already applied, so
-    // overlaying them again changes nothing.
+    // environment also carries the session's `env` overrides — but only
+    // for a call made before the first turn, which has no turn to lend
+    // them: without the overlay the capture would freeze ambient env and
+    // the pre-turn setup would read sibling credentials and headers from
+    // the wrong namespace. Inside a turn the overrides are already
+    // applied by the turn itself, so no overlay is passed: the current
+    // options.env may have changed since the turn started, and overlaying
+    // it would let that change replace the namespace the turn wrote its
+    // registration under (CodeRabbit #2493 review 5956557301).
     const attempt = new AbortController()
     // Snapshot the session env once, for both scopes below: a host-supplied
     // env whose getter returns different values per read would otherwise
@@ -1036,8 +1039,11 @@ class SDKSessionImpl implements SDKSession {
     // credential homes. Each scope keeps its own signal/priority setting.
     // The value is read into a local first: reading `this.options.env`
     // in both the condition and the spread would invoke a host getter
-    // twice (CodeRabbit #2493 review 5955577457).
-    const sessionEnv = this.options.env
+    // twice (CodeRabbit #2493 review 5955577457). No overlay when a turn
+    // scope exists: the turn already applied the session env, and the
+    // current value may have changed since (CodeRabbit #2493 review
+    // 5956557301).
+    const sessionEnv = entryCredentialScope ? undefined : this.options.env
     const credentialEnv = sessionEnv ? { ...sessionEnv } : undefined
     const credentialScope = captureCredentialScope(
       () => entryCredentialScope ?? undefined,
@@ -1346,6 +1352,18 @@ class SDKSessionImpl implements SDKSession {
     name: string,
     result: Awaited<ReturnType<typeof reconnectMcpServerImpl>>,
   ): McpServerStatus {
+    // The status lists the tools the model actually sees: the pool
+    // assembly drops disallowed tools (and built-in name collisions),
+    // so the status is built from the server's tools in the assembled
+    // pool — this.mcpTools already holds the swap above — not the raw
+    // discovery list (CodeRabbit #2493 review 5956557301).
+    const installedTools =
+      result.client.type === 'connected'
+        ? assembleToolPool(
+            this.appStateStore.getState().toolPermissionContext,
+            this.mcpTools,
+          ).filter(tool => tool.mcpInfo?.serverName === name)
+        : []
     return {
       name,
       status: result.client.type,
@@ -1353,7 +1371,7 @@ class SDKSessionImpl implements SDKSession {
       error: result.client.type === 'failed' ? result.client.error : undefined,
       tools:
         result.client.type === 'connected'
-          ? result.tools.map(tool => ({
+          ? installedTools.map(tool => ({
               name: tool.mcpInfo?.toolName ?? tool.name,
               annotations: {
                 readOnly: tool.isReadOnly({}) || undefined,

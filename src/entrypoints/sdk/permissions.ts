@@ -589,7 +589,7 @@ export function captureCredentialScope(
      * `env` overrides, so the caller passes them here and the frozen
      * namespace is the session's established environment, not ambient.
      * A call inside a turn already runs with those overrides applied,
-     * so overlaying them again changes nothing.
+     * so the caller passes none.
      */
     env?: Record<string, string | undefined>
     /**

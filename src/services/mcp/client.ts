@@ -2446,11 +2446,17 @@ function clearFetchCaches(name: string, serverRef: ScopedMcpServerConfig): void 
  * @param signal Aborts the wait for a pending connect: a caller that is
  * cancelled while another connect is in flight does not wait it out.
  * Only the reconnect path passes one.
+ * @param options.keepAdoptedClient When true, a client another caller
+ * adopted from the shared connect is detached, not closed: closing it
+ * would fail that caller's in-flight calls. Only the reconnect path
+ * passes this — a caller replacing the connection, not ending it.
+ * Other callers (disable, session expiry) close the client outright.
  */
 export async function clearServerCache(
   name: string,
   serverRef: ScopedMcpServerConfig,
   signal?: AbortSignal,
+  options?: { keepAdoptedClient?: boolean },
 ): Promise<void> {
   const key = getServerCacheKey(name, serverRef)
 
@@ -2469,7 +2475,19 @@ export async function clearServerCache(
     const wrappedClient = await raceAbort(cached, signal)
 
     if (wrappedClient.type === 'connected') {
-      await wrappedClient.cleanup()
+      if (options?.keepAdoptedClient && isMcpClientAdopted(wrappedClient)) {
+        // Another caller adopted this client from the shared connect:
+        // detach the cache entry below without closing its transport,
+        // so the reconnect dials fresh while the adopter's in-flight
+        // calls finish on the client it holds. The declined release is
+        // recorded, so the withdrawing call re-runs it when the last
+        // claim goes; a received adoption stays until its owning
+        // session closes the client it installed (Copilot #2493 review
+        // 5955514041).
+        blockedUnownedReleases.add(wrappedClient)
+      } else {
+        await wrappedClient.cleanup()
+      }
     }
   } catch {
     // A cancelled wait is not a failed connect: the caller is gone, so
@@ -2482,9 +2500,19 @@ export async function clearServerCache(
   }
 
   // Clear from cache (both connection and fetch caches so reconnect
-  // fetches fresh tools/resources/commands instead of stale ones)
-  connectToServer.cache.delete(key)
-  clearFetchCaches(name, serverRef)
+  // fetches fresh tools/resources/commands instead of stale ones) —
+  // but only when this generation still owns the entry. A newer
+  // connect can replace the entry while cleanup runs: the close
+  // callback evicts the old one, and a concurrent connect stores its
+  // replacement in that gap. An unconditional delete would drop the
+  // replacement, leaving it connected with no cache entry, so a later
+  // clear never releases it — and its discovery caches with it
+  // (CodeRabbit #2493 review 5956557301).
+  const current = connectToServer.cache.get(key)
+  if (current === undefined || current === cached) {
+    connectToServer.cache.delete(key)
+    clearFetchCaches(name, serverRef)
+  }
 }
 
 /**
@@ -3169,7 +3197,11 @@ export async function reconnectMcpServerImpl(
     // use stale cached data and never notice the tokens were removed.
     clearKeychainCache()
 
-    await clearServerCache(name, config, signal)
+    // A reconnect replaces the connection, it does not end it: a client
+    // another session adopted from the shared connect keeps its
+    // transport while the reconnect dials fresh (Copilot #2493 review
+    // 5955514041).
+    await clearServerCache(name, config, signal, { keepAdoptedClient: true })
     const client = await connectToServer(name, config, undefined, signal)
     connected = client
 
