@@ -24,8 +24,12 @@ import {
 import { deleteSessionFiles } from './sessionDeletion.js'
 import * as sessionStorage from './sessionStorage.js'
 import {
+  finishDeletedSession,
   flushSessionStorage,
+  forgetDeletedSession,
   getProjectDir,
+  getSessionFileForTesting,
+  getTranscriptPath,
   getTranscriptPathForSession,
   recordGoalState,
   resetProjectForTesting,
@@ -103,6 +107,38 @@ async function writtenOtherSession(): Promise<string> {
   await flushSessionStorage()
   return transcript
 }
+
+test('a deletion marked while the existence check is in flight does not cache the deleted pointer', async () => {
+  // CodeRabbit on #2489: appendEntry checks the deletion mark, then awaits
+  // transcriptExists; a deletion marking the path during that await left
+  // the success branch caching a pointer to a deleted transcript, so later
+  // appends in that context skipped the buffer and were dropped by the
+  // write layer. Drive it step-by-step: start the append (it parks on the
+  // stat inside transcriptExists), mark the deletion synchronously, then
+  // let the existence check resolve.
+  switchSession(ACTIVE as never)
+  await resetSessionFilePointer()
+  const transcript = getTranscriptPath()
+  await mkdir(dirname(transcript), { recursive: true })
+  await writeFile(
+    transcript,
+    `${JSON.stringify({ type: 'user', sessionId: ACTIVE, message: { role: 'user', content: 'hi' } })}\n`,
+  )
+
+  // recordGoalState runs synchronously up to the awaited stat, so the
+  // forget below lands while the existence check is still in flight.
+  const appendPromise = recordGoalState(createGoalState('racing goal'), ACTIVE)
+  const forgetPromise = forgetDeletedSession(ACTIVE as never, transcript)
+  await appendPromise
+  await forgetPromise
+  finishDeletedSession(transcript)
+  await flushSessionStorage()
+
+  // The pointer must not be resurrected for a deleted transcript.
+  expect(getSessionFileForTesting()).toBeNull()
+  // The racing entry is dropped, not written through to the deleted file.
+  expect(await readFile(transcript, 'utf8')).not.toContain('racing goal')
+})
 
 test('late metadata writes do not resurrect a deleted session transcript', async () => {
   const transcript = await writtenOtherSession()
