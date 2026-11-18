@@ -1503,24 +1503,34 @@ describe('built Node CLI startup regressions', () => {
       expectedCode: number,
       timeoutMs = 15_000,
     ): Promise<{ stdout: string; stderr: string }> {
-      const outcome = await Promise.race([
-        proc.exited.then(code => ({ code, timedOut: false as const })),
-        new Promise<{ code: null; timedOut: true }>(resolve =>
-          setTimeout(() => resolve({ code: null, timedOut: true }), timeoutMs),
-        ),
-      ])
-      if (outcome.timedOut) {
-        proc.kill('SIGKILL')
-        await proc.exited
-        const output = await readChildOutput(proc)
-        throw new Error(
-          `waiter did not exit within ${timeoutMs}ms ` +
-            `(stdout: ${JSON.stringify(output.stdout)}, ` +
-            `stderr: ${JSON.stringify(output.stderr)})`,
-        )
+      // The watchdog timer is cleared in the finally, so it cannot leak
+      // past the test (maintainer review 5948202472 on #2497).
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const outcome = await Promise.race([
+          proc.exited.then(code => ({ code, timedOut: false as const })),
+          new Promise<{ code: null; timedOut: true }>(resolve => {
+            timer = setTimeout(
+              () => resolve({ code: null, timedOut: true }),
+              timeoutMs,
+            )
+          }),
+        ])
+        if (outcome.timedOut) {
+          proc.kill('SIGKILL')
+          await proc.exited
+          const output = await readChildOutput(proc)
+          throw new Error(
+            `waiter did not exit within ${timeoutMs}ms ` +
+              `(stdout: ${JSON.stringify(output.stdout)}, ` +
+              `stderr: ${JSON.stringify(output.stderr)})`,
+          )
+        }
+        expect(outcome.code).toBe(expectedCode)
+        return await readChildOutput(proc)
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
       }
-      expect(outcome.code).toBe(expectedCode)
-      return await readChildOutput(proc)
     }
 
     function expectObservationErrorJson(

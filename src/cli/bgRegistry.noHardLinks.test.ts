@@ -6,13 +6,15 @@ import { join } from 'node:path'
 /**
  * Regression tests for CodeRabbit #2497 (review 5825606005):
  * writeNewSession published new sessions with link(), which fails on
- * filesystems that reject hard links (EPERM/ENOSYS/EOPNOTSUPP), so
+ * filesystems that reject hard links (EPERM/ENOSYS/EOPNOTSUPP/ENOTSUP), so
  * `openclaude --bg` failed and terminated the child there. Session
  * creation must work without hard links while keeping atomic visibility
  * and duplicate-ID protection.
  *
  * The filesystem is simulated by making every link() call fail with
- * EPERM; the registry module is imported after the mock is registered so
+ * EPERM or ENOTSUP (one code per describe run, maintainer review
+ * 5948202472 on #2497 — Node on Linux surfaces a refused link() as
+ * either); the registry module is imported after the mock is registered so
  * it binds the mocked link.
  */
 
@@ -26,15 +28,24 @@ const realLink = realFsPromises.link
 const realFs = await import('node:fs')
 const realLinkSync = realFs.linkSync
 
+const linkErrorMessage = (code: 'EPERM' | 'ENOTSUP'): string =>
+  code === 'EPERM' ? 'Operation not permitted' : 'Operation not supported'
+
+// Both errno spellings Node uses for a refused link() (maintainer review
+// 5948202472 on #2497): every no-hard-link test runs once per code.
+const LINK_ERROR_CODES = ['EPERM', 'ENOTSUP'] as const
+
 describe('background session creation without hard links', () => {
+  for (const linkCode of LINK_ERROR_CODES) {
+  describe(`link() fails with ${linkCode}`, () => {
   let configDir: string
   let registry: typeof import('./bgRegistry.js')
 
   beforeEach(async () => {
     configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-no-hardlink-'))
     const linkError = Object.assign(
-      new Error('Operation not permitted'),
-      { code: 'EPERM' },
+      new Error(linkErrorMessage(linkCode)),
+      { code: linkCode },
     )
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
@@ -68,7 +79,7 @@ describe('background session creation without hard links', () => {
     // applying, session creation would no longer be proven link-free.
     const fsPromises = await import('node:fs/promises')
     await expect(fsPromises.link('x', 'y')).rejects.toThrow(
-      'Operation not permitted',
+      linkErrorMessage(linkCode),
     )
   })
 
@@ -104,6 +115,8 @@ describe('background session creation without hard links', () => {
     ).rejects.toThrow('already exists')
     expect(await registry.listBackgroundSessions()).toHaveLength(1)
   })
+  })
+  }
 })
 
 /**
@@ -116,19 +129,22 @@ describe('background session creation without hard links', () => {
  * publish with the same temp + sync + rename() duplicate-guard pattern
  * as writeNewSession, for both the async and the sync installer.
  *
- * Both link() and linkSync() fail with EPERM here; the registry module is
- * imported after the mocks are registered so it binds the mocked
- * functions (same mechanism as the creation tests above).
+ * Both link() and linkSync() fail with EPERM or ENOTSUP here (one code
+ * per describe run, maintainer review 5948202472 on #2497); the registry
+ * module is imported after the mocks are registered so it binds the
+ * mocked functions (same mechanism as the creation tests above).
  */
 describe('background session terminal facts without hard links', () => {
+  for (const linkCode of LINK_ERROR_CODES) {
+  describe(`link() fails with ${linkCode}`, () => {
   let configDir: string
   let registry: typeof import('./bgRegistry.js')
 
   beforeEach(async () => {
     configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-no-hardlink-'))
     const linkError = Object.assign(
-      new Error('Operation not permitted'),
-      { code: 'EPERM' },
+      new Error(linkErrorMessage(linkCode)),
+      { code: linkCode },
     )
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
@@ -168,7 +184,7 @@ describe('background session terminal facts without hard links', () => {
     // Guards the sync regression test below: if the mock silently stopped
     // applying, the sync installer would no longer be proven link-free.
     const fs = await import('node:fs')
-    expect(() => fs.linkSync('x', 'y')).toThrow('Operation not permitted')
+    expect(() => fs.linkSync('x', 'y')).toThrow(linkErrorMessage(linkCode))
   })
 
   it('publishes a natural terminal fact when link() is rejected', async () => {
@@ -260,4 +276,6 @@ describe('background session terminal facts without hard links', () => {
     expect(await readFile(factPath, 'utf8')).toBe(existingFact)
     expect(result.status).toBe('running')
   })
+  })
+  }
 })
