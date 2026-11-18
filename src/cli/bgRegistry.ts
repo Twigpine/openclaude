@@ -1933,7 +1933,11 @@ async function commitPublishFile(
     // the stale threshold can lose its claim to a successor, which
     // publishes first; without the ownership check the resumed rename
     // would overwrite the successor's publish and still report success
-    // (maintainer review 5948202472 on #2497).
+    // (maintainer review 5948202472 on #2497). Keep the ownership
+    // check as the last verification before the rename: a target
+    // recheck after it would reopen the same window for a holder
+    // stalled past the stale threshold (CodeRabbit #2497 review
+    // 5950772048).
     try {
       try {
         await lstat(target)
@@ -1953,12 +1957,6 @@ async function commitPublishFile(
         // commit failed): re-enter the claim loop instead of reporting
         // a fact that does not exist.
         continue
-      }
-      try {
-        await lstat(target)
-        return 'exists'
-      } catch (error) {
-        if (!isErrno(error, 'ENOENT')) throw error
       }
       try {
         await rename(tmp, target)
@@ -2013,6 +2011,8 @@ function commitPublishFileSync(
     }
     // We hold the claim: recheck the target, then verify we still own
     // the claim immediately before the rename (see commitPublishFile).
+    // Keep the ownership check last here too: a target recheck after
+    // it would reopen the same stalled-holder window.
     try {
       try {
         lstatSync(target)
@@ -2031,12 +2031,6 @@ function commitPublishFileSync(
         // The claim is gone but nothing was published: re-enter the
         // claim loop instead of reporting a fact that does not exist.
         continue
-      }
-      try {
-        lstatSync(target)
-        return 'exists'
-      } catch (error) {
-        if (!isErrno(error, 'ENOENT')) throw error
       }
       try {
         renameSync(tmp, target)
