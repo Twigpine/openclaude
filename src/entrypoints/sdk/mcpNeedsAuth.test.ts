@@ -3852,6 +3852,50 @@ test('A JOIN DURING THE RELEASE PROBE KEEPS THE CLIENT OPEN', async () => {
 }, 30_000)
 
 /**
+ * The same join, but its trigger queues behind the probe's first
+ * continuation: the release has already yielded on its cache probe when
+ * the join is scheduled, so the join's adoption callback would land
+ * behind a second probe tick. A release that decides ownership from a
+ * fixed number of ticks cleans up a client the joiner is about to
+ * receive; the join must adopt synchronously instead, so the decision
+ * sees it no matter which tick scheduled it.
+ */
+test('A JOIN QUEUED BEHIND THE RELEASE PROBE KEEPS THE CLIENT OPEN', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  const client = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(client.type).toBe('connected')
+  if (client.type !== 'connected') throw new Error('expected a connected client')
+  const realCleanup = client.cleanup
+  let cleanedUp = 0
+  client.cleanup = async (...args: Parameters<typeof realCleanup>) => {
+    cleanedUp++
+    return realCleanup(...args)
+  }
+  try {
+    let joinerClient: MCPServerConnection | undefined
+    const release = realClient.releaseUnownedMcpClient('gated', config, client)
+    // Queued after the release yielded on its probe: this trigger runs
+    // behind the probe's first continuation.
+    void Promise.resolve().then(async () => {
+      joinerClient = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+    })
+    await release
+    expect(cleanedUp).toBe(0)
+    expect(joinerClient).toBe(client)
+    expect(realClient.isMcpClientAdopted(client)).toBe(true)
+    expect(realClient.connectToServer.cache.get(key)).toBeDefined()
+    const tools = await realClient.fetchToolsForClient(joinerClient!)
+    expect(tools.map(tool => tool.mcpInfo?.toolName ?? tool.name)).toEqual(['hello'])
+  } finally {
+    client.cleanup = realCleanup
+    await client.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
  * A failed tool swap must not close a client another caller adopted,
  * even when the cache entry has since been replaced by a pending
  * connect: the adoption evidence is on the client, not in the entry —
