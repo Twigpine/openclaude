@@ -202,22 +202,38 @@ let heldAgentDefinitions: {
   answer: () => void
   answered: Promise<void>
 } | null = null
+// The wrapper must stay transparent to callers that clear the memoized
+// loader's cache: clearAgentDefinitionsCache() reads
+// getAgentDefinitionsWithOverrides.cache, and a plain wrapper has no
+// `.cache` — the optional chain guards only `.clear`, so the call throws
+// in any shard that loads this mock alongside tests/sdk/sdk-v2-lifecycle.test.ts
+// (jatmn #2493 review 5965105241). Forward `.cache` to the real memoized
+// function, as mockedInit does above.
+const mockedGetAgentDefinitions = (async (
+  ...args: Parameters<typeof realLoadAgentsDir.getAgentDefinitionsWithOverrides>
+) => {
+  const held = heldAgentDefinitions
+  if (held) {
+    held.arrived = true
+    await held.answered
+  }
+  return realLoadAgentsDir.getAgentDefinitionsWithOverrides(...args)
+}) as typeof realLoadAgentsDir.getAgentDefinitionsWithOverrides
+Object.defineProperty(mockedGetAgentDefinitions, 'cache', {
+  get: () => (realLoadAgentsDir.getAgentDefinitionsWithOverrides as unknown as { cache: unknown }).cache,
+  set: value => {
+    ;(realLoadAgentsDir.getAgentDefinitionsWithOverrides as unknown as { cache: unknown }).cache = value
+  },
+  configurable: true,
+})
 mock.module('../../tools/AgentTool/loadAgentsDir.js', () => ({
   ...realLoadAgentsDir,
-  getAgentDefinitionsWithOverrides: async (
-    ...args: Parameters<typeof realLoadAgentsDir.getAgentDefinitionsWithOverrides>
-  ) => {
-    const held = heldAgentDefinitions
-    if (held) {
-      held.arrived = true
-      await held.answered
-    }
-    return realLoadAgentsDir.getAgentDefinitionsWithOverrides(...args)
-  },
+  getAgentDefinitionsWithOverrides: mockedGetAgentDefinitions,
 }))
 
 const { connectSdkMcpServers, captureCredentialScope } = await import('./permissions.js')
 const { unstable_v2_createSession } = await import('./v2.js')
+const { query } = await import('./query.js')
 
 let server: ReturnType<typeof Bun.serve> | null = null
 let configHome = ''
@@ -1887,6 +1903,22 @@ test('THE SESSION OFFERS A HOST-FACING authenticateMcpServer METHOD', async () =
   expect(typeof (session as unknown as { authenticateMcpServer?: unknown }).authenticateMcpServer).toBe('function')
 }, 30_000)
 
+/**
+ * This file's agent-loader mock replaces the lodash-memoized loader with
+ * a wrapper: the wrapper must forward `.cache`, or clearAgentDefinitionsCache()
+ * throws in any shard that loads this mock alongside
+ * tests/sdk/sdk-v2-lifecycle.test.ts — which calls it in beforeAll/afterAll
+ * (jatmn #2493 review 5965105241, CI run 44384083719).
+ */
+test('THE MOCKED AGENT LOADER KEEPS THE MEMOIZE CACHE CLEARABLE', async () => {
+  const { getAgentDefinitionsWithOverrides, clearAgentDefinitionsCache } =
+    await import('../../tools/AgentTool/loadAgentsDir.js')
+  expect(
+    (getAgentDefinitionsWithOverrides as unknown as { cache?: unknown }).cache,
+  ).toBeDefined()
+  expect(() => clearAgentDefinitionsCache()).not.toThrow()
+}, 30_000)
+
 /** An SDK session holding arbitrary servers, before any turn. */
 function openSessionWith(mcpServers: Record<string, unknown>): SDKSession {
   const session = unstable_v2_createSession({ cwd: process.cwd(), mcpServers })
@@ -2601,7 +2633,9 @@ test('CLOSING DURING THE RECONNECT REJECTS INSTEAD OF REPORTING SUCCESS', async 
   await waitFor(() => held.arrived)
   session.close()
   try {
-    await expect(settlesWithin(done, 5_000)).rejects.toThrow('SDK session is closed')
+    await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
     const acquired = await acquireEnvMutex({ timeoutMs: 5_000 })
     expect(acquired.acquired).toBe(true)
     releaseEnvMutex()
@@ -3635,6 +3669,82 @@ test('A TOOL STARTED SIGN-IN ABORTS THE HOST SIGN-IN FOR THE SAME SERVER, AND CO
 }, 30_000)
 
 /**
+ * The pseudo-tool must register its shared sign-in entry inside the same
+ * credential scope its OAuth flow uses — not from the ambient environment
+ * live at call time. A host sign-in freezes the session's config home;
+ * the tool's flow runs in that home too (its scope factory carries the
+ * session env overlay, as the host's pre-turn capture does), so the two
+ * attempts must share one entry and supersede — the tool's URL replaces
+ * the host's, and only the tool's tokens land, in the session home
+ * (jatmn #2493 review 5965105241).
+ */
+test('A TOOL SIGN-IN REGISTERS INSIDE ITS CREDENTIAL SCOPE AND SUPERSEDES THE HOST SIGN-IN', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store: the
+  // test override would make every session resolve to the same home.
+  const savedOverride = getClaudeConfigHomeDirOverrideForTesting()
+  setClaudeConfigHomeDirForTesting(undefined)
+  const sessionDir = join(configHome, 'session-home')
+  const ambientDir = join(configHome, 'home-ambient')
+  process.env.OPENCLAUDE_CONFIG_DIR = ambientDir
+  try {
+    const url = serveNeedingAuth()
+    const session = unstable_v2_createSession({
+      cwd: process.cwd(),
+      mcpServers: { gated: { type: 'http', url } },
+      env: { OPENCLAUDE_CONFIG_DIR: sessionDir },
+    })
+    sdkSessions.push(session)
+
+    // Host pre-turn sign-in: freezes the session home.
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    const doneCaught = done.catch(error => error)
+    await waitFor(() => seenUrls.length > 0)
+
+    // The tool, built the way a session connect builds it, but with its
+    // scope factory carrying the session env overlay — the flow's
+    // namespace is the session home, while the ambient environment at
+    // call time is a different home.
+    const { createMcpAuthTool } = await import('../../tools/McpAuthTool/McpAuthTool.js')
+    const tool = createMcpAuthTool(
+      'gated',
+      { type: 'http', url, scope: 'session' } as never,
+      {
+        realToolsInCurrentContext: false,
+        captureCredentialScope: signal =>
+          captureCredentialScope(undefined, {
+            signal,
+            env: { OPENCLAUDE_CONFIG_DIR: sessionDir },
+          }),
+      },
+    )
+    const toolSession = openSession()
+    const { result: toolResult } = await startSignIn(tool, toolSession)
+    expect(toolResult.status).toBe('auth_url')
+    expect(toolResult.authUrl).not.toBe(seenUrls[0])
+
+    // The host attempt is over: its callback reaches nothing, and its
+    // promise rejects as cancelled.
+    await expect(fetch(callbackFor(seenUrls[0]!))).rejects.toThrow()
+    await expect(doneCaught).resolves.toBeInstanceOf(realAuth.AuthenticationCancelledError)
+
+    expect((await fetch(callbackFor(toolResult.authUrl!))).status).toBe(200)
+    await flowEnded(1)
+    expect(refusedExchanges).toBe(0)
+    expect(storedAccessTokens(storeIn(sessionDir))).toEqual([
+      `token-for-${clientOf(toolResult)}`,
+    ])
+    expect(storedAccessTokens(storeIn(ambientDir))).toEqual([])
+  } finally {
+    setClaudeConfigHomeDirForTesting(savedOverride)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
  * A sign-in called with an already-cancelled signal must reject at once,
  * before it aborts the attempt still pending or registers a replacement:
  * the superseded attempt's flow still completes, and its tokens still land.
@@ -4260,6 +4370,155 @@ test('A RECONNECT DOES NOT CLOSE A TRANSPORT ANOTHER SESSION ADOPTED', async () 
 }, 30_000)
 
 /**
+ * Aborting the session while the first tools/list is still in flight
+ * must release the setup reservation: fetchToolsForClient swallows an
+ * abort into [] instead of throwing, so the connect's catch never runs
+ * and only an explicit post-fetch check releases it — without that
+ * check the reservation holds the transport open with no owner, and the
+ * caller installs a client with no tools as if it connected cleanly
+ * (jatmn #2493 review 5965105241).
+ */
+test('ABORTING DURING INITIAL TOOL DISCOVERY RELEASES THE SETUP RESERVATION', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const creator = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(creator.type).toBe('connected')
+  if (creator.type !== 'connected') throw new Error('expected a connected client')
+  const held = holdToolsList()
+  const owner = {}
+  const abort = new AbortController()
+  try {
+    const done = connectSdkMcpServers(
+      { gated: { type: 'http', url } },
+      undefined,
+      abort.signal,
+      owner,
+    )
+    await waitFor(() => held.arrived)
+    abort.abort()
+    held.answer()
+    const { clients, tools } = (await settlesWithin(done, 5_000)) as {
+      clients: MCPServerConnection[]
+      tools: Tool[]
+    }
+    expect(tools).toEqual([])
+    expect(clients).toHaveLength(1)
+    expect(clients[0]!.type).toBe('failed')
+    if (clients[0]!.type === 'failed') {
+      expect(clients[0]!.error).toMatch(/aborted/)
+    }
+    // No reservation survives the abort: the transport is releasable
+    // again, and no client with no tools was installed.
+    expect(realClient.getMcpClientSetupReservationCountForTesting(creator)).toBe(0)
+  } finally {
+    held.answer()
+    await creator.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * A reconnect's discovery must survive another session closing the
+ * client it shares: the reconnect caller holds a setup reservation
+ * from receipt through installation, so the other session's close —
+ * which withdraws the adoption claim and releases the transport —
+ * cannot close it while prompts/list is still pending (CodeRabbit
+ * #2493 review 5964014825).
+ */
+test('A RECONNECT KEEPS ITS TRANSPORT ALIVE WHILE ANOTHER SESSION CLOSES', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  offerPrompts = true
+  pagePromptsList()
+  const held = holdPromptsList()
+  const ownerA = {}
+  let reconnected: MCPServerConnection | undefined
+  try {
+    // A's reconnect: tools/list answers at once, prompts/list waits.
+    const reconnect = realClient.reconnectMcpServerImpl(
+      'gated',
+      config,
+      undefined,
+      undefined,
+      ownerA,
+    )
+    await waitFor(() => held.arrived)
+    // B joins the same client, installs it, then closes: its close
+    // withdraws the adoption claim and releases the transport, which
+    // must not take the transport A is still discovering on.
+    const { clients } = await connectSdkMcpServers({ gated: { type: 'http', url } })
+    expect(clients).toHaveLength(1)
+    const bClient = clients[0]!
+    expect(bClient.type).toBe('connected')
+    if (bClient.type !== 'connected') throw new Error('expected a connected client')
+    const ownerB = {}
+    realClient.noteMcpClientInstalled(bClient, ownerB)
+    await realClient.releaseInstalledMcpClient('gated', config, bClient, ownerB)
+    held.answer()
+    const result = (await settlesWithin(reconnect, 5_000)) as Awaited<
+      ReturnType<typeof realClient.reconnectMcpServerImpl>
+    >
+    expect(result.client.type).toBe('connected')
+    reconnected = result.client
+    // The prompts arrived over the transport B tried to close.
+    expect(result.commands.map(command => command.name)).toEqual([
+      'mcp__gated__prompt-a',
+      'mcp__gated__prompt-b',
+    ])
+    // A's reservation survived B's close and still holds the client
+    // until A installs it.
+    expect(realClient.getMcpClientSetupReservationCountForTesting(result.client)).toBe(1)
+    realClient.noteMcpClientInstalled(result.client, ownerA)
+    expect(realClient.getMcpClientSetupReservationCountForTesting(result.client)).toBe(0)
+  } finally {
+    held.answer()
+    if (reconnected?.type === 'connected') await reconnected.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * Closing a query while its first MCP connect is still in flight must
+ * release the setup reservations: close() only reaches installed
+ * clients, so the clients the connect returns have to release their
+ * reservations at the return site instead of being installed into an
+ * engine close() already cleared (jatmn #2493 review 5965105241,
+ * CodeRabbit #2493 review 5964014825).
+ */
+test('CLOSING A QUERY DURING ITS FIRST MCP CONNECT RELEASES THE SETUP RESERVATIONS', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const creator = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(creator.type).toBe('connected')
+  if (creator.type !== 'connected') throw new Error('expected a connected client')
+  const held = holdToolsList()
+  const recorded = recordingEngine()
+  const q = query({
+    prompt: 'hi',
+    options: { cwd: process.cwd(), mcpServers: { gated: { type: 'http', url } } },
+  })
+  ;(q as unknown as { setEngine: (engine: unknown) => void }).setEngine(recorded.engine)
+  try {
+    const drain = (async () => {
+      for await (const _ of q) {
+      }
+    })().catch(() => {})
+    await waitFor(() => held.arrived)
+    q.close()
+    held.answer()
+    await settlesWithin(drain, 5_000)
+    // No reservation survives the close: the transport is releasable
+    // again, and nothing was installed into the closed query.
+    expect(realClient.getMcpClientSetupReservationCountForTesting(creator)).toBe(0)
+    expect(recorded.calls.setMcpClients).toHaveLength(0)
+  } finally {
+    held.answer()
+    await creator.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
  * A single session reauthenticating after a tool call must not leak the
  * old transport: the completed call adopted the client through
  * ensureConnectedClient, so the reconnect detaches it instead of closing
@@ -4811,8 +5070,9 @@ test('ABORTING THE CALLER WHILE INITIALIZATION IS HELD REJECTS AT ONCE', async (
 
 /**
  * Closing the session while initialization is held rejects at once too,
- * with the session-closed error — not with a cancellation, and not after
- * initialization is released.
+ * with the cancellation error — closing the session mid-flow is a
+ * cancellation per the sdk.d.ts contract, not a plain closed error
+ * (jatmn #2493 review 5965105241).
  */
 test('CLOSING THE SESSION WHILE INITIALIZATION IS HELD REJECTS AT ONCE', async () => {
   const url = serveNeedingAuth()
@@ -4826,11 +5086,27 @@ test('CLOSING THE SESSION WHILE INITIALIZATION IS HELD REJECTS AT ONCE', async (
   await waitFor(() => held.arrived)
   session.close()
   try {
-    await expect(settlesWithin(done, 5_000)).rejects.toThrow('SDK session is closed')
+    await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
     expect(seenUrls).toEqual([])
   } finally {
     held.answer()
   }
+}, 30_000)
+
+/**
+ * The entry guard is the one closed-session branch that keeps the plain
+ * error: the session was already closed when called, so no flow started
+ * and nothing was cancelled (jatmn #2493 review 5965105241).
+ */
+test('authenticateMcpServer ON AN ALREADY-CLOSED SESSION REJECTS AS CLOSED, NOT CANCELLED', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  session.close()
+  await expect(session.authenticateMcpServer('gated')).rejects.toThrow(
+    'SDK session is closed',
+  )
 }, 30_000)
 
 /**
@@ -6338,7 +6614,9 @@ test('A CLOSE AFTER THE RECONNECT SUCCEEDS REPORTS THE SESSION AS CLOSED', async
     })
     await waitFor(() => seenUrls.length > 0)
     expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
-    await expect(settlesWithin(done, 5_000)).rejects.toThrow('SDK session is closed')
+    await expect(settlesWithin(done, 5_000)).rejects.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
     // The unowned client was released: the cache no longer holds it.
     expect(realClient.connectToServer.cache.get(key)).toBeUndefined()
   } finally {
