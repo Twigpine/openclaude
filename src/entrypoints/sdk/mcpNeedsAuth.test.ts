@@ -1954,6 +1954,35 @@ test('authenticateMcpServer DELIVERS THE URL, AWAITS THE FLOW, AND RECONNECTS IN
 }, 30_000)
 
 /**
+ * The status reports the tools the model actually sees: with hello
+ * disallowed, the reconnected pool drops it, so status.tools must not
+ * list it either — the public API promises the model-visible list, not
+ * the raw discovery list (CodeRabbit #2493 review 5956557301).
+ */
+test('authenticateMcpServer REPORTS ONLY THE TOOLS THE POOL INSTALLS', async () => {
+  const url = serveNeedingAuth()
+  const session = unstable_v2_createSession({
+    cwd: process.cwd(),
+    mcpServers: { gated: { type: 'http', url } },
+    disallowedTools: ['mcp__gated__hello'],
+  })
+  sdkSessions.push(session)
+  const calls = recordEngine(session)
+
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  const status = await done
+  expect(status.status).toBe('connected')
+  // The reconnected pool holds no hello, and neither does the status.
+  expect(calls.updateTools.at(-1)!.map(tool => tool.name)).not.toContain('mcp__gated__hello')
+  expect(status.tools?.map(tool => tool.name)).toEqual([])
+}, 30_000)
+
+/**
  * The swap itself: the reconnected client replaces the needs-auth one, and
  * the tool pool drops the authenticate pseudo-tool for the real tools.
  * Observed through a recording engine — no provider is needed to see it.
@@ -3390,12 +3419,23 @@ test('AN ENV OVERRIDE REPLACES AN INHERITED VARIABLE CASE-INSENSITIVELY ON WINDO
     // spellings are distinct variables, so the override lands under its
     // own spelling while the inherited one is removed; on Windows both
     // spellings are the one variable, which ends as the session home.)
+    // The assertions below read process.env, whose case rules come from
+    // the real host — stubbing process.platform does not change them —
+    // so the inherited spelling's expected value is derived from the
+    // platform captured before stubbing, not the stubbed one: on native
+    // Windows both spellings read the session home, elsewhere the
+    // inherited spelling keeps the ambient value (CodeRabbit #2493
+    // review 5956557301).
+    const isNativeWindows = originalPlatform === 'win32'
     expect(
       await scope(async () => [
         process.env.OPENCLAUDE_CONFIG_DIR,
         process.env.openclaude_config_dir,
       ]),
-    ).toEqual([undefined, join(configHome, 'session')])
+    ).toEqual([
+      isNativeWindows ? join(configHome, 'session') : undefined,
+      join(configHome, 'session'),
+    ])
     // On other platforms the same override sets only its exact key and
     // the inherited spelling survives.
     Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
@@ -3407,7 +3447,10 @@ test('AN ENV OVERRIDE REPLACES AN INHERITED VARIABLE CASE-INSENSITIVELY ON WINDO
         process.env.OPENCLAUDE_CONFIG_DIR,
         process.env.openclaude_config_dir,
       ]),
-    ).toEqual([join(configHome, 'ambient'), join(configHome, 'session')])
+    ).toEqual([
+      isNativeWindows ? join(configHome, 'session') : join(configHome, 'ambient'),
+      join(configHome, 'session'),
+    ])
   } finally {
     Object.defineProperty(process, 'platform', {
       value: originalPlatform,
@@ -4091,6 +4134,107 @@ test('RELEASING AN OLDER CONNECTION KEEPS A NEWER GENERATION CACHED', async () =
 }, 30_000)
 
 /**
+ * Clearing an older connection must not evict a newer generation's
+ * cache entry: the old cleanup's close callback evicts the entry, and a
+ * concurrent connect for the same key stores a replacement in that gap.
+ * The clear's final delete — and its fetch-cache clear — must keep a
+ * different promise and its discovery caches (CodeRabbit #2493 review
+ * 5956557301). The stub stands in for that interleaving: the replacement
+ * is started after the real cleanup resolves, before the clear's
+ * post-cleanup step runs, which is exactly the state the race leaves.
+ */
+test('CLEARING AN OLDER CONNECTION KEEPS A NEWER GENERATION CACHED', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  const oldClient = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(oldClient.type).toBe('connected')
+  if (oldClient.type !== 'connected') throw new Error('expected a connected client')
+  // Populate the discovery caches before the clear: the close callback
+  // clears them during cleanup, which is the legitimate path — the
+  // trailing clear the identity check gates is what must not run when
+  // a replacement is present, and it is skipped together with the
+  // entry delete in the same check below.
+  expect(
+    (await realClient.fetchToolsForClient(oldClient)).map(
+      tool => tool.mcpInfo?.toolName ?? tool.name,
+    ),
+  ).toEqual(['hello'])
+  const realCleanup = oldClient.cleanup
+  const held = holdInitialize()
+  let replacement: Promise<MCPServerConnection> | undefined
+  let newClient: MCPServerConnection | undefined
+  oldClient.cleanup = async (...args: Parameters<typeof realCleanup>) => {
+    await realCleanup(...args)
+    // The close callback evicted the old entry; a concurrent connect
+    // stores the replacement before the clear's final delete runs.
+    realClient.connectToServer.cache.delete(key)
+    replacement = realClient.connectToServer('gated', config)
+  }
+  try {
+    await realClient.clearServerCache('gated', config)
+    expect(replacement).toBeDefined()
+    // The replacement's entry survived the clear: a later connect
+    // reuses it instead of dialling a third connection.
+    expect(realClient.connectToServer.cache.get(key)).toBe(replacement)
+    await waitFor(() => held.arrived)
+    held.answer()
+    newClient = (await settlesWithin(replacement!, 5_000)) as MCPServerConnection
+    expect(newClient.type).toBe('connected')
+    expect(newClient).not.toBe(oldClient)
+    expect(await realClient.connectToServer('gated', config)).toBe(newClient)
+  } finally {
+    oldClient.cleanup = realCleanup
+    held.answer()
+    await oldClient.cleanup().catch(() => {})
+    if (newClient?.type === 'connected') await newClient.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * Reauthenticating one session must not close a transport another
+ * session adopted from the shared connect: the reconnect detaches its
+ * cache entry and dials fresh, while the adopter's in-flight calls
+ * finish on the client it holds (Copilot #2493 review 5955514041).
+ */
+test('A RECONNECT DOES NOT CLOSE A TRANSPORT ANOTHER SESSION ADOPTED', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  // The first session creates the shared connect; the second joins it
+  // and adopts it, so its calls ride the same transport.
+  const creator = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(creator.type).toBe('connected')
+  if (creator.type !== 'connected') throw new Error('expected a connected client')
+  const joined = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(joined).toBe(creator)
+  // Let the receipt marker run: the provisional claim consolidates
+  // into the single permanent marker two ticks out.
+  await waitFor(() => realClient.getMcpClientAdoptionClaimCountForTesting(creator) === 1)
+  expect(realClient.isMcpClientAdopted(creator)).toBe(true)
+
+  let fresh: MCPServerConnection | undefined
+  try {
+    // The first session reauthenticates: the reconnect dials fresh
+    // without closing the transport the second session still uses.
+    const initializesBefore = initializes
+    const result = await realClient.reconnectMcpServerImpl('gated', config)
+    fresh = result.client
+    expect(result.client.type).toBe('connected')
+    expect(result.client).not.toBe(creator)
+    expect(initializes).toBe(initializesBefore + 1)
+    // The cache holds the fresh client, and the adopted one still
+    // answers: the other session's in-flight calls are not interrupted.
+    expect(await realClient.connectToServer('gated', config)).toBe(result.client)
+    expect((await creator.client.listTools()).tools.map(tool => tool.name)).toEqual(['hello'])
+  } finally {
+    await creator.cleanup().catch(() => {})
+    if (fresh?.type === 'connected') await fresh.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
  * The release's cache probe, isolated: with the close callback stubbed
  * out, only the probe itself can evict the entry — and it must, when
  * the entry already settled to this client.
@@ -4697,6 +4841,72 @@ test('THE HOST FLOW KEEPS THE CALL-ENTRY NAMESPACE WHEN ITS LENT TURN ENDS DURIN
     // turn's store.
     expect(storedAccessTokens(storeIn(ambient))).toEqual([])
     expect(storedAccessTokens(storeIn(origin))).toEqual([
+      `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
+    ])
+  } finally {
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The fallback scopes overlay the session env only for pre-turn calls:
+ * inside a turn the turn already applied its env at turn start, so a host
+ * change to options.env while sign-in is pending must not replace the
+ * namespace the turn wrote its registration under. The exchange reads
+ * the turn's environment even when the turn ends before it runs
+ * (CodeRabbit #2493 review 5956557301).
+ */
+test('THE HOST FLOW KEEPS THE TURN ENVIRONMENT WHEN OPTIONS.ENV CHANGES MID-SIGN-IN', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const turnHome = join(configHome, 'turn')
+  const changedHome = join(configHome, 'changed')
+  try {
+    // The turn applied the session env at turn start: the process env
+    // holds the turn home, and the turn lends its scope.
+    process.env.OPENCLAUDE_CONFIG_DIR = turnHome
+    const url = serveNeedingAuth()
+    const options: Parameters<typeof unstable_v2_createSession>[0] = {
+      cwd: process.cwd(),
+      env: { OPENCLAUDE_CONFIG_DIR: turnHome },
+      mcpServers: { gated: { type: 'http', url } },
+    }
+    const session = unstable_v2_createSession(options)
+    sdkSessions.push(session)
+    let delegateActive = true
+    const scopeField = session as unknown as { turnCredentialScope: unknown }
+    // An expired delegate declines by returning undefined, not a promise
+    // resolving to undefined — that is how the scope falls back to its
+    // frozen environment.
+    scopeField.turnCredentialScope = <T>(work: () => Promise<T>): Promise<T> | undefined => {
+      if (!delegateActive) return undefined
+      return work()
+    }
+    // The host changes the session env while sign-in is pending: the
+    // turn already applied the old value, so the exchange must still
+    // read the turn's environment, not the changed one.
+    options.env = { OPENCLAUDE_CONFIG_DIR: changedHome }
+
+    const held = holdInit()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => held.arrived)
+    // The turn ends while init waits: the delegate declines afterwards,
+    // so only the frozen environment can save the flow's namespace.
+    delegateActive = false
+    held.answer()
+
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The token landed in the turn's namespace, not the changed one.
+    expect(storedAccessTokens(storeIn(changedHome))).toEqual([])
+    expect(storedAccessTokens(storeIn(turnHome))).toEqual([
       `token-for-${clientOf({ authUrl: seenUrls[0] } as McpAuthOutput)}`,
     ])
   } finally {
