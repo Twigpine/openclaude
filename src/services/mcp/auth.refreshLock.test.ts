@@ -2436,9 +2436,10 @@ test('an XAA sign-in finishing after its turn caches the id_token and stores the
   expect((await originalFetch(callback)).status).toBe(200)
   await flow
 
-  // Four scope entries: the initial reads, the cache read, the id_token
-  // cached by the IdP login, then the AS tokens stored by the exchange.
-  expect(scopeEntries).toBe(4)
+  // Five scope entries: the XAA enablement check, the initial reads, the
+  // cache read, the id_token cached by the IdP login, then the AS tokens
+  // stored by the exchange.
+  expect(scopeEntries).toBe(5)
   expect(ambient.updateCalls).toBe(0)
   expect(ambient.readCalls).toBe(0)
   const serverKey = getServerKey('enterprise', config)
@@ -2532,10 +2533,11 @@ test.each(['stored', 'rejected'] as const)(
       expect((await originalFetch(callback)).status).toBe(200)
       const error = await settlesSoon(settled)
 
-      // Four scope entries: the initial reads (which peek at the id_token),
-      // the acquisition's cache read, the id_token cached by the IdP login,
-      // then the AS tokens stored by the exchange (or the id_token dropped).
-      expect(scopeEntries).toBe(4)
+      // Five scope entries: the XAA enablement check, the initial reads
+      // (which peek at the id_token), the acquisition's cache read, the
+      // id_token cached by the IdP login, then the AS tokens stored by the
+      // exchange (or the id_token dropped).
+      expect(scopeEntries).toBe(5)
       expect(ambient.updateCalls).toBe(0)
       expect(ambient.readCalls).toBe(0)
       expect(ambient.getData()).toEqual(ambientData)
@@ -2601,10 +2603,10 @@ test.each(['before the flow peeks', 'between the peek and acquisition'] as const
     )
 
     expect(loginUrls).toBe(0)
-    // Three scope entries on the silent path: the initial reads, the cache
-    // read that finds the id_token, then the token save. The cached id_token
-    // needs no login, so nothing caches one.
-    expect(scopeEntries).toBe(3)
+    // Four scope entries on the silent path: the XAA enablement check,
+    // the initial reads, the cache read that finds the id_token, then the
+    // token save. The cached id_token needs no login, so nothing caches one.
+    expect(scopeEntries).toBe(4)
     const serverKey = getServerKey('enterprise', config)
     expect(activeStorage.getData().mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
   },
@@ -2664,9 +2666,10 @@ test('a silent XAA exchange stores its token in the originating store when anoth
   )
 
   expect(loginUrls).toBe(0)
-  // Three scope entries on the silent path: the initial reads, the cache
-  // read that finds the id_token, then the token save.
-  expect(scopeEntries).toBe(3)
+  // Four scope entries on the silent path: the XAA enablement check, the
+  // initial reads, the cache read that finds the id_token, then the token
+  // save.
+  expect(scopeEntries).toBe(4)
   expect(ambient.updateCalls).toBe(0)
   expect(ambient.readCalls).toBe(0)
   expect(ambient.getData()).toEqual(ambientData)
@@ -2703,11 +2706,12 @@ test.each([
 
   let loginUrl: URL | undefined
   let scopeEntries = 0
-  // The flow enters the scope four times: the initial reads (1), the cache
-  // read (2), the id_token cached by the IdP login (3), then the AS tokens
-  // stored by the exchange or the id_token dropped on failure (4). Queue
-  // the scope at the write the stage under test owns.
-  const queuedEntry = stage === 'idp-cache' ? 3 : 4
+  // The flow enters the scope five times: the XAA enablement check (1),
+  // the initial reads (2), the cache read (3), the id_token cached by the
+  // IdP login (4), then the AS tokens stored by the exchange or the
+  // id_token dropped on failure (5). Queue the scope at the write the
+  // stage under test owns.
+  const queuedEntry = stage === 'idp-cache' ? 4 : 5
   const resume = deferred()
   const session = new AbortController()
   const flow = performMCPOAuthFlow('enterprise', config, url => {

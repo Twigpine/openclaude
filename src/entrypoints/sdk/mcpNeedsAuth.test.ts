@@ -16,7 +16,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from 'bun:test'
 import { feature } from 'bun:bundle'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -99,6 +99,7 @@ mock.module('../../services/mcp/auth.js', () => ({
   },
 }))
 const realClient = { ...(await import('../../services/mcp/client.js')) }
+const { fetchMcpSkillsForClient } = await import('../../skills/mcpSkills.js')
 let reconnects = 0
 /** A hook a test sets to run when the mocked reconnect settles. */
 let onReconnectSettled:
@@ -216,8 +217,30 @@ let heldInitialize: { arrived: boolean; answer: () => void; answered: Promise<vo
 let heldToolsList: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
 /** When set, the stand-in answers tools/list in two pages: hello, then world. */
 let pagedToolsList = false
+/** When set, the stand-in lists only its own tool named `authenticate`. */
+let offerRemoteAuthenticate = false
 /** The Authorization header of each tools/list request, in order. */
 const toolsListAuth: string[] = []
+/** When set, the stand-in answers prompts/list in two pages: prompt-a, then prompt-b. */
+let pagedPromptsList = false
+/** The Authorization header of each prompts/list request, in order. */
+const promptsListAuth: string[] = []
+/** A prompts/list the stand-in keeps waiting until the test lets it answer. */
+let heldPromptsList: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
+/** When set, the stand-in answers resources/list in two pages. */
+let pagedResourcesList = false
+/** The Authorization header of each resources/list request, in order. */
+const resourcesListAuth: string[] = []
+/** A resources/list the stand-in keeps waiting until the test lets it answer. */
+let heldResourcesList: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
+/** The Authorization header of each resources/read request, in order. */
+const skillReadAuth: string[] = []
+/** When set, the first tools/list page-two request fails once, then succeeds. */
+let failToolsListPage2Once = false
+/** When set, the stand-in advertises the prompts capability. */
+let offerPrompts = false
+/** When set, the stand-in advertises the resources capability. */
+let offerResources = false
 /** A skill resources/read the stand-in keeps waiting until the test lets it answer. */
 let heldSkillRead: { arrived: boolean; answer: () => void; answered: Promise<void> } | null = null
 /** Authorized initialize requests the stand-in has answered, so a test can tell a dial from a cache lookup. */
@@ -407,19 +430,55 @@ function serveNeedingAuth(invalidClient = false): string {
           heldToolsList.arrived = true
           await heldToolsList.answered
         }
+        // A reconnect's prompts/list can be held the same way. Only the
+        // first page is held: a later page is the work that outlives the
+        // caller.
+        if (rpc.method === 'prompts/list') {
+          promptsListAuth.push(request.headers.get('authorization') ?? '')
+        }
+        if (rpc.method === 'prompts/list' && heldPromptsList && !rpc.params?.cursor) {
+          heldPromptsList.arrived = true
+          await heldPromptsList.answered
+        }
+        // A reconnect's resources/list can be held the same way.
+        if (rpc.method === 'resources/list') {
+          resourcesListAuth.push(request.headers.get('authorization') ?? '')
+        }
+        if (rpc.method === 'resources/list' && heldResourcesList && !rpc.params?.cursor) {
+          heldResourcesList.arrived = true
+          await heldResourcesList.answered
+        }
         // A reconnect's skill resources/read can be held the same way:
         // with the resources capability advertised, discovery reads the
         // skill, and a cancel during that read must reject the attempt
         // instead of waiting out the request timeout.
+        if (rpc.method === 'resources/read') {
+          skillReadAuth.push(request.headers.get('authorization') ?? '')
+        }
         if (rpc.method === 'resources/read' && heldSkillRead) {
           heldSkillRead.arrived = true
           await heldSkillRead.answered
+        }
+        // The tools/list retry branch: the first page-two request fails
+        // once, so the traversal retries it — a later credential read
+        // under the surviving scope, not the first page's.
+        if (
+          failToolsListPage2Once &&
+          rpc.method === 'tools/list' &&
+          rpc.params?.cursor === 'page-2'
+        ) {
+          failToolsListPage2Once = false
+          return new Response(null, { status: 500 })
         }
         const result =
           rpc.method === 'initialize'
             ? {
                 protocolVersion: '2025-03-26',
-                capabilities: heldSkillRead ? { tools: {}, resources: {} } : { tools: {} },
+                capabilities: {
+                  tools: {},
+                  ...(heldSkillRead || offerResources ? { resources: {} } : {}),
+                  ...(offerPrompts ? { prompts: {} } : {}),
+                },
                 serverInfo: { name: 'gated', version: '1' },
               }
             : rpc.method === 'tools/list'
@@ -430,17 +489,49 @@ function serveNeedingAuth(invalidClient = false): string {
                       tools: [{ name: 'hello', description: 'hello', inputSchema: { type: 'object', properties: {} } }],
                       nextCursor: 'page-2',
                     }
-                : { tools: [{ name: 'hello', description: 'hello', inputSchema: { type: 'object', properties: {} } }] }
+                : offerRemoteAuthenticate
+                  ? { tools: [{ name: 'authenticate', description: 'Sign in through the remote server', inputSchema: { type: 'object', properties: {} } }] }
+                  : { tools: [{ name: 'hello', description: 'hello', inputSchema: { type: 'object', properties: {} } }] }
               : rpc.method === 'resources/list'
-                ? {
-                    resources: [
-                      {
-                        uri: 'skill://review',
-                        name: 'review',
-                        mimeType: 'text/markdown',
-                      },
-                    ],
-                  }
+                ? pagedResourcesList
+                  ? rpc.params?.cursor === 'resources-2'
+                    ? {
+                        resources: [
+                          {
+                            uri: 'file:///second',
+                            name: 'second',
+                            mimeType: 'text/plain',
+                          },
+                        ],
+                      }
+                    : {
+                        resources: [
+                          {
+                            uri: 'skill://review',
+                            name: 'review',
+                            mimeType: 'text/markdown',
+                          },
+                        ],
+                        nextCursor: 'resources-2',
+                      }
+                  : {
+                      resources: [
+                        {
+                          uri: 'skill://review',
+                          name: 'review',
+                          mimeType: 'text/markdown',
+                        },
+                      ],
+                    }
+                : rpc.method === 'prompts/list'
+                  ? pagedPromptsList
+                    ? rpc.params?.cursor === 'prompts-2'
+                      ? { prompts: [{ name: 'prompt-b', description: 'prompt-b' }] }
+                      : {
+                          prompts: [{ name: 'prompt-a', description: 'prompt-a' }],
+                          nextCursor: 'prompts-2',
+                        }
+                    : { prompts: [] }
                 : rpc.method === 'resources/read'
                   ? {
                       contents: [
@@ -473,6 +564,46 @@ function serveNeedingAuth(invalidClient = false): string {
 function serveBroken(): string {
   server = Bun.serve({ port: 0, fetch: () => new Response('nope', { status: 500 }) })
   return `http://127.0.0.1:${server.port}/mcp`
+}
+
+/**
+ * A second, minimal MCP endpoint with no auth, serving a single tool.
+ * Stands in for a same-named peer server at a different URL; the caller
+ * stops it. Its initialize is never held by the shared hold flags.
+ */
+function servePeerWithTool(toolName: string): { url: string; stop: () => void } {
+  const peer = Bun.serve({
+    port: 0,
+    fetch: async request => {
+      if (request.method !== 'POST') return new Response(null, { status: 405 })
+      const rpc = (await request.json()) as {
+        id?: string | number
+        method: string
+      }
+      // A notification gets no body back.
+      if (rpc.id === undefined) return new Response(null, { status: 202 })
+      const result =
+        rpc.method === 'initialize'
+          ? {
+              protocolVersion: '2025-03-26',
+              capabilities: { tools: {} },
+              serverInfo: { name: 'gated', version: '1' },
+            }
+          : rpc.method === 'tools/list'
+            ? {
+                tools: [
+                  {
+                    name: toolName,
+                    description: `${toolName} tool`,
+                    inputSchema: { type: 'object', properties: {} },
+                  },
+                ],
+              }
+            : {}
+      return Response.json({ jsonrpc: '2.0', id: rpc.id, result })
+    },
+  })
+  return { url: `http://127.0.0.1:${peer.port}/mcp`, stop: () => peer.stop(true) }
 }
 
 /**
@@ -526,6 +657,61 @@ function pageToolsList() {
   toolsListAuth.length = 0
 }
 
+/** Makes the stand-in answer prompts/list in two pages, recording each page's bearer. */
+function pagePromptsList() {
+  pagedPromptsList = true
+  promptsListAuth.length = 0
+}
+
+/** Makes the stand-in hold its answer to a prompts/list. */
+function holdPromptsList() {
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldPromptsList = { arrived: false, answer, answered }
+  return heldPromptsList
+}
+
+/** Makes the stand-in answer resources/list in two pages, recording each page's bearer. */
+function pageResourcesList() {
+  pagedResourcesList = true
+  resourcesListAuth.length = 0
+}
+
+/** Makes the stand-in hold its answer to a resources/list. */
+function holdResourcesList() {
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  heldResourcesList = { arrived: false, answer, answered }
+  return heldResourcesList
+}
+
+/**
+ * A competing owner that queues on the environment mutex, applies its own
+ * environment, and holds the mutex until the test releases it. Returns the
+ * release and the promise that resolves once it has applied and released.
+ */
+function queueCompetitor(configDir: string): {
+  release: () => void
+  applied: Promise<void>
+} {
+  let release!: () => void
+  const held = new Promise<void>(resolve => {
+    release = resolve
+  })
+  const applied = (async () => {
+    const { acquired } = await acquireEnvMutex()
+    expect(acquired).toBe(true)
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
+    await held
+    releaseEnvMutex()
+  })()
+  return { release, applied }
+}
+
 /** Makes the stand-in hold its answer to a skill resources/read. */
 function holdSkillRead() {
   let answer!: () => void
@@ -544,6 +730,85 @@ function holdInit() {
   })
   heldInit = { arrived: false, answer, answered }
   return heldInit
+}
+
+/**
+ * A headersHelper script that blocks until the test releases it, so a
+ * connect can be held in header setup — before any transport exists.
+ * The script records its arrival in `arrivedFile` and waits for `goFile`
+ * to appear before printing `{}`; the test passes both paths through
+ * the environment the helper inherits. Returns the script and file paths.
+ */
+async function holdHeaders(): Promise<{
+  script: string
+  arrivedFile: string
+  goFile: string
+}> {
+  const arrivedFile = join(configHome, 'headers-arrived')
+  const goFile = join(configHome, 'headers-go')
+  const script = join(configHome, 'headers-helper.cjs')
+  await writeFile(
+    script,
+    `#!/usr/bin/env node
+const fs = require('node:fs')
+fs.writeFileSync(process.env.MCP_HEADER_HELPER_ARRIVED, 'arrived')
+const start = Date.now()
+while (!fs.existsSync(process.env.MCP_HEADER_HELPER_GO)) {
+  if (Date.now() - start > 9000) break
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+}
+console.log('{}')
+`,
+  )
+  await chmod(script, 0o755)
+  return { script, arrivedFile, goFile }
+}
+
+/**
+ * A headersHelper script that records the environment it runs in: it
+ * writes the value of MCP_SIBLING_PROBE to a probe file (whose path it
+ * reads from MCP_SIBLING_PROBE_FILE) and prints {}, so the sibling keeps
+ * its static Authorization header. Returns the script and probe file.
+ */
+async function probeSiblingEnv(): Promise<{
+  script: string
+  probeFile: string
+}> {
+  const probeFile = join(configHome, 'sibling-probe')
+  const script = join(configHome, 'sibling-helper.cjs')
+  await writeFile(
+    script,
+    `#!/usr/bin/env node
+const fs = require('node:fs')
+fs.writeFileSync(process.env.MCP_SIBLING_PROBE_FILE, process.env.MCP_SIBLING_PROBE ?? 'unset')
+console.log('{}')
+`,
+  )
+  await chmod(script, 0o755)
+  return { script, probeFile }
+}
+
+/**
+ * A session with a gated server to sign into and a sibling at the same
+ * URL whose header helper records the environment its connect runs in.
+ * The sibling carries a static token, so it connects during setup.
+ */
+function openSiblingSession(url: string, script: string): SDKSession {
+  const session = unstable_v2_createSession({
+    cwd: process.cwd(),
+    mcpServers: {
+      gated: { type: 'http', url },
+      sibling: {
+        type: 'http',
+        url,
+        headers: { Authorization: 'Bearer token-for-seeded' },
+        headersHelper: script,
+      },
+    },
+    env: { MCP_SIBLING_PROBE: 'session-value' },
+  })
+  sdkSessions.push(session)
+  return session
 }
 
 /** Calls the authenticate tool the way the engine does, within a session. */
@@ -668,6 +933,10 @@ afterAll(() => {
   mock.module('../../services/mcp/xaaIdpLogin.js', () => realXaaIdpLogin)
   mock.module('../../services/mcp/xaa.js', () => realXaa)
   mock.module('../../utils/secureStorage/index.js', () => realSecureStorage)
+  // The init wrapper too: it forwards `cache` to the real memoized init,
+  // so leaving it registered makes the next file in the shard see the
+  // wrapper instead of the real export.
+  mock.module('../init.js', () => realInit)
   if (hadMacro) (globalThis as Record<string, unknown>).MACRO = savedMacro
   else delete (globalThis as Record<string, unknown>).MACRO
   // A test that failed while holding the mutex must not lock the next file out.
@@ -691,7 +960,16 @@ beforeEach(async () => {
   rejectTokens = false
   offerRootsList = false
   pagedToolsList = false
+  offerRemoteAuthenticate = false
   toolsListAuth.length = 0
+  pagedPromptsList = false
+  promptsListAuth.length = 0
+  pagedResourcesList = false
+  resourcesListAuth.length = 0
+  skillReadAuth.length = 0
+  failToolsListPage2Once = false
+  offerPrompts = false
+  offerResources = false
   rootsSeen = []
   rootsRequests = 0
   initializes = 0
@@ -713,6 +991,10 @@ afterEach(async () => {
   heldInitialize = null
   heldToolsList?.answer()
   heldToolsList = null
+  heldPromptsList?.answer()
+  heldPromptsList = null
+  heldResourcesList?.answer()
+  heldResourcesList = null
   heldSkillRead?.answer()
   heldSkillRead = null
   heldInit?.answer()
@@ -1790,6 +2072,101 @@ test('A RECONNECT THAT STILL NEEDS AUTH REPLACES ONLY ITS OWN SERVER, NOT ITS NA
   const afterNeedsAuth = calls.updateTools.at(-1)!.map(tool => tool.name)
   expect(afterNeedsAuth).toContain('mcp__gated__authenticate')
   expect(afterNeedsAuth).toContain('mcp__gated__other__hello')
+}, 30_000)
+
+/**
+ * A needs-auth outcome replaces a remote tool named `authenticate` with
+ * the local recovery tool: the remote tool shares the qualified name and
+ * owner metadata, so the name alone cannot tell them apart — and the
+ * stale remote description would otherwise stay in the pool after
+ * reconnect, offering the model a sign-in that goes nowhere.
+ */
+test('A RECONNECT THAT STILL NEEDS AUTH REPLACES A REMOTE authenticate TOOL WITH THE LOCAL RECOVERY TOOL', async () => {
+  const url = serveNeedingAuth()
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+
+  // The server exposes its own tool named `authenticate`.
+  offerRemoteAuthenticate = true
+  try {
+    expect((await completeSignIn(session, 'gated')).status).toBe('connected')
+    // The pool holds only the remote tool: no stale real tool beside it,
+    // so the name alone would pass for the local recovery tool.
+    const afterConnect = calls.updateTools.at(-1)!.map(tool => tool.name)
+    expect(afterConnect).toContain('mcp__gated__authenticate')
+    expect(afterConnect).not.toContain('mcp__gated__hello')
+
+    // The server stops accepting the tokens it issued.
+    rejectTokens = true
+    try {
+      expect((await completeSignIn(session, 'gated')).status).toBe('needs-auth')
+    } finally {
+      rejectTokens = false
+    }
+    const afterNeedsAuth = calls.updateTools.at(-1)!
+    expect(afterNeedsAuth.map(tool => tool.name)).not.toContain('mcp__gated__hello')
+    const authTool = afterNeedsAuth.find(tool => tool.name === 'mcp__gated__authenticate')
+    expect(authTool).toBeDefined()
+    // Description oracle: the installed tool is the local recovery tool,
+    // not the remote tool that shared its name.
+    const description = await authTool!.description({} as never, {} as never)
+    expect(description).toContain('requires authentication')
+    expect(description).not.toContain('remote server')
+  } finally {
+    offerRemoteAuthenticate = false
+  }
+}, 30_000)
+
+/**
+ * A host reconnect installs tools from its own endpoint, not a
+ * same-named peer's: discovery is shared by display name, so a peer
+ * discovering mid-reconnect can repopulate the memo the host then reads
+ * — and the swap would install the peer's tools alongside the host's
+ * connected status, dispatching to the wrong endpoint.
+ */
+test('A HOST RECONNECT INSTALLS TOOLS FROM ITS OWN ENDPOINT, NOT A SAME-NAMED PEER', async () => {
+  const url = serveNeedingAuth()
+  const peer = servePeerWithTool('peer-tool')
+  const session = openGatedSession(url)
+  const calls = recordEngine(session)
+  try {
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => seenUrls.length > 0)
+    // The initial connect is done once the URL is out: hold the
+    // reconnect's initialize, so the peer can discover while the host
+    // reconnect waits for its fresh connection.
+    const held = holdInitialize()
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    await waitFor(() => held.arrived)
+
+    // The peer discovers mid-reconnect: same display name, different
+    // endpoint. Its tools must not become the host's.
+    const peerClient = (await realClient.connectToServer('gated', {
+      type: 'http',
+      url: peer.url,
+      scope: 'session',
+    } as never)) as MCPServerConnection
+    expect(peerClient.type).toBe('connected')
+    const peerTools = await realClient.fetchToolsForClient(peerClient)
+    expect(peerTools.map(tool => tool.mcpInfo?.toolName ?? tool.name)).toEqual(['peer-tool'])
+
+    held.answer()
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The returned status and the installed pool carry the host's tool,
+    // not the peer's — and the installed tool is the host's own object,
+    // so it dispatches to the host endpoint.
+    expect(status.tools?.map(tool => tool.name)).toEqual(['hello'])
+    const installed = calls.updateTools.at(-1)!
+    expect(installed.map(tool => tool.name)).toContain('mcp__gated__hello')
+    expect(installed.map(tool => tool.name)).not.toContain('mcp__gated__peer-tool')
+    expect(installed.find(tool => tool.name === 'mcp__gated__peer-tool')).toBeUndefined()
+  } finally {
+    peer.stop()
+  }
 }, 30_000)
 
 /**
@@ -3258,6 +3635,129 @@ test('clearServerCache WITH AN ABORTED SIGNAL DOES NOT WAIT OUT A PENDING CONNEC
   expect(initializes).toBe(initializesBefore)
 }, 30_000)
 
+/**
+ * Releasing an older connection must not evict a newer generation's
+ * cache entry: the old cleanup's close callback clears by key, and the
+ * newer generation for that key is the entry by then.
+ */
+test('RELEASING AN OLDER CONNECTION KEEPS A NEWER GENERATION CACHED', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  const oldClient = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(oldClient.type).toBe('connected')
+  const initializesBefore = initializes
+  // The entry is superseded by a newer generation: evict without
+  // cleanup, then start the replacement while its initialize is held.
+  realClient.connectToServer.cache.delete(key)
+  const held = holdInitialize()
+  const newConnect = realClient.connectToServer('gated', config)
+  const newCaught = newConnect.catch(error => error)
+  await waitFor(() => held.arrived)
+
+  // The old generation's cleanup must not drop the newer's entry.
+  await realClient.releaseUnownedMcpClient('gated', config, oldClient)
+  await new Promise(resolve => setImmediate(resolve))
+  expect(realClient.connectToServer.cache.get(key)).toBe(newConnect)
+  held.answer()
+  const newClient = (await settlesWithin(newConnect, 5_000)) as MCPServerConnection
+  expect(newClient.type).toBe('connected')
+  // The newer generation stays cached: a later connect reuses it
+  // instead of dialling a third connection.
+  expect(await realClient.connectToServer('gated', config)).toBe(newClient)
+  expect(initializes).toBe(initializesBefore + 1)
+  await settlesWithin(newCaught, 5_000).catch(() => {})
+}, 30_000)
+
+/**
+ * The release's cache probe, isolated: with the close callback stubbed
+ * out, only the probe itself can evict the entry — and it must, when
+ * the entry already settled to this client.
+ */
+test('RELEASING A CACHED CLIENT EVICTS ITS OWN SETTLED ENTRY', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  const client = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(client.type).toBe('connected')
+  if (client.type !== 'connected') throw new Error('expected a connected client')
+  const realCleanup = client.cleanup
+  let cleanedUp = 0
+  // Stub the cleanup so no close callback runs: the entry can only go
+  // away through the release's own eviction.
+  client.cleanup = async () => {
+    cleanedUp++
+  }
+  try {
+    await realClient.releaseUnownedMcpClient('gated', config, client)
+    expect(cleanedUp).toBe(1)
+    expect(realClient.connectToServer.cache.get(key)).toBeUndefined()
+  } finally {
+    client.cleanup = realCleanup
+    await client.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
+ * A failed tool swap must not close a client another caller adopted,
+ * even when the cache entry has since been replaced by a pending
+ * connect: the adoption evidence is on the client, not in the entry —
+ * and a pending replacement must not make the rejection wait it out.
+ */
+test('A FAILED SWAP KEEPS AN ADOPTED CLIENT ITS CACHE ENTRY REPLACED', async () => {
+  const url = serveNeedingAuth()
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  let failSwap = false
+  const session = openGatedSession(url)
+  recordEngine(session, () => {
+    if (failSwap) throw new Error('swap failed for the test')
+  })
+  const heldTools = holdToolsList()
+  const seenUrls: string[] = []
+  const done = session.authenticateMcpServer('gated', {
+    onAuthorizationUrl: seen => seenUrls.push(seen),
+  })
+  const doneCaught = done.catch(error => error)
+  await waitFor(() => seenUrls.length > 0)
+  expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+  // The reconnect's discovery is stalled on tools/list.
+  await waitFor(() => heldTools.arrived)
+  // Another caller joins the settled shared connect: it adopts the
+  // client the reconnect resolves to.
+  const joinerConnect = realClient.connectToServer('gated', config)
+  const joinerCaught = joinerConnect.catch(error => error)
+  // The cache entry is replaced by a newer generation, whose initialize
+  // stays held while the swap runs.
+  realClient.connectToServer.cache.delete(key)
+  const heldInit = holdInitialize()
+  const newConnect = realClient.connectToServer('gated', config)
+  const newCaught = newConnect.catch(error => error)
+  failSwap = true
+  heldTools.answer()
+
+  // The swap fails, and the rejection arrives promptly — it does not
+  // wait out the newer pending connect.
+  const error = await settlesWithin(doneCaught, 5_000)
+  expect(error).toBeInstanceOf(Error)
+  expect((error as Error).message).toBe('swap failed for the test')
+  // The newer generation is untouched in the cache while its initialize
+  // is still held.
+  expect(realClient.connectToServer.cache.get(key)).toBe(newConnect)
+  heldInit.answer()
+  // The adopted client was never cleaned up: it still lists tools.
+  const adopted = (await joinerConnect) as MCPServerConnection
+  expect(adopted.type).toBe('connected')
+  const tools = await realClient.fetchToolsForClient(adopted)
+  expect(tools.map(tool => tool.mcpInfo?.toolName ?? tool.name)).toEqual(['hello'])
+  const newer = (await settlesWithin(newConnect, 5_000)) as MCPServerConnection
+  expect(newer.type).toBe('connected')
+  await settlesWithin(joinerCaught, 5_000).catch(() => {})
+  await settlesWithin(newCaught, 5_000).catch(() => {})
+}, 30_000)
+
 // Skill discovery is behind the MCP_SKILLS build flag, off by default
 // under bun test: without it the stand-in never advertises resources and
 // the read never runs, so the test is skipped rather than vacuous.
@@ -3597,6 +4097,169 @@ test('THE HOST FLOW READS XAA CREDENTIALS IN THE NAMESPACE IT STARTED IN', async
 }, 30_000)
 
 /**
+ * A pre-turn sign-in initializes every configured server, and a sibling
+ * whose header helper reads its configured environment must see the
+ * session's value — not the ambient one the process carries before any
+ * turn.
+ */
+test('A PRE-TURN SIGN-IN INITIALIZES A SIBLING IN THE SESSION ENVIRONMENT', async () => {
+  const restoreEnv = snapshotEnv(['MCP_SIBLING_PROBE', 'MCP_SIBLING_PROBE_FILE'])
+  const url = serveNeedingAuth()
+  process.env.MCP_SIBLING_PROBE = 'ambient-value'
+  const { script, probeFile } = await probeSiblingEnv()
+  process.env.MCP_SIBLING_PROBE_FILE = probeFile
+  try {
+    await rm(probeFile, { force: true })
+    const session = openSiblingSession(url, script)
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    const status = await done
+    expect(status.status).toBe('connected')
+    // The sibling's header helper ran during the pre-turn setup, in the
+    // session environment — not the ambient one.
+    expect(await readFile(probeFile, 'utf8')).toBe('session-value')
+  } finally {
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The same setup, held on init while another turn's environment is
+ * applied: the sibling must still see the environment the call began
+ * in, not the one applied while it waited.
+ */
+test('A SIGN-IN HELD ON INIT STILL INITIALIZES ITS SIBLING IN THE ENTRY ENVIRONMENT', async () => {
+  const restoreEnv = snapshotEnv(['MCP_SIBLING_PROBE', 'MCP_SIBLING_PROBE_FILE'])
+  const url = serveNeedingAuth()
+  process.env.MCP_SIBLING_PROBE = 'ambient-value'
+  const { script, probeFile } = await probeSiblingEnv()
+  process.env.MCP_SIBLING_PROBE_FILE = probeFile
+  let held: ReturnType<typeof holdInit> | undefined
+  try {
+    await rm(probeFile, { force: true })
+    const session = openSiblingSession(url, script)
+    held = holdInit()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+    })
+    await waitFor(() => held!.arrived)
+    // Another turn applies its own environment while setup is pending.
+    process.env.MCP_SIBLING_PROBE = 'turn-value'
+    held.answer()
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    const status = await done
+    expect(status.status).toBe('connected')
+    expect(await readFile(probeFile, 'utf8')).toBe('session-value')
+  } finally {
+    held?.answer()
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The XAA enablement flag is read in the namespace the flow started
+ * in: set at entry and deleted while the flow waits on initialize, the
+ * exchange still proceeds via XAA and lands tokens in the origin store.
+ */
+test('THE HOST FLOW KEEPS XAA ENABLED WHEN THE FLAG IS DELETED MID-WAIT', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR', 'CLAUDE_CODE_ENABLE_XAA'])
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const savedSettings = getSessionSettingsCache()
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    process.env.CLAUDE_CODE_ENABLE_XAA = '1'
+    const url = serveNeedingAuth()
+    const base = new URL(url).origin
+    setSessionSettingsCache({
+      settings: { xaaIdp: { issuer: base, clientId: 'idp-client' } },
+      errors: [],
+    })
+    realAuth.saveMcpClientSecret('gated', { type: 'http', url } as never, 'not-a-secret')
+    seedStoredToken('gated', url, 'token-for-seeded')
+    saveIdpIdTokenFromJwt(base, 'fake-id-token')
+    const session = unstable_v2_createSession({
+      cwd: process.cwd(),
+      mcpServers: {
+        gated: { type: 'http', url, oauth: { xaa: true, clientId: 'xaa-client' } },
+      },
+    })
+    sdkSessions.push(session)
+    const held = holdInitialize()
+    const done = session.authenticateMcpServer('gated', {})
+    await waitFor(() => held.arrived)
+    // The flag is deleted while setup is pending.
+    delete process.env.CLAUDE_CODE_ENABLE_XAA
+    held.answer()
+
+    const status = await done
+    expect(status.status).toBe('connected')
+    expect(storedAccessTokens(storeIn(origin))).toEqual(['token-for-xaa'])
+  } finally {
+    if (savedSettings) setSessionSettingsCache(savedSettings)
+    else resetSettingsCache()
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The other direction: the flag unset at entry and set while the flow
+ * waits must not admit XAA — the flow rejects with the not-enabled
+ * error instead of exchanging in the later ambient namespace.
+ */
+test('THE HOST FLOW REFUSES XAA WHEN THE FLAG WAS UNSET AT ENTRY', async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR', 'CLAUDE_CODE_ENABLE_XAA'])
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const savedSettings = getSessionSettingsCache()
+  let held: ReturnType<typeof holdInitialize> | undefined
+  try {
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    delete process.env.CLAUDE_CODE_ENABLE_XAA
+    const url = serveNeedingAuth()
+    const base = new URL(url).origin
+    setSessionSettingsCache({
+      settings: { xaaIdp: { issuer: base, clientId: 'idp-client' } },
+      errors: [],
+    })
+    realAuth.saveMcpClientSecret('gated', { type: 'http', url } as never, 'not-a-secret')
+    seedStoredToken('gated', url, 'token-for-seeded')
+    saveIdpIdTokenFromJwt(base, 'fake-id-token')
+    const session = unstable_v2_createSession({
+      cwd: process.cwd(),
+      mcpServers: {
+        gated: { type: 'http', url, oauth: { xaa: true, clientId: 'xaa-client' } },
+      },
+    })
+    sdkSessions.push(session)
+    held = holdInitialize()
+    const done = session.authenticateMcpServer('gated', {})
+    const doneCaught = done.catch(error => error)
+    await waitFor(() => held!.arrived)
+    // The flag appears while setup is pending — too late for this call.
+    process.env.CLAUDE_CODE_ENABLE_XAA = '1'
+    held.answer()
+
+    const error = await settlesWithin(doneCaught, 5_000)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('XAA is not enabled')
+  } finally {
+    held?.answer()
+    if (savedSettings) setSessionSettingsCache(savedSettings)
+    else resetSettingsCache()
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
  * A session that joins a shared reconnect and then closes must not keep
  * that reconnect from closing when its own caller cancels: the joiner's
  * waiter leaves with it, so the abort can close the stalled transport
@@ -3795,6 +4458,403 @@ test("A SURVIVING SHARED DISCOVERY KEEPS ITS ORIGINATING CREDENTIAL NAMESPACE", 
 }, 30_000)
 
 /**
+ * The same surviving discovery, against a competitor that queued
+ * BEFORE the cancellation: the competitor takes the mutex next and
+ * holds it with its own environment applied. The surviving scope must
+ * already be ahead of it in the queue — a re-entry made only in the
+ * catch would queue behind it — or the next page reads the
+ * competitor's credentials.
+ */
+test("A SURVIVING SHARED DISCOVERY KEEPS ITS NAMESPACE AGAINST A COMPETITOR QUEUED BEFORE THE CANCEL", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  // Real config homes, so OPENCLAUDE_CONFIG_DIR selects the store.
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  let releaseCompetitor: (() => void) | undefined
+  try {
+    const url = serveNeedingAuth()
+    // The competitor's token, in its own store: no page may carry it.
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    seedStoredToken('gated', url, 'token-for-other-session')
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    pageToolsList()
+
+    const session = openGatedSession(url)
+    const calls = recordEngine(session)
+    const held = holdToolsList()
+
+    const caller = new AbortController()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+      signal: caller.signal,
+    })
+    const doneCaught = done.catch(error => error)
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    // The reconnect connected, and its discovery is stalled on page one.
+    await waitFor(() => held.arrived)
+
+    // Another caller adopts the in-flight discovery: it connects through
+    // the shared client, then fetches the same tools/list the reconnect
+    // started. Awaiting the connect lets the adoption register before the
+    // abort below.
+    const connectedClient = (await realClient.connectToServer('gated', {
+      type: 'http',
+      url,
+      scope: 'session',
+    } as never)) as MCPServerConnection
+    expect(connectedClient.type).toBe('connected')
+    const adopterTools = realClient
+      .fetchToolsForClient(connectedClient)
+      // The names the model sees, as the status projects them.
+      .then(tools => tools.map(tool => tool.mcpInfo?.toolName ?? tool.name))
+
+    // A competing owner queues BEFORE the cancellation: it takes the
+    // mutex next, applies its own environment, and holds it while the
+    // next page is read.
+    const competitorHeld = new Promise<void>(resolve => {
+      releaseCompetitor = resolve
+    })
+    const competitorApplied = (async () => {
+      const { acquired } = await acquireEnvMutex()
+      expect(acquired).toBe(true)
+      process.env.OPENCLAUDE_CONFIG_DIR = ambient
+      await competitorHeld
+      releaseEnvMutex()
+    })()
+
+    caller.abort()
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    // The cancelled attempt installed nothing.
+    expect(calls.setMcpClients).toHaveLength(1)
+
+    // Page one answers: the second page is read while the competitor
+    // still holds the mutex with its own environment applied, so it
+    // must carry the origin token, not the competitor's.
+    held.answer()
+    await expect(settlesWithin(adopterTools, 5_000)).resolves.toEqual([
+      'hello',
+      'world',
+    ])
+    expect(toolsListAuth).toEqual([
+      'Bearer token-for-stand-in-client-2',
+      'Bearer token-for-stand-in-client-2',
+    ])
+    releaseCompetitor?.()
+    await competitorApplied
+  } finally {
+    releaseCompetitor?.()
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The prompts branch of the same race: a later prompts/list page must
+ * carry the origin token even when a competitor queued before the
+ * cancel and holds the mutex with its own environment applied.
+ */
+test("A SURVIVING PROMPTS DISCOVERY KEEPS ITS ORIGINATING CREDENTIAL NAMESPACE", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  let releaseCompetitor: (() => void) | undefined
+  try {
+    const url = serveNeedingAuth()
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    seedStoredToken('gated', url, 'token-for-other-session')
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    offerPrompts = true
+    pagePromptsList()
+
+    const session = openGatedSession(url)
+    const calls = recordEngine(session)
+    const held = holdPromptsList()
+
+    const caller = new AbortController()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+      signal: caller.signal,
+    })
+    const doneCaught = done.catch(error => error)
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    // The reconnect connected, and its discovery is stalled on prompts
+    // page one.
+    await waitFor(() => held.arrived)
+
+    const connectedClient = (await realClient.connectToServer('gated', {
+      type: 'http',
+      url,
+      scope: 'session',
+    } as never)) as MCPServerConnection
+    expect(connectedClient.type).toBe('connected')
+    const adopterCommands = realClient
+      .fetchCommandsForClient(connectedClient)
+      .then(commands => commands.map(command => command.name))
+
+    const competitor = queueCompetitor(ambient)
+    releaseCompetitor = competitor.release
+
+    caller.abort()
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    expect(calls.setMcpClients).toHaveLength(1)
+
+    held.answer()
+    await expect(settlesWithin(adopterCommands, 5_000)).resolves.toEqual([
+      'mcp__gated__prompt-a',
+      'mcp__gated__prompt-b',
+    ])
+    expect(promptsListAuth).toEqual([
+      'Bearer token-for-stand-in-client-2',
+      'Bearer token-for-stand-in-client-2',
+    ])
+    releaseCompetitor?.()
+    await competitor.applied
+  } finally {
+    releaseCompetitor?.()
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The resources branch of the same race: a later resources/list page
+ * must carry the origin token under a competitor queued before the
+ * cancel.
+ */
+test("A SURVIVING RESOURCES DISCOVERY KEEPS ITS ORIGINATING CREDENTIAL NAMESPACE", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  let releaseCompetitor: (() => void) | undefined
+  try {
+    const url = serveNeedingAuth()
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    seedStoredToken('gated', url, 'token-for-other-session')
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    offerResources = true
+    pageResourcesList()
+
+    const session = openGatedSession(url)
+    const calls = recordEngine(session)
+    const held = holdResourcesList()
+
+    const caller = new AbortController()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+      signal: caller.signal,
+    })
+    const doneCaught = done.catch(error => error)
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    // The reconnect connected, and its discovery is stalled on resources
+    // page one.
+    await waitFor(() => held.arrived)
+
+    const connectedClient = (await realClient.connectToServer('gated', {
+      type: 'http',
+      url,
+      scope: 'session',
+    } as never)) as MCPServerConnection
+    expect(connectedClient.type).toBe('connected')
+    const adopterResources = realClient
+      .fetchResourcesForClient(connectedClient)
+      .then(resources => resources.map(resource => resource.uri))
+
+    const competitor = queueCompetitor(ambient)
+    releaseCompetitor = competitor.release
+
+    caller.abort()
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    expect(calls.setMcpClients).toHaveLength(1)
+
+    held.answer()
+    await expect(settlesWithin(adopterResources, 5_000)).resolves.toEqual([
+      'skill://review',
+      'file:///second',
+    ])
+    // Two pages per traversal; under MCP_SKILLS the skills fetch lists
+    // resources too, so there are two traversals. Every request carries
+    // the origin token, never the competitor's.
+    expect(resourcesListAuth).toHaveLength(feature('MCP_SKILLS') ? 4 : 2)
+    expect(
+      resourcesListAuth.every(
+        auth => auth === 'Bearer token-for-stand-in-client-2',
+      ),
+    ).toBe(true)
+    releaseCompetitor?.()
+    await competitor.applied
+  } finally {
+    releaseCompetitor?.()
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The skills branch of the same race: the skill resources/read starts
+ * only after the resources/list answers, so it is a later credential
+ * operation — it must carry the origin token under a competitor queued
+ * before the cancel. The list is the held branch here, not the read:
+ * holding the read would only delay its answer, after its credential
+ * was already read. Behind the MCP_SKILLS flag, like the other
+ * skill-read test.
+ */
+skillReadTest("A SURVIVING SKILL READ KEEPS ITS ORIGINATING CREDENTIAL NAMESPACE", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  let releaseCompetitor: (() => void) | undefined
+  try {
+    const url = serveNeedingAuth()
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    seedStoredToken('gated', url, 'token-for-other-session')
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    offerResources = true
+
+    const session = openGatedSession(url)
+    const calls = recordEngine(session)
+    const held = holdResourcesList()
+
+    const caller = new AbortController()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+      signal: caller.signal,
+    })
+    const doneCaught = done.catch(error => error)
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    // The reconnect connected, and its discovery is stalled on the
+    // resources/list the skill read waits for.
+    await waitFor(() => held.arrived)
+
+    const connectedClient = (await realClient.connectToServer('gated', {
+      type: 'http',
+      url,
+      scope: 'session',
+    } as never)) as MCPServerConnection
+    expect(connectedClient.type).toBe('connected')
+    const adopterSkills = fetchMcpSkillsForClient(connectedClient)
+      .then(commands => commands.map(command => command.name))
+
+    const competitor = queueCompetitor(ambient)
+    releaseCompetitor = competitor.release
+
+    caller.abort()
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    expect(calls.setMcpClients).toHaveLength(1)
+
+    // The list answers, and only then does the skill read start — its
+    // credential is read while the competitor still holds the mutex
+    // with its own environment applied, so it must carry the origin
+    // token, not the competitor's.
+    held.answer()
+    await expect(settlesWithin(adopterSkills, 5_000)).resolves.toEqual([
+      'mcp__gated__review',
+    ])
+    expect(skillReadAuth).toEqual(['Bearer token-for-stand-in-client-2'])
+    releaseCompetitor?.()
+    await competitor.applied
+  } finally {
+    releaseCompetitor?.()
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The tools retry branch of the same race: a failed page-two request
+ * retries after a backoff, and the retry must carry the origin token —
+ * not the competitor's — under a competitor queued before the cancel.
+ */
+test("A SURVIVING TOOLS RETRY KEEPS ITS ORIGINATING CREDENTIAL NAMESPACE", async () => {
+  const restoreEnv = snapshotEnv(['OPENCLAUDE_CONFIG_DIR'])
+  setClaudeConfigHomeDirForTesting(undefined)
+  const origin = join(configHome, 'origin')
+  const ambient = join(configHome, 'ambient')
+  let releaseCompetitor: (() => void) | undefined
+  try {
+    const url = serveNeedingAuth()
+    process.env.OPENCLAUDE_CONFIG_DIR = ambient
+    seedStoredToken('gated', url, 'token-for-other-session')
+    process.env.OPENCLAUDE_CONFIG_DIR = origin
+    pageToolsList()
+    failToolsListPage2Once = true
+
+    const session = openGatedSession(url)
+    const calls = recordEngine(session)
+    const held = holdToolsList()
+
+    const caller = new AbortController()
+    const seenUrls: string[] = []
+    const done = session.authenticateMcpServer('gated', {
+      onAuthorizationUrl: seen => seenUrls.push(seen),
+      signal: caller.signal,
+    })
+    const doneCaught = done.catch(error => error)
+    await waitFor(() => seenUrls.length > 0)
+    expect((await fetch(callbackFor(seenUrls[0]!))).status).toBe(200)
+    // The reconnect connected, and its discovery is stalled on tools
+    // page one.
+    await waitFor(() => held.arrived)
+
+    const connectedClient = (await realClient.connectToServer('gated', {
+      type: 'http',
+      url,
+      scope: 'session',
+    } as never)) as MCPServerConnection
+    expect(connectedClient.type).toBe('connected')
+    const adopterTools = realClient
+      .fetchToolsForClient(connectedClient)
+      .then(tools => tools.map(tool => tool.mcpInfo?.toolName ?? tool.name))
+
+    const competitor = queueCompetitor(ambient)
+    releaseCompetitor = competitor.release
+
+    caller.abort()
+    await expect(settlesWithin(doneCaught, 5_000)).resolves.toBeInstanceOf(
+      realAuth.AuthenticationCancelledError,
+    )
+    expect(calls.setMcpClients).toHaveLength(1)
+
+    held.answer()
+    // Page two fails once, then retries after its backoff and succeeds.
+    await expect(settlesWithin(adopterTools, 10_000)).resolves.toEqual([
+      'hello',
+      'world',
+    ])
+    expect(toolsListAuth).toEqual([
+      'Bearer token-for-stand-in-client-2',
+      'Bearer token-for-stand-in-client-2',
+      'Bearer token-for-stand-in-client-2',
+    ])
+    releaseCompetitor?.()
+    await competitor.applied
+  } finally {
+    releaseCompetitor?.()
+    setClaudeConfigHomeDirForTesting(configHome)
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
  * The SDK preamble joins a pending connect before awaiting it: a creator
  * abort while it waits must not close the transport the SDK session
  * still needs. An explicit Authorization header authorizes the connect
@@ -3875,6 +4935,80 @@ test('AN OLDER GENERATION KEEPS ITS TRANSPORT WHILE ITS JOINER STILL WAITS', asy
 }, 30_000)
 
 /**
+ * The creator cancelling during header setup — before any transport
+ * exists — must not close the transport its live joiner still needs:
+ * the wrapper drops the creator from the count first, so a count of one
+ * after that is the joiner alone, not the creator alone.
+ */
+test('A CREATOR CANCELLING DURING HEADER SETUP KEEPS THE TRANSPORT FOR ITS JOINER', async () => {
+  const restoreEnv = snapshotEnv(['MCP_HEADER_HELPER_ARRIVED', 'MCP_HEADER_HELPER_GO'])
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const held = await holdHeaders()
+  process.env.MCP_HEADER_HELPER_ARRIVED = held.arrivedFile
+  process.env.MCP_HEADER_HELPER_GO = held.goFile
+  const config = { type: 'http', url, headersHelper: held.script, scope: 'session' } as never
+  try {
+    const creator = new AbortController()
+    const creatorConnect = realClient.connectToServer('gated', config, undefined, creator.signal)
+    // The creator is inside header setup: no transport exists yet.
+    await waitFor(() => existsSync(held.arrivedFile))
+    // The joiner shares the creator's pending connect.
+    const joinerConnect = realClient.connectToServer('gated', config)
+    const joinerCaught = joinerConnect.catch(error => error)
+
+    creator.abort()
+    // Release header setup: the transport is assigned now, with the
+    // joiner still waiting on it.
+    await writeFile(held.goFile, 'go')
+
+    const joinerClient = (await settlesWithin(joinerConnect, 5_000)) as MCPServerConnection
+    expect(joinerClient.type).toBe('connected')
+    expect((await settlesWithin(creatorConnect, 5_000)) as MCPServerConnection).toBe(joinerClient)
+    // The transport survived: the joiner can still list tools through it.
+    const tools = await realClient.fetchToolsForClient(joinerClient)
+    expect(tools.map(tool => tool.mcpInfo?.toolName ?? tool.name)).toEqual(['hello'])
+    await settlesWithin(joinerCaught, 5_000).catch(() => {})
+  } finally {
+    // A failed assertion must not leave the helper blocked.
+    await writeFile(held.goFile, 'go').catch(() => {})
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
+ * The same cancellation with no waiter left must still close the
+ * abandoned transport once it is assigned, instead of holding the
+ * caller until the connection timeout.
+ */
+test('A CREATOR CANCELLING DURING HEADER SETUP WITH NO WAITER CLOSES THE ABANDONED TRANSPORT', async () => {
+  const restoreEnv = snapshotEnv(['MCP_HEADER_HELPER_ARRIVED', 'MCP_HEADER_HELPER_GO'])
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const held = await holdHeaders()
+  process.env.MCP_HEADER_HELPER_ARRIVED = held.arrivedFile
+  process.env.MCP_HEADER_HELPER_GO = held.goFile
+  const config = { type: 'http', url, headersHelper: held.script, scope: 'session' } as never
+  try {
+    const creator = new AbortController()
+    const creatorConnect = realClient.connectToServer('gated', config, undefined, creator.signal)
+    await waitFor(() => existsSync(held.arrivedFile))
+    creator.abort()
+    await writeFile(held.goFile, 'go')
+    // The abandoned transport closes once assigned, so the connect
+    // settles promptly with a closed-connection error — not at the
+    // connection timeout.
+    const client = (await settlesWithin(creatorConnect, 5_000)) as MCPServerConnection
+    expect(client.type).toBe('failed')
+    if (client.type !== 'failed') throw new Error('expected a failed client')
+    expect(client.error ?? '').not.toContain('timed out')
+  } finally {
+    await writeFile(held.goFile, 'go').catch(() => {})
+    restoreEnv()
+  }
+}, 30_000)
+
+/**
  * A joiner cancelled before its connect settles adopts nothing: a later
  * release must evict the cache instead of keeping a client no session
  * holds.
@@ -3945,55 +5079,63 @@ function isProcessAlive(pid: number): boolean {
  * deferred until it has.
  */
 test('A STALLED STDIO CONNECT CLOSES ONCE ITS CREATOR AND JOINER HAVE BOTH ABORTED', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'openclaude-stalled-stdio-'))
-  const pidFile = join(dir, 'server.pid')
-  // A server that starts but never answers initialize: the connect stalls
-  // until the transport closes or the connection timeout fires.
-  const serverRef = {
-    type: 'stdio',
-    command: process.execPath,
-    args: [
-      '-e',
-      `require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 120_000)`,
-      pidFile,
-    ],
-    scope: 'session',
-  } as never
-
+  // The fixture owns teardown from allocation on: a failure waiting for
+  // the child or reading its PID must still release the subprocess, the
+  // pending connects and the temp directory.
+  let dir: string | undefined
+  let pid: number | undefined
   const creator = new AbortController()
-  const creatorConnect = realClient.connectToServer(
-    'stalled-stdio',
-    serverRef,
-    undefined,
-    creator.signal,
-  )
-  const creatorCaught = creatorConnect.catch(error => error)
-  // The joiner shares the creator's pending connect.
   const joiner = new AbortController()
-  const joinerConnect = realClient.connectToServer(
-    'stalled-stdio',
-    serverRef,
-    undefined,
-    joiner.signal,
-  )
-  const joinerCaught = joinerConnect.catch(error => error)
-
-  // Wait until the subprocess has started and the connect is stalled on
-  // initialize — only then is an abort a cancellation of a stalled
-  // connect rather than a race with startup.
-  await waitFor(() => existsSync(pidFile))
-  const pid = Number.parseInt(await readFile(pidFile, 'utf8'), 10)
-  expect(Number.isInteger(pid)).toBe(true)
-  expect(isProcessAlive(pid)).toBe(true)
-
-  // The creator aborts while the joiner remains: the transport is
-  // preserved for the joiner, so the connect stays stalled.
-  creator.abort()
-  // The joiner aborts too: the last waiter cancels, so the transport
-  // must close and the connect must reject — promptly, not at the
-  // connection timeout.
-  joiner.abort()
+  let creatorConnect: Promise<MCPServerConnection> | undefined
+  let joinerConnect: Promise<MCPServerConnection> | undefined
   try {
+    dir = await mkdtemp(join(tmpdir(), 'openclaude-stalled-stdio-'))
+    const pidFile = join(dir, 'server.pid')
+    // A server that starts but never answers initialize: the connect stalls
+    // until the transport closes or the connection timeout fires.
+    const serverRef = {
+      type: 'stdio',
+      command: process.execPath,
+      args: [
+        '-e',
+        `require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 120_000)`,
+        pidFile,
+      ],
+      scope: 'session',
+    } as never
+
+    creatorConnect = realClient.connectToServer(
+      'stalled-stdio',
+      serverRef,
+      undefined,
+      creator.signal,
+    )
+    const creatorCaught = creatorConnect.catch(error => error)
+    // The joiner shares the creator's pending connect.
+    joinerConnect = realClient.connectToServer(
+      'stalled-stdio',
+      serverRef,
+      undefined,
+      joiner.signal,
+    )
+    const joinerCaught = joinerConnect.catch(error => error)
+
+    // Wait until the subprocess has started and the connect is stalled on
+    // initialize — only then is an abort a cancellation of a stalled
+    // connect rather than a race with startup.
+    await waitFor(() => existsSync(pidFile))
+    const parsedPid = Number.parseInt(await readFile(pidFile, 'utf8'), 10)
+    expect(Number.isInteger(parsedPid)).toBe(true)
+    pid = parsedPid
+    expect(isProcessAlive(parsedPid)).toBe(true)
+
+    // The creator aborts while the joiner remains: the transport is
+    // preserved for the joiner, so the connect stays stalled.
+    creator.abort()
+    // The joiner aborts too: the last waiter cancels, so the transport
+    // must close and the connect must reject — promptly, not at the
+    // connection timeout.
+    joiner.abort()
     // A failed connect resolves to a failed client, not a rejection — the
     // point is that it settles promptly with a closed-connection error,
     // not at the 30s connection timeout.
@@ -4009,17 +5151,29 @@ test('A STALLED STDIO CONNECT CLOSES ONCE ITS CREATOR AND JOINER HAVE BOTH ABORT
     expect(creatorClient.error).toContain('Connection closed')
     expect(await settlesWithin(joinerCaught, 5_000)).toBe(creatorClient)
     // The abandoned subprocess is gone, not left until the timeout.
-    await waitFor(() => !isProcessAlive(pid))
+    await waitFor(() => !isProcessAlive(parsedPid))
   } finally {
-    // A failed assertion must not leave a sleeping subprocess behind.
-    try {
-      process.kill(pid, 'SIGKILL')
-    } catch {
-      // Already gone.
+    // Abort both controllers so a stalled connect cannot outlive the
+    // test; kill the child only once its PID was read, and remove the
+    // temp directory whether setup or an assertion failed.
+    creator.abort()
+    joiner.abort()
+    if (pid !== undefined) {
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {
+        // Already gone.
+      }
     }
-    await rm(dir, { recursive: true, force: true })
-    await settlesWithin(creatorCaught, 5_000).catch(() => {})
-    await settlesWithin(joinerCaught, 5_000).catch(() => {})
+    if (dir !== undefined) {
+      await rm(dir, { recursive: true, force: true })
+    }
+    if (creatorConnect) {
+      await settlesWithin(creatorConnect.catch(error => error), 5_000).catch(() => {})
+    }
+    if (joinerConnect) {
+      await settlesWithin(joinerConnect.catch(error => error), 5_000).catch(() => {})
+    }
   }
 }, 30_000)
 
