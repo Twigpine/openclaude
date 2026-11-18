@@ -846,6 +846,293 @@ describe('wait command handler', () => {
     expect(result.error).toBe('timeout')
   })
 
+  it('waits for the write callback even when write() returns true', async () => {
+    // Regression test for CodeRabbit #2497 review 5950772048: a real
+    // stream's write() can return true while the chunk is still
+    // pending — the return value describes buffer capacity, not
+    // completion. The waiter must wait for the write callback, not the
+    // boolean. The fake reports every write as flushed at once (true)
+    // but invokes the callback 150 ms later.
+    await createTestSession('bg-aaa1')
+    class DelayedWriteOutput {
+      chunks: string[] = []
+      flushed = false
+      private listeners = new Map<string, Array<() => void>>()
+      write(chunk: string, callback?: () => void): boolean {
+        this.chunks.push(chunk)
+        setTimeout(() => {
+          this.flushed = true
+          callback?.()
+        }, 150)
+        return true
+      }
+      once(event: string, listener: () => void): void {
+        const list = this.listeners.get(event) ?? []
+        list.push(listener)
+        this.listeners.set(event, list)
+      }
+      off(event: string, listener: () => void): void {
+        this.listeners.set(
+          event,
+          (this.listeners.get(event) ?? []).filter(l => l !== listener),
+        )
+      }
+      text(): string {
+        return this.chunks.join('')
+      }
+    }
+    const stdout = new DelayedWriteOutput()
+    const startedAt = performance.now()
+    const { code } = await runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: liveLookup('sleep 30'),
+      stdout,
+    })
+    const elapsedMs = performance.now() - startedAt
+    expect(code).toBe(124)
+    // The waiter returned only after the write callback fired (~150 ms
+    // after the write at the 60 ms deadline), not on the `true` return.
+    expect(stdout.flushed).toBe(true)
+    expect(elapsedMs).toBeGreaterThanOrEqual(170)
+    const result = expectWaitJsonShape(JSON.parse(stdout.text()))
+    expect(result.waitResult).toBe('timeout')
+    expect(result.error).toBe('timeout')
+  })
+
+  it('returns 130 when SIGINT lands during a lookup stalled past grace expiry', async () => {
+    // Regression test for CodeRabbit #2497 review 5950772048: a SIGINT
+    // received while the in-flight lookup is still pending must win
+    // over the grace-timeout return (124). The lookup ignores the abort
+    // signal and never settles, so the grace timer expires with no
+    // observation — the old code returned 124 from that branch.
+    await createTestSession('bg-aaa1')
+    const neverSettlingLookup = async (
+      _pid: number,
+      _options: { signal?: AbortSignal },
+    ): Promise<string | null> => new Promise<string | null>(() => {})
+    const startedAt = performance.now()
+    const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      pollIntervalMs: 50,
+      getProcessCommandAsync: neverSettlingLookup,
+    })
+    // The deadline fires at 60 ms and the grace interval runs to
+    // ~110 ms; the signal lands mid-grace. It is sent at 70 ms, not
+    // right at the deadline: it only has to be set before the grace
+    // return, so earlier is strictly safer under load.
+    await new Promise(resolve => setTimeout(resolve, 70))
+    process.emit('SIGINT')
+    const { code, stdout, stderr } = await waiting
+    const elapsedMs = performance.now() - startedAt
+    expect(code).toBe(130)
+    expect(stderr).toBe('')
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.waitResult).toBe('interrupted')
+    expect(result.waitSignal).toBe('SIGINT')
+    expect(elapsedMs).toBeLessThan(2000)
+  })
+
+  it('returns 130 when SIGINT lands during a final lookup stalled past grace expiry', async () => {
+    // Regression test for CodeRabbit #2497 review 5950772048: the
+    // final-observation timeout branch has the same precedence bug —
+    // a signal received while the fresh lookup never settles must
+    // report the interruption (130), not the timeout (124). The first
+    // lookup aborts on the deadline signal; the final lookup ignores
+    // its signal and never settles.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    })
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    const childPid = child.pid
+    try {
+      await createTestSession('bg-aaa1', { pid: childPid })
+      let lookups = 0
+      let finalEnteredResolve!: () => void
+      const finalEntered = new Promise<void>(resolve => {
+        finalEnteredResolve = resolve
+      })
+      const stalledFinalLookup = async (
+        _pid: number,
+        options: { signal?: AbortSignal },
+      ): Promise<string | null> => {
+        lookups += 1
+        if (lookups === 1) {
+          await new Promise<void>(resolve => {
+            options.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            })
+          })
+          return null
+        }
+        finalEnteredResolve()
+        return new Promise<string | null>(() => {})
+      }
+      const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+        pollIntervalMs: 50,
+        getProcessCommandAsync: stalledFinalLookup,
+      })
+      await finalEntered
+      process.emit('SIGINT')
+      const { code, stdout, stderr } = await waiting
+      expect(code).toBe(130)
+      expect(stderr).toBe('')
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.waitResult).toBe('interrupted')
+      expect(result.waitSignal).toBe('SIGINT')
+      expect(lookups).toBe(2)
+    } finally {
+      child.kill()
+    }
+  })
+
+  it('returns promptly on SIGINT while the result flush is stalled', async () => {
+    // Regression test for CodeRabbit #2497 review 5950772048: when the
+    // consumer never drains, the pending-flush wait in the finally must
+    // still respond to a client signal — otherwise the waiter ignores
+    // SIGINT/SIGTERM indefinitely. The rendered timeout result (124)
+    // is preserved; only the wait is abandoned, and the signal
+    // listeners are removed.
+    await createTestSession('bg-aaa1')
+    class NeverDrainingOutput {
+      chunks: string[] = []
+      private listeners = new Map<string, Array<() => void>>()
+      write(_chunk: string, _callback?: () => void): boolean {
+        this.chunks.push(_chunk)
+        return false
+      }
+      once(event: string, listener: () => void): void {
+        const list = this.listeners.get(event) ?? []
+        list.push(listener)
+        this.listeners.set(event, list)
+      }
+      off(event: string, listener: () => void): void {
+        this.listeners.set(
+          event,
+          (this.listeners.get(event) ?? []).filter(l => l !== listener),
+        )
+      }
+      text(): string {
+        return this.chunks.join('')
+      }
+    }
+    const stdout = new NeverDrainingOutput()
+    const sigintBefore = getEventListeners(process, 'SIGINT').length
+    const sigtermBefore = getEventListeners(process, 'SIGTERM').length
+    const startedAt = performance.now()
+    const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: liveLookup('sleep 30'),
+      stdout,
+    })
+    // The flush starts at the ~60 ms deadline and never settles on its
+    // own; the signal lands well inside the stalled wait.
+    await new Promise(resolve => setTimeout(resolve, 150))
+    process.emit('SIGINT')
+    const { code } = await waiting
+    const elapsedMs = performance.now() - startedAt
+    expect(code).toBe(124)
+    expect(elapsedMs).toBeLessThan(2000)
+    const result = expectWaitJsonShape(JSON.parse(stdout.text()))
+    expect(result.waitResult).toBe('timeout')
+    expect(result.error).toBe('timeout')
+    // The handler removed its own signal listeners on the way out.
+    expect(getEventListeners(process, 'SIGINT').length).toBe(sigintBefore)
+    expect(getEventListeners(process, 'SIGTERM').length).toBe(sigtermBefore)
+  })
+
+  it('does not return while a resolution-time inspector outlasts the cleanup grace', async () => {
+    // Regression test for CodeRabbit #2497 review 5950772048: when the
+    // deadline fires during selector resolution, the resolution lookup
+    // must be aborted (killing its `ps` child) instead of running on
+    // past the cleanup grace. The stub stands in for the real lookup:
+    // the first (resolution-time) probe spawns a real child that traps
+    // SIGTERM and exits 300 ms later, so a waiter that never signals
+    // the probe returns at the 500 ms grace bound with the child
+    // observably alive. Two same-name candidates also prove no further
+    // probe starts once the waiter is cancelled. The deadline is
+    // 500 ms, not 60 ms: the child is a fresh Bun process, and a
+    // SIGTERM that lands before it installs its trap kills it at once
+    // instead of after the 300 ms trap — the test would then pass or
+    // fail on startup timing instead of on the abort wiring.
+    const sessionChild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    })
+    if (sessionChild.pid === undefined) {
+      throw new Error('spawned session child has no pid')
+    }
+    const sessionPid = sessionChild.pid
+    let inspector: ReturnType<typeof spawn> | undefined
+    try {
+      await createTestSession('bg-aaa1', {
+        name: 'worker',
+        pid: sessionPid,
+      })
+      await createTestSession('bg-bbb2', {
+        name: 'worker2',
+        pid: sessionPid,
+      })
+      // Two live candidates must share the name for the scan to probe
+      // a second one; creation enforces name uniqueness, so rename the
+      // second fixture's metadata file directly (test-only fixture edit,
+      // as with the terminal-fact fixtures above).
+      const secondPath = metadataPath('bg-bbb2')
+      const secondRaw = JSON.parse(await readFile(secondPath, 'utf8')) as Record<
+        string,
+        unknown
+      >
+      secondRaw.name = 'worker'
+      await writeFile(secondPath, JSON.stringify(secondRaw))
+      let lookups = 0
+      const slowRealLookup = async (
+        _pid: number,
+        options: { signal?: AbortSignal },
+      ): Promise<string | null> => {
+        lookups += 1
+        if (lookups !== 1) return liveLookup('sleep 30')(_pid, options)
+        inspector = spawn(
+          process.execPath,
+          [
+            '-e',
+            "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300)); setTimeout(() => {}, 60000)",
+          ],
+          { stdio: 'ignore', signal: options.signal },
+        )
+        await new Promise<void>(resolve => {
+          inspector?.once('error', () => {})
+          inspector?.once('close', () => resolve())
+        })
+        return options.signal?.aborted ? null : 'sleep 30'
+      }
+      const startedAt = performance.now()
+      const { code, stdout, stderr } = await runWait(
+        ['worker', '--timeout', '500ms', '--json'],
+        {
+          pollIntervalMs: 500,
+          getProcessCommandAsync: slowRealLookup,
+        },
+      )
+      const elapsedMs = performance.now() - startedAt
+      expect(code).toBe(124)
+      expect(stderr).toBe('')
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.waitResult).toBe('timeout')
+      expect(result.error).toBe('timeout')
+      // Only the first candidate was probed: the scan stopped once the
+      // deadline cancelled the waiter.
+      expect(lookups).toBe(1)
+      // The waiter returned only after the trapped inspector exited
+      // (~500 ms deadline + 300 ms trap), not at the deadline.
+      expect(elapsedMs).toBeGreaterThanOrEqual(700)
+      expect(inspector?.pid).toBeDefined()
+      expect(() => process.kill(inspector!.pid!, 0)).toThrow()
+    } finally {
+      sessionChild.kill()
+      try {
+        inspector?.kill('SIGKILL')
+      } catch {}
+    }
+  })
+
   it('releases deadline reactions when each poll settles', async () => {
     // Regression test for maintainer review 5948202472 (P3) on #2497:
     // racing one long-lived deadline promise per poll retains a

@@ -3836,6 +3836,10 @@ export type ResolveBackgroundSessionForWaitOptions = {
     pid: number,
     options: { signal?: AbortSignal },
   ) => Promise<string | null>
+  // Cancels the exact-name liveness probes: the waiter's client-or-
+  // deadline signal aborts the in-flight probe, and no further probe
+  // starts once it has fired (CodeRabbit #2497 review 5950772048).
+  signal?: AbortSignal
 }
 
 export async function resolveBackgroundSessionForWait(
@@ -3912,18 +3916,23 @@ export async function resolveBackgroundSessionForWait(
   // candidate counts as live only when read-only inspection says its
   // pinned PID is still alive and its recorded command still matches
   // (maintainer review 5948202472 on #2497). This reuses the async
-  // process-identity verifier with no abort signal, writes nothing, and
-  // never refreshes registry status from `wait`. Terminal candidates are
-  // unaffected — they fall through to the terminal-name match below.
+  // process-identity verifier with the caller's cancellation signal,
+  // writes nothing, and never refreshes registry status from `wait`.
+  // A cancelled probe stops the scan: further candidates are not probed
+  // once the waiter is gone (CodeRabbit #2497 review 5950772048).
+  // Terminal candidates are unaffected — they fall through to the
+  // terminal-name match below.
   const liveByName: BackgroundSession[] = []
   for (const session of effectiveByName) {
     if (isTerminalBackgroundSession(session)) continue
+    if (options?.signal?.aborted) break
     const identity = await verifyBackgroundSessionProcessIdentityAsync(
       session,
       {
         isProcessAlive: options?.isProcessAlive,
         signalProcess: options?.signalProcess,
         getProcessCommandAsync: options?.getProcessCommandAsync,
+        signal: options?.signal,
       },
     )
     if (identity.state === 'matches') liveByName.push(session)
