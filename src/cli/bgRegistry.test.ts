@@ -3727,6 +3727,24 @@ describe('background session wait strict reads', () => {
     return join(configDir, 'bg-sessions', 'terminal', `${id}.${kind}.json`)
   }
 
+  // Links a case-variant path to its canonical file, reproducing how a
+  // case-insensitive registry opens one file under both spellings. On a
+  // case-insensitive filesystem the variant already resolves to the
+  // canonical file, so creating the link would fail with EEXIST — the
+  // native aliasing is the fixture there, and no link is created
+  // (CodeRabbit #2497 review 5954753623).
+  async function linkCaseVariant(
+    canonical: string,
+    variant: string,
+  ): Promise<void> {
+    try {
+      await stat(variant)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error
+      await symlink(canonical, variant)
+    }
+  }
+
   async function waitErrorCode(
     operation: () => Promise<unknown>,
   ): Promise<string | undefined> {
@@ -3907,7 +3925,7 @@ describe('background session wait strict reads', () => {
       command: ['sleep', '30'],
       sessionId: 'sess-bg-ab',
     })
-    await symlink(metadataPath('bg-ab'), metadataPath('BG-ab'))
+    await linkCaseVariant(metadataPath('bg-ab'), metadataPath('BG-ab'))
 
     const resolved = await resolveBackgroundSessionForWait('BG-ab')
 
@@ -3927,7 +3945,7 @@ describe('background session wait strict reads', () => {
       command: ['sleep', '30'],
       sessionId: 'sess-bg-ab',
     })
-    await symlink(metadataPath('bg-ab'), metadataPath('BG-ab'))
+    await linkCaseVariant(metadataPath('bg-ab'), metadataPath('BG-ab'))
 
     expect(
       await waitErrorCode(() => resolveBackgroundSessionForWait('BG-ab')),
@@ -3948,12 +3966,45 @@ describe('background session wait strict reads', () => {
       command: ['sleep', '30'],
       sessionId: 'sess-bg-ab',
     })
-    await symlink(metadataPath('bg-ab'), metadataPath('BG-ab'))
+    await linkCaseVariant(metadataPath('bg-ab'), metadataPath('BG-ab'))
 
     expect(
       await waitErrorCode(() =>
         readPinnedBackgroundSessionForWait({ id: 'BG-ab', pid: 424242 }),
       ),
+    ).toBe('metadata_malformed')
+  })
+
+  it('fails closed when an enumerated row has a stored ID with no canonical file', async () => {
+    // Regression test for CodeRabbit #2497 review 5954753623: a row
+    // whose stored id differs from its filename and names no valid
+    // canonical row must fail the lookup instead of being skipped
+    // silently. The stray row below carries the requested name, so
+    // skipping it would pin the other prefix candidate and report the
+    // wrong session; only a row that aliases a valid canonical row
+    // (the case-variant fixtures above) may be skipped.
+    await createBackgroundSession({
+      id: 'bg-job2',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-job2',
+    })
+    await createBackgroundSession({
+      id: 'bg-other',
+      name: 'bg-job',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-other',
+    })
+    // Move the row under a filename its stored id does not name, with
+    // no canonical file left behind: bg-job1.json holds a session
+    // whose stored id is bg-other, and bg-other.json no longer exists.
+    await rename(metadataPath('bg-other'), metadataPath('bg-job1'))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-job')),
     ).toBe('metadata_malformed')
   })
 
