@@ -22,6 +22,7 @@ import { createTaskStateBase, generateTaskId } from '../../Task.js'
 import type { SetAppState } from '../../Task.js'
 import {
   markMcpServerTaskTerminal,
+  type McpServerTaskCancelOptions,
   type McpServerTaskState,
   registerMcpServerTaskCanceler,
 } from '../../tasks/McpServerTask/McpServerTask.js'
@@ -225,7 +226,7 @@ function clampPollInterval(interval: number | undefined): number {
 // The server may purge a task's result when its TTL ends, so the next poll
 // has to land inside the remaining TTL. Aim for half of what is left, with a
 // small floor so a nearly expired task is not polled in a tight loop. Tasks
-// far from expiry keep the normal interval bounds.
+// far from expiry, or already past it, keep the normal interval bounds.
 const MIN_TTL_POLL_INTERVAL_MS = 50
 
 function pollDelayWithinTtl(
@@ -242,6 +243,8 @@ function pollDelayWithinTtl(
     return interval
   }
   const remaining = createdAtMs + task.ttl - Date.now()
+  // Past the TTL the server may still hold the task; nothing is left to race.
+  if (remaining <= 0) return interval
   return Math.min(
     interval,
     Math.max(MIN_TTL_POLL_INTERVAL_MS, Math.floor(remaining / 2)),
@@ -481,14 +484,34 @@ export function handleMcpTaskStatusNotification(
 
 /**
  * Kill path: tasks/cancel on the live connection. Registered as the
- * McpServerTask kill hook at module load.
+ * McpServerTask kill hook at module load. With releaseOnFailure (agent exit),
+ * a rejected cancel ends the local task as failed and stops tracking it,
+ * since nothing remains to stop it later or receive its completion.
  */
-async function cancelMcpServerTask(localTaskId: string): Promise<void> {
+async function cancelMcpServerTask(
+  localTaskId: string,
+  opts?: McpServerTaskCancelOptions,
+): Promise<boolean> {
   const entry = trackedByLocalId.get(localTaskId)
-  if (!entry || entry.finalized) return
+  if (!entry) return false
+  if (entry.finalized) return true
   try {
-    await entry.client.experimental.tasks.cancelTask(entry.mcpTaskId)
+    await entry.client.experimental.tasks.cancelTask(
+      entry.mcpTaskId,
+      opts?.timeoutMs === undefined ? undefined : { timeout: opts.timeoutMs },
+    )
   } catch (e) {
+    if (opts?.releaseOnFailure) {
+      if (entry.finalized) return true
+      entry.finalized = true
+      entry.abort.abort()
+      trackedByLocalId.delete(localTaskId)
+      localIdByMcpTaskId.delete(mcpTaskKey(entry.serverName, entry.mcpTaskId))
+      markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
+        statusMessage: `Cancel request failed (tasks/cancel): ${e instanceof Error ? e.message : String(e)}; the server may still be running the task`,
+      })
+      return true
+    }
     // The server refused (for example it does not implement tasks/cancel),
     // so the task may still be running there. Keep tracking it, say why the
     // stop did not take, and let the caller leave it running and retryable.
@@ -500,6 +523,7 @@ async function cancelMcpServerTask(localTaskId: string): Promise<void> {
     throw e
   }
   await finalizeMcpServerTask(localTaskId, 'cancelled')
+  return true
 }
 
 /**

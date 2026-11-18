@@ -2259,6 +2259,10 @@ export const fetchToolsForClient = memoizeWithLRU(
                     meta,
                     signal: context.abortController.signal,
                     setAppState: context.setAppState,
+                    // Async subagents get a no-op setAppState; task
+                    // registration must still reach the root store.
+                    setTaskAppState:
+                      context.setAppStateForTasks ?? context.setAppState,
                     // The scheduler's id names this tool use; the first
                     // block of parentMessage can belong to a sibling call.
                     toolUseId: context.toolUseId ?? toolUseId,
@@ -3277,6 +3281,7 @@ export async function callMCPToolWithUrlElicitationRetry({
   meta,
   signal,
   setAppState,
+  setTaskAppState = setAppState,
   onProgress,
   toolUseId,
   agentId,
@@ -3292,6 +3297,8 @@ export async function callMCPToolWithUrlElicitationRetry({
   meta?: Record<string, unknown>
   signal: AbortSignal
   setAppState: (f: (prev: AppState) => AppState) => void
+  /** Task registration channel (setAppStateForTasks); defaults to setAppState. */
+  setTaskAppState?: (f: (prev: AppState) => AppState) => void
   onProgress?: (data: MCPProgress) => void
   /** Caller context for the background task notification. */
   toolUseId?: string
@@ -3343,7 +3350,7 @@ export async function callMCPToolWithUrlElicitationRetry({
             description,
             toolUseId,
             agentId,
-            setAppState,
+            setAppState: setTaskAppState,
           })
           return {
             content: `MCP server "${connectedClient.name}" started "${tool}" as background task ${taskId}. The task runs on the server; you will be notified when it completes. Do not retry or poll for the result.`,

@@ -1148,8 +1148,10 @@ and delivers the real result as a task notification when the server finishes.
 The task list (`/tasks` or the background-tasks dialog) shows these under
 "Server tasks"; `x` sends `tasks/cancel` to the server. If the server
 rejects the cancel, the task stays in the list with the reason and `x` can be
-pressed again. A task started by a subagent is cancelled when that subagent
-exits, since nothing remains to receive its completion.
+pressed again. When a subagent exits, OpenClaude sends `tasks/cancel` for the
+tasks it started, since nothing remains to receive their completion. If the
+server rejects that cancel, the local task is marked failed and its
+notification is dropped, but the server may keep running it.
 
 The client polls `tasks/get` at the interval the server suggests and also
 listens for `notifications/tasks/status`. A disconnect before the task

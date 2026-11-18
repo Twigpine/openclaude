@@ -1114,8 +1114,8 @@ test('an exiting agent cancels its own server tasks and leaves no notification b
     setAppState: state.set,
   })
 
-  killMcpServerTasksForAgent('agent-1' as never, state.get, state.set)
-  await waitFor(() => taskFrom(state, owned).status !== 'running')
+  await killMcpServerTasksForAgent('agent-1' as never, state.get, state.set)
+  assert.notEqual(taskFrom(state, owned).status, 'running')
   await new Promise(resolve => setTimeout(resolve, 50))
 
   assert.deepEqual(calls.cancelTask, ['owned'])
@@ -1125,6 +1125,118 @@ test('an exiting agent cancels its own server tasks and leaves no notification b
     getCommandQueue().filter(c => c.agentId === ('agent-1' as never)).length,
     0,
   )
+  clearCommandQueue()
+  _resetMcpServerTasksForTest()
+})
+
+test('an exiting agent whose tasks/cancel is rejected ends the local task instead of leaving it running', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  let pushComplete = false
+  const { client, calls } = makeClient({
+    cancelTask: async () => {
+      throw new McpError(ErrorCode.MethodNotFound, 'tasks/cancel not supported')
+    },
+    getTask: async id =>
+      makeMcpTask({ taskId: id, status: pushComplete ? 'completed' : 'working' }),
+  })
+  const taskId = trackMcpServerTask({
+    connection: makeConnection(client, { capabilities: TASK_CAPS }),
+    task: makeMcpTask({ taskId: 'stuck', pollInterval: 1000 }),
+    toolName: 't',
+    description: 'srv: stuck',
+    agentId: 'agent-1' as never,
+    setAppState: state.set,
+  })
+
+  await killMcpServerTasksForAgent('agent-1' as never, state.get, state.set)
+
+  assert.deepEqual(calls.cancelTask, ['stuck'])
+  const task = taskFrom(state, taskId)
+  assert.equal(task.status, 'failed')
+  assert.match(task.statusMessage ?? '', /may still be running/)
+  // Tracking is released: a later server completion is not observed and no
+  // notification for the dead agent is queued.
+  pushComplete = true
+  handleMcpTaskStatusNotification('srv', {
+    taskId: 'stuck',
+    status: 'completed',
+    ttl: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    lastUpdatedAt: '2026-01-01T00:00:01Z',
+  })
+  await new Promise(resolve => setTimeout(resolve, 1200))
+  assert.equal(calls.getTask.length, 0)
+  assert.equal(taskFrom(state, taskId).status, 'failed')
+  assert.equal(
+    getCommandQueue().filter(c => c.agentId === ('agent-1' as never)).length,
+    0,
+  )
+  clearCommandQueue()
+  _resetMcpServerTasksForTest()
+})
+
+test('a task past its TTL that the server still holds is polled at the normal interval', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  // Expired a minute ago but still working on the server.
+  const expired = makeMcpTask({
+    ttl: 1000,
+    pollInterval: 1000,
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+  })
+  const { client, calls } = makeClient({
+    getTask: async id => ({ ...expired, taskId: id }),
+  })
+  trackMcpServerTask({
+    connection: makeConnection(client, { capabilities: TASK_CAPS }),
+    task: expired,
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+  await new Promise(resolve => setTimeout(resolve, 400))
+  assert.equal(calls.getTask.length, 0)
+  await waitFor(() => calls.getTask.length > 0, 1500)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(calls.getTask.length, 1)
+  _resetMcpServerTasksForTest()
+})
+
+test('a disconnect during agent-exit cancel keeps the task failed, not killed', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  let rejectCancel!: (e: Error) => void
+  const { client } = makeClient({
+    cancelTask: () =>
+      new Promise((_, reject) => {
+        rejectCancel = reject
+      }),
+  })
+  const taskId = trackMcpServerTask({
+    connection: makeConnection(client, { capabilities: TASK_CAPS }),
+    task: makeMcpTask({ taskId: 'gone', pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: gone',
+    agentId: 'agent-1' as never,
+    setAppState: state.set,
+  })
+
+  const exit = killMcpServerTasksForAgent('agent-1' as never, state.get, state.set)
+  await waitFor(() => rejectCancel !== undefined)
+  failMcpServerTasksForServer('srv', 'MCP server "srv" disconnected')
+  rejectCancel(new McpError(ErrorCode.ConnectionClosed, 'Connection closed'))
+  await exit
+  await waitFor(() => taskFrom(state, taskId).status !== 'running')
+  await new Promise(resolve => setTimeout(resolve, 50))
+
+  assert.equal(taskFrom(state, taskId).status, 'failed')
+  assert.match(taskFrom(state, taskId).statusMessage ?? '', /disconnected/)
   clearCommandQueue()
   _resetMcpServerTasksForTest()
 })

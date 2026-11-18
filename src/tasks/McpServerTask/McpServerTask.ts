@@ -62,10 +62,26 @@ export function isMcpServerTask(task: unknown): task is McpServerTaskState {
  * services/mcp layer can reach. It registers this hook when tracking
  * starts; before that there is nothing server-side to cancel.
  */
-let cancelHook: ((localTaskId: string) => Promise<void>) | undefined
+export type McpServerTaskCancelOptions = {
+  /** End the local task and stop tracking it if the server rejects the cancel. */
+  releaseOnFailure?: boolean
+  /** Bound on the tasks/cancel request. */
+  timeoutMs?: number
+}
+
+/**
+ * Resolves false when the task is not tracked, so the caller owns its
+ * terminal transition; true when the tracking layer has set or will set it.
+ */
+type McpServerTaskCanceler = (
+  localTaskId: string,
+  opts?: McpServerTaskCancelOptions,
+) => Promise<boolean>
+
+let cancelHook: McpServerTaskCanceler | undefined
 
 export function registerMcpServerTaskCanceler(
-  fn: (localTaskId: string) => Promise<void>,
+  fn: McpServerTaskCanceler,
 ): void {
   cancelHook = fn
 }
@@ -175,19 +191,27 @@ export function killMcpServerTask(
   void McpServerTask.kill(taskId, setAppState)
 }
 
+// Agent exit waits on these cancels, so a server that never answers must not
+// hold the exit for the default request timeout.
+const AGENT_EXIT_CANCEL_TIMEOUT_MS = 10_000
+
 /**
  * Cancel the running server tasks an exiting agent started and purge its
  * queued notifications. The agent's query loop is gone, so nothing would
  * drain a completion addressed to it. Tasks are marked notified first so the
  * cancel's terminal transition does not enqueue a fresh notification for the
- * dead agent after the purge.
+ * dead agent after the purge. Await it before closing the agent's own MCP
+ * connections: a closed connection can no longer carry tasks/cancel. A
+ * rejected cancel still ends the local task (failed), since no later stop
+ * could reach it.
  */
-export function killMcpServerTasksForAgent(
+export async function killMcpServerTasksForAgent(
   agentId: AgentId,
   getAppState: () => AppState,
   setAppState: SetAppState,
-): void {
+): Promise<void> {
   const tasks = getAppState().tasks ?? {}
+  const cancels: Promise<void>[] = []
   for (const [taskId, task] of Object.entries(tasks)) {
     if (
       isMcpServerTask(task) &&
@@ -201,7 +225,26 @@ export function killMcpServerTasksForAgent(
         ...t,
         notified: true,
       }))
-      void McpServerTask.kill(taskId, setAppState)
+      cancels.push(
+        (async () => {
+          const tracked = await cancelHook?.(taskId, {
+            releaseOnFailure: true,
+            timeoutMs: AGENT_EXIT_CANCEL_TIMEOUT_MS,
+          })
+          // A disconnect or completion that finalized the task first sets its
+          // own terminal state; do not overwrite it with killed.
+          if (!tracked) markMcpServerTaskTerminal(taskId, setAppState, 'killed')
+          void evictTaskOutput(taskId)
+        })(),
+      )
+    }
+  }
+  const results = await Promise.allSettled(cancels)
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      logForDebugging(
+        `killMcpServerTasksForAgent: cancel failed for agent ${agentId}: ${r.reason}`,
+      )
     }
   }
   dequeueAllMatching(cmd => cmd.agentId === agentId)
