@@ -4190,14 +4190,7 @@ describe('background session wait strict reads', () => {
   // are different files (different inodes), so the alias read and the
   // canonical read disagree until the BG-other.json entry is repointed
   // at the canonical file. The alias spelling holds a large stored
-  // command while the canonical file holds a small one: whichever entry
-  // the directory lists first, the alias read's stat lands within
-  // ~1 ms (a small preceding read at most), and parsing the
-  // multi-megabyte alias document then keeps that read in flight for
-  // milliseconds — so a timer-scheduled repoint lands after the alias
-  // read's stat but before the retry's re-read. (Making both files
-  // large backfires: when the canonical file lists first, its parse
-  // delays the alias read's stat past the repoint.) Liveness still
+  // command while the canonical file holds a small one. Liveness still
   // matches on the sessionId token, not the stored command.
   // Case-sensitive filesystems only (CodeRabbit #2497 review
   // 5957376769).
@@ -4210,33 +4203,48 @@ describe('background session wait strict reads', () => {
       { stdio: 'ignore' },
     )
     if (child.pid === undefined) throw new Error('spawned child has no pid')
-    const padding = Array.from({ length: 20000 }, () => 'x'.repeat(100))
-    await createBackgroundSession({
-      id: 'bg-other',
-      name: 'bg-job',
-      pid: child.pid,
-      cwd: '/repo',
-      command: ['sleep', '30', ...padding],
-      sessionId: 'sess-bg-other',
-    })
-    await createBackgroundSession({
-      id: 'bg-job2',
-      pid: 424242,
-      cwd: '/repo',
-      command: ['sleep', '30'],
-      sessionId: 'sess-job2',
-    })
-    // Hard-link the alias spelling to the created (large) row, then
-    // replace the canonical path with a small session for the same
-    // id/name/pid under a new inode.
-    await link(metadataPath('bg-other'), metadataPath('BG-other'))
-    const large = JSON.parse(
-      await readFile(metadataPath('bg-other'), 'utf8'),
-    ) as Record<string, unknown>
-    const small = { ...large, command: ['sleep', '30'] }
-    const tmp = join(dirname(metadataPath('bg-other')), 'bg-other.tmp')
-    await writeFile(tmp, JSON.stringify(small))
-    await rename(tmp, metadataPath('bg-other'))
+    try {
+      const padding = Array.from({ length: 20000 }, () => 'x'.repeat(100))
+      await createBackgroundSession({
+        id: 'bg-other',
+        name: 'bg-job',
+        pid: child.pid,
+        cwd: '/repo',
+        command: ['sleep', '30', ...padding],
+        sessionId: 'sess-bg-other',
+      })
+      await createBackgroundSession({
+        id: 'bg-job2',
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-job2',
+      })
+      // Hard-link the alias spelling to the created (large) row, then
+      // replace the canonical path with a small session for the same
+      // id/name/pid under a new inode.
+      await link(metadataPath('bg-other'), metadataPath('BG-other'))
+      const large = JSON.parse(
+        await readFile(metadataPath('bg-other'), 'utf8'),
+      ) as Record<string, unknown>
+      const small = { ...large, command: ['sleep', '30'] }
+      const tmp = join(dirname(metadataPath('bg-other')), 'bg-other.tmp')
+      await writeFile(tmp, JSON.stringify(small))
+      await rename(tmp, metadataPath('bg-other'))
+    } catch (error) {
+      // The caller never received the child, so it cannot clean it up:
+      // stop it here and wait for the exit before reporting the setup
+      // failure (CodeRabbit #2497 review 5961433156).
+      child.kill()
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(() => resolve(), 5000)
+        child.once('exit', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+      })
+      throw error
+    }
     return { child }
   }
 
@@ -4266,12 +4274,12 @@ describe('background session wait strict reads', () => {
       // Regression test for CodeRabbit #2497 review 5957376769: when
       // replaceSessionFile renames a valid update into place between
       // the alias read and the canonical read, the two reads disagree
-      // — the resolver must re-read the enumerated path and accept the
-      // row once the fresh read agrees with the canonical identity,
-      // instead of failing with metadata_malformed. The repoint is
-      // scheduled with a short timer so it lands after the alias
-      // read's stat (the large document keeps that read in flight
-      // for milliseconds) but before the retry's re-read.
+      // — the resolver must re-read both paths and accept the row once
+      // the fresh reads agree, instead of failing with
+      // metadata_malformed. The repoint happens in the mismatch hook,
+      // so it lands strictly between the mismatch and the retry's
+      // re-reads: no timer, and the hook count proves the retry path
+      // ran (CodeRabbit #2497 review 5961433156).
       const { child } = await createSplitAliasFixture()
       try {
         // Repoint the alias spelling at the canonical file: a prepared
@@ -4279,15 +4287,63 @@ describe('background session wait strict reads', () => {
         const sessionsDir = dirname(metadataPath('bg-other'))
         const repoint = join(sessionsDir, 'BG-other.tmp')
         await link(metadataPath('bg-other'), repoint)
-        const resolving = resolveBackgroundSessionForWait('bg-job')
-        let repointError: unknown
-        setTimeout(() => {
-          rename(repoint, metadataPath('BG-other')).catch(error => {
-            repointError = error
-          })
-        }, 2)
-        const resolved = await resolving
-        if (repointError !== undefined) throw repointError
+        let mismatchHookCalls = 0
+        const resolved = await resolveBackgroundSessionForWait('bg-job', {
+          _onAliasIdentityMismatchForTesting: async () => {
+            mismatchHookCalls++
+            await rename(repoint, metadataPath('BG-other'))
+          },
+        })
+        // The hook fires only on a mismatch that is retried: exactly
+        // one call proves the retry path was exercised (without the
+        // retry the lookup fails with metadata_malformed).
+        expect(mismatchHookCalls).toBe(1)
+        expect(resolved.id).toBe('bg-other')
+        expect(resolved.name).toBe('bg-job')
+      } finally {
+        child.kill()
+      }
+    },
+  )
+
+  it.skipIf(CASE_INSENSITIVE_FS)(
+    'keeps one candidate when a verified alias and its canonical entry share a stored id',
+    async () => {
+      // Regression test for CodeRabbit #2497 review 5961433156: a
+      // verified alias adds bg-other from one inode, and a metadata
+      // update replaces the canonical file before the scan reads the
+      // canonical entry — the two rows then carry different file
+      // identities for one validated stored ID, and the lookup must
+      // resolve the session instead of reporting an ambiguous name.
+      // The repoint below makes the alias verify; the replacement
+      // happens in the verified hook, so it lands strictly after
+      // verification and before the canonical entry's read, whichever
+      // entry the directory lists first.
+      const { child } = await createSplitAliasFixture()
+      try {
+        // Repoint the alias spelling at the canonical file first, so
+        // the alias check verifies: a prepared hard link to
+        // bg-other.json renamed into place atomically.
+        const sessionsDir = dirname(metadataPath('bg-other'))
+        const repoint = join(sessionsDir, 'BG-other.tmp')
+        await link(metadataPath('bg-other'), repoint)
+        await rename(repoint, metadataPath('BG-other'))
+        let verifiedHookCalls = 0
+        const resolved = await resolveBackgroundSessionForWait('bg-job', {
+          _afterAliasVerifiedForTesting: async () => {
+            verifiedHookCalls++
+            // Replace the canonical file with identical content under
+            // a new inode, as a metadata update would.
+            const replacement = join(sessionsDir, 'bg-other.tmp')
+            const content = await readFile(metadataPath('bg-other'), 'utf8')
+            await writeFile(replacement, content)
+            await rename(replacement, metadataPath('bg-other'))
+          },
+        })
+        // The hook fires only for the one verified alias row: exactly
+        // one call proves the replacement landed between verification
+        // and the canonical entry's read.
+        expect(verifiedHookCalls).toBe(1)
         expect(resolved.id).toBe('bg-other')
         expect(resolved.name).toBe('bg-job')
       } finally {

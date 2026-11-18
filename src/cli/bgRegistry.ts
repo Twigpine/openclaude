@@ -3873,6 +3873,14 @@ export type ResolveBackgroundSessionForWaitOptions = {
   // deadline signal aborts the in-flight probe, and no further probe
   // starts once it has fired (CodeRabbit #2497 review 5950772048).
   signal?: AbortSignal
+  // Test-only hooks for the alias identity checks below: invoked when
+  // an alias read disagrees with its canonical read (before the retry
+  // re-reads) and after an alias is verified (before the candidate is
+  // recorded). They let a test place a filesystem change at the exact
+  // point the resolver observes it, instead of racing a timer
+  // (CodeRabbit #2497 review 5961433156).
+  _onAliasIdentityMismatchForTesting?: (attempt: number) => Promise<void>
+  _afterAliasVerifiedForTesting?: () => Promise<void>
 }
 
 export async function resolveBackgroundSessionForWait(
@@ -3923,13 +3931,23 @@ export async function resolveBackgroundSessionForWait(
   // identical name rows would report an ambiguous name (CodeRabbit #2497
   // review 5956497652).
   const seenCandidateIdentities = new Set<string>()
+  // One row per validated stored ID: a verified alias and its canonical
+  // entry are the same session, but a metadata update can replace the
+  // canonical file between the alias check and the canonical entry's
+  // read, so the two rows carry different file identities for one
+  // stored ID. Record only the first row — two rows for one id would
+  // report an ambiguous name for a single session (CodeRabbit #2497
+  // review 5961433156).
+  const seenCandidateIds = new Set<string>()
   const addCandidateOnce = (
     session: BackgroundSession,
     identity: FileIdentity,
   ): void => {
+    if (seenCandidateIds.has(session.id)) return
     const key = `${identity.dev}:${identity.ino}`
     if (seenCandidateIdentities.has(key)) return
     seenCandidateIdentities.add(key)
+    seenCandidateIds.add(session.id)
     candidates.push(session)
   }
   for (const entry of entries) {
@@ -3972,25 +3990,33 @@ export async function resolveBackgroundSessionForWait(
       // The two reads can disagree without the row being stray:
       // replaceSessionFile can rename a valid update into place
       // between them, so the alias read returns the old inode and
-      // the canonical read the new one. Re-read the enumerated path
-      // and retry the comparison while its identity keeps changing;
-      // a stable mismatch is still a genuinely different file and
-      // fails the lookup. The retry is bounded so a file replaced
-      // on every read cannot spin the resolver (CodeRabbit #2497
-      // review 5957376769).
+      // the canonical read the new one. Re-read both paths and retry
+      // the comparison while either identity keeps changing; a stable
+      // mismatch is still a genuinely different file and fails the
+      // lookup. Refreshing only the alias read would compare a fresh
+      // alias identity against a stale canonical one, so a second
+      // update landing during the retry could still fail a row whose
+      // two paths now agree (CodeRabbit #2497 reviews 5957376769 and
+      // 5961433156). The retry is bounded so a file replaced on every
+      // read cannot spin the resolver.
       const MAX_ALIAS_IDENTITY_RETRIES = 2
       let aliasRead = read
+      let canonicalRead = canonical
       let aliasVerified = false
       for (
         let attempt = 0;
         attempt <= MAX_ALIAS_IDENTITY_RETRIES;
         attempt++
       ) {
-        if (sameFileIdentity(aliasRead.identity, canonical.identity)) {
+        if (sameFileIdentity(aliasRead.identity, canonicalRead.identity)) {
           aliasVerified = true
           break
         }
         if (attempt === MAX_ALIAS_IDENTITY_RETRIES) break
+        // Test hook (see ResolveBackgroundSessionForWaitOptions): lets
+        // a test place the repoint between the mismatch and the retry's
+        // re-reads.
+        await options?._onAliasIdentityMismatchForTesting?.(attempt)
         const reread = await readSessionFileStrict(
           metadataPathForId(id),
           id,
@@ -4009,7 +4035,22 @@ export async function resolveBackgroundSessionForWait(
             null,
           )
         }
+        const rereadCanonical = await readSessionFileStrict(
+          metadataPathForId(read.value.id),
+          read.value.id,
+        )
+        if (rereadCanonical.state !== 'valid') {
+          // The canonical row changed shape while it was being
+          // verified: fail closed rather than guess which row it
+          // is now.
+          throwWaitMetadataError(
+            'malformed',
+            `Background session ${id} metadata`,
+            null,
+          )
+        }
         aliasRead = reread
+        canonicalRead = rereadCanonical
       }
       if (!aliasVerified) {
         throwWaitMetadataError(
@@ -4018,6 +4059,10 @@ export async function resolveBackgroundSessionForWait(
           null,
         )
       }
+      // Test hook (see ResolveBackgroundSessionForWaitOptions): lets a
+      // test replace the canonical file after verification and before
+      // the scan reads the canonical entry.
+      await options?._afterAliasVerifiedForTesting?.()
       addCandidateOnce(aliasRead.value, aliasRead.identity)
       continue
     }
