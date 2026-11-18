@@ -4008,6 +4008,91 @@ describe('background session wait strict reads', () => {
     ).toBe('metadata_malformed')
   })
 
+  it('fails closed when an enumerated row claims another session id from a different file', async () => {
+    // Regression test for CodeRabbit #2497 review 5956497652: a valid
+    // canonical row does not make a mismatch an alias. The row below
+    // lives in bg-job1.json but stores id bg-other, while bg-other.json
+    // is a separate valid session — so the row is a stray document
+    // whose stored name (bg-job) could match the target, and skipping
+    // it would pin the bg-job2 prefix candidate instead of failing.
+    // Only a mismatch whose row and canonical reads opened the same
+    // file (the case-variant fixtures above) may be retained.
+    await createBackgroundSession({
+      id: 'bg-job2',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-job2',
+    })
+    await createBackgroundSession({
+      id: 'bg-other',
+      name: 'bg-job',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-other',
+    })
+    // Move the row under a filename its stored id does not name, then
+    // write a separate valid canonical file directly: recreating the
+    // session via createBackgroundSession would fail on the per-id log
+    // files, which the rename leaves behind.
+    await rename(metadataPath('bg-other'), metadataPath('bg-job1'))
+    const canonicalRaw = JSON.parse(
+      await readFile(metadataPath('bg-job1'), 'utf8'),
+    ) as Record<string, unknown>
+    canonicalRaw.name = 'other-name'
+    canonicalRaw.sessionId = 'sess-other2'
+    await writeFile(metadataPath('bg-other'), JSON.stringify(canonicalRaw))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-job')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('retains a verified case-variant alias as the only candidate for its name', async () => {
+    // Regression test for CodeRabbit #2497 review 5956497652: on a
+    // case-insensitive registry the canonical row may be enumerated
+    // only under its case variant, so a verified alias must be
+    // retained as a candidate instead of skipped — otherwise the live
+    // named session loses to the unrelated bg-job2 prefix match. The
+    // symlink reproduces the aliasing on a case-sensitive filesystem;
+    // both spellings are listed there, so resolving the live name once
+    // also proves the deduplication: without it the same file would
+    // appear twice and the name would report ambiguous. The
+    // only-one-spelling-listed case itself needs a case-insensitive
+    // filesystem and is covered by the same code path.
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)', 'sess-bg-other'],
+      { stdio: 'ignore' },
+    )
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    try {
+      await createBackgroundSession({
+        id: 'bg-other',
+        name: 'bg-job',
+        pid: child.pid,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-bg-other',
+      })
+      await createBackgroundSession({
+        id: 'bg-job2',
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-job2',
+      })
+      await linkCaseVariant(metadataPath('bg-other'), metadataPath('BG-other'))
+
+      const resolved = await resolveBackgroundSessionForWait('bg-job')
+      expect(resolved.id).toBe('bg-other')
+      expect(resolved.name).toBe('bg-job')
+    } finally {
+      child.kill()
+    }
+  })
+
   it('prefers a live ID-prefix match over a dead exact-name row', async () => {
     // Regression test for maintainer review 5948202472 (P2) on #2497:
     // a `status: running` row with no terminal fact but a dead PID must
