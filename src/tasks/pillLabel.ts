@@ -58,6 +58,8 @@ export function getPillLabel(tasks: BackgroundTaskState[]): string {
         return n === 1 ? '1 background workflow' : `${n} background workflows`
       case 'monitor_mcp':
         return n === 1 ? '1 monitor' : `${n} monitors`
+      case 'mcp_server':
+        return n === 1 ? '1 server task' : `${n} server tasks`
       case 'dream':
         return 'dreaming'
     }

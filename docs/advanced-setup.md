@@ -633,6 +633,7 @@ remain in the selected model, but context-limit keys use the model name before
 | `CLAUDE_CODE_DISABLE_ULTRATHINK` | No | Set truthy to stop the `ultrathink` keyword from raising the turn to high effort |
 | `CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES` | No | Set truthy to stop periodic forked-agent progress-summary requests for running agents |
 | `CLAUDE_CODE_DISABLE_FILE_MENTIONS` | No | Set truthy so `@`-mentioned files pass their path only; contents are not read into context |
+| `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND` | No | Set truthy to stop advertising MCP task support, so tools/call never returns a server-side task. Tools a server marks `taskSupport: "required"` become unavailable |
 | `CLAUDE_CODE_RESUME_HINT_COMMAND` | No | Override the program name printed in the exit-time resume hint (default: `openclaude`) |
 
 ### Web search
@@ -1136,3 +1137,30 @@ project's `disabledMcpServers` key to restore inheritance. Builtin servers that
 are disabled by default keep their separate project-level `enabledMcpServers`
 allowlist. Existing running sessions are not forcibly disconnected by a toggle
 in another project.
+
+## MCP server tasks
+
+A server that supports the MCP tasks extension may answer a `tools/call` with
+a task handle instead of a result when the tool's listing marks it
+`execution.taskSupport`. When that happens, OpenClaude registers a
+`mcp_server` background task, returns a "task started" result immediately,
+and delivers the real result as a task notification when the server finishes.
+The task list (`/tasks` or the background-tasks dialog) shows these under
+"Server tasks"; `x` sends `tasks/cancel` to the server. If the server
+rejects the cancel, the task stays in the list with the reason and `x` can be
+pressed again. When a subagent exits, OpenClaude sends `tasks/cancel` for the
+tasks it started, since nothing remains to receive their completion. If the
+server rejects that cancel, the local task is marked failed and its
+notification is dropped, but the server may keep running it.
+
+The client polls `tasks/get` at the interval the server suggests and also
+listens for `notifications/tasks/status`. A disconnect before the task
+finishes marks the local task failed. When the server reports a task as
+failed or cancelled, OpenClaude also asks for `tasks/result` and, if the server
+returns diagnostic content, saves it to the task output file; otherwise the
+notification and output rely on the server's `statusMessage`. Set
+`CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND` to disable the whole path: the
+tasks capability is then not advertised and every tool call stays synchronous.
+A tool the server marks `execution.taskSupport: "required"` is unavailable
+while the opt-out is set, because the server rejects a plain call to it; tools
+that allow plain calls still run synchronously.

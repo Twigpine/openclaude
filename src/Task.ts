@@ -10,6 +10,7 @@ export type TaskType =
   | 'in_process_teammate'
   | 'local_workflow'
   | 'monitor_mcp'
+  | 'mcp_server'
   | 'dream'
 
 export type TaskStatus =
@@ -83,6 +84,7 @@ const TASK_ID_PREFIXES: Record<string, string> = {
   in_process_teammate: 't',
   local_workflow: 'w',
   monitor_mcp: 'm',
+  mcp_server: 's',
   dream: 'd',
 }
 

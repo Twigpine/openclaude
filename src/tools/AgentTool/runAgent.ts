@@ -30,6 +30,7 @@ import type {
 } from '../../services/mcp/types.js'
 import type { Tool, Tools, ToolUseContext } from '../../Tool.js'
 import { killShellTasksForAgent } from '../../tasks/LocalShellTask/killShellTasks.js'
+import { killMcpServerTasksForAgent } from '../../tasks/McpServerTask/McpServerTask.js'
 import type { Command } from '../../types/command.js'
 import type { AgentId } from '../../types/ids.js'
 import type {
@@ -1004,6 +1005,13 @@ export async function* runAgent({
       agentDefinition.callback()
     }
   } finally {
+    // Cancel this agent's MCP server tasks while its connections are still
+    // open, so tasks/cancel can reach agent-specific servers.
+    await killMcpServerTasksForAgent(
+      agentId,
+      toolUseContext.getAppState,
+      rootSetAppState,
+    )
     // Clean up agent-specific MCP servers (runs on normal completion, abort, or error)
     await mcpCleanup()
     // Clean up agent's session hooks
