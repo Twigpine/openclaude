@@ -252,27 +252,31 @@ export interface SDKSession {
    * The authorization URL is delivered to `options.onAuthorizationUrl` as
    * soon as it is known, so the host can open it (or show it) while the
    * flow runs. The returned promise resolves once the flow settles and the
-   * server has been reconnected, with the server's new status in the same
-   * shape `system:init.mcp_servers` reports — the next turn's `system:init`
-   * carries it too, since it is built from the session's MCP clients. The
+   * server has been reconnected, with the server's new status: `status`
+   * plus `serverInfo` when connected, `error` when the reconnect failed,
+   * and the model-visible `tools` (with annotations) when connected. The
+   * next turn's `system:init` carries the same server with only its name
+   * and status, since it is built from the session's MCP clients. The
    * flow may complete without a redirect (a cached IdP token signs in
    * silently); then `onAuthorizationUrl` is never called and the promise
-   * still resolves with the connected status.
+   * still resolves with whatever status the reconnect then reports.
    *
    * A successful flow whose reconnect still does not connect (the server
    * still answers 401, or is down) resolves with that status instead of
    * rejecting — read `status` and `error`. A flow that itself fails, is
    * cancelled, or is superseded by a newer call for the same server rejects.
-   * Calling this before the first turn connects the session's MCP servers
-   * first, so a settings page can sign in before anyone chats.
+   * Cancellation covers the call's own `signal`, `interrupt()` — which
+   * aborts the SDK root signal the flow listens to — and closing the
+   * session. Calling this before the first turn connects the session's MCP
+   * servers first, so a settings page can sign in before anyone chats.
    *
    * Only `http`/`sse` servers support this. The flow runs in the
-   * environment captured when the call starts — a session's `env`
-   * overrides are not applied to a call made outside a turn. A call made
-   * by `canUseTool` during an environment-carrying turn is the exception:
-   * it uses that turn's environment, lent rather than re-acquired, so the
-   * sign-in does not wait on the mutex the turn holds. Closing the
-   * session aborts an in-flight flow.
+   * environment captured when the call starts — the session's `env`
+   * overrides included, whether the call starts inside a turn or before
+   * the first one. A call made by `canUseTool` during an
+   * environment-carrying turn uses that turn's environment, lent rather
+   * than re-acquired, so the sign-in does not wait on the mutex the turn
+   * holds. Closing the session aborts an in-flight flow.
    */
   authenticateMcpServer(
     name: string,
@@ -1238,10 +1242,13 @@ class SDKSessionImpl implements SDKSession {
   }
 
   /**
-   * The reconnected server's status in the shape system:init reports it —
-   * same fields cli/print.ts builds for mcp_status, minus the config, which
-   * stays with the session. Tools are listed only once connected, with the
-   * names the model sees.
+   * The reconnected server's status as the promise returns it: name and
+   * status always, serverInfo when connected, error when the reconnect
+   * failed, and tools — listed only once connected, under the names the
+   * model sees (`mcpInfo.toolName`) with readOnly/destructive/openWorld
+   * annotations — when connected. This is fuller than the next turn's
+   * system:init row for the same server, which carries only name and
+   * status; the config stays with the session either way.
    */
   private toMcpServerStatus(
     name: string,

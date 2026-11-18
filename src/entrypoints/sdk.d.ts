@@ -480,13 +480,27 @@ export interface SDKSession {
   /**
    * Start the OAuth flow for one of the session's MCP servers and await it.
    * The authorization URL is delivered to `options.onAuthorizationUrl` as
-   * soon as it is known; the returned promise resolves once the flow settles
-   * and the server has been reconnected, with the server's new status.
+   * soon as it is known, so the host can open it while the flow runs. The
+   * returned promise resolves once the flow settles and the server has been
+   * reconnected, with the server's new status: `status` plus `serverInfo`
+   * when connected, `error` when the reconnect failed, and the
+   * model-visible `tools` (with annotations) when connected. A flow that
+   * completes without a redirect (a cached IdP token signs in silently)
+   * never calls `onAuthorizationUrl` and still resolves with whatever
+   * status the reconnect then reports. A reconnect that still does not
+   * connect resolves with that status instead of rejecting — read `status`
+   * and `error`. A flow that itself fails, is cancelled, or is superseded
+   * by a newer call for the same server rejects — including cancellation
+   * via `interrupt()`, which aborts the SDK root signal the flow listens
+   * to, closing the session, or the call's own `signal`. The next turn's
+   * `system:init` carries the same server with only its name and status.
    * Only `http`/`sse` servers support this. The flow runs in the
-   * environment captured when the call starts — a session's `env` overrides
-   * are not applied to a call made outside a turn. A call made by
-   * `canUseTool` during an environment-carrying turn uses that turn's
-   * environment instead. Closing the session aborts an in-flight flow.
+   * environment captured when the call starts — the session's `env`
+   * overrides included, whether the call starts inside a turn or before
+   * the first one. A call made by `canUseTool` during an
+   * environment-carrying turn uses that turn's environment, lent rather
+   * than re-acquired, so the sign-in does not wait on the mutex the turn
+   * holds.
    */
   authenticateMcpServer(
     name: string,
