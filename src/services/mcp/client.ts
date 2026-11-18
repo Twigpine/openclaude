@@ -844,6 +844,21 @@ const connectWaiters = new Map<
  */
 const adoptedMcpClients = new WeakSet<MCPServerConnection>()
 
+/**
+ * The client each connect promise settled to, once it has settled.
+ * Recorded by a `.then` the wrapper attaches when the promise is created,
+ * so it is in place before any caller can await the promise — and therefore
+ * before any release can run. A join of an already-settled connect adopts
+ * synchronously from this map (below): recording adoption in a `.then` on
+ * the cached promise instead leaves a microtask gap a release can win, no
+ * matter how many ticks the release waits. A WeakMap, so a settled entry
+ * never keeps a client — or its transport — alive past its promise.
+ */
+const settledConnectClients = new WeakMap<
+  Promise<MCPServerConnection>,
+  MCPServerConnection
+>()
+
 /** Whether another caller adopted this client from the shared connect. */
 export function isMcpClientAdopted(client: MCPServerConnection): boolean {
   return adoptedMcpClients.has(client)
@@ -894,11 +909,17 @@ export async function releaseUnownedMcpClient(
     settledToThisClient = isSettled && settledValue === client
   }
   // A join that ran while the probe yielded records its adoption in a
-  // `.then` on the cached promise, queued behind the probe's continuation:
-  // one more tick lets it land, so the ownership decision below sees every
-  // join that happened before it. Decide ownership here, before cleanup
-  // starts — a recheck after cleanup would be too late, the joiner would
-  // already hold a closing client.
+  // `.then` on the cached promise, queued behind the probe's continuation.
+  // One more tick lets a join whose trigger was queued behind that
+  // continuation run its call before the decision below: the call adopts
+  // synchronously in connectToServer (see settledConnectClients), so the
+  // decision sees it without a third tick — a fixed tick count alone can
+  // always be beaten by a join scheduled one tick later. Decide ownership
+  // here, before cleanup starts — a recheck after cleanup would be too
+  // late, the joiner would already hold a closing client. The probe's
+  // first tick above still stands: it lets the adoption callback of a
+  // caller that joined while the connect was still pending land — that
+  // callback was attached at join time, ahead of the probe's continuation.
   await Promise.resolve()
   if (isMcpClientAdopted(client)) return
   // Evict the entry before cleanup starts, so a caller that joins after
@@ -2180,6 +2201,17 @@ export const connectToServer = Object.assign(
     } = {}
     const promise = connectToServerMemoized(name, serverRef, serverStats, signal, generation)
     generation.promise = promise
+    // Remember what this connect settles to, synchronously readable
+    // afterwards: a later join of the settled connect and a later release
+    // both need the value without yielding. Attached here, before the
+    // promise reaches any caller, so it runs before any await continuation
+    // that could release the client.
+    void promise.then(
+      client => {
+        if (client.type === 'connected') settledConnectClients.set(promise, client)
+      },
+      () => {},
+    )
     // Register this connect's stalled-transport closer, keyed by the
     // originating promise. The body leaves it on the generation holder:
     // on the synchronous stdio path it runs before this promise exists
@@ -2198,6 +2230,16 @@ export const connectToServer = Object.assign(
       void promise.then(dropCloser, dropCloser)
     }
     if (hadCached) {
+      // A settled connect adopts synchronously: the `.then` below records
+      // adoption a microtask later, and a release deciding ownership in
+      // that gap would clean up a client this caller is about to receive.
+      // The map is filled when the connect settles, before any caller can
+      // hold the client, so a hit after settle always finds it. The `.then`
+      // stays for the pending case, where the client is not known yet.
+      const settled = settledConnectClients.get(promise)
+      if (settled?.type === 'connected' && !signal?.aborted) {
+        adoptedMcpClients.add(settled)
+      }
       void promise.then(
         client => {
           if (client.type === 'connected' && !signal?.aborted) adoptedMcpClients.add(client)
