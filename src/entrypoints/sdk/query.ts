@@ -57,6 +57,10 @@ import {
 } from '../../utils/fileHistory.js'
 import type { MCPServerConnection } from '../../services/mcp/types.js'
 import {
+  noteMcpClientInstalled,
+  noteMcpClientUninstalled,
+} from '../../services/mcp/client.js'
+import {
   acquireEnvMutex,
   releaseEnvMutex,
   type SDKMessage,
@@ -653,6 +657,11 @@ class QueryImpl implements Query {
               self.sdkMcpTools = mcpTools
               if (mcpClients.length > 0) {
                 self.engine.setMcpClients(mcpClients)
+                for (const client of mcpClients) {
+                  if (client.type === 'connected') {
+                    noteMcpClientInstalled(client, self)
+                  }
+                }
               }
               if (mcpTools.length > 0) {
                 self.engine.updateTools(assembleToolPool(self.permissionContext, mcpTools))
@@ -822,6 +831,9 @@ class QueryImpl implements Query {
     const mcpClients = this._engine?.getMcpClients?.() ?? []
     for (const client of mcpClients) {
       if (client.type === 'connected' && client.cleanup) {
+        // The record goes with the session: a client another session
+        // still has installed stays installed for it.
+        noteMcpClientUninstalled(client, this)
         // Fire-and-forget cleanup — close() is synchronous
         void client.cleanup().catch(err => {
           console.warn('SDK: MCP client cleanup error:', err instanceof Error ? err.message : String(err))

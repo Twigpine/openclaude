@@ -812,14 +812,34 @@ export function getServerCacheKey(
 }
 
 /**
+ * One discovery generation per transport, keyed by the client object
+ * that owns it: a reconnect creates a new client object, so the
+ * replacement gets its own entry instead of reading — or invalidating —
+ * the entry the transport it replaces wrote. Callers sharing one
+ * transport share one client object, so they still share one entry.
+ * Assigned lazily per object, so a client that never discovers anything
+ * takes no id (CodeRabbit #2493 review 5957362782).
+ */
+const discoveryGenerations = new WeakMap<MCPServerConnection, string>()
+let discoveryGenerationCounter = 0
+
+/**
  * Discovery cache key for a connection. The display name alone does not
  * identify a connection — two sessions can run the same server name at
  * different endpoints — so the discovery memos are keyed by the same
  * connection key the connect cache uses. A fetch keyed by name alone
- * lets a same-named peer's tools answer a host's reconnect.
+ * lets a same-named peer's tools answer a host's reconnect. The key is
+ * further scoped to the transport generation that owns the client, so a
+ * replacement transport never reads entries written by the transport it
+ * replaces.
  */
 export function getDiscoveryCacheKey(client: MCPServerConnection): string {
-  return getServerCacheKey(client.name, client.config)
+  let generation = discoveryGenerations.get(client)
+  if (generation === undefined) {
+    generation = `gen${++discoveryGenerationCounter}`
+    discoveryGenerations.set(client, generation)
+  }
+  return `${getServerCacheKey(client.name, client.config)}#${generation}`
 }
 
 /**
@@ -908,6 +928,121 @@ const settledConnectClients = new WeakMap<
 /** Whether another caller adopted this client from the shared connect. */
 export function isMcpClientAdopted(client: MCPServerConnection): boolean {
   return (adoptedMcpClients.get(client)?.size ?? 0) > 0
+}
+
+/**
+ * Whether the connection cache no longer holds this client as its
+ * settled generation — a replacement took over the entry, or one is in
+ * flight. No entry means the client never went through the connect
+ * cache (in-process SDK servers), so it is not retired. Used where a
+ * stale generation must not act on the current one: a retired
+ * transport's list-changed update, and its onclose clear/reconnect
+ * (CodeRabbit #2493 review 5957362782). One microtask tick tells
+ * whether the entry already settled: a .then callback on a settled
+ * promise runs before the continuation of the await below; on a pending
+ * one it never runs. (The same probe lives in releaseUnownedMcpClient
+ * and isClientCached.)
+ */
+export async function isMcpClientRetired(
+  name: string,
+  serverRef: ScopedMcpServerConfig,
+  client: MCPServerConnection,
+): Promise<boolean> {
+  const key = getServerCacheKey(name, serverRef)
+  const cached = connectToServer.cache.get(key) as
+    | Promise<MCPServerConnection>
+    | undefined
+  if (cached === undefined) return false
+  let settledValue: MCPServerConnection | undefined
+  let isSettled = false
+  void cached.then(
+    value => {
+      isSettled = true
+      settledValue = value
+    },
+    () => {},
+  )
+  await Promise.resolve()
+  // A pending entry is a newer connect in flight: this generation no
+  // longer owns the entry, and the replacement's completion applies its
+  // own discovery.
+  if (!isSettled) return true
+  return settledValue !== client
+}
+
+/**
+ * Sessions that installed a client as their current client record, by
+ * owner token (the session instance). Adoption alone cannot tell session
+ * ownership from cache reuse: every tool call through
+ * ensureConnectedClient joins the cached connect and consolidates into
+ * the same permanent adoption marker, so a session that reuses the cache
+ * for one completed call looks like a permanent owner forever. The
+ * install record is the ownership: a session notes the install when it
+ * puts the client in its record and the uninstall when it replaces or
+ * drops that record, so a client with no installers left has no real
+ * session owner — only completed cache reuse — and may be released. A
+ * WeakMap, so an install record never keeps a client — or its transport
+ * — alive past the client itself (CodeRabbit #2493 review 5957362782).
+ */
+const installedMcpClients = new WeakMap<MCPServerConnection, Set<object>>()
+
+/** Notes that a session installed this client as its current record. */
+export function noteMcpClientInstalled(
+  client: MCPServerConnection,
+  owner: object,
+): void {
+  let owners = installedMcpClients.get(client)
+  if (!owners) {
+    owners = new Set()
+    installedMcpClients.set(client, owners)
+  }
+  owners.add(owner)
+}
+
+/**
+ * Notes that a session dropped this client from its record — replaced by
+ * a reconnected client, or cleaned up on close. Idempotent: dropping a
+ * record the session never installed is a no-op.
+ */
+export function noteMcpClientUninstalled(
+  client: MCPServerConnection,
+  owner: object,
+): void {
+  const owners = installedMcpClients.get(client)
+  if (!owners) return
+  owners.delete(owner)
+  if (owners.size === 0) installedMcpClients.delete(client)
+}
+
+/** Whether any session still has this client as its current record. */
+export function isMcpClientInstalled(client: MCPServerConnection): boolean {
+  return (installedMcpClients.get(client)?.size ?? 0) > 0
+}
+
+/**
+ * Releases a client a session adopted and then stopped owning: withdraws
+ * the permanent adoption claim the session's cache reuse left behind,
+ * and re-runs a release the claim had blocked. Only the permanent marker
+ * goes — provisional claims belong to joiners still awaiting receipt,
+ * and withdrawing them would break the abort-before-receipt path; a
+ * joiner whose receipt lands afterwards re-adds the marker, and its own
+ * install record keeps the client alive until that session drops it.
+ * Callers must have uninstalled the client first and checked no other
+ * session still has it installed.
+ */
+export async function releaseAdoptedMcpClient(
+  name: string,
+  serverRef: ScopedMcpServerConfig,
+  client: MCPServerConnection,
+): Promise<void> {
+  if (client.type !== 'connected') return
+  if (
+    withdrawMcpClientAdoption(client, permanentAdoptionClaim) &&
+    blockedUnownedReleases.has(client)
+  ) {
+    blockedUnownedReleases.delete(client)
+    await releaseUnownedMcpClient(name, serverRef, client)
+  }
 }
 
 /**
@@ -1957,29 +2092,26 @@ const connectToServerMemoized = memoize(
         // Clear the memoization cache so next operation reconnects
         const key = getServerCacheKey(name, serverRef)
 
-        // Also clear fetch caches (keyed by connection). Reconnection
-        // creates a new connection object; without clearing, the next
-        // fetch would return stale tools/resources from the old connection.
-        // The key is the connection, not the display name, so a
-        // same-named peer's discovery survives this close.
-        fetchToolsForClient.cache.delete(key)
-        fetchResourcesForClient.cache.delete(key)
-        fetchCommandsForClient.cache.delete(key)
-        if (feature('MCP_SKILLS')) {
-          fetchMcpSkillsForClient!.cache.delete(key)
-        }
-
         // Evict the connect entry only when this generation still owns
         // it. A newer generation for the same key replaces it while this
         // one is being released, and an unconditional delete would drop
         // the newer's entry with it. A generation the wrapper never
         // supplied a promise for (the synchronous stdio path) owns no
-        // entry by construction, so it still clears.
+        // entry by construction, so it still clears. The discovery
+        // caches go under the same condition: a retired transport's close
+        // must not drop the replacement's freshly fetched tools — the
+        // clear is keyed by connection, not by display name, so a
+        // same-named peer's discovery survives this close either way
+        // (CodeRabbit #2493 review 5957362782).
         const current = connectToServer.cache.get(key) as
           | Promise<MCPServerConnection>
           | undefined
         if (generation?.promise === undefined || current === generation.promise) {
           connectToServer.cache.delete(key)
+          // Also clear fetch caches (keyed by connection). Reconnection
+          // creates a new connection object; without clearing, the next
+          // fetch would return stale tools/resources from the old connection.
+          clearFetchCaches(name, serverRef)
         }
         logMCPDebug(name, `Cleared connection cache for reconnection`)
 
@@ -2427,15 +2559,24 @@ export const connectToServer = Object.assign(
  * Drops the per-connection discovery caches so a reconnect fetches fresh
  * tools/resources/commands instead of stale ones. Keyed by connection,
  * not by display name, so clearing one endpoint never drops another
- * same-named connection's discovery.
+ * same-named connection's discovery. Entries are scoped by transport
+ * generation, so the clear drops every generation for this connection:
+ * the `#gen` suffix keeps one server's generations from matching another
+ * server whose name extends it, since the full config JSON is part of
+ * the prefix.
  */
 function clearFetchCaches(name: string, serverRef: ScopedMcpServerConfig): void {
-  const key = getServerCacheKey(name, serverRef)
-  fetchToolsForClient.cache.delete(key)
-  fetchResourcesForClient.cache.delete(key)
-  fetchCommandsForClient.cache.delete(key)
-  if (feature('MCP_SKILLS')) {
-    fetchMcpSkillsForClient!.cache.delete(key)
+  const prefix = `${getServerCacheKey(name, serverRef)}#`
+  const caches = [
+    fetchToolsForClient.cache,
+    fetchResourcesForClient.cache,
+    fetchCommandsForClient.cache,
+    ...(feature('MCP_SKILLS') ? [fetchMcpSkillsForClient!.cache] : []),
+  ]
+  for (const cache of caches) {
+    for (const key of cache.keys()) {
+      if (key.startsWith(prefix)) cache.delete(key)
+    }
   }
 }
 

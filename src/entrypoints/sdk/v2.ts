@@ -17,6 +17,7 @@ import { createStore, type Store } from '../../state/store.js'
 import {
   type Tool,
   type ToolPermissionContext,
+  type Tools,
 } from '../../Tool.js'
 import { AuthenticationCancelledError, performMCPOAuthFlow } from '../../services/mcp/auth.js'
 import {
@@ -24,7 +25,11 @@ import {
   connectToServer,
   getServerCacheKey,
   isMcpClientAdopted,
+  isMcpClientInstalled,
+  noteMcpClientInstalled,
+  noteMcpClientUninstalled,
   reconnectMcpServerImpl,
+  releaseAdoptedMcpClient,
   releaseUnownedMcpClient,
 } from '../../services/mcp/client.js'
 import {
@@ -725,6 +730,10 @@ class SDKSessionImpl implements SDKSession {
     const mcpClients = this._engine?.getMcpClients?.() ?? []
     for (const client of mcpClients) {
       if (client.type === 'connected' && client.cleanup) {
+        // The record goes with the session: a client another session
+        // still has installed stays installed for it, and one no session
+        // owns any longer can be released by a swap that replaces it.
+        noteMcpClientUninstalled(client, this)
         // Fire-and-forget cleanup — close() is synchronous
         void client.cleanup().catch(err => {
           console.warn('SDK: MCP client cleanup error:', err instanceof Error ? err.message : String(err))
@@ -936,6 +945,11 @@ class SDKSessionImpl implements SDKSession {
       if (this.closed) return false
       if (mcpClients.length > 0) {
         this.engine.setMcpClients(mcpClients)
+        for (const client of mcpClients) {
+          if (client.type === 'connected') {
+            noteMcpClientInstalled(client, this)
+          }
+        }
       }
       if (mcpTools.length > 0) {
         const permissionContext = this.appStateStore.getState().toolPermissionContext
@@ -1223,13 +1237,25 @@ class SDKSessionImpl implements SDKSession {
       // sibling's already-usable tools.
       const ownsServerTool = (tool: Tool): boolean => tool.mcpInfo?.serverName === name
       const permissionContext = this.appStateStore.getState().toolPermissionContext
+      // The client this session installed for the server, if any: the
+      // swap replaces it below, and the replacement must release it —
+      // close() only reaches installed clients, so a replaced one would
+      // otherwise keep its transport open with no owner.
+      const previousClient = this.engine
+        .getMcpClients()
+        .find(client => client.name === name)
+      // The pool the successful swap assembles, for the status below: the
+      // status must describe the same tool set the engine accepted, not
+      // a second assembly of the pool (CodeRabbit #2493 review 5957362782).
+      let assembledPool: Tools | undefined
       try {
         if (result.client.type === 'connected') {
           const nextTools = [
             ...this.mcpTools.filter(tool => !ownsServerTool(tool)),
             ...result.tools,
           ]
-          this.engine.updateTools(assembleToolPool(permissionContext, nextTools))
+          assembledPool = assembleToolPool(permissionContext, nextTools)
+          this.engine.updateTools(assembledPool)
           this.mcpTools = nextTools
         } else if (result.client.type === 'failed') {
           // The server's tools are stale — drop them. A server that still
@@ -1281,6 +1307,27 @@ class SDKSessionImpl implements SDKSession {
             ? clients.map(client => (client.name === name ? result.client : client))
             : [...clients, result.client],
         )
+        // The record now holds the reconnected client. The previous one
+        // is no longer owned by this session: a completed tool call
+        // adopted it through ensureConnectedClient, so the reconnect
+        // detached it instead of closing it, and the permanent adoption
+        // marker alone cannot tell that cache reuse from a real owner.
+        // Release it once no other session still has it installed — a
+        // session with a call in flight on it still holds its record —
+        // and keep it while one does (CodeRabbit #2493 review 5957362782).
+        if (result.client.type === 'connected') {
+          noteMcpClientInstalled(result.client, this)
+        }
+        if (
+          previousClient !== undefined &&
+          previousClient.type === 'connected' &&
+          previousClient !== result.client
+        ) {
+          noteMcpClientUninstalled(previousClient, this)
+          if (!isMcpClientInstalled(previousClient)) {
+            await releaseAdoptedMcpClient(name, config, previousClient)
+          }
+        }
       } catch (error) {
         if (result.client.type === 'connected') {
           // The reconnected client is cached by server key, and another
@@ -1302,7 +1349,7 @@ class SDKSessionImpl implements SDKSession {
         }
         throw error
       }
-      return this.toMcpServerStatus(name, result)
+      return this.toMcpServerStatus(name, result, assembledPool)
     } finally {
       options?.signal?.removeEventListener('abort', stopAttempt)
       sessionSignal?.removeEventListener('abort', stopAttempt)
@@ -1351,6 +1398,16 @@ class SDKSessionImpl implements SDKSession {
   private toMcpServerStatus(
     name: string,
     result: Awaited<ReturnType<typeof reconnectMcpServerImpl>>,
+    /**
+     * The pool the successful swap already assembled and installed: the
+     * status filters that pool by server ownership instead of assembling
+     * — and sorting — a second pool, so it describes the same tool set
+     * the engine accepted (CodeRabbit #2493 review 5957362782). Absent
+     * when the swap did not install a connected client, in which case
+     * the status lists no tools and the pool is assembled from the
+     * installed tools as before.
+     */
+    assembledPool?: Tools,
   ): McpServerStatus {
     // The status lists the tools the model actually sees: the pool
     // assembly drops disallowed tools (and built-in name collisions),
@@ -1359,10 +1416,10 @@ class SDKSessionImpl implements SDKSession {
     // discovery list (CodeRabbit #2493 review 5956557301).
     const installedTools =
       result.client.type === 'connected'
-        ? assembleToolPool(
+        ? (assembledPool ?? assembleToolPool(
             this.appStateStore.getState().toolPermissionContext,
             this.mcpTools,
-          ).filter(tool => tool.mcpInfo?.serverName === name)
+          )).filter(tool => tool.mcpInfo?.serverName === name)
         : []
     return {
       name,

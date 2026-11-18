@@ -11,6 +11,7 @@ import {
   fetchToolsForClient,
   getDiscoveryCacheKey,
   getMcpToolsCommandsAndResources,
+  isMcpClientRetired,
   reconnectMcpServerImpl,
 } from './client.js'
 import type {
@@ -111,6 +112,18 @@ export function registerMcpListChangedHandlers(
   client: ConnectedMCPServer,
   updateServer: (update: ConnectedListUpdate) => void,
 ): void {
+  /**
+   * Whether a queued notification update from this transport may still
+   * apply: the transport must be the current generation — a reconnect
+   * may have installed a replacement since the notification arrived —
+   * and the server must still be enabled. Updates apply by server name,
+   * so a retired transport's list-change would otherwise restore tools
+   * for a disabled server (CodeRabbit #2493 review 5957362782).
+   */
+  const mayApplyListUpdate = async (): Promise<boolean> =>
+    !isMcpServerDisabled(client.name) &&
+    !(await isMcpClientRetired(client.name, client.config, client))
+
   if (client.capabilities?.tools?.listChanged) {
     client.client.setNotificationHandler(
       ToolListChangedNotificationSchema,
@@ -149,6 +162,7 @@ export function registerMcpListChangedHandlers(
               newCount,
             })
           }
+          if (!(await mayApplyListUpdate())) return
           updateServer({ ...client, tools: newTools })
         } catch (error) {
           logMCPError(
@@ -181,6 +195,7 @@ export function registerMcpListChangedHandlers(
               ? fetchMcpSkillsForClient!(client)
               : Promise.resolve([]),
           ])
+          if (!(await mayApplyListUpdate())) return
           updateServer({
             ...client,
             commands: [...mcpPrompts, ...mcpSkills],
@@ -223,6 +238,7 @@ export function registerMcpListChangedHandlers(
               fetchCommandsForClient(client),
               fetchMcpSkillsForClient!(client),
             ])
+            if (!(await mayApplyListUpdate())) return
             updateServer({
               ...client,
               resources: newResources,
@@ -233,6 +249,7 @@ export function registerMcpListChangedHandlers(
             clearSkillIndexCache?.()
           } else {
             const newResources = await fetchResourcesForClient(client)
+            if (!(await mayApplyListUpdate())) return
             updateServer({ ...client, resources: newResources })
           }
         } catch (error) {
@@ -482,7 +499,10 @@ export function useManageMCPConnections(
           // re-running for every already-connected server on each state change.
           registerElicitationHandler(client.client, client.name, setAppState)
 
-          client.client.onclose = () => {
+          // The close handler for this generation, extracted so the
+          // onclose assignment below can gate it on the generation
+          // still being current without re-indenting the body.
+          const handleClientClose = () => {
             const configType = client.config.type ?? 'stdio'
 
             clearServerCache(client.name, client.config).catch(() => {
@@ -617,6 +637,32 @@ export function useManageMCPConnections(
             } else {
               updateServer({ ...client, type: 'failed' })
             }
+          }
+
+          // This handler belongs to the transport generation that
+          // installed it: a close on a retired transport must not clear
+          // — or reconnect — the replacement that already took over. A
+          // close on the current generation still recovers an enabled
+          // server, in handleClientClose above (CodeRabbit #2493 review
+          // 5957362782).
+          client.client.onclose = () => {
+            void (async () => {
+              let retired = false
+              try {
+                retired = await isMcpClientRetired(
+                  client.name,
+                  client.config,
+                  client,
+                )
+              } catch {
+                // A probe failure falls through to the pre-change
+                // behavior instead of dropping the close.
+              }
+              if (retired) {
+                return
+              }
+              handleClientClose()
+            })()
           }
 
           // Channel push: notifications/claude/channel → enqueue().
