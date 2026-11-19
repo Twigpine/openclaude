@@ -17,6 +17,15 @@ Results are cached to disk (`~/.openclaude/repomap-cache/`) keyed by file path, 
 - TypeScript (`.ts`, `.tsx`)
 - JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`)
 - Python (`.py`)
+- Go (`.go`)
+- Rust (`.rs`)
+
+Go and Rust files are parsed with their bundled tree-sitter grammars from
+`tree-sitter-wasms`, so no extra install step is needed. The Go query captures
+package-level functions, methods, type declarations (including aliases), and
+call references; the Rust query captures functions and methods (including those
+inside `impl` blocks), structs, enums, traits, modules, `impl` type references,
+and call references.
 
 Additional language grammars will be added in future releases.
 
@@ -63,6 +72,6 @@ The model can also call the `RepoMap` tool on demand during a session. This is u
 
 - **Signatures only** — The map shows function/class/type declarations, not implementations. The model still needs `Read` to see function bodies.
 - **Cold build time** — First build on large repos (2000+ files) can take 20-30 seconds due to WASM-based parsing. Subsequent builds use the disk cache and complete in under 100ms.
-- **Language coverage** — Only TypeScript, JavaScript, and Python are supported. Files in other languages are skipped.
+- **Language coverage** — Only TypeScript, JavaScript, Python, Go, and Rust are supported. Files in other languages are skipped.
 - **TypeScript references** — The TypeScript tree-sitter query captures type annotations and `new` expressions as references, but not plain function calls. This means the ranking slightly favors type-heavy hub files.
 - **Git dependency** — File enumeration uses `git ls-files --cached --others --exclude-standard` by default, so untracked files that are not ignored can appear in the map. Non-git repos fall back to a directory walk with hardcoded exclusions.

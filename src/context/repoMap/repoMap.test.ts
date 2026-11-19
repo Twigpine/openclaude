@@ -197,6 +197,181 @@ describe('symbol extraction', () => {
     }
   })
 
+  test('extracts definitions and references from Go files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-go-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'server.go'),
+        [
+          'package main',
+          '',
+          'type Server struct {',
+          '\tName string',
+          '}',
+          '',
+          'type Alias = Server',
+          '',
+          'func NewServer(name string) *Server {',
+          '\treturn &Server{Name: name}',
+          '}',
+          '',
+          'func (s *Server) Start() error {',
+          '\treturn nil',
+          '}',
+          '',
+          'func main() {',
+          '\ts := NewServer("x")',
+          '\t_ = s.Start()',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('server.go', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags
+        .filter(tag => tag.kind === 'def')
+        .map(tag => tag.name)
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      // Type declarations (including aliases), functions, and methods.
+      expect(defs).toContain('Server')
+      expect(defs).toContain('Alias')
+      expect(defs).toContain('NewServer')
+      expect(defs).toContain('Start')
+      expect(defs).toContain('main')
+
+      const methods = result!.tags.filter(
+        tag => tag.kind === 'def' && tag.subKind === 'method',
+      )
+      expect(methods.map(tag => tag.name)).toEqual(['Start'])
+
+      // Package-qualified and selector calls resolve to their callee name.
+      expect(refs).toContain('NewServer')
+      expect(refs).toContain('Start')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('extracts definitions and references from Rust files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-rust-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'lib.rs'),
+        [
+          'mod util;',
+          '',
+          'pub struct Server {',
+          '    name: String,',
+          '}',
+          '',
+          'pub enum Mode {',
+          '    Fast,',
+          '}',
+          '',
+          'pub trait Starter {',
+          '    fn start(&self);',
+          '}',
+          '',
+          'impl Server {',
+          '    pub fn new(name: &str) -> Server {',
+          '        Server { name: name.to_string() }',
+          '    }',
+          '',
+          '    pub fn start(&self) {',
+          '        helper();',
+          '    }',
+          '}',
+          '',
+          'fn helper() {}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('lib.rs', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const defNames = defs.map(tag => tag.name)
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      expect(defNames).toContain('util')
+      expect(defNames).toContain('Server')
+      expect(defNames).toContain('Mode')
+      expect(defNames).toContain('Starter')
+      // `impl Server` methods are definitions owned by their type.
+      expect(defNames).toContain('new')
+      expect(defNames).toContain('start')
+      expect(defNames).toContain('helper')
+
+      const serverDef = defs.find(tag => tag.name === 'Server')
+      expect(serverDef?.subKind).toBe('class')
+      const modeDef = defs.find(tag => tag.name === 'Mode')
+      expect(modeDef?.subKind).toBe('enum')
+      const traitDef = defs.find(tag => tag.name === 'Starter')
+      expect(traitDef?.subKind).toBe('interface')
+
+      // `impl Server` references the type; `helper()` is a bare call.
+      expect(refs).toContain('Server')
+      expect(refs).toContain('helper')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('builds a map for a Go repo and ranks the referenced file first', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-go-map-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'store.go'),
+        [
+          'package store',
+          '',
+          'type Store struct{}',
+          '',
+          'func NewStore() *Store {',
+          '\treturn &Store{}',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'main.go'),
+        [
+          'package main',
+          '',
+          'func main() {',
+          '\ts := store.NewStore()',
+          '\t_ = s',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await buildRepoMap({
+        root: tempDir,
+        files: ['main.go', 'store.go'],
+        maxTokens: 1024,
+      })
+
+      expect(result.map).toContain('store.go:')
+      expect(result.map).toContain('func NewStore() *Store {')
+      // store.go is referenced by main.go, so it ranks first.
+      expect(result.map.split('\n')[0]).toBe('store.go:')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
   test('builds a non-empty map for JavaScript-only repos', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'repomap-js-only-'))
     try {
