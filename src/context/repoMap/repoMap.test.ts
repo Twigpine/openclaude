@@ -327,6 +327,68 @@ describe('symbol extraction', () => {
     }
   })
 
+  test('captures bodyless trait methods, generic impls, and turbofish calls in Rust', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-rust-generics-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'service.rs'),
+        [
+          'trait Service {',
+          '    fn validate(&self, id: u32) -> bool;',
+          '}',
+          '',
+          'struct Store<T> {',
+          '    value: T,',
+          '}',
+          '',
+          'impl<T> Store<T> {',
+          '    fn get(&self) -> &T {',
+          '        &self.value',
+          '    }',
+          '}',
+          '',
+          'fn helper<T>(v: T) -> T {',
+          '    v',
+          '}',
+          '',
+          'fn run(service: &Service, store: &Store<u32>, id: u32) {',
+          '    let _ = helper::<u32>(id);',
+          '    let _ = service.validate(id);',
+          '    let _ = store.get::<u32>();',
+          '    let _ = Store::<u32>::count(id);',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('service.rs', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      // `fn validate(&self, id: u32) -> bool;` has no body, so it parses as
+      // function_signature_item. The name is unique to the trait, so an impl
+      // method cannot mask it.
+      const traitMethod = defs.find(tag => tag.name === 'validate')
+      expect(traitMethod?.subKind).toBe('method')
+
+      // `impl<T> Store<T>` carries a generic_type node, not a bare type.
+      expect(refs).toContain('Store')
+
+      // Explicit type arguments wrap the callee in generic_function.
+      expect(refs).toContain('helper')
+      expect(refs).toContain('validate')
+      expect(refs).toContain('get')
+      expect(refs).toContain('count')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
   test('builds a map for a Go repo and ranks the referenced file first', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'repomap-go-map-'))
     try {

@@ -23,9 +23,11 @@ Results are cached to disk (`~/.openclaude/repomap-cache/`) keyed by file path, 
 Go and Rust files are parsed with their bundled tree-sitter grammars from
 `tree-sitter-wasms`, so no extra install step is needed. The Go query captures
 package-level functions, methods, type declarations (including aliases), and
-call references; the Rust query captures functions and methods (including those
-inside `impl` blocks), structs, enums, traits, modules, `impl` type references,
-and call references.
+call references. The Rust query captures functions and methods (including those
+inside `impl` blocks and bodyless trait signatures such as `fn handle(&self);`),
+structs, enums, traits, modules, `impl` type references (including generic
+`impl<T> Store<T>`), and call references (including explicit type arguments such
+as `helper::<u8>()` and `Store::<u8>::count()`).
 
 Additional language grammars will be added in future releases.
 
