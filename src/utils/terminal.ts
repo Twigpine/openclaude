@@ -1,7 +1,7 @@
 import chalk from 'chalk'
 import { ctrlOToExpand } from '../components/CtrlOToExpand.js'
 import { stringWidth } from '../ink/stringWidth.js'
-import sliceAnsi from './sliceAnsi.js'
+import { sliceAnsiCells } from './sliceAnsi.js'
 
 // Text rendering utilities for terminal display
 const MAX_LINES_TO_SHOW = 3
@@ -31,26 +31,26 @@ function wrapText(
       // Break long lines into chunks of wrapWidth visible characters
       // using ANSI-aware slicing to preserve escape sequences.
       //
-      // Advance by the width that was actually emitted, not by wrapWidth: a
-      // wide glyph (CJK, emoji) that does not fit in the remaining cells is
-      // dropped from the chunk by `fitEnd`, and the next chunk must start on
-      // that glyph's first cell. Advancing by a fixed stride would slice
-      // through the glyph and lose or duplicate it.
+      // Advance by the cells the slice reports consuming, not by measuring the
+      // chunk: the tokenizer counts a grapheme carrying VS16 as two cells while
+      // `stringWidth` can count one, and mixing the two accounts duplicates or
+      // drops a character at the boundary. Advancing by the reported width also
+      // keeps wide glyphs whole, because a glyph that does not fit is dropped
+      // from the chunk and the next chunk starts on its first cell.
       let position = 0
       while (position < visibleWidth) {
-        let chunk = sliceAnsi(line, position, position + wrapWidth, {
+        let chunk = sliceAnsiCells(line, position, position + wrapWidth, {
           fitEnd: true,
         })
-        if (chunk === '') {
+        if (chunk.width === 0) {
           // The glyph at this boundary is wider than the whole budget; widen
           // by one cell so it is emitted rather than skipped.
-          chunk = sliceAnsi(line, position, position + wrapWidth + 1, {
+          chunk = sliceAnsiCells(line, position, position + wrapWidth + 1, {
             fitEnd: true,
           })
         }
-        wrappedLines.push(chunk.trimEnd())
-        const chunkWidth = stringWidth(chunk)
-        position += chunkWidth > 0 ? chunkWidth : wrapWidth
+        wrappedLines.push(chunk.text.trimEnd())
+        position += chunk.width > 0 ? chunk.width : wrapWidth
       }
     }
   }

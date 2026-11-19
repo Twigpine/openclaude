@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { stripVTControlCharacters as stripAnsi } from 'node:util'
 import { stringWidth } from '../ink/stringWidth.js'
-import sliceAnsi from './sliceAnsi.js'
+import sliceAnsi, { sliceAnsiCells } from './sliceAnsi.js'
 
 const BOLD = '\x1b[1m'
 const BOLD_OFF = '\x1b[22m'
@@ -95,5 +95,33 @@ describe('sliceAnsi', () => {
         ).toBe(stripAnsi(text))
       }
     }
+  })
+
+  test('sliceAnsiCells reports the cells the slice consumed', () => {
+    // The tokenizer marks a grapheme carrying VS16 as two cells while
+    // stringWidth counts one; the reported width must follow the tokenizer, so
+    // a caller that walks the string in chunks stays aligned with what the
+    // slice actually consumed instead of duplicating a character.
+    const text = '1\uFE0Fabcdefghij'
+    const first = sliceAnsiCells(text, 0, 10, { fitEnd: true })
+    expect(first.text).toBe('1\uFE0Fabcdefgh')
+    expect(first.width).toBe(10)
+    expect(stringWidth(first.text)).toBe(9)
+
+    const second = sliceAnsiCells(text, first.width, first.width + 10, {
+      fitEnd: true,
+    })
+    expect(second.text).toBe('ij')
+    expect(first.text + second.text).toBe(text)
+  })
+
+  test('sliceAnsiCells counts two cells per wide glyph', () => {
+    const chunk = sliceAnsiCells('你好', 0, 3, { fitEnd: true })
+    expect(chunk.text).toBe('你')
+    expect(chunk.width).toBe(2)
+  })
+
+  test('sliceAnsiCells reports zero width outside the text', () => {
+    expect(sliceAnsiCells('abc', 10, 12)).toEqual({ text: '', width: 0 })
   })
 })

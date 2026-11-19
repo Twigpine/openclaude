@@ -42,6 +42,20 @@ describe('renderTruncatedContent wrapping', () => {
     expect(visibleLines(rendered, wrapWidth).join('')).toBe('你'.repeat(15 + 15))
   })
 
+  test('does not duplicate a character when the tokenizer counts a grapheme fuller than stringWidth', () => {
+    // '1' + VS16 is one cell for stringWidth but two for the tokenizer. The
+    // cursor used to advance by the measured chunk (9 cells), so the next chunk
+    // started one character early and repeated 'h'.
+    const text = '1\uFE0Fabcdefghij'
+    const wrapWidth = WRAP_WIDTH_FOR(20)
+    const rendered = renderTruncatedContent(text, 20, true)
+
+    for (const line of rendered.split('\n')) {
+      expect(stringWidth(line)).toBeLessThanOrEqual(wrapWidth)
+    }
+    expect(visibleLines(rendered, wrapWidth).join('')).toBe(text)
+  })
+
   test('stays within the line budget and reports the remainder', () => {
     const text = Array.from({ length: 20 }, (_, i) => `line-${i}`).join('\n')
     const rendered = renderTruncatedContent(text, 80, true)

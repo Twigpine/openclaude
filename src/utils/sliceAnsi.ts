@@ -31,18 +31,33 @@ export type SliceAnsiOptions = {
   fitEnd?: boolean
 }
 
+export type SliceAnsiCellsResult = {
+  /** The sliced text, with the style runs it needs re-opened and closed. */
+  text: string
+  /**
+   * Display cells consumed from the source starting at `start`.
+   *
+   * Callers that walk a string in fixed-width chunks must advance their cursor
+   * by this value instead of measuring `text`. The slice counts cells with the
+   * tokenizer's `fullWidth` flag (a grapheme carrying VS16 is two cells), while
+   * `stringWidth` may disagree for the same cluster; mixing the two accounts
+   * duplicates or drops a character at the chunk boundary.
+   */
+  width: number
+}
+
 /**
- * Slice a string containing ANSI escape codes.
+ * Slice a string containing ANSI escape codes, reporting the cells consumed.
  *
  * Unlike the slice-ansi package, this properly handles OSC 8 hyperlink
  * sequences because @alcalzone/ansi-tokenize tokenizes them correctly.
  */
-export default function sliceAnsi(
+export function sliceAnsiCells(
   str: string,
   start: number,
   end?: number,
   options?: SliceAnsiOptions,
-): string {
+): SliceAnsiCellsResult {
   const fitEnd = options?.fitEnd === true
   // Don't pass `end` to tokenize — it counts code units, not display cells,
   // so it drops tokens early for text with zero-width combining marks.
@@ -113,13 +128,25 @@ export default function sliceAnsi(
     }
   }
 
+  const width = Math.max(0, position - start)
+
   // Empty or out-of-range slice: emit nothing. Running the undo sequence here
   // would leak a stray reset code for styles that were never opened in the
   // result (the codes were only collected, never emitted).
-  if (!include) return result
+  if (!include) return { text: result, width }
 
   // Only undo start codes that are still active
   const activeStartCodes = filterStartCodes(reduceAnsiCodes(activeCodes))
   result += ansiCodesToString(undoAnsiCodes(activeStartCodes))
-  return result
+  return { text: result, width }
+}
+
+/** Slice a string containing ANSI escape codes. */
+export default function sliceAnsi(
+  str: string,
+  start: number,
+  end?: number,
+  options?: SliceAnsiOptions,
+): string {
+  return sliceAnsiCells(str, start, end, options).text
 }
