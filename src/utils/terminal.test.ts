@@ -56,6 +56,20 @@ describe('renderTruncatedContent wrapping', () => {
     expect(visibleLines(rendered, wrapWidth).join('')).toBe(text)
   })
 
+  test('keeps the last character at an exact VS16 boundary', () => {
+    // 21 tokenizer cells, 20 by stringWidth: the loop used to stop at 20 and
+    // silently drop the final 's'.
+    const text = '1\uFE0Fabcdefghijklmnopqrs'
+    const wrapWidth = WRAP_WIDTH_FOR(20)
+    const rendered = renderTruncatedContent(text, 20, true)
+
+    for (const line of rendered.split('\n')) {
+      expect(stringWidth(line)).toBeLessThanOrEqual(wrapWidth)
+    }
+    expect(visibleLines(rendered, wrapWidth).join('')).toBe(text)
+    expect(rendered.endsWith('s')).toBe(true)
+  })
+
   test('stays within the line budget and reports the remainder', () => {
     const text = Array.from({ length: 20 }, (_, i) => `line-${i}`).join('\n')
     const rendered = renderTruncatedContent(text, 80, true)

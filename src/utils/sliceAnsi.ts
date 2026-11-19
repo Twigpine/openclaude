@@ -31,6 +31,33 @@ export type SliceAnsiOptions = {
   fitEnd?: boolean
 }
 
+/**
+ * Display cells one token occupies. This is the single accounting rule shared
+ * by slicing and measuring: the tokenizer's `fullWidth` flag wins over
+ * `stringWidth`, because a grapheme carrying VS16 is two cells to the tokenizer
+ * and may be one to `stringWidth`.
+ */
+function tokenCells(token: ReturnType<typeof tokenize>[number]): number {
+  return token.type === 'ansi'
+    ? 0
+    : (token as Char).fullWidth
+      ? 2
+      : stringWidth((token as Char).value)
+}
+
+/**
+ * Display cells a string occupies, using the same accounting as
+ * `sliceAnsiCells`. Use this instead of `stringWidth` when the value decides
+ * how a string is split into chunks, so measurement and slicing agree.
+ */
+export function displayCells(str: string): number {
+  let cells = 0
+  for (const token of tokenize(str)) {
+    cells += tokenCells(token)
+  }
+  return cells
+}
+
 export type SliceAnsiCellsResult = {
   /** The sliced text, with the style runs it needs re-opened and closed. */
   text: string
@@ -71,16 +98,11 @@ export function sliceAnsiCells(
     // Advance by display width, not code units. Combining marks (Devanagari
     // matras, virama, diacritics) are width 0 — counting them via .length
     // advanced position past `end` early and truncated the slice. Callers
-    // pass start/end in display cells (via stringWidth), so position must
-    // track the same units.
+    // pass start/end in display cells, so position must track the same units
+    // `displayCells` reports.
     // Non-ansi tokens are treated as Char; tokenize doesn't emit ControlCode
     // for the strings we slice (pre-existing runtime assumption).
-    const width =
-      token.type === 'ansi'
-        ? 0
-        : (token as Char).fullWidth
-          ? 2
-          : stringWidth((token as Char).value)
+    const width = tokenCells(token)
 
     // Break AFTER trailing zero-width marks — a combining mark attaches to
     // the preceding base char, so "भा" (भ + ा, 1 display cell) sliced at

@@ -1,7 +1,6 @@
 import chalk from 'chalk'
 import { ctrlOToExpand } from '../components/CtrlOToExpand.js'
-import { stringWidth } from '../ink/stringWidth.js'
-import { sliceAnsiCells } from './sliceAnsi.js'
+import { displayCells, sliceAnsiCells } from './sliceAnsi.js'
 
 // Text rendering utilities for terminal display
 const MAX_LINES_TO_SHOW = 3
@@ -24,8 +23,11 @@ function wrapText(
   const wrappedLines: string[] = []
 
   for (const line of lines) {
-    const visibleWidth = stringWidth(line)
-    if (visibleWidth <= wrapWidth) {
+    // Same accounting as the slicer, for both the fit decision and the walk:
+    // `stringWidth` can under-count a grapheme the tokenizer calls full-width,
+    // which would leave the last character unsliced at an exact boundary.
+    const lineCells = displayCells(line)
+    if (lineCells <= wrapWidth) {
       wrappedLines.push(line.trimEnd())
     } else {
       // Break long lines into chunks of wrapWidth visible characters
@@ -38,7 +40,7 @@ function wrapText(
       // keeps wide glyphs whole, because a glyph that does not fit is dropped
       // from the chunk and the next chunk starts on its first cell.
       let position = 0
-      while (position < visibleWidth) {
+      while (position < lineCells) {
         let chunk = sliceAnsiCells(line, position, position + wrapWidth, {
           fitEnd: true,
         })
@@ -49,6 +51,7 @@ function wrapText(
             fitEnd: true,
           })
         }
+        if (chunk.text === '') break
         wrappedLines.push(chunk.text.trimEnd())
         position += chunk.width > 0 ? chunk.width : wrapWidth
       }

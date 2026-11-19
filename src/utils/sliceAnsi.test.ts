@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { stripVTControlCharacters as stripAnsi } from 'node:util'
 import { stringWidth } from '../ink/stringWidth.js'
-import sliceAnsi, { sliceAnsiCells } from './sliceAnsi.js'
+import sliceAnsi, { displayCells, sliceAnsiCells } from './sliceAnsi.js'
 
 const BOLD = '\x1b[1m'
 const BOLD_OFF = '\x1b[22m'
@@ -123,5 +123,19 @@ describe('sliceAnsi', () => {
 
   test('sliceAnsiCells reports zero width outside the text', () => {
     expect(sliceAnsiCells('abc', 10, 12)).toEqual({ text: '', width: 0 })
+  })
+
+  test('displayCells uses the same accounting as slicing', () => {
+    // The tokenizer counts '1' + VS16 as two cells; stringWidth counts one.
+    expect(displayCells('1\uFE0Fabcdefghij')).toBe(12)
+    expect(stringWidth('1\uFE0Fabcdefghij')).toBe(11)
+    expect(displayCells('你好')).toBe(4)
+    expect(displayCells('\x1b[1mbold\x1b[22m')).toBe(4)
+    expect(displayCells('')).toBe(0)
+
+    // Whatever a line's total is, slicing the whole line consumes exactly it.
+    for (const text of ['hello', '你好世界', '1\uFE0Fabc', '\x1b[31mred\x1b[39m']) {
+      expect(sliceAnsiCells(text, 0).width).toBe(displayCells(text))
+    }
   })
 })
