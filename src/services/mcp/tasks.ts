@@ -534,9 +534,19 @@ async function cancelMcpServerTask(
 export function failMcpServerTasksForServer(
   serverName: string,
   reason: string,
+  /**
+   * When set, only tasks run on this SDK client fail. A generation's
+   * close must not stop another generation's live tasks: reconnect
+   * leaves a retired generation open while its replacement takes over
+   * the cache, so the closing generation fails only its own tasks
+   * (CodeRabbit #2493 review 5968087303). Callers that omit it keep
+   * the name-keyed behaviour, as before.
+   */
+  client?: Client,
 ): void {
   for (const [localTaskId, entry] of [...trackedByLocalId]) {
     if (entry.serverName !== serverName || entry.finalized) continue
+    if (client !== undefined && entry.client !== client) continue
     entry.finalized = true
     entry.abort.abort()
     trackedByLocalId.delete(localTaskId)

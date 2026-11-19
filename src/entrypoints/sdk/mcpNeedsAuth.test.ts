@@ -4370,6 +4370,61 @@ test('A RECONNECT DOES NOT CLOSE A TRANSPORT ANOTHER SESSION ADOPTED', async () 
 }, 30_000)
 
 /**
+ * A reconnect joining a cached connection must record its claim under
+ * the SDK owner: when the reconnect then abandons setup, the
+ * reservation release withdraws only that owner's claim, so the
+ * transport is released instead of staying adopted forever under the
+ * shared permanent marker. A plain connect started in the same tick
+ * populates the cache before the reconnect's connect runs, so the
+ * reconnect joins it instead of dialing fresh — the join window the
+ * reconnect's clearServerCache leaves open (CodeRabbit #2493 review
+ * 5966435933).
+ */
+test('A RECONNECT JOINING A CACHED CONNECT RECORDS ITS CLAIM UNDER ITS OWNER', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const owner = {}
+  let client: MCPServerConnection | undefined
+  try {
+    const done = realClient.reconnectMcpServerImpl(
+      'gated',
+      config,
+      undefined,
+      undefined,
+      owner,
+    )
+    // Started synchronously after the reconnect, before any microtask
+    // runs: this connect populates the cache the reconnect's
+    // clearServerCache just found empty, so the reconnect joins it.
+    const creatorConnect = realClient.connectToServer('gated', config)
+    const result = (await settlesWithin(done, 5_000)) as Awaited<
+      ReturnType<typeof realClient.reconnectMcpServerImpl>
+    >
+    expect(result.client.type).toBe('connected')
+    if (result.client.type !== 'connected') {
+      throw new Error('expected a connected client')
+    }
+    const connectedClient = result.client
+    client = connectedClient
+    expect(await settlesWithin(creatorConnect, 5_000)).toBe(connectedClient)
+    // The reconnect's setup reservation is held for the owner, and the
+    // join recorded one adoption claim.
+    expect(realClient.getMcpClientSetupReservationCountForTesting(connectedClient)).toBe(1)
+    expect(realClient.getMcpClientAdoptionClaimCountForTesting(connectedClient)).toBe(1)
+    // Abandoning setup withdraws the owner's claim: the transport is
+    // adopted by nobody now, instead of staying adopted under the
+    // shared permanent marker the join would have consolidated into
+    // without the owner.
+    realClient.releaseMcpClientSetupReservation(connectedClient, owner)
+    expect(realClient.getMcpClientAdoptionClaimCountForTesting(connectedClient)).toBe(0)
+    expect(realClient.isMcpClientAdopted(connectedClient)).toBe(false)
+  } finally {
+    if (client?.type === 'connected') await client.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
  * Aborting the session while the first tools/list is still in flight
  * must release the setup reservation: fetchToolsForClient swallows an
  * abort into [] instead of throwing, so the connect's catch never runs
@@ -6225,6 +6280,13 @@ test("A SURVIVING RESOURCES DISCOVERY KEEPS ITS ORIGINATING CREDENTIAL NAMESPACE
       'skill://review',
       'file:///second',
     ])
+    // Under MCP_SKILLS the skills fetch lists resources too: await its
+    // shared traversal as well, or the count below can run while its
+    // second page is still in flight and see three requests instead of
+    // four (CodeRabbit #2493 review 5968087303).
+    if (feature('MCP_SKILLS')) {
+      await settlesWithin(fetchMcpSkillsForClient(connectedClient), 5_000)
+    }
     // Two pages per traversal; under MCP_SKILLS the skills fetch lists
     // resources too, so there are two traversals. Every request carries
     // the origin token, never the competitor's.
@@ -6756,6 +6818,19 @@ test('A STALLED STDIO CONNECT CLOSES ONCE ITS CREATOR AND JOINER HAVE BOTH ABORT
     // The creator aborts while the joiner remains: the transport is
     // preserved for the joiner, so the connect stays stalled.
     creator.abort()
+    // Observe the preservation before the joiner aborts: the child is
+    // still alive and the joiner's connect is still pending — if the
+    // creator's abort had closed the transport, both callers would
+    // already have settled with 'Connection closed' and the assertions
+    // below would pass without proving anything (CodeRabbit #2493
+    // review 5968087303).
+    expect(isProcessAlive(parsedPid)).toBe(true)
+    let joinerSettled = false
+    void joinerCaught.then(() => {
+      joinerSettled = true
+    })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(joinerSettled).toBe(false)
     // The joiner aborts too: the last waiter cancels, so the transport
     // must close and the connect must reject — promptly, not at the
     // connection timeout.

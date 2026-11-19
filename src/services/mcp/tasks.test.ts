@@ -343,6 +343,48 @@ test('disconnect fails tracked tasks for that server only', async () => {
   _resetMcpServerTasksForTest()
 })
 
+test('disconnect fails only the closing transport’s tasks, not a live generation’s', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const state = makeState()
+  // Two generations of the same server: A is closing, B still runs a task.
+  const { client: clientA } = makeClient({})
+  const { client: clientB } = makeClient({})
+  const connA = makeConnection(clientA, { capabilities: TASK_CAPS })
+  const connB = makeConnection(clientB, { capabilities: TASK_CAPS })
+
+  const taskA = trackMcpServerTask({
+    connection: connA,
+    task: makeMcpTask({ taskId: 'a1', pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+  const taskB = trackMcpServerTask({
+    connection: connB,
+    task: makeMcpTask({ taskId: 'b1', pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+
+  // Failing A's transport must not stop B's task: the fail is keyed by
+  // server name, so without a client filter it marks B's task failed too
+  // (CodeRabbit #2493 review 5968087303).
+  failMcpServerTasksForServer(
+    'srv',
+    'MCP server "srv" disconnected before the task completed',
+    clientA,
+  )
+  await waitFor(() => taskFrom(state, taskA).status !== 'running')
+
+  assert.equal(taskFrom(state, taskA).status, 'failed')
+  // Give B's finalize chain time to land if it were (wrongly) failed too.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(taskFrom(state, taskB).status, 'running')
+  _resetMcpServerTasksForTest()
+})
+
 test('getTask errors fail the task instead of hanging', async () => {
   _resetMcpServerTasksForTest()
   _resetTaskOutputDirForTest()

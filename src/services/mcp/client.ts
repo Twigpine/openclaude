@@ -2322,10 +2322,14 @@ const connectToServerMemoized = memoize(
           // Fail this connection's server tasks under the same guard
           // (upstream #2541): the fail call is keyed by server name, so
           // a retired generation's close must not fail the replacement
-          // connection's live tasks.
+          // connection's live tasks — and it is filtered by this
+          // generation's SDK client, so a current generation's close
+          // must not fail a retired generation's live tasks either
+          // (CodeRabbit #2493 review 5968087303).
           failMcpServerTasksForServer(
             name,
             `MCP server "${name}" disconnected before the task completed`,
+            client,
           )
         }
         logMCPDebug(name, `Cleared connection cache for reconnection`)
@@ -3637,7 +3641,13 @@ export async function reconnectMcpServerImpl(
     // transport while the reconnect dials fresh (Copilot #2493 review
     // 5955514041).
     await clearServerCache(name, config, signal, { keepAdoptedClient: true })
-    const client = await connectToServer(name, config, undefined, signal)
+    // The SDK owner joins the connect under its own claim, so a join
+    // of a cached connection records the claim under that owner and
+    // the reservation cleanup below can release it (CodeRabbit #2493
+    // review 5966435933). Without it the join consolidates into the
+    // shared permanent marker, and abandoning setup leaves the
+    // transport adopted forever.
+    const client = await connectToServer(name, config, undefined, signal, owner)
     connected = client
 
     if (client.type !== 'connected') {
