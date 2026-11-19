@@ -36,6 +36,7 @@ import {
 import { AuthenticationCancelledError, ClaudeAuthProvider } from '../../services/mcp/auth.js'
 import { logError } from '../../utils/log.js'
 import type { ActiveCredentialScope, CredentialScope } from '../../services/mcp/credentialScope.js'
+import { raceAbort } from '../../utils/boundedAsync.js'
 import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import {
   acquireEnvMutex,
@@ -817,6 +818,13 @@ export async function connectSdkMcpServers(
         // credentials. Retry disconnected results when this environment has
         // tokens, without changing the global key or touching connected clients.
         const serverConfig = scopedConfig as unknown as ScopedMcpServerConfig
+        // A cached connect is joined once and its connected result used
+        // directly: joining again below would adopt the replacement under
+        // the same owner if a reconnect detached this generation in
+        // between, and the first client's claim would never be reserved,
+        // installed, or released — its release stays blocked by an owner
+        // that never uses it (CodeRabbit #2493 review 5966435933).
+        let client: MCPServerConnection | undefined
         if (serverConfig.type === 'http' || serverConfig.type === 'sse') {
           const key = getServerCacheKey(name, serverConfig)
           const cached = connectToServer.cache.get(key)
@@ -840,41 +848,45 @@ export async function connectSdkMcpServers(
               ) {
                 connectToServer.cache.delete(key)
               }
+            } else {
+              client = joined
             }
           }
         }
         // Connect to the server
         // Note: SDK 'session' scope is not part of internal ConfigScope,
         // but connectToServer accepts any object with scope field
-        const client = await connectToServer(
-          name,
-          scopedConfig as unknown as ScopedMcpServerConfig,
-          {
-            totalServers: Object.keys(mcpServers).length,
-            stdioCount: 0,
-            sseCount: 0,
-            httpCount: 0,
-            sseIdeCount: 0,
-            wsIdeCount: 0,
-          },
-          // The session's signal is passed only when joining a connect
-          // another caller started: closing the session then releases the
-          // waiter it registered, so a later cancellation can close the
-          // transport instead of waiting out the connection timeout. A
-          // fresh connect is owned by the cache, not the session — passing
-          // the signal would attach the connect's abort listener to it,
-          // and closing the session would close a transport the next
-          // session reuses.
-          connectToServer.cache.get(
-            getServerCacheKey(name, scopedConfig as unknown as ScopedMcpServerConfig),
-          ) !== undefined
-            ? sessionSignal
-            : undefined,
-          // A join through this connect adopts the client under the
-          // session's owner token (see connectToServer), so a setup
-          // abandonment can withdraw only this session's claim.
-          owner,
-        )
+        if (client === undefined) {
+          client = await connectToServer(
+            name,
+            scopedConfig as unknown as ScopedMcpServerConfig,
+            {
+              totalServers: Object.keys(mcpServers).length,
+              stdioCount: 0,
+              sseCount: 0,
+              httpCount: 0,
+              sseIdeCount: 0,
+              wsIdeCount: 0,
+            },
+            // The session's signal is passed only when joining a connect
+            // another caller started: closing the session then releases the
+            // waiter it registered, so a later cancellation can close the
+            // transport instead of waiting out the connection timeout. A
+            // fresh connect is owned by the cache, not the session — passing
+            // the signal would attach the connect's abort listener to it,
+            // and closing the session would close a transport the next
+            // session reuses.
+            connectToServer.cache.get(
+              getServerCacheKey(name, scopedConfig as unknown as ScopedMcpServerConfig),
+            ) !== undefined
+              ? sessionSignal
+              : undefined,
+            // A join through this connect adopts the client under the
+            // session's owner token (see connectToServer), so a setup
+            // abandonment can withdraw only this session's claim.
+            owner,
+          )
+        }
 
         // If connected, fetch tools
         if (client.type === 'connected') {
@@ -882,13 +894,27 @@ export async function connectSdkMcpServers(
             reserveMcpClientForSetup(client, owner)
             reservedClient = client
           }
-          const serverTools = await fetchToolsForClient(client, { signal: sessionSignal })
+          // fetchToolsForClient memoizes by connection: the fetch one
+          // session starts is the fetch every session joining that client
+          // awaits, so this session's signal must not drive the shared
+          // fetch — closing this session would cancel discovery another
+          // live session still awaits, and the shared promise would
+          // resolve to [] for both. The fetch runs without a signal and
+          // raceAbort ends only this caller's wait, the same split the
+          // reconnect path uses (client.ts, reconnectMcpServerImpl); the
+          // shared fetch keeps running for the joiner (CodeRabbit #2493
+          // review 5966435933).
+          const serverTools = await raceAbort(
+            fetchToolsForClient(client),
+            sessionSignal,
+          )
           if (sessionSignal?.aborted) {
-            // fetchToolsForClient returns [] on abort instead of throwing
-            // (client.ts), so the catch below never runs: release the
-            // reservation explicitly, and report the server as failed so
-            // the caller does not install a client from a dead session
-            // (jatmn #2493 review 5965105241).
+            // The tools arrived as the abort landed, so the race above
+            // resolved instead of throwing: release the reservation
+            // explicitly, and report the server as failed so the caller
+            // does not install a client from a dead session (jatmn #2493
+            // review 5965105241). An abort that wins the race throws
+            // instead and the catch below releases the reservation.
             if (reservedClient !== undefined && owner !== undefined) {
               releaseMcpClientSetupReservation(reservedClient, owner)
             }

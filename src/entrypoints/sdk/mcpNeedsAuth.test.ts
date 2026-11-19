@@ -4418,6 +4418,67 @@ test('ABORTING DURING INITIAL TOOL DISCOVERY RELEASES THE SETUP RESERVATION', as
 }, 30_000)
 
 /**
+ * Initial SDK setup shares one tools/list fetch per connection: the
+ * first session's abort must end only its own wait, not cancel the
+ * discovery a second session joined while it was in flight — the
+ * second session must still receive the server's tools (CodeRabbit
+ * #2493 review 5966435933).
+ */
+test("ONE SESSION ABORTING INITIAL TOOL DISCOVERY DOES NOT STRIP ANOTHER SESSION'S TOOLS", async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const creator = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(creator.type).toBe('connected')
+  if (creator.type !== 'connected') throw new Error('expected a connected client')
+  const held = holdToolsList()
+  const ownerA = {}
+  const ownerB = {}
+  const abortA = new AbortController()
+  try {
+    const doneA = connectSdkMcpServers(
+      { gated: { type: 'http', url } },
+      undefined,
+      abortA.signal,
+      ownerA,
+    )
+    await waitFor(() => held.arrived)
+    // B joins the same client while A's discovery is still in flight.
+    const doneB = connectSdkMcpServers(
+      { gated: { type: 'http', url } },
+      undefined,
+      undefined,
+      ownerB,
+    )
+    abortA.abort()
+    const resultA = (await settlesWithin(doneA, 5_000)) as {
+      clients: MCPServerConnection[]
+      tools: Tool[]
+    }
+    expect(resultA.tools).toEqual([])
+    expect(resultA.clients).toHaveLength(1)
+    expect(resultA.clients[0]!.type).toBe('failed')
+    // A's abort released only A's reservation: B's setup still holds
+    // the client while it waits on the shared discovery.
+    await waitFor(
+      () => realClient.getMcpClientSetupReservationCountForTesting(creator) === 1,
+    )
+    held.answer()
+    const resultB = (await settlesWithin(doneB, 5_000)) as {
+      clients: MCPServerConnection[]
+      tools: Tool[]
+    }
+    expect(resultB.clients[0]!.type).toBe('connected')
+    expect(resultB.tools.map(tool => tool.name)).toEqual(['mcp__gated__hello'])
+    // B's setup reservation is still held until B installs the client.
+    expect(realClient.getMcpClientSetupReservationCountForTesting(creator)).toBe(1)
+  } finally {
+    held.answer()
+    await creator.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
  * A reconnect's discovery must survive another session closing the
  * client it shares: the reconnect caller holds a setup reservation
  * from receipt through installation, so the other session's close —
@@ -4500,10 +4561,13 @@ test('CLOSING A QUERY DURING ITS FIRST MCP CONNECT RELEASES THE SETUP RESERVATIO
   })
   ;(q as unknown as { setEngine: (engine: unknown) => void }).setEngine(recorded.engine)
   try {
+    // The drain must complete without rejection: the closed query ends
+    // its iteration instead of throwing on the engine close() already
+    // cleared (CodeRabbit #2493 review 5966435933).
     const drain = (async () => {
       for await (const _ of q) {
       }
-    })().catch(() => {})
+    })()
     await waitFor(() => held.arrived)
     q.close()
     held.answer()
@@ -6341,6 +6405,80 @@ test('AN OLDER GENERATION KEEPS ITS TRANSPORT WHILE ITS JOINER STILL WAITS', asy
   expect((await joinerConnect).type).toBe('connected')
   expect((await creatorConnect).type).toBe('connected')
   expect((await nextConnect).type).toBe('connected')
+}, 30_000)
+
+/**
+ * Setup must use its first cache join's connected result: if a
+ * reconnect detaches that generation before setup's second connect,
+ * the second join adopts the replacement under the same owner and the
+ * first client's claim is never reserved, installed, or released — its
+ * release stays blocked by an owner that never uses it. Using the
+ * first result leaves no such claim behind (CodeRabbit #2493 review
+ * 5966435933).
+ */
+test('SETUP USES ITS FIRST JOIN WHEN A RECONNECT DETACHES THAT GENERATION', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const held = holdInitialize()
+  const key = realClient.getServerCacheKey('gated', {
+    type: 'http',
+    url,
+    scope: 'session',
+  } as never)
+
+  const creator = new AbortController()
+  const creatorConnect = realClient.connectToServer(
+    'gated',
+    { type: 'http', url, scope: 'session' } as never,
+    undefined,
+    creator.signal,
+  )
+  await waitFor(() => held.arrived)
+  // A's setup joins the pending connect; a cache clear then forces the
+  // next connect to start a newer generation before the first settles.
+  const ownerA = {}
+  const sdkConnect = connectSdkMcpServers(
+    { gated: { type: 'http', url } },
+    undefined,
+    undefined,
+    ownerA,
+  )
+  realClient.connectToServer.cache.delete(key)
+  const nextCreator = new AbortController()
+  const nextConnect = realClient.connectToServer(
+    'gated',
+    { type: 'http', url, scope: 'session' } as never,
+    undefined,
+    nextCreator.signal,
+  )
+  let secondClient: MCPServerConnection | undefined
+  try {
+    held.answer()
+    const firstClient = (await creatorConnect) as MCPServerConnection
+    expect(firstClient.type).toBe('connected')
+    const { clients, tools } = (await settlesWithin(sdkConnect, 5_000)) as {
+      clients: MCPServerConnection[]
+      tools: Tool[]
+    }
+    expect(clients).toHaveLength(1)
+    expect(clients[0]!.type).toBe('connected')
+    expect(tools.map(tool => tool.name)).toEqual(['mcp__gated__hello'])
+    secondClient = (await nextConnect) as MCPServerConnection
+    expect(secondClient.type).toBe('connected')
+    // Setup used the first generation: the client it returns is the one
+    // the creator connected, not the replacement.
+    expect(clients[0]).toBe(firstClient)
+    // Releasing its setup reservation leaves no adoption claim behind.
+    realClient.releaseMcpClientSetupReservation(firstClient, ownerA)
+    expect(realClient.isMcpClientAdopted(firstClient)).toBe(false)
+  } finally {
+    held.answer()
+    if (secondClient?.type === 'connected') await secondClient.cleanup().catch(() => {})
+    const firstClient = (await creatorConnect.catch(() => undefined)) as
+      | MCPServerConnection
+      | undefined
+    if (firstClient?.type === 'connected') await firstClient.cleanup().catch(() => {})
+  }
 }, 30_000)
 
 /**

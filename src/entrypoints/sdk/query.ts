@@ -669,6 +669,11 @@ class QueryImpl implements Query {
                     releaseMcpClientSetupReservation(client, self)
                   }
                 }
+                // Stop here: close() already cleared _engine, so reaching
+                // submitMessage below would reject instead of ending the
+                // iteration. The finally still restores the environment
+                // (CodeRabbit #2493 review 5966435933).
+                return
               } else {
                 self.sdkMcpTools = mcpTools
                 if (mcpClients.length > 0) {
