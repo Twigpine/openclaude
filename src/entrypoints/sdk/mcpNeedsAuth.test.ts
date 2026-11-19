@@ -22,7 +22,12 @@ import { join } from 'node:path'
 
 import { snapshotEnv } from '../../test/envSnapshot.js'
 import type { McpAuthOutput } from '../../tools/McpAuthTool/McpAuthTool.js'
-import type { MCPServerConnection } from '../../services/mcp/types.js'
+import type { AppState } from '../../state/AppState.js'
+import type {
+  ConnectedMCPServer,
+  MCPServerConnection,
+} from '../../services/mcp/types.js'
+import type { McpServerTaskState } from '../../tasks/McpServerTask/McpServerTask.js'
 import type { Tool } from '../../Tool.js'
 import type { SDKSession } from './v2.js'
 import {
@@ -4241,6 +4246,87 @@ test('RELEASING AN OLDER CONNECTION KEEPS A NEWER GENERATION CACHED', async () =
   expect(await realClient.connectToServer('gated', config)).toBe(newClient)
   expect(initializes).toBe(initializesBefore + 1)
   await settlesWithin(newCaught, 5_000).catch(() => {})
+}, 30_000)
+
+/**
+ * A retired generation's close must still fail its own tasks: the
+ * client-filtered fail call sits outside the cache-ownership guard, so a
+ * generation that closes after its replacement took over the cache entry
+ * does not leave its tasks `running` until the next poll (CodeRabbit
+ * #2493 review 5972751613). The replacement's tasks and its cache entry
+ * are untouched — eviction stays guarded.
+ */
+test('A RETIRED GENERATION STILL FAILS ITS OWN TASKS WHEN IT CLOSES', async () => {
+  const { trackMcpServerTask, _resetMcpServerTasksForTest } = await import(
+    '../../services/mcp/tasks.js'
+  )
+  const { _resetTaskOutputDirForTest } = await import(
+    '../../utils/task/diskOutput.js'
+  )
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const key = realClient.getServerCacheKey('gated', config)
+  const oldClient = (await realClient.connectToServer(
+    'gated',
+    config,
+  )) as MCPServerConnection
+  expect(oldClient.type).toBe('connected')
+  if (oldClient.type !== 'connected') throw new Error('expected a connected client')
+  let state = { tasks: {} } as AppState
+  const setAppState = (update: (prev: AppState) => AppState) => {
+    state = update(state)
+  }
+  const taskStatus = (id: string) => {
+    const task = state.tasks[id]
+    expect(task).toBeDefined()
+    expect(task?.type).toBe('mcp_server')
+    return (task as McpServerTaskState).status
+  }
+  const track = (connection: ConnectedMCPServer, taskId: string) =>
+    trackMcpServerTask({
+      connection,
+      task: {
+        taskId,
+        status: 'working',
+        ttl: null,
+        createdAt: '2026-01-01T00:00:00Z',
+        lastUpdatedAt: '2026-01-01T00:00:00Z',
+        pollInterval: 60000,
+      },
+      toolName: 't',
+      description: `gated: t (${taskId})`,
+      setAppState,
+    })
+  const oldTaskId = track(oldClient, 'old-task')
+  expect(taskStatus(oldTaskId)).toBe('running')
+
+  // A replacement takes over the cache entry while the old generation
+  // is still open.
+  realClient.connectToServer.cache.delete(key)
+  const held = holdInitialize()
+  const newConnect = realClient.connectToServer('gated', config)
+  const newCaught = newConnect.catch(error => error)
+  await waitFor(() => held.arrived)
+  held.answer()
+  const newClient = (await settlesWithin(newConnect, 5_000)) as MCPServerConnection
+  expect(newClient.type).toBe('connected')
+  if (newClient.type !== 'connected') throw new Error('expected a connected client')
+  const newTaskId = track(newClient, 'new-task')
+  expect(taskStatus(newTaskId)).toBe('running')
+
+  // The old generation closes after its replacement took over: its own
+  // tasks fail promptly, the replacement's keep running, and the cache
+  // entry still belongs to the replacement.
+  await realClient.releaseUnownedMcpClient('gated', config, oldClient)
+  await waitFor(() => taskStatus(oldTaskId) !== 'running')
+  expect(taskStatus(oldTaskId)).toBe('failed')
+  expect(taskStatus(newTaskId)).toBe('running')
+  expect(realClient.connectToServer.cache.get(key)).toBe(newConnect)
+  await settlesWithin(newCaught, 5_000).catch(() => {})
+  _resetMcpServerTasksForTest()
 }, 30_000)
 
 /**

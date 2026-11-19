@@ -2319,19 +2319,20 @@ const connectToServerMemoized = memoize(
           // resources, commands, MCP skills), scoped to this connection
           // so a same-named peer's discovery survives the close.
           clearFetchCaches(name, serverRef)
-          // Fail this connection's server tasks under the same guard
-          // (upstream #2541): the fail call is keyed by server name, so
-          // a retired generation's close must not fail the replacement
-          // connection's live tasks — and it is filtered by this
-          // generation's SDK client, so a current generation's close
-          // must not fail a retired generation's live tasks either
-          // (CodeRabbit #2493 review 5968087303).
-          failMcpServerTasksForServer(
-            name,
-            `MCP server "${name}" disconnected before the task completed`,
-            client,
-          )
         }
+        // Fail this connection's server tasks OUTSIDE the cache-ownership
+        // guard: the call is filtered by this generation's SDK client, so
+        // it cannot fail the replacement's tasks — and a retired
+        // generation's close must still fail its own tasks promptly. Under
+        // the guard, a generation that closes after its replacement took
+        // over the cache entry would leave its tasks `running` until the
+        // next poll, up to 60 seconds later (CodeRabbit #2493 review
+        // 5972751613). Connection and cache eviction stay guarded above.
+        failMcpServerTasksForServer(
+          name,
+          `MCP server "${name}" disconnected before the task completed`,
+          client,
+        )
         logMCPDebug(name, `Cleared connection cache for reconnection`)
 
         if (originalOnclose) {
