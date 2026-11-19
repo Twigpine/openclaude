@@ -291,9 +291,12 @@ export function execFileNoThrowWithCwd(
     // result must still settle (CodeRabbit #2497 review 5963778469).
     // The first starter wins: the timeout callback below passes its own
     // error, while the abort escalation reports the overflow or abort
-    // error that caused it.
+    // error that caused it. Never arms for a settled operation: output
+    // that arrives after the result settled (a descendant still holding
+    // the pipe) must not restart the escalation cycle (CodeRabbit #2497
+    // review 5966284444).
     const startKillSettleTimer = (error?: string): void => {
-      if (killSettleTimer !== undefined) return
+      if (settled || killSettleTimer !== undefined) return
       killSettleTimer = setTimeout(() => {
         killSettleTimer = undefined
         finish({
@@ -322,7 +325,7 @@ export function execFileNoThrowWithCwd(
     }
 
     const scheduleAbortKill = (): void => {
-      if (abortKillTimer !== undefined) return
+      if (settled || abortKillTimer !== undefined) return
       abortKillTimer = setTimeout(escalateAbortedChild, ABORT_SIGKILL_GRACE_MS)
     }
 
@@ -330,6 +333,13 @@ export function execFileNoThrowWithCwd(
       chunk: string | Buffer,
       target: 'stdout' | 'stderr',
     ) => {
+      // Output that arrives after the result settled is ignored for
+      // result and escalation purposes: a descendant can keep the stdio
+      // pipe open (and writing) long after the caller was given the
+      // result, and a late chunk must not restart the SIGKILL
+      // escalation or re-arm its timers (CodeRabbit #2497 review
+      // 5966284444).
+      if (settled) return
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
       combinedBufferSize += Buffer.byteLength(text, 'utf8')
       if (combinedBufferSize > maxBuffer) {

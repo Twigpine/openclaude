@@ -800,9 +800,13 @@ export async function waitHandler(
   const now = options.now ?? (() => performance.now())
   const pollIntervalMs = options.pollIntervalMs ?? WAIT_POLL_INTERVAL_MS
   const sleep = options.sleep ?? abortableSleep
-  // Track the in-flight process lookup so every cancellation path can
-  // await the inspector child's settlement before the waiter returns
-  // (maintainer review 5948202472 on #2497). The lookup promise is the
+  // Track each in-flight process lookup so every cancellation path
+  // can await the inspector children's settlement before the waiter
+  // returns (maintainer review 5948202472 on #2497). Settlement is
+  // recorded per lookup promise: a shared flag would let an earlier
+  // lookup's settlement mask a later lookup that is still pending, so
+  // the cleanup wait could skip while that inspector is still active
+  // (CodeRabbit #2497 review 5966284444). The lookup promise is the
   // settlement signal: the production lookup waits for the inspector
   // child's close before settling on abort (getProcessCommandAsync
   // passes awaitCloseOnAbort), so settlement proves the child has
@@ -812,31 +816,33 @@ export async function waitHandler(
   // gate's lookups are tracked too — a deadline or signal during
   // resolution must not return while that inspector child is still
   // alive either.
-  let pendingLookup: Promise<string | null> | null = null
-  let lookupSettled = true
+  const pendingLookups = new Set<Promise<string | null>>()
   const trackedGetProcessCommandAsync = async (
     pid: number,
     lookupOptions: { signal?: AbortSignal },
   ): Promise<string | null> => {
     const baseLookup = options.getProcessCommandAsync ?? getProcessCommandAsync
     const promise = baseLookup(pid, lookupOptions)
-    pendingLookup = promise
-    lookupSettled = false
+    pendingLookups.add(promise)
     void promise.then(
       () => {
-        lookupSettled = true
+        pendingLookups.delete(promise)
       },
       () => {
-        lookupSettled = true
+        pendingLookups.delete(promise)
       },
     )
     return promise
   }
   const awaitPendingLookup = async (): Promise<void> => {
-    if (pendingLookup === null || lookupSettled) return
-    const pending = pendingLookup
+    if (pendingLookups.size === 0) return
+    // Join every outstanding lookup within one shared cleanup budget:
+    // a snapshot, so a lookup that starts during the wait cannot
+    // extend it, and one budget for all of them, so the waiter still
+    // returns promptly when several inspectors are outstanding.
+    const pending = [...pendingLookups]
     await Promise.race([
-      pending.then(
+      Promise.allSettled(pending).then(
         () => undefined,
         () => undefined,
       ),
@@ -894,11 +900,21 @@ export async function waitHandler(
   // after the timeout result was selected but before its JSON leaves a
   // back-pressured stdout still interrupts the waiter (130/143) — it
   // does not merely shorten the flush (maintainer review 5964758980
-  // on #2497). The interrupted result is rendered in place of the
-  // timeout one; the finally below flushes that render for at most one
-  // poll interval, so a consumer that never drains still cannot stall
-  // the waiter. An unsignalled timeout keeps today's longer flush
-  // bound and returns 124.
+  // on #2497). The timeout line was already submitted to stdout, so
+  // the interrupted result is rendered after it, not in place of it:
+  // the output carries both lines and the last line is the waiter's
+  // outcome. That cutoff — the timeout outcome commits when its write
+  // starts — is the direct consequence of the maintainer-required
+  // reclassification; emitting strictly one JSON object would require
+  // either dropping that reclassification or delaying every
+  // unsignalled timeout until the signal window closes, so the
+  // single-object contract needs maintainer agreement before it can
+  // be tightened (CodeRabbit #2497 review 5966284444). The
+  // reclassified render's flush is awaited below, bounded by one poll
+  // interval, so a consumer that never drains still cannot stall the
+  // waiter; the finally below flushes the timeout render it captured
+  // when the poll loop returned. An unsignalled timeout keeps today's
+  // longer flush bound and returns 124.
   const finishTimeout = async (
     result: WaitResult,
     humanMessage?: string,
@@ -906,7 +922,16 @@ export async function waitHandler(
     finish(result, humanMessage)
     await awaitPendingFlush(TIMEOUT_FLUSH_BOUND_MS, abortController.signal)
     if (clientSignal !== null) {
-      return finish(interruptedWaitResult(result.id, clientSignal))
+      // A `return finishTimeout(...)` in the poll loop runs the
+      // handler's finally before this reclassification completes, so
+      // the finally's flush wait captured the timeout render, not
+      // this one: await the interrupted render's flush here, bounded
+      // by one poll interval, or the CLI fast path could exit before
+      // the selected result's line reaches the consumer (CodeRabbit
+      // #2497 review 5966284444).
+      const code = finish(interruptedWaitResult(result.id, clientSignal))
+      await awaitPendingFlush(WAIT_POLL_INTERVAL_MS)
+      return code
     }
     return waitExitCode(result)
   }
@@ -1152,18 +1177,26 @@ export async function waitHandler(
               })
             }
             observation = finalObservation
-          } else if (late.kind === 'aborted' || late.kind === 'running') {
+          } else if (
+            late.kind === 'aborted' ||
+            late.kind === 'running' ||
+            late.kind === 'unknown'
+          ) {
             // An aborted in-flight lookup never observed the process,
             // so its classification is meaningless; a running result
             // settled from a pre-deadline lookup can likewise be
             // stale — the child may have exited in the meantime
-            // without publishing a terminal fact. Run one final
+            // without publishing a terminal fact. An unknown result
+            // is no better: its null came from a pre-deadline lookup
+            // that ran before the second metadata read finished, so
+            // a transiently unreadable command can read as a
+            // permanently unreadable process. Run one final
             // observation with a fresh lookup signal that is not
             // self-cancelled, bounded by one poll interval: terminal
             // wins, a genuinely unreadable process returns 3, and a
             // child that is still alive returns 124 (maintainer
-            // review 5964758980 and CodeRabbit #2497 review 5963778469
-            // on #2497).
+            // review 5964758980 and CodeRabbit #2497 reviews
+            // 5963778469 and 5966284444 on #2497).
             const finalObservation =
               await finalTimeoutObservation(pinned, lookupDeps)
             if (finalObservation === null) {
