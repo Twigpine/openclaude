@@ -268,8 +268,10 @@ describe('wait command handler', () => {
   // correctly return 130/143 instead of 124 (CodeRabbit #2497 review
   // 5957376769). The barrier races the handler's completion so a write
   // that never starts fails the test instead of hanging it, and the
-  // held callback is released in a finally so no async work is left
-  // pending.
+  // held callbacks are released in a finally so no async work is left
+  // pending. The interrupted result's write gets its own completion
+  // barrier: the first callback firing says nothing about the
+  // selected result's write (CodeRabbit #2497 review 5966284444).
   async function flushesResultOnDelayedWrite(
     signal: 'SIGINT' | 'SIGTERM',
   ): Promise<void> {
@@ -278,26 +280,44 @@ describe('wait command handler', () => {
     const writeStarted = new Promise<void>(resolve => {
       writeStartedResolve = resolve
     })
+    let interruptedWriteStartedResolve!: () => void
+    const interruptedWriteStarted = new Promise<void>(resolve => {
+      interruptedWriteStartedResolve = resolve
+    })
     let releaseWrite: (() => void) | undefined
+    let releaseInterruptedWrite: (() => void) | undefined
     class DelayedOutput extends Writable {
       chunks: string[] = []
-      callbackFired = false
+      interruptedCallbackFired = false
+      writeCount = 0
       _write(
         chunk: unknown,
         _encoding: BufferEncoding,
         callback: (error?: Error | null) => void,
       ): void {
         this.chunks.push(String(chunk))
-        writeStartedResolve()
-        // Hold the callback until the test releases it after emitting
-        // the signal: the signal must land while the write is pending.
-        // Self-clearing so a second release is a no-op.
-        releaseWrite = () => {
-          releaseWrite = undefined
-          setTimeout(() => {
-            this.callbackFired = true
-            callback(null)
-          }, 250)
+        this.writeCount += 1
+        if (this.writeCount === 1) {
+          writeStartedResolve()
+          // Hold the callback until the test releases it after emitting
+          // the signal: the signal must land while the write is pending.
+          // Self-clearing so a second release is a no-op.
+          releaseWrite = () => {
+            releaseWrite = undefined
+            setTimeout(() => {
+              callback(null)
+            }, 250)
+          }
+          return
+        }
+        // The second write is the reclassified interrupted result:
+        // hold its callback separately and track its completion
+        // separately from the first write's callback.
+        interruptedWriteStartedResolve()
+        releaseInterruptedWrite = () => {
+          releaseInterruptedWrite = undefined
+          this.interruptedCallbackFired = true
+          callback(null)
         }
       }
     }
@@ -316,11 +336,30 @@ describe('wait command handler', () => {
       expect(started).toBe(true)
       process.emit(signal)
       releaseWrite?.()
+      // The reclassified result renders only after the first write's
+      // callback fires: wait for its write to start, then prove the
+      // handler is still pending while that write is held — the
+      // finally flush bound is one production poll interval, so a
+      // 100 ms check sits safely inside it — before releasing it and
+      // joining the handler.
+      const interruptedStarted = await Promise.race([
+        interruptedWriteStarted.then(() => true),
+        waiting.then(() => false),
+      ])
+      expect(interruptedStarted).toBe(true)
+      const stillPending = await Promise.race([
+        waiting.then(() => 'done' as const),
+        new Promise<'pending'>(resolve =>
+          setTimeout(() => resolve('pending'), 100),
+        ),
+      ])
+      expect(stillPending).toBe('pending')
+      releaseInterruptedWrite?.()
       const { code } = await waiting
       const elapsedMs = performance.now() - startedAt
       expect(code).toBe(signal === 'SIGTERM' ? 143 : 130)
       expect(elapsedMs).toBeLessThan(2000)
-      expect(stdout.callbackFired).toBe(true)
+      expect(stdout.interruptedCallbackFired).toBe(true)
       // The timeout line was already written when the signal landed, so
       // the output carries both lines: the superseded timeout outcome
       // first, the interrupting outcome last.
@@ -334,7 +373,7 @@ describe('wait command handler', () => {
       expect(result.error).toBe('interrupted')
       expect(result.waitSignal).toBe(signal)
     } finally {
-      // Never leave the write callback held if an assertion above
+      // Never leave a write callback held if an assertion above
       // fails: the waiter's flush bound returns it regardless, and
       // releasing an already-fired callback is a no-op. Join the
       // waiter as well, so it finishes before teardown and cannot
@@ -342,6 +381,7 @@ describe('wait command handler', () => {
       // catch keeps a waiter failure from masking the original test
       // failure (CodeRabbit #2497 review 5961433156).
       releaseWrite?.()
+      releaseInterruptedWrite?.()
       await waiting.catch(() => {})
     }
   }
@@ -770,6 +810,11 @@ describe('wait command handler', () => {
     const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
       isProcessAlive: () => true,
       pollIntervalMs: 500,
+      // Injected so filesystem selector resolution stays outside the
+      // 60 ms deadline: on a slow runner the handler could otherwise
+      // return an unpinned 124 before this pinned branch is reached
+      // (CodeRabbit #2497 review 5966284444).
+      resolveSession: async () => session,
       getProcessCommandAsync: async () => {
         lookups += 1
         if (lookups === 1) return 'sleep 30'
@@ -860,6 +905,55 @@ describe('wait command handler', () => {
         inspector?.kill('SIGKILL')
       } catch {}
     }
+  })
+
+  it('waits for the final lookup when an earlier lookup settles first', async () => {
+    // Regression test for CodeRabbit #2497 review 5966284444: the
+    // cleanup wait must track settlement per lookup, not in shared
+    // state. The in-flight lookup is still pending when the deadline
+    // expires; the final observation starts a second lookup, and the
+    // first lookup settles right after. A shared settled flag would
+    // let that settlement mask the second lookup, so the waiter would
+    // return while its inspector is still active. Both lookups are
+    // held stubs, so the only thing that can delay the return past
+    // the grace and final bounds is the cleanup wait joining the
+    // second lookup within one poll interval.
+    const session = await createTestSession('bg-aaa1')
+    let lookups = 0
+    let releaseFirstLookup: (() => void) | undefined
+    const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      pollIntervalMs: 500,
+      // Injected so filesystem selector resolution stays outside the
+      // 60 ms deadline: on a slow runner the handler could otherwise
+      // return an unpinned 124 before this pinned branch is reached
+      // (CodeRabbit #2497 review 5966284444).
+      resolveSession: async () => session,
+      getProcessCommandAsync: async () => {
+        lookups += 1
+        if (lookups === 1) {
+          return new Promise<string | null>(resolve => {
+            releaseFirstLookup = () => resolve(null)
+          })
+        }
+        // The final observation's lookup: releasing the first lookup
+        // here is what would mask this one under shared state.
+        releaseFirstLookup?.()
+        return new Promise<string | null>(() => {})
+      },
+    })
+    const startedAt = performance.now()
+    const { code, stdout } = await waiting
+    const elapsedMs = performance.now() - startedAt
+    expect(code).toBe(124)
+    expect(lookups).toBe(2)
+    // Deadline (60) + grace (500) + final observation (500) is 1060
+    // without the cleanup wait; joining the still-pending final
+    // lookup adds one more poll interval (500).
+    expect(elapsedMs).toBeGreaterThanOrEqual(1300)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.waitResult).toBe('timeout')
+    expect(result.status).toBe('running')
   })
 
   it('does not return while a resolution-time inspector child is still alive', async () => {
@@ -2515,6 +2609,11 @@ describe('wait command handler', () => {
     const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
       isProcessAlive: () => true,
       pollIntervalMs: 500,
+      // Injected so filesystem selector resolution stays outside the
+      // 60 ms deadline: on a slow runner the handler could otherwise
+      // return an unpinned 124 before this pinned branch is reached
+      // (CodeRabbit #2497 review 5966284444).
+      resolveSession: async () => session,
       getProcessCommandAsync: () => new Promise<string | null>(() => {}),
       readPinnedSession: () => {
         reads += 1
@@ -2547,6 +2646,11 @@ describe('wait command handler', () => {
     const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
       isProcessAlive: () => true,
       pollIntervalMs: 500,
+      // Injected so filesystem selector resolution stays outside the
+      // 60 ms deadline: on a slow runner the handler could otherwise
+      // return an unpinned 124 before this pinned branch is reached
+      // (CodeRabbit #2497 review 5966284444).
+      resolveSession: async () => session,
       getProcessCommandAsync: () => new Promise<string | null>(() => {}),
       readPinnedSession: () => {
         reads += 1
@@ -2575,11 +2679,16 @@ describe('wait command handler', () => {
     // waiter runs one final complete observation instead of reporting
     // a timeout from a metadata-only re-read — an unreadable process
     // state at the boundary reports exit 3 per the deadline table.
-    await createTestSession('bg-aaa1')
+    const session = await createTestSession('bg-aaa1')
     let lookups = 0
     const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
       isProcessAlive: () => true,
       pollIntervalMs: 500,
+      // Injected so filesystem selector resolution stays outside the
+      // 60 ms deadline: on a slow runner the handler could otherwise
+      // return an unpinned 124 before this pinned branch is reached
+      // (CodeRabbit #2497 review 5966284444).
+      resolveSession: async () => session,
       getProcessCommandAsync: async () => {
         lookups += 1
         if (lookups === 1) return new Promise<string | null>(() => {})
@@ -2594,6 +2703,50 @@ describe('wait command handler', () => {
     expect(result.waitResult).toBe('observation_error')
     expect(result.error).toBe('process_unreadable')
     expect(result.status).toBe('unknown')
+  })
+
+  it('re-probes a stale unknown observation at the timeout boundary', async () => {
+    // Regression test for CodeRabbit #2497 review 5966284444
+    // (additional comment on bgWait.ts:1155): an 'unknown' late
+    // observation can rest on a pre-deadline lookup that returned null
+    // before the second metadata read finished — a transiently
+    // unreadable command, not proof the process is unreadable — so
+    // the boundary runs a fresh observation instead of returning 3.
+    // The fresh lookup reads the command, so the waiter reports the
+    // timeout (124).
+    const session = await createTestSession('bg-aaa1')
+    let lookups = 0
+    let reads = 0
+    const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
+      isProcessAlive: () => true,
+      pollIntervalMs: 500,
+      // Injected so filesystem selector resolution stays outside the
+      // 60 ms deadline: on a slow runner the handler could otherwise
+      // return an unpinned 124 before this pinned branch is reached
+      // (CodeRabbit #2497 review 5966284444).
+      resolveSession: async () => session,
+      getProcessCommandAsync: async () => {
+        lookups += 1
+        if (lookups === 1) return null
+        return 'sleep 30'
+      },
+      readPinnedSession: async () => {
+        reads += 1
+        if (reads === 2) {
+          // The second metadata read lands after the deadline, so the
+          // first observation settles during grace as unknown.
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+        return session
+      },
+    })
+    const { code, stdout } = await waiting
+
+    expect(code).toBe(124)
+    expect(lookups).toBe(2)
+    const result = expectWaitJsonShape(JSON.parse(stdout))
+    expect(result.waitResult).toBe('timeout')
+    expect(result.status).toBe('running')
   })
 
   it('returns 130 with interrupted JSON on SIGINT during sleep', async () => {
