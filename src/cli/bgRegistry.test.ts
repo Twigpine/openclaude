@@ -3781,21 +3781,23 @@ describe('background session wait strict reads', () => {
     }
   }
 
-  // Records the durations of every Atomics.wait sleep while `run` executes,
-  // restoring the original implementation afterward.
-  function recordSyncSleepDurations(run: () => void): number[] {
-    const originalWait = Atomics.wait
-    const sleepDurations: number[] = []
-    Atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
-      sleepDurations.push(args[3] ?? 0)
-      return originalWait(...args)
-    }) as typeof Atomics.wait
+  function recordSyncSleepDurations(run: () => void) {
+    let elapsed = 0
+    const clock = jest.spyOn(performance, 'now').mockImplementation(() => elapsed++)
+    const sleeps: Array<{ elapsed: number; duration: number }> = []
+    const sleep = jest.spyOn(Atomics, 'wait').mockImplementation((_, __, ___, timeout) => {
+      const duration = timeout ?? 0
+      sleeps.push({ elapsed, duration })
+      elapsed += duration
+      return 'timed-out' as const
+    })
     try {
       run()
+      return sleeps
     } finally {
-      Atomics.wait = originalWait
+      sleep.mockRestore()
+      clock.mockRestore()
     }
-    return sleepDurations
   }
 
   beforeEach(async () => {
@@ -4377,6 +4379,26 @@ describe('background session wait strict reads', () => {
     },
   )
 
+  it.skipIf(CASE_INSENSITIVE_FS).each(['BG-other', 'bg-other'])(
+    'reports unreadable metadata when %s cannot be reread during alias verification',
+    async id => {
+      const { child } = await createSplitAliasFixture()
+      try {
+        const code = await waitErrorCode(() =>
+          resolveBackgroundSessionForWait('bg-job', {
+            _onAliasIdentityMismatchForTesting: async () => {
+              await rm(metadataPath(id))
+              await mkdir(metadataPath(id))
+            },
+          }),
+        )
+        expect(code).toBe('metadata_unreadable')
+      } finally {
+        child.kill()
+      }
+    },
+  )
+
   it.skipIf(CASE_INSENSITIVE_FS)(
     'retries the alias check when the enumerated file is replaced between reads',
     async () => {
@@ -4636,6 +4658,29 @@ describe('background session wait strict reads', () => {
     ).toBe('metadata_missing')
   })
 
+  it.each([true, false])('detects a reused PID with generation metadata %s', async withGeneration => {
+    const session = await createBackgroundSession({
+      id: 'bg-wait-reused-pid',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-generation',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const identity = {
+      ...session,
+      terminalFactGeneration: withGeneration ? session.terminalFactGeneration : undefined,
+    }
+    await writeFile(metadataPath(session.id), JSON.stringify(identity))
+    expect((await readPinnedBackgroundSessionForWait(identity)).pid).toBe(session.pid)
+    await writeFile(metadataPath(session.id), JSON.stringify({
+      ...identity,
+      processMarker: OTHER_PROCESS_MARKER,
+      terminalFactGeneration: withGeneration ? OTHER_PROCESS_MARKER : undefined,
+    }))
+    expect(await waitErrorCode(() => readPinnedBackgroundSessionForWait(identity))).toBe('metadata_replaced')
+  })
+
   it('verifies process identity asynchronously with an abortable lookup', async () => {
     const session: BackgroundSession = {
       id: 'bg-identity',
@@ -4691,20 +4736,20 @@ describe('background session wait strict reads', () => {
       stderrLogPath: '/tmp/stderr.log',
     }
     const controller = new AbortController()
-    controller.abort()
-
-    // Main's verify helper catches a lookup aborted by the client signal
-    // and reports it as aborted instead of rethrowing, so a lookup that
-    // rejects on abort (like the real async helper) resolves here — and
-    // the caller can tell it apart from a genuinely unreadable process
-    // (maintainer review 5948202472 on #2497).
-    const aborted = await verifyBackgroundSessionProcessIdentityAsync(session, {
+    const entered = Promise.withResolvers<void>()
+    const verification = verifyBackgroundSessionProcessIdentityAsync(session, {
       isProcessAlive: () => true,
-      getProcessCommandAsync: async () => {
-        throw new DOMException('The operation was aborted', 'AbortError')
+      getProcessCommandAsync: async (_pid, { signal }) => {
+        return await new Promise<never>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+          entered.resolve()
+        })
       },
       signal: controller.signal,
     })
+    expect(await Promise.race([entered.promise.then(() => true), verification.then(() => false)])).toBe(true)
+    controller.abort()
+    const aborted = await verification
     expect(aborted.state).toBe('aborted')
   })
 
@@ -4756,7 +4801,7 @@ describe('background session wait strict reads', () => {
     // timer granularity is exact, fewer when a sleep overshoots; either
     // way it must sleep rather than spin.
     expect(
-      sleepDurations.filter(duration => duration === 10).length,
+      sleepDurations.filter(sleep => sleep.duration === 10).length,
     ).toBeGreaterThanOrEqual(5)
     const resolved = await resolveBackgroundSessionForWait('bg-wait-sync-sleep')
     expect(resolved.status).toBe('exited')
@@ -4788,11 +4833,10 @@ describe('background session wait strict reads', () => {
       ),
     )
 
-    // Two full 250 ms waits: ~50 polls at exact granularity, fewer with
-    // overshoot.
-    expect(
-      sleepDurations.filter(duration => duration === 10).length,
-    ).toBeGreaterThanOrEqual(20)
+    // The two 250 ms budgets are consecutive on the controlled clock.
+    // Sleeps in the fact wait cannot prove that the later claim wait slept.
+    expect(sleepDurations.some(sleep => sleep.elapsed < 250 && sleep.duration === 10)).toBe(true)
+    expect(sleepDurations.some(sleep => sleep.elapsed >= 250 && sleep.duration === 10)).toBe(true)
     const resolved = await resolveBackgroundSessionForWait('bg-wait-sync-claim')
     expect(resolved.status).toBe('exited')
     expect(resolved.exitCode).toBe(0)

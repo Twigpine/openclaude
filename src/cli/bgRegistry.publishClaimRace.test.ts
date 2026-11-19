@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 // live module bindings, so the mock cannot rewrite them (CodeRabbit #2497).
 const realFsPromises = await import('node:fs/promises')
 const realWriteFile = realFsPromises.writeFile
+const realReadFile = realFsPromises.readFile
 const realOpen = realFsPromises.open
 const realLink = realFsPromises.link
 const realRename = realFsPromises.rename
@@ -50,8 +51,15 @@ const TEST_PROCESS_MARKER = 'a'.repeat(64)
 type PausedClaimWrite = {
   opened: () => void
   gate: Promise<void>
+  publisherGate?: Promise<void>
 }
 let pausedClaimWrite: PausedClaimWrite | undefined
+let onClaimRead: (() => void) | undefined
+
+const mockedReadFile: typeof realReadFile = ((...args: Parameters<typeof realReadFile>) => {
+  if (isTerminalFactClaimFilePath(args[0])) onClaimRead?.()
+  return realReadFile(...args)
+}) as typeof realReadFile
 
 function isTerminalFactClaimFilePath(path: unknown): path is string {
   return (
@@ -84,6 +92,7 @@ async function mockedWriteFile(
     } finally {
       await handle.close()
     }
+    await control.publisherGate
     return
   }
   await realWriteFile(path, data, options)
@@ -347,9 +356,10 @@ describe('terminal-fact publish across withdrawn claims', () => {
 
   // Arms the one-shot open-before-write pause; `opened` resolves once
   // the owner's claim file exists but is still empty.
-  function armClaimWritePause(): {
+  function armClaimWritePause(holdPublisher = false): {
     opened: Promise<void>
     release: () => void
+    releasePublisher: () => void
   } {
     let release!: () => void
     const gate = new Promise<void>(resolve => {
@@ -359,8 +369,13 @@ describe('terminal-fact publish across withdrawn claims', () => {
     const opened = new Promise<void>(resolve => {
       openedResolve = resolve
     })
-    pausedClaimWrite = { opened: openedResolve, gate }
-    return { opened, release }
+    const publisher = Promise.withResolvers<void>()
+    pausedClaimWrite = {
+      opened: openedResolve,
+      gate,
+      publisherGate: holdPublisher ? publisher.promise : undefined,
+    }
+    return { opened, release, releasePublisher: publisher.resolve }
   }
 
   // Fails fast with a clear message when the pause never fires (e.g.
@@ -433,6 +448,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-claim-race-'))
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
+      readFile: mockedReadFile,
       writeFile: mockedWriteFile,
       link: mockedLink,
       rename: mockedRename,
@@ -450,6 +466,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
 
   afterEach(async () => {
     pausedClaimWrite = undefined
+    onClaimRead = undefined
     commitInjection = undefined
     commitPause = undefined
     linkUnsupported = false
@@ -462,6 +479,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     // so later files bind the unmocked implementation again.
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
+      readFile: realReadFile,
       writeFile: realWriteFile,
       link: realLink,
       rename: realRename,
@@ -896,7 +914,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
       sessionId: 'sess-claim-race-adopt',
       processMarker: TEST_PROCESS_MARKER,
     })
-    const { opened, release } = armClaimWritePause()
+    const { opened, release, releasePublisher } = armClaimWritePause(true)
     const firstTermination =
       registry.recordBackgroundSessionNaturalTermination(
         session.id,
@@ -904,24 +922,29 @@ describe('terminal-fact publish across withdrawn claims', () => {
         { ownerPid: session.pid, expectedSession: session },
       )
     firstTermination.catch(() => {})
+    const writers = [firstTermination]
     try {
       await awaitClaimOpened(opened)
       await ageSessionLock(session.id)
+      const claimRead = Promise.withResolvers<void>()
+      onClaimRead = claimRead.resolve
       const secondTermination =
         registry.recordBackgroundSessionNaturalTermination(
           session.id,
           { exitCode: 3 },
           { ownerPid: session.pid, expectedSession: session },
         )
+      writers.push(secondTermination)
       secondTermination.catch(() => {})
-      // The adopter waits 250 ms for the target, then polls the claim:
-      // release the pointer write while it is polling, so it reads the
-      // completed claim instead of a stale empty one.
-      await new Promise(resolve => setTimeout(resolve, 300))
+      // Let the adopter reach the claim before completing the pointer.
+      // The first installer stays paused until the adopter has committed.
+      await awaitClaimOpened(claimRead.promise)
       release()
       const second = await secondTermination
       // The adopter completed the first publisher's fact.
       expect(second).toMatchObject({ status: 'exited', exitCode: 0 })
+      expect(await storedExitCode(session.id)).toBe(0)
+      releasePublisher()
       const first = await firstTermination
       expect(first).toMatchObject({ status: 'exited', exitCode: 0 })
       expect(
@@ -931,7 +954,8 @@ describe('terminal-fact publish across withdrawn claims', () => {
     } finally {
       pausedClaimWrite = undefined
       release()
-      await firstTermination.catch(() => {})
+      releasePublisher()
+      await Promise.allSettled(writers)
     }
     },
     },
@@ -1025,6 +1049,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
       stderrLogPath,
     })
     firstCreate.catch(() => {})
+    const writers = [firstCreate]
     try {
       await awaitCommitPaused(commits, 0)
       // The first create holds the per-ID lock: age it past the stale
@@ -1041,6 +1066,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
         stdoutLogPath,
         stderrLogPath,
       })
+      writers.push(secondCreate)
       secondCreate.catch(() => {})
       await awaitCommitPaused(commits, 1)
       // The first create commits first...
@@ -1055,7 +1081,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     } finally {
       commitPause = undefined
       for (const commit of commits) commit.release()
-      await firstCreate.catch(() => {})
+      await Promise.allSettled(writers)
     }
       },
     },
@@ -1096,6 +1122,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
       stderrLogPath,
     })
     firstCreate.catch(() => {})
+    const writers = [firstCreate]
     try {
       await awaitCommitPaused(commits, 0)
       // The first create holds the per-ID lock: age it past the stale
@@ -1112,6 +1139,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
         stdoutLogPath,
         stderrLogPath,
       })
+      writers.push(secondCreate)
       secondCreate.catch(() => {})
       // Wait until the second create has entered the commit — its
       // link() call — so it is inside the fallback, past its
@@ -1133,7 +1161,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
       linkUnsupported = false
       commitPause = undefined
       for (const commit of commits) commit.release()
-      await firstCreate.catch(() => {})
+      await Promise.allSettled(writers)
     }
       },
     },
@@ -1168,6 +1196,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
       stderrLogPath,
     })
     firstCreate.catch(() => {})
+    const writers = [firstCreate]
     try {
       await awaitCommitHookEntered(entered)
       // The first create holds the per-ID lock and the commit claim:
@@ -1196,7 +1225,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     } finally {
       linkUnsupported = false
       release()
-      await firstCreate.catch(() => {})
+      await Promise.allSettled(writers)
     }
       },
     },

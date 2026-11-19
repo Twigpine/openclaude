@@ -263,9 +263,11 @@ scripts and CI jobs. `wait` prints nothing while waiting. Without `--json`
 it prints one line for the terminal outcome (`exited with code 0`,
 `failed with exit code <code>`, `failed after <signal>`, `was killed`, or
 `became stale without an observable child outcome`); with `--json` it prints
-exactly one newline-terminated JSON object (schema version 1) with the
-keys `version`, `id`, `status`, `exitCode`, `signal`, `terminalReason`,
-`finishedAt`, `waitResult`, `error`, and `waitSignal`. The selector is a
+a newline-terminated JSON result (schema version 1) with the keys
+`version`, `id`, `status`, `exitCode`, `signal`, `terminalReason`,
+`finishedAt`, `waitResult`, `error`, and `waitSignal`. If the waiter receives
+SIGINT or SIGTERM while flushing a timeout result, it appends an interrupted
+result. Read the last JSON line as the final outcome. The selector is a
 session ID, session name, or unambiguous ID prefix, resolved once and then
 pinned, so a reused name cannot retarget an active waiter. `--timeout`
 accepts positive integer durations with `ms`, `s`, `m`, or `h` suffixes

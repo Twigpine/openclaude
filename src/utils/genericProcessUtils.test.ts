@@ -2,7 +2,10 @@ import { describe, expect, it } from 'bun:test'
 import { getProcessCommandAsync } from './genericProcessUtils.js'
 
 async function deadPid(): Promise<number> {
-  const child = Bun.spawn(['true'], { stdout: 'ignore', stderr: 'ignore' })
+  const child = Bun.spawn([process.execPath, '-e', 'process.exit(0)'], {
+    stdout: 'ignore',
+    stderr: 'ignore',
+  })
   await child.exited
   return child.pid
 }

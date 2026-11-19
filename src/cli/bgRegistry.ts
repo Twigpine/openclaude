@@ -1717,11 +1717,11 @@ async function waitForTerminalFact(
   kind: 'natural' | 'killed',
   generation?: string,
 ): Promise<BackgroundSessionTerminalFact | null> {
-  const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  const deadline = performance.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
   for (;;) {
     const existing = await readTerminalFact(id, kind, generation)
     if (existing) return existing
-    if (Date.now() >= deadline) return null
+    if (performance.now() >= deadline) return null
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
@@ -1752,11 +1752,11 @@ function waitForTerminalFactSync(
   kind: 'natural' | 'killed',
   generation?: string,
 ): BackgroundSessionTerminalFact | null {
-  const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  const deadline = performance.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
   for (;;) {
     const existing = readTerminalFactSync(id, kind, generation)
     if (existing) return existing
-    if (Date.now() >= deadline) return null
+    if (performance.now() >= deadline) return null
     sleepSync(10)
   }
 }
@@ -1765,7 +1765,7 @@ async function readTerminalFactClaim(
   target: string,
 ): Promise<string | undefined> {
   const claimFile = terminalFactClaimFile(target)
-  const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  const deadline = performance.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
   for (;;) {
     let claimed: string | undefined
     try {
@@ -1793,7 +1793,7 @@ async function readTerminalFactClaim(
       // (maintainer review 5896325929 on #2497).
       if (claimed) return undefined
     }
-    if (Date.now() >= deadline) return undefined
+    if (performance.now() >= deadline) return undefined
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
@@ -1806,7 +1806,7 @@ async function readTerminalFactClaim(
  */
 function readTerminalFactClaimSync(target: string): string | undefined {
   const claimFile = terminalFactClaimFile(target)
-  const deadline = Date.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  const deadline = performance.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
   for (;;) {
     let claimed: string | undefined
     try {
@@ -1829,7 +1829,7 @@ function readTerminalFactClaimSync(target: string): string | undefined {
       // write still in flight, so keep polling until the deadline.
       if (claimed) return undefined
     }
-    if (Date.now() >= deadline) return undefined
+    if (performance.now() >= deadline) return undefined
     sleepSync(10)
   }
 }
@@ -3971,7 +3971,7 @@ export async function resolveBackgroundSessionForWait(
       )
       if (canonical.state !== 'valid') {
         throwWaitMetadataError(
-          'malformed',
+          canonical.state === 'unreadable' ? 'unreadable' : 'malformed',
           `Background session ${id} metadata`,
           null,
         )
@@ -4030,7 +4030,7 @@ export async function resolveBackgroundSessionForWait(
           // another id): fail closed rather than guess which row
           // it is now.
           throwWaitMetadataError(
-            'malformed',
+            reread.state === 'unreadable' ? 'unreadable' : 'malformed',
             `Background session ${id} metadata`,
             null,
           )
@@ -4044,7 +4044,7 @@ export async function resolveBackgroundSessionForWait(
           // verified: fail closed rather than guess which row it
           // is now.
           throwWaitMetadataError(
-            'malformed',
+            rereadCanonical.state === 'unreadable' ? 'unreadable' : 'malformed',
             `Background session ${id} metadata`,
             null,
           )
@@ -4168,16 +4168,18 @@ export async function resolveBackgroundSessionForWait(
   )
 }
 
+export type BackgroundSessionWaitIdentity = Pick<
+  BackgroundSession,
+  'id' | 'pid' | 'terminalFactGeneration' | 'processMarker'
+>
+
 /**
- * Strict `wait`-only re-read of an already-pinned session. A missing file, a
- * changed PID, or an unreadable/malformed document fails with exit code 4
- * instead of being treated as absent, so a reused name or a replaced
- * metadata file can never retarget an active waiter.
+ * Strict `wait`-only re-read of an already-pinned session. A missing or
+ * invalid record or a changed launch identity fails with exit code 4.
  */
-export async function readPinnedBackgroundSessionForWait(pinned: {
-  id: string
-  pid: number
-}): Promise<BackgroundSession> {
+export async function readPinnedBackgroundSessionForWait(
+  pinned: BackgroundSessionWaitIdentity,
+): Promise<BackgroundSession> {
   const read = await readSessionFileStrict(
     metadataPathForId(pinned.id),
     pinned.id,
@@ -4202,7 +4204,16 @@ export async function readPinnedBackgroundSessionForWait(pinned: {
       pinned.id,
     )
   }
-  if (read.value.pid !== pinned.pid) {
+  // Generation identifies current launches. Older metadata used the process
+  // marker alone, and unmarked legacy sessions still use ID and PID.
+  const pinnedGeneration = pinned.terminalFactGeneration
+  const pinnedMarker = pinned.processMarker
+  if (
+    read.value.pid !== pinned.pid ||
+    (pinnedGeneration !== undefined
+      ? read.value.terminalFactGeneration !== pinnedGeneration
+      : pinnedMarker !== undefined && read.value.processMarker !== pinnedMarker)
+  ) {
     throw new BackgroundSessionWaitError(
       'metadata_replaced',
       `Background session ${pinned.id} metadata was replaced`,

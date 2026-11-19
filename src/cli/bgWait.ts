@@ -5,8 +5,10 @@ import {
   resolveBackgroundSessionForWait,
   verifyBackgroundSessionProcessIdentityAsync,
   type BackgroundSession,
+  type BackgroundSessionWaitIdentity,
 } from './bgRegistry.js'
 import { ndjsonSafeStringify } from './ndjsonSafeStringify.js'
+import { EXEC_FILE_TERMINATION_GRACE_MS } from '../utils/execFileNoThrow.js'
 import { getProcessCommandAsync } from '../utils/genericProcessUtils.js'
 
 // Scriptable wait for one local background session (issue #2162, v1).
@@ -44,7 +46,7 @@ Arguments:
 Options:
   --timeout <duration>  Maximum time to wait (e.g. 500ms, 30s, 5m, 1h).
                         Maximum 2147483647ms. Without it, wait indefinitely.
-  --json                Print a single JSON object describing the result.
+  --json                Print the result as JSON. The last line is final.
   -h, --help            Show this help.
 
 Exit codes:
@@ -121,10 +123,9 @@ export type WaitHandlerOptions = {
     options: { signal?: AbortSignal },
   ) => Promise<string | null>
   resolveSession?: (target: string) => Promise<BackgroundSession>
-  readPinnedSession?: (pinned: {
-    id: string
-    pid: number
-  }) => Promise<BackgroundSession>
+  readPinnedSession?: (
+    pinned: BackgroundSessionWaitIdentity,
+  ) => Promise<BackgroundSession>
   stdout?: WaitOutput
   stderr?: WaitOutput
 }
@@ -608,13 +609,14 @@ function terminalObservation(session: BackgroundSession): WaitObservation {
 }
 
 async function observePinnedSession(
-  pinned: { id: string; pid: number },
+  pinned: BackgroundSessionWaitIdentity,
   signal: AbortSignal,
   deps: WaitHandlerOptions,
   lookupSignal: AbortSignal,
 ): Promise<WaitObservation> {
   const readPinned = deps.readPinnedSession ?? readPinnedBackgroundSessionForWait
   let session: BackgroundSession
+  signal.throwIfAborted()
   try {
     session = await raceWithClientSignal(readPinned(pinned), signal)
   } catch (error) {
@@ -632,6 +634,7 @@ async function observePinnedSession(
   // deadline expires; the registry reads above and below keep the
   // client signal only, so a deadline expiry cannot turn them into an
   // interruption (maintainer review 5942761094 on #2497).
+  signal.throwIfAborted()
   const identity = await verifyBackgroundSessionProcessIdentityAsync(session, {
     isProcessAlive: deps.isProcessAlive,
     signalProcess: deps.signalProcess,
@@ -641,6 +644,7 @@ async function observePinnedSession(
 
   // A natural or killed fact published during the lookup wins over derived
   // stale, unknown, or running state, so re-read before classifying.
+  signal.throwIfAborted()
   try {
     session = await raceWithClientSignal(readPinned(pinned), signal)
   } catch (error) {
@@ -800,54 +804,42 @@ export async function waitHandler(
   const now = options.now ?? (() => performance.now())
   const pollIntervalMs = options.pollIntervalMs ?? WAIT_POLL_INTERVAL_MS
   const sleep = options.sleep ?? abortableSleep
-  // Track each in-flight process lookup so every cancellation path
-  // can await the inspector children's settlement before the waiter
-  // returns (maintainer review 5948202472 on #2497). Settlement is
-  // recorded per lookup promise: a shared flag would let an earlier
-  // lookup's settlement mask a later lookup that is still pending, so
-  // the cleanup wait could skip while that inspector is still active
-  // (CodeRabbit #2497 review 5966284444). The lookup promise is the
-  // settlement signal: the production lookup waits for the inspector
-  // child's close before settling on abort (getProcessCommandAsync
-  // passes awaitCloseOnAbort), so settlement proves the child has
-  // exited; the await below still bounds the wait by one poll interval
-  // for a child that never closes (CodeRabbit #2497 review 5957376769).
-  // Defined before selector resolution so the exact-name liveness
-  // gate's lookups are tracked too — a deadline or signal during
-  // resolution must not return while that inspector child is still
-  // alive either.
+  // Resolution and observations share this tracker so cancellation can
+  // join every inspector before the CLI exits.
   const pendingLookups = new Set<Promise<string | null>>()
+  const processLookup = options.getProcessCommandAsync ?? getProcessCommandAsync
   const trackedGetProcessCommandAsync = async (
     pid: number,
     lookupOptions: { signal?: AbortSignal },
   ): Promise<string | null> => {
-    const baseLookup = options.getProcessCommandAsync ?? getProcessCommandAsync
-    const promise = baseLookup(pid, lookupOptions)
+    const promise = processLookup(pid, lookupOptions)
     pendingLookups.add(promise)
     void promise.then(
-      () => {
-        pendingLookups.delete(promise)
-      },
-      () => {
-        pendingLookups.delete(promise)
-      },
+      () => pendingLookups.delete(promise),
+      () => pendingLookups.delete(promise),
     )
     return promise
   }
   const awaitPendingLookup = async (): Promise<void> => {
     if (pendingLookups.size === 0) return
-    // Join every outstanding lookup within one shared cleanup budget:
-    // a snapshot, so a lookup that starts during the wait cannot
-    // extend it, and one budget for all of them, so the waiter still
-    // returns promptly when several inspectors are outstanding.
-    const pending = [...pendingLookups]
-    await Promise.race([
-      Promise.allSettled(pending).then(
-        () => undefined,
-        () => undefined,
-      ),
-      new Promise(resolve => setTimeout(resolve, pollIntervalMs)),
-    ])
+    const settled = Promise.allSettled(pendingLookups)
+    if (processLookup === getProcessCommandAsync) {
+      // The subprocess wrapper bounds escalation and closes its own pipes.
+      // Join it directly so a competing timer cannot win before cleanup.
+      await settled
+      return
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        settled,
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, EXEC_FILE_TERMINATION_GRACE_MS)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
   }
   // Thread the waiter's liveness probes into selector resolution, so the
   // exact-name liveness gate in resolveBackgroundSessionForWait uses the
@@ -958,7 +950,7 @@ export async function waitHandler(
   // when one is injected, so tests can observe the same re-read the
   // production path makes.
   const readTerminalAtTimeoutBoundary = async (
-    pinned: { id: string; pid: number },
+    pinned: BackgroundSessionWaitIdentity,
     deps: WaitHandlerOptions,
   ): Promise<WaitObservation | null> => {
     const readPinned =
@@ -995,7 +987,7 @@ export async function waitHandler(
   // expiry so its `ps` child is killed; the tracked-lookup await in the
   // finally below reaps it before the waiter returns.
   const finalTimeoutObservation = async (
-    pinned: { id: string; pid: number },
+    pinned: BackgroundSessionWaitIdentity,
     deps: WaitHandlerOptions,
   ): Promise<WaitObservation | null> => {
     const finalLookupController = new AbortController()
@@ -1011,7 +1003,7 @@ export async function waitHandler(
       const settled = await Promise.race([
         observePinnedSession(
           pinned,
-          abortController.signal,
+          finalLookupSignal,
           deps,
           finalLookupSignal,
         ),
@@ -1104,7 +1096,12 @@ export async function waitHandler(
     if (clientSignal) {
       return finish(interruptedWaitResult(null, clientSignal))
     }
-    const pinned = { id: session.id, pid: session.pid }
+    const pinned: BackgroundSessionWaitIdentity = {
+      id: session.id,
+      pid: session.pid,
+      terminalFactGeneration: session.terminalFactGeneration,
+      processMarker: session.processMarker,
+    }
     pinnedId = pinned.id
 
     // No signal check at the top of the loop: the pre-loop check above
@@ -1112,11 +1109,17 @@ export async function waitHandler(
     // followed by a signal check before control reaches here again, so a
     // check here could never be true (CodeQL #2497).
     while (true) {
-      let observation: WaitObservation
+      let observation: WaitObservation | null
+      let atDeadline: boolean
       try {
+        const observationController = new AbortController()
+        const observationSignal = AbortSignal.any([
+          abortController.signal,
+          observationController.signal,
+        ])
         const observationPromise = observePinnedSession(
           pinned,
-          abortController.signal,
+          observationSignal,
           lookupDeps,
           lookupSignal,
         )
@@ -1124,98 +1127,46 @@ export async function waitHandler(
           observationPromise,
           deadlineController?.signal ?? null,
         )
+        atDeadline =
+          raced === DEADLINE_EXPIRED || (deadline !== null && now() >= deadline)
         if (raced === DEADLINE_EXPIRED) {
-          // The deadline elapsed while this observation was in flight:
-          // abort the in-flight process lookup first, so a slow `ps`
-          // cannot outlive the waiter and its child is killed, then give
-          // the observation one poll interval to settle and classify the
-          // boundary from what it observed. A stalled registry read is
-          // unaffected by the abort — the reads keep the client signal —
-          // so it still settles as 124 via the grace timer below.
-          // The grace timer is cleared in a finally, so it cannot leak
-          // when the observation rejects or a signal lands mid-grace.
           deadlineAbortController.abort()
           let graceTimer: ReturnType<typeof setTimeout> | undefined
-          const graceExpired = new Promise<null>(resolve => {
-            graceTimer = setTimeout(() => resolve(null), pollIntervalMs)
-          })
-          let late: WaitObservation | null
           try {
-            late = await Promise.race([observationPromise, graceExpired])
+            observation = await Promise.race([
+              observationPromise,
+              new Promise<null>(resolve => {
+                graceTimer = setTimeout(() => resolve(null), pollIntervalMs)
+              }),
+            ])
           } finally {
-            if (graceTimer !== undefined) clearTimeout(graceTimer)
+            clearTimeout(graceTimer)
           }
-          if (late === null) {
-            // A client signal that arrived while the grace timer ran
-            // takes precedence over the timeout: the waiter was
-            // interrupted (130/143), not merely slow (124). The same
-            // check guards the final-observation timeout below
-            // (CodeRabbit #2497 review 5950772048).
-            if (clientSignal) {
-              return finish(interruptedWaitResult(pinned.id, clientSignal))
-            }
-            // The observation never settled, so a metadata-only
-            // re-read cannot classify the boundary: run one final
-            // complete observation instead. A terminal fact published
-            // while it was pending wins, a pinned metadata failure
-            // reports exit 4, and a genuinely unreadable process
-            // reports exit 3 — the deadline table's outcomes — while
-            // a fresh observation that never settles either is still
-            // a timeout (124), as in the aborted branch below
-            // (maintainer review 5964758980 on #2497). A client
-            // signal received during that final observation takes
-            // precedence over the timeout, as below.
-            const finalObservation =
-              await finalTimeoutObservation(pinned, lookupDeps)
-            if (finalObservation === null) {
-              if (clientSignal) {
-                return finish(interruptedWaitResult(pinned.id, clientSignal))
-              }
-              return finishTimeout({
-                ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
-                status: 'running',
-              })
-            }
-            observation = finalObservation
-          } else if (
-            late.kind === 'aborted' ||
-            late.kind === 'running' ||
-            late.kind === 'unknown'
-          ) {
-            // An aborted in-flight lookup never observed the process,
-            // so its classification is meaningless; a running result
-            // settled from a pre-deadline lookup can likewise be
-            // stale — the child may have exited in the meantime
-            // without publishing a terminal fact. An unknown result
-            // is no better: its null came from a pre-deadline lookup
-            // that ran before the second metadata read finished, so
-            // a transiently unreadable command can read as a
-            // permanently unreadable process. Run one final
-            // observation with a fresh lookup signal that is not
-            // self-cancelled, bounded by one poll interval: terminal
-            // wins, a genuinely unreadable process returns 3, and a
-            // child that is still alive returns 124 (maintainer
-            // review 5964758980 and CodeRabbit #2497 reviews
-            // 5963778469 and 5966284444 on #2497).
-            const finalObservation =
-              await finalTimeoutObservation(pinned, lookupDeps)
-            if (finalObservation === null) {
-              // As above: a client signal received during the pending
-              // final lookup takes precedence over the timeout (124).
-              if (clientSignal) {
-                return finish(interruptedWaitResult(pinned.id, clientSignal))
-              }
-              return finishTimeout({
-                ...baseWaitResult(pinned.id, 'timeout', 'timeout'),
-                status: 'running',
-              })
-            }
-            observation = finalObservation
-          } else {
-            observation = late
+          if (observation === null) {
+            // A pending file read cannot be cancelled at the OS boundary.
+            // Stop this observation so it cannot resume and start more work.
+            observationController.abort()
           }
         } else {
           observation = raced
+        }
+
+        if (
+          atDeadline &&
+          !clientSignal &&
+          observation?.kind !== 'terminal' &&
+          observation?.kind !== 'metadata_error'
+        ) {
+          deadlineAbortController.abort()
+          // Time can expire before or after its timer callback. Both routes
+          // need the same fresh decision. When an inspector is still closing,
+          // use only the metadata boundary read rather than starting another.
+          if (pendingLookups.size === 0) {
+            await observationPromise.catch(() => {})
+            observation = await finalTimeoutObservation(pinned, lookupDeps)
+          } else {
+            observation = await readTerminalAtTimeoutBoundary(pinned, lookupDeps)
+          }
         }
       } catch (error) {
         if (clientSignal || abortController.signal.aborted) {
@@ -1228,10 +1179,10 @@ export async function waitHandler(
       if (clientSignal) {
         return finish(interruptedWaitResult(pinned.id, clientSignal))
       }
-      if (observation.kind === 'terminal') {
+      if (observation?.kind === 'terminal') {
         return finish(terminalWaitResult(observation.session))
       }
-      if (observation.kind === 'metadata_error') {
+      if (observation?.kind === 'metadata_error') {
         const result = {
           ...baseWaitResult(pinned.id, 'observation_error', observation.error.code),
         }
@@ -1242,8 +1193,8 @@ export async function waitHandler(
       // 'aborted' observation reaching here was cut short without
       // observing the process, so it falls through to the timeout below
       // (124), never to the unreadable outcome (3).
-      if (deadline !== null && now() >= deadline) {
-        if (observation.kind === 'unknown') {
+      if (atDeadline) {
+        if (observation?.kind === 'unknown') {
           return finish({
             ...baseWaitResult(pinned.id, 'observation_error', 'process_unreadable'),
             status: 'unknown',
@@ -1275,7 +1226,7 @@ export async function waitHandler(
     // On a cancellation path (client signal, deadline abort, or
     // deadline expiry during selector resolution), do not return while
     // the inspector child may still be alive: await the in-flight
-    // lookup's settlement within one poll interval first.
+    // lookup's bounded cleanup first.
     if (
       clientSignal !== null ||
       deadlineAbortController.signal.aborted ||

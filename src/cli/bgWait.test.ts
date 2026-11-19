@@ -18,6 +18,7 @@ import {
   BackgroundSessionWaitError,
   createBackgroundSession,
   markBackgroundSessionKilled,
+  readPinnedBackgroundSessionForWait,
   recordBackgroundSessionNaturalTermination,
   type BackgroundSession,
 } from './bgRegistry.js'
@@ -726,6 +727,7 @@ describe('wait command handler', () => {
     })
     if (child.pid === undefined) throw new Error('spawned child has no pid')
     const childPid = child.pid
+    let watchdog: ReturnType<typeof setTimeout> | undefined
     try {
       await createTestSession('bg-aaa1', { pid: childPid })
       let lookups = 0
@@ -767,7 +769,7 @@ describe('wait command handler', () => {
       const { code, stdout, stderr } = await Promise.race([
         waiting,
         new Promise<never>((_, reject) => {
-          setTimeout(
+          watchdog = setTimeout(
             () =>
               reject(
                 new Error(
@@ -791,6 +793,7 @@ describe('wait command handler', () => {
       expect(lookups).toBe(2)
       expect(elapsedMs).toBeLessThan(1500)
     } finally {
+      clearTimeout(watchdog)
       child.kill()
     }
   })
@@ -907,53 +910,46 @@ describe('wait command handler', () => {
     }
   })
 
-  it('waits for the final lookup when an earlier lookup settles first', async () => {
-    // Regression test for CodeRabbit #2497 review 5966284444: the
-    // cleanup wait must track settlement per lookup, not in shared
-    // state. The in-flight lookup is still pending when the deadline
-    // expires; the final observation starts a second lookup, and the
-    // first lookup settles right after. A shared settled flag would
-    // let that settlement mask the second lookup, so the waiter would
-    // return while its inspector is still active. Both lookups are
-    // held stubs, so the only thing that can delay the return past
-    // the grace and final bounds is the cleanup wait joining the
-    // second lookup within one poll interval.
+  it('joins the first inspector without starting another after the deadline grace', async () => {
     const session = await createTestSession('bg-aaa1')
+    const boundaryRead = Promise.withResolvers<void>()
+    const inspectorClosed = Promise.withResolvers<string | null>()
     let lookups = 0
-    let releaseFirstLookup: (() => void) | undefined
+    let reads = 0
+    let settled = false
     const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
       isProcessAlive: () => true,
-      pollIntervalMs: 500,
-      // Injected so filesystem selector resolution stays outside the
-      // 60 ms deadline: on a slow runner the handler could otherwise
-      // return an unpinned 124 before this pinned branch is reached
-      // (CodeRabbit #2497 review 5966284444).
+      pollIntervalMs: 50,
       resolveSession: async () => session,
+      readPinnedSession: async () => {
+        reads += 1
+        if (reads === 2) boundaryRead.resolve()
+        return session
+      },
       getProcessCommandAsync: async () => {
         lookups += 1
-        if (lookups === 1) {
-          return new Promise<string | null>(resolve => {
-            releaseFirstLookup = () => resolve(null)
-          })
-        }
-        // The final observation's lookup: releasing the first lookup
-        // here is what would mask this one under shared state.
-        releaseFirstLookup?.()
-        return new Promise<string | null>(() => {})
+        return inspectorClosed.promise
       },
+    }).finally(() => {
+      settled = true
     })
-    const startedAt = performance.now()
-    const { code, stdout } = await waiting
-    const elapsedMs = performance.now() - startedAt
-    expect(code).toBe(124)
-    expect(lookups).toBe(2)
-    // Deadline (60) + grace (500) + final observation (500) is 1060
-    // without the cleanup wait; joining the still-pending final
-    // lookup adds one more poll interval (500).
-    expect(elapsedMs).toBeGreaterThanOrEqual(1300)
-    const result = expectWaitJsonShape(JSON.parse(stdout))
-    expect(result.waitResult).toBe('timeout')
-    expect(result.status).toBe('running')
+    try {
+      expect(await Promise.race([
+        boundaryRead.promise.then(() => true),
+        waiting.then(() => false),
+      ])).toBe(true)
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(lookups).toBe(1)
+      expect(settled).toBe(false)
+      inspectorClosed.resolve(null)
+      const { code, stdout } = await waiting
+      expect(code).toBe(124)
+      expect(JSON.parse(stdout).waitResult).toBe('timeout')
+      expect(reads).toBe(2)
+    } finally {
+      inspectorClosed.resolve(null)
+      await waiting
+    }
   })
 
   it('does not return while a resolution-time inspector child is still alive', async () => {
@@ -2450,20 +2446,32 @@ describe('wait command handler', () => {
     const pid1 = 111001
     const pid2 = 111002
     await createTestSession('bg-aaa1', { name: 'foo', pid: pid1 })
-    const waiting = runWait(['foo', '--json'], {
+    const firstPinnedRead = Promise.withResolvers<string>()
+    const waiting = runWait(['foo', '--timeout', '2s', '--json'], {
       isProcessAlive: pid => pid === pid1 || pid === pid2,
       getProcessCommandAsync: async () => 'sleep 30',
+      readPinnedSession: async pinned => {
+        firstPinnedRead.resolve(pinned.id)
+        return readPinnedBackgroundSessionForWait(pinned)
+      },
     })
-    // While waiting: kill bg-aaa1 and start a new live session named foo.
-    await new Promise(resolve => setTimeout(resolve, 40))
-    await markBackgroundSessionKilled('bg-aaa1')
-    await createTestSession('bg-aaa2', { name: 'foo', pid: pid2 })
-    const { code, stdout } = await waiting
+    try {
+      const selected = await Promise.race([
+        firstPinnedRead.promise,
+        waiting.then(() => null),
+      ])
+      expect(selected).toBe('bg-aaa1')
+      await markBackgroundSessionKilled('bg-aaa1')
+      await createTestSession('bg-aaa2', { name: 'foo', pid: pid2 })
+      const { code, stdout } = await waiting
 
-    expect(code).toBe(1)
-    const result = expectWaitJsonShape(JSON.parse(stdout))
-    expect(result.id).toBe('bg-aaa1')
-    expect(result.status).toBe('killed')
+      expect(code).toBe(1)
+      const result = expectWaitJsonShape(JSON.parse(stdout))
+      expect(result.id).toBe('bg-aaa1')
+      expect(result.status).toBe('killed')
+    } finally {
+      await waiting
+    }
   })
 
   it('returns ambiguous for a later ID-prefix collision', async () => {
@@ -2687,6 +2695,7 @@ describe('wait command handler', () => {
     // state at the boundary reports exit 3 per the deadline table.
     const session = await createTestSession('bg-aaa1')
     let lookups = 0
+    let reads = 0
     const waiting = runWait(['bg-aaa1', '--timeout', '60ms', '--json'], {
       isProcessAlive: () => true,
       pollIntervalMs: 500,
@@ -2697,8 +2706,12 @@ describe('wait command handler', () => {
       resolveSession: async () => session,
       getProcessCommandAsync: async () => {
         lookups += 1
-        if (lookups === 1) return new Promise<string | null>(() => {})
         return null
+      },
+      readPinnedSession: async () => {
+        reads += 1
+        if (reads === 2) return new Promise<BackgroundSession>(() => {})
+        return session
       },
     })
     const { code, stdout } = await waiting
@@ -2753,6 +2766,31 @@ describe('wait command handler', () => {
     const result = expectWaitJsonShape(JSON.parse(stdout))
     expect(result.waitResult).toBe('timeout')
     expect(result.status).toBe('running')
+  })
+
+  it('re-probes when the monotonic clock expires before the deadline timer', async () => {
+    const session = await createTestSession('bg-aaa1')
+    let elapsed = 0
+    let lookups = 0
+    const { code, stdout } = await runWait(
+      ['bg-aaa1', '--timeout', '30s', '--json'],
+      {
+        now: () => elapsed,
+        isProcessAlive: () => true,
+        resolveSession: async () => session,
+        readPinnedSession: async () => session,
+        getProcessCommandAsync: async () => {
+          if (++lookups === 1) {
+            elapsed = 30_000
+            return null
+          }
+          return 'sleep 30'
+        },
+      },
+    )
+    expect(lookups).toBe(2)
+    expect(code).toBe(124)
+    expect(JSON.parse(stdout).status).toBe('running')
   })
 
   it('returns 130 with interrupted JSON on SIGINT during sleep', async () => {

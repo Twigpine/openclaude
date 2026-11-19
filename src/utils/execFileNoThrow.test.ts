@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -144,7 +144,7 @@ test('execFileNoThrowWithCwd keeps the SIGKILL escalation when output overflows 
   }
 })
 
-test('execFileNoThrowWithCwd settles an aborted child even when timeout is 0', async () => {
+test.each([0, 10_000])('execFileNoThrowWithCwd closes a retained output pipe after abort with timeout %i', async timeout => {
   // Regression test for CodeRabbit #2497 review 5963778469: with
   // timeout 0 there is no timeout callback to start the last-resort
   // settle timer, so an aborted child whose stdio pipe a descendant
@@ -157,25 +157,17 @@ test('execFileNoThrowWithCwd settles an aborted child even when timeout is 0', a
   const childPidFile = join(dir, 'child.pid')
   const pidFile = join(dir, 'grandchild.pid')
   const controller = new AbortController()
+  const scheduled = spyOn(globalThis, 'setTimeout')
+  const cleared = spyOn(globalThis, 'clearTimeout')
+  const { getInMemoryErrors } = await import('./log.js')
+  const errorsBeforeAbort = getInMemoryErrors().slice()
   try {
-    // The pid directory reaches the child through the environment, not
-    // interpolated into the -e script: no code is constructed from a
-    // value, so the CodeQL code-injection alert on this test clears
-    // (CodeQL #2497). The path was JSON.stringify-escaped before, so
-    // no injection was possible through it — this only removes the
-    // flagged pattern. The grandchild writes its burst only after the
-    // test publishes the settlement marker (CodeRabbit #2497 review
-    // 5968087698): a fixed 2000 ms timer could fire before the result
-    // settles on a slow runner, so a timer alone cannot prove the
-    // burst arrived post-settlement. The burst is 2000 bytes against
-    // maxBuffer 1000, so it would overflow if the settled-output
-    // guard let it through: output arriving after settlement must be
-    // ignored for result and escalation purposes, not restart the
-    // SIGKILL cycle (CodeRabbit #2497 review 5966284444).
-    const script = `process.on('SIGTERM', () => {}); const { spawn } = require('child_process'); const grandchild = spawn(process.execPath, ['-e', 'const fs = require("fs"); const path = require("path"); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; const wait = () => { if (fs.existsSync(path.join(dir, "settled"))) { process.stdout.write("x".repeat(2000)); fs.writeFileSync(path.join(dir, "burst.done"), ""); } else { setTimeout(wait, 25); } }; wait(); setTimeout(() => {}, 15000)'], { stdio: ['ignore', 'inherit', 'ignore'] }); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; require('fs').writeFileSync(require('path').join(dir, 'child.pid'), String(process.pid)); require('fs').writeFileSync(require('path').join(dir, 'grandchild.pid'), String(grandchild.pid)); setTimeout(() => {}, 15000);`
+    // Pass the fixture directory as data. The grandchild waits until the
+    // wrapper returns before trying to write to the inherited pipe.
+    const script = `process.on('SIGTERM', () => {}); const { spawn } = require('child_process'); const grandchild = spawn(process.execPath, ['-e', 'const fs = require("fs"); const path = require("path"); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; const wait = () => { if (fs.existsSync(path.join(dir, "settled"))) { process.stdout.on("error", () => {}); process.stdout.write("x".repeat(2000), error => { fs.writeFileSync(path.join(dir, "burst.done"), error?.code ?? "written"); }); } else { setTimeout(wait, 25); } }; wait(); setTimeout(() => {}, 15000)'], { stdio: ['ignore', 'inherit', 'ignore'] }); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; require('fs').writeFileSync(require('path').join(dir, 'child.pid'), String(process.pid)); require('fs').writeFileSync(require('path').join(dir, 'grandchild.pid'), String(grandchild.pid)); setTimeout(() => {}, 15000);`
     const startedAt = performance.now()
     const pending = execFileNoThrowWithCwd(process.execPath, ['-e', script], {
-      timeout: 0,
+      timeout,
       maxBuffer: 1000,
       abortSignal: controller.signal,
       awaitCloseOnAbort: true,
@@ -184,6 +176,7 @@ test('execFileNoThrowWithCwd settles an aborted child even when timeout is 0', a
         OPENCLAUDE_TEST_PID_DIR: dir,
       },
     })
+    const commandTimer = scheduled.mock.calls.findIndex(([, delay]) => delay === timeout)
     while (!existsSync(pidFile)) {
       if (performance.now() - startedAt > 5000) {
         throw new Error('child did not start')
@@ -224,6 +217,11 @@ test('execFileNoThrowWithCwd settles an aborted child even when timeout is 0', a
     const result = await resultPromise
     const elapsedMs = performance.now() - startedAt
     expect(result.code).toBe(1)
+    expect(getInMemoryErrors()).toEqual(errorsBeforeAbort)
+    if (timeout > 0) {
+      expect(commandTimer).toBeGreaterThanOrEqual(0)
+      expect(cleared).toHaveBeenCalledWith(scheduled.mock.results[commandTimer]!.value)
+    }
     // The grandchild holds the pipe for 15 s: settling here proves the
     // kill settle bound fired instead of waiting for its 'close'.
     expect(elapsedMs).toBeLessThan(10000)
@@ -240,14 +238,7 @@ test('execFileNoThrowWithCwd settles an aborted child even when timeout is 0', a
       }
       await new Promise(resolve => setTimeout(resolve, 10))
     }
-    // The burst is 2000 bytes against maxBuffer 1000: had the
-    // settled-output guard let it through, the burst would have
-    // overflowed and reached the escalation path. Give a full abort
-    // grace (350 ms) for any such escalation to fire, then assert
-    // nothing followed settlement: the result is unchanged and the
-    // descendant that wrote the burst is still alive.
-    await new Promise(resolve => setTimeout(resolve, 600))
-    expect(result.code).toBe(1)
+    expect(readFileSync(join(dir, 'burst.done'), 'utf8')).not.toBe('written')
     expect(() => process.kill(grandchildPid, 0)).not.toThrow()
   } finally {
     try {
@@ -262,6 +253,36 @@ test('execFileNoThrowWithCwd settles an aborted child even when timeout is 0', a
     } catch {
       // Already dead or never started.
     }
+    scheduled.mockRestore()
+    cleared.mockRestore()
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test.skipIf(process.platform === 'win32')(
+  'execFileNoThrowWithCwd reaps an opted-in inspector after its own timeout',
+  async () => {
+    const { execFileNoThrowWithCwd } = await importFreshExecFileNoThrowModule()
+    const dir = mkdtempSync(join(tmpdir(), 'openclaude-execfile-own-timeout-'))
+    const pidFile = join(dir, 'child.pid')
+    let pid: number | undefined
+    try {
+      const result = await execFileNoThrowWithCwd(process.execPath, [
+        '-e',
+        'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.env.OPENCLAUDE_TEST_PID_FILE, String(process.pid)); setTimeout(() => {}, 10000)',
+      ], {
+        timeout: 1000,
+        awaitCloseOnAbort: true,
+        env: { ...process.env, OPENCLAUDE_TEST_PID_FILE: pidFile },
+      })
+      pid = Number(readFileSync(pidFile, 'utf8'))
+      expect(result.error).toBe('Command timed out after 1000ms')
+      expect(() => process.kill(pid!, 0)).toThrow()
+    } finally {
+      if (pid !== undefined) {
+        try { process.kill(pid, 'SIGKILL') } catch {}
+      }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  },
+)

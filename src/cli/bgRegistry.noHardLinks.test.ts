@@ -97,7 +97,12 @@ describe('background session creation without hard links', () => {
   })
 
   it('still rejects a duplicate session id when link() is rejected', async () => {
+    const stdoutLogPath = join(configDir, 'stdout.log')
+    const stderrLogPath = join(configDir, 'stderr.log')
+    await Promise.all([writeFile(stdoutLogPath, ''), writeFile(stderrLogPath, '')])
+    const logs = { logFilesPrecreated: true, stdoutLogPath, stderrLogPath }
     await registry.createBackgroundSession({
+      ...logs,
       id: 'bg-no-link-dup',
       pid: 424242,
       cwd: '/repo',
@@ -106,6 +111,7 @@ describe('background session creation without hard links', () => {
     })
     await expect(
       registry.createBackgroundSession({
+        ...logs,
         id: 'bg-no-link-dup',
         pid: 424243,
         cwd: '/repo',
@@ -113,7 +119,9 @@ describe('background session creation without hard links', () => {
         sessionId: 'sess-no-link-dup-2',
       }),
     ).rejects.toThrow('already exists')
-    expect(await registry.listBackgroundSessions()).toHaveLength(1)
+    expect(await registry.listBackgroundSessions()).toMatchObject([
+      { id: 'bg-no-link-dup', pid: 424242 },
+    ])
   })
   })
   }

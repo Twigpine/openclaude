@@ -391,12 +391,13 @@ export async function main(
     // timeout outcome (124) takes the explicit-exit path below — every
     // other outcome returns normally and exits on its own.
     if (waitExitCode === 130 || waitExitCode === 143) {
-      const signal = waitExitCode === 143 ? 'SIGTERM' : 'SIGINT'
-      process.removeAllListeners(signal)
-      process.kill(process.pid, signal)
-      // Fall back to exiting with the signal's code if the signal is
-      // somehow swallowed (e.g. blocked): the exit is deferred while a
-      // read is pending, but it still records the right code.
+      if (process.platform !== 'win32') {
+        const signal = waitExitCode === 143 ? 'SIGTERM' : 'SIGINT'
+        process.removeAllListeners(signal)
+        process.kill(process.pid, signal)
+      }
+      // Windows self-signalling terminates with code 1. Exit directly
+      // there, and also use the numeric code if POSIX swallowed the signal.
       // eslint-disable-next-line custom-rules/no-process-exit
       process.exit(waitExitCode)
     }

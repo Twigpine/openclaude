@@ -12,6 +12,7 @@ import {
   expect,
   it,
   mock,
+  spyOn,
 } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { copyFile, mkdir, mkdtemp, readdir, rename, rm, symlink } from 'node:fs/promises'
@@ -553,6 +554,26 @@ describe('cli.tsx — background routing behavior', () => {
     expect(mockHandleBgFlag).not.toHaveBeenCalled()
     expect(mockValidateProviderEnvForStartupOrExit).not.toHaveBeenCalled()
     expect(mockCliMain).not.toHaveBeenCalled()
+  })
+
+  it.each([130, 143])('exits directly with wait interruption code %i on Windows', async code => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    const exited = new Error('process.exit')
+    const exit = spyOn(process, 'exit').mockImplementation(() => { throw exited })
+    const kill = spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('must not self-signal on Windows')
+    })
+    mockWaitHandler.mockResolvedValueOnce(code)
+    try {
+      Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'win32' })
+      await expect(runCliEntrypoint(['wait', 'session-1'], bgOptions)).rejects.toBe(exited)
+      expect(exit).toHaveBeenCalledWith(code)
+      expect(kill).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(process, 'platform', originalPlatform)
+      exit.mockRestore()
+      kill.mockRestore()
+    }
   })
 
   it('keeps wait on the fast path before provider validation', async () => {
