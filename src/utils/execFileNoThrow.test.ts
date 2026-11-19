@@ -163,15 +163,20 @@ test('execFileNoThrowWithCwd settles an aborted child even when timeout is 0', a
     // value, so the CodeQL code-injection alert on this test clears
     // (CodeQL #2497). The path was JSON.stringify-escaped before, so
     // no injection was possible through it — this only removes the
-    // flagged pattern. The grandchild writes one burst after the
-    // result settles, so the post-settle output path runs too: output
-    // arriving after settlement must be ignored for result and
-    // escalation purposes, not restart the SIGKILL cycle (CodeRabbit
-    // #2497 review 5966284444).
-    const script = `process.on('SIGTERM', () => {}); const { spawn } = require('child_process'); const grandchild = spawn(process.execPath, ['-e', 'setTimeout(() => { process.stdout.write("x".repeat(2000)); }, 2000); setTimeout(() => {}, 15000)'], { stdio: ['ignore', 'inherit', 'ignore'] }); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; require('fs').writeFileSync(require('path').join(dir, 'child.pid'), String(process.pid)); require('fs').writeFileSync(require('path').join(dir, 'grandchild.pid'), String(grandchild.pid)); setTimeout(() => {}, 15000);`
+    // flagged pattern. The grandchild writes its burst only after the
+    // test publishes the settlement marker (CodeRabbit #2497 review
+    // 5968087698): a fixed 2000 ms timer could fire before the result
+    // settles on a slow runner, so a timer alone cannot prove the
+    // burst arrived post-settlement. The burst is 2000 bytes against
+    // maxBuffer 1000, so it would overflow if the settled-output
+    // guard let it through: output arriving after settlement must be
+    // ignored for result and escalation purposes, not restart the
+    // SIGKILL cycle (CodeRabbit #2497 review 5966284444).
+    const script = `process.on('SIGTERM', () => {}); const { spawn } = require('child_process'); const grandchild = spawn(process.execPath, ['-e', 'const fs = require("fs"); const path = require("path"); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; const wait = () => { if (fs.existsSync(path.join(dir, "settled"))) { process.stdout.write("x".repeat(2000)); fs.writeFileSync(path.join(dir, "burst.done"), ""); } else { setTimeout(wait, 25); } }; wait(); setTimeout(() => {}, 15000)'], { stdio: ['ignore', 'inherit', 'ignore'] }); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; require('fs').writeFileSync(require('path').join(dir, 'child.pid'), String(process.pid)); require('fs').writeFileSync(require('path').join(dir, 'grandchild.pid'), String(grandchild.pid)); setTimeout(() => {}, 15000);`
     const startedAt = performance.now()
     const pending = execFileNoThrowWithCwd(process.execPath, ['-e', script], {
       timeout: 0,
+      maxBuffer: 1000,
       abortSignal: controller.signal,
       awaitCloseOnAbort: true,
       env: {
@@ -224,9 +229,26 @@ test('execFileNoThrowWithCwd settles an aborted child even when timeout is 0', a
     expect(elapsedMs).toBeLessThan(10000)
     const grandchildPid = Number(readFileSync(pidFile, 'utf8'))
     expect(() => process.kill(grandchildPid, 0)).not.toThrow()
-    // Let the grandchild's post-settle burst arrive before teardown,
-    // so the settled-output guard above actually runs.
-    await new Promise(resolve => setTimeout(resolve, 1200))
+    // Publish the settlement marker so the grandchild writes its burst
+    // now, strictly after the result settled, and wait until the burst
+    // has been delivered before asserting anything about it.
+    writeFileSync(join(dir, 'settled'), '')
+    const burstDeadline = performance.now() + 5000
+    while (!existsSync(join(dir, 'burst.done'))) {
+      if (performance.now() > burstDeadline) {
+        throw new Error('grandchild did not write its post-settle burst')
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    // The burst is 2000 bytes against maxBuffer 1000: had the
+    // settled-output guard let it through, the burst would have
+    // overflowed and reached the escalation path. Give a full abort
+    // grace (350 ms) for any such escalation to fire, then assert
+    // nothing followed settlement: the result is unchanged and the
+    // descendant that wrote the burst is still alive.
+    await new Promise(resolve => setTimeout(resolve, 600))
+    expect(result.code).toBe(1)
+    expect(() => process.kill(grandchildPid, 0)).not.toThrow()
   } finally {
     try {
       const childPid = Number(readFileSync(childPidFile, 'utf8'))
