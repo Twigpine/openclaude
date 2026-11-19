@@ -1,19 +1,32 @@
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
   ErrorCode,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js'
+import { killMcpServerTasksForAgent } from '../../tasks/McpServerTask/McpServerTask.js'
+import { snapshotEnv } from '../../test/envSnapshot.js'
 import { AbortError } from '../../utils/errors.js'
 import { createAssistantMessage } from '../../utils/messages.js'
 import {
   callMCPToolWithUrlElicitationRetry,
   fetchToolsForClient,
 } from './client.js'
+import { _resetMcpServerTasksForTest } from './tasks.js'
 import type { ConnectedMCPServer } from './types.js'
+import type { AppState } from '../../state/AppState.js'
+import type { McpServerTaskState } from '../../tasks/McpServerTask/McpServerTask.js'
 
 describe('MCP tool activity', () => {
+  let restoreEnv: (() => void) | undefined
+  beforeEach(() => {
+    restoreEnv = snapshotEnv(['CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND'], {
+      clear: true,
+    })
+  })
   afterEach(() => {
     vi.useRealTimers()
+    restoreEnv?.()
+    restoreEnv = undefined
   })
 
   test('URL elicitation cancellation uses the shared AbortError type', async () => {
@@ -375,6 +388,220 @@ describe('MCP tool activity', () => {
     await expect(callPromise).resolves.toMatchObject({
       data: [{ type: 'text', text: 'done' }],
     })
+  })
+
+  test('a taskified call does not report completed progress', async () => {
+    const sdkClient = {
+      request: vi.fn(async (req: { method: string }) => {
+        if (req.method === 'tools/list') {
+          return {
+            tools: [
+              {
+                name: 'slow-tool',
+                inputSchema: { type: 'object' },
+                execution: { taskSupport: 'optional' },
+              },
+            ],
+          }
+        }
+        return {
+          task: {
+            taskId: 'remote-progress-1',
+            status: 'working',
+            ttl: null,
+            createdAt: '2026-01-01T00:00:00Z',
+            lastUpdatedAt: '2026-01-01T00:00:00Z',
+            pollInterval: 60000,
+          },
+        }
+      }),
+      callTool: vi.fn(),
+    }
+    const connection = {
+      type: 'connected',
+      name: 'taskified-progress-test',
+      config: { type: 'sdk' },
+      capabilities: { tools: {}, tasks: { requests: { tools: { call: {} } } } },
+      client: sdkClient,
+    } as unknown as ConnectedMCPServer
+    const [tool] = await fetchToolsForClient(connection)
+    expect(tool).toBeDefined()
+    const onProgress = vi.fn()
+    const parentMessage = createAssistantMessage({
+      content: [
+        {
+          type: 'tool_use',
+          id: 'toolu_taskified_progress',
+          name: tool!.name,
+          input: {},
+        },
+      ],
+    })
+
+    try {
+      await tool!.call(
+        {},
+        {
+          abortController: new AbortController(),
+          setAppState: vi.fn(),
+        } as never,
+        undefined as never,
+        parentMessage,
+        onProgress,
+      )
+    } finally {
+      _resetMcpServerTasksForTest()
+    }
+
+    const statuses = onProgress.mock.calls.map(
+      ([arg]) => (arg as { data: { status: string } }).data.status,
+    )
+    expect(statuses).toContain('started')
+    expect(statuses).not.toContain('completed')
+  })
+
+  test('a taskified call is attributed to the scheduled tool use, not the first block of the message', async () => {
+    const sdkClient = {
+      request: vi.fn(async (req: { method: string }) => {
+        if (req.method === 'tools/list') {
+          return {
+            tools: [
+              {
+                name: 'slow-tool',
+                inputSchema: { type: 'object' },
+                execution: { taskSupport: 'optional' },
+              },
+            ],
+          }
+        }
+        return {
+          task: {
+            taskId: 'remote-attrib-1',
+            status: 'working',
+            ttl: null,
+            createdAt: '2026-01-01T00:00:00Z',
+            lastUpdatedAt: '2026-01-01T00:00:00Z',
+            pollInterval: 60000,
+          },
+        }
+      }),
+      callTool: vi.fn(),
+    }
+    const connection = {
+      type: 'connected',
+      name: 'taskified-attribution-test',
+      config: { type: 'sdk' },
+      capabilities: { tools: {}, tasks: { requests: { tools: { call: {} } } } },
+      client: sdkClient,
+    } as unknown as ConnectedMCPServer
+    const [tool] = await fetchToolsForClient(connection)
+    expect(tool).toBeDefined()
+    // One assistant message carrying two tool uses; the scheduler runs the
+    // second one and says so through context.toolUseId.
+    const parentMessage = createAssistantMessage({
+      content: [
+        { type: 'tool_use', id: 'toolu_first', name: 'other', input: {} },
+        { type: 'tool_use', id: 'toolu_second', name: tool!.name, input: {} },
+      ],
+    })
+    let state = { tasks: {} } as Record<string, unknown>
+    const setAppState = (f: (prev: typeof state) => typeof state) => {
+      state = f(state)
+    }
+
+    try {
+      await tool!.call(
+        {},
+        {
+          abortController: new AbortController(),
+          setAppState,
+          toolUseId: 'toolu_second',
+        } as never,
+        undefined as never,
+        parentMessage,
+        vi.fn(),
+      )
+    } finally {
+      _resetMcpServerTasksForTest()
+    }
+
+    const tasks = Object.values(state.tasks as Record<string, { toolUseId?: string }>)
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]!.toolUseId).toBe('toolu_second')
+  })
+
+  test('an async subagent registers its server task in the root task store and cancels it on exit', async () => {
+    const cancelTask = vi.fn(async () => ({}))
+    const sdkClient = {
+      request: vi.fn(async (req: { method: string }) => {
+        if (req.method === 'tools/list') {
+          return {
+            tools: [
+              {
+                name: 'slow-tool',
+                inputSchema: { type: 'object' },
+                execution: { taskSupport: 'optional' },
+              },
+            ],
+          }
+        }
+        return {
+          task: {
+            taskId: 'remote-async-1',
+            status: 'working',
+            ttl: null,
+            createdAt: '2026-01-01T00:00:00Z',
+            lastUpdatedAt: '2026-01-01T00:00:00Z',
+            pollInterval: 60000,
+          },
+        }
+      }),
+      callTool: vi.fn(),
+      experimental: { tasks: { cancelTask } },
+    }
+    const connection = {
+      type: 'connected',
+      name: 'async-subagent-task-test',
+      config: { type: 'sdk' },
+      capabilities: { tools: {}, tasks: { requests: { tools: { call: {} } } } },
+      client: sdkClient,
+    } as unknown as ConnectedMCPServer
+    const [tool] = await fetchToolsForClient(connection)
+    expect(tool).toBeDefined()
+    let root = { tasks: {} } as AppState
+    const getRoot = () => root
+    const setRoot = (f: (prev: AppState) => AppState) => {
+      root = f(root)
+    }
+
+    try {
+      // createSubagentContext gives a background subagent a no-op
+      // setAppState and routes task registration through setAppStateForTasks.
+      await tool!.call(
+        {},
+        {
+          abortController: new AbortController(),
+          setAppState: () => {},
+          setAppStateForTasks: setRoot,
+          agentId: 'agent-async',
+          toolUseId: 'toolu_async',
+        } as never,
+        undefined as never,
+        createAssistantMessage({ content: [] }),
+        vi.fn(),
+      )
+      const registered = Object.values(root.tasks) as McpServerTaskState[]
+      expect(registered).toHaveLength(1)
+      expect(registered[0]!.status).toBe('running')
+
+      await killMcpServerTasksForAgent('agent-async' as never, getRoot, setRoot)
+      expect(cancelTask).toHaveBeenCalledWith('remote-async-1', expect.anything())
+      expect((Object.values(root.tasks) as McpServerTaskState[])[0]!.status).toBe(
+        'killed',
+      )
+    } finally {
+      _resetMcpServerTasksForTest()
+    }
   })
 
   test('a throwing completed callback does not turn success into failure', async () => {

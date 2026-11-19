@@ -15,7 +15,7 @@ type Props = {
   maxActivityWidth?: number;
 };
 export function BackgroundTask(t0) {
-  const $ = _c(92);
+  const $ = _c(102);
   const {
     task,
     maxActivityWidth
@@ -290,6 +290,40 @@ export function BackgroundTask(t0) {
           $[76] = t5;
         } else {
           t5 = $[76];
+        }
+        return t5;
+      }
+    case "mcp_server":
+      {
+        let t1;
+        if ($[92] !== activityLimit || $[93] !== task.description) {
+          t1 = truncate(task.description, activityLimit, true);
+          $[92] = activityLimit;
+          $[93] = task.description;
+          $[94] = t1;
+        } else {
+          t1 = $[94];
+        }
+        const t2 = task.status === "completed" ? "done" : undefined;
+        const t3 = task.status === "completed" && !task.notified ? ", unread" : undefined;
+        let t4;
+        if ($[95] !== t2 || $[96] !== t3 || $[97] !== task.status) {
+          t4 = <TaskStatusText status={task.status} label={t2} suffix={t3} />;
+          $[95] = t2;
+          $[96] = t3;
+          $[97] = task.status;
+          $[98] = t4;
+        } else {
+          t4 = $[98];
+        }
+        let t5;
+        if ($[99] !== t1 || $[100] !== t4) {
+          t5 = <Text>{t1}{" "}{t4}</Text>;
+          $[99] = t1;
+          $[100] = t4;
+          $[101] = t5;
+        } else {
+          t5 = $[101];
         }
         return t5;
       }

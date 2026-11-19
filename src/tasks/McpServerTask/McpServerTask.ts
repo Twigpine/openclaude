@@ -1,0 +1,251 @@
+// McpServerTask — task registry entry for the 'mcp_server' type.
+//
+// An MCP server may run a tools/call as a durable task (the tasks utility
+// from the MCP spec). When it does, services/mcp/tasks.ts registers one of
+// these in AppState and polls tasks/get until a terminal status. The model
+// gets a "task started" tool result immediately and the real result arrives
+// through the same task-notification machinery as local background tasks.
+
+import type { SetAppState, Task, TaskStateBase } from '../../Task.js'
+import type { AppState } from '../../state/AppState.js'
+import {
+  OUTPUT_FILE_TAG,
+  STATUS_TAG,
+  SUMMARY_TAG,
+  TASK_ID_TAG,
+  TASK_NOTIFICATION_TAG,
+  TOOL_USE_ID_TAG,
+} from '../../constants/xml.js'
+import type { AgentId } from '../../types/ids.js'
+import { logForDebugging } from '../../utils/debug.js'
+import {
+  dequeueAllMatching,
+  enqueuePendingNotification,
+} from '../../utils/messageQueueManager.js'
+import {
+  evictTaskOutput,
+  getTaskOutputPath,
+} from '../../utils/task/diskOutput.js'
+import { updateTaskState } from '../../utils/task/framework.js'
+import { escapeXml } from '../../utils/xml.js'
+
+export type McpServerTaskState = TaskStateBase & {
+  type: 'mcp_server'
+  /** MCP server config name that owns the remote task. */
+  mcpServerName: string
+  /** Tool name as the server knows it (without the mcp__ prefix). */
+  mcpToolName: string
+  /** Task id assigned by the MCP server, used for tasks/get/result/cancel. */
+  mcpTaskId: string
+  /** Agent that initiated the tool call, for addressed notifications. */
+  agentId?: AgentId
+  /** Last statusMessage reported by the server, if any. */
+  statusMessage?: string
+  /**
+   * Why the last tasks/cancel did not take. Kept apart from statusMessage so
+   * a routine server update cannot overwrite it; cleared on a terminal state.
+   */
+  cancelError?: string
+}
+
+export function isMcpServerTask(task: unknown): task is McpServerTaskState {
+  return (
+    typeof task === 'object' &&
+    task !== null &&
+    'type' in task &&
+    task.type === 'mcp_server'
+  )
+}
+
+/**
+ * tasks/cancel goes through the live MCP connection, which only the
+ * services/mcp layer can reach. It registers this hook when tracking
+ * starts; before that there is nothing server-side to cancel.
+ */
+export type McpServerTaskCancelOptions = {
+  /** End the local task and stop tracking it if the server rejects the cancel. */
+  releaseOnFailure?: boolean
+  /** Bound on the tasks/cancel request. */
+  timeoutMs?: number
+}
+
+/**
+ * Resolves false when the task is not tracked, so the caller owns its
+ * terminal transition; true when the tracking layer has set or will set it.
+ */
+type McpServerTaskCanceler = (
+  localTaskId: string,
+  opts?: McpServerTaskCancelOptions,
+) => Promise<boolean>
+
+let cancelHook: McpServerTaskCanceler | undefined
+
+export function registerMcpServerTaskCanceler(
+  fn: McpServerTaskCanceler,
+): void {
+  cancelHook = fn
+}
+
+function mcpTerminalSummary(
+  description: string,
+  status: 'completed' | 'failed' | 'killed',
+  statusMessage?: string,
+): string {
+  switch (status) {
+    case 'completed':
+      return `MCP server task "${description}" completed`
+    case 'failed':
+      return `MCP server task "${description}" failed${statusMessage ? `: ${statusMessage}` : ''}`
+    case 'killed':
+      return `MCP server task "${description}" was stopped${statusMessage ? `: ${statusMessage}` : ''}`
+  }
+}
+
+/**
+ * Terminal transition plus model notification, in one step. The status
+ * update only applies from a non-terminal state, so a user kill landing
+ * while a tasks/result fetch is in flight is not overwritten by the late
+ * result. The notified flag is claimed inside the same update, so exactly
+ * one task-notification is enqueued across the poll loop, status
+ * notifications, kill, and disconnect paths.
+ */
+export function markMcpServerTaskTerminal(
+  taskId: string,
+  setAppState: SetAppState,
+  status: 'completed' | 'failed' | 'killed',
+  opts?: { statusMessage?: string; summary?: string },
+): void {
+  let notify:
+    | { description: string; toolUseId?: string; agentId?: AgentId }
+    | undefined
+  updateTaskState<McpServerTaskState>(taskId, setAppState, task => {
+    if (task.status !== 'running' && task.status !== 'pending') {
+      return task
+    }
+    if (!task.notified) {
+      notify = {
+        description: task.description,
+        toolUseId: task.toolUseId,
+        agentId: task.agentId,
+      }
+    }
+    return {
+      ...task,
+      status,
+      statusMessage: opts?.statusMessage ?? task.statusMessage,
+      cancelError: undefined,
+      notified: true,
+      endTime: Date.now(),
+    }
+  })
+  if (!notify) return
+  const outputPath = getTaskOutputPath(taskId)
+  const toolUseIdLine = notify.toolUseId
+    ? `\n<${TOOL_USE_ID_TAG}>${notify.toolUseId}</${TOOL_USE_ID_TAG}>`
+    : ''
+  const summary =
+    opts?.summary ??
+    mcpTerminalSummary(notify.description, status, opts?.statusMessage)
+  const message = `<${TASK_NOTIFICATION_TAG}>
+<${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>${toolUseIdLine}
+<${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
+<${STATUS_TAG}>${status}</${STATUS_TAG}>
+<${SUMMARY_TAG}>${escapeXml(summary)}</${SUMMARY_TAG}>
+</${TASK_NOTIFICATION_TAG}>`
+  enqueuePendingNotification({
+    value: message,
+    mode: 'task-notification',
+    priority: 'later',
+    agentId: notify.agentId,
+  })
+}
+
+export const McpServerTask: Task = {
+  name: 'McpServerTask',
+  type: 'mcp_server',
+  async kill(taskId, setAppState) {
+    try {
+      await cancelHook?.(taskId)
+    } catch (e) {
+      // The server refused the cancel, so it may still be running the task:
+      // leave the local task running (the hook recorded the reason) so a
+      // second stop can retry, instead of reporting a kill that did not happen.
+      logForDebugging(
+        `mcp_server task ${taskId} cancel request failed: ${e instanceof Error ? e.message : String(e)}`,
+      )
+      return
+    }
+    markMcpServerTaskTerminal(taskId, setAppState, 'killed')
+    void evictTaskOutput(taskId)
+  },
+}
+
+/**
+ * Stop a running mcp_server task. Used by the background tasks dialog
+ * ('x' shortcut and detail-view kill button).
+ */
+export function killMcpServerTask(
+  taskId: string,
+  setAppState: SetAppState,
+): void {
+  void McpServerTask.kill(taskId, setAppState)
+}
+
+// Agent exit waits on these cancels, so a server that never answers must not
+// hold the exit for the default request timeout.
+const AGENT_EXIT_CANCEL_TIMEOUT_MS = 10_000
+
+/**
+ * Cancel the running server tasks an exiting agent started and purge its
+ * queued notifications. The agent's query loop is gone, so nothing would
+ * drain a completion addressed to it. Tasks are marked notified first so the
+ * cancel's terminal transition does not enqueue a fresh notification for the
+ * dead agent after the purge. Await it before closing the agent's own MCP
+ * connections: a closed connection can no longer carry tasks/cancel. A
+ * rejected cancel still ends the local task (failed), since no later stop
+ * could reach it.
+ */
+export async function killMcpServerTasksForAgent(
+  agentId: AgentId,
+  getAppState: () => AppState,
+  setAppState: SetAppState,
+): Promise<void> {
+  const tasks = getAppState().tasks ?? {}
+  const cancels: Promise<void>[] = []
+  for (const [taskId, task] of Object.entries(tasks)) {
+    if (
+      isMcpServerTask(task) &&
+      task.agentId === agentId &&
+      task.status === 'running'
+    ) {
+      logForDebugging(
+        `killMcpServerTasksForAgent: cancelling mcp_server task ${taskId} (agent ${agentId} exiting)`,
+      )
+      updateTaskState<McpServerTaskState>(taskId, setAppState, t => ({
+        ...t,
+        notified: true,
+      }))
+      cancels.push(
+        (async () => {
+          const tracked = await cancelHook?.(taskId, {
+            releaseOnFailure: true,
+            timeoutMs: AGENT_EXIT_CANCEL_TIMEOUT_MS,
+          })
+          // A disconnect or completion that finalized the task first sets its
+          // own terminal state; do not overwrite it with killed.
+          if (!tracked) markMcpServerTaskTerminal(taskId, setAppState, 'killed')
+          void evictTaskOutput(taskId)
+        })(),
+      )
+    }
+  }
+  const results = await Promise.allSettled(cancels)
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      logForDebugging(
+        `killMcpServerTasksForAgent: cancel failed for agent ${agentId}: ${r.reason}`,
+      )
+    }
+  }
+  dequeueAllMatching(cmd => cmd.agentId === agentId)
+}
