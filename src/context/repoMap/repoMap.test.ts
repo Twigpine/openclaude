@@ -159,6 +159,105 @@ describe('symbol extraction', () => {
     }
   })
 
+  test('extracts call references from TypeScript files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-ts-calls-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'calls.ts'),
+        [
+          "import { computeTotal } from './helpers'",
+          '',
+          'export function run(items: number[]) {',
+          '  const total = computeTotal(items)',
+          '  const loaded = store.load(total)',
+          "  require('legacy')",
+          '  return new Widget(loaded)',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('calls.ts', tempDir)
+      expect(result).not.toBeNull()
+
+      const refs = result!.tags.filter(tag => tag.kind === 'ref')
+      const refNames = refs.map(tag => tag.name)
+
+      // Plain calls were previously missing entirely.
+      expect(refNames).toContain('computeTotal')
+      // Constructor references still resolve, as before.
+      expect(refNames).toContain('Widget')
+      // `require` is module loading, not a symbol reference (matches the
+      // JavaScript query).
+      expect(refNames).not.toContain('require')
+      // Member calls are intentionally excluded: `.load()` could belong to any
+      // class, so they would add mostly-noise edges to the graph.
+      expect(refNames).not.toContain('load')
+
+      const callRefs = refs.filter(tag => tag.subKind === 'call')
+      expect(callRefs.map(tag => tag.name)).toEqual(['computeTotal'])
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('ranks a file that is only reached through calls', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-ts-call-rank-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'helpers.ts'),
+        [
+          'export function computeTotal(items: number[]) {',
+          '  return items.length',
+          '}',
+          '',
+          'export function parseAmount(raw: string) {',
+          '  return Number(raw)',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      // Calls both helpers without referencing them in any type position.
+      writeFileSync(
+        join(tempDir, 'main.ts'),
+        [
+          'export function run(raw: string) {',
+          '  return computeTotal([parseAmount(raw)])',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'unrelated.ts'),
+        [
+          'export function standalone() {',
+          '  return 1',
+          '}',
+          '',
+          'export function another() {',
+          '  return 2',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const files = ['main.ts', 'helpers.ts', 'unrelated.ts']
+      const tags = await Promise.all(files.map(file => extractTags(file, tempDir)))
+      const graph = buildGraph(
+        tags.filter((entry): entry is FileTags => entry !== null),
+      )
+      expect(graph.hasEdge('main.ts', 'helpers.ts')).toBe(true)
+      expect(graph.getEdgeAttribute('main.ts', 'helpers.ts', 'weight')).toBeGreaterThan(0)
+
+      const result = await buildRepoMap({ root: tempDir, files, maxTokens: 1024 })
+      expect(result.map.split('\n')[0]).toBe('helpers.ts:')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
   test('extracts definitions and references from JavaScript files', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'repomap-js-'))
     try {
