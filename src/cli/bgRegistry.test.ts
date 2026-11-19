@@ -1,23 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test'
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import {
   chmod,
+  link,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import * as lockfile from '../utils/lockfile.js'
 import * as backgroundSessionRegistry from './bgRegistry.js'
 import {
   _setBackgroundSessionsRootForTesting,
+  BackgroundSessionWaitError,
   cleanupBackgroundSessionsBefore,
   createBackgroundSession,
   isBackgroundSessionProcessAlive,
@@ -26,8 +32,10 @@ import {
   markBackgroundSessionKilled,
   readBackgroundSessionForOwner,
   refreshBackgroundSessionStatus,
+  readPinnedBackgroundSessionForWait,
   refreshBackgroundSessionStatuses,
   resolveBackgroundSession,
+  resolveBackgroundSessionForWait,
   snapshotBackgroundSessionRecoveryJournal,
   takeBackgroundSessionRecoveryBatch,
   verifyBackgroundSessionProcessIdentity,
@@ -2365,6 +2373,159 @@ describe('background session registry', () => {
     expect(await Bun.file(metadataPath).exists()).toBe(false)
   })
 
+  it('keeps the first-published terminal fact when the sync exit fallback races async finalization', async () => {
+    // Regression test for CodeRabbit #2497: if exit occurs while
+    // asynchronous finalization is pending, the synchronous ELOCKED
+    // fallback publishes without the per-ID lock. Both installers could
+    // observe a missing fact and one rename could replace the other, so
+    // a waiter could observe a result that later changes. The first
+    // publisher must win: the fallback completes the pending publish
+    // instead of replacing it.
+    const session = await createBackgroundSession({
+      id: 'bg-terminal-fact-race',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-terminal-fact-race',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let releaseHook: (() => void) | undefined
+    let hookReachedResolve: (() => void) | undefined
+    const hookReached = new Promise<void>(resolve => {
+      hookReachedResolve = resolve
+    })
+    const hookGate = new Promise<void>(resolve => {
+      releaseHook = resolve
+    })
+    backgroundSessionRegistry._setTerminalFactPublishHookForTesting(
+      async () => {
+        hookReachedResolve?.()
+        await hookGate
+      },
+    )
+    // Start async finalization and pause it after it has claimed the
+    // publish but before it renames: it holds the per-ID lock, so the
+    // sync call below takes the ELOCKED fallback.
+    const asyncTermination = recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      { ownerPid: session.pid, expectedSession: session },
+    )
+    // Mark the rejection handled so a failure mid-test cannot surface
+    // as an unhandled rejection; awaiting the promise still throws.
+    asyncTermination.catch(() => {})
+    try {
+      await hookReached
+      // The exit fallback cannot wait for the lock, so it publishes
+      // without it — but it must not replace the pending publish.
+      recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      // The fallback completed the first publisher's fact, so the
+      // waiter already sees the first exit code — not the fallback's.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'exited', exitCode: 0 })
+      releaseHook?.()
+      const terminated = await asyncTermination
+      expect(terminated).toMatchObject({ status: 'exited', exitCode: 0 })
+      // The resumed installer must not replace the published fact.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'exited', exitCode: 0 })
+      const stored = JSON.parse(
+        await readFile(
+          terminalFactPath(session.id, 'natural', TEST_PROCESS_MARKER),
+          'utf8',
+        ),
+      ) as { exitCode?: number }
+      expect(stored.exitCode).toBe(0)
+    } finally {
+      backgroundSessionRegistry._setTerminalFactPublishHookForTesting(
+        undefined,
+      )
+      releaseHook?.()
+      await asyncTermination.catch(() => {})
+    }
+  })
+
+  it('keeps the first-published terminal fact when a publisher claims after the target check', async () => {
+    // Regression test for CodeRabbit #2497: publishTerminalFact checked
+    // the target before claiming the publish, but not after. A sync
+    // fallback publishing (and removing its claim) in that gap let the
+    // paused installer rename over the completed fact. The first
+    // publisher must win.
+    const session = await createBackgroundSession({
+      id: 'bg-terminal-fact-recheck',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-terminal-fact-recheck',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    let releaseHook: (() => void) | undefined
+    let hookReachedResolve: (() => void) | undefined
+    const hookReached = new Promise<void>(resolve => {
+      hookReachedResolve = resolve
+    })
+    const hookGate = new Promise<void>(resolve => {
+      releaseHook = resolve
+    })
+    backgroundSessionRegistry._setTerminalFactPublishClaimHookForTesting(
+      async () => {
+        hookReachedResolve?.()
+        await hookGate
+      },
+    )
+    // Start async finalization and pause it after the target check but
+    // before it claims the publish: it holds the per-ID lock, so the
+    // sync call below takes the ELOCKED fallback.
+    const asyncTermination = recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      { ownerPid: session.pid, expectedSession: session },
+    )
+    // Mark the rejection handled so a failure mid-test cannot surface
+    // as an unhandled rejection; awaiting the promise still throws.
+    asyncTermination.catch(() => {})
+    try {
+      await hookReached
+      // The fallback publishes exit code 3 while the first installer is
+      // paused between the target check and the claim.
+      recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      // The fallback already published, so the waiter sees its exit code.
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      releaseHook?.()
+      const terminated = await asyncTermination
+      // The resumed installer must not replace the published fact.
+      expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(
+        await resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+      const stored = JSON.parse(
+        await readFile(
+          terminalFactPath(session.id, 'natural', TEST_PROCESS_MARKER),
+          'utf8',
+        ),
+      ) as { exitCode?: number }
+      expect(stored.exitCode).toBe(3)
+    } finally {
+      backgroundSessionRegistry._setTerminalFactPublishClaimHookForTesting(
+        undefined,
+      )
+      releaseHook?.()
+      await asyncTermination.catch(() => {})
+    }
+  })
+
   it('reconciles stronger terminal facts and retries reservation release', async () => {
     const id = 'bg-terminal-reconciliation-retry'
     const name = 'terminal-reconciliation-retry'
@@ -3517,7 +3678,7 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
     stderrLogPath: '/tmp/stderr.log',
   }
 
-  it('settles promptly as unreadable when the command lookup is aborted', async () => {
+  it('settles promptly as aborted when the command lookup is aborted', async () => {
     const abort = new AbortController()
     const verifying = verifyBackgroundSessionProcessIdentityAsync(session, {
       isProcessAlive: () => true,
@@ -3538,7 +3699,11 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
     expect(settled).toBe(false)
 
     abort.abort()
-    await expect(verifying).resolves.toMatchObject({ state: 'unreadable' })
+    // An aborted lookup observed nothing: it is 'aborted', not
+    // 'unreadable', so the wait timeout boundary can re-observe with a
+    // fresh lookup instead of reporting the process unreadable
+    // (maintainer review 5948202472 on #2497).
+    await expect(verifying).resolves.toMatchObject({ state: 'aborted' })
   })
 
   it('reads the live command through the real async lookup', async () => {
@@ -3550,4 +3715,1130 @@ describe('verifyBackgroundSessionProcessIdentityAsync', () => {
     expect(command?.length).toBeGreaterThan(0)
     expect(await getProcessCommandAsync(42424242)).toBeNull()
   }, 15_000)
+})
+
+// Whether the temp filesystem folds filename case. The case-variant
+// fixtures that need two distinct directory entries (a canonical file
+// and a separate alias spelling) cannot exist on a case-insensitive
+// registry, so they are skipped there; the single-entry layout is
+// covered by a test that branches on the same probe at run time
+// (CodeRabbit #2497 review 5957376769). Probed once in the temp
+// directory, where the per-test registries live too.
+const CASE_INSENSITIVE_FS = ((): boolean => {
+  const probeDir = mkdtempSync(join(tmpdir(), 'openclaude-case-probe-'))
+  try {
+    const probe = join(probeDir, 'probe.json')
+    writeFileSync(probe, '{}')
+    try {
+      statSync(join(probeDir, 'PROBE.json'))
+      return true
+    } catch {
+      return false
+    }
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true })
+  }
+})()
+
+describe('background session wait strict reads', () => {
+  let configDir: string
+
+  function metadataPath(id: string): string {
+    return join(configDir, 'bg-sessions', 'sessions', `${id}.json`)
+  }
+
+  function terminalFactPath(id: string, kind: 'natural' | 'killed'): string {
+    return join(configDir, 'bg-sessions', 'terminal', `${id}.${kind}.json`)
+  }
+
+  // Links a case-variant path to its canonical file, reproducing how a
+  // case-insensitive registry opens one file under both spellings. On a
+  // case-insensitive filesystem the variant already resolves to the
+  // canonical file, so creating the link would fail with EEXIST — the
+  // native aliasing is the fixture there, and no link is created
+  // (CodeRabbit #2497 review 5954753623).
+  async function linkCaseVariant(
+    canonical: string,
+    variant: string,
+  ): Promise<void> {
+    try {
+      await stat(variant)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error
+      await symlink(canonical, variant)
+    }
+  }
+
+  async function waitErrorCode(
+    operation: () => Promise<unknown>,
+  ): Promise<string | undefined> {
+    try {
+      await operation()
+      return undefined
+    } catch (error) {
+      if (error instanceof BackgroundSessionWaitError) return error.code
+      throw error
+    }
+  }
+
+  function recordSyncSleepDurations(run: () => void) {
+    let elapsed = 0
+    const clock = jest.spyOn(performance, 'now').mockImplementation(() => elapsed++)
+    const sleeps: Array<{ elapsed: number; duration: number }> = []
+    const sleep = jest.spyOn(Atomics, 'wait').mockImplementation((_, __, ___, timeout) => {
+      const duration = timeout ?? 0
+      sleeps.push({ elapsed, duration })
+      elapsed += duration
+      return 'timed-out' as const
+    })
+    try {
+      run()
+      return sleeps
+    } finally {
+      sleep.mockRestore()
+      clock.mockRestore()
+    }
+  }
+
+  beforeEach(async () => {
+    configDir = await mkdtemp(join(tmpdir(), 'openclaude-bg-wait-registry-'))
+    _setBackgroundSessionsRootForTesting(join(configDir, 'bg-sessions'))
+  })
+
+  afterEach(async () => {
+    _setBackgroundSessionsRootForTesting(undefined)
+    await rm(configDir, { force: true, recursive: true })
+  })
+
+  it('resolves an exact ID with authoritative terminal facts applied', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-wait-1',
+      { exitCode: 3 },
+      { ownerPid: session.pid },
+    )
+
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-1')
+
+    expect(resolved.id).toBe('bg-wait-1')
+    expect(resolved.status).toBe('failed')
+    expect(resolved.exitCode).toBe(3)
+    expect(resolved.terminalReason).toBe('exit_code')
+  })
+
+  it('ignores a terminal fact published by another PID during name resolution', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    // A valid fact from another PID (e.g. a previous incarnation of the
+    // id): the non-strict registry reader ignores it via applyTerminalFacts,
+    // so name resolution must select the live session instead of failing
+    // with metadata_replaced (CodeRabbit #2497).
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), { recursive: true })
+    await writeFile(
+      terminalFactPath('bg-wait-1', 'natural'),
+      JSON.stringify({
+        version: 1,
+        id: 'bg-wait-1',
+        pid: 999999,
+        status: 'failed',
+        finishedAt: '2026-07-01T08:00:00.000Z',
+        terminalReason: 'exit_code',
+        exitCode: 3,
+      }),
+    )
+
+    const resolved = await resolveBackgroundSessionForWait('target')
+    expect(resolved.id).toBe('bg-wait-1')
+    expect(resolved.status).toBe('running')
+
+    // The pinned read still succeeds with the foreign fact ignored; only a
+    // changed metadata PID reports replacement.
+    const pinned = await readPinnedBackgroundSessionForWait({
+      id: 'bg-wait-1',
+      pid: 424242,
+    })
+    expect(pinned.status).toBe('running')
+  })
+
+  it('never reports metadata_malformed for sessions created during name resolution', async () => {
+    // writeNewSession publishes atomically (temp file + rename), so a
+    // name/prefix scan racing a creation must never read a partially-written
+    // metadata document as malformed (CodeRabbit #2497).
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    // Both groups are awaited with allSettled, so a rejection in either
+    // group cannot skip the other group's join: teardown must never run
+    // while a creation is still using the registry root (CodeRabbit
+    // #2497 review 5963778469).
+    const creations = Promise.allSettled(
+      Array.from({ length: 8 }, (_, index) =>
+        createBackgroundSession({
+          id: `bg-wait-new-${index}`,
+          pid: 424250 + index,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: `sess-wait-new-${index}`,
+        }),
+      ),
+    )
+    const scans = Promise.allSettled(
+      Array.from({ length: 40 }, () =>
+        waitErrorCode(() => resolveBackgroundSessionForWait('target')),
+      ),
+    )
+    const [creationResults, scanResults] = await Promise.all([
+      creations,
+      scans,
+    ])
+    expect(
+      creationResults.every(result => result.status === 'fulfilled'),
+    ).toBe(true)
+    expect(
+      scanResults.every(
+        result => result.status === 'fulfilled' && result.value === undefined,
+      ),
+    ).toBe(true)
+  })
+
+  it('resolves by live name, ID prefix, and terminal name in selection order', async () => {
+    await createBackgroundSession({
+      id: 'bg-waaa1',
+      name: 'nightly',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-waaa1',
+    })
+    const live = await createBackgroundSession({
+      id: 'bg-wbbb2',
+      name: 'worker',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wbbb2',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-waaa1',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+    // A competing session whose ID starts with `worker`: without
+    // live-name precedence the ID-prefix fallback would select it, so
+    // the `worker` assertion below only passes when the live name
+    // match wins (CodeRabbit #2497 review 5963778469).
+    await createBackgroundSession({
+      id: 'worker-cccc3',
+      name: 'other',
+      pid: 424244,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-cccc3',
+    })
+
+    expect(
+      (
+        await resolveBackgroundSessionForWait('worker', {
+          isProcessAlive: () => true,
+          getProcessCommandAsync: async () => 'sleep 30',
+        })
+      ).id,
+    ).toBe('bg-wbbb2')
+    expect((await resolveBackgroundSessionForWait('bg-wbbb')).id).toBe(
+      'bg-wbbb2',
+    )
+    expect((await resolveBackgroundSessionForWait('nightly')).id).toBe('bg-waaa1')
+    expect(live.id).toBe('bg-wbbb2')
+  })
+
+  it('lets a live name match win over an exited row with a malformed terminal fact', async () => {
+    // Regression test for CodeRabbit #2497 review 5963778469: an old
+    // exited `worker` row whose terminal fact is malformed must not
+    // block a newer live `worker` — the old row cannot become live, so
+    // its facts are read only when selection reaches it. The persisted
+    // exited status below is what the reconciler writes back after
+    // applying a terminal fact.
+    const old = await createBackgroundSession({
+      id: 'bg-old1',
+      name: 'worker',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-old1',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-old1',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+    await writeFile(
+      metadataPath('bg-old1'),
+      JSON.stringify({ ...old, status: 'exited' }),
+    )
+    await writeFile(terminalFactPath('bg-old1', 'natural'), '{not json')
+    await createBackgroundSession({
+      id: 'bg-new2',
+      name: 'worker',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-new2',
+    })
+
+    const resolved = await resolveBackgroundSessionForWait('worker', {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'sleep 30',
+    })
+
+    expect(resolved.id).toBe('bg-new2')
+  })
+
+  it('still reports metadata_malformed when an exited row with a malformed terminal fact is selected', async () => {
+    // Same fixture as the live-wins test above, but with no live
+    // `worker` to select: selection reaches the exited row, so its
+    // malformed fact still reports exit 4 (CodeRabbit #2497 review
+    // 5963778469).
+    const old = await createBackgroundSession({
+      id: 'bg-old1',
+      name: 'worker',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-old1',
+    })
+    await recordBackgroundSessionNaturalTermination(
+      'bg-old1',
+      { exitCode: 0 },
+      { ownerPid: 424242 },
+    )
+    await writeFile(
+      metadataPath('bg-old1'),
+      JSON.stringify({ ...old, status: 'exited' }),
+    )
+    await writeFile(terminalFactPath('bg-old1', 'natural'), '{not json')
+
+    expect(
+      await waitErrorCode(() =>
+        resolveBackgroundSessionForWait('worker', {
+          isProcessAlive: () => true,
+          getProcessCommandAsync: async () => 'sleep 30',
+        }),
+      ),
+    ).toBe('metadata_malformed')
+  })
+
+  it('treats a stored-ID mismatch in the exact-ID file as missing and resolves by name', async () => {
+    // Regression test for CodeRabbit #2497 review 5953263672: on a
+    // case-insensitive registry `wait BG-ab` opens `bg-ab.json`, whose
+    // stored id (`bg-ab`) differs from the requested ID. The strict
+    // reader must treat that read as missing — not malformed — so name
+    // matching can still select the session named `BG-ab`. The symlink
+    // reproduces the case-insensitive open on a case-sensitive
+    // filesystem: the same file is reachable under both case variants.
+    await createBackgroundSession({
+      id: 'bg-ab',
+      name: 'BG-ab',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-bg-ab',
+    })
+    await linkCaseVariant(metadataPath('bg-ab'), metadataPath('BG-ab'))
+
+    const resolved = await resolveBackgroundSessionForWait('BG-ab')
+
+    expect(resolved.id).toBe('bg-ab')
+    expect(resolved.name).toBe('BG-ab')
+  })
+
+  it('returns not found instead of malformed when no name matches a stored-ID mismatch', async () => {
+    // Same case-insensitive exact-ID mismatch as above, but no session
+    // is named `BG-ab`: the user must get `not_found`, not a
+    // malformed-metadata error (CodeRabbit #2497 review 5953263672).
+    await createBackgroundSession({
+      id: 'bg-ab',
+      name: 'other-name',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-bg-ab',
+    })
+    await linkCaseVariant(metadataPath('bg-ab'), metadataPath('BG-ab'))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('BG-ab')),
+    ).toBe('not_found')
+  })
+
+  it('keeps failing closed when a pinned re-read has a stored-ID mismatch', async () => {
+    // The mismatch-as-missing rule applies to the resolver's exact-ID
+    // path only: a pinned re-read whose stored id differs from the
+    // pinned id is a replaced document and must still fail with exit
+    // code 4 instead of retargeting (CodeRabbit #2497 review
+    // 5953263672).
+    await createBackgroundSession({
+      id: 'bg-ab',
+      name: 'BG-ab',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-bg-ab',
+    })
+    await linkCaseVariant(metadataPath('bg-ab'), metadataPath('BG-ab'))
+
+    expect(
+      await waitErrorCode(() =>
+        readPinnedBackgroundSessionForWait({ id: 'BG-ab', pid: 424242 }),
+      ),
+    ).toBe('metadata_malformed')
+  })
+
+  it('fails closed when an enumerated row has a stored ID with no canonical file', async () => {
+    // Regression test for CodeRabbit #2497 review 5954753623: a row
+    // whose stored id differs from its filename and names no valid
+    // canonical row must fail the lookup instead of being skipped
+    // silently. The stray row below carries the requested name, so
+    // skipping it would pin the other prefix candidate and report the
+    // wrong session; only a row that aliases a valid canonical row
+    // (the case-variant fixtures above) may be skipped.
+    await createBackgroundSession({
+      id: 'bg-job2',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-job2',
+    })
+    await createBackgroundSession({
+      id: 'bg-other',
+      name: 'bg-job',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-other',
+    })
+    // Move the row under a filename its stored id does not name, with
+    // no canonical file left behind: bg-job1.json holds a session
+    // whose stored id is bg-other, and bg-other.json no longer exists.
+    await rename(metadataPath('bg-other'), metadataPath('bg-job1'))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-job')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('fails closed when an enumerated row claims another session id from a different file', async () => {
+    // Regression test for CodeRabbit #2497 review 5956497652: a valid
+    // canonical row does not make a mismatch an alias. The row below
+    // lives in bg-job1.json but stores id bg-other, while bg-other.json
+    // is a separate valid session — so the row is a stray document
+    // whose stored name (bg-job) could match the target, and skipping
+    // it would pin the bg-job2 prefix candidate instead of failing.
+    // Only a mismatch whose row and canonical reads opened the same
+    // file (the case-variant fixtures above) may be retained.
+    await createBackgroundSession({
+      id: 'bg-job2',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-job2',
+    })
+    await createBackgroundSession({
+      id: 'bg-other',
+      name: 'bg-job',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-other',
+    })
+    // Move the row under a filename its stored id does not name, then
+    // write a separate valid canonical file directly: recreating the
+    // session via createBackgroundSession would fail on the per-id log
+    // files, which the rename leaves behind.
+    await rename(metadataPath('bg-other'), metadataPath('bg-job1'))
+    const canonicalRaw = JSON.parse(
+      await readFile(metadataPath('bg-job1'), 'utf8'),
+    ) as Record<string, unknown>
+    canonicalRaw.name = 'other-name'
+    canonicalRaw.sessionId = 'sess-other2'
+    await writeFile(metadataPath('bg-other'), JSON.stringify(canonicalRaw))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-job')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('retains a verified case-variant alias as the only candidate for its name', async () => {
+    // Regression test for CodeRabbit #2497 review 5956497652, kept as
+    // the TWO-ENTRY deduplication test (CodeRabbit #2497 review
+    // 5957376769): on a case-sensitive filesystem the symlink makes
+    // both spellings list the same file, so resolving the live name
+    // once proves the deduplication — without it the same file would
+    // appear twice and the name would report ambiguous. On a
+    // case-insensitive registry the canonical row may be enumerated
+    // only under its case variant, so a verified alias must still be
+    // retained as a candidate instead of skipped — otherwise the live
+    // named session loses to the unrelated bg-job2 prefix match. The
+    // only-one-spelling-listed layout is covered by the next test.
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)', 'sess-bg-other'],
+      { stdio: 'ignore' },
+    )
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    try {
+      await createBackgroundSession({
+        id: 'bg-other',
+        name: 'bg-job',
+        pid: child.pid,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-bg-other',
+      })
+      await createBackgroundSession({
+        id: 'bg-job2',
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-job2',
+      })
+      await linkCaseVariant(metadataPath('bg-other'), metadataPath('BG-other'))
+
+      const resolved = await resolveBackgroundSessionForWait('bg-job')
+      expect(resolved.id).toBe('bg-other')
+      expect(resolved.name).toBe('bg-job')
+    } finally {
+      child.kill()
+    }
+  })
+
+  it('resolves by name when only the case-variant spelling is listed', async () => {
+    // Regression test for CodeRabbit #2497 review 5957376769: the
+    // two-entry fixture above proves deduplication, but on a
+    // case-sensitive filesystem both spellings are listed there, so it
+    // cannot prove the resolver handles the layout where the canonical
+    // row is enumerated ONLY under its case variant. Rename the row
+    // through an intermediate filename to BG-other.json — a direct
+    // rename to the case variant is a no-op on a case-insensitive
+    // filesystem — and assert only that spelling is listed before
+    // resolving bg-job. On a case-insensitive registry the alias
+    // spelling opens the canonical file, so the name resolves; on a
+    // case-sensitive registry the canonical file is genuinely gone, so
+    // the row is a stray document and the lookup fails closed instead
+    // of silently pinning the unrelated prefix candidate.
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)', 'sess-bg-other'],
+      { stdio: 'ignore' },
+    )
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    try {
+      await createBackgroundSession({
+        id: 'bg-other',
+        name: 'bg-job',
+        pid: child.pid,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-bg-other',
+      })
+      await createBackgroundSession({
+        id: 'bg-job2',
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-job2',
+      })
+      const sessionsDir = dirname(metadataPath('bg-other'))
+      const intermediate = join(sessionsDir, 'bg-other.tmp')
+      await rename(metadataPath('bg-other'), intermediate)
+      await rename(intermediate, metadataPath('BG-other'))
+      const listed = (await readdir(sessionsDir)).filter(f =>
+        f.endsWith('.json'),
+      )
+      expect(listed).toContain('BG-other.json')
+      expect(listed).not.toContain('bg-other.json')
+      let caseInsensitive = false
+      try {
+        await stat(metadataPath('bg-other'))
+        caseInsensitive = true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          throw error
+        }
+      }
+      if (caseInsensitive) {
+        const resolved = await resolveBackgroundSessionForWait('bg-job')
+        expect(resolved.id).toBe('bg-other')
+        expect(resolved.name).toBe('bg-job')
+      } else {
+        expect(
+          await waitErrorCode(() => resolveBackgroundSessionForWait('bg-job')),
+        ).toBe('metadata_malformed')
+      }
+    } finally {
+      child.kill()
+    }
+  })
+
+  // Builds the two-file alias fixture for the identity-retry tests:
+  // bg-other.json and BG-other.json hold sessions for id bg-other, but
+  // are different files (different inodes), so the alias read and the
+  // canonical read disagree until the BG-other.json entry is repointed
+  // at the canonical file. The alias spelling holds a large stored
+  // command while the canonical file holds a small one. Liveness still
+  // matches on the sessionId token, not the stored command.
+  // Case-sensitive filesystems only (CodeRabbit #2497 review
+  // 5957376769).
+  async function createSplitAliasFixture(): Promise<{
+    child: ReturnType<typeof spawn>
+  }> {
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)', 'sess-bg-other'],
+      { stdio: 'ignore' },
+    )
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    try {
+      const padding = Array.from({ length: 20000 }, () => 'x'.repeat(100))
+      await createBackgroundSession({
+        id: 'bg-other',
+        name: 'bg-job',
+        pid: child.pid,
+        cwd: '/repo',
+        command: ['sleep', '30', ...padding],
+        sessionId: 'sess-bg-other',
+      })
+      await createBackgroundSession({
+        id: 'bg-job2',
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-job2',
+      })
+      // Hard-link the alias spelling to the created (large) row, then
+      // replace the canonical path with a small session for the same
+      // id/name/pid under a new inode.
+      await link(metadataPath('bg-other'), metadataPath('BG-other'))
+      const large = JSON.parse(
+        await readFile(metadataPath('bg-other'), 'utf8'),
+      ) as Record<string, unknown>
+      const small = { ...large, command: ['sleep', '30'] }
+      const tmp = join(dirname(metadataPath('bg-other')), 'bg-other.tmp')
+      await writeFile(tmp, JSON.stringify(small))
+      await rename(tmp, metadataPath('bg-other'))
+    } catch (error) {
+      // The caller never received the child, so it cannot clean it up:
+      // stop it here and wait for the exit before reporting the setup
+      // failure (CodeRabbit #2497 review 5961433156).
+      child.kill()
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(() => resolve(), 5000)
+        child.once('exit', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+      })
+      throw error
+    }
+    return { child }
+  }
+
+  it.skipIf(CASE_INSENSITIVE_FS)(
+    'still fails closed when a verified alias read and its canonical read open different files',
+    async () => {
+      // Regression test for CodeRabbit #2497 review 5957376769: the
+      // identity-mismatch retry must not accept a row whose alias and
+      // canonical reads stably open different files — re-reading the
+      // enumerated path returns the same distinct identity, so the
+      // lookup still fails with metadata_malformed instead of pinning
+      // the row or the unrelated prefix candidate.
+      const { child } = await createSplitAliasFixture()
+      try {
+        expect(
+          await waitErrorCode(() => resolveBackgroundSessionForWait('bg-job')),
+        ).toBe('metadata_malformed')
+      } finally {
+        child.kill()
+      }
+    },
+  )
+
+  it.skipIf(CASE_INSENSITIVE_FS).each(['BG-other', 'bg-other'])(
+    'reports unreadable metadata when %s cannot be reread during alias verification',
+    async id => {
+      const { child } = await createSplitAliasFixture()
+      try {
+        const code = await waitErrorCode(() =>
+          resolveBackgroundSessionForWait('bg-job', {
+            _onAliasIdentityMismatchForTesting: async () => {
+              await rm(metadataPath(id))
+              await mkdir(metadataPath(id))
+            },
+          }),
+        )
+        expect(code).toBe('metadata_unreadable')
+      } finally {
+        child.kill()
+      }
+    },
+  )
+
+  it.skipIf(CASE_INSENSITIVE_FS)(
+    'retries the alias check when the enumerated file is replaced between reads',
+    async () => {
+      // Regression test for CodeRabbit #2497 review 5957376769: when
+      // replaceSessionFile renames a valid update into place between
+      // the alias read and the canonical read, the two reads disagree
+      // — the resolver must re-read both paths and accept the row once
+      // the fresh reads agree, instead of failing with
+      // metadata_malformed. The replacement and repoint happen in the
+      // mismatch hook, so they land strictly between the mismatch and
+      // the retry's re-reads: no timer, and the hook count proves the
+      // retry path ran (CodeRabbit #2497 review 5961433156). The hook
+      // replaces the canonical file with a new file first, then points
+      // the alias at that replacement: a retry that refreshes only the
+      // alias would compare the fresh alias identity against the stale
+      // canonical one and fail this row (CodeRabbit #2497 review
+      // 5963778469).
+      const { child } = await createSplitAliasFixture()
+      try {
+        const sessionsDir = dirname(metadataPath('bg-other'))
+        let mismatchHookCalls = 0
+        const resolved = await resolveBackgroundSessionForWait('bg-job', {
+          _onAliasIdentityMismatchForTesting: async () => {
+            mismatchHookCalls++
+            const replacement = join(sessionsDir, 'bg-other.tmp')
+            const content = await readFile(metadataPath('bg-other'), 'utf8')
+            await writeFile(replacement, content)
+            await rename(replacement, metadataPath('bg-other'))
+            const repoint = join(sessionsDir, 'BG-other.tmp')
+            await link(metadataPath('bg-other'), repoint)
+            await rename(repoint, metadataPath('BG-other'))
+          },
+        })
+        // The hook fires only on a mismatch that is retried: exactly
+        // one call proves the retry path was exercised (without the
+        // retry the lookup fails with metadata_malformed).
+        expect(mismatchHookCalls).toBe(1)
+        expect(resolved.id).toBe('bg-other')
+        expect(resolved.name).toBe('bg-job')
+      } finally {
+        child.kill()
+      }
+    },
+  )
+
+  it.skipIf(CASE_INSENSITIVE_FS)(
+    'keeps one candidate when a verified alias and its canonical entry share a stored id',
+    async () => {
+      // Regression test for CodeRabbit #2497 review 5961433156: a
+      // verified alias adds bg-other from one inode, and a metadata
+      // update replaces the canonical file before the scan reads the
+      // canonical entry — the two rows then carry different file
+      // identities for one validated stored ID, and the lookup must
+      // resolve the session instead of reporting an ambiguous name.
+      // The repoint below makes the alias verify; the replacement
+      // happens in the verified hook, so it lands strictly after
+      // verification and before the canonical entry's read, whichever
+      // entry the directory lists first.
+      const { child } = await createSplitAliasFixture()
+      try {
+        // Repoint the alias spelling at the canonical file first, so
+        // the alias check verifies: a prepared hard link to
+        // bg-other.json renamed into place atomically.
+        const sessionsDir = dirname(metadataPath('bg-other'))
+        const repoint = join(sessionsDir, 'BG-other.tmp')
+        await link(metadataPath('bg-other'), repoint)
+        await rename(repoint, metadataPath('BG-other'))
+        let verifiedHookCalls = 0
+        const resolved = await resolveBackgroundSessionForWait('bg-job', {
+          _afterAliasVerifiedForTesting: async () => {
+            verifiedHookCalls++
+            // Replace the canonical file with identical content under
+            // a new inode, as a metadata update would.
+            const replacement = join(sessionsDir, 'bg-other.tmp')
+            const content = await readFile(metadataPath('bg-other'), 'utf8')
+            await writeFile(replacement, content)
+            await rename(replacement, metadataPath('bg-other'))
+          },
+        })
+        // The hook fires only for the one verified alias row: exactly
+        // one call proves the replacement landed between verification
+        // and the canonical entry's read.
+        expect(verifiedHookCalls).toBe(1)
+        expect(resolved.id).toBe('bg-other')
+        expect(resolved.name).toBe('bg-job')
+      } finally {
+        child.kill()
+      }
+    },
+  )
+
+  it('prefers a live ID-prefix match over a dead exact-name row', async () => {
+    // Regression test for maintainer review 5948202472 (P2) on #2497:
+    // a `status: running` row with no terminal fact but a dead PID must
+    // not win exact-name resolution over a unique live ID-prefix match.
+    // The selector 'bg-abc' is both the dead row's name and the live
+    // row's ID prefix; the read-only liveness gate excludes the dead
+    // row, so prefix resolution reaches the live child.
+    await createBackgroundSession({
+      id: 'bg-dead1',
+      name: 'bg-abc',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-dead1',
+    })
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore',
+    })
+    if (child.pid === undefined) throw new Error('spawned child has no pid')
+    try {
+      await createBackgroundSession({
+        id: 'bg-abc999',
+        pid: child.pid,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-abc999',
+      })
+      const resolved = await resolveBackgroundSessionForWait('bg-abc')
+      expect(resolved.id).toBe('bg-abc999')
+      expect(resolved.status).toBe('running')
+    } finally {
+      child.kill()
+    }
+  })
+
+  it('reports not_found for an unknown selector', async () => {
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('nope')),
+    ).toBe('not_found')
+  })
+
+  it('reports ambiguous for an ID-prefix collision', async () => {
+    for (const id of ['bg-aaaa1111', 'bg-aaaa2222']) {
+      await createBackgroundSession({
+        id,
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: `sess-${id}`,
+      })
+    }
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-aaaa')),
+    ).toBe('ambiguous')
+  })
+
+  it('reports metadata_malformed for malformed exact-ID metadata', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await writeFile(metadataPath('bg-wait-1'), '{not json')
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-wait-1')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('reports metadata_malformed for a malformed terminal fact', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await mkdir(join(configDir, 'bg-sessions', 'terminal'), { recursive: true })
+    await writeFile(terminalFactPath('bg-wait-1', 'natural'), '{not json')
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('bg-wait-1')),
+    ).toBe('metadata_malformed')
+  })
+
+  it('resolves a valid long session name in the strict wait selector', async () => {
+    // Regression test for maintainer review 5942761094 (P2) on #2497:
+    // a 300-char ASCII name is accepted by launch, but the speculative
+    // exact-ID metadata path is 305 chars — over the 255-byte filename
+    // limit — so the open fails with ENAMETOOLONG. That must read as
+    // missing (a path that cannot exist), so the name scan can find the
+    // session, not as unreadable metadata.
+    const longName = 'a'.repeat(300)
+    await createBackgroundSession({
+      id: 'bg-wait-long',
+      name: longName,
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-long',
+    })
+
+    expect((await resolveBackgroundSessionForWait(longName)).id).toBe(
+      'bg-wait-long',
+    )
+  })
+
+  it('reports metadata_unreadable for an unreadable name-resolution entry', async () => {
+    await createBackgroundSession({
+      id: 'bg-wait-1',
+      name: 'target',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+    await createBackgroundSession({
+      id: 'bg-wait-2',
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-2',
+    })
+    await rm(metadataPath('bg-wait-2'))
+    await mkdir(metadataPath('bg-wait-2'))
+
+    expect(
+      await waitErrorCode(() => resolveBackgroundSessionForWait('target')),
+    ).toBe('metadata_unreadable')
+  })
+
+  it('reads a pinned session strictly and detects replacement', async () => {
+    const session = await createBackgroundSession({
+      id: 'bg-wait-1',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-1',
+    })
+
+    const pinned = await readPinnedBackgroundSessionForWait({
+      id: 'bg-wait-1',
+      pid: 424242,
+    })
+    expect(pinned.id).toBe('bg-wait-1')
+    expect(pinned.status).toBe('running')
+
+    await writeFile(
+      metadataPath('bg-wait-1'),
+      JSON.stringify({ ...session, pid: 999999 }),
+    )
+    expect(
+      await waitErrorCode(() =>
+        readPinnedBackgroundSessionForWait({ id: 'bg-wait-1', pid: 424242 }),
+      ),
+    ).toBe('metadata_replaced')
+
+    await rm(metadataPath('bg-wait-1'))
+    expect(
+      await waitErrorCode(() =>
+        readPinnedBackgroundSessionForWait({ id: 'bg-wait-1', pid: 424242 }),
+      ),
+    ).toBe('metadata_missing')
+  })
+
+  it.each([true, false])('detects a reused PID with generation metadata %s', async withGeneration => {
+    const session = await createBackgroundSession({
+      id: 'bg-wait-reused-pid',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-generation',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const identity = {
+      ...session,
+      terminalFactGeneration: withGeneration ? session.terminalFactGeneration : undefined,
+    }
+    await writeFile(metadataPath(session.id), JSON.stringify(identity))
+    expect((await readPinnedBackgroundSessionForWait(identity)).pid).toBe(session.pid)
+    await writeFile(metadataPath(session.id), JSON.stringify({
+      ...identity,
+      processMarker: OTHER_PROCESS_MARKER,
+      terminalFactGeneration: withGeneration ? OTHER_PROCESS_MARKER : undefined,
+    }))
+    expect(await waitErrorCode(() => readPinnedBackgroundSessionForWait(identity))).toBe('metadata_replaced')
+  })
+
+  it('verifies process identity asynchronously with an abortable lookup', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-identity',
+      pid: 4242,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-01T08:00:00.000Z',
+      updatedAt: '2026-07-01T08:00:00.000Z',
+      sessionId: 'conversation-identity',
+      command: ['node', 'openclaude', '1642'],
+      stdoutLogPath: '/tmp/stdout.log',
+      stderrLogPath: '/tmp/stderr.log',
+    }
+
+    const matches = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'node openclaude 1642 --serve',
+    })
+    expect(matches.state).toBe('matches')
+
+    const mismatch = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => 'node openclaude 16420 --serve',
+    })
+    expect(mismatch.state).toBe('mismatch')
+
+    const unreadable = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async () => null,
+    })
+    expect(unreadable.state).toBe('unreadable')
+
+    const notRunning = await verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => false,
+      getProcessCommandAsync: async () => {
+        throw new Error('lookup must not run for a dead process')
+      },
+    })
+    expect(notRunning.state).toBe('not-running')
+  })
+
+  it('reports aborted when the async identity lookup aborts', async () => {
+    const session: BackgroundSession = {
+      id: 'bg-identity',
+      pid: 4242,
+      cwd: '/repo',
+      status: 'running',
+      startedAt: '2026-07-01T08:00:00.000Z',
+      updatedAt: '2026-07-01T08:00:00.000Z',
+      sessionId: 'conversation-identity',
+      command: ['node', 'openclaude', '1642'],
+      stdoutLogPath: '/tmp/stdout.log',
+      stderrLogPath: '/tmp/stderr.log',
+    }
+    const controller = new AbortController()
+    const entered = Promise.withResolvers<void>()
+    const verification = verifyBackgroundSessionProcessIdentityAsync(session, {
+      isProcessAlive: () => true,
+      getProcessCommandAsync: async (_pid, { signal }) => {
+        return await new Promise<never>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+          entered.resolve()
+        })
+      },
+      signal: controller.signal,
+    })
+    expect(await Promise.race([entered.promise.then(() => true), verification.then(() => false)])).toBe(true)
+    controller.abort()
+    const aborted = await verification
+    expect(aborted.state).toBe('aborted')
+  })
+
+  it('sleeps between polls while synchronously waiting for a terminal fact (CodeRabbit #2497)', async () => {
+    // A stale publish claim whose tmp holds a complete fact, as if another
+    // installer claimed the publish and died before renaming it: the sync
+    // installer adopts the winner's publish, but only after
+    // waitForTerminalFactSync polls for the target. That loop must sleep
+    // 10 ms between reads like its async sibling instead of spinning
+    // readFileSync at 100% CPU until the 250 ms deadline.
+    await createBackgroundSession({
+      id: 'bg-wait-sync-sleep',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-sync-sleep',
+    })
+    const terminalDir = join(configDir, 'bg-sessions', 'terminal')
+    await mkdir(terminalDir, { recursive: true })
+    const claimedTmp = join(
+      terminalDir,
+      'bg-wait-sync-sleep.424242.00000000-0000-4000-8000-000000000000.tmp',
+    )
+    await writeFile(
+      claimedTmp,
+      JSON.stringify({
+        version: 1,
+        id: 'bg-wait-sync-sleep',
+        pid: 424242,
+        status: 'exited',
+        finishedAt: '2026-07-01T08:00:00.000Z',
+        terminalReason: 'exit_code',
+        exitCode: 0,
+      }),
+    )
+    const target = terminalFactPath('bg-wait-sync-sleep', 'natural')
+    await mkdir(`${target}.claim`, { recursive: true })
+    await writeFile(join(`${target}.claim`, 'tmp'), claimedTmp)
+
+    const sleepDurations = recordSyncSleepDurations(() =>
+      recordBackgroundSessionNaturalTerminationSync(
+        'bg-wait-sync-sleep',
+        { exitCode: 0 },
+        { ownerPid: 424242 },
+      ),
+    )
+
+    // One 250 ms wait burns ~25 polls at the async interval when the
+    // timer granularity is exact, fewer when a sleep overshoots; either
+    // way it must sleep rather than spin.
+    expect(
+      sleepDurations.filter(sleep => sleep.duration === 10).length,
+    ).toBeGreaterThanOrEqual(5)
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-sync-sleep')
+    expect(resolved.status).toBe('exited')
+    expect(resolved.exitCode).toBe(0)
+  })
+
+  it('sleeps between polls while synchronously waiting for a missing claim file (CodeRabbit #2497)', async () => {
+    // A claim directory with no claim file, as if the winner died between
+    // mkdir and the claim-file write: adoption waits for the target in
+    // waitForTerminalFactSync and then for the claim file in
+    // readTerminalFactClaimSync. Both loops must sleep 10 ms between
+    // reads; the stale claim is then removed and this installer publishes
+    // its own fact on the next attempt.
+    await createBackgroundSession({
+      id: 'bg-wait-sync-claim',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-wait-sync-claim',
+    })
+    const target = terminalFactPath('bg-wait-sync-claim', 'natural')
+    await mkdir(`${target}.claim`, { recursive: true })
+
+    const sleepDurations = recordSyncSleepDurations(() =>
+      recordBackgroundSessionNaturalTerminationSync(
+        'bg-wait-sync-claim',
+        { exitCode: 0 },
+        { ownerPid: 424242 },
+      ),
+    )
+
+    // The two 250 ms budgets are consecutive on the controlled clock.
+    // Sleeps in the fact wait cannot prove that the later claim wait slept.
+    expect(sleepDurations.some(sleep => sleep.elapsed < 250 && sleep.duration === 10)).toBe(true)
+    expect(sleepDurations.some(sleep => sleep.elapsed >= 250 && sleep.duration === 10)).toBe(true)
+    const resolved = await resolveBackgroundSessionForWait('bg-wait-sync-claim')
+    expect(resolved.status).toBe('exited')
+    expect(resolved.exitCode).toBe(0)
+  })
 })

@@ -255,7 +255,33 @@ openclaude ps
 openclaude logs auth-refactor
 openclaude logs auth-refactor -f
 openclaude kill auth-refactor
+openclaude wait auth-refactor --timeout 30m --json
 ```
+
+Wait for one local background session to reach a terminal state, for shell
+scripts and CI jobs. `wait` prints nothing while waiting. Without `--json`
+it prints one line for the terminal outcome (`exited with code 0`,
+`failed with exit code <code>`, `failed after <signal>`, `was killed`, or
+`became stale without an observable child outcome`); with `--json` it prints
+a newline-terminated JSON result (schema version 1) with the keys
+`version`, `id`, `status`, `exitCode`, `signal`, `terminalReason`,
+`finishedAt`, `waitResult`, `error`, and `waitSignal`. If the waiter receives
+SIGINT or SIGTERM while flushing a timeout result, it appends an interrupted
+result. Read the last JSON line as the final outcome. The selector is a
+session ID, session name, or unambiguous ID prefix, resolved once and then
+pinned, so a reused name cannot retarget an active waiter. `--timeout`
+accepts positive integer durations with `ms`, `s`, `m`, or `h` suffixes
+(maximum 2147483647ms); without it, `wait` blocks until the session ends.
+Exit codes are command-owned: 0 for a child exit code of 0; 1 for a failed,
+signalled, killed, or stale child; 2 for invalid arguments, an unknown or
+ambiguous selector, a build with background sessions disabled, or an internal
+wait error (`waitResult`/`error` `internal_error` in JSON); 3 when
+the process state is still unreadable when the timeout boundary is
+classified (after the grace poll); 4 for missing,
+unreadable, malformed, or replaced session metadata; 124 when the wait times
+out without confirming a terminal result; 130 on SIGINT and 143 on SIGTERM to the
+waiting client. There is no `--follow` flag; `openclaude logs <id-or-name>
+-f` remains the log command.
 
 Background sessions are local child processes. OpenClaude does not start a daemon
 or network service, and permission/provider/model/settings flags are passed to
