@@ -657,21 +657,27 @@ class QueryImpl implements Query {
           if (self.mcpServers && Object.keys(self.mcpServers).length > 0) {
             try {
               const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, () => runInQueryEnv, self.abortController.signal, self)
-              if (self.closed) {
+              if (self.closed || self.abortController.signal.aborted) {
                 // Mirror v2.ts connectMcpServersOnce: the query closed
-                // while this connect was in flight, so the clients it
-                // received will never be installed — their setup
-                // reservations go here, since close() only reaches
-                // installed clients (jatmn #2493 review 5965105241,
-                // CodeRabbit #2493 review 5964014825).
+                // — or the host aborted it — while this connect was in
+                // flight, so the clients it received will never be
+                // installed — their setup reservations go here, since
+                // close() only reaches installed clients (jatmn #2493
+                // review 5965105241, CodeRabbit #2493 review 5964014825).
+                // A host abort does not set closed (only close() does),
+                // so without the signal check the aborted query would
+                // install the clients and submit the string prompt below
+                // (CodeRabbit #2493 review 5967851717).
                 for (const client of mcpClients) {
                   if (client.type === 'connected') {
                     releaseMcpClientSetupReservation(client, self)
                   }
                 }
-                // Stop here: close() already cleared _engine, so reaching
-                // submitMessage below would reject instead of ending the
-                // iteration. The finally still restores the environment
+                // Stop here: on close() the engine is already cleared,
+                // so reaching submitMessage below would reject instead of
+                // ending the iteration; on a host abort the engine is
+                // still live, so reaching it would run the turn the host
+                // cancelled. The finally still restores the environment
                 // (CodeRabbit #2493 review 5966435933).
                 return
               } else {

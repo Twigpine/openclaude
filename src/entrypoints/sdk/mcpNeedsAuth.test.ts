@@ -4597,6 +4597,58 @@ test('CLOSING A QUERY DURING ITS FIRST MCP CONNECT RELEASES THE SETUP RESERVATIO
 }, 30_000)
 
 /**
+ * Aborting the host controller while a query's first MCP connect is
+ * still in flight must not install the clients or submit the string
+ * prompt: a host abort does not set `closed` (only close() does), so
+ * the post-connect guard must check the abort signal too — otherwise
+ * the aborted query installs the connected clients and runs the turn
+ * the host cancelled (CodeRabbit #2493 review 5967851717).
+ */
+test('ABORTING THE HOST CONTROLLER DURING THE FIRST MCP CONNECT INSTALLS NOTHING AND SUBMITS NOTHING', async () => {
+  const url = serveNeedingAuth()
+  seedStoredToken('gated', url, 'token-for-seeded')
+  const config = { type: 'http', url, scope: 'session' } as never
+  const creator = (await realClient.connectToServer('gated', config)) as MCPServerConnection
+  expect(creator.type).toBe('connected')
+  if (creator.type !== 'connected') throw new Error('expected a connected client')
+  const held = holdToolsList()
+  const host = openSession()
+  const recorded = recordingEngine()
+  let submitCalls = 0
+  const engine = {
+    ...recorded.engine,
+    submitMessage: async function* (): AsyncGenerator<never> {
+      submitCalls++
+    },
+  }
+  const q = query({
+    prompt: 'hi',
+    options: { cwd: process.cwd(), abortController: host, mcpServers: { gated: { type: 'http', url } } },
+  })
+  ;(q as unknown as { setEngine: (engine: unknown) => void }).setEngine(engine)
+  try {
+    // The drain must complete without rejection: the aborted query ends
+    // its iteration instead of submitting the string prompt.
+    const drain = (async () => {
+      for await (const _ of q) {
+      }
+    })()
+    await waitFor(() => held.arrived)
+    host.abort()
+    held.answer()
+    await settlesWithin(drain, 5_000)
+    // No reservation survives the abort, nothing was installed into
+    // the aborted query, and the string prompt was never submitted.
+    expect(realClient.getMcpClientSetupReservationCountForTesting(creator)).toBe(0)
+    expect(recorded.calls.setMcpClients).toHaveLength(0)
+    expect(submitCalls).toBe(0)
+  } finally {
+    held.answer()
+    await creator.cleanup().catch(() => {})
+  }
+}, 30_000)
+
+/**
  * A single session reauthenticating after a tool call must not leak the
  * old transport: the completed call adopted the client through
  * ensureConnectedClient, so the reconnect detaches it instead of closing
