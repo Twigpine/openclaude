@@ -951,9 +951,12 @@ describe('cache', () => {
       }
 
       // Old version, fingerprints matching the unchanged files, and tags that
-      // carry no call reference from main.ts to helpers.ts.
+      // carry no call reference from main.ts to helpers.ts. Pinned to the real
+      // historical version, not CACHE_VERSION - 1: if the bump were removed,
+      // the fixture would otherwise become version 1 and this test could pass
+      // while version-2 caches still serve stale tags.
       const stale: CacheData = {
-        version: CACHE_VERSION - 1,
+        version: 2,
         entries: {
           'helpers.ts': staleEntry(
             'helpers.ts',
