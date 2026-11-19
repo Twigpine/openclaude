@@ -1904,7 +1904,7 @@ const connectToServerMemoized = memoize(
         client.setNotificationHandler(
           TaskStatusNotificationSchema,
           notification => {
-            handleMcpTaskStatusNotification(name, notification.params)
+            handleMcpTaskStatusNotification(name, notification.params, client)
           },
         )
       }

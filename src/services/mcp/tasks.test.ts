@@ -176,7 +176,7 @@ test('completed status notification fetches result and marks notified', async ()
 
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ status: 'completed' }),
-  })
+  }, client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
 
   const task = taskFrom(state, taskId)
@@ -207,7 +207,7 @@ test('failed status notification marks failed with statusMessage', async () => {
 
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ status: 'failed', statusMessage: 'out of memory' }),
-  })
+  }, client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
 
   const task = taskFrom(state, taskId)
@@ -385,6 +385,61 @@ test('disconnect fails only the closing transport’s tasks, not a live generati
   _resetMcpServerTasksForTest()
 })
 
+test('failing one generation keeps the other generation’s same-id task reachable by push', async () => {
+  _resetMcpServerTasksForTest()
+  _resetTaskOutputDirForTest()
+  clearCommandQueue()
+  const state = makeState()
+  // Two generations of the same server report the same remote task id.
+  const a = makeClient({
+    getTaskResult: async () => ({ content: [{ type: 'text', text: 'from A' }] }),
+  })
+  const b = makeClient({
+    getTaskResult: async () => ({ content: [{ type: 'text', text: 'from B' }] }),
+  })
+  const taskA = trackMcpServerTask({
+    connection: makeConnection(a.client, { capabilities: TASK_CAPS }),
+    task: makeMcpTask({ taskId: 'shared', pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+  const taskB = trackMcpServerTask({
+    connection: makeConnection(b.client, { capabilities: TASK_CAPS }),
+    task: makeMcpTask({ taskId: 'shared', pollInterval: 60000 }),
+    toolName: 't',
+    description: 'srv: t',
+    setAppState: state.set,
+  })
+
+  // Failing A's generation must not drop B's notification routing: the
+  // task index is keyed by server + task id only, so the later
+  // registration replaced A's mapping and the fail deleted the mapping
+  // B's push lookup needs (CodeRabbit #2493 review 5971776700).
+  failMcpServerTasksForServer(
+    'srv',
+    'MCP server "srv" disconnected before the task completed',
+    a.client,
+  )
+  await waitFor(() => taskFrom(state, taskA).status !== 'running')
+
+  assert.equal(taskFrom(state, taskA).status, 'failed')
+  // Give B's finalize chain time to land if it were (wrongly) failed too.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(taskFrom(state, taskB).status, 'running')
+
+  handleMcpTaskStatusNotification(
+    'srv',
+    makeMcpTask({ taskId: 'shared', status: 'completed' }),
+    b.client,
+  )
+  await waitFor(() => taskFrom(state, taskB).status !== 'running')
+  assert.equal(taskFrom(state, taskB).status, 'completed')
+  assert.deepEqual(b.calls.getTaskResult, ['shared'])
+  clearCommandQueue()
+  _resetMcpServerTasksForTest()
+})
+
 test('getTask errors fail the task instead of hanging', async () => {
   _resetMcpServerTasksForTest()
   _resetTaskOutputDirForTest()
@@ -464,10 +519,10 @@ test('notifications for unknown or other-server tasks are ignored', async () => 
 
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ taskId: 'untracked', status: 'completed' }),
-  })
+  }, client)
   handleMcpTaskStatusNotification('other-server', {
     ...makeMcpTask({ taskId: 'srv-9', status: 'completed' }),
-  })
+  }, client)
   await new Promise(resolve => setTimeout(resolve, 100))
 
   assert.equal(taskFrom(state, taskId).status, 'running')
@@ -501,7 +556,7 @@ test('terminal transition enqueues exactly one task-notification', async () => {
   // a disconnect - must still produce a single notification.
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ status: 'completed' }),
-  })
+  }, client)
   failMcpServerTasksForServer('srv', 'connection closed')
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
   await new Promise(resolve => setTimeout(resolve, 50))
@@ -542,7 +597,7 @@ test('isError task result marks the task failed', async () => {
 
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ status: 'completed' }),
-  })
+  }, client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
 
   const task = taskFrom(state, taskId)
@@ -573,7 +628,7 @@ test('rejected tasks/result marks failed and keeps the error', async () => {
 
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ status: 'completed' }),
-  })
+  }, client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
 
   const task = taskFrom(state, taskId)
@@ -606,7 +661,7 @@ test('cancelled status marks the task killed', async () => {
 
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ status: 'cancelled' }),
-  })
+  }, client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
 
   assert.equal(taskFrom(state, taskId).status, 'killed')
@@ -637,7 +692,7 @@ test('a user kill during a pending tasks/result wins the terminal race', async (
 
   handleMcpTaskStatusNotification('srv', {
     ...makeMcpTask({ status: 'completed' }),
-  })
+  }, client)
   await waitFor(() => calls.getTaskResult.length === 1)
 
   await McpServerTask.kill(taskId, state.set)
@@ -716,13 +771,13 @@ test('identical remote task ids on two servers stay separate', async () => {
   })
 
   // A's push update must reach A even though B registered the same id later.
-  handleMcpTaskStatusNotification('A', makeMcpTask({ taskId: '1', status: 'completed' }))
+  handleMcpTaskStatusNotification('A', makeMcpTask({ taskId: '1', status: 'completed' }), a.client)
   await waitFor(() => taskFrom(state, idA).status !== 'running')
   assert.equal(taskFrom(state, idA).status, 'completed')
   assert.deepEqual(a.calls.getTaskResult, ['1'])
   // Finalizing A must not drop B's lookup.
   assert.equal(taskFrom(state, idB).status, 'running')
-  handleMcpTaskStatusNotification('B', makeMcpTask({ taskId: '1', status: 'completed' }))
+  handleMcpTaskStatusNotification('B', makeMcpTask({ taskId: '1', status: 'completed' }), b.client)
   await waitFor(() => taskFrom(state, idB).status !== 'running')
   assert.equal(taskFrom(state, idB).status, 'completed')
   assert.deepEqual(b.calls.getTaskResult, ['1'])
@@ -748,7 +803,7 @@ test('server-reported failed fetches tasks/result and keeps the payload', async 
     description: 'srv: t',
     setAppState: state.set,
   })
-  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'failed' }))
+  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'failed' }), client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
 
   assert.equal(taskFrom(state, taskId).status, 'failed')
@@ -780,7 +835,7 @@ test('server-reported cancelled fetches tasks/result and stays killed', async ()
     description: 'srv: t',
     setAppState: state.set,
   })
-  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'cancelled' }))
+  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'cancelled' }), client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
 
   assert.equal(taskFrom(state, taskId).status, 'killed')
@@ -810,6 +865,7 @@ test('a failed tasks/result fetch falls back to the statusMessage', async () => 
   handleMcpTaskStatusNotification(
     'srv',
     makeMcpTask({ status: 'failed', statusMessage: 'out of quota' }),
+    client,
   )
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
 
@@ -890,7 +946,7 @@ test('a disconnect during a pending tasks/result fails the task', async () => {
     description: 'srv: t',
     setAppState: state.set,
   })
-  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'completed' }))
+  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'completed' }), client)
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(taskFrom(state, taskId).status, 'running')
 
@@ -926,7 +982,7 @@ test('tasks/result is requested with an explicit timeout', async () => {
     description: 'srv: t',
     setAppState: state.set,
   })
-  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'completed' }))
+  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'completed' }), client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
   assert.equal(typeof (seenOptions as { timeout?: number })?.timeout, 'number')
   _resetMcpServerTasksForTest()
@@ -991,7 +1047,7 @@ test('a stale tasks/get response does not overwrite a newer pushed status', asyn
       statusMessage: 'Waiting for input',
       lastUpdatedAt: '2026-01-01T00:00:02Z',
     }),
-  })
+  }, client)
   assert.equal(taskFrom(state, taskId).statusMessage, 'Waiting for input')
   release()
   await new Promise(resolve => setTimeout(resolve, 50))
@@ -1004,7 +1060,7 @@ test('a stale tasks/get response does not overwrite a newer pushed status', asyn
       statusMessage: 'Resumed',
       lastUpdatedAt: '2026-01-01T00:00:03Z',
     }),
-  })
+  }, client)
   assert.equal(taskFrom(state, taskId).statusMessage, 'Resumed')
   _resetMcpServerTasksForTest()
 })
@@ -1025,7 +1081,7 @@ test('a protocol error from tasks/result on a failed task is kept as the diagnos
     description: 'srv: t',
     setAppState: state.set,
   })
-  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'failed' }))
+  handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'failed' }), client)
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
   const task = taskFrom(state, taskId)
   assert.equal(task.status, 'failed')
@@ -1052,7 +1108,7 @@ test('a timeout or transport error from tasks/result is not reported as the task
       description: 'srv: t',
       setAppState: state.set,
     })
-    handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'failed' }))
+    handleMcpTaskStatusNotification('srv', makeMcpTask({ status: 'failed' }), client)
     await waitFor(() => taskFrom(state, taskId).status !== 'running')
     assert.equal(
       taskFrom(state, taskId).statusMessage,
@@ -1082,6 +1138,7 @@ test('a server cancellation reason reaches the output file and the notification'
   handleMcpTaskStatusNotification(
     'srv',
     makeMcpTask({ status: 'cancelled', statusMessage: 'Revoked by administrator' }),
+    client,
   )
   await waitFor(() => taskFrom(state, taskId).status !== 'running')
   await new Promise(resolve => setTimeout(resolve, 50))
@@ -1119,6 +1176,7 @@ test('a failed tasks/cancel is kept apart from the server status message', async
   handleMcpTaskStatusNotification(
     'srv',
     makeMcpTask({ statusMessage: 'Processing', lastUpdatedAt: '2026-01-01T00:00:05Z' }),
+    client,
   )
   const during = taskFrom(state, taskId)
   assert.equal(during.statusMessage, 'Processing')
@@ -1208,7 +1266,7 @@ test('an exiting agent whose tasks/cancel is rejected ends the local task instea
     ttl: null,
     createdAt: '2026-01-01T00:00:00Z',
     lastUpdatedAt: '2026-01-01T00:00:01Z',
-  })
+  }, client)
   await new Promise(resolve => setTimeout(resolve, 1200))
   assert.equal(calls.getTask.length, 0)
   assert.equal(taskFrom(state, taskId).status, 'failed')
