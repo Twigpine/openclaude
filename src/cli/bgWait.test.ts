@@ -1822,18 +1822,17 @@ describe('wait command handler', () => {
     const shimDir = await mkdtemp(join(tmpdir(), 'openclaude-ps-shim-'))
     const markerDir = await mkdtemp(join(tmpdir(), 'openclaude-ps-markers-'))
     const shim = join(shimDir, 'ps')
-    const startedMarker = join(markerDir, 'started')
-    const signalledMarker = join(markerDir, 'signalled')
-    const exitedMarker = join(markerDir, 'exited')
-    const onTerm =
-      closeDelayMs === null
-        ? ''
-        : `setTimeout(() => { fs.writeFileSync(${JSON.stringify(exitedMarker)}, 'done'); process.exit(0) }, ${closeDelayMs});`
+    await writeFile(
+      join(shimDir, 'config.json'),
+      JSON.stringify({ markerDir, closeDelayMs }),
+    )
     await writeFile(
       shim,
       [
         '#!/usr/bin/env node',
         `const fs = require('node:fs')`,
+        `const { join } = require('node:path')`,
+        `const { markerDir, closeDelayMs } = require('./config.json')`,
         `process.stdout.write('sleep 30\\n')`,
         // Install the SIGTERM handler before publishing readiness:
         // a test that signals the shim as soon as it sees `started`
@@ -1843,8 +1842,15 @@ describe('wait command handler', () => {
         // 5961433156). The handler records the signal at once, so a
         // test can publish a terminal fact while the close is still
         // delayed.
-        `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(signalledMarker)}, 'signalled'); ${onTerm} })`,
-        `fs.writeFileSync(${JSON.stringify(startedMarker)}, String(process.pid))`,
+        `process.on('SIGTERM', () => {`,
+        `  fs.writeFileSync(join(markerDir, 'signalled'), 'signalled')`,
+        `  if (closeDelayMs === null) return`,
+        `  setTimeout(() => {`,
+        `    fs.writeFileSync(join(markerDir, 'exited'), 'done')`,
+        `    process.exit(0)`,
+        `  }, closeDelayMs)`,
+        `})`,
+        `fs.writeFileSync(join(markerDir, 'started'), String(process.pid))`,
         'setTimeout(() => {}, 60000)',
         '',
       ].join('\n'),
