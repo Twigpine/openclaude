@@ -202,6 +202,7 @@ export function createUserMessage({
   isVirtual,
   isCompactSummary,
   isCollapseSummary,
+  isLocalNotice,
   summarizeMetadata,
   toolUseResult,
   imagePermissionToolUseIds,
@@ -220,6 +221,7 @@ export function createUserMessage({
   isVirtual?: boolean
   isCompactSummary?: boolean
   isCollapseSummary?: boolean
+  isLocalNotice?: boolean
   toolUseResult?: unknown // Matches tool's `Output` type
   imagePermissionToolUseIds?: Array<string | null>
   isAgentStepLimitToolResult?: boolean
@@ -259,6 +261,7 @@ export function createUserMessage({
     isVirtual,
     isCompactSummary,
     isCollapseSummary,
+    isLocalNotice,
     summarizeMetadata,
     uuid: (uuid as UUID | undefined) || randomUUID(),
     timestamp: timestamp ?? new Date().toISOString(),

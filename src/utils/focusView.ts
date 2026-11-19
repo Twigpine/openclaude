@@ -3,7 +3,6 @@ import { stripSystemReminders } from '../components/messageActions.js'
 import { countHunkLines, isFileEditResult } from '../hooks/useTurnDiffs.js'
 import {
   CANCEL_MESSAGE,
-  HOOK_STOPPED_MESSAGE,
   INTERRUPT_MESSAGE,
   INTERRUPT_MESSAGE_FOR_TOOL_USE,
   PLAN_REJECTION_PREFIX,
@@ -11,7 +10,6 @@ import {
   REJECT_MESSAGE_WITH_REASON_PREFIX,
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
   SYNTHETIC_MESSAGES,
-  UNKNOWN_SKILL_PREFIX,
 } from './messages.js'
 import { getGlobalConfig } from './config.js'
 import { isFullscreenEnvEnabled } from './fullscreen.js'
@@ -43,6 +41,7 @@ export type FocusMessage = {
   level?: string
   isMeta?: boolean
   isCompactSummary?: boolean
+  isLocalNotice?: boolean
   isApiErrorMessage?: boolean
   origin?: unknown
   hookErrors?: unknown[]
@@ -108,8 +107,6 @@ const NON_PROMPT_TAGS = [
   '<system-reminder>',
 ]
 const COMMAND_TAG = '<command-name>'
-/** Plain-text user rows the input pipeline writes instead of a prompt. */
-const LOCAL_NOTICE_PREFIXES = [HOOK_STOPPED_MESSAGE, UNKNOWN_SKILL_PREFIX]
 
 const REJECTION_PREFIXES = [
   CANCEL_MESSAGE,
@@ -136,6 +133,10 @@ function toolResultOf(m: FocusMessage): FocusBlock | undefined {
 
 function isAdvisorCall(b: FocusBlock): boolean {
   return b.type === 'server_tool_use' && b.name === 'advisor'
+}
+
+function isAdvisorActivity(b: FocusBlock): boolean {
+  return isAdvisorCall(b) || b.type === 'advisor_tool_result'
 }
 
 function isAdvisorError(b: FocusBlock): boolean {
@@ -211,7 +212,9 @@ function candidateKind(m: FocusMessage): CandidateKind | undefined {
       : undefined
   }
   if (m.type !== 'user') return undefined
-  if (m.isMeta || m.isCompactSummary || m.origin !== undefined) return undefined
+  if (m.isMeta || m.isCompactSummary || m.isLocalNotice || m.origin !== undefined) {
+    return undefined
+  }
   const blocks = blocksOf(m)
   if (blocks.some(b => b.type === 'tool_result')) return undefined
   const rawText = firstText(m)
@@ -221,7 +224,6 @@ function candidateKind(m: FocusMessage): CandidateKind | undefined {
   const text = stripSystemReminders(rawText ?? '')
   if (text.startsWith(COMMAND_TAG)) return 'command'
   if (NON_PROMPT_TAGS.some(t => text.startsWith(t))) return undefined
-  if (LOCAL_NOTICE_PREFIXES.some(p => text.startsWith(p))) return undefined
   if (text === '' && !hasImage) return undefined
   return 'prompt'
 }
@@ -299,7 +301,10 @@ function promptBoundaryIndices(
   return out
 }
 
-/** Index of the last row in [from, to) that is a tool call or tool result. */
+/**
+ * Index of the last row in [from, to) that is a tool call or tool result,
+ * Advisor calls and results included.
+ */
 function lastToolActivityIndex(
   messages: readonly FocusMessage[],
   from: number,
@@ -308,6 +313,7 @@ function lastToolActivityIndex(
   for (let i = to - 1; i >= from; i--) {
     const m = messages[i]!
     if (toolResultOf(m) || toolUsesOf(m).length > 0) return i
+    if (m.type === 'assistant' && blocksOf(m).some(isAdvisorActivity)) return i
   }
   return from - 1
 }
@@ -500,13 +506,15 @@ export function selectFocusView<T extends FocusMessage>(
       } else if (isInterrupt(m)) {
         keep.add(i)
         lastInterrupt = i
-      } else if (candidateKind(m) === 'command' || isLocalCommandOutput(m)) {
+      } else if (
+        m.isLocalNotice ||
+        candidateKind(m) === 'command' ||
+        isLocalCommandOutput(m)
+      ) {
         keep.add(i)
       } else {
         const t = stripSystemReminders(firstText(m) ?? '')
-        if ([...SHELL_OUTPUT_TAGS, ...LOCAL_NOTICE_PREFIXES].some(p => t.startsWith(p))) {
-          keep.add(i)
-        }
+        if (SHELL_OUTPUT_TAGS.some(p => t.startsWith(p))) keep.add(i)
       }
     } else if (m.type === 'attachment') {
       if (m.attachment?.type === 'max_turns_reached') keep.add(i)

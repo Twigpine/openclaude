@@ -111,6 +111,11 @@ export interface UserMessage<C = string | ContentBlockParam[]> {
   isVirtual?: boolean
   isCompactSummary?: boolean
   /**
+   * Set on notices the input pipeline writes in place of a prompt (a hook
+   * stop, an unknown skill), so they are not mistaken for one the user typed.
+   */
+  isLocalNotice?: boolean
+  /**
    * Set when a context-collapse summary placeholder is converted to (or merged
    * into) a user message. Keeps the `<collapsed>` summary non-snippable: the
    * snip-tag sweep skips these, and merges that absorb a summary inherit the

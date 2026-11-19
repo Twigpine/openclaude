@@ -34,6 +34,9 @@ function label<T extends object>(id: string, msg: T): T {
 function prompt(id: string, text: string, extra: object = {}) {
   return label(id, { ...createUserMessage({ content: text }), ...extra })
 }
+function notice(id: string, text: string) {
+  return label(id, createUserMessage({ content: text, isLocalNotice: true }))
+}
 function say(id: string, text: string) {
   return label(id, createAssistantMessage({ content: text }))
 }
@@ -1089,7 +1092,7 @@ describe('stop reasons and diagnostics from the input pipeline', () => {
       prompt('p1', 'one'),
       say('a1', 'answer'),
       prompt('p2', 'the real prompt'),
-      prompt('h', `${HOOK_STOPPED_MESSAGE}: policy says no`),
+      notice('h', `${HOOK_STOPPED_MESSAGE}: policy says no`),
     ])
     expect(r.boundary?.uuid).toBe('p2')
     expect(r.hiddenTurns).toBe(1)
@@ -1097,7 +1100,7 @@ describe('stop reasons and diagnostics from the input pipeline', () => {
   })
 
   test('a hook stop with no reason is not a prompt either', () => {
-    const r = select([prompt('p2', 'go'), prompt('h', HOOK_STOPPED_MESSAGE)])
+    const r = select([prompt('p2', 'go'), notice('h', HOOK_STOPPED_MESSAGE)])
     expect(r.boundary?.uuid).toBe('p2')
     expect(ids(r.rows)).toContain('h')
   })
@@ -1107,11 +1110,33 @@ describe('stop reasons and diagnostics from the input pipeline', () => {
       prompt('p1', 'one'),
       say('a1', 'answer'),
       label('cv', createSyntheticUserCaveatMessage()),
-      prompt('u', `${UNKNOWN_SKILL_PREFIX}nope`),
+      notice('u', `${UNKNOWN_SKILL_PREFIX}nope`),
       sys('w', 'informational', { level: 'warning', content: 'Args from unknown skill: x' }),
     ])
     expect(r.boundary?.uuid).toBe('p1')
     expect(ids(r.rows)).toEqual(['p1', 'a1', 'u', 'w'])
+  })
+
+  test('a typed prompt that reads like a local notice is still a prompt', () => {
+    for (const text of [
+      `${UNKNOWN_SKILL_PREFIX}deploy. How do I install it?`,
+      `${HOOK_STOPPED_MESSAGE}: why does this happen?`,
+    ]) {
+      const r = select([prompt('p1', 'one'), say('a1', 'answer'), prompt('p2', text), say('a2', 'reply')])
+      expect(r.boundary?.uuid).toBe('p2')
+      expect(ids(r.rows)).toEqual(['p2', 'a2'])
+    }
+  })
+
+  test('a local notice split by normalization keeps its provenance', () => {
+    const rows = normalized([
+      createUserMessage({ content: 'one' }),
+      createAssistantMessage({ content: 'answer' }),
+      createUserMessage({ content: [IMG, txt(`${UNKNOWN_SKILL_PREFIX}nope`)], isLocalNotice: true }),
+    ])
+    const r = select(rows)
+    expect(r.boundary?.uuid).toBe(rows[0]!.uuid)
+    expect(ids(r.rows)).toContain(rows[3]!.uuid)
   })
 
   const advisorCall = (id: string) =>
@@ -1168,5 +1193,33 @@ describe('stop reasons and diagnostics from the input pipeline', () => {
     const r = select(rows)
     expect(r.rows).toHaveLength(3)
     expect(r.summary.failed).toBe(1)
+  })
+
+  const advisorTurn = (withAnswer: boolean) =>
+    normalized([
+      createUserMessage({ content: 'go' }),
+      createAssistantMessage({
+        content: [
+          { type: 'text', text: 'let me check with the advisor' } as never,
+          { type: 'server_tool_use', id: 's1', name: 'advisor', input: {} } as never,
+          {
+            type: 'advisor_tool_result',
+            tool_use_id: 's1',
+            content: { type: 'advisor_result', text: 'looks fine' },
+          } as never,
+          ...(withAnswer ? [{ type: 'text', text: 'done' } as never] : []),
+        ],
+      }),
+    ])
+
+  test('narration before an Advisor call is hidden like narration before a tool call', () => {
+    const rows = advisorTurn(true)
+    const r = select(rows)
+    expect(ids(r.rows)).toEqual([rows[0]!.uuid, rows[4]!.uuid])
+  })
+
+  test('a turn whose only text is narration before an Advisor call is not unseen yet', () => {
+    expect(countUnseenFocusTurns(advisorTurn(false), 0)).toBe(0)
+    expect(countUnseenFocusTurns(advisorTurn(true), 0)).toBe(1)
   })
 })

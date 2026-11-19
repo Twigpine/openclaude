@@ -221,6 +221,7 @@ export async function processUserInput({
       result.messages.push(
         createUserMessage({
           content: message,
+          isLocalNotice: true,
         }),
       )
       result.shouldQuery = false

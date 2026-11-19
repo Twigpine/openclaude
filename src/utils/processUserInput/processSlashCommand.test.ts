@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { getDefaultAppState } from '../../state/AppStateStore.js'
 import type { Command } from '../../types/command.js'
 import {
   attachmentScanInputForCommand,
+  processSlashCommand,
   resolveSlashCommand,
 } from './processSlashCommand.js'
 
@@ -66,4 +68,23 @@ describe('resolveSlashCommand', () => {
       resolveSlashCommand('status', [statusCommand], projectReview),
     ).toBe(statusCommand)
   })
+})
+
+describe('local notices written instead of a prompt', () => {
+  const context = {
+    options: { commands: [], isNonInteractiveSession: false },
+    getAppState: () => getDefaultAppState(),
+    setAppState: () => {},
+    messages: [],
+  } as unknown as Parameters<typeof processSlashCommand>[4]
+
+  for (const input of ['/nosuchskill', '/']) {
+    test(`${input} returns a notice marked as local, not a prompt`, async () => {
+      const result = await processSlashCommand(input, [], [], [], context, () => {})
+      expect(result.shouldQuery).toBe(false)
+      const notices = result.messages.filter(m => m.type === 'user' && !m.isMeta)
+      expect(notices).toHaveLength(1)
+      expect(notices[0]!.isLocalNotice).toBe(true)
+    })
+  }
 })

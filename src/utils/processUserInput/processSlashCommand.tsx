@@ -323,7 +323,8 @@ export async function processSlashCommand(inputString: string, precedingInputBlo
         content: prepareUserContent({
           inputString: errorMessage,
           precedingInputBlocks
-        })
+        }),
+        isLocalNotice: true
       })],
       shouldQuery: false,
       resultText: errorMessage
@@ -357,7 +358,8 @@ export async function processSlashCommand(inputString: string, precedingInputBlo
           content: prepareUserContent({
             inputString: unknownMessage,
             precedingInputBlocks
-          })
+          }),
+          isLocalNotice: true
         }),
         // gh-32591: preserve args so the user can copy/resubmit without
         // retyping. System warning is UI-only (filtered before API).
