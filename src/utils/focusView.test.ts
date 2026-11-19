@@ -1057,6 +1057,33 @@ describe('chronology and terminal diagnostics', () => {
     expect(ids(r.rows)).toContain('a2')
   })
 
+  test('a rejection in the typed turn stays visible when only a later scheduled run is interrupted', () => {
+    const r = select([
+      prompt('p', 'edit it'),
+      use('u1', 't1', 'Edit'),
+      result('r1', 't1', { isError: true, content: REJECT_MESSAGE }),
+      sys('fire', 'scheduled_task_fire'),
+      interrupt('i', true),
+    ])
+    expect(ids(r.rows)).toContain('u1')
+    expect(ids(r.rows)).toContain('r1')
+    expect(ids(r.rows)).toContain('i')
+  })
+
+  test('a rejection and an interrupt in the same scheduled run still show only the interrupt', () => {
+    const r = select([
+      prompt('p', 'typed'),
+      say('a1', 'typed answer'),
+      sys('fire', 'scheduled_task_fire'),
+      use('u2', 't2', 'Edit'),
+      result('r2', 't2', { isError: true, content: REJECT_MESSAGE }),
+      interrupt('i', true),
+    ])
+    expect(ids(r.rows)).not.toContain('u2')
+    expect(ids(r.rows)).not.toContain('r2')
+    expect(ids(r.rows)).toContain('i')
+  })
+
   test('a typed-turn warning before its own answer stays hidden when a scheduled run follows', () => {
     const r = select([
       prompt('p', 'typed'),

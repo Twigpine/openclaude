@@ -444,11 +444,11 @@ export function selectFocusView<T extends FocusMessage>(
   const replyCalls = new Map<string, number>()
   const keep = new Set<number>()
   const callLineIdx = new Map<string, number>()
-  let lastInterrupt = -1
+  const segmentInterrupt = segmentLastTool.map(() => -1)
   const segmentFinal = segmentLastTool.map(() => -1)
   let segment = 0
   const warnings: Array<{ index: number; segment: number }> = []
-  const rejections: Array<{ index: number; toolUseId: string | undefined }> = []
+  const rejections: Array<{ index: number; segment: number; toolUseId: string | undefined }> = []
 
   for (let i = start; i < messages.length; i++) {
     const m = messages[i]!
@@ -496,7 +496,7 @@ export function selectFocusView<T extends FocusMessage>(
           if (typeof agentCount === 'number') summary.toolCount += agentCount
           addEditLines(m.toolUseResult, summary)
         }
-        if (isRejection(tr)) rejections.push({ index: i, toolUseId: tr.tool_use_id })
+        if (isRejection(tr)) rejections.push({ index: i, segment, toolUseId: tr.tool_use_id })
         else if (tr.is_error) {
           if (typed) summary.failed++
           keep.add(i)
@@ -505,7 +505,7 @@ export function selectFocusView<T extends FocusMessage>(
         }
       } else if (isInterrupt(m)) {
         keep.add(i)
-        lastInterrupt = i
+        segmentInterrupt[segment] = i
       } else if (
         m.isLocalNotice ||
         candidateKind(m) === 'command' ||
@@ -538,7 +538,7 @@ export function selectFocusView<T extends FocusMessage>(
     }
   }
   for (const r of rejections) {
-    if (lastInterrupt > r.index) continue
+    if (segmentInterrupt[r.segment]! > r.index) continue
     keep.add(r.index)
     const call = r.toolUseId !== undefined ? callLineIdx.get(r.toolUseId) : undefined
     if (call !== undefined) keep.add(call)
