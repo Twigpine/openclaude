@@ -4421,8 +4421,9 @@ test('ABORTING DURING INITIAL TOOL DISCOVERY RELEASES THE SETUP RESERVATION', as
  * Initial SDK setup shares one tools/list fetch per connection: the
  * first session's abort must end only its own wait, not cancel the
  * discovery a second session joined while it was in flight — the
- * second session must still receive the server's tools (CodeRabbit
- * #2493 review 5966435933).
+ * second session must still receive the server's tools, from the one
+ * shared fetch (CodeRabbit #2493 review 5966435933, strengthened in
+ * review 5967851717).
  */
 test("ONE SESSION ABORTING INITIAL TOOL DISCOVERY DOES NOT STRIP ANOTHER SESSION'S TOOLS", async () => {
   const url = serveNeedingAuth()
@@ -4435,6 +4436,7 @@ test("ONE SESSION ABORTING INITIAL TOOL DISCOVERY DOES NOT STRIP ANOTHER SESSION
   const ownerA = {}
   const ownerB = {}
   const abortA = new AbortController()
+  const toolsListBefore = toolsListAuth.length
   try {
     const doneA = connectSdkMcpServers(
       { gated: { type: 'http', url } },
@@ -4449,6 +4451,15 @@ test("ONE SESSION ABORTING INITIAL TOOL DISCOVERY DOES NOT STRIP ANOTHER SESSION
       undefined,
       undefined,
       ownerB,
+    )
+    // Wait until B has joined the shared discovery before aborting A:
+    // both setup reservations held means B reserved the client and
+    // called fetchToolsForClient on the same in-flight fetch. Aborting
+    // A before that point would let B start a second tools/list and
+    // still pass the tool assertion below (CodeRabbit #2493 review
+    // 5967851717).
+    await waitFor(
+      () => realClient.getMcpClientSetupReservationCountForTesting(creator) === 2,
     )
     abortA.abort()
     const resultA = (await settlesWithin(doneA, 5_000)) as {
@@ -4470,6 +4481,9 @@ test("ONE SESSION ABORTING INITIAL TOOL DISCOVERY DOES NOT STRIP ANOTHER SESSION
     }
     expect(resultB.clients[0]!.type).toBe('connected')
     expect(resultB.tools.map(tool => tool.name)).toEqual(['mcp__gated__hello'])
+    // One tools/list for the connection: B joined A's in-flight
+    // discovery instead of starting its own.
+    expect(toolsListAuth.length).toBe(toolsListBefore + 1)
     // B's setup reservation is still held until B installs the client.
     expect(realClient.getMcpClientSetupReservationCountForTesting(creator)).toBe(1)
   } finally {
@@ -6473,7 +6487,14 @@ test('SETUP USES ITS FIRST JOIN WHEN A RECONNECT DETACHES THAT GENERATION', asyn
     expect(realClient.isMcpClientAdopted(firstClient)).toBe(false)
   } finally {
     held.answer()
-    if (secondClient?.type === 'connected') await secondClient.cleanup().catch(() => {})
+    // Await the replacement connect here, not only the success-path
+    // assignment: an earlier assertion failing leaves nextConnect
+    // pending and its client with no owner (CodeRabbit #2493 review
+    // 5967851717).
+    const second = (await nextConnect.catch(() => undefined)) as
+      | MCPServerConnection
+      | undefined
+    if (second?.type === 'connected') await second.cleanup().catch(() => {})
     const firstClient = (await creatorConnect.catch(() => undefined)) as
       | MCPServerConnection
       | undefined
