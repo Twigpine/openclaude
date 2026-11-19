@@ -278,8 +278,8 @@ ambiguous selector, a build with background sessions disabled, or an internal
 wait error (`waitResult`/`error` `internal_error` in JSON); 3 when
 the process state is still unreadable when the timeout boundary is
 classified (after the grace poll); 4 for missing,
-unreadable, malformed, or replaced session metadata; 124 on timeout while
-the session is still running; 130 on SIGINT and 143 on SIGTERM to the
+unreadable, malformed, or replaced session metadata; 124 when the wait times
+out without confirming a terminal result; 130 on SIGINT and 143 on SIGTERM to the
 waiting client. There is no `--follow` flag; `openclaude logs <id-or-name>
 -f` remains the log command.
 

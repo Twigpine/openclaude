@@ -4,6 +4,7 @@
 // back to a generic shell command string.
 
 import { spawn } from 'cross-spawn'
+import { addAbortListener } from 'node:events'
 import path from 'node:path'
 import { getCwd } from '../utils/cwd.js'
 import { logError } from './log.js'
@@ -225,7 +226,7 @@ export function execFileNoThrowWithCwd(
       cwd: finalCwd,
       env: sanitizedEnv.value,
       shell: false,
-      signal: abortSignal,
+      signal: finalAwaitCloseOnAbort ? undefined : abortSignal,
       stdio: [stdinMode, 'pipe', 'pipe'],
     })
 
@@ -238,6 +239,7 @@ export function execFileNoThrowWithCwd(
     let timeoutId: ReturnType<typeof setTimeout> | undefined
     let killTimer: ReturnType<typeof setTimeout> | undefined
     let settleTimer: ReturnType<typeof setTimeout> | undefined
+    let abortListener: ReturnType<typeof addAbortListener> | undefined
 
     const finish = (result: {
       stdout: string
@@ -250,6 +252,7 @@ export function execFileNoThrowWithCwd(
       clearTimeout(timeoutId)
       clearTimeout(killTimer)
       clearTimeout(settleTimer)
+      abortListener?.[Symbol.dispose]()
       resolve(result)
     }
 
@@ -262,7 +265,7 @@ export function execFileNoThrowWithCwd(
       })
     }
 
-    const terminateAndWait = (error: string, signalAlreadySent = false) => {
+    const terminateAndWait = (error: string) => {
       if (settled || terminationError !== undefined) return
       terminationError = error
       clearTimeout(timeoutId)
@@ -280,7 +283,7 @@ export function execFileNoThrowWithCwd(
           child.kill('SIGKILL')
         }
       }, ABORT_SIGKILL_GRACE_MS)
-      if (!signalAlreadySent) child.kill()
+      if (child.exitCode === null && child.signalCode === null) child.kill()
     }
 
     const appendOutput = (
@@ -324,15 +327,6 @@ export function execFileNoThrowWithCwd(
 
     child.on('error', error => {
       if (settled || terminationError !== undefined) return
-      if (
-        finalAwaitCloseOnAbort &&
-        abortSignal?.aborted &&
-        error.name === 'AbortError'
-      ) {
-        // Node sends SIGTERM before reporting the expected abort error.
-        terminateAndWait(error.message, true)
-        return
-      }
       logError(error)
       finish({ stdout: '', stderr: '', code: 1, error: error.message })
     })
@@ -347,6 +341,14 @@ export function execFileNoThrowWithCwd(
           finishWithError(error)
         }
       }, finalTimeout)
+    }
+
+    if (finalAwaitCloseOnAbort && abortSignal) {
+      // Node's spawn listener is removed on exit, but a descendant may
+      // still hold an output pipe. Own cancellation through settlement.
+      abortListener = addAbortListener(abortSignal, () =>
+        terminateAndWait('The operation was aborted'),
+      )
     }
 
     child.once('close', (code, closeSignal) => {

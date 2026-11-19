@@ -57,7 +57,7 @@ Exit codes:
   3    Process state was still unreadable when the timeout boundary was
        classified (after the grace poll).
   4    Session metadata is missing, unreadable, malformed, or replaced.
-  124  Timeout while the session was still running.
+  124  Wait timed out without confirming a terminal result.
   130  Waiting client received SIGINT.
   143  Waiting client received SIGTERM.
 

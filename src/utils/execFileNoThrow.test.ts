@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from 'bun:test'
+import { getEventListeners } from 'node:events'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -144,7 +145,11 @@ test('execFileNoThrowWithCwd keeps the SIGKILL escalation when output overflows 
   }
 })
 
-test.each([0, 10_000])('execFileNoThrowWithCwd closes a retained output pipe after abort with timeout %i', async timeout => {
+test.each([
+  { timeout: 0, exitBeforeAbort: false },
+  { timeout: 10_000, exitBeforeAbort: false },
+  { timeout: 0, exitBeforeAbort: true },
+])('execFileNoThrowWithCwd closes retained pipes (timeout $timeout, exited before abort $exitBeforeAbort)', async ({ timeout, exitBeforeAbort }) => {
   // Regression test for CodeRabbit #2497 review 5963778469: with
   // timeout 0 there is no timeout callback to start the last-resort
   // settle timer, so an aborted child whose stdio pipe a descendant
@@ -161,12 +166,14 @@ test.each([0, 10_000])('execFileNoThrowWithCwd closes a retained output pipe aft
   const cleared = spyOn(globalThis, 'clearTimeout')
   const { getInMemoryErrors } = await import('./log.js')
   const errorsBeforeAbort = getInMemoryErrors().slice()
+  let watchdog: ReturnType<typeof setTimeout> | undefined
+  let pending: ReturnType<typeof execFileNoThrowWithCwd> | undefined
   try {
     // Pass the fixture directory as data. The grandchild waits until the
     // wrapper returns before trying to write to the inherited pipe.
-    const script = `process.on('SIGTERM', () => {}); const { spawn } = require('child_process'); const grandchild = spawn(process.execPath, ['-e', 'const fs = require("fs"); const path = require("path"); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; const wait = () => { if (fs.existsSync(path.join(dir, "settled"))) { process.stdout.on("error", () => {}); process.stdout.write("x".repeat(2000), error => { fs.writeFileSync(path.join(dir, "burst.done"), error?.code ?? "written"); }); } else { setTimeout(wait, 25); } }; wait(); setTimeout(() => {}, 15000)'], { stdio: ['ignore', 'inherit', 'ignore'] }); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; require('fs').writeFileSync(require('path').join(dir, 'child.pid'), String(process.pid)); require('fs').writeFileSync(require('path').join(dir, 'grandchild.pid'), String(grandchild.pid)); setTimeout(() => {}, 15000);`
+    const script = `process.on('SIGTERM', () => {}); const { spawn } = require('child_process'); const grandchild = spawn(process.execPath, ['-e', 'const fs = require("fs"); const path = require("path"); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; const wait = () => { if (fs.existsSync(path.join(dir, "settled"))) { process.stdout.on("error", () => {}); process.stdout.write("x".repeat(2000), error => { fs.writeFileSync(path.join(dir, "burst.done"), error?.code ?? "written"); }); } else { setTimeout(wait, 25); } }; wait(); setTimeout(() => {}, 15000)'], { stdio: ['ignore', 'inherit', 'ignore'] }); const dir = process.env.OPENCLAUDE_TEST_PID_DIR; require('fs').writeFileSync(require('path').join(dir, 'child.pid'), String(process.pid)); require('fs').writeFileSync(require('path').join(dir, 'grandchild.pid'), String(grandchild.pid)); if (process.env.OPENCLAUDE_TEST_EXIT_FIRST === '1') process.exit(0); setTimeout(() => {}, 15000);`
     const startedAt = performance.now()
-    const pending = execFileNoThrowWithCwd(process.execPath, ['-e', script], {
+    pending = execFileNoThrowWithCwd(process.execPath, ['-e', script], {
       timeout,
       maxBuffer: 1000,
       abortSignal: controller.signal,
@@ -174,6 +181,7 @@ test.each([0, 10_000])('execFileNoThrowWithCwd closes a retained output pipe aft
       env: {
         ...process.env,
         OPENCLAUDE_TEST_PID_DIR: dir,
+        OPENCLAUDE_TEST_EXIT_FIRST: exitBeforeAbort ? '1' : '0',
       },
     })
     const commandTimer = scheduled.mock.calls.findIndex(([, delay]) => delay === timeout)
@@ -196,7 +204,7 @@ test.each([0, 10_000])('execFileNoThrowWithCwd closes a retained output pipe aft
       resultSettled = true
       return result
     })
-    controller.abort()
+    if (!exitBeforeAbort) controller.abort()
     const exitDeadline = performance.now() + 5000
     for (;;) {
       let alive = true
@@ -214,9 +222,19 @@ test.each([0, 10_000])('execFileNoThrowWithCwd closes a retained output pipe aft
       }
       await new Promise(resolve => setTimeout(resolve, 10))
     }
-    const result = await resultPromise
+    if (exitBeforeAbort) {
+      expect(resultSettled).toBe(false)
+      controller.abort()
+    }
+    const result = await Promise.race([
+      resultPromise,
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error('wrapper did not settle after abort')), 3500)
+      }),
+    ])
     const elapsedMs = performance.now() - startedAt
     expect(result.code).toBe(1)
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
     expect(getInMemoryErrors()).toEqual(errorsBeforeAbort)
     if (timeout > 0) {
       expect(commandTimer).toBeGreaterThanOrEqual(0)
@@ -241,6 +259,7 @@ test.each([0, 10_000])('execFileNoThrowWithCwd closes a retained output pipe aft
     expect(readFileSync(join(dir, 'burst.done'), 'utf8')).not.toBe('written')
     expect(() => process.kill(grandchildPid, 0)).not.toThrow()
   } finally {
+    clearTimeout(watchdog)
     try {
       const childPid = Number(readFileSync(childPidFile, 'utf8'))
       if (childPid) process.kill(childPid, 'SIGKILL')
@@ -253,6 +272,7 @@ test.each([0, 10_000])('execFileNoThrowWithCwd closes a retained output pipe aft
     } catch {
       // Already dead or never started.
     }
+    await pending
     scheduled.mockRestore()
     cleared.mockRestore()
     rmSync(dir, { recursive: true, force: true })
