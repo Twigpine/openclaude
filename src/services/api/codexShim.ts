@@ -112,6 +112,7 @@ type CodexResponse = {
 
 type CodexEventData = {
   type?: string
+  message?: string
   response?: CodexResponse
   error?: { message?: string }
   item?: CodexOutputItem
@@ -902,7 +903,8 @@ async function* readSseEvents(
         const isTerminalEvent =
           event === 'response.completed' ||
           event === 'response.incomplete' ||
-          event === 'response.failed'
+          event === 'response.failed' ||
+          event === 'error'
         if (isTerminalEvent) {
           protocolComplete = true
           traceInterruptionEvent('codex_stream.protocol_terminal', {
@@ -1273,6 +1275,13 @@ async function* codexStreamToAnthropicWithReadOptions(
         providerTerminalObserved = true
         const msg = payload?.response?.error?.message ??
           payload?.error?.message ?? 'Codex response failed'
+        throw APIError.generate(500, undefined, msg, new Headers())
+      }
+
+      if (event.event === 'error') {
+        providerTerminalObserved = true
+        const msg = payload?.message ??
+          payload?.error?.message ?? 'Codex stream error'
         throw APIError.generate(500, undefined, msg, new Headers())
       }
 
