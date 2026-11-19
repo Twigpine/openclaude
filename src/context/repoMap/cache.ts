@@ -17,7 +17,12 @@ import type {
   Tag,
 } from './types.js'
 
-const CACHE_VERSION = 2
+/**
+ * Bump whenever extraction semantics change, so persisted per-file tags and
+ * rendered maps are discarded instead of serving stale results. Version 3 adds
+ * plain call references to the TypeScript query.
+ */
+export const CACHE_VERSION = 3
 const MAX_RENDERED_ENTRIES = 20
 
 function getCacheDir(): string {

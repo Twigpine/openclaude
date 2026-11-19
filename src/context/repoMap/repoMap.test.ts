@@ -19,6 +19,7 @@ import {
   extractTagsWithCache,
 } from './index.js'
 import {
+  CACHE_VERSION,
   getCachedTags,
   loadCache,
   saveCache,
@@ -32,7 +33,7 @@ import { rankFiles } from './pagerank.js'
 import { initParser, resolveProjectRoot } from './parser.js'
 import { renderMap } from './renderer.js'
 import { countTokens } from './tokenize.js'
-import type { FileTags } from './types.js'
+import type { CacheData, FileTags } from './types.js'
 
 const FIXTURE_ROOT = join(import.meta.dir, '__fixtures__', 'mini-repo')
 const FIXTURE_FILES = ['fileA.ts', 'fileB.ts', 'fileC.ts', 'fileD.ts', 'fileE.ts']
@@ -690,7 +691,7 @@ describe('tag cache extraction', () => {
       }
 
       const fileStats = new Map(files.map(file => [file, statFile(tempDir, file)]))
-      const cache = { version: 2, entries: {}, renderedEntries: {} }
+      const cache = { version: CACHE_VERSION, entries: {}, renderedEntries: {} }
       const cachedTags = await extractTags('b.ts', tempDir)
       expect(cachedTags).not.toBeNull()
       setCachedTags(
@@ -911,7 +912,7 @@ describe('cache', () => {
   test('saveCache does not throw when persistence is unavailable', () => {
     expect(() => {
       saveCache('\0invalid-root', {
-        version: 2,
+        version: CACHE_VERSION,
         entries: {
           bad: {
             tags: [{ value: BigInt(1) }],
@@ -923,6 +924,68 @@ describe('cache', () => {
       } as never)
     }).not.toThrow()
   })
+
+  test('a cache from before call references is discarded and re-extracted', async () => withWritableConfigHome(async () => {
+    // Extraction semantics changed (plain calls are now references), so a cache
+    // written by the previous version must not be served for unchanged files.
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-cache-upgrade-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'helpers.ts'),
+        'export function computeTotal(items: number[]) {\n  return items.length\n}\n',
+      )
+      writeFileSync(
+        join(tempDir, 'main.ts'),
+        'export function run() {\n  return computeTotal([1])\n}\n',
+      )
+
+      const staleEntry = (file: string, name: string, signature: string) => {
+        const stat = statFile(tempDir, file)!
+        return {
+          tags: [
+            { kind: 'def' as const, name, line: 1, signature, subKind: 'function' },
+          ],
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+        }
+      }
+
+      // Old version, fingerprints matching the unchanged files, and tags that
+      // carry no call reference from main.ts to helpers.ts.
+      const stale: CacheData = {
+        version: CACHE_VERSION - 1,
+        entries: {
+          'helpers.ts': staleEntry(
+            'helpers.ts',
+            'computeTotal',
+            'export function computeTotal(items: number[]) {',
+          ),
+          'main.ts': staleEntry('main.ts', 'run', 'export function run() {'),
+        },
+        renderedEntries: {
+          stale: { map: 'stale map', fileCount: 1, tokenCount: 2, createdAt: 0 },
+        },
+      }
+      saveCache(tempDir, stale)
+
+      const result = await buildRepoMap({
+        root: tempDir,
+        files: ['main.ts', 'helpers.ts'],
+        maxTokens: 1024,
+      })
+
+      // Re-extracted rather than served from the stale cache, so the call from
+      // main.ts ranks helpers.ts first.
+      expect(result.cacheHit).toBe(false)
+      expect(result.map.split('\n')[0]).toBe('helpers.ts:')
+
+      // The refreshed cache is written at the current version.
+      expect(loadCache(tempDir).version).toBe(CACHE_VERSION)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  }))
 
   test('stores repo map cache under OPENCLAUDE_CONFIG_DIR when configured', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'repomap-config-home-'))
