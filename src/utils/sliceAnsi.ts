@@ -18,6 +18,19 @@ function filterStartCodes(codes: AnsiCode[]): AnsiCode[] {
   return codes.filter(c => !isEndCode(c))
 }
 
+export type SliceAnsiOptions = {
+  /**
+   * Guarantee the result covers at most `end - start` display cells.
+   *
+   * The default (`false`) keeps the partitioning contract: a wide glyph that
+   * straddles `end` is included whole, so `slice(0, k) + slice(k)` reproduces
+   * the original text. Callers that clip to a fixed cell budget (truncation,
+   * viewport clipping, wrapping) must set `fitEnd`, because a two-cell glyph
+   * starting on the last cell of the range would otherwise overflow it.
+   */
+  fitEnd?: boolean
+}
+
 /**
  * Slice a string containing ANSI escape codes.
  *
@@ -28,7 +41,9 @@ export default function sliceAnsi(
   str: string,
   start: number,
   end?: number,
+  options?: SliceAnsiOptions,
 ): string {
+  const fitEnd = options?.fitEnd === true
   // Don't pass `end` to tokenize — it counts code units, not display cells,
   // so it drops tokens early for text with zero-width combining marks.
   const tokens = tokenize(str)
@@ -71,6 +86,12 @@ export default function sliceAnsi(
         result += token.code
       }
     } else {
+      // With fitEnd, a printable char that would straddle `end` is dropped
+      // instead of overflowing the requested cell range.
+      if (fitEnd && end !== undefined && width > 0 && position + width > end) {
+        break
+      }
+
       if (!include && position >= start) {
         // Skip leading zero-width marks at the start boundary — they belong
         // to the preceding base char in the left half. Without this, the
@@ -91,6 +112,11 @@ export default function sliceAnsi(
       position += width
     }
   }
+
+  // Empty or out-of-range slice: emit nothing. Running the undo sequence here
+  // would leak a stray reset code for styles that were never opened in the
+  // result (the codes were only collected, never emitted).
+  if (!include) return result
 
   // Only undo start codes that are still active
   const activeStartCodes = filterStartCodes(reduceAnsiCodes(activeCodes))

@@ -29,12 +29,28 @@ function wrapText(
       wrappedLines.push(line.trimEnd())
     } else {
       // Break long lines into chunks of wrapWidth visible characters
-      // using ANSI-aware slicing to preserve escape sequences
+      // using ANSI-aware slicing to preserve escape sequences.
+      //
+      // Advance by the width that was actually emitted, not by wrapWidth: a
+      // wide glyph (CJK, emoji) that does not fit in the remaining cells is
+      // dropped from the chunk by `fitEnd`, and the next chunk must start on
+      // that glyph's first cell. Advancing by a fixed stride would slice
+      // through the glyph and lose or duplicate it.
       let position = 0
       while (position < visibleWidth) {
-        const chunk = sliceAnsi(line, position, position + wrapWidth)
+        let chunk = sliceAnsi(line, position, position + wrapWidth, {
+          fitEnd: true,
+        })
+        if (chunk === '') {
+          // The glyph at this boundary is wider than the whole budget; widen
+          // by one cell so it is emitted rather than skipped.
+          chunk = sliceAnsi(line, position, position + wrapWidth + 1, {
+            fitEnd: true,
+          })
+        }
         wrappedLines.push(chunk.trimEnd())
-        position += wrapWidth
+        const chunkWidth = stringWidth(chunk)
+        position += chunkWidth > 0 ? chunkWidth : wrapWidth
       }
     }
   }

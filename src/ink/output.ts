@@ -475,17 +475,9 @@ export default class Output {
                 const from = x < clip.x1! ? clip.x1! - x : 0
                 const width = stringWidth(line)
                 const to = x + width > clip.x2! ? clip.x2! - x : width
-                let sliced = sliceAnsi(line, from, to)
-                // Wide chars (CJK, emoji) occupy 2 cells. When `to` lands
-                // on the first cell of a wide char, sliceAnsi includes the
-                // entire glyph and the result overflows clip.x2 by one cell,
-                // writing a SpacerTail into the adjacent sibling. Re-slice
-                // one cell earlier; wide chars are exactly 2 cells, so a
-                // single retry always fits.
-                if (stringWidth(sliced) > to - from) {
-                  sliced = sliceAnsi(line, from, to - 1)
-                }
-                return sliced
+                // fitEnd keeps a wide glyph from straddling clip.x2: without
+                // it the glyph would overflow into the adjacent sibling's cell.
+                return sliceAnsi(line, from, to, { fitEnd: true })
               })
 
               if (x < clip.x1!) {
