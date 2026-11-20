@@ -7,12 +7,14 @@ import {
   readFile,
   readdir,
   rename,
+  rmdir,
   stat,
   unlink,
   writeFile,
 } from 'node:fs/promises'
 import {
   closeSync,
+  constants as fsConstants,
   fstatSync,
   fsyncSync,
   linkSync,
@@ -20,6 +22,8 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
   type Dirent,
@@ -137,6 +141,12 @@ const COMPLETED_STATUSES = new Set<BackgroundSessionStatus>([
   'killed',
 ])
 const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/
+// Temp files written by writeNewSession/replaceSessionFile are named
+// `<id>.<pid>.<uuid>.tmp`; the id is everything before the numeric pid
+// and the random UUID suffix, and the pid is the publishing process.
+const SESSION_TEMP_FILE_RE =
+  /^(.*)\.(\d+)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
+
 const SAFE_SIGNAL_RE = /^SIG[A-Z0-9]{1,24}$/
 const BACKGROUND_RECOVERY_JOURNAL_ENTRY_LIMIT = 256
 const BACKGROUND_RECOVERY_JOURNAL_RECORD_MAX_BYTES = 512
@@ -767,6 +777,21 @@ function isErrno(error: unknown, code: string): boolean {
   )
 }
 
+// Whether link() failed because the filesystem rejects hard links: the
+// no-hard-link publication fallback applies. Any other link() failure
+// (EEXIST, ENOENT, EACCES, ...) is a real outcome, not a capability
+// signal (CodeRabbit #2497). Node on Linux surfaces a refused link() as
+// ENOTSUP as well as EOPNOTSUPP, so both enter the fallback (maintainer
+// review 5948202472 on #2497).
+function isHardLinkUnsupported(error: unknown): boolean {
+  return (
+    isErrno(error, 'EPERM') ||
+    isErrno(error, 'ENOSYS') ||
+    isErrno(error, 'EOPNOTSUPP') ||
+    isErrno(error, 'ENOTSUP')
+  )
+}
+
 type CleanupJsonRead<T> =
   | { state: 'missing' }
   | { state: 'valid'; value: T; identity?: CleanupFileIdentity }
@@ -985,15 +1010,54 @@ async function writeNewSession(session: BackgroundSession): Promise<void> {
         if (!isErrno(error, 'ENOENT')) throw error
       }
     }
+    // Publish atomically: write the document to a temp file in the same
+    // directory and commit it into place, so a concurrent name/prefix
+    // scan in resolveBackgroundSessionForWait never reads a
+    // partially-written metadata document as malformed (CodeRabbit
+    // #2497). The commit is link(), which fails with EEXIST when the
+    // target is already published: the lstat pre-check below is not
+    // enough on its own, because the per-ID lock can be stolen after a
+    // wall-clock jump, and a second create whose check ran before the
+    // first commit would otherwise rename over the first publisher's
+    // metadata (maintainer review 5942761094 on #2497). On filesystems
+    // that reject hard links the commit falls back to a claim-serialized
+    // rename, so the second publisher still reports the duplicate
+    // instead of overwriting the first publisher's row (CodeRabbit
+    // #2497 review 5945720742). Temp files end in .tmp so the scan
+    // skips them.
+    const target = metadataPathForId(session.id)
+    const tmp = join(
+      getBackgroundSessionMetadataDir(),
+      `${session.id}.${process.pid}.${randomUUID()}.tmp`,
+    )
+    // Sync the completed temp file to storage before committing it into
+    // place, matching installTerminalFact: without a sync, a crash or
+    // power loss after the commit can leave a zero-length or partial
+    // session metadata file on filesystems with delayed allocation
+    // (CodeRabbit #2497).
+    let handle: Awaited<ReturnType<typeof open>> | undefined
     try {
-      await writeFile(metadataPathForId(session.id), jsonStringify(session), {
-        flag: 'wx',
-      })
-    } catch (error) {
-      if (isErrno(error, 'EEXIST')) {
-        throw new Error(`Background session id "${session.id}" already exists`)
+      handle = await open(tmp, 'wx')
+      await handle.writeFile(jsonStringify(session))
+      await handle.sync()
+      await handle.close()
+      handle = undefined
+      try {
+        await lstat(target)
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        const committed = await commitPublishFile(tmp, target)
+        if (committed !== 'committed') {
+          throw new Error(
+            `Background session id "${session.id}" already exists`,
+          )
+        }
+        return
       }
-      throw error
+      throw new Error(`Background session id "${session.id}" already exists`)
+    } finally {
+      await handle?.close().catch(() => {})
+      await unlink(tmp).catch(() => {})
     }
   })
 }
@@ -1497,11 +1561,947 @@ function applyTerminalFacts(
   return effective
 }
 
+// How long a terminal-fact installer that loses the publish claim waits
+// for the winning publish to appear before completing the winner's
+// publish itself. The winner publishes within microseconds of claiming,
+// so the budget is only spent when the winner died or stalled;
+// completing the winner's publish is always safe, so the budget is
+// short (CodeRabbit #2497).
+const TERMINAL_FACT_PUBLISH_WAIT_MS = 250
+// Maximum publish attempts (claim, adopt, retry) before giving up with
+// the invalid-fact error.
+const TERMINAL_FACT_PUBLISH_ATTEMPTS = 3
+// Bound for the no-hard-link commit-claim wait below: a claim holder's
+// critical section (recheck + rename) takes microseconds, so a waiter
+// only polls this long when the holder is suspended; the claim goes
+// stale after COMMIT_PUBLISH_CLAIM_STALE_MS and is reclaimed first.
+// 3000 polls at 10 ms is about 30 s.
+const COMMIT_PUBLISH_CLAIM_MAX_POLLS = 3000
+// A commit claim older than this belongs to a dead or suspended
+// holder: the waiter reclaims it. Matches proper-lockfile's 10 s stale
+// threshold used by the per-ID locks in this file.
+const COMMIT_PUBLISH_CLAIM_STALE_MS = 10_000
+
 function terminalFactTempPath(id: string): string {
   return join(
     getBackgroundSessionTerminalDir(),
     `${id}.${process.pid}.${randomUUID()}.tmp`,
   )
+}
+
+// The publish claim for one terminal-fact target: a directory, so
+// creating it with mkdir() is atomic and works on filesystems without
+// hard-link support. The claim file inside names the temp file to
+// publish.
+function terminalFactClaimDir(target: string): string {
+  return `${target}.claim`
+}
+
+function terminalFactClaimFile(target: string): string {
+  return join(terminalFactClaimDir(target), 'tmp')
+}
+
+// Removes a publish claim: the claim file first, then the directory.
+// rmdir() refuses a non-empty directory, so removing the directory
+// alone would leave the claim behind.
+async function removeTerminalFactClaim(target: string): Promise<void> {
+  await unlink(terminalFactClaimFile(target)).catch(() => {})
+  await rmdir(terminalFactClaimDir(target)).catch(() => {})
+}
+
+function removeTerminalFactClaimSync(target: string): void {
+  try {
+    unlinkSync(terminalFactClaimFile(target))
+  } catch {}
+  try {
+    rmdirSync(terminalFactClaimDir(target))
+  } catch {}
+}
+
+// Whether the claim file still names this installer's temp file: the
+// claim is withdrawn when the file is gone or names another tmp. A
+// publisher checks this immediately before committing, so a delayed
+// owner whose claim was withdrawn cannot rename over a fact another
+// installer published in the meantime (maintainer review 5896325929
+// on #2497).
+async function ownsTerminalFactClaim(
+  target: string,
+  tmp: string,
+): Promise<boolean> {
+  const claimed = await readFile(terminalFactClaimFile(target), 'utf8').catch(
+    () => undefined,
+  )
+  return claimed?.trim() === tmp
+}
+
+function ownsTerminalFactClaimSync(target: string, tmp: string): boolean {
+  let claimed: string | undefined
+  try {
+    claimed = readFileSync(terminalFactClaimFile(target), 'utf8')
+  } catch {
+    return false
+  }
+  return claimed?.trim() === tmp
+}
+
+// Removes a publish claim only when this installer created it: the
+// claim file names the winner's tmp, so a claim naming another tmp
+// belongs to a newer publisher and must be left alone. A claim file
+// that is already gone means the claim was adopted and removed, so
+// there is nothing to do.
+async function removeOwnTerminalFactClaim(
+  target: string,
+  tmp: string,
+): Promise<void> {
+  if (!(await ownsTerminalFactClaim(target, tmp))) return
+  await removeTerminalFactClaim(target)
+}
+
+function removeOwnTerminalFactClaimSync(
+  target: string,
+  tmp: string,
+): void {
+  if (!ownsTerminalFactClaimSync(target, tmp)) return
+  removeTerminalFactClaimSync(target)
+}
+
+// Test-only hook invoked by installTerminalFact after it has claimed a
+// terminal-fact publish and before it renames the temp file into place,
+// so a test can pause one installer while a second installer publishes
+// (CodeRabbit #2497). Never set outside tests.
+let terminalFactPublishHookForTesting: (() => Promise<void>) | undefined
+
+export function _setTerminalFactPublishHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  terminalFactPublishHookForTesting = hook
+}
+
+// Test-only hook invoked by publishTerminalFact after it has checked the
+// target and before it claims the publish, so a test can let a second
+// installer publish while the first is between the check and the claim
+// (CodeRabbit #2497). Never set outside tests.
+let terminalFactPublishClaimHookForTesting: (() => Promise<void>) | undefined
+
+export function _setTerminalFactPublishClaimHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  terminalFactPublishClaimHookForTesting = hook
+}
+
+// Test-only hook invoked by commitPublishFile after it has claimed a
+// no-hard-link publish and rechecked the target, and before it renames
+// the temp file into place, so a test can pause one publisher while a
+// second publisher reclaims its stale claim and publishes (maintainer
+// review 5948202472 on #2497). Never set outside tests.
+let commitPublishHookForTesting: (() => Promise<void>) | undefined
+
+export function _setCommitPublishHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  commitPublishHookForTesting = hook
+}
+
+// Synchronous counterpart of the hook above, for commitPublishFileSync.
+// Never set outside tests.
+let commitPublishHookForTestingSync: (() => void) | undefined
+
+export function _setCommitPublishHookForTestingSync(
+  hook: (() => void) | undefined,
+): void {
+  commitPublishHookForTestingSync = hook
+}
+
+async function waitForTerminalFact(
+  id: string,
+  kind: 'natural' | 'killed',
+  generation?: string,
+): Promise<BackgroundSessionTerminalFact | null> {
+  const deadline = performance.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  for (;;) {
+    const existing = await readTerminalFact(id, kind, generation)
+    if (existing) return existing
+    if (performance.now() >= deadline) return null
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+// Shared buffer for sleepSync: Atomics.wait is the only synchronous sleep
+// available in Bun/Node, and it needs a shared-memory view. Same idiom as
+// src/utils/transcriptFileLock.ts. The buffer is never written, so waits
+// always time out after `ms` instead of waking early.
+const terminalFactSyncWaitBuffer = new Int32Array(new SharedArrayBuffer(4))
+
+/**
+ * Blocks the current thread for `ms` milliseconds without yielding to the
+ * event loop. Only for the synchronous terminal-fact wait loops below,
+ * which cannot await: a plain loop would spin readFileSync at 100% CPU
+ * until the deadline.
+ */
+function sleepSync(ms: number): void {
+  Atomics.wait(terminalFactSyncWaitBuffer, 0, 0, ms)
+}
+
+/**
+ * Polls for a published terminal fact, sleeping 10 ms between reads like
+ * the async waitForTerminalFact, and returns null when the 250 ms deadline
+ * passes without the fact appearing.
+ */
+function waitForTerminalFactSync(
+  id: string,
+  kind: 'natural' | 'killed',
+  generation?: string,
+): BackgroundSessionTerminalFact | null {
+  const deadline = performance.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  for (;;) {
+    const existing = readTerminalFactSync(id, kind, generation)
+    if (existing) return existing
+    if (performance.now() >= deadline) return null
+    sleepSync(10)
+  }
+}
+
+async function readTerminalFactClaim(
+  target: string,
+): Promise<string | undefined> {
+  const claimFile = terminalFactClaimFile(target)
+  const deadline = performance.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  for (;;) {
+    let claimed: string | undefined
+    try {
+      claimed = (await readFile(claimFile, 'utf8')).trim()
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) return undefined
+      claimed = undefined
+    }
+    if (claimed !== undefined) {
+      const terminalDir = getBackgroundSessionTerminalDir()
+      // The claim must name a temp file in this terminal directory;
+      // anything else is a corrupt claim, never a path to rename.
+      if (
+        claimed &&
+        join(terminalDir, basename(claimed)) === claimed &&
+        SESSION_TEMP_FILE_RE.test(basename(claimed))
+      ) {
+        return claimed
+      }
+      // A non-empty claim that names an invalid path is corrupt: no
+      // publisher will fix it, so stop polling. An empty claim means
+      // the winner opened the claim file but has not finished writing
+      // its pointer yet — keep polling until the deadline, so a live
+      // publisher is not treated as dead while its write is in flight
+      // (maintainer review 5896325929 on #2497).
+      if (claimed) return undefined
+    }
+    if (performance.now() >= deadline) return undefined
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+/**
+ * Polls for the claim file naming the winning installer's temp file,
+ * sleeping 10 ms between reads like the async readTerminalFactClaim, and
+ * returns undefined when no valid claim appears before the 250 ms
+ * deadline (or the claim names a path outside the terminal directory).
+ */
+function readTerminalFactClaimSync(target: string): string | undefined {
+  const claimFile = terminalFactClaimFile(target)
+  const deadline = performance.now() + TERMINAL_FACT_PUBLISH_WAIT_MS
+  for (;;) {
+    let claimed: string | undefined
+    try {
+      claimed = readFileSync(claimFile, 'utf8').trim()
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) return undefined
+      claimed = undefined
+    }
+    if (claimed !== undefined) {
+      const terminalDir = getBackgroundSessionTerminalDir()
+      if (
+        claimed &&
+        join(terminalDir, basename(claimed)) === claimed &&
+        SESSION_TEMP_FILE_RE.test(basename(claimed))
+      ) {
+        return claimed
+      }
+      // Same empty-claim rule as readTerminalFactClaim: a non-empty
+      // invalid claim is corrupt, but an empty claim is a pointer
+      // write still in flight, so keep polling until the deadline.
+      if (claimed) return undefined
+    }
+    if (performance.now() >= deadline) return undefined
+    sleepSync(10)
+  }
+}
+
+// Whether the temp file a claim names no longer exists: the winner died
+// (or its publish failed) after writing the claim, and its temp was
+// unlinked. Any error other than ENOENT is treated as "still there",
+// so the commit surfaces the real failure instead of reclaiming a live
+// publisher's claim.
+async function isTerminalFactClaimTempGone(tmp: string): Promise<boolean> {
+  try {
+    await lstat(tmp)
+    return false
+  } catch (error) {
+    return isErrno(error, 'ENOENT')
+  }
+}
+
+function isTerminalFactClaimTempGoneSync(tmp: string): boolean {
+  try {
+    lstatSync(tmp)
+    return false
+  } catch (error) {
+    return isErrno(error, 'ENOENT')
+  }
+}
+
+type PublishCommitOutcome = 'committed' | 'exists' | 'gone'
+
+/**
+ * Commits a synced temp file as a published fact or session row, and
+ * reports which fact actually ended up at the target.
+ *
+ * link() is the atomic commit: it fails with EEXIST when the target is
+ * already published, so a delayed owner whose claim was withdrawn can
+ * never replace a fact another installer published (maintainer review
+ * 5942761094 on #2497) — the rename() pre-checks alone leave a window
+ * between the check and the rename, which a successor's publish can
+ * land in. A missing temp file means another installer adopted this
+ * publish, so the caller waits for the fact at the target instead.
+ *
+ * On filesystems that reject hard links, link() fails with
+ * EPERM/ENOSYS/EOPNOTSUPP and the commit falls back to a
+ * claim-serialized rename: mkdir() on `<target>.commit` is atomic, so
+ * exactly one publisher wins the claim, rechecks the target under it,
+ * and renames, while a loser that finds the claim waits for the target
+ * to appear and reports it. A plain rename() cannot replace link()
+ * here — it overwrites an existing target, so two publishers that both
+ * reach the fallback publish in turn and the second one's readback
+ * matches its own bytes, letting both creates succeed instead of
+ * rejecting the duplicate (CodeRabbit #2497 review 5945720742). The
+ * target still only ever appears complete, via rename, and a stale
+ * claim is reclaimed by the waiter. A holder that stalls past the
+ * stale threshold can lose its claim that way, so the holder records
+ * the claim directory's (dev, ino) identity when it wins the claim
+ * and re-verifies it immediately before the rename: a superseded
+ * holder reports the successor's publish instead of overwriting it,
+ * and the claim directory is only removed while it is still the
+ * holder's own (maintainer review 5948202472 on #2497).
+ */
+async function commitPublishFile(
+  tmp: string,
+  target: string,
+): Promise<PublishCommitOutcome> {
+  try {
+    await link(tmp, target)
+    return 'committed'
+  } catch (error) {
+    if (isErrno(error, 'EEXIST')) return 'exists'
+    if (isErrno(error, 'ENOENT')) return 'gone'
+    if (!isHardLinkUnsupported(error)) throw error
+  }
+  const claimDir = commitPublishClaimDir(target)
+  for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
+    let claimIdentity: CleanupFileIdentity | undefined
+    try {
+      await mkdir(claimDir)
+      claimIdentity = await readCommitPublishClaimIdentity(claimDir)
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+    }
+    if (claimIdentity === undefined) {
+      // Another publisher holds the claim: its rename lands within
+      // microseconds, so the target appears — report it instead of
+      // racing it.
+      try {
+        await lstat(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      if (await isCommitPublishClaimStale(claimDir)) {
+        await rmdir(claimDir).catch(() => {})
+        continue
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+      continue
+    }
+    // We hold the claim: recheck the target, then verify we still own
+    // the claim immediately before the rename. A holder stalled past
+    // the stale threshold can lose its claim to a successor, which
+    // publishes first; without the ownership check the resumed rename
+    // would overwrite the successor's publish and still report success
+    // (maintainer review 5948202472 on #2497). Keep the ownership
+    // check as the last verification before the rename: a target
+    // recheck after it would reopen the same window for a holder
+    // stalled past the stale threshold (CodeRabbit #2497 review
+    // 5950772048).
+    try {
+      try {
+        await lstat(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      await commitPublishHookForTesting?.()
+      if (!(await ownsCommitPublishClaim(claimDir, claimIdentity))) {
+        try {
+          await lstat(target)
+          return 'exists'
+        } catch (error) {
+          if (!isErrno(error, 'ENOENT')) throw error
+        }
+        // The claim is gone but nothing was published (the successor's
+        // commit failed): re-enter the claim loop instead of reporting
+        // a fact that does not exist.
+        continue
+      }
+      try {
+        await rename(tmp, target)
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        return 'gone'
+      }
+      return 'committed'
+    } finally {
+      await removeOwnCommitPublishClaim(claimDir, claimIdentity)
+    }
+  }
+  throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
+}
+
+function commitPublishFileSync(
+  tmp: string,
+  target: string,
+): PublishCommitOutcome {
+  try {
+    linkSync(tmp, target)
+    return 'committed'
+  } catch (error) {
+    if (isErrno(error, 'EEXIST')) return 'exists'
+    if (isErrno(error, 'ENOENT')) return 'gone'
+    if (!isHardLinkUnsupported(error)) throw error
+  }
+  const claimDir = commitPublishClaimDir(target)
+  for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
+    let claimIdentity: CleanupFileIdentity | undefined
+    try {
+      mkdirSync(claimDir)
+      claimIdentity = readCommitPublishClaimIdentitySync(claimDir)
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+    }
+    if (claimIdentity === undefined) {
+      try {
+        lstatSync(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      if (isCommitPublishClaimStaleSync(claimDir)) {
+        try {
+          rmdirSync(claimDir)
+        } catch {}
+        continue
+      }
+      sleepSync(10)
+      continue
+    }
+    // We hold the claim: recheck the target, then verify we still own
+    // the claim immediately before the rename (see commitPublishFile).
+    // Keep the ownership check last here too: a target recheck after
+    // it would reopen the same stalled-holder window.
+    try {
+      try {
+        lstatSync(target)
+        return 'exists'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+      commitPublishHookForTestingSync?.()
+      if (!ownsCommitPublishClaimSync(claimDir, claimIdentity)) {
+        try {
+          lstatSync(target)
+          return 'exists'
+        } catch (error) {
+          if (!isErrno(error, 'ENOENT')) throw error
+        }
+        // The claim is gone but nothing was published: re-enter the
+        // claim loop instead of reporting a fact that does not exist.
+        continue
+      }
+      try {
+        renameSync(tmp, target)
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        return 'gone'
+      }
+      return 'committed'
+    } finally {
+      removeOwnCommitPublishClaimSync(claimDir, claimIdentity)
+    }
+  }
+  throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
+}
+
+// The publish claim for one commit target: a directory, so creating it
+// with mkdir() is atomic and works on filesystems without hard-link
+// support — the same idiom as the terminal-fact claim directories
+// above. It serializes the recheck-and-rename in the no-hard-link
+// fallback only; the link() path never creates one.
+function commitPublishClaimDir(target: string): string {
+  return `${target}.commit`
+}
+
+// The identity of a commit claim directory, recorded when the claim is
+// won: a stale-reclaiming successor removes this directory and creates
+// a new one, so the (dev, ino) pair no longer matches and a delayed
+// holder can tell its claim was superseded. The pair is the same
+// identity idiom as CleanupFileIdentity above.
+async function readCommitPublishClaimIdentity(
+  claimDir: string,
+): Promise<CleanupFileIdentity | undefined> {
+  try {
+    const stats = await lstat(claimDir)
+    return { dev: stats.dev, ino: stats.ino }
+  } catch {
+    return undefined
+  }
+}
+
+function readCommitPublishClaimIdentitySync(
+  claimDir: string,
+): CleanupFileIdentity | undefined {
+  try {
+    const stats = lstatSync(claimDir)
+    return { dev: stats.dev, ino: stats.ino }
+  } catch {
+    return undefined
+  }
+}
+
+// Whether the claim directory is still the one this publisher won: a
+// successor that reclaimed a stale claim removed it and created a new
+// directory, so the identity differs (or the directory is gone).
+async function ownsCommitPublishClaim(
+  claimDir: string,
+  identity: CleanupFileIdentity,
+): Promise<boolean> {
+  const current = await readCommitPublishClaimIdentity(claimDir)
+  return (
+    current !== undefined &&
+    current.dev === identity.dev &&
+    current.ino === identity.ino
+  )
+}
+
+function ownsCommitPublishClaimSync(
+  claimDir: string,
+  identity: CleanupFileIdentity,
+): boolean {
+  const current = readCommitPublishClaimIdentitySync(claimDir)
+  return (
+    current !== undefined &&
+    current.dev === identity.dev &&
+    current.ino === identity.ino
+  )
+}
+
+// Removes a commit claim only while it is still ours: an unguarded
+// rmdir() in the commit finally could delete a successor's active
+// claim directory after our claim was stale-reclaimed, letting a third
+// publisher claim while the successor is mid-publish.
+async function removeOwnCommitPublishClaim(
+  claimDir: string,
+  identity: CleanupFileIdentity,
+): Promise<void> {
+  if (!(await ownsCommitPublishClaim(claimDir, identity))) return
+  await rmdir(claimDir).catch(() => {})
+}
+
+function removeOwnCommitPublishClaimSync(
+  claimDir: string,
+  identity: CleanupFileIdentity,
+): void {
+  if (!ownsCommitPublishClaimSync(claimDir, identity)) return
+  try {
+    rmdirSync(claimDir)
+  } catch {}
+}
+
+// Whether a commit claim belongs to a dead or suspended holder: its
+// mtime is older than the stale threshold. A live holder's critical
+// section (recheck + rename) takes microseconds, so a fresh claim
+// means the holder is about to publish.
+async function isCommitPublishClaimStale(claimDir: string): Promise<boolean> {
+  try {
+    const stats = await lstat(claimDir)
+    return Date.now() - stats.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
+  } catch {
+    // The claim disappeared: not stale, the waiter just retries.
+    return false
+  }
+}
+
+function isCommitPublishClaimStaleSync(claimDir: string): boolean {
+  try {
+    const stats = lstatSync(claimDir)
+    return Date.now() - stats.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Publishes one terminal fact with atomic no-overwrite semantics. The
+ * target only ever appears complete, via link() (or rename() on
+ * filesystems that reject hard links) of a synced temp file, so a
+ * concurrent `wait` never reads a partially-written fact as malformed;
+ * and the first publisher wins: an installer claims the target by
+ * creating `<target>.claim` (mkdir is atomic) and recording its temp
+ * path in `<target>.claim/tmp`, so a second installer that finds the
+ * claim — including the synchronous ELOCKED exit fallback, which
+ * publishes without the per-ID lock — completes the winner's publish
+ * instead of racing it. A loser whose winner died after claiming removes
+ * the stale claim and retries. A claim whose pointer write is still in
+ * flight reads as empty, so an adopter polls for it instead of removing
+ * it; and the commit itself is atomic (link() EEXIST, with a
+ * claim-serialized rename() fallback where hard links fail), so a delayed owner whose claim was
+ * withdrawn never replaces a fact another installer published
+ * (maintainer review 5896325929 and 5942761094 on #2497). This keeps
+ * the old link() EEXIST duplicate semantics where hard links work, and
+ * keeps publication working without them where they fail (maintainer
+ * review 5830922741 on #2497).
+ */
+async function publishTerminalFact(
+  fact: BackgroundSessionTerminalFact,
+  kind: 'natural' | 'killed',
+  target: string,
+  tmp: string,
+): Promise<BackgroundSessionTerminalFact> {
+  const claimDir = terminalFactClaimDir(target)
+  const claimFile = terminalFactClaimFile(target)
+  for (let attempt = 0; attempt < TERMINAL_FACT_PUBLISH_ATTEMPTS; attempt++) {
+    // A fact already published by an earlier installer wins. The target
+    // only ever appears complete (via rename), so one read is enough.
+    let targetExists = false
+    try {
+      await lstat(target)
+      targetExists = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetExists) {
+      const existing = await readTerminalFact(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    // Test-only pause point between the target check and the claim, so a
+    // test can publish from a second installer inside that gap
+    // (CodeRabbit #2497).
+    await terminalFactPublishClaimHookForTesting?.()
+    // Claim the publish: exactly one installer per target wins the
+    // mkdir, and the claim file names the tmp to publish, so a loser
+    // can complete the winner's publish instead of racing it.
+    try {
+      await mkdir(claimDir)
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+      const adopted = await adoptTerminalFactPublish(fact, kind, target)
+      if (adopted) return adopted
+      continue
+    }
+    // Recheck the target now that this installer holds the claim: a
+    // publisher may have completed and removed its claim after the
+    // lstat above. Drop this installer's own fresh claim directory, but
+    // only the directory: the claim file has not been written yet, so a
+    // claim file present here belongs to another publisher that claimed
+    // into this directory meanwhile, and rmdir refuses a non-empty
+    // directory, so that claim survives (maintainer review 5942761094
+    // on #2497).
+    try {
+      await lstat(target)
+      await rmdir(claimDir).catch(() => {})
+      const existing = await readTerminalFact(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    try {
+      await writeFile(claimFile, tmp, { flag: 'wx' })
+    } catch (error) {
+      if (isErrno(error, 'ENOENT')) continue
+      // Another publisher claimed first and wrote its pointer while this
+      // installer was stalled: retry the publish instead of failing —
+      // the loop rechecks the target and adopts that publish.
+      if (isErrno(error, 'EEXIST')) continue
+      throw error
+    }
+    await terminalFactPublishHookForTesting?.()
+    // Commit only while this installer still owns the claim and the
+    // target is still unpublished: the claim may have been withdrawn
+    // while this installer was stalled — e.g. between opening the
+    // claim file and finishing its pointer write — and a successor may
+    // have adopted the publish or published its own fact in the
+    // meantime. Committing over that fact would replace the
+    // first-published fact, so return it instead (or retry the publish
+    // if nothing was published yet). The commit itself is atomic
+    // (link() EEXIST), so no publisher can land between this recheck
+    // and the commit.
+    let targetPublished = false
+    try {
+      await lstat(target)
+      targetPublished = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetPublished) {
+      const existing = await readTerminalFact(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    if (!(await ownsTerminalFactClaim(target, tmp))) continue
+    const committed = await commitPublishFile(tmp, target)
+    if (committed === 'gone') {
+      // Another installer adopted this tmp and published it; the fact
+      // now at the target is this publish, so return it.
+      const existing = await waitForTerminalFact(
+        fact.id,
+        kind,
+        fact.generation,
+      )
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    if (committed === 'exists') {
+      // Another installer published first; the fact at the target wins.
+      const existing = await readTerminalFact(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    return fact
+  }
+  throw new Error(`Invalid background session ${kind} terminal fact`)
+}
+
+async function adoptTerminalFactPublish(
+  fact: BackgroundSessionTerminalFact,
+  kind: 'natural' | 'killed',
+  target: string,
+): Promise<BackgroundSessionTerminalFact | null> {
+  // The winner publishes within microseconds of claiming, so wait
+  // briefly for its target to appear before adopting.
+  const existing = await waitForTerminalFact(fact.id, kind, fact.generation)
+  if (existing) return existing
+  // The winner died or stalled after claiming: complete its publish by
+  // committing its tmp to the target. Its tmp is complete — the claim
+  // file is written only after the tmp is synced — so the target only
+  // ever appears complete, and the first publisher still wins. The
+  // commit is atomic (link() EEXIST), so a publisher that committed
+  // after this adopter read the claim is not overwritten.
+  const claimedTmp = await readTerminalFactClaim(target)
+  if (claimedTmp === undefined) {
+    // No claim file: the winner died between mkdir and the claim-file
+    // write, or stalled there. Remove the stale claim so the next
+    // attempt can claim the publish.
+    await removeTerminalFactClaim(target)
+    return null
+  }
+  // Abandoned winner: the claim names a temp that no longer exists
+  // and the target is still unpublished — the winner died (or its
+  // publish failed) after writing the claim, and its temp was
+  // unlinked. Committing the missing temp would return 'gone' and the
+  // caller would retry against the same dead pointer until the
+  // attempts run out, leaving the session `running` and `wait` never
+  // reaching terminal JSON. Reclaim the claim — removeOwn leaves a
+  // successor's active claim alone — so the next attempt can claim
+  // the publish itself (maintainer review 5948202472 on #2497).
+  if (await isTerminalFactClaimTempGone(claimedTmp)) {
+    const adopted = await readTerminalFact(fact.id, kind, fact.generation)
+    if (adopted) return adopted
+    await removeOwnTerminalFactClaim(target, claimedTmp)
+    return null
+  }
+  const committed = await commitPublishFile(claimedTmp, target)
+  if (committed !== 'committed') {
+    // The target already holds a fact, or the winner's tmp was adopted
+    // by another installer: return the fact at the target if it
+    // appeared, else retry the publish.
+    return await waitForTerminalFact(fact.id, kind, fact.generation)
+  }
+  // The winner's tmp is now redundant at the target: unlink it so a
+  // stalled winner's delayed cleanup cannot mistake it for a live
+  // publish. The winner's own commit sees the target already published
+  // and returns the fact instead.
+  await unlink(claimedTmp).catch(() => {})
+  // This publish is complete, so the winner's claim is stale — remove
+  // it only while it still names the adopted tmp, so a newer
+  // publisher's claim is left alone (maintainer review 5942761094
+  // on #2497).
+  await removeOwnTerminalFactClaim(target, claimedTmp)
+  const adopted = await readTerminalFact(fact.id, kind, fact.generation)
+  if (!adopted) {
+    throw new Error(`Invalid background session ${kind} terminal fact`)
+  }
+  return adopted
+}
+
+function publishTerminalFactSync(
+  fact: BackgroundSessionTerminalFact,
+  kind: 'natural' | 'killed',
+  target: string,
+  tmp: string,
+): BackgroundSessionTerminalFact {
+  const claimDir = terminalFactClaimDir(target)
+  const claimFile = terminalFactClaimFile(target)
+  for (let attempt = 0; attempt < TERMINAL_FACT_PUBLISH_ATTEMPTS; attempt++) {
+    // Same duplicate-guard as publishTerminalFact: a fact already
+    // published by an earlier installer wins.
+    let targetExists = false
+    try {
+      lstatSync(target)
+      targetExists = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetExists) {
+      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    try {
+      mkdirSync(claimDir)
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+      const adopted = adoptTerminalFactPublishSync(fact, kind, target)
+      if (adopted) return adopted
+      continue
+    }
+    // Same post-claim recheck as publishTerminalFact: a publisher may
+    // have completed and removed its claim after the lstat above.
+    // Drop only this installer's own fresh claim directory (see the
+    // async path): a claim file present here belongs to another
+    // publisher, and rmdir refuses a non-empty directory.
+    try {
+      lstatSync(target)
+      try {
+        rmdirSync(claimDir)
+      } catch {}
+      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    try {
+      writeFileSync(claimFile, tmp, { flag: 'wx' })
+    } catch (error) {
+      if (isErrno(error, 'ENOENT')) continue
+      // Same claim-write race as publishTerminalFact: another publisher
+      // claimed first, so retry instead of failing.
+      if (isErrno(error, 'EEXIST')) continue
+      throw error
+    }
+    // Same pre-commit ownership check as publishTerminalFact: only
+    // commit while this installer still owns the claim and the target
+    // is still unpublished.
+    let targetPublished = false
+    try {
+      lstatSync(target)
+      targetPublished = true
+    } catch (error) {
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+    if (targetPublished) {
+      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    if (!ownsTerminalFactClaimSync(target, tmp)) continue
+    const committed = commitPublishFileSync(tmp, target)
+    if (committed === 'gone') {
+      // Same adoption case as publishTerminalFact: another installer
+      // adopted this tmp and published it.
+      const existing = waitForTerminalFactSync(
+        fact.id,
+        kind,
+        fact.generation,
+      )
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    if (committed === 'exists') {
+      // Another installer published first; the fact at the target wins.
+      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
+      if (!existing) {
+        throw new Error(`Invalid background session ${kind} terminal fact`)
+      }
+      return existing
+    }
+    return fact
+  }
+  throw new Error(`Invalid background session ${kind} terminal fact`)
+}
+
+function adoptTerminalFactPublishSync(
+  fact: BackgroundSessionTerminalFact,
+  kind: 'natural' | 'killed',
+  target: string,
+): BackgroundSessionTerminalFact | null {
+  const existing = waitForTerminalFactSync(fact.id, kind, fact.generation)
+  if (existing) return existing
+  const claimedTmp = readTerminalFactClaimSync(target)
+  if (claimedTmp === undefined) {
+    removeTerminalFactClaimSync(target)
+    return null
+  }
+  // Abandoned winner, same as adoptTerminalFactPublish: a valid claim
+  // naming a temp that no longer exists must be reclaimed so the next
+  // attempt can claim the publish instead of retrying against the
+  // same dead pointer (maintainer review 5948202472 on #2497).
+  if (isTerminalFactClaimTempGoneSync(claimedTmp)) {
+    const adopted = readTerminalFactSync(fact.id, kind, fact.generation)
+    if (adopted) return adopted
+    removeOwnTerminalFactClaimSync(target, claimedTmp)
+    return null
+  }
+  const committed = commitPublishFileSync(claimedTmp, target)
+  if (committed !== 'committed') {
+    return waitForTerminalFactSync(fact.id, kind, fact.generation)
+  }
+  // Same post-adoption cleanup as adoptTerminalFactPublish: the
+  // winner's tmp is redundant at the target, and the claim is removed
+  // only while it still names the adopted tmp.
+  try {
+    unlinkSync(claimedTmp)
+  } catch {}
+  removeOwnTerminalFactClaimSync(target, claimedTmp)
+  const adopted = readTerminalFactSync(fact.id, kind, fact.generation)
+  if (!adopted) {
+    throw new Error(`Invalid background session ${kind} terminal fact`)
+  }
+  return adopted
 }
 
 async function installTerminalFact(
@@ -1519,22 +2519,18 @@ async function installTerminalFact(
     await handle.sync()
     await handle.close()
     handle = undefined
-    await link(tmp, target)
-    installed = fact
-  } catch (error) {
-    if (isErrno(error, 'EEXIST')) {
-      const existing = await readTerminalFact(fact.id, kind, fact.generation)
-      if (existing) {
-        installed = existing
-      } else {
-        throw new Error(`Invalid background session ${kind} terminal fact`)
-      }
-    } else {
-      throw error
-    }
+    installed = await publishTerminalFact(fact, kind, target, tmp)
   } finally {
     await handle?.close().catch(() => {})
     await unlink(tmp).catch(() => {})
+    // The claim belongs to this publish attempt: remove it once the
+    // publish is decided, whether this installer published, a loser
+    // adopted its tmp, or the publish failed. Only a claim this
+    // installer created is removed — a claim naming another tmp belongs
+    // to a newer publisher. A loser that already read the claim still
+    // holds the tmp path, so removing the directory cannot break its
+    // adoption; a loser that has not read it yet retries its own publish.
+    await removeOwnTerminalFactClaim(target, tmp)
   }
   await enqueueBackgroundSessionRecovery(installed.id, installed.generation).catch(() => {})
   return installed
@@ -1558,19 +2554,7 @@ function installTerminalFactSync(
     fsyncSync(fd)
     closeSync(fd)
     fd = undefined
-    linkSync(tmp, target)
-    installed = fact
-  } catch (error) {
-    if (isErrno(error, 'EEXIST')) {
-      const existing = readTerminalFactSync(fact.id, kind, fact.generation)
-      if (existing) {
-        installed = existing
-      } else {
-        throw new Error(`Invalid background session ${kind} terminal fact`)
-      }
-    } else {
-      throw error
-    }
+    installed = publishTerminalFactSync(fact, kind, target, tmp)
   } finally {
     if (fd !== undefined) {
       try {
@@ -1580,6 +2564,8 @@ function installTerminalFactSync(
     try {
       unlinkSync(tmp)
     } catch {}
+    // Same claim cleanup as installTerminalFact.
+    removeOwnTerminalFactClaimSync(target, tmp)
   }
   try {
     enqueueBackgroundSessionRecoverySync(installed.id, installed.generation)
@@ -2635,6 +3621,608 @@ export const __test = {
   resolveBackgroundSessionWithList,
 }
 
+// ---------------------------------------------------------------------------
+// `wait`-only strict read path (issue #2162).
+//
+// The display commands (ps/logs/attach/kill) intentionally collapse missing,
+// unreadable, malformed, and invalid registry documents to null. That
+// tolerance cannot support `wait`'s exit-code contract, so `wait` reads the
+// pinned session and its terminal facts strictly instead. Nothing below is
+// used by the display commands; do not widen it into a shared reader.
+// ---------------------------------------------------------------------------
+
+export type BackgroundSessionWaitErrorCode =
+  | 'metadata_missing'
+  | 'metadata_unreadable'
+  | 'metadata_malformed'
+  | 'metadata_replaced'
+  | 'invalid_arguments'
+  | 'not_found'
+  | 'ambiguous'
+  | 'unsupported'
+
+export class BackgroundSessionWaitError extends Error {
+  readonly code: BackgroundSessionWaitErrorCode
+  readonly pinnedId: string | null
+
+  constructor(
+    code: BackgroundSessionWaitErrorCode,
+    message: string,
+    pinnedId: string | null = null,
+  ) {
+    super(message)
+    this.name = 'BackgroundSessionWaitError'
+    this.code = code
+    this.pinnedId = pinnedId
+  }
+}
+
+type StrictSessionRead =
+  | { state: 'missing' }
+  | { state: 'valid'; value: BackgroundSession; identity: FileIdentity }
+  | { state: 'unreadable' }
+  | { state: 'malformed' }
+  | { state: 'id_mismatch'; value: BackgroundSession; identity: FileIdentity }
+
+/** The (device, inode) identity of an opened registry file, used to tell
+ * whether two spellings of a path opened the same file. Kept as bigint:
+ * Node on Windows can expose 64-bit file IDs, and two distinct IDs above
+ * 2^53 round to the same JavaScript number — a collision that could drop
+ * a distinct candidate row or accept two separate files as one alias
+ * (CodeRabbit #2497 review 5957376769). The string key built from these
+ * values stays exact because bigint template interpolation never rounds. */
+type FileIdentity = { dev: bigint; ino: bigint }
+
+function sameFileIdentity(first: FileIdentity, second: FileIdentity): boolean {
+  return first.dev === second.dev && first.ino === second.ino
+}
+
+/**
+ * Reads a `wait`-path registry file without ever blocking on a
+ * non-regular file. `open()` on a FIFO blocks until a writer appears, so
+ * a plain `readFile` on a FIFO at a metadata or terminal-fact path stalls
+ * the waiter forever; under Node the timeout exit then cannot run either,
+ * because `process.exit()` waits for the blocked libuv threadpool worker
+ * (CodeRabbit #2497). Open with O_NONBLOCK so the open itself cannot
+ * block, then stat the opened handle — the type check applies to the file
+ * actually read, so a swap between the check and the open cannot retarget
+ * it — and refuse anything that is not a regular file. A non-regular file
+ * reports as unreadable metadata, the same outcome a directory already
+ * produced via EISDIR. The same guard covers the 130/143 signal path,
+ * which reads through these same strict readers.
+ */
+async function readWaitRegistryFile(
+  path: string,
+): Promise<
+  | { state: 'missing' }
+  | { state: 'unreadable' }
+  | { state: 'ok'; content: string; identity: FileIdentity }
+> {
+  let handle: Awaited<ReturnType<typeof open>>
+  try {
+    handle = await open(
+      path,
+      fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+    )
+  } catch (error) {
+    // A path that cannot exist is missing, not unreadable: a valid long
+    // session name exceeds the 255-byte filename limit, so the
+    // speculative exact-ID metadata path fails with ENAMETOOLONG before
+    // the name/prefix scan can find the session (maintainer review
+    // 5942761094 on #2497). True unreadable errors for paths that can
+    // exist are unchanged.
+    return isErrno(error, 'ENOENT') || isErrno(error, 'ENAMETOOLONG')
+      ? { state: 'missing' }
+      : { state: 'unreadable' }
+  }
+  try {
+    const fileStat = await handle.stat({ bigint: true })
+    if (!fileStat.isFile()) return { state: 'unreadable' }
+    return {
+      state: 'ok',
+      content: await handle.readFile('utf8'),
+      identity: { dev: fileStat.dev, ino: fileStat.ino },
+    }
+  } catch {
+    return { state: 'unreadable' }
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+async function readSessionFileStrict(
+  path: string,
+  id: string,
+): Promise<StrictSessionRead> {
+  const read = await readWaitRegistryFile(path)
+  if (read.state === 'missing') return { state: 'missing' }
+  if (read.state === 'unreadable') return { state: 'unreadable' }
+  let parsed: unknown
+  try {
+    parsed = jsonParse(read.content)
+  } catch {
+    return { state: 'malformed' }
+  }
+  if (isBackgroundSession(parsed, id)) {
+    return { state: 'valid', value: parsed, identity: read.identity }
+  }
+  // A structurally valid session whose stored id differs from the
+  // requested id is not a corrupt document: on a case-insensitive
+  // registry the exact-ID path can open another session's file (for
+  // example `wait BG-ab` opens `bg-ab.json`). Report it distinctly so
+  // the resolver can treat that read as missing instead of failing
+  // with a malformed-metadata error, while a file whose stored id
+  // matches but fails other validation still reports `malformed`
+  // (CodeRabbit #2497 review 5953263672).
+  const storedId =
+    parsed !== null && typeof parsed === 'object'
+      ? (parsed as Partial<BackgroundSession>).id
+      : undefined
+  if (
+    typeof storedId === 'string' &&
+    storedId !== id &&
+    isBackgroundSession(parsed, storedId)
+  ) {
+    return { state: 'id_mismatch', value: parsed, identity: read.identity }
+  }
+  return { state: 'malformed' }
+}
+
+type StrictTerminalFactRead =
+  | { state: 'missing' }
+  | { state: 'valid'; value: BackgroundSessionTerminalFact }
+  | { state: 'unreadable' }
+  | { state: 'malformed' }
+
+async function readTerminalFactStrict(
+  id: string,
+  kind: 'natural' | 'killed',
+  generation?: string,
+): Promise<StrictTerminalFactRead> {
+  const read = await readWaitRegistryFile(
+    terminalFactPathForId(id, kind, generation),
+  )
+  if (read.state === 'missing') return { state: 'missing' }
+  if (read.state === 'unreadable') return { state: 'unreadable' }
+  let parsed: unknown
+  try {
+    parsed = jsonParse(read.content)
+  } catch {
+    return { state: 'malformed' }
+  }
+  return isBackgroundSessionTerminalFact(parsed, id, kind) &&
+    parsed.generation === generation
+    ? { state: 'valid', value: parsed }
+    : { state: 'malformed' }
+}
+
+function throwWaitMetadataError(
+  state: 'unreadable' | 'malformed',
+  what: string,
+  pinnedId: string | null,
+): never {
+  if (state === 'unreadable') {
+    throw new BackgroundSessionWaitError(
+      'metadata_unreadable',
+      `${what} could not be read`,
+      pinnedId,
+    )
+  }
+  throw new BackgroundSessionWaitError(
+    'metadata_malformed',
+    `${what} is malformed`,
+    pinnedId,
+  )
+}
+
+async function readEffectiveSessionStrict(
+  session: BackgroundSession,
+  pinnedId: string | null,
+): Promise<BackgroundSession> {
+  const natural = await readTerminalFactStrict(
+    session.id,
+    'natural',
+    session.terminalFactGeneration,
+  )
+  if (natural.state === 'unreadable' || natural.state === 'malformed') {
+    throwWaitMetadataError(
+      natural.state,
+      `Terminal fact for background session ${session.id}`,
+      pinnedId,
+    )
+  }
+  const killed = await readTerminalFactStrict(
+    session.id,
+    'killed',
+    session.terminalFactGeneration,
+  )
+  if (killed.state === 'unreadable' || killed.state === 'malformed') {
+    throwWaitMetadataError(
+      killed.state,
+      `Terminal fact for background session ${session.id}`,
+      pinnedId,
+    )
+  }
+  const naturalFact = natural.state === 'valid' ? natural.value : null
+  const killedFact = killed.state === 'valid' ? killed.value : null
+  // A fact published by another PID is not this session's outcome:
+  // applyTerminalFacts ignores pid-mismatched facts, matching the
+  // non-strict registry reader, so name resolution can still select the
+  // session. Actual metadata replacement is reported by the separate
+  // pinned-PID check in readPinnedBackgroundSessionForWait, which stays
+  // (CodeRabbit #2497).
+  return applyTerminalFacts(session, naturalFact, killedFact)
+}
+
+/**
+ * Strict `wait`-only selector resolution. Preserves the display commands'
+ * selection order (exact ID, one live session with the exact name, one
+ * unambiguous ID prefix, one terminal session with the exact name) but
+ * distinguishes the failure modes `wait` must report: a missing exact-ID
+ * file still allows name or prefix matching, while an unreadable or
+ * malformed entry that could change matching fails with exit code 4.
+ */
+export type ResolveBackgroundSessionForWaitOptions = {
+  isProcessAlive?: (pid: number) => boolean
+  signalProcess?: (pid: number, signal: 0) => unknown
+  getProcessCommandAsync?: (
+    pid: number,
+    options: { signal?: AbortSignal },
+  ) => Promise<string | null>
+  // Cancels the exact-name liveness probes: the waiter's client-or-
+  // deadline signal aborts the in-flight probe, and no further probe
+  // starts once it has fired (CodeRabbit #2497 review 5950772048).
+  signal?: AbortSignal
+  // Test-only hooks for the alias identity checks below: invoked when
+  // an alias read disagrees with its canonical read (before the retry
+  // re-reads) and after an alias is verified (before the candidate is
+  // recorded). They let a test place a filesystem change at the exact
+  // point the resolver observes it, instead of racing a timer
+  // (CodeRabbit #2497 review 5961433156).
+  _onAliasIdentityMismatchForTesting?: (attempt: number) => Promise<void>
+  _afterAliasVerifiedForTesting?: () => Promise<void>
+}
+
+export async function resolveBackgroundSessionForWait(
+  target: string,
+  options?: ResolveBackgroundSessionForWaitOptions,
+): Promise<BackgroundSession> {
+  if (SAFE_ID_RE.test(target)) {
+    const exact = await readSessionFileStrict(
+      metadataPathForId(target),
+      target,
+    )
+    if (exact.state === 'unreadable' || exact.state === 'malformed') {
+      throwWaitMetadataError(
+        exact.state,
+        `Background session ${target} metadata`,
+        null,
+      )
+    }
+    if (exact.state === 'valid') {
+      return await readEffectiveSessionStrict(exact.value, null)
+    }
+    // A missing exact-ID file — or one whose stored id differs from
+    // the requested id (a case-insensitive registry opening another
+    // session's file) — can still allow name or prefix matching.
+  }
+
+  let entries: string[]
+  try {
+    entries = await readdir(getBackgroundSessionMetadataDir())
+  } catch (error) {
+    if (isErrno(error, 'ENOENT')) {
+      throw new BackgroundSessionWaitError(
+        'not_found',
+        `No background session found for "${target}"`,
+      )
+    }
+    throw new BackgroundSessionWaitError(
+      'metadata_unreadable',
+      'Background session metadata could not be read',
+    )
+  }
+
+  const candidates: BackgroundSession[] = []
+  // One row per file: on a case-insensitive registry the same file can
+  // be enumerated under two spellings (bg-other.json and BG-other.json),
+  // and the mismatch branch below retains the verified row, so a second
+  // spelling of the same file must not add a duplicate candidate — two
+  // identical name rows would report an ambiguous name (CodeRabbit #2497
+  // review 5956497652).
+  const seenCandidateIdentities = new Set<string>()
+  // One row per validated stored ID: a verified alias and its canonical
+  // entry are the same session, but a metadata update can replace the
+  // canonical file between the alias check and the canonical entry's
+  // read, so the two rows carry different file identities for one
+  // stored ID. Record only the first row — two rows for one id would
+  // report an ambiguous name for a single session (CodeRabbit #2497
+  // review 5961433156).
+  const seenCandidateIds = new Set<string>()
+  const addCandidateOnce = (
+    session: BackgroundSession,
+    identity: FileIdentity,
+  ): void => {
+    if (seenCandidateIds.has(session.id)) return
+    const key = `${identity.dev}:${identity.ino}`
+    if (seenCandidateIdentities.has(key)) return
+    seenCandidateIdentities.add(key)
+    seenCandidateIds.add(session.id)
+    candidates.push(session)
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) continue
+    const id = entry.slice(0, -'.json'.length)
+    if (!SAFE_ID_RE.test(id)) continue
+    const read = await readSessionFileStrict(metadataPathForId(id), id)
+    if (read.state === 'missing') continue
+    if (read.state === 'id_mismatch') {
+      // A stored-id mismatch is an alias only when the stored id names
+      // a valid canonical row: on a case-insensitive registry the same
+      // file is reachable under both spellings, and the canonical row
+      // is enumerated under its real filename. A mismatch with no valid
+      // canonical row is a stray document whose stored name or id could
+      // match the target, so it fails the lookup instead of being
+      // skipped silently — skipping it could pin the wrong session
+      // (CodeRabbit #2497 review 5954753623).
+      const canonical = await readSessionFileStrict(
+        metadataPathForId(read.value.id),
+        read.value.id,
+      )
+      if (canonical.state !== 'valid') {
+        throwWaitMetadataError(
+          canonical.state === 'unreadable' ? 'unreadable' : 'malformed',
+          `Background session ${id} metadata`,
+          null,
+        )
+      }
+      // A valid canonical row makes the mismatch an alias only when
+      // both reads opened the same file. A row in a different file
+      // that claims the canonical id is a stray document, not an
+      // alias: skipping it could pin the wrong session, so it fails
+      // the lookup instead. When the identities match, the canonical
+      // row may be enumerated only under its case variant on a
+      // case-insensitive registry, so retain the verified row once
+      // instead of discarding it — discarding it would let an
+      // unrelated prefix match win over a live named session
+      // (CodeRabbit #2497 review 5956497652).
+      //
+      // The two reads can disagree without the row being stray:
+      // replaceSessionFile can rename a valid update into place
+      // between them, so the alias read returns the old inode and
+      // the canonical read the new one. Re-read both paths and retry
+      // the comparison while either identity keeps changing; a stable
+      // mismatch is still a genuinely different file and fails the
+      // lookup. Refreshing only the alias read would compare a fresh
+      // alias identity against a stale canonical one, so a second
+      // update landing during the retry could still fail a row whose
+      // two paths now agree (CodeRabbit #2497 reviews 5957376769 and
+      // 5961433156). The retry is bounded so a file replaced on every
+      // read cannot spin the resolver.
+      const MAX_ALIAS_IDENTITY_RETRIES = 2
+      let aliasRead = read
+      let canonicalRead = canonical
+      let aliasVerified = false
+      for (
+        let attempt = 0;
+        attempt <= MAX_ALIAS_IDENTITY_RETRIES;
+        attempt++
+      ) {
+        if (sameFileIdentity(aliasRead.identity, canonicalRead.identity)) {
+          aliasVerified = true
+          break
+        }
+        if (attempt === MAX_ALIAS_IDENTITY_RETRIES) break
+        // Test hook (see ResolveBackgroundSessionForWaitOptions): lets
+        // a test place the repoint between the mismatch and the retry's
+        // re-reads.
+        await options?._onAliasIdentityMismatchForTesting?.(attempt)
+        const reread = await readSessionFileStrict(
+          metadataPathForId(id),
+          id,
+        )
+        if (
+          reread.state !== 'id_mismatch' ||
+          reread.value.id !== read.value.id
+        ) {
+          // The enumerated row changed shape while it was being
+          // verified (for example it was replaced by a row for
+          // another id): fail closed rather than guess which row
+          // it is now.
+          throwWaitMetadataError(
+            reread.state === 'unreadable' ? 'unreadable' : 'malformed',
+            `Background session ${id} metadata`,
+            null,
+          )
+        }
+        const rereadCanonical = await readSessionFileStrict(
+          metadataPathForId(read.value.id),
+          read.value.id,
+        )
+        if (rereadCanonical.state !== 'valid') {
+          // The canonical row changed shape while it was being
+          // verified: fail closed rather than guess which row it
+          // is now.
+          throwWaitMetadataError(
+            rereadCanonical.state === 'unreadable' ? 'unreadable' : 'malformed',
+            `Background session ${id} metadata`,
+            null,
+          )
+        }
+        aliasRead = reread
+        canonicalRead = rereadCanonical
+      }
+      if (!aliasVerified) {
+        throwWaitMetadataError(
+          'malformed',
+          `Background session ${id} metadata`,
+          null,
+        )
+      }
+      // Test hook (see ResolveBackgroundSessionForWaitOptions): lets a
+      // test replace the canonical file after verification and before
+      // the scan reads the canonical entry.
+      await options?._afterAliasVerifiedForTesting?.()
+      addCandidateOnce(aliasRead.value, aliasRead.identity)
+      continue
+    }
+    if (read.state === 'unreadable' || read.state === 'malformed') {
+      // The name lives inside the file, so any entry could be the named or
+      // prefix-matched session; it cannot be skipped safely.
+      throwWaitMetadataError(
+        read.state,
+        `Background session ${id} metadata`,
+        null,
+      )
+    }
+    addCandidateOnce(read.value, read.identity)
+  }
+
+  const exactId = candidates.filter(s => s.id === target)
+  if (exactId.length === 1) {
+    return await readEffectiveSessionStrict(exactId[0], null)
+  }
+
+  // Liveness is an effective-status property, so name candidates need their
+  // terminal facts applied strictly before the live/terminal split — but
+  // only for rows that could still be live. A row whose recorded status
+  // is already terminal cannot become live, regardless of its terminal
+  // facts, so its facts are read only when selection reaches it: an old
+  // exited row with a malformed fact must not block a newer live row
+  // with the same name (CodeRabbit #2497 review 5963778469). The
+  // deferred rows are strict-read in the terminal-name fallback below,
+  // where a malformed fact still reports exit 4 when the row is
+  // selected.
+  const byName = candidates.filter(s => s.name === target)
+  const effectiveByName: BackgroundSession[] = []
+  const deferredTerminalByName: BackgroundSession[] = []
+  for (const session of byName) {
+    if (isTerminalBackgroundSession(session)) {
+      deferredTerminalByName.push(session)
+    } else {
+      effectiveByName.push(await readEffectiveSessionStrict(session, null))
+    }
+  }
+  // A `status: running` row whose child is already gone must not win
+  // exact-name resolution over a unique live ID-prefix match: a name
+  // candidate counts as live only when read-only inspection says its
+  // pinned PID is still alive and its recorded command still matches
+  // (maintainer review 5948202472 on #2497). This reuses the async
+  // process-identity verifier with the caller's cancellation signal,
+  // writes nothing, and never refreshes registry status from `wait`.
+  // A cancelled probe stops the scan: further candidates are not probed
+  // once the waiter is gone (CodeRabbit #2497 review 5950772048).
+  // Terminal candidates are unaffected — they fall through to the
+  // terminal-name match below.
+  const liveByName: BackgroundSession[] = []
+  for (const session of effectiveByName) {
+    if (isTerminalBackgroundSession(session)) continue
+    if (options?.signal?.aborted) break
+    const identity = await verifyBackgroundSessionProcessIdentityAsync(
+      session,
+      {
+        isProcessAlive: options?.isProcessAlive,
+        signalProcess: options?.signalProcess,
+        getProcessCommandAsync: options?.getProcessCommandAsync,
+        signal: options?.signal,
+      },
+    )
+    if (identity.state === 'matches') liveByName.push(session)
+  }
+  if (liveByName.length === 1) return liveByName[0]
+  if (liveByName.length > 1) {
+    throw new BackgroundSessionWaitError(
+      'ambiguous',
+      `Background session name "${target}" is ambiguous`,
+    )
+  }
+
+  const idPrefix = candidates.filter(s => s.id.startsWith(target))
+  if (idPrefix.length === 1) {
+    return await readEffectiveSessionStrict(idPrefix[0], null)
+  }
+  if (idPrefix.length > 1) {
+    throw new BackgroundSessionWaitError(
+      'ambiguous',
+      `Background session id "${target}" is ambiguous`,
+    )
+  }
+
+  // Terminal-name fallback: only now are the deferred terminal rows'
+  // facts read, in scan order, so a malformed fact still reports exit 4
+  // when its row is the selected one (CodeRabbit #2497 review 5963778469).
+  for (const session of deferredTerminalByName) {
+    effectiveByName.push(await readEffectiveSessionStrict(session, null))
+  }
+  if (effectiveByName.length === 1) return effectiveByName[0]
+  if (effectiveByName.length > 1) {
+    throw new BackgroundSessionWaitError(
+      'ambiguous',
+      `Background session name "${target}" is ambiguous`,
+    )
+  }
+
+  throw new BackgroundSessionWaitError(
+    'not_found',
+    `No background session found for "${target}"`,
+  )
+}
+
+export type BackgroundSessionWaitIdentity = Pick<
+  BackgroundSession,
+  'id' | 'pid' | 'terminalFactGeneration' | 'processMarker'
+>
+
+/**
+ * Strict `wait`-only re-read of an already-pinned session. A missing or
+ * invalid record or a changed launch identity fails with exit code 4.
+ */
+export async function readPinnedBackgroundSessionForWait(
+  pinned: BackgroundSessionWaitIdentity,
+): Promise<BackgroundSession> {
+  const read = await readSessionFileStrict(
+    metadataPathForId(pinned.id),
+    pinned.id,
+  )
+  if (read.state === 'missing') {
+    throw new BackgroundSessionWaitError(
+      'metadata_missing',
+      `Background session ${pinned.id} metadata is missing`,
+      pinned.id,
+    )
+  }
+  if (
+    read.state === 'unreadable' ||
+    read.state === 'malformed' ||
+    read.state === 'id_mismatch'
+  ) {
+    // A pinned re-read whose stored id differs is a replaced document,
+    // not an absent one: fail with the metadata error, never retarget.
+    throwWaitMetadataError(
+      read.state === 'id_mismatch' ? 'malformed' : read.state,
+      `Background session ${pinned.id} metadata`,
+      pinned.id,
+    )
+  }
+  // Generation identifies current launches. Older metadata used the process
+  // marker alone, and unmarked legacy sessions still use ID and PID.
+  const pinnedGeneration = pinned.terminalFactGeneration
+  const pinnedMarker = pinned.processMarker
+  if (
+    read.value.pid !== pinned.pid ||
+    (pinnedGeneration !== undefined
+      ? read.value.terminalFactGeneration !== pinnedGeneration
+      : pinnedMarker !== undefined && read.value.processMarker !== pinnedMarker)
+  ) {
+    throw new BackgroundSessionWaitError(
+      'metadata_replaced',
+      `Background session ${pinned.id} metadata was replaced`,
+      pinned.id,
+    )
+  }
+  return await readEffectiveSessionStrict(read.value, pinned.id)
+}
+
 export async function refreshBackgroundSessionStatuses(options?: {
   isProcessAlive?: (pid: number) => boolean
   getProcessCommand?: (pid: number) => string | null
@@ -2791,7 +4379,7 @@ export async function refreshBackgroundSessionStatus(
   const nextStatus: BackgroundSessionStatus =
     identity.state === 'matches'
       ? 'running'
-      : identity.state === 'unreadable'
+      : identity.state === 'unreadable' || identity.state === 'aborted'
         ? 'unknown'
         : 'stale'
   if (
@@ -2813,7 +4401,7 @@ export async function refreshBackgroundSessionStatus(
 }
 
 export type BackgroundSessionProcessIdentity = {
-  state: 'not-running' | 'matches' | 'mismatch' | 'unreadable'
+  state: 'not-running' | 'matches' | 'mismatch' | 'unreadable' | 'aborted'
   backgroundSessionId: string
   pid: number
 }
@@ -2995,15 +4583,24 @@ export async function verifyBackgroundSessionProcessIdentityAsync(
 
   const readCommand =
     options?.getProcessCommandAsync ?? getProcessCommandAsync
+  // A lookup cut short by the caller's abort signal is not an unreadable
+  // process: the command was never observed, so callers (notably the wait
+  // timeout boundary) must not classify it as unknown state. The real
+  // lookup returns null on abort rather than throwing, so the aborted
+  // check runs on both the throw and the null paths below.
+  const isAborted = () => options?.signal?.aborted === true
+  if (isAborted()) return result('aborted')
   let command: string | null
   try {
     command = await readCommand(session.pid, { signal: options?.signal })
   } catch {
     const latestLiveness = getLiveness()
-    return result(latestLiveness === 'alive' ? 'unreadable' : latestLiveness)
+    if (latestLiveness !== 'alive') return result(latestLiveness)
+    return result(isAborted() ? 'aborted' : 'unreadable')
   }
   const latestLiveness = getLiveness()
   if (latestLiveness !== 'alive') return result(latestLiveness)
+  if (isAborted()) return result('aborted')
   if (command == null || command.trim() === '') {
     return result('unreadable')
   }

@@ -4,6 +4,7 @@
 // back to a generic shell command string.
 
 import { spawn } from 'cross-spawn'
+import { addAbortListener } from 'node:events'
 import path from 'node:path'
 import { getCwd } from '../utils/cwd.js'
 import { logError } from './log.js'
@@ -13,6 +14,12 @@ export { execSyncWithDefaults_DEPRECATED } from './execFileNoThrowPortable.js'
 const MS_IN_SECOND = 1000
 const SECONDS_IN_MINUTE = 60
 const DEFAULT_MAX_BUFFER = 1_000_000
+// Give the inspector time to respond to SIGTERM before force-stopping it.
+const ABORT_SIGKILL_GRACE_MS = 350
+// Bound the final wait when a killed process or an inherited pipe delays close.
+const ABORT_KILL_SETTLE_MS = 1000
+export const EXEC_FILE_TERMINATION_GRACE_MS =
+  ABORT_SIGKILL_GRACE_MS + ABORT_KILL_SETTLE_MS
 
 type ExecFileOptions = {
   abortSignal?: AbortSignal
@@ -35,6 +42,8 @@ type ExecFileWithCwdOptions = {
   env?: NodeJS.ProcessEnv
   stdin?: 'ignore' | 'inherit' | 'pipe'
   input?: string
+  // Opt in to bounded child/pipe cleanup on abort, timeout, and overflow.
+  awaitCloseOnAbort?: boolean
 }
 
 type ProcessResultWithError = {
@@ -164,6 +173,7 @@ export function execFileNoThrowWithCwd(
     maxBuffer = DEFAULT_MAX_BUFFER,
     stdin: finalStdin,
     input: finalInput,
+    awaitCloseOnAbort: finalAwaitCloseOnAbort = false,
   }: ExecFileWithCwdOptions = {
     timeout: 10 * SECONDS_IN_MINUTE * MS_IN_SECOND,
     preserveOutputOnError: true,
@@ -216,7 +226,7 @@ export function execFileNoThrowWithCwd(
       cwd: finalCwd,
       env: sanitizedEnv.value,
       shell: false,
-      signal: abortSignal,
+      signal: finalAwaitCloseOnAbort ? undefined : abortSignal,
       stdio: [stdinMode, 'pipe', 'pipe'],
     })
 
@@ -224,8 +234,12 @@ export function execFileNoThrowWithCwd(
     let stdout = ''
     let stderr = ''
     let combinedBufferSize = 0
-    let signal: string | undefined
-    let timedOut = false
+    let terminationError: string | undefined
+    let overflowError: string | undefined
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    let settleTimer: ReturnType<typeof setTimeout> | undefined
+    let abortListener: ReturnType<typeof addAbortListener> | undefined
 
     const finish = (result: {
       stdout: string
@@ -233,27 +247,61 @@ export function execFileNoThrowWithCwd(
       code: number
       error?: string
     }) => {
-      if (settled) {
-        return
-      }
+      if (settled) return
       settled = true
-      void resolve(result)
+      clearTimeout(timeoutId)
+      clearTimeout(killTimer)
+      clearTimeout(settleTimer)
+      abortListener?.[Symbol.dispose]()
+      resolve(result)
+    }
+
+    const finishWithError = (error: string) => {
+      finish({
+        stdout: finalPreserveOutput ? stdout : '',
+        stderr: finalPreserveOutput ? stderr : '',
+        code: 1,
+        error,
+      })
+    }
+
+    const terminateAndWait = (error: string) => {
+      if (settled || terminationError !== undefined) return
+      terminationError = error
+      clearTimeout(timeoutId)
+      killTimer = setTimeout(() => {
+        settleTimer = setTimeout(() => {
+          // The direct child can be gone while a descendant still owns the
+          // write end. Close the wrapper's handles before resolving.
+          child.stdin?.destroy()
+          child.stdout?.destroy()
+          child.stderr?.destroy()
+          child.unref()
+          finishWithError(overflowError ?? error)
+        }, ABORT_KILL_SETTLE_MS)
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGKILL')
+        }
+      }, ABORT_SIGKILL_GRACE_MS)
+      if (child.exitCode === null && child.signalCode === null) child.kill()
     }
 
     const appendOutput = (
       chunk: string | Buffer,
       target: 'stdout' | 'stderr',
     ) => {
+      if (settled || overflowError !== undefined) return
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
       combinedBufferSize += Buffer.byteLength(text, 'utf8')
       if (combinedBufferSize > maxBuffer) {
-        child.kill()
-        finish({
-          stdout: finalPreserveOutput ? stdout : '',
-          stderr: finalPreserveOutput ? stderr : '',
-          code: 1,
-          error: 'maxBuffer exceeded',
-        })
+        const error = 'maxBuffer exceeded'
+        if (finalAwaitCloseOnAbort) {
+          overflowError = error
+          terminateAndWait(error)
+        } else {
+          child.kill()
+          finishWithError(error)
+        }
         return
       }
 
@@ -277,43 +325,42 @@ export function execFileNoThrowWithCwd(
       }
     })
 
-    child.once('error', error => {
+    child.on('error', error => {
+      if (settled || terminationError !== undefined) return
       logError(error)
       finish({ stdout: '', stderr: '', code: 1, error: error.message })
     })
 
-    const timeoutId =
-      finalTimeout > 0
-        ? setTimeout(() => {
-            timedOut = true
-            child.kill?.()
-            finish({
-              stdout: finalPreserveOutput ? stdout : '',
-              stderr: finalPreserveOutput ? stderr : '',
-              code: 1,
-              error: `Command timed out after ${finalTimeout}ms`,
-            })
-          }, finalTimeout)
-        : undefined
+    if (finalTimeout > 0) {
+      timeoutId = setTimeout(() => {
+        const error = `Command timed out after ${finalTimeout}ms`
+        if (finalAwaitCloseOnAbort) {
+          terminateAndWait(error)
+        } else {
+          child.kill()
+          finishWithError(error)
+        }
+      }, finalTimeout)
+    }
+
+    if (finalAwaitCloseOnAbort && abortSignal) {
+      // Node's spawn listener is removed on exit, but a descendant may
+      // still hold an output pipe. Own cancellation through settlement.
+      abortListener = addAbortListener(abortSignal, () =>
+        terminateAndWait('The operation was aborted'),
+      )
+    }
 
     child.once('close', (code, closeSignal) => {
-      if (timeoutId) {
-        clearTimeout(timeoutId)
-      }
-
-      signal = closeSignal ?? undefined
-      const errorCode = code ?? 1
-
-      if (timedOut) {
-        finish({
-          stdout: finalPreserveOutput ? stdout : '',
-          stderr: finalPreserveOutput ? stderr : '',
-          code: errorCode,
-          error: `Command timed out after ${finalTimeout}ms`,
-        })
+      if (settled) return
+      const error = overflowError ?? terminationError
+      if (error !== undefined) {
+        finishWithError(error)
         return
       }
 
+      const signal = closeSignal ?? undefined
+      const errorCode = code ?? 1
       if (errorCode !== 0) {
         if (finalPreserveOutput) {
           finish({

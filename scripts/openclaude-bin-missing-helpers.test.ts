@@ -12,6 +12,11 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
+import {
+  _setBackgroundSessionsRootForTesting,
+  createBackgroundSession,
+  recordBackgroundSessionNaturalTermination,
+} from '../src/cli/bgRegistry.js'
 
 const REPO_ROOT = join(import.meta.dir, '..')
 const BIN_PATH = join(REPO_ROOT, 'bin', 'openclaude')
@@ -281,6 +286,48 @@ describe('openclaude launcher without bin/*.mjs siblings', () => {
       expect(result.stdout).toBe(EXPECTED_VERSION_OUTPUT)
       expect(`${result.stdout}${result.stderr}`).not.toContain('unknown option')
     })
+  })
+
+  // The inline fallback strips heap args the same way as the canonical
+  // helper, so a dash-leading wait selector after `--` must survive it
+  // too: `wait --json -- --max-memory=512` selects the session named
+  // `--max-memory=512` instead of failing with invalid_arguments.
+  test('preserves a dash-leading wait selector after -- without siblings', async () => {
+    const root = makeSiblinglessLayout()
+    const configDir = join(root, 'config')
+    _setBackgroundSessionsRootForTesting(join(configDir, 'bg-sessions'))
+    try {
+      await createBackgroundSession({
+        id: 'bg-delim-mem',
+        name: '--max-memory=512',
+        pid: 424242,
+        cwd: configDir,
+        command: ['sleep', '30'],
+        sessionId: 'sess-bg-delim-mem',
+      })
+      await recordBackgroundSessionNaturalTermination(
+        'bg-delim-mem',
+        { exitCode: 0 },
+        { ownerPid: 424242 },
+      )
+      const result = runSiblingless(root, [
+        'wait',
+        '--json',
+        '--',
+        '--max-memory=512',
+      ])
+      expect(result.status).toBe(0)
+      expect(result.stderr).toBe('')
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        id: 'bg-delim-mem',
+        status: 'exited',
+        exitCode: 0,
+        waitResult: 'terminal',
+      })
+    } finally {
+      _setBackgroundSessionsRootForTesting(undefined)
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
