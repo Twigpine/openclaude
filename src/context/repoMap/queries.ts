@@ -302,6 +302,8 @@ const C_TAGS = `; Adapted from Aider's tree-sitter language queries.
     (type_identifier) @name.definition.type
     (pointer_declarator
       declarator: (type_identifier) @name.definition.type)
+    (array_declarator
+      declarator: (type_identifier) @name.definition.type)
   ]) @definition.type
 
 ; Definitions and declarations (prototypes in headers) share function_declarator.
@@ -363,35 +365,77 @@ const CPP_TAGS = `; Adapted from Aider's tree-sitter language queries.
     (type_identifier) @name.definition.type
     (pointer_declarator
       declarator: (type_identifier) @name.definition.type)
+    (array_declarator
+      declarator: (type_identifier) @name.definition.type)
   ]) @definition.type
 
 ; One pattern for every function shape: free functions and prototypes
 ; (identifier), in-class declarations (field_identifier), and out-of-class
 ; definitions, constructors, destructors and operators, which wrap the name in
-; a qualified_identifier. Matching the declarator keeps pointer- and
-; reference-returning signatures in scope, where it sits under a
-; pointer_declarator or reference_declarator.
+; a qualified_identifier. Nested qualification (app::Store::count) puts another
+; qualified_identifier in the name field, so the alternatives below cover up to
+; three scopes. Matching the declarator keeps pointer- and reference-returning
+; signatures in scope, where it sits under a pointer_declarator or
+; reference_declarator.
 (function_declarator
   declarator: [
     (identifier) @name.definition.function
     (field_identifier) @name.definition.method
-    (qualified_identifier
-      name: (identifier) @name.definition.method)
-    (qualified_identifier
-      name: (destructor_name) @name.definition.method)
-    (qualified_identifier
-      name: (operator_name) @name.definition.method)
     (destructor_name) @name.definition.method
     (operator_name) @name.definition.function
+    (qualified_identifier
+      name: [
+        (identifier) @name.definition.method
+        (destructor_name) @name.definition.method
+        (operator_name) @name.definition.method
+        (qualified_identifier
+          name: [
+            (identifier) @name.definition.method
+            (destructor_name) @name.definition.method
+            (operator_name) @name.definition.method
+            (qualified_identifier
+              name: [
+                (identifier) @name.definition.method
+                (destructor_name) @name.definition.method
+                (operator_name) @name.definition.method
+              ])
+          ])
+      ])
   ]) @definition.function
 
+; Calls name their callee in the function field. Direct calls use identifier,
+; member calls wrap the field in field_expression, and explicit template
+; arguments wrap the name in template_function or template_method. Qualified
+; calls use a qualified_identifier, which nests for names such as
+; app::Store::count.
 (call_expression
   function: [
     (identifier) @name.reference.call
+    (template_function
+      name: (identifier) @name.reference.call)
     (field_expression
       field: (field_identifier) @name.reference.call)
+    (field_expression
+      field: (template_method
+        name: (field_identifier) @name.reference.call))
     (qualified_identifier
-      name: (identifier) @name.reference.call)
+      name: [
+        (identifier) @name.reference.call
+        (template_function
+          name: (identifier) @name.reference.call)
+        (qualified_identifier
+          name: [
+            (identifier) @name.reference.call
+            (template_function
+              name: (identifier) @name.reference.call)
+            (qualified_identifier
+              name: [
+                (identifier) @name.reference.call
+                (template_function
+                  name: (identifier) @name.reference.call)
+              ])
+          ])
+      ])
   ]) @reference.call
 
 ; Class, struct, enum, typedef and template-argument types are type_identifier

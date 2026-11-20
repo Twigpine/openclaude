@@ -27,6 +27,8 @@
     (type_identifier) @name.definition.type
     (pointer_declarator
       declarator: (type_identifier) @name.definition.type)
+    (array_declarator
+      declarator: (type_identifier) @name.definition.type)
   ]) @definition.type
 
 ; Definitions and declarations (prototypes in headers) share function_declarator.

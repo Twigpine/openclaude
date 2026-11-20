@@ -533,6 +533,10 @@ describe('symbol extraction', () => {
           '',
           'typedef int len_t;',
           '',
+          'typedef unsigned char Digest[32];',
+          '',
+          'typedef int (*Callback)(int);',
+          '',
           'static int helper(int v) {',
           '    return v + 1;',
           '}',
@@ -570,6 +574,11 @@ describe('symbol extraction', () => {
       expect(defs.find(tag => tag.name === 'Value')?.subKind).toBe('class')
       expect(defs.find(tag => tag.name === 'Color')?.subKind).toBe('enum')
       expect(defs.find(tag => tag.name === 'len_t')?.subKind).toBe('type')
+
+      // Array typedefs use an array_declarator; function-pointer typedefs stay
+      // out of scope because their declarator is a function_declarator.
+      expect(defs.find(tag => tag.name === 'Digest')?.subKind).toBe('type')
+      expect(defNames).not.toContain('Callback')
 
       // `struct Forward;` and `struct Node *next;` only mention the type, so
       // they must not add definitions, and Node stays a single definition.
@@ -661,6 +670,10 @@ describe('symbol extraction', () => {
           '',
           'using StorePtr = Store *;',
           '',
+          'typedef unsigned char Bytes[16];',
+          '',
+          'typedef int (*Callback)(int);',
+          '',
           'template <typename T>',
           'class Box {',
           'public:',
@@ -675,13 +688,27 @@ describe('symbol extraction', () => {
           '    return v + 1;',
           '}',
           '',
+          'template <typename T>',
+          'T identity(T value) {',
+          '    return value;',
+          '}',
+          '',
           'void run(Store *s) {',
           '    s->count();',
+          '    Store::count();',
           '    helper(3);',
           '    app::helper(4);',
+          '    app::Store::count();',
+          '    identity<int>(5);',
+          '    s->count<int>();',
+          '    app::helper<int>(6);',
           '}',
           '',
           '}  // namespace app',
+          '',
+          'int app::Store::count() const {',
+          '    return 0;',
+          '}',
           '',
         ].join('\n'),
       )
@@ -690,20 +717,22 @@ describe('symbol extraction', () => {
       expect(result).not.toBeNull()
 
       const defs = result!.tags.filter(tag => tag.kind === 'def')
-      const refs = result!.tags
-        .filter(tag => tag.kind === 'ref')
-        .map(tag => tag.name)
+      const refTags = result!.tags.filter(tag => tag.kind === 'ref')
+      const refs = refTags.map(tag => tag.name)
 
       expect(defs.find(tag => tag.name === 'app')?.subKind).toBe('module')
       expect(defs.find(tag => tag.name === 'Store')?.subKind).toBe('class')
       expect(defs.find(tag => tag.name === 'StorePtr')?.subKind).toBe('type')
+      // Array typedefs are captured; function-pointer typedefs stay excluded.
+      expect(defs.find(tag => tag.name === 'Bytes')?.subKind).toBe('type')
+      expect(defs.some(tag => tag.name === 'Callback')).toBe(false)
       expect(defs.find(tag => tag.name === 'Box')?.subKind).toBe('class')
       expect(defs.find(tag => tag.name === 'Mode')?.subKind).toBe('enum')
 
-      // In-class declarations and out-of-class definitions both count as
-      // methods, so count appears twice for the two lines that declare it.
+      // In-class declarations and the two out-of-class definitions that use
+      // Store::count and app::Store::count all count as methods.
       const countDefs = defs.filter(tag => tag.name === 'count')
-      expect(countDefs).toHaveLength(2)
+      expect(countDefs).toHaveLength(3)
       expect(countDefs.every(tag => tag.subKind === 'method')).toBe(true)
 
       // Destructors and operators carry their own name nodes.
@@ -711,11 +740,56 @@ describe('symbol extraction', () => {
       expect(defs.some(tag => tag.name === 'operator==')).toBe(true)
       expect(defs.find(tag => tag.name === 'get')?.subKind).toBe('method')
       expect(defs.find(tag => tag.name === 'run')?.subKind).toBe('function')
+      expect(defs.find(tag => tag.name === 'identity')?.subKind).toBe('function')
 
-      // s->count(), helper(3) and app::helper(4) all name their callee.
+      // s->count(), helper(3) and app::helper(4) all name their callee. The
+      // qualified call must produce its own reference at its own source line.
       expect(refs).toContain('count')
       expect(refs).toContain('helper')
       expect(refs).toContain('Store')
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'helper' && tag.signature.trim() === 'app::helper(4);',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'count' &&
+            tag.signature.trim() === 'app::Store::count();',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'count' && tag.signature.trim() === 'Store::count();',
+        ),
+      ).toBeDefined()
+
+      // Explicit template arguments wrap the callee in template_function or
+      // template_method, including qualified forms.
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'identity' &&
+            tag.signature.trim() === 'identity<int>(5);',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'count' &&
+            tag.signature.trim() === 's->count<int>();',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'helper' &&
+            tag.signature.trim() === 'app::helper<int>(6);',
+        ),
+      ).toBeDefined()
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
       invalidateCache(tempDir)
