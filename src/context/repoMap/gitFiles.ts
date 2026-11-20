@@ -13,6 +13,7 @@ const SUPPORTED_EXTENSIONS: Record<string, SupportedLanguage> = {
   '.py': 'python',
   '.go': 'go',
   '.rs': 'rust',
+  '.java': 'java',
 }
 
 const EXCLUDED_DIRS = new Set([

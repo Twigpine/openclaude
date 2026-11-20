@@ -489,6 +489,205 @@ describe('symbol extraction', () => {
     }
   })
 
+  test('extracts definitions and references from Java files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-java-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'Store.java'),
+        [
+          'package com.example;',
+          '',
+          'public class Store extends Base implements Closeable {',
+          '    private final Widget widget;',
+          '',
+          '    public Store(Widget widget) {',
+          '        this.widget = widget;',
+          '    }',
+          '',
+          '    @Override',
+          '    public String render(String input) {',
+          '        return widget.render(input.trim());',
+          '    }',
+          '',
+          '    interface Sink {',
+          '        void accept(String value);',
+          '    }',
+          '',
+          '    enum Mode {',
+          '        FAST, SLOW;',
+          '    }',
+          '',
+          '    record Point(int x, int y) {',
+          '    }',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('Store.java', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const defNames = defs.map(tag => tag.name)
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      // Classes, nested types, methods, and the constructor.
+      expect(defNames).toContain('Store')
+      expect(defNames).toContain('render')
+      expect(defNames).toContain('Sink')
+      expect(defNames).toContain('accept')
+      expect(defNames).toContain('Mode')
+      expect(defNames).toContain('Point')
+
+      expect(defs.find(tag => tag.name === 'Sink')?.subKind).toBe('interface')
+      expect(defs.find(tag => tag.name === 'Mode')?.subKind).toBe('enum')
+      // A record is a class-shaped declaration.
+      expect(defs.find(tag => tag.name === 'Point')?.subKind).toBe('class')
+      // The constructor shares the class name but is a method-shaped def on its
+      // own line, so both definitions are present.
+      const storeDefs = defs.filter(tag => tag.name === 'Store')
+      expect(storeDefs.map(tag => tag.subKind).sort()).toEqual([
+        'class',
+        'method',
+      ])
+
+      // extends / implements / field / parameter / return types.
+      expect(refs).toContain('Base')
+      expect(refs).toContain('Closeable')
+      expect(refs).toContain('Widget')
+      expect(refs).toContain('String')
+
+      // Instance calls (widget.render(...), input.trim()) resolve to the callee.
+      expect(refs).toContain('render')
+      expect(refs).toContain('trim')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('captures Java method references, annotation elements, and records', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-java-refs-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'Worker.java'),
+        [
+          'package com.example;',
+          '',
+          'class Worker {',
+          '    private final Helper helper;',
+          '',
+          '    Worker(Helper helper) {',
+          '        this.helper = helper;',
+          '    }',
+          '',
+          '    void run(java.util.List<String> inputs) {',
+          '        inputs.forEach(this::handle);',
+          '        Runnable reset = helper::reset;',
+          '        String joined = String.join(",", inputs);',
+          '        reset.run();',
+          '    }',
+          '',
+          '    private void handle(String input) {',
+          '        helper.reset();',
+          '    }',
+          '}',
+          '',
+          '@interface Marker {',
+          '    String value();',
+          '}',
+          '',
+          'enum Kind {',
+          '    A, B',
+          '}',
+          '',
+          'record Pair(int left, int right) {',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('Worker.java', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      // `String value();` inside an @interface is an annotation element, which
+      // method_declaration does not match.
+      expect(defs.find(tag => tag.name === 'Marker')?.subKind).toBe('interface')
+      expect(defs.find(tag => tag.name === 'value')?.subKind).toBe('method')
+
+      expect(defs.find(tag => tag.name === 'Kind')?.subKind).toBe('enum')
+      expect(defs.find(tag => tag.name === 'Pair')?.subKind).toBe('class')
+
+      // `this::handle` and `helper::reset` are method references, which carry no
+      // argument list and no name field.
+      expect(refs).toContain('handle')
+      expect(refs).toContain('reset')
+      // Plain calls still resolve through the invocation name.
+      expect(refs).toContain('join')
+      expect(refs).toContain('run')
+      // Fully qualified generic types contribute their base type.
+      expect(refs).toContain('List')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('builds a map for a Java repo and ranks the referenced file first', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-java-map-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'Widget.java'),
+        [
+          'package com.example;',
+          '',
+          'public class Widget {',
+          '    public String render(String input) {',
+          '        return input;',
+          '    }',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'App.java'),
+        [
+          'package com.example;',
+          '',
+          'public class App {',
+          '    private final Widget widget = new Widget();',
+          '',
+          '    public String start(String input) {',
+          '        return widget.render(input);',
+          '    }',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await buildRepoMap({
+        root: tempDir,
+        files: ['App.java', 'Widget.java'],
+        maxTokens: 1024,
+      })
+
+      expect(result.map).toContain('Widget.java:')
+      expect(result.map).toContain('public String render(String input) {')
+      // App.java references Widget, so Widget.java ranks first.
+      expect(result.map.split('\n')[0]).toBe('Widget.java:')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
   test('builds a map for a Go repo and ranks the referenced file first', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'repomap-go-map-'))
     try {
