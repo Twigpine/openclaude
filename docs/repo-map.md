@@ -19,8 +19,10 @@ Results are cached to disk (`~/.openclaude/repomap-cache/`) keyed by file path, 
 - Python (`.py`)
 - Go (`.go`)
 - Rust (`.rs`)
+- C (`.c`)
+- C++ (`.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`, and `.h`)
 
-Go and Rust files are parsed with their bundled tree-sitter grammars from
+Go, Rust, C, and C++ files are parsed with their bundled tree-sitter grammars from
 `tree-sitter-wasms`, so no extra install step is needed. The Go query captures
 package-level functions, methods, type declarations (including aliases), and
 call references. The Rust query captures functions and methods (including those
@@ -28,6 +30,20 @@ inside `impl` blocks and bodyless trait signatures such as `fn handle(&self);`),
 structs, enums, traits, modules, `impl` type references (including generic
 `impl<T> Store<T>`), and call references (including explicit type arguments such
 as `helper::<u8>()` and `Store::<u8>::count()`).
+
+The C query captures structs, unions and enums that have a body, `typedef`
+aliases, and functions and header prototypes (including pointer-returning
+signatures such as `char *dup_string(...)`). The C++ query captures classes,
+structs, unions, enums, namespaces, `using` and `typedef` aliases, and functions
+and methods — in-class declarations, out-of-class definitions, constructors,
+destructors and operators. Both capture call references, including
+`object->method()` and `ns::function()` forms.
+
+`.h` is ambiguous between C and C++. It is parsed with the C++ grammar, which is
+a superset of C, so C headers parse correctly while C++ headers keep their
+classes, namespaces and templates. Bodyless specifiers (`struct Node;` or a
+`struct Node *next;` field) are references, not definitions, so a forward
+declaration never adds a duplicate signature line.
 
 Additional language grammars will be added in future releases.
 
@@ -74,6 +90,6 @@ The model can also call the `RepoMap` tool on demand during a session. This is u
 
 - **Signatures only** — The map shows function/class/type declarations, not implementations. The model still needs `Read` to see function bodies.
 - **Cold build time** — First build on large repos (2000+ files) can take 20-30 seconds due to WASM-based parsing. Subsequent builds use the disk cache and complete in under 100ms.
-- **Language coverage** — Only TypeScript, JavaScript, Python, Go, and Rust are supported. Files in other languages are skipped.
+- **Language coverage** — Only TypeScript, JavaScript, Python, Go, Rust, C, and C++ are supported. Files in other languages are skipped.
 - **TypeScript references** — The TypeScript query captures type annotations, constructor (`new`) expressions, and plain function calls, so the ranking follows call edges as well as type edges. Member calls (`object.method()`) are not captured: method names such as `.log()`, `.get()` or `.map()` collide across unrelated classes and would add mostly-noise edges. `require(...)` is excluded to match the JavaScript query, and common callee names stay heavily down-weighted by the graph's IDF penalty.
 - **Git dependency** — File enumeration uses `git ls-files --cached --others --exclude-standard` by default, so untracked files that are not ignored can appear in the map. Non-git repos fall back to a directory walk with hardcoded exclusions.

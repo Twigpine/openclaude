@@ -13,6 +13,16 @@ const SUPPORTED_EXTENSIONS: Record<string, SupportedLanguage> = {
   '.py': 'python',
   '.go': 'go',
   '.rs': 'rust',
+  '.c': 'c',
+  // .h is ambiguous: the C++ grammar is a superset of C, so C headers parse
+  // with it while C++ headers keep their classes, namespaces and templates.
+  '.h': 'cpp',
+  '.hh': 'cpp',
+  '.hpp': 'cpp',
+  '.hxx': 'cpp',
+  '.cc': 'cpp',
+  '.cpp': 'cpp',
+  '.cxx': 'cpp',
 }
 
 const EXCLUDED_DIRS = new Set([
