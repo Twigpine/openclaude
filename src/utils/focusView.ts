@@ -9,7 +9,9 @@ import {
   REJECT_MESSAGE,
   REJECT_MESSAGE_WITH_REASON_PREFIX,
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
+  HOOK_STOPPED_MESSAGE,
   SYNTHETIC_MESSAGES,
+  UNKNOWN_SKILL_PREFIX,
 } from './messages.js'
 import { getGlobalConfig } from './config.js'
 import { isFullscreenEnvEnabled } from './fullscreen.js'
@@ -200,8 +202,14 @@ function hasVisibleText(m: FocusMessage): boolean {
 
 type CandidateKind = 'prompt' | 'command'
 
-/** A message that could start a turn, before slash-command classification. */
-function candidateKind(m: FocusMessage): CandidateKind | undefined {
+/**
+ * A message that could start a turn, before slash-command classification.
+ * legacyNotice marks a row that predates isLocalNotice (see legacyNoticeIndices).
+ */
+function candidateKind(
+  m: FocusMessage,
+  legacyNotice = false,
+): CandidateKind | undefined {
   if (m.type === 'attachment') {
     const a = m.attachment
     return a?.type === 'queued_command' &&
@@ -212,7 +220,13 @@ function candidateKind(m: FocusMessage): CandidateKind | undefined {
       : undefined
   }
   if (m.type !== 'user') return undefined
-  if (m.isMeta || m.isCompactSummary || m.isLocalNotice || m.origin !== undefined) {
+  if (
+    m.isMeta ||
+    m.isCompactSummary ||
+    m.isLocalNotice ||
+    legacyNotice ||
+    m.origin !== undefined
+  ) {
     return undefined
   }
   const blocks = blocksOf(m)
@@ -226,6 +240,48 @@ function candidateKind(m: FocusMessage): CandidateKind | undefined {
   if (NON_PROMPT_TAGS.some(t => text.startsWith(t))) return undefined
   if (text === '' && !hasImage) return undefined
   return 'prompt'
+}
+
+const UNKNOWN_SKILL_NOTICE = new RegExp(
+  `^${UNKNOWN_SKILL_PREFIX}[a-zA-Z0-9:_-]+$`,
+)
+
+/**
+ * Indices of rows that are local notices without the isLocalNotice flag, which
+ * only rows written before the flag existed lack (a resumed transcript). The
+ * input pipeline wrote exactly three shapes: a hook stop with no reason, an
+ * unknown-skill notice whose name is a bare command token, and a hook stop
+ * with a reason, which follows the prompt it stopped. The last one cannot be
+ * told from typed text by content alone, so it counts only directly after a
+ * prompt row of another submission, never after an assistant reply or an
+ * interrupt. Text that merely starts like a notice stays a prompt.
+ */
+function legacyNoticeIndices(messages: readonly FocusMessage[]): Set<number> {
+  const out = new Set<number>()
+  messages.forEach((m, i) => {
+    if (m.type !== 'user' || m.isLocalNotice || m.isMeta || m.origin !== undefined) {
+      return
+    }
+    if (blocksOf(m).some(b => b.type === 'tool_result')) return
+    const text = firstText(m)
+    if (text === undefined) return
+    if (text === HOOK_STOPPED_MESSAGE || UNKNOWN_SKILL_NOTICE.test(text)) {
+      out.add(i)
+      return
+    }
+    if (!text.startsWith(`${HOOK_STOPPED_MESSAGE}: `)) return
+    let p = i - 1
+    while (p >= 0 && messages[p]!.type === 'attachment') p--
+    const prev = p >= 0 ? messages[p]! : undefined
+    if (
+      prev !== undefined &&
+      candidateKind(prev) !== undefined &&
+      sourceKey(prev) !== sourceKey(m)
+    ) {
+      out.add(i)
+    }
+  })
+  return out
 }
 
 /**
@@ -263,19 +319,21 @@ function submissionGroups(
 function promptBoundaryIndices(
   messages: readonly FocusMessage[],
   isLoading: boolean,
+  legacy: ReadonlySet<number>,
 ): number[] {
   const groups = submissionGroups(messages)
+  const kindAt = (j: number) => candidateKind(messages[j]!, legacy.has(j))
   const candidates: Array<{ index: number; kind: CandidateKind }> = []
   messages.forEach((m, index) => {
-    const kind = candidateKind(m)
+    const kind = kindAt(index)
     if (!kind) return
     const key = sourceKey(m)
     const group = key === undefined ? undefined : groups.get(key)
     if (group) {
       if (group.some(j => toolResultOf(messages[j]!))) return
-      const first = group.find(j => candidateKind(messages[j]!))
+      const first = group.find(j => kindAt(j))
       if (first !== index) return
-      const kinds = group.map(j => candidateKind(messages[j]!))
+      const kinds = group.map(kindAt)
       candidates.push({ index, kind: kinds.includes('command') ? 'command' : kind })
       return
     }
@@ -399,7 +457,8 @@ export function selectFocusView<T extends FocusMessage>(
   options: FocusOptions = {},
 ): FocusSelection<T> {
   const synthetic = options.syntheticToolUseIds
-  const prompts = promptBoundaryIndices(messages, options.isLoading ?? false)
+  const legacy = legacyNoticeIndices(messages)
+  const prompts = promptBoundaryIndices(messages, options.isLoading ?? false, legacy)
   let boundaryIdx = prompts.length > 0 ? prompts[prompts.length - 1]! : -1
   const compactions = turnEndingCompactions(messages, prompts)
   const lastCompaction = compactions.length > 0 ? compactions[compactions.length - 1]! : -1
@@ -419,7 +478,7 @@ export function selectFocusView<T extends FocusMessage>(
     boundaryKey === undefined
       ? []
       : (submissionGroups(messages).get(boundaryKey) ?? []).filter(
-          j => j > boundaryIdx && candidateKind(messages[j]!) !== undefined,
+          j => j > boundaryIdx && candidateKind(messages[j]!, legacy.has(j)) !== undefined,
         ),
   )
   const hiddenTurns = prompts.filter(i => i < boundaryIdx).length
@@ -508,6 +567,7 @@ export function selectFocusView<T extends FocusMessage>(
         segmentInterrupt[segment] = i
       } else if (
         m.isLocalNotice ||
+        legacy.has(i) ||
         candidateKind(m) === 'command' ||
         isLocalCommandOutput(m)
       ) {
@@ -613,7 +673,11 @@ export function countUnseenFocusTurns(
   dividerIndex: number,
   options: FocusOptions = {},
 ): number {
-  const prompts = promptBoundaryIndices(messages, options.isLoading ?? false)
+  const prompts = promptBoundaryIndices(
+    messages,
+    options.isLoading ?? false,
+    legacyNoticeIndices(messages),
+  )
   const starts = [...prompts, ...turnEndingCompactions(messages, prompts)]
   messages.forEach((m, i) => {
     if (isScheduledFire(m)) starts.push(i)

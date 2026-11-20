@@ -1155,6 +1155,64 @@ describe('stop reasons and diagnostics from the input pipeline', () => {
     }
   })
 
+  // Rows persisted before isLocalNotice existed carry no flag, so a resumed
+  // transcript is recognized by the exact shapes the pipeline wrote.
+  test('an unflagged hook stop without a reason from a resumed transcript is not a prompt', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      prompt('p2', 'the real prompt'),
+      prompt('h', HOOK_STOPPED_MESSAGE),
+    ])
+    expect(r.boundary?.uuid).toBe('p2')
+    expect(r.hiddenTurns).toBe(1)
+    expect(ids(r.rows)).toEqual(['p2', 'h'])
+  })
+
+  test('an unflagged hook stop with a reason right after the prompt it stopped is not a prompt', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      prompt('p2', 'the real prompt'),
+      prompt('h', `${HOOK_STOPPED_MESSAGE}: policy says no`),
+    ])
+    expect(r.boundary?.uuid).toBe('p2')
+    expect(r.hiddenTurns).toBe(1)
+    expect(ids(r.rows)).toEqual(['p2', 'h'])
+  })
+
+  test('an unflagged unknown skill notice from a resumed transcript stays in the tail', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      label('cv', createSyntheticUserCaveatMessage()),
+      prompt('u', `${UNKNOWN_SKILL_PREFIX}plugin:nope`),
+      sys('w', 'informational', { level: 'warning', content: 'Args from unknown skill: x' }),
+    ])
+    expect(r.boundary?.uuid).toBe('p1')
+    expect(ids(r.rows)).toEqual(['p1', 'a1', 'u', 'w'])
+  })
+
+  test('unflagged typed text that only starts like a notice stays a prompt', () => {
+    const after = (text: string) =>
+      select([
+        prompt('p1', 'one'),
+        say('a1', 'answer'),
+        label('i', createUserInterruptionMessage({})),
+        prompt('p2', text),
+        say('a2', 'reply'),
+      ])
+    for (const text of [
+      `${HOOK_STOPPED_MESSAGE}: why does this happen?`,
+      `${UNKNOWN_SKILL_PREFIX}deploy how do I install it`,
+      `${UNKNOWN_SKILL_PREFIX}deploy. How do I install it?`,
+      `${UNKNOWN_SKILL_PREFIX}`,
+      `${HOOK_STOPPED_MESSAGE} again`,
+    ]) {
+      expect(after(text).boundary?.uuid).toBe('p2')
+    }
+  })
+
   test('a local notice split by normalization keeps its provenance', () => {
     const rows = normalized([
       createUserMessage({ content: 'one' }),
