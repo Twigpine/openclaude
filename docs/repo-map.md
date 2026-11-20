@@ -29,10 +29,12 @@ inside `impl` blocks and bodyless trait signatures such as `fn handle(&self);`),
 structs, enums, traits, modules, `impl` type references (including generic
 `impl<T> Store<T>`), and call references (including explicit type arguments such
 as `helper::<u8>()` and `Store::<u8>::count()`). The Java query captures classes,
-records, interfaces, annotation types, enums, methods, constructors, and
-annotation elements, plus calls (`obj.method()`, `Type.static()`, chained calls),
-method references (`this::handle`, `Helper::reset`), and type positions
-(`extends`/`implements`, field, parameter, return, and generic argument types).
+records, interfaces, annotation types, enums, methods, constructors (including
+compact record constructors), and annotation elements, plus calls
+(`obj.method()`, `Type.static()`, chained calls), method references
+(`this::handle`, `helper::reset`, where only the referenced method name is
+captured), and type positions (`extends`/`implements`, field, parameter, return,
+and generic argument types).
 
 Additional language grammars will be added in future releases.
 
