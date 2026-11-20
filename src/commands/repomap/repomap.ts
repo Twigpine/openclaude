@@ -152,6 +152,8 @@ type RepoMapCommandDeps = {
   getCacheStats: (root?: string) => CacheStats
 }
 
+type RepoMapDepsLoader = () => Promise<RepoMapCommandDeps>
+
 async function loadRepoMapDeps(): Promise<RepoMapCommandDeps> {
   return import('../../context/repoMap/index.js')
 }
@@ -160,6 +162,7 @@ export async function runRepoMapCommand(
   args: string,
   root: string,
   depsPromise?: Promise<RepoMapCommandDeps>,
+  loadDeps: RepoMapDepsLoader = loadRepoMapDeps,
 ): Promise<LocalCommandResult> {
   const { tokens, focus, focusSymbols, invalidate, stats, error } =
     parseArgs(args)
@@ -174,7 +177,7 @@ export async function runRepoMapCommand(
   // for (or fail during) the module import.
   let deps: RepoMapCommandDeps
   try {
-    deps = await (depsPromise ?? loadRepoMapDeps())
+    deps = await (depsPromise ?? loadDeps())
   } catch (err) {
     return renderError('Failed to load repo map module', err)
   }

@@ -327,14 +327,28 @@ describe('/repomap command', () => {
     expect(value).not.toContain('should not build')
   })
 
-  test('validates arguments before loading the default dependencies', async () => {
-    // No injected dependencies here: the usage error must come back without
-    // waiting for, or reporting a failure from, the repo-map module import.
-    const value = await runTextCommand('--tokens nope', '/tmp/repo')
+  test('loads dependencies only after arguments validate', async () => {
+    // No depsPromise is supplied, so the loader below stands in for the default
+    // module import. An eager loader would be called for the invalid input too.
+    let loaderCalls = 0
+    const loader = async () => {
+      loaderCalls++
+      return fakeDeps()
+    }
 
-    expect(value).toContain('--tokens expects a whole number')
-    expect(value).toContain('Usage: /repomap')
-    expect(value).not.toContain('Failed to load repo map module')
+    const invalid = await runRepoMapCommand(
+      '--tokens nope',
+      '/tmp/repo',
+      undefined,
+      loader,
+    )
+    expect(textValue(invalid)).toContain('--tokens expects a whole number')
+    expect(textValue(invalid)).toContain('Usage: /repomap')
+    expect(loaderCalls).toBe(0)
+
+    const valid = await runRepoMapCommand('', '/tmp/repo', undefined, loader)
+    expect(textValue(valid)).toContain('Repository map:')
+    expect(loaderCalls).toBe(1)
   })
 
   test('reports build failures without throwing', async () => {
