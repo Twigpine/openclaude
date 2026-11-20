@@ -1,7 +1,6 @@
 import chalk from 'chalk'
 import { ctrlOToExpand } from '../components/CtrlOToExpand.js'
-import { stringWidth } from '../ink/stringWidth.js'
-import sliceAnsi from './sliceAnsi.js'
+import { displayCells, sliceAnsiCells } from './sliceAnsi.js'
 
 // Text rendering utilities for terminal display
 const MAX_LINES_TO_SHOW = 3
@@ -24,17 +23,37 @@ function wrapText(
   const wrappedLines: string[] = []
 
   for (const line of lines) {
-    const visibleWidth = stringWidth(line)
-    if (visibleWidth <= wrapWidth) {
+    // Same accounting as the slicer, for both the fit decision and the walk:
+    // `stringWidth` can under-count a grapheme the tokenizer calls full-width,
+    // which would leave the last character unsliced at an exact boundary.
+    const lineCells = displayCells(line)
+    if (lineCells <= wrapWidth) {
       wrappedLines.push(line.trimEnd())
     } else {
       // Break long lines into chunks of wrapWidth visible characters
-      // using ANSI-aware slicing to preserve escape sequences
+      // using ANSI-aware slicing to preserve escape sequences.
+      //
+      // Advance by the cells the slice reports consuming, not by measuring the
+      // chunk: the tokenizer counts a grapheme carrying VS16 as two cells while
+      // `stringWidth` can count one, and mixing the two accounts duplicates or
+      // drops a character at the boundary. Advancing by the reported width also
+      // keeps wide glyphs whole, because a glyph that does not fit is dropped
+      // from the chunk and the next chunk starts on its first cell.
       let position = 0
-      while (position < visibleWidth) {
-        const chunk = sliceAnsi(line, position, position + wrapWidth)
-        wrappedLines.push(chunk.trimEnd())
-        position += wrapWidth
+      while (position < lineCells) {
+        let chunk = sliceAnsiCells(line, position, position + wrapWidth, {
+          fitEnd: true,
+        })
+        if (chunk.width === 0) {
+          // The glyph at this boundary is wider than the whole budget; widen
+          // by one cell so it is emitted rather than skipped.
+          chunk = sliceAnsiCells(line, position, position + wrapWidth + 1, {
+            fitEnd: true,
+          })
+        }
+        if (chunk.text === '') break
+        wrappedLines.push(chunk.text.trimEnd())
+        position += chunk.width > 0 ? chunk.width : wrapWidth
       }
     }
   }
