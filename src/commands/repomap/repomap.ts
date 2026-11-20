@@ -141,7 +141,6 @@ export const call: LocalCommandCall = async (args) => {
   return runRepoMapCommand(args ?? '', root)
 }
 
-
 type RepoMapCommandDeps = {
   buildRepoMap: (options: {
     root: string
@@ -160,7 +159,7 @@ async function loadRepoMapDeps(): Promise<RepoMapCommandDeps> {
 export async function runRepoMapCommand(
   args: string,
   root: string,
-  depsPromise: Promise<RepoMapCommandDeps> = loadRepoMapDeps(),
+  depsPromise?: Promise<RepoMapCommandDeps>,
 ): Promise<LocalCommandResult> {
   const { tokens, focus, focusSymbols, invalidate, stats, error } =
     parseArgs(args)
@@ -171,9 +170,11 @@ export async function runRepoMapCommand(
     return { type: 'text', value: `${error}\n\n${REPOMAP_USAGE}` }
   }
 
+  // Load dependencies only after validation so a bad invocation does not pay
+  // for (or fail during) the module import.
   let deps: RepoMapCommandDeps
   try {
-    deps = await depsPromise
+    deps = await (depsPromise ?? loadRepoMapDeps())
   } catch (err) {
     return renderError('Failed to load repo map module', err)
   }

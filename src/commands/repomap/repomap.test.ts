@@ -327,6 +327,16 @@ describe('/repomap command', () => {
     expect(value).not.toContain('should not build')
   })
 
+  test('validates arguments before loading the default dependencies', async () => {
+    // No injected dependencies here: the usage error must come back without
+    // waiting for, or reporting a failure from, the repo-map module import.
+    const value = await runTextCommand('--tokens nope', '/tmp/repo')
+
+    expect(value).toContain('--tokens expects a whole number')
+    expect(value).toContain('Usage: /repomap')
+    expect(value).not.toContain('Failed to load repo map module')
+  })
+
   test('reports build failures without throwing', async () => {
     const result = await runRepoMapCommand(
       '',
