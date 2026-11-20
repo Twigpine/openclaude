@@ -32,12 +32,14 @@ structs, enums, traits, modules, `impl` type references (including generic
 as `helper::<u8>()` and `Store::<u8>::count()`).
 
 The C query captures structs, unions and enums that have a body, `typedef`
-aliases, and functions and header prototypes (including pointer-returning
-signatures such as `char *dup_string(...)`). The C++ query captures classes,
-structs, unions, enums, namespaces, `using` and `typedef` aliases, and functions
-and methods — in-class declarations, out-of-class definitions, constructors,
-destructors and operators. Both capture call references, including
-`object->method()` and `ns::function()` forms.
+aliases (including array aliases), and functions and header prototypes
+(including pointer-returning signatures such as `char *dup_string(...)`). The
+C++ query captures classes, structs, unions, enums, namespaces, `using` and
+`typedef` aliases, and functions and methods — in-class declarations,
+out-of-class definitions (including nested names such as `app::Store::count`),
+constructors, destructors and operators. Both capture call references, including
+`object->method()`, `ns::function()`, nested qualified calls, and explicit
+template calls such as `helper<int>(1)`.
 
 `.h` is ambiguous between C and C++. It is parsed with the C++ grammar, which is
 a superset of C, so C headers parse correctly while C++ headers keep their
