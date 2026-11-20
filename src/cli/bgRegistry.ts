@@ -13,6 +13,7 @@ import {
   rmdir,
   stat,
   unlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises'
 import {
@@ -26,11 +27,13 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   rmdirSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
   type Dirent,
   type Stats,
@@ -1741,6 +1744,37 @@ export function _setCommitPublishOwnedHookForTestingSync(
   commitPublishOwnedHookForTestingSync = hook
 }
 
+// Test-only hook invoked by commitPublishFile and commitPublishFileSync
+// after a commit claim has been observed stale and before that claim is
+// removed, so a test can interleave inside the reclaim window: pause the
+// reclaimer, install a successor claim, or publish the target
+// (CodeRabbit review on #2564). Never set outside tests.
+let commitPublishReclaimHookForTesting: (() => Promise<void>) | undefined
+let commitPublishReclaimHookForTestingSync: (() => void) | undefined
+
+export function _setCommitPublishReclaimHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  commitPublishReclaimHookForTesting = hook
+}
+
+export function _setCommitPublishReclaimHookForTestingSync(
+  hook: (() => void) | undefined,
+): void {
+  commitPublishReclaimHookForTestingSync = hook
+}
+
+// Test-only override for the commit-claim poll budget, so a test can
+// exercise the loop-exhaustion path without three thousand polls.
+// Never set outside tests.
+let commitPublishClaimMaxPollsForTesting: number | undefined
+
+export function _setCommitPublishClaimMaxPollsForTesting(
+  maxPolls: number | undefined,
+): void {
+  commitPublishClaimMaxPollsForTesting = maxPolls
+}
+
 async function waitForTerminalFact(
   id: string,
   kind: 'natural' | 'killed',
@@ -1916,14 +1950,36 @@ async function commitPublishFile(
     if (!isHardLinkUnsupported(error)) throw error
   }
   const claimDir = `${target}.commit`
-  for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
+  const maxClaimPolls =
+    commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
+  for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
     if (await commitPublishPathStat(target)) return 'exists'
     const claim = await commitPublishPathStat(claimDir)
     if (claim) {
       if (Date.now() - claim.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS) {
-        // Reclaim the staged path as well as the directory. Even if the
-        // claim changed after stat, removing it revokes its staged path.
-        await rm(claimDir, { force: true, recursive: true }).catch(() => {})
+        await commitPublishReclaimHookForTesting?.()
+        // Remove only the claim this waiter observed as stale: a
+        // successor may have installed a fresh claim since the stat,
+        // and a recursive rm by path would delete its staged record.
+        // Re-verify the directory is still the observed one, unlink
+        // the observed entries by name, then rmdir: a nonempty
+        // successor claim makes rmdir fail, so only a fully consumed
+        // stale claim is removed.
+        const entries = await readdir(claimDir).catch(() => undefined)
+        if (entries !== undefined) {
+          const current = await commitPublishPathStat(claimDir)
+          if (
+            current !== undefined &&
+            current.dev === claim.dev &&
+            current.ino === claim.ino &&
+            current.mtimeMs === claim.mtimeMs
+          ) {
+            for (const entry of entries) {
+              await unlink(join(claimDir, entry)).catch(() => {})
+            }
+            await rmdir(claimDir).catch(() => {})
+          }
+        }
       } else {
         await new Promise(resolve => setTimeout(resolve, 10))
       }
@@ -1958,9 +2014,20 @@ async function commitPublishFile(
           if ((await commitPublishPathStat(claimDir))?.isDirectory()) continue
           // The winner may have removed its claim before we could stat it.
           if (await commitPublishPathStat(target)) return 'exists'
+          // Neither path exists: the competing publisher removed its
+          // claim and has not published yet, so the collision is
+          // retryable — keep polling like EEXIST and ENOTEMPTY instead
+          // of failing a complete staged record.
+          continue
         }
         throw error
       }
+      // rename() preserves the staged directory's mtime, so a holder
+      // paused between staging and installing would already look stale
+      // on arrival. Stamp the claim with the installation time so its
+      // age is measured from acquisition.
+      const acquiredAt = new Date()
+      await utimes(claimDir, acquiredAt, acquiredAt).catch(() => {})
       if (await commitPublishPathStat(target)) return 'exists'
       await commitPublishHookForTesting?.()
       if (!(await commitPublishPathStat(staged))) continue
@@ -1983,6 +2050,11 @@ async function commitPublishFile(
       }
     }
   }
+  // The final poll can miss a successor that reclaims the staged
+  // source and publishes during that iteration, so recheck the target
+  // once before failing: callers expecting 'exists' must not see the
+  // timeout when the record is already there.
+  if (await commitPublishPathStat(target)) return 'exists'
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
@@ -1999,15 +2071,39 @@ function commitPublishFileSync(
     if (!isHardLinkUnsupported(error)) throw error
   }
   const claimDir = `${target}.commit`
-  for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
+  const maxClaimPolls =
+    commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
+  for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
     if (commitPublishPathStatSync(target)) return 'exists'
     const claim = commitPublishPathStatSync(claimDir)
     if (claim) {
       if (Date.now() - claim.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS) {
-        // Reclaim the staged path as well as the directory. Even if the
-        // claim changed after stat, removing it revokes its staged path.
+        commitPublishReclaimHookForTestingSync?.()
+        // Remove only the claim this waiter observed as stale: a
+        // successor may have installed a fresh claim since the stat,
+        // and a recursive rm by path would delete its staged record.
+        // Re-verify the directory is still the observed one, unlink
+        // the observed entries by name, then rmdir: a nonempty
+        // successor claim makes rmdir fail, so only a fully consumed
+        // stale claim is removed.
         try {
-          rmSync(claimDir, { force: true, recursive: true })
+          const entries = readdirSync(claimDir)
+          const current = commitPublishPathStatSync(claimDir)
+          if (
+            current !== undefined &&
+            current.dev === claim.dev &&
+            current.ino === claim.ino &&
+            current.mtimeMs === claim.mtimeMs
+          ) {
+            for (const entry of entries) {
+              try {
+                unlinkSync(join(claimDir, entry))
+              } catch {}
+            }
+            try {
+              rmdirSync(claimDir)
+            } catch {}
+          }
         } catch {}
       } else {
         sleepSync(10)
@@ -2042,9 +2138,22 @@ function commitPublishFileSync(
         if (isCommitPublishDirectoryCollisionOnWindows(error)) {
           if (commitPublishPathStatSync(claimDir)?.isDirectory()) continue
           if (commitPublishPathStatSync(target)) return 'exists'
+          // Neither path exists: the competing publisher removed its
+          // claim and has not published yet, so the collision is
+          // retryable — keep polling like EEXIST and ENOTEMPTY instead
+          // of failing a complete staged record.
+          continue
         }
         throw error
       }
+      // rename() preserves the staged directory's mtime, so a holder
+      // paused between staging and installing would already look stale
+      // on arrival. Stamp the claim with the installation time so its
+      // age is measured from acquisition.
+      const acquiredAt = new Date()
+      try {
+        utimesSync(claimDir, acquiredAt, acquiredAt)
+      } catch {}
       if (commitPublishPathStatSync(target)) return 'exists'
       commitPublishHookForTestingSync?.()
       if (!(commitPublishPathStatSync(staged))) continue
@@ -2072,6 +2181,9 @@ function commitPublishFileSync(
       }
     }
   }
+  // Same final recheck as the async path: a successor can publish
+  // during the last poll iteration.
+  if (commitPublishPathStatSync(target)) return 'exists'
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 

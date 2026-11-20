@@ -235,6 +235,24 @@ function mockedRenameSync(oldPath: string, newPath: string): void {
   realRenameSync(oldPath, newPath)
 }
 
+// Pins process.platform for the rest of the current test; afterEach
+// restores every pin, so a Windows-only error classification can be
+// exercised deterministically on every platform (CodeRabbit review on
+// #2564).
+const pendingPlatformRestores: Array<() => void> = []
+function pinProcessPlatform(platform: NodeJS.Platform): void {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', {
+    value: platform,
+    configurable: true,
+  })
+  if (descriptor) {
+    pendingPlatformRestores.push(() => {
+      Object.defineProperty(process, 'platform', descriptor)
+    })
+  }
+}
+
 describe('terminal-fact publish across withdrawn claims', () => {
   let configDir: string
   let registry: typeof import('./bgRegistry.js')
@@ -547,6 +565,12 @@ describe('terminal-fact publish across withdrawn claims', () => {
     registry?._setCommitPublishHookForTestingSync(undefined)
     registry?._setCommitPublishOwnedHookForTesting(undefined)
     registry?._setCommitPublishOwnedHookForTestingSync(undefined)
+    registry?._setCommitPublishReclaimHookForTesting(undefined)
+    registry?._setCommitPublishReclaimHookForTestingSync(undefined)
+    registry?._setCommitPublishClaimMaxPollsForTesting(undefined)
+    while (pendingPlatformRestores.length > 0) {
+      pendingPlatformRestores.pop()!()
+    }
     mock.restore()
     // See bgRegistry.noHardLinks.test.ts: mock.restore() does not undo a
     // mock.module registration, so re-register the real module explicitly
@@ -1603,6 +1627,184 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
       },
     },
+    {
+      name: 'keeps a paused holder claim that was staged longer than the stale threshold',
+      run: async () => {
+    // Regression test for the CodeRabbit review on #2564: rename()
+    // preserves the staged directory's mtime, so a holder that paused
+    // longer than the stale threshold between staging and installing
+    // its claim looked stale the moment it acquired the claim — and a
+    // successor revoked it immediately. The claim age must be measured
+    // from installation: the installed claim is restamped, so the
+    // successor waits for the paused holder instead of revoking it.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-claim-age-install-async',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-claim-age-install-async',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const target = terminalFactPath(session.id, 'natural')
+    const options = { ownerPid: session.pid, expectedSession: session }
+    linkUnsupported = true
+    // Backdate the staged directory right before the rename installs
+    // it, reproducing a holder paused past the stale threshold before
+    // the directory rename: the installed claim inherits the old mtime.
+    claimInstallInjection = from => {
+      const stale = new Date(Date.now() - 11_000)
+      realFs.utimesSync(from, stale, stale)
+    }
+    const { entered, release } = armCommitOwnedHookPause()
+    const holder = registry.recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      options,
+    )
+    holder.catch(() => {})
+    try {
+      await awaitCommitHookEntered(entered)
+      // Withdraw the holder's terminal-fact claim and age the per-ID
+      // lock, so the successor claims the publish itself instead of
+      // adopting the holder's tmp while the holder is paused.
+      await rm(`${target}.claim`, { force: true, recursive: true })
+      await ageSessionLock(session.id)
+      const successor = registry.recordBackgroundSessionNaturalTermination(
+        session.id,
+        { exitCode: 3 },
+        options,
+      )
+      successor.catch(() => {})
+      let successorSettled = false
+      void successor.then(
+        () => {
+          successorSettled = true
+        },
+        () => {
+          successorSettled = true
+        },
+      )
+      // The successor must wait on the freshly installed claim instead
+      // of revoking it: after several poll iterations it has neither
+      // settled nor removed the holder's staged record.
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(successorSettled).toBe(false)
+      const holderStaged = realFs
+        .readdirSync(`${target}.commit`)
+        .find(name => name.startsWith('staged.'))
+      expect(holderStaged).toBeDefined()
+      release()
+      expect(await holder).toMatchObject({ status: 'exited', exitCode: 0 })
+      expect(await successor).toMatchObject({ status: 'exited', exitCode: 0 })
+      expect(await storedExitCode(session.id)).toBe(0)
+    } finally {
+      linkUnsupported = false
+      release()
+      await Promise.allSettled([holder])
+    }
+      },
+    },
+    {
+      name: 'a stale-claim reclaim must not remove a successor claim installed after the stale check',
+      run: async () => {
+    // Regression test for the CodeRabbit review on #2564: the reclaim
+    // removed the claim directory by pathname, so a reclaimer delayed
+    // after its stale check would delete a fresh successor claim
+    // installed in between — and with it the successor's staged record.
+    // The reclaim must remove only the claim it verified as stale, and
+    // the fresh writer's staged record must survive and publish.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-reclaim-successor-async',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-reclaim-successor-async',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const target = terminalFactPath(session.id, 'natural')
+    const claimDir = `${target}.commit`
+    const options = { ownerPid: session.pid, expectedSession: session }
+    linkUnsupported = true
+    const { entered, release } = armCommitOwnedHookPause()
+    const holder = registry.recordBackgroundSessionNaturalTermination(
+      session.id,
+      { exitCode: 0 },
+      options,
+    )
+    holder.catch(() => {})
+    const writers = [holder]
+    try {
+      await awaitCommitHookEntered(entered)
+      // Age the holder's claim (installed fresh) and the per-ID lock so
+      // the contender can proceed while the holder stays paused, and
+      // withdraw the terminal-fact claim so the contender publishes its
+      // own fact instead of adopting the holder's tmp.
+      await ageCommitClaim(target)
+      await ageSessionLock(session.id)
+      await rm(`${target}.claim`, { force: true, recursive: true })
+      // The contender observes the stale claim and pauses inside the
+      // reclaim window, right after its stale check.
+      const reclaimEntered = Promise.withResolvers<void>()
+      let releaseContender!: () => void
+      const contenderGate = new Promise<void>(resolve => {
+        releaseContender = resolve
+      })
+      registry._setCommitPublishReclaimHookForTesting(async () => {
+        reclaimEntered.resolve()
+        await contenderGate
+      })
+      const contender = registry.recordBackgroundSessionNaturalTermination(
+        session.id,
+        { exitCode: 3 },
+        options,
+      )
+      contender.catch(() => {})
+      writers.push(contender)
+      try {
+        await Promise.race([
+          reclaimEntered.promise,
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error('reclaim hook never fired')),
+              5000,
+            ),
+          ),
+        ])
+        // While the contender is paused after its stale check, another
+        // reclaimer removes the stale claim and a fresh publisher
+        // installs its own claim with a complete staged record.
+        await rm(claimDir, { force: true, recursive: true })
+        const manualPending = join(dirname(claimDir), '.publish-manual')
+        await mkdir(manualPending)
+        await realWriteFile(
+          join(manualPending, 'staged.manual'),
+          JSON.stringify(successorFact(session.id, 3)),
+        )
+        await realRename(manualPending, claimDir)
+        releaseContender()
+        // The resumed contender must abort its reclaim: the installed
+        // claim is not the one it observed stale. Give it a few poll
+        // iterations, then confirm the successor's staged record
+        // survived the reclaim attempt.
+        await new Promise(resolve => setTimeout(resolve, 100))
+        expect(realFs.existsSync(join(claimDir, 'staged.manual'))).toBe(true)
+        // The surviving record is complete and publishes.
+        realFs.renameSync(join(claimDir, 'staged.manual'), target)
+        realFs.rmdirSync(claimDir)
+        const contenderResult = await contender
+        expect(contenderResult).toMatchObject({ status: 'failed', exitCode: 3 })
+        expect(await storedExitCode(session.id)).toBe(3)
+      } finally {
+        releaseContender()
+        registry._setCommitPublishReclaimHookForTesting(undefined)
+      }
+    } finally {
+      linkUnsupported = false
+      release()
+      await Promise.allSettled(writers)
+    }
+      },
+    },
   ]
 
   for (const scenario of staleLockScenarios) {
@@ -1691,6 +1893,14 @@ describe('terminal-fact publish across withdrawn claims', () => {
         const options = { ownerPid: session.pid, expectedSession: session }
         let injected = false
         linkUnsupported = true
+        if (outcome === 'denied') {
+          // After the Windows collision fix, an EACCES with both the
+          // claim directory and the target absent is a retryable
+          // collision on win32 by design. This case asserts the
+          // non-Windows permission failure, so pin the platform and
+          // keep the expectation deterministic on every host.
+          pinProcessPlatform('linux')
+        }
         if (outcome === 'reclaimed') {
           const reclaim = () => {
             if (injected) return
@@ -1756,6 +1966,244 @@ describe('terminal-fact publish across withdrawn claims', () => {
       })
     }
   }
+
+  it('restamps a no-hard-link claim at installation through the sync fallback', async () => {
+    // Regression test for the CodeRabbit review on #2564: rename()
+    // preserves the staged directory's mtime, so a holder that paused
+    // longer than the stale threshold between staging and installing
+    // its claim looked stale the moment it acquired the claim. The sync
+    // installation itself must record a reliable acquisition time: the
+    // claim's mtime is observed inside the owned-commit hook, before
+    // the holder publishes and cleans up its claim.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-claim-age-install-sync',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-claim-age-install-sync',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const target = terminalFactPath(session.id, 'natural')
+    linkUnsupported = true
+    // Backdate the staged directory right before the rename installs
+    // it, reproducing a holder paused past the stale threshold before
+    // the directory rename.
+    claimInstallInjection = from => {
+      const stale = new Date(Date.now() - 11_000)
+      realFs.utimesSync(from, stale, stale)
+    }
+    const startedAt = Date.now()
+    let observedMtimeMs: number | undefined
+    registry._setCommitPublishOwnedHookForTestingSync(() => {
+      observedMtimeMs = realFs.statSync(`${target}.commit`).mtimeMs
+    })
+    try {
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      expect(observedMtimeMs).toBeGreaterThanOrEqual(startedAt - 1000)
+      expect(await storedExitCode(session.id)).toBe(0)
+    } finally {
+      linkUnsupported = false
+    }
+  })
+
+  for (const synchronous of [false, true]) {
+    it(
+      `retries a Windows access-denied claim collision when the claim and target are both absent (${synchronous ? 'sync' : 'async'})`,
+      async () => {
+        // Regression test for the CodeRabbit review on #2564: on
+        // Windows a directory-rename collision reports EACCES/EPERM
+        // instead of ENOTEMPTY. When the competing publisher removed
+        // its claim and has not published yet, neither the claim
+        // directory nor the target exists: the collision is retryable
+        // — the staged record is complete — so the publisher must keep
+        // polling like the EEXIST/ENOTEMPTY branches instead of
+        // failing the publish.
+        const session = await registry.createBackgroundSession({
+          id: `bg-claim-eacces-retry-${synchronous ? 'sync' : 'async'}`,
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: `sess-claim-eacces-retry-${synchronous ? 'sync' : 'async'}`,
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        const target = terminalFactPath(session.id, 'natural')
+        const options = { ownerPid: session.pid, expectedSession: session }
+        let injected = false
+        linkUnsupported = true
+        pinProcessPlatform('win32')
+        // Windows denies the directory rename while the competing claim
+        // exists; by the time the publisher rechecks, that claim is
+        // gone and the target has not appeared yet.
+        claimInstallInjection = () => {
+          injected = true
+          throw Object.assign(new Error('simulated Windows collision'), {
+            code: 'EACCES',
+          })
+        }
+        try {
+          if (synchronous) {
+            registry.recordBackgroundSessionNaturalTerminationSync(
+              session.id,
+              { exitCode: 0 },
+              options,
+            )
+          } else {
+            const terminated =
+              await registry.recordBackgroundSessionNaturalTermination(
+                session.id,
+                { exitCode: 0 },
+                options,
+              )
+            expect(terminated).toMatchObject({ status: 'exited', exitCode: 0 })
+          }
+          expect(injected).toBe(true)
+          expect(await storedExitCode(session.id)).toBe(0)
+          expect(realFs.existsSync(`${target}.commit`)).toBe(false)
+          expect(
+            realFs
+              .readdirSync(dirname(target))
+              .filter(name => name.startsWith('.publish-')),
+          ).toEqual([])
+        } finally {
+          linkUnsupported = false
+        }
+      },
+    )
+  }
+
+  for (const synchronous of [false, true]) {
+    it(
+      `returns the concurrent publish instead of timing out when a successor publishes during the final claim poll (${synchronous ? 'sync' : 'async'})`,
+      async () => {
+        // Regression test for the CodeRabbit review on #2564: when the
+        // publish-wait loop exhausts, the last iteration can miss a
+        // successor that reclaimed the staged source and published
+        // during that poll. The target then holds a complete record,
+        // so callers expecting 'exists' must not receive the timeout.
+        const session = await registry.createBackgroundSession({
+          id: `bg-final-poll-target-${synchronous ? 'sync' : 'async'}`,
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: `sess-final-poll-target-${synchronous ? 'sync' : 'async'}`,
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        const target = terminalFactPath(session.id, 'natural')
+        const options = { ownerPid: session.pid, expectedSession: session }
+        linkUnsupported = true
+        registry._setCommitPublishClaimMaxPollsForTesting(1)
+        // One stale claim: the only poll iteration takes the
+        // stale-reclaim branch after its target check.
+        const claimDir = `${target}.commit`
+        await mkdir(claimDir)
+        await writeFile(join(claimDir, 'staged.dead'), 'stale')
+        const stale = new Date(Date.now() - 11_000)
+        await utimes(claimDir, stale, stale)
+        // During that only iteration — after its target check, inside
+        // the reclaim window — a successor publishes the target.
+        if (synchronous) {
+          registry._setCommitPublishReclaimHookForTestingSync(() => {
+            realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+          })
+        } else {
+          registry._setCommitPublishReclaimHookForTesting(async () => {
+            await realWriteFile(target, JSON.stringify(successorFact(session.id, 3)))
+          })
+        }
+        try {
+          if (synchronous) {
+            registry.recordBackgroundSessionNaturalTerminationSync(
+              session.id,
+              { exitCode: 0 },
+              options,
+            )
+          } else {
+            const terminated =
+              await registry.recordBackgroundSessionNaturalTermination(
+                session.id,
+                { exitCode: 0 },
+                options,
+              )
+            expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+          }
+          expect(await storedExitCode(session.id)).toBe(3)
+          expect(realFs.existsSync(claimDir)).toBe(false)
+        } finally {
+          linkUnsupported = false
+        }
+      },
+    )
+  }
+
+  it('a sync stale-claim reclaim must not remove a successor claim installed after the stale check', async () => {
+    // Regression test for the CodeRabbit review on #2564: the reclaim
+    // removed the claim directory by pathname, so a reclaimer delayed
+    // after its stale check could delete a successor claim installed in
+    // between — and with it the successor's staged record. The reclaim
+    // must remove only the claim it verified as stale.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-reclaim-successor-sync',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-reclaim-successor-sync',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const target = terminalFactPath(session.id, 'natural')
+    const claimDir = `${target}.commit`
+    const options = { ownerPid: session.pid, expectedSession: session }
+    linkUnsupported = true
+    registry._setCommitPublishClaimMaxPollsForTesting(1)
+    // A stale claim left by a dead publisher.
+    await mkdir(claimDir)
+    await writeFile(join(claimDir, 'staged.dead'), 'stale')
+    const stale = new Date(Date.now() - 11_000)
+    await utimes(claimDir, stale, stale)
+    let hookFired = false
+    registry._setCommitPublishReclaimHookForTestingSync(() => {
+      hookFired = true
+      // Between the stale check and the removal, another reclaimer
+      // frees the stale claim and a fresh publisher installs its own
+      // claim with a complete staged record.
+      realFs.rmSync(claimDir, { recursive: true, force: true })
+      const manualPending = join(dirname(claimDir), '.publish-manual')
+      realFs.mkdirSync(manualPending)
+      realFs.writeFileSync(
+        join(manualPending, 'staged.manual'),
+        JSON.stringify(successorFact(session.id, 3)),
+      )
+      realFs.renameSync(manualPending, claimDir)
+    })
+    try {
+      let timedOut = false
+      try {
+        registry.recordBackgroundSessionNaturalTerminationSync(
+          session.id,
+          { exitCode: 0 },
+          options,
+        )
+      } catch (error) {
+        timedOut = (error as Error).message.includes(
+          'Timed out waiting for a concurrent publish',
+        )
+      }
+      expect(hookFired).toBe(true)
+      // The single poll ended without a target to return.
+      expect(timedOut).toBe(true)
+      // The successor's staged record survived the reclaim.
+      expect(realFs.existsSync(join(claimDir, 'staged.manual'))).toBe(true)
+      // The surviving record is complete and publishes.
+      realFs.renameSync(join(claimDir, 'staged.manual'), target)
+      realFs.rmdirSync(claimDir)
+      expect(await storedExitCode(session.id)).toBe(3)
+    } finally {
+      linkUnsupported = false
+    }
+  })
 
   // Bounded staging-open matrix: async/sync x missing copy with/without
   // a competing winner, and a permission failure. ENOENT recovers;
