@@ -489,6 +489,359 @@ describe('symbol extraction', () => {
     }
   })
 
+  test('extracts definitions and references from C files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-c-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'point.h'),
+        [
+          '#pragma once',
+          '',
+          'typedef struct Point Point;',
+          '',
+          'struct Forward;',
+          '',
+          'int add(int a, int b);',
+          '',
+          'char *dup_string(const char *s);',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'point.c'),
+        [
+          '#include "point.h"',
+          '',
+          'struct Node {',
+          '    struct Node *next;',
+          '    Point value;',
+          '};',
+          '',
+          'struct Forward;',
+          '',
+          'union Value {',
+          '    int i;',
+          '    float f;',
+          '};',
+          '',
+          'enum Color { RED, GREEN };',
+          '',
+          'typedef struct {',
+          '    int x;',
+          '    int y;',
+          '} Coord;',
+          '',
+          'typedef int len_t;',
+          '',
+          'typedef unsigned char Digest[32];',
+          '',
+          'typedef int (*Callback)(int);',
+          '',
+          'static int helper(int v) {',
+          '    return v + 1;',
+          '}',
+          '',
+          'char *dup_string(const char *s) {',
+          '    return 0;',
+          '}',
+          '',
+          'int add(int a, int b) {',
+          '    Coord c = { 0, 0 };',
+          '    return helper(c.x) + process(c) + util_scale(b);',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('point.c', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const defNames = defs.map(tag => tag.name)
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      // Structs, unions, enums and typedefs with a body are definitions; the
+      // typedef in front of an anonymous struct still provides the name.
+      expect(defNames).toContain('Node')
+      expect(defNames).toContain('Value')
+      expect(defNames).toContain('Color')
+      expect(defNames).toContain('Coord')
+      expect(defNames).toContain('len_t')
+
+      expect(defs.find(tag => tag.name === 'Node')?.subKind).toBe('class')
+      expect(defs.find(tag => tag.name === 'Value')?.subKind).toBe('class')
+      expect(defs.find(tag => tag.name === 'Color')?.subKind).toBe('enum')
+      expect(defs.find(tag => tag.name === 'len_t')?.subKind).toBe('type')
+
+      // Array typedefs use an array_declarator; function-pointer typedefs stay
+      // out of scope because their declarator is a function_declarator.
+      expect(defs.find(tag => tag.name === 'Digest')?.subKind).toBe('type')
+      expect(defNames).not.toContain('Callback')
+
+      // `struct Forward;` and `struct Node *next;` only mention the type, so
+      // they must not add definitions, and Node stays a single definition.
+      expect(defNames).not.toContain('Forward')
+      expect(defs.filter(tag => tag.name === 'Node')).toHaveLength(1)
+
+      // char *dup_string(...) puts the function declarator under a
+      // pointer_declarator and must still be captured.
+      expect(defs.find(tag => tag.name === 'helper')?.subKind).toBe('function')
+      expect(defs.find(tag => tag.name === 'dup_string')?.subKind).toBe(
+        'function',
+      )
+      expect(defs.find(tag => tag.name === 'add')?.subKind).toBe('function')
+
+      // Calls and type mentions drive the reference graph.
+      expect(refs).toContain('helper')
+      expect(refs).toContain('process')
+      expect(refs).toContain('util_scale')
+      expect(refs).toContain('Coord')
+      expect(refs).toContain('Point')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('captures C header prototypes as definitions', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-c-header-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'point.h'),
+        [
+          '#pragma once',
+          '',
+          'typedef int len_t;',
+          '',
+          'int add(int a, int b);',
+          '',
+          'char *dup_string(const char *s);',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('point.h', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      // Headers declare the API without a body, so declarations have to count
+      // as definitions or the file would drop out of the map.
+      expect(defs.find(tag => tag.name === 'add')?.subKind).toBe('function')
+      expect(defs.find(tag => tag.name === 'dup_string')?.subKind).toBe(
+        'function',
+      )
+      expect(defs.find(tag => tag.name === 'len_t')?.subKind).toBe('type')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('extracts definitions and references from C++ files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-cpp-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'store.cpp'),
+        [
+          '#include "store.h"',
+          '',
+          'namespace app {',
+          '',
+          'class Store {',
+          'public:',
+          '    Store(int size);',
+          '    ~Store();',
+          '    int count() const;',
+          'private:',
+          '    int size_;',
+          '};',
+          '',
+          'Store::Store(int size) : size_(size) {}',
+          '',
+          'int Store::count() const {',
+          '    return helper(size_);',
+          '}',
+          '',
+          'bool operator==(const Store &a, const Store &b) {',
+          '    return a.count() == b.count();',
+          '}',
+          '',
+          'using StorePtr = Store *;',
+          '',
+          'typedef unsigned char Bytes[16];',
+          '',
+          'typedef int (*Callback)(int);',
+          '',
+          'template <typename T>',
+          'class Box {',
+          'public:',
+          '    T get() const { return value_; }',
+          'private:',
+          '    T value_;',
+          '};',
+          '',
+          'enum class Mode { Fast, Slow };',
+          '',
+          'int helper(int v) {',
+          '    return v + 1;',
+          '}',
+          '',
+          'template <typename T>',
+          'T identity(T value) {',
+          '    return value;',
+          '}',
+          '',
+          'void run(Store *s) {',
+          '    s->count();',
+          '    Store::count();',
+          '    helper(3);',
+          '    app::helper(4);',
+          '    app::Store::count();',
+          '    identity<int>(5);',
+          '    s->count<int>();',
+          '    app::helper<int>(6);',
+          '}',
+          '',
+          '}  // namespace app',
+          '',
+          'int app::Store::count() const {',
+          '    return 0;',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('store.cpp', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const refTags = result!.tags.filter(tag => tag.kind === 'ref')
+      const refs = refTags.map(tag => tag.name)
+
+      expect(defs.find(tag => tag.name === 'app')?.subKind).toBe('module')
+      expect(defs.find(tag => tag.name === 'Store')?.subKind).toBe('class')
+      expect(defs.find(tag => tag.name === 'StorePtr')?.subKind).toBe('type')
+      // Array typedefs are captured; function-pointer typedefs stay excluded.
+      expect(defs.find(tag => tag.name === 'Bytes')?.subKind).toBe('type')
+      expect(defs.some(tag => tag.name === 'Callback')).toBe(false)
+      expect(defs.find(tag => tag.name === 'Box')?.subKind).toBe('class')
+      expect(defs.find(tag => tag.name === 'Mode')?.subKind).toBe('enum')
+
+      // In-class declarations and the two out-of-class definitions that use
+      // Store::count and app::Store::count all count as methods.
+      const countDefs = defs.filter(tag => tag.name === 'count')
+      expect(countDefs).toHaveLength(3)
+      expect(countDefs.every(tag => tag.subKind === 'method')).toBe(true)
+
+      // Destructors and operators carry their own name nodes.
+      expect(defs.find(tag => tag.name === '~Store')?.subKind).toBe('method')
+      expect(defs.some(tag => tag.name === 'operator==')).toBe(true)
+      expect(defs.find(tag => tag.name === 'get')?.subKind).toBe('method')
+      expect(defs.find(tag => tag.name === 'run')?.subKind).toBe('function')
+      expect(defs.find(tag => tag.name === 'identity')?.subKind).toBe('function')
+
+      // s->count(), helper(3) and app::helper(4) all name their callee. The
+      // qualified call must produce its own reference at its own source line.
+      expect(refs).toContain('count')
+      expect(refs).toContain('helper')
+      expect(refs).toContain('Store')
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'helper' && tag.signature.trim() === 'app::helper(4);',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'count' &&
+            tag.signature.trim() === 'app::Store::count();',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'count' && tag.signature.trim() === 'Store::count();',
+        ),
+      ).toBeDefined()
+
+      // Explicit template arguments wrap the callee in template_function or
+      // template_method, including qualified forms.
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'identity' &&
+            tag.signature.trim() === 'identity<int>(5);',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'count' &&
+            tag.signature.trim() === 's->count<int>();',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'helper' &&
+            tag.signature.trim() === 'app::helper<int>(6);',
+        ),
+      ).toBeDefined()
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('builds a map for a C repo and ranks the referenced file first', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-c-map-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'widget.c'),
+        [
+          '#include "widget.h"',
+          '',
+          'int widget_render(const char *input) {',
+          '    return helper(input);',
+          '}',
+          '',
+          'static int helper(const char *input) {',
+          '    return 0;',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'main.c'),
+        [
+          '#include "widget.h"',
+          '',
+          'int main(void) {',
+          '    return widget_render("x");',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await buildRepoMap({
+        root: tempDir,
+        files: ['main.c', 'widget.c'],
+        maxTokens: 1024,
+      })
+
+      expect(result.map).toContain('widget.c:')
+      expect(result.map).toContain('int widget_render(const char *input) {')
+      // main.c calls widget_render, so widget.c ranks first.
+      expect(result.map.split('\n')[0]).toBe('widget.c:')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
   test('builds a map for a Go repo and ranks the referenced file first', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'repomap-go-map-'))
     try {

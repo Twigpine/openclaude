@@ -14,6 +14,8 @@ describe('bundled query drift guard', () => {
     'python',
     'go',
     'rust',
+    'c',
+    'cpp',
   ])(
     '%s: bundled query matches the .scm source file byte-for-byte',
     (language) => {

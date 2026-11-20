@@ -10,6 +10,14 @@ test('resolves supported extensions to their language', () => {
   expect(getLanguageForFile('main.py')).toBe('python')
   expect(getLanguageForFile('cmd/server.go')).toBe('go')
   expect(getLanguageForFile('crates/core/src/lib.rs')).toBe('rust')
+  expect(getLanguageForFile('src/point.c')).toBe('c')
+  expect(getLanguageForFile('src/point.h')).toBe('cpp')
+  expect(getLanguageForFile('src/store.cpp')).toBe('cpp')
+  expect(getLanguageForFile('include/store.hpp')).toBe('cpp')
+  expect(getLanguageForFile('include/store.hh')).toBe('cpp')
+  expect(getLanguageForFile('include/store.hxx')).toBe('cpp')
+  expect(getLanguageForFile('src/store.cc')).toBe('cpp')
+  expect(getLanguageForFile('src/store.cxx')).toBe('cpp')
 })
 
 test('returns null for an unsupported extension', () => {
