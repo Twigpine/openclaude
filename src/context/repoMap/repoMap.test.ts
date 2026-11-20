@@ -618,9 +618,8 @@ describe('symbol extraction', () => {
       expect(result).not.toBeNull()
 
       const defs = result!.tags.filter(tag => tag.kind === 'def')
-      const refs = result!.tags
-        .filter(tag => tag.kind === 'ref')
-        .map(tag => tag.name)
+      const refTags = result!.tags.filter(tag => tag.kind === 'ref')
+      const refs = refTags.map(tag => tag.name)
 
       // `String value();` inside an @interface is an annotation element, which
       // method_declaration does not match.
@@ -643,6 +642,20 @@ describe('symbol extraction', () => {
       // argument list and no name field.
       expect(refs).toContain('handle')
       expect(refs).toContain('reset')
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'handle' &&
+            tag.signature.trim() === 'inputs.forEach(this::handle);',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'reset' &&
+            tag.signature.trim() === 'Runnable reset = helper::reset;',
+        ),
+      ).toBeDefined()
       // The receiver of helper::reset is an identifier as well, but only the
       // referenced method name is a call.
       expect(refs).not.toContain('helper')
