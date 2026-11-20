@@ -10,6 +10,9 @@ test('resolves supported extensions to their language', () => {
   expect(getLanguageForFile('main.py')).toBe('python')
   expect(getLanguageForFile('cmd/server.go')).toBe('go')
   expect(getLanguageForFile('crates/core/src/lib.rs')).toBe('rust')
+  expect(getLanguageForFile('src/main/java/com/example/Store.java')).toBe(
+    'java',
+  )
 })
 
 test('returns null for an unsupported extension', () => {

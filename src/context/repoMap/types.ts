@@ -86,3 +86,4 @@ export type SupportedLanguage =
   | 'python'
   | 'go'
   | 'rust'
+  | 'java'
