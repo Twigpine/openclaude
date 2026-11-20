@@ -56,11 +56,23 @@ The `/repomap` command is always available regardless of the feature flag. It le
 ```text
 /repomap                          # Show the map with default settings (2048 tokens)
 /repomap --tokens 4096            # Increase the token budget for a larger map
+/repomap --tokens=4096            # Same, using the --flag=value form
 /repomap --focus src/tools/       # Boost specific paths in the ranking
 /repomap --focus src/context.ts   # Can use multiple --focus flags
 /repomap --focus-symbols buildTool # Boost files that define specific symbols
 /repomap --stats                  # Show cache statistics
 /repomap --invalidate             # Clear cache and rebuild from scratch
+```
+
+Arguments are validated before anything is built. `--tokens` takes a whole
+number between 256 and 16384, `--focus` and `--focus-symbols` need a value, and
+unrecognised arguments are reported instead of ignored:
+
+```text
+/repomap --tokens 100
+--tokens expects a whole number between 256 and 16384 (got "100")
+
+Usage: /repomap [--tokens <256-16384>] [--focus <path>]... [--focus-symbols <name>]... [--stats] [--invalidate]
 ```
 
 ## The RepoMap tool

@@ -58,6 +58,7 @@ describe('/repomap argument parsing', () => {
     expect(result.focus).toEqual([])
     expect(result.invalidate).toBe(false)
     expect(result.stats).toBe(false)
+    expect(result.error).toBeNull()
   })
 
   test('parses --tokens flag', () => {
@@ -67,12 +68,69 @@ describe('/repomap argument parsing', () => {
 
   test('rejects --tokens below 256', () => {
     const result = parseArgs('--tokens 100')
-    expect(result.tokens).toBe(2048) // falls back to default
+    expect(result.tokens).toBe(2048) // stays at the default
+    expect(result.error).toBe(
+      '--tokens expects a whole number between 256 and 16384 (got "100")',
+    )
   })
 
   test('rejects --tokens above 16384', () => {
     const result = parseArgs('--tokens 20000')
-    expect(result.tokens).toBe(2048) // falls back to default
+    expect(result.tokens).toBe(2048) // stays at the default
+    expect(result.error).toBe(
+      '--tokens expects a whole number between 256 and 16384 (got "20000")',
+    )
+  })
+
+  test('rejects a non-numeric --tokens value instead of silently ignoring it', () => {
+    // parseInt('4096abc', 10) used to return 4096, and 'abc' used to leave the
+    // default in place with no feedback.
+    for (const value of ['4096abc', 'abc', '40.96', '-4096']) {
+      const result = parseArgs(`--tokens ${value}`)
+      expect(result.tokens).toBe(2048)
+      expect(result.error).toContain('--tokens expects a whole number')
+    }
+  })
+
+  test('reports a --tokens flag with no value', () => {
+    const result = parseArgs('--tokens')
+    expect(result.tokens).toBe(2048)
+    expect(result.error).toBe('--tokens expects a value')
+  })
+
+  test('parses the --flag=value form', () => {
+    const result = parseArgs(
+      '--tokens=4096 --focus=src/tools/ --focus-symbols=buildTool',
+    )
+    expect(result.tokens).toBe(4096)
+    expect(result.focus).toEqual(['src/tools/'])
+    expect(result.focusSymbols).toEqual(['buildTool'])
+    expect(result.error).toBeNull()
+  })
+
+  test('rejects an empty inline value', () => {
+    expect(parseArgs('--tokens=').error).toBe('--tokens expects a value')
+    expect(parseArgs('--focus=').error).toBe('--focus expects a value')
+  })
+
+  test('rejects an unknown flag instead of ignoring it', () => {
+    const result = parseArgs('--tokens 4096 --tokenss 512')
+    // The valid argument is still parsed; the unknown one is reported.
+    expect(result.tokens).toBe(4096)
+    expect(result.error).toBe('Unknown argument "--tokenss"')
+  })
+
+  test('rejects a bare argument instead of ignoring it', () => {
+    const result = parseArgs('--stats extra')
+    expect(result.stats).toBe(true)
+    expect(result.error).toBe('Unknown argument "extra"')
+  })
+
+  test('rejects a value on a flag that takes none', () => {
+    expect(parseArgs('--stats=yes').error).toBe('--stats takes no value (got "yes")')
+    expect(parseArgs('--invalidate=1').error).toBe(
+      '--invalidate takes no value (got "1")',
+    )
   })
 
   test('parses --focus flag', () => {
@@ -96,6 +154,9 @@ describe('/repomap argument parsing', () => {
     const result = parseArgs('--focus && --tokens 4096')
     expect(result.tokens).toBe(4096)
     expect(result.focus).toEqual([])
+    // `&&` is not a path, so --focus is reported as missing its value rather
+    // than silently dropping the flag.
+    expect(result.error).toBe('--focus expects a value')
   })
 
   test('parses multiple --focus flags', () => {
@@ -227,6 +288,67 @@ describe('/repomap command', () => {
 
     expect(textValue(result)).toContain('Repository map:')
     expect(captured.focusSymbols).toEqual(['buildTool', 'ToolUseContext'])
+  })
+
+  test('reports invalid arguments with the usage line and builds nothing', async () => {
+    let buildCalls = 0
+    const result = await runRepoMapCommand(
+      '--tokens nope',
+      '/tmp/repo',
+      fakeDeps({
+        buildRepoMap: async () => {
+          buildCalls++
+          return SAMPLE_RESULT
+        },
+      }),
+    )
+
+    const value = textValue(result)
+    expect(value).toContain('--tokens expects a whole number')
+    expect(value).toContain('Usage: /repomap')
+    // A mistyped flag must not spend a build on a silently wrong budget.
+    expect(buildCalls).toBe(0)
+  })
+
+  test('reports an unknown flag without building a map', async () => {
+    const result = await runRepoMapCommand(
+      '--stat',
+      '/tmp/repo',
+      fakeDeps({
+        buildRepoMap: async () => {
+          throw new Error('should not build')
+        },
+      }),
+    )
+
+    const value = textValue(result)
+    expect(value).toContain('Unknown argument "--stat"')
+    expect(value).toContain('Usage: /repomap')
+    expect(value).not.toContain('should not build')
+  })
+
+  test('loads dependencies only after arguments validate', async () => {
+    // No depsPromise is supplied, so the loader below stands in for the default
+    // module import. An eager loader would be called for the invalid input too.
+    let loaderCalls = 0
+    const loader = async () => {
+      loaderCalls++
+      return fakeDeps()
+    }
+
+    const invalid = await runRepoMapCommand(
+      '--tokens nope',
+      '/tmp/repo',
+      undefined,
+      loader,
+    )
+    expect(textValue(invalid)).toContain('--tokens expects a whole number')
+    expect(textValue(invalid)).toContain('Usage: /repomap')
+    expect(loaderCalls).toBe(0)
+
+    const valid = await runRepoMapCommand('', '/tmp/repo', undefined, loader)
+    expect(textValue(valid)).toContain('Repository map:')
+    expect(loaderCalls).toBe(1)
   })
 
   test('reports build failures without throwing', async () => {
