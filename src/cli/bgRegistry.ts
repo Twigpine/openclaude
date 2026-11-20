@@ -1,12 +1,15 @@
 import {
+  copyFile,
   link,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   opendir,
   readFile,
   readdir,
   rename,
+  rm,
   rmdir,
   stat,
   unlink,
@@ -15,14 +18,17 @@ import {
 import {
   closeSync,
   constants as fsConstants,
+  copyFileSync,
   fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   renameSync,
+  rmSync,
   rmdirSync,
   unlinkSync,
   writeFileSync,
@@ -30,7 +36,7 @@ import {
   type Stats,
 } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import {
   getProcessCommand,
@@ -1712,6 +1718,29 @@ export function _setCommitPublishHookForTestingSync(
   commitPublishHookForTestingSync = hook
 }
 
+// Test-only hook invoked by commitPublishFile after the final claim
+// ownership check has passed and immediately before the rename makes
+// the record visible, so a test can pause the holder past the stale
+// threshold while a successor reclaims the claim and publishes
+// (issue #2556). Never set outside tests.
+let commitPublishOwnedHookForTesting: (() => Promise<void>) | undefined
+
+export function _setCommitPublishOwnedHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  commitPublishOwnedHookForTesting = hook
+}
+
+// Synchronous counterpart of the hook above, for commitPublishFileSync.
+// Never set outside tests.
+let commitPublishOwnedHookForTestingSync: (() => void) | undefined
+
+export function _setCommitPublishOwnedHookForTestingSync(
+  hook: (() => void) | undefined,
+): void {
+  commitPublishOwnedHookForTestingSync = hook
+}
+
 async function waitForTerminalFact(
   id: string,
   kind: 'natural' | 'killed',
@@ -1860,35 +1889,19 @@ function isTerminalFactClaimTempGoneSync(tmp: string): boolean {
 type PublishCommitOutcome = 'committed' | 'exists' | 'gone'
 
 /**
- * Commits a synced temp file as a published fact or session row, and
- * reports which fact actually ended up at the target.
+ * Publishes a synced temp without replacing an existing record. Prefer
+ * link(), which checks for an existing target atomically. If hard links
+ * are unavailable, install a nonempty claim directory in one rename.
+ * Another claimant cannot rename over it while its uniquely named
+ * staged record is present. Recheck the target after installing the
+ * claim: a previous publisher may have consumed its staged record just
+ * before we installed ours.
  *
- * link() is the atomic commit: it fails with EEXIST when the target is
- * already published, so a delayed owner whose claim was withdrawn can
- * never replace a fact another installer published (maintainer review
- * 5942761094 on #2497) — the rename() pre-checks alone leave a window
- * between the check and the rename, which a successor's publish can
- * land in. A missing temp file means another installer adopted this
- * publish, so the caller waits for the fact at the target instead.
- *
- * On filesystems that reject hard links, link() fails with
- * EPERM/ENOSYS/EOPNOTSUPP and the commit falls back to a
- * claim-serialized rename: mkdir() on `<target>.commit` is atomic, so
- * exactly one publisher wins the claim, rechecks the target under it,
- * and renames, while a loser that finds the claim waits for the target
- * to appear and reports it. A plain rename() cannot replace link()
- * here — it overwrites an existing target, so two publishers that both
- * reach the fallback publish in turn and the second one's readback
- * matches its own bytes, letting both creates succeed instead of
- * rejecting the duplicate (CodeRabbit #2497 review 5945720742). The
- * target still only ever appears complete, via rename, and a stale
- * claim is reclaimed by the waiter. A holder that stalls past the
- * stale threshold can lose its claim that way, so the holder records
- * the claim directory's (dev, ino) identity when it wins the claim
- * and re-verifies it immediately before the rename: a superseded
- * holder reports the successor's publish instead of overwriting it,
- * and the claim directory is only removed while it is still the
- * holder's own (maintainer review 5948202472 on #2497).
+ * The final rename consumes the unique staged path. Reclaim removes that
+ * path before any successor can install a claim, so even a holder that
+ * stalls after its last check cannot overwrite a successor. Staging
+ * before acquiring the shared path also avoids mistaking a recycled
+ * directory inode for ownership or writing into a successor's claim.
  */
 async function commitPublishFile(
   tmp: string,
@@ -1902,71 +1915,72 @@ async function commitPublishFile(
     if (isErrno(error, 'ENOENT')) return 'gone'
     if (!isHardLinkUnsupported(error)) throw error
   }
-  const claimDir = commitPublishClaimDir(target)
+  const claimDir = `${target}.commit`
   for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
-    let claimIdentity: CleanupFileIdentity | undefined
-    try {
-      await mkdir(claimDir)
-      claimIdentity = await readCommitPublishClaimIdentity(claimDir)
-    } catch (error) {
-      if (!isErrno(error, 'EEXIST')) throw error
-    }
-    if (claimIdentity === undefined) {
-      // Another publisher holds the claim: its rename lands within
-      // microseconds, so the target appears — report it instead of
-      // racing it.
-      try {
-        await lstat(target)
-        return 'exists'
-      } catch (error) {
-        if (!isErrno(error, 'ENOENT')) throw error
+    if (await commitPublishPathStat(target)) return 'exists'
+    const claim = await commitPublishPathStat(claimDir)
+    if (claim) {
+      if (Date.now() - claim.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS) {
+        // Reclaim the staged path as well as the directory. Even if the
+        // claim changed after stat, removing it revokes its staged path.
+        await rm(claimDir, { force: true, recursive: true }).catch(() => {})
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 10))
       }
-      if (await isCommitPublishClaimStale(claimDir)) {
-        await rmdir(claimDir).catch(() => {})
-        continue
-      }
-      await new Promise(resolve => setTimeout(resolve, 10))
       continue
     }
-    // We hold the claim: recheck the target, then verify we still own
-    // the claim immediately before the rename. A holder stalled past
-    // the stale threshold can lose its claim to a successor, which
-    // publishes first; without the ownership check the resumed rename
-    // would overwrite the successor's publish and still report success
-    // (maintainer review 5948202472 on #2497). Keep the ownership
-    // check as the last verification before the rename: a target
-    // recheck after it would reopen the same window for a holder
-    // stalled past the stale threshold (CodeRabbit #2497 review
-    // 5950772048).
+    const stagedName = `staged.${randomUUID()}`
+    const pendingDir = await mkdtemp(join(dirname(target), '.publish-'))
+    const pending = join(pendingDir, stagedName)
+    const staged = join(claimDir, stagedName)
+    let installed = false
     try {
       try {
-        await lstat(target)
-        return 'exists'
+        await copyFile(tmp, pending)
+        const handle = await open(pending, 'r+')
+        try {
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
-      }
-      await commitPublishHookForTesting?.()
-      if (!(await ownsCommitPublishClaim(claimDir, claimIdentity))) {
-        try {
-          await lstat(target)
-          return 'exists'
-        } catch (error) {
-          if (!isErrno(error, 'ENOENT')) throw error
-        }
-        // The claim is gone but nothing was published (the successor's
-        // commit failed): re-enter the claim loop instead of reporting
-        // a fact that does not exist.
+        if (await commitPublishPathStat(target)) return 'exists'
+        if (!(await commitPublishPathStat(tmp))) return 'gone'
         continue
       }
       try {
-        await rename(tmp, target)
+        await rename(pendingDir, claimDir)
+        installed = true
+      } catch (error) {
+        if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
+        if (isCommitPublishDirectoryCollisionOnWindows(error)) {
+          if ((await commitPublishPathStat(claimDir))?.isDirectory()) continue
+          // The winner may have removed its claim before we could stat it.
+          if (await commitPublishPathStat(target)) return 'exists'
+        }
+        throw error
+      }
+      if (await commitPublishPathStat(target)) return 'exists'
+      await commitPublishHookForTesting?.()
+      if (!(await commitPublishPathStat(staged))) continue
+      await commitPublishOwnedHookForTesting?.()
+      try {
+        await rename(staged, target)
+        return 'committed'
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
-        return 'gone'
+        // The source was reclaimed. Recheck the target on the next
+        // iteration and retry with the caller's temp if nobody won.
       }
-      return 'committed'
     } finally {
-      await removeOwnCommitPublishClaim(claimDir, claimIdentity)
+      if (installed) {
+        await unlink(staged).catch(() => {})
+        // A fresh holder's claim is nonempty and rmdir cannot remove it.
+        await rmdir(claimDir).catch(() => {})
+      } else {
+        await rm(pendingDir, { force: true, recursive: true }).catch(() => {})
+      }
     }
   }
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
@@ -1984,173 +1998,105 @@ function commitPublishFileSync(
     if (isErrno(error, 'ENOENT')) return 'gone'
     if (!isHardLinkUnsupported(error)) throw error
   }
-  const claimDir = commitPublishClaimDir(target)
+  const claimDir = `${target}.commit`
   for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
-    let claimIdentity: CleanupFileIdentity | undefined
-    try {
-      mkdirSync(claimDir)
-      claimIdentity = readCommitPublishClaimIdentitySync(claimDir)
-    } catch (error) {
-      if (!isErrno(error, 'EEXIST')) throw error
+    if (commitPublishPathStatSync(target)) return 'exists'
+    const claim = commitPublishPathStatSync(claimDir)
+    if (claim) {
+      if (Date.now() - claim.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS) {
+        // Reclaim the staged path as well as the directory. Even if the
+        // claim changed after stat, removing it revokes its staged path.
+        try {
+          rmSync(claimDir, { force: true, recursive: true })
+        } catch {}
+      } else {
+        sleepSync(10)
+      }
+      continue
     }
-    if (claimIdentity === undefined) {
+    const stagedName = `staged.${randomUUID()}`
+    const pendingDir = mkdtempSync(join(dirname(target), '.publish-'))
+    const pending = join(pendingDir, stagedName)
+    const staged = join(claimDir, stagedName)
+    let installed = false
+    try {
       try {
-        lstatSync(target)
-        return 'exists'
+        copyFileSync(tmp, pending)
+        const fd = openSync(pending, 'r+')
+        try {
+          fsyncSync(fd)
+        } finally {
+          closeSync(fd)
+        }
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
+        if (commitPublishPathStatSync(target)) return 'exists'
+        if (!(commitPublishPathStatSync(tmp))) return 'gone'
+        continue
       }
-      if (isCommitPublishClaimStaleSync(claimDir)) {
+      try {
+        renameSync(pendingDir, claimDir)
+        installed = true
+      } catch (error) {
+        if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
+        if (isCommitPublishDirectoryCollisionOnWindows(error)) {
+          if (commitPublishPathStatSync(claimDir)?.isDirectory()) continue
+          if (commitPublishPathStatSync(target)) return 'exists'
+        }
+        throw error
+      }
+      if (commitPublishPathStatSync(target)) return 'exists'
+      commitPublishHookForTestingSync?.()
+      if (!(commitPublishPathStatSync(staged))) continue
+      commitPublishOwnedHookForTestingSync?.()
+      try {
+        renameSync(staged, target)
+        return 'committed'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        // The source was reclaimed. Recheck the target on the next
+        // iteration and retry with the caller's temp if nobody won.
+      }
+    } finally {
+      if (installed) {
+        try {
+          unlinkSync(staged)
+        } catch {}
         try {
           rmdirSync(claimDir)
         } catch {}
-        continue
-      }
-      sleepSync(10)
-      continue
-    }
-    // We hold the claim: recheck the target, then verify we still own
-    // the claim immediately before the rename (see commitPublishFile).
-    // Keep the ownership check last here too: a target recheck after
-    // it would reopen the same stalled-holder window.
-    try {
-      try {
-        lstatSync(target)
-        return 'exists'
-      } catch (error) {
-        if (!isErrno(error, 'ENOENT')) throw error
-      }
-      commitPublishHookForTestingSync?.()
-      if (!ownsCommitPublishClaimSync(claimDir, claimIdentity)) {
+      } else {
         try {
-          lstatSync(target)
-          return 'exists'
-        } catch (error) {
-          if (!isErrno(error, 'ENOENT')) throw error
-        }
-        // The claim is gone but nothing was published: re-enter the
-        // claim loop instead of reporting a fact that does not exist.
-        continue
+          rmSync(pendingDir, { force: true, recursive: true })
+        } catch {}
       }
-      try {
-        renameSync(tmp, target)
-      } catch (error) {
-        if (!isErrno(error, 'ENOENT')) throw error
-        return 'gone'
-      }
-      return 'committed'
-    } finally {
-      removeOwnCommitPublishClaimSync(claimDir, claimIdentity)
     }
   }
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
-// The publish claim for one commit target: a directory, so creating it
-// with mkdir() is atomic and works on filesystems without hard-link
-// support — the same idiom as the terminal-fact claim directories
-// above. It serializes the recheck-and-rename in the no-hard-link
-// fallback only; the link() path never creates one.
-function commitPublishClaimDir(target: string): string {
-  return `${target}.commit`
+// Windows can report access denied rather than ENOTEMPTY when a
+// directory rename collides. Callers confirm the destination exists.
+function isCommitPublishDirectoryCollisionOnWindows(error: unknown): boolean {
+  return process.platform === 'win32' &&
+    (isErrno(error, 'EACCES') || isErrno(error, 'EPERM'))
 }
 
-// The identity of a commit claim directory, recorded when the claim is
-// won: a stale-reclaiming successor removes this directory and creates
-// a new one, so the (dev, ino) pair no longer matches and a delayed
-// holder can tell its claim was superseded. The pair is the same
-// identity idiom as CleanupFileIdentity above.
-async function readCommitPublishClaimIdentity(
-  claimDir: string,
-): Promise<CleanupFileIdentity | undefined> {
+async function commitPublishPathStat(path: string) {
   try {
-    const stats = await lstat(claimDir)
-    return { dev: stats.dev, ino: stats.ino }
-  } catch {
+    return await lstat(path)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
     return undefined
   }
 }
 
-function readCommitPublishClaimIdentitySync(
-  claimDir: string,
-): CleanupFileIdentity | undefined {
+function commitPublishPathStatSync(path: string) {
   try {
-    const stats = lstatSync(claimDir)
-    return { dev: stats.dev, ino: stats.ino }
-  } catch {
+    return lstatSync(path)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
     return undefined
-  }
-}
-
-// Whether the claim directory is still the one this publisher won: a
-// successor that reclaimed a stale claim removed it and created a new
-// directory, so the identity differs (or the directory is gone).
-async function ownsCommitPublishClaim(
-  claimDir: string,
-  identity: CleanupFileIdentity,
-): Promise<boolean> {
-  const current = await readCommitPublishClaimIdentity(claimDir)
-  return (
-    current !== undefined &&
-    current.dev === identity.dev &&
-    current.ino === identity.ino
-  )
-}
-
-function ownsCommitPublishClaimSync(
-  claimDir: string,
-  identity: CleanupFileIdentity,
-): boolean {
-  const current = readCommitPublishClaimIdentitySync(claimDir)
-  return (
-    current !== undefined &&
-    current.dev === identity.dev &&
-    current.ino === identity.ino
-  )
-}
-
-// Removes a commit claim only while it is still ours: an unguarded
-// rmdir() in the commit finally could delete a successor's active
-// claim directory after our claim was stale-reclaimed, letting a third
-// publisher claim while the successor is mid-publish.
-async function removeOwnCommitPublishClaim(
-  claimDir: string,
-  identity: CleanupFileIdentity,
-): Promise<void> {
-  if (!(await ownsCommitPublishClaim(claimDir, identity))) return
-  await rmdir(claimDir).catch(() => {})
-}
-
-function removeOwnCommitPublishClaimSync(
-  claimDir: string,
-  identity: CleanupFileIdentity,
-): void {
-  if (!ownsCommitPublishClaimSync(claimDir, identity)) return
-  try {
-    rmdirSync(claimDir)
-  } catch {}
-}
-
-// Whether a commit claim belongs to a dead or suspended holder: its
-// mtime is older than the stale threshold. A live holder's critical
-// section (recheck + rename) takes microseconds, so a fresh claim
-// means the holder is about to publish.
-async function isCommitPublishClaimStale(claimDir: string): Promise<boolean> {
-  try {
-    const stats = await lstat(claimDir)
-    return Date.now() - stats.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
-  } catch {
-    // The claim disappeared: not stale, the waiter just retries.
-    return false
-  }
-}
-
-function isCommitPublishClaimStaleSync(claimDir: string): boolean {
-  try {
-    const stats = lstatSync(claimDir)
-    return Date.now() - stats.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
-  } catch {
-    return false
   }
 }
 
