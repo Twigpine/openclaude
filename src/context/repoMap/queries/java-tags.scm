@@ -25,6 +25,11 @@
 (constructor_declaration
   name: (identifier) @name.definition.method) @definition.method
 
+; A record's compact canonical constructor (public Pair { ... }) parses as
+; compact_constructor_declaration rather than constructor_declaration.
+(compact_constructor_declaration
+  name: (identifier) @name.definition.method) @definition.method
+
 ; Annotation elements (String value(); inside an @interface) are method-shaped
 ; declarations that method_declaration does not match.
 (annotation_type_element_declaration
@@ -35,8 +40,11 @@
 (method_invocation
   name: (identifier) @name.reference.call) @reference.call
 
-; Method references (this::normalize, Type::of) carry no name field.
+; Method references (this::normalize, Type::of) carry no name field, and a
+; receiver such as helper::reset is an identifier too, so the pattern anchors on
+; the "::" token to capture only the referenced method name.
 (method_reference
+  "::"
   (identifier) @name.reference.call) @reference.call
 
 ; Type positions — field, parameter, return, extends/implements, generic

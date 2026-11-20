@@ -604,6 +604,11 @@ describe('symbol extraction', () => {
           '}',
           '',
           'record Pair(int left, int right) {',
+          '    public Pair {',
+          '        if (left > right) {',
+          '            throw new IllegalArgumentException("left");',
+          '        }',
+          '    }',
           '}',
           '',
         ].join('\n'),
@@ -623,12 +628,24 @@ describe('symbol extraction', () => {
       expect(defs.find(tag => tag.name === 'value')?.subKind).toBe('method')
 
       expect(defs.find(tag => tag.name === 'Kind')?.subKind).toBe('enum')
+
+      // A record is a class-shaped def, and its compact canonical constructor
+      // (public Pair { ... }) is a method-shaped def of the same name.
       expect(defs.find(tag => tag.name === 'Pair')?.subKind).toBe('class')
+      expect(
+        defs
+          .filter(tag => tag.name === 'Pair')
+          .map(tag => tag.subKind)
+          .sort(),
+      ).toEqual(['class', 'method'])
 
       // `this::handle` and `helper::reset` are method references, which carry no
       // argument list and no name field.
       expect(refs).toContain('handle')
       expect(refs).toContain('reset')
+      // The receiver of helper::reset is an identifier as well, but only the
+      // referenced method name is a call.
+      expect(refs).not.toContain('helper')
       // Plain calls still resolve through the invocation name.
       expect(refs).toContain('join')
       expect(refs).toContain('run')
@@ -680,6 +697,10 @@ describe('symbol extraction', () => {
 
       expect(result.map).toContain('Widget.java:')
       expect(result.map).toContain('public String render(String input) {')
+      // Both files must survive, so a regression that drops the calling file is
+      // visible here.
+      expect(result.map).toContain('App.java:')
+      expect(result.fileCount).toBe(2)
       // App.java references Widget, so Widget.java ranks first.
       expect(result.map.split('\n')[0]).toBe('Widget.java:')
     } finally {
