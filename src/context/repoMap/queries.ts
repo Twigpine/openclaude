@@ -64,6 +64,20 @@ const TYPESCRIPT_TAGS = `; Source: https://github.com/Aider-AI/aider/blob/main/a
 
 (enum_declaration
   name: (identifier) @name.definition.enum) @definition.enum
+
+; Call references. The repo map ranks a file by references to symbols it
+; defines, and plain function calls are its strongest structural signal:
+; without these the TypeScript query only captured type annotations and
+; constructor calls, which skewed the ranking toward type-heavy hub files.
+; require(...) is excluded to match the JavaScript query, and member calls
+; (object.method()) are deliberately not captured — method names such as
+; .log(), .get() or .map() collide across unrelated classes and would add
+; mostly-noise edges.
+(
+  (call_expression
+    function: (identifier) @name.reference.call) @reference.call
+  (#not-match? @name.reference.call "^(require)$")
+)
 `
 
 const JAVASCRIPT_TAGS = `; Source: https://github.com/Aider-AI/aider/blob/main/aider/queries/tree-sitter-languages/javascript-tags.scm

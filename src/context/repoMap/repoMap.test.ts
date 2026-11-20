@@ -19,6 +19,7 @@ import {
   extractTagsWithCache,
 } from './index.js'
 import {
+  CACHE_VERSION,
   getCachedTags,
   loadCache,
   saveCache,
@@ -32,7 +33,7 @@ import { rankFiles } from './pagerank.js'
 import { initParser, resolveProjectRoot } from './parser.js'
 import { renderMap } from './renderer.js'
 import { countTokens } from './tokenize.js'
-import type { FileTags } from './types.js'
+import type { CacheData, FileTags } from './types.js'
 
 const FIXTURE_ROOT = join(import.meta.dir, '__fixtures__', 'mini-repo')
 const FIXTURE_FILES = ['fileA.ts', 'fileB.ts', 'fileC.ts', 'fileD.ts', 'fileE.ts']
@@ -156,6 +157,105 @@ describe('symbol extraction', () => {
       )).toBe(true)
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('extracts call references from TypeScript files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-ts-calls-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'calls.ts'),
+        [
+          "import { computeTotal } from './helpers'",
+          '',
+          'export function run(items: number[]) {',
+          '  const total = computeTotal(items)',
+          '  const loaded = store.load(total)',
+          "  require('legacy')",
+          '  return new Widget(loaded)',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('calls.ts', tempDir)
+      expect(result).not.toBeNull()
+
+      const refs = result!.tags.filter(tag => tag.kind === 'ref')
+      const refNames = refs.map(tag => tag.name)
+
+      // Plain calls were previously missing entirely.
+      expect(refNames).toContain('computeTotal')
+      // Constructor references still resolve, as before.
+      expect(refNames).toContain('Widget')
+      // `require` is module loading, not a symbol reference (matches the
+      // JavaScript query).
+      expect(refNames).not.toContain('require')
+      // Member calls are intentionally excluded: `.load()` could belong to any
+      // class, so they would add mostly-noise edges to the graph.
+      expect(refNames).not.toContain('load')
+
+      const callRefs = refs.filter(tag => tag.subKind === 'call')
+      expect(callRefs.map(tag => tag.name)).toEqual(['computeTotal'])
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('ranks a file that is only reached through calls', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-ts-call-rank-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'helpers.ts'),
+        [
+          'export function computeTotal(items: number[]) {',
+          '  return items.length',
+          '}',
+          '',
+          'export function parseAmount(raw: string) {',
+          '  return Number(raw)',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      // Calls both helpers without referencing them in any type position.
+      writeFileSync(
+        join(tempDir, 'main.ts'),
+        [
+          'export function run(raw: string) {',
+          '  return computeTotal([parseAmount(raw)])',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'unrelated.ts'),
+        [
+          'export function standalone() {',
+          '  return 1',
+          '}',
+          '',
+          'export function another() {',
+          '  return 2',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const files = ['main.ts', 'helpers.ts', 'unrelated.ts']
+      const tags = await Promise.all(files.map(file => extractTags(file, tempDir)))
+      const graph = buildGraph(
+        tags.filter((entry): entry is FileTags => entry !== null),
+      )
+      expect(graph.hasEdge('main.ts', 'helpers.ts')).toBe(true)
+      expect(graph.getEdgeAttribute('main.ts', 'helpers.ts', 'weight')).toBeGreaterThan(0)
+
+      const result = await buildRepoMap({ root: tempDir, files, maxTokens: 1024 })
+      expect(result.map.split('\n')[0]).toBe('helpers.ts:')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
     }
   })
 
@@ -591,7 +691,7 @@ describe('tag cache extraction', () => {
       }
 
       const fileStats = new Map(files.map(file => [file, statFile(tempDir, file)]))
-      const cache = { version: 2, entries: {}, renderedEntries: {} }
+      const cache = { version: CACHE_VERSION, entries: {}, renderedEntries: {} }
       const cachedTags = await extractTags('b.ts', tempDir)
       expect(cachedTags).not.toBeNull()
       setCachedTags(
@@ -812,7 +912,7 @@ describe('cache', () => {
   test('saveCache does not throw when persistence is unavailable', () => {
     expect(() => {
       saveCache('\0invalid-root', {
-        version: 2,
+        version: CACHE_VERSION,
         entries: {
           bad: {
             tags: [{ value: BigInt(1) }],
@@ -824,6 +924,80 @@ describe('cache', () => {
       } as never)
     }).not.toThrow()
   })
+
+  test('a cache from before call references is discarded and re-extracted', async () => withWritableConfigHome(async () => {
+    // Extraction semantics changed (plain calls are now references), so a cache
+    // written by the previous version must not be served for unchanged files.
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-cache-upgrade-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'helpers.ts'),
+        'export function computeTotal(items: number[]) {\n  return items.length\n}\n',
+      )
+      writeFileSync(
+        join(tempDir, 'main.ts'),
+        'export function run() {\n  return computeTotal([1])\n}\n',
+      )
+
+      const staleEntry = (file: string, name: string, signature: string) => {
+        const stat = statFile(tempDir, file)!
+        return {
+          tags: [
+            { kind: 'def' as const, name, line: 1, signature, subKind: 'function' },
+          ],
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+        }
+      }
+
+      // Old version, fingerprints matching the unchanged files, and tags that
+      // carry no call reference from main.ts to helpers.ts. Pinned to the real
+      // historical version, not CACHE_VERSION - 1: if the bump were removed,
+      // the fixture would otherwise become version 1 and this test could pass
+      // while version-2 caches still serve stale tags.
+      const stale: CacheData = {
+        version: 2,
+        entries: {
+          'helpers.ts': staleEntry(
+            'helpers.ts',
+            'computeTotal',
+            'export function computeTotal(items: number[]) {',
+          ),
+          'main.ts': staleEntry('main.ts', 'run', 'export function run() {'),
+        },
+        renderedEntries: {
+          stale: { map: 'stale map', fileCount: 1, tokenCount: 2, createdAt: 0 },
+        },
+      }
+      saveCache(tempDir, stale)
+
+      const result = await buildRepoMap({
+        root: tempDir,
+        files: ['main.ts', 'helpers.ts'],
+        maxTokens: 1024,
+      })
+
+      // Re-extracted rather than served from the stale cache, so the call from
+      // main.ts ranks helpers.ts first.
+      expect(result.cacheHit).toBe(false)
+      expect(result.map.split('\n')[0]).toBe('helpers.ts:')
+
+      // The refreshed cache is persisted at the current version. Checking the
+      // version alone would also pass on the empty fallback, so assert the
+      // upgraded contents: the re-extracted call reference and a rendered map.
+      const refreshed = loadCache(tempDir)
+      expect(refreshed.version).toBe(CACHE_VERSION)
+      expect(refreshed.entries['main.ts']?.tags).toContainEqual(
+        expect.objectContaining({ kind: 'ref', name: 'computeTotal' }),
+      )
+      expect(Object.keys(refreshed.renderedEntries).length).toBeGreaterThan(0)
+      // The version-2 rendered map was discarded rather than carried over.
+      expect(refreshed.renderedEntries.stale).toBeUndefined()
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  }))
 
   test('stores repo map cache under OPENCLAUDE_CONFIG_DIR when configured', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'repomap-config-home-'))
